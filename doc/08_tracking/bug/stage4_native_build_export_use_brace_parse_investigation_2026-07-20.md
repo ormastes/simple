@@ -1,6 +1,6 @@
 # Investigation: reported stage4 `export use X.{a,b,c}` parse failure — NOT a general main-branch regression
 
-Status: **investigated, verdict: environmental to one worktree's stage3 artifact, not a source-level grammar defect on main.** No fix needed on `main` for the parsing question itself; original bug (`rt_fork_parent_wait_bounded` truncation) is unaffected and still needs its own stage-4 rebuild to verify.
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## What was reported
 
@@ -100,3 +100,7 @@ stage-4 rebuild, but that block is very likely a worktree-local artifact
 problem in `/tmp/wt_deploy`, not a defect to fix on `main`. Recommend: retry
 the stage-4 rebuild in a **fresh** worktree/cache (not the contaminated one)
 before spending more time hunting for a phantom grammar regression.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -1,6 +1,6 @@
 ---
 id: spec_matcher_nested_call_dispatch_2026-07-27
-status: OPEN
+status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 severity: high
 discovered: 2026-07-27
 discovered_by: lane SPECM while triaging test/01_unit/lib/ecs/ecs_spec.spl
@@ -98,3 +98,7 @@ that match arm into a shared helper so the two dispatchers cannot drift again).
 
 Workaround until then: always write the canonical `expect(<value>).to_matcher(...)`
 form — never chain a matcher onto a method call.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

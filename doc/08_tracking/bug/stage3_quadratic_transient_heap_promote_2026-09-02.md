@@ -1,5 +1,7 @@
 # Stage 3 stalls in `rt_transient_heap_promote` — one enormous scan, NOT quadratic
 
+**Status:** OPEN (unverified 2026-09-12)
+
 > **CORRECTION 2026-09-02 (same day, before any fix was attempted).** This record
 > originally claimed the cost was O(n^2) because `rt_transient_heap_promote` was
 > "called once per module surface". **That is wrong.** There is exactly ONE call
@@ -112,3 +114,7 @@ The quadratic characterisation is from stack sampling plus reading the call site
 an instrumented count of `scope.objects` length over time. The hot path is certain; the
 exact growth curve is inferred from `Vec::retain`'s definition and the per-surface call
 pattern, and has not been measured directly.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

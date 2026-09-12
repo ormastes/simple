@@ -1,5 +1,7 @@
 # Duplicate test-tree divergence — triage pass (2026-08-21)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Guard: `scripts/check/check-test-tree-divergence.shs --ref <sha>` (committed content only;
 the shared working copy carries other sessions' in-flight test edits and disagrees).
 
@@ -125,3 +127,7 @@ Proposed consolidation (reviewable, NOT done here):
 3. Once the baseline is empty, delete `test/unit/` and `test/integration/` in one reviewed
    commit and add an exclusion in the test runner so they cannot be re-created silently.
 Deleting a whole test tree is explicitly out of scope for an automated pass.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

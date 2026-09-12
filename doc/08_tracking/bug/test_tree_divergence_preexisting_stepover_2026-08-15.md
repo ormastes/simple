@@ -1,5 +1,7 @@
 # Test-tree divergence: recorded pre-existing step-over (2026-08-15)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Landing of the engine2d GPU-offload commit used the mechanical delta escape:
 `check-test-tree-divergence-delta.shs origin/main <NEW>` = PASS — 16
 pre-existing offender(s), 0 introduced by this range. Offender list (verbatim
@@ -18,3 +20,7 @@ purpose. The referenced offender list is present at
 silent, which is exactly the rule's requirement. No code change is possible or
 needed. The underlying test-tree divergence backlog is tracked separately and
 is not this record.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

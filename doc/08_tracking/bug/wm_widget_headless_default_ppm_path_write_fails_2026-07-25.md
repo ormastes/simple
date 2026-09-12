@@ -1,7 +1,7 @@
 # `widget × host-WM` headless capture: `ppm-write-failed` on the DEFAULT path, passes with an explicit path — cause not yet identified
 
 - **ID:** wm_widget_headless_default_ppm_path_write_fails_2026-07-25
-- **Status:** OPEN — reproducible, well-characterised, **root cause unknown**
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** medium — the cell cannot pass unattended; it passes only when
   `SIMPLE_WM_HEADLESS_CAPTURE_PPM` is set to a path outside the repo.
 
@@ -94,3 +94,7 @@ the same path with the same byte count. Differences not yet eliminated:
 - `doc/08_tracking/bug/examples_isolation_buffers_output_lost_on_timeout_2026-07-25.md`
   — the two *earlier* obstacles on this same lane (output buffering, 10s
   watchdog). All three had to be cleared in order before this one became visible.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

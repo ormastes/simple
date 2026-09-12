@@ -1,5 +1,7 @@
 # Trait-group `with` sugar is unreachable, and the generated `.from()` capability check is AOT-broken
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-08-09 (stream P0b, while correcting the unsound `.from()` shape)
 **Related:** `capability_group_from_unsound_under_value_semantics_2026-08-09.md`
 **Affects:** `src/app/desugar/trait_desugar.spl`,
@@ -107,3 +109,7 @@ cover AOT while the sugar is unreachable (blocker 1).
 Fix order: blocker 2 must be closed (or `.from()` re-expressed with an
 AOT-sound Option test) before the sugar is wired, or wiring it ships a
 fail-open capability check.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

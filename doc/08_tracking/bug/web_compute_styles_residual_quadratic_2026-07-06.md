@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-06
 - **Area:** web / browser_engine (`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`)
-- **Status:** partially addressed 2026-07-07 — the candidate-lookup scan named as a suspect below
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   (`style_rule_candidates`, `:4924`) was fixed (N1: carried `id_key_dict`/`class_key_dict`/
   `tag_key_dict` through `RuleBuckets`, replacing the linear `text_key_index` scan with O(1) dict
   lookup; component cost now negligible, ~0.03–0.05 ms/node). **Root cause re-attributed**: the
@@ -81,3 +81,7 @@ Profile the remaining scans in the styles path with per-call counters (not just 
 Once localized, apply the same fix pattern as WEB-2 (replace the offending linear/quadratic
 scan with dict-indexed or pre-sorted access) and re-run this same three-point (700/1500/3000)
 measurement to confirm linear scaling end-to-end, not just within `build_rule_buckets`.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

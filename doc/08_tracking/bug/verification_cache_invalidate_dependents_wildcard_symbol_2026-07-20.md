@@ -1,7 +1,7 @@
 # Bug: `VerificationCache.invalidate_dependents` treats the file-level `"*"` symbol sentinel as a trackable dependency key, causing false-positive invalidation of unrelated proof units
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Area:** `src/compiler_rust/lib/std/src/verification/cache.spl` (`VerificationCache.invalidate_dependents`), tested via `test/00_formal_verification/compiler/cache_correctness_spec.spl`
 - **Binary:** reproduced on `bin/release/x86_64-unknown-linux-gnu/simple`, which currently prints the Rust-seed bootstrap warning (`WARNING: this Rust-built Simple binary is a bootstrap seed only`) — this is pure-`.spl` logic, not seed-interpreter-specific, but has not been independently re-verified on a genuinely self-hosted binary.
 
@@ -62,3 +62,7 @@ Do not propagate the `"*"` sentinel into `changed_keys` (skip the `unit.source_s
 bin/release/x86_64-unknown-linux-gnu/simple test test/00_formal_verification/compiler/cache_correctness_spec.spl --no-session-daemon
 ```
 Failing example: "Verification Cache > invalidate_dependents > removes cached entries for units depending on changed module".
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

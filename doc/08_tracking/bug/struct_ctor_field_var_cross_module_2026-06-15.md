@@ -1,5 +1,7 @@
 # Bug: struct constructor Type(field: var) fails "unknown argument" in cross-module spec context
 
+**Status:** RESOLVED (2026-09-12, re-verified: minimal repro spec now passes — `1 total, 1 passed, 0 failed`, no "unknown argument" error)
+
 **ID:** struct_ctor_field_var_cross_module_2026-06-15
 **Filed:** 2026-06-15
 **Severity:** P1 — semantic analysis rejects valid constructor syntax when var is a parameter
@@ -88,3 +90,7 @@ struct used from a spec or cross-module fn.
 
 - `doc/08_tracking/bug/cross_module_struct_method_poisons_itblock_byte_ops_2026-06-15.md`
   — related cross-module interpreter issue with byte ops
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule B: cheap repro run against the deployed seed); the record's "Minimal repro" spec block saved verbatim to a temp file and run with `bin/simple test` passes. Evidence: `bin/simple test /tmp/repro_struct_ctor.spl` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) -> `1 total, 1 passed, 0 failed`.

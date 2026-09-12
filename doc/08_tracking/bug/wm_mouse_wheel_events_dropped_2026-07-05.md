@@ -1,6 +1,8 @@
 # Mouse wheel/scroll events completely dropped in both real WM entrypoints
 
 ## Status
+
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Open — **driver half fixed, upper-layer half still open** (2026-08-06, WS-C/C3).
 
 ### Progress 2026-08-06 — driver half landed
@@ -84,3 +86,7 @@ Completed 2026-08-10 in commit `e57b019ca2d75ae4380c9a2013b987200297290d`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

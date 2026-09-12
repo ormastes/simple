@@ -1,5 +1,7 @@
 # Stage 2 Cranelift mislowers optional-float nil comparison
 
+**Status:** OPEN (unverified 2026-09-12)
+
 While compiling the real ARM64 SimpleOS desktop closure, Stage 2 lowered the
 `f64? != nil` checks in `parse_pct_value` to `icmp_imm.f32`. Cranelift rejected
 both instructions because integer comparison cannot control an `f32` value.
@@ -29,3 +31,7 @@ failed closed before loading the spec because that diagnostic compiler exposes
 no `test` command (`error: unknown command 'test'`). No Rust seed, stub fallback,
 shared cache, or second verification attempt was used; executable confirmation
 therefore remains pending an admitted test-capable self-host.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

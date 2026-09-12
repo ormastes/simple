@@ -1,5 +1,7 @@
 # vcs.md overstated pre-push guard wiring; 5 green gates sat at bootstrap tier — 2026-09-01
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Ground truth (origin/main 5e09b3ef2fd)
 
 Chain: `.git/hooks/pre-push` -> `scripts/hooks/pre-push` (dispatcher) ->
@@ -96,3 +98,7 @@ push-must-check: ADVISORY push-perf-regression-tests verdict exit=1 (recorded, n
 FAIL — selftest failed; gate cannot be trusted
 push-must-check: ADVISORY push-process-wait-eintr-retry verdict exit=1 (recorded, not blocking)
 ```
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

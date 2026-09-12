@@ -6,7 +6,7 @@
   `_native_build_entry_closure`
 - **Severity:** high candidate — it may block the pre-QEMU guest native-build
   investigation and therefore SimpleOS x86_64/ARM64 evidence preparation.
-- **Status:** OPEN — no qualifying timing evidence is retained in this
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   worktree; no speculative source patch is accepted until it can preserve the
   real closure under a qualifying tool.
 
@@ -119,3 +119,7 @@ Until those gates pass, the stage4 full-CLI closure diagnosis in
 report identifies source-level resolver/probe candidates; it does not claim
 their timing contribution, or that resolver work is the sole Stage 4
 bottleneck.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

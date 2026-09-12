@@ -1,5 +1,7 @@
 # `check-vulkan-2d-c-compare.shs` always reports `compare_status=skipped` — two independent causes
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Measured 2026-09-11 on macOS (Apple M4), at `origin/main` = `75b81c1d1f0` (#528 merge; #529/#530 not present at fetch time).
 
 ## Cause 1 (structural, not host-specific): aggregate() never sees `c_st=admitted`
@@ -66,3 +68,7 @@ was produced manually (same workload: 800x600, 64 rects, 300 frames, 5
 warmups, both legs against the same MoltenVK ICD) — see
 `doc/10_metrics/ui/vulkan_2d_c_vs_simple_compare_macos_2026-09-11.md`,
 `mode=manual`.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

@@ -1,7 +1,7 @@
 # HIR: static method call on builtin type name `text` unresolved (entry-closure)
 
 **Found:** 2026-07-23, MCP native rebuild campaign (rMCP11).
-**Status:** OPEN — call site worked around (std.string_core.char_from_code).
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Re-verification (2026-08-10)
 Re-checked against current `main`: `is_static_method_call` still lives in
@@ -195,3 +195,7 @@ bin/simple run i64_parse_repro.spl   # fn main(): match i64.parse("42"): ...
   don't consider this bug closed until they're triaged too.
 - Status stays **OPEN**. Do not revert the `main_lazy_query_tools.spl`
   workaround — it is still required.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

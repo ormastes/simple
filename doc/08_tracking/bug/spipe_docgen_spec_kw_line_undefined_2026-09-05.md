@@ -1,5 +1,7 @@
 # `spipe-docgen` imported two functions that were defined nowhere — every manual generation aborted
 
+**Status:** OPEN (unverified 2026-09-12)
+
 (Two symbols, same defect class, found one after the other: `spec_kw_line`
 first, then `scenario_at_is_unconditional_pending`. Both are documented below.)
 
@@ -127,3 +129,7 @@ Verified with `src/compiler_rust/target/debug/simple` (current-source Rust seed,
 built 2026-09-04 18:13). The sanctioned `bin/release/aarch64-apple-darwin/simple_seed`
 (2026-07-25) cannot parse current stdlib source — see
 `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

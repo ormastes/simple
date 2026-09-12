@@ -1,5 +1,7 @@
 # Stage4 Iteration 20 Error Propagation Characterization (#95)
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-04  
 **Binary tested:** `/tmp/claude-1000/...scratchpad/stage4_it20f` (42M, ELF x86-64)  
 **Task:** Determine whether the `?` operator's Err-propagation misbehaves on stage4-built binaries
@@ -198,3 +200,7 @@ Independent minimal repros on the deployed binary CORRECT two rows above:
   - Ok(42) case: `v` = 5 (WRONG VALUE — not the payload)
   - Err case: does NOT short-circuit; `v` = garbage (348752240628) and execution continues
   - Repro: scratchpad qmark_check.spl. This is a silent-wrong-value correctness bug in the deployed interpreter, independent of stage4.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

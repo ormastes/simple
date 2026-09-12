@@ -1,5 +1,7 @@
 # Typed Vulkan rect-batch upload had no working fallback on an old binary (2026-09-11)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Symptom
 
 PR #534 added `vulkan_sffi_copy_to_buffer_u32` -> `rt_vulkan_copy_to_buffer_u32`
@@ -98,3 +100,7 @@ Vulkan/GPU path has the same landmine unless it is opt-in by default the same
 way. Filing a general-purpose extern-availability probe is future work, not
 done here (`.claude/rules/commands.md`'s "NEVER over-engineer" applies -- this
 fix is scoped to the one regressed call site).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

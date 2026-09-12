@@ -1,6 +1,6 @@
 # SSpec runner suppresses the failing child diagnostic
 
-**Status:** open
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Found:** 2026-07-26
 **Area:** app/test_runner / deployed CLI
 **Blocks:** fresh verification of the WM/Web CPU glass material slice
@@ -37,3 +37,7 @@ intentionally failing minimal SSpec, executed by the same deployed
 pure-Simple binary, with the failing child message visible and no seed
 delegation. This WM/Web lane will consume that repair but will not implement a
 parallel runner or bootstrap the toolchain.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

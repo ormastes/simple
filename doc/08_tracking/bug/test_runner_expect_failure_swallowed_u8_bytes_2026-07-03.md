@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-03
 - **Severity:** P1 (trust — second greenwash mode, distinct from the fixed summary-sum bug)
-- **Status:** open, needs minimal repro
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Observed (by P0c encoder agent, worktree agent-a170cd9758e16d60e)
 
@@ -36,3 +36,7 @@ spec (test_runner_single_example_failure_contract_spec.spl).
 
 `bin/simple run` harness with raw print-and-compare assertions; per-describe
 output lines remain trustworthy.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

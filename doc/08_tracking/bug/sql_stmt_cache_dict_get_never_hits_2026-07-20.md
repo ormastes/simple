@@ -3,7 +3,7 @@
 **Date:** 2026-07-20
 **Severity:** high (writes/reads silently diverge for repeated same-SQL
 `exec`/`query` calls on one connection)
-**Status:** open — root-cause hypothesis only, needs interpreter-side fix
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 (out of scope for `.spl`-source test triage per campaign guide)
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/database/sql`
 cluster
@@ -104,3 +104,7 @@ the downstream symptom (data loss / early return, not just a silently-skipped
 branch) is more severe than the original doc's scope suggests. No `.spl`
 source fix attempted here per campaign guide (interpreter-side, needs
 redeploy to verify).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -7,7 +7,7 @@
   `compile_method_call_static`
 - **Severity:** high — silent miscompile to an unrelated function, then a page
   fault on garbage. 28 known call sites across the CSS path.
-- **Status:** OPEN, **fix IN FLIGHT.** Root cause **PROVEN** (five independent
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   proof steps, below). Repro reduced to **0.5s**.
 - **Class:** flat-registry name collision — same family as the known
   `interp env_get` defect (cross-linked below), now for METHODS.
@@ -203,3 +203,7 @@ test. Cover `ends_with` and `contains` too.
   receivers … chains fail only when a link's receiver type is erased." This
   bug is that documented hazard biting inside the compiler's own resolution,
   not just in user code.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

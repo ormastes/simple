@@ -1,5 +1,7 @@
 # Bug: `type X = Y` alias declarations are discarded at parse time — nothing downstream can see them
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-07-29
 - **Severity:** medium (blocks semantic-alias enforcement; silent semantic hole)
 - **Area:** 10.frontend parser / arena / FlatAstBridge
@@ -59,3 +61,7 @@ Same defect family as the FlatAstBridge silent-NilLit fallback (fixed loud in
 `147c80f4248`) and the arena tag lossiness A1 proved: the frontend silently
 drops surface syntax, and downstream layers can neither see it nor detect the
 loss.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

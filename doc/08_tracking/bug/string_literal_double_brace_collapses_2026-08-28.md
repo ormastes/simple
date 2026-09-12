@@ -1,5 +1,7 @@
 # Bug: `}}` in a double-quoted string literal collapses to `}` (silent payload corruption)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Found:** 2026-08-28, MCP parity lane, while debugging why `jq` returned
   nothing for spec-built hook payloads.
 - **Symptom:** in `.spl` double-quoted literals, adjacent closing braces are
@@ -25,3 +27,7 @@
 - **Repro spec candidate:** assert
   `"{\"a\":{\"b\":1}}".len() == 13` — currently fails with 12
   (verified 2026-08-28 on the deployed seed: prints `len=12`).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

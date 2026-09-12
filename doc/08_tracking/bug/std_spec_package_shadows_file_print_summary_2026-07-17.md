@@ -1,7 +1,7 @@
 # Bug: `use std.spec.{print_summary, get_exit_code, get_executed_test_count}` — cannot be root-fixed in pure Simple (interpreter mode)
 
 - **Date:** 2026-07-17
-- **Status:** open — investigated and root-caused at **three independent,
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   stacked layers**, all requiring a Rust change. NOT fixed in this pass
   (assigned scope was pure-Simple only: no `src/compiler_rust` edits, no new
   `rt_*` externs — see "Why no fix was applied" below).
@@ -272,3 +272,7 @@ wrapped harness through the interpreter):
 timeout 240 src/compiler_rust/target/release/simple test test/01_unit/lib/test_runner_result_wrapper_spec.spl        # exit 0
 timeout 240 src/compiler_rust/target/release/simple test test/01_unit/lib/test_runner/result_wrapper_unit_spec.spl   # exit 0
 ```
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

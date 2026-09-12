@@ -1,5 +1,7 @@
 # `simple ui tui` runs a stub; the real TUI app is unreachable from the CLI
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-05 · **Status:** OPEN · **Lane:** ui_slim_kernel_plugin (found while gating the product entry)
 
 ## Evidence
@@ -27,3 +29,7 @@ the ordinary route no longer drags the compositor in, keeping the stub only behi
 explicit `--stub` for size audits; or declare `tui_web` the product TUI and delete the
 dead route. Pick one, then re-gate with `scripts/check/check-ui-slim-closure.shs` on the
 terminal module and measure T1.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

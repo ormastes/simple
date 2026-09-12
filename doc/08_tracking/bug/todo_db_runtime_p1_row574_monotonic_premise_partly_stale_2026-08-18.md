@@ -1,5 +1,7 @@
 # todo_db row 574 (area runtime, P1) — premise is partly stale
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Row 574 asks to "provide overflow-safe cross-platform monotonic millisecond
 conversion and split QEMU runner elapsed timing from wall-clock artifact
 stamps", and its note lists four concrete sub-claims. Two of them no longer
@@ -56,3 +58,7 @@ Left untouched; no claim made either way.
 
 Narrow row 574 to sub-claims 3 and 4 and drop 1 and 2, so the row stops
 pointing at code that already satisfies it.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

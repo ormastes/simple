@@ -1,5 +1,7 @@
 # Bug: sspec runner — process_run exit code unreliable + 3-way if/elif/else mis-evaluates
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Filed:** 2026-06-29
 **Severity:** medium (both have workarounds; the elif one is a real codegen/interp defect)
 **Found while:** writing subprocess sspec system tests
@@ -33,3 +35,7 @@ This is a real evaluation defect (the `elif` chain is not honored on this path),
 Both are worked around in the committed NVMe sspec system tests (the rv32 baremetal-boot spec branches
 on stdout tokens and uses nested if/else). A correct runner would surface child exit codes and evaluate
 `elif` chains.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.
