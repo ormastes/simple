@@ -1,0 +1,163 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# plan: doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md (L10, rows 735-769 / 1280 / 1303-1305)
+
+# @cover src/lib/common/perf/crosslang_result_shape.spl 80%
+# @tag: unit, perf, cross_language, l10, schema
+
+# L10 recorded rejection cause 3 — RESULT-SHAPE EQUIVALENCE.
+# Each adapter emitted its own result shape, so "equivalent" rows were compared
+# by eye and the historical matrices contain missing and unequal-work rows. This
+# spec pins a CANONICAL result schema every adapter maps into, proves two
+# adapters' results for the same fixture compare equal after mapping, and makes
+# any shape deviation a typed rejection naming the offending field.
+#
+# Synthetic only — no adapter is executed (no fourth collector cycle).
+
+use std.spec
+use std.spec.step
+use common.perf.crosslang_result_shape.{
+    AdapterField,
+    CanonicalResult,
+    crosslang_canonical_keys,
+    crosslang_map_adapter_result,
+    crosslang_results_work_equal,
+    crosslang_results_sdn,
+}
+
+fn simple_adapter_fields() -> [AdapterField]:
+    """What the Simple adapter emits for fixture `feature_core_v1`."""
+    [
+        AdapterField(key: "fixture_id", value: "feature_core_v1"),
+        AdapterField(key: "adapter_id", value: "simple"),
+        AdapterField(key: "unit", value: "us"),
+        AdapterField(key: "p50", value: "107"),
+        AdapterField(key: "p95", value: "900"),
+        AdapterField(key: "sample_count", value: "15"),
+        AdapterField(key: "output_checksum", value: "fnv1a64:12345"),
+        AdapterField(key: "item_count", value: "15"),
+    ]
+
+fn rust_adapter_fields() -> [AdapterField]:
+    """What the Rust adapter emits for the SAME fixture. Its timings legitimately
+    differ; its executed work must not."""
+    [
+        AdapterField(key: "fixture_id", value: "feature_core_v1"),
+        AdapterField(key: "adapter_id", value: "rust"),
+        AdapterField(key: "unit", value: "us"),
+        AdapterField(key: "p50", value: "42"),
+        AdapterField(key: "p95", value: "310"),
+        AdapterField(key: "sample_count", value: "15"),
+        AdapterField(key: "output_checksum", value: "fnv1a64:12345"),
+        AdapterField(key: "item_count", value: "15"),
+    ]
+
+describe "crosslang result shape — one canonical schema every adapter maps into":
+    # @manual_section L10 rejection cause 3
+
+    it "maps two different adapters' outputs into the same canonical shape":
+        """Both adapters' emissions become CanonicalResult records with the same
+        eight fields in the same order."""
+        # @req REQ-SSPEC-UNIT
+        step("map the Simple and Rust adapter emissions")
+        val s = crosslang_map_adapter_result(simple_adapter_fields())
+        val r = crosslang_map_adapter_result(rust_adapter_fields())
+        assert_true(s.ok)
+        assert_true(r.ok)
+        assert_equal(s.deviation_kind, "")
+        assert_equal(r.deviation_kind, "")
+        assert_equal(s.result.fixture_id, "feature_core_v1")
+        assert_equal(s.result.adapter_id, "simple")
+        assert_equal(r.result.adapter_id, "rust")
+        assert_true(s.result.p50 == 107)
+        assert_true(s.result.p95 == 900)
+        assert_true(r.result.p50 == 42)
+        # Vacuity gate: the canonical key list must be real and non-empty.
+        assert_true(crosslang_canonical_keys().len() == 8)
+
+    it "two adapters' mapped results for the same fixture compare equal":
+        """Work equivalence is what must match across adapters: same fixture,
+        same unit, same produced output, same sample count. Timings differ and
+        are deliberately excluded from the equality."""
+        # @req REQ-SSPEC-UNIT
+        step("compare the two mapped results for work equivalence")
+        val s = crosslang_map_adapter_result(simple_adapter_fields())
+        val r = crosslang_map_adapter_result(rust_adapter_fields())
+        val eq = crosslang_results_work_equal(s.result, r.result)
+        assert_true(eq.equal)
+        assert_equal(eq.reason, "")
+        # And the comparison is not vacuously true: differing work is caught.
+        var other = rust_adapter_fields()
+        other[6] = AdapterField(key: "output_checksum", value: "fnv1a64:99999")
+        val different = crosslang_map_adapter_result(other)
+        assert_true(different.ok)
+        val neq = crosslang_results_work_equal(s.result, different.result)
+        assert_false(neq.equal)
+        assert_contains(neq.reason, "output_checksum")
+
+    it "a missing field is a typed rejection naming the field":
+        """A shape deviation is refused, never filled in with a default."""
+        # @req REQ-SSPEC-UNIT
+        step("map an emission that omits output_checksum")
+        var missing: [AdapterField] = []
+        var i: i64 = 0
+        val src = simple_adapter_fields()
+        while i < src.len():
+            if i != 6:
+                missing.push(src[i.to_i32()])
+            i = i + 1
+        assert_true(missing.len() == 7)
+        val out = crosslang_map_adapter_result(missing)
+        assert_false(out.ok)
+        assert_equal(out.deviation_kind, "missing_field")
+        assert_contains(out.detail, "output_checksum")
+
+    it "an unknown field is a typed rejection naming the field":
+        """The schema is closed: an adapter cannot smuggle an extra column into
+        the matrix."""
+        # @req REQ-SSPEC-UNIT
+        step("map an emission carrying an undeclared field")
+        var extra = simple_adapter_fields()
+        extra.push(AdapterField(key: "warm_ms", value: "3"))
+        val out = crosslang_map_adapter_result(extra)
+        assert_false(out.ok)
+        assert_equal(out.deviation_kind, "unknown_field")
+        assert_contains(out.detail, "warm_ms")
+
+    it "a non-integer numeric field is a typed rejection naming the field":
+        """`p50: "fast"` must fail loudly rather than map to 0."""
+        # @req REQ-SSPEC-UNIT
+        step("map an emission whose p50 is not an integer")
+        var bad = simple_adapter_fields()
+        bad[3] = AdapterField(key: "p50", value: "fast")
+        val out = crosslang_map_adapter_result(bad)
+        assert_false(out.ok)
+        assert_equal(out.deviation_kind, "not_an_integer")
+        assert_contains(out.detail, "p50")
+
+    it "an empty emission is a typed rejection, not an empty pass":
+        """Vacuity gate: an adapter that emitted nothing is refused."""
+        # @req REQ-SSPEC-UNIT
+        step("map an empty emission")
+        val out = crosslang_map_adapter_result([])
+        assert_false(out.ok)
+        assert_equal(out.deviation_kind, "empty_emission")
+
+    it "serializes mapped results as canonical SDN with a fixed column order":
+        """The canonical schema is the on-disk contract, so its header is pinned
+        here and a column reorder breaks this assertion."""
+        # @req REQ-SSPEC-UNIT
+        step("serialize both mapped results")
+        val s = crosslang_map_adapter_result(simple_adapter_fields())
+        val r = crosslang_map_adapter_result(rust_adapter_fields())
+        val sdn = crosslang_results_sdn([s.result, r.result])
+        assert_contains(sdn, "# version: crosslang-result-v1")
+        assert_contains(sdn, "results |fixture_id, adapter_id, unit, p50, p95, sample_count, output_checksum, item_count|")
+        assert_contains(sdn, "\"simple\"")
+        assert_contains(sdn, "\"rust\"")
+        assert_contains(sdn, "107")
+        # Vacuity gate: serializing nothing yields the header only, never a
+        # document that looks like it carried rows.
+        val empty = crosslang_results_sdn([])
+        assert_contains(empty, "# version: crosslang-result-v1")
+        assert_false(empty.contains("\"simple\""))
