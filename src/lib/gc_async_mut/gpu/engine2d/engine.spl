@@ -85,6 +85,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
     Engine2dGlassMaterialConfig,
     engine2d_glass_execution_metal,
+    engine2d_glass_execution_vulkan,
     engine2d_glass_execution_unavailable
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_context_admission.{
@@ -1436,6 +1437,29 @@ class Engine2D with DrawIrRenderTarget:
             if applied:
                 return engine2d_glass_execution_metal(handle, identity)
             if not metal.initialized:
+                return engine2d_glass_execution_unavailable(
+                    "device-glass-state-unknown")
+            return engine2d_glass_execution_unavailable(reason)
+        if val Some(vulkan) = self.vulkan_backend:
+            val identity = vulkan.session.device
+            if identity <= 0 or vulkan.d_framebuffer <= 0:
+                self.vulkan_backend = Some(vulkan)
+                return engine2d_glass_execution_unavailable(
+                    "vulkan-device-identity-unavailable")
+            val applied = vulkan.draw_ir_apply_glass_material_device(config)
+            val handle = vulkan.d_framebuffer
+            val reason = vulkan.last_error
+            if not applied:
+                # The host twin is about to read the whole framebuffer back,
+                # blur on the CPU and upload the rect again. That round trip
+                # used to happen SILENTLY (cpu_fallback_count stayed 0 while it
+                # ran); record it so an audit can see the boundary crossing.
+                vulkan.mark_cpu_fallback("glass-device-unavailable")
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            if applied:
+                return engine2d_glass_execution_vulkan(handle, identity)
+            if not vulkan.initialized:
                 return engine2d_glass_execution_unavailable(
                     "device-glass-state-unknown")
             return engine2d_glass_execution_unavailable(reason)
