@@ -685,24 +685,49 @@ pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
     std::fs::create_dir_all(build_dir).ok()?;
     let cc = target_c_compiler(target);
     let riscv_vector = std::env::var("SIMPLE_RUNTIME_RISCV64_VECTOR").ok().as_deref() == Some("1");
-    let status = std::process::Command::new(&cc)
-        .arg("-c")
-        .arg("-Os")
-        .arg("-ffunction-sections")
-        .arg("-fdata-sections")
-        .arg("-fno-unwind-tables")
-        .arg("-fno-asynchronous-unwind-tables")
-        .arg("-fno-stack-protector")
-        .arg("-fPIC")
-        .arg("-std=gnu11")
+    // cl.exe understands none of the GCC codegen flags -- it reports each as
+    // `warning D9002: ignoring unknown option` -- and, worse, reads `-o` as its
+    // long-deprecated `/o` (`warning D9035`) rather than as "write the object
+    // here". The object therefore never appeared at the requested path and the
+    // archive step failed with `llvm-ar: runtime_native.obj: no such file or
+    // directory` AFTER every translation unit had compiled successfully. Give
+    // MSVC its own spelling of the same intent; the GNU branch is unchanged.
+    let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    let mut command = std::process::Command::new(&cc);
+    if msvc {
+        command
+            .arg("-c")
+            .arg("-O1")   // -Os: optimise for size
+            .arg("-Gy")   // -ffunction-sections
+            .arg("-Gw")   // -fdata-sections
+            .arg("-GS-"); // -fno-stack-protector
+        // -fPIC and the unwind-table flags have no MSVC equivalent: Windows
+        // code is position-independent by construction, and SEH unwind data is
+        // not optional there.
+    } else {
+        command
+            .arg("-c")
+            .arg("-Os")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
+            .arg("-fno-unwind-tables")
+            .arg("-fno-asynchronous-unwind-tables")
+            .arg("-fno-stack-protector")
+            .arg("-fPIC")
+            .arg("-std=gnu11");
+    }
+    let status = command
         .args(msvc_c11_atomics_flags(&cc))
         .arg("-DSIMPLE_CORE_C_STANDALONE=1")
         .args(core_c_target_flags(target, source, riscv_vector))
         .arg(format!("-I{}", runtime_root.display()))
         .arg(format!("-I{}", runtime_root.join("platform").display()))
         .arg(&source_path)
-        .arg("-o")
-        .arg(&object)
+        .args(if msvc {
+            vec![format!("-Fo{}", object.display())]
+        } else {
+            vec!["-o".to_string(), object.display().to_string()]
+        })
         .status()
         .ok()?;
     (status.success() && std::fs::metadata(&object).map(|m| m.len() > 0).unwrap_or(false)).then_some(object)
