@@ -47,6 +47,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
 }
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_draw_census_line, vulkan_draw_census_reset, vulkan_readback_census_line, vulkan_readback_census_reset}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
@@ -1452,3 +1453,47 @@ export web_draw_ir_gpu_route_canonical_submission_count
 export web_draw_ir_gpu_route_last_comparison_receipt
 export web_draw_ir_gpu_route_last_evidence
 export web_draw_ir_gpu_route_sample
+
+# ---------------------------------------------------------------------------
+# Vulkan-lane census (read-only instrumentation)
+# ---------------------------------------------------------------------------
+# The engine slot pool above is the ONLY place that still holds the Engine2D --
+# and therefore the VulkanBackend -- after a render returns. Every counter below
+# already existed on the backend; this funnel just reads them out so a page probe
+# can attribute a frame without re-plumbing the renderer. Read-only: nothing here
+# mutates engine, backend or cache state.
+
+pub fn web_vulkan_lane_census_line() -> text:
+    """One-line Vulkan-lane census for the pooled engine, or `pool=empty`."""
+    if _web_fast_engine_slots.len() <= 0:
+        return "draws[" + vulkan_draw_census_line() + " " + vulkan_readback_census_line() + "] pool=empty creates={_web_fast_engine_creates} reuses={_web_fast_engine_reuses} discards={_web_fast_engine_discards}"
+    var out = "draws[" + vulkan_draw_census_line() + " " + vulkan_readback_census_line() + "] creates={_web_fast_engine_creates} reuses={_web_fast_engine_reuses} discards={_web_fast_engine_discards}"
+    var i = 0
+    while i < _web_fast_engine_slots.len():
+        val slot = _web_fast_engine_slots[i]
+        out = out + " | slot={slot.backend}@{slot.width}x{slot.height}"
+        if val Some(vk) = slot.engine.vulkan_backend:
+            out = out + (
+                " vk_init={vk.initialized}" +
+                " cpu_fallback={vk.cpu_fallback_used}" +
+                " cpu_fallback_reason={vk.cpu_fallback_reason}" +
+                " dispatches_frame={vk.frame_dispatch_count}" +
+                " dispatches_last_frame={vk.last_frame_dispatch_count}" +
+                " submits={vk.observed_device_submit_count}" +
+                " fences={vk.observed_device_fence_count}" +
+                " midframe_flushes={vk.midframe_flush_count}" +
+                " font_atlas_cpu_builds={vk.font_atlas_cpu_build_count}" +
+                " font_atlas_uploads={vk.font_atlas_upload_count}" +
+                " full_readbacks={vk.present_full_readback_count}" +
+                " readback_noops={vk.present_noop_count}" +
+                " image_host_uploads={vk.image_source_upload_count}" +
+                " image_scratch_fallbacks={vk.image_upload_scratch_fallback_count}")
+        else:
+            out = out + " vk=absent"
+        i = i + 1
+    out
+
+pub fn web_vulkan_lane_census_drain():
+    """Zero the draw-kind counters so the next frame is measured on its own."""
+    vulkan_draw_census_reset()
+    vulkan_readback_census_reset()

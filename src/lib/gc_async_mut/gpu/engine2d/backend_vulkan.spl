@@ -2026,6 +2026,7 @@ impl RenderBackend for VulkanBackend:
         samples
 
     me read_pixels_with_source() -> Engine2DReadback:
+        vulkan_stat_note_readback(_i64(self.w) * _i64(self.h))
         if vulkan_order_trace_enabled():
             vulkan_order_trace("readback-entry dirty={self.dirty} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown} fb={self.d_framebuffer}")
         if self.completion_unknown:
@@ -2381,3 +2382,91 @@ impl Engine2DExtended for VulkanBackend:
         if text_buf.is_empty():
             return
         self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
+
+# ---------------------------------------------------------------------------
+# Draw-kind census (process-global, instrumentation only)
+# ---------------------------------------------------------------------------
+# Counts what each Vulkan draw entry point actually DID, split by the branch it
+# took, so a page probe can attribute a frame instead of guessing. Module-level
+# rather than per-backend fields because a probe reads them without holding the
+# backend, and exactly one Vulkan surface is live on the page lane.
+#
+# The load-bearing split is `rect_alpha_blend`: `draw_rect_filled` turns ANY
+# colour with alpha < 255 into a full `draw_image_blend`, which on this lane is a
+# staging upload + dispatch + fence. `rect_alpha_1x1` counts the degenerate
+# single-pixel case that anti-aliased shape decomposition emits.
+
+var _vk_stat_rect_opaque: i64 = 0
+var _vk_stat_rect_alpha_blend: i64 = 0
+var _vk_stat_rect_alpha_1x1: i64 = 0
+var _vk_stat_rect_masked: i64 = 0
+var _vk_stat_rect_list: i64 = 0
+var _vk_stat_image_blend: i64 = 0
+var _vk_stat_image_blend_small: i64 = 0
+var _vk_stat_image: i64 = 0
+var _vk_stat_text: i64 = 0
+
+pub fn vulkan_draw_census_reset():
+    _vk_stat_rect_opaque = 0
+    _vk_stat_rect_alpha_blend = 0
+    _vk_stat_rect_alpha_1x1 = 0
+    _vk_stat_rect_masked = 0
+    _vk_stat_rect_list = 0
+    _vk_stat_image_blend = 0
+    _vk_stat_image_blend_small = 0
+    _vk_stat_image = 0
+    _vk_stat_text = 0
+
+pub fn vulkan_draw_census_line() -> text:
+    ("rect_opaque={_vk_stat_rect_opaque}" +
+     " rect_alpha_blend={_vk_stat_rect_alpha_blend}" +
+     " rect_alpha_1x1={_vk_stat_rect_alpha_1x1}" +
+     " rect_masked={_vk_stat_rect_masked}" +
+     " rect_list={_vk_stat_rect_list}" +
+     " image_blend={_vk_stat_image_blend}" +
+     " image_blend_le16px={_vk_stat_image_blend_small}" +
+     " image={_vk_stat_image}" +
+     " text={_vk_stat_text}")
+
+fn _vk_stat_rect(w: i32, h: i32, alpha: bool, masked: bool):
+    if masked:
+        _vk_stat_rect_masked = _vk_stat_rect_masked + 1
+    elif alpha:
+        _vk_stat_rect_alpha_blend = _vk_stat_rect_alpha_blend + 1
+        if w == 1 and h == 1:
+            _vk_stat_rect_alpha_1x1 = _vk_stat_rect_alpha_1x1 + 1
+    else:
+        _vk_stat_rect_opaque = _vk_stat_rect_opaque + 1
+
+fn _vk_stat_image_op(w: i32, h: i32, blend: bool):
+    if blend:
+        _vk_stat_image_blend = _vk_stat_image_blend + 1
+        if w * h <= 16:
+            _vk_stat_image_blend_small = _vk_stat_image_blend_small + 1
+    else:
+        _vk_stat_image = _vk_stat_image + 1
+
+fn _vk_stat_text_op():
+    _vk_stat_text = _vk_stat_text + 1
+
+fn _vk_stat_rect_list_op():
+    _vk_stat_rect_list = _vk_stat_rect_list + 1
+
+# Full-surface readbacks and checksum walks are O(framebuffer) EACH, so a frame
+# that performs several is superlinear in page content even when its draw count
+# is small. These are cumulative for the process, unlike the frame-scoped
+# `present_*_count` fields, which a frame boundary resets before a probe can
+# read them.
+var _vk_stat_readbacks: i64 = 0
+var _vk_stat_readback_pixels: i64 = 0
+
+pub fn vulkan_stat_note_readback(pixel_count: i64):
+    _vk_stat_readbacks = _vk_stat_readbacks + 1
+    _vk_stat_readback_pixels = _vk_stat_readback_pixels + pixel_count
+
+pub fn vulkan_readback_census_line() -> text:
+    "readbacks={_vk_stat_readbacks} readback_pixels={_vk_stat_readback_pixels}"
+
+pub fn vulkan_readback_census_reset():
+    _vk_stat_readbacks = 0
+    _vk_stat_readback_pixels = 0
