@@ -18,6 +18,13 @@ use compiler.driver.cache.native_build_environment_identity.{
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write(path: text, content: text) -> bool
+# rt_file_write above does not resolve ("semantic: unknown extern function:
+# rt_file_write"), which is why six of this file's examples are RED before this
+# change -- a pre-existing failure, not one introduced here. rt_file_write_text
+# is the declaration every other system spec in test/03_system/compiler uses,
+# so the example added at the end of this file gets a verdict about the code
+# under test rather than about an unresolvable symbol.
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
 extern fn rt_dir_remove_all(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -240,3 +247,31 @@ describe "MBH-NFR-002 native zero-work admission":
         expect(present_value.valid).to_equal(true)
         expect(absent.digest == present_empty.digest).to_equal(false)
         expect(present_empty.digest == present_value.digest).to_equal(false)
+
+    it "refuses to publish a receipt for a request with no identity":
+        # An empty environment digest is the documented "this build is not
+        # identifiable" sentinel: native_noop_request_v1 returns identity ""
+        # for it, and native_noop_admit_v1 already refuses such a request with
+        # "request-invalid". The publish side must refuse it the SAME way.
+        # Without the guard the receipt is written under the identity-less
+        # path "{root}//generations", where every unidentifiable build on the
+        # host collides on one CURRENT pointer -- a cache that can hand one
+        # build's output to a different build.
+        val root = "/tmp/simple-native-zero-work-unidentified-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_be(true)
+        val source = "{root}/main.spl"
+        val output = "{root}/app"
+        expect(rt_file_write_text(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(rt_file_write_text(output, "native-output-v1")).to_be(true)
+        val unidentified = zero_work_request_with_environment(root, output, "")
+        val refused = native_noop_admit_v1(unidentified)
+        expect(native_noop_admission_hit_v1(refused)).to_be(false)
+        expect(native_noop_admission_reason_v1(refused)).to_equal("request-invalid")
+        expect(native_noop_publish_v1(unidentified, [source])).to_equal(
+            "request-invalid")
+        # Fail closed on vacuity: the refusal must leave no pointer behind, so
+        # a publish that "returned a string" but still wrote is still a FAIL.
+        val leaked = rt_file_read_regular_no_follow_bounded(
+            native_noop_request_current_path_v1(unidentified), 128)
+        expect(leaked == nil).to_be(true)
