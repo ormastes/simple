@@ -609,3 +609,105 @@ call sites; **208 across 109 functions remain** by a second route (qualified-nam
 single-candidate fallbacks). Stage 2 is not blocked by them — they are latent —
 but the population is NOT closed. See
 `doc/08_tracking/bug/unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13.md`.
+
+## Run 18 (2026-09-13) — the darwin `-lc` is FIXED; libSystem was hiding behind it
+
+Change under test: PR #752, a target-keyed library/CRT table in
+`src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl`
+(`native_link_std_lib_args(os, mode)`, `native_link_uses_crt_objects(os)`,
+`native_link_shared_std_libs(os)`), consumed by the direct-ld path, both
+cc-fallback arms, and the shared-library line.
+
+Link line, before -> after:
+
+| target | before | after |
+|---|---|---|
+| darwin, direct ld64 | `-L /opt/homebrew/lib -L /usr/local/lib -lc -lpthread -lm -lSystem -lSDL2` | `-L /opt/homebrew/lib -L /usr/local/lib -lSystem -lSDL2` (one `-lSystem`) |
+| darwin, cc fallback | `-L /opt/homebrew/lib -L /usr/local/lib -lc -lpthread -lm -lSystem -lSDL2` | `-L /opt/homebrew/lib -L /usr/local/lib -lSDL2` (driver adds its own `-lSystem`) |
+| linux, direct ld | `-lc -lpthread -ldl --as-needed -lm --no-as-needed` | unchanged, byte for byte |
+| linux, cc | `-lc -lpthread -ldl` … `-Wl,--as-needed -lm -Wl,--no-as-needed` | unchanged, byte for byte |
+| freebsd | (both arms) | unchanged, byte for byte |
+
+Darwin additionally stops treating a missing CRT set as a strict-link-profile
+error. **Behaviour change worth knowing:** `allow_cc_fallback=false` on darwin no
+longer fails — it routes to the compiler driver. That is deliberate (a direct
+ld64 line was never workable without `-syslibroot`), but it means the strict
+profile is not strict on macOS.
+
+Spec: `test/01_unit/compiler/native/link_line_per_target_spec.spl`, 8 examples /
+0 failures under the Rust seed. Linux and FreeBSD expectations are the literals
+captured from the pre-change code, so a later darwin edit cannot move them.
+
+Verdict: Stage 1 admitted. Stage 2 built its full closure clean — `Build
+complete: 886 compiled, 0 cached, 0 failed`, 568.3s compile + 15.6s link — and
+sanity FAILED one library further along:
+
+```
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+error: in-process native-build: LLVM native linking failed: Linking failed: cc linking failed: ld: library 'System' not found
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+error: Stage 2 bootstrap compiler sanity failed
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+`-lc` is gone; the duplicate-`-lSystem` warning is gone. The new error is NOT a
+regression — ld reports only the FIRST missing library, so `library 'c' not
+found` had been masking the fact that libSystem was never resolvable here.
+
+Rejected candidate preserved at
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`,
+139327304 bytes. Rebuilding a three-line hello world with it reproduced the
+failure in ~40 s, which is how run 19's fix was found without a second
+25-minute cycle.
+
+## Run 19 (2026-09-13) — the link is FIXED end to end; a non-linker blocker is exposed
+
+Change under test: PR #753. `native_cc_platform_flags` now adds `-isysroot
+<sdk>` on darwin, from `SDKROOT` when set else `xcrun --show-sdk-path`, and adds
+nothing when no SDK resolves.
+
+Root cause, measured directly rather than inferred:
+`darwin_resolve_link_tool("cc")` resolves through `xcrun --find clang`, which
+returns `/Applications/Xcode.app/…/XcodeDefault.xctoolchain/usr/bin/clang`. On
+this host the active developer dir is CommandLineTools, so that clang's default
+SDK is absent:
+
+```
+/Applications/Xcode.app/.../usr/bin/clang t.c -lSystem                          -> ld: library 'System' not found
+/Applications/Xcode.app/.../usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk t.c  -> links
+/usr/bin/cc t.c -lSystem                                                        -> links
+```
+
+The last line is why the failure looked impossible at first: the obvious `cc` on
+PATH works fine, and only the xcrun-resolved one does not.
+
+Spec: 9 examples / 0 failures. The new assertion only demands the flag where an
+SDK actually resolves, so a host with none is not handed an empty `-isysroot`.
+
+Verdict: Stage 1 admitted, Stage 2 closure clean, and the sanity hello world now
+COMPILES AND LINKS — the first time on this lane. Stage 2 is still NOT admitted;
+the gate advances past the frontend smoke and fails at the next check:
+
+```
+  Stage 2: running bootstrap compiler sanity
+  Stage 2: proving struct receiver/runtime capability
+error: Stage 2 struct receiver/runtime capability failed
+    | error: stage2 failed the positional pure-Simple Stage-3 route (status 1)
+    | error: in-process native-build: Module surface registry graph promotion failed after phase 2
+exit:  3
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Stages reached: 1 admitted, 2 built and rejected. Stage 3 not attempted. Nothing
+deployed. **No candidate is preserved on the exit-3 path** —
+`stage2/aarch64-apple-darwin/` is empty — so the 40-second witness loop is not
+available for the successor. Filed as
+`doc/08_tracking/bug/stage2_sanity_module_surface_registry_promotion_fails_2026-09-13.md`.
+
+**Operational trap, cost one full 25-minute cycle.** A `timeout`-bounded waiter
+(or any background waiter that gets killed) signals the bootstrap's process
+GROUP. The run dies with a bare `Terminated: 15` that reads like a build failure
+and leaves a stale lock, so the next run fails with `timed out waiting for
+bootstrap output ownership`. Clear
+`.simple/storage/build/.simple-bootstrap-locks` after any killed run, and poll
+with short, unbounded foreground checks only.
