@@ -680,3 +680,89 @@ platform gets wrong. Untouched here.
 | Stage 4 link gates 1-5 | **fixed** |
 | Stage 4 link gate 6 | open (runtime capsule symbol strength) |
 | native f64 correctness | **broken** — blocks deployment on its own |
+
+---
+
+## Re-audit 2026-09-12 (aarch64-apple-darwin, M4) — two claims above are now STALE
+
+This record was written on 2026-09-06. Work landed on 2026-09-10 that this
+document predates, so two of its load-bearing claims no longer describe the
+tree. Correcting them here rather than leaving a reader to rediscover it.
+
+### CORRECTED: "`sha256sum` ... does not exist on macOS" — a fallback exists
+
+`scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs:33`
+(`candidate_frontend_hash_file`) prefers `sha256sum`, falls back to
+`shasum -a 256`, and returns 126 with neither — fail-closed, not GNU-only. It
+additionally rejects any digest that is not 64 lowercase hex characters.
+
+### CORRECTED: "blocker A is NOT a small port ... it needs a redesign"
+
+The "Correction: blocker A is NOT a small port" section above concluded that
+`/proc/<pid>/fd/<n>/<leaf>` — traversing a name *through* a directory
+descriptor — has no macOS equivalent, and that Stage-2 admission was therefore
+blocked pending a redesign of a deliberate security property.
+
+That redesign LANDED, in `e1c40702a20` ("fix(bootstrap): support macOS frontend
+admission capture", 2026-09-10). `candidate_frontend_admission.shs` now carries
+a third capture kind, `darwin-pinned`, beside `procfd` and `windows-job`:
+`candidate_frontend_descriptor_root()` returns `/dev/fd` on Darwin (`:49`),
+`candidate_frontend_procfd()` accepts the `/dev/fd/N` shape on Darwin only
+(`:61-62`), and the directory-traversal problem is handled by re-entering the
+pinned parent rather than by spelling a path through it (`:83-104`) — with the
+`Darwin fdescfs supports reading an inherited file descriptor, but neither
+directory-fd suffixes nor executing an executable through /dev/fd` comment
+recording exactly why the substitution the earlier section looked for is
+impossible.
+
+Verified by RUNNING the three tests that shipped with it, on this host:
+
+```
+$ sh test/01_unit/scripts/candidate_frontend_darwin_capture_test.shs
+PASS: macOS frontend capture and bounded receipt integration          (rc=0)
+$ sh test/01_unit/scripts/candidate_frontend_hash_portability_test.shs
+PASS: frontend portable hashing with sanitized PATH and fail-closed errors  (rc=0)
+$ sh test/01_unit/scripts/process_group_bounded_log_contract_test.shs
+PASS: descriptor-safe bounded process-group log collector             (rc=0)
+```
+
+(They live under `test/01_unit/scripts/`, not beside the script — the commit's
+`--stat` abbreviates the paths, which cost one search.)
+
+**Blocker A is CLOSED.** Blocker B (the `serialize_mir_function` SEGV) is
+untouched by this change and, on this record's own 2026-09-06 evidence, remains
+the gating defect for macOS Stage-2 admission. It was **not** re-reproduced on
+2026-09-12: doing so needs a Stage-2 binary, and the
+`--full-bootstrap --stop-after-stage2` run started for that purpose spent its
+first **18m35s** on a cold Rust seed build (246 crates; `Finished \`bootstrap\`
+profile [optimized] target(s) in 18m 35s`, in
+`.simple/storage/build/bootstrap/logs/aarch64-apple-darwin/rust-seed-build.log`).
+That seed cost is worth recording on its own — it is the floor any macOS lane
+pays before Stage 1 can start, and it is why a "quick" Stage-2 reproduction of
+blocker B is not quick from a cold tree. Whether Stage-2 admission then
+reproduces the SEGV was not settled within this session. Treat the SEGV as a carried-forward citation until someone
+re-measures it.
+
+### STILL OPEN, unchanged: Stage 3/4 manifest verification is Linux-only
+
+Re-measured 2026-09-12:
+
+```
+$ grep -c '/proc' scripts/check/lib/bootstrap-stage3/manifest-verify.shs
+19
+```
+
+Byte-for-byte the count this record reported on 2026-09-06. Nothing has moved
+there, and the `darwin-pinned` work above did not reach it. Every macOS lane
+that gets as far as Stage 3 or Stage 4 manifest verification — which is every
+`--deploy` route — still fails closed. This is the item the fix-lane plan names
+as "remaining `/proc` coupling in Stage-3 authority path", and it is NOT fixed.
+
+Scoping note for whoever picks it up: the `darwin-pinned` capture kind is now a
+worked precedent for the same class of problem (descriptor pinning without
+procfs, fail-closed, with tests), so this is no longer an open design question
+— it is a port with a model to follow. It is still materially larger than the
+admission-side change: 19 references in `manifest-verify.shs` alone, ~50 across
+`scripts/check/lib/bootstrap-stage3/`, including a hard-coded GNU `stat -Lc '%f'`
+raw-mode comparison (`[ "$3" = 8100 ]`) that has the same BSD-`stat` problem as
+defect 2 above.
