@@ -7,6 +7,66 @@ use std.nogc_async_mut.engine.render.backend3d.{
     RenderBackend3D, BufferHandle, RenderPassHandle, PipelineHandle
 }
 use std.nogc_async_mut.engine.render.instancing.{InstanceBatch, InstanceData}
+use std.nogc_async_mut.binary_io.{f32_to_bits, f64_to_bits}
+
+# ============================================================================
+# Wire-format packers — little-endian, matching the nogc_sync_mut twin
+#
+# The GPU expects raw little-endian scalars: f32 vertex attributes, u32 indices
+# and f64 per-instance transforms.
+# ============================================================================
+
+fn mesh_vertices_to_bytes(vertices: [f32]) -> [u8]:
+    """Pack a flat f32 vertex stream as little-endian 4-byte words."""
+    var bytes: [u8] = []
+    var i = 0
+    while i < vertices.len():
+        val bits = f32_to_bits(vertices[i])
+        bytes.push((bits & 0xffu32) as u8)
+        bytes.push(((bits >> 8) & 0xffu32) as u8)
+        bytes.push(((bits >> 16) & 0xffu32) as u8)
+        bytes.push(((bits >> 24) & 0xffu32) as u8)
+        i = i + 1
+    bytes
+
+fn mesh_indices_to_bytes(indices: [i64]) -> [u8]:
+    """Pack triangle indices as little-endian u32 (the GPU index-buffer width)."""
+    var bytes: [u8] = []
+    var i = 0
+    while i < indices.len():
+        val bits = indices[i] as u32
+        bytes.push((bits & 0xffu32) as u8)
+        bytes.push(((bits >> 8) & 0xffu32) as u8)
+        bytes.push(((bits >> 16) & 0xffu32) as u8)
+        bytes.push(((bits >> 24) & 0xffu32) as u8)
+        i = i + 1
+    bytes
+
+fn _push_f64_le(bytes: [u8], value: f64) -> [u8]:
+    """Append one little-endian f64 to `bytes`."""
+    val bits = f64_to_bits(value)
+    var out = bytes
+    var shift = 0
+    while shift < 64:
+        out.push(((bits >> shift) & 0xffu64) as u8)
+        shift = shift + 8
+    out
+
+fn instances_to_bytes(instances: [InstanceData]) -> [u8]:
+    """Pack per-instance transforms: 7 x f64 = 56 bytes per instance."""
+    var bytes: [u8] = []
+    var i = 0
+    while i < instances.len():
+        val inst = instances[i]
+        bytes = _push_f64_le(bytes, inst.position_x)
+        bytes = _push_f64_le(bytes, inst.position_y)
+        bytes = _push_f64_le(bytes, inst.position_z)
+        bytes = _push_f64_le(bytes, inst.scale_x)
+        bytes = _push_f64_le(bytes, inst.scale_y)
+        bytes = _push_f64_le(bytes, inst.scale_z)
+        bytes = _push_f64_le(bytes, inst.rotation)
+        i = i + 1
+    bytes
 
 # ============================================================================
 # GpuMeshHandle — opaque handles to vertex and index buffers on the GPU
@@ -87,10 +147,7 @@ impl GpuMeshPool:
 # vertices: flat f32 array (x, y, z, nx, ny, nz, u, v per vertex — 8 floats)
 # indices:  flat i64 array of triangle indices
 #
-# Byte conversion: Simple has no f32→[u8] primitive.  We allocate a zero-filled
-# [u8] of the required size and pass it to the backend.  Real float serialization
-# must be wired once the runtime provides an rt_f32_to_bytes or equivalent.
-# TODO: replace placeholder zeroed byte buffers with real float serialization
+# Wire format is little-endian: packed f32 vertex attributes and u32 indices.
 # ============================================================================
 
 fn gpu_mesh_upload(backend: RenderBackend3D, vertices: [f32], indices: [i64]) -> GpuMeshHandle:
@@ -101,18 +158,8 @@ fn gpu_mesh_upload(backend: RenderBackend3D, vertices: [f32], indices: [i64]) ->
     val vbuf = backend.create_vertex_buffer(vbyte_count)
     val ibuf = backend.create_index_buffer(ibyte_count)
 
-    # TODO: real float serialization — build zeroed placeholder bytes for now
-    var vbytes: [u8] = []
-    var vi = 0
-    while vi < vbyte_count:
-        vbytes.push(0)
-        vi = vi + 1
-
-    var ibytes: [u8] = []
-    var ii = 0
-    while ii < ibyte_count:
-        ibytes.push(0)
-        ii = ii + 1
+    val vbytes = mesh_vertices_to_bytes(vertices)
+    val ibytes = mesh_indices_to_bytes(indices)
 
     backend.upload_buffer(vbuf, vbytes, 0)
     backend.upload_buffer(ibuf, ibytes, 0)
@@ -158,9 +205,7 @@ fn gpu_mesh_draw(backend: RenderBackend3D, rph: RenderPassHandle, mesh: GpuMeshH
 # the backend gains draw_indexed_instanced, this can be collapsed to a single
 # GPU call.
 #
-# TODO: upload real f64→[u8] per-instance transform data once rt_f64_to_bytes
-# is available; currently uploads a zeroed placeholder so the slot binding is
-# established.
+# Instance transforms are packed little-endian by `instances_to_bytes`.
 # ============================================================================
 
 fn gpu_mesh_draw_instanced(backend: RenderBackend3D, rph: RenderPassHandle, mesh: GpuMeshHandle, mvp_buf: BufferHandle, pipeline: PipelineHandle, batch: InstanceBatch):
@@ -174,12 +219,7 @@ fn gpu_mesh_draw_instanced(backend: RenderBackend3D, rph: RenderPassHandle, mesh
     val bytes_per_instance = 56
     val ibuf_byte_count = inst_count * bytes_per_instance
 
-    # TODO: serialize InstanceData fields into real bytes once rt_f64_to_bytes lands
-    var inst_bytes: [u8] = []
-    var bi = 0
-    while bi < ibuf_byte_count:
-        inst_bytes.push(0)
-        bi = bi + 1
+    val inst_bytes = instances_to_bytes(batch.instances)
 
     val inst_buf = backend.create_vertex_buffer(ibuf_byte_count)
     backend.upload_buffer(inst_buf, inst_bytes, 0)
