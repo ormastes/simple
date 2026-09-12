@@ -1,6 +1,14 @@
 # `SIMPLE_BOOTSTRAP=1` is treated as "this compile IS the bootstrap CLI" at several sites
 
-- Status: OPEN (2026-09-13) — two of the sites fixed, at least one more remains
+- Status: FIXED (2026-09-13, BOOT-5) — all three sites closed and the third
+  proven on a freshly built Stage-2 binary. Stage 2 is still not admitted, but
+  for an unrelated defect:
+  `stage2_capsule_receipt_size_canary_blocks_linux_admission_2026-09-13.md`.
+  Proof on `build/bootstrap-boot5/stage2/aarch64-unknown-linux-gnu/simple.rejected`
+  (sha256 `69fdfbf8b1c5e152...`), `SIMPLE_BOOTSTRAP=1`, same probe:
+  `fn-list:start` count 0 (the bootstrap-flat loop is no longer entered) and
+  `lower_function:start main` count 1, identical to the `SIMPLE_BOOTSTRAP=0`
+  control. `MIR module has no functions` no longer occurs in any pass.
 - Found: bootstrap lane BOOT-4, `work/bootstrap-full-2-2026-09-12`
 - Severity: blocks Stage-2 admission. Only reachable once the zero-work
   request-identity defect (`request-invalid`) is fixed — before that, the
@@ -36,7 +44,51 @@ own status receipt is the control.
 Both now additionally require `app.cli.bootstrap_main` to be among
 `ctx.sources`. Neither relaxes the guard it sits next to.
 
-## Site still open
+## Site 3 — found by measurement and fixed (BOOT-5, 2026-09-13)
+
+The "site still open" below is CLOSED. Third site:
+`driver_pipeline_lowering.spl`, the `direct_lowering` semantic-policy
+selection. It read only `allow_bootstrap_shortcuts`, so a positional build
+kept `MirLowering`'s AMBIENT bootstrap policy on; with `SIMPLE_BOOTSTRAP=1`
+`MirLowering.ambient_bootstrap_enabled()` is then true and `lower_module`
+routes the module through its bootstrap-FLAT function loop. That loop walks
+`module.functions.keys()` and re-finds each entry through
+`hir_module_function`, which returns an `is_extern: true` placeholder on a
+miss; extern functions are skipped, so the module contributed ZERO MIR
+functions.
+
+Measured on `scratchpad/boot5/pin/simple.stage2.rejected` (sha256
+`79139f420ee07450...`, the run-3 binary carrying sites 1 and 2), identical
+scrubbed environment plus `SIMPLE_COMPILER_PHASE_PROFILE=1
+SIMPLE_INTERP_TRACE=1`, `SIMPLE_BOOTSTRAP` the only variable changed
+(`scratchpad/boot5/disc5.sh`):
+
+| variables | raw_status | decisive trace |
+|---|---|---|
+| `SIMPLE_BOOTSTRAP=0` | **0** | `[mir-lower] lower_function:start main` ... `body-done main` |
+| `SIMPLE_BOOTSTRAP=1` | 1 | `[mir-lower] fn-list:start`, `functions:count 1`, `function-index 0`, `function-symbol`, `function-loaded`, then straight to `lower_module:done` |
+
+The `lower_module:start` / `fn-list:start` / `functions:count` lines print only
+under `bootstrap_trace = bootstrap_mode and trace`, so their presence is the
+measurement that ambient bootstrap MIR semantics were active for a module that
+is not the bootstrap CLI.
+
+Two leads die on the same trace. HIR was NOT empty in the failing run
+(`phase3:hir:file:done ... funcs=1`), so "HIR is already empty" is wrong. And
+`aot:lower_to_mir:module:done ... functions=-1` appears in BOTH runs, so the
+`-1` is the known native `Dict.len()` artifact, not the defect.
+
+Fix: `if not (allow_bootstrap_shortcuts and bootstrap_entry_requested):` —
+the same predicate and the same `ctx.sources` identity sites 1 and 2 use.
+Spec: `test/01_unit/compiler/driver/bootstrap_ambient_mir_policy_requires_requested_module_spec.spl`.
+
+## Site still open (superseded by the section above)
+
+One env-only site is deliberately NOT changed: `driver_aot_pipeline.spl:93`
+`bootstrap_flat_aot`, which skips borrow-check and the flat MIR passes on
+`SIMPLE_BOOTSTRAP` alone. It is benign for a non-bootstrap module — the three
+`--entry` probes already pass under `SIMPLE_BOOTSTRAP=1` with those passes
+skipped — so the next lane should not chase it.
 
 After both fixes the same probe fails one phase later:
 
