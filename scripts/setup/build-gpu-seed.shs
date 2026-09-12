@@ -18,14 +18,179 @@
 #
 # Usage:
 #   sh scripts/setup/build-gpu-seed.shs [extra cargo args...]
+#   sh scripts/setup/build-gpu-seed.shs --verify [seed-path]
+#   sh scripts/setup/build-gpu-seed.shs --selftest
 # Env:
 #   CARGO_TARGET_DIR   where to build (default: build/cargo-r2 under repo root)
+#
+# --verify does not build anything. It CALLS a fixed set of capability probe
+# specs against a deployed seed (default: $CARGO_TARGET_DIR/release/simple, or
+# the path given as the second argument) under
+# SIMPLE_EXECUTION_MODE=interpreter, one at a time, and fails closed the way
+# every other push-tier guard in this repo does. This exists because a
+# missing GPU-feature symbol at the FFI-link/dispatch layer (e.g.
+# rt_vulkan_copy_to_buffer_u32) does not show up in `strings`/`nm` truth for a
+# stale-vs-fresh binary as reliably as actually invoking it — see
+# doc/08_tracking/bug/gpu_seed_feature_set_drift_2026-09-12.md.
 
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 : "${CARGO_TARGET_DIR:=$repo_root/build/cargo-r2}"
 export CARGO_TARGET_DIR
+
+# ---------------------------------------------------------------------------
+# --verify / --selftest
+# ---------------------------------------------------------------------------
+
+# Each probe: "<env var>=<value>|<relative spec path>". Env part may be empty.
+probes="SIMPLE_VK_RECT_UPLOAD=u32|test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_typed_upload_spec.spl
+SIMPLE_VK_IMAGE_UPLOAD=u32|test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_image_typed_upload_spec.spl
+SIMPLE_VK_READBACK=native|test/02_integration/gpu/engine2d_vulkan_readback_unpack_cost_spec.spl
+|test/02_integration/rendering/metal_msl_pipeline_spec.spl
+|test/01_unit/lib/sffi/wffi_into_bytes_spec.spl"
+
+run_probes() {
+    # $1 = seed path, $2 = repo root to run specs from
+    seed="$1"
+    root="$2"
+    if [ ! -x "$seed" ]; then
+        echo "ERROR — nothing was checked (seed not executable: $seed)" >&2
+        return 2
+    fi
+    checked=0
+    failed=""
+    old_ifs=$IFS
+    IFS='
+'
+    for row in $probes; do
+        env_kv=${row%%|*}
+        spec=${row#*|}
+        log=$(mktemp)
+        rc=0
+        if [ -n "$env_kv" ]; then
+            var=${env_kv%%=*}
+            val=${env_kv#*=}
+            (cd "$root" && env "$var=$val" SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 "$seed" run "$spec") >"$log" 2>&1 || rc=$?
+        else
+            (cd "$root" && SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 "$seed" run "$spec") >"$log" 2>&1 || rc=$?
+        fi
+        checked=$((checked + 1))
+        if grep -q "unknown extern function" "$log"; then
+            failed="$failed $spec(unknown-extern:$(grep -o 'unknown extern function: [A-Za-z0-9_]*' "$log" | head -1 | sed 's/^unknown extern function: //'))"
+        elif [ "$rc" -ne 0 ]; then
+            failline=$(grep -E "examples,.*failures" "$log" | tail -1)
+            failed="$failed $spec(rc=$rc:${failline:-no-verdict-line})"
+        fi
+        rm -f "$log"
+    done
+    IFS=$old_ifs
+    if [ "$checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 probes ran)" >&2
+        return 2
+    fi
+    if [ -n "$failed" ]; then
+        echo "FAIL —$failed" >&2
+        return 1
+    fi
+    echo "PASS — $checked capability probe(s) executed"
+    return 0
+}
+
+selftest() {
+    # selftest overrides the module-level $probes for its fixtures; save/
+    # restore it so a caller that runs --selftest then reuses run_probes
+    # (--verify does exactly this) still sees the real probe list.
+    saved_probes=$probes
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+
+    # Fixture repo layout mirroring the two relative spec paths this script
+    # probes, so run_probes's `cd "$root"` + relative-path invocation is
+    # exercised exactly as it is against the real repo.
+    mkdir -p "$tmp/pass/test/02_integration/rendering"
+    mkdir -p "$tmp/fail_extern/test/02_integration/rendering"
+    mkdir -p "$tmp/fail_rc/test/02_integration/rendering"
+
+    cat > "$tmp/ok_seed" <<'EOF'
+#!/bin/sh
+echo "7 examples, 0 failures"
+exit 0
+EOF
+    cat > "$tmp/extern_seed" <<'EOF'
+#!/bin/sh
+echo "semantic: unknown extern function: rt_vulkan_copy_to_buffer_u32"
+echo "1 examples, 1 failures"
+exit 1
+EOF
+    cat > "$tmp/rc_seed" <<'EOF'
+#!/bin/sh
+echo "boom: provider crashed"
+exit 1
+EOF
+    chmod +x "$tmp/ok_seed" "$tmp/extern_seed" "$tmp/rc_seed"
+
+    # Point every probe at the same single fixture spec path by overriding
+    # $probes for the duration of the selftest (real repo paths need not exist
+    # for a fixture pass/fail check of run_probes's own logic).
+    probes="|test/02_integration/rendering/metal_msl_pipeline_spec.spl"
+    touch "$tmp/pass/test/02_integration/rendering/metal_msl_pipeline_spec.spl"
+    touch "$tmp/fail_extern/test/02_integration/rendering/metal_msl_pipeline_spec.spl"
+    touch "$tmp/fail_rc/test/02_integration/rendering/metal_msl_pipeline_spec.spl"
+
+    if ! out=$(run_probes "$tmp/ok_seed" "$tmp/pass" 2>&1); then
+        echo "SELFTEST FAIL: expected PASS on ok_seed, got: $out" >&2
+        exit 1
+    fi
+    case "$out" in
+        "PASS — 1 capability probe(s) executed") ;;
+        *) echo "SELFTEST FAIL: unexpected PASS text: $out" >&2; exit 1 ;;
+    esac
+
+    if out=$(run_probes "$tmp/extern_seed" "$tmp/fail_extern" 2>&1); then
+        echo "SELFTEST FAIL: expected FAIL on extern_seed, got PASS: $out" >&2
+        exit 1
+    fi
+    case "$out" in
+        *"unknown-extern:rt_vulkan_copy_to_buffer_u32"*) ;;
+        *) echo "SELFTEST FAIL: extern_seed FAIL text missing symbol name: $out" >&2; exit 1 ;;
+    esac
+
+    if out=$(run_probes "$tmp/rc_seed" "$tmp/fail_rc" 2>&1); then
+        echo "SELFTEST FAIL: expected FAIL on rc_seed, got PASS: $out" >&2
+        exit 1
+    fi
+
+    if out=$(run_probes "$tmp/does-not-exist" "$tmp/pass" 2>&1); then
+        echo "SELFTEST FAIL: expected ERROR on missing seed, got PASS: $out" >&2
+        exit 1
+    fi
+    case "$out" in
+        *"ERROR — nothing was checked"*) ;;
+        *) echo "SELFTEST FAIL: missing-seed case did not ERROR: $out" >&2; exit 1 ;;
+    esac
+
+    trap - EXIT
+    rm -rf "$tmp"
+    probes=$saved_probes
+    echo "SELFTEST PASS — 4 fixture(s) checked"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    selftest
+    exit 0
+fi
+
+if [ "${1:-}" = "--verify" ]; then
+    selftest
+    seed="${2:-$CARGO_TARGET_DIR/release/simple}"
+    run_probes "$seed" "$repo_root"
+    exit $?
+fi
+
+# ---------------------------------------------------------------------------
+# build
+# ---------------------------------------------------------------------------
 
 case "$(uname -s)" in
     Darwin)
@@ -48,3 +213,12 @@ if [ ! -x "$out" ]; then
     exit 2
 fi
 echo "PASS — built $out ($(wc -c < "$out" | tr -d ' ') bytes) with features $features"
+
+# Run the capability probes against what was just built, on every build too —
+# a stale-vs-fresh-source seed (this incident's actual root cause) is caught
+# here without a separate manual step.
+run_probes "$out" "$repo_root" || {
+    rc=$?
+    echo "WARNING — post-build capability verify did not pass (see above); the binary was still built and deployed" >&2
+    exit "$rc"
+}

@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Purpose: Prove that flex items with a non-zero `flex-grow` on a
+`flex-wrap: wrap` line consume the line's free space instead of stopping at
+their flex basis.
+Audience: browser-engine layout maintainers.
+
+The wrap branch of the row-flex layout placed every item at `base_w_wrap` —
+its `flex-basis` — and handed the leftover space to `row_flex_distribution`
+(justify-content) instead of growing anything. CSS Flexbox SS9.7 resolves
+flexible lengths FIRST; a line whose grow factors sum to a positive number has
+no free space left for justify-content at all.
+
+Chrome oracle (headless --dump-dom + getBoundingClientRect on
+test/fixtures/browser_engine/layout/round3_probe.html at 900x20000, body
+margin 0, `.flex { display:flex; flex-wrap:wrap; gap:12px }`,
+`.card { flex: 1 1 180px; padding:12px; border-left:5px solid; box-sizing:border-box }`):
+  div.flex   x=0   y=0  w=900  h=48
+  .card #1   x=0   y=0  w=444  h=48
+  .card #2   x=456 y=0  w=444  h=48
+Free space on the line is 900 - (180 + 12 + 180) = 528; each of the two
+grow:1 items takes 264, so 180 + 264 = 444.
+"""
+
+# @req: REQ-BROWSER-ENGINE-FLEX-WRAP-GROW-001 — wrapped flex lines distribute free space by flex-grow.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 2%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+
+val FLEX_PAGE: text = (
+    "<html><body style=\"margin:0;font:16px/1.5 sans-serif\">" +
+    "<div id=\"row\" style=\"display:flex;flex-wrap:wrap;gap:12px\">" +
+    "<div id=\"a\" style=\"flex:1 1 180px;box-sizing:border-box;" +
+    "padding:12px;border-left:5px solid #4f46e5\">Flexible card A</div>" +
+    "<div id=\"b\" style=\"flex:1 1 180px;box-sizing:border-box;" +
+    "padding:12px;border-left:5px solid #4f46e5\">Flexible card B</div>" +
+    "</div></body></html>"
+)
+
+fn flex_field(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(FLEX_PAGE, VW, VH, id, field)
+
+describe "flex-grow on a wrapped flex line":
+    it "AC-1: both cards grow to 444 px, the Chrome-measured width":
+        expect(flex_field("a", "w")).to_equal("444")
+        expect(flex_field("b", "w")).to_equal("444")
+
+    it "AC-2: neither card stops at its 180 px flex-basis":
+        assert_true(flex_field("a", "w") != "180")
+
+    it "AC-3: the second card starts at x=456 (444 + the 12 px gap)":
+        expect(flex_field("b", "x")).to_equal("456")
+
+    it "AC-4: both cards stay on ONE line":
+        expect(flex_field("b", "y")).to_equal(flex_field("a", "y"))

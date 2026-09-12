@@ -210,6 +210,78 @@ fn vulkan_dispatch_framebuffer_compute_checked(d_framebuffer: i64, pipe: i64, pu
     """Engine2D compatibility name for the shared checked buffer dispatch."""
     vulkan_sffi_dispatch_buffer_compute_checked(d_framebuffer, pipe, push_data, gx, gy, gz)
 
+fn vulkan_dispatch_region_kernel_checked(d_framebuffer: i64, pipe: i64, d_out: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    """Dispatch a region kernel: framebuffer (binding 0) -> output (binding 1).
+
+    Deliberately NOT `vulkan_dispatch_image_composite_checked`: that one OWNS
+    its binding-1 buffer and frees it on every exit, which is correct for a
+    one-shot image upload and fatal here -- the caller needs the output buffer
+    alive afterwards to blit it back over the framebuffer. This variant never
+    frees `d_out`; the caller owns it on every path, success or failure.
+
+    Same completion contract as its sibling: 1 = receipt-eligible completion,
+    2 = completed mutation with ineligible cleanup evidence, 0 = no submission,
+    -1 = completion or dependency release unknown.
+    """
+    if d_framebuffer <= 0 or pipe <= 0 or d_out <= 0 or push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0:
+        return 0
+    if not vulkan_sffi_reap_dependency_quarantine():
+        return -1
+    if not vulkan_sffi_fence_submission_supported():
+        return 0
+    val desc = vulkan_sffi_create_descriptor_set(pipe)
+    if desc <= 0:
+        return 0
+
+    var cmd: i64 = 0
+    var ready = vulkan_sffi_bind_buffer(desc, 0, d_framebuffer)
+    if ready:
+        ready = vulkan_sffi_bind_buffer(desc, 1, d_out)
+    if ready:
+        cmd = vulkan_sffi_begin_compute()
+        ready = cmd > 0
+    if ready:
+        ready = vulkan_sffi_bind_pipeline(cmd, pipe)
+    if ready:
+        ready = vulkan_sffi_bind_descriptors(cmd, desc)
+    if ready:
+        ready = vulkan_sffi_push_constants(cmd, pipe, push_data)
+    if ready:
+        ready = vulkan_sffi_dispatch(cmd, gx, gy, gz)
+    if ready:
+        ready = vulkan_sffi_end_compute(cmd)
+
+    if not ready:
+        val command_released = cmd <= 0 or vulkan_sffi_discard_command(cmd)
+        if not command_released:
+            # 0 for the source slot: this helper owns no buffer to quarantine.
+            vulkan_sffi_quarantine_unsubmitted_command(cmd, desc, 0)
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    if fence < 0:
+        if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return VK_DISPATCH_COMPLETED_INELIGIBLE
+    if fence == 0:
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+    if not completion_waited:
+        if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
+            return -1
+    val fence_destroyed = vulkan_sffi_destroy_fence(fence)
+    val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+    if completion_waited and fence_destroyed and descriptor_destroyed:
+        return 1
+    VK_DISPATCH_COMPLETED_INELIGIBLE
+
 fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
     """Dispatch image copy/src-over with a non-replayable completion status.
 
@@ -585,6 +657,70 @@ impl VulkanBackend:
             self.pending_compute_sources[slot] = 0
             slot = slot + 1
         self.pending_compute_count = 0
+        # The command buffer is gone, so no atlas slot is read by anything
+        # unsubmitted any more. This runs on EVERY flush return path, including
+        # the failure ones -- clearing the flags there too is the conservative
+        # direction: it can only make a later write look free when the
+        # dispatches that would have read it were discarded or quarantined.
+        var atlas_slot: i64 = 0
+        while atlas_slot < self.font_atlas_slot_referenced.len().to_i64():
+            self.font_atlas_slot_referenced[atlas_slot] = false
+            atlas_slot = atlas_slot + 1
+
+    me _font_atlas_slot_index(owner: text) -> i64:
+        """Index of the device atlas slot holding `owner`'s pixels, or -1."""
+        if owner == "":
+            return -1
+        var i: i64 = 0
+        while i < self.font_atlas_slot_owners.len().to_i64():
+            if self.font_atlas_slot_owners[i] == owner and self.font_atlas_slot_handles[i] != 0:
+                return i
+            i = i + 1
+        -1
+
+    me _font_atlas_spare_slot_index() -> i64:
+        """A slot index a relocating write may take without flushing.
+
+        Returns -2 when the table has room for a NEW slot, a valid index when
+        an existing unreferenced slot can be recycled, and -1 when neither is
+        possible (the caller must then flush).
+        """
+        if self.font_atlas_slot_handles.len().to_i64() < vulkan_font_atlas_slot_depth():
+            return -2
+        var i: i64 = 0
+        while i < self.font_atlas_slot_referenced.len().to_i64():
+            if not self.font_atlas_slot_referenced[i] and self.font_atlas_slot_handles[i] != 0:
+                return i
+            i = i + 1
+        -1
+
+    me _font_atlas_bind_slot(index: i64) -> bool:
+        """Make slot `index` the one subsequent descriptors bind."""
+        if index < 0 or index >= self.font_atlas_slot_handles.len().to_i64():
+            return false
+        if self.font_atlas_slot_handles[index] == 0:
+            return false
+        self.d_font_atlas = self.font_atlas_slot_handles[index]
+        self.font_atlas_active_slot = index
+        true
+
+    me _font_atlas_mark_slot_referenced():
+        """Record that a dispatch reading the active slot is now in the buffer."""
+        val index = self.font_atlas_active_slot
+        if index >= 0 and index < self.font_atlas_slot_referenced.len().to_i64():
+            self.font_atlas_slot_referenced[index] = true
+
+    me _font_atlas_release_slots():
+        """Free every device atlas slot. Used when the atlas DIMENSIONS move."""
+        for handle in self.font_atlas_slot_handles:
+            if handle != 0:
+                vulkan_sffi_free_buffer(handle)
+        self.font_atlas_slot_handles = []
+        self.font_atlas_slot_owners = []
+        self.font_atlas_slot_sequences = []
+        self.font_atlas_slot_referenced = []
+        self.font_atlas_active_slot = -1
+        self.d_font_atlas = 0
 
     me discard_stale_pending_compute() -> bool:
         """Drop a pending compute batch left over from a PREVIOUS frame.
@@ -684,6 +820,12 @@ impl VulkanBackend:
         `untagged`, which is how the two font-lane sites
         (`backend_vulkan_font.spl:1112,1182`, owned elsewhere) are told apart
         from this file's sites without editing that file.
+
+        The engine's two pre-readback flushes (`engine.spl` `read_pixels` /
+        `read_pixels_with_source`) used to reach the untagged entry point and
+        were therefore mis-read as font-lane submits; they now tag themselves
+        `engine.read_pixels` / `engine.read_pixels_with_source`
+        (`doc/08_tracking/bug/vulkan_engine_untagged_frame_flush_2026-09-12.md`).
         """
         self.pending_flush_site = site
         self._flush_pending_compute()
@@ -706,7 +848,12 @@ impl VulkanBackend:
         val flush_rc = self._flush_pending_compute_impl()
         vulkan_timing_add(VK_T_FLUSH, _t_flush)
         if vulkan_order_trace_enabled():
-            vulkan_order_trace("flush site={self.last_flush_site} rc={flush_rc} pending_n={traced_pending} font_n={traced_font} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown}")
+            # The three atlas-slot counters ride this line so the trace can
+            # attribute a submit to the font lane WITHOUT guessing: `forced` is
+            # the only way a slot decision can produce one, so `forced=0` across
+            # a frame proves every flush in it came from somewhere else. They
+            # would otherwise be write-only state, which the repo forbids.
+            vulkan_order_trace("flush site={self.last_flush_site} rc={flush_rc} pending_n={traced_pending} font_n={traced_font} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown} atlas_hits={self.font_atlas_slot_hits} atlas_inplace={self.font_atlas_slot_inplace_writes} atlas_forced={self.font_atlas_slot_forced_flushes}")
         flush_rc
 
     me _flush_pending_compute_impl() -> i64:
@@ -1328,7 +1475,14 @@ impl VulkanBackend:
         1
 
     me _flush_for_host_fallback(reason: text) -> bool:
-        val status = self._flush_pending_compute_at("_flush_for_host_fallback")
+        # The reason rides the trace tag: this is the ONE site that can turn a
+        # one-submit frame into two (it submits the batch so the host can read
+        # the surface back mid-frame), and `_flush_for_host_fallback` alone did
+        # not say WHICH host round-trip did it
+        # (`doc/08_tracking/bug/vulkan_engine_untagged_frame_flush_2026-09-12.md`).
+        # This lane arrived at the same need independently and took the
+        # upstream form: it tags every flush, not only a traced one.
+        val status = self._flush_pending_compute_at("_flush_for_host_fallback:{reason}")
         if status == 1:
             return true
         self.mark_cpu_fallback(reason)
@@ -1773,6 +1927,51 @@ fn _pack_image_composite_pc(x: i32, y: i32, w: i32, h: i32, fb_w: i32, fb_h: i32
     buf = _pack_i32_le(buf, 56, src_h)
     buf
 
+fn _pack_blur_rect_pc(rx: i32, ry: i32, rw: i32, rh: i32,
+                      fb_w: i32, fb_h: i32, radius: i32) -> [u8]:
+    """Push constants for the device box-blur kernel (28 bytes used).
+
+    FROZEN: the field order is shaders/blur_rect.comp's PushConstants block.
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, rx)
+    buf = _pack_i32_le(buf, 4, ry)
+    buf = _pack_i32_le(buf, 8, rw)
+    buf = _pack_i32_le(buf, 12, rh)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, radius)
+    buf
+
+fn _pack_glass_material_pc(fb_w: i32, fb_h: i32, rx: i32, ry: i32, rw: i32, rh: i32,
+                           corner_radius: i32, blur_radius: i32,
+                           saturation_milli: i32, surface_alpha_milli: i32,
+                           surface_color: u32, gradient_from: u32, gradient_to: u32,
+                           gradient_enabled: bool, gradient_layered: bool) -> [u8]:
+    """Push constants for the device glass material kernel (60 bytes used).
+
+    FROZEN: the field order is shaders/glass_material.comp's PushConstants
+    block. A reorder here silently paints the wrong material rather than
+    failing, so the spec pins the byte offsets.
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, fb_w)
+    buf = _pack_i32_le(buf, 4, fb_h)
+    buf = _pack_i32_le(buf, 8, rx)
+    buf = _pack_i32_le(buf, 12, ry)
+    buf = _pack_i32_le(buf, 16, rw)
+    buf = _pack_i32_le(buf, 20, rh)
+    buf = _pack_i32_le(buf, 24, corner_radius)
+    buf = _pack_i32_le(buf, 28, blur_radius)
+    buf = _pack_i32_le(buf, 32, saturation_milli)
+    buf = _pack_i32_le(buf, 36, surface_alpha_milli)
+    buf = _pack_u32_le(buf, 40, surface_color)
+    buf = _pack_u32_le(buf, 44, gradient_from)
+    buf = _pack_u32_le(buf, 48, gradient_to)
+    buf = _pack_i32_le(buf, 52, _bool_to_i32(gradient_enabled))
+    buf = _pack_i32_le(buf, 56, _bool_to_i32(gradient_layered))
+    buf
+
 # ============================================================================
 # Byte / Pixel Conversion
 # ============================================================================
@@ -1806,3 +2005,157 @@ fn _bytes_to_pixel_array(bytes: [u8], count: i32) -> [u32]:
         pixels[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
         i = i + 1
     pixels
+
+# ---------------------------------------------------------------------------
+# Font-atlas mirror continuity (2026-09-12)
+# ---------------------------------------------------------------------------
+# Free function so the decision is testable without a Vulkan device.
+#
+# `atlas_generation` is ONE global counter shared by every atlas owner, so on a
+# page where two font identities interleave an owner's own steps are never
+# contiguous in it and the `host_gen + 1` rule can never hold -- that is the
+# whole of the 8 full 1,048,576-pixel repacks measured at 900x760
+# (doc/08_tracking/bug/vulkan_font_atlas_shared_mirror_repacks_2026-09-12.md).
+# When the producer publishes a per-owner sequence, continuity is tested on
+# THAT instead, with three outcomes:
+#
+#   0 = full repack        -- the mirror cannot be trusted for this batch
+#   1 = incremental repack -- apply this batch's dirty cells to the mirror
+#   2 = mirror is already truth -- this owner added no cells since the mirror
+#                                 was taken, so nothing needs repacking at all
+#
+# Outcome 2 is not an optimisation of 1: a returning owner whose glyphs are all
+# cached emits NO dirty cells, so its sequence does not move, and under a plain
+# `+1` rule that is a full repack of an atlas the mirror already matches.
+val VK_FONT_MIRROR_FULL: i64 = 0
+val VK_FONT_MIRROR_INCREMENTAL: i64 = 1
+val VK_FONT_MIRROR_ALREADY_TRUTH: i64 = 2
+
+fn vulkan_font_mirror_continuity(mirror_coherent: bool, owner_identity: text,
+                                 host_identity: text, bytes_match: bool,
+                                 host_generation: i64, batch_generation: i64,
+                                 host_owner_sequence: i64, batch_owner_sequence: i64,
+                                 dirty_cells: i64) -> i64:
+    if not mirror_coherent or owner_identity == "" or host_identity != owner_identity or not bytes_match:
+        return VK_FONT_MIRROR_FULL
+    if batch_owner_sequence >= 0 and host_owner_sequence >= 0:
+        # Per-owner sequence published by the producer.
+        if batch_owner_sequence == host_owner_sequence and dirty_cells == 0:
+            return VK_FONT_MIRROR_ALREADY_TRUTH
+        if batch_owner_sequence == host_owner_sequence + 1 and dirty_cells > 0:
+            return VK_FONT_MIRROR_INCREMENTAL
+        return VK_FONT_MIRROR_FULL
+    # No per-owner sequence: fall back to the global-generation rule. A gap
+    # there can mean a dirty batch for this owner that never reached this
+    # backend, whose cells the mirror would then be missing, so only an exact
+    # +1 is safe.
+    if host_generation >= 0 and batch_generation == host_generation + 1 and dirty_cells > 0:
+        return VK_FONT_MIRROR_INCREMENTAL
+    VK_FONT_MIRROR_FULL
+
+# ---------------------------------------------------------------------------
+# Per-owner device atlas slots (F32)
+# ---------------------------------------------------------------------------
+
+# How many device atlas buffers this backend will hold at once. A page with two
+# font owners needs two; the cap exists so a pathological page cannot allocate
+# one 4 MiB buffer per face. When the table is full an unreferenced slot is
+# recycled, and only when even that is impossible does a flush happen.
+val VULKAN_FONT_ATLAS_SLOT_MAX: i64 = 4
+
+fn vulkan_font_atlas_slot_sabotage() -> bool:
+    """SABOTAGE CONTROL: `SIMPLE_VK_FONT_ATLAS_SABOTAGE=same-slot`.
+
+    Forces every run onto slot 0 AND onto the no-write outcome, so owner B's
+    dispatch reads whatever owner A left in that buffer. Both halves are needed:
+    merely pointing every owner at slot 0 is absorbed by the plan (it sees a
+    sequence mismatch and takes a fresh slot), which was measured -- all eight
+    showcase PPMs stayed byte-identical -- so a weaker sabotage proves nothing.
+
+    Exists so the guard this design rests on can be shown to FIRE, not merely to
+    be present: a check that has never failed is a check nobody has tested.
+    Never set in production runs.
+    """
+    (env_get("SIMPLE_VK_FONT_ATLAS_SABOTAGE") ?? "") == "same-slot"
+
+fn vulkan_font_atlas_slot_depth() -> i64:
+    """Live slot depth, so before/after evidence comes from ONE binary.
+
+    MEASUREMENT CONTROL: `SIMPLE_VK_FONT_ATLAS_SLOTS=1` collapses the table to a
+    single slot, which reproduces the pre-F32 behaviour exactly -- one device
+    atlas shared by every owner, so any owner switch finds the sole slot
+    referenced with no spare and takes `FLUSH_THEN_WRITE`. A before/after pair
+    captured this way cannot be contaminated by a rebuild or a tree difference.
+    Values outside 1..VULKAN_FONT_ATLAS_SLOT_MAX are ignored rather than
+    honoured, so a typo degrades to the default instead of to one slot.
+    """
+    val raw = env_get("SIMPLE_VK_FONT_ATLAS_SLOTS") ?? ""
+    if raw == "":
+        return VULKAN_FONT_ATLAS_SLOT_MAX
+    # Literal comparison rather than a parse: the legal range is 1..4, and a
+    # string compare cannot disagree with a parser about what "01" or "4 " mean.
+    if raw == "1": return 1
+    if raw == "2": return 2
+    if raw == "3": return 3
+    if raw == "4": return 4
+    VULKAN_FONT_ATLAS_SLOT_MAX
+
+# The device already holds exactly these bytes: bind and record, no host write,
+# no flush.
+val VK_FONT_SLOT_REUSE_NO_WRITE: i64 = 0
+# Write this owner's slot where it stands. Safe without a flush because every
+# byte a recorded dispatch reads keeps its value (incremental append), or
+# because nothing recorded reads this slot at all.
+val VK_FONT_SLOT_WRITE_IN_PLACE: i64 = 1
+# Write a slot no recorded dispatch references (a newly allocated one, or a
+# recycled unreferenced one). Never a hazard.
+val VK_FONT_SLOT_WRITE_FRESH: i64 = 2
+# The only remaining case: a relocating write into a slot a recorded dispatch
+# reads, with no spare slot to take it. This is the genuine hazard and the one
+# flush the lane still owes.
+val VK_FONT_SLOT_FLUSH_THEN_WRITE: i64 = 3
+
+fn vulkan_font_atlas_slot_plan(slot_found: bool, slot_sequence: i64,
+                               host_sequence_before: i64, batch_sequence: i64,
+                               slot_referenced: bool, continuity: i64,
+                               free_slot_available: bool) -> i64:
+    """Decide what a font run must do to the device atlas, device-free.
+
+    Split out of the composite so the submit-count invariant is testable
+    without a Vulkan device. Every branch is fail-closed: an unknown sequence
+    (-1, the value used when the producer publishes none) matches nothing and
+    therefore never takes a no-write or in-place path.
+
+    The two cheap outcomes rest on facts F16/F24 established, not on hope:
+
+      * `REUSE_NO_WRITE` needs the slot to hold this same owner at this exact
+        published sequence. The producer bumps `atlas_owner_sequence` on every
+        mutation and re-seeds it off a globally monotone counter after a wipe
+        (so a wiped atlas can never present a sequence a stale slot still
+        holds). Equal sequence therefore means equal bytes.
+
+      * `WRITE_IN_PLACE` on an INCREMENTAL batch needs the slot to hold exactly
+        the sequence the mirror was at BEFORE this batch was folded in
+        (`host_sequence_before`), with the batch at +1. The dirty rects then
+        name the only cells that differ, and those cells are new, so no
+        recorded dispatch reads them. Every other cell is written back with the
+        value it already had.
+
+    A FULL repack may relocate cells, so it takes a slot nothing references --
+    a fresh one when available, otherwise a flush.
+    """
+    if not slot_found:
+        # A slot this owner does not have yet cannot be read by anything
+        # already recorded, so allocating or recycling one is always free.
+        return if free_slot_available: VK_FONT_SLOT_WRITE_FRESH else: VK_FONT_SLOT_FLUSH_THEN_WRITE
+    if batch_sequence >= 0 and slot_sequence >= 0 and slot_sequence == batch_sequence:
+        return VK_FONT_SLOT_REUSE_NO_WRITE
+    if (continuity == VK_FONT_MIRROR_INCREMENTAL and batch_sequence >= 0 and
+        host_sequence_before >= 0 and slot_sequence >= 0 and
+        slot_sequence == host_sequence_before and batch_sequence == host_sequence_before + 1):
+        return VK_FONT_SLOT_WRITE_IN_PLACE
+    if not slot_referenced:
+        return VK_FONT_SLOT_WRITE_IN_PLACE
+    if free_slot_available:
+        return VK_FONT_SLOT_WRITE_FRESH
+    VK_FONT_SLOT_FLUSH_THEN_WRITE

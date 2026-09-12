@@ -26,9 +26,15 @@ use std.gpu.engine2d.helpers_text.{text_blit_buffer}
 # module back — the same mutual pair backend_vulkan_helpers.spl already forms.
 # Importing the provenance constant keeps that dependency explicit and loaded.
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_TEXT_PATH_CPU_RASTER, VULKAN_TEXT_PATH_NOT_DRAWN}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassMaterialConfig, ENGINE2D_GLASS_MAX_WORK_PIXELS,
+    engine2d_glass_corner_radius
+}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_circle_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
+    _pack_glass_material_pc, _pack_blur_rect_pc,
+    vulkan_dispatch_region_kernel_checked,
     _pixels_to_bytes, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
     vulkan_dispatch_image_composite_checked,
@@ -197,6 +203,24 @@ fn _vulkan_scaled_image_args_valid(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i3
 # Vulkan Backend
 # ============================================================================
 
+# One parked host byte mirror of a font atlas, keyed on the atlas OWNER identity
+# (the font face) and the atlas generation those bytes incorporate. Nothing here
+# is device state: the bytes are a copy of `batch.atlas_pixels`, so a parked slot
+# stays valid across device buffer rewrites and is invalidated only by a
+# generation gap, which the incremental repack already requires to be exactly +1.
+class VulkanFontAtlasMirror:
+    identity: text
+    generation: i64
+    # This owner's own atlas sequence as of `bytes`. The GLOBAL `generation` is
+    # bumped by every owner, so it cannot express continuity across an
+    # interleave; `owner_sequence` advances by exactly 1 per dirty batch for
+    # THIS owner and is what the incremental path tests. -1 = the producer
+    # published none and the global +1 rule applies instead.
+    owner_sequence: i64 = -1
+    bytes: [u8]
+
+val VULKAN_FONT_ATLAS_MIRROR_MAX: i32 = 4
+
 class VulkanBackend:
     """Vulkan compute shader 2D renderer.
 
@@ -279,6 +303,14 @@ class VulkanBackend:
     font_atlas_host_bytes: [u8]
     font_atlas_host_identity: text
     font_atlas_host_valid: bool
+    # Parked mirrors for atlas owners that are not currently active. Two font
+    # identities on one page used to evict each other's mirror on every switch,
+    # so BOTH paid a full 1,048,576-pixel repack per batch (measured: every
+    # owner switch was a `pack_full`). Parking the outgoing owner's bytes and
+    # swapping the incoming owner's back in makes an alternating A,B,A,B page
+    # repack only its dirty cells. Bounded LRU: index 0 is the least recently
+    # used and is evicted first.
+    font_atlas_mirror_slots: [VulkanFontAtlasMirror]
     # The atlas generation the mirror actually incorporated. Generations come
     # from ONE global counter bumped once per dirty batch, so `batch
     # .atlas_generation == font_atlas_host_generation + 1` proves no other dirty
@@ -286,6 +318,57 @@ class VulkanBackend:
     # batches this backend never saw at all, which no flag inside the composite
     # can observe. Any gap forces a full repack, which is always safe.
     font_atlas_host_generation: i64
+    # The per-owner atlas sequence the mirror bytes incorporate; parked and
+    # restored with them. -1 = unknown / producer publishes none.
+    font_atlas_host_owner_sequence: i64 = -1
+    # PER-OWNER DEVICE ATLAS SLOTS (F32).
+    #
+    # There used to be exactly ONE device atlas buffer (`d_font_atlas`). Every
+    # font run whose atlas content moved therefore had to flush the pending
+    # command buffer before its host write, because the dispatches already
+    # recorded in that command buffer read the very bytes the write was about
+    # to replace -- a genuine read-after-write hazard. With one buffer the
+    # cheapest honest cap was `1 + font runs`, and the catalog page measured 17
+    # submits / 17 fence waits per frame against an invariant of 1.
+    #
+    # A round-robin ring does not fix this (run 3 finds both slots referenced
+    # and flushes anyway, landing at ~runs/2). What fixes it is keying the slot
+    # on the ATLAS OWNER and exploiting the two facts F16/F24 already
+    # established:
+    #   * an owner whose parked atlas is restored unchanged (`ALREADY_TRUTH`)
+    #     needs NO device write at all -- its slot still holds exactly those
+    #     bytes -- so an alternating A,B,A,B page costs zero uploads and zero
+    #     flushes after the first pass over each owner;
+    #   * an `INCREMENTAL` batch writes only cells this batch inserted. Every
+    #     cell an already-recorded dispatch reads keeps byte-identical content,
+    #     so the write is not a hazard and needs no flush either.
+    # A flush is then required only for a FULL repack (cells may have moved)
+    # into a slot a recorded dispatch still references, and only when no
+    # unreferenced slot is free to take the write instead.
+    #
+    # Parallel arrays rather than a struct array: the tables are tiny (bounded
+    # by VULKAN_FONT_ATLAS_SLOT_MAX) and every other pooled resource in this
+    # backend is already shaped this way.
+    font_atlas_slot_handles: [i64]
+    font_atlas_slot_owners: [text]
+    # The owner's published `atlas_owner_sequence` the slot's bytes incorporate.
+    # -1 = unknown (producer publishes none), which never matches and so always
+    # forces a write -- fail-closed.
+    font_atlas_slot_sequences: [i64]
+    # Bound by a dispatch recorded into the CURRENT, not-yet-submitted command
+    # buffer. Cleared wholesale by `_clear_pending_compute_state`, which runs at
+    # the end of every flush path including the failure ones.
+    font_atlas_slot_referenced: [bool]
+    # Index into the tables above of the slot `d_font_atlas` currently aliases.
+    # -1 = none bound yet.
+    font_atlas_active_slot: i64 = -1
+    # Counters, for the audit gate and the bug record. `hits` are runs that
+    # needed no device write at all; `inplace` are writes that skipped a flush
+    # because they were incremental; `forced` are the flushes that genuinely
+    # remained.
+    font_atlas_slot_hits: i64
+    font_atlas_slot_inplace_writes: i64
+    font_atlas_slot_forced_flushes: i64
     font_atlas_width: i32
     font_atlas_height: i32
     font_atlas_upload_count: i64
@@ -481,7 +564,17 @@ class VulkanBackend:
             font_atlas_host_bytes: [],
             font_atlas_host_identity: "",
             font_atlas_host_valid: false,
+            font_atlas_mirror_slots: [],
             font_atlas_host_generation: -1,
+            font_atlas_host_owner_sequence: -1,
+            font_atlas_slot_handles: [],
+            font_atlas_slot_owners: [],
+            font_atlas_slot_sequences: [],
+            font_atlas_slot_referenced: [],
+            font_atlas_active_slot: -1,
+            font_atlas_slot_hits: 0,
+            font_atlas_slot_inplace_writes: 0,
+            font_atlas_slot_forced_flushes: 0,
             font_atlas_width: 0,
             font_atlas_height: 0,
             font_atlas_upload_count: 0,
@@ -994,8 +1087,20 @@ impl RenderBackend for VulkanBackend:
         self.font_descriptor_pool = []
         self.font_params_pool = []
         self.font_params_pool_capacity = []
+        # Free every per-owner slot. `d_font_atlas` aliases whichever slot was
+        # active, so it must NOT be freed a second time below.
+        for slot_handle in self.font_atlas_slot_handles:
+            if slot_handle != 0:
+                vulkan_sffi_free_buffer(slot_handle)
+        val atlas_was_slotted = self.font_atlas_slot_handles.len() > 0
+        self.font_atlas_slot_handles = []
+        self.font_atlas_slot_owners = []
+        self.font_atlas_slot_sequences = []
+        self.font_atlas_slot_referenced = []
+        self.font_atlas_active_slot = -1
         if self.d_font_atlas != 0:
-            vulkan_sffi_free_buffer(self.d_font_atlas)
+            if not atlas_was_slotted:
+                vulkan_sffi_free_buffer(self.d_font_atlas)
             self.d_font_atlas = 0
         self.font_atlas_generation = -1
         self.font_atlas_owner_identity = ""
@@ -1005,6 +1110,8 @@ impl RenderBackend for VulkanBackend:
         self.font_atlas_host_identity = ""
         self.font_atlas_host_valid = false
         self.font_atlas_host_generation = -1
+        self.font_atlas_host_owner_sequence = -1
+        self.font_atlas_mirror_slots = []
         self.font_atlas_width = 0
         self.font_atlas_height = 0
         self.font_atlas_upload_count = 0
@@ -2552,10 +2659,209 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown: return
         emu_draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, color, thickness)
 
+    me draw_ir_apply_glass_material_device(config: Engine2dGlassMaterialConfig) -> bool:
+        """Paint the whole glass rect on the device, with no host round trip.
+
+        This replaces the lane's single largest CPU<->GPU boundary crossing:
+        the CPU twin reads the ENTIRE framebuffer back to the host, blurs and
+        tints one rect there, and uploads that rect again -- one full-surface
+        readback plus one upload per glass rect per frame. The kernel reads the
+        framebuffer where it already lives.
+
+        Fail-closed on every path: a `false` return has left the framebuffer
+        untouched, so the caller's CPU twin still paints the identical pixels.
+        The validation below deliberately MIRRORS
+        `engine2d_draw_ir_glass_material_pixels`' own guards -- a config that
+        one rejects must not be painted by the other, or the two lanes differ.
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
+            self.last_error = "glass-device-state-unavailable"
+            return false
+        if self.pipe_blit <= 0 or self.session.pipe_glass_material <= 0:
+            self.last_error = if self.session.glass_error != "":
+                self.session.glass_error
+            else:
+                "glass-device-pipeline-unavailable"
+            return false
+        if self.mask_buf.len() > 0:
+            # A mask changes which pixels the copy-back may touch; the CPU twin
+            # has no such concept, so parity is not established here.
+            self.last_error = "glass-device-mask-unsupported"
+            return false
+        if (config.framebuffer_width != self.w or config.framebuffer_height != self.h or
+            config.width <= 0 or config.height <= 0 or config.x < 0 or config.y < 0 or
+            _i64(config.x) + _i64(config.width) > _i64(self.w) or
+            _i64(config.y) + _i64(config.height) > _i64(self.h)):
+            self.last_error = "glass-device-geometry-rejected"
+            return false
+        val pixel_count = _i64(config.width) * _i64(config.height)
+        if pixel_count <= 0 or pixel_count > ENGINE2D_GLASS_MAX_WORK_PIXELS:
+            self.last_error = "glass-device-work-budget-exceeded"
+            return false
+
+        val out_bytes = pixel_count * 4
+        # One acquisition serves both roles: the kernel's output buffer and,
+        # immediately after, the image source of the copy-back -- so the pool
+        # owns its lifetime exactly as it does for an ordinary image upload.
+        var d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0 and self._image_source_pool_is_fully_pending():
+            val retried = self._flush_pending_compute_at("glass-device-retry")
+            if retried < 0:
+                self.completion_unknown = true
+                self.last_error = "glass-device-flush-unknown"
+                return false
+            if retried > 0:
+                d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0:
+            self.last_error = "glass-device-output-unavailable"
+            return false
+
+        val blur = if config.blur_radius < 0:
+            0
+        elif config.blur_radius > 4:
+            4
+        else:
+            config.blur_radius
+        val pc = _pack_glass_material_pc(
+            self.w, self.h, config.x, config.y, config.width, config.height,
+            engine2d_glass_corner_radius(config), blur,
+            config.saturation_milli, config.surface_alpha_milli,
+            config.surface_color, config.gradient_from, config.gradient_to,
+            config.gradient_enabled, config.gradient_layered_over_surface)
+        val gx = (_i64(config.width) + 15) / 16
+        val gy = (_i64(config.height) + 15) / 16
+        # Recorded rather than submitted, for the same reason as the blur twin
+        # above: every dispatch already carries a full memory barrier.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_glass_material, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_glass_material, d_out, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("glass-device x={config.x} y={config.y} w={config.width} h={config.height} blur={blur} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
+            if produced < 0:
+                self.completion_unknown = true
+            self.last_error = "glass-device-dispatch-failed"
+            return false
+
+        # Reuse the ordinary image-composite tail so the copy-back is exactly
+        # what `draw_image(x, y, w, h, pixels)` does today -- same clip, same
+        # damage and dirty bookkeeping -- with the pixels already on the device.
+        val composited = self._finish_image_composite(
+            d_out, config.x, config.y, config.width, config.height,
+            config.width, config.height, 1000, VK_IMAGE_COMPOSITE_COPY)
+        if composited <= 0:
+            if composited < 0:
+                self.completion_unknown = true
+            self.last_error = "glass-device-composite-failed"
+            return false
+        vulkan_stat_note_device_glass_material()
+        self.last_error = ""
+        true
+
+    me _draw_blur_rect_device(x: i32, y: i32, w: i32, h: i32, radius: i32) -> bool:
+        """Box-blur a rect entirely on the device. False = nothing was drawn.
+
+        The host twin this replaces reads the ENTIRE framebuffer back, blurs
+        one rect on the CPU and uploads that rect again -- a full-surface
+        readback per blurred rect per frame, and the largest remaining
+        CPU<->GPU crossing on the web renderer's Vulkan lane. It was also a
+        SILENT one: the flush it performs succeeds, so no cpu-fallback reason
+        was ever recorded for it.
+
+        Fail-closed: every `false` return has left the framebuffer untouched,
+        so the caller falls through to the host twin and paints the identical
+        pixels (proven byte-for-byte by the parity spec).
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
+            return false
+        if self.pipe_blit <= 0 or self.session.pipe_blur_rect <= 0:
+            return false
+        if self.mask_buf.len() > 0:
+            return false
+        # Mirror emu_draw_blur_rect()'s own guards exactly: a rect it would
+        # decline must not be painted here either.
+        if w <= 0 or h <= 0 or radius <= 0:
+            return false
+        val pixel_count = _i64(w) * _i64(h)
+        if pixel_count <= 0 or pixel_count > 4294967295 or pixel_count > 9223372036854775807 / 4:
+            return false
+
+        val out_bytes = pixel_count * 4
+        # One acquisition serves both roles: the kernel's output buffer and,
+        # immediately after, the image source of the copy-back, so the pool
+        # owns its lifetime exactly as for an ordinary image upload.
+        var d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0 and self._image_source_pool_is_fully_pending():
+            val retried = self._flush_pending_compute_at("blur-device-retry")
+            if retried < 0:
+                self.completion_unknown = true
+                return false
+            if retried > 0:
+                d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0:
+            return false
+
+        val pc = _pack_blur_rect_pc(x, y, w, h, self.w, self.h, radius)
+        val gx = (_i64(w) + 15) / 16
+        val gy = (_i64(h) + 15) / 16
+        # FROZEN PRECONDITION for reusing the image-composite enqueue with a
+        # foreign pipeline: blur_rect.comp, glass_material.comp and _glsl_blit
+        # all declare the SAME descriptor set layout -- exactly two storage
+        # buffers, 0 = framebuffer and 1 = source -- and all fit the 64-byte
+        # push-constant range. The batcher's warm descriptor pool hands out
+        # sets built for the blit pipeline, which are layout-compatible with
+        # these only while that holds. A third binding, or a different binding
+        # order, means a new pool, not a new caller here.
+        #
+        # RECORDED, not submitted. The kernel samples framebuffer content that
+        # earlier dispatches in this same command buffer produced, and that is
+        # safe without a flush because `rt_vulkan_dispatch` emits a full memory
+        # barrier after EVERY dispatch (vulkan_graphics_runtime_compute.rs:480-494).
+        # Flushing here instead would cost one queue submission per blurred
+        # rect -- which is exactly what the host path cost, so the boundary
+        # crossing would be gone while the submit count stood still.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_blur_rect, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_blur_rect, d_out, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("blur-device x={x} y={y} w={w} h={h} r={radius} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
+            if produced < 0:
+                self.completion_unknown = true
+            return false
+
+        # Same tail as an ordinary image upload, so the copy-back is exactly
+        # what emu_draw_blur_rect's `core.draw_image(x, y, w, h, temp)` does --
+        # same clip, same damage and dirty bookkeeping.
+        val composited = self._finish_image_composite(
+            d_out, x, y, w, h, w, h, 1000, VK_IMAGE_COMPOSITE_COPY)
+        if composited <= 0:
+            if composited < 0:
+                self.completion_unknown = true
+            return false
+        vulkan_stat_note_device_blur_rect()
+        true
+
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
         if self.completion_unknown: return
+        if self._draw_blur_rect_device(x, y, w, h, radius):
+            return
         if not self._flush_for_host_fallback("blur-host-readback"):
             return
+        # Reached only when the device kernel declined. Record it: this is a
+        # full-surface readback plus an upload, and it used to happen with
+        # cpu_fallback_count reading 0.
+        self.mark_cpu_fallback("glass-device-unavailable")
         emu_draw_blur_rect(self, x, y, w, h, radius)
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
@@ -2733,6 +3039,41 @@ var _vk_stat_readback_pixels: i64 = 0
 pub fn vulkan_stat_note_readback(pixel_count: i64):
     _vk_stat_readbacks = _vk_stat_readbacks + 1
     _vk_stat_readback_pixels = _vk_stat_readback_pixels + pixel_count
+
+pub fn vulkan_readback_count() -> i64:
+    """Full-surface readbacks this process has performed.
+
+    Exposed on its own, not only inside the census line, because the device
+    glass/blur claim is exactly "this counter did not move" and parsing a
+    formatted line to assert that would be a worse oracle than reading it.
+    """
+    _vk_stat_readbacks
+
+# Device-side replacements for what used to be host round trips. These rise
+# while `_vk_stat_readbacks` stays put -- that pairing, not either number on
+# its own, is what distinguishes "painted on the device" from "painted
+# correctly by some path".
+var _vk_stat_device_blur_rects: i64 = 0
+var _vk_stat_device_glass_materials: i64 = 0
+
+pub fn vulkan_stat_note_device_blur_rect():
+    _vk_stat_device_blur_rects = _vk_stat_device_blur_rects + 1
+
+pub fn vulkan_stat_note_device_glass_material():
+    _vk_stat_device_glass_materials = _vk_stat_device_glass_materials + 1
+
+pub fn vulkan_device_blur_rect_count() -> i64:
+    _vk_stat_device_blur_rects
+
+pub fn vulkan_device_glass_material_count() -> i64:
+    _vk_stat_device_glass_materials
+
+pub fn vulkan_device_material_census_line() -> text:
+    "device_blur_rects={_vk_stat_device_blur_rects} device_glass_materials={_vk_stat_device_glass_materials}"
+
+pub fn vulkan_device_material_census_reset():
+    _vk_stat_device_blur_rects = 0
+    _vk_stat_device_glass_materials = 0
 
 pub fn vulkan_readback_census_line() -> text:
     "readbacks={_vk_stat_readbacks} readback_pixels={_vk_stat_readback_pixels}"
@@ -2921,6 +3262,15 @@ pub fn vulkan_font_dirty_note(gen_changed: bool, identity_changed: bool,
 
 var _vk_font_pack_full: i64 = 0
 var _vk_font_pack_incremental: i64 = 0
+
+pub fn vulkan_font_per_owner_mirror_enabled() -> bool:
+    """Per-owner atlas mirrors, on by default; `0` restores the single mirror.
+
+    The off position exists as a MEASUREMENT CONTROL: it lets the same binary
+    and the same tree produce the pre-change pack counts, so a before/after
+    comparison cannot be contaminated by a rebuild.
+    """
+    (env_get("SIMPLE_VK_FONT_PER_OWNER_MIRROR") ?? "") != "0"
 
 pub fn vulkan_font_pack_note(incremental: bool):
     """Record whether an atlas upload repacked the whole atlas or only the

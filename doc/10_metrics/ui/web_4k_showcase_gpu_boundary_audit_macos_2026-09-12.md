@@ -113,3 +113,53 @@ pixel-scaled work.
    (`image_source_alloc n=78`, pooled via `_acquire_image_source`). Pooling makes
    this not an allocation defect: the same pixels re-upload every frame with no
    producer-generation key. **Fix:** key on `(identity, generation)`.
+
+## Appendix — device backdrop blur lands (2026-09-12, F33)
+
+Re-measured with `scripts/check/check-web-vulkan-gpu-boundary-audit.shs` on
+`overview.html`, 900x760, 2 frames, interpreter, `SIMPLE_2D_BACKEND=vulkan
+SIMPLE_VK_READBACK=native SIMPLE_VK_IMAGE_UPLOAD=u32 SIMPLE_VK_RECT_UPLOAD=u32`,
+binary `build/cargo-r2/release/simple` (`39528776 1789199850`).
+
+| key | before | after |
+|---|---|---|
+| `readbacks_per_frame` | 2 | **1** |
+| `readback_bytes` | 5,472,000 | **2,736,000** |
+| `uploads_per_frame` | 25 | 24 |
+| `submits_per_frame` | 17 | 17 |
+| `host_pixel_iterations` | 16 | 16 |
+
+Page pixels are byte-identical (full-page FNV-1a digest
+`-3650045829680336039` before and after, both frames).
+
+**Correction to this document's defect #2/#4 attribution.** The second
+full-surface readback was NOT the parent-material glass seed in
+`draw_ir_adv.spl` — that branch never runs on this lane (every `[vk-order]`
+line in the frame carries the same `fb=3`, so no offscreen delta surface is
+ever created). It was `VulkanBackend.draw_blur_rect`, which had no device
+implementation and delegated to the host `emu_draw_blur_rect`: a whole-surface
+`read_pixels()`, an interpreted box blur, and a re-upload — silently, with
+`cpu_fallback_count` reading 0 throughout. Detail and the trace evidence:
+`doc/08_tracking/bug/vulkan_glass_seed_host_roundtrip_2026-09-12.md`.
+
+Still open here: the `image-composite w=888 h=384 mode=1` that precedes the
+blur is a 340,992-pixel host-sourced upload each frame — the remaining half of
+defect #4, a different producer, untouched by this change.
+
+### Final numbers, rebased onto `origin/main` @ `7001fa826e6`
+
+| key | pristine base | with device blur + glass |
+|---|---|---|
+| `readbacks_per_frame` | 2 | **1** |
+| `readback_bytes` | 5,472,000 | **2,736,000** |
+| `submits_per_frame` | 2 | **1** |
+| `uploads_per_frame` | 24 | **23** |
+| `frame_digest` | `a15c50cd` | `a15c50cd` |
+
+The kernels are RECORDED into the frame's command buffer rather than flushed:
+every `rt_vulkan_dispatch` already emits a full memory barrier, so no
+submission is needed to make the earlier dispatches' writes visible to a kernel
+that samples them. Flushing instead would have removed the readback while
+leaving the submit count where it was.
+
+Only `host_pixel_iterations=15 (font_atlas_pack_u32_to_u8)` still violates.

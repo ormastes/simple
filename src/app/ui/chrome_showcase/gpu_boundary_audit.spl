@@ -111,6 +111,36 @@ pub fn audit_host_pixel_report(log: text) -> (i64, text):
         i = i + 1
     (total, if names == "": "none" else: names)
 
+pub fn audit_host_fallback_report(log: text) -> (i64, text):
+    """Real mid-frame host-readback submits of the LAST frame, and their reasons.
+
+    A `[vk-order] flush site=_flush_for_host_fallback:<reason>` line with
+    `pending_n=0` submitted nothing (`_flush_pending_compute_impl` returns at
+    `cmd <= 0` before the queue submit), so only `pending_n>0` lines are
+    counted -- counting the no-ops would attribute submits that never happened.
+    A frame's flush lines precede its `[audit-frame]` line, so the counter is
+    reset at every frame marker and the last completed frame is reported.
+    """
+    var n: i64 = 0
+    var reasons = ""
+    var last_n: i64 = 0
+    var last_reasons = ""
+    for raw in log.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("[audit-frame"):
+            last_n = n
+            last_reasons = reasons
+            n = 0
+            reasons = ""
+        elif line.contains("flush site=_flush_for_host_fallback"):
+            if _audit_to_int(audit_field(line, "pending_n")) > 0:
+                n = n + 1
+                val site = audit_field(line, "site")
+                val reason = if site.contains(":"): site.split(":")[1] else: "unnamed"
+                if not reasons.contains(reason):
+                    reasons = reasons + (if reasons == "": "" else: ",") + reason
+    (last_n, if last_reasons == "": "none" else: last_reasons)
+
 pub fn audit_classify(log: text) -> text:
     """Multi-line `key=value` audit block ending in the verdict line."""
     var frames: i64 = 0
@@ -177,6 +207,22 @@ pub fn audit_classify(log: text) -> text:
     out = out + "full_surface_composites={full_surface}\n"
     out = out + "atlas_full_repacks={pack_full}\n"
     out = out + "fence_waits={fences + midframe}\n"
+    # Pixel-level observability. Every other key here is a COUNT, so a sabotage
+    # that keeps the op counts identical and changes only the pixels those ops
+    # wrote is invisible to all of them. `frame_digest` is FNV-1a/32 over the
+    # final readback words of the LAST frame, printed by the render mode; a log
+    # produced before this key existed reports `unavailable`, never a fabricated
+    # digest. It is reported, not gated: the expected value is page- and
+    # font-dependent, so the comparison belongs to whoever holds the baseline.
+    val digest_raw = audit_field_in_log(log, "frame_digest")
+    out = out + "frame_digest=" + (if digest_raw == "": na else: digest_raw) + "\n"
+    # Which flush turned a one-submit frame into a multi-submit one. A
+    # `_flush_for_host_fallback` line with `pending_n>0` is a REAL mid-frame
+    # submit taken so the host could read the surface back; the tag after the
+    # colon names the host round-trip that forced it.
+    val (hf_n, hf_reasons) = audit_host_fallback_report(log)
+    out = out + "host_fallback_submits={hf_n}\n"
+    out = out + "host_fallback_reasons={hf_reasons}\n"
     out = out + "full_readbacks={full_rb}\n"
     # Presenter-owned route attribution. `host_paint_pixels` is the one boundary
     # term no Vulkan counter can carry: pixels rasterized on the HOST and then
@@ -327,6 +373,62 @@ val FIXTURE_ROUTE_STAGE_CLEAN: text = ("audit page=p.html size=10x10 backend_req
     "  sffi_submit_and_wait 1 5 5\n" +
     "  sffi_wait_fence 1 0 0")
 
+# A frame log carrying the digest key (render mode prints it on the frame line).
+val FIXTURE_DIGEST: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold frame_digest=deadbeef\n" +
+    "draws[rect_opaque=3 image_blend=0 readbacks=1 readback_pixels=100] creates=1 " +
+    "| slot=vulkan@10x10 vk_init=true cpu_fallback=false cpu_fallback_reason= " +
+    "dispatches_frame=1 dispatches_last_frame=1 submits=0 fences=0 " +
+    "midframe_flushes=0 font_atlas_cpu_builds=0 full_readbacks=0\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  sffi_dispatch 3 1 0\n" +
+    "  sffi_submit_and_wait 1 5 5\n" +
+    "  sffi_wait_fence 1 0 0")
+
+# A frame that took a mid-frame host round-trip (real submit, `pending_n=3`)
+# alongside a no-op flush (`pending_n=0`) that must NOT be counted as a submit.
+val FIXTURE_HOST_FALLBACK: text = ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+    "[vk-order] flush site=_flush_for_host_fallback:image-blend-host-readback rc=1 pending_n=3 font_n=0\n" +
+    "[vk-order] flush site=_flush_for_host_fallback:blur-host-readback rc=1 pending_n=0 font_n=0\n" +
+    "[vk-order] flush site=submit_batch rc=1 pending_n=78 font_n=19\n" +
+    "[audit-frame 1] ms=10 px=100 kind=cold frame_digest=deadbeef\n" +
+    "draws[rect_opaque=3 readbacks=2 readback_pixels=100] | slot=vulkan@10x10\n" +
+    "vk-timing bucket n total_ms max_ms\n" +
+    "  sffi_submit_and_wait 2 5 5")
+
+# --- frame pixel digest -----------------------------------------------------
+
+# Every counter this gate reads is a COUNT: submits, dispatches, readbacks,
+# host-pixel loop invocations. A sabotage that keeps the op counts identical and
+# changes only what the ops WROTE — a shader that drops a glyph, an atlas slot
+# that composites the wrong rectangle — is invisible to all of them, which is
+# the observability gap recorded in
+# `doc/08_tracking/bug/vulkan_font_atlas_midframe_flush_per_run_2026-09-12.md`.
+# The digest closes it: it is FNV-1a/32 over the FINAL readback words in order,
+# so it changes for a single altered pixel AND for two pixels swapped.
+#
+# It is computed from the pixels the audit already holds -- NOT from a second
+# readback, which would add a submit and a fence wait to the very frame this
+# gate bounds at one of each.
+val _AUDIT_FNV_PRIME: i64 = 16777619
+val _AUDIT_FNV_OFFSET: i64 = 2166136261
+val _AUDIT_U32_MASK: i64 = 4294967295
+
+pub fn audit_frame_digest(pixels: [u32]) -> text:
+    """FNV-1a/32 over the frame words, as 8 lowercase hex digits."""
+    var h: i64 = _AUDIT_FNV_OFFSET
+    var i = 0
+    while i < pixels.len():
+        h = ((h ^ pixels[i].to_i64()) * _AUDIT_FNV_PRIME) & _AUDIT_U32_MASK
+        i = i + 1
+    var out = ""
+    var shift = 28
+    while shift >= 0:
+        val nib = (h >> shift) & 15
+        out = out + "0123456789abcdef".substring(nib, nib + 1)
+        shift = shift - 4
+    out
+
 pub fn audit_verdict_of(block: text) -> text:
     var last = ""
     for line in block.split("\n"):
@@ -394,6 +496,50 @@ pub fn audit_selftest() -> i64:
         print "selftest FAIL disarmed: {v5}"
         failures = failures + 1
 
+    # --- frame digest: the pixel-level sabotage detector ---------------------
+    # A deliberate ONE-pixel change must flip the digest; identical frames must
+    # agree. Device-free by construction, so it runs wherever the selftest does.
+    val base_px: [u32] = [1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32]
+    val same_px: [u32] = [1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32]
+    val one_px_changed: [u32] = [1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 9u32]
+    val swapped_px: [u32] = [2u32, 1u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32]
+    examples = examples + 1
+    if audit_frame_digest(base_px) != audit_frame_digest(same_px):
+        print "selftest FAIL digest-stable: identical frames disagree"
+        failures = failures + 1
+    examples = examples + 1
+    if audit_frame_digest(base_px) == audit_frame_digest(one_px_changed):
+        print "selftest FAIL digest-sabotage: a 1-pixel change did not flip the digest"
+        failures = failures + 1
+    examples = examples + 1
+    if audit_frame_digest(base_px) == audit_frame_digest(swapped_px):
+        print "selftest FAIL digest-order: swapping two pixels did not flip the digest"
+        failures = failures + 1
+    examples = examples + 1
+    if audit_frame_digest(base_px).len() != 8:
+        print "selftest FAIL digest-width: {audit_frame_digest(base_px)}"
+        failures = failures + 1
+    examples = examples + 1
+    if not audit_classify(FIXTURE_CLEAN).contains("frame_digest=unavailable"):
+        print "selftest FAIL digest-absent: a log without the key must be unavailable, not fabricated"
+        failures = failures + 1
+    examples = examples + 1
+    if not audit_classify(FIXTURE_DIGEST).contains("frame_digest=deadbeef"):
+        print "selftest FAIL digest-parsed: {audit_classify(FIXTURE_DIGEST)}"
+        failures = failures + 1
+
+    # --- host-fallback submit attribution -----------------------------------
+    examples = examples + 1
+    val (hf_n, hf_why) = audit_host_fallback_report(FIXTURE_HOST_FALLBACK)
+    if hf_n != 1 or hf_why != "image-blend-host-readback":
+        print "selftest FAIL host-fallback: n={hf_n} why={hf_why}"
+        failures = failures + 1
+    examples = examples + 1
+    val (hf0_n, hf0_why) = audit_host_fallback_report(FIXTURE_CLEAN)
+    if hf0_n != 0 or hf0_why != "none":
+        print "selftest FAIL host-fallback-clean: n={hf0_n} why={hf0_why}"
+        failures = failures + 1
+
     print "selftest: {examples} examples, {failures} failures"
     if failures > 0: 1 else: 0
 
@@ -459,7 +605,8 @@ fn main() -> i64:
         val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, requested)
         val dt = (default_frame_clock().now_micros() - t0) / 1000
         val kind = if f == 0: "cold" else: "steady"
-        print "[audit-frame {f + 1}] ms={dt} px={pixels.len()} kind={kind}"
+        val digest = audit_frame_digest(pixels)
+        print "[audit-frame {f + 1}] ms={dt} px={pixels.len()} kind={kind} frame_digest={digest}"
         print web_route_stage_drain()
         print web_vulkan_lane_census_line()
         print web_vulkan_lane_timing_table()

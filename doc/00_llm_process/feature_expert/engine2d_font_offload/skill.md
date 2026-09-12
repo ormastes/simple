@@ -107,3 +107,33 @@ What remains unproven is narrower and still true: **no Metal device has
 executed the packed path.** The parity spec proves the packer and the frame
 contract without a device, and this host has no Metal-featured binary. Do not
 read a green parity run as evidence the GPU produced correct pixels.
+
+## Atlas continuity is PER OWNER, not per global generation (2026-09-12, F22)
+
+`FontRenderBatch.atlas_generation` is one **global** counter, bumped by every
+atlas owner. Any backend rule of the form `batch.atlas_generation ==
+host_generation + 1` therefore cannot hold on a page where two font identities
+interleave, and forces a full 1,048,576-pixel repack per switch. Use
+`FontRenderBatch.atlas_owner_sequence` (added in `font_types.spl`) instead; the
+decision itself lives in the device-free free function
+`vulkan_font_mirror_continuity` (`backend_vulkan_helpers.spl`), which returns
+FULL / INCREMENTAL / **ALREADY_TRUTH** — the last for a returning owner whose
+glyphs are all cached, which emits no dirty cells and whose mirror is already
+exact.
+
+**The trap that makes the sequence alone unsound:** `Engine2D` keeps ONE
+`FontRenderer` and ONE atlas, and a face switch used to `_reset_font_atlas`,
+i.e. WIPE it. A per-owner sequence without the matching producer-side park lets
+`can_increment` fire against a mirror holding the owner's pre-wipe pixels while
+the truth is a freshly re-rasterised atlas — `SIMPLE_VK_FONT_SELFCHECK=1` goes
+red. The two halves must land together: `FontAtlasPark` + `_switch_font_atlas`
+in `font_renderer.spl`, and the sequence in `font_types.spl`.
+
+Second trap: several staging paths insert a glyph and then abort with
+`valid: false` before the `dirty.len() > 0` bump, so the atlas can move without
+the sequence moving. `atlas_unpublished_mutation` makes `_stage_batch` publish
+`-1` (no continuity claim) until a dirty batch names the cells.
+
+Controls: `SIMPLE_FONT_ATLAS_PARK=0` (producer park off),
+`SIMPLE_VK_FONT_PER_OWNER_MIRROR=0` (consumer mirrors off). Record:
+`doc/08_tracking/bug/vulkan_font_atlas_shared_mirror_repacks_2026-09-12.md`.
