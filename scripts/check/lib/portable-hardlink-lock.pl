@@ -100,11 +100,53 @@ sub group_state_detail {
     return ('unknown', 0);
 }
 
-# Full (pid, ppid, pgid, starttime) table from /proc. Returns an empty list
-# when /proc scanning is unavailable (e.g. macOS); callers must then keep the
-# kill()-based verdict unchanged.
+# Full (pid, ppid, pgid, starttime) table from `ps`, for hosts with no /proc
+# (macOS, the BSDs). The start column is `lstart`, the SAME field
+# process_snapshot() reads through ps_value() on those hosts, so the hex
+# encodings of the two are directly comparable -- mixing `lstart` here with
+# /proc field 22 there would silently never match.
+#
+# `lstart` is a multi-word date and must therefore be the LAST column; the
+# leading three numeric columns are peeled off with an anchored regex and the
+# remainder is trimmed exactly as ps_value() trims, so a row produced here is
+# byte-identical to one produced by ps_value('lstart', $pid).
+sub ps_table {
+    local $ENV{LC_ALL} = 'C';
+    my $child = open(my $fh, '-|');
+    return unless defined($child);
+    if (!$child) {
+        open(STDERR, '>', '/dev/null');
+        exec('ps', '-axo', 'pid=,ppid=,pgid=,lstart=');
+        exit 127;
+    }
+    my @rows;
+    while (my $line = <$fh>) {
+        chomp($line);
+        next unless $line =~ /\A\s*([1-9][0-9]*)\s+([0-9]+)\s+([0-9]+)\s+(\S.*)\z/;
+        my ($pid, $ppid, $pgrp, $start) = ($1, $2, $3, $4);
+        $start =~ s/\s+\z//;
+        next unless length($start);
+        push(@rows, [$pid + 0, $ppid + 0, $pgrp + 0, $start]);
+    }
+    close($fh) or return;
+    return @rows;
+}
+
+# Start-time identity of one pid in whichever encoding this host's table uses.
+# On /proc hosts that is field 22; elsewhere it is `lstart`. process_snapshot()
+# already picks the right source and returns it hex-encoded, so refinement
+# re-checks go through it rather than through the /proc-only reader.
+sub host_start_hex {
+    my ($pid) = @_;
+    my ($start_hex) = process_snapshot($pid);
+    return $start_hex;
+}
+
+# Full (pid, ppid, pgid, starttime) table from /proc, falling back to `ps` on
+# hosts that have no /proc. Returns an empty list only when NEITHER source is
+# available; callers must then keep the kill()-based verdict unchanged.
 sub proc_table {
-    return unless -r "/proc/$$/stat";
+    return ps_table() unless -r "/proc/$$/stat";
     opendir(my $dh, '/proc') or return;
     my @rows;
     for my $entry (readdir($dh)) {
@@ -215,9 +257,9 @@ sub refine_leader_group_state {
             "the recycled leader; keeping the lock held (fail closed)\n";
         return 'live';
     }
-    my ($leader_start_again) = proc_stat_snapshot($pgid);
+    my $leader_start_again = host_start_hex($pgid);
     return 'live' unless defined($leader_start_again) &&
-        unpack('H*', $leader_start_again) eq $leader_start_hex;
+        $leader_start_again eq $leader_start_hex;
     print STDERR "portable-lock: recorded pgid $pgid was recycled by an " .
         "unrelated process (start-time mismatch); the recorded owner group " .
         "is positively absent, allowing stale-lock reclaim\n";
@@ -260,6 +302,19 @@ if ($command eq 'owner-snapshot') {
     my ($start, $pgid) = process_snapshot($owner);
     defined($start) && getppid() == $owner or exit 1;
     print "pid=$owner\nstart_hex=$start\npgid=$pgid\n";
+    exit 0;
+}
+
+# Diagnostic: the host process table the stale-lock refinement depends on.
+# An empty table is exactly the macOS defect that made a dead owner's claim
+# report 'live' forever, and it is invisible in the claim-state verdict alone
+# (an empty table and a genuinely live group both say 'live'), so the table is
+# exposed for direct assertion by check-portable-lock-dead-owner-reclaim.shs.
+if ($command eq 'process-table') {
+    @ARGV == 0 or fail_usage();
+    my @rows = proc_table();
+    @rows or exit 1;
+    print "$_->[0] $_->[1] $_->[2]\n" for @rows;
     exit 0;
 }
 

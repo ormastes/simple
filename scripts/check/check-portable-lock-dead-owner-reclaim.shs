@@ -1,0 +1,129 @@
+#!/bin/sh
+# check-portable-lock-dead-owner-reclaim.shs
+#
+# A bootstrap ownership lock whose recorded owner PID is dead must be
+# reclaimable. On macOS it was not: portable-hardlink-lock.pl's process table
+# was read exclusively from /proc, which does not exist there, so
+# refine_leader_group_state() took its documented "macOS opts out" path and
+# returned 'live' for a provably dead owner. The next bootstrap run then waited
+# out its poll window and refused, with no way to recover short of deleting the
+# lock by hand.
+#
+# This gate pins the claim-state verdict itself -- the single value the whole
+# reclaim path keys off -- against real processes on the real host.
+#
+# Verdict convention (last line of stdout):
+#   PASS  — <n> fixture(s) checked, 0 failed        exit 0
+#   FAIL  — <n> fixture(s) checked, <k> failed: ... exit 1
+#   ERROR — nothing was checked (<reason>)          exit 2
+#
+# Non-vacuity is absolute: a run that executed 0 fixtures is ERROR, never a
+# pass, and a host with no usable `perl` is ERROR for the same reason.
+
+set -u
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 2
+helper="$script_dir/lib/portable-hardlink-lock.pl"
+
+[ -f "$helper" ] || { printf 'ERROR — nothing was checked (helper missing: %s)\n' "$helper"; exit 2; }
+command -v perl >/dev/null 2>&1 || { printf 'ERROR — nothing was checked (no perl on PATH)\n'; exit 2; }
+
+ev_checked=0
+ev_failed=0
+ev_names=''
+
+record_fail() {
+    ev_failed=$((ev_failed + 1))
+    if [ -n "$ev_names" ]; then ev_names="$ev_names, $1"; else ev_names=$1; fi
+    printf 'fixture %s FAILED: %s\n' "$1" "$2" >&2
+}
+
+# claim_state PID START_HEX PGID -> prints the verdict token
+claim_state() {
+    perl "$helper" claim-state "$1" "$2" "$3" 2>/dev/null
+}
+
+# ---- fixture 1: the host process table is readable at all -------------------
+# The whole defect was an empty table. A verdict fixture alone cannot
+# discriminate it (an empty table also yields 'live'), so the table is probed
+# directly: it must contain this shell's own pid with this shell's own pgid.
+ev_checked=$((ev_checked + 1))
+self_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
+table_dump=$(perl "$helper" process-table 2>/dev/null)
+table_rc=$?
+table_probe=$(printf '%s\n' "$table_dump" | awk -v p="$$" '$1 == p { print $3; exit }')
+[ -n "$table_probe" ] || table_rc=1
+if [ "$table_rc" != 0 ]; then
+    record_fail host-process-table "proc_table() returned no row for pid $$ (rc=$table_rc)"
+elif [ -n "$self_pgid" ] && [ "$table_probe" != "$self_pgid" ]; then
+    record_fail host-process-table "proc_table() pgid $table_probe != ps pgid $self_pgid"
+fi
+
+# ---- fixture 2: a LIVE owner must never be reclaimed ------------------------
+ev_checked=$((ev_checked + 1))
+sleep 30 &
+live_pid=$!
+live_id=$(perl "$helper" owner-snapshot "$live_pid" 2>/dev/null ||
+    perl "$helper" identity "$live_pid" 2>/dev/null)
+live_start=$(printf '%s\n' "$live_id" | sed -n 's/^start_hex=//p')
+live_pgid=$(printf '%s\n' "$live_id" | sed -n 's/^pgid=//p')
+if [ -z "$live_start" ] || [ -z "$live_pgid" ]; then
+    # No snapshot command accepts a non-child pid on this host; fall back to ps.
+    live_start=$(ps -o lstart= -p "$live_pid" 2>/dev/null | sed 's/^ *//; s/ *$//' |
+        perl -ne 'chomp; print unpack("H*", $_)')
+    live_pgid=$(ps -o pgid= -p "$live_pid" 2>/dev/null | tr -d ' ')
+fi
+if [ -z "$live_start" ] || [ -z "$live_pgid" ]; then
+    record_fail live-owner "could not snapshot the live owner pid $live_pid"
+else
+    live_verdict=$(claim_state "$live_pid" "$live_start" "$live_pgid")
+    [ "$live_verdict" = live ] ||
+        record_fail live-owner "live owner reported '$live_verdict', expected 'live'"
+fi
+kill "$live_pid" 2>/dev/null
+wait "$live_pid" 2>/dev/null
+
+# ---- fixture 3: a DEAD owner in a dead group must be reclaimable ------------
+# The reaped pid is in its own process group (setsid/setpgrp via perl), so the
+# group dies with it and no unrelated survivor can keep the claim 'live'.
+ev_checked=$((ev_checked + 1))
+dead_info=$(perl -e '
+    my $pid = fork();
+    die unless defined $pid;
+    if (!$pid) { setpgrp(0, 0); exec($^X, "-e", "exit 0"); exit 127; }
+    my $start = `ps -o lstart= -p $pid 2>/dev/null`;
+    $start =~ s/^\s+//; $start =~ s/\s+$//;
+    print "$pid\n", unpack("H*", $start), "\n";
+    waitpid($pid, 0);
+' 2>/dev/null)
+dead_pid=$(printf '%s\n' "$dead_info" | sed -n '1p')
+dead_start=$(printf '%s\n' "$dead_info" | sed -n '2p')
+if [ -z "$dead_pid" ] || [ -z "$dead_start" ]; then
+    record_fail dead-owner "could not stage a reaped owner pid"
+else
+    # The child was its own group leader, so pgid == pid.
+    dead_verdict=$(claim_state "$dead_pid" "$dead_start" "$dead_pid")
+    case "$dead_verdict" in
+        dead) ;;
+        *) record_fail dead-owner \
+            "dead owner pid $dead_pid reported '$dead_verdict', expected 'dead' (lock would never be reclaimed)" ;;
+    esac
+fi
+
+# ---- fixture 4: malformed input must fail closed, never reclaim -------------
+ev_checked=$((ev_checked + 1))
+garbage_verdict=$(claim_state "not-a-pid" deadbeef 1)
+[ "$garbage_verdict" != dead ] ||
+    record_fail garbage-pid "a malformed pid yielded 'dead'; reclaim must fail closed"
+
+# ---- verdict ----------------------------------------------------------------
+if [ "$ev_checked" -eq 0 ]; then
+    printf 'ERROR — nothing was checked (no fixture executed)\n'
+    exit 2
+fi
+if [ "$ev_failed" -gt 0 ]; then
+    printf 'FAIL — %s fixture(s) checked, %s failed: %s\n' "$ev_checked" "$ev_failed" "$ev_names"
+    exit 1
+fi
+printf 'PASS — %s fixture(s) checked, 0 failed\n' "$ev_checked"
+exit 0
