@@ -95,7 +95,7 @@ A future gate should flag: a spec-file `fn` whose parameter type resolves to a
 `struct` and whose body mutates that parameter (field assign, field-method
 mutation, or element store).
 
-## Re-check 2026-09-12 (BUGFIX-5) — 4 of 5 rows now green, 1 unblock condition is not actionable
+## Triage 2026-09-12 (BUGFIX-5) — 4 of 5 rows now green, 1 unblock condition is not actionable
 
 Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
 (Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`

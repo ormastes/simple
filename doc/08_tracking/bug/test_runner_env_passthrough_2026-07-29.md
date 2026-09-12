@@ -185,7 +185,7 @@ from "empty".
 
 Probe file (scratch, not committed): `/tmp/env_probe_spec.spl`.
 
-## Re-check 2026-09-12 (BUGFIX-5) — still reproduces, and the symptom is worse than recorded
+## Triage 2026-09-12 (BUGFIX-5) — still reproduces, and the symptom is worse than recorded
 
 Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
 (Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`

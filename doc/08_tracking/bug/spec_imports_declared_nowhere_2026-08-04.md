@@ -736,7 +736,7 @@ python3 classify.py <path> out.json rows.json  # module-resolves / does-not-reso
 ```
 
 
-## 2026-09-12 (BUGFIX-5) — a concrete, mechanical subset: 26 spec files with a `std.lib.` prefix that resolves nowhere
+## Triage 2026-09-12 (BUGFIX-5) — a concrete, mechanical subset: 26 spec files with a `std.lib.` prefix that resolves nowhere
 
 Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
 (Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
