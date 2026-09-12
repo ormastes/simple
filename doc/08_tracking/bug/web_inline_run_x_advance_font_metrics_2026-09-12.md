@@ -43,3 +43,33 @@ rather than being folded into a layout-flow change. `Style` already carries
 `resolved_font_advances` / `resolved_font_width` for the real-metrics path; the
 work is to make that path cover these runs (including the bold/italic faces)
 instead of falling back to the flat advance.
+
+## RESOLVED (plain text) 2026-09-12 — round 4
+
+Cause 1 is fixed. The real-metrics path was not merely "not covering these
+runs": it was UNREACHABLE for them. `inline_text_advance_width` checked the
+advance array's arity against the codepoints of `node.text_data` (UNTRIMMED),
+while `..._core.spl`'s style stage measures `metric_text`, which is
+`node.text_trimmed` for everything except `white-space: nowrap`. Any run with
+leading or trailing whitespace — i.e. most prose, including every run in the
+evidence table above — could never match, so the flat `style_text_advance`
+fallback always won. The check now uses the trimmed string and charges the
+trimmed-off edge whitespace separately (CSS collapses each edge run to one
+space), taking the space's advance out of the measured array when it has one.
+
+Measured after, same page and viewport:
+
+| element | Chrome x | Simple x before | Simple x after |
+|---|---|---|---|
+| `strong` | 113 | 140 | **112** |
+| `em` | 173 | 198 | 164 |
+| `a` | 295 | 331 | 285 |
+
+The leading run `"Paragraph with "` is now within 1 px of Chrome. The residual
+drift on `em`/`a` is entirely cause 2 (bold under-measured), which accumulates
+after the bold run — split out to
+`web_inline_bold_face_advances_never_selected_2026-09-12.md` and still OPEN,
+blocked on a font-metrics signature that carries no weight.
+
+Pin: `test/01_unit/browser_engine/inline_run_advance_and_break_boxes_spec.spl`
+AC-1.
