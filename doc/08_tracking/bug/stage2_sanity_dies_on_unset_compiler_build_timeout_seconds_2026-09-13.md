@@ -1,6 +1,6 @@
 # Stage-2 sanity dies before any probe runs: `COMPILER_BUILD_TIMEOUT_SECONDS: parameter not set`
 
-- Status: OPEN (2026-09-13)
+- Status: FIXED (2026-09-13) — `candidate_frontend_admission.shs:238` now defaults the value (`${COMPILER_BUILD_TIMEOUT_SECONDS:-180}`), the same fail-soft its four sibling readers use; the carry itself is still not restored (operator exports still do not reach the probe), which is recorded below as remaining work
 - Found: bootstrap lane BOOT-5, `work/bootstrap-full-3-2026-09-12`, rebased onto
   `origin/main` `3a3e0121a7e`
 - Severity: **Stage-2 sanity cannot produce a probe verdict at all.** It is not a
