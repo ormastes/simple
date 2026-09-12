@@ -2904,6 +2904,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   rm -f "${stage2_native_log}"
   bootstrap_run_stage2_native() {
     set -- \
+      "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
+      "LLVM_SYS_180_PREFIX=${LLVM_SYS_180_PREFIX:-}" \
       "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
