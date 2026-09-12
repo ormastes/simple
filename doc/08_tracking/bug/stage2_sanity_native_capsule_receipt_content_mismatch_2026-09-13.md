@@ -362,8 +362,11 @@ across calls because `path` is freshly allocated each time; `content_hash`
 (offset 8) survived because its own read used a different, correct offset; and
 `runtime=632` from `rt_file_size` is stable and right.
 
-**"A fresh box per read" is NOT what happens and should not be repeated.** There
-is no box. It is a fixed load at the wrong offset returning a string pointer.
+**"A fresh box per read" is NOT what happens and should not be repeated.** The
+instruction proves the READ is at offset 0; offset 0 is the slot the producer
+fills with `path` (`stp x19, x20, [x0]`). Whether the 3072-byte stride between
+successive garbage values is string-allocation stride has NOT been measured and
+should not be asserted.
 
 ### Not the shape — the CLOSURE
 
@@ -381,7 +384,11 @@ and prints `632`. The 834-unit Stage-2 closure compiles the identical construct
 to offset 0. The defect is **closure-size / global-scope dependent**, not
 shape-dependent.
 
-### Where it goes wrong in the seed
+### Where it goes wrong in the seed — CANDIDATE MECHANISM, NOT YET OBSERVED
+
+Everything above (the offset diff, the closure dependence, the ownership) is
+measured. What follows is a READING of the seed's source that has **not** been
+confirmed by a trace, and must not be cited as verified.
 
 `src/compiler_rust/compiler/src/hir/lower/expr/access.rs` resolves a field
 access to a `field_index`. Line **252** is the precise, receiver-typed path
@@ -394,6 +401,20 @@ field of this name* — a heuristic that ignores the receiver entirely. In an
 struct's index. The two trace channels that name it:
 `SIMPLE_TRACE_FIELD_GET=1` (`[FT2] <BRANCH>/<field> struct=<S> idx=<n> in <file>`)
 and `SIMPLE_DEBUG_FIELD_FAIL=1`.
+
+Two facts argue against this exact branch and are recorded so nobody treats it
+as settled: (a) `NKM-LOCALBEST` returns the *chosen struct's own* index for
+`size`, so it can only yield 0 if some >=5-field struct in the closure declares
+`size` first — unchecked; (b) the `S-GLOBAL/... idx=N` trace lines show the
+by-name path running **correctly** all over this closure, so it is a normal
+path, not a smoking gun. An equally good fit is: receiver type unresolved ->
+`TypeId::ANY` -> a generic field-0 load, which is a different fix in the same
+file. **To settle it**, run the Stage-2 build under `SIMPLE_TRACE_FIELD_GET=1`
+and read the lines around
+`func=driver_native_capsule_result_reason_v1`: an
+`[FT2] <BRANCH>/size struct=<S> idx=0` line confirms the by-name story; no
+`/size` line at all means the typed path itself emitted offset 0, which is a
+different defect; a `[FIELD-FAIL]` line names the failed resolution directly.
 
 **Owner: `src/compiler_rust` (the seed). Not `src/compiler/**`.** No
 pure-Simple change can fix this; the source it miscompiles is already correct.
