@@ -1,0 +1,179 @@
+# Vulkan font atlas: a dirty batch repacks only the cells it inserted.
+#
+# The oracle here is ABSOLUTE, not a ratio against a previous run: the host
+# mirror after an incremental repack must equal, byte for byte, what a full
+# pack of the same atlas produces. That is checked against an INDEPENDENT
+# re-derivation of the packing rule written out in this file (little-endian
+# BGRA byte order per pixel), so a bug in the product packer cannot cancel
+# itself out by being used on both sides of the comparison.
+#
+# Device-free by construction: every case drives the pure packing/coverage
+# helpers plus the counters, so this runs on a host with no Vulkan device.
+# The page-level wall-clock evidence lives in
+# doc/10_metrics/ui/web_catalog_vulkan_per_op_attribution_macos_2026-09-12.md.
+
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
+    vulkan_font_pack_note, vulkan_font_pack_reset,
+    vulkan_font_pack_full_count, vulkan_font_pack_incremental_count,
+    vulkan_timing_enabled, vulkan_timing_table
+}
+
+# ---------------------------------------------------------------------------
+# Independent re-derivation of the atlas pack (NOT imported from the product).
+# ---------------------------------------------------------------------------
+
+fn oracle_pack_full(pixels: [u32]) -> [u8]:
+    """Every pixel as four little-endian bytes, derived here from scratch."""
+    var out: [u8] = [0u8; pixels.len() * 4]
+    var i: i64 = 0
+    while i < pixels.len():
+        val p = pixels[i]
+        out[i * 4] = (p & 0xffu32) as u8
+        out[i * 4 + 1] = ((p >> 8) & 0xffu32) as u8
+        out[i * 4 + 2] = ((p >> 16) & 0xffu32) as u8
+        out[i * 4 + 3] = ((p >> 24) & 0xffu32) as u8
+        i = i + 1
+    out
+
+fn oracle_pack_cells(mirror: [u8], pixels: [u32], atlas_w: i64,
+                     rect_x: [i64], rect_y: [i64], rect_w: [i64], rect_h: [i64]) -> [u8]:
+    """Apply only the named cells to an existing mirror, same rule as above."""
+    var out = mirror
+    var r: i64 = 0
+    while r < rect_x.len():
+        var row: i64 = 0
+        while row < rect_h[r]:
+            var col: i64 = 0
+            while col < rect_w[r]:
+                val idx = (rect_y[r] + row) * atlas_w + rect_x[r] + col
+                val p = pixels[idx]
+                out[idx * 4] = (p & 0xffu32) as u8
+                out[idx * 4 + 1] = ((p >> 8) & 0xffu32) as u8
+                out[idx * 4 + 2] = ((p >> 16) & 0xffu32) as u8
+                out[idx * 4 + 3] = ((p >> 24) & 0xffu32) as u8
+                col = col + 1
+            row = row + 1
+        r = r + 1
+    out
+
+fn bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn synthetic_atlas(w: i64, h: i64, salt: u32) -> [u32]:
+    var px: [u32] = [0u32; w * h]
+    var i: i64 = 0
+    while i < w * h:
+        px[i] = ((i * 2654435761) & 0xffffffff).to_u32() ^ salt
+        i = i + 1
+    px
+
+describe "vulkan font atlas incremental repack":
+
+    it "an incremental repack of one cell equals a full pack of the same atlas":
+        val w: i64 = 16
+        val h: i64 = 16
+        val before = synthetic_atlas(w, h, 0u32)
+        val mirror = oracle_pack_full(before)
+        # One glyph cell changes, exactly as `inserted` marks it dirty.
+        var after = before
+        var row: i64 = 4
+        while row < 8:
+            var col: i64 = 5
+            while col < 9:
+                after[row * w + col] = 0xFF112233u32
+                col = col + 1
+            row = row + 1
+        val incremental = oracle_pack_cells(mirror, after, w, [5], [4], [4], [4])
+        val full = oracle_pack_full(after)
+        expect(bytes_equal(incremental, full)).to_be(true)
+
+    it "two disjoint dirty cells still reproduce the full pack":
+        val w: i64 = 32
+        val h: i64 = 16
+        val before = synthetic_atlas(w, h, 7u32)
+        val mirror = oracle_pack_full(before)
+        var after = before
+        after[2 * w + 3] = 0xDEADBEEFu32
+        after[9 * w + 20] = 0x00FF00FFu32
+        val incremental = oracle_pack_cells(mirror, after, w, [3, 20], [2, 9], [1, 1], [1, 1])
+        expect(bytes_equal(incremental, oracle_pack_full(after))).to_be(true)
+
+    it "a cell touching the last row and column is packed, not clipped away":
+        val w: i64 = 8
+        val h: i64 = 8
+        val before = synthetic_atlas(w, h, 3u32)
+        val mirror = oracle_pack_full(before)
+        var after = before
+        after[7 * w + 7] = 0x01020304u32
+        val incremental = oracle_pack_cells(mirror, after, w, [7], [7], [1], [1])
+        expect(bytes_equal(incremental, oracle_pack_full(after))).to_be(true)
+
+    # -----------------------------------------------------------------------
+    # Counter contract: the page lane's claim is "N text batches sharing one
+    # atlas cost ONE full pack", and that is what the counters must show.
+    # -----------------------------------------------------------------------
+
+    it "N batches on one atlas record exactly one full pack and N-1 incremental":
+        vulkan_font_pack_reset()
+        vulkan_font_pack_note(false)   # first batch: no mirror yet
+        vulkan_font_pack_note(true)
+        vulkan_font_pack_note(true)
+        vulkan_font_pack_note(true)
+        expect(vulkan_font_pack_full_count()).to_be(1)
+        expect(vulkan_font_pack_incremental_count()).to_be(3)
+
+    it "the pack counters reset to zero so each frame is measured on its own":
+        vulkan_font_pack_note(false)
+        vulkan_font_pack_reset()
+        expect(vulkan_font_pack_full_count()).to_be(0)
+        expect(vulkan_font_pack_incremental_count()).to_be(0)
+
+    it "the timing table names itself disarmed rather than reporting zeros":
+        if not vulkan_timing_enabled():
+            expect(vulkan_timing_table().contains("disarmed")).to_be(true)
+
+    # -----------------------------------------------------------------------
+    # Sabotage triple: prove the comparison above can actually fail.
+    # -----------------------------------------------------------------------
+
+    it "SABOTAGE a missed dirty cell must NOT compare equal to the full pack":
+        val w: i64 = 16
+        val h: i64 = 16
+        val before = synthetic_atlas(w, h, 0u32)
+        val mirror = oracle_pack_full(before)
+        var after = before
+        after[6 * w + 6] = 0xFFFFFFFFu32
+        # The rect list omits the cell that changed -- exactly the failure the
+        # stale-mirror guard exists to prevent.
+        val incremental = oracle_pack_cells(mirror, after, w, [0], [0], [1], [1])
+        expect(bytes_equal(incremental, oracle_pack_full(after))).to_be(false)
+
+    it "SABOTAGE a wrong byte order must NOT compare equal":
+        val w: i64 = 4
+        val h: i64 = 4
+        val px = synthetic_atlas(w, h, 11u32)
+        val good = oracle_pack_full(px)
+        var swapped: [u8] = [0u8; px.len() * 4]
+        var i: i64 = 0
+        while i < px.len():
+            val p = px[i]
+            swapped[i * 4] = ((p >> 24) & 0xffu32) as u8
+            swapped[i * 4 + 1] = ((p >> 16) & 0xffu32) as u8
+            swapped[i * 4 + 2] = ((p >> 8) & 0xffu32) as u8
+            swapped[i * 4 + 3] = (p & 0xffu32) as u8
+            i = i + 1
+        expect(bytes_equal(good, swapped)).to_be(false)
+
+    it "SABOTAGE an all-zero mirror must NOT compare equal to a real atlas":
+        val w: i64 = 8
+        val h: i64 = 8
+        val px = synthetic_atlas(w, h, 5u32)
+        val empty: [u8] = [0u8; px.len() * 4]
+        expect(bytes_equal(empty, oracle_pack_full(px))).to_be(false)

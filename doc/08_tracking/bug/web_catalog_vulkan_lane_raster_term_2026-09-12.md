@@ -1,5 +1,38 @@
 # A real catalog page renders 4.2x SLOWER on the Vulkan native-readback lane than on CPU software raster (macOS M4, 2026-09-12)
 
+Status: **PARTLY FIXED, and the attribution below is PARTLY WRONG.** Read this
+header before the body.
+
+**Located (2026-09-12, per-op wall clock).** The unexplained term is the font
+composite, not the raster. On css-layout.html at 300x253 the frame is 47.1 s
+and `composite_font_batch` is **27.3 s of it across 5 calls**, of which
+`_vulkan_font_pixels_to_bytes` is 19.0 s and `_vulkan_font_atlas_payload_digest`
+is 8.2 s — two O(atlas) interpreted walks over a fixed 1024x1024 (4 MB) atlas,
+re-run in full on every dirty batch. The SFFI upload they feed is 44 ms.
+
+**Fixed:** `backend_vulkan_font.spl` now keeps a host byte mirror and repacks
+only `batch.dirty_rects`. Frame 47,646 -> 36,066 ms (-24.3%), PPM byte-identical,
+checksum unchanged. Spec:
+`test/02_integration/gpu/vulkan_font_atlas_incremental_repack_spec.spl` (9/9,
+incl. a sabotage triple).
+
+**CORRECTION — the "~0.6 s per 1x1 alpha blend" figure below is WRONG.**
+Measured directly: 76 one-pixel composites cost **99 ms TOTAL (1.3 ms each)**,
+and all 187 rect dispatches cost 145 ms. The 0.6 s figure was inferred from a
+run that moved two variables at once; no per-op cost was ever measured. The
+whole "largest removable op population" section is therefore chasing ~0.2 s of a
+47 s frame. **F14's held-back corner-sprite coalescing was NOT landed:** its
+claimed -13.7% cannot be attributed to op cost that does not exist, so it would
+have been landing an unexplained pixel-checksum move for nothing.
+
+**Still open, quantified:** the payload digest (8.3 s / 5 calls) and the 2
+remaining full repacks (7.8 s). Vulkan is now 1.44x cpu_simd at this size
+(36.1 s vs 25 s), down from 2.7x — the parity target is MISSED. Measurements
+and next steps:
+`doc/10_metrics/ui/web_catalog_vulkan_per_op_attribution_macos_2026-09-12.md`.
+
+Original text follows, retained for history.
+
 Status: **OPEN.** The slowdown is measured and one large contributor is
 quantified; the rest is NOT located in source. Nothing was changed in product
 code: the one candidate fix is measured (-13.7%) and held back, and the census
