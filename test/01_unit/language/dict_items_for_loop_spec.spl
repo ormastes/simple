@@ -1,0 +1,122 @@
+# Regression spec for
+# doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md
+#
+# Defect 1 (interpreter): `for k, v in d.items():` -- the bare two-name
+# pattern documented at
+# doc/07_guide/quick_reference/syntax_quick_reference.md -- bound `k` to the
+# loop's positional index and `v` to the WHOLE (key, value) tuple instead of
+# unpacking it. The parser's "enumerate shorthand" special case (`for i, item
+# in items:` auto-wraps each element as `(loop_index, element)`) fired
+# unconditionally on any bare two-name pattern, double-wrapping an iterable
+# that already yielded tuples. `for (k, v) in d.items():` (parenthesized) was
+# unaffected. Symptom: `semantic: type mismatch: cannot convert tuple to int`.
+#
+# Defect 2 (JIT/native): `Dict.items` had no dispatch arm in the MIR lowering
+# path at all -- `Runtime error: Function 'Dict.items' not found` -- even
+# though the byte-identical `Dict.entries` alias already worked there.
+#
+# WHY A SUBPROCESS for the JIT half: a spec body runs on the tree-walk
+# interpreter under the spec runner's own engine and structurally cannot
+# observe what the JIT does.
+#
+# Pin (a) (regression guard, interpreter only): the fix is a STATIC rule on
+# the iterable EXPRESSION -- destructure only when it is written as a
+# `.items()`/`.entries()` call; every other iterable, including an array
+# whose elements happen to be 2-tuples, keeps the plain enumerate shorthand.
+# `for i, pair in [(1, 2), (3, 4)]:` must still enumerate (`i` = 0, 1;
+# `pair` = the tuple unchanged), never destructure. An earlier (rejected) fix
+# decided this per ITEM at runtime instead (wrap unless the yielded value was
+# already a 2-tuple), which silently flipped this exact shape from enumerate
+# to destructure -- a real feature break, and data-dependent since the same
+# source could flip behavior depending on what the array happened to hold.
+#
+# Pin (a) is INTERPRETER-ONLY, not JIT: the JIT's bare-enumerate loop over
+# ANY plain array (tuples or not) is a separate, PRE-EXISTING defect,
+# unrelated to and unaffected by this fix in either direction -- confirmed
+# byte-identical (`IDX_SUM=4`, `PAIR_REPR=nil-nil;nil-nil;`) on both the
+# original deployed seed and every rebuilt candidate in this session. Not
+# fixed here; out of scope for this bug.
+#
+# Pin (b): `for k, v in d.entries():` (the second alias) destructures the
+# same as `.items()`, in both lanes.
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_dict_items_for_loop.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn field(raw: text, key: text) -> text:
+    val prefix = key + "="
+    for line in raw.split("\n"):
+        val t = line.trim()
+        if t.starts_with(prefix):
+            val parts = t.split("=")
+            return parts[1]
+    "MISSING"
+
+describe "for k, v in d.items() (bare two-name pattern) on the interpreter":
+    it "sums the same total as the parenthesized spelling and matches d[k] on every pair":
+        step("interpreter: bare and parenthesized items() for-loops agree with the oracle")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        val expected = field(out, "EXPECTED_TOTAL")
+        # Absolute-literal oracle (d = {"a":1,"b":2,"c":3}) so a crashed probe
+        # (both sides read "MISSING") cannot vacuously satisfy the relative
+        # checks below.
+        expect(expected).to_equal("6")
+        expect(field(out, "UNPAREN_TOTAL")).to_equal(expected)
+        expect(field(out, "PAREN_TOTAL")).to_equal(expected)
+        expect(field(out, "KV_MATCH")).to_equal("1")
+        expect(field(out, "COUNT_MATCH")).to_equal("1")
+
+    it "still enumerates a bare two-name pattern over an array of 2-tuples (pin a, regression guard)":
+        step("interpreter: for i, pair in [(1,2),(3,4)] still enumerates, does not destructure")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "IDX_SUM")).to_equal("1")
+        expect(field(out, "PAIR_REPR")).to_equal("1-2;3-4;")
+
+    it "destructures the .entries() alias the same as .items() (pin b)":
+        step("interpreter: for k, v in d.entries() destructures like d.items()")
+        val out = run_probe_in_mode("interpreter")
+        expect(out).to_contain("PROBE_DONE")
+        expect(field(out, "ENTRIES_BARE_TOTAL")).to_equal("6")
+
+describe "Dict.items() under the JIT":
+    it "resolves Dict.items (same as Dict.entries) and agrees with the interpreter":
+        step("jit: Dict.items resolves and both for-loop spellings agree with the oracle and the interpreter")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PROBE_DONE")
+        val expected = field(jit, "EXPECTED_TOTAL")
+        expect(expected).to_equal("6")
+        expect(field(jit, "UNPAREN_TOTAL")).to_equal(expected)
+        expect(field(jit, "PAREN_TOTAL")).to_equal(expected)
+        expect(field(jit, "KV_MATCH")).to_equal("1")
+        expect(field(jit, "COUNT_MATCH")).to_equal("1")
+
+        val interp = run_probe_in_mode("interpreter")
+        expect(field(jit, "UNPAREN_TOTAL")).to_equal(field(interp, "UNPAREN_TOTAL"))
+        expect(field(jit, "PAREN_TOTAL")).to_equal(field(interp, "PAREN_TOTAL"))
+
+    it "destructures the .entries() alias the same as .items() (pin b, JIT)":
+        step("jit: for k, v in d.entries() destructures like d.items(), matching the interpreter")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("PROBE_DONE")
+        expect(field(jit, "ENTRIES_BARE_TOTAL")).to_equal("6")
+
+    # Pin (a) is deliberately NOT asserted here for the JIT lane: the JIT's
+    # bare-enumerate loop over ANY plain array is a separate, pre-existing
+    # defect (see the header comment), unrelated to and unaffected by this
+    # fix. Asserting IDX_SUM/PAIR_REPR here would either fail on an
+    # unrelated pre-existing gap or require fixing it, which is out of scope
+    # for this bug.

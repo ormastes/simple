@@ -1598,6 +1598,38 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
     }
 }
 
+/// Decide, for a bare two-name for-pattern (`for a, b in e:`,
+/// `ForStmt.auto_enumerate == true`), whether `e` should be treated as
+/// TUPLE DESTRUCTURING (`k`/`v` unpack the tuple each element already is,
+/// same as the parenthesized `for (k, v) in e:`) rather than the classic
+/// enumerate shorthand (`i` = the loop's own position, `item` = the element
+/// as-is).
+///
+/// This is a STATIC decision on the iterable EXPRESSION, made ONCE per loop
+/// — not a per-item runtime guess. An earlier version of this fix inspected
+/// each yielded `item`'s VALUE (wrap unless it was already a 2-tuple), which
+/// is wrong: it silently changes the meaning of `for i, pair in
+/// [(1, 2), (3, 4)]:` from enumerate (`i` = 0, 1; `pair` = the tuple) to
+/// destructure (`i` = 1, 3; `pair` = 2, 4) purely because the array's
+/// elements happen to be 2-tuples — a real feature break, and
+/// data-dependent: the same source could flip behavior depending on what the
+/// array holds at runtime. See
+/// doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+///
+/// The static rule: destructure only when the iterable is written as a
+/// method call named `items` or `entries` (any receiver) — `d.items()`,
+/// `d.entries()`, `some_expr().items()`, etc. Every other iterable —
+/// including an array literal or variable that happens to hold 2-tuples —
+/// keeps the plain enumerate shorthand exactly as before this bug's fix.
+/// Direct dict iteration (`for k, v in d:`, no `.items()`/`.entries()` call
+/// at all) is handled separately by the caller via a runtime check on the
+/// iterable's evaluated `Value` (`Value::Dict`/`Value::FrozenDict`), since
+/// there is no syntactic marker for it — that check predates this bug and is
+/// unchanged in kind, only widened to include `FrozenDict`.
+pub(crate) fn for_loop_iterable_is_items_or_entries_call(iterable: &Expr) -> bool {
+    matches!(iterable, Expr::MethodCall { method, .. } if method == "items" || method == "entries")
+}
+
 /// Bind any pattern from a let statement.
 pub(crate) fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, env: &mut Env) {
     match pat {
