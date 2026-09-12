@@ -1,5 +1,7 @@
 # Implicit `self` field READ inside a plain `fn` method is unresolved (JIT + HIR)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-09-03
 - Status: OPEN
 - Platform observed: Windows x86_64 (`bin/simple.exe`, tracked seed)
@@ -67,3 +69,6 @@ every devhub exit path.
 
 Write `self.kind` explicitly. Not applied here: the scope of the defect is
 compiler-side and a mass rewrite would hide it.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

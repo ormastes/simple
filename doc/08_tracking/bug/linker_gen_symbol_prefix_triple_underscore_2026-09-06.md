@@ -1,5 +1,7 @@
 # linker_gen section boundary symbols emit three leading underscores, not two
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-09-06
 **File:** `src/app/linker_gen/main.spl` (`generate_section`, symbol lines)
 **Reproduced by:** `test/03_system/feature/app/linker_gen_spec.spl` — "generates
@@ -53,3 +55,6 @@ two total. Once fixed, update the four Symbol Generation scenarios in
 `test/03_system/feature/app/linker_gen_spec.spl` back to asserting
 `__text_start`/`__text_end`/`__bss_start`/`__bss_end` and remove the `# NOTE:`
 comments citing this file.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

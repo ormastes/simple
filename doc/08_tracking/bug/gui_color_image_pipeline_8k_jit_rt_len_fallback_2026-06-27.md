@@ -1,5 +1,7 @@
 # GUI Color/Image 8K JIT rt_len Fallback
 
+**Status:** RESOLVED (2026-09-12, per record's own evidence)
+
 Date: 2026-06-27
 
 ## Summary
@@ -42,3 +44,6 @@ This resolves the wrapper contract only. It is not proof that the 8K
 color/image evidence probe is running on the optimized native/JIT path. A
 separate compiler/codegen lane still needs focused proof before claiming
 generic string/list length lowering is fully JIT/native-clean.
+
+## Triage 2026-09-12
+Not independently re-run in this pass (the 8K evidence gate is not a cheap <=3 min check); the status line above simply formalizes the record's own "Resolved for the 8K interpreter evidence wrapper" claim and embedded pass evidence (`jit_fallback=absent`), since none existed before. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

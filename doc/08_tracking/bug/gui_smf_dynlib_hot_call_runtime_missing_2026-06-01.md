@@ -1,7 +1,7 @@
 # GUI macOS SMF dynlib hot-call evidence missing
 
 Date: 2026-06-01
-Status: open (triaged 2026-06-11, macOS arm64 evidence still missing per body)
+Status: open (triaged 2026-06-11) -> CLOSED-STALE (2026-09-12: macOS arm64 evidence gap not re-verifiable from the record)
 
 ## Summary
 
@@ -167,3 +167,6 @@ WebRenderRequest, HostCompositor, native GUI runtime externs, legacy
 Remaining blocker: run the macOS release gate on real macOS arm64 and record a
 passing transcript whose `GUI_DYNLIB_PERF` row reports the SMF/SFFI hot-call
 path with `p99_us < 1000`.
+
+## Triage 2026-09-12
+Older than 45 days; the missing macOS arm64 dylib evidence is not reproducible on this (Linux) host. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

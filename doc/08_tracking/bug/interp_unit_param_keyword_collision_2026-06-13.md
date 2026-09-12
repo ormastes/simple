@@ -1,5 +1,7 @@
 # BUG: parameter/variable named `unit` collides with the `Unit` keyword token (seed parser)
 
+**Status:** OPEN (workaround landed; general seed fix pending — see Status section below)
+
 - **ID:** `interp_unit_param_keyword_collision`
 - **Severity:** P1 (any user code with a `unit` parameter/variable mis-parses or fails lookup)
 - **Found:** 2026-06-13, perf-umbrella (diagnosing the bench `make_bench_result` failure)
@@ -46,3 +48,6 @@ as the prior `Slice`/`Flat` fix (2026-06-12, comment ~line 78).
   `bench_run_warm`/`bench_emit` and db/web/os doc emission can now proceed.
 - **General seed fix: OPEN** — pending user authorization (affects all user code with `unit`).
 - Treat `unit` as effectively reserved until the seed fix lands.
+
+## Triage 2026-09-12
+Reviewed 2026-09-12: the record's own Status section (workaround landed, general seed fix open) is already accurate; added a top-level Status line for gate compliance only, no reclassification. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # `bin/simple lint` aborts (SIGABRT) in cranelift `finalize_definitions` on `src/app/sj/*.spl`
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-09-05
 - Status: OPEN
 - Severity: tooling — the linter cannot be run at all on two files on the landing path
@@ -70,3 +72,6 @@ offending files themselves, not the modules they pull in.
 Crash reports were written to `.simple/logs/crash_2055979.log`,
 `.simple/logs/crash_2056619.log`, `.simple/logs/crash_2056845.log`,
 `.simple/logs/crash_2057276.log`.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

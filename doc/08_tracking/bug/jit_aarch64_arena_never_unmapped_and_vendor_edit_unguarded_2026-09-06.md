@@ -1,5 +1,7 @@
 # The aarch64 JIT arena is never unmapped, and the vendored edit that added it is unguarded
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-09-06
 **Severity:** medium — a leak bounded by process lifetime, plus a process gap that
 silently reverts the fix
@@ -83,3 +85,6 @@ pages use `align_down(self.high, ps)`, there is no overlap and no post-hoc offse
 shifting. W^X holds — the arena is mapped `PROT_READ|PROT_WRITE` and only made RX
 after relocation, and `publish_veneers` snaps `self.high = start` so no page is
 written after publication.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

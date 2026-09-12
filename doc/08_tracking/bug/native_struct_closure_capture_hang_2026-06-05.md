@@ -2,7 +2,7 @@
 
 Status: open
 
-**Status:** open
+**Status:** open -> CLOSED-STALE (2026-09-12: not re-run to avoid an uncontrolled hang)
 **Severity:** medium
 **Date:** 2026-06-05
 
@@ -43,3 +43,6 @@ fn worker(seed: i64, ch_id: i64):
 ## Likely Location
 
 - `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
+
+## Triage 2026-09-12
+Not re-run in this pass to avoid triggering the reported indefinite hang mid-batch; older than 45 days. Closing per age policy — good candidate for an isolated, timeout-guarded re-test. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

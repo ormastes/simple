@@ -1,5 +1,7 @@
 # MCP `simple_pipe` is declared everywhere but neither advertised nor dispatched — the wrapper admission probe therefore rejects every native
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-09-05
 - **Host:** aarch64 Ubuntu 24.04, `origin/main` @ `5864dbfd054`
 - **Severity:** blocking for `simple-mcp` — no native built from current source can be admitted by `bin/simple_mcp_server`
@@ -134,3 +136,6 @@ the `tools/call` returns a result with no error, and the payload contains
 The wider fan-out this record describes (6 scripts + 4 specs referencing
 `simple_pipe`, and `main_dispatch_core.spl` having zero `.spl` importers so
 `SIMPLE_MCP_TOOL_SET=core` has no dispatcher) is NOT addressed and remains open.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

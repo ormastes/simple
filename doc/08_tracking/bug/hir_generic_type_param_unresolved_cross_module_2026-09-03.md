@@ -1,5 +1,7 @@
 # HIR: a generic type parameter is treated as a missing named type across modules
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-09-03
 Compiler: `build/bootstrap/stage3/x86_64-pc-windows-msvc/stage2-admitted/simple.exe`
 sha256 `fcf473728180d790bc6e15892c59cadf2f12600b4825575b30e3ff91c20bcf86`
@@ -101,3 +103,6 @@ Same class as
 `stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md`, which is
 cited in the materialization source itself (line ~1032). So fixing the HIR half
 may only move a generic-using program's failure to a codegen SEGV.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

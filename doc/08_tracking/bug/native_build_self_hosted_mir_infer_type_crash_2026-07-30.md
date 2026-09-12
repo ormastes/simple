@@ -1,5 +1,7 @@
 # `native-build` crashes on module-level globals with a binary-expression initializer (self-hosted compiler, not the Rust seed)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Filed while following up on
 `doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md`'s own
 side-finding that `native-build --entry`/`--entry-closure` was failing in
@@ -150,3 +152,6 @@ existing `Error`-case precedent, adding an `Infer` arm to
 `MirType.i64()` fail-soft slot `Error` already uses — either is a
 distinct piece of work in a codebase (`src/compiler/**`) this session's
 JIT-focused sweep never otherwise touched, and is left for its own pass.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

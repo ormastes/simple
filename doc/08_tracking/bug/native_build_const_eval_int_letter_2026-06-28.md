@@ -1,5 +1,7 @@
 # native-build const-eval: hex-letter parse (FIXED) + residual typed/module-val gaps (OPEN)
 
+**Status:** PARTIAL — Part 1 FIXED (per record, verified 2026-06-28); Part 2 residual gaps CLOSED-STALE (2026-09-12: not re-verifiable from the record)
+
 Date: 2026-06-28
 
 Lane: `.spipe/simpleos-alpine-harden-musl-busybox` (AC-6b — cross-compile simplebox)
@@ -110,3 +112,6 @@ freestanding PIE ELF with the current cargo seed — the libc port is sound.
 - Then `build_simplebox("x86_64-unknown-none")` produces a runnable
   `build/os/rootfs/bin/simplebox` and `simplebox seq '  2'` proves
   `libc_strtoul` executes in the compiled binary.
+
+## Triage 2026-09-12
+Part 1's hex-letter const-eval fix is recorded as verified in the body. Part 2 (residual typed/module-val gaps) has no cheap repro and is older than 45 days; closing that portion per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

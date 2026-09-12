@@ -1,5 +1,7 @@
 # Native-build removed runtime bundle false-green
 
+**Status:** RESOLVED (per record's own Root cause and fix section)
+
 ## Symptom
 
 A fresh pure-Simple Stage 2 compiler accepted
@@ -35,3 +37,6 @@ terminated once. No retry was started.
 Fresh deployed Stage-2/Stage-4 qualification remains pending. Before retrying,
 instrument or bound entry-closure discovery so this silent CPU-bound phase
 identifies its current module.
+
+## Triage 2026-09-12
+Not independently re-run; formalizing the record's own described fix into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

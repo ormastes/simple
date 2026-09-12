@@ -1,5 +1,7 @@
 # 342 `SIMPLE_JIT_STRICT` suite failures — root cause: a stray tracked `test/01_unit/lib/src/` poisons project-root detection
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Filed 2026-08-31. **Root cause CORRECTED 2026-08-31 (same day).** Status: OPEN,
 fix in flight on `fix/cov-wrapper-import-resolution`.
 
@@ -161,3 +163,6 @@ unrelated to this one: `fix/cov-wrapper-hir-lowering` (#164),
 `fix/cov-wrapper-undefined-identifiers` (#163).
 
 Original (retracted) filing: PR #169.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

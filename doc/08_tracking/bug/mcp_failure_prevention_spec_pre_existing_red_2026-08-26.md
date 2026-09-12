@@ -1,5 +1,7 @@
 # mcp_failure_prevention_spec pre-existing RED at HEAD (2026-08-26)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Symptom
 `bin/simple test test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl`
 fails at HEAD (verified by restoring HEAD content in place, 2026-08-26):
@@ -23,3 +25,6 @@ fix cannot be dual-checked green on a spec whose scenarios already fail).
 MCP/LSP wrapper interface-cache evidence gate and the NFR evidence script
 (`scripts/check/check-mcp-lsp-nfr-evidence.shs`) must pass on this host, or
 the gates need environment-appropriate timeouts.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

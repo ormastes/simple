@@ -1,5 +1,7 @@
 # Native: module-level `var x = false` is garbage-truthy at startup
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Severity:** P1
 **Date:** 2026-06-13
 **Area:** native codegen (module-level var initialization)
@@ -86,3 +88,6 @@ Module-level bool initializers likely skip the global-init path that i64
 literals take (uninitialized BSS/data slot read as nonzero, or boxed-value
 slot read before init). Check where global `var` initializers are lowered in
 native entry-closure builds; bool literal may be dropped or mis-sized.
+
+## Triage 2026-09-12
+Re-verification attempted 2026-09-12: `bin/simple native-build --runtime-bundle core-c-bootstrap` on the repro failed for an unrelated reason (`error: semantic: unknown extern function: rt_env_vars`), so the original module-level-bool claim could not be re-tested. Older than 45 days with no working cheap repro; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

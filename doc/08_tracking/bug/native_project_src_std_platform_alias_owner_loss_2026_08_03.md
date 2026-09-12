@@ -1,5 +1,7 @@
 # Native-project aliased `src.std.platform` facade owner loss
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-03
 - Status: open
 - Bug ID: `native_project_src_std_platform_alias_owner_loss_2026_08_03`
@@ -73,3 +75,6 @@ leading `src.std` is supported import syntax that native-project must normalize,
 or whether both filesystem variants should use their direct family platform
 facades. Either choice must keep exact owner selection and the strict runtime
 regressions above.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

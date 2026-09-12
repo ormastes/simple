@@ -1,5 +1,7 @@
 # Bug: HPACK huffman single-symbol decode returns empty; concat-built [u8] encodes wrong
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-06-30
 **Severity:** Medium — `hpack_huffman_decode` drops short payloads; blocks
 `hpack/huffman_h2_spec` "round-trips 256-byte indexed payload".
@@ -131,3 +133,6 @@ concat corrupts, with a minimal non-huffman repro; fix in the interpreter (seed)
 or rework the huffman loops to avoid the offending array pattern (e.g. index
 assignment into a pre-sized array instead of push/concat). Multi-hour; same
 class as the other interpreter array bugs.
+
+## Triage 2026-09-12
+Not re-run in this pass (would require assembling a focused huffman encode/decode harness, not a trivial <=3 min check); older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

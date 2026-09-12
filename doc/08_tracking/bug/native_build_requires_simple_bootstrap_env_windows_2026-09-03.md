@@ -1,5 +1,7 @@
 # native-build fails on hello world unless SIMPLE_BOOTSTRAP=1, and says nothing useful
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-09-03
 Host: Windows 11, MSVC ABI, `. scripts/setup/windows-msvc-bootstrap-env.shs` sourced.
 
@@ -70,3 +72,6 @@ path at all.
 `impl Box<T>`) SEGVs (rc=139) after monomorphize, even with the working
 invocation. See
 `hir_generic_type_param_unresolved_cross_module_2026-09-03.md` § Related.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

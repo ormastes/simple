@@ -1,5 +1,7 @@
 # Module-level glyph raster cache: `[text]` array-element read is corrupt under native/JIT — lookup never hits its own store
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-06
 - **Lane:** hosted `bin/simple run` (Cranelift JIT), font rendering
 - Status: OPEN (P2)
@@ -230,3 +232,6 @@ replacing the linear `[text]` key-array scan with parallel primitive arrays
 text-array-free key encoding is feasible for this cache's key shape
 (identity+generation+font_size+codepoint+render_config — mostly not
 representable as small integers without a lookup step of its own).
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

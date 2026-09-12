@@ -1,5 +1,7 @@
 # Live browser lane measures inline text by UTF-8 BYTES, not characters
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-11
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -193,3 +195,6 @@ Executed proof (`bin/simple run`, seed):
                                  # this doc asked for
 
 Status: RESOLVED. No source change was needed by this lane.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

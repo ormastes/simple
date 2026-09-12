@@ -1,5 +1,7 @@
 # Bug: `return` inside a match/if EXPRESSION is swallowed (becomes the expr value)
 
+**Status:** OPEN (confirmed still reproduces 2026-09-12)
+
 **Date:** 2026-06-30
 **Severity:** High — a whole CLASS of `Result`-handling failures. Any
 `val x = match r: case Ok(v): v; case Err(e): return Err(e)` leaves `x` bound to
@@ -87,3 +89,6 @@ now does `Control::Return(v) => return Err(CompileError::TryError(Box::new(v)))`
 at five sites (`:167`, `:280`, `:304`, `:320`, `:362`). Grepping for
 `EarlyReturn` finds nothing, which is why this can look unfixed. Not fixed by
 this session.
+
+## Triage 2026-09-12
+Re-verified 2026-09-12: ran the record's own minimal repro (`return` inside a `match` expression assigned to `val x`); it still misbehaves — printed a raw `<enum@0x...>` pointer instead of a clean result, confirming `return` inside a match/if expression is still swallowed. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

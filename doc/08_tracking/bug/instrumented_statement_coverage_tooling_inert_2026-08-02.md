@@ -1,5 +1,7 @@
 # Instrumented statement-coverage tooling is inert (three independent breaks)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** test tooling / coverage
 **Found during:** web-rendering GPU offload coverage campaign (goal: verify
 ≥90% on `src/lib/gc_async_mut/gpu/browser_engine/*` target modules).
@@ -72,3 +74,6 @@ plus per-file evidence (>=1 recordable function of the same file in the
 called set). Measured: dom.spl 28% -> 87%, dom_identity_index 40% -> 83%,
 non-imported control 0/108, previously-gated modules byte-identical,
 no-env-var output byte-clean.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

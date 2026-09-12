@@ -1,5 +1,7 @@
 # JIT Gap Implementation Plan — 2026-07-29
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **ANALYSIS/DESIGN ONLY.** No source was edited, nothing was built, nothing was
 committed. This turns `jit_gap_reaudit_2026-07-29.md` +
 `jit_dispatch_worklist_2026-07-29.md`'s two blocked classes (Object/Enum print
@@ -338,3 +340,6 @@ dispatch files' arms one batch at a time** (fast, since each arm is a
 self-contained few-line block). If a strict same-file rule is required with
 no exceptions, the max safe parallelism is **1** for the dispatch-arm step
 and **6** for everything upstream of it.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

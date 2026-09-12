@@ -1,5 +1,7 @@
 # Git auto-merge silently loses content, with no conflict and no marker
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Filed:** 2026-09-07
 - **Severity:** high — landed code is silently deleted; every pre-push guard passes
 - **Detector:** `scripts/check/check-merge-content-conservation-push.shs`
@@ -255,3 +257,6 @@ on stderr via `run_push_gate`. An advisory verdict is not a pass.
   can decide soundly.
 - A push range `P1..M` re-scans the second parent's side, so pre-existing red
   from older merges re-fires. Acceptable while advisory; see promotion criteria.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

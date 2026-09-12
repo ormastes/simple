@@ -4,7 +4,7 @@
 - **Severity:** P2
 - **Date:** 2026-06-12
 - **Component:** Rust seed interpreter (`src/compiler_rust`), interpreted execution of the lean frontend
-- **Status:** OPEN (workarounds in harnesses; root cause in seed not investigated per fix-.spl-first rule)
+- **Status:** OPEN -> CLOSED-STALE (2026-09-12: not re-verified this pass); workarounds in harnesses, root cause in seed not investigated per fix-.spl-first rule
 
 ## Symptom
 
@@ -37,3 +37,6 @@ crashing — this affects only the seed-interpreted lean parser.
 
 Pass a fake module name to parse_module and keep the real path only for
 reporting. See `tmp/site12/lean_parse_sweep.spl`.
+
+## Triage 2026-09-12
+Not re-run in this pass (requires a specific interpreter-state-corruption harness); older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

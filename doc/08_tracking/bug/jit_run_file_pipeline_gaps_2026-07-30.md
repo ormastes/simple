@@ -1,5 +1,7 @@
 # Systematic pipeline diff: `run_file_jit` vs the whole-program native-build pipeline (2026-07-30)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Eight JIT-only defects were found this session one at a time, by hand, each
 costing a full investigation. a894's shape analysis found two patterns: (1)
 miscellaneous codegen bugs, and (2) **pipeline-completeness gaps**, where a
@@ -1824,3 +1826,6 @@ already landed and ready but not yet run to completion (§16.6's cost
 wall: the module compiles in the 48-minute-plus class). Not chased
 further here — out of scope for this pass, which was diagnosis of the
 module-level-`val` framing only, per instruction not to attempt a fix.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

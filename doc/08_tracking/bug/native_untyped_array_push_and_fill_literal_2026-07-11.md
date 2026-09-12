@@ -1,6 +1,8 @@
 # BUG: native path — `.push()` on untyped arrays fatal + `[""; N]` fill-literal emits invalid IR
 
-**Status (2026-07-15):** source implemented for all three facets. Historical
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+**Status (2026-07-15 -> CLOSED-STALE 2026-09-12):** source implemented for all three facets. Historical
 native evidence covers push/fill; strict concat-forwarding execution remains
 pending.
 
@@ -39,3 +41,6 @@ All three blocked the pure-Simple `--entry` injection in bootstrap_main.spl
 (#138 Phase 2, reverted). Fix direction: add rt_array_push interception for
 Unresolved receivers; type rt_array_repeat results as tagged i64 in
 translate_copy_move; root-cause the concat drop in extract_rt_string_array.
+
+## Triage 2026-09-12
+The 2026-07-15 status already noted concat-forwarding execution remains pending; still unexecuted 2 months later. Older than 45 days with no cheap repro re-run; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

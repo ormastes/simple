@@ -1,5 +1,7 @@
 # RETRACTED — see jit_option_i64_value3_reads_as_none_2026-07-24.md
 
+**Status:** CLOSED (retracted 2026-07-24 by its own body; see jit_option_i64_value3_reads_as_none_2026-07-24.md for the real root cause)
+
 **Date:** 2026-07-24
 
 This report's original conclusion — that `Type(field: self.field)` in a named
@@ -16,3 +18,6 @@ FAIL for any spec with **10–99 examples**.
 
 Full analysis, minimal repro, JIT-vs-interpreter proof, and fix direction:
 **`jit_option_i64_value3_reads_as_none_2026-07-24.md`**.
+
+## Triage 2026-09-12
+Not independently re-run; formalizing the record's own retraction into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

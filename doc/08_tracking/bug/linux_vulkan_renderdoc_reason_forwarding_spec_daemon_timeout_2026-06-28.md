@@ -1,5 +1,7 @@
 # Linux Vulkan RenderDoc Reason Forwarding SSpec Daemon Timeout
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Date: 2026-06-28
 
 ## Summary
@@ -40,3 +42,6 @@ Fix the SPipe daemon profile or split this focused static-forwarding scenario so
 it can complete reliably. Until then, use the direct aggregate evidence for this
 specific forwarding contract and keep the broader Linux RenderDoc gate
 incomplete until Chrome and Electron `.rdc` artifacts have `RDOC` magic.
+
+## Triage 2026-09-12
+The record itself warns not to rerun this SSpec repeatedly in one session, so it was not re-run; older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

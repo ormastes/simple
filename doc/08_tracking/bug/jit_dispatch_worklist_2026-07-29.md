@@ -1,5 +1,7 @@
 # JIT Method-Dispatch Worklist — remaining gaps after 2026-07-29 sweeps
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Derived from `doc/08_tracking/bug/jit_method_dispatch_audit_2026-07-29.md`.
 Already-landed methods are NOT relisted: `count`/`drop`/`entries`/`insert`/
 `max`/`min`/`skip`/`sum`/`take` (array insert/max/min/skip/sum/take, dict
@@ -121,3 +123,6 @@ grep + existing dispatch-arm shapes in
 - Every candidate MUST be re-confirmed on a `fn main()`-wrapped probe on the
   freshly-built seed (JIT==interp, [jit-addr]) before landing — the worklist was
   inferred from grep, not run.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

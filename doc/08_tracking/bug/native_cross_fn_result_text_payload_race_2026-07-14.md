@@ -1,5 +1,7 @@
 # native-build: cross-function `Result` text-payload match is non-deterministic
 
+**Status:** RESOLVED (per record's own **Resolved:** 2026-07-15 field)
+
 **Severity:** high (non-deterministic silent-wrong)
 **Found:** 2026-07-14, errhandling lane
 **Resolved:** 2026-07-15
@@ -46,3 +48,6 @@ module (`boomboom41`) in the 40-case gate.
 ## Reproduce
 
 `/tmp/wt_errhandling/` probes; run the same `--entry` build 3× with `--clean`.
+
+## Triage 2026-09-12
+Not independently re-run; formalizing the record's own Resolved field into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

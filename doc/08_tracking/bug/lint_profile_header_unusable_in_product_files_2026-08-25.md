@@ -1,5 +1,7 @@
 # `@lint_profile(critical)` file header cannot be placed in any product file
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-08-25  **Severity:** medium  **Area:** parser / lint tier selection
 **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed)
 
@@ -29,3 +31,6 @@ Either the parser accepts a standalone module-level `@lint_profile(...)` attribu
 `use`/`val`), or the semantic pass whitelists `@lint_profile` as a file-scope, non-function
 attribute. Regression spec to add with the fix: a module carrying the header on line 1 must
 import cleanly and `simple lint` must report the `critical` tier for it.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

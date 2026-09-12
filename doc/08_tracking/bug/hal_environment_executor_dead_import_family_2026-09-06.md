@@ -1,5 +1,7 @@
 # Six HAL environment-executor specs import test modules that exist nowhere — they can never execute
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-06
 **Found by:** sspec score-80 wave 12G (modernizing the `hal_environment_*` executor specs)
 
@@ -41,3 +43,6 @@ assertions in waves 12C–12G, but their runtime scenarios stay
 Implement (or restore) the `app.test.hal_environment_executor` module
 family — or the `src/` product surface it was meant to wrap — so the six
 specs' imports resolve and their scenarios execute.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

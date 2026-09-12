@@ -1,5 +1,7 @@
 # `bin/simple lint` crashes on any non-empty input: array index out of bounds
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-07-30
 
 ## Symptom
@@ -391,3 +393,6 @@ list.
 Both content-verified landed on `origin/main` via
 `git show origin/main:<path> | grep decl_get_tag` /
 `grep -c "decl_get_tag\|expr_get_tag\|stmt_get_tag"` after push.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
