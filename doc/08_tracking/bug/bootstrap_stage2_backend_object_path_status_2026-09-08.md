@@ -256,3 +256,59 @@ This single defect consumed many bootstrap cycles in one session. Each cycle is
 ~40 minutes and the reason string is the ONLY signal, so guessing is expensive
 and measuring is cheap. The trace answered in one run what four rounds of
 inference could not. Start there.
+
+## 2026-09-13 session close: what is fixed, what remains
+
+### Fixed and landed (each verified)
+
+- **`llc not found`** — the real backend failure. `find_llc` consults
+  `_env_tool_dirs` (SIMPLE_LLVM_BIN / LLVM_SYS_180_PREFIX) before any PATH
+  lookup, but `bootstrap_stage_sanity` scrubs the environment and re-exports
+  only a fixed set, so those two were stripped exactly where needed. Carried
+  through the scrub. Measured before: `find_llc: env_dirs=0 resolved=[]`;
+  after: `env_dirs=1 resolved=[C:/dev/install/clang+llvm-18.1.8-.../bin]`.
+- **Four nil-vs-empty defects**, all of which converted a real fault into an
+  invisible one: the secure-temp-dir guard (`== ""` misses nil), the provider
+  diagnostic guard, the discarded `file_atomic_write` result, and
+  `file_read_regular_no_follow_bounded` returning `Ok(<nil>)` on a failed read.
+  That last one is why this defect read as "diagnostic file empty" for many
+  cycles: the message WAS written, the READ failed, and the failure was
+  laundered into an empty success that pointed suspicion at the writer.
+
+### The current, honest frontier
+
+The failure is now reported truthfully:
+
+```
+backend object-path status 1 (diagnostic unreadable:
+  regular no-follow bounded file read returned nil: <path>)
+AOT diagnostic wrote 29 bytes but is unreadable
+```
+
+So the backend produces a 29-byte reason that still cannot be read back. The
+write reports success; the read returns nil. Both go through `host_path_native`,
+and host detection and separator normalisation are confirmed working
+(`host_is_windows_host=true`).
+
+### Methodology traps that cost real time here — read before continuing
+
+1. **`src/runtime/*.c` is COMPILED INTO the binary; `src/lib/**` is read as
+   source.** A probe run with the deployed `bin/simple.exe` (dated 2026-09-02)
+   exercises the OLD C runtime and says nothing about a runtime change. Only a
+   bootstrap run, or a locally rebuilt seed, tests those.
+2. **Backslashes do not survive into heredocs reliably here.** Three separate
+   probes and two C edits were corrupted by `\` collapsing to `\`, once
+   silently turning `C:\Users\...` into escape sequences and producing a
+   completely bogus "mixed separators fail" conclusion. Build path separators
+   from a numeric code point, or avoid literals entirely by obtaining paths from
+   the runtime (e.g. `secure_temp_dir`).
+3. **`timeout` is not available under `env -i`.** Two readings of `rc=127`/`rc=1`
+   were `timeout` failing, not the program under test. Read stderr.
+
+### Next step
+
+Instrument `rt_file_read_regular_no_follow_bounded` on the Windows branch the
+same way `rt_secure_temp_dir` was instrumented (report `GetLastError` and the
+path), then run ONE bootstrap. The reason string is the only signal a cycle
+produces, and a one-line trace has out-performed every round of inference in
+this investigation.
