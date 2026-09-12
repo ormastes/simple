@@ -1636,7 +1636,9 @@ interpreter scaling certified linear; `check --help` 203→81 opens; while-loop 
 (#696) and BOOT-4 (#713), and the four gate syncs that kept the required CI job and the push gates green under
 concurrent landings (#665, #697 hot-loop baseline, #710 `rt_file_size` routed through `file_size_raw`).
 `main` @ `e5f1b5f0a0c` passes the hot-loop, keyword-binding, lifecycle, guard-wiring and ledger gates; the
-ruleset's strict up-to-date flag is restored.
+ruleset's strict up-to-date flag is restored after the last landing. CI on `main` @ `e5f1b5f0a0c`: the required job
+`Code Idiom & Structural Ratchet Gates` succeeded; the non-required regression gate reports the same 17 pre-existing
+forbidden-extension violations it reported on `99c73a6ac87` before this wave.
 
 Landing method that finally held (recorded for the next wave): never squash-merge `main` into a lane; rebuild the
 lane as ONE commit on current `origin/main` from its own files (3-way merged), push to a fresh branch, supersede
@@ -1650,5 +1652,5 @@ pass fails in the backend (`backend object-path status 1, diagnostic file empty`
 `doc/08_tracking/bug/stage2_sanity_bootstrap1_backend_object_path_status_1_2026-09-13.md`, 30 s repro); BOOT-6
 is on it. The `v1.0.1-beta.2` bump and tag stay held until Stage 2 admits, per the beta.1 precedent.
 
-Still open: L10 collector wiring (the collector exists on no committed ref — nothing to wire), EGL Q (2-token
+Still open: L10 collector wiring (the collector exists on no committed ref; the only known copy is uncommitted in Codex's worktree, so it cannot be wired from main), EGL Q (2-token
 parse) and S (frozen by Codex), `_runtime_object_cache_dir`, frontend rewiring.
