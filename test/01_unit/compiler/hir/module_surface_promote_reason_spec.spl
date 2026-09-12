@@ -1,0 +1,106 @@
+# Site 8 (macOS bootstrap chain run 19, 2026-09-13): `--stop-after-stage2` was
+# rejected with `Module surface registry graph promotion failed after phase 2`
+# and nothing else. That message names neither the surface nor the field nor the
+# scope state, and `module_surfaces_promote` had 26 distinct ways to answer the
+# bare `false` behind it, so the only route to a diagnosis was a fresh ~25-minute
+# bootstrap cycle. `module_surfaces_promote_reason` replaces the bool with a
+# named reason; `module_surfaces_promote` is now a wrapper over it.
+#
+# The first two examples are behavioural — they run the real promotion against a
+# real transient scope. The last two assert the failure contract against the
+# source, because the Rust seed's interpreter stubs the transient-scope externs
+# (see the note above that example); when this spec is run by a natively built
+# compiler the sabotage becomes exercisable behaviourally.
+#
+# See doc/08_tracking/bug/stage2_sanity_module_surface_registry_promotion_fails_2026-09-13.md
+use std.spec
+use std.io.{file_read}
+use compiler.hir.hir_lowering.module_surface_types.{
+    ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName
+}
+use compiler.hir.hir_lowering.module_surface.{
+    module_surfaces_promote,
+    module_surfaces_promote_reason
+}
+
+val REGISTRY = "src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+val DRIVER = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn build_registry(name: text) -> ModuleSurfacesByName:
+    var builder = ModuleSurfaceBuilder.new()
+    val added = builder.add_indexed_name(name, 0).is_ok()
+    builder.surfaces = [ModuleSurface.empty(name)]
+    val registry = ModuleSurfacesByName(
+        surfaces: [], index_by_name: {},
+        ordered_names: [], ordered_indices: [], generation: 0, frozen: false)
+    val finish_error = builder.finish_into(registry)
+    registry
+
+describe "module surface registry graph promotion reports a named reason":
+    it "answers an empty reason when the whole graph promotes":
+        # @req REQ-SSPEC-COMPILER
+        step("promote a finished registry inside a paused transient scope")
+        val began = rt_transient_array_scope_begin()
+        val registry = build_registry("first")
+        val paused = rt_transient_array_scope_pause()
+        val reason = if paused: module_surfaces_promote_reason(registry) else: "scope pause failed"
+        val ended = rt_transient_array_scope_end()
+        expect(began).to_equal(true)
+        expect(paused).to_equal(true)
+        expect(ended).to_equal(true)
+        expect(reason).to_equal("")  # oracle: a fully promoted graph has no offending node to name
+
+    it "keeps the bool wrapper agreeing with the reason":
+        # @req REQ-SSPEC-COMPILER
+        step("the bool wrapper is true exactly when the reason is empty")
+        val began = rt_transient_array_scope_begin()
+        val registry = build_registry("second")
+        val paused = rt_transient_array_scope_pause()
+        val promoted = if paused: module_surfaces_promote(registry) else: false
+        val ended = rt_transient_array_scope_end()
+        expect(began).to_equal(true)
+        expect(promoted).to_equal(true)  # oracle: wrapper answers true for the same graph the reason call cleared
+        expect(ended).to_equal(true)
+
+    # SABOTAGE: the runtime answers false for EVERY value when the transient
+    # array scope is not both active and paused (runtime_native.c:2430) — byte
+    # for byte the failure shape the macOS lane hit, and before this change it
+    # was indistinguishable from an unpromotable field.
+    #
+    # It cannot be exercised behaviourally HERE: the Rust seed's interpreter
+    # backs `rt_transient_array_scope_*` and `rt_transient_heap_promote` with
+    # stubs that answer true unconditionally, so a no-scope call measured
+    # `reason=""` under the seed while the real C runtime returns false. The two
+    # examples above therefore assert the success contract only. The sabotage is
+    # asserted against the SOURCE contract instead, which is what fails closed
+    # if anyone restores a bare boolean: the failure routes must name the field,
+    # the surface and the scope sentinel, and the driver must carry that text
+    # into its error.
+    it "keeps every promotion failure route self-identifying":
+        # @req REQ-SSPEC-COMPILER
+        step("no promotion failure route may answer a bare false")
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        expect(registry).to_contain("fn module_surfaces_promote_reason(")
+        expect(registry).to_contain("fn module_surface_promote_scope_sentinel(")
+        expect(registry).to_contain("of surface[")
+        expect(registry).to_contain("logical=")
+        expect(registry).to_contain("scope sentinel promote=")
+        expect(registry).to_contain("return \"registry root carrier")
+        # The 24-operand `not promote(a) or not promote(b) or ...` chain is gone:
+        # it could only answer an unnamed false, and the Rust-seed aarch64
+        # backend has mis-lowered long boolean chains in this file's neighbours.
+        expect(registry.contains("not rt_transient_heap_promote(surface.enum_names) or")).to_be_false()
+
+    it "carries the named reason into the driver error text":
+        # @req REQ-SSPEC-COMPILER
+        step("the phase-2 driver error must not be a bare sentence")
+        val driver = file_read(DRIVER)
+        expect(driver.len() > 4000).to_be_true()
+        expect(driver).to_contain("module_surfaces_promote_reason(retained_surfaces)")
+        expect(driver).to_contain(
+            "Module surface registry graph promotion failed after phase 2: ")

@@ -1,6 +1,15 @@
 # Stage 2's Stage-3 route now reaches native_compile and SEGVs in `serialize_mir_function`
 
 - Status: OPEN (2026-09-13)
+- **Reproduced on macOS aarch64-apple-darwin (2026-09-13, chain run 20).** Not
+  Linux-specific. Once `460aa9781cc` (this record's predecessor, site 7) reached
+  `main` and therefore the macOS lane, that lane landed on exactly this site: route `status 139`, crash report
+  `simple-2026-09-13-083808.ips` frame 0
+  `compiler__mir__mir_json__serialize_mir_function`. Candidate preserved at
+  `<evidence-root>/stage2-rejected/aarch64-apple-darwin/simple`, sha256
+  `630ad64b7194eec6873fdcd6382c83ecad4b23f760d303a57eac5b26f214e0ed`, so the
+  ~40-second witness loop is available on macOS too. The two lanes have
+  converged; this is now the single `--stop-after-stage2` blocker on both.
 - Found: bootstrap lane BOOT-7, `work/bootstrap-full-5-2026-09-12` at `592041db98a`
 - Severity: **the current `--stop-after-stage2` admission blocker**, and the successor to
   site 7 (`stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md`, fixed).
