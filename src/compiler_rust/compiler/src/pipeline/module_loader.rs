@@ -18,7 +18,7 @@ use crate::interpreter::{
     flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
-use crate::stdlib_variant::stdlib_root_candidates;
+use crate::stdlib_variant::stdlib_root_candidates_present;
 use crate::CompileError as _;
 
 fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) -> PathBuf {
@@ -494,7 +494,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             continue;
         }
 
-        for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
+        for stdlib_root in stdlib_root_candidates_present(&stdlib_candidate) {
             if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
                 let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
                 if p_exists(&compat_init) && p_is_file(&compat_init) {
