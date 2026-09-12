@@ -1388,3 +1388,145 @@ fn test_fn_scope_module_use_does_not_bait_field_guess() {
         }
     }
 }
+
+/// `static fn ... -> T?` must not lose T's name, and an optional-bound field
+/// read must use T's OWN field index.
+///
+/// Regression for the 2026-09-13 Stage 2 miscompile: `FileFingerprint.from_file`
+/// is declared `-> FileFingerprint?`, whose `ast::Type::Optional` had no arm in
+/// `static_call_return_type_name` and fell to `_ => None`. With no name recorded
+/// for `object_fp`, the `if val fp = object_fp:` binding had none to inherit, so
+/// `fp.size` reached `get_field_info(TypeId::ANY, "size")`, whose LOCAL-BEST scan
+/// returns the SMALLEST index among every struct in `module.types` declaring the
+/// name — index 0 here, thanks to the `Decoy` below, which stands in for the 15
+/// real structs (FileStat, GcObjectHeader, TypeLayout, ...) that declare `size`
+/// first. Offset 0 instead of 24 returned the struct's `path` text POINTER
+/// (measured: 34363944961 = 0x8_0010_2001) where a 632-byte file size belonged.
+/// The decoy is what makes this test discriminate: without it LOCAL-BEST finds
+/// only FileFingerprint and yields 3 even when the name is lost, which is exactly
+/// why 3-unit and 58-unit reproducers passed and only the 834-unit closure failed.
+///
+/// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+#[test]
+fn test_optional_static_return_keeps_struct_name_for_bound_field_index() {
+    fn walk(stmts: &[HirStmt], seen: &mut Option<usize>) {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Return(Some(expr)) => {
+                    if let HirExprKind::FieldAccess { field_index, .. } = &expr.kind {
+                        *seen = Some(*field_index);
+                    }
+                }
+                HirStmt::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    walk(then_block, seen);
+                    if let Some(block) = else_block {
+                        walk(block, seen);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let source = concat!(
+        "struct Decoy:\n",
+        "    size: i64\n",
+        "\n",
+        "fn probe(p: text) -> i64:\n",
+        "    val object_fp = FileFingerprint.from_file(p)\n",
+        "    if val fp = object_fp:\n",
+        "        return fp.size\n",
+        "    return 0 - 1\n",
+    );
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    // FileFingerprint is declared in ANOTHER unit: it reaches this module only
+    // through the whole-program tables, never `module.types`.
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "FileFingerprint".to_string(),
+        vec![
+            ("path".to_string(), Type::Simple("text".to_string())),
+            ("content_hash".to_string(), Type::Simple("text".to_string())),
+            ("modified_time".to_string(), Type::Simple("i64".to_string())),
+            ("size".to_string(), Type::Simple("i64".to_string())),
+        ],
+    )])));
+    // `size` sits at index 0 in Decoy and index 3 in FileFingerprint.
+    lowerer.set_ambiguous_field_names(Arc::new(HashSet::from(["size".to_string()])));
+    // The declared return type is OPTIONAL — the exact shape that was dropped.
+    lowerer.set_global_fn_return_types(Arc::new(HashMap::from([(
+        "FileFingerprint.from_file".to_string(),
+        Type::Optional(Box::new(Type::Simple("FileFingerprint".to_string()))),
+    )])));
+
+    let lowered = lowerer.lower_module(&module).unwrap();
+    let func = lowered
+        .functions
+        .iter()
+        .find(|f| f.name.contains("probe"))
+        .expect("probe not lowered");
+
+    let mut seen = None;
+    walk(&func.body, &mut seen);
+
+    assert_eq!(
+        seen,
+        Some(3),
+        "`fp.size` must read FileFingerprint's own index 3 (byte offset 24); \
+         index 0 is the Decoy's `size` — the miscompile that returned the \
+         `path` pointer instead of the file size"
+    );
+}
+
+/// A declared `-> T?` return type names T, and reports that T arrived WRAPPED.
+///
+/// This is the exact resolution step the 2026-09-13 Stage 2 miscompile turned
+/// on. `ast::Type::Optional` had no arm and fell to `_ => None`, so every
+/// `static fn ... -> T?` constructor — `FileFingerprint.from_file` among them —
+/// silently contributed no name, and the field read downstream fell through to
+/// `get_field_info(TypeId::ANY, ..)`'s smallest-index guess (offset 0, the
+/// struct's `path` pointer, instead of offset 24's 632-byte size).
+///
+/// The `wrapped` flag is equally load-bearing in the other direction: the
+/// caller may upgrade a binding's TypeId only for an UNWRAPPED `-> T`. Typing an
+/// optional-valued local as bare `T` addresses the payload's slots through the
+/// wrapper and reads zero — measured as `field=0:runtime=632` on the way to this
+/// fix.
+///
+/// doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md
+#[test]
+fn test_declared_type_struct_name_looks_through_payload_wrappers() {
+    let ff = || Type::Simple("FileFingerprint".to_string());
+
+    // Unwrapped: name, and the caller may upgrade the TypeId.
+    assert_eq!(
+        Lowerer::declared_type_struct_name(&ff()),
+        Some(("FileFingerprint".to_string(), false))
+    );
+
+    // `-> T?` — the shape that was dropped entirely.
+    assert_eq!(
+        Lowerer::declared_type_struct_name(&Type::Optional(Box::new(ff()))),
+        Some(("FileFingerprint".to_string(), true)),
+        "`-> T?` must still name T, and must report it as wrapped"
+    );
+
+    // Nested wrappers resolve to the same single struct.
+    assert_eq!(
+        Lowerer::declared_type_struct_name(&Type::Optional(Box::new(Type::Optional(Box::new(ff()))))),
+        Some(("FileFingerprint".to_string(), true))
+    );
+
+    // Types that name no single struct stay None — never a guess.
+    assert_eq!(
+        Lowerer::declared_type_struct_name(&Type::Tuple(vec![ff(), ff()])),
+        None
+    );
+    assert_eq!(Lowerer::declared_type_struct_name(&Type::Union(vec![ff()])), None);
+}
