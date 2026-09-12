@@ -15,12 +15,19 @@ What it consumes rather than re-derives:
   With no provider, a task that requires the requested provider, or whose
   semantics forbid the CPU lane, is REFUSED here; it is never quietly run.
 
-What it does not reach: a device. The only execution body wired in is the
-existing CPU/software rasterizer (`SoftwareBackend`), reused unchanged — no new
-renderer. Every receipt states that (`lane == "cpu_emulated"`,
-`device_execution_proven == false`), so a green run of this module is never
-evidence of device execution. A real provider is refused outright
-(`DeviceLaneUnavailable`) rather than silently served by the CPU lane.
+Two lanes, and the CPU one is the default. With no provider the execution body
+is the existing CPU/software rasterizer (`SoftwareBackend`), reused unchanged —
+no new renderer — and every receipt says so (`lane == "cpu_emulated"`,
+`device_execution_proven == false`). With a provider the lease is admitted on
+the device lane instead, where the only way to complete is the packed-completion
+join: `engine2d_draw_ir_runtime_queue_complete_packed_with_authority` redeeming
+a backend owner's `Engine2dPackedCompletionAuthorityV1`. The island never
+derives device facts — `device_execution_proven` is copied from the queue's
+verdict on the OWNER's evidence — and `execute` (the CPU body) refuses a
+device-lane lease outright, so the rasterizer can never impersonate a device.
+Issuing an authority from a retained native fence is the backend owner's line
+and lives nowhere in this tree, so a green run here is still not evidence that
+a GPU ran.
 
 Lifecycle: admit -> resident -> retired.
 
@@ -37,12 +44,33 @@ use common.gpu.environment_variant_task_contract_v1.{
     GpuBoundedTaskV1, GpuTaskFallbackDecisionV1,
     gpu_bounded_task_validate_v1, gpu_task_missing_provider_decision_v1
 }
+use common.gpu.environment_transfer_scheduler_v1.{
+    TransferCostV1, TransferPlanV1, TransferScheduleErrorV1, TransferTaskV1,
+    transfer_aware_plan_v1
+}
+use common.gpu.engine2d.gpu_epoch.{Engine2dGpuEpochReceipt}
 use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_queue.{
+    engine2d_draw_ir_runtime_queue_complete_packed_with_authority
+}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{Engine2dHostGpuRuntimeQueue}
+use std.nogc_async_mut.gpu.engine2d.packed_completion_authority_v1.{
+    Engine2dPackedCompletionAuthorityV1, Engine2dPackedCompletionLedgerV1,
+    engine2d_packed_completion_ledger_new
+}
 
 pub val RESIDENT_PHASE_ADMITTED_V1: text = "admitted"
 pub val RESIDENT_PHASE_RESIDENT_V1: text = "resident"
 pub val RESIDENT_PHASE_RETIRED_V1: text = "retired"
 pub val RESIDENT_LANE_CPU_EMULATED_V1: text = "cpu_emulated"
+pub val RESIDENT_LANE_DEVICE_AUTHORITY_V1: text = "device_authority"
+
+# Bytes per pixel in the software backend's flat ARGB buffer. Every measured
+# transfer byte below is a pixel count from one of its own receipts times this.
+pub const RESIDENT_BYTES_PER_PIXEL_V1: i64 = 4
+# Rect cap handed to the backend's damage plan. Past it the plan collapses to a
+# bounding rect, which is the backend's own transport decision, not ours.
+const _RESIDENT_DAMAGE_MAX_RECTS_V1: i32 = 16i32
 
 # One island holds a bounded live set. The bound exists so a leaking caller
 # cannot pin surfaces indefinitely; it is deliberately small because each live
@@ -52,11 +80,14 @@ pub const RESIDENT_ISLAND_MAX_LIVE_V1: i64 = 8
 pub enum ResidentExecutorErrorV1:
     TaskContractRejected
     AuthorityMissing
-    DeviceLaneUnavailable
     CapacityExceeded
     SurfaceUnavailable
     UnknownLease
     NotResident
+    # The requested body does not belong to the lane the lease was admitted on.
+    LaneMismatch
+    # The packed-completion join refused the presented callback authority.
+    CompletionRefused
 
 pub struct ResidentLeaseV1:
     lease_handle: u64
@@ -72,6 +103,10 @@ pub struct ResidentReceiptV1:
     idle_bound_ticks: i64
     readback_checksum: i64
     pixel_count: i64
+    # Bytes this lease actually moved across the boundary, accumulated over
+    # every crossing so far, as the backend's own receipts report them.
+    measured_upload_bytes: u64
+    measured_readback_bytes: u64
     lane: text
     device_execution_proven: bool
     routing_evidence_only: bool
@@ -80,13 +115,37 @@ struct _ResidentRecordV1:
     lease_handle: u64
     invocation_id: u64
     phase: text
+    lane: text
+    device_execution_proven: bool
     executions: i64
     resident_since_tick: i64
     last_used_tick: i64
     readback_checksum: i64
     pixel_count: i64
+    measured_upload_bytes: u64
+    measured_readback_bytes: u64
 
 var _next_resident_island_owner_v1: u64 = 1u64
+
+fn _damage_plan_pixels(rects: [i32]) -> i64:
+    """Pixels in the backend's flat [x, y, w, h, ...] damage plan."""
+    var total: i64 = 0
+    var i: i64 = 0
+    while i + 3 < rects.len():
+        total = total + (rects[i + 2].to_i64() * rects[i + 3].to_i64())
+        i = i + 4
+    total
+
+pub fn resident_measured_transfer_cost_v1(receipt: ResidentReceiptV1) -> TransferCostV1:
+    """The crossing cost this lease actually incurred, for the scheduler.
+
+    Substituting this for a declared `TransferCostV1` is the whole point: the
+    numbers come from the emulated lane's own receipts rather than from the
+    caller's estimate. On a device lane the executor moves no bytes itself, so
+    both sides stay zero until an owner reports them.
+    """
+    TransferCostV1(host_to_device_bytes: receipt.measured_upload_bytes,
+        device_to_host_bytes: receipt.measured_readback_bytes)
 
 pub class ResidentExecutionIslandV1:
     var owner_identity: u64
@@ -97,6 +156,9 @@ pub class ResidentExecutionIslandV1:
     var admissions_granted: i64
     var records: [_ResidentRecordV1]
     var surfaces: [SoftwareBackend]
+    # One redemption ledger per island: a callback authority is single-use
+    # against this island exactly as it is against the queue that issued it.
+    var completion_ledger: Engine2dPackedCompletionLedgerV1
 
     pub static fn create(idle_bound_ticks: i64, width: i32, height: i32) -> ResidentExecutionIslandV1:
         val identity = _next_resident_island_owner_v1
@@ -105,7 +167,8 @@ pub class ResidentExecutionIslandV1:
         ResidentExecutionIslandV1(owner_identity: identity,
             idle_bound_ticks: idle_bound_ticks, surface_width: width,
             surface_height: height, next_handle: 1u64, admissions_granted: 0,
-            records: [], surfaces: [])
+            records: [], surfaces: [],
+            completion_ledger: engine2d_packed_completion_ledger_new())
 
     me _index_of(lease: ResidentLeaseV1) -> i64:
         if lease.owner_identity != self.owner_identity:
@@ -126,25 +189,37 @@ pub class ResidentExecutionIslandV1:
             last_used_tick: record.last_used_tick,
             idle_bound_ticks: self.idle_bound_ticks,
             readback_checksum: record.readback_checksum,
-            pixel_count: record.pixel_count, lane: RESIDENT_LANE_CPU_EMULATED_V1,
-            device_execution_proven: false, routing_evidence_only: false)
+            pixel_count: record.pixel_count,
+            measured_upload_bytes: record.measured_upload_bytes,
+            measured_readback_bytes: record.measured_readback_bytes,
+            lane: record.lane,
+            device_execution_proven: record.device_execution_proven,
+            routing_evidence_only: false)
 
     pub me admit(task: GpuBoundedTaskV1, provider_available: bool,
         tick: i64) -> Result<ResidentLeaseV1, ResidentExecutorErrorV1>:
-        """Admit a bounded task once and make its surface resident."""
+        """Admit a bounded task once and make its surface resident.
+
+        The provider decides the lane, not the body: with a provider the lease
+        is admitted on the device lane, which completes only through a backend
+        owner's callback authority. Without one the package-6 fallback
+        authority still has to say `UseCpu`.
+        """
         if gpu_bounded_task_validate_v1(task).is_err():
             return Err(ResidentExecutorErrorV1.TaskContractRejected)
-        if provider_available:
-            # A device provider was offered, but this island implements no
-            # device body. Refusing keeps the CPU lane from impersonating one.
-            return Err(ResidentExecutorErrorV1.DeviceLaneUnavailable)
-        val decision = gpu_task_missing_provider_decision_v1(task.fallback_policy,
-            task.cpu_fallback_semantically_allowed)
-        if decision != GpuTaskFallbackDecisionV1.UseCpu:
-            return Err(ResidentExecutorErrorV1.AuthorityMissing)
+        var lane = RESIDENT_LANE_DEVICE_AUTHORITY_V1
+        if not provider_available:
+            lane = RESIDENT_LANE_CPU_EMULATED_V1
+            val decision = gpu_task_missing_provider_decision_v1(task.fallback_policy,
+                task.cpu_fallback_semantically_allowed)
+            if decision != GpuTaskFallbackDecisionV1.UseCpu:
+                return Err(ResidentExecutorErrorV1.AuthorityMissing)
         if self.records.len() >= RESIDENT_ISLAND_MAX_LIVE_V1 or
            self.next_handle == 0u64 or self.next_handle == 0xffffffffffffffffu64:
             return Err(ResidentExecutorErrorV1.CapacityExceeded)
+        # A surface is initialized on BOTH lanes: `records` and `surfaces` are
+        # index-parallel, and a device-lane record with no entry would misalign
+        # every later sweep/retire. The device lane never draws on it.
         var surface = SoftwareBackend.create()
         if not surface.init(self.surface_width, self.surface_height):
             return Err(ResidentExecutorErrorV1.SurfaceUnavailable)
@@ -152,8 +227,10 @@ pub class ResidentExecutionIslandV1:
         self.next_handle = handle + 1u64
         self.records.push(_ResidentRecordV1(lease_handle: handle,
             invocation_id: task.invocation_id, phase: RESIDENT_PHASE_ADMITTED_V1,
+            lane: lane, device_execution_proven: false,
             executions: 0, resident_since_tick: tick, last_used_tick: tick,
-            readback_checksum: 0, pixel_count: 0))
+            readback_checksum: 0, pixel_count: 0,
+            measured_upload_bytes: 0u64, measured_readback_bytes: 0u64))
         self.surfaces.push(surface)
         self.admissions_granted = self.admissions_granted + 1
         Ok(ResidentLeaseV1(lease_handle: handle, owner_identity: self.owner_identity))
@@ -172,8 +249,13 @@ pub class ResidentExecutionIslandV1:
             return Err(ResidentExecutorErrorV1.UnknownLease)
         if self.records[index].phase == RESIDENT_PHASE_RETIRED_V1:
             return Err(ResidentExecutorErrorV1.NotResident)
+        if self.records[index].lane != RESIDENT_LANE_CPU_EMULATED_V1:
+            # This body IS the CPU rasterizer. Running it for a device-lane
+            # lease would be the impersonation the module exists to refuse.
+            return Err(ResidentExecutorErrorV1.LaneMismatch)
         var surface = self.surfaces[index]
         surface.draw_rect_filled(x, y, w, h, color)
+        val upload_pixels = _damage_plan_pixels(surface.damage_rects(_RESIDENT_DAMAGE_MAX_RECTS_V1))
         val readback = surface.read_pixels_with_source()
         self.surfaces[index] = surface
         var record = self.records[index]
@@ -182,6 +264,49 @@ pub class ResidentExecutionIslandV1:
         record.last_used_tick = tick
         record.readback_checksum = readback.checksum
         record.pixel_count = readback.pixel_count
+        # Measured, not declared: the upload side is the backend's own damage
+        # plan (what it says needs transporting) and the readback side is the
+        # snapshot it just handed back. Damage is sticky — `present()` is the
+        # backend's only clear owner and this island never presents — so each
+        # crossing charges the resident surface the plan names, not a delta.
+        record.measured_upload_bytes = record.measured_upload_bytes +
+            (upload_pixels * RESIDENT_BYTES_PER_PIXEL_V1).to_u64()
+        record.measured_readback_bytes = record.measured_readback_bytes +
+            (readback.pixel_count * RESIDENT_BYTES_PER_PIXEL_V1).to_u64()
+        self.records[index] = record
+        Ok(self._receipt(index))
+
+    pub me complete_device(lease: ResidentLeaseV1, tick: i64,
+        receipt: Engine2dGpuEpochReceipt, queue: Engine2dHostGpuRuntimeQueue,
+        authority: Engine2dPackedCompletionAuthorityV1?
+    ) -> Result<ResidentReceiptV1, ResidentExecutorErrorV1>:
+        """Complete one device-lane crossing against a backend owner's authority.
+
+        The island decides nothing about the device: it forwards the authority
+        to the queue owner's packed-completion join and copies back that join's
+        verdict. `device_execution_proven` is therefore the queue's reading of
+        the OWNER's evidence, never a fact this module produced.
+
+        The ledger is stored back on every return, admitted or refused, because
+        a validated authority is spent even when the host queue then disagrees.
+        """
+        val index = self._index_of(lease)
+        if index < 0:
+            return Err(ResidentExecutorErrorV1.UnknownLease)
+        if self.records[index].phase == RESIDENT_PHASE_RETIRED_V1:
+            return Err(ResidentExecutorErrorV1.NotResident)
+        if self.records[index].lane != RESIDENT_LANE_DEVICE_AUTHORITY_V1:
+            return Err(ResidentExecutorErrorV1.LaneMismatch)
+        val outcome = engine2d_draw_ir_runtime_queue_complete_packed_with_authority(
+            receipt, queue, self.completion_ledger, authority)
+        self.completion_ledger = outcome.ledger
+        if not outcome.admitted:
+            return Err(ResidentExecutorErrorV1.CompletionRefused)
+        var record = self.records[index]
+        record.phase = RESIDENT_PHASE_RESIDENT_V1
+        record.executions = record.executions + 1
+        record.last_used_tick = tick
+        record.device_execution_proven = outcome.receipt.device_execution_proven
         self.records[index] = record
         Ok(self._receipt(index))
 
@@ -239,3 +364,59 @@ pub class ResidentExecutionIslandV1:
             if record.phase != RESIDENT_PHASE_RETIRED_V1:
                 live = live + 1
         live
+
+pub class ResidentDeferralLoopV1:
+    """Multi-round scheduling with the deferral count fed forward for the caller.
+
+    `TransferTaskV1.deferrals` is a number the scheduler reads and never writes,
+    so a caller that re-supplies zero every round can starve a task forever
+    without the bound noticing. This loop closes that: each round plans the
+    tasks still pending, drops the ones the plan admitted, and increments the
+    count on the ones it deferred. A task the budget can never fit is therefore
+    deferred exactly `TRANSFER_SCHEDULER_STARVATION_BOUND_V1` times and forced
+    on the round after — the bound counts deferrals, not rounds.
+
+    It is bookkeeping only: it owns no island and executes nothing, so the
+    caller still decides what a round's admitted batches do.
+    """
+    var budget_bytes: u64
+    var pending: [TransferTaskV1]
+
+    pub static fn create(tasks: [TransferTaskV1], budget_bytes: u64) -> ResidentDeferralLoopV1:
+        var pending: [TransferTaskV1] = []
+        for task in tasks:
+            pending.push(task)
+        ResidentDeferralLoopV1(budget_bytes: budget_bytes, pending: pending)
+
+    pub me pending_count() -> i64:
+        self.pending.len()
+
+    pub me deferrals_of(invocation_id: u64) -> i64:
+        """How many rounds have deferred this task; -1 once it is no longer pending."""
+        for task in self.pending:
+            if task.invocation_id == invocation_id:
+                return task.deferrals
+        -1
+
+    pub me next_round() -> Result<TransferPlanV1, TransferScheduleErrorV1>:
+        """Plan the pending set, retire what it admitted, age what it deferred.
+
+        A drained loop reports `EmptyPlan`, which is the scheduler's own verdict
+        on an empty task set rather than a second opinion invented here.
+        """
+        val planned = transfer_aware_plan_v1(self.pending, self.budget_bytes)
+        if planned.is_err():
+            return planned
+        val plan = planned.unwrap()
+        var kept: [TransferTaskV1] = []
+        for task in self.pending:
+            var deferred = false
+            for id in plan.deferred:
+                if id == task.invocation_id:
+                    deferred = true
+            if deferred:
+                var aged = task
+                aged.deferrals = task.deferrals + 1
+                kept.push(aged)
+        self.pending = kept
+        Ok(plan)
