@@ -1,5 +1,7 @@
 # TODO: [gpu][P2] Make the resident-slice readback counter a real measurement or delete it
 
+Status: OPEN (unverified 2026-09-12)
+
 Date: 2026-09-06
 Lane: GPU scheduler hardening (plan doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md)
 Rule: this may not be closed by a source scan, a routing receipt, or an interpreter run.

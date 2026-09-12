@@ -1,5 +1,7 @@
 # Tier C -- Deferred Userland Ports (2026-04-24)
 
+Status: OPEN (unverified 2026-09-12)
+
 Packages from the Ubuntu install script that are deferred to follow-up /dev runs.
 Each requires multi-KLOC implementation or external subsystem support.
 

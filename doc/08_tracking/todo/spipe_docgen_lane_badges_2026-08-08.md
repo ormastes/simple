@@ -1,5 +1,7 @@
 # SPipe-Docgen Per-Cell Lane Badges
 
+Status: OPEN (unverified 2026-09-12)
+
 Rendering of lane badges in notebook spec manuals when lane-gated specs land.
 
 # TODO: [spipe_docgen][P2] Render per-cell `%%mode` lane badges in notebook spec manuals

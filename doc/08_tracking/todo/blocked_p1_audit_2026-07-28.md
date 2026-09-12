@@ -1,5 +1,7 @@
 # Blocked "P1" audit — 2026-07-28
 
+Status: OPEN (unverified 2026-09-12)
+
 Evidence-based re-verification of every tracked item carrying a blocked-class
 status. Nobody had audited these; this file records what was actually checked.
 

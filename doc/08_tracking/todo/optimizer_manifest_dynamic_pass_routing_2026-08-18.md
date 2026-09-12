@@ -1,5 +1,7 @@
 # TODO: Route dynamic manifest passes to a real execution path
 
+Status: OPEN (unverified 2026-09-12)
+
 Date: 2026-08-18
 Area: src/compiler/60.mir_opt/optimizer_manifest.spl, optimizer_plugin.spl
 

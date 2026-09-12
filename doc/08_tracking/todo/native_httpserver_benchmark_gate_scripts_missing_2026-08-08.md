@@ -1,5 +1,7 @@
 # Native HTTPServer benchmark gate scripts never built
 
+Status: OPEN (unverified 2026-09-12)
+
 `.claude/skills/spipe.md` (and `doc/07_guide/infra/testing/benchmarking.md`)
 describe a native HTTPServer/static-file benchmark gate built from
 `scripts/check/check-native-pure-simple-goal-status.shs` plus peer wrappers

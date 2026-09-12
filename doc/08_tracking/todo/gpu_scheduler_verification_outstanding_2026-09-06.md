@@ -1,5 +1,7 @@
 # GPU scheduler hardening — outstanding verification and bootstrap work
 
+Status: OPEN (unverified 2026-09-12)
+
 Every implementation item of the GPU scheduler hardening arc (plan
 `doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md`, steps 1-5) is
 implemented and has a device-free acceptance spec. What remains is **verification**
