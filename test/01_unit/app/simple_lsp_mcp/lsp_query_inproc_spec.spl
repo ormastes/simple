@@ -1,0 +1,123 @@
+# In-process result-returning LSP query adapters (L9 gate G1).
+#
+# Every `run_lsp_query` in `app.simple_lsp_mcp.tools` used to start a `simple`
+# child that re-loaded the outline and query modules from scratch, so N repeated
+# semantic queries cost N process startups.  These examples pin the repair: the
+# same query operations are callable in-process and RETURN their result instead
+# of printing it, the MCP tool path takes that route for a workspace file the
+# server can already read, and repeated queries add ZERO process starts.
+#
+# Parity is by construction: `engine_*` in `app.cli.query_engine` is now a thin
+# printer over the `engine_*_lines` core that the adapter calls, and the one-shot
+# script `src/lib/nogc_sync_mut/lsp/lsp_query.spl` calls the same printers.  The
+# last example additionally compares against a real one-shot child.
+#
+# @req LSP-PERSIST-V4-SESSION
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use app.io.env_ops.{host_os}
+use app.simple_lsp_mcp.lsp_query_inproc.*
+use app.simple_lsp_mcp.lsp_command_metrics.{lsp_command_starts_total, lsp_reset_command_starts}
+use app.simple_lsp_mcp.tools.{run_lsp_query, run_command_text}
+use app.simple_lsp_mcp.json_helpers.{find_simple_binary, clean_command_output}
+
+val FIXTURE: text = "test/fixtures/lsp_query_session/sample_module.spl"
+# `fn sample_helper(value: i64) -> i64:` is line 9; column 4 is inside the name.
+val HELPER_LINE: i64 = 9
+val HELPER_COL: i64 = 4
+
+describe "in-process LSP query adapters":
+    it "answers a definition query without printing and without a process":
+        step("Dispatch a definition query straight into the adapter")
+        lsp_reset_command_starts()
+        val answer = lsp_query_inproc_dispatch_v1(
+            "definition", FIXTURE, HELPER_LINE, HELPER_COL)
+        expect(answer.handled).to_be(true)
+        expect(answer.code).to_equal(0)
+        expect(answer.text).to_equal(
+            FIXTURE + ":9: [fn] fn sample_helper(value: i64) -> i64:")
+        step("No command was started to produce it")
+        expect(lsp_command_starts_total()).to_equal(0)
+
+    it "starts one worker process for zero of twenty repeated MCP queries":
+        step("Run twenty repeated tool-path queries over the same workspace file")
+        lsp_reset_command_starts()
+        var i: i64 = 0
+        var last = ""
+        while i < 20:
+            last = run_lsp_query("definition", FIXTURE, HELPER_LINE - 1, HELPER_COL - 1)
+            i = i + 1
+        expect(last).to_equal(
+            FIXTURE + ":9: [fn] fn sample_helper(value: i64) -> i64:")
+        step("The bounded command owner was never entered")
+        expect(lsp_command_starts_total()).to_equal(0)
+
+    it "falls back to the bounded command owner for a file it cannot read":
+        step("A path outside the workspace is not answered in process")
+        lsp_reset_command_starts()
+        val answer = lsp_query_inproc_dispatch_v1(
+            "definition", "test/fixtures/lsp_query_session/absent_module.spl", 1, 1)
+        expect(answer.handled).to_be(false)
+        expect(answer.reason).to_equal("file_not_readable")
+        step("And the tool path therefore does start exactly one command")
+        val out = run_lsp_query(
+            "definition", "test/fixtures/lsp_query_session/absent_module.spl", 0, 0)
+        expect(lsp_command_starts_total()).to_equal(1)
+
+    it "refuses a subcommand it does not implement in process":
+        step("An unsupported operation must decline rather than answer wrongly")
+        expect(lsp_query_inproc_supported_v1("definition")).to_be(true)
+        expect(lsp_query_inproc_supported_v1("hover")).to_be(true)
+        expect(lsp_query_inproc_supported_v1("references")).to_be(true)
+        expect(lsp_query_inproc_supported_v1("completions")).to_be(true)
+        expect(lsp_query_inproc_supported_v1("type-at")).to_be(true)
+        expect(lsp_query_inproc_supported_v1("signature-help")).to_be(true)
+        expect(lsp_query_inproc_supported_v1("folding-range")).to_be(false)
+        expect(lsp_query_inproc_supported_v1("nonsense")).to_be(false)
+        val declined = lsp_query_inproc_dispatch_v1("nonsense", FIXTURE, 1, 1)
+        expect(declined.handled).to_be(false)
+        expect(declined.reason).to_equal("subcommand_not_supported")
+
+    it "answers hover and type-at from the same outline without a process":
+        step("Hover and type-at are outline reads, not command dispatches")
+        lsp_reset_command_starts()
+        val hover = lsp_query_inproc_dispatch_v1(
+            "hover", FIXTURE, HELPER_LINE, HELPER_COL)
+        expect(hover.handled).to_be(true)
+        expect(hover.text).to_contain("Symbol: sample_helper")
+        expect(hover.text).to_contain("Kind: fn")
+        val type_at = lsp_query_inproc_dispatch_v1(
+            "type-at", FIXTURE, HELPER_LINE, HELPER_COL)
+        expect(type_at.handled).to_be(true)
+        expect(type_at.text).to_contain("Symbol: sample_helper")
+        expect(lsp_command_starts_total()).to_equal(0)
+
+    it "keeps the printing one-shot as a thin wrapper over the same core":
+        step("Parity is structural: the printer delegates to the returning core")
+        val engine = file_read("src/app/cli/query_engine.spl")
+        expect(engine).to_contain("fn engine_find_definition_lines(file: text, symbol: text) -> ([text], i64):")
+        expect(engine).to_contain("fn engine_find_definition(file: text, symbol: text) -> i64:\n    val (lines, code) = engine_find_definition_lines(file, symbol)\n    _print_lines(lines)\n    code")
+        expect(engine).to_contain("fn engine_hover_lines(")
+        expect(engine).to_contain("fn engine_type_at_lines(")
+
+    it "matches the one-shot child byte for byte on the fixture":
+        step("Run the real one-shot query as an oracle and compare")
+        if host_os() != "windows":
+            # The one-shot resolves `app.cli.*` only under the interpreter; the
+            # JIT lane fails the import (see the L9 report), so the oracle pins
+            # the execution mode explicitly.
+            # `find_simple_binary()` is environment-dependent: under the test
+            # runner it resolves the real binary, but in a worktree whose
+            # `bin/release/simple` wrapper cannot pass its identity probe it
+            # resolves that wrapper instead. This example is fail-closed — a
+            # failing oracle fails the comparison — so a red here on another
+            # host means "check the binary resolution", not "the adapter is wrong".
+            val cmd = "SIMPLE_EXECUTION_MODE=interpreter " + find_simple_binary() +
+                " src/lib/nogc_sync_mut/lsp/lsp_query.spl definition " + FIXTURE +
+                " " + str(HELPER_LINE) + " " + str(HELPER_COL)
+            val oracle = run_command_text("/bin/sh", ["-c", cmd])
+            val adapter = lsp_query_inproc_dispatch_v1(
+                "definition", FIXTURE, HELPER_LINE, HELPER_COL)
+            expect(adapter.handled).to_be(true)
+            expect(adapter.text).to_equal(oracle)
