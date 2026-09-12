@@ -1,0 +1,303 @@
+# Owned-process launcher for the persistent LSP query worker (L9 gate G3).
+#
+# The launcher starts the query child through the owned-process lease ABI
+# (`std.nogc_sync_mut.io.process_ops`), observes it through bounded polls,
+# cancels it on its own deadline, and ALWAYS reaps it before answering.
+#
+# Two facts about this lane are load-bearing and are encoded here rather than
+# assumed:
+#
+#   1. `rt_process_observation_v4_*` does not exist in this tree.  The observed
+#      ABI is `rt_process_owned_v3_*`, wrapped by `OwnedProcessLease` /
+#      `OwnedExecutablePin`.  This module names the observation record after the
+#      role it plays, not after a symbol that is absent.
+#   2. On a lane that does not register the owned-process externs, the call does
+#      not return a sentinel value — it raises `semantic: unknown extern
+#      function` and kills the caller.  So availability MUST be decided before
+#      the extern is touched: `lsp_query_owned_provider_probe_v1` is pure, reads
+#      no runtime symbol, and an unavailable provider short-circuits every path
+#      in this file to a typed `Unavailable` result.  Nothing here aborts.
+#
+# This module owns no session, no semantic answer, and no cache.  Request
+# identity and worker reuse belong to `lsp_query_session_runner_v1`.
+
+use app.io.minimal_runtime_ops.{env_get}
+use std.nogc_sync_mut.io.process_ops.{OwnedExecutablePin}
+
+const LSP_QUERY_OWNED_MAX_POLLS_V1: i64 = 100000
+const LSP_QUERY_OWNED_OPT_IN_ENV_V1: text = "SIMPLE_LSP_OWNED_PROCESS_V3"
+
+enum LspQueryOwnedOutcomeV1:
+    Pending
+    Completed
+    TimedOut
+    Failed
+    Unavailable
+
+struct LspQueryOwnedProviderV1:
+    available: bool
+    mode: text
+    reason: text
+
+struct LspQueryOwnedLaunchV1:
+    executable: text
+    args: [text]
+    workspace_root: text
+    timeout_ms: i64
+    term_grace_ms: i64
+    max_output_bytes: i64
+    poll_wait_ms: i64
+
+# One bounded observation of the owned child.  The fields mirror the words the
+# owned-process poll receipt projects, so a live poll and a spec's scripted port
+# produce the same record and take the same decisions.
+struct LspQueryOwnedObservationV1:
+    version: i64
+    live: bool
+    terminal: bool
+    timed_out: bool
+    reaped: bool
+    cancel_requested: bool
+    exit_code: i64
+    stdout_bytes: i64
+    stderr_bytes: i64
+    runtime_error: i64
+
+struct LspQueryOwnedRunV1:
+    outcome: LspQueryOwnedOutcomeV1
+    reason: text
+    exit_code: i64
+    stdout_bytes: i64
+    stderr_bytes: i64
+    started: bool
+    observations_consumed: i64
+    poll_count: i64
+    cancel_count: i64
+    collect_count: i64
+    release_count: i64
+    cancel_before_collect: bool
+    elapsed_ms: i64
+
+fn _run(
+    outcome: LspQueryOwnedOutcomeV1,
+    reason: text,
+    exit_code: i64,
+    stdout_bytes: i64,
+    stderr_bytes: i64,
+    started: bool,
+    consumed: i64,
+    polls: i64,
+    cancels: i64,
+    collects: i64,
+    releases: i64,
+    cancel_first: bool,
+    elapsed_ms: i64,
+) -> LspQueryOwnedRunV1:
+    LspQueryOwnedRunV1(
+        outcome: outcome, reason: reason, exit_code: exit_code,
+        stdout_bytes: stdout_bytes, stderr_bytes: stderr_bytes, started: started,
+        observations_consumed: consumed, poll_count: polls, cancel_count: cancels,
+        collect_count: collects, release_count: releases,
+        cancel_before_collect: cancel_first, elapsed_ms: elapsed_ms)
+
+# A result that never reached a child: no poll, no cancel, no reap.
+fn lsp_query_owned_unavailable_v1(reason: text) -> LspQueryOwnedRunV1:
+    _run(LspQueryOwnedOutcomeV1.Unavailable, reason, -1, 0, 0, false, 0, 0, 0, 0, 0, false, 0)
+
+fn _refused(reason: text) -> LspQueryOwnedRunV1:
+    _run(LspQueryOwnedOutcomeV1.Failed, reason, -1, 0, 0, false, 0, 0, 0, 0, 0, false, 0)
+
+# The execution mode this process runs under.  An unset value is reported as
+# "unknown" and is NOT treated as a native lane.
+fn lsp_query_owned_execution_mode_v1() -> text:
+    val mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    if mode == "":
+        return "unknown"
+    mode
+
+# Whether the owned-process externs are registered for this binary.  There is no
+# way to ask the runtime without calling one, and an unregistered call aborts
+# the caller, so this is an explicit opt-in rather than a probe.  A live
+# provider sets `SIMPLE_LSP_OWNED_PROCESS_V3=1` only on a lane that really
+# registers `rt_process_owned_v3_*`.
+fn lsp_query_owned_primitive_declared_v1() -> bool:
+    (env_get(LSP_QUERY_OWNED_OPT_IN_ENV_V1) ?? "") == "1"
+
+fn lsp_query_owned_provider_probe_v1(
+    execution_mode: text, primitive_declared: bool,
+) -> LspQueryOwnedProviderV1:
+    if execution_mode == "interpreter":
+        return LspQueryOwnedProviderV1(available: false, mode: execution_mode,
+            reason: "owned_process_provider_rejects_interpreter")
+    if execution_mode != "native" and execution_mode != "jit":
+        return LspQueryOwnedProviderV1(available: false, mode: execution_mode,
+            reason: "owned_process_execution_mode_unknown")
+    if not primitive_declared:
+        return LspQueryOwnedProviderV1(available: false, mode: execution_mode,
+            reason: "owned_process_primitive_not_declared")
+    LspQueryOwnedProviderV1(available: true, mode: execution_mode, reason: "")
+
+# "" when the launch is admissible, otherwise the refusal reason.
+fn lsp_query_owned_launch_reason_v1(launch: LspQueryOwnedLaunchV1) -> text:
+    if launch.workspace_root == "":
+        return "invalid_workspace_root"
+    if launch.executable == "":
+        return "invalid_executable"
+    if not launch.executable.starts_with(launch.workspace_root):
+        return "executable_outside_workspace_root"
+    if launch.timeout_ms <= 0:
+        return "invalid_timeout"
+    if launch.max_output_bytes <= 0:
+        return "invalid_output_bound"
+    if launch.poll_wait_ms <= 0:
+        return "invalid_poll_interval"
+    if launch.term_grace_ms < 0:
+        return "invalid_term_grace"
+    ""
+
+fn lsp_query_owned_admit_v1(
+    provider: LspQueryOwnedProviderV1, launch: LspQueryOwnedLaunchV1,
+) -> LspQueryOwnedRunV1:
+    if not provider.available:
+        return lsp_query_owned_unavailable_v1(provider.reason)
+    val reason = lsp_query_owned_launch_reason_v1(launch)
+    if reason != "":
+        return _refused(reason)
+    _run(LspQueryOwnedOutcomeV1.Pending, "", -1, 0, 0, true, 0, 0, 0, 0, 0, false, 0)
+
+# Drive the launcher over a caller-supplied observation sequence.  This is the
+# port every unit spec uses: the sequence stands in for the poll receipts a live
+# child would produce, so the decisions below are exercised without a process.
+#
+# Fails closed on vacuity: an empty sequence is a FAILURE, never a success, and
+# the child is still cancelled and reaped.
+fn lsp_query_owned_run_observations_v1(
+    provider: LspQueryOwnedProviderV1,
+    launch: LspQueryOwnedLaunchV1,
+    observations: [LspQueryOwnedObservationV1],
+) -> LspQueryOwnedRunV1:
+    val admission = lsp_query_owned_admit_v1(provider, launch)
+    if admission.outcome != LspQueryOwnedOutcomeV1.Pending:
+        return admission
+
+    val total = observations.len()
+    if total == 0:
+        return _run(LspQueryOwnedOutcomeV1.Failed, "no_observations", -1, 0, 0,
+            true, 0, 0, 1, 1, 1, true, 0)
+
+    var index: i64 = 0
+    var elapsed: i64 = 0
+    while index < total:
+        val obs = observations[index]
+        index = index + 1
+        elapsed = elapsed + launch.poll_wait_ms
+        if obs.runtime_error != 0:
+            return _run(LspQueryOwnedOutcomeV1.Failed,
+                "owned_process_runtime_error_" + obs.runtime_error.to_text(),
+                obs.exit_code, obs.stdout_bytes, obs.stderr_bytes, true,
+                index, index, 0, 1, 1, false, elapsed)
+        if obs.timed_out:
+            return _run(LspQueryOwnedOutcomeV1.TimedOut, "child_timed_out",
+                obs.exit_code, obs.stdout_bytes, obs.stderr_bytes, true,
+                index, index, 1, 1, 1, true, elapsed)
+        if obs.terminal:
+            if obs.exit_code == 0:
+                return _run(LspQueryOwnedOutcomeV1.Completed, "", obs.exit_code,
+                    obs.stdout_bytes, obs.stderr_bytes, true,
+                    index, index, 0, 1, 1, false, elapsed)
+            return _run(LspQueryOwnedOutcomeV1.Failed, "child_exit_nonzero",
+                obs.exit_code, obs.stdout_bytes, obs.stderr_bytes, true,
+                index, index, 0, 1, 1, false, elapsed)
+        if elapsed >= launch.timeout_ms:
+            return _run(LspQueryOwnedOutcomeV1.TimedOut, "launcher_deadline_exceeded",
+                obs.exit_code, obs.stdout_bytes, obs.stderr_bytes, true,
+                index, index, 1, 1, 1, true, elapsed)
+
+    _run(LspQueryOwnedOutcomeV1.Failed, "observations_exhausted", -1, 0, 0, true,
+        total, total, 1, 1, 1, true, elapsed)
+
+# Live adapter.  Unreachable on a lane whose provider is unavailable — the
+# guard above returns before any extern is named, which is what keeps this file
+# from aborting on the seed lane.
+fn lsp_query_owned_run_live_v1(
+    provider: LspQueryOwnedProviderV1, launch: LspQueryOwnedLaunchV1,
+) -> LspQueryOwnedRunV1:
+    val admission = lsp_query_owned_admit_v1(provider, launch)
+    if admission.outcome != LspQueryOwnedOutcomeV1.Pending:
+        return admission
+
+    var pin = match OwnedExecutablePin.pin(launch.executable):
+        Ok(p) => p
+        Err(e) => return lsp_query_owned_unavailable_v1("owned_process_pin_rejected")
+    val receipt = match pin.start(launch.args, [], launch.timeout_ms,
+        launch.term_grace_ms, launch.max_output_bytes):
+        Ok(r) => r
+        Err(e) => return lsp_query_owned_unavailable_v1("owned_process_start_rejected")
+    if not receipt.accepted:
+        return lsp_query_owned_unavailable_v1("owned_process_start_not_accepted")
+
+    var lease = receipt.lease()
+    var elapsed: i64 = 0
+    var polls: i64 = 0
+    var cancels: i64 = 0
+    var outcome = LspQueryOwnedOutcomeV1.Failed
+    var reason = "observations_exhausted"
+    var exit_code: i64 = -1
+    var stdout_bytes: i64 = 0
+    var stderr_bytes: i64 = 0
+    var done = false
+    while not done and polls < LSP_QUERY_OWNED_MAX_POLLS_V1:
+        val polled = match lease.poll(launch.poll_wait_ms, launch.max_output_bytes,
+            launch.max_output_bytes):
+            Ok(p) => p
+            Err(e) =>
+                reason = "owned_process_poll_rejected"
+                done = true
+                continue
+        polls = polls + 1
+        elapsed = elapsed + launch.poll_wait_ms
+        stdout_bytes = polled.stdout_seen
+        stderr_bytes = polled.stderr_seen
+        if polled.runtime_error != 0:
+            outcome = LspQueryOwnedOutcomeV1.Failed
+            reason = "owned_process_runtime_error_" + polled.runtime_error.to_text()
+            done = true
+        elif polled.timed_out:
+            outcome = LspQueryOwnedOutcomeV1.TimedOut
+            reason = "child_timed_out"
+            done = true
+        elif polled.terminal:
+            outcome = LspQueryOwnedOutcomeV1.Completed
+            reason = ""
+            done = true
+        elif elapsed >= launch.timeout_ms:
+            outcome = LspQueryOwnedOutcomeV1.TimedOut
+            reason = "launcher_deadline_exceeded"
+            done = true
+
+    if outcome == LspQueryOwnedOutcomeV1.TimedOut or reason == "observations_exhausted":
+        cancels = 1
+        val _cancelled = lease.cancel()
+    val collected = match lease.collect():
+        Ok(r) => r
+        Err(e) => return _run(LspQueryOwnedOutcomeV1.Failed, "owned_process_collect_rejected",
+            exit_code, stdout_bytes, stderr_bytes, true, polls, polls, cancels, 0, 0,
+            cancels > 0, elapsed)
+    exit_code = collected.exit_code
+    stdout_bytes = collected.stdout_seen
+    stderr_bytes = collected.stderr_seen
+    if outcome == LspQueryOwnedOutcomeV1.Completed and exit_code != 0:
+        outcome = LspQueryOwnedOutcomeV1.Failed
+        reason = "child_exit_nonzero"
+    val _released = lease.release()
+    val _closed = pin.close()
+    _run(outcome, reason, exit_code, stdout_bytes, stderr_bytes, true, polls, polls,
+        cancels, 1, 1, cancels > 0, elapsed)
+
+export LSP_QUERY_OWNED_MAX_POLLS_V1, LSP_QUERY_OWNED_OPT_IN_ENV_V1
+export LspQueryOwnedOutcomeV1, LspQueryOwnedProviderV1, LspQueryOwnedLaunchV1
+export LspQueryOwnedObservationV1, LspQueryOwnedRunV1
+export lsp_query_owned_execution_mode_v1, lsp_query_owned_primitive_declared_v1
+export lsp_query_owned_provider_probe_v1, lsp_query_owned_launch_reason_v1
+export lsp_query_owned_admit_v1, lsp_query_owned_unavailable_v1
+export lsp_query_owned_run_observations_v1, lsp_query_owned_run_live_v1

@@ -1,0 +1,204 @@
+# Owned-process launcher coverage for the persistent LSP query worker (L9 G3).
+#
+# Every example drives the launcher through a FAKE observation port: a list of
+# pre-recorded observation records.  No example starts a real process.
+# @req LSP-PERSIST-V4-OWNED-PROCESS
+
+use std.spec.*
+use app.simple_lsp_mcp.lsp_query_owned_process_v1.*
+
+fn _launch() -> LspQueryOwnedLaunchV1:
+    LspQueryOwnedLaunchV1(
+        executable: "/workspace/bin/simple",
+        args: ["--version"],
+        workspace_root: "/workspace",
+        timeout_ms: 5000,
+        term_grace_ms: 500,
+        max_output_bytes: 65536,
+        poll_wait_ms: 100,
+    )
+
+fn _live() -> LspQueryOwnedObservationV1:
+    LspQueryOwnedObservationV1(
+        version: 1, live: true, terminal: false, timed_out: false, reaped: false,
+        cancel_requested: false, exit_code: -1, stdout_bytes: 0, stderr_bytes: 0,
+        runtime_error: 0)
+
+fn _terminal(exit_code: i64, stdout_bytes: i64) -> LspQueryOwnedObservationV1:
+    LspQueryOwnedObservationV1(
+        version: 1, live: false, terminal: true, timed_out: false, reaped: true,
+        cancel_requested: false, exit_code: exit_code, stdout_bytes: stdout_bytes,
+        stderr_bytes: 0, runtime_error: 0)
+
+fn _timed_out() -> LspQueryOwnedObservationV1:
+    LspQueryOwnedObservationV1(
+        version: 1, live: true, terminal: false, timed_out: true, reaped: false,
+        cancel_requested: false, exit_code: -1, stdout_bytes: 0, stderr_bytes: 0,
+        runtime_error: 0)
+
+fn _runtime_error(code: i64) -> LspQueryOwnedObservationV1:
+    LspQueryOwnedObservationV1(
+        version: 1, live: false, terminal: true, timed_out: false, reaped: true,
+        cancel_requested: false, exit_code: -1, stdout_bytes: 0, stderr_bytes: 0,
+        runtime_error: code)
+
+fn _available() -> LspQueryOwnedProviderV1:
+    lsp_query_owned_provider_probe_v1("native", true)
+
+describe "LspQueryOwnedProcessV1 provider admission":
+    it "reports the seed interpreter lane as typed-unavailable, never available":
+        step("Probe the provider on the interpreter lane where the extern is a sentinel")
+        val probe = lsp_query_owned_provider_probe_v1("interpreter", true)
+        expect(probe.available).to_be(false)
+        expect(probe.reason).to_equal("owned_process_provider_rejects_interpreter")
+        expect(probe.mode).to_equal("interpreter")
+
+    it "stays unavailable on a native lane that never declared the primitive":
+        step("Probe a native lane whose runtime does not register the owned-process ABI")
+        val probe = lsp_query_owned_provider_probe_v1("native", false)
+        expect(probe.available).to_be(false)
+        expect(probe.reason).to_equal("owned_process_primitive_not_declared")
+
+    it "admits only a native lane that declared the primitive":
+        step("Probe a native lane with the declared owned-process ABI")
+        val probe = lsp_query_owned_provider_probe_v1("native", true)
+        expect(probe.available).to_be(true)
+        expect(probe.reason).to_equal("")
+
+describe "LspQueryOwnedProcessV1 launcher":
+    it "returns a typed Unavailable without consuming or reaping anything":
+        step("Run with an unavailable provider and a non-empty observation script")
+        val provider = lsp_query_owned_provider_probe_v1("interpreter", true)
+        val run = lsp_query_owned_run_observations_v1(
+            provider, _launch(), [_live(), _terminal(0, 12)])
+        step("Observe the typed unavailable result with no process work performed")
+        expect(run.outcome == LspQueryOwnedOutcomeV1.Unavailable).to_be(true)
+        expect(run.reason).to_equal("owned_process_provider_rejects_interpreter")
+        expect(run.observations_consumed).to_equal(0)
+        expect(run.poll_count).to_equal(0)
+        expect(run.release_count).to_equal(0)
+        expect(run.started).to_be(false)
+
+    it "polls to a clean terminal observation and always reaps once":
+        step("Run three live observations followed by a clean exit")
+        val run = lsp_query_owned_run_observations_v1(
+            _available(), _launch(), [_live(), _live(), _live(), _terminal(0, 42)])
+        step("Observe a completed result that consumed every observation and reaped once")
+        expect(run.outcome == LspQueryOwnedOutcomeV1.Completed).to_be(true)
+        expect(run.exit_code).to_equal(0)
+        expect(run.stdout_bytes).to_equal(42)
+        expect(run.observations_consumed).to_equal(4)
+        expect(run.poll_count).to_equal(4)
+        expect(run.collect_count).to_equal(1)
+        expect(run.release_count).to_equal(1)
+        expect(run.cancel_count).to_equal(0)
+        expect(run.started).to_be(true)
+
+    it "reports a nonzero child exit as a typed failure and still reaps":
+        step("Run a child that exits nonzero")
+        val run = lsp_query_owned_run_observations_v1(
+            _available(), _launch(), [_live(), _terminal(3, 0)])
+        expect(run.outcome == LspQueryOwnedOutcomeV1.Failed).to_be(true)
+        expect(run.reason).to_equal("child_exit_nonzero")
+        expect(run.exit_code).to_equal(3)
+        expect(run.release_count).to_equal(1)
+
+    it "cancels before collecting when the child times out":
+        step("Run a child that reports the runtime timeout flag")
+        val run = lsp_query_owned_run_observations_v1(
+            _available(), _launch(), [_live(), _timed_out()])
+        step("Observe cancel ordered before collect, with the reap still performed")
+        expect(run.outcome == LspQueryOwnedOutcomeV1.TimedOut).to_be(true)
+        expect(run.reason).to_equal("child_timed_out")
+        expect(run.cancel_count).to_equal(1)
+        expect(run.cancel_before_collect).to_be(true)
+        expect(run.collect_count).to_equal(1)
+        expect(run.release_count).to_equal(1)
+
+    it "cancels on its own deadline when the child never reports a timeout":
+        step("Run a launch whose deadline expires after two polls of live observations")
+        val launch = LspQueryOwnedLaunchV1(
+            executable: "/workspace/bin/simple", args: ["--version"],
+            workspace_root: "/workspace", timeout_ms: 200, term_grace_ms: 500,
+            max_output_bytes: 65536, poll_wait_ms: 100)
+        val run = lsp_query_owned_run_observations_v1(
+            _available(), launch, [_live(), _live(), _live(), _terminal(0, 9)])
+        step("Observe the launcher-side deadline cancel, not the child's clean exit")
+        expect(run.outcome == LspQueryOwnedOutcomeV1.TimedOut).to_be(true)
+        expect(run.reason).to_equal("launcher_deadline_exceeded")
+        expect(run.observations_consumed).to_equal(2)
+        expect(run.cancel_count).to_equal(1)
+        expect(run.cancel_before_collect).to_be(true)
+        expect(run.release_count).to_equal(1)
+
+    it "surfaces a runtime error code as a typed failure and still reaps":
+        step("Run an observation carrying a nonzero runtime error")
+        val run = lsp_query_owned_run_observations_v1(
+            _available(), _launch(), [_runtime_error(9)])
+        expect(run.outcome == LspQueryOwnedOutcomeV1.Failed).to_be(true)
+        expect(run.reason).to_equal("owned_process_runtime_error_9")
+        expect(run.release_count).to_equal(1)
+
+    it "fails closed on an empty observation script rather than reporting success":
+        step("Run an available provider with zero observations")
+        val run = lsp_query_owned_run_observations_v1(_available(), _launch(), [])
+        expect(run.outcome == LspQueryOwnedOutcomeV1.Failed).to_be(true)
+        expect(run.reason).to_equal("no_observations")
+        expect(run.observations_consumed).to_equal(0)
+        expect(run.release_count).to_equal(1)
+
+    it "fails closed when the script runs out before any terminal observation":
+        step("Run a script of live observations that never terminates")
+        val run = lsp_query_owned_run_observations_v1(
+            _available(), _launch(), [_live(), _live()])
+        expect(run.outcome == LspQueryOwnedOutcomeV1.Failed).to_be(true)
+        expect(run.reason).to_equal("observations_exhausted")
+        expect(run.observations_consumed).to_equal(2)
+        expect(run.cancel_count).to_equal(1)
+        expect(run.release_count).to_equal(1)
+
+    it "refuses a launch whose executable escapes the pinned workspace root":
+        step("Run a launch naming an executable outside the session workspace root")
+        val launch = LspQueryOwnedLaunchV1(
+            executable: "/elsewhere/bin/simple", args: ["--version"],
+            workspace_root: "/workspace", timeout_ms: 5000, term_grace_ms: 500,
+            max_output_bytes: 65536, poll_wait_ms: 100)
+        val run = lsp_query_owned_run_observations_v1(
+            _available(), launch, [_terminal(0, 1)])
+        expect(run.outcome == LspQueryOwnedOutcomeV1.Failed).to_be(true)
+        expect(run.reason).to_equal("executable_outside_workspace_root")
+        expect(run.started).to_be(false)
+        expect(run.release_count).to_equal(0)
+
+    it "refuses a launch with a non-positive timeout or output bound":
+        step("Run launches with a zero timeout and a zero output bound")
+        val no_timeout = LspQueryOwnedLaunchV1(
+            executable: "/workspace/bin/simple", args: ["--version"],
+            workspace_root: "/workspace", timeout_ms: 0, term_grace_ms: 500,
+            max_output_bytes: 65536, poll_wait_ms: 100)
+        val no_bound = LspQueryOwnedLaunchV1(
+            executable: "/workspace/bin/simple", args: ["--version"],
+            workspace_root: "/workspace", timeout_ms: 5000, term_grace_ms: 500,
+            max_output_bytes: 0, poll_wait_ms: 100)
+        expect(lsp_query_owned_run_observations_v1(
+            _available(), no_timeout, [_terminal(0, 1)]).reason).to_equal("invalid_timeout")
+        expect(lsp_query_owned_run_observations_v1(
+            _available(), no_bound, [_terminal(0, 1)]).reason).to_equal("invalid_output_bound")
+
+describe "LspQueryOwnedProcessV1 live provider":
+    it "degrades to a typed Unavailable on this lane instead of aborting":
+        step("Ask the launcher for the lane's own provider and run it live")
+        val provider = lsp_query_owned_provider_probe_v1(
+            lsp_query_owned_execution_mode_v1(), lsp_query_owned_primitive_declared_v1())
+        val run = lsp_query_owned_run_live_v1(provider, _launch())
+        step("Accept only a typed unavailable result or a real completed one")
+        if provider.available:
+            expect(run.outcome == LspQueryOwnedOutcomeV1.Completed).to_be(true)
+            expect(run.exit_code).to_equal(0)
+            expect(run.stdout_bytes > 0).to_be(true)
+            expect(run.release_count).to_equal(1)
+        else:
+            expect(run.outcome == LspQueryOwnedOutcomeV1.Unavailable).to_be(true)
+            expect(run.reason != "").to_be(true)
+            expect(run.started).to_be(false)
+            expect(run.release_count).to_equal(0)
