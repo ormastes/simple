@@ -1,0 +1,69 @@
+# Guest-side, allocation-free encoder for the BRC1 capture-control line.
+#
+# The host formats the same line with
+# `common.renderdoc.backend_render_receipt_wire.backend_render_capture_control_line`,
+# which builds a `text` by concatenation. The guest runs in kernel context and
+# must not allocate, so it emits the identical bytes one at a time and the
+# caller pushes them straight at the transport.
+#
+# Wire layout — fixed width, 41 bytes, frame-correlated:
+#
+#   index  0..3   "BRC1"
+#          4      ' '
+#          5      kind, one of 'W' (wait), 'A' (ack), 'K' (keep)
+#          6      ' '
+#          7..22  boot_id  as 16 lower-case hex digits, most significant first
+#          23     ' '
+#          24..39 frame_id as 16 lower-case hex digits, most significant first
+#          40     '\n'
+#
+# The host helper produces everything except the trailing newline, which is why
+# the spec compares `guest_line == host_line + "\n"`.
+#
+# Bug: doc/08_tracking/bug/engine2d_render_evidence_spec_missing_module_2026-08-08.md
+# Spec: test/01_unit/os/compositor/engine2d_render_evidence_spec.spl
+
+val RENDER_CAPTURE_CONTROL_WIRE_BYTES: i64 = 41
+
+fn render_capture_control_wire_byte_count() -> i64:
+    """Fixed width of one capture-control line, newline included."""
+    RENDER_CAPTURE_CONTROL_WIRE_BYTES
+
+fn _render_capture_hex_digit(value: u64, digit_index: i64) -> u8:
+    """digit_index 0 is the most significant of the 16 hex digits."""
+    val shift = (15 - digit_index) * 4
+    val nibble = ((value >> shift) & 15u64).to_i64()
+    if nibble < 10:
+        return (48 + nibble).to_u8()
+    (87 + nibble).to_u8()
+
+fn render_capture_control_wire_byte_at(
+    kind: u8,
+    boot_id: u64,
+    frame_id: u64,
+    index: i64
+) -> u8:
+    """One byte of the capture-control line. Out-of-range reads yield 0."""
+    if index < 0 or index >= RENDER_CAPTURE_CONTROL_WIRE_BYTES:
+        return 0u8
+    if index == 0:
+        return 66u8
+    if index == 1:
+        return 82u8
+    if index == 2:
+        return 67u8
+    if index == 3:
+        return 49u8
+    if index == 4:
+        return 32u8
+    if index == 5:
+        return kind
+    if index == 6:
+        return 32u8
+    if index < 23:
+        return _render_capture_hex_digit(boot_id, index - 7)
+    if index == 23:
+        return 32u8
+    if index < 40:
+        return _render_capture_hex_digit(frame_id, index - 24)
+    10u8

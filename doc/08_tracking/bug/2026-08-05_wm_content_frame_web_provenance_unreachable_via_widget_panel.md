@@ -1,7 +1,7 @@
 # `wm_content_frame_web_provenance_valid` is unreachable for `widget-panel`-wrapped WM content
 
 - **Date:** 2026-08-05
-- Status: OPEN (P2)
+- Status: RESOLVED (2026-09-12) — fix in `src/lib/common/ui/glass_css_components.spl`, guard `test/01_unit/lib/common/ui/glass_css_backdrop_admission_spec.spl` (see Triage 2026-09-12)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** Medium — the canonical themed WM content-frame path silently
   rejects every frame that goes through it, regardless of caller
@@ -106,3 +106,47 @@ the already-admitted surface classes instead of `.widget-panel`. Any of these
 touches shared theme/renderer code used well beyond this showcase and needs
 its own verification pass; each interpreted HTML render in this environment
 costs 30-50 CPU-minutes, so iterating on it is expensive.
+
+## Triage 2026-09-12
+
+Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
+
+Claim 2 of the original report is **stale**: `simple_web_backdrop_admission`
+(`simple_web_html_layout_renderer_foundation.spl:100-133`) no longer requires
+the two-term form — a blur-only declaration is admitted and defaults
+`realized_saturation_milli` to 1000. Claim 1's *cause* was therefore narrower
+than filed: what still rejected every wrapper frame was that `.widget-panel`
+declared `blur(var(--glass-blur-surface))`, and the admission parser is
+byte-indexed and needs a literal decimal straight after `blur(` — `var(` is
+not one.
+
+A guard spec for this bug already existed and was RED on `main`:
+
+```
+$ bin/simple test test/01_unit/lib/common/ui/glass_css_backdrop_admission_spec.spl
+✗ admits the .widget-panel backdrop declaration used by the WM content wrapper
+✗ realizes a nonzero blur and saturation for .widget-panel
+✗ admits every wrapper-applied surface class backdrop declaration
+SPEC FILE VERDICT: ... outcome=ERROR declared>=5 executed=5 passed=2 failed=3 skipped=0 dropped=0
+```
+
+Fix (the report's option (a)/(c) hybrid, minimal scope): `.widget-panel` now
+declares the literal `blur(20px)` on both `backdrop-filter` and
+`-webkit-backdrop-filter`. 20px is `GlassBlurTokens.default_blur().surface_blur`,
+i.e. exactly what `--glass-blur-surface` resolved to by default, so rendered
+output is unchanged. No other class was touched.
+
+```
+$ bin/simple test test/01_unit/lib/common/ui/glass_css_backdrop_admission_spec.spl
+SPEC FILE VERDICT: ... outcome=OK declared>=5 executed=5 passed=5 failed=0 skipped=0 dropped=0
+```
+
+Neighbours re-run clean: `glass_css_output_spec.spl` 29/29,
+`glass_debug_interface_spec.spl` 24/24.
+
+Not closed by this change: `.widget-card` and the other 16 one-term
+`blur(var(...))` declarations in this file keep the var. They are not applied
+by the WM content wrapper, so they do not gate provenance; a renderer-side
+`var()` resolution before admission remains the general fix and is untouched
+here (`simple_web_html_layout_renderer_paint_layout.spl` is under another
+lane's fence).

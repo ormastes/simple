@@ -1,6 +1,7 @@
 # Interpreter: an equivalent loop body costs 47x more when the call sits inside a binary operand
 
 - Status: RESOLVED (2026-09-12, PERF-3) — closed by generalising the matcher to an inline integer EXPRESSION rather than adding another literal shape. Filed OPEN by PERF-1's probe sweep.
+- Status: OPEN (2026-09-12) — found by PERF-1 probe sweep; mechanism located, not fixed (widening the fast-path battery is an optimization change, not a contained fix)
 - Found: 2026-09-12, interpreter component perf sweep (worktree simple-perf-1)
 - Component: seed tree-walk interpreter —
   `src/compiler_rust/compiler/src/interpreter_control.rs` `exec_while`
