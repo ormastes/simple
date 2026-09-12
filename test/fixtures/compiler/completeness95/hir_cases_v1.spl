@@ -1,0 +1,85 @@
+# Luna B HIR primitive fixtures.  These are typed inputs for the production
+# codec/graph owners; they never mint availability, authority, or golden bytes.
+
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.common.config.Logger
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_codec.{HirDecodeError}
+use compiler.hir.portable_body_profile_types.{PortableBodyDependencyEdgeV1}
+use std.spec.{expect}
+
+fn fixture_hir_source_v1() -> text:
+    "fn alpha(value: i64) -> i64:\n    value + 1\n\n" +
+    "fn beta(value: i64) -> i64:\n    alpha(value)\n"
+
+pub fn fixture_hir_module_v1(reverse_insertion: bool) -> HirModule:
+    val parsed = parse_full_frontend(fixture_hir_source_v1(),
+        "completeness95.spl", "completeness95", Logger(level: 0))
+    var lowering = HirLowering.with_filename("completeness95.spl")
+    val module = lowering.lower_module(parsed)
+    if not reverse_insertion:
+        return module
+    val keys = module.functions.keys()
+    var reordered: Dict<SymbolId, HirFunction> = {}
+    var index = keys.len() - 1
+    while index >= 0:
+        val key = keys[index]
+        reordered[key] = module.functions[key]
+        index = index - 1
+    module.functions = reordered
+    module
+
+fn edge(caller: i64, caller_name: text, callee: i64, callee_name: text) ->
+        PortableBodyDependencyEdgeV1:
+    PortableBodyDependencyEdgeV1(caller_symbol_id: caller,
+        caller_name: caller_name, callee_symbol_id: callee,
+        callee_name: callee_name)
+
+pub fn fixture_graph_v1(case_name: text) -> ([i64], [PortableBodyDependencyEdgeV1]):
+    match case_name:
+        case "empty": ([], [])
+        case "chain": ([1, 2, 3], [edge(1, "a", 2, "b"),
+            edge(2, "b", 3, "c")])
+        case "reverse_chain": ([1, 2, 3], [edge(2, "b", 3, "c"),
+            edge(1, "a", 2, "b")])
+        case "fanout": ([1, 2, 3], [edge(1, "a", 2, "b"),
+            edge(1, "a", 3, "c")])
+        case "mutated": ([1, 2, 3], [edge(1, "a", 2, "changed")])
+        case "prefix": ([1, 2, 3], [edge(1, "shared-prefix-aaaaaaaa",
+            2, "shared-prefix-aaabbbbbbbb"), edge(1, "shared-prefix-aaaaaaaa",
+            3, "shared-prefix-aaacccccccc")])
+        case "name_mismatch": ([1, 2], [edge(1, "a", 2, "b"),
+            edge(1, "changed", 2, "b")])
+        case "duplicate": ([1, 2], [edge(1, "a", 2, "b"),
+            edge(1, "a", 2, "b")])
+        case "foreign": ([1], [edge(1, "a", 9, "missing")])
+        case "cycle": ([1, 2], [edge(1, "a", 2, "b"),
+            edge(2, "b", 1, "a")])
+        case "negative": ([-1], [])
+        case "duplicate_nodes": ([1, 1], [])
+        case _: fail("unknown HIR graph fixture: " + case_name)
+
+pub fn require_hir_ok_v1(result: Result<HirModule, HirDecodeError>) -> HirModule:
+    match result:
+        case Ok(module): module
+        case Err(error): fail("HIR decode expected Ok: " + error.to_string())
+
+pub fn require_hir_error_v1(result: Result<HirModule, HirDecodeError>,
+                            kind: text, detail: text):
+    match result:
+        case Ok(_): fail("expected HIR decode error: " + kind)
+        case Err(error):
+            match error:
+                case HirDecodeError.Malformed(actual):
+                    expect(kind).to_equal("Malformed")
+                    expect(actual).to_equal(detail)
+                case HirDecodeError.BoundsExceeded(actual):
+                    expect(kind).to_equal("BoundsExceeded")
+                    expect(actual).to_equal(detail)
+                case HirDecodeError.Unavailable(actual):
+                    expect(kind).to_equal("Unavailable")
+                    expect(actual).to_equal(detail)

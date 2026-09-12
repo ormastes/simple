@@ -1,0 +1,124 @@
+# Purpose: focused G5 prerequisite evidence for bounded path-free payload-object IO.
+# This does not claim physical OS-file or production worker admission.
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.physical_tld_v1.{
+    TldPayloadRoleV1, TldSectionRefV1, PhysicalTldHeaderV1,
+    physical_tld_section_table_digest_v1
+}
+use compiler.frontend.cache_artifact.physical_tld_codec_v1.{encode_physical_tld_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadFallbackV1, closure_coverage_dimension_v1
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    ThreePayloadSnapshotV2, ThreePayloadParentGenerationV2,
+    ThreePayloadModuleClosureV2, ThreePayloadVerifiedObjectsV2,
+    ThreePayloadPackBoundsV2, PreparedThreePayloadV2, seal_three_payload_closure_v2
+}
+use compiler.driver.cache.worker.three_payload_worker_io_v1.{
+    ThreePayloadWorkerPolicyV1, read_three_payload_confined_objects_v1,
+    three_payload_worker_confinement_available_v1
+}
+
+fn digest(label: text) -> text: sha256_text(label)
+
+fn coverage_roots() -> [ClosureCoverageRootV1]:
+    var roots: [ClosureCoverageRootV1] = []
+    var index: i64 = 0
+    while index < 9:
+        roots.push(ClosureCoverageRootV1(dimension: closure_coverage_dimension_v1(index),
+            root_digest: digest("coverage-{index}"), coverage: SemanticCoverageV1.Complete))
+        index = index + 1
+    roots
+
+fn physical_tld(role: TldPayloadRoleV1, label: text, body: [u8]) -> (PhysicalTldHeaderV1, [u8]):
+    val section = TldSectionRefV1(role: role, section_index: 0,
+        kind: "semantic-body", semantic_object_digest: sha256_u8_hex(body),
+        offset: 0, stored_bytes: body.len(), decoded_bytes: body.len(),
+        encoding_profile: "raw-v1")
+    val sections = [section]
+    val header = PhysicalTldHeaderV1(schema: 1, role: role,
+        semantic_record_digest: digest(label),
+        section_table_digest: physical_tld_section_table_digest_v1(sections),
+        payload_bytes: body.len(), sections: sections)
+    (header, encode_physical_tld_v1(header, [body]).unwrap())
+
+fn prepared(warm: bool) -> PreparedThreePayloadV2:
+    val source = text_to_bytes("fn value() -> i64: 7\n")
+    # Non-UTF-8 bytes prove the object broker does not pass through a text IO path.
+    val init_body: [u8] = [0u8, 255u8, 254u8, 1u8]
+    val (init_header, init_bytes) = physical_tld(
+        TldPayloadRoleV1.PackageInitTld, "init", init_body)
+    var prior_digest: text? = nil
+    var prior_bytes: [u8]? = nil
+    var prior_header: PhysicalTldHeaderV1? = nil
+    if warm:
+        val prior_body: [u8] = [253u8, 2u8]
+        val (header, bytes) = physical_tld(TldPayloadRoleV1.PriorModuleTld,
+            "prior", prior_body)
+        prior_digest = Some(sha256_u8_hex(bytes))
+        prior_bytes = Some(bytes)
+        prior_header = Some(header)
+    seal_three_payload_closure_v2(
+        ThreePayloadSnapshotV2(snapshot_digest: digest("snapshot"),
+            source_digest: sha256_u8_hex(source), source_bytes: source),
+        ThreePayloadParentGenerationV2(generation_digest: digest("parent"),
+            prior_tld_digest: prior_digest, prior_tld_bytes: prior_bytes,
+            prior_tld_header: prior_header),
+        ThreePayloadModuleClosureV2(module_id: "object-fixture",
+            init_tld_digest: sha256_u8_hex(init_bytes), init_tld_bytes: init_bytes,
+            init_tld_header: init_header, semantic_refs: [], coverage_roots: coverage_roots()),
+        ThreePayloadVerifiedObjectsV2(compiler_semantics_digest: digest("semantics"),
+            consumed_inputs_digest: digest("inputs"), verified_semantic_object_digests: []),
+        ThreePayloadPackBoundsV2(max_sections: 8, max_payload_bytes: 1048576,
+            max_decode_bytes: 1048576)).unwrap()
+
+fn policy() -> ThreePayloadWorkerPolicyV1:
+    ThreePayloadWorkerPolicyV1(executor_digest: digest("object-broker"),
+        max_read_bytes: 1048576, max_decode_bytes: 1048576,
+        max_decoded_sections: 8, request_external_input: false,
+        request_reverse_reference: false)
+
+describe "Three-payload confined byte-object broker":
+    it "records exact logical cold-two and warm-three reads without physical-open or peak-allocation claims":
+        val cold = prepared(false)
+        val warm = prepared(true)
+        val cold_evidence = read_three_payload_confined_objects_v1(cold, cold.seal, policy()).unwrap()
+        val warm_evidence = read_three_payload_confined_objects_v1(warm, warm.seal, policy()).unwrap()
+        expect(cold_evidence.logical_receipt.distinct_source).to_equal(1)
+        expect(cold_evidence.logical_receipt.distinct_prior).to_equal(0)
+        expect(cold_evidence.logical_receipt.distinct_init).to_equal(1)
+        expect(cold_evidence.logical_receipt.logical_read_calls).to_equal(2)
+        expect(cold_evidence.logical_receipt.logical_read_bytes).to_equal(cold.seal.payload_bytes)
+        expect(cold_evidence.logical_receipt.decoded_sections).to_equal(1)
+        expect(cold_evidence.logical_receipt.rr_input_count).to_equal(0)
+        expect(cold_evidence.logical_receipt.external_input_count).to_equal(0)
+        expect(warm_evidence.logical_receipt.distinct_prior).to_equal(1)
+        expect(warm_evidence.logical_receipt.logical_read_calls).to_equal(3)
+        expect(warm_evidence.logical_receipt.logical_read_bytes).to_equal(warm.seal.payload_bytes)
+        expect(warm_evidence.logical_receipt.decoded_sections).to_equal(2)
+        expect(warm_evidence.logical_receipt.rr_input_count).to_equal(0)
+
+    it "refuses budgets and forbidden fourth-input requests before production admission":
+        val cold = prepared(false)
+        var bounded = policy()
+        bounded.max_read_bytes = cold.seal.payload_bytes - 1
+        match read_three_payload_confined_objects_v1(cold, cold.seal, bounded):
+            case Err(BoundsExceeded): pass
+            case _: fail("aggregate byte budget did not fail closed")
+        var rr = policy()
+        rr.request_reverse_reference = true
+        var corrupt = cold
+        corrupt.seal_digest = digest("corrupt-prepared")
+        match read_three_payload_confined_objects_v1(corrupt, cold.seal, rr):
+            case Err(ExternalFacetRequired): pass
+            case _: fail("RR policy was not enforced before prepared verification")
+        var small = policy()
+        small.max_read_bytes = cold.seal.payload_bytes - 1
+        match read_three_payload_confined_objects_v1(corrupt, cold.seal, small):
+            case Err(BoundsExceeded): pass
+            case _: fail("worker bounds were not enforced before prepared verification")
+        expect(three_payload_worker_confinement_available_v1()).to_equal(false)

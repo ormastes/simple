@@ -1,0 +1,37 @@
+use std.spec
+use compiler.loader.jit_instantiator.{
+    JitInstantiator,
+    JitInstantiatorConfig,
+    LoadedMetadata,
+    PossibleInstantiation
+}
+
+fn metadata_for(symbol: text) -> LoadedMetadata:
+    LoadedMetadata(
+        possible: [PossibleInstantiation(
+            template_name: "Vector",
+            type_args: "i64",
+            mangled_name: symbol
+        )],
+        instantiations: []
+    )
+
+describe "JIT possible-instantiation lookup cache":
+    it "memoizes a discovered symbol by exact name":
+        step("Load metadata and resolve the same possible instantiation twice")
+        var jit = JitInstantiator.new(JitInstantiatorConfig.default())
+        jit.set_metadata_for_test("one.smf", metadata_for("vector$i64"))
+
+        expect(jit.find_possible("vector$i64").?).to_be(true)
+        expect(jit.find_possible("vector$i64").unwrap().0).to_equal("one.smf")
+
+    it "invalidates memoized hits when an SMF metadata row is replaced":
+        step("Replace metadata and reject the symbol cached from the old row")
+        var jit = JitInstantiator.new(JitInstantiatorConfig.default())
+        jit.set_metadata_for_test("one.smf", metadata_for("old_symbol"))
+        expect(jit.find_possible("old_symbol").?).to_be(true)
+
+        jit.set_metadata_for_test("one.smf", metadata_for("new_symbol"))
+
+        expect(jit.find_possible("old_symbol").?).to_be(false)
+        expect(jit.find_possible("new_symbol").unwrap().0).to_equal("one.smf")

@@ -103,10 +103,104 @@ val APK_FC_BOUND: i64 = 0
 val APK_FC_QUIESCING: i64 = 1
 val APK_FC_UNLOADED: i64 = 2
 
+# Additive V2 final-unpin transaction. A reservation keeps the final public
+# pin (or an already-zero binding) resident until an upper owner proves that
+# physical release has completed. V1 never manufactures one of these tokens.
+val APK_FINAL_UNPIN_SCHEMA_V2: i64 = 2
+val APK_FINAL_UNPIN_DEFAULT_CAPACITY_V2: i64 = 1024
+val APK_FINAL_UNPIN_MAX_CAPACITY_V2: i64 = 1024
+val APK_FINAL_UNPIN_TERMINAL_CAPACITY_V2: i64 = 1024
+val APK_FINAL_UNPIN_MAX_I64_V2: i64 = 9223372036854775807
+val APK_FINAL_UNPIN_MAX_FACET_KEY_BYTES_V2: i64 = 4096
+
+fn apk_binding_checked_next_generation_v2(current: i64) -> i64:
+    """Return the next binding generation, or zero on invalid/exhausted input."""
+    if current < 0 or current == APK_FINAL_UNPIN_MAX_I64_V2:
+        return 0
+    current + 1
+
+fn apk_final_unpin_checked_next_reservation_id_v2(current: i64) -> i64:
+    """Return the next reservation ID, or zero instead of wrapping."""
+    if current <= 0 or current == APK_FINAL_UNPIN_MAX_I64_V2:
+        return 0
+    current + 1
+
 # Unload history is diagnostic lifecycle state, not an ownership root.  Keep
 # only a bounded FIFO window so repeated unload/reload cannot grow resident
 # tombstones forever.  A live binding always takes precedence over history.
 val APK_MAX_RETAINED_TOMBSTONES_V1: i64 = 1024
+
+# Logical catalog values shared by compiler-side pack construction and the
+# OS-owned admitted-image boundary.  These are deliberately data-only: the OS
+# module remains the authority for manifest, artifact, ABI, and export checks.
+class AspectFacetDescriptor:
+    facet_id: text
+    export_symbol: text
+    interface_abi_hash: text
+
+class AspectPackBinding:
+    facet_id: text
+    aspect_id: text
+    library_id: text
+    library_path: text
+    library_abi_version: text
+    module_id: text
+    module_abi_hash: text
+    pack_content_hash: text
+    placement: text
+
+class AspectCatalogEntry:
+    descriptor: AspectFacetDescriptor
+    binding: AspectPackBinding
+
+class AspectCatalog:
+    schema_version: i64
+    entries: [AspectCatalogEntry]
+
+class AspectCatalogBuildResult:
+    ok: bool
+    error_code: text
+    error_message: text
+    catalog: AspectCatalog
+
+fn _aspect_catalog_error(code: text, message: text) -> AspectCatalogBuildResult:
+    AspectCatalogBuildResult(ok: false, error_code: code, error_message: message,
+        catalog: AspectCatalog(schema_version: 0, entries: []))
+
+fn aspect_catalog_build(entries: [AspectCatalogEntry]) -> AspectCatalogBuildResult:
+    """Build a deterministic logical facet catalog, rejecting ambiguity."""
+    var facet_ids: Dict<text, bool> = {}
+    var exports: Dict<text, bool> = {}
+    var index = 0
+    while index < entries.len():
+        val descriptor = entries[index].descriptor
+        val binding = entries[index].binding
+        if (descriptor.facet_id == "" or descriptor.export_symbol == "" or
+            descriptor.interface_abi_hash == "" or binding.facet_id == "" or
+            binding.aspect_id == "" or binding.library_id == "" or
+            binding.library_path == "" or binding.library_abi_version == "" or
+            binding.module_id == "" or binding.module_abi_hash == "" or
+            binding.pack_content_hash == "" or binding.placement == ""):
+            return _aspect_catalog_error("ASPECT_CATALOG_ENTRY_INCOMPLETE",
+                "logical aspect catalog fields must be nonempty")
+        if descriptor.facet_id != binding.facet_id:
+            return _aspect_catalog_error("ASPECT_CATALOG_FACET_MISMATCH",
+                "descriptor and binding facet ids differ")
+        if binding.placement != "dynamic":
+            return _aspect_catalog_error("ASPECT_CATALOG_PLACEMENT_INVALID",
+                "admitted aspect-pack bindings must use dynamic placement")
+        if facet_ids.get(descriptor.facet_id) != nil:
+            return _aspect_catalog_error("ASPECT_CATALOG_FACET_AMBIGUOUS",
+                "multiple catalog entries claim one facet id")
+        val export_key = binding.library_id + "\0" + descriptor.export_symbol
+        if exports.get(export_key) != nil:
+            return _aspect_catalog_error("ASPECT_CATALOG_EXPORT_AMBIGUOUS",
+                "multiple catalog entries claim one library export")
+        facet_ids[descriptor.facet_id] = true
+        exports[export_key] = true
+        index = index + 1
+    AspectCatalogBuildResult(ok: true, error_code: "", error_message: "",
+        catalog: AspectCatalog(schema_version: 1, entries: entries))
 
 # design §11.2 ChunkEntry.kind: a pack frame is either ordinary code/data or
 # the design's separately-split COLD debug/source metadata chunk (§12.2).
@@ -226,6 +320,37 @@ struct ApkUnloadResultV1:
     released: bool
     refcount: i64
     generation: i64
+
+# Owner-issued coordinate only. Its fields are intentionally pointer-free and
+# are not authority unless they resolve the exact live owner-held reservation.
+struct ApkFinalUnpinLeaseV2:
+    schema: i64
+    loader_handle: i64
+    aspect_owner_identity: text
+    facet_key: text
+    facet_generation: i64
+    reservation_id: i64
+
+struct ApkUnpinPrepareResultV2:
+    ok: bool
+    error_code: text
+    error_message: text
+    # True only for an ordinary unpin completed by prepare. A final public pin
+    # is retained until commit and is represented by final_reserved instead.
+    pin_consumed: bool
+    final_reserved: bool
+    remaining_refcount: i64
+    lease: ApkFinalUnpinLeaseV2
+
+struct ApkFinalUnpinResultV2:
+    ok: bool
+    error_code: text
+    error_message: text
+    release_started: bool
+    committed: bool
+    aborted: bool
+    refcount: i64
+    facet_generation: i64
 
 struct ApkBuildResultV1:
     ok: bool
@@ -487,9 +612,9 @@ fn apk_build_pack_v3(modules: [ApkModuleSourceV3]) -> ApkBuildResultV1:
             error_message: "an aspect pack must hold at least one module", bytes: empty, module_count: 0)
     var i = 0
     while i < n:
-        if modules[i].alignment < 1:
+        if modules[i].alignment < 1 or (modules[i].alignment & (modules[i].alignment - 1)) != 0:
             return ApkBuildResultV1(ok: false, error_code: "APK_BAD_ALIGNMENT",
-                error_message: "module {modules[i].module_id} declares alignment {modules[i].alignment}; alignment must be at least 1", bytes: empty, module_count: 0)
+                error_message: "module {modules[i].module_id} declares alignment {modules[i].alignment}; alignment must be a positive power of two", bytes: empty, module_count: 0)
         var j = i + 1
         while j < n:
             if modules[i].module_id == modules[j].module_id:
@@ -1708,6 +1833,11 @@ var _fc_generation: [i64] = []
 # freed only when nothing still holds it.
 var _fc_state: [i64] = []
 var _fc_refs: [i64] = []
+# Final-unpin reservation state is aligned with the canonical binding columns.
+# A zero reservation ID means no V2 transaction owns the row.
+var _fc_final_reservation_id_v2: [i64] = []
+var _fc_final_reserved_pin_v2: [bool] = []
+var _fc_final_release_started_v2: [bool] = []
 # Compact bounded history ledger: preserves recent public UNLOADED observations
 # without retaining payloads or full binding rows.  `_fc_unloaded_order` is a
 # fixed-capacity FIFO ring once full; the Dict therefore never exceeds the
@@ -1721,6 +1851,31 @@ var _fc_unloaded_head: i64 = 0
 # compaction rebuilds every loader's map because removing a middle global row
 # shifts survivor rows belonging to this loader and to other loaders.
 var _ld_binding_index: [Dict<text, i64>] = []
+# Exact per-loader cardinality. Dict.keys() allocates, and Dict.len() is not a
+# portable native-codegen contract in this tier.
+var _ld_binding_counts: [i64] = []
+
+# Stable identities and bounded pending counts belong to the existing loader
+# owner. Loader handles are monotonic and never recycled in this registry.
+var _ld_aspect_owner_identity_v2: [text] = []
+var _ld_final_unpin_capacity_v2: [i64] = []
+var _ld_pending_final_unpins_v2: [i64] = []
+# Reservation identities are issued within one stable loader-owner identity.
+# Keeping the cursor, ceiling, and exhaustion latch per loader makes bounded
+# deployments testable through normal construction without exposing a mutable
+# reset hook or weakening the default nonwrapping i64 policy.
+var _ld_next_final_unpin_reservation_id_v2: [i64] = []
+var _ld_max_final_unpin_reservation_id_v2: [i64] = []
+var _ld_final_unpin_issuance_exhausted_v2: [bool] = []
+
+struct _ApkFinalUnpinTerminalV2:
+    lease: ApkFinalUnpinLeaseV2
+    outcome: text
+
+# Bounded replay ledger. It retains coordinates and terminal outcomes only;
+# payload bytes and binding-array offsets never enter this ring.
+var _apk_final_unpin_terminals_v2: [_ApkFinalUnpinTerminalV2] = []
+var _apk_final_unpin_terminal_head_v2: i64 = 0
 
 # One path-indexed registry per loader. Keeping the registry with its loader
 # makes duplicate detection and routed lookup independent of the number of
@@ -1772,7 +1927,51 @@ fn apk_loader_new() -> i64:
     _ld_operational_sealed = _ld_operational_sealed.push(false)
     _ld_packs = _ld_packs.push({})
     _ld_binding_index = _ld_binding_index.push({})
+    _ld_binding_counts = _ld_binding_counts.push(0)
+    _ld_aspect_owner_identity_v2 = _ld_aspect_owner_identity_v2.push(
+        "apk-aspect-owner-v2:{id}")
+    _ld_final_unpin_capacity_v2 = _ld_final_unpin_capacity_v2.push(
+        APK_FINAL_UNPIN_DEFAULT_CAPACITY_V2)
+    _ld_pending_final_unpins_v2 = _ld_pending_final_unpins_v2.push(0)
+    _ld_next_final_unpin_reservation_id_v2 =
+        _ld_next_final_unpin_reservation_id_v2.push(1)
+    _ld_max_final_unpin_reservation_id_v2 =
+        _ld_max_final_unpin_reservation_id_v2.push(
+            APK_FINAL_UNPIN_MAX_I64_V2)
+    _ld_final_unpin_issuance_exhausted_v2 =
+        _ld_final_unpin_issuance_exhausted_v2.push(false)
     id
+
+fn apk_loader_new_with_final_unpin_limits_v2(capacity: i64,
+        max_reservation_id: i64) -> i64:
+    """Create a loader with bounded pending and reservation-ID limits.
+
+    The ID ceiling is immutable loader policy, not a mutable issuer hook.
+    Invalid limits allocate no loader identity and return -1.
+    """
+    if (capacity <= 0 or capacity > APK_FINAL_UNPIN_MAX_CAPACITY_V2 or
+            max_reservation_id <= 0):
+        return -1
+    val ld = apk_loader_new()
+    _ld_final_unpin_capacity_v2[ld] = capacity
+    _ld_max_final_unpin_reservation_id_v2[ld] = max_reservation_id
+    ld
+
+fn apk_loader_new_with_final_unpin_capacity_v2(capacity: i64) -> i64:
+    """Create a loader with a positive bounded pending-reservation limit."""
+    apk_loader_new_with_final_unpin_limits_v2(
+        capacity, APK_FINAL_UNPIN_MAX_I64_V2)
+
+fn apk_loader_owner_identity_v2(ld: i64) -> text:
+    """Stable aspect-owner identity for this process-lifetime loader."""
+    if ld < 0 or ld >= _ld_aspect_owner_identity_v2.len():
+        return ""
+    _ld_aspect_owner_identity_v2[ld]
+
+fn apk_loader_pending_final_unpins_v2(ld: i64) -> i64:
+    if ld < 0 or ld >= _ld_pending_final_unpins_v2.len():
+        return -1
+    _ld_pending_final_unpins_v2[ld]
 
 fn apk_loader_seal_operational_state(ld: i64):
     """design §19 `lazy_io_after_start: deny` — SEAM: call this exactly once,
@@ -1846,7 +2045,7 @@ fn apk_loader_select_profile(ld: i64, profile_id: text):
     """
     if _ld_profile[ld] == profile_id:
         return
-    var owns_live_state = _ld_binding_index[ld].keys().len() > 0
+    var owns_live_state = _ld_binding_counts[ld] > 0
     var activation = 0
     while activation < _stk_ld.len() and not owns_live_state:
         owns_live_state = _stk_ld[activation] == ld
@@ -1870,9 +2069,13 @@ fn _apk_loader_release_profile_bindings(ld: i64) -> bool:
         i = i + 1
     i = 0
     while i < _fc_ld.len():
-        if _fc_ld[i] == ld and _fc_state[i] != APK_FC_UNLOADED and _fc_refs[i] > 0:
-            _ld_last_error[ld] = "loader has pinned facets; profile switch refused"
-            return false
+        if _fc_ld[i] == ld and _fc_state[i] != APK_FC_UNLOADED:
+            if _fc_final_reservation_id_v2[i] != 0:
+                _ld_last_error[ld] = "loader has a pending final unpin; profile switch refused"
+                return false
+            if _fc_refs[i] > 0:
+                _ld_last_error[ld] = "loader has pinned facets; profile switch refused"
+                return false
         i = i + 1
     _apk_compact_bindings(ld, -1, "", false, true)
     _ld_last_error[ld] = ""
@@ -1936,6 +2139,9 @@ fn apk_loader_unregister_pack(ld: i64, path: text) -> bool:
     i = 0
     while i < _fc_ld.len():
         if _fc_ld[i] == ld and _fc_pack[i] == path and _fc_state[i] != APK_FC_UNLOADED:
+            if _fc_final_reservation_id_v2[i] != 0:
+                _ld_last_error[ld] = "pack has a pending final unpin: {path}"
+                return false
             if _fc_refs[i] > 0:
                 _ld_last_error[ld] = "pack has pinned facets: {path}"
                 return false
@@ -1973,10 +2179,19 @@ fn apk_activation_stack_enter_v1(ld: i64, facet_key: text) -> bool:
 
 fn apk_activation_stack_exit_v1(ld: i64, facet_key: text):
     """Pop the top of the activation stack. Callers use enter/exit in strict
-    LIFO nesting, matching how _apk_acquire_facet wraps its own body."""
-    if _stk_ld.len() > 0:
-        _stk_ld.pop()
-        _stk_key.pop()
+    LIFO nesting, matching how _apk_acquire_facet wraps its own body. A
+    mismatched exit is rejected without mutating the stack; otherwise a bad
+    callback could pop an unrelated activation and weaken cycle/quiescence
+    protection for the still-active facet."""
+    if _stk_ld.len() <= 0:
+        _ld_last_error[ld] = "activation stack exit without a matching entry: {facet_key}"
+        return
+    val top = _stk_ld.len() - 1
+    if _stk_ld[top] != ld or _stk_key[top] != facet_key:
+        _ld_last_error[ld] = "activation stack exit is not LIFO: {facet_key}"
+        return
+    _stk_ld.pop()
+    _stk_key.pop()
 
 fn _apk_facet_miss(facet_key: text) -> ApkFacetLoadV1:
     var empty: [u8] = []
@@ -2254,7 +2469,11 @@ fn _apk_acquire_facet_body_opened(ld: i64, catalog: [u8],
     if binding_index.contains_key(facet_key):
         _ld_last_error[ld] = "facet binding already published: {facet_key}"
         return _apk_facet_error("APK_BINDING_DUPLICATE", _ld_last_error[ld])
-    val gen = _ld_generation[ld] + 1
+    val gen = apk_binding_checked_next_generation_v2(_ld_generation[ld])
+    if gen == 0:
+        _ld_last_error[ld] = "facet binding generation is exhausted"
+        return _apk_facet_error("APK_BINDING_GENERATION_EXHAUSTED",
+            _ld_last_error[ld])
     val row = _fc_ld.len()
     _fc_ld = _fc_ld.push(ld)
     _fc_key = _fc_key.push(facet_key)
@@ -2267,8 +2486,12 @@ fn _apk_acquire_facet_body_opened(ld: i64, catalog: [u8],
     _fc_generation = _fc_generation.push(gen)
     _fc_state = _fc_state.push(APK_FC_BOUND)
     _fc_refs = _fc_refs.push(0)
+    _fc_final_reservation_id_v2 = _fc_final_reservation_id_v2.push(0)
+    _fc_final_reserved_pin_v2 = _fc_final_reserved_pin_v2.push(false)
+    _fc_final_release_started_v2 = _fc_final_release_started_v2.push(false)
     binding_index[facet_key] = row
     _ld_binding_index[ld] = binding_index
+    _ld_binding_counts[ld] = _ld_binding_counts[ld] + 1
     _ld_generation[ld] = gen
     ApkFacetLoadV1(ok: true, found: true, error_code: "", error_message: "",
         facet_key: facet_key, pack_path: route.pack_path, module_id: load.module_id,
@@ -2362,6 +2585,12 @@ fn apk_facet_unpin_v1(ld: i64, facet_key: text) -> bool:
     if i < 0:
         _ld_last_error[ld] = "cannot unpin an unbound facet: {facet_key}"
         return false
+    # V1 remains the legacy payload-only release path, but it cannot consume a
+    # pin already transferred into a V2 final-unpin reservation. In particular
+    # it never marks physical release started or commits a V2 transaction.
+    if _fc_final_reservation_id_v2[i] != 0:
+        _ld_last_error[ld] = "final unpin is reserved by V2: {facet_key}"
+        return false
     if _fc_refs[i] <= 0:
         _ld_last_error[ld] = "unbalanced unpin for {facet_key}"
         return false
@@ -2371,6 +2600,321 @@ fn apk_facet_unpin_v1(ld: i64, facet_key: text) -> bool:
         _apk_release_binding(ld, i)
     _ld_last_error[ld] = ""
     true
+
+fn _apk_empty_final_unpin_lease_v2() -> ApkFinalUnpinLeaseV2:
+    ApkFinalUnpinLeaseV2(schema: APK_FINAL_UNPIN_SCHEMA_V2, loader_handle: -1,
+        aspect_owner_identity: "", facet_key: "", facet_generation: 0,
+        reservation_id: 0)
+
+fn _apk_final_unpin_prepare_error_v2(code: text, message: text,
+        refcount: i64) -> ApkUnpinPrepareResultV2:
+    ApkUnpinPrepareResultV2(ok: false, error_code: code,
+        error_message: message, pin_consumed: false, final_reserved: false,
+        remaining_refcount: refcount, lease: _apk_empty_final_unpin_lease_v2())
+
+fn _apk_final_unpin_error_v2(code: text, message: text,
+        refcount: i64, generation: i64) -> ApkFinalUnpinResultV2:
+    ApkFinalUnpinResultV2(ok: false, error_code: code,
+        error_message: message, release_started: false, committed: false,
+        aborted: false, refcount: refcount, facet_generation: generation)
+
+fn _apk_final_unpin_success_v2(release_started: bool, committed: bool,
+        aborted: bool, refcount: i64, generation: i64) -> ApkFinalUnpinResultV2:
+    ApkFinalUnpinResultV2(ok: true, error_code: "", error_message: "",
+        release_started: release_started, committed: committed,
+        aborted: aborted, refcount: refcount, facet_generation: generation)
+
+fn _apk_final_unpin_lease_matches_v2(left: ApkFinalUnpinLeaseV2,
+        right: ApkFinalUnpinLeaseV2) -> bool:
+    (left.schema == right.schema and
+        left.loader_handle == right.loader_handle and
+        left.aspect_owner_identity == right.aspect_owner_identity and
+        left.facet_key == right.facet_key and
+        left.facet_generation == right.facet_generation and
+        left.reservation_id == right.reservation_id)
+
+fn _apk_final_unpin_terminal_outcome_v2(lease: ApkFinalUnpinLeaseV2) -> text:
+    var i = 0
+    while i < _apk_final_unpin_terminals_v2.len():
+        if _apk_final_unpin_lease_matches_v2(
+                _apk_final_unpin_terminals_v2[i].lease, lease):
+            return _apk_final_unpin_terminals_v2[i].outcome
+        i = i + 1
+    ""
+
+fn apk_final_unpin_terminal_count_v2() -> i64:
+    _apk_final_unpin_terminals_v2.len()
+
+fn apk_final_unpin_terminal_capacity_v2() -> i64:
+    APK_FINAL_UNPIN_TERMINAL_CAPACITY_V2
+
+fn _apk_record_final_unpin_terminal_v2(lease: ApkFinalUnpinLeaseV2,
+        outcome: text):
+    val terminal = _ApkFinalUnpinTerminalV2(lease: lease, outcome: outcome)
+    if _apk_final_unpin_terminals_v2.len() < APK_FINAL_UNPIN_TERMINAL_CAPACITY_V2:
+        _apk_final_unpin_terminals_v2.push(terminal)
+        return
+    _apk_final_unpin_terminals_v2[_apk_final_unpin_terminal_head_v2] = terminal
+    _apk_final_unpin_terminal_head_v2 = (
+        _apk_final_unpin_terminal_head_v2 + 1) %
+        APK_FINAL_UNPIN_TERMINAL_CAPACITY_V2
+
+fn _apk_final_unpin_issue_id_v2(ld: i64) -> i64:
+    if _ld_final_unpin_issuance_exhausted_v2[ld]:
+        return 0
+    val issued = _ld_next_final_unpin_reservation_id_v2[ld]
+    if issued == _ld_max_final_unpin_reservation_id_v2[ld]:
+        _ld_final_unpin_issuance_exhausted_v2[ld] = true
+    else:
+        _ld_next_final_unpin_reservation_id_v2[ld] =
+            apk_final_unpin_checked_next_reservation_id_v2(issued)
+    issued
+
+fn _apk_final_unpin_is_activating_v2(ld: i64, facet_key: text) -> bool:
+    var i = 0
+    while i < _stk_ld.len():
+        if _stk_ld[i] == ld and _stk_key[i] == facet_key:
+            return true
+        i = i + 1
+    false
+
+fn _apk_final_unpin_prepare_identity_v2(owner_identity: text, ld: i64,
+        facet_key: text, expected_generation: i64) -> ApkUnpinPrepareResultV2:
+    if (ld < 0 or ld >= _ld_aspect_owner_identity_v2.len() or
+            facet_key == "" or expected_generation <= 0):
+        return _apk_final_unpin_prepare_error_v2("APK_FINAL_UNPIN_MALFORMED",
+            "final-unpin preparation coordinates are malformed", -1)
+    val facet_key_bytes = text_to_bytes(facet_key)
+    if facet_key_bytes.len() > APK_FINAL_UNPIN_MAX_FACET_KEY_BYTES_V2:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_KEY_TOO_LONG",
+            "facet key exceeds final-unpin byte capacity", -1)
+    if owner_identity != _ld_aspect_owner_identity_v2[ld]:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_OWNER_MISMATCH",
+            "aspect owner identity does not match loader", -1)
+    val i = _apk_fc_index(ld, facet_key)
+    if i < 0:
+        return _apk_final_unpin_prepare_error_v2("APK_FINAL_UNPIN_NOT_BOUND",
+            "facet has no live binding", -1)
+    if _fc_generation[i] != expected_generation:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_GENERATION_MISMATCH",
+            "facet generation does not match the live binding", _fc_refs[i])
+    if _fc_final_reservation_id_v2[i] != 0:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_ALREADY_STAGED",
+            "final unpin is already reserved", _fc_refs[i])
+    if _apk_final_unpin_is_activating_v2(ld, facet_key):
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_ACTIVATING",
+            "cannot reserve a final unpin while the facet is activating",
+            _fc_refs[i])
+    ApkUnpinPrepareResultV2(ok: true, error_code: "", error_message: "",
+        pin_consumed: false, final_reserved: false,
+        remaining_refcount: _fc_refs[i], lease: _apk_empty_final_unpin_lease_v2())
+
+fn _apk_reserve_final_unpin_v2(owner_identity: text, ld: i64,
+        facet_key: text, expected_generation: i64, reserved_pin: bool,
+        i: i64) -> ApkUnpinPrepareResultV2:
+    if _ld_pending_final_unpins_v2[ld] >= _ld_final_unpin_capacity_v2[ld]:
+        return _apk_final_unpin_prepare_error_v2("APK_FINAL_UNPIN_CAPACITY",
+            "loader final-unpin reservation capacity is exhausted", _fc_refs[i])
+    val reservation_id = _apk_final_unpin_issue_id_v2(ld)
+    if reservation_id == 0:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_ID_EXHAUSTED",
+            "final-unpin reservation identities are exhausted", _fc_refs[i])
+    val lease = ApkFinalUnpinLeaseV2(schema: APK_FINAL_UNPIN_SCHEMA_V2,
+        loader_handle: ld, aspect_owner_identity: owner_identity,
+        facet_key: facet_key, facet_generation: expected_generation,
+        reservation_id: reservation_id)
+    _fc_final_reservation_id_v2[i] = reservation_id
+    _fc_final_reserved_pin_v2[i] = reserved_pin
+    _fc_final_release_started_v2[i] = false
+    _ld_pending_final_unpins_v2[ld] = _ld_pending_final_unpins_v2[ld] + 1
+    _ld_last_error[ld] = ""
+    ApkUnpinPrepareResultV2(ok: true, error_code: "", error_message: "",
+        pin_consumed: false, final_reserved: true,
+        remaining_refcount: _fc_refs[i], lease: lease)
+
+fn apk_facet_prepare_unpin_v2(owner_identity: text, ld: i64,
+        facet_key: text, expected_generation: i64) -> ApkUnpinPrepareResultV2:
+    """Consume an ordinary pin or reserve the final pin of a quiescing row.
+    Identity and generation are validated before any mutation."""
+    val checked = _apk_final_unpin_prepare_identity_v2(
+        owner_identity, ld, facet_key, expected_generation)
+    if not checked.ok:
+        return checked
+    val i = _apk_fc_index(ld, facet_key)
+    if _fc_refs[i] <= 0:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_UNBALANCED", "facet has no pin to release",
+            _fc_refs[i])
+    if _fc_state[i] == APK_FC_QUIESCING and _fc_refs[i] == 1:
+        return _apk_reserve_final_unpin_v2(owner_identity, ld, facet_key,
+            expected_generation, true, i)
+    if _fc_state[i] != APK_FC_BOUND and _fc_state[i] != APK_FC_QUIESCING:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_STATE", "facet cannot be unpinned in this state",
+            _fc_refs[i])
+    val remaining = _fc_refs[i] - 1
+    _fc_refs[i] = remaining
+    _ld_last_error[ld] = ""
+    ApkUnpinPrepareResultV2(ok: true, error_code: "", error_message: "",
+        pin_consumed: true, final_reserved: false,
+        remaining_refcount: remaining, lease: _apk_empty_final_unpin_lease_v2())
+
+fn apk_facet_prepare_zero_pin_unload_v2(owner_identity: text, ld: i64,
+        facet_key: text, expected_generation: i64) -> ApkUnpinPrepareResultV2:
+    """Quiesce and reserve an already-zero binding without a synthetic pin."""
+    val checked = _apk_final_unpin_prepare_identity_v2(
+        owner_identity, ld, facet_key, expected_generation)
+    if not checked.ok:
+        return checked
+    val i = _apk_fc_index(ld, facet_key)
+    if _fc_refs[i] != 0:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_NOT_ZERO", "facet still has public pins",
+            _fc_refs[i])
+    if _fc_state[i] != APK_FC_BOUND and _fc_state[i] != APK_FC_QUIESCING:
+        return _apk_final_unpin_prepare_error_v2(
+            "APK_FINAL_UNPIN_STATE", "facet cannot begin zero-pin unload",
+            _fc_refs[i])
+    # Capacity and ID issuance precede the visible quiescing transition, so a
+    # refused reservation leaves the original binding state unchanged.
+    val reserved = _apk_reserve_final_unpin_v2(owner_identity, ld, facet_key,
+        expected_generation, false, i)
+    if reserved.ok:
+        _fc_state[i] = APK_FC_QUIESCING
+    reserved
+
+fn _apk_final_unpin_resolve_v2(lease: ApkFinalUnpinLeaseV2) -> i64:
+    if (lease.schema != APK_FINAL_UNPIN_SCHEMA_V2 or
+            lease.loader_handle < 0 or
+            lease.loader_handle >= _ld_aspect_owner_identity_v2.len() or
+            lease.aspect_owner_identity == "" or lease.facet_key == "" or
+            text_to_bytes(lease.facet_key).len() >
+                APK_FINAL_UNPIN_MAX_FACET_KEY_BYTES_V2 or
+            lease.facet_generation <= 0 or lease.reservation_id <= 0):
+        return -1
+    val ld = lease.loader_handle
+    if lease.aspect_owner_identity != _ld_aspect_owner_identity_v2[ld]:
+        return -2
+    val i = _apk_fc_index(ld, lease.facet_key)
+    if i < 0:
+        if _apk_final_unpin_terminal_outcome_v2(lease) != "":
+            return -5
+        return -3
+    if _fc_generation[i] != lease.facet_generation:
+        return -4
+    if _fc_final_reservation_id_v2[i] != lease.reservation_id:
+        if _apk_final_unpin_terminal_outcome_v2(lease) != "":
+            return -5
+        return -6
+    if _apk_final_unpin_is_activating_v2(ld, lease.facet_key):
+        return -8
+    if _fc_state[i] != APK_FC_QUIESCING:
+        return -7
+    i
+
+fn _apk_final_unpin_resolution_error_v2(lease: ApkFinalUnpinLeaseV2,
+        resolved: i64) -> ApkFinalUnpinResultV2:
+    if resolved == -2:
+        return _apk_final_unpin_error_v2("APK_FINAL_UNPIN_OWNER_MISMATCH",
+            "aspect owner identity does not match loader", -1, 0)
+    if resolved == -3:
+        return _apk_final_unpin_error_v2("APK_FINAL_UNPIN_NOT_BOUND",
+            "facet has no live binding", -1, 0)
+    if resolved == -4:
+        return _apk_final_unpin_error_v2(
+            "APK_FINAL_UNPIN_GENERATION_MISMATCH",
+            "facet generation does not match the live binding", -1,
+            lease.facet_generation)
+    if resolved == -5:
+        return _apk_final_unpin_error_v2("APK_FINAL_UNPIN_REPLAY",
+            "final-unpin reservation was already consumed", -1,
+            lease.facet_generation)
+    if resolved == -6:
+        return _apk_final_unpin_error_v2(
+            "APK_FINAL_UNPIN_RESERVATION_MISMATCH",
+            "reservation does not match owner-held state", -1,
+            lease.facet_generation)
+    if resolved == -7:
+        return _apk_final_unpin_error_v2("APK_FINAL_UNPIN_STATE",
+            "reserved facet is not quiescing", -1, lease.facet_generation)
+    if resolved == -8:
+        return _apk_final_unpin_error_v2("APK_FINAL_UNPIN_ACTIVATING",
+            "reserved facet is activating", -1, lease.facet_generation)
+    _apk_final_unpin_error_v2("APK_FINAL_UNPIN_MALFORMED",
+        "final-unpin lease is malformed", -1, 0)
+
+fn apk_facet_validate_final_unpin_v2(
+        lease: ApkFinalUnpinLeaseV2) -> ApkFinalUnpinResultV2:
+    val i = _apk_final_unpin_resolve_v2(lease)
+    if i < 0:
+        return _apk_final_unpin_resolution_error_v2(lease, i)
+    _apk_final_unpin_success_v2(_fc_final_release_started_v2[i], false,
+        false, _fc_refs[i], _fc_generation[i])
+
+fn apk_facet_mark_final_unpin_release_started_v2(
+        lease: ApkFinalUnpinLeaseV2) -> ApkFinalUnpinResultV2:
+    """Irreversibly close abort before an upper owner dispatches release."""
+    val i = _apk_final_unpin_resolve_v2(lease)
+    if i < 0:
+        return _apk_final_unpin_resolution_error_v2(lease, i)
+    _fc_final_release_started_v2[i] = true
+    _apk_final_unpin_success_v2(true, false, false, _fc_refs[i],
+        _fc_generation[i])
+
+fn apk_facet_commit_final_unpin_v2(
+        lease: ApkFinalUnpinLeaseV2) -> ApkFinalUnpinResultV2:
+    """Consume one exact release-started reservation and reclaim its payload."""
+    val i = _apk_final_unpin_resolve_v2(lease)
+    if i < 0:
+        return _apk_final_unpin_resolution_error_v2(lease, i)
+    if not _fc_final_release_started_v2[i]:
+        return _apk_final_unpin_error_v2(
+            "APK_FINAL_UNPIN_RELEASE_NOT_STARTED",
+            "final-unpin commit requires release-started", _fc_refs[i],
+            _fc_generation[i])
+    if _fc_final_reserved_pin_v2[i]:
+        if _fc_refs[i] != 1:
+            return _apk_final_unpin_error_v2("APK_FINAL_UNPIN_PIN_MISMATCH",
+                "reserved final pin count changed", _fc_refs[i],
+                _fc_generation[i])
+        _fc_refs[i] = 0
+    elif _fc_refs[i] != 0:
+        return _apk_final_unpin_error_v2("APK_FINAL_UNPIN_PIN_MISMATCH",
+            "zero-pin reservation gained a public pin", _fc_refs[i],
+            _fc_generation[i])
+    _ld_pending_final_unpins_v2[lease.loader_handle] =
+        _ld_pending_final_unpins_v2[lease.loader_handle] - 1
+    _apk_record_final_unpin_terminal_v2(lease, "committed")
+    _apk_release_binding(lease.loader_handle, i)
+    _apk_final_unpin_success_v2(true, true, false, 0,
+        lease.facet_generation)
+
+fn apk_facet_abort_final_unpin_v2(
+        lease: ApkFinalUnpinLeaseV2) -> ApkFinalUnpinResultV2:
+    """Consume a reservation before release-started, retaining quiescence."""
+    val i = _apk_final_unpin_resolve_v2(lease)
+    if i < 0:
+        return _apk_final_unpin_resolution_error_v2(lease, i)
+    if _fc_final_release_started_v2[i]:
+        return ApkFinalUnpinResultV2(ok: false,
+            error_code: "APK_FINAL_UNPIN_RELEASE_STARTED",
+            error_message: "release-started is irreversible; abort is refused",
+            release_started: true, committed: false, aborted: false,
+            refcount: _fc_refs[i], facet_generation: _fc_generation[i])
+    _fc_final_reservation_id_v2[i] = 0
+    _fc_final_reserved_pin_v2[i] = false
+    _fc_final_release_started_v2[i] = false
+    _ld_pending_final_unpins_v2[lease.loader_handle] =
+        _ld_pending_final_unpins_v2[lease.loader_handle] - 1
+    _apk_record_final_unpin_terminal_v2(lease, "aborted")
+    _apk_final_unpin_success_v2(false, false, true, _fc_refs[i],
+        _fc_generation[i])
 
 fn _apk_record_unloaded(ld: i64, key: text):
     val tombstone = "{ld}\0{key}"
@@ -2388,7 +2932,7 @@ fn _apk_record_unloaded(ld: i64, key: text):
 
 fn apk_retained_tombstone_count_v1() -> i64:
     """Current process-wide unload-history rows; always at or below capacity."""
-    _fc_unloaded.keys().len() as i64
+    _fc_unloaded_order.len() as i64
 
 fn apk_retained_tombstone_capacity_v1() -> i64:
     APK_MAX_RETAINED_TOMBSTONES_V1
@@ -2418,10 +2962,15 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
     var next_generation: [i64] = []
     var next_state: [i64] = []
     var next_refs: [i64] = []
+    var next_final_reservation_id_v2: [i64] = []
+    var next_final_reserved_pin_v2: [bool] = []
+    var next_final_release_started_v2: [bool] = []
     var next_binding_index: [Dict<text, i64>] = []
+    var next_binding_counts: [i64] = []
     var loader_index = 0
     while loader_index < _ld_binding_index.len():
         next_binding_index.push({})
+        next_binding_counts.push(0)
         loader_index = loader_index + 1
     var released = 0
     var row = 0
@@ -2449,9 +2998,15 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
             next_generation.push(_fc_generation[row])
             next_state.push(_fc_state[row])
             next_refs.push(_fc_refs[row])
+            next_final_reservation_id_v2.push(
+                _fc_final_reservation_id_v2[row])
+            next_final_reserved_pin_v2.push(_fc_final_reserved_pin_v2[row])
+            next_final_release_started_v2.push(
+                _fc_final_release_started_v2[row])
             var survivor_index = next_binding_index[_fc_ld[row]]
             survivor_index[_fc_key[row]] = next_row
             next_binding_index[_fc_ld[row]] = survivor_index
+            next_binding_counts[_fc_ld[row]] = next_binding_counts[_fc_ld[row]] + 1
         row = row + 1
     _fc_ld = next_ld
     _fc_key = next_key
@@ -2464,7 +3019,11 @@ fn _apk_compact_bindings(ld: i64, index: i64, pack_path: text, by_pack: bool, al
     _fc_generation = next_generation
     _fc_state = next_state
     _fc_refs = next_refs
+    _fc_final_reservation_id_v2 = next_final_reservation_id_v2
+    _fc_final_reserved_pin_v2 = next_final_reserved_pin_v2
+    _fc_final_release_started_v2 = next_final_release_started_v2
     _ld_binding_index = next_binding_index
+    _ld_binding_counts = next_binding_counts
     _ld_unloads[ld] = _ld_unloads[ld] + released
 
 fn _apk_release_binding(ld: i64, i: i64):
@@ -2492,9 +3051,13 @@ fn apk_loader_invalidate_catalog_v1(ld: i64) -> bool:
         i = i + 1
     i = 0
     while i < _fc_ld.len():
-        if _fc_ld[i] == ld and _fc_state[i] != APK_FC_UNLOADED and _fc_refs[i] > 0:
-            _ld_last_error[ld] = "loader has pinned facets; catalog update refused"
-            return false
+        if _fc_ld[i] == ld and _fc_state[i] != APK_FC_UNLOADED:
+            if _fc_final_reservation_id_v2[i] != 0:
+                _ld_last_error[ld] = "loader has a pending final unpin; catalog update refused"
+                return false
+            if _fc_refs[i] > 0:
+                _ld_last_error[ld] = "loader has pinned facets; catalog update refused"
+                return false
         i = i + 1
     _apk_compact_bindings(ld, -1, "", false, true)
     _ld_catalog_invalidations[ld] = _ld_catalog_invalidations[ld] + 1
@@ -2530,6 +3093,13 @@ fn apk_unload_facet_v1(ld: i64, facet_key: text) -> ApkUnloadResultV1:
             error_message: "no such bound facet: {facet_key}",
             facet_key: facet_key, quiescing: false, released: false, refcount: -1, generation: 0)
     val gen = _fc_generation[idx]
+    if _fc_final_reservation_id_v2[idx] != 0:
+        _ld_last_error[ld] = "facet has a pending final unpin: {facet_key}"
+        return ApkUnloadResultV1(ok: false,
+            error_code: "APK_UNLOAD_FINAL_UNPIN_PENDING",
+            error_message: _ld_last_error[ld], facet_key: facet_key,
+            quiescing: true, released: false, refcount: _fc_refs[idx],
+            generation: gen)
     if _fc_refs[idx] > 0:
         _fc_state[idx] = APK_FC_QUIESCING
         _ld_last_error[ld] = ""

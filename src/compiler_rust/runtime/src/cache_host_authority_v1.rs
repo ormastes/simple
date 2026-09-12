@@ -14,6 +14,7 @@ mod unix {
     use std::sync::{Mutex, OnceLock};
 
     const INVALID: i64 = -1;
+    const GC_NAMESPACE_LOCK_NAME: &[u8] = b".simple-cache-gc-v2.lock\0";
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
     static HANDLES: OnceLock<Mutex<HashMap<i64, Entry>>> = OnceLock::new();
     static READER_ROOTS: OnceLock<Mutex<HashMap<(u64, u64), ReaderRootState>>> = OnceLock::new();
@@ -31,6 +32,7 @@ mod unix {
         Read(RawFd),
         ReaderPin {
             root_fd: RawFd,
+            namespace_lock_fd: RawFd,
             root_key: (u64, u64),
             epoch: i64,
             generation: i64,
@@ -136,6 +138,42 @@ mod unix {
 
     fn dup_fd(fd: RawFd) -> RawFd {
         unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) }
+    }
+
+    fn private_regular(fd: RawFd) -> bool {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        (unsafe { libc::fstat(fd, &mut stat) == 0 })
+            && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && stat.st_nlink == 1
+            && stat.st_uid == unsafe { libc::geteuid() }
+    }
+
+    /// Join the kernel-visible reader/GC namespace.  The shared flock is held
+    /// for the complete reader-pin lifetime, so a different process cannot
+    /// obtain a destructive GC window while this pin is live.  The v1 reader
+    /// epoch remains process-local; v2 owns its separate durable epoch only
+    /// after cooperative namespace authority is admitted.
+    unsafe fn acquire_reader_namespace(root_fd: RawFd, expected_even: i64) -> RawFd {
+        if expected_even < 0 || expected_even % 2 != 0 {
+            return -1;
+        }
+        let lock_fd = libc::openat(
+            root_fd,
+            GC_NAMESPACE_LOCK_NAME.as_ptr().cast(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        );
+        if lock_fd < 0 || !private_regular(lock_fd) {
+            if lock_fd >= 0 {
+                libc::close(lock_fd);
+            }
+            return -1;
+        }
+        if libc::flock(lock_fd, libc::LOCK_SH | libc::LOCK_NB) != 0 {
+            libc::close(lock_fd);
+            return -1;
+        }
+        lock_fd
     }
 
     /// Duplicate only a live root capability for another runtime authority
@@ -439,9 +477,16 @@ mod unix {
         if owned < 0 {
             return INVALID;
         }
+        let namespace_lock_fd = acquire_reader_namespace(owned, epoch);
+        if namespace_lock_fd < 0 {
+            libc::close(owned);
+            return INVALID;
+        }
         let mut roots = reader_roots().lock().expect("cache reader root lock");
         let state = roots.entry(key).or_insert(ReaderRootState { epoch, generation });
         if state.epoch % 2 != 0 || epoch < state.epoch || generation < state.generation {
+            libc::flock(namespace_lock_fd, libc::LOCK_UN);
+            libc::close(namespace_lock_fd);
             libc::close(owned);
             return INVALID;
         }
@@ -450,11 +495,14 @@ mod unix {
         }
         drop(roots);
         let Some(expires) = now.checked_add(ttl) else {
+            libc::flock(namespace_lock_fd, libc::LOCK_UN);
+            libc::close(namespace_lock_fd);
             libc::close(owned);
             return INVALID;
         };
         insert(Entry::ReaderPin {
             root_fd: owned,
+            namespace_lock_fd,
             root_key: key,
             epoch,
             generation,
@@ -587,9 +635,16 @@ mod unix {
         if !matches {
             return INVALID;
         }
-        let Some(Entry::ReaderPin { root_fd, .. }) = guard.remove(&pin) else {
+        let Some(Entry::ReaderPin {
+            root_fd,
+            namespace_lock_fd,
+            ..
+        }) = guard.remove(&pin)
+        else {
             return INVALID;
         };
+        libc::flock(namespace_lock_fd, libc::LOCK_UN);
+        libc::close(namespace_lock_fd);
         libc::close(root_fd) as i64
     }
 
@@ -980,7 +1035,15 @@ mod unix {
             | Entry::CasShard1(fd)
             | Entry::CasShard2(fd)
             | Entry::Read(fd) => libc::close(fd) as i64,
-            Entry::ReaderPin { root_fd, .. } => libc::close(root_fd) as i64,
+            Entry::ReaderPin {
+                root_fd,
+                namespace_lock_fd,
+                ..
+            } => {
+                libc::flock(namespace_lock_fd, libc::LOCK_UN);
+                libc::close(namespace_lock_fd);
+                libc::close(root_fd) as i64
+            }
             Entry::Temp { fd, root_fd, name, .. } => {
                 libc::unlinkat(root_fd, name.as_ptr(), 0);
                 libc::close(root_fd);
@@ -1329,6 +1392,44 @@ mod unix {
             unsafe {
                 rt_cache_host_close_v1(object);
                 rt_cache_host_close_v1(pin);
+            }
+            let next_pin = unsafe {
+                rt_cache_host_begin_reader_pin_v1(
+                    r,
+                    10,
+                    7,
+                    b"manifest".as_ptr(),
+                    8,
+                    b"process".as_ptr(),
+                    7,
+                    b"boot".as_ptr(),
+                    4,
+                    b"namespace".as_ptr(),
+                    9,
+                    120,
+                    10,
+                )
+            };
+            assert!(next_pin > 0);
+            assert_eq!(
+                unsafe {
+                    rt_cache_host_release_reader_pin_v1(
+                        next_pin,
+                        10,
+                        7,
+                        b"manifest".as_ptr(),
+                        8,
+                        b"process".as_ptr(),
+                        7,
+                        b"boot".as_ptr(),
+                        4,
+                        b"namespace".as_ptr(),
+                        9,
+                    )
+                },
+                0
+            );
+            unsafe {
                 rt_cache_host_close_v1(r);
             }
         }
@@ -1384,3 +1485,279 @@ mod windows_unsupported {
 
 #[cfg(windows)]
 pub use windows_unsupported::*;
+
+// ---------------------------------------------------------------------------
+// V3 namespace ABI — fail-closed Rust twins.
+//
+// The C provider (src/runtime/runtime_cache_host_authority_v1.c:41-54)
+// deliberately reports Unsupported (-3) on POSIX and Windows alike, applied
+// unconditionally (not inside its `#ifdef _WIN32` split), because it has no
+// admitted descriptor registry, durable recovery barrier, or complete
+// roots/readers/leases/pins inventory yet. These Rust twins mirror that
+// exactly: same names, same signatures, same -3 sentinel, unconditional on
+// every target — so no cfg(unix)/cfg(windows) split here either.
+const NAMESPACE_V3_UNSUPPORTED: i64 = -3;
+
+/// Contract: C twin `rt_cache_host_namespace_available_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:41. Sentinel: -3
+/// (Unsupported) on every target; no admitted Rust provider yet.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_available_v3() -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_open_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:42. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_open_v3(
+    _r: i64,
+    _l: i64,
+    _p: i64,
+    _ready: i64,
+    _n: *const u8,
+    _nl: i64,
+    _we: i64,
+    _mr: i64,
+    _mrd: i64,
+    _mlr: i64,
+    _mso: i64,
+    _mpb: i64,
+    _mc: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_begin_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:43. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_begin_v3(
+    _ns: i64,
+    _mode: i64,
+    _head: *const u8,
+    _head_len: i64,
+    _pin: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_sync_object_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:44. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_sync_object_v3(
+    _scope: i64,
+    _object: i64,
+    _kind: *const u8,
+    _kind_len: i64,
+    _schema: i64,
+    _digest: *const u8,
+    _digest_len: i64,
+    _size: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_commit_selected_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:45. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_commit_selected_v3(
+    _scope: i64,
+    _head: *const u8,
+    _head_len: i64,
+    _append: *const u8,
+    _append_len: i64,
+    _objects: *const i64,
+    _object_count: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_recovery_capture_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:46. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_recovery_capture_v3(_scope: i64) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_recovery_read_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:47. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_recovery_read_v3(
+    _recovery: i64,
+    _part: i64,
+    _offset: i64,
+    _out: *mut u8,
+    _cap: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_resolve_operation_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:48. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_resolve_operation_v3(
+    _recovery: i64,
+    _writer: i64,
+    _operation: *const u8,
+    _operation_len: i64,
+    _generation: i64,
+    _manifest: *const u8,
+    _manifest_len: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_gc_roots_page_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:49. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_gc_roots_page_v3(
+    _scope: i64,
+    _cursor: i64,
+    _out: *mut u8,
+    _cap: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_gc_open_candidate_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:50. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_gc_open_candidate_v3(
+    _scope: i64,
+    _kind: *const u8,
+    _kind_len: i64,
+    _schema: i64,
+    _digest: *const u8,
+    _digest_len: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_gc_unlink_candidate_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:51. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_gc_unlink_candidate_v3(
+    _scope: i64,
+    _candidate: i64,
+) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_finish_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:52. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_finish_v3(_scope: i64) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_abort_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:53. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_abort_v3(_scope: i64) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+/// Contract: C twin `rt_cache_host_namespace_close_v3` at
+/// src/runtime/runtime_cache_host_authority_v1.c:54. Sentinel: -3.
+#[no_mangle]
+pub unsafe extern "C" fn rt_cache_host_namespace_close_v3(_ns: i64) -> i64 {
+    NAMESPACE_V3_UNSUPPORTED
+}
+
+#[cfg(test)]
+mod dual_lane_twin_sentinels {
+    //! `cargo test --lib -p simple-runtime dual_lane_twin_sentinels`.
+    //! Asserts every namespace-v3 fail-closed twin returns the exact
+    //! sentinel its C counterpart returns
+    //! (src/runtime/runtime_cache_host_authority_v1.c:41-54).
+    use super::*;
+
+    #[test]
+    fn namespace_v3_twins_return_unsupported() {
+        unsafe {
+            assert_eq!(rt_cache_host_namespace_available_v3(), -3);
+            assert_eq!(
+                rt_cache_host_namespace_open_v3(
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ),
+                -3
+            );
+            assert_eq!(
+                rt_cache_host_namespace_begin_v3(0, 0, std::ptr::null(), 0, 0),
+                -3
+            );
+            assert_eq!(
+                rt_cache_host_namespace_sync_object_v3(
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    0
+                ),
+                -3
+            );
+            assert_eq!(
+                rt_cache_host_namespace_commit_selected_v3(
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0
+                ),
+                -3
+            );
+            assert_eq!(rt_cache_host_namespace_recovery_capture_v3(0), -3);
+            assert_eq!(
+                rt_cache_host_namespace_recovery_read_v3(0, 0, 0, std::ptr::null_mut(), 0),
+                -3
+            );
+            assert_eq!(
+                rt_cache_host_namespace_resolve_operation_v3(
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0
+                ),
+                -3
+            );
+            assert_eq!(
+                rt_cache_host_namespace_gc_roots_page_v3(0, 0, std::ptr::null_mut(), 0),
+                -3
+            );
+            assert_eq!(
+                rt_cache_host_namespace_gc_open_candidate_v3(
+                    0,
+                    std::ptr::null(),
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0
+                ),
+                -3
+            );
+            assert_eq!(rt_cache_host_namespace_gc_unlink_candidate_v3(0, 0), -3);
+            assert_eq!(rt_cache_host_namespace_finish_v3(0), -3);
+            assert_eq!(rt_cache_host_namespace_abort_v3(0), -3);
+            assert_eq!(rt_cache_host_namespace_close_v3(0), -3);
+        }
+    }
+}

@@ -61,6 +61,7 @@ pub mod cache_daemon_host_authority_v1;
 pub mod cache_daemon_process_v1;
 pub mod cache_host_authority_v1;
 pub mod cuda_runtime;
+pub mod process_observation_v4_twins;
 pub mod debug;
 pub mod executor;
 pub mod fiber_identity;

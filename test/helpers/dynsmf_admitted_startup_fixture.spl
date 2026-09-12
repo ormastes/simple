@@ -7,13 +7,21 @@ use std.common.aspect_pack.{
     aspect_catalog_build
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.common.string_core.{char_code}
+use compiler.backend.linker.smf_writer.{
+    SmfWriter,
+    SmfWriterSymbol,
+    SmfWriterSymbolBinding,
+    SmfWriterSymbolType,
+    smf_build_aspect_pack_image
+}
 use os.smf.aspect_pack_directory.{
+    AspectPackDirectory,
     AspectPackArtifactIdentity,
     AspectPackExportContract,
     AspectPackLookupRequest,
     aspect_pack_directory_parse_from_outer_smf_bytes
 }
+use std.common.aspect_pack.{AspectCatalog}
 use os.smf.dynsmf_manifest_contract.{DynSmfManifestEntry}
 
 class DynSmfAdmittedStartupFixture:
@@ -21,89 +29,99 @@ class DynSmfAdmittedStartupFixture:
     manifest: [DynSmfManifestEntry]
     request: AspectPackLookupRequest
 
-fn _dynsmf_fixture_append_u32(bytes: [u8], value: i64) -> [u8]:
-    var out = bytes
-    out.push((value & 0xff) as u8)
-    out.push(((value >> 8) & 0xff) as u8)
-    out.push(((value >> 16) & 0xff) as u8)
-    out.push(((value >> 24) & 0xff) as u8)
-    out
+fn _dynsmf_fixture_empty() -> DynSmfAdmittedStartupFixture:
+    DynSmfAdmittedStartupFixture(
+        artifact_bytes: [], manifest: [],
+        request: AspectPackLookupRequest(
+            directory: AspectPackDirectory(
+                schema_version: 0, flags: 0, total_size: 0,
+                content_hash: "", entries: []),
+            catalog: AspectCatalog(schema_version: 0, entries: []),
+            manifest: [], artifact: AspectPackArtifactIdentity(
+                library_id: "", path: "", content_hash: ""),
+            export_contracts: [], facet_id: ""))
 
-fn _dynsmf_fixture_append_u64(bytes: [u8], value: i64) -> [u8]:
-    var out = bytes
-    var index = 0
-    while index < 8:
-        out.push(((value >> (index * 8)) & 0xff) as u8)
-        index = index + 1
-    out
+@cfg(x86_64)
+fn _dynsmf_fixture_host_arch_byte() -> u8: 0
 
-fn _dynsmf_fixture_append(bytes: [u8], suffix: [u8]) -> [u8]:
-    var out = bytes
-    for byte in suffix:
-        out.push(byte)
-    out
+@cfg(arm64)
+fn _dynsmf_fixture_host_arch_byte() -> u8: 1
 
-fn _dynsmf_fixture_section(wire_type: i64, flags: i64, offset: i64, size: i64, alignment: i64) -> [u8]:
-    var out: [u8] = [wire_type as u8, 0 as u8, 0 as u8, 0 as u8]
-    out = _dynsmf_fixture_append_u32(out, flags)
-    out = _dynsmf_fixture_append_u64(out, offset)
-    out = _dynsmf_fixture_append_u64(out, size)
-    out = _dynsmf_fixture_append_u64(out, size)
-    out = _dynsmf_fixture_append_u64(out, alignment)
-    while out.len() < 64:
-        out.push(0 as u8)
-    out
+@cfg(x86)
+fn _dynsmf_fixture_host_arch_byte() -> u8: 2
 
-fn _dynsmf_fixture_symbol(code_size: i64) -> [u8]:
-    var out: [u8] = []
-    out = _dynsmf_fixture_append_u32(out, 1)
-    out = _dynsmf_fixture_append_u32(out, 0)
-    out.push(0 as u8)
-    out.push(1 as u8)
-    while out.len() < 16:
-        out.push(0 as u8)
-    out = _dynsmf_fixture_append_u64(out, 0)
-    out = _dynsmf_fixture_append_u64(out, code_size)
-    while out.len() < 56:
-        out.push(0 as u8)
-    out
+@cfg(arm32)
+fn _dynsmf_fixture_host_arch_byte() -> u8: 3
 
-fn _dynsmf_fixture_header(section_table: i64, symbol_table: i64) -> [u8]:
-    var out: [u8] = [83 as u8, 77 as u8, 70 as u8, 0 as u8, 1 as u8, 1 as u8, 1 as u8, 0 as u8]
-    out = _dynsmf_fixture_append_u32(out, 0x21)
-    out = _dynsmf_fixture_append(out, [0 as u8, 0 as u8, 0 as u8, 0 as u8])
-    out = _dynsmf_fixture_append_u32(out, 2)
-    out = _dynsmf_fixture_append_u64(out, section_table)
-    out = _dynsmf_fixture_append_u64(out, symbol_table)
-    out = _dynsmf_fixture_append_u32(out, 1)
-    out = _dynsmf_fixture_append_u32(out, 1)
-    out = _dynsmf_fixture_append_u64(out, 0)
-    out = _dynsmf_fixture_append_u32(out, 0)
-    out = _dynsmf_fixture_append_u32(out, 0)
-    while out.len() < 128:
-        out.push(0 as u8)
-    out
+@cfg(riscv64)
+fn _dynsmf_fixture_host_arch_byte() -> u8: 4
 
-fn _dynsmf_fixture_outer_smf(pack_bytes: [u8], export_symbol: text) -> [u8]:
-    var out: [u8] = [195 as u8]
-    while out.len() % 8 != 0:
-        out.push(0 as u8)
-    val pack_offset = out.len()
-    out = _dynsmf_fixture_append(out, pack_bytes)
-    val section_table = out.len()
-    out = _dynsmf_fixture_append(out, _dynsmf_fixture_section(1, 5, 0, 1, 16))
-    out = _dynsmf_fixture_append(out, _dynsmf_fixture_section(16, 1, pack_offset, pack_bytes.len(), 8))
-    val symbol_table = out.len()
-    out = _dynsmf_fixture_append(out, _dynsmf_fixture_symbol(1))
-    out.push(0 as u8)
-    var char_index = 0
-    while char_index < export_symbol.len():
-        out.push(char_code(export_symbol.char_at(char_index)) as u8)
-        char_index = char_index + 1
-    out.push(0 as u8)
-    _dynsmf_fixture_append(out, _dynsmf_fixture_header(section_table, symbol_table))
+@cfg(riscv32)
+fn _dynsmf_fixture_host_arch_byte() -> u8: 5
 
-fn dynsmf_admitted_startup_fixture(library_id: text, path: text, source_module: text, abi_version: text, export_symbol: text, default_autoload: bool) -> DynSmfAdmittedStartupFixture:
+@cfg(x86_64)
+fn _dynsmf_fixture_return42_code() -> [i64]:
+    # mov eax, 42; ret
+    [184, 42, 0, 0, 0, 195]
+
+@cfg(arm64)
+fn _dynsmf_fixture_return42_code() -> [i64]:
+    # mov w0, #42; ret (AArch64 little-endian words)
+    [64, 5, 128, 82, 192, 3, 95, 214]
+
+@cfg(x86)
+fn _dynsmf_fixture_return42_code() -> [i64]:
+    # mov eax, 42; ret
+    [184, 42, 0, 0, 0, 195]
+
+@cfg(arm32)
+fn _dynsmf_fixture_return42_code() -> [i64]:
+    # mov r0, #42; bx lr (ARM little-endian words)
+    [42, 0, 160, 227, 30, 255, 47, 225]
+
+@cfg(riscv64)
+fn _dynsmf_fixture_return42_code() -> [i64]:
+    # addi a0, zero, 42; ret (RV64 little-endian words)
+    [19, 5, 160, 2, 103, 128, 0, 0]
+
+@cfg(riscv32)
+fn _dynsmf_fixture_return42_code() -> [i64]:
+    # addi a0, zero, 42; ret (RV32 little-endian words)
+    [19, 5, 160, 2, 103, 128, 0, 0]
+
+fn _dynsmf_fixture_nested_smf_sections(
+        export_symbol: text, section_count: i64) -> [u8]:
+    var writer = SmfWriter.create()
+    val code = _dynsmf_fixture_return42_code()
+    var section_index: i64 = 0
+    while section_index < section_count:
+        writer.add_code_section("code_" + section_index.to_string(), code)
+        section_index = section_index + 1
+    writer.add_symbol(SmfWriterSymbol(
+        name: export_symbol,
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0,
+        value: 0,
+        size: code.len(),
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false
+    ))
+    val built = writer.write()
+    var bytes: [u8] = []
+    match built:
+        case Ok(words):
+            for word in words:
+                bytes.push(word as u8)
+        case Err(_):
+            return []
+    bytes
+
+fn _dynsmf_admitted_startup_fixture_sections(library_id: text, path: text,
+        source_module: text, abi_version: text, export_symbol: text,
+        default_autoload: bool, section_count: i64
+    ) -> DynSmfAdmittedStartupFixture:
     val facet_id = "startup/" + library_id
     val module_id = library_id + ".module"
     val modules = [
@@ -113,12 +131,30 @@ fn dynsmf_admitted_startup_fixture(library_id: text, path: text, source_module: 
             module_abi_hash: "startup-module-abi",
             required_core_public_abi_hash: "startup-core-abi",
             variant_fingerprint: "startup-test",
-            payload: [1 as u8, 2 as u8, 3 as u8]
+            payload: _dynsmf_fixture_nested_smf_sections(
+                export_symbol, section_count)
         )
     ]
-    val pack_bytes = apk_build_pack_v2(modules).bytes
-    val artifact_bytes = _dynsmf_fixture_outer_smf(pack_bytes, export_symbol)
+    val pack_built = apk_build_pack_v2(modules)
+    if not pack_built.ok:
+        return _dynsmf_fixture_empty()
+    val pack_bytes = pack_built.bytes
+    val artifact_built = smf_build_aspect_pack_image(pack_bytes)
+    var artifact_bytes: [u8] = []
+    match artifact_built:
+        case Ok(bytes): artifact_bytes = bytes
+        case Err(_): return _dynsmf_fixture_empty()
+    # smf_build_aspect_pack_image currently carries an x86-64 default header.
+    # The nested writer already emits host arch; make this provider header
+    # target-correct too without changing production writer behavior in this
+    # test-only fixture.
+    val header_offset = artifact_bytes.len() - 128
+    if header_offset < 0 or header_offset + 7 >= artifact_bytes.len():
+        return _dynsmf_fixture_empty()
+    artifact_bytes[header_offset + 7] = _dynsmf_fixture_host_arch_byte()
     val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(artifact_bytes)
+    if not parsed.ok:
+        return _dynsmf_fixture_empty()
     val manifest = [
         DynSmfManifestEntry(
             id: library_id,
@@ -151,6 +187,8 @@ fn dynsmf_admitted_startup_fixture(library_id: text, path: text, source_module: 
         )
     ]
     val built_catalog = aspect_catalog_build(entries)
+    if not built_catalog.ok:
+        return _dynsmf_fixture_empty()
     val artifact = AspectPackArtifactIdentity(
         library_id: library_id,
         path: path,
@@ -173,4 +211,22 @@ fn dynsmf_admitted_startup_fixture(library_id: text, path: text, source_module: 
     )
     DynSmfAdmittedStartupFixture(artifact_bytes: artifact_bytes, manifest: manifest, request: request)
 
+fn dynsmf_admitted_startup_fixture(library_id: text, path: text,
+        source_module: text, abi_version: text, export_symbol: text,
+        default_autoload: bool) -> DynSmfAdmittedStartupFixture:
+    _dynsmf_admitted_startup_fixture_sections(
+        library_id, path, source_module, abi_version, export_symbol,
+        default_autoload, 1)
+
+fn dynsmf_admitted_startup_fixture_sections(library_id: text, path: text,
+        source_module: text, abi_version: text, export_symbol: text,
+        default_autoload: bool, section_count: i64
+    ) -> DynSmfAdmittedStartupFixture:
+    if section_count <= 0 or section_count > 4096:
+        return _dynsmf_fixture_empty()
+    _dynsmf_admitted_startup_fixture_sections(
+        library_id, path, source_module, abi_version, export_symbol,
+        default_autoload, section_count)
+
 export DynSmfAdmittedStartupFixture, dynsmf_admitted_startup_fixture
+export dynsmf_admitted_startup_fixture_sections

@@ -4,11 +4,20 @@
 # root `compiler.loader` package. Newer curated loader consumers should prefer
 # the `compiler.loader.runtime` package and its explicit surface.
 
-extern fn rt_file_exists(path: text) -> bool
 use compiler.loader.jit_instantiator.{JitCacheRecord, JitInstantiator}
+use std.nogc_sync_mut.io_runtime.{file_exists}
 use compiler.loader.compiler_sffi.{TypeInfo, type_to_string}
 use compiler.loader.metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
-use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
+use compiler.loader.unload_ownership.{
+    partition_global_symbols_by_owner, global_symbols_without_names,
+    symbol_matches_owner_path
+}
+use compiler.loader.loader.module_loader_semantic.{
+    _semantic_dependents_from_paths,
+    _semantic_fingerprint_dependents_from_paths,
+    _semantic_cache_is_fresh_from_maps,
+    text_array_push_unique
+}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.obj_taker.{SymbolType}
 use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
@@ -27,51 +36,36 @@ use std.common.aspect_pack.{
     apk_loader_invalidate_catalog_v1, apk_loader_catalog_invalidations_v1,
     apk_unload_facet_v1, apk_activate_startup, apk_loader_last_error,
     _ApkCatalogIndexV1, _apk_index_catalog_v1, _apk_load_facet_indexed_v1,
+    ApkFinalUnpinLeaseV2, apk_loader_owner_identity_v2,
+    apk_facet_prepare_unpin_v2, apk_facet_mark_final_unpin_release_started_v2,
+    apk_facet_commit_final_unpin_v2, apk_facet_abort_final_unpin_v2,
     apk_loader_set_host_offer_v1, _apk_catalog_route_kind_indexed_v1,
     APK_ENTRY_FACET
+}
+use std.common.aspect_dynload_lifecycle_v1.{
+    ASPECT_DYNLOAD_RETIRED_V1,
+    AspectDynloadLifecycleHandleV1, AspectDynloadExecutionLeaseV1,
+    aspect_dynload_lifecycle_create_v1, aspect_dynload_callback_begin_v1,
+    aspect_dynload_lifecycle_snapshot_v1, aspect_dynload_unload_v1,
+    aspect_dynload_lease_complete_v1
+}
+use os.smf.dynsmf_owned_v2.{
+    DynSmfOwnedHandleV2, DynSmfOwnedQueryHandleV2,
+    DynSmfOwnedCloseReservationV3, dynsmf_owned_query_v2,
+    _dynsmf_owned_reserve_close_for_loader_v3,
+    _dynsmf_owned_commit_close_for_loader_v3,
+    dynsmf_owned_release_query_v3, dynsmf_owned_mapping_observe_v2
+}
+use os.smf.smf_dynlib.{
+    DynSmfReleaseAttemptV3,
+    _smf_dynlib_release_attempt_for_loader_v3,
+    _smf_dynlib_release_for_handle_observe_for_loader_v3,
+    _smf_dynlib_ack_release_for_loader_v3
 }
 use common.plugin.iface_id.{IfaceId, ParamHeader}
 use common.plugin.negotiation.{HostOfferV1}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.io_runtime.{file_read_bytes}
-
-fn _path_tag(path: text) -> text:
-    val base = path.split("/").last() ?? path
-    val stem = base.split(".").first() ?? base
-    if stem.contains("_"):
-        return stem.split("_").first() ?? stem
-    stem
-
-fn _symbol_matches_path(symbol: text, path: text) -> bool:
-    val tag = _path_tag(path)
-    if tag == "":
-        return false
-    symbol.starts_with(tag + "_") or symbol.contains("_" + tag + "_")
-
-fn _name_in(list: [text], name: text) -> bool:
-    for n in list:
-        if n == name:
-            return true
-    false
-
-fn _push_unique(list: [text], name: text) -> [text]:
-    if _name_in(list, name):
-        return list
-    var out = list
-    out.push(name)
-    out
-
-fn _any_name_in(left: [text], right: [text]) -> bool:
-    for item in left:
-        if _name_in(right, item):
-            return true
-    false
-
-fn _metadata_instantiation_symbols(self: ModuleLoader, path: text) -> [text]:
-    loaded_metadata_instantiation_symbol_names(self.jit.loaded_metadata, path)
-
-fn _jit_cache_owner(self: ModuleLoader, sym_name: text, rec_cache: JitCacheRecord) -> text:
-    rec_cache.owner
 
 fn _jit_cached_loaded_symbol(sym_name: text, rec_cache: JitCacheRecord) -> LoadedSymbol:
     val code = rec_cache.code
@@ -87,63 +81,22 @@ fn _jit_cached_loaded_symbol(sym_name: text, rec_cache: JitCacheRecord) -> Loade
 
 fn _collect_unload_jit_symbols(self: ModuleLoader, path: text) -> [text]:
     var remove_jit: [text] = []
-    for sym_name in _metadata_instantiation_symbols(self, path):
-        if not _name_in(remove_jit, sym_name):
+    var remove_jit_set: Dict<text, bool> = {}
+    for sym_name in loaded_metadata_instantiation_symbol_names(
+            self.jit.loaded_metadata, path):
+        if not remove_jit_set.has(sym_name):
             remove_jit.push(sym_name)
+            remove_jit_set[sym_name] = true
 
     for sym_name in self.jit.jit_cache.keys():
         val rec_cache = self.jit.jit_cache[sym_name]
-        val owner = _jit_cache_owner(self, sym_name, rec_cache)
+        val owner = rec_cache.owner
 
-        if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
-            if not _name_in(remove_jit, sym_name):
+        if owner == path or (owner == "__jit__" and symbol_matches_owner_path(sym_name, path)):
+            if not remove_jit_set.has(sym_name):
                 remove_jit.push(sym_name)
+                remove_jit_set[sym_name] = true
     remove_jit
-
-fn _moduleloader_semantic_dependents(self: ModuleLoader, changed_key: text) -> [text]:
-    var changed_keys: [text] = [changed_key]
-    var affected: [text] = []
-    var progressed = true
-    while progressed:
-        progressed = false
-        for path in self.modules.keys():
-            if _name_in(affected, path):
-                continue
-            val exports = if self.semantic_exports.has(path):
-                self.semantic_exports[path]
-            else:
-                []
-            val deps = if self.semantic_dependencies.has(path):
-                self.semantic_dependencies[path]
-            else:
-                []
-            if _any_name_in(exports, changed_keys) or _any_name_in(deps, changed_keys):
-                affected = _push_unique(affected, path)
-                changed_keys = _push_unique(changed_keys, path)
-                for key in exports:
-                    changed_keys = _push_unique(changed_keys, key)
-                progressed = true
-    affected
-
-fn _moduleloader_semantic_fingerprint_dependents(self: ModuleLoader, changed_path: text) -> [text]:
-    var changed_paths: [text] = [changed_path]
-    var affected: [text] = []
-    var progressed = true
-    while progressed:
-        progressed = false
-        for path in self.dependency_semantic_fingerprints.keys():
-            if _name_in(affected, path):
-                continue
-            val deps = self.dependency_semantic_fingerprints[path]
-            var depends_on_changed = false
-            for candidate in changed_paths:
-                if deps.has(candidate):
-                    depends_on_changed = true
-            if depends_on_changed:
-                affected = _push_unique(affected, path)
-                changed_paths = _push_unique(changed_paths, path)
-                progressed = true
-    affected
 
 enum LoaderSymbolType:
     Function
@@ -222,12 +175,79 @@ struct _ModuleAspectCatalogSnapshotV1:
     index: _ApkCatalogIndexV1
 
 val MODULE_ASPECT_MAX_RETAINED_SNAPSHOTS_V1: i64 = 64
+val MODULE_ASPECT_MAX_BOUND_ROWS_V3: i64 = 16384
+val MODULE_ASPECT_MAX_FINAL_UNPIN_ROWS_V3: i64 = 4096
+val MODULE_ASPECT_MAX_EXECUTION_ROWS_V3: i64 = 4096
+
+# V3 catalog admission contains only an already-admitted dynSMF owner and the
+# library identity selected by product configuration. `load_bound_facet_v3`
+# revalidates it through the canonical owner; a copied value cannot mint trust.
+struct ModuleDynSmfCatalogRefV3:
+    dynsmf_owner: DynSmfOwnedHandleV2
+    library_id: text
+
+struct AspectFinalUnpinHandleV3:
+    owner_identity: i64
+    opaque_handle: i64
+
+# Loader-scoped coordinate for one retained execution lease. The lifecycle
+# lease itself stays in the private owner row and cannot be supplied by a
+# caller during drain completion.
+struct AspectExecutionHandleV3:
+    owner_identity: i64
+    opaque_handle: i64
+
+class AspectFinalUnpinResultV3:
+    ok: bool
+    reason: text
+    handle: AspectFinalUnpinHandleV3
+    released: bool
+    retryable: bool
+    native_attempted: bool
+    acknowledged: bool
+
+class _ModuleAspectBoundRowV3:
+    binding_key: text
+    query: DynSmfOwnedQueryHandleV2
+    dynsmf_owner_identity: i64
+    library_id: text
+    facet_key: text
+    generation: i64
+    lifecycle: AspectDynloadLifecycleHandleV1
+    dynsmf_released: bool
+    aspect_released: bool
+    active: bool
+
+class _ModuleAspectFinalUnpinRowV3:
+    handle_id: i64
+    binding_key: text
+    facet_lease: ApkFinalUnpinLeaseV2
+    lifecycle: AspectDynloadLifecycleHandleV1
+    close_reservation: DynSmfOwnedCloseReservationV3
+    native_handle: i64
+    attempt: DynSmfReleaseAttemptV3
+    release_started: bool
+    in_flight: bool
+    physical_complete: bool
+    dynsmf_committed: bool
+    aspect_committed: bool
+    released: bool
+    retryable: bool
+    acknowledged: bool
+
+class _ModuleAspectExecutionRowV3:
+    handle_id: i64
+    binding_key: text
+    lifecycle: AspectDynloadLifecycleHandleV1
+    lease: AspectDynloadExecutionLeaseV1
+    active: bool
 
 # Private immutable content-addressed publication owners. ModuleLoader keeps
 # its established public fields/layout; this registry correlates each digest
 # with the exact validated bytes and index used by the hot route.
 var _module_aspect_catalog_snapshots: Dict<text, _ModuleAspectCatalogSnapshotV1> = {}
 var _module_aspect_catalog_snapshot_refs: Dict<text, i64> = {}
+var _module_aspect_catalog_snapshot_count: i64 = 0
 
 fn _module_aspect_snapshot_retain(snapshot: _ModuleAspectCatalogSnapshotV1):
     val digest = snapshot.digest
@@ -237,6 +257,7 @@ fn _module_aspect_snapshot_retain(snapshot: _ModuleAspectCatalogSnapshotV1):
         _module_aspect_catalog_snapshot_refs[digest] = 1
     if not _module_aspect_catalog_snapshots.has(digest):
         _module_aspect_catalog_snapshots[digest] = snapshot
+        _module_aspect_catalog_snapshot_count = _module_aspect_catalog_snapshot_count + 1
 
 fn _module_aspect_snapshot_release(digest: text):
     if not _module_aspect_catalog_snapshot_refs.has(digest):
@@ -244,14 +265,16 @@ fn _module_aspect_snapshot_release(digest: text):
     val refs = _module_aspect_catalog_snapshot_refs[digest]
     if refs <= 1:
         _module_aspect_catalog_snapshot_refs = _module_aspect_catalog_snapshot_refs.remove(digest)
-        _module_aspect_catalog_snapshots = _module_aspect_catalog_snapshots.remove(digest)
+        if _module_aspect_catalog_snapshots.has(digest):
+            _module_aspect_catalog_snapshots = _module_aspect_catalog_snapshots.remove(digest)
+            _module_aspect_catalog_snapshot_count = _module_aspect_catalog_snapshot_count - 1
     else:
         _module_aspect_catalog_snapshot_refs[digest] = refs - 1
 
 fn _module_aspect_snapshot_can_retain(digest: text, replaced_digest: text) -> bool:
     if _module_aspect_catalog_snapshots.has(digest):
         return true
-    if _module_aspect_catalog_snapshots.keys().len() <
+    if _module_aspect_catalog_snapshot_count <
             MODULE_ASPECT_MAX_RETAINED_SNAPSHOTS_V1:
         return true
     # A replacement may reuse the outgoing slot only when this loader owns
@@ -275,7 +298,7 @@ fn moduleloader_retained_aspect_snapshot_count_v1() -> i64:
         _module_aspect_gate_key_v1(0, "snapshot-count"))
     if not admission.acquired:
         return -1
-    val count = _module_aspect_catalog_snapshots.keys().len() as i64
+    val count = _module_aspect_catalog_snapshot_count
     if not _module_aspect_gate_exit_v1(admission):
         return -1
     count
@@ -292,13 +315,19 @@ class _ModuleAspectOwnerV1:
     catalog_digest_cell: Dict<i64, text>
     catalog_generation: i64
     catalog_digest_computations: i64
+    # V3 rows are owned here, not by a public facet reference or a second
+    # loader object. Opaque handles resolve these exact private coordinates.
+    bound_rows_v3: [_ModuleAspectBoundRowV3]
+    execution_rows_v3: [_ModuleAspectExecutionRowV3]
+    final_unpin_rows_v3: [_ModuleAspectFinalUnpinRowV3]
 
 fn _module_aspect_owner_new_v1() -> _ModuleAspectOwnerV1:
     _ModuleAspectOwnerV1(
         identity: aspect_lifecycle_identity_new_v1(),
         loader_cell: {}, pack_paths: {}, catalog_cell: {},
         catalog_digest_cell: {}, catalog_generation: 0,
-        catalog_digest_computations: 0)
+        catalog_digest_computations: 0,
+        bound_rows_v3: [], execution_rows_v3: [], final_unpin_rows_v3: [])
 
 struct ModuleLoader:
     config: ModuleLoaderConfig
@@ -340,6 +369,9 @@ class ModuleFacetRefV1:
     load: ApkFacetLoadV1
     owner_handle: i64
     active: bool
+    # Empty for all legacy/unbound acquisitions. V3 accepts only a key it
+    # created while loading its admitted dynSMF query.
+    bound_key_v3: text
 
     fn is_live() -> bool:
         if self.owner_handle < 0:
@@ -363,6 +395,10 @@ class ModuleFacetRefV1:
         live
 
     me release() -> bool:
+        # A V3 reference owns a paired dynSMF query. Only its ModuleLoader
+        # owner can drain both pins atomically through release_bound_facet_v3.
+        if self.bound_key_v3 != "":
+            return false
         val admission = aspect_lifecycle_gate_enter_v1(
             _module_aspect_gate_key_v1(
                 self.owner_handle, "facet-ref-release", self.load.facet_key))
@@ -386,8 +422,10 @@ fn _moduleloader_facet_ref(load: ApkFacetLoadV1, owner_handle: i64) -> ModuleFac
     if load.ok and load.found and not pinned:
         val failed = _moduleloader_aspect_result(false, load.facet_key,
             "APK_FACET_PIN_FAILED", "facet binding could not be pinned")
-        return ModuleFacetRefV1(load: failed, owner_handle: owner_handle, active: false)
-    ModuleFacetRefV1(load: load, owner_handle: owner_handle, active: pinned)
+        return ModuleFacetRefV1(load: failed, owner_handle: owner_handle, active: false,
+            bound_key_v3: "")
+    ModuleFacetRefV1(load: load, owner_handle: owner_handle, active: pinned,
+        bound_key_v3: "")
 
 impl ModuleLoader:
     static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
@@ -398,9 +436,9 @@ impl ModuleLoader:
 
     fn stats() -> LoaderStats:
         LoaderStats(
-            module_count: self.modules.keys().len() as i64,
-            symbol_count: self.global_symbols.keys().len() as i64,
-            jit_stats: {"cached_count": self.jit.jit_cache.keys().len() as i64},
+            module_count: self.modules.len(),
+            symbol_count: self.global_symbols.len(),
+            jit_stats: {"cached_count": self.jit.stats().cached_count},
             cache_stats: {"template_count": 0, "instance_count": 0}
         )
 
@@ -575,6 +613,467 @@ impl ModuleLoader:
         _moduleloader_facet_ref(_apk_load_facet_indexed_v1(
             owner, snapshot.bytes, snapshot.index, facet_key), owner)
 
+    me load_bound_facet_v3(catalog_ref: ModuleDynSmfCatalogRefV3,
+            facet_key: text) -> ModuleFacetRefV1:
+        """Acquire an aspect facet and its dynSMF query as one loader binding.
+
+        Lock ordering is frozen as A(loader identity) -> B(library identity)
+        -> C(facet identity).  The global lifecycle gate is the concrete lock;
+        the ordered key makes every competing V3 acquisition use the same
+        order without nested gate acquisition.
+        """
+        if catalog_ref.library_id == "" or facet_key == "":
+            return _moduleloader_facet_ref(_moduleloader_aspect_result(
+                false, facet_key, "DYNSMF_V3_ARGUMENT", "bound facet arguments are empty"), -1)
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(self.aspect_owner.identity,
+                "v3-A-B-C-bound", catalog_ref.library_id + "\0" + facet_key))
+        if not admission.acquired:
+            return _moduleloader_facet_ref(_moduleloader_aspect_result(
+                false, facet_key, "DYNSMF_V3_GATE", "bound facet gate unavailable"), -1)
+        # Acquire the existing aspect pin first. If dynSMF admission then
+        # refuses, release that pin before returning; no unattached query is
+        # ever leaked by this path.
+        var reference = self._aspect_facet_visible_owned(facet_key)
+        if not reference.active or not reference.load.found:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return reference
+        val queried = dynsmf_owned_query_v2(
+            catalog_ref.dynsmf_owner, catalog_ref.library_id)
+        if queried.query.opaque_handle <= 0:
+            _ = apk_facet_unpin_v1(reference.owner_handle, facet_key)
+            reference.active = false
+            _ = _module_aspect_gate_exit_v1(admission)
+            return _moduleloader_facet_ref(_moduleloader_aspect_result(
+                false, facet_key, "DYNSMF_V3_QUERY", queried.reason), -1)
+        val observed = dynsmf_owned_mapping_observe_v2(queried.query)
+        if (not observed.ok or observed.facet_id != facet_key or
+                observed.library_id != catalog_ref.library_id):
+            _ = dynsmf_owned_release_query_v3(queried.query)
+            _ = apk_facet_unpin_v1(reference.owner_handle, facet_key)
+            reference.active = false
+            _ = _module_aspect_gate_exit_v1(admission)
+            return _moduleloader_facet_ref(_moduleloader_aspect_result(
+                false, facet_key, "DYNSMF_V3_BINDING", "dynsmf binding does not match facet"), -1)
+        val lifecycle = aspect_dynload_lifecycle_create_v1(
+            facet_key, reference.load.generation, 4096, false)
+        if lifecycle.is_err():
+            _ = dynsmf_owned_release_query_v3(queried.query)
+            _ = apk_facet_unpin_v1(reference.owner_handle, facet_key)
+            reference.active = false
+            _ = _module_aspect_gate_exit_v1(admission)
+            return _moduleloader_facet_ref(_moduleloader_aspect_result(
+                false, facet_key, "DYNSMF_V3_LIFECYCLE",
+                lifecycle.unwrap_err()), -1)
+        val binding_key = self.aspect_owner.identity.to_string() + "\0" +
+            queried.query.opaque_handle.to_string() + "\0" + facet_key + "\0" +
+            reference.load.generation.to_string()
+        if self.aspect_owner.bound_rows_v3.len() >=
+                MODULE_ASPECT_MAX_BOUND_ROWS_V3:
+            _ = dynsmf_owned_release_query_v3(queried.query)
+            _ = apk_facet_unpin_v1(reference.owner_handle, facet_key)
+            reference.active = false
+            _ = _module_aspect_gate_exit_v1(admission)
+            return _moduleloader_facet_ref(_moduleloader_aspect_result(
+                false, facet_key, "DYNSMF_V3_CAPACITY",
+                "bound facet owner capacity exhausted"), -1)
+        self.aspect_owner.bound_rows_v3 = self.aspect_owner.bound_rows_v3.push(
+            _ModuleAspectBoundRowV3(binding_key: binding_key,
+                query: queried.query,
+                dynsmf_owner_identity: observed.owner_identity,
+                library_id: observed.library_id,
+                facet_key: facet_key, generation: reference.load.generation,
+                lifecycle: lifecycle.unwrap(),
+                dynsmf_released: false, aspect_released: false,
+                active: true))
+        reference.bound_key_v3 = binding_key
+        if not _module_aspect_gate_exit_v1(admission):
+            _ = dynsmf_owned_release_query_v3(queried.query)
+            _ = apk_facet_unpin_v1(reference.owner_handle, facet_key)
+            reference.active = false
+            return _moduleloader_facet_ref(_moduleloader_aspect_result(
+                false, facet_key, "DYNSMF_V3_GATE", "bound facet gate exit failed"), -1)
+        reference
+
+    fn begin_bound_execution_v3(reference: ModuleFacetRefV1
+        ) -> Result<AspectExecutionHandleV3, text>:
+        """Retain one real callback lease in this loader's private owner.
+
+        Final association changes the lifecycle to Quiescing and prevents any
+        later begin. Already-issued handles remain completable so the final
+        physical release can wait for an actual in-flight drain.
+        """
+        if reference.bound_key_v3 == "" or not reference.active:
+            return Err("V3 execution requires a live bound facet reference")
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(self.aspect_owner.identity,
+                "v3-execution-begin", reference.bound_key_v3))
+        if not admission.acquired:
+            return Err("V3 execution begin gate unavailable")
+        if self.aspect_owner.execution_rows_v3.len() >=
+                MODULE_ASPECT_MAX_EXECUTION_ROWS_V3:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 execution owner capacity exhausted")
+        var bound_index: i64 = -1
+        var index: i64 = 0
+        while index < self.aspect_owner.bound_rows_v3.len():
+            val row = self.aspect_owner.bound_rows_v3[index]
+            if (row.binding_key == reference.bound_key_v3 and row.active and
+                    row.facet_key == reference.load.facet_key and
+                    row.generation == reference.load.generation):
+                bound_index = index
+            index = index + 1
+        if bound_index < 0:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 execution binding is unknown or inactive")
+        val bound = self.aspect_owner.bound_rows_v3[bound_index]
+        val issued = aspect_dynload_callback_begin_v1(bound.lifecycle)
+        if issued.is_err():
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err(issued.unwrap_err())
+        val handle_id = self.aspect_owner.execution_rows_v3.len() + 1
+        self.aspect_owner.execution_rows_v3 =
+            self.aspect_owner.execution_rows_v3.push(
+                _ModuleAspectExecutionRowV3(handle_id: handle_id,
+                    binding_key: bound.binding_key,
+                    lifecycle: bound.lifecycle, lease: issued.unwrap(),
+                    active: true))
+        if not _module_aspect_gate_exit_v1(admission):
+            return Err("V3 execution begin gate exit failed")
+        Ok(AspectExecutionHandleV3(
+            owner_identity: self.aspect_owner.identity,
+            opaque_handle: handle_id))
+
+    me complete_bound_execution_v3(handle: AspectExecutionHandleV3) -> bool:
+        """Complete one exact retained lease, including after Closing."""
+        if handle.owner_identity != self.aspect_owner.identity or
+                handle.opaque_handle <= 0 or
+                handle.opaque_handle > self.aspect_owner.execution_rows_v3.len():
+            return false
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(self.aspect_owner.identity,
+                "v3-execution-complete", handle.opaque_handle.to_string()))
+        if not admission.acquired:
+            return false
+        var row = self.aspect_owner.execution_rows_v3[handle.opaque_handle - 1]
+        if row.handle_id != handle.opaque_handle or not row.active:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return false
+        val completed = aspect_dynload_lease_complete_v1(
+            row.lifecycle, row.lease)
+        if completed.is_err():
+            _ = _module_aspect_gate_exit_v1(admission)
+            return false
+        row.active = false
+        self.aspect_owner.execution_rows_v3[handle.opaque_handle - 1] = row
+        _module_aspect_gate_exit_v1(admission)
+
+    me release_bound_facet_v3(reference: ModuleFacetRefV1) -> bool:
+        """Drain one V3 query and its matching aspect pin together."""
+        if reference.bound_key_v3 == "" or not reference.active:
+            return false
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(self.aspect_owner.identity,
+                "v3-A-B-C-bound-release", reference.bound_key_v3))
+        if not admission.acquired:
+            return false
+        var bound_index: i64 = -1
+        var index: i64 = 0
+        while index < self.aspect_owner.bound_rows_v3.len():
+            if (self.aspect_owner.bound_rows_v3[index].binding_key ==
+                    reference.bound_key_v3 and
+                    self.aspect_owner.bound_rows_v3[index].active):
+                bound_index = index
+            index = index + 1
+        if bound_index < 0:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return false
+        var mutable_bound = self.aspect_owner.bound_rows_v3[bound_index]
+        if not mutable_bound.dynsmf_released:
+            val drained = dynsmf_owned_release_query_v3(mutable_bound.query)
+            if not drained.ok:
+                _ = _module_aspect_gate_exit_v1(admission)
+                return false
+            mutable_bound.dynsmf_released = true
+            self.aspect_owner.bound_rows_v3[bound_index] = mutable_bound
+        if not mutable_bound.aspect_released:
+            if not apk_facet_unpin_v1(
+                    reference.owner_handle, mutable_bound.facet_key):
+                _ = _module_aspect_gate_exit_v1(admission)
+                return false
+            mutable_bound.aspect_released = true
+        mutable_bound.active = false
+        self.aspect_owner.bound_rows_v3[bound_index] = mutable_bound
+        reference.active = false
+        _module_aspect_gate_exit_v1(admission)
+
+    fn associate_final_unpin_v3(reference: ModuleFacetRefV1
+        ) -> Result<AspectFinalUnpinHandleV3, text>:
+        if reference.bound_key_v3 == "" or not reference.active or
+                reference.owner_handle < 0:
+            return Err("V3 final unpin requires a loader-owned bound facet reference")
+        val admission = aspect_lifecycle_gate_enter_v1(
+            _module_aspect_gate_key_v1(self.aspect_owner.identity,
+                "v3-A-B-C-associate", reference.bound_key_v3))
+        if not admission.acquired:
+            return Err("V3 final unpin gate unavailable")
+        var bound_index: i64 = -1
+        var index: i64 = 0
+        while index < self.aspect_owner.bound_rows_v3.len():
+            val row = self.aspect_owner.bound_rows_v3[index]
+            if row.binding_key == reference.bound_key_v3 and row.active:
+                bound_index = index
+            index = index + 1
+        if bound_index < 0:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 final unpin binding is unknown or inactive")
+        val bound = self.aspect_owner.bound_rows_v3[bound_index]
+        if (not self.aspect_owner.loader_cell.has(0) or
+                reference.load.facet_key != bound.facet_key or
+                reference.load.generation != bound.generation or
+                reference.owner_handle != self.aspect_owner.loader_cell[0]):
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 final unpin reference coordinates do not match owner binding")
+        val observed = dynsmf_owned_mapping_observe_v2(bound.query)
+        if (not observed.ok or
+                observed.owner_identity != bound.dynsmf_owner_identity or
+                observed.library_id != bound.library_id or
+                observed.facet_id != bound.facet_key):
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 final unpin dynsmf owner association is stale")
+        if self.aspect_owner.final_unpin_rows_v3.len() >=
+                MODULE_ASPECT_MAX_FINAL_UNPIN_ROWS_V3:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 final unpin owner capacity exhausted")
+        # Closing is published before any drain or native gate drop. New query
+        # acquisition is now refused by the dynSMF owner. Existing non-final
+        # query pins remain releasable and the caller retries association once
+        # this library reaches its one retained final pin.
+        val close = _dynsmf_owned_reserve_close_for_loader_v3(bound.query)
+        if not close.ok:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err(close.reason)
+        val unloaded = apk_unload_facet_v1(reference.owner_handle, bound.facet_key)
+        if not unloaded.quiescing:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 final unpin could not quiesce facet")
+        if unloaded.refcount != 1:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 final unpin waits for all non-final aspect pins")
+        val facet_lease = apk_facet_prepare_unpin_v2(
+            apk_loader_owner_identity_v2(reference.owner_handle),
+            reference.owner_handle, bound.facet_key, bound.generation)
+        if not facet_lease.ok or not facet_lease.final_reserved:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err("V3 final unpin reservation refused: " + facet_lease.error_code)
+        val retired = aspect_dynload_unload_v1(bound.lifecycle)
+        if retired.is_err():
+            _ = apk_facet_abort_final_unpin_v2(facet_lease.lease)
+            _ = _module_aspect_gate_exit_v1(admission)
+            return Err(retired.unwrap_err())
+        val handle_id = self.aspect_owner.final_unpin_rows_v3.len() + 1
+        self.aspect_owner.final_unpin_rows_v3 =
+            self.aspect_owner.final_unpin_rows_v3.push(_ModuleAspectFinalUnpinRowV3(
+                handle_id: handle_id, binding_key: bound.binding_key,
+                facet_lease: facet_lease.lease, lifecycle: bound.lifecycle,
+                close_reservation: close.reservation, native_handle: close.native_handle,
+                attempt: DynSmfReleaseAttemptV3(opaque_attempt: 0),
+                release_started: false, in_flight: false,
+                physical_complete: false, dynsmf_committed: false,
+                aspect_committed: false, released: false,
+                retryable: false, acknowledged: false))
+        var mutable_bound = bound
+        mutable_bound.active = false
+        self.aspect_owner.bound_rows_v3[bound_index] = mutable_bound
+        # The final reservation now owns this last aspect pin. The public
+        # reference remains inspectable but cannot reach the legacy V1 unpin
+        # escape hatch while V3 physical/logical completion is pending.
+        reference.active = false
+        if not _module_aspect_gate_exit_v1(admission):
+            return Err("V3 final unpin association gate exit failed")
+        Ok(AspectFinalUnpinHandleV3(
+            owner_identity: self.aspect_owner.identity,
+            opaque_handle: handle_id))
+
+    me _release_final_unpin_v3(handle: AspectFinalUnpinHandleV3,
+            explicit_retry: bool) -> AspectFinalUnpinResultV3:
+        if handle.owner_identity != self.aspect_owner.identity:
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: "V3 final unpin handle owner mismatch",
+                handle: handle, released: false, retryable: false,
+                native_attempted: false, acknowledged: false)
+        if handle.opaque_handle <= 0 or
+                handle.opaque_handle > self.aspect_owner.final_unpin_rows_v3.len():
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: "V3 final unpin handle unknown",
+                handle: handle, released: false, retryable: false,
+                native_attempted: false, acknowledged: false)
+        val admission = aspect_lifecycle_gate_enter_v1(_module_aspect_gate_key_v1(
+            self.aspect_owner.identity, "v3-A-B-C-release", handle.opaque_handle.to_string()))
+        if not admission.acquired:
+            return AspectFinalUnpinResultV3(ok: false, reason: "V3 final unpin gate unavailable",
+                handle: handle, released: false, retryable: true,
+                native_attempted: false, acknowledged: false)
+        var row = self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1]
+        var logical_gate = admission
+        if row.handle_id != handle.opaque_handle:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return AspectFinalUnpinResultV3(ok: false,
+                reason: "V3 final unpin private row mismatch",
+                handle: handle, released: false, retryable: false,
+                native_attempted: false, acknowledged: false)
+        if row.released:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return AspectFinalUnpinResultV3(ok: true, reason: "V3 final unpin already released",
+                handle: handle, released: true, retryable: false,
+                native_attempted: false, acknowledged: row.acknowledged)
+        if explicit_retry and not row.retryable and not row.in_flight and
+                not row.physical_complete:
+            _ = _module_aspect_gate_exit_v1(admission)
+            return AspectFinalUnpinResultV3(ok: false, reason: "V3 retry is not ready",
+                handle: handle, released: false, retryable: false,
+                native_attempted: false, acknowledged: false)
+
+        # Recover an owner-retained completion when the elected caller could
+        # not reacquire the lifecycle gate after native dispatch.
+        if row.in_flight:
+            val observed = _smf_dynlib_release_for_handle_observe_for_loader_v3(
+                row.native_handle)
+            if observed.attempt.opaque_attempt <= 0:
+                _ = _module_aspect_gate_exit_v1(admission)
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: "V3 physical release remains in flight",
+                    handle: handle, released: false, retryable: true,
+                    native_attempted: false, acknowledged: false)
+            row.attempt = observed.attempt
+            row.in_flight = false
+            row.physical_complete = observed.physical_complete
+            row.retryable = observed.retryable
+            self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1] = row
+
+        var native_attempted = false
+        if not row.physical_complete:
+            val lifecycle = aspect_dynload_lifecycle_snapshot_v1(row.lifecycle)
+            if lifecycle.is_err() or lifecycle.unwrap().state !=
+                    ASPECT_DYNLOAD_RETIRED_V1 or
+                    lifecycle.unwrap().outstanding_count != 0:
+                _ = _module_aspect_gate_exit_v1(admission)
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: "V3 execution lifecycle remains live",
+                    handle: handle, released: false, retryable: false,
+                    native_attempted: false, acknowledged: false)
+            if row.retryable and not explicit_retry:
+                _ = _module_aspect_gate_exit_v1(admission)
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: "V3 physical failure requires explicit retry",
+                    handle: handle, released: false, retryable: true,
+                    native_attempted: false, acknowledged: false)
+            if not row.release_started:
+                val started = apk_facet_mark_final_unpin_release_started_v2(
+                    row.facet_lease)
+                if not started.ok or not started.release_started:
+                    _ = _module_aspect_gate_exit_v1(admission)
+                    return AspectFinalUnpinResultV3(ok: false,
+                        reason: started.error_code,
+                        handle: handle, released: false, retryable: false,
+                        native_attempted: false, acknowledged: false)
+                row.release_started = true
+            row.in_flight = true
+            row.retryable = false
+            self.aspect_owner.final_unpin_rows_v3[handle.opaque_handle - 1] = row
+            if not _module_aspect_gate_exit_v1(admission):
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: "V3 gate exit failed",
+                    handle: handle, released: false, retryable: true,
+                    native_attempted: false, acknowledged: false)
+
+            # Native dispatch is serialized by the physical owner and occurs
+            # only after the lifecycle gate is released.
+            val observed = _smf_dynlib_release_attempt_for_loader_v3(
+                row.native_handle)
+            native_attempted = true
+            val completion_gate = aspect_lifecycle_gate_enter_v1(
+                _module_aspect_gate_key_v1(self.aspect_owner.identity,
+                    "v3-A-B-C-complete", handle.opaque_handle.to_string()))
+            if not completion_gate.acquired:
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: "V3 completion gate unavailable",
+                    handle: handle, released: false, retryable: true,
+                    native_attempted: true, acknowledged: false)
+            logical_gate = completion_gate
+            row = self.aspect_owner.final_unpin_rows_v3[
+                handle.opaque_handle - 1]
+            if observed.attempt.opaque_attempt <= 0:
+                row.in_flight = false
+                row.retryable = observed.retryable
+                self.aspect_owner.final_unpin_rows_v3[
+                    handle.opaque_handle - 1] = row
+                _ = _module_aspect_gate_exit_v1(logical_gate)
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: observed.reason, handle: handle, released: false,
+                    retryable: observed.retryable, native_attempted: true,
+                    acknowledged: false)
+            row.attempt = observed.attempt
+            row.in_flight = false
+            row.physical_complete = observed.physical_complete
+            row.retryable = observed.retryable
+            self.aspect_owner.final_unpin_rows_v3[
+                handle.opaque_handle - 1] = row
+            if not row.physical_complete:
+                _ = _module_aspect_gate_exit_v1(logical_gate)
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: observed.reason, handle: handle, released: false,
+                    retryable: row.retryable, native_attempted: true,
+                    acknowledged: false)
+        if not row.dynsmf_committed:
+            val committed = _dynsmf_owned_commit_close_for_loader_v3(
+                row.close_reservation, row.attempt)
+            if not committed.committed:
+                row.retryable = true
+                self.aspect_owner.final_unpin_rows_v3[
+                    handle.opaque_handle - 1] = row
+                _ = _module_aspect_gate_exit_v1(logical_gate)
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: committed.reason, handle: handle,
+                    released: false, retryable: true,
+                    native_attempted: native_attempted, acknowledged: false)
+            row.dynsmf_committed = true
+        if not row.aspect_committed:
+            val aspect = apk_facet_commit_final_unpin_v2(row.facet_lease)
+            if not aspect.ok or not aspect.committed:
+                row.retryable = true
+                self.aspect_owner.final_unpin_rows_v3[
+                    handle.opaque_handle - 1] = row
+                _ = _module_aspect_gate_exit_v1(logical_gate)
+                return AspectFinalUnpinResultV3(ok: false,
+                    reason: aspect.error_code, handle: handle,
+                    released: false, retryable: true,
+                    native_attempted: native_attempted, acknowledged: false)
+            row.aspect_committed = true
+        row.acknowledged = _smf_dynlib_ack_release_for_loader_v3(row.attempt)
+        row.released = row.acknowledged
+        row.retryable = not row.released
+        self.aspect_owner.final_unpin_rows_v3[
+            handle.opaque_handle - 1] = row
+        _ = _module_aspect_gate_exit_v1(logical_gate)
+        AspectFinalUnpinResultV3(ok: row.released,
+            reason: if row.released:
+                "V3 final unpin released"
+            else:
+                "V3 native ack refused",
+            handle: handle, released: row.released,
+            retryable: row.retryable,
+            native_attempted: native_attempted,
+            acknowledged: row.acknowledged)
+
+    me release_final_unpin_v3(handle: AspectFinalUnpinHandleV3
+        ) -> AspectFinalUnpinResultV3:
+        self._release_final_unpin_v3(handle, false)
+
+    me retry_final_unpin_v3(handle: AspectFinalUnpinHandleV3
+        ) -> AspectFinalUnpinResultV3:
+        self._release_final_unpin_v3(handle, true)
+
     fn unload_aspect_facet(facet_key: text) -> ApkUnloadResultV1:
         """Owner-authoritative facet unload.
 
@@ -730,7 +1229,7 @@ impl ModuleLoader:
             if not self.module_intents.has(path) or self.module_intents[path] != requested_intent:
                 return LoadResult.Error(message: "module already loaded with a different intent: " + path)
             return LoadResult.AlreadyLoaded(module: self.modules[path])
-        if not rt_file_exists(path):
+        if not file_exists(path):
             return LoadResult.Error(message: "module not found: " + path)
 
         match intent:
@@ -863,7 +1362,7 @@ impl ModuleLoader:
                     val metadata_result = self.jit.load_smf_metadata(path)
                     match metadata_result:
                         case Err(err):
-                            if symbols.keys().len() == 0:
+                            if symbols.is_empty():
                                 return LoadResult.Error(message: err)
                         case Ok(_):
                             pass
@@ -933,13 +1432,14 @@ impl ModuleLoader:
         for sym_name in remove_jit:
             self.jit.drop_cached_symbol(sym_name)
 
-        val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
-        val removed_symbols = owned_symbols + remove_jit
-        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
+        val (_owned_symbols, globals_without_owned) =
+            partition_global_symbols_by_owner(self.global_symbols, path)
+        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> =
+            global_symbols_without_names(globals_without_owned, remove_jit)
 
         for sym_name in self.jit.jit_cache.keys():
             val rec_cache = self.jit.jit_cache[sym_name]
-            val mapped_owner = _jit_cache_owner(self, sym_name, rec_cache)
+            val mapped_owner = rec_cache.owner
             rebuilt_globals[sym_name] = (mapped_owner, _jit_cached_loaded_symbol(sym_name, rec_cache))
 
         self.global_symbols = rebuilt_globals
@@ -957,12 +1457,12 @@ impl ModuleLoader:
     me record_semantic_export(path: text, key: text):
         if not self.semantic_exports.has(path):
             self.semantic_exports[path] = []
-        self.semantic_exports[path] = _push_unique(self.semantic_exports[path], key)
+        self.semantic_exports[path] = text_array_push_unique(self.semantic_exports[path], key)
 
     me record_semantic_dependency(path: text, key: text):
         if not self.semantic_dependencies.has(path):
             self.semantic_dependencies[path] = []
-        self.semantic_dependencies[path] = _push_unique(self.semantic_dependencies[path], key)
+        self.semantic_dependencies[path] = text_array_push_unique(self.semantic_dependencies[path], key)
 
     # Inlined directly on the `me` receiver (see the NOTE above `me load`):
     # a plain free function mutating `self.semantic_fingerprints` /
@@ -979,36 +1479,28 @@ impl ModuleLoader:
         self.dependency_semantic_fingerprints[dependent_path] = deps
 
     fn semantic_cache_is_fresh(path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
-        if not self.semantic_fingerprints.has(path):
-            return false
-        if self.semantic_fingerprints[path] != current_fingerprint:
-            return false
-        if not self.dependency_semantic_fingerprints.has(path):
-            return current_dependencies.keys().len() == 0
-        val stored_deps = self.dependency_semantic_fingerprints[path]
-        if stored_deps.keys().len() != current_dependencies.keys().len():
-            return false
-        for dep_path in current_dependencies.keys():
-            if not stored_deps.has(dep_path):
-                return false
-            if stored_deps[dep_path] != current_dependencies[dep_path]:
-                return false
-        true
+        _semantic_cache_is_fresh_from_maps(
+            self.semantic_fingerprints, self.dependency_semantic_fingerprints,
+            path, current_fingerprint, current_dependencies)
 
     fn semantic_dependents_of(changed_path: text) -> [text]:
         self.semantic_fingerprint_dependents(changed_path)
 
     fn semantic_dependents(changed_key: text) -> [text]:
-        _moduleloader_semantic_dependents(self, changed_key)
+        _semantic_dependents_from_paths(
+            self.modules.keys(), self.semantic_exports,
+            self.semantic_dependencies, changed_key)
 
     fn semantic_fingerprint_dependents(changed_path: text) -> [text]:
-        _moduleloader_semantic_fingerprint_dependents(self, changed_path)
+        _semantic_fingerprint_dependents_from_paths(
+            self.dependency_semantic_fingerprints.keys(),
+            self.dependency_semantic_fingerprints, changed_path)
 
     me invalidate_semantic_change(changed_key: text) -> [text]:
         var affected = self.semantic_dependents(changed_key)
-        affected = _push_unique(affected, changed_key)
+        affected = text_array_push_unique(affected, changed_key)
         for path in self.semantic_fingerprint_dependents(changed_key):
-            affected = _push_unique(affected, path)
+            affected = text_array_push_unique(affected, path)
         for path in affected:
             if self.modules.has(path):
                 self.unload(path)
@@ -1028,7 +1520,7 @@ impl ModuleLoader:
         if self.jit.jit_cache.has(name):
             val rec_cache = self.jit.jit_cache[name]
             val code = rec_cache.code
-            val owner = _jit_cache_owner(self, name, rec_cache)
+            val owner = rec_cache.owner
             val sym = _jit_cached_loaded_symbol(name, rec_cache)
             self.global_symbols[name] = (owner, sym)
             return SymbolResult.JitCompiled(symbol: sym, code: code)
@@ -1178,6 +1670,41 @@ me moduleloader_aspect_facet(self: ModuleLoader, catalog: [u8], facet_key: text)
 
 fn moduleloader_aspect_facet_visible(self: ModuleLoader, facet_key: text) -> ModuleFacetRefV1:
     self.aspect_facet_visible(facet_key)
+
+me moduleloader_load_bound_facet_v3(self: ModuleLoader,
+        catalog_ref: ModuleDynSmfCatalogRefV3, facet_key: text
+    ) -> ModuleFacetRefV1:
+    self.load_bound_facet_v3(catalog_ref, facet_key)
+
+me moduleloader_release_bound_facet_v3(self: ModuleLoader,
+        reference: ModuleFacetRefV1) -> bool:
+    self.release_bound_facet_v3(reference)
+
+fn moduleloader_begin_bound_execution_v3(self: ModuleLoader,
+        reference: ModuleFacetRefV1) -> Result<AspectExecutionHandleV3, text>:
+    self.begin_bound_execution_v3(reference)
+
+me moduleloader_complete_bound_execution_v3(self: ModuleLoader,
+        handle: AspectExecutionHandleV3) -> bool:
+    self.complete_bound_execution_v3(handle)
+
+fn moduleloader_associate_final_unpin_v3(self: ModuleLoader,
+        reference: ModuleFacetRefV1
+    ) -> Result<AspectFinalUnpinHandleV3, text>:
+    self.associate_final_unpin_v3(reference)
+
+fn moduleloader_final_unpin_owner_identity_v3(self: ModuleLoader) -> i64:
+    self.aspect_owner.identity
+
+me moduleloader_release_final_unpin_v3(self: ModuleLoader,
+        handle: AspectFinalUnpinHandleV3
+    ) -> AspectFinalUnpinResultV3:
+    self.release_final_unpin_v3(handle)
+
+me moduleloader_retry_final_unpin_v3(self: ModuleLoader,
+        handle: AspectFinalUnpinHandleV3
+    ) -> AspectFinalUnpinResultV3:
+    self.retry_final_unpin_v3(handle)
 
 fn moduleloader_unload_aspect_facet(self: ModuleLoader,
         facet_key: text) -> ApkUnloadResultV1:

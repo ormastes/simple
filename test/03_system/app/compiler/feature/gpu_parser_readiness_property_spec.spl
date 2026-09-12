@@ -1,0 +1,210 @@
+# @cover src/lib/common/structural/parse/__init__.spl 0%
+# @cover src/lib/nogc_async_mut/structural/parse/parallel_lex.spl 0%
+# @cover src/lib/nogc_async_mut/structural/parse/incremental.spl 0%
+# codex-system-test
+# @tag: system, compiler, parser, gpu-preparation, property, red
+# @req REQ-001, REQ-003, REQ-005, REQ-006, REQ-008
+#
+# This is an intentionally RED readiness gate.  It proves the currently
+# available CPU-reference safety properties and fails closed with explicit
+# MissingEvidence markers for GPU-preparation contracts that do not yet have
+# production owners.  It must not be converted into a green fixture by
+# weakening an assertion or by claiming that a CPU fallback is GPU evidence.
+
+use std.spec
+use std.common.structural.parse.*
+use std.nogc_async_mut.structural.parse.incremental.{incremental_parse_plan}
+use std.nogc_async_mut.structural.parse.parallel_lex.{compose_chunk_summaries}
+
+val D_NUMBER: i64 = 1
+val D_SPACE: i64 = 2
+val D_IDENT: i64 = 3
+
+fn readiness_byte_class() -> [u8]:
+    var out: [u8] = []
+    var b = 0
+    while b < 256:
+        var cls = 0
+        if b >= 48 and b <= 57:
+            cls = 1
+        elif b == 32:
+            cls = 2
+        elif (b >= 97 and b <= 122) or (b >= 65 and b <= 90):
+            cls = 3
+        out = out.push(cls as u8)
+        b = b + 1
+    out
+
+fn readiness_transitions() -> [u32]:
+    val no = PARSE_NO_ID
+    [no, 1u32, 2u32, 3u32,
+     no, 1u32, no, no,
+     no, no, 2u32, no,
+     no, 3u32, no, 3u32]
+
+fn readiness_dialect() -> ParseDialect:
+    val program = parse_lex_program(
+        7u32,
+        4,
+        4,
+        0u32,
+        readiness_byte_class(),
+        readiness_transitions(),
+        [0u16, D_NUMBER as u16, D_SPACE as u16, D_IDENT as u16],
+        [PARSE_STATE_FLAG_NONE, PARSE_STATE_FLAG_NONE, PARSE_STATE_FLAG_SKIP, PARSE_STATE_FLAG_NONE]
+    )
+    parse_dialect_lexical(11u32, program)
+
+fn readiness_request(source: text, mode: text, capacity: ParseCapacityManifest) -> ParseRequest:
+    parse_request(
+        parse_source_blob_from_text(source),
+        0u32,
+        PARSE_OUTPUT_TOKENS | PARSE_OUTPUT_DIAGNOSTICS,
+        PARSE_TAG_DEMAND_OFF,
+        mode,
+        capacity
+    )
+
+fn readiness_blob_request(source: ParseSourceBlob, mode: text, capacity: ParseCapacityManifest) -> ParseRequest:
+    parse_request(
+        source,
+        0u32,
+        PARSE_OUTPUT_TOKENS | PARSE_OUTPUT_DIAGNOSTICS,
+        PARSE_TAG_DEMAND_OFF,
+        mode,
+        capacity
+    )
+
+fn readiness_request_default(source: text, mode: text) -> ParseRequest:
+    readiness_request(source, mode, parse_capacity_manifest(4096, 256, 64))
+
+fn missing_evidence(id: text, owner: text) -> text:
+    "MissingEvidence:{id}:{owner}"
+
+describe "GPU parser readiness property gate [importance=critical; importance_weight=3]":
+    describe "GPU-PREP-V001 grammar manifest completeness and digest [importance=critical; importance_weight=3]":
+        it "should validate the flat lexical manifest before requesting a grammar digest [GPU-PREP-V001; importance=critical; importance_weight=3]":
+            step("Build the canonical flat lexical manifest")
+            val program = parse_dialect_lex_program(readiness_dialect())
+            expect(parse_lex_program_valid(program)).to_equal(true)
+
+            step("Require per-dialect generated grammar manifests and digests")
+            fail(missing_evidence("GPU-PREP-V001", "grammar-manifest-generator-and-consumer-registry"))
+
+        it "should reject a malformed manifest instead of repairing it implicitly [GPU-PREP-V001; importance=critical; importance_weight=3]":
+            step("Remove one transition row from the flat manifest")
+            val malformed = parse_lex_program(
+                7u32, 4, 4, 0u32, readiness_byte_class(), [0u32, 1u32],
+                [0u16, 1u16, 2u16, 3u16], [0u16, 0u16, 0u16, 0u16])
+            expect(parse_lex_program_valid(malformed)).to_equal(false)
+
+            step("Require Simple, SdnDialect, and SoshDialect consumer digest comparisons")
+            fail(missing_evidence("GPU-PREP-V001", "generated-consumer-digest-check"))
+
+    describe "GPU-PREP-V002 progress, bounded lookahead, and lexical composition [importance=critical; importance_weight=3]":
+        it "should make finite scalar progress on empty and non-empty bounded inputs [GPU-PREP-V002; importance=critical; importance_weight=3]":
+            step("Run the scalar oracle on an empty source and a representative source")
+            val empty = parse_run(readiness_dialect(), readiness_request_default("", PARSE_MODE_CPU_REFERENCE))
+            val nonempty = parse_run(readiness_dialect(), readiness_request_default("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+            expect(empty.receipt.item_count_in).to_equal(0)
+            expect(nonempty.receipt.item_count_in).to_be_greater_than(0)
+            expect(nonempty.receipt.bytes_read).to_equal(8)
+
+            step("Require a bounded-lookahead and no-epsilon-cycle proof for every generated grammar")
+            fail(missing_evidence("GPU-PREP-V002", "grammar-progress-model-checker"))
+
+        it "should compose lexical continuation state in source order without an unbounded stack [GPU-PREP-V002; importance=critical; importance_weight=3]":
+            step("Validate the scalar transition table used as the lexical oracle")
+            val program = parse_dialect_lex_program(readiness_dialect())
+            expect(parse_lex_transition(program, 0, 3)).to_equal(3)
+            expect(parse_lex_transition(program, 99, 0)).to_equal(PARSE_NO_ID_I64)
+
+            step("Require chunk-summary composition and a finite lexical-state bound")
+            fail(missing_evidence("GPU-PREP-V002", "parallel-lex-summary-composer"))
+
+    describe "GPU-PREP-V003 stack, action, arena, and exact-capacity bounds [importance=critical; importance_weight=3]":
+        it "should reject a source that exceeds the declared source arena before emission [GPU-PREP-V003; importance=critical; importance_weight=3]":
+            step("Submit a source larger than its exact source-byte capacity")
+            val result = parse_run(
+                readiness_dialect(),
+                readiness_request("ab 12 cd", PARSE_MODE_CPU_REFERENCE, parse_capacity_manifest(3, 256, 64)))
+            expect(result.ok).to_equal(false)
+            expect(result.receipt.fallback_reason).to_equal(PARSE_REJECT_CAPACITY_EXCEEDED + ":max_source_bytes")
+
+            step("Require one-over capacity and every output arena to have a deterministic receipt")
+            fail(missing_evidence("GPU-PREP-V003", "count-scan-emit-capacity-oracle"))
+
+        it "should preserve exact output counts when capacity is sufficient [GPU-PREP-V003; importance=critical; importance_weight=3]":
+            step("Run with a sufficient capacity manifest and request token output")
+            val result = parse_run(readiness_dialect(), readiness_request_default("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+            expect(result.ok).to_equal(true)
+            expect(parse_token_arena_len(result.tokens)).to_equal(result.receipt.item_count_out)
+
+            step("Require count-pass versus emit-pass equality on GPU-admitted regions")
+            fail(missing_evidence("GPU-PREP-V003", "gpu-count-emit-parity-receipt"))
+
+    describe "GPU-PREP-V004 region partition soundness and clean-vs-partitioned parity [importance=high; importance_weight=2]":
+        it "should keep the clean scalar fingerprint stable for the same source [GPU-PREP-V004; importance=high; importance_weight=2]":
+            step("Parse the same source twice through the CPU oracle")
+            val first = parse_run(readiness_dialect(), readiness_request_default("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+            val second = parse_run(readiness_dialect(), readiness_request_default("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+            expect(first.receipt.deterministic_hash).to_equal(second.receipt.deterministic_hash)
+            expect(first.receipt.item_count_out).to_equal(second.receipt.item_count_out)
+
+            step("Require a region-partition oracle proving ordered disjoint coverage")
+            fail(missing_evidence("GPU-PREP-V004", "region-partition-equivalence-oracle"))
+
+        it "should not accept unsupported partition composition as successful GPU evidence [GPU-PREP-V004; importance=high; importance_weight=2]":
+            step("Attempt to compose the currently unimplemented chunk-summary seam")
+            val attempted = compose_chunk_summaries(readiness_dialect(), [])
+            match attempted:
+                Err(error): expect(error.message).to_equal("compose_chunk_summaries is not implemented in wave-1")
+                Ok(_): fail("unsupported partition composition was accepted")
+
+            step("Record the missing partition implementation explicitly")
+            fail(missing_evidence("GPU-PREP-V004", "parallel-region-parser"))
+
+    describe "GPU-PREP-V005 deterministic fallback, cancellation, generation, and recovery [importance=high; importance_weight=2]":
+        it "should demote an unimplemented accelerated mode with CPU-equivalent output [GPU-PREP-V005; importance=high; importance_weight=2]":
+            step("Run the CPU oracle and the requested accelerated mode")
+            val base = parse_run(readiness_dialect(), readiness_request_default("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+            val accelerated = parse_run(readiness_dialect(), readiness_request_default("ab 12 cd", PARSE_MODE_HYBRID_VECTOR_GPU))
+            expect(accelerated.receipt.backend).to_equal(PARSE_BACKEND_CPU_REFERENCE)
+            expect(accelerated.receipt.fallback_count).to_equal(1)
+            expect(accelerated.receipt.deterministic_hash).to_equal(base.receipt.deterministic_hash)
+
+            step("Require cancellation and generation mismatch receipts before device admission")
+            fail(missing_evidence("GPU-PREP-V005", "parse-cancellation-generation-admission"))
+
+        it "should recover malformed bytes through an explicit CPU recovery policy [GPU-PREP-V005; importance=high; importance_weight=2]":
+            step("Submit a malformed byte sequence to the scalar reference")
+            val malformed = parse_run(
+                readiness_dialect(),
+                readiness_blob_request(parse_source_blob([255u8]), PARSE_MODE_CPU_REFERENCE, parse_capacity_manifest(16, 16, 16)))
+            expect(malformed.ok).to_equal(true)
+            expect(malformed.receipt.backend).to_equal(PARSE_BACKEND_CPU_REFERENCE)
+
+            step("Require malformed UTF-8 policy, diagnostic parity, and recovery provenance")
+            fail(missing_evidence("GPU-PREP-V005", "utf8-validation-and-recovery-oracle"))
+
+    describe "GPU-PREP-V006 clean versus incremental equivalence [importance=high; importance_weight=2]":
+        it "should expose an explicit incremental-plan result instead of silently using a clean parse [GPU-PREP-V006; importance=high; importance_weight=2]":
+            step("Build the clean request used as the CPU reference")
+            val request = readiness_request_default("ab 12 cd", PARSE_MODE_CPU_REFERENCE)
+            val planned = incremental_parse_plan(readiness_dialect(), request)
+            match planned:
+                Err(error): expect(error.message).to_equal("incremental_parse_plan is not implemented in wave-1")
+                Ok(_): fail("incremental plan unexpectedly bypassed the readiness seam")
+
+            step("Require edit stabilization, region reuse, and clean-reparse equality evidence")
+            fail(missing_evidence("GPU-PREP-V006", "incremental-region-equivalence-oracle"))
+
+    describe "GPU-PREP-V007 generated-consumer valid-source equivalence [importance=normal; importance_weight=1]":
+        it "should establish the scalar source fingerprint before comparing generated consumers [GPU-PREP-V007; importance=normal; importance_weight=1]":
+            step("Parse a valid source through the canonical scalar dialect")
+            val result = parse_run(readiness_dialect(), readiness_request_default("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+            expect(result.ok).to_equal(true)
+            expect(result.receipt.deterministic_hash.len()).to_be_greater_than(0)
+
+            step("Require public API parity within each generated dialect consumer set")
+            fail(missing_evidence("GPU-PREP-V007", "canonical-generated-consumer-parity"))

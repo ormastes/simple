@@ -1,0 +1,136 @@
+"""Pure behavioral retention, mailbox, contention, and permit scenarios."""
+use std.spec.*
+use compiler.loader.loader.exec_mapping_cleanup_v1.{
+    exec_cleanup_state_v1, exec_cleanup_check_v1,
+    exec_cleanup_reserve_v1, exec_cleanup_begin_construct_v1,
+    exec_cleanup_complete_construct_v1, exec_cleanup_completion_v1,
+    exec_cleanup_quarantine_completion_v1,
+    exec_cleanup_retry_at_map_entry_v1, exec_cleanup_free_range_allowed_v1}
+
+fn reserve() -> any:
+    exec_cleanup_reserve_v1(exec_cleanup_state_v1(), "map-a", 4096)
+
+fn retention_pending() -> any:
+    val r = reserve()
+    val b = exec_cleanup_begin_construct_v1(r.state, r.token, 4096)
+    exec_cleanup_complete_construct_v1(b.state, b.token, false)
+
+fn retention_failed() -> any:
+    val p = retention_pending()
+    exec_cleanup_quarantine_completion_v1(
+        p.state, exec_cleanup_completion_v1(p.token, p.permit, false))
+
+describe "exec mapping cleanup retention behavior v1":
+    it "places failed receipts in the retry mailbox":
+        val f = retention_failed()
+        val r = exec_cleanup_retry_at_map_entry_v1(f.state, [])
+        expect(r.reason).to_equal("retry_failed_receipts")
+        expect(r.permit_present).to_equal(true)
+
+    it "keeps retry ordering FIFO across two slots":
+        val s = exec_cleanup_state_v1()
+        val a = exec_cleanup_reserve_v1(s, "a", 1)
+        val b = exec_cleanup_reserve_v1(a.state, "b", 1)
+        val ba = exec_cleanup_begin_construct_v1(b.state, a.token, 4096)
+        val bb = exec_cleanup_begin_construct_v1(ba.state, b.token, 8192)
+        val qa = exec_cleanup_complete_construct_v1(bb.state, ba.token, false)
+        val qb = exec_cleanup_complete_construct_v1(qa.state, bb.token, false)
+        val fa = exec_cleanup_quarantine_completion_v1(
+            qb.state, exec_cleanup_completion_v1(qa.token, qa.permit, false))
+        val fb = exec_cleanup_quarantine_completion_v1(
+            fa.state, exec_cleanup_completion_v1(qb.token, qb.permit, false))
+        val retry = exec_cleanup_retry_at_map_entry_v1(fb.state, [])
+        expect(retry.token).to_equal(fa.token)
+
+    it "skips a receipt already in the attempted mailbox":
+        val f = retention_failed()
+        val r = exec_cleanup_retry_at_map_entry_v1(f.state, [1])
+        expect(r.reason).to_equal("retry-drain-empty")
+
+    it "enforces the retry drain bound":
+        val f = retention_failed()
+        val r = exec_cleanup_retry_at_map_entry_v1(f.state, [1, 2, 3, 4])
+        expect(r.reason).to_equal("retry-drain-limit")
+
+    it "rejects a foreign ledger owner permit":
+        val p = retention_pending()
+        var permit = p.permit
+        permit.ledger_owner = "foreign"
+        val r = exec_cleanup_quarantine_completion_v1(
+            p.state, exec_cleanup_completion_v1(p.token, permit, true))
+        expect(r.reason).to_equal("StaleReceipt")
+
+    it "rejects a foreign ledger epoch permit":
+        val p = retention_pending()
+        var permit = p.permit
+        permit.ledger_epoch = 99
+        val r = exec_cleanup_quarantine_completion_v1(
+            p.state, exec_cleanup_completion_v1(p.token, permit, true))
+        expect(r.reason).to_equal("StaleReceipt")
+
+    it "rejects a foreign mapping permit":
+        val p = retention_pending()
+        var permit = p.permit
+        permit.mapping_id = "foreign"
+        val r = exec_cleanup_quarantine_completion_v1(
+            p.state, exec_cleanup_completion_v1(p.token, permit, true))
+        expect(r.reason).to_equal("StaleReceipt")
+
+    it "rejects a foreign sequence permit":
+        val p = retention_pending()
+        var permit = p.permit
+        permit.mapping_sequence = 99
+        val r = exec_cleanup_quarantine_completion_v1(
+            p.state, exec_cleanup_completion_v1(p.token, permit, true))
+        expect(r.reason).to_equal("StaleReceipt")
+
+    it "rejects a foreign close token permit":
+        val p = retention_pending()
+        var permit = p.permit
+        permit.close_token = 99
+        val r = exec_cleanup_quarantine_completion_v1(
+            p.state, exec_cleanup_completion_v1(p.token, permit, true))
+        expect(r.reason).to_equal("StaleReceipt")
+
+    it "rejects a mismatched byte-count permit":
+        val p = retention_pending()
+        var permit = p.permit
+        permit.mapped_bytes = 1
+        val r = exec_cleanup_quarantine_completion_v1(
+            p.state, exec_cleanup_completion_v1(p.token, permit, true))
+        expect(r.reason).to_equal("StaleReceipt")
+
+    it "rejects completion on a nonquarantined slot":
+        val r = reserve()
+        val p = retention_pending()
+        val done = exec_cleanup_quarantine_completion_v1(
+            r.state, exec_cleanup_completion_v1(r.token, p.permit, true))
+        expect(done.ok).to_equal(false)
+
+    it "rejects invalid state before native release":
+        val p = retention_pending()
+        var invalid = p.state
+        invalid.reserved_bytes = -1
+        val done = exec_cleanup_quarantine_completion_v1(
+            invalid, exec_cleanup_completion_v1(p.token, p.permit, true))
+        expect(done.reason).to_equal("invalid-state")
+
+    it "keeps bytes after stale completion":
+        val p = retention_pending()
+        var permit = p.permit
+        permit.close_token = 0
+        val stale = exec_cleanup_quarantine_completion_v1(
+            p.state, exec_cleanup_completion_v1(p.token, permit, true))
+        expect(stale.state.reserved_bytes).to_equal(4096)
+
+    it "rejects overlapping ranges while another owner is live":
+        val r = reserve()
+        val b = exec_cleanup_begin_construct_v1(r.state, r.token, 4096)
+        expect(exec_cleanup_free_range_allowed_v1(b.state, 4096, 4096)).to_equal(false)
+
+    it "rejects invalid and overflowing free ranges":
+        val s = exec_cleanup_state_v1()
+        expect(exec_cleanup_free_range_allowed_v1(s, 0, 1)).to_equal(false)
+        expect(exec_cleanup_free_range_allowed_v1(s, 1, 0)).to_equal(false)
+        expect(exec_cleanup_free_range_allowed_v1(
+            s, 9223372036854775807, 2)).to_equal(false)

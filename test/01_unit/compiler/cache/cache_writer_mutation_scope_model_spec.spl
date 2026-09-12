@@ -1,0 +1,156 @@
+# Protocol model only; never imported by production or evidence of native IO.
+# @req REQ-CSM-008 REQ-CSM-009 REQ-CSM-010 REQ-CSM-024
+use std.spec.step
+
+# One root and a one-entry replay window. Real hosts need a bounded durable
+# replay index; this finite model exercises ordering, not filesystem semantics.
+class EpochCommitModel:
+    root: i64
+    epoch: i64
+    visible_sequence: i64
+    active: bool
+    closing: bool
+    closed: bool
+    uncertain: bool
+    durable_pending: bool
+    pending_operation: i64
+    pending_payload: i64
+    last_operation: i64
+    last_payload: i64
+
+    static fn fresh(root: i64) -> EpochCommitModel:
+        EpochCommitModel(root: root, epoch: 1, visible_sequence: 0,
+            active: false, closing: false, closed: false, uncertain: false,
+            durable_pending: false, pending_operation: 0, pending_payload: 0,
+            last_operation: 0, last_payload: 0)
+
+    me begin(root: i64, epoch: i64, operation: i64, payload: i64) -> text:
+        if root != self.root or epoch != self.epoch or self.closed or self.closing:
+            return "RejectedAuthority"
+        if self.uncertain: return "Indeterminate"
+        if self.active: return "Busy"
+        if operation <= 0 or payload <= 0: return "RejectedBounds"
+        if operation == self.last_operation:
+            if payload == self.last_payload: return "CommittedReplay"
+            return "RejectedReplayMismatch"
+        if operation < self.last_operation: return "RejectedReplayExpired"
+        self.active = true
+        self.pending_operation = operation
+        self.pending_payload = payload
+        "Prepared"
+
+    me revoke() -> text:
+        self.closing = true
+        if self.active or self.uncertain: return "Draining"
+        if not self.closed:
+            self.epoch = self.epoch + 1
+            self.closed = true
+        "Revoked"
+
+    me finish(outcome: text, durable_pending: bool) -> text:
+        if not self.active: return "RejectedNoMutation"
+        if outcome != "Committed" and outcome != "Rejected" and outcome != "Indeterminate":
+            return "RejectedOutcome"
+        self.active = false
+        if outcome == "Indeterminate":
+            self.uncertain = true
+            self.durable_pending = durable_pending
+            return "Indeterminate"
+        if outcome == "Committed":
+            self.visible_sequence = self.visible_sequence + 1
+            self.last_operation = self.pending_operation
+            self.last_payload = self.pending_payload
+        self.pending_operation = 0
+        self.pending_payload = 0
+        if self.closing:
+            val _drained = self.revoke()
+        outcome
+
+    me recover() -> text:
+        if not self.uncertain: return "RejectedNoRecovery"
+        val committed = self.durable_pending
+        if committed:
+            self.visible_sequence = self.visible_sequence + 1
+            self.last_operation = self.pending_operation
+            self.last_payload = self.pending_payload
+        self.uncertain = false
+        self.durable_pending = false
+        self.pending_operation = 0
+        self.pending_payload = 0
+        if self.closing:
+            val _drained = self.revoke()
+        if committed: "Committed" else: "Rejected"
+
+describe "Mutation-scoped epoch protocol model, not native admission":
+    it "rejects stale and wrong-root requests without changing the visible journal":
+        step("Reject authority mismatch before mutation")
+        val owner = EpochCommitModel.fresh(7)
+        expect(owner.begin(8, 1, 1, 11)).to_equal("RejectedAuthority")
+        expect(owner.begin(7, 2, 1, 11)).to_equal("RejectedAuthority")
+        expect(owner.visible_sequence).to_equal(0)
+        expect(owner.active).to_equal(false)
+
+    it "serializes revocation after an admitted commit and blocks new admission":
+        step("Drain an active commit before releasing its writer epoch")
+        val owner = EpochCommitModel.fresh(7)
+        expect(owner.begin(7, 1, 1, 11)).to_equal("Prepared")
+        expect(owner.revoke()).to_equal("Draining")
+        expect(owner.epoch).to_equal(1)
+        expect(owner.begin(7, 1, 2, 22)).to_equal("RejectedAuthority")
+        expect(owner.finish("Committed", true)).to_equal("Committed")
+        expect(owner.visible_sequence).to_equal(1)
+        expect(owner.epoch).to_equal(2)
+        expect(owner.closed).to_equal(true)
+
+    it "lets revocation win before admission with no journal change":
+        step("Reject a request after writer revocation")
+        val owner = EpochCommitModel.fresh(7)
+        expect(owner.revoke()).to_equal("Revoked")
+        expect(owner.begin(7, 1, 1, 11)).to_equal("RejectedAuthority")
+        expect(owner.visible_sequence).to_equal(0)
+
+    it "serializes one root without blocking an independent root":
+        step("Use per-root mutation ownership")
+        val left = EpochCommitModel.fresh(7)
+        val right = EpochCommitModel.fresh(8)
+        expect(left.begin(7, 1, 1, 11)).to_equal("Prepared")
+        expect(left.begin(7, 1, 2, 22)).to_equal("Busy")
+        expect(right.begin(8, 1, 1, 33)).to_equal("Prepared")
+        expect(right.finish("Committed", true)).to_equal("Committed")
+        expect(left.finish("Rejected", false)).to_equal("Rejected")
+        expect(left.visible_sequence).to_equal(0)
+        expect(right.visible_sequence).to_equal(1)
+
+    it "replays an identical operation once and rejects mismatched reuse":
+        step("Resolve retries without duplicate journal records")
+        val owner = EpochCommitModel.fresh(7)
+        expect(owner.begin(7, 1, 1, 11)).to_equal("Prepared")
+        expect(owner.finish("Committed", true)).to_equal("Committed")
+        expect(owner.begin(7, 1, 1, 11)).to_equal("CommittedReplay")
+        expect(owner.begin(7, 1, 1, 12)).to_equal("RejectedReplayMismatch")
+        expect(owner.visible_sequence).to_equal(1)
+
+    it "blocks visibility and further writes while a durable commit is uncertain":
+        step("Recover an uncertain acknowledgment from durable journal evidence")
+        val owner = EpochCommitModel.fresh(7)
+        expect(owner.begin(7, 1, 1, 11)).to_equal("Prepared")
+        expect(owner.finish("Indeterminate", true)).to_equal("Indeterminate")
+        expect(owner.visible_sequence).to_equal(0)
+        expect(owner.begin(7, 1, 2, 22)).to_equal("Indeterminate")
+        expect(owner.revoke()).to_equal("Draining")
+        expect(owner.epoch).to_equal(1)
+        expect(owner.recover()).to_equal("Committed")
+        expect(owner.visible_sequence).to_equal(1)
+        expect(owner.epoch).to_equal(2)
+
+    it "recovers an absent uncertain commit without publishing a result":
+        step("Discard a non-admitted tail and preserve visible state")
+        val owner = EpochCommitModel.fresh(7)
+        expect(owner.begin(7, 1, 1, 11)).to_equal("Prepared")
+        expect(owner.finish("Indeterminate", false)).to_equal("Indeterminate")
+        expect(owner.visible_sequence).to_equal(0)
+        expect(owner.recover()).to_equal("Rejected")
+        expect(owner.visible_sequence).to_equal(0)
+        expect(owner.begin(7, 1, 1, 11)).to_equal("Prepared")
+        expect(owner.finish("Committed", true)).to_equal("Committed")
+        expect(owner.visible_sequence).to_equal(1)

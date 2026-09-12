@@ -1,0 +1,356 @@
+# Driver-layer qualification consumer coverage for bounded P1 HIR and the
+# authenticated semantic-scope dependency enumeration. Successful canonical
+# cases fail with their typed reason until the generator/golden gate opens;
+# the current closed boundary is asserted separately and exactly.
+# @req REQ-CSM-003 REQ-CSM-006 REQ-CSM-017 REQ-CSM-024 NFR-CSM-010
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.cache_contract.physical_tld_v1.{
+    PhysicalTldHeaderV1, PhysicalTldObjectV1, TldPayloadRoleV1,
+    TldSectionRefV1, physical_tld_object_encode_v1,
+    physical_tld_section_table_digest_v1
+}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectStageV1, PortablePortabilityV1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1
+}
+use compiler.common.cache_contract.snapshot_contract_v1.{CacheObjectRefV1}
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1
+}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadClosureSealV2,
+    ThreePayloadFallbackV1, ThreePayloadSemanticBinding,
+    ThreePayloadSemanticRefV2, closure_coverage_dimension_v1
+}
+use compiler.hir.hir_types.{
+    HirModule, HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable,
+    ScopeKind
+}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind, HirExpr,
+    HirExprKind, HirCallArg
+}
+use compiler.hir.hir_codec.{HirDecodeLimits, HirDecodeError,
+    hir_module_encode_canonical, hir_canonical_codec_generated_available_v1}
+use compiler.hir.portable_body_profile_types.{
+    PortableBodyLimitsV1, PortableBodyDependencyEdgeV1,
+    PortableBodyDescriptorV1, PortableBodyErrorV1
+}
+use compiler.hir.portable_object_profile_v1.{
+    portable_embedded_body_profile_digest_v1,
+    verify_embedded_portable_hir_v1
+}
+use compiler.semantics.semantic_scope_contribution_v1.{
+    SemanticScopeDependencyEnumerationV1,
+    semantic_scope_body_dependency_enumeration_v1
+}
+use compiler.frontend.cache_artifact.three_payload_semantic_closure.{
+    ThreePayloadSemanticBindBounds, ThreePayloadSemanticView,
+    bind_three_payload_semantic_inputs
+}
+use compiler.driver.cache.worker.three_payload_body_authority_v1.{
+    verify_three_payload_body_facts_v1,
+    three_payload_body_graph_matches_scope_v1,
+    three_payload_body_authority_available_v1,
+    three_payload_body_authority_blocker_v1
+}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+fn d(label: text) -> text: sha256_text(label)
+fn span() -> Span: Span.empty()
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: span())
+
+fn typed(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: span())
+
+fn block(stmts: [HirStmt], value: HirExpr) -> HirBlock:
+    HirBlock(stmts: stmts, has: true, value: value, span: span())
+
+fn function(id: SymbolId, name: text, params: [HirParam], body: HirBlock,
+            public_: bool) -> HirFunction:
+    HirFunction(symbol: id, name: name, type_params: [], params: params,
+        return_type: i64_type(), body: body, effects: [],
+        visibility: if public_: Visibility.Public else: Visibility.Private,
+        is_async: false, is_static: false, is_public: public_, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_suspension: false,
+        has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: span(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: false)
+
+fn require_canonical_hir_bytes_v1(
+    result: Result<text, HirDecodeError>,
+) -> text:
+    match result:
+        case Ok(bytes): bytes
+        case Err(error):
+            fail("canonical HIR bytes unavailable: " + error.to_string())
+
+fn require_portable_descriptor_v1(
+    result: Result<PortableBodyDescriptorV1, PortableBodyErrorV1>,
+) -> PortableBodyDescriptorV1:
+    match result:
+        case Ok(descriptor): descriptor
+        case Err(error):
+            fail("portable HIR descriptor unavailable: " + error.to_string())
+
+fn body_module() -> HirModule:
+    var symbols = SymbolTable.new()
+    val helper_type = HirType(kind: HirTypeKind.Function([i64_type()],
+        i64_type(), []), span: span())
+    val helper_id = symbols.define("identity", SymbolKind.Function,
+        Some(helper_type), span(), Visibility.Private, false, Some("qualified"))
+    _ = symbols.push_scope(ScopeKind.Function)
+    val parameter_id = symbols.define("value", SymbolKind.Parameter,
+        Some(i64_type()), span(), Visibility.Private, false, Some("qualified"))
+    symbols.pop_scope()
+    val parameter = HirParam(symbol: parameter_id, name: "value",
+        type_: i64_type(), has_default: false, default: nil, span: span(),
+        is_mutable: false)
+    val helper = function(helper_id, "identity", [parameter], block([], typed(
+        HirExprKind.Var(parameter_id), i64_type())), false)
+    val entry_type = HirType(kind: HirTypeKind.Function([], i64_type(), []),
+        span: span())
+    val entry_id = symbols.define("entry", SymbolKind.Function,
+        Some(entry_type), span(), Visibility.Public, false, Some("qualified"))
+    val callee = typed(HirExprKind.NamedVar(helper_id, "identity"), helper_type)
+    val call = typed(HirExprKind.Call(callee, [HirCallArg(has_name: false,
+        name: "", value: typed(HirExprKind.IntLit(7, nil), i64_type()),
+        span: span())], []), i64_type())
+    val entry = function(entry_id, "entry", [], block([], call), true)
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[helper_id] = helper
+    functions[entry_id] = entry
+    HirModule(name: "qualified",
+        path: "qualified.spl", imports: [], exports: ["entry"],
+        domain_blocks: [], symbols: symbols, functions: functions,
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+        constants: {}, static_asserts: [], aop_advices: [], di_bindings: [],
+        arch_rules: [], mock_decls: [], types: [], extend_enums: [])
+
+fn encoded_body() -> text:
+    require_canonical_hir_bytes_v1(hir_module_encode_canonical(body_module()))
+
+fn roots() -> [ClosureCoverageRootV1]:
+    var result: [ClosureCoverageRootV1] = []
+    for index in 0..9:
+        result.push(ClosureCoverageRootV1(
+            dimension: closure_coverage_dimension_v1(index),
+            root_digest: d("root:{index}"), coverage: SemanticCoverageV1.Complete))
+    result
+
+fn body_section(bytes: [u8]) -> TldSectionRefV1:
+    TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld, section_index: 0,
+        kind: "semantic-body", semantic_object_digest: sha256_u8_hex(bytes),
+        offset: 0, stored_bytes: bytes.len(), decoded_bytes: bytes.len(),
+        encoding_profile: "raw-v1")
+
+fn body_object(bytes: [u8]) -> PhysicalTldObjectV1:
+    val section = body_section(bytes)
+    PhysicalTldObjectV1(header: PhysicalTldHeaderV1(schema: 1,
+        role: TldPayloadRoleV1.PackageInitTld,
+        semantic_record_digest: d("record"),
+        section_table_digest: physical_tld_section_table_digest_v1([section]),
+        payload_bytes: bytes.len(), sections: [section]),
+        canonical_sections: [bytes])
+
+fn body_view_from_claims(encoded: text, kind: ThreePayloadSemanticRefKindV1,
+                         signature: text, effect: text,
+                         raw_digest: text) -> ThreePayloadSemanticView:
+    val bytes = encoded.bytes()
+    val section = body_section(bytes)
+    val object = body_object(bytes)
+    val object_bytes = physical_tld_object_encode_v1(object)
+    val reference = ThreePayloadSemanticRefV2(kind: kind,
+        stable_entity_id: "qualified.entry",
+        callable_signature_digest: signature,
+        effect_digest: effect,
+        body_or_object_digest: raw_digest,
+        embedded: Some(section), selection_contract_digest: d("selection"))
+    val seal = ThreePayloadClosureSealV2(schema: 2,
+        input_generation_digest: d("generation"), snapshot_digest: d("snapshot"),
+        source_digest: d("source"), prior_tld_digest: nil,
+        init_tld_digest: sha256_u8_hex(object_bytes),
+        compiler_semantics_digest: portable_embedded_body_profile_digest_v1(),
+        consumed_inputs_digest: d("inputs"), semantic_refs: [reference],
+        coverage_roots: roots(), section_count: 1,
+        payload_bytes: object_bytes.len(), max_decode_bytes: bytes.len())
+    val binding = ThreePayloadSemanticBinding(
+        stable_entity_id: "qualified.entry", semantic_use_kind: kind,
+        object_ref: CacheObjectRefV1(kind: "portable_hir_object", schema: 2,
+            object_digest: raw_digest),
+        embedded_role: Some(TldPayloadRoleV1.PackageInitTld),
+        embedded_section_index: Some(0),
+        raw_section_digest: Some(raw_digest),
+        access_policy_digest: d("access"),
+        semantic_profile_digest: portable_embedded_body_profile_digest_v1(),
+        callable_signature_digest: signature,
+        effect_digest: effect,
+        selection_contract_digest: d("selection"))
+    val bounds = ThreePayloadSemanticBindBounds(max_bindings: 4,
+        max_sections: 4, max_retained_bytes: 1048576,
+        max_decoded_bytes: 1048576,
+        expected_input_generation_digest: d("generation"),
+        expected_access_policy_digest: d("access"),
+        expected_owner_receipt_digest: d("owner"),
+        presented_owner_receipt_digest: d("owner"),
+        expected_module_id: "qualified", presented_module_id: "qualified")
+    bind_three_payload_semantic_inputs(seal, nil, object, [binding],
+        bounds).unwrap()
+
+fn body_view(kind: ThreePayloadSemanticRefKindV1,
+             signature: text) -> ThreePayloadSemanticView:
+    val encoded = encoded_body()
+    val descriptor = require_portable_descriptor_v1(
+        verify_embedded_portable_hir_v1(encoded,
+            portable_embedded_body_profile_digest_v1(),
+            HirDecodeLimits.standard(), PortableBodyLimitsV1.standard()))
+    val entry = descriptor.exported_entries[0]
+    body_view_from_claims(encoded, kind, signature,
+        entry.normalized_effect_digest, descriptor.raw_content_digest)
+
+fn descriptor_and_dependencies() -> SemanticScopeDependencyEnumerationV1:
+    val encoded = encoded_body()
+    val descriptor = require_portable_descriptor_v1(
+        verify_embedded_portable_hir_v1(encoded,
+            portable_embedded_body_profile_digest_v1(),
+            HirDecodeLimits.standard(), PortableBodyLimitsV1.standard()))
+    semantic_scope_body_dependency_enumeration_v1([descriptor]).unwrap()
+
+describe "L7 driver body authority composition":
+    it "preserves canonical unavailability through the driver consumer":
+        expect(hir_canonical_codec_generated_available_v1()).to_equal(false)
+        match hir_module_encode_canonical(body_module()):
+            case Err(HirDecodeError.Unavailable(detail)):
+                expect(detail).to_equal("canonical_codec_generator_stale")
+            case _: fail("canonical encode did not report exact unavailability")
+        val encoded = "not-admitted-canonical-hir"
+        val digest = sha256_text(encoded)
+        val view = body_view_from_claims(encoded,
+            ThreePayloadSemanticRefKindV1.ConcreteFunction,
+            d("unqualified-signature"), d("unqualified-effect"), digest)
+        val dependencies = semantic_scope_body_dependency_enumeration_v1([]).unwrap()
+        match verify_three_payload_body_facts_v1(view,
+                ThreePayloadSemanticRefKindV1.ConcreteFunction,
+                "qualified.entry", dependencies, HirDecodeLimits.standard(),
+                PortableBodyLimitsV1.standard()):
+            case Err(ThreePayloadFallbackV1.AuthorityUnavailable): pass
+            case _: fail("driver consumer did not preserve HIR unavailability")
+
+    it "derives the selected entry signature effects and dependency edge from P1":
+        val encoded = encoded_body()
+        val descriptor = require_portable_descriptor_v1(
+            verify_embedded_portable_hir_v1(encoded,
+                portable_embedded_body_profile_digest_v1(),
+                HirDecodeLimits.standard(), PortableBodyLimitsV1.standard()))
+        val facts = verify_three_payload_body_facts_v1(
+            body_view(ThreePayloadSemanticRefKindV1.ConcreteFunction,
+                descriptor.exported_entries[0].signature_digest),
+            ThreePayloadSemanticRefKindV1.ConcreteFunction, "qualified.entry",
+            descriptor_and_dependencies(), HirDecodeLimits.standard(),
+            PortableBodyLimitsV1.standard()).unwrap()
+        expect(facts.selected_entry.name).to_equal("entry")
+        expect(facts.selected_entry.signature_digest).to_equal(
+            descriptor.exported_entries[0].signature_digest)
+        expect(facts.descriptor.dependency_edges.len()).to_equal(1)
+        expect(facts.descriptor.dependency_edges[0].callee_name).to_equal("identity")
+        expect(facts.body_fingerprint.len()).to_equal(64)
+
+    it "rejects a sealed callable signature that differs from verified HIR":
+        match verify_three_payload_body_facts_v1(
+                body_view(ThreePayloadSemanticRefKindV1.ConcreteFunction,
+                    d("wrong-signature")),
+                ThreePayloadSemanticRefKindV1.ConcreteFunction,
+                "qualified.entry", descriptor_and_dependencies(),
+                HirDecodeLimits.standard(), PortableBodyLimitsV1.standard()):
+            case Err(ThreePayloadFallbackV1.CorruptPayload): pass
+            case _: fail("a copied signature replaced the actual P1 entry signature")
+
+    it "rejects a live-scope enumeration that omits the verified body edge":
+        val encoded = encoded_body()
+        val descriptor = require_portable_descriptor_v1(
+            verify_embedded_portable_hir_v1(encoded,
+                portable_embedded_body_profile_digest_v1(),
+                HirDecodeLimits.standard(), PortableBodyLimitsV1.standard()))
+        var without_edges = descriptor
+        without_edges.dependency_edges = []
+        val incomplete = semantic_scope_body_dependency_enumeration_v1(
+            [without_edges]).unwrap()
+        match verify_three_payload_body_facts_v1(
+                body_view(ThreePayloadSemanticRefKindV1.ConcreteFunction,
+                    descriptor.exported_entries[0].signature_digest),
+                ThreePayloadSemanticRefKindV1.ConcreteFunction,
+                "qualified.entry", incomplete, HirDecodeLimits.standard(),
+                PortableBodyLimitsV1.standard()):
+            case Err(ThreePayloadFallbackV1.WitnessIncomplete): pass
+            case _: fail("scope completeness omitted an actual P1 dependency edge")
+
+    it "matches exact edge sets independent of decimal SymbolId sort width":
+        val encoded = encoded_body()
+        val descriptor = require_portable_descriptor_v1(
+            verify_embedded_portable_hir_v1(encoded,
+                portable_embedded_body_profile_digest_v1(),
+                HirDecodeLimits.standard(), PortableBodyLimitsV1.standard()))
+        val id_two = PortableBodyDependencyEdgeV1(caller_symbol_id: 2,
+            caller_name: "two", callee_symbol_id: 3, callee_name: "leaf-two")
+        val id_ten = PortableBodyDependencyEdgeV1(caller_symbol_id: 10,
+            caller_name: "ten", callee_symbol_id: 11, callee_name: "leaf-ten")
+        var actual = descriptor
+        actual.dependency_edges = [id_two, id_ten]
+        var scope_order = descriptor
+        # Semantic-scope canonical text places decimal "10" before "2".
+        scope_order.dependency_edges = [id_ten, id_two]
+        val dependencies = semantic_scope_body_dependency_enumeration_v1(
+            [scope_order]).unwrap()
+        expect(three_payload_body_graph_matches_scope_v1(actual,
+            dependencies)).to_equal(true)
+        actual.dependency_edges = [id_two]
+        expect(three_payload_body_graph_matches_scope_v1(actual,
+            dependencies)).to_equal(false)
+
+    it "keeps macro generic and trait-default labels incomplete":
+        val descriptor = require_portable_descriptor_v1(
+            verify_embedded_portable_hir_v1(encoded_body(),
+                portable_embedded_body_profile_digest_v1(),
+                HirDecodeLimits.standard(), PortableBodyLimitsV1.standard()))
+        for kind in [ThreePayloadSemanticRefKindV1.MacroExpansion,
+                ThreePayloadSemanticRefKindV1.GenericBody,
+                ThreePayloadSemanticRefKindV1.TraitDefaultBody]:
+            match verify_three_payload_body_facts_v1(body_view(kind,
+                    descriptor.exported_entries[0].signature_digest), kind,
+                    "qualified.entry", descriptor_and_dependencies(),
+                    HirDecodeLimits.standard(), PortableBodyLimitsV1.standard()):
+                case Err(ThreePayloadFallbackV1.UnsupportedSemantics): pass
+                case _: fail("an unsupported semantic family obtained P1 authority")
+
+    it "keeps the live-validated composition as preflight until owner retention exists":
+        val source = file_read_text(
+            "src/compiler/80.driver/cache/worker/three_payload_body_authority_v1.spl")
+        val frontend_source = file_read_text(
+            "src/compiler/10.frontend/cache_artifact/three_payload_semantic_closure.spl")
+        expect(source.contains("scope_owner.validate_scope_v2(grant, expected_scope)?"))
+            .to_equal(true)
+        expect(source.contains("scope_owner.validate_worker_admission_v2"))
+            .to_equal(true)
+        expect(source.contains("scope_owner.reserve_three_payload_worker_v2"))
+            .to_equal(false)
+        expect(source.contains("AdmittedThreePayloadWorkerV2")).to_equal(false)
+        expect(source.contains("verifier_callback")).to_equal(false)
+        expect(source.contains("use compiler.frontend")).to_equal(true)
+        expect(source.contains("use compiler.hir")).to_equal(true)
+        expect(frontend_source.contains("use compiler.hir")).to_equal(false)
+        expect(three_payload_body_authority_available_v1()).to_equal(false)
+        expect(three_payload_body_authority_blocker_v1()).to_contain(
+            "owner_retained_body_binding")

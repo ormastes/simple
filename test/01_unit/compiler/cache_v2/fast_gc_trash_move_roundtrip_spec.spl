@@ -1,0 +1,32 @@
+"""Fast GC must really remove an evicted action from its served location."""
+
+use std.spec.step
+use compiler.driver.cache.cas_store.{ActionManifest, action_get, action_put, cas_open}
+use compiler.driver.cache.gc.fast_gc.{gc_fast_sweep}
+use compiler.driver.cache.metadata.cache_limits.{CacheLimits}
+use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros}
+
+describe "fast GC production trash move":
+    it "stops serving an unleased action after forced eviction":
+        val root = "build/fast_gc_move_{getpid()}_{time_now_unix_micros()}"
+        cas_open(root)
+        action_put(root, "evict-me", ActionManifest(
+            action_digest: "evict-me",
+            artifact_digests: [],
+            schema_version: 1,
+        ))
+        expect(action_get(root, "evict-me") == nil).to_equal(false)
+
+        step("Force the action above a zero-byte low watermark")
+        val limits = CacheLimits(
+            max_bytes: 1,
+            high_watermark: 0.0,
+            low_watermark: 0.0,
+            min_free_ratio: 0.0,
+            hard_limit_ratio: 1.0,
+            tmp_hours: 24,
+            quarantine_days: 7,
+        )
+        gc_fast_sweep(root, limits)
+        expect(action_get(root, "evict-me") == nil).to_equal(true)
+        dir_remove_all(root)

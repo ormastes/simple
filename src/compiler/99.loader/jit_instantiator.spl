@@ -1,10 +1,7 @@
 # Compatibility JIT instantiator surface for interpreter/test runner.
 
 use std.env.{env_get_or}
-
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable, file_write_exact}
 
 class JitInstantiatorConfig:
     update_smf: bool
@@ -154,6 +151,8 @@ class JitInstantiator:
     in_progress: [text]
     depth: i64
     compile_count: i64
+    cached_count: i64
+    loaded_smf_count: i64
 
     static fn new(config: JitInstantiatorConfig) -> JitInstantiator:
         JitInstantiator(
@@ -166,21 +165,27 @@ class JitInstantiator:
             loaded_metadata: {},
             in_progress: [],
             depth: 0,
-            compile_count: 0
+            compile_count: 0,
+            cached_count: 0,
+            loaded_smf_count: 0
         )
 
     fn stats() -> JitStats:
         JitStats(
-            cached_count: self.jit_cache.keys().len() as i64,
+            cached_count: self.cached_count,
             compile_count: self.compile_count,
-            loaded_smf_count: self.loaded_metadata.keys().len() as i64
+            loaded_smf_count: self.loaded_smf_count
         )
 
     me load_smf_metadata(path: text) -> Result<(), text>:
+        if not self.loaded_metadata.has(path):
+            self.loaded_smf_count = self.loaded_smf_count + 1
         self.loaded_metadata[path] = _load_metadata_from_disk(path)
         Ok(())
 
     me set_metadata_for_test(path: text, metadata: LoadedMetadata):
+        if not self.loaded_metadata.has(path):
+            self.loaded_smf_count = self.loaded_smf_count + 1
         self.loaded_metadata[path] = metadata
 
     fn can_jit_instantiate(symbol: text) -> bool:
@@ -212,6 +217,8 @@ class JitInstantiator:
         if val mapped_record = rec:
             if mapped_record != nil:
                 owner = mapped_record.owner_id
+        if not self.jit_cache.has(name):
+            self.cached_count = self.cached_count + 1
         self.jit_cache[name] = JitCacheRecord(code: code, address: addr, owner: owner)
 
     me set_smf_semantic_keys(path: text, keys: [text]):
@@ -232,6 +239,7 @@ class JitInstantiator:
     me drop_cached_symbol(name: text):
         if self.jit_cache.has(name):
             self.jit_cache = self.jit_cache.remove(name)
+            self.cached_count = self.cached_count - 1
         if self.jit_semantic_keys.has(name):
             self.jit_semantic_keys = self.jit_semantic_keys.remove(name)
         _global_remove(name)
@@ -295,6 +303,8 @@ class JitInstantiator:
             path
         _global_set(name, owner_id, address)
         self.exec_mapper.set_record(name, owner_id, address)
+        if not self.jit_cache.has(name):
+            self.cached_count = self.cached_count + 1
         self.jit_cache[name] = JitCacheRecord(code: compiled, address: address, owner: owner_id)
         if self.smf_semantic_keys.has(path):
             self.jit_semantic_keys[name] = self.smf_semantic_keys[path]
@@ -338,7 +348,7 @@ class JitInstantiator:
         metadata.possible = remaining
         metadata.instantiations.push(inst)
         self.loaded_metadata[path] = metadata
-        val persisted = rt_file_write_text(_metadata_sidecar_path(path), _metadata_to_text(metadata))
+        val persisted = file_write_exact(_metadata_sidecar_path(path), _metadata_to_text(metadata))
         if not persisted:
             return Err("failed to persist JIT metadata for " + path)
         Ok(())
@@ -409,8 +419,8 @@ fn _metadata_sidecar_path(path: text) -> text:
 
 fn _load_metadata_from_disk(path: text) -> LoadedMetadata:
     val sidecar = _metadata_sidecar_path(path)
-    if rt_file_exists(sidecar):
-        val content = rt_file_read_text(sidecar) ?? ""
+    if file_exists(sidecar):
+        val content = file_read_nullable(sidecar) ?? ""
         return _metadata_from_text(content)
     LoadedMetadata(possible: [], instantiations: [])
 

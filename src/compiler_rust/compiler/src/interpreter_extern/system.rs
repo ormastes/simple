@@ -967,6 +967,32 @@ unsafe extern "C" {
     ) -> bool;
 }
 
+/// Capability discovery is a query, not an authority-minting operation.  The
+/// interpreter therefore returns the exact unavailable receipt instead of
+/// throwing while all lease-bearing V3 operations continue to fail closed.
+pub fn rt_process_owned_v3_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(1),
+        Value::Int(0),
+        Value::Int(0),
+    ])))
+}
+
+pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(4), Value::Int(8), Value::Int(0), Value::Int(0),
+        Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(95),
+    ])))
+}
+
+/// Process Observation V4 never falls back to the V1/V3 process providers.
+/// Interpreter mode exposes the symbol surface but cannot mint V4 authority.
+pub fn rt_process_observation_v4_provider_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime(
+        "process observation V4 is unavailable in interpreter mode; use the exact native V4 provider",
+    ))
+}
+
 /// `rt_process_run_owned_observed_bounded_value(cmd, args, timeout_ms, max_output_bytes) -> (text, text, [i64])`
 ///
 /// Interpreter twin of the C `_value` wrapper in `runtime_process_owned.c`:
@@ -2100,6 +2126,28 @@ mod tests {
     #[test]
     fn interpreter_runtime_reports_interpreter_abi() {
         assert_eq!(rt_is_interpreter_runtime(&[]).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn owned_process_v3_adapter_fails_closed_in_interpreter() {
+        let error = rt_process_owned_v3_adapter_unavailable(&[]).expect_err("interpreter must not mint a lease");
+        assert!(error.to_string().contains("opaque adapter is unavailable"));
+        assert!(error.to_string().contains("native runtime provider"));
+    }
+
+    #[test]
+    fn owned_process_v3_capability_query_reports_unavailable_in_interpreter() {
+        assert_eq!(
+            rt_process_owned_v3_capabilities_unavailable(&[]).unwrap(),
+            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(0), Value::Int(0),]))
+        );
+    }
+
+    #[test]
+    fn owned_pinned_process_adapter_fails_closed_in_interpreter() {
+        let error =
+            rt_process_owned_v3_adapter_unavailable(&[]).expect_err("interpreter must not mint an executable pin");
+        assert!(error.to_string().contains("opaque adapter is unavailable"));
     }
 
     // Note: Can't test sys_exit() as it terminates the process

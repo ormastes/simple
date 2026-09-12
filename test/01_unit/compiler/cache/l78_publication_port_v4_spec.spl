@@ -1,0 +1,232 @@
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009
+# U02 scripted model evidence, not physical publication or qualified execution.
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+use common.cache_daemon_host_authority_v1.{CacheNamespaceExpectedHeadV3}
+use compiler.driver.cache.publication.three_payload_selected_head_publisher.*
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
+    ThreePayloadDurablePublicationPacketV1}
+use test.fixtures.compiler.cache.three_payload_durable_packet_v1.{durable_packet_v1}
+use .fixtures.l78_namespace_publication_ports_v4.*
+
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
+
+fn publication_attempt(packet: ThreePayloadDurablePublicationPacketV1) -> L78AttemptKeyV4:
+    L78AttemptKeyV4(root_digest: sha256_text("root"), generation: packet.root.generation,
+        manifest_digest: packet.root.manifest_digest, profile_digest: sha256_text("profile"),
+        operation_digest: packet.durable.operation_digest)
+
+fn publication_input(packet: ThreePayloadDurablePublicationPacketV1,
+        kind: L78TokenKindV4, slot: i64) -> L78OwnerTokenV4:
+    L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble, kind: kind,
+        owner_instance: 41, slot: slot, epoch: 1,
+        attempt_digest: l78_attempt_key_digest_v4(publication_attempt(packet)).unwrap())
+
+fn publication_fake(script: text, packet: ThreePayloadDurablePublicationPacketV1
+) -> L78FakePublicationPortV4:
+    val attempt = publication_attempt(packet)
+    val authority = L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+        kind: L78TokenKindV4.Publication, owner_instance: 51, slot: 1, epoch: 1,
+        attempt_digest: l78_attempt_key_digest_v4(attempt).unwrap())
+    val seed = L78PublishReceiptV4(phase: L78PublicationPhaseV4.Committed,
+        operation: attempt, active_head: CacheNamespaceExpectedHeadV3.Selected([7u8]),
+        authority: Some(authority))
+    l78_fake_publication_port_v4(script, 51, attempt,
+        L78LimitsV4(max_items: 32, max_bytes: 16777216, max_steps: 8), seed)
+
+fn commit_publication(owner: L78FakePublicationPortV4,
+        packet: ThreePayloadDurablePublicationPacketV1
+) -> L78OwnedResultV4<L78FakePublicationPortV4, L78PublishReceiptV4>:
+    l78_commit_with_port_v4(owner,
+        publication_input(packet, L78TokenKindV4.Namespace, 1),
+        publication_input(packet, L78_KIND_SCOPE_V4, 2),
+        publication_input(packet, L78TokenKindV4.AffectedDomain, 3),
+        publication_input(packet, L78TokenKindV4.Closure, 4),
+        CacheNamespaceExpectedHeadV3.Genesis, packet)
+
+describe "U02 publication V4 four-token boundary":
+    it "returns a committed receipt and updated TestDouble owner from the production runner":
+        step("Forward namespace scope affected-domain and closure tokens together")
+        val packet = durable_packet_v1(7, "u02-commit")
+        val committed = commit_publication(publication_fake("publish_committed", packet), packet)
+        val receipt = committed.outcome.unwrap()
+        l78_expect_publication_phase_v4(receipt, L78PublicationPhaseV4.Committed)
+        val token = receipt.authority.unwrap()
+        expect(token.domain).to_equal(L78AuthorityDomainV4.TestDouble)
+        expect(token.kind).to_equal(L78TokenKindV4.Publication)
+        expect(token.owner_instance).to_equal(51)
+        expect(token.attempt_digest).to_equal(l78_attempt_key_digest_v4(publication_attempt(packet)).unwrap())
+        expect(committed.owner.active_slots).to_equal([token.slot])
+        expect(committed.owner.events).to_equal(["publication.commit"])
+        expect(committed.owner.step_count).to_equal(1)
+
+    it "preserves a scripted exact replay receipt with publication-kind authority":
+        val packet = durable_packet_v1(7, "u02-replay")
+        var owner = publication_fake("publish_committed", packet)
+        var replay = owner.seed
+        replay.phase = L78PublicationPhaseV4.Replayed
+        owner.seed = replay
+        val committed = commit_publication(owner, packet)
+        val receipt = committed.outcome.unwrap()
+        l78_expect_publication_phase_v4(receipt, L78PublicationPhaseV4.Replayed)
+        expect(receipt.authority.unwrap().kind).to_equal(L78TokenKindV4.Publication)
+
+    it "refuses absent or mismatched seed authority instead of manufacturing publication authority":
+        for mutation in ["missing", "live", "kind", "owner", "slot", "epoch", "attempt"]:
+            val packet = durable_packet_v1(7, "u02-seed-authority")
+            var owner = publication_fake("publish_committed", packet)
+            var seed = owner.seed
+            var token = seed.authority.unwrap()
+            if mutation == "live": token.domain = L78AuthorityDomainV4.Live
+            if mutation == "kind": token.kind = L78TokenKindV4.Namespace
+            if mutation == "owner": token.owner_instance = token.owner_instance + 1
+            if mutation == "slot": token.slot = token.slot + 1
+            if mutation == "epoch": token.epoch = token.epoch + 1
+            if mutation == "attempt": token.attempt_digest = sha256_text("other-attempt")
+            seed.authority = if mutation == "missing":
+                nil
+            else:
+                Some(token)
+            owner.seed = seed
+            val rejected = commit_publication(owner, packet)
+            expect(rejected.outcome).to_equal(Err(L78BoundaryErrorV4.Rejected))
+            expect(rejected.owner.active_slots.len()).to_equal(0)
+            expect(rejected.owner.next_slot).to_equal(1)
+
+    it "rejects wrong-kind and absent-slot tokens independently at every required position":
+        for position in 0..4:
+            for absent in [false, true]:
+                val packet = durable_packet_v1(7, "u02-required-token")
+                var owner = publication_fake("publish_committed", packet)
+                var tokens = [publication_input(packet, L78TokenKindV4.Namespace, 1),
+                    publication_input(packet, L78_KIND_SCOPE_V4, 2),
+                    publication_input(packet, L78TokenKindV4.AffectedDomain, 3),
+                    publication_input(packet, L78TokenKindV4.Closure, 4)]
+                var invalid = tokens[position]
+                if absent: invalid.slot = 0
+                else: invalid.kind = L78TokenKindV4.Candidate
+                tokens[position] = invalid
+                expect(owner.commit(tokens[0], tokens[1], tokens[2], tokens[3],
+                    CacheNamespaceExpectedHeadV3.Genesis, packet)).to_equal(
+                        Err(L78BoundaryErrorV4.ForeignToken))
+                expect(owner.active_slots.len()).to_equal(0)
+                expect(owner.next_slot).to_equal(1)
+
+    it "rejects Live-domain stale-attempt and detached closure inputs before mutation":
+        for mutation in ["live", "attempt", "epoch", "closure-owner", "closure-slot"]:
+            val packet = durable_packet_v1(7, "u02-token-binding")
+            var owner = publication_fake("publish_committed", packet)
+            val namespace_token = publication_input(packet, L78TokenKindV4.Namespace, 1)
+            var closure = publication_input(packet, L78TokenKindV4.Closure, 4)
+            var expected = L78BoundaryErrorV4.ForeignToken
+            if mutation == "live": closure.domain = L78AuthorityDomainV4.Live
+            if mutation == "closure-owner": closure.owner_instance = 99
+            if mutation == "closure-slot": closure.slot = namespace_token.slot
+            if mutation == "epoch":
+                closure.epoch = 2
+                expected = L78BoundaryErrorV4.StaleToken
+            if mutation == "attempt":
+                closure.attempt_digest = sha256_text("other-attempt")
+                expected = L78BoundaryErrorV4.StaleToken
+            expect(owner.commit(namespace_token,
+                publication_input(packet, L78_KIND_SCOPE_V4, 2),
+                publication_input(packet, L78TokenKindV4.AffectedDomain, 3), closure,
+                CacheNamespaceExpectedHeadV3.Genesis, packet)).to_equal(Err(expected))
+            expect(owner.active_slots.len()).to_equal(0)
+
+    it "distinguishes precommit conflict from postcommit Unknown without asserting an old head":
+        val packet = durable_packet_v1(7, "u02-conflict-unknown")
+        val conflict = commit_publication(publication_fake("publish_conflict", packet), packet)
+        expect(conflict.outcome).to_equal(Err(L78BoundaryErrorV4.Conflict))
+        expect(conflict.owner.active_slots.len()).to_equal(0)
+        expect(conflict.owner.next_slot).to_equal(1)
+        val unknown = commit_publication(publication_fake("publish_unknown", packet), packet)
+        expect(unknown.outcome).to_equal(Err(L78BoundaryErrorV4.Unknown))
+        expect(unknown.owner.active_slots).to_equal([1])
+        expect(unknown.owner.revoked_slots.len()).to_equal(0)
+        var retained = unknown.owner
+        expect(retained.resolve(publication_input(packet, L78TokenKindV4.Namespace, 1),
+            publication_attempt(packet))).to_equal(Err(L78BoundaryErrorV4.Unknown))
+        expect(retained.active_slots).to_equal([1])
+        expect(retained.events).to_equal(["publication.commit", "publication.resolve"])
+
+    it "returns scripted cancellation before allocating any publication state":
+        val packet = durable_packet_v1(7, "u02-cancelled")
+        val cancelled = commit_publication(publication_fake("publish_cancelled", packet), packet)
+        expect(cancelled.outcome).to_equal(Err(L78BoundaryErrorV4.Cancelled))
+        expect(cancelled.owner.events).to_equal(["publication.commit"])
+        expect(cancelled.owner.active_slots.len()).to_equal(0)
+        expect(cancelled.owner.revoked_slots.len()).to_equal(0)
+        expect(cancelled.owner.next_slot).to_equal(1)
+
+    it "retains receipt-phase Unknown and resolves the exact operation to committed":
+        step("Keep ownership through an uncertain commit and an exact later resolution")
+        val packet = durable_packet_v1(7, "u02-resolution")
+        val unknown = commit_publication(publication_fake("publish_unknown_then_committed", packet), packet)
+        val pending = unknown.outcome.unwrap()
+        l78_expect_publication_phase_v4(pending, L78PublicationPhaseV4.Unknown)
+        expect(pending.authority).to_be_nil()
+        var owner = unknown.owner
+        val slots = owner.active_slots
+        val exact = owner.resolve(publication_input(packet, L78TokenKindV4.Namespace, 1),
+            publication_attempt(packet)).unwrap()
+        l78_expect_publication_phase_v4(exact, L78PublicationPhaseV4.Committed)
+        expect(exact.authority.unwrap().slot).to_equal(slots[0])
+        expect(owner.revoked_slots.len()).to_equal(0)
+        expect(owner.events).to_equal(["publication.commit", "publication.resolve"])
+        expect(exact.operation).to_equal(publication_attempt(packet))
+
+    it "rejects a different exact operation on the sole resolution attempt and retains ownership":
+        for dimension in ["generation", "root", "manifest", "profile", "operation"]:
+            val packet = durable_packet_v1(7, "u02-resolution-binding")
+            val unknown = commit_publication(publication_fake("publish_unknown_then_committed", packet), packet)
+            var owner = unknown.owner
+            var wrong = publication_attempt(packet)
+            if dimension == "generation": wrong.generation = wrong.generation + 1
+            if dimension == "root": wrong.root_digest = sha256_text("other-root")
+            if dimension == "manifest": wrong.manifest_digest = sha256_text("other-manifest")
+            if dimension == "profile": wrong.profile_digest = sha256_text("other-profile")
+            if dimension == "operation": wrong.operation_digest = sha256_text("other-operation")
+            expect(owner.resolve(publication_input(packet, L78TokenKindV4.Namespace, 1), wrong)).to_equal(
+                Err(L78BoundaryErrorV4.StaleToken))
+            expect(owner.active_slots).to_equal([1])
+            expect(owner.revoked_slots.len()).to_equal(0)
+            expect(owner.events).to_equal(["publication.commit", "publication.resolve"])
+
+    it "rejects mismatched packet identity without allocating publication slots":
+        for dimension in ["generation", "manifest", "operation"]:
+            val packet = durable_packet_v1(7, "u02-packet-binding")
+            var altered = packet
+            var root = packet.root
+            var durable = packet.durable
+            if dimension == "generation": root.generation = root.generation + 1
+            if dimension == "manifest": root.manifest_digest = sha256_text("other-manifest")
+            if dimension == "operation": durable.operation_digest = sha256_text("other-operation")
+            altered.root = root
+            altered.durable = durable
+            var owner = publication_fake("publish_committed", packet)
+            expect(owner.commit(publication_input(packet, L78TokenKindV4.Namespace, 1),
+                publication_input(packet, L78_KIND_SCOPE_V4, 2),
+                publication_input(packet, L78TokenKindV4.AffectedDomain, 3),
+                publication_input(packet, L78TokenKindV4.Closure, 4),
+                CacheNamespaceExpectedHeadV3.Genesis, altered)).to_equal(Err(L78BoundaryErrorV4.InvalidRequest))
+            expect(owner.active_slots.len()).to_equal(0)
+
+    it "enforces publication budgets and refuses TestDouble tokens at the closed adapter":
+        val packet = durable_packet_v1(7, "u02-publication-budget")
+        var owner = publication_fake("publish_committed", packet)
+        var limits = owner.limits
+        limits.max_bytes = 1
+        owner.limits = limits
+        val bounded = commit_publication(owner, packet)
+        expect(bounded.outcome).to_equal(Err(L78BoundaryErrorV4.Bounds))
+        expect(bounded.owner.active_slots.len()).to_equal(0)
+        var closed = l78_closed_publication_port_v4("no live issuer installed")
+        expect(closed.commit(publication_input(packet, L78TokenKindV4.Namespace, 1),
+            publication_input(packet, L78_KIND_SCOPE_V4, 2),
+            publication_input(packet, L78TokenKindV4.AffectedDomain, 3),
+            publication_input(packet, L78TokenKindV4.Closure, 4),
+            CacheNamespaceExpectedHeadV3.Genesis, packet)).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+        val unavailable = commit_publication(publication_fake("publish_unavailable", packet), packet)
+        expect(unavailable.outcome).to_equal(Err(L78BoundaryErrorV4.Unavailable))

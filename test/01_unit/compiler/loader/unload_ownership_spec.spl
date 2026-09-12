@@ -1,5 +1,10 @@
 use compiler.loader.{LoadedSymbol, SymbolType}
-use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
+use compiler.loader.unload_ownership.{
+    owned_global_symbol_names, global_symbols_without_names,
+    partition_global_symbols_by_owner, symbol_matches_owner_path
+}
+
+extern fn rt_file_read_text(path: text) -> text
 
 describe "Loader unload ownership helpers":
     """
@@ -46,6 +51,20 @@ describe "Loader unload ownership helpers":
         expect(names.contains("c_fn")).to_equal(true)
         expect(names.contains("b_fn")).to_equal(false)
 
+        val (partitioned_names, partitioned_kept) =
+            partition_global_symbols_by_owner(global_symbols, "path_a")
+        expect(partitioned_names.len()).to_equal(2)
+        expect(partitioned_names.contains("a_fn")).to_equal(true)
+        expect(partitioned_names.contains("c_fn")).to_equal(true)
+        expect(partitioned_kept.len()).to_equal(1)
+        expect(partitioned_kept.has("b_fn")).to_equal(true)
+
+        val empty_symbols: Dict<text, (text, LoadedSymbol)> = {}
+        val (empty_owned, empty_kept) =
+            partition_global_symbols_by_owner(empty_symbols, "path_a")
+        expect(empty_owned.len()).to_equal(0)
+        expect(empty_kept.len()).to_equal(0)
+
     it "filters requested names from the global symbol table":
         val sym_a = LoadedSymbol(
             name: "a_fn",
@@ -81,3 +100,49 @@ describe "Loader unload ownership helpers":
         expect(kept.has("a_fn")).to_equal(false)
         expect(kept.has("c_fn")).to_equal(false)
         expect(kept.has("b_fn")).to_equal(true)
+
+        val unchanged = global_symbols_without_names(global_symbols, [])
+        expect(unchanged.len()).to_equal(3)
+        expect(unchanged.has("a_fn")).to_equal(true)
+        expect(unchanged.has("b_fn")).to_equal(true)
+        expect(unchanged.has("c_fn")).to_equal(true)
+
+        val absent_unchanged = global_symbols_without_names(
+            global_symbols, ["missing_fn", "missing_fn"])
+        expect(absent_unchanged.len()).to_equal(3)
+        expect(absent_unchanged.has("a_fn")).to_equal(true)
+        expect(absent_unchanged.has("b_fn")).to_equal(true)
+        expect(absent_unchanged.has("c_fn")).to_equal(true)
+
+    it "matches JIT symbols to normalized owner-path tags":
+        expect(symbol_matches_owner_path(
+            "foo_specialized_i64", "/tmp/foo_module.smf")).to_equal(true)
+        expect(symbol_matches_owner_path(
+            "prefix_foo_specialized", "/tmp/foo_module.smf")).to_equal(true)
+        expect(symbol_matches_owner_path(
+            "foobar_specialized", "/tmp/foo_module.smf")).to_equal(false)
+        expect(symbol_matches_owner_path("anything", "")).to_equal(false)
+
+    it "indexes removal names once instead of rescanning them per symbol":
+        val source = rt_file_read_text(
+            "src/compiler/99.loader/unload_ownership.spl")
+        val filter_source = source.split(
+            "fn global_symbols_without_names<T>(")[1]
+        val guard = filter_source.find("if names.is_empty():") ?? -1
+        val allocation = filter_source.find("var removal_set: Dict<text, bool> = {}") ?? -1
+        val no_overlap_guard = filter_source.find("if not removes_any:") ?? -1
+        val output_allocation = filter_source.find("var kept: Dict<text, (text, T)> = {}") ?? -1
+        expect(guard).to_be_greater_than(-1)
+        expect(allocation).to_be_greater_than(guard)
+        expect(no_overlap_guard).to_be_greater_than(allocation)
+        expect(output_allocation).to_be_greater_than(no_overlap_guard)
+        expect(source).to_contain("var removal_set: Dict<text, bool> = {}")
+        expect(source).to_contain("if not removal_set.has(sym_name):")
+        expect(source.contains("fn _name_in(")).to_equal(false)
+
+    it "indexes compatibility JIT-symbol deduplication":
+        val source = rt_file_read_text(
+            "src/compiler/99.loader/module_loader_compat.spl")
+        expect(source).to_contain("var remove_jit_set: Dict<text, bool> = {}")
+        expect(source).to_contain("remove_jit_set[sym_name] = true")
+        expect(source.contains("text_array_contains(remove_jit")).to_equal(false)

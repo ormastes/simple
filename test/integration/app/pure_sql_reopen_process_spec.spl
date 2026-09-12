@@ -1,0 +1,71 @@
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+use std.io_runtime.{file_delete, file_write}
+
+val RUNNER = "test/integration/app/pure_sql_reopen_process_runner.spl"
+
+fn temp_path(suffix: text) -> text:
+    "/tmp/pure_sql_reopen_{rt_getpid()}_{rt_time_now_unix_micros()}_{suffix}.db"
+
+describe "PureDatabase independent process reopen" :
+    it "reopens checkpointed NOT NULL data across writer and reader processes and rejects other formats":
+        val db_path = temp_path("main")
+        val legacy_path = temp_path("legacy")
+        val corrupt_path = temp_path("corrupt")
+        val (writer_out, _writer_err, writer_code) = rt_process_run("bin/simple", ["run", RUNNER, "write", db_path])
+        expect(writer_code).to_equal(0)
+        expect(writer_out).to_contain("PURE_SQL_WRITER_CHECKPOINTED")
+
+        val (reader_out, _reader_err, reader_code) = rt_process_run("bin/simple", ["run", RUNNER, "read", db_path])
+        expect(reader_code).to_equal(0)
+        expect(reader_out).to_contain("PURE_SQL_READER_REOPENED rows=2")
+
+        expect(file_write(legacy_path, "SIMPLE_SQLITE_FACADE_V1\n")).to_equal(true)
+        val (legacy_out, _legacy_err, legacy_code) = rt_process_run("bin/simple", ["run", RUNNER, "reject", legacy_path])
+        expect(legacy_code).to_equal(0)
+        expect(legacy_out).to_contain("PURE_SQL_IMAGE_REJECTED")
+
+        expect(file_write(corrupt_path, "simple-pure-db-v1\nrow|mm|T:orphan\n")).to_equal(true)
+        val (corrupt_out, _corrupt_err, corrupt_code) = rt_process_run("bin/simple", ["run", RUNNER, "reject", corrupt_path])
+        expect(corrupt_code).to_equal(0)
+        expect(corrupt_out).to_contain("PURE_SQL_IMAGE_REJECTED")
+
+        file_delete(db_path)
+        file_delete(legacy_path)
+        file_delete(corrupt_path)
+
+    it "publishes exact staged bytes and reopens the published schema":
+        val stage_path = temp_path("stage")
+        val destination_path = temp_path("published")
+        val (output, _error, code) = rt_process_run("bin/simple", ["run", RUNNER, "publish", stage_path, destination_path])
+        expect(code).to_equal(0)
+        expect(output).to_contain("PURE_SQL_PUBLICATION_VERIFIED")
+        expect(output).to_contain("rows=1")
+        file_delete(stage_path)
+        file_delete(destination_path)
+
+    it "round-trips delimiter and control text across independent processes":
+        val path = temp_path("framed")
+        val (writer_out, _writer_err, writer_code) = rt_process_run(
+            "bin/simple", ["run", RUNNER, "write-framed", path])
+        expect(writer_code).to_equal(0)
+        expect(writer_out).to_contain("PURE_SQL_FRAMED_WRITER_CHECKPOINTED")
+        val (reader_out, _reader_err, reader_code) = rt_process_run(
+            "bin/simple", ["run", RUNNER, "read-framed", path])
+        expect(reader_code).to_equal(0)
+        expect(reader_out).to_contain("PURE_SQL_FRAMED_READER_REOPENED")
+        file_delete(path)
+
+    it "round-trips ordered schema types and a non-first primary key across independent processes":
+        val path = temp_path("schema_v3")
+        val (writer_out, _writer_err, writer_code) = rt_process_run(
+            "bin/simple", ["run", RUNNER, "write-schema", path])
+        expect(writer_code).to_equal(0)
+        expect(writer_out).to_contain("PURE_SQL_SCHEMA_WRITER_CHECKPOINTED")
+        val (reader_out, _reader_err, reader_code) = rt_process_run(
+            "bin/simple", ["run", RUNNER, "read-schema", path])
+        expect(reader_code).to_equal(0)
+        expect(reader_out).to_contain("PURE_SQL_SCHEMA_READER_REOPENED columns=5 pk=1")
+        file_delete(path)

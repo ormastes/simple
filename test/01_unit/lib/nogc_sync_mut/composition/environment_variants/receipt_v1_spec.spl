@@ -1,0 +1,160 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+
+fn digest(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn identity_v1() -> EnvironmentVariantReceiptIdentityV1:
+    EnvironmentVariantReceiptIdentityV1(
+        provider_identity: digest(1u64), variant_identity: digest(2u64),
+        artifact_digest: digest(3u64), environment_identity: digest(4u64),
+        environment_generation: 7u64, provider_generation: 11u64)
+
+fn discovered_v1() -> EnvironmentVariantReceiptV1:
+    val created = environment_variant_receipt_create_v1(identity_v1())
+    match created:
+        case Ok(receipt): receipt
+        case Err(_):
+            fail("valid receipt identity must create a discovered receipt")
+            # The branch is unreachable after fail; retain a typed value for
+            # interpreters that require every match arm to have a value.
+            EnvironmentVariantReceiptV1(
+                descriptor_size: 224u32, schema_version: 1u16,
+                state: EnvironmentVariantReceiptStateV1.Discovered,
+                provider_identity: digest(1u64), variant_identity: digest(2u64),
+                artifact_digest: digest(3u64), environment_identity: digest(4u64),
+                environment_generation: 7u64, provider_generation: 11u64,
+                metadata_digest: digest(5u64), eligibility_digest: digest(6u64),
+                mapping_handle: 1u64, callable_handle: 1u64,
+                binding_plan_digest: digest(7u64), execution_digest: digest(8u64),
+                completion_digest: digest(9u64),
+                self_check_digest: digest(15u64), state_evidence_digest: digest(16u64),
+                execution_count: 1u64,
+                outstanding_references: 0u64, event_sequence: 0u64)
+
+describe "environment variant truthful receipt V1":
+    it "advances every lifecycle state with pinned identity and evidence":
+        val identity = identity_v1()
+        val discovered = discovered_v1()
+        expect(environment_variant_receipt_state_name_v1(discovered.state)).to_equal("discovered")
+        val metadata = environment_variant_receipt_metadata_validate_v1(discovered, identity, digest(10u64)).unwrap()
+        expect(metadata.state).to_equal(EnvironmentVariantReceiptStateV1.MetadataValidated)
+        val checked = environment_variant_receipt_self_check_v1(metadata, identity, digest(11u64)).unwrap()
+        val eligible = environment_variant_receipt_mark_eligible_v1(checked, identity, digest(12u64)).unwrap()
+        val mapped = environment_variant_receipt_mark_mapped_v1(eligible, identity, 100u64).unwrap()
+        val callable = environment_variant_receipt_mark_callable_v1(mapped, identity, 200u64).unwrap()
+        val bound = environment_variant_receipt_bind_v1(callable, identity, digest(13u64)).unwrap()
+        val active = environment_variant_receipt_activate_v1(bound, identity).unwrap()
+        val executed = environment_variant_receipt_execute_v1(active, identity, digest(14u64), 1u64).unwrap()
+        val completed = environment_variant_receipt_complete_v1(executed, identity, digest(15u64)).unwrap()
+        val draining = environment_variant_receipt_begin_draining_v1(completed, identity, 2u64).unwrap()
+        val drained = environment_variant_receipt_update_draining_v1(draining, identity, 0u64).unwrap()
+        val retired = environment_variant_receipt_retire_v1(drained, identity).unwrap()
+        expect(retired.state).to_equal(EnvironmentVariantReceiptStateV1.Retired)
+        expect(retired.event_sequence).to_equal(12u64)
+        expect(environment_variant_receipt_validate_v1(retired)).to_equal(Ok(()))
+
+    it "rejects skips, replays, and identity or generation mismatches":
+        val identity = identity_v1()
+        val discovered = discovered_v1()
+        expect(environment_variant_receipt_execute_v1(discovered, identity, digest(20u64), 1u64)).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.InvalidTransition))
+        val wrong = EnvironmentVariantReceiptIdentityV1(
+            provider_identity: digest(99u64), variant_identity: digest(2u64),
+            artifact_digest: digest(3u64), environment_identity: digest(4u64),
+            environment_generation: 7u64, provider_generation: 11u64)
+        expect(environment_variant_receipt_metadata_validate_v1(discovered, wrong, digest(20u64))).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.IdentityMismatch))
+        val stale = EnvironmentVariantReceiptIdentityV1(
+            provider_identity: digest(1u64), variant_identity: digest(2u64),
+            artifact_digest: digest(3u64), environment_identity: digest(4u64),
+            environment_generation: 6u64, provider_generation: 11u64)
+        expect(environment_variant_receipt_metadata_validate_v1(discovered, stale, digest(20u64))).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.IdentityMismatch))
+        val metadata = environment_variant_receipt_metadata_validate_v1(discovered, identity, digest(20u64)).unwrap()
+        val checked = environment_variant_receipt_self_check_v1(metadata, identity, digest(21u64)).unwrap()
+        expect(environment_variant_receipt_self_check_v1(checked, identity, digest(22u64))).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.InvalidTransition))
+
+    it "does not claim execution or completion without the bound prerequisites":
+        val identity = identity_v1()
+        val discovered = discovered_v1()
+        val metadata = environment_variant_receipt_metadata_validate_v1(discovered, identity, digest(30u64)).unwrap()
+        val checked = environment_variant_receipt_self_check_v1(metadata, identity, digest(31u64)).unwrap()
+        val eligible = environment_variant_receipt_mark_eligible_v1(checked, identity, digest(32u64)).unwrap()
+        val mapped = environment_variant_receipt_mark_mapped_v1(eligible, identity, 300u64).unwrap()
+        val callable = environment_variant_receipt_mark_callable_v1(mapped, identity, 301u64).unwrap()
+        expect(environment_variant_receipt_execute_v1(callable, identity, digest(33u64), 1u64)).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.InvalidTransition))
+        val bound = environment_variant_receipt_bind_v1(callable, identity, digest(34u64)).unwrap()
+        expect(environment_variant_receipt_execute_v1(bound, identity, digest(35u64), 1u64)).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.InvalidTransition))
+        val active = environment_variant_receipt_activate_v1(bound, identity).unwrap()
+        expect(environment_variant_receipt_execute_v1(active, identity, digest(0u64), 1u64)).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.InvalidIdentity))
+        expect(environment_variant_receipt_execute_v1(active, identity, digest(36u64), 0u64)).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.MissingExecutionEvidence))
+        val executed = environment_variant_receipt_execute_v1(active, identity, digest(36u64), 1u64).unwrap()
+        expect(environment_variant_receipt_complete_v1(executed, identity, digest(0u64))).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.InvalidIdentity))
+
+    it "keeps retired generations pinned until references actually drain":
+        val identity = identity_v1()
+        var receipt = discovered_v1()
+        receipt = environment_variant_receipt_metadata_validate_v1(receipt, identity, digest(40u64)).unwrap()
+        receipt = environment_variant_receipt_self_check_v1(receipt, identity, digest(41u64)).unwrap()
+        receipt = environment_variant_receipt_mark_eligible_v1(receipt, identity, digest(42u64)).unwrap()
+        receipt = environment_variant_receipt_mark_mapped_v1(receipt, identity, 400u64).unwrap()
+        receipt = environment_variant_receipt_mark_callable_v1(receipt, identity, 401u64).unwrap()
+        receipt = environment_variant_receipt_bind_v1(receipt, identity, digest(43u64)).unwrap()
+        receipt = environment_variant_receipt_activate_v1(receipt, identity).unwrap()
+        receipt = environment_variant_receipt_execute_v1(receipt, identity, digest(44u64), 1u64).unwrap()
+        receipt = environment_variant_receipt_complete_v1(receipt, identity, digest(45u64)).unwrap()
+        val draining = environment_variant_receipt_begin_draining_v1(receipt, identity, 1u64).unwrap()
+        expect(environment_variant_receipt_retire_v1(draining, identity)).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.OutstandingReferences))
+        expect(environment_variant_receipt_update_draining_v1(draining, identity, 1u64)).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.InvalidDrainCount))
+        val drained = environment_variant_receipt_update_draining_v1(draining, identity, 0u64).unwrap()
+        expect(environment_variant_receipt_retire_v1(drained, identity).unwrap().outstanding_references).to_equal(0u64)
+
+    it "keeps self-check, active, quarantine, rollback, and fallback truthful":
+        val identity = identity_v1()
+        val metadata = environment_variant_receipt_metadata_validate_v1(discovered_v1(), identity, digest(50u64)).unwrap()
+        val checked = environment_variant_receipt_self_check_v1(metadata, identity, digest(51u64)).unwrap()
+        val quarantined = environment_variant_receipt_quarantine_v1(checked, identity, digest(52u64)).unwrap()
+        expect(quarantined.state).to_equal(EnvironmentVariantReceiptStateV1.Quarantined)
+        expect(environment_variant_receipt_validate_v1(quarantined)).to_equal(Ok(()))
+        val eligible = environment_variant_receipt_mark_eligible_v1(checked, identity, digest(53u64)).unwrap()
+        val mapped = environment_variant_receipt_mark_mapped_v1(eligible, identity, 500u64).unwrap()
+        val callable = environment_variant_receipt_mark_callable_v1(mapped, identity, 501u64).unwrap()
+        val bound = environment_variant_receipt_bind_v1(callable, identity, digest(54u64)).unwrap()
+        val rolled_back = environment_variant_receipt_rollback_v1(bound, identity, digest(55u64)).unwrap()
+        expect(rolled_back.state).to_equal(EnvironmentVariantReceiptStateV1.Rollback)
+        val active = environment_variant_receipt_activate_v1(bound, identity).unwrap()
+        expect(active.execution_count).to_equal(0u64)
+        expect(environment_variant_receipt_validate_v1(active)).to_equal(Ok(()))
+        val fallback = environment_variant_receipt_fallback_v1(active, identity, digest(56u64)).unwrap()
+        expect(fallback.state).to_equal(EnvironmentVariantReceiptStateV1.Fallback)
+        expect(environment_variant_receipt_validate_v1(fallback)).to_equal(Ok(()))
+
+    it "rejects event and execution counter exhaustion before mutation":
+        val identity = identity_v1()
+        var event_exhausted = discovered_v1()
+        event_exhausted.event_sequence = ENV_VARIANT_RECEIPT_MAX_EVENTS_V1
+        expect(environment_variant_receipt_metadata_validate_v1(event_exhausted, identity, digest(60u64))).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.EventLimitExceeded))
+        event_exhausted.event_sequence = ENV_VARIANT_RECEIPT_MAX_COUNTER_V1
+        expect(environment_variant_receipt_metadata_validate_v1(event_exhausted, identity, digest(61u64))).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.CounterOverflow))
+        val metadata = environment_variant_receipt_metadata_validate_v1(discovered_v1(), identity, digest(62u64)).unwrap()
+        val checked = environment_variant_receipt_self_check_v1(metadata, identity, digest(63u64)).unwrap()
+        val eligible = environment_variant_receipt_mark_eligible_v1(checked, identity, digest(64u64)).unwrap()
+        val mapped = environment_variant_receipt_mark_mapped_v1(eligible, identity, 600u64).unwrap()
+        val callable = environment_variant_receipt_mark_callable_v1(mapped, identity, 601u64).unwrap()
+        val bound = environment_variant_receipt_bind_v1(callable, identity, digest(65u64)).unwrap()
+        val active = environment_variant_receipt_activate_v1(bound, identity).unwrap()
+        expect(environment_variant_receipt_execute_v1(
+            active, identity, digest(66u64), ENV_VARIANT_RECEIPT_MAX_EXECUTIONS_V1 + 1u64)).to_equal(
+            Err(EnvironmentVariantReceiptErrorV1.ExecutionLimitExceeded))

@@ -15,6 +15,8 @@ use test.helpers.dynsmf_admitted_startup_fixture.{
     dynsmf_admitted_startup_fixture
 }
 
+extern fn rt_file_read_text(path: text) -> text
+
 fn trust_fixture() -> DynSmfAdmittedStartupFixture:
     dynsmf_admitted_startup_fixture(
         "file_io",
@@ -115,6 +117,19 @@ describe "dynSMF OS trust config admission":
             [image])
         expect(wrong_digest.reason).to_contain("artifact_digest_mismatch")
 
+        var duplicate_manifest = fixture.manifest
+        duplicate_manifest.push(fixture.manifest[0])
+        val ambiguous_manifest = dynsmf_admitted_registry_from_values(
+            duplicate_manifest, exact_trust_source(fixture), [image])
+        expect(ambiguous_manifest.reason).to_contain("manifest_identity_missing_or_ambiguous")
+
+        val second_source = trust_source(
+            fixture, "other", "build/other.smf", "1", "precompiled_smf",
+            fixture.request.artifact.content_hash, "other_export")
+        val ambiguous_images = dynsmf_admitted_registry_from_values(
+            fixture.manifest, exact_trust_source(fixture) + second_source, [image, image])
+        expect(ambiguous_images.reason).to_contain("artifact_image_missing_or_ambiguous")
+
     it "rejects missing, incomplete, and duplicate trust declarations":
         expect(dynsmf_trust_config_parse("").reason).to_equal("trust_registry_empty")
         val fixture = trust_fixture()
@@ -123,3 +138,43 @@ describe "dynSMF OS trust config admission":
         expect(dynsmf_trust_config_parse(incomplete).reason).to_contain("incomplete_binding")
         val duplicate = exact_trust_source(fixture) + exact_trust_source(fixture)
         expect(dynsmf_trust_config_parse(duplicate).reason).to_contain("duplicate_artifact")
+
+        val duplicate_facet = exact_trust_source(fixture) +
+            "  binding:\n    facet_id: startup/file_io\n    aspect_id: other.aspect\n    module_id: other.module\n    module_abi_hash: other-module-abi\n    export_symbol: close\n    interface_abi_hash: other-facet-abi\n"
+        expect(dynsmf_trust_config_parse(duplicate_facet).reason).to_contain("duplicate_binding")
+        val duplicate_export = exact_trust_source(fixture) +
+            "  binding:\n    facet_id: startup/file_io/other\n    aspect_id: other.aspect\n    module_id: other.module\n    module_abi_hash: other-module-abi\n    export_symbol: open\n    interface_abi_hash: other-facet-abi\n"
+        expect(dynsmf_trust_config_parse(duplicate_export).reason).to_contain("duplicate_binding")
+
+    it "indexes artifact ids, paths, facets, and exports while parsing":
+        var source = ""
+        var index = 0
+        while index < 64:
+            source = source + "trust_artifact:\n  id: library_" + index.to_text() + "\n  path: build/library_" + index.to_text() + ".smf\n  abi_version: 1\n  artifact_kind: precompiled_smf\n  content_hash: 0000000000000000000000000000000000000000000000000000000000000000\n  binding:\n    facet_id: facet_" + index.to_text() + "\n    aspect_id: aspect\n    module_id: module_" + index.to_text() + "\n    module_abi_hash: module-abi\n    export_symbol: export_" + index.to_text() + "\n    interface_abi_hash: interface-abi\n"
+            index = index + 1
+        val parsed = dynsmf_trust_config_parse(source)
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.artifacts.len()).to_equal(64)
+
+        val owner = rt_file_read_text("src/os/smf/dynsmf_trust_registry.spl")
+        expect(owner.contains("var seen_library_ids: Dict<text, bool> = {}" )).to_equal(true)
+        expect(owner.contains("var seen_paths: Dict<text, bool> = {}" )).to_equal(true)
+        expect(owner.contains("var seen_facet_ids: Dict<text, bool> = {}" )).to_equal(true)
+        expect(owner.contains("var seen_export_symbols: Dict<text, bool> = {}" )).to_equal(true)
+        expect(owner.contains("fn _dynsmf_trust_binding_duplicate")).to_equal(false)
+        expect(owner.contains("fn _dynsmf_trust_artifact_duplicate")).to_equal(false)
+
+    it "owns a constant-time admitted artifact index":
+        val source = rt_file_read_text("src/os/smf/dynsmf_trust_registry.spl")
+        expect(source.contains("artifact_indices: Dict<text, i64>")).to_equal(true)
+        expect(source.contains("if not registry.artifact_indices.has(library_id):")).to_equal(true)
+        expect(source.contains("while index < registry.artifacts.len()" )).to_equal(false)
+
+    it "indexes admission inputs once while preserving ambiguous identities":
+        val source = rt_file_read_text("src/os/smf/dynsmf_trust_registry.spl")
+        expect(source.contains("fn _dynsmf_trust_manifest_indices")).to_equal(true)
+        expect(source.contains("fn _dynsmf_trust_image_indices")).to_equal(true)
+        expect(source.contains("indices[library_id] = -2")).to_equal(true)
+        expect(source.contains("indices[path] = -2")).to_equal(true)
+        expect(source.contains("fn _dynsmf_trust_manifest_entry")).to_equal(false)
+        expect(source.contains("fn _dynsmf_trust_image(")).to_equal(false)

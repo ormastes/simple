@@ -12,21 +12,24 @@ use .smf_cache.{SmfCache}
 # SmfCacheManager
 # ============================================================================
 
-struct SmfCacheManager:
+class SmfCacheManager:
     """Ref-counted wrapper over SmfCache for per-module eviction."""
     cache: SmfCache
     ref_counts: Dict<text, i32>
+    tracked_count: i32
 
 fn smfcachemanager_new(cache: SmfCache) -> SmfCacheManager:
     SmfCacheManager(
         cache: cache,
-        ref_counts: {}
+        ref_counts: {},
+        tracked_count: 0
     )
 
 fn smfcachemanager_with_new_cache() -> SmfCacheManager:
     SmfCacheManager(
         cache: SmfCache.new(),
-        ref_counts: {}
+        ref_counts: {},
+        tracked_count: 0
     )
 
 # ============================================================================
@@ -39,6 +42,7 @@ fn smfcachemanager_ref_count_inc(self: SmfCacheManager, path: text):
         self.ref_counts[path] = self.ref_counts[path] + 1
     else:
         self.ref_counts[path] = 1
+        self.tracked_count = self.tracked_count + 1
 
 fn smfcachemanager_ref_count_dec(self: SmfCacheManager, path: text):
     """Decrement reference count. Evicts from cache when it reaches zero."""
@@ -50,6 +54,7 @@ fn smfcachemanager_ref_count_dec(self: SmfCacheManager, path: text):
         # Last reference gone — evict the mmap.
         _ = self.cache.evict(path)
         self.ref_counts = self.ref_counts.remove(path)
+        self.tracked_count = self.tracked_count - 1
     else:
         self.ref_counts[path] = new_count
 
@@ -63,10 +68,11 @@ fn smfcachemanager_force_clear(self: SmfCacheManager):
     """Force-close all mmaps and reset all ref counts."""
     self.cache.clear()
     self.ref_counts = {}
+    self.tracked_count = 0
 
 fn smfcachemanager_tracked_count(self: SmfCacheManager) -> i32:
     """Number of paths with active references."""
-    self.ref_counts.keys().len()
+    self.tracked_count
 
 # ============================================================================
 # Delegate to underlying SmfCache for read access
@@ -78,4 +84,3 @@ fn smfcachemanager_tracked_count(self: SmfCacheManager) -> i32:
 # ============================================================================
 # Exports
 # ============================================================================
-

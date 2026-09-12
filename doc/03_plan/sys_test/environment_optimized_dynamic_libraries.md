@@ -98,3 +98,75 @@ calls and typed oracles, regenerate the manual, then run each acceptance command
 once after convergence. REQ-015 and REQ-016 each require all three focused
 scenarios to pass before the selected registry or inspector can authorize cache,
 publication, or inspection evidence.
+
+## E1-E5 environment dispatch acceptance handoff — 2026-09-11
+
+This section is the current test-side handoff for the additive
+`environment-variant-dispatch-v1` ledger frozen in
+`doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md`.
+It does not replace the historical 47-item/800-point ledger and does not infer
+implementation status from source presence. The five lanes contain 38
+obligations and 100 importance-weighted points; the current state is
+`P=0,F=0,E=0,U=38,X=0`, `D=0`, and `D_w=0`. Ratios whose denominator is zero
+are `N/A`; all 38 rows remain pending (`U`).
+
+### Canonical E5 executable matrix
+
+| ID | Evidence class | Requirement mapping | Executable SSpec | Generated manual | Current state |
+|---|---|---|---|---|---|
+| E5-001 | `integration` | REQ-002,003,004,006,010,014 | `test/02_integration/compiler/environment_variant_activation_spec.spl` | `doc/06_spec/test/02_integration/compiler/environment_variant_activation_spec.md` | `U / MissingEvidence` until E1-E3 owner receipts |
+| E5-002 | `physical_worker` | REQ-011,012,013 | `test/03_system/runtime/environment_variant_gpu_infrastructure_spec.spl` | `doc/06_spec/test/03_system/runtime/environment_variant_gpu_infrastructure_spec.md` | `U / MissingEvidence` until E4 device receipts |
+| E5-003 | `integration`, `performance` | REQ-013,014 | `test/03_system/app/compiler/feature/environment_variant_activation_spec.spl` | `doc/06_spec/test/03_system/app/compiler/feature/environment_variant_activation_spec.md` | `U / MissingEvidence` until qualified runner/reviewer |
+| E5-004 | `source_contract` + `integration` | REQ-002,011,014 | `test/03_system/app/compiler/feature/environment_variant_activation_spec.spl` | same as E5-003 | `U / MissingEvidence` until canonical row authority |
+
+Every visible scenario retains its stable ID and the frozen suffix
+`[importance=critical|high; importance_weight=3|2]`. The test-side helper names
+are frozen as `collect_policy_sources`, `resolve_policy_and_ceiling`,
+`probe_execution_domain`, `admit_exact_provider`, `pin_selected_generation`,
+`execute_bounded_region`, `validate_completion_receipt`, and
+`drain_and_retire`. Missing owners fail explicitly with `MissingEvidence:<ID>`;
+they are not opt-in skips, tautological passes, fixture substitutions, or
+claims of GPU/native execution.
+
+### Pending lane summary
+
+| Lane | Obligations | Weight | State | Blocking authority |
+|---|---:|---:|---|---|
+| E1 policy-source acquisition | 8 | 20 | `U` | presence-preserving source owner and authenticated admin restrictions |
+| E2 live x86 admission | 9 | 25 | `U` | trusted CPUID/OS-state/affinity snapshot and exact artifact admission |
+| E3 startup binding/lifetime | 9 | 25 | `U` | private package activation, source sessions, drain/retry owner |
+| E4 GPU task infrastructure | 8 | 20 | `U` | owner-issued submit/fence/readback/cancel/retire and native lock safety |
+| E5 integrated evidence/tracking | 4 | 10 | `U` | qualified runner, retained receipts, manual review, canonical row allocator |
+| **Total** | **38** | **100** | **U** | no admitted execution or deployment evidence |
+
+### Astra final review guide
+
+Astra accepts this handoff only after checking the isolated diff against the
+frozen E1-E5 manifest and exact base/head revisions. The review must confirm:
+
+1. E5 owns only test, manual, instrumentation, and canonical tracking edits;
+   no production activation, provider deployment, or default-selection change
+   is hidden in the acceptance diff.
+2. Each E5 ID maps to the exact requirement IDs and evidence class above;
+   split implementation/review ownership remains many-to-many without adding
+   accounting weight.
+3. `MissingEvidence` names the absent production owner and a concrete resume
+   condition. Source inventories, catalog enumeration, scalar fallback,
+   generated GPU artifacts, routing, or a successful test process do not close
+   `physical_worker` or native execution rows.
+4. GPU evidence separately proves submission, fence/completion/readback, and
+   retirement. Parser-GPU availability remains false until the device receipt
+   exists; CPU/model/QEMU fixtures cannot substitute for it.
+5. Importance tags are review priority only. No tag, scenario count, manual,
+   or source review changes the 0/100 pending ledger. A row becomes `P` only
+   after all mandatory leaves and the independent issuer/runtime/reviewer
+   receipt are retained.
+6. All three changed SSpecs regenerate successfully with zero stubs, visible
+   operator steps, folded executable source, and no executable `.spl` under
+   `doc/06_spec`. A qualified native runner is still required for execution;
+   interpreter loading or docgen success is not runtime admission.
+
+The next handoff is an exact immutable E1-E4 revision manifest. Until it names
+the production owners, runner, issuer, artifact, and reviewer receipts, this
+E5 suite remains intentionally RED/`MissingEvidence` and the lane ledger stays
+`U`.

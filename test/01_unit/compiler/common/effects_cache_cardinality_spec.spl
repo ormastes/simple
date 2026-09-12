@@ -1,0 +1,41 @@
+use compiler.common.effects_cache.{
+    EffectCache, EffectCacheConfig, CachedFunctionEffectInfo
+}
+
+fn effect_info(name: text, effect: text) -> CachedFunctionEffectInfo:
+    CachedFunctionEffectInfo(
+        name: name,
+        declared_effects: [effect],
+        derived_effects: [],
+        called_operations: [],
+        called_functions: [],
+        violations: []
+    )
+
+describe "effect cache cardinality":
+    it "counts insertion once and keeps replacement count-neutral":
+        val cache = EffectCache.create(EffectCacheConfig(
+            max_entries: 16,
+            validate_on_lookup: true
+        ))
+
+        cache.store_function(effect_info("parse", "io"))
+        cache.store_function(effect_info("parse", "alloc"))
+        cache.store_function(effect_info("lower", "alloc"))
+
+        expect(cache.get_stats().entries).to_equal(2)
+        expect(cache.lookup_function("parse").unwrap().declared_effects).to_equal(["alloc"])
+        expect(cache.lookup_function("missing") == nil).to_equal(true)
+        expect(cache.get_stats().hits).to_equal(1)
+        expect(cache.get_stats().misses).to_equal(1)
+
+    it "resets entries and lookup statistics together":
+        val cache = EffectCache.create(EffectCacheConfig.default_config())
+        cache.store_function(effect_info("analyze", "io"))
+        _ = cache.lookup_function("analyze")
+        cache.clear()
+
+        expect(cache.get_stats().entries).to_equal(0)
+        expect(cache.get_stats().hits).to_equal(0)
+        expect(cache.get_stats().misses).to_equal(0)
+        expect(cache.lookup_function("analyze") == nil).to_equal(true)

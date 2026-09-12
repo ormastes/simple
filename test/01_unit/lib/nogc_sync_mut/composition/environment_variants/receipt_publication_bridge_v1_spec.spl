@@ -1,0 +1,124 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.*
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.*
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.*
+use std.nogc_sync_mut.composition.environment_variants.receipt_publication_bridge_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn empty_range() -> EnvironmentArenaRangeV1:
+    EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)
+
+fn identity(environment_generation: u64) -> EnvironmentVariantReceiptIdentityV1:
+    EnvironmentVariantReceiptIdentityV1(
+        provider_identity: d(1u64), variant_identity: d(2u64),
+        artifact_digest: d(3u64), environment_identity: d(4u64),
+        environment_generation: environment_generation, provider_generation: 11u64)
+
+fn trust_receipt() -> ArtifactTrustVerificationReceiptV1:
+    ArtifactTrustVerificationReceiptV1(
+        descriptor_size: ENV_ARTIFACT_TRUST_RECEIPT_BYTES_V1,
+        schema_version: ENV_VARIANT_SCHEMA_V1,
+        authentication_status: ENV_ARTIFACT_TRUST_AUTHENTICATED_V1,
+        receipt_identity: d(5u64), artifact_digest: d(3u64),
+        trust_policy_digest: d(6u64), verifier_identity: d(7u64),
+        verifier_generation: 12u64, verification_evidence_digest: d(8u64))
+
+fn artifact_evidence() -> PublicationArtifactEvidenceV1:
+    PublicationArtifactEvidenceV1(
+        provider_identity: d(1u64), variant_identity: d(2u64),
+        artifact_digest: d(3u64), provider_generation: 11u64,
+        observed_artifact_digest: d(3u64),
+        required_trust_policy_digest: d(6u64),
+        required_verifier_identity: d(7u64), minimum_verifier_generation: 12u64,
+        trust_receipt: trust_receipt())
+
+fn admission(environment_generation: u64) -> EnvironmentPublicationAdmissionV1:
+    val none = empty_range()
+    val plan = BindingPlanV1(
+        descriptor_size: 224u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        plan_digest: d(20u64), environment_identity: d(4u64),
+        environment_generation: environment_generation, catalog_digest: d(21u64),
+        catalog_generation: 1u64, policy_digest: d(22u64),
+        dependency_lock_digest: d(23u64), publication_generation: 1u64,
+        facet_bindings: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        selected_variant_identities: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        rejections: none)
+    EnvironmentPublicationAdmissionV1(
+        schema_version: ENV_PUBLICATION_ADMISSION_SCHEMA_V1, plan: plan,
+        root_provider_identity: d(1u64), root_variant_identity: d(2u64),
+        dependency_closure_digest: d(24u64), admitted_artifacts: [artifact_evidence()])
+
+fn discovered(environment_generation: u64) -> EnvironmentVariantReceiptV1:
+    val receipt_identity = identity(environment_generation)
+    var receipt = environment_variant_receipt_create_v1(receipt_identity).unwrap()
+    receipt = environment_variant_receipt_metadata_validate_v1(
+        receipt, receipt_identity, d(30u64)).unwrap()
+    environment_variant_receipt_self_check_v1(
+        receipt, receipt_identity, d(31u64)).unwrap()
+
+describe "Receipt publication bridge V1":
+    it "publishes eligibility and admitted mapping only with matching evidence":
+        val receipt_identity = identity(7u64)
+        val eligible = environment_receipt_admit_publication_v1(
+            discovered(7u64), receipt_identity, admission(7u64)).unwrap()
+        expect(eligible.state).to_equal(EnvironmentVariantReceiptStateV1.Eligible)
+        val mapped = environment_receipt_mark_admitted_mapping_v1(
+            eligible, receipt_identity, admission(7u64), 42u64).unwrap()
+        expect(mapped.state).to_equal(EnvironmentVariantReceiptStateV1.Mapped)
+        expect(mapped.mapping_handle).to_equal(42u64)
+
+    it "rejects publication from a different environment generation":
+        val receipt_identity = identity(8u64)
+        expect(environment_receipt_admit_publication_v1(
+            discovered(8u64), receipt_identity, admission(7u64)))
+            .to_equal(Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionGenerationMismatch))
+
+    it "rejects publication when exact artifact evidence is missing":
+        val receipt_identity = identity(7u64)
+        var missing = admission(7u64)
+        missing.admitted_artifacts = []
+        expect(environment_receipt_admit_publication_v1(
+            discovered(7u64), receipt_identity, missing))
+            .to_equal(Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionArtifactMissing))
+
+    it "rejects forged schema, root, and closure authority":
+        val receipt_identity = identity(7u64)
+        var forged_schema = admission(7u64)
+        forged_schema.schema_version = 99u16
+        expect(environment_receipt_admit_publication_v1(
+            discovered(7u64), receipt_identity, forged_schema))
+            .to_equal(Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionSchemaMismatch))
+
+        var forged_root = admission(7u64)
+        forged_root.root_provider_identity = d(99u64)
+        expect(environment_receipt_admit_publication_v1(
+            discovered(7u64), receipt_identity, forged_root))
+            .to_equal(Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionRootMismatch))
+
+        var stale_closure = admission(7u64)
+        stale_closure.dependency_closure_digest = d(0u64)
+        expect(environment_receipt_admit_publication_v1(
+            discovered(7u64), receipt_identity, stale_closure))
+            .to_equal(Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionClosureInvalid))
+
+    it "rejects duplicate admitted artifacts before receipt mutation":
+        val receipt_identity = identity(7u64)
+        var duplicate = admission(7u64)
+        duplicate.admitted_artifacts = [artifact_evidence(), artifact_evidence()]
+        duplicate.plan.selected_variant_identities.count = 2u32
+        expect(environment_receipt_admit_publication_v1(
+            discovered(7u64), receipt_identity, duplicate))
+            .to_equal(Err(EnvironmentReceiptPublicationBridgeErrorV1.AdmissionArtifactDuplicate))
+
+    it "does not map an eligible receipt with a different admission plan":
+        val receipt_identity = identity(7u64)
+        val eligible = environment_receipt_admit_publication_v1(
+            discovered(7u64), receipt_identity, admission(7u64)).unwrap()
+        var admission_b = admission(7u64)
+        admission_b.plan.plan_digest = d(999u64)
+        expect(environment_receipt_mark_admitted_mapping_v1(
+            eligible, receipt_identity, admission_b, 42u64))
+            .to_equal(Err(EnvironmentReceiptPublicationBridgeErrorV1.MappingPlanMismatch))

@@ -48,11 +48,41 @@ use .smf_mmap_native.{
 use app.startup.load_plan_receipt.{
     LoadPlanV1, LoadReceiptV1, load_plan_seal, load_receipt_record
 }
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use std.common.structural.parallel_commit.executable_mapping_receipt.{
+    ExecutableMappingProducerKindV1,
+    ExecutableMappingReleaseOutcomeV1,
+    ExecutableMappingReceiptV1,
+    ExecutableMappingReleaseResultV1,
+    executable_mapping_receipt_v1,
+    executable_mapping_receipt_v1_well_formed,
+    executable_mapping_receipt_v1_same_identity,
+    executable_mapping_release_result_v1,
+}
 
 # Page size assumed by the alignment guard. mmap bases are page-aligned on
 # every supported target; a section demanding more than this cannot be
 # honoured by a plain anonymous mapping and is refused.
 val SEGMENT_MAX_ALIGNMENT: i64 = 4096
+val SEGMENT_MAPPER_MAX_SEQUENCE_V1: i64 = 9223372036854775807
+val SEGMENT_MAPPER_RELEASE_TERMINAL_CAPACITY_V1: i64 = 1024
+val SEGMENT_MAPPER_INSTANCE_ISSUE_BUDGET_V1: i64 = 65536
+
+var _segment_mapper_next_instance_v1: AtomicI64 = atomic_i64_new(1)
+
+fn _segment_mapper_issue_instance_v1() -> text:
+    var tries = 0
+    while tries < SEGMENT_MAPPER_INSTANCE_ISSUE_BUDGET_V1:
+        val current = _segment_mapper_next_instance_v1.load(
+            MemoryOrdering.Acquire)
+        if current <= 0 or current == SEGMENT_MAPPER_MAX_SEQUENCE_V1:
+            return ""
+        if _segment_mapper_next_instance_v1.compare_exchange(
+                current, current + 1,
+                MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return "segment-mapper-v1-" + current.to_string()
+        tries = tries + 1
+    ""
 
 """One mapped segment: a single contiguous executable region."""
 struct MappedSegment:
@@ -84,12 +114,17 @@ struct SegmentMapperStats:
     generation: i64
 
 struct SegmentMapper:
+    instance_id: text
     segments: Dict<text, MappedSegment>
     symbols: Dict<text, SegmentSymbol>
+    record_generations: Dict<text, i64>
+    released_receipts: [ExecutableMappingReceiptV1]
+    released_receipt_head: i64
     bytes_mapped: i64
     mapping_calls: i64
     protection_transitions: i64
     generation: i64
+    next_release_attempt_id: i64
     verbose: bool
 
 fn segment_key(owner_id: text, section_index: i32) -> text:
@@ -98,12 +133,17 @@ fn segment_key(owner_id: text, section_index: i32) -> text:
 impl SegmentMapper:
     static fn new() -> SegmentMapper:
         SegmentMapper(
+            instance_id: _segment_mapper_issue_instance_v1(),
             segments: {},
             symbols: {},
+            record_generations: {},
+            released_receipts: [],
+            released_receipt_head: 0,
             bytes_mapped: 0,
             mapping_calls: 0,
             protection_transitions: 0,
             generation: 0,
+            next_release_attempt_id: 1,
             verbose: false
         )
 
@@ -111,6 +151,19 @@ impl SegmentMapper:
     segment path that allocates executable memory; symbol count never
     influences how often it is called."""
     me map_segment(owner_id: text, section_index: i32, bytes: [u8], alignment: i64) -> Result<i64, text>:
+        self._map_segment(owner_id, section_index, bytes, alignment, true)
+
+    """Map a relocation candidate RW. The loader must call end_relocation
+    exactly once before publishing any address from this segment."""
+    me map_segment_writable(owner_id: text, section_index: i32, bytes: [u8], alignment: i64) -> Result<i64, text>:
+        self._map_segment(owner_id, section_index, bytes, alignment, false)
+
+    me _map_segment(owner_id: text, section_index: i32, bytes: [u8], alignment: i64,
+            seal_executable: bool) -> Result<i64, text>:
+        if self.instance_id == "":
+            return Err("Segment mapper instance identity is exhausted")
+        if self.generation == SEGMENT_MAPPER_MAX_SEQUENCE_V1:
+            return Err("Segment mapper record generation is exhausted")
         val size = bytes.len() as i64
         if size <= 0:
             return Err("Cannot map empty segment {section_index} for {owner_id}")
@@ -131,13 +184,15 @@ impl SegmentMapper:
             _ = native_free_exec_memory(base, size)
             return Err("Failed to copy segment bytes for {key}")
 
-        if not native_make_executable(base, size):
-            _ = native_free_exec_memory(base, size)
-            return Err("Failed to switch RW->RX for segment {key}")
-        self.protection_transitions = self.protection_transitions + 1
-        native_flush_icache(base, size)
+        if seal_executable:
+            if not native_make_executable(base, size):
+                _ = native_free_exec_memory(base, size)
+                return Err("Failed to switch RW->RX for segment {key}")
+            self.protection_transitions = self.protection_transitions + 1
+            native_flush_icache(base, size)
 
-        self.generation = self.generation + 1
+        val record_generation = self.generation + 1
+        self.generation = record_generation
         self.segments[key] = MappedSegment(
             owner_id: owner_id,
             section_index: section_index,
@@ -145,14 +200,131 @@ impl SegmentMapper:
             size: size,
             alignment: alignment,
             symbol_count: 0,
-            protected_executable: true
+            protected_executable: seal_executable
         )
+        self.record_generations[key] = record_generation
         self.bytes_mapped = self.bytes_mapped + size
 
         if self.verbose:
             print "[segment-mapper] mapped {key} base=0x{base} size={size}"
 
         Ok(base)
+
+    """Return a pointer-free receipt for one exact live segment record."""
+    fn mapping_receipt_v1(owner_id: text, section_index: i32
+        ) -> Result<ExecutableMappingReceiptV1, text>:
+        val key = segment_key(owner_id, section_index)
+        if not self.segments.has(key) or not self.record_generations.has(key):
+            return Err("Cannot receipt unmapped segment " + key)
+        val segment = self.segments[key]
+        if segment.owner_id != owner_id or segment.section_index != section_index:
+            return Err("Segment receipt owner coordinate mismatch for " + key)
+        val receipt = executable_mapping_receipt_v1(
+            ExecutableMappingProducerKindV1.SegmentMapper,
+            self.instance_id,
+            owner_id,
+            key,
+            self.record_generations[key],
+            segment.size,
+            1)
+        if not executable_mapping_receipt_v1_well_formed(receipt):
+            return Err("Segment mapping receipt is malformed for " + key)
+        Ok(receipt)
+
+    """Map one segment and return its exact producer-owned receipt."""
+    me map_segment_receipt_v1(owner_id: text, section_index: i32,
+            bytes: [u8], alignment: i64
+        ) -> Result<ExecutableMappingReceiptV1, text>:
+        match self.map_segment(owner_id, section_index, bytes, alignment):
+            case Err(reason): return Err(reason)
+            case Ok(_): self.mapping_receipt_v1(owner_id, section_index)
+
+    fn _released_receipt_matches_v1(
+            receipt: ExecutableMappingReceiptV1) -> bool:
+        for terminal in self.released_receipts:
+            if executable_mapping_receipt_v1_same_identity(terminal, receipt):
+                return true
+        false
+
+    me _record_released_receipt_v1(receipt: ExecutableMappingReceiptV1):
+        if self.released_receipts.len() <
+                SEGMENT_MAPPER_RELEASE_TERMINAL_CAPACITY_V1:
+            self.released_receipts.push(receipt)
+            return
+        self.released_receipts[self.released_receipt_head] = receipt
+        self.released_receipt_head = (self.released_receipt_head + 1) %
+            SEGMENT_MAPPER_RELEASE_TERMINAL_CAPACITY_V1
+
+    fn _release_result_v1(receipt: ExecutableMappingReceiptV1,
+            outcome: ExecutableMappingReleaseOutcomeV1,
+            released_bytes: i64, released_segments: i64,
+            attempt_id: i64) -> ExecutableMappingReleaseResultV1:
+        executable_mapping_release_result_v1(
+            receipt, outcome, released_bytes, released_segments, attempt_id)
+
+    """Release only the exact live segment named by a complete receipt.
+
+    A failed native free retains the record and generation for a fresh retry.
+    Exact terminal replay returns AlreadyReleased without a second free.
+    """
+    me release_mapping_v1(receipt: ExecutableMappingReceiptV1
+        ) -> ExecutableMappingReleaseResultV1:
+        val attempt_id = self.next_release_attempt_id
+        if attempt_id <= 0 or attempt_id == SEGMENT_MAPPER_MAX_SEQUENCE_V1:
+            return self._release_result_v1(
+                receipt, ExecutableMappingReleaseOutcomeV1.NativeReleaseFailed,
+                0, 0, if attempt_id > 0: attempt_id else: 1)
+        self.next_release_attempt_id = attempt_id + 1
+        if not executable_mapping_receipt_v1_well_formed(receipt):
+            return self._release_result_v1(
+                receipt, ExecutableMappingReleaseOutcomeV1.NotFound,
+                0, 0, attempt_id)
+        if receipt.producer_kind != ExecutableMappingProducerKindV1.SegmentMapper or
+                receipt.mapper_instance_id != self.instance_id:
+            return self._release_result_v1(
+                receipt, ExecutableMappingReleaseOutcomeV1.OwnerMismatch,
+                0, 0, attempt_id)
+        if self._released_receipt_matches_v1(receipt):
+            return self._release_result_v1(
+                receipt, ExecutableMappingReleaseOutcomeV1.AlreadyReleased,
+                0, 0, attempt_id)
+        if not self.segments.has(receipt.mapping_key) or
+                not self.record_generations.has(receipt.mapping_key):
+            return self._release_result_v1(
+                receipt, ExecutableMappingReleaseOutcomeV1.NotFound,
+                0, 0, attempt_id)
+        val segment = self.segments[receipt.mapping_key]
+        if segment.owner_id != receipt.owner_id:
+            return self._release_result_v1(
+                receipt, ExecutableMappingReleaseOutcomeV1.OwnerMismatch,
+                0, 0, attempt_id)
+        if self.record_generations[receipt.mapping_key] !=
+                receipt.mapping_generation or segment.size != receipt.mapped_bytes or
+                receipt.segment_count != 1:
+            return self._release_result_v1(
+                receipt, ExecutableMappingReleaseOutcomeV1.GenerationMismatch,
+                0, 0, attempt_id)
+        if not native_free_exec_memory(segment.base, segment.size):
+            return self._release_result_v1(
+                receipt, ExecutableMappingReleaseOutcomeV1.NativeReleaseFailed,
+                0, 0, attempt_id)
+
+        self.bytes_mapped = self.bytes_mapped - segment.size
+        self.segments = self.segments.remove(receipt.mapping_key)
+        self.record_generations = self.record_generations.remove(
+            receipt.mapping_key)
+        var dead_symbols: [text] = []
+        for name in self.symbols.keys():
+            val symbol = self.symbols[name]
+            if symbol.owner_id == receipt.owner_id and
+                    symbol.section_index == segment.section_index:
+                dead_symbols.push(name)
+        for name in dead_symbols:
+            self.symbols = self.symbols.remove(name)
+        self._record_released_receipt_v1(receipt)
+        self._release_result_v1(
+            receipt, ExecutableMappingReleaseOutcomeV1.Released,
+            segment.size, 1, attempt_id)
 
     """Place a symbol inside an already-mapped segment. Allocates nothing:
     the address is `base + offset`, bounds-checked against the segment."""
@@ -203,6 +375,13 @@ impl SegmentMapper:
             return self.segments[key].size
         0
 
+    fn owner_segment_count(owner_id: text) -> i32:
+        var count = 0
+        for key in self.segments.keys():
+            if self.segments[key].owner_id == owner_id:
+                count = count + 1
+        count
+
     """RX -> RW for the whole segment, once, ahead of relocation."""
     me begin_relocation(owner_id: text, section_index: i32) -> Result<(), text>:
         val key = segment_key(owner_id, section_index)
@@ -243,6 +422,7 @@ impl SegmentMapper:
             if native_free_exec_memory(seg.base, seg.size):
                 self.bytes_mapped = self.bytes_mapped - seg.size
                 self.segments = self.segments.remove(key)
+                self.record_generations = self.record_generations.remove(key)
                 removed = removed + 1
 
         var dead: [text] = []
@@ -303,6 +483,7 @@ impl SegmentMapper:
                 if free_segment(seg.base, seg.size):
                     self.bytes_mapped = self.bytes_mapped - seg.size
                     self.segments = self.segments.remove(key)
+                    self.record_generations = self.record_generations.remove(key)
                 key_slot = next_key[key_slot]
             owner_slot = owner_slot + 1
 
@@ -316,8 +497,8 @@ impl SegmentMapper:
 
     fn stats() -> SegmentMapperStats:
         SegmentMapperStats(
-            segment_count: self.segments.keys().len() as i64,
-            symbol_count: self.symbols.keys().len() as i64,
+            segment_count: self.segments.len() as i64,
+            symbol_count: self.symbols.len() as i64,
             bytes_mapped: self.bytes_mapped,
             mapping_calls: self.mapping_calls,
             protection_transitions: self.protection_transitions,

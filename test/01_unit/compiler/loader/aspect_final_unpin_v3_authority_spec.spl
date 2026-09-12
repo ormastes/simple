@@ -1,0 +1,357 @@
+"""Behavioral V3 close-authority coverage using admitted production owners."""
+# @cover src/compiler/99.loader/module_loader_compat.spl 80%
+# @cover src/os/smf/dynsmf_owned_v2.spl 80%
+# @cover src/os/smf/smf_dynlib.spl 80%
+# @req REQ-L06-A06
+# @req REQ-L06-A07
+
+use std.spec.{describe, it, expect, step}
+use compiler.loader.module_loader_compat.{
+    ModuleLoader,
+    ModuleFacetRefV1,
+    LoadResult,
+    ModuleDynSmfCatalogRefV3,
+    AspectFinalUnpinHandleV3,
+    moduleloader_install_aspect_catalog,
+    moduleloader_load_bound_facet_v3,
+    moduleloader_release_bound_facet_v3,
+    moduleloader_begin_bound_execution_v3,
+    moduleloader_complete_bound_execution_v3,
+    moduleloader_associate_final_unpin_v3,
+    moduleloader_final_unpin_owner_identity_v3,
+    moduleloader_release_final_unpin_v3,
+    moduleloader_retry_final_unpin_v3,
+    modulefacetref_release,
+}
+use std.common.aspect_pack.{
+    APK_ENTRY_FACET,
+    APK_ACT_LAZY_FACET,
+    ApkCatalogEntryV2,
+    apk_build_catalog_v2,
+}
+use std.io_runtime.{mkdir_p, file_write_bytes}
+use os.smf.dynsmf_session.{dynsmf_policy_default}
+use os.smf.dynsmf_trust_registry.{
+    DynSmfAdmittedRegistry,
+    DynSmfTrustArtifactImage,
+    dynsmf_admitted_registry_from_values,
+}
+use os.smf.dynsmf_owned_v2.{
+    DYNSMF_OWNED_OK_V2,
+    DynSmfOwnedHandleV2,
+    dynsmf_owned_load_v2,
+}
+use compiler.loader.smf_mmap_native.{native_exec_memory_count}
+use test.helpers.dynsmf_admitted_startup_fixture.{
+    DynSmfAdmittedStartupFixture,
+    dynsmf_admitted_startup_fixture,
+    dynsmf_admitted_startup_fixture_sections,
+}
+
+fn v3_fixture(suffix: text) -> DynSmfAdmittedStartupFixture:
+    dynsmf_admitted_startup_fixture(
+        "v3_" + suffix,
+        "build/dynsmf/v3_" + suffix + ".smf",
+        "test.v3_" + suffix,
+        "1",
+        "v3_call_" + suffix,
+        false)
+
+fn v3_trust_source(fixture: DynSmfAdmittedStartupFixture,
+        suffix: text) -> text:
+    "trust_artifact:\n" +
+        "  id: v3_" + suffix + "\n" +
+        "  path: build/dynsmf/v3_" + suffix + ".smf\n" +
+        "  abi_version: 1\n" +
+        "  artifact_kind: precompiled_smf\n" +
+        "  content_hash: " + fixture.request.artifact.content_hash + "\n" +
+        "  binding:\n" +
+        "    facet_id: startup/v3_" + suffix + "\n" +
+        "    aspect_id: startup.aspect\n" +
+        "    module_id: v3_" + suffix + ".module\n" +
+        "    module_abi_hash: startup-module-abi\n" +
+        "    export_symbol: v3_call_" + suffix + "\n" +
+        "    interface_abi_hash: startup-facet-abi\n"
+
+fn v3_registry(suffix: text) -> DynSmfAdmittedRegistry:
+    val fixture = v3_fixture(suffix)
+    dynsmf_admitted_registry_from_values(
+        fixture.manifest,
+        v3_trust_source(fixture, suffix),
+        [DynSmfTrustArtifactImage(
+            path: fixture.manifest[0].path,
+            artifact_bytes: fixture.artifact_bytes)])
+
+fn v3_registry_sections(suffix: text,
+        section_count: i64) -> DynSmfAdmittedRegistry:
+    val fixture = dynsmf_admitted_startup_fixture_sections(
+        "v3_" + suffix,
+        "build/dynsmf/v3_" + suffix + ".smf",
+        "test.v3_" + suffix,
+        "1",
+        "v3_call_" + suffix,
+        false,
+        section_count)
+    dynsmf_admitted_registry_from_values(
+        fixture.manifest,
+        v3_trust_source(fixture, suffix),
+        [DynSmfTrustArtifactImage(
+            path: fixture.manifest[0].path,
+            artifact_bytes: fixture.artifact_bytes)])
+
+fn v3_owner(suffix: text) -> DynSmfOwnedHandleV2:
+    val loaded = dynsmf_owned_load_v2(
+        v3_registry(suffix), "v3-session-" + suffix,
+        dynsmf_policy_default())
+    expect(loaded.status).to_equal(DYNSMF_OWNED_OK_V2)
+    loaded.owner
+
+fn v3_loader_catalog(suffix: text) -> [u8]:
+    apk_build_catalog_v2([ApkCatalogEntryV2(
+        facet_key: "startup/v3_" + suffix,
+        pack_path: "build/dynsmf/v3_" + suffix + ".smf",
+        module_id: "v3_" + suffix + ".module",
+        entry_kind: APK_ENTRY_FACET,
+        activation: APK_ACT_LAZY_FACET,
+        abi_hash: "startup-module-abi")]).bytes
+
+fn v3_bound_loader(suffix: text) -> (ModuleLoader, ModuleFacetRefV1):
+    val fixture = v3_fixture(suffix)
+    val owner = v3_owner(suffix)
+    _ = mkdir_p("build/dynsmf")
+    expect(file_write_bytes(
+        fixture.manifest[0].path, fixture.artifact_bytes)).to_equal(true)
+    var loader = ModuleLoader.with_defaults()
+    match loader.load(fixture.manifest[0].path):
+        case LoadResult.Success(_): pass
+        case _: panic("V3 bound loader did not admit aspect pack")
+    expect(moduleloader_install_aspect_catalog(
+        loader, v3_loader_catalog(suffix)).is_ok()).to_equal(true)
+    val reference = moduleloader_load_bound_facet_v3(
+        loader, ModuleDynSmfCatalogRefV3(
+            dynsmf_owner: owner, library_id: "v3_" + suffix),
+        "startup/v3_" + suffix)
+    expect(reference.active).to_equal(true)
+    (loader, reference)
+
+fn v3_final_operation(suffix: text
+    ) -> (ModuleLoader, AspectFinalUnpinHandleV3):
+    val bound = v3_bound_loader(suffix)
+    val operation = moduleloader_associate_final_unpin_v3(
+        bound.0, bound.1).unwrap()
+    (bound.0, operation)
+
+describe "L6 final-unpin V3 release authority":
+    it "binds acquisition to one loader owner and consumes one final pin":
+        val suffix = "module"
+        val fixture = v3_fixture(suffix)
+        val owner = v3_owner(suffix)
+        _ = mkdir_p("build/dynsmf")
+        expect(file_write_bytes(
+            fixture.manifest[0].path, fixture.artifact_bytes)).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(fixture.manifest[0].path):
+            case LoadResult.Success(_): pass
+            case _: panic("V3 module loader did not admit aspect pack")
+        expect(moduleloader_install_aspect_catalog(
+            loader, v3_loader_catalog(suffix)).is_ok()).to_equal(true)
+        val reference = moduleloader_load_bound_facet_v3(
+            loader, ModuleDynSmfCatalogRefV3(
+                dynsmf_owner: owner, library_id: "v3_" + suffix),
+            "startup/v3_" + suffix)
+        expect(reference.active).to_equal(true)
+
+        step("The legacy unpin cannot consume a paired V3 reference")
+        expect(modulefacetref_release(reference)).to_equal(false)
+        val operation = moduleloader_associate_final_unpin_v3(
+            loader, reference).unwrap()
+        expect(operation.owner_identity).to_equal(
+            moduleloader_final_unpin_owner_identity_v3(loader))
+
+        step("One owner release consumes physical, dynSMF, and aspect pins")
+        val released = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(released.ok).to_equal(true)
+        expect(released.native_attempted).to_equal(true)
+        expect(released.acknowledged).to_equal(true)
+        val replay = moduleloader_retry_final_unpin_v3(loader, operation)
+        expect(replay.ok).to_equal(true)
+        expect(replay.native_attempted).to_equal(false)
+
+    it "keeps physical owner C idle until gate A drains a retained dynSMF execution B":
+        val before = native_exec_memory_count()
+        val suffix = "execution_drain"
+        val fixture = v3_fixture(suffix)
+        val owner = v3_owner(suffix)
+        _ = mkdir_p("build/dynsmf")
+        expect(file_write_bytes(
+            fixture.manifest[0].path, fixture.artifact_bytes)).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(fixture.manifest[0].path):
+            case LoadResult.Success(_): pass
+            case _: panic("V3 execution-drain pack admission failed")
+        expect(moduleloader_install_aspect_catalog(
+            loader, v3_loader_catalog(suffix)).is_ok()).to_equal(true)
+        val reference = moduleloader_load_bound_facet_v3(
+            loader, ModuleDynSmfCatalogRefV3(
+                dynsmf_owner: owner, library_id: "v3_" + suffix),
+            "startup/v3_" + suffix)
+        expect(reference.active).to_equal(true)
+        val execution_a = moduleloader_begin_bound_execution_v3(
+            loader, reference).unwrap()
+        val execution_b = moduleloader_begin_bound_execution_v3(
+            loader, reference).unwrap()
+        val execution_c = moduleloader_begin_bound_execution_v3(
+            loader, reference).unwrap()
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("Quiesce lifecycle gate A and publish dynSMF owner B Closing")
+        val operation = moduleloader_associate_final_unpin_v3(
+            loader, reference).unwrap()
+        expect(moduleloader_begin_bound_execution_v3(
+            loader, reference).is_err()).to_equal(true)
+
+        step("Keep physical owner C idle while the retained execution drains")
+        val blocked = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(blocked.released).to_equal(false)
+        expect(blocked.reason).to_equal("V3 execution lifecycle remains live")
+        expect(blocked.native_attempted).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("Drain retained executions B then C without dispatching C physical")
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution_b)).to_equal(true)
+        val after_b = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(after_b.native_attempted).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution_c)).to_equal(true)
+        val after_c = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(after_c.native_attempted).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("Complete A before one physical final release")
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution_a)).to_equal(true)
+        expect(moduleloader_complete_bound_execution_v3(
+            loader, execution_a)).to_equal(false)
+        val released = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(released.ok).to_equal(true)
+        expect(released.released).to_equal(true)
+        expect(released.native_attempted).to_equal(true)
+        expect(released.acknowledged).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before)
+        val replay = moduleloader_retry_final_unpin_v3(loader, operation)
+        expect(replay.native_attempted).to_equal(false)
+
+    it "publishes Closing before drain and still releases existing bound pins":
+        val fixture = v3_fixture("drain-paired")
+        val owner = v3_owner("drain-paired")
+        _ = mkdir_p("build/dynsmf")
+        expect(file_write_bytes(
+            fixture.manifest[0].path, fixture.artifact_bytes)).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(fixture.manifest[0].path):
+            case LoadResult.Success(_): pass
+            case _: panic("V3 drain pack admission failed")
+        expect(moduleloader_install_aspect_catalog(
+            loader, v3_loader_catalog("drain-paired")).is_ok()).to_equal(true)
+        val catalog_ref = ModuleDynSmfCatalogRefV3(
+            dynsmf_owner: owner, library_id: "v3_drain-paired")
+        val final_pin = moduleloader_load_bound_facet_v3(
+            loader, catalog_ref, "startup/v3_drain-paired")
+        val other_pin = moduleloader_load_bound_facet_v3(
+            loader, catalog_ref, "startup/v3_drain-paired")
+
+        step("Final association publishes Closing before the other pin drains")
+        val pending = moduleloader_associate_final_unpin_v3(loader, final_pin)
+        expect(pending.is_err()).to_equal(true)
+        expect(pending.unwrap_err()).to_equal(
+            "dynsmf-owned-library-query-drain-pending")
+        val refused = moduleloader_load_bound_facet_v3(
+            loader, catalog_ref, "startup/v3_drain-paired")
+        expect(refused.active).to_equal(false)
+
+        step("The already-issued paired pin drains and final association resumes")
+        expect(moduleloader_release_bound_facet_v3(
+            loader, other_pin)).to_equal(true)
+        val operation = moduleloader_associate_final_unpin_v3(
+            loader, final_pin).unwrap()
+        expect(moduleloader_release_final_unpin_v3(
+            loader, operation).released).to_equal(true)
+
+    it "rejects a handle from another loader even when row ids can collide":
+        val before = native_exec_memory_count()
+        val first = v3_final_operation("owner-first")
+        val second = v3_final_operation("owner-second")
+        expect(first.1.opaque_handle).to_equal(second.1.opaque_handle)
+        expect(first.1.owner_identity == second.1.owner_identity).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before + 2)
+
+        step("Interleaved cross-owner releases reject both real colliding rows")
+        val first_from_second = moduleloader_release_final_unpin_v3(
+            second.0, first.1)
+        val second_from_first = moduleloader_release_final_unpin_v3(
+            first.0, second.1)
+        expect(first_from_second.ok).to_equal(false)
+        expect(second_from_first.ok).to_equal(false)
+        expect(first_from_second.reason).to_equal(
+            "V3 final unpin handle owner mismatch")
+        expect(first_from_second.native_attempted).to_equal(false)
+        expect(second_from_first.native_attempted).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(before + 2)
+
+        step("Each valid owner retires only its own physical mapping")
+        expect(moduleloader_release_final_unpin_v3(
+            first.0, first.1).released).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+        expect(moduleloader_retry_final_unpin_v3(
+            first.0, first.1).native_attempted).to_equal(false)
+        expect(moduleloader_release_final_unpin_v3(
+            second.0, second.1).released).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before)
+
+    it "retains 4095 plus one progress beyond mapper terminal-ring churn":
+        val before = native_exec_memory_count()
+        val suffix = "progress"
+        val fixture = dynsmf_admitted_startup_fixture_sections(
+            "v3_" + suffix,
+            "build/dynsmf/v3_" + suffix + ".smf",
+            "test.v3_" + suffix, "1", "v3_call_" + suffix,
+            false, 4096)
+        val loaded = dynsmf_owned_load_v2(
+            dynsmf_admitted_registry_from_values(
+                fixture.manifest, v3_trust_source(fixture, suffix),
+                [DynSmfTrustArtifactImage(
+                    path: fixture.manifest[0].path,
+                    artifact_bytes: fixture.artifact_bytes)]),
+            "v3-session-progress", dynsmf_policy_default())
+        expect(loaded.status).to_equal(DYNSMF_OWNED_OK_V2)
+        _ = mkdir_p("build/dynsmf")
+        expect(file_write_bytes(
+            fixture.manifest[0].path, fixture.artifact_bytes)).to_equal(true)
+        var loader = ModuleLoader.with_defaults()
+        match loader.load(fixture.manifest[0].path):
+            case LoadResult.Success(_): pass
+            case _: panic("V3 progress pack admission failed")
+        expect(moduleloader_install_aspect_catalog(
+            loader, v3_loader_catalog(suffix)).is_ok()).to_equal(true)
+        val reference = moduleloader_load_bound_facet_v3(
+            loader, ModuleDynSmfCatalogRefV3(
+                dynsmf_owner: loaded.owner, library_id: "v3_" + suffix),
+            "startup/v3_" + suffix)
+        expect(reference.active).to_equal(true)
+        val operation = moduleloader_associate_final_unpin_v3(
+            loader, reference).unwrap()
+        expect(native_exec_memory_count()).to_equal(before + 4096)
+
+        step("The bounded first dispatch retains 4095 completed records")
+        val first = moduleloader_release_final_unpin_v3(loader, operation)
+        expect(first.released).to_equal(false)
+        expect(first.retryable).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before + 1)
+
+        step("Retry skips retained progress even after 3071 tombstones evict")
+        val second = moduleloader_retry_final_unpin_v3(loader, operation)
+        expect(second.released).to_equal(true)
+        expect(second.acknowledged).to_equal(true)
+        expect(native_exec_memory_count()).to_equal(before)

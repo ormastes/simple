@@ -41,6 +41,7 @@ use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.string_core.{char_code}
 use app.io.mod.{file_delete, file_read_text, file_write, file_write_bytes}
 use app.startup.component_dynsmf_wiring.{
+    component_dynsmf_config_parse,
     component_dynsmf_startup_from_values,
     component_dynsmf_startup_from_admitted_values,
     component_dynsmf_startup_from_config_path,
@@ -179,6 +180,13 @@ describe "production component dynSMF startup call":
             config_path,
             registry)
         expect(result.ok).to_equal(true)
+        if not result.ok:
+            file_delete(trust_path)
+            file_delete(config_path)
+            file_delete(descriptor_path)
+            file_delete(resolver_path)
+            component_prod_cleanup()
+            return
         expect(result.session.loaded.len()).to_equal(1)  # oracle: only file_io is admitted, so exactly one component loads
         expect(result.session.loaded[0].content_hash).to_equal(fixture.request.artifact.content_hash)
         file_delete(trust_path)
@@ -203,6 +211,9 @@ describe "production component dynSMF startup call":
         )
         val rendered = component_dynsmf_result_render(result)
         expect(result.ok).to_equal(true)
+        if not result.ok:
+            component_prod_cleanup()
+            return
         expect(result.session.loaded.len()).to_equal(1)  # oracle: the single admitted request loads exactly one component
         expect(result.session.loaded[0].id).to_equal("file_io")
         expect(result.session.loaded[0].content_hash).to_equal(fixture.request.artifact.content_hash)
@@ -312,19 +323,50 @@ describe "production component dynSMF startup call":
         expect(owner_free_of_directory_scan).to_equal(true)  # oracle: startup must not scan directories for components
         expect(owner_free_of_background_compiles).to_equal(true)  # oracle: background compiles are dispatched outside the startup owner
 
+    it "indexes component binding ids once while preserving duplicate rejection":
+        # @req REQ-DYSMF-008
+        step("Parse many distinct bindings and one repeated component id")
+        var source = "target: linux-x86_64\nprofile: release\ndescriptor_path: exact/components.sdn\nresolver_path: exact/resolver.sdn\n"
+        var index = 0
+        while index < 64:
+            source = source + "binding:\n  component_id: component_" + index.to_text() + "\n  interface_name: interface_" + index.to_text() + "\n  required_capability_bits: 1\n"
+            index = index + 1
+        val distinct = component_dynsmf_config_parse(source)
+        val duplicate = component_dynsmf_config_parse(source + "binding:\n  component_id: component_31\n  interface_name: duplicate\n  required_capability_bits: 1\n")
+        expect(distinct.ok).to_equal(true)
+        expect(distinct.config.bindings.len()).to_equal(64)
+        expect(duplicate.ok).to_equal(false)
+        expect(duplicate.reason).to_equal("duplicate_binding:component_31")
+
+        step("Pin the indexed implementation and retired scanner absence")
+        val wiring_source = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
+        expect(wiring_source.contains("var seen_binding_ids: Dict<text, bool> = {}" )).to_equal(true)
+        expect(wiring_source.contains("seen_binding_ids.contains_key(binding.component_id)")).to_equal(true)
+        expect(wiring_source.contains("fn _component_dynsmf_binding_index")).to_equal(false)
+
     it "retains the one digest-verified image through admitted session load":
         # @req REQ-DYSMF-009
         # @capture(bit_table): admitted-load contract probes over the wiring source
         step("Read the wiring source and probe the admitted-image load contract")
         val wiring_source = file_read_text("src/app/startup/component_dynsmf_wiring.spl")
-        val admitted_path_read_into_exact_bytes = wiring_source.contains("val exact_bytes = file_read_bytes(admitted.artifact_path)")
+        val admitted_path_read_into_exact_bytes = wiring_source.contains("exact_bytes = file_read_bytes(admitted.artifact_path)")
         val actual_digest_computed_over_exact_bytes = wiring_source.contains("val actual_digest = sha256_u8_hex(exact_bytes)")
         val image_carries_the_exact_bytes = wiring_source.contains("artifact_bytes: exact_bytes")
-        val admitted_load_call_present = wiring_source.contains("dynsmf_session_load_admitted(out_session, item.component_id, image!.request, image!.artifact_bytes)")
+        val admitted_load_call_present = wiring_source.contains("dynsmf_session_load_admitted(out_session, item.component_id, image.request, image.artifact_bytes)")
         val session_reassigned_by_admitted_load = wiring_source.contains("out_session = dynsmf_session_load_admitted")
         val manifest_mismatch_diagnosed = wiring_source.contains("trusted_admission_manifest_mismatch")
         val digest_mismatch_diagnosed = wiring_source.contains("trusted_admission_digest_mismatch")
         val checked_load_route_absent = wiring_source.contains("dynsmf_session_load_checked(") == false
+        val exact_loaded_identity_required = wiring_source.contains("_component_dynsmf_loaded_exact(out_session")
+        val explicit_failure_evidence_required = wiring_source.contains("val emitted_failure =")
+        val batch_rollback_present = wiring_source.contains("_component_dynsmf_rollback_new(out_session, newly_loaded)")
+        val startup_catalogs_indexed_once = (wiring_source.contains("var descriptor_indices: Dict<text, i64> = {}") and
+            wiring_source.contains("var manifest_indices: Dict<text, i64> = {}") and
+            wiring_source.contains("var admitted_image_indices: Dict<text, i64> = {}") and
+            wiring_source.contains("var trusted_request_indices: Dict<text, i64> = {}"))
+        val repeated_catalog_scanners_absent = (not wiring_source.contains("fn _component_dynsmf_descriptor_index") and
+            not wiring_source.contains("fn _component_dynsmf_manifest_index") and
+            not wiring_source.contains("fn _component_dynsmf_admitted_image"))
         expect(admitted_path_read_into_exact_bytes).to_equal(true)  # oracle: the admitted image must be read from its admitted artifact path
         expect(actual_digest_computed_over_exact_bytes).to_equal(true)  # oracle: the loaded bytes are digest-verified before use
         expect(image_carries_the_exact_bytes).to_equal(true)  # oracle: the verified bytes, not a re-read, reach the session load
@@ -333,3 +375,8 @@ describe "production component dynSMF startup call":
         expect(manifest_mismatch_diagnosed).to_equal(true)  # oracle: manifest mismatches are diagnosed by code
         expect(digest_mismatch_diagnosed).to_equal(true)  # oracle: digest mismatches are diagnosed by code
         expect(checked_load_route_absent).to_equal(true)  # oracle: the unchecked dynsmf_session_load_checked route must not exist in the owner
+        expect(exact_loaded_identity_required).to_equal(true)
+        expect(explicit_failure_evidence_required).to_equal(true)
+        expect(batch_rollback_present).to_equal(true)
+        expect(startup_catalogs_indexed_once).to_equal(true)
+        expect(repeated_catalog_scanners_absent).to_equal(true)

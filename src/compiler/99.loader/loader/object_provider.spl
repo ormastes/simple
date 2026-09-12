@@ -28,18 +28,35 @@ struct ObjectProvider:
     obj_taker: ObjTaker
     verbose: bool
     prefer_backend: text?
+    enable_cache: bool
     object_cache: Dict<text, [u8]>
     smf_cache: Dict<text, [u8]>
+    object_cache_count: i32
+    smf_cache_count: i32
+
+fn objectprovider_with_obj_taker(config: ObjectProviderConfig, obj_taker: ObjTaker) -> ObjectProvider:
+    """Create a provider sharing its owner's compiler context and caches."""
+    var getter = SmfGetter.new()
+    getter.set_verbose(config.verbose)
+    for p in config.search_paths:
+        getter.add_search_path(p)
+    for lib in config.libraries:
+        _ = getter.add_library(lib)
+
+    ObjectProvider(
+        getter: getter,
+        obj_taker: obj_taker,
+        verbose: config.verbose,
+        prefer_backend: config.prefer_backend,
+        enable_cache: config.enable_cache,
+        object_cache: {},
+        smf_cache: {},
+        object_cache_count: 0,
+        smf_cache_count: 0
+    )
 
 impl ObjectProvider:
     static fn new(config: ObjectProviderConfig) -> ObjectProvider:
-        var getter = SmfGetter.new()
-        getter.set_verbose(config.verbose)
-        for p in config.search_paths:
-            getter.add_search_path(p)
-        for lib in config.libraries:
-            _ = getter.add_library(lib)
-
         val ctx = compiler_create_context()
         val ot_config = ObjTakerConfig(
             enable_caching: config.enable_cache,
@@ -47,14 +64,33 @@ impl ObjectProvider:
             verbose: config.verbose,
             allow_deferred: true
         )
-        ObjectProvider(
-            getter: getter,
-            obj_taker: ObjTaker__with_compiler_context(ctx, ot_config),
-            verbose: config.verbose,
-            prefer_backend: config.prefer_backend,
-            object_cache: {},
-            smf_cache: {}
+        objectprovider_with_obj_taker(
+            config,
+            ObjTaker__with_compiler_context(ctx, ot_config)
         )
+
+    fn cache_enabled() -> bool:
+        self.enable_cache and self.obj_taker.config.max_cache_size > 0
+
+    me cache_smf(key: text, bytes: [u8]):
+        if not self.cache_enabled():
+            return
+        if not self.smf_cache.contains_key(key):
+            if self.smf_cache_count >= self.obj_taker.config.max_cache_size:
+                self.smf_cache = {}
+                self.smf_cache_count = 0
+            self.smf_cache_count = self.smf_cache_count + 1
+        self.smf_cache[key] = bytes
+
+    me cache_object(key: text, bytes: [u8]):
+        if not self.cache_enabled():
+            return
+        if not self.object_cache.contains_key(key):
+            if self.object_cache_count >= self.obj_taker.config.max_cache_size:
+                self.object_cache = {}
+                self.object_cache_count = 0
+            self.object_cache_count = self.object_cache_count + 1
+        self.object_cache[key] = bytes
 
     me add_search_path(path: text):
         if not self.getter.search_paths.contains(path):
@@ -67,7 +103,7 @@ impl ObjectProvider:
         self.getter.list_modules()
 
     fn get_module_bytes(self: ObjectProvider, module_name_or_path: text) -> Result<[u8], text>:
-        if self.smf_cache.contains_key(module_name_or_path):
+        if self.cache_enabled() and self.smf_cache.contains_key(module_name_or_path):
             return Ok(self.smf_cache[module_name_or_path])
 
         val smf_res = self.getter.get(module_name_or_path)
@@ -76,23 +112,32 @@ impl ObjectProvider:
             case Err(reason): return Err(reason)
         if self.getter.verbose:
             print "[object-provider] loaded {module_name_or_path} ({smf.len()} bytes)"
-        self.smf_cache[module_name_or_path] = smf
+        self.cache_smf(module_name_or_path, smf)
         Ok(smf)
 
     fn get_reader(self: ObjectProvider, module_name_or_path: text) -> Result<SmfReaderMemory, text>:
         val smf_bytes = self.get_module_bytes(module_name_or_path)?
         SmfReaderMemory.from_data(smf_bytes)
 
+    me invalidate_module(module_name_or_path: text):
+        """Drop provider-owned derived bytes before an explicit hot reload."""
+        if self.smf_cache.contains_key(module_name_or_path):
+            self.smf_cache = self.smf_cache.remove(module_name_or_path)
+            self.smf_cache_count = self.smf_cache_count - 1
+        if self.object_cache.contains_key(module_name_or_path):
+            self.object_cache = self.object_cache.remove(module_name_or_path)
+            self.object_cache_count = self.object_cache_count - 1
+
     fn get_object(self: ObjectProvider, module_or_path: text) -> Result<[u8], text>:
         # Prefer cached object
-        if self.object_cache.contains_key(module_or_path):
+        if self.cache_enabled() and self.object_cache.contains_key(module_or_path):
             return Ok(self.object_cache[module_or_path])
 
         # Try direct object extraction (lsm provides .o)
         val obj_result = self.getter.get_object(module_or_path)
         match obj_result:
             case Ok(obj):
-                self.object_cache[module_or_path] = obj
+                self.cache_object(module_or_path, obj)
                 return Ok(obj)
             case Err(_):
                 pass
@@ -107,7 +152,7 @@ impl ObjectProvider:
         val obj_bytes = match obj_build:
             case Ok(bytes): bytes
             case Err(reason): return Err(reason)
-        self.object_cache[module_or_path] = obj_bytes
+        self.cache_object(module_or_path, obj_bytes)
         Ok(obj_bytes)
 
     fn get_exported_code(self: ObjectProvider, module_or_path: text) -> Result<[ObjectCodeUnit], text>:

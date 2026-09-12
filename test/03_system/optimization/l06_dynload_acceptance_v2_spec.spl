@@ -1,0 +1,177 @@
+"""
+## Purpose and audience
+
+Physical acceptance for L06 provider/dynlib/aspect-dynload work.  The suite is
+intentionally fail-closed: it invokes production owners and requires an actual
+admitted native worker, mapped execution association, retained pins and native
+release observation.  Current missing associations fail; source scans, model
+lifecycle rows, bootstrap/seed execution, and self-authored receipts do not
+count.
+
+## Operator workflow
+
+bin/simple test test/03_system/optimization/l06_dynload_acceptance_v2_spec.spl --native
+
+## Evidence class
+
+The frozen inventory requires `host_behavior` for L06-A01 and
+`physical_worker` for L06-A02 through L06-A05.  A successful execution must be
+retained and admitted separately by the frozen lane-progress evaluator.
+"""
+# codex-system-test
+# @tag:in-development
+# @evidence-display: links
+# @req REQ-L06-A01: immutable typed provider admission
+# @req REQ-L06-A02: mapped payload typed execution
+# @req REQ-L06-A03: pin quiescence retry and physical unload
+# @req REQ-L06-A04: generation invalidation and TOCTOU rejection
+# @req REQ-L06-A05: POSIX open symbol call close ownership
+# requirements: doc/02_requirements/feature/compiler_semantic_cache_daemon_virtual_summary.md
+# traceability: test/01_unit/os/smf/dynsmf_session_spec.spl ; test/02_integration/app/simple/dynsmf_autoload_policy_spec.spl ; test/05_perf/startup/dynsmf_background_filter_no_copy_contract_test.shs
+# doc-path: doc/03_plan/sys_test/optimization_lane_acceptance_progress_v1.md
+
+use std.spec.{describe, it, expect, step}
+use fixtures.l06_dynload_acceptance_v2.{
+    l06_expect_posix_missing_symbol_retains_owner_v2,
+    l06_expect_posix_open_symbol_call_close_v2,
+    l06_require_admitted_native_worker_v2,
+    l06_require_authenticated_native_fixture_v2,
+    l06_require_authenticated_posix_fixture_v2,
+    l06_require_loader_association_v2,
+    l06_require_positive_close_retry_owner_v2,
+    l06_require_real_mapped_query_v2,
+}
+use fixtures.acceptance_inventory_v2.{
+    load_optimization_acceptance_inventory_v2,
+    optimization_item_index_v2,
+}
+use os.smf.provider_loader.{PROVIDER_SESSION_OK}
+
+fn require_l06_item_v2(item_id: text, evidence_class: text):
+    val items = load_optimization_acceptance_inventory_v2()
+    val index = optimization_item_index_v2(items, item_id)
+    expect(index >= 0).to_equal(true)
+    if index >= 0:
+        expect(items[index].work_lane_id).to_equal("L6")
+        expect(items[index].accounting_lane_id).to_equal("L06")
+        expect(items[index].required_evidence_class).to_equal(evidence_class)
+
+describe "L06 physical dynload acceptance v2 [importance=critical; importance_weight=3]":
+    describe "REQ-L06-A01: typed provider admission [importance=critical; importance_weight=3]":
+        it "should bind an immutable provider artifact before activation [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A01", "host_behavior")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            expect(dynamic.admission.artifact_digest.len()).to_equal(64)
+            expect(dynamic.admission.process_callable).to_equal(true)
+
+        it "should refuse a configuration mismatch without replacing the active generation [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A01", "host_behavior")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require the loader association to retain the prior generation on refusal")
+            l06_require_loader_association_v2(dynamic, "L06-A01 configuration mismatch")
+
+        it "should admit an exact boundary manifest without widening capability authority [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A01", "host_behavior")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require the production association to report exact capability bounds")
+            l06_require_loader_association_v2(dynamic, "L06-A01 exact capability boundary")
+
+    describe "REQ-L06-A02: real mapped payload execution [importance=critical; importance_weight=3]":
+        it "should call an admitted mapped provider through the typed query boundary [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A02", "physical_worker")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Invoke the typed query through the retained mapped session")
+            val query = l06_require_real_mapped_query_v2(dynamic.session, fixture)
+            expect(query.query.status).to_equal(PROVIDER_SESSION_OK)
+            expect(query.query.pin_id > 0u64).to_equal(true)
+
+        it "should retain origin evidence through a nested mapped call [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A02", "physical_worker")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require a nested mapped-call association owned by the loader")
+            l06_require_loader_association_v2(dynamic, "L06-A02 nested mapped call")
+
+        it "should refuse a missing mapped payload before it can execute [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A02", "physical_worker")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require the production association to reject missing or portable-only payloads")
+            l06_require_loader_association_v2(dynamic, "L06-A02 missing or portable payload rejection")
+
+    describe "REQ-L06-A03: pins quiescence retry and unload [importance=critical; importance_weight=3]":
+        it "should defer unload while an admitted call remains pinned [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A03", "physical_worker")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require the loader to retain the physical mapping while its pin is live")
+            l06_require_loader_association_v2(dynamic, "L06-A03 in-flight pin and quiescence")
+
+        it "should retain the same mapping after a failed close until retry succeeds [importance=critical; importance_weight=3]":
+            require_l06_item_v2("L06-A03", "physical_worker")
+            step("Require a positive-handle close failure and owner-retained retry")
+            l06_require_positive_close_retry_owner_v2()
+
+        it "should release every native record exactly once after the last consumer [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A03", "physical_worker")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require authenticated release receipts after all consumers quiesce")
+            l06_require_loader_association_v2(dynamic, "L06-A03 exactly-once final physical release")
+
+    describe "REQ-L06-A04: generation invalidation and TOCTOU [importance=critical; importance_weight=3]":
+        it "should invalidate a same-size rewritten provider artifact [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A04", "integration")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require an immutable mapping identity across the rewrite boundary")
+            l06_require_loader_association_v2(dynamic, "L06-A04 same-size artifact rewrite")
+
+        it "should keep concurrent readers on one coherent old or new generation [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A04", "integration")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require generation-pinned concurrent reader observation")
+            l06_require_loader_association_v2(dynamic, "L06-A04 reader generation coherence")
+
+        it "should reject an unstable whole-pack digest before publication [importance=critical; importance_weight=3]":
+            step("Admit the immutable native provider artifact")
+            require_l06_item_v2("L06-A04", "integration")
+            val fixture = l06_require_authenticated_native_fixture_v2()
+            val dynamic = l06_require_admitted_native_worker_v2(fixture)
+            step("Require the loader to reject a post-open digest change")
+            l06_require_loader_association_v2(dynamic, "L06-A04 unstable whole-pack digest")
+
+    describe "REQ-L06-A05: POSIX typed ownership [importance=critical; importance_weight=3]":
+        it "should open resolve call and close the real POSIX fixture [importance=critical; importance_weight=3]":
+            step("Open the production POSIX fixture through its typed owner")
+            require_l06_item_v2("L06-A05", "physical_worker")
+            val fixture = l06_require_authenticated_posix_fixture_v2()
+            step("Resolve and call the real fixture export")
+            l06_expect_posix_open_symbol_call_close_v2(fixture)
+
+        it "should return a typed missing-symbol error without discarding the open handle [importance=critical; importance_weight=3]":
+            step("Open the production POSIX fixture through its typed owner")
+            require_l06_item_v2("L06-A05", "physical_worker")
+            val fixture = l06_require_authenticated_posix_fixture_v2()
+            step("Resolve a missing symbol through the checked production owner")
+            l06_expect_posix_missing_symbol_retains_owner_v2(fixture)
+
+        it "should keep a positive handle owned when close reports an error [importance=critical; importance_weight=3]":
+            require_l06_item_v2("L06-A05", "physical_worker")
+            step("Require a controlled positive-handle close failure and later retry")
+            l06_require_positive_close_retry_owner_v2()

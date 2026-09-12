@@ -60,6 +60,7 @@ class AspectPackDirectoryParse:
     error_code: text
     error_message: text
     directory: AspectPackDirectory
+    payload: [u8]
 
 class AspectPackArtifactIdentity:
     library_id: text
@@ -104,7 +105,8 @@ fn _aspect_pack_parse_error(code: text, message: text) -> AspectPackDirectoryPar
         ok: false,
         error_code: code,
         error_message: message,
-        directory: _empty_aspect_pack_directory()
+        directory: _empty_aspect_pack_directory(),
+        payload: []
     )
 
 fn _aspect_pack_admission_error(code: text, message: text) -> AspectPackAdmission:
@@ -204,8 +206,8 @@ fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDir
     if data[header_offset + 4] != 1 or data[header_offset + 5] != 1:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_VERSION", "outer SMF version is unsupported")
     val flags = _aspect_pack_read_u32(data, header_offset + 8)
-    if (flags & 0x01) == 0 or (flags & 0x20) == 0:
-        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_FLAGS", "outer SMF must be executable and carry the aspect-pack flag")
+    if (flags & 0x40) == 0 or (flags & 0x01) != 0:
+        return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_FLAGS", "outer SMF must be a non-executable aspect-pack provider")
     if data[header_offset + 12] != 0:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_COMPRESSED", "compressed outer SMF is unsupported")
 
@@ -237,7 +239,7 @@ fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDir
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_TABLE_OVERLAP", "outer SMF tables overlap each other or the header")
 
     var section_offsets: [i64] = []
-    var section_sizes: [i64] = []
+    var section_sizes_by_offset: Dict<i64, i64> = {}
     var pack_offset = -1i64
     var pack_size = 0i64
     var pack_count = 0
@@ -260,13 +262,10 @@ fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDir
             _aspect_pack_outer_ranges_overlap(file_offset!, size!, symbols_offset!, symbol_table_size) or
             _aspect_pack_outer_ranges_overlap(file_offset!, size!, header_offset, ASPECT_PACK_OUTER_SMF_HEADER_SIZE)):
             return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_OVERLAP", "outer SMF section overlaps metadata")
-        var previous = 0
-        while previous < section_offsets.len():
-            if _aspect_pack_outer_ranges_overlap(file_offset!, size!, section_offsets[previous], section_sizes[previous]):
-                return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_OVERLAP", "outer SMF sections overlap")
-            previous = previous + 1
+        if section_sizes_by_offset.has(file_offset!):
+            return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_OVERLAP", "outer SMF sections overlap")
         section_offsets.push(file_offset!)
-        section_sizes.push(size!)
+        section_sizes_by_offset[file_offset!] = size!
         if wire_type == ASPECT_PACK_OUTER_SMF_ASPECT_TYPE:
             pack_count = pack_count + 1
             pack_offset = file_offset!
@@ -274,6 +273,19 @@ fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDir
             if section_flags != 0x01:
                 return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_FLAGS", "aspect-pack section must be read-only data")
         index = index + 1
+    # External writers may order section rows independently of file layout.
+    # Sort scalar starts once and compare adjacent intervals instead of doing
+    # an O(section_count^2) scan while decoding every row.
+    section_offsets.sort()
+    var ordered_index = 1
+    while ordered_index < section_offsets.len():
+        val previous_offset = section_offsets[ordered_index - 1]
+        val current_offset = section_offsets[ordered_index]
+        if _aspect_pack_outer_ranges_overlap(
+            previous_offset, section_sizes_by_offset[previous_offset],
+            current_offset, section_sizes_by_offset[current_offset]):
+            return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_OVERLAP", "outer SMF sections overlap")
+        ordered_index = ordered_index + 1
     if pack_count != 1:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_COUNT", "outer SMF must contain exactly one aspect-pack section")
 
@@ -403,7 +415,8 @@ fn aspect_pack_directory_parse_from_smf_bytes(data: [u8]) -> AspectPackDirectory
         ok: true,
         error_code: "",
         error_message: "",
-        directory: AspectPackDirectory(schema_version: schema, flags: flags, total_size: total_size, content_hash: sha256_u8_hex(data), entries: entries)
+        directory: AspectPackDirectory(schema_version: schema, flags: flags, total_size: total_size, content_hash: sha256_u8_hex(data), entries: entries),
+        payload: data
     )
 
 fn aspect_pack_directory_validate_against_manifest(
