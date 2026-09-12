@@ -4807,10 +4807,7 @@ pub fn rt_vulkan_readback_u32_array_fn(args: &[Value]) -> Result<Value, CompileE
             size: u64::MAX,
         };
         let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
-        let bytes = std::slice::from_raw_parts(
-            (buffer.mapped as *const u8).add(offset_u as usize),
-            count_u as usize,
-        );
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
         let words: Vec<Value> = bytes
             .chunks_exact(4)
             .map(|c| Value::Int(i64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))))
@@ -4861,10 +4858,15 @@ pub fn rt_vulkan_readback_u32_array_checksum_fn(args: &[Value]) -> Result<Value,
         if buffer.mapped.is_null() {
             return Ok(Value::Int(-1));
         }
-        let bytes = std::slice::from_raw_parts(
-            (buffer.mapped as *const u8).add(offset_u as usize),
-            count_u as usize,
-        );
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
         let mut checksum: i64 = 0;
         for c in bytes.chunks_exact(4) {
             let px = i64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));

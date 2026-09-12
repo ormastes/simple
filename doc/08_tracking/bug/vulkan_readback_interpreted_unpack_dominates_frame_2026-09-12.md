@@ -3,7 +3,21 @@
 Status: FIXED (default path 1.84x, opt-in native path 255x), with two follow-ups filed below.
 Platform: macOS 25.5.0 / Apple M4, `SIMPLE_EXECUTION_MODE=interpreter`, backend `vulkan`.
 Profile: `doc/10_metrics/ui/web_render_frame_profile_macos_2026-09-12.md`.
-Spec: `test/02_integration/gpu/engine2d_vulkan_readback_unpack_cost_spec.spl`.
+Spec: `test/02_integration/gpu/engine2d_vulkan_readback_unpack_cost_spec.spl`
+(6 examples: reproduce = one download + zero interpreted iterations against a
+fixed-colour oracle; generalize = pixels survive a following present, 1x1 and
+odd sizes, no write-through into a handed-out readback array, and the frame
+receipt still reports readback + host-cache refresh completed with
+`present_full_readback_count` unchanged).
+
+Pre-existing red, NOT caused by this change and verified identical on
+`origin/main` with the same binary:
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_drawing_spec.spl`
+40/44 both before and after (the `host-mirror-seed` receipt assertion at :375
+is among the 40 that pass), and
+`test/02_integration/gpu/engine2d_readback_present_parity_spec.spl`'s third
+example, which runs on the `cpu` backend and asserts on the contents of
+`test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl` — neither touched here.
 
 ## Symptom
 
@@ -60,8 +74,16 @@ ran and the full-surface path always did.
   the interpreter's own dlopen Vulkan state (`VK_STATE`, `buffer.mapped`). The
   checksum uses the identical `sum % 2147483647` fold, so the value stays
   lane-independent. No runtime-crate, codegen or `runtime_symbols.rs`
-  registration was added, because no native lane calls them: the native lane
-  keeps `rt_vulkan_readback_u32_checksum`.
+  Because `gpu_sffi_uses_interpreter_array_abi()` is a RUNTIME predicate
+  (`rt_is_interpreter_runtime()`, `sffi_dispatch.spl:49`), native codegen still
+  emits the call site even where it never executes, so the symbols are also
+  defined in `runtime/src/vulkan_graphics_runtime_buffer.rs` (with
+  `cfg(not(feature = "vulkan"))` stubs, exactly as `rt_vulkan_read_buffer_bytes`
+  has) and declared in `codegen/runtime_sffi.rs` — the same registration
+  `rt_u32s_from_raw`, the closest precedent, carries. **Not verified on a real
+  native/JIT link:** no native build of this spec was run on this host, so the
+  claim is "registered like its precedent and the crate compiles", not "linked
+  and executed natively".
 - **Gated behind `SIMPLE_VK_READBACK=native`.** Calling an extern a binary does
   not know is an *uncatchable* interpreter abort, not a recoverable error, so a
   default-on route would break every already-deployed binary — the same hazard
@@ -80,7 +102,7 @@ ran and the full-surface path always did.
 | config | 900x760 | 1920x1080 |
 |---|---|---|
 | before | 5,872 ms | 14,980 ms (profile doc) |
-| after, default path (present dedup only) | 3,199 ms | not measured |
+| after, default path (present dedup only) | 3,199 ms | 8,837 ms |
 | after, `SIMPLE_VK_READBACK=native` | **23 ms** | **33 ms** |
 
 Counters per steady frame: `readback_calls` 2 -> 1; `unpack_iterations`

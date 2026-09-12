@@ -32,6 +32,7 @@ a readback that downloaded nothing.
 
 use std.spec.*
 use gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_readback_calls,
     vulkan_sffi_readback_unpack_iterations,
@@ -121,3 +122,48 @@ describe "Vulkan readback stays correct around present":
             expect(odd_px.len()).to_equal(21)
             expect(odd_px[0]).to_equal(ORACLE_COLOR)
             expect(odd_px[20]).to_equal(ORACLE_COLOR)
+
+describe "Vulkan host mirror does not write through a handed-out readback":
+    it "leaves an earlier frame's readback pixels alone when a later present refreshes the mirror":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            # The mirror is seeded FROM the readback array, so a later
+            # present() that refreshes the mirror in place would overwrite
+            # pixels the earlier caller still holds. Draw between the two
+            # frames so the second present really does refresh.
+            val engine = Engine2D.create_with_backend_fast(64, 64, "vulkan")
+            engine.clear(ORACLE_COLOR)
+            engine.submit_batch()
+            val first = engine.read_pixels_with_source().pixels
+            expect(first[0]).to_equal(ORACLE_COLOR)
+            engine.clear(0xFF102030u32)
+            engine.submit_batch()
+            engine.present()
+            expect(first[0]).to_equal(ORACLE_COLOR)
+            expect(first[4095]).to_equal(ORACLE_COLOR)
+
+describe "Vulkan frame receipt stays truthful when the second download is skipped":
+    it "still reports readback and host-cache refresh completed, with no extra full readback":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            # Removing the duplicate download must not turn a real refresh into
+            # a reported one. The mirror IS refreshed from the device for this
+            # frame -- by the readback -- so both receipt flags stay true while
+            # present_full_readback_count does NOT advance.
+            val backend = VulkanBackend.create()
+            if not backend.init(8, 8):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                backend.clear(ORACLE_COLOR)
+                backend.present()
+                val baseline_full = backend.present_full_readback_count
+                backend.clear(0xFF0A0B0Cu32)
+                val pixels = backend.read_pixels_with_source().pixels
+                expect(pixels.len()).to_equal(64)
+                backend.present()
+                val receipt = backend.latest_frame_receipt()
+                expect(receipt.readback_completed).to_equal(true)
+                expect(receipt.host_cache_refresh_completed).to_equal(true)
+                expect(backend.present_full_readback_count).to_equal(baseline_full)

@@ -149,7 +149,7 @@ Same probe, 8 frames, median of frames 4-8, same env:
 | config | 900x760 steady | 1920x1080 steady | readback_calls | unpack_iterations |
 |---|---|---|---|---|
 | before (re-measured on this box) | 5,872 ms | 14,980 ms (table above) | 2 | 1,368,000 |
-| after, default path | 3,199 ms | not measured | 1 | 684,000 |
+| after, default path | 3,199 ms | 8,837 ms | 1 | 684,000 / 2,073,600 |
 | after, `SIMPLE_VK_READBACK=native` | **23 ms** | **33 ms** | **1** | **0** |
 
 The projected ~30 ms was met on the opt-in path (23 ms). The default path gets

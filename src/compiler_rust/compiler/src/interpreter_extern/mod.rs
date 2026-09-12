@@ -2234,16 +2234,46 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_thread_join", concurrency::rt_thread_join);
     insert_simple!("spl_thread_detach", concurrency::rt_thread_free);
     insert_simple!("spl_thread_current_id", concurrency::rt_thread_id);
-    insert_simple!("rt_cpu_affinity_avx2_acquire", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
-    insert_simple!("rt_cpu_affinity_avx2_generation", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
-    insert_simple!("rt_cpu_affinity_avx2_thread_id", concurrency::rt_cpu_affinity_avx2_unavailable_i64);
-    insert_simple!("rt_cpu_affinity_avx2_cpu", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
-    insert_simple!("rt_cpu_affinity_avx2_validate", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
-    insert_simple!("rt_cpu_affinity_avx2_release", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
-    insert_simple!("rt_cpu_affinity_avx2_call_enter", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
-    insert_simple!("rt_cpu_affinity_avx2_call_exit", concurrency::rt_cpu_affinity_avx2_unavailable_bool);
-    insert_simple!("rt_parser_mask_call_u8x32", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
-    insert_simple!("rt_parser_lexical_mask_call_u8x32", concurrency::rt_cpu_affinity_avx2_unavailable_cpu);
+    insert_simple!(
+        "rt_cpu_affinity_avx2_acquire",
+        concurrency::rt_cpu_affinity_avx2_unavailable_i64
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_generation",
+        concurrency::rt_cpu_affinity_avx2_unavailable_i64
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_thread_id",
+        concurrency::rt_cpu_affinity_avx2_unavailable_i64
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_cpu",
+        concurrency::rt_cpu_affinity_avx2_unavailable_cpu
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_validate",
+        concurrency::rt_cpu_affinity_avx2_unavailable_bool
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_release",
+        concurrency::rt_cpu_affinity_avx2_unavailable_bool
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_call_enter",
+        concurrency::rt_cpu_affinity_avx2_unavailable_bool
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_call_exit",
+        concurrency::rt_cpu_affinity_avx2_unavailable_bool
+    );
+    insert_simple!(
+        "rt_parser_mask_call_u8x32",
+        concurrency::rt_cpu_affinity_avx2_unavailable_cpu
+    );
+    insert_simple!(
+        "rt_parser_lexical_mask_call_u8x32",
+        concurrency::rt_cpu_affinity_avx2_unavailable_cpu
+    );
     insert_simple!("spl_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("spl_thread_yield", concurrency::rt_thread_yield);
     insert_simple!("spl_mutex_create", concurrency::spl_mutex_create);
@@ -3123,7 +3153,11 @@ pub(crate) fn call_extern_function(
     // variable. Only `&mut <identifier>` is written back -- a borrow of a
     // temporary has no slot to write to, and nothing else is touched.
     for (argument, value) in args.iter().zip(evaluated.iter()) {
-        let Expr::Unary { op: UnaryOp::RefMut, operand } = &argument.value else {
+        let Expr::Unary {
+            op: UnaryOp::RefMut,
+            operand,
+        } = &argument.value
+        else {
             continue;
         };
         let Value::BorrowMut(borrow) = value else {
@@ -3373,10 +3407,10 @@ mod tests {
         let enums = HashMap::new();
         let impl_methods = HashMap::new();
 
-        let all_value = all(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods)
-            .expect("rt_env_all snapshot");
-        let vars_value = vars(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods)
-            .expect("rt_env_vars snapshot");
+        let all_value =
+            all(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods).expect("rt_env_all snapshot");
+        let vars_value =
+            vars(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods).expect("rt_env_vars snapshot");
         assert_eq!(format!("{all_value:?}"), format!("{vars_value:?}"));
 
         for handler in [all, vars] {
