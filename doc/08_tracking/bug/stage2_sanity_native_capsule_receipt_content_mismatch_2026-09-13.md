@@ -451,3 +451,150 @@ three times, then the link-nil failure. ~5 s.
 
 Shape alone never bites. Only the full closure does, which is consistent with
 the name-keyed fallback above.
+
+## RESOLVED (2026-09-13, runs 13-14): the seed dropped `-> T?`'s struct name
+
+The codegen defect this record has been chasing since run 8 is fixed in the Rust
+seed. It was never an offset-model bug and never shape-dependent; it was a NAME
+that the seed threw away one step earlier than anyone had looked.
+
+### Measured at instruction level, not inferred
+
+F53 left this branch as a candidate "not yet observed". It is now observed. The
+Stage 2 `native-build` was replayed verbatim from its own
+`stage2-command.transcript` with `SIMPLE_TRACE_FIELD_GET=1` (the bootstrap script
+sanitises the stage environment to a canonical env-name list, so the trace does
+NOT survive a plain `SIMPLE_TRACE_FIELD_GET=1 sh bootstrap-from-scratch.sh` —
+replaying the transcript directly is what makes it observable). 877 units, 829
+trace lines, and the whole diagnosis is two of them:
+
+```
+[FIELD-TRACE] ANY/size -> LOCAL-BEST idx=0 count=7 in driver_aot_native_output.spl   (x2)
+```
+
+No `[FT2]` line accompanies them, which is the load-bearing detail: `get_field_info`
+returned **Ok**, so not one of `expr/access.rs`'s name-keyed fallbacks
+(`:339/:369/:404/:435`) ever ran. **F53's hand-off named the wrong suspects.**
+`NKM-LOCALBEST` and friends are innocent here — they were never reached.
+
+### The chain
+
+1. `FileFingerprint.from_file` is declared `-> FileFingerprint?`
+   (`driver_build/incremental.spl:623`). `static_call_return_type_name`
+   (`hir/lower/stmt_lowering.rs:127`) matched only `Type::Simple` and
+   `Type::Generic`; `ast::Type::Optional` fell to `_ => None`. So
+   `val object_fp = FileFingerprint.from_file(capsule.object_path)`
+   (`driver_aot_native_output.spl:970`) recorded **no name at all** — no
+   `static_call_type_hints` row, no TypeId upgrade.
+2. `if val fp = object_fp:` (`:983`) registers its binding with
+   `ctx.add_local(name, ty, ..)` — a TypeId and nothing else. With the subject
+   erased to ANY there was no `type_name_hint` (that is set only for parameters)
+   and no hint row keyed by `object_fp` to inherit, so `fp` carried no name.
+3. `expr/access.rs:231`'s ambiguous-field guard DID fire (`size` is ambiguous)
+   and asked `try_resolve_receiver_struct_name_from_expr(fp)` — which returned
+   None, so the recovery declined. This is why the guard looked dead.
+4. `get_field_info(TypeId::ANY, "size")` (`hir/lower/type_resolver.rs:675`) then
+   reached its LOCAL-BEST scan: the SMALLEST index among every `HirType::Struct`
+   in `module.types` declaring the name. It returned `Ok((0, _))` from a 7-field
+   struct. `size` is index **3** in `FileFingerprint` (byte offset 24); index 0
+   is `path`, a `text` pointer.
+
+**Why only the 834-unit closure.** 15 structs in the tree declare `size` as their
+FIRST field — `FileStat`, `GcObjectHeader` (x3), `TypeLayout`, `BlockHeader`,
+`BrushConfig` (x2), `SftpFileInfo` (x2), `ThreadPool`, `PersistentMap`,
+`PersistentTrie`, `PersistentSortedMap`, `FileReadCacheStats`. One of them only
+enters this unit's `module.types` once the closure is big enough. At 3 and 58
+units LOCAL-BEST finds only `FileFingerprint` and answers 3 — which is exactly
+why every one of F53's shapes 1-8 passed and only shape 9 failed. The shape table
+was measuring the presence of a decoy, not the shape.
+
+### Fix (`src/compiler_rust`, 3 files)
+
+`declared_type_struct_name` looks through payload-preserving wrappers (`T?`,
+`mut T`, `*T`) and reports whether the struct arrived WRAPPED. The flag is
+load-bearing in both directions: a wrapped return contributes the NAME only,
+because upgrading the local's TypeId to bare `T` addresses the payload's slots
+through the wrapper — measured as `field=0:runtime=632` on the way to this fix,
+a second wrong answer that briefly replaced the first. Unwrapped `-> T` keeps the
+existing TypeId upgrade. The name is additionally propagated onto pattern
+bindings whose TypeId erased to ANY, reusing the existing `static_call_type_hints`
+consumer rather than adding a second mechanism.
+
+**LOCAL-BEST's smallest-index rule is deliberately NOT changed.** It is
+memory-safe by construction and flipping it to most-fields-wins is the
+`stage2_struct_field_offset_model_mismatch_oob_read_2026-08-30` out-of-bounds
+incident. The defect is that it was reached at all.
+
+### Evidence
+
+5-second witness (`stage2 native-build hello_world.spl`,
+`SIMPLE_PACKAGE_INDEX_COLD_INIT=1`), both binaries built by the same release-profile
+seed so only the fix differs:
+
+| | canary |
+|---|---|
+| before | `[receipt-size-canary] ... field=40607765761:runtime=632` **x3** |
+| after | **no canary line at all** — `fp.size` == `runtime` == 632 |
+
+Both `ANY/size -> LOCAL-BEST idx=0` lines for `driver_aot_native_output.spl` are
+gone from the Stage 2 build trace. The one remaining in `native_noop_admission.spl`
+is a different call site and is recorded as follow-up below.
+
+Tests: 2 new lowerer tests. `cargo test -p simple-compiler --lib` goes
+3946 passed / 35 failed to 3948 passed / 35 failed, and the 35 failing test NAMES
+diff byte-for-byte identical against the unmodified tree — all pre-existing.
+Note the first test written for this (`test_optional_static_return_keeps_...`)
+PASSES on the unmodified tree: a synthetic module cannot reproduce the defect
+because the real decoy population is what triggers it. It is kept as a pin, but
+`test_declared_type_struct_name_looks_through_payload_wrappers` is the one that
+actually discriminates.
+
+### Follow-up, deliberately NOT in this change
+
+`get_field_info`'s ANY branch consults `is_ambiguous_global_field` only AFTER
+LOCAL-BEST has already returned, so a field name the compiler KNOWS is
+index-ambiguous is still silently guessed whenever a receiver's name cannot be
+recovered. `native_noop_admission.spl` still shows exactly that. Making it
+fail closed is a separate change with an unmeasured blast radius across 829
+trace lines, and it would NOT have fixed this site on its own (access.rs's
+`NKM-LOCALBEST` repeats the identical smallest-index guess). It needs its own
+lane.
+
+### Run 13 (2026-09-13) — unchanged reproducer, now with the trace
+
+`--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+evidence root, worktree `agent-aa45d51377e3a4e99`, at `origin/main` 42347f19a51.
+Stage 1 admitted; Stage 2 built its 877-unit closure clean; the canary fired
+(`field=31758752897:runtime=632`, x3) and the smoke build then failed at the
+run-7 link site. Identical to runs 10 and 12.
+
+Two process notes that each cost a run:
+- **A tracked-file edit while a bootstrap is running kills it** —
+  `error: Rust inputs changed during full bootstrap; refusing to publish a stale
+  seed`. It fires during the SEED build, long before admission.
+- **`/opt/homebrew/bin/cmp` shadows `/usr/bin/cmp` and is a SYMLINK**, so
+  `bootstrap_stage3_compare_bind` (`scripts/check/lib/bootstrap-stage3/authority.shs:26`)
+  fails its `candidate == canonical` check and returns 2 —
+  `error: Rust runtime authority private-admission origin comparator unavailable
+  or I/O failed ... status=2`. The fix is to put `/usr/bin` FIRST on PATH and
+  leave `BOOTSTRAP_STAGE3_COMPARE_TOOL` **unset** so auto-bind derives both the
+  path and its sha256. Setting that variable by hand without
+  `BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256` fails a different check in the same
+  function.
+
+### Run 14 (2026-09-13) — this record's blocker is CLEARED
+
+Same command, virgin evidence root (`--output=.../bootstrap-run14`), carrying the
+fix. Stage 1 admitted; Stage 2 built its closure clean (877 compiled, 0 failed,
+492.5s + 10.4s link). **For the first time in this chain the receipt-size canary
+did not fire even once** — no `[receipt-size-canary]`, no
+`capsule-receipt-size-implausible`, no `receipt-content-mismatch`. This record is
+RESOLVED.
+
+Stages reached: Stage 1 admitted; Stage 2 built, **not admitted**; Stage 3 not
+attempted. The sole remaining blocker is the sibling record's link-nil, verbatim:
+
+```
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+error: in-process native-build: LLVM native linking failed: Linking failed: no error payload from link_to_native (rendered nil); see the unconditional [linker-wrapper] prints for the failing site
+```

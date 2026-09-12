@@ -220,3 +220,47 @@ is a workaround, not a fix.
 
 A 5-second witness for both (no bootstrap) is recorded in the sibling file; the
 key missing knob was `SIMPLE_PACKAGE_INDEX_COLD_INIT=1`.
+
+## 2026-09-13, run 14 — now the SOLE Stage 2 blocker, and the payload renders as `0`
+
+The sibling receipt-size defect is fixed in the Rust seed
+(`stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md`
+§ RESOLVED), so run 14's Stage 2 reaches this site with nothing else in the way.
+Stage 2 built its 877-unit closure clean and was **not admitted** solely because
+of this.
+
+**New, and it narrows the search a lot: `darwin_link_tool_unresolved_error`'s
+unconditional print now fires, and the command it names is a bare `0`.** PR
+#717's hardening (print the literal line first, each value BARE on its own line)
+is what made this legible. Verbatim from
+`stage2-sanity.env.frontend-failure.log`:
+
+```
+[linker-wrapper] darwin-link-tool-unresolved -- command, trail and PATH follow
+0
+
+/opt/homebrew/Cellar/llvm@18/18.1.8/bin:/usr/bin:/Users/ormastes/.local/bin:...
+```
+
+The command is `0` and the trail is EMPTY. Not nil, not `""` — the integer zero,
+rendered as text. So `find_linker_path()`'s `Result<text, text>` Ok payload is
+being read out of the wrong slot and yielding a zero word, exactly as
+`FileFingerprint.size` yielded a `path` pointer before its fix. `0` is then
+handed to `darwin_resolve_link_tool`, fails `file_exists`, and takes the
+unresolved branch whose error payload renders nil.
+
+**This is the same family as the receipt-size defect but NOT the same defect, and
+the fix that cleared that one does not clear this one** — run 14 carries the seed
+fix and still fails here. The receipt-size chain was a NAME lost at
+`static_call_return_type_name` for a `-> T?` static constructor; `find_linker_path`
+returns `Result<text, text>` from a free function, so it loses its payload type by
+a different route. What the two share is the shape: a payload behind a wrapper,
+read at an offset chosen without the receiver.
+
+Next step, and it is now cheap: replay the Stage 2 `native-build` from its own
+`stage2-command.transcript` with `SIMPLE_TRACE_FIELD_GET=1` (the bootstrap script
+sanitises the stage env, so the trace only survives the direct replay — see the
+sibling record) and read the `[PB]` payload-bind lines for `mold.spl` /
+`native_linking.spl`. The `[PB] Result.Ok slot0 expected_ty=... field_ty=...`
+channel already prints for every Result bind in the closure and is the direct
+analogue of the `[FIELD-TRACE]` line that settled the sibling defect in one read.
