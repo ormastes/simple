@@ -1404,6 +1404,26 @@ mod tests {
         );
     }
 
+    /// The Cranelift twin of the qualified-name hole. Its `enum_helper`
+    /// predicate used to be keyed on the WHOLE `lookup_name`, so a qualified
+    /// `MirStaticInit.unwrap` was not recognised as a helper and the bare
+    /// last-resort `use_map.get(method)` scan rebound it. Asserted at source
+    /// level because the scans are inline in a function that needs a whole
+    /// Cranelift `FunctionBuilder` -- the same technique, and the same reason,
+    /// as `bare_enum_helper_scans_are_guarded_in_mangle_mir`.
+    #[test]
+    fn cranelift_enum_helper_guard_is_keyed_on_the_method_segment() {
+        let src = include_str!("../../codegen/instr/closures_structs.rs");
+        assert!(
+            src.contains("let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);"),
+            "cranelift enum_helper predicate must be keyed on the method segment, not the whole lookup name"
+        );
+        assert!(
+            src.contains("if resolved_name.is_none() && !enum_helper {\n                    resolved_name = ctx\n                        .use_map\n                        .get(method)"),
+            "the cranelift last-resort bare-method lookup lost its enum-helper guard"
+        );
+    }
+
     #[test]
     fn enum_helper_owner_match_is_exact_not_substring() {
         let poll = "lib__nogc_async_mut__async__poll__Poll.unwrap";
