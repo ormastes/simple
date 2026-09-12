@@ -1,6 +1,6 @@
 # Three app modules/symbols their specs import exist nowhere in the tree
 
-**Status:** OPEN
+- Status: PARTIALLY-RESOLVED (2026-09-12) — 3 of the 4 specs green; see Triage 2026-09-12
 **Found:** 2026-08-04
 **Severity:** high — 19 spec examples cannot run, and two of the three are real
 CLI surfaces (`simple os …`, `simple build --target-feature …`) that a user can
@@ -67,3 +67,45 @@ dependencies (`os_parse_log_arg`, `os_log_arg_error`, `os_parse_scenario_arg`,
 `get_scenario`, `build_scenario`, `arch_from_name`, `get_qemu_target`,
 `build_os`, `_export_os_log_mode_inline`, `_restore_os_log_mode_inline`) are
 themselves absent and touch the SimpleOS/QEMU build path.
+
+## Triage 2026-09-12
+
+Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
+
+Re-ran all four specs from the symptom table.
+
+| spec | 2026-08-04 | now |
+|---|---|---|
+| `test/01_unit/app/build/feature_flags_spec.spl` | 0 passed, 1 failed | **OK 17/17** — module landed since |
+| `test/01_unit/app/build/opt_remarks_spec.spl` | 0 passed, 1 failed | **OK 13/13** — module landed since |
+| `test/01_unit/app/cli/cli_os_spec.spl` | 0 passed, 7 failed | 6/7 (was `handle_os_inline` not found ×7) |
+| `test/01_unit/app/cli/os_build_dispatch_spec.spl` | 0 passed, 1 failed | **OK 1/1** |
+
+Rows 1 and 2 were fixed by other work; rows 3 and 4 are fixed here.
+
+`handle_os_inline` / `handle_os_build_inline` now exist in
+`src/app/cli/_CliMain/args_and_os_commands.spl` (re-exported by
+`app.cli.main`), so the unified CLI dispatches `os` without delegating to a
+separate entry file. `handle_os_build_inline` deliberately uses `get_target`
+(the per-platform kernel SMOKE lane) rather than `get_qemu_target` (the
+filesystem-backed ACCEPTANCE lane), which is what
+`os_build_dispatch_spec.spl` pins; validation rejects a bad `--log`, a bare
+`--arch`/`--target`/`--scenario`, an unknown scenario and an unknown
+architecture before `SIMPLE_OS_LOG_MODE` is ever exported, so a rejected
+command leaves the caller's environment byte-identical (the spec asserts this).
+Everything else delegates to the existing `os.cli.handle_os`; nothing was
+duplicated.
+
+Blast radius checked — the other three specs that import `app.cli.main` are
+unaffected: `cli_helpers_cycle_spec` 1/1, `cli_unknown_subcommand_exit_code_spec`
+4/4, `static_startup_fast_path_spec` 3/3.
+
+**The one remaining failure is NOT this bug.** `cli_os_spec`'s "dispatches os
+targets successfully" now fails with
+`semantic: unknown variant or method 'Riscv64' on enum Architecture`, which is
+the bare-name registry collision tracked in
+`bare_name_registry_collision_trigger_conditions_2026-07-30.md`. Widening the
+CLI's module graph to reach `os.cli` pulled a second `enum Architecture` into
+the same flat name registry. That record was open precisely because five lanes
+failed to reproduce the collision; a 10-line reproducer derived from this
+failure is recorded there today.
