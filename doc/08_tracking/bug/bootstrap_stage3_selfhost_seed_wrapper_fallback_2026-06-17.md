@@ -1,7 +1,7 @@
 # Bootstrap Stage 3 self-host fails — stage2 `bootstrap_main` binary can only emit a seed-wrapper, not real native code
 
 - **Id:** bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17
-- **Status:** CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
+- **Status:** OPEN (reopened 2026-09-12 — an earlier same-day closure was based on only 1 of the 3 named specs, and that one is a source-contract spec; see Correction below)
 - **Severity:** P2 — **NEEDS REVISIT (2026-06-21):** the parenthetical below
   claims "the seed-built artifacts are valid," but that assumption is now
   contradicted. A fresh `--pure-simple` Stage 4 binary **SIGSEGVs on every
@@ -352,3 +352,34 @@ LLVM / self-hosted binary / other architecture), and it did not audit whether
 the spec's assertions still cover the original symptom as tightly as when the
 record was written. If a residual lane is known to be uncovered, reopen with
 the lane named rather than relying on this line.
+
+
+## Correction 2026-09-12 — REOPENED, the earlier same-day closure was wrong
+
+Same error as above in kind: the closure rested on **one** of the three specs
+this record names, and it was the one that passes.
+
+```
+test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl -> OK 11/11
+test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl
+  ✗ rejects a native-build worker that exits 0 without an output binary
+  ✗ rejects a compiler driver Success that wrote no artifact
+  ✗ reads argv through the runtime extern, never through a same-named import
+      assert_false failed: got true
+  -> ERROR declared>=3 executed=3 passed=0 failed=3
+test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl
+  -> ERROR declared>=3 executed=3 passed=1 failed=2
+```
+
+Five of the six examples across those two specs fail — including the
+`bootstrap_seed_fallback_policy` spec, which is the one that actually tests the
+fallback behaviour this record is about, rather than a source-shape contract.
+
+There is also a scoping point the first pass got wrong and this record should
+state plainly: `native_build_bootstrap_lane_contract_spec.spl` is a *source
+contract* spec. A green source contract is not evidence about lane behaviour —
+the same distinction `bootstrap_planner_v1_unbound_authorization_2026-08-14`
+makes when it says "structural validity is not authority". Passing it does not
+close a bootstrap-lane bug.
+
+Status returned to OPEN.
