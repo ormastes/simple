@@ -234,6 +234,92 @@ fn vulkan_font_count_overlapping_quads(quads: [FontRenderQuad]) -> i64:
         i = i + 1
     pairs
 
+fn vulkan_font_partition_quads(quads: [FontRenderQuad]) -> [i64]:
+    """Sub-batch index per quad, such that no two quads in one index overlap.
+
+    The packed font kernel blends with a non-atomic read-modify-write on
+    `dst[di]` and runs one invocation per (pixel, glyph), so two quads in the
+    SAME dispatch that share a destination pixel race. Dispatching each index
+    separately fixes that, and soundly: the runtime emits a full
+    `vkCmdPipelineBarrier` after every `vkCmdDispatch`
+    (`interpreter_extern/gpu.rs:5340-5359`), so sub-batches are ordered with
+    respect to each other even though invocations within one are not.
+
+    The rule is `bucket(q) = 1 + max(bucket(p))` over EARLIER overlapping `p`,
+    and it is not interchangeable with first-fit. Given A, B overlapping A, and
+    C overlapping B but not A, first-fit assigns C to bucket 0 -- dispatched
+    BEFORE B, inverting the painter order the CPU raster defines. Taking one
+    past the highest earlier conflict keeps every overlapping pair in its
+    original relative order, which is the property that makes the split a pure
+    cost change rather than a rendering change.
+
+    Returns one index per quad, parallel to `quads`. All-zero (a single
+    sub-batch, today's behaviour byte for byte) whenever nothing overlaps, which
+    is the common case: measured on `css-layout.html`, 900x760 has 19
+    overlapping pairs across 496 quads and 300x253 has none.
+    """
+    var buckets: [i64] = [0; quads.len().to_i64()]
+    var i: i64 = 0
+    val n = quads.len().to_i64()
+    while i < n:
+        val a = quads[i]
+        val al = a.dst_x.to_i64()
+        val at = a.dst_y.to_i64()
+        val ar = al + a.width.to_i64()
+        val ab = at + a.height.to_i64()
+        var want: i64 = 0
+        var j: i64 = 0
+        while j < i:
+            val b = quads[j]
+            val bl = b.dst_x.to_i64()
+            val bt = b.dst_y.to_i64()
+            if al < bl + b.width.to_i64() and bl < ar and at < bt + b.height.to_i64() and bt < ab:
+                if buckets[j] + 1 > want:
+                    want = buckets[j] + 1
+            j = j + 1
+        buckets[i] = want
+        i = i + 1
+    buckets
+
+fn _vulkan_font_sub_batch(batch: FontRenderBatch, buckets: [i64],
+                          want: i64) -> FontRenderBatch:
+    """The original batch narrowed to the quads assigned sub-batch `want`.
+
+    Everything except `quads` and `dirty_rects` is carried through unchanged --
+    critically `atlas_generation` and `font_identity`, because those are what
+    make sub-batch 2..N take the impl's atlas cache-hit branch instead of
+    re-uploading and re-packing a 4 MB atlas per dispatch.
+
+    Only sub-batch 0 carries `dirty_rects`. They drive the mirror repack, which
+    must happen once per real atlas change; replaying them on later sub-batches
+    would repack cells that are already correct.
+    """
+    var members: [FontRenderQuad] = []
+    var i: i64 = 0
+    while i < buckets.len().to_i64():
+        if buckets[i] == want:
+            members.push(batch.quads[i])
+        i = i + 1
+    FontRenderBatch(
+        program_version: batch.program_version,
+        transform_identity: batch.transform_identity,
+        font_identity: batch.font_identity,
+        face_generation: batch.face_generation,
+        valid: batch.valid,
+        atlas_width: batch.atlas_width,
+        atlas_height: batch.atlas_height,
+        atlas_pixels: batch.atlas_pixels,
+        quads: members,
+        atlas_generation: batch.atlas_generation,
+        dirty_rects: if want == 0: batch.dirty_rects else: [])
+
+fn vulkan_font_partition_bucket_count(buckets: [i64]) -> i64:
+    """How many dispatches `vulkan_font_partition_quads` implies. 1 when clean."""
+    var highest: i64 = -1
+    for b in buckets:
+        if b > highest: highest = b
+    highest + 1
+
 fn vulkan_font_atlas_identity_digest(owner: text, generation: i64, width: i32,
                                       height: i32, count: i64) -> text:
     """O(1) atlas token: the generation/owner pair the upload cache already trusts.
@@ -916,7 +1002,29 @@ impl VulkanBackend:
                             batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
         val clock = default_frame_clock()
         val started_ns = clock.now_micros() * 1000
-        var evidence = self._composite_font_batch_impl(origin_x, origin_y, batch, clock)
+        # Split a batch whose quads overlap into sub-batches that do not, and
+        # composite them in order. The packed kernel runs one invocation per
+        # (pixel, glyph) and blends with a NON-ATOMIC read-modify-write on
+        # `dst[di]`, so two overlapping quads in one dispatch race and one
+        # blend is lost -- measured as pixel (89,392) reading 139 in one run
+        # and 226 in another of the same binary. Separate dispatches are
+        # ordered: the runtime emits a full pipeline barrier after every
+        # dispatch (`interpreter_extern/gpu.rs:5340-5359`).
+        #
+        # Re-entering the impl per sub-batch is cheap, and specifically it does
+        # NOT re-upload the atlas: sub-batch 2..N carries the same
+        # `atlas_generation` and owner identity as sub-batch 1, so each takes
+        # the impl's cache-hit branch instead of packing 4 MB again. The split
+        # is skipped entirely -- byte-for-byte today's single call -- whenever
+        # nothing overlaps, which is the common case (measured: 0 overlapping
+        # pairs at 300x253, 19 across 496 quads at 900x760).
+        val buckets = vulkan_font_partition_quads(batch.quads)
+        val bucket_count = vulkan_font_partition_bucket_count(buckets)
+        var evidence = if bucket_count > 1:
+            self._composite_font_sub_batches(origin_x, origin_y, batch, buckets,
+                bucket_count, clock)
+        else:
+            self._composite_font_batch_impl(origin_x, origin_y, batch, clock)
         val total_ns = vulkan_font_elapsed_ns(started_ns, clock.now_micros() * 1000)
         # Reuse the composite's own clock rather than starting a second one:
         # this path is already measured, it just never reached the lane census.
@@ -925,6 +1033,36 @@ impl VulkanBackend:
         evidence.atlas_upload_count = self.font_atlas_upload_count
         evidence.atlas_upload_bytes = self.font_atlas_upload_bytes
         evidence.gpu_resource_high_water_bytes = self.font_gpu_resource_high_water_bytes
+        evidence
+
+    me _composite_font_sub_batches(origin_x: i32, origin_y: i32,
+                                   batch: FontRenderBatch, buckets: [i64],
+                                   bucket_count: i64,
+                                   clock: FrameClock) -> VulkanFontCompositeEvidence:
+        """Composite one batch as N overlap-free dispatches, in painter order.
+
+        Returns the LAST sub-batch's evidence with `quad_count` restored to the
+        original batch's, because callers read it as "how many glyphs did this
+        batch draw" and the last sub-batch knows only its own share. A sub-batch
+        that does not reach `recorded`/`completed` short-circuits the rest:
+        continuing would paint later glyphs over a hole the caller was never
+        told about.
+        """
+        var evidence = self._composite_font_batch_impl(origin_x, origin_y,
+            _vulkan_font_sub_batch(batch, buckets, 0), clock)
+        if evidence.status != "recorded" and evidence.status != "completed":
+            evidence.quad_count = batch.quads.len()
+            return evidence
+        var b: i64 = 1
+        while b < bucket_count:
+            evidence = self._composite_font_batch_impl(origin_x, origin_y,
+                _vulkan_font_sub_batch(batch, buckets, b), clock)
+            if evidence.status != "recorded" and evidence.status != "completed":
+                evidence.quad_count = batch.quads.len()
+                return evidence
+            b = b + 1
+        evidence.quad_count = batch.quads.len()
+        evidence.sub_batch_count = bucket_count
         evidence
 
     me _composite_font_batch_impl(origin_x: i32, origin_y: i32,
@@ -1552,6 +1690,7 @@ export VULKAN_FONT_FRAME_GLYPH_CAP, vulkan_font_gpu_resource_bytes_for_params
 export VULKAN_FONT_PACKED_HEADER_WORDS, VULKAN_FONT_PACKED_GLYPH_WORDS
 export VULKAN_FONT_PACKED_MAX_BYTES, vulkan_font_packed_params
 export vulkan_font_atlas_identity_digest, vulkan_font_count_overlapping_quads
+export vulkan_font_partition_quads, vulkan_font_partition_bucket_count
 export VULKAN_BITMAP_FONT_FIRST_CODE, VULKAN_BITMAP_FONT_LAST_CODE
 export VULKAN_BITMAP_FONT_CELL_COUNT, VULKAN_BITMAP_FONT_CELL_COLUMNS
 export VULKAN_BITMAP_FONT_CONFIG_IDENTITY

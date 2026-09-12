@@ -153,9 +153,10 @@ Recorded in `web_catalog_900x760_frame_checksum_nondeterministic_2026-09-12.md`.
 
 ### Target: MISSED, and the arithmetic says why
 
-The brief set ≤ 150,000 ms at 900x760. Measured with the census instrument ON
-(an O(n^2) host walk that inflates the frame): **194,723 ms**, from F17's
-259,523. The remaining `font_composite` is 28,932 ms of full atlas repacks
+The brief set ≤ 150,000 ms at 900x760. Measured clean (no census
+instrument): **191,872 ms**, from F17's 259,523 — a 26% reduction. With the
+font race fix also applied (below) it is **215,249 ms**, because removing the
+nondeterminism costs ~24 s. The remaining `font_composite` is 28,932 ms of full atlas repacks
 driven by `identity_changed=8` — the page alternates between two font identities
 and the backend keeps ONE host mirror, so each flip repacks 4 MB. A per-owner
 mirror would remove it, leaving a floor near **166,000 ms**.
@@ -166,3 +167,33 @@ that `simple_web_html_engine2d_presenter.spl:597` then uploads and reads straigh
 back — the GPU is a pass-through. Reaching 150 s means not rasterizing on the
 host, which is a different and much larger change. The cpu_simd bar on this page
 is 263,636 ms; the Vulkan lane is now well under it.
+
+### 4. The font race fix, and what it costs
+
+The partition described in §3 is implemented. Two 900x760 renders are now
+**byte-identical** (`cmp` clean, checksum `8316155370661695245`) where before
+they differed, and **pixel (89,392) reads 124 — the CPU oracle value — in both**,
+where before it read 139 in one run and 226 in another. 300x253 is `cmp` clean
+against F17's reference PPM. One submit per frame is preserved.
+
+| | F17 | + image/digest fixes | + race fix |
+|---|---|---|---|
+| **frame 900x760** | 259,523 | **191,872** | **215,249** |
+| font_composite | 70,708 | 29,459 | 51,003 |
+| 900x760 reproducible | no | no | **yes** |
+
+The +24 s is the O(n^2) interpreted overlap scan every batch now pays, plus an
+extra params pack and dispatch for the batches that overlap. It is reported as a
+cost, not smoothed: a renderer that cannot reproduce its own output cannot be
+pixel-tested, which is exactly why 900x760 was unusable as an oracle. Making the
+scan cheaper (sweep-line, or an early-out below a glyph count) is the follow-up;
+undoing the split is not.
+
+### Final honest position on the target
+
+**≤150,000 ms: MISSED.** 191,872 ms without the race fix, 215,249 ms with it.
+The named remaining Vulkan term is 28,932 ms of full atlas repacks
+(`identity_changed=8`, one host mirror shared by two alternating font
+identities; a per-owner mirror removes it) and ~24 s of partition scan. Even
+both would leave ~162,000 ms, and that floor is host rasterization plus the
+29,451 ms document pipeline, not GPU work. The cpu_simd bar is 263,636 ms.

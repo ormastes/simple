@@ -429,7 +429,36 @@ dispatches per batch to the 23 already issued, each already barrier-separated.
 One submit per frame is unaffected — this adds dispatches within the existing
 command buffer, not submits.
 
-**Not yet implemented.** The diagnosis, the census instrument, the barrier
-finding and the partition rule are recorded here; the partition itself is the
-next change, and its proof is: two 900x760 renders byte-identical, and pixel
-(89,392) reading the CPU oracle value 124 on both.
+## IMPLEMENTED AND PROVEN (same day)
+
+`vulkan_font_partition_quads` assigns each quad a sub-batch index by the
+`1 + max(bucket(p))` rule; `composite_font_batch` composites the sub-batches in
+order when the count exceeds 1, and takes the unchanged single-dispatch path
+byte for byte when it does not. Re-entry per sub-batch does NOT re-upload the
+atlas: each sub-batch carries the same `atlas_generation` and owner identity, so
+sub-batch 2..N takes the impl's cache-hit branch. Only sub-batch 0 carries
+`dirty_rects`, so the mirror repack still happens once per real atlas change.
+
+**The proof, measured, same binary (`39368072 1789171430`), serial runs:**
+
+| | before the fix | after the fix |
+|---|---|---|
+| two 900x760 renders | checksums **8316162126305609402** and **8316164145970244972** — DIFFER | **byte-identical**, `cmp` clean over all 2,052,015 bytes, checksum `8316155370661695245` on both |
+| **pixel (89,392)** | **`0x8b`=139** in one run, **`0xe2`=226** in the other | **`0x7c`=124 in BOTH** |
+| 300x253 | — | `cmp` clean against F17's reference PPM |
+| submits per frame | 22 | 23 — one per frame preserved (the count tracks frames, not dispatches) |
+
+**139 and 226 are the exact two values this record measured before the cause was
+known, and 124 is the CPU oracle it named.** The fix does not merely make the
+page reproducible; it makes it reproduce the CPU value, which distinguishes
+"the race is gone" from "the race now loses consistently".
+
+**Cost, stated rather than buried: `font_composite` 29,459 -> 51,003 ms**, frame
+191,872 -> 215,249 ms. The partition is an O(n^2) interpreted scan per batch and
+every batch pays it, plus overlapping batches pay an extra params pack and
+dispatch. That is a real +24 s for correctness, and it is worth it -- a
+non-deterministic renderer cannot be pixel-tested at all, which is what blocked
+using 900x760 as an oracle in the first place. The obvious follow-up is to make
+the scan cheaper (sweep-line, or an early-out on batches below a size), not to
+undo the split. The frame is still well under both F17's 259,523 ms and the
+263,636 ms cpu_simd bar.
