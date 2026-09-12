@@ -19,6 +19,7 @@ Configuration files for build, test, packaging, and tooling.
 | `log_opt` | Toolchain build-log optimizer plugin descriptors |
 | `mcp` | MCP server configurations |
 | `packaging` | Packaging configurations |
+| `perf` | Entry-point import-closure baselines (`entry_closure_baselines.sdn`) frozen by check-entry-closure-ratchet.shs |
 | `process.sdn` | Process configuration |
 | `README_DOCKER.md` | Docker readme |
 | `resources` | Resource files |
