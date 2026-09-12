@@ -207,3 +207,64 @@ discriminant, so `?` never early-returns. The 50.mir counterpart IS fixed (see
 does NOT cover this row: its own header at line 37 reads "SCOPE — Result ONLY.
 `?` on an Option is a SEPARATE, STILL-OPEN defect". Recommend re-attributing this
 row to `hir/lower/expr/control.rs`.
+
+## Re-check 2026-09-12 — still open, and the success path has since regressed
+
+- Status: OPEN (2026-09-12) — worse than filed; fix needs the Rust seed
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+- Command: `bin/simple run <the verbatim repro above>`, exit code 0
+
+```
+none_case START
+  SIDE_EFFECT_RAN
+                      <- blank
+some_case START
+  SIDE_EFFECT_RAN
+                      <- blank, and this line USED TO READ some_case=SOME:got:v
+```
+
+Point 1 of this record (no early return on `None`) reproduces verbatim. **What
+is new is that the success path is now broken too.** This record explicitly
+states "The success path is correct"; it no longer is.
+
+Point 2 is now disambiguated, and the answer is "neither arm matches". Probing
+the returned handles directly rather than through a `match`:
+
+```
+A raw=<enum@0x2421006a6e0>  A is_nil=false     # use_opt(true)  — the None path
+B raw=<enum@0x2421006c140>  B is_nil=false     # use_opt(false) — the Some path
+C raw=<enum@0x2421006c1e0>                     # boxed_opt(false) — CONTROL, no `?`
+C match=SOME:v                                 # control matches correctly
+```
+
+The control `c` comes from the same `-> text?` function shape with no `?` in its
+body and matches `Some(v)` normally. `a` and `b` match neither `Some` nor `None`
+and are both non-nil. So the corruption is a property of **a function whose body
+contains `?` at all**, not of the absent path: the early-return branch is
+never taken (point 1) *and* the enclosing function's typed-return promotion is
+bypassed for every return, so even the value that flowed through no `?` branch
+comes back as an unmatchable enum handle.
+
+That is consistent with this record's own analysis of what the seed's `lower_try`
+omits — "on absence the raw nil local must be promoted to the canonical enum-id-1
+`None` handle before the early return, or the branch bypasses the enclosing
+function's typed-return promotion" — except the bypass is wider than absence.
+
+### The interpreter and JIT lanes disagree
+
+Under `bin/simple test` (interpreter) the same shape DOES early-return: the
+statement after `?` on a `None` does not run. But the value returned from a
+`-> bool` function is then `Option::None`, with the non-optional return contract
+not enforced. So neither lane is correct and they are wrong in different ways;
+any fix must be checked on both.
+
+### Not fixed here
+
+`lower_try` is `src/compiler_rust/compiler/src/hir/lower/expr/control.rs`, and
+the pure-Simple counterpart this record cites
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`) cannot be
+validated on a deployed seed binary. Outside the pure-Simple scope of this pass.
+
+Related, found while probing this: `.?` is a presence predicate only in
+call-argument position and a bare unwrap everywhere else —
+`doc/08_tracking/bug/dotq_presence_operator_is_bare_unwrap_outside_argument_position_2026-09-12.md`.

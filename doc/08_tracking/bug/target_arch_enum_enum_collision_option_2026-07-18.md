@@ -138,3 +138,21 @@ the symptom this record tracked, not the underlying flat-global-registry
 mechanism. The systemic lane
 (`duplicate_type_name_collision_audit_2026-07-17.md`) therefore still owns the
 enum-vs-enum extension this record contributed; closing only this instance.
+
+### Addendum 2026-09-12 — the original attribution was probably wrong
+
+The spec passes today because `expect(parsed.?).to_equal(true)` is in
+**call-argument position**, which is the one position where `.?` really does
+yield a bool on this seed. Bound to a local or returned from a `-> bool`
+function, the same `.?` yields the unwrapped payload — the exact symptom this
+record describes ("instead evaluates to the raw unwrapped enum value") — with no
+same-named enum anywhere in sight. Measured matrix:
+`doc/08_tracking/bug/dotq_presence_operator_is_bare_unwrap_outside_argument_position_2026-09-12.md`.
+
+So the collision-audit lane should NOT inherit this as evidence that enum-vs-enum
+registry collisions corrupt `Option<T>`. The enum-vs-enum collision this record
+demonstrated with a synthetic decoy is real and still worth extending the audit
+scan for; the `architecture_spec.spl` failure it was filed from is more likely a
+`.?` lowering defect that happened to be observed in a tree that also had a
+collision. The record's own "What is *not* independently confirmed" section
+already flagged that attribution gap.
