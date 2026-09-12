@@ -1,7 +1,7 @@
 # OpenType gvar table: variable font glyph delta application and packed-delta decoders
 
 use std.skia.entity.path.{SkPath, SkPathVerb, sk_path_new}
-use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_i16_be, read_u32_be, read_f2dot14}
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_u32_be, read_f2dot14}
 
 # ===== gvar (variable font glyph deltas) =====
 
@@ -116,45 +116,6 @@ fn apply_glyph_deltas(outline: SkPath, gvar: GvarTable, glyph_id: u32, normalize
     # Without the font blob we cannot decode the variation data, so return unchanged.
     outline
 
-fn gvar_tuple_scalar(peak_coords: [f64], normalized_coords: [f64], axis_count: i64, n_coords: i64) -> f64:
-    # Compute tuple scalar = product over axes of piecewise-linear factor
-    var scalar: f64 = 1.0
-    var ai: i64 = 0
-    while ai < axis_count and ai < n_coords and ai < (peak_coords.len() as i64):
-        val peak = peak_coords[ai]
-        val coord = normalized_coords[ai]
-        if peak == 0.0:
-            ai = ai + 1
-            continue
-        if coord == peak:
-            ai = ai + 1
-            continue
-        if coord == 0.0 or (coord < 0.0 and peak > 0.0) or (coord > 0.0 and peak < 0.0):
-            return 0.0
-        val factor = coord / peak
-        scalar = scalar * factor
-        ai = ai + 1
-    scalar
-
-fn sum_delta_list(all_dx: [f64], all_dy: [f64], n_points: i64, n_variations: i64) -> ([f64], [f64]):
-    # all_dx has n_variations * n_points entries: variation 0 first, then variation 1, etc.
-    # Returns two arrays of length n_points summing across variations.
-    var sum_x: [f64] = []
-    var sum_y: [f64] = []
-    var pi: i64 = 0
-    while pi < n_points:
-        var sx: f64 = 0.0
-        var sy: f64 = 0.0
-        var vi: i64 = 0
-        while vi < n_variations:
-            sx = sx + all_dx[vi * n_points + pi]
-            sy = sy + all_dy[vi * n_points + pi]
-            vi = vi + 1
-        sum_x.append(sx)
-        sum_y.append(sy)
-        pi = pi + 1
-    (sum_x, sum_y)
-
 fn apply_glyph_deltas_with_font(font: OtFont, outline: SkPath, gvar: GvarTable, glyph_id: u32, normalized_coords: [f64]) -> SkPath:
     # Real implementation with font blob access.
     if normalized_coords.len() == 0:
@@ -171,11 +132,6 @@ fn apply_glyph_deltas_with_font(font: OtFont, outline: SkPath, gvar: GvarTable, 
     val data_base = gvar.glyph_variation_data_array_offset as i64 + start_off
     if data_base + 3 >= blob.len() as i64:
         return outline
-    # TupleVariation data header: tupleVariationCount(u16), dataOffset(u16)
-    val tuple_variation_count_raw = read_u16_be(blob, data_base)
-    val tuple_count = (tuple_variation_count_raw & 0x0FFF) as i64
-    val serial_data_offset = read_u16_be(blob, data_base + 2) as i64
-    val serial_data_base = data_base + serial_data_offset
     # Gather original points
     val n_segs = outline.segments.len() as i64
     var orig_xs: [f64] = []
@@ -191,64 +147,17 @@ fn apply_glyph_deltas_with_font(font: OtFont, outline: SkPath, gvar: GvarTable, 
         si = si + 1
     val n_points = orig_xs.len() as i64
     val axis_count = gvar.axis_count as i64
-    val n_coords = normalized_coords.len() as i64
-    # Collect per-variation flat delta arrays (each n_points long), then sum.
-    # all_vdx[vi * n_points + pi] = x-delta contribution of variation vi at point pi
-    var all_vdx: [f64] = []
-    var all_vdy: [f64] = []
-    var header_pos: i64 = data_base + 4
-    var vi: i64 = 0
-    while vi < tuple_count:
-        if header_pos + 3 >= blob.len() as i64:
-            # Pad with zeros for this variation
-            var zi: i64 = 0
-            while zi < n_points:
-                all_vdx.append(0.0)
-                all_vdy.append(0.0)
-                zi = zi + 1
-            vi = vi + 1
-            continue
-        val tuple_index_word = read_u16_be(blob, header_pos + 2)
-        val has_embedded_peak = (tuple_index_word & 0x8000) != 0
-        val has_intermediate_region = (tuple_index_word & 0x4000) != 0
-        header_pos = header_pos + 4
-        # Read embedded peak coords if present
-        var peak_coords: [f64] = []
-        if has_embedded_peak:
-            var ci: i64 = 0
-            while ci < axis_count:
-                if header_pos + 1 >= blob.len() as i64:
-                    peak_coords.append(0.0)
-                else:
-                    val pv = read_f2dot14(blob, header_pos)
-                    peak_coords.append(pv)
-                header_pos = header_pos + 2
-                ci = ci + 1
-        # Skip intermediate region (start/end coords) if present
-        if has_intermediate_region:
-            header_pos = header_pos + axis_count * 4
-        val scalar = gvar_tuple_scalar(peak_coords, normalized_coords, axis_count, n_coords)
-        # TODO: support packed delta stream format
-        # Assume uncompressed deltas: n_points i16 x-deltas followed by n_points i16 y-deltas
-        if scalar != 0.0 and serial_data_base + n_points * 4 <= blob.len() as i64:
-            var pi2: i64 = 0
-            while pi2 < n_points:
-                val dx = read_i16_be(blob, serial_data_base + pi2 * 2) as f64
-                val dy = read_i16_be(blob, serial_data_base + n_points * 2 + pi2 * 2) as f64
-                all_vdx.append(scalar * dx)
-                all_vdy.append(scalar * dy)
-                pi2 = pi2 + 1
-        else:
-            var zi: i64 = 0
-            while zi < n_points:
-                all_vdx.append(0.0)
-                all_vdy.append(0.0)
-                zi = zi + 1
-        vi = vi + 1
-    # Sum deltas across all variations per point
-    val sums = sum_delta_list(all_vdx, all_vdy, n_points, tuple_count)
-    val delta_x = sums.0
-    val delta_y = sums.1
+    # Decode the packed TupleVariation delta stream for this glyph.
+    val flat = gvar_accumulate_point_deltas(
+        blob, data_base, axis_count, gvar.shared_tuple_count as i64, normalized_coords, n_points
+    )
+    var delta_x: [f64] = []
+    var delta_y: [f64] = []
+    var fi: i64 = 0
+    while fi < n_points:
+        delta_x.append(flat[fi])
+        delta_y.append(flat[n_points + fi])
+        fi = fi + 1
     # Rebuild path applying accumulated deltas
     var new_path = sk_path_new()
     var point_idx: i64 = 0
@@ -499,6 +408,89 @@ fn _compute_tuple_scalar(peak: [f64], user: [f64]) -> f64:
         i = i + 1
     scalar
 
+# gvar_accumulate_point_deltas — decode one glyph's packed TupleVariation delta
+# stream and accumulate scalar-weighted per-point deltas.
+#
+# `data_base` points at the glyph's variation data header
+# (tupleVariationCount u16, dataOffset u16). Handles SHARED_POINT_NUMBERS
+# (0x8000 of tupleVariationCount), per-tuple PRIVATE_POINT_NUMBERS, embedded
+# peak tuples and the packed byte/word/zero-run delta encodings.
+#
+# Returns a flat [f64] of length 2 * n_points: x-deltas first, then y-deltas.
+# A flat array (rather than a tuple of two) keeps callers — including specs —
+# off the struct/tuple-field lowering path.
+fn gvar_accumulate_point_deltas(blob: [u8], data_base: i64, axis_count: i64, shared_tuple_count: i64, normalized_coords: [f64], n_points: i64) -> [f64]:
+    var acc_dx: [f64] = []
+    var acc_dy: [f64] = []
+    var k: i64 = 0
+    while k < n_points:
+        acc_dx.append(0.0)
+        acc_dy.append(0.0)
+        k = k + 1
+    if n_points <= 0 or data_base < 0 or data_base + 3 >= (blob.len() as i64):
+        return _gvar_flatten_deltas(acc_dx, acc_dy, n_points)
+    val tuple_count_raw = read_u16_be(blob, data_base) as i64
+    val tuple_count = tuple_count_raw & 0x0FFF
+    val has_shared_points = (tuple_count_raw & 0x8000) != 0
+    val serial_data_offset = read_u16_be(blob, data_base + 2) as i64
+    var serial_pos: i64 = data_base + serial_data_offset
+    var shared_points: [i64] = []
+    if has_shared_points:
+        val sp = decode_packed_point_numbers(blob, serial_pos)
+        shared_points = sp.0
+        serial_pos = sp.1
+    var header_pos: i64 = data_base + 4
+    var ti: i64 = 0
+    while ti < tuple_count:
+        val parsed = parse_tuple_variation_header(blob, header_pos, axis_count, shared_tuple_count)
+        val header = parsed.0
+        header_pos = parsed.1
+        # An empty embedded peak means the tuple references the shared-tuples
+        # array, which is outside this glyph's data; _compute_tuple_scalar then
+        # yields 1.0, matching the previous behaviour of this path.
+        val scalar = _compute_tuple_scalar(header.embedded_peak, normalized_coords)
+        val tuple_data_end = serial_pos + header.variation_data_size
+        if scalar == 0.0:
+            serial_pos = tuple_data_end
+            ti = ti + 1
+            continue
+        var local_pos = serial_pos
+        var point_list: [i64] = shared_points
+        if header.private_point_numbers:
+            val pp = decode_packed_point_numbers(blob, local_pos)
+            point_list = pp.0
+            local_pos = pp.1
+        val listed = point_list.len() as i64
+        # An empty point list means "all glyph points".
+        val point_count: i64 = if listed == 0: n_points else: listed
+        val dxres = decode_packed_deltas(blob, local_pos, point_count)
+        val xdeltas = dxres.0
+        local_pos = dxres.1
+        val dyres = decode_packed_deltas(blob, local_pos, point_count)
+        val ydeltas = dyres.0
+        var pi: i64 = 0
+        while pi < point_count:
+            val target_idx: i64 = if listed == 0: pi else: point_list[pi]
+            if target_idx >= 0 and target_idx < n_points and pi < (xdeltas.len() as i64) and pi < (ydeltas.len() as i64):
+                acc_dx[target_idx] = acc_dx[target_idx] + scalar * (xdeltas[pi] as f64)
+                acc_dy[target_idx] = acc_dy[target_idx] + scalar * (ydeltas[pi] as f64)
+            pi = pi + 1
+        serial_pos = tuple_data_end
+        ti = ti + 1
+    _gvar_flatten_deltas(acc_dx, acc_dy, n_points)
+
+fn _gvar_flatten_deltas(dx: [f64], dy: [f64], n_points: i64) -> [f64]:
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < n_points:
+        out.append(dx[i])
+        i = i + 1
+    var j: i64 = 0
+    while j < n_points:
+        out.append(dy[j])
+        j = j + 1
+    out
+
 # apply_gvar_deltas_to_points — wire the packed-delta decoders into gvar processing.
 # Reads the gvar header from the top of gvar_blob, locates this glyph's variation
 # data via the offset table, parses each TupleVariation (shared or private point
@@ -538,109 +530,17 @@ fn apply_gvar_deltas_to_points(points: [(i64, i64)], gvar_blob: [u8], glyph_id: 
     val data_base = data_array_offset + start_off
     if data_base + 3 >= gvar_blob.len() as i64:
         return points
-    val tuple_count_raw = read_u16_be(gvar_blob, data_base) as i64
-    val tuple_count = tuple_count_raw & 0x0FFF
-    val has_shared_points = (tuple_count_raw & 0x8000) != 0
-    val serial_data_offset = read_u16_be(gvar_blob, data_base + 2) as i64
-    # Initialize accumulated deltas
     val n_points = points.length()
+    # Decode the packed TupleVariation delta stream (shared/private point
+    # numbers, packed byte/word/zero-run deltas) via the shared accumulator.
+    val flat = gvar_accumulate_point_deltas(gvar_blob, data_base, axis_count, shared_tuple_count, user_coords, n_points)
     var acc_dx: [f64] = []
     var acc_dy: [f64] = []
     var k: i64 = 0
     while k < n_points:
-        acc_dx.append(0.0)
-        acc_dy.append(0.0)
+        acc_dx.append(flat[k])
+        acc_dy.append(flat[n_points + k])
         k = k + 1
-    # Shared point numbers (optional, stored at start of the glyph's serialized data)
-    var serial_pos: i64 = data_base + serial_data_offset
-    var shared_points: [i64] = []
-    if has_shared_points:
-        val sp = decode_packed_point_numbers(gvar_blob, serial_pos)
-        shared_points = sp.0
-        serial_pos = sp.1
-    # Walk tuple variation headers (each header is immediately followed by per-tuple
-    # serialized data, but in gvar the serialized data is packed together AFTER all
-    # headers starting at data_base + serial_data_offset — advancing serial_pos by
-    # each header's variation_data_size).
-    var header_pos: i64 = data_base + 4
-    var ti: i64 = 0
-    while ti < tuple_count:
-        val parsed = parse_tuple_variation_header(gvar_blob, header_pos, axis_count, shared_tuple_count)
-        val header = parsed.0
-        header_pos = parsed.1
-        # Determine peak coords: embedded peak takes precedence; otherwise look up
-        # in the shared-tuples array by tuple_index.
-        var peak: [f64] = header.embedded_peak
-        if peak.length() == 0:
-            # Shared-tuples array lives at gvar_base + sharedTuplesOffset; each entry
-            # is axis_count × F2DOT14. Because this function only sees the gvar blob
-            # (not the enclosing font), we approximate by leaving peak empty here —
-            # a full implementation would plumb sharedTuplesOffset through.
-            pass_dn  # shared-tuples peak lookup requires sharedTuplesOffset plumbing
-        val scalar = _compute_tuple_scalar(peak, user_coords)
-        # Tuple-local serialized data spans [serial_pos, serial_pos + variation_data_size)
-        val tuple_data_end = serial_pos + header.variation_data_size
-        if scalar == 0.0:
-            # skip this tuple's data entirely
-            serial_pos = tuple_data_end
-            ti = ti + 1
-            continue
-        var local_pos = serial_pos
-        # Private point numbers override shared for this tuple
-        var point_list: [i64] = shared_points
-        if header.private_point_numbers:
-            val pp = decode_packed_point_numbers(gvar_blob, local_pos)
-            point_list = pp.0
-            local_pos = pp.1
-        # Empty point list means "all points" (0..n_points-1)
-        val point_count: i64 = if point_list.length() == 0: n_points else: point_list.length()
-        val dxres = decode_packed_deltas(gvar_blob, local_pos, point_count)
-        val xdeltas = dxres.0
-        local_pos = dxres.1
-        val dyres = decode_packed_deltas(gvar_blob, local_pos, point_count)
-        val ydeltas = dyres.0
-        local_pos = dyres.1
-        var pi: i64 = 0
-        while pi < point_count:
-            val target_idx: i64 = if point_list.length() == 0:
-                pi
-            else:
-                match point_list.at(pi):
-                    Some(value):
-                        value
-                    None:
-                        pi = pi + 1
-                        continue
-            if target_idx >= 0 and target_idx < n_points:
-                val dx = match xdeltas.at(pi):
-                    Some(value):
-                        value as f64
-                    None:
-                        pi = pi + 1
-                        continue
-                val dy = match ydeltas.at(pi):
-                    Some(value):
-                        value as f64
-                    None:
-                        pi = pi + 1
-                        continue
-                val cur_x = match acc_dx.at(target_idx):
-                    Some(value):
-                        value
-                    None:
-                        pi = pi + 1
-                        continue
-                val cur_y = match acc_dy.at(target_idx):
-                    Some(value):
-                        value
-                    None:
-                        pi = pi + 1
-                        continue
-                acc_dx[target_idx] = cur_x + scalar * dx
-                acc_dy[target_idx] = cur_y + scalar * dy
-            pi = pi + 1
-        serial_pos = tuple_data_end
-        ti = ti + 1
     # Apply accumulated deltas, rounding to i64
     var out: [(i64, i64)] = []
     var oi: i64 = 0
