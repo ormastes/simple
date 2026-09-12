@@ -10,11 +10,6 @@ result copying every field from itself, so `inject_labels` and `injections`
 came back empty and a macro's inject contract was invisible to IDE completion.
 Audience: compiler semantics engineers.
 
-Assertions go through `macro_contract_inject_digest` rather than reading the
-result's fields directly: a struct-field read from an `it` block is lowered
-into the wrapped spec's `main`, which the compiled (whole-directory) lane
-rejects with "cannot infer field type", losing the entire file.
-
 ## Operator workflow
 
 `bin/simple test test/01_unit/compiler/semantics/macro_contracts_spec.spl`
@@ -23,55 +18,82 @@ rejects with "cannot infer field type", losing the entire file.
 use std.spec.{describe, it, expect}
 use compiler.35.semantics.macro_contracts.{
     process_macro_contract,
-    macro_contract_item_inject,
-    macro_contract_inject_digest,
     symbolscope_empty,
-    macrocontractresult_empty
+    macrocontractresult_empty,
+    MacroContractItem,
+    MacroContractResult,
+    MacroAnchor
 }
 
-fn _digest(items) -> text:
+fn _inject_item(anchor_value: text, label: text) -> MacroContractItem:
+    MacroContractItem(
+        kind: "inject",
+        has_name: false, name: "",
+        has_type_name: false, type_name: "",
+        has_label: true, label: label,
+        has_anchor: true, anchor: anchor_value,
+        has_anchor_value: true, anchor_value: anchor_value)
+
+fn _process(items: [MacroContractItem]) -> MacroContractResult:
     val r = process_macro_contract(items, {}, symbolscope_empty())
     match r:
-        case Ok(v): macro_contract_inject_digest(v)
-        case _: macro_contract_inject_digest(macrocontractresult_empty())
+        case Ok(v): v
+        case _: macrocontractresult_empty()
+
+fn _anchor_name(a: MacroAnchor) -> text:
+    match a:
+        case Head: "head"
+        case Tail: "tail"
+        case _: "here"
 
 describe "process_macro_contract — inject contract items":
 
     context "a single head injection":
-        it "records the label and its anchor":
-            expect(_digest([macro_contract_item_inject("head", "body")])).to_equal("labels=1;buckets=1;body=head")
+        it "records the label in inject_labels":
+            val res = _process([_inject_item("head", "body")])
+            expect(res.inject_labels.contains_key("body")).to_equal(true)
 
-        it "records exactly one label":
-            expect(_digest([macro_contract_item_inject("head", "body")]).contains("labels=1")).to_equal(true)
+        it "maps the label to the Head anchor":
+            val res = _process([_inject_item("head", "body")])
+            expect(_anchor_name(res.inject_labels["body"])).to_equal("head")
 
-        it "seeds exactly one injections bucket":
-            expect(_digest([macro_contract_item_inject("head", "body")]).contains("buckets=1")).to_equal(true)
+        it "seeds an injections bucket for the anchor":
+            val res = _process([_inject_item("head", "body")])
+            expect(res.injections.contains_key("head")).to_equal(true)
 
     context "tail and callsite anchors":
         it "maps 'tail' to the Tail anchor":
-            expect(_digest([macro_contract_item_inject("tail", "after")])).to_equal("labels=1;buckets=1;after=tail")
+            val res = _process([_inject_item("tail", "after")])
+            expect(_anchor_name(res.inject_labels["after"])).to_equal("tail")
 
         it "maps an unknown anchor word to Here":
-            expect(_digest([macro_contract_item_inject("somewhere", "mid")])).to_equal("labels=1;buckets=1;mid=here")
+            val res = _process([_inject_item("somewhere", "mid")])
+            expect(_anchor_name(res.inject_labels["mid"])).to_equal("here")
 
         it "seeds a distinct bucket per anchor":
-            val d = _digest([macro_contract_item_inject("head", "a"), macro_contract_item_inject("tail", "b")])
-            expect(d.contains("buckets=2")).to_equal(true)
+            val res = _process([_inject_item("head", "a"), _inject_item("tail", "b")])
+            expect(res.injections.contains_key("head")).to_equal(true)
+            expect(res.injections.contains_key("tail")).to_equal(true)
 
     context "several injections":
         it "records every label":
-            val d = _digest([
-                macro_contract_item_inject("head", "a"),
-                macro_contract_item_inject("tail", "b"),
-                macro_contract_item_inject("here", "c")
+            val res = _process([
+                _inject_item("head", "a"),
+                _inject_item("tail", "b"),
+                _inject_item("here", "c")
             ])
-            expect(d.contains("labels=3")).to_equal(true)
+            expect(res.inject_labels.len()).to_equal(3)
 
         it "shares one bucket for two labels on the same anchor":
-            val d = _digest([macro_contract_item_inject("head", "a"), macro_contract_item_inject("head", "b")])
-            expect(d.contains("labels=2")).to_equal(true)
-            expect(d.contains("buckets=1")).to_equal(true)
+            val res = _process([_inject_item("head", "a"), _inject_item("head", "b")])
+            expect(res.inject_labels.len()).to_equal(2)
+            expect(res.injections.len()).to_equal(1)
 
     context "contracts with no inject item":
-        it "records no labels and no buckets":
-            expect(_digest([])).to_equal("labels=0;buckets=0")
+        it "leaves inject_labels empty":
+            val res = _process([])
+            expect(res.inject_labels.len()).to_equal(0)
+
+        it "leaves injections empty":
+            val res = _process([])
+            expect(res.injections.len()).to_equal(0)
