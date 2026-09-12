@@ -181,6 +181,36 @@ fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
 # Native Linking
 # ============================================================================
 
+pub fn link_status_text(site: text, payload: text) -> text:
+    """Normalize an "" == ok / message == failure status returned by a helper.
+
+    Two jobs, both forced by a real incident
+    (doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md):
+    the stage-2 NATIVE binary produced a status value that rendered as `nil`,
+    which is neither "" nor a message, so `status != ""` fired and the caller
+    returned `Err(nil)` — a link failure with no statement of what failed and
+    no print anywhere on the path.
+
+    Interpolation is the only reliable normalizer here: a nil renders as the
+    literal text "nil", which no legitimate status of these helpers ever is
+    (every failure message on this path starts with a word plus a quoted
+    subject). A `nil` therefore means "the return channel lost the value", and
+    the only value these helpers can lose on a success path is "" — so it is
+    reported LOUDLY, unconditionally, and then treated as the success it was.
+    A genuine failure still renders as its own message and still fails."""
+    val rendered = "{payload}"
+    if rendered == "nil":
+        print "[linker-wrapper] {site}: status lost in the native return channel (rendered nil); treating as ok"
+        return ""
+    rendered
+
+pub fn link_error_detail(site: text, payload: text) -> text:
+    """Site-named detail for an error payload that may itself be unusable."""
+    val rendered = "{payload}"
+    if rendered == "" or rendered == "nil":
+        return site + ": no error payload (native return channel produced " + rendered + ")"
+    site + ": " + rendered
+
 fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     val trace = linker_trace_enabled()
     if trace:
@@ -201,10 +231,12 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
     # ultimately materializes native objects and re-enters this linker; doing
     # the check here also prevents Windows MinGW/MSVC from bypassing it.
     val msvc_runtime = os == "windows" and not _is_mingw_env()
-    val provider_error = native_runtime_provider_selection_error_for_config_platform(
-        config, msvc_runtime)
+    val provider_error = link_status_text(
+        "native-runtime-provider-selection",
+        native_runtime_provider_selection_error_for_config_platform(config, msvc_runtime))
     if provider_error != "":
-        return Err(provider_error)
+        print "[linker-wrapper] native-runtime-provider-selection failed: {provider_error}"
+        return Err(link_error_detail("native-runtime-provider-selection", provider_error))
 
     # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
     val smf_inputs = filter_smf_inputs(object_files)
@@ -251,7 +283,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         # `ld` is mold, that is the very linker the user asked to avoid).
         # Surface the alias-resolution error instead of swallowing it.
         if requested_linker_override() != "":
-            return Err(linker_result.unwrap_err())
+            print "[linker-wrapper] requested-linker-unresolved: {linker_result.unwrap_err()}"
+            return Err(link_error_detail("requested-linker-unresolved", linker_result.unwrap_err()))
         if not config.allow_cc_fallback:
             return Err("Direct native linker is required by the strict link profile")
         if trace:
@@ -455,8 +488,12 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         val size = linker_file_size(output)
         print "[linker-wrapper] Native binary: {output} ({size} bytes)"
 
-    val darwin_tool_error = publish_darwin_link_tool_identity(execution_linker_path)
-    if darwin_tool_error != "": return Err(darwin_tool_error)
+    val darwin_tool_error = link_status_text(
+        "darwin-link-tool-identity-direct",
+        publish_darwin_link_tool_identity(execution_linker_path))
+    if darwin_tool_error != "":
+        print "[linker-wrapper] darwin-link-tool-identity-direct failed: {darwin_tool_error}"
+        return Err(link_error_detail("darwin-link-tool-identity-direct", darwin_tool_error))
 
     Ok(output)
 
@@ -700,7 +737,9 @@ fn native_runtime_provider_selection_error_for(runtime_dir: text, runtime_bundle
         return "runtime bundle '" + runtime_bundle + "' cannot use runtime path 'none'"
     if native_runtime_archive_names(runtime_bundle, has_compiler, has_backfill, has_native_all).is_empty():
         return native_runtime_provider_selection_error(runtime_dir, runtime_bundle)
-    ""
+    # Explicit, not a bare tail expression: a bare `""` tail is the shape that
+    # reached a stage-2 native caller as `nil`.
+    return ""
 
 fn native_runtime_provider_selection_error_for_config(config: NativeLinkConfig) -> text:
     native_runtime_provider_selection_error_for_config_platform(config, false)
@@ -923,7 +962,8 @@ fn publish_darwin_link_tool_identity(tool_path: text) -> text:
         "\nidentity=" + identity + "\npolicy=darwin-dead-strip-v1\n"
     ):
         return "darwin-link-tool-identity-write-failed"
-    ""
+    # Explicit, not a bare tail expression — see native_runtime_provider_selection_error_for.
+    return ""
 
 pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: bool = false) -> [text]:
     if os == "linux" or os == "freebsd":
@@ -1000,9 +1040,12 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     if object_files.len() == 0:
         return Err("cc fallback requires at least one object file")
 
-    val provider_error = native_runtime_provider_selection_error_for_config(config)
+    val provider_error = link_status_text(
+        "cc-native-runtime-provider-selection",
+        native_runtime_provider_selection_error_for_config(config))
     if provider_error != "":
-        return Err(provider_error)
+        print "[linker-wrapper] cc-native-runtime-provider-selection failed: {provider_error}"
+        return Err(link_error_detail("cc-native-runtime-provider-selection", provider_error))
 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val os_name = host_os()
@@ -1016,7 +1059,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     # only on the ones that can act on it.
     val fuse_ld_result = cc_requested_fuse_ld_flag(os_name, hosted_cross)
     if fuse_ld_result.is_err():
-        return Err(fuse_ld_result.unwrap_err())
+        print "[linker-wrapper] cc-fuse-ld-selection failed: {fuse_ld_result.unwrap_err()}"
+        return Err(link_error_detail("cc-fuse-ld-selection", fuse_ld_result.unwrap_err()))
     val requested_fuse_ld = fuse_ld_result.unwrap()
     var cc = env_get("SIMPLE_CC") ?? ""
     if cc == "":
@@ -1070,8 +1114,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         val (stdout, stderr, code) = process_run(cc, args)
         if code == 0:
-            val tool_error = publish_darwin_link_tool_identity(cc)
-            if tool_error != "": return Err(tool_error)
+            val tool_error = link_status_text(
+                "darwin-link-tool-identity-cc", publish_darwin_link_tool_identity(cc))
+            if tool_error != "":
+                print "[linker-wrapper] darwin-link-tool-identity-cc failed: {tool_error}"
+                return Err(link_error_detail("darwin-link-tool-identity-cc", tool_error))
             return Ok(output)
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
