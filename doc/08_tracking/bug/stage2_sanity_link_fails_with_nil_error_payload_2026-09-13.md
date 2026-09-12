@@ -77,3 +77,33 @@ with a warm seed, ~26 min cold. Stage 2 itself builds clean: 871 compiled, 0 fai
 - `doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md` (runs 1-7)
 - `doc/08_tracking/bug/native_tuple_return_of_texts_yields_nil_2026-09-13.md`
 - PRs #690, #694
+
+## Run 10 (2026-09-13): this site is now REACHED, and it is RED
+
+Runs 8 and 9 could not reach the linker — they failed earlier, in capsule
+collection. With that cleared (PRs #708 / #710), run 10's Stage 2 smoke build
+reached the link and produced, verbatim:
+
+```
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+error: in-process native-build: LLVM native linking failed: Linking failed: no error payload from link_to_native (rendered nil); see the unconditional [linker-wrapper] prints for the failing site
+```
+
+Two halves, opposite verdicts:
+
+1. **The orchestrator's half WORKS.** PR #702's refusal to format a nil into
+   `Linking failed: ...` held: the message names the condition ("no error
+   payload from link_to_native (rendered nil)") instead of printing a bare nil.
+2. **The `[linker-wrapper]` half is EMPTY.** `grep 'linker-wrapper'` over
+   `stage2-sanity.env.frontend-failure.log` matches exactly one line — the error
+   above, which *references* those prints. Not one actual `[linker-wrapper]`
+   line was emitted. The prints PR #702 describes as "unconditional" did not
+   run, or did not reach this log.
+
+So the failing link site is still unnamed, and the next step is to find out why
+that channel is silent — is the print unreachable on this path, or is its output
+going somewhere the sanity harness does not preserve? That is a different
+question from the nil payload, and it is now the sole remaining Stage 2 blocker
+on macOS.
+
+Chain: `doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md` runs 9-10.

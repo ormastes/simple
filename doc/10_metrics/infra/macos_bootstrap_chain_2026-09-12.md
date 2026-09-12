@@ -194,3 +194,85 @@ What changed and what did not:
   Stage 2 binary — prints `BARE-TAIL-OK / EXPLICIT-TAIL-OK / AFTER-WRITE-OK`.
   The minimal shape does not bite; whatever produced run 7's nil is narrower than
   that.
+
+## Runs 9-10 (2026-09-13) — the receipt blocker is cleared; the link site is reached
+
+### First, a correction to run 8
+
+**Run 8 executed a compiler built WITHOUT PR #677.** Commit `54660c1a0d4`
+(PR #702) is a stale-snapshot clobber of
+`src/compiler/80.driver/driver_aot_native_output.spl`: `+22 / -100` on that one
+file, of which only 11 added lines are its own work. It reverted `0e437dec9b1`
+(#677, the `rt_file_size` receipt sites) and `418399c2d84` (#670, the
+`first-diff-line` diagnostic). The history range `0e437dec9b1..54660c1a0d4^` for
+that file is empty, and `--stat` lists one file, so the loss is exactly those
+two. Restored in PR #708. Run 8's verdict above is therefore **not** evidence
+against #677; it is evidence of the clobber. `.claude/rules/vcs.md` § "Sync must
+never clobber" requires this disclosure.
+
+### Run 9 — the canary fires, and it is the mode-matched reproducer
+
+`--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin root,
+worktree `agent-a87b4c8362f754818`, carrying PR #708. Stage 1 admitted; Stage 2
+built clean. Verbatim:
+
+```
+error: AOT compile error -- unit, reason and lengths follow on the next lines
+error:   unit (bare):
+scripts.check.cert.redeploy_gate.fixtures.hello_world
+error:   reason (bare):
+capsule-receipt-size-implausible:field=34363944961:runtime=632:<...>.o
+error:   name-len=53 reason-len=403
+```
+
+`receipt-content-mismatch` is gone. On the real 834-unit dynload artifact — the
+thing F45's single-entry probes could not reproduce — `rt_file_size` returns
+**632**, the true size, while the optional-bound `fp.size` read returns
+**34363944961** = `0x8_0010_2001`, a tagged heap pointer in the same `0x8_…`
+space as live heap objects in that process. #677's remedy is proven end to end.
+
+The build stopped only because that check was fail-closed, over a codegen defect
+the file already routes around, on a run whose receipt was sound. PR #710 split
+it: **blocking** on the value actually written (`-1` sentinel, `>= 2^40`),
+**advisory** on the field-vs-runtime divergence. Note the 2^40 backstop did NOT
+fire — 34363944961 is ~3% of it — so the inequality is the load-bearing half.
+
+Stages reached: Stage 1 admitted; Stage 2 built, not admitted; Stage 3 not
+attempted.
+
+### Run 10 — capsule collection PASSES
+
+Same command, virgin root, carrying PR #710. **The smoke build got past native
+capsule collection for the first time in this chain.** The advisory canary fired
+three times:
+
+```
+[receipt-size-canary] optional-bound scalar field read miscompiled: field=51251192833:runtime=632 path=<...>.o
+[receipt-size-canary] optional-bound scalar field read miscompiled: field=51251189761:runtime=632 path=<...>.o
+```
+
+Same file, same process, field values **3072 bytes apart** — the identical
+stride #677 measured — while `runtime=632` is stable across all three reads. The
+field read is non-deterministic; the runtime call is not.
+
+The blocker moved forward to the run-7 link site:
+
+```
+candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+error: in-process native-build: LLVM native linking failed: Linking failed: no error payload from link_to_native (rendered nil); see the unconditional [linker-wrapper] prints for the failing site
+```
+
+This resolves run 8's open question: PR #702's link hardening is now **reached**,
+and it is **RED**. Its refusal to format a nil into `Linking failed: ...` works —
+the message names the condition. But the `[linker-wrapper]` prints it points at
+**do not appear in the log at all**, so the failing site is still unnamed. That
+is the next blocker and it belongs to
+`stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`.
+
+Stages reached: Stage 1 admitted; Stage 2 built, **not admitted**; Stage 3 not
+attempted; no Stage 3 artifact exists, so none is offered as a candidate.
+Rejected Stage 2 candidate preserved at
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`;
+the run-9 copy is pinned at sha256
+`a9e61220cb17e438a959083ebb4554138dd2bc3bd333ea8de0ee1ce6c6aeb736`
+(139044728 bytes) as the standalone codegen reproducer.
