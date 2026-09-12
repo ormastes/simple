@@ -323,3 +323,11 @@ Pre-push guards on this range, all foreground with `timeout 900`: conflict-marke
 unwired), no-revert PASS (7 files, 0 reverts), divergence-delta PASS — 3217 pre-existing
 offender(s), 0 introduced by this range (base verdict 3945 diverged vs 965 baselined;
 recorded here as the delta escape requires).
+
+**Execution evidence for the run-11 fix (interpreter tier, added before landing).** Both
+specs run green through the seed's interpreter
+(`phase1_1789233412/simple test <spec>`, `SIMPLE_LIB=<worktree>/src`):
+`linker_resolution_no_tuple_spec.spl` 5/5 passed, and the pre-existing
+`darwin_link_tool_resolution_spec.spl` 7/7 passed after the error builder was rewritten
+to print literal-first/values-bare. That is the only tier available while the seed build
+is red; it does NOT exercise native codegen, which is where the defect lives.

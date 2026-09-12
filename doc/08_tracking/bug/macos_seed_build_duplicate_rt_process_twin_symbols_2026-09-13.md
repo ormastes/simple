@@ -84,3 +84,25 @@ sh scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2 --full-bootst
 ```
 
 Fails in ~4 minutes, well before any Simple compilation.
+
+## Scope and mechanism — what is verified and what is not (added before landing)
+
+Verified:
+- `git diff origin/main..HEAD -- src/compiler_rust src/runtime` is EMPTY for the branch
+  that hit this, so no change on that branch can be the cause.
+- Both halves landed in the SAME commit, `920b7c2dcb3` (Sat Sep 12 20:02 +0900):
+  `process_observation_v4_twins.rs` and `runtime_process_owned.c`.
+- Run 10's worktree (`agent-a87b4c8362f754818`) has NO `rust-seed-build.log` at all —
+  it never built the seed, it reused a warm authority. So there is no evidence any
+  macOS seed has linked successfully since `920b7c2dcb3`, and equally none that it was
+  ever green after it.
+
+NOT verified, stated as such:
+- The ELF/Mach-O asymmetry. The plausible mechanism is that `-Wl,-force_load` is
+  Mach-O-only, so on Linux the C archive member is lazily loaded and never pulled in
+  once the Rust symbol satisfies the reference — ELF `ld` also rejects duplicate strong
+  symbols, so "ELF is more tolerant" would be wrong. NOT checked on a Linux host; do not
+  repeat it as fact. The "Why macOS and not Linux" paragraph above is a hypothesis.
+- Whether `origin/main` is red for every macOS host or only from a virgin evidence root.
+  Any lane with a warm `rust-authority-*` target (like run 10) skips the relink entirely
+  and will not see this.
