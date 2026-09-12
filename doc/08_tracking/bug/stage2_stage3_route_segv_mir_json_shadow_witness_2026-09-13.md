@@ -42,12 +42,26 @@ gdb on the pinned candidate replaying the gate's own probe
 #5  CompilerDriver.compile_with_reverse_reference_owner_v1 ()
 #6  CompilerDriver.compile ()
 #7  app.cli.bootstrap_main.run_native_build_bootstrap ()
-x0 = 0x8
 ```
 
-`x0 = 8` is a load at offset 8 of a nil base — a nil dereference, not a wild pointer.
+**Corrected on a second gdb run — the first reading of this was wrong.** `x0 = 8` in the
+initial dump is only `rt_alloc`'s size argument, not the faulting base. Disassembling
+`+1280` gives `ldr x20, [x24]` with `x24 = x21 & ~7`, immediately after the `"locals":[`
+literal is concatenated — i.e. the load of `func.locals`' object header, at
+`mir_json.spl:634` (`for local in func.locals:`). The second run pins the base:
+
+```
+#0  0x0000000003677630 in compiler.mir.mir_json.serialize_mir_function ()
+x21  0x3      3          <- the value being used as `func.locals`
+x24  0x0      0          <- x21 & ~7, the faulting address
+```
+
+`func.locals` holds the inline word **3**, not a heap pointer — so it is not an array, and
+it is not nil either (a nil field would be 0).
 
 ## Two candidate causes, NEITHER verified
+
+A wrongly-DECODED field weighs the candidates: 3 is a live inline word, not an absent one.
 
 1. `native_capsule_mir_identity_v1` (`driver_types.spl:390-392`) reads
    `val function = module.functions[symbol]` — a `Dict` **bracket read** whose value is a
