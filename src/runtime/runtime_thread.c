@@ -1985,6 +1985,19 @@ int64_t spl_thread_cpu_count(void) {
  * address is null when the Simple thread-pool module is outside the retained
  * shared-library closure. */
 extern void worker_loop_entry(int64_t pool_id) __attribute__((weak_import));
+#elif defined(_MSC_VER)
+/* MSVC has no weak symbols and rejects __attribute__ outright, so this
+ * declaration had never compiled under cl.exe. /alternatename is the supported
+ * equivalent: the linker binds worker_loop_entry to the fallback below ONLY
+ * when nothing else defines it, which is exactly the "optional provider"
+ * contract the weak declaration expresses. The `if (worker_loop_entry)` guards
+ * at the call sites stay correct -- they exist to avoid calling through a null
+ * address, and here the address is a do-nothing stub with the same effect as
+ * skipping the call. x64 C symbols are undecorated, so the name needs no
+ * leading underscore. */
+void worker_loop_entry_default(int64_t pool_id) { (void)pool_id; }
+#pragma comment(linker, "/alternatename:worker_loop_entry=worker_loop_entry_default")
+extern void worker_loop_entry(int64_t pool_id);
 #else
 extern void worker_loop_entry(int64_t pool_id) __attribute__((weak));
 #endif
