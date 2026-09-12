@@ -7,7 +7,6 @@ SIMPLE_EXECUTION_MODE=interpreter`, one at a time. Page `css-layout.html`;
 logs `build/perf/vk_attr_2026-09-12/` (gitignored).
 
 ## 300x253 — where the frame goes (ms)
-
 | bucket | n | before | after |
 |---|---|---|---|
 | **font_atlas_pack_u32_to_u8** | 5 | **19,012** | **7,433** |
@@ -24,7 +23,7 @@ cells, not a falsely-missing cache. Fix: host byte mirror repacked only over
 `batch.dirty_rects` (`pack_full=2 pack_incremental=3`); PPM **byte-identical**,
 checksum `325932497106919` unchanged. `font_atlas_sffi_upload` is 44 ms total.
 
-## 900x760 — the dominant term is a DIFFERENT one
+## 900x760 — a DIFFERENT dominant term
 
 True pair on this tree (before = font files checked back to the
 instrumentation-only commit, so instrumentation matches both sides):
@@ -34,7 +33,7 @@ instrumentation-only commit, so instrumentation matches both sides):
 | frame | | 863,307 | **789,177 (-8.6%)** |
 | font_composite | 23 | 113,668 | **61,463 (-45.9%)** |
 | **image_composite** | 264 | 568,149 | **544,646** |
-| rect | 550 | 286,068 | 270,139 |
+| rect / image_blend | 550/262 | 286,068 | 270,139 |
 
 `image_composite` is **69% of the frame**; its SFFI upload is 237 ms across all
 264 calls, so the cost is interpreted host work. It splits in two, needing
@@ -52,7 +51,6 @@ the `readback` bucket wraps only `read_pixels()` (n=2) and misses the
 **without `mark_cpu_fallback`**, so every existing counter reads clean.
 
 ## Correctness oracle, and the target
-
 Pixel safety comes from `SIMPLE_VK_FONT_SELFCHECK=1`, comparing the mirror to a
 full pack of the same atlas after every incremental repack: `checks=13
 bad_calls=0 bad_bytes=0` at 900x760. **Do not use the 900x760 frame checksum** —
