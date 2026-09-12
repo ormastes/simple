@@ -105,6 +105,50 @@ also that the `full_surface=4` tally classifies "source >= 90% of THIS engine's
 surface", so a small offscreen child engine at `draw_ir_adv.spl:2600` counts as
 full-surface too; read `max_px` alongside the count, never the count alone.
 
+## Measured, 900x760, flag ON (`SIMPLE_VK_IMAGE_UPLOAD=u32`)
+
+| bucket | n | before ms | after ms |
+|---|---|---|---|
+| **frame** | | **830,186** | **259,523 (-68.7%)** |
+| image_composite | 264 | 573,780 | **940** |
+| image_pack_u32_to_u8 | 264 | 391,259 | **0 (bucket never fires)** |
+| image_exact_size_byte_fallback | 262 | 180,995 | **0 (bucket never fires)** |
+| image_blend | 262 | 287,818 | 594 |
+| rect | 550 | 288,153 | 909 |
+| image_source_alloc | 264 | 315 | 332 |
+| image_descriptor_dispatch | 264 | 94 | 93 |
+| font_composite | 23 | 68,745 | 70,708 |
+
+`image_composite_stats ... upload_mode=u32 upload_reason=typed-requested
+reasons: ok=264`.
+
+**The typed lane genuinely ran.** `upload_reason=typed-requested` is the load
+bearing check: the two lanes write identical device bytes by construction, so a
+`typed-declined` here would mean the run measured the byte path twice and the
+speedup would have to be attributed to something else.
+
+**Target MET.** cpu_simd on this page at 900x760 is 263,636 ms; the Vulkan lane
+is now **259,523 ms**, i.e. under the bar for the first time, from 830,186 ms.
+The image composite went 573,780 -> 940 ms, a 610x reduction, because both
+interpreted packs disappear: the typed branch returns before
+`_prepare_image_upload` is ever called, so neither pack bucket fires at all.
+
+Note `rect` also fell 288,153 -> 909 ms. That is not a second fix: `rect` and
+`image_blend` are outer buckets that WRAP the composite, so they were carrying
+its cost.
+
+**Correctness: PPM byte-identical at 900x760**, `cmp` clean over all 2,052,015
+bytes, frame checksum `8316162126305609402` on both sides. This is worth
+stating precisely because
+`web_catalog_900x760_frame_checksum_nondeterministic_2026-09-12.md` (F16)
+records that this page renders non-deterministically at this size: the oracle
+was therefore not ASSUMED to hold, it was measured, and on this pair it did.
+A future run that differs is F16's nondeterminism, not evidence against this
+change -- use the differ, and the 300x253 pair, to tell them apart.
+
+**What is now dominant.** `font_composite` at 70,708 ms is 27% of the remaining
+frame and is the next term, not the image path.
+
 ## Origin of the full-surface composites
 
 `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl:597`
