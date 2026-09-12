@@ -603,3 +603,9 @@ The closure-size dependence belongs to the REBIND, not the payload: a small
 closure has no competing symbol to bind to. **When a defect is said to need the
 full closure, ask what the closure CONTAINS that a small one does not** — naming
 it here turned a 26-minute lane into a 2.6-second loop.
+
+**Residual, measured after run 17:** the fix cleared 62 of the 270 `Poll.unwrap`
+call sites; **208 across 109 functions remain** by a second route (qualified-name
+single-candidate fallbacks). Stage 2 is not blocked by them — they are latent —
+but the population is NOT closed. See
+`doc/08_tracking/bug/unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13.md`.
