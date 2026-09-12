@@ -94,3 +94,53 @@ Neither the non-matcher-`expect` gate nor the comment-needle gate detects this.
 A future gate should flag: a spec-file `fn` whose parameter type resolves to a
 `struct` and whose body mutates that parameter (field assign, field-method
 mutation, or element store).
+
+## Re-check 2026-09-12 (BUGFIX-5) — 4 of 5 rows now green, 1 unblock condition is not actionable
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`. Every spec in the table above, re-run unmodified:
+
+| spec | record | now |
+|---|---|---|
+| `test/03_system/engine/physics_perf_spec.spl` | 0/4 ALL RED, fixed inline | **4 passed, 0 failed** |
+| `test/05_perf/graphics_2d/report_spec.spl` | 17/18, 1 RED | **18 passed, 0 failed** |
+| `test/01_unit/lib/service/lease_grant_spec.spl` | 4/10, LEFT RED | **16 passed, 0 failed** |
+| `test/01_unit/app/sj/busy_contract_spec.spl` | 3/6, LEFT RED | **7 passed, 0 failed** |
+| `test/01_unit/lib/service/request_queue_spec.spl` | 2/8, LEFT RED | 7 passed, **1 failed** |
+
+`lease_grant_spec.spl` was fixed the way this record prescribes — it now
+imports the real library (`use std.service.lease_manager`, `:39`) instead of
+re-declaring `struct LeaseManager`.
+
+**`request_queue_spec.spl` cannot be fixed that way, and the record's unblock
+condition should be corrected rather than retried.** The single remaining
+failure is the documented trap exactly:
+
+```
+✗ assigns unique IDs to entries    expected req-1 to not equal req-1
+```
+
+`_next_queue_id(q: RequestQueue)` (`:26-29`) assigns `q.next_id = q.next_id + 1`
+on a spec-local `struct` (`:19`), i.e. on a copy, so the counter never advances.
+But "rewrite the spec to import the real library types" has no target:
+**`RequestQueue` is declared nowhere in `src/`** (`grep -rn "RequestQueue"
+--include=*.spl src/` -> 0 hits), and there is no
+`src/lib/nogc_sync_mut/service/request_queue.spl` — that directory holds
+`audit_log, daemon_base, extern, lease_manager, lifecycle, mod, traits`.
+
+So the spec is a self-contained reimplementation with no product counterpart,
+and the two available moves are both decisions, not repairs:
+
+1. Port it onto the real request path (`src/app/sj_daemon/request_handler.spl`
+   / `ecs/systems.spl`, which is where request queueing actually lives), or
+2. Delete it — a spec whose subject exists only inside the spec file tests
+   nothing, and turning `struct` -> `class` (the `TFB` fix in the row above)
+   would make it green while still testing nothing, which this record already
+   warns against.
+
+Left RED deliberately, per this record's own "do not weaken" rule. Not fixed
+here because choosing between (1) and (2) is an ownership decision for the
+sj_daemon lane, not a triage repair.
+
+- Status: OPEN (2026-09-12) — 4 of 5 family rows now green on seed sha256 3d120a6f; only request_queue_spec.spl remains (7/8), and its recorded unblock condition is void because RequestQueue exists nowhere in src/
