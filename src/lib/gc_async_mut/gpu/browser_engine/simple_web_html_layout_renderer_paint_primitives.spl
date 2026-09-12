@@ -328,12 +328,29 @@ fn _isqrt_i64(v: i64) -> i64:
 
 # Pixel coverage (0..256) of a rounded corner whose arc has radius `r`, for a
 # pixel whose centre is (dx, dy) away from the arc centre. The ramp is one pixel
-# wide and crosses 1/2 exactly on the arc, which is the standard analytic
-# distance-field approximation; the previous hard `dx*dx+dy*dy <= r*r` test
-# produced a stair-stepped corner with no intermediate value anywhere.
+# wide and crosses 1/2 exactly on the arc; the previous hard `dx*dx+dy*dy<=r*r`
+# test produced a stair-stepped corner with no intermediate value anywhere.
+#
+# This is the SHARED ROUNDED-RECT CORNER COVERAGE FORMULA v1, whose single
+# definition is the comment block above `emu_draw_rounded_rect` in
+# src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl. Keep the two in step:
+# this repo has two rounded-rect rasterizers (this framebuffer painter and the
+# Engine2D one) and they are meant to agree.
+#
+# The `2*d + 1` terms are load-bearing. The arc centre is the continuous point
+# (x+r, y+r) and a pixel centre is (px+0.5, py+0.5), so the true offset is
+# `dx + 0.5`; doubling clears the halves, which makes the sum FOUR TIMES the
+# squared distance and is why the scale is `* 16384`, not `<< 16`. The original
+# 2026-09-12 version of this function used `sq * 65536`, i.e. it measured from
+# the arc-centre PIXEL — that pushes the whole arc outward by half a pixel.
+# It looks fine in isolation (this file's own spec only asserts "some pixels
+# are intermediate") but puts the ramp in the wrong place, which
+# test/01_unit/browser_engine/border_radius_antialias_engine2d_spec.spl's AC-1
+# coordinates detect on the Engine2D side.
 fn _corner_coverage256(dx: i32, dy: i32, r: i32) -> i32:
-    val sq = (dx as i64) * (dx as i64) + (dy as i64) * (dy as i64)
-    val dist256 = _isqrt_i64(sq * 65536)
+    val ex = (2 * dx + 1) as i64
+    val ey = (2 * dy + 1) as i64
+    val dist256 = _isqrt_i64((ex * ex + ey * ey) * 16384)
     val cov = ((r as i64) * 256 + 128 - dist256) as i32
     if cov < 0:
         return 0

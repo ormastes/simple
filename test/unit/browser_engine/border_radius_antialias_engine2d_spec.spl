@@ -4,19 +4,23 @@ Purpose: Assert that the Engine2D rounded-corner rasterizer anti-aliases the
 corner arc by pixel coverage.
 Audience: browser-engine and Engine2D maintainers.
 
-RED AND EXPECTED TO FAIL. `emu_draw_rounded_rect` still uses the hard
-`dx*dx + dy*dy <= r*r` midpoint-circle span fill. An analytic-coverage
-implementation was written and verified to work (the page renders 23 distinct
-colours instead of 2), then REVERTED: the CPU fill is pinned against a replica
-of the GPU `kernel_draw_rounded_rect` membership formula by
-`test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl`, and
-changing CPU alone turned 1 pre-existing failure into 5. Landing this needs a
-coordinated CPU + Metal + Vulkan shared-raster change, and the Vulkan/Metal
-backends are owned by another lane.
+GREEN as of 2026-09-12. `emu_draw_rounded_rect` now implements the SHARED
+ROUNDED-RECT CORNER COVERAGE FORMULA v1 — defined once in the comment block
+above that function in `src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl`, and
+implemented identically by all three twin lanes: CPU and Vulkan share that code
+(`backend_vulkan.spl`'s `draw_rounded_rect` delegates to it), Metal
+transliterates it in `kernel_draw_rounded_rect`.
+
+The earlier attempt was reverted because it changed the CPU alone, which broke
+the CPU<->GPU parity contract in
+`test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` (1
+pre-existing failure -> 5). All three lanes now move together, so that spec's
+rounded-rect rows still pass. It additionally carries the ABSOLUTE oracle for
+the formula (hand-derived coverage values), because parity alone would be
+satisfied by three lanes agreeing on a WRONG formula — "MATCH != correct".
 See doc/08_tracking/bug/web_border_radius_corner_not_antialiased_2026-09-12.md
 """
 
-# @tag:in-development
 # @req: REQ-BROWSER-ENGINE-BORDER-RADIUS-AA-002 — Engine2D rounded corners are coverage anti-aliased.
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 4%
 use std.spec.*
