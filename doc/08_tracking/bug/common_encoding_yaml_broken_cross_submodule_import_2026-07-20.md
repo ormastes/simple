@@ -3,7 +3,7 @@
 **Date:** 2026-07-20
 **Severity:** medium (product source bug, not test-only — affects every real
 caller of `std.common.encoding.yaml`, not just this spec)
-**Status:** open — needs a source fix, out of test-triage scope (not a
+- Status: RESOLVED (2026-09-12) — product source already fixed upstream; the last broken importer (the spec) fixed here. Original note follows: open — needs a source fix, out of test-triage scope (not a
 one-line change, not inside the assigned test-cluster dir)
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/common` cluster
 
@@ -106,3 +106,36 @@ green.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/unit/lib/common/encoding/yaml_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-12
+
+Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
+
+The **product** half of this bug is already fixed: `src/lib/common/encoding/yaml.spl`
+now imports `std.common.yaml.parse.{…}` and `std.common.yaml.types.{…}`, the
+real submodules, exactly as this record prescribed. There is still no barrel at
+`src/lib/common/yaml/` and every other consumer imports the submodules
+directly, so none is needed.
+
+What was left behind is the spec itself, which still carried the same broken
+bare-package import at line 9 and therefore never ran at all — the symptom had
+moved from "22 of 27 fail" to silent zero coverage:
+
+```
+$ bin/simple test test/01_unit/lib/common/encoding/yaml_spec.spl
+error: runtime: Module "std.common" does not export 'yaml'
+SPEC FILE VERDICT: ... outcome=ERROR declared>=27 executed=0 passed=0 failed=0 dropped=0
+```
+
+Fixed the import the same way the product source was fixed
+(`std.common.yaml` -> `std.common.yaml.types`; all seven symbols live in
+`types.spl`):
+
+```
+test/01_unit/lib/common/encoding/yaml_spec.spl  outcome=OK executed=27 passed=27 failed=0
+test/unit/lib/common/encoding/yaml_spec.spl     outcome=OK executed=27 passed=27 failed=0
+```
+
+The live (`test/01_unit/`) and legacy (`test/unit/`) copies were byte-identical
+before this change and are byte-identical after it, so the test-tree divergence
+baseline is unchanged.
