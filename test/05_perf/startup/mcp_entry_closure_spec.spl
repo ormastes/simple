@@ -1,0 +1,157 @@
+# @tag: perf, startup, mcp, source-closure
+"""
+## Purpose and audience
+Entry-closure ratchet for the MCP server entry (`src/app/mcp/main.spl`). It
+pins the number of PHYSICAL `.spl` files the seed loader reads, and the sum of
+their sizes, for two entries: `mcp-help` (`--help`, no tool dispatch) and
+`mcp-info-call` (initialize + one `tools/call` frame). Written for engineers
+changing imports under `src/app/mcp/`.
+
+## Operator workflow
+`bin/simple test test/05_perf/startup/mcp_entry_closure_spec.spl`.
+The binary under measurement defaults to `readlink -f bin/simple` and can be
+overridden with `SIMPLE_ENTRY_CLOSURE_BIN`. Read the printed `[perf]` lines:
+they carry the binary identity plus current/baseline counts.
+
+## Compatibility and limitations
+Method is the `EntryClosureReceiptV1` contract method `strace-openat-realpath`
+(doc/07_guide/perf/entry_closure_receipt_v1.md): a unit is an `openat` of a
+path ending `.spl` that returned >= 0; `physical_files` is the distinct set of
+`realpath`s of those units, so the count is stable across seed and candidate
+binaries even when the number of raw opens differs (the HIR lowerer and the
+interpreter read the same file under separate spellings today). `spl_opens` is
+deliberately NOT asserted for that reason.
+
+Counts only. Wall time and RSS are informative and never gated: this host is
+shared. When `strace` is absent the scenario SKIPS with a printed reason
+rather than passing vacuously, and a measurement that yields
+`physical_files == 0` is a hard FAIL (a broken pipeline must not read as a
+0 <= budget green).
+
+## Verification guidance and troubleshooting
+A failure prints current vs budget vs baseline. Re-measure by hand with
+`strace -f -e trace=openat -o LOG <bin> run src/app/mcp/main.spl --help` and
+count `sort -u` of the successful `.spl` opens resolved through `readlink -f`.
+Lower the baselines here only together with a reviewed import change.
+"""
+# Lifecycle: doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md (L5-B)
+
+use std.spec.{describe, it, expect, skip}
+use std.io_runtime.{env_get, process_run, file_write}
+
+# --- Baseline, measured 2026-09-12 on the wave binary -----------------------
+# binary : /home/yoon/dev/simple-wave/src/compiler_rust/target/release/simple
+#          51,308,600 B, mtime 2026-09-12 11:54:39, sha256 ef528c608113173c...
+#          (= main content c7c5bef3ca3 / #568 `normalize_path_key`)
+# method : strace-openat-realpath
+# mcp-help      : spl_opens=571 spellings=239 physical_files=131 bytes=1,323,864
+# mcp-info-call : physical_files=131 bytes=1,323,864 (server process only; the
+#                 tool is `simple_info`, the CLI-passthrough family)
+# The two were IDENTICAL before this change: every tool-handler module was
+# loaded eagerly at startup, so a real `tools/call` added nothing to the entry's
+# own closure. Both numbers reproduce byte-for-byte on the deployed seed
+# (bin/release/aarch64-unknown-linux-gnu/simple), which is what makes the
+# physical-file metric, unlike `spl_opens`, valid across binaries.
+# In-process tools (`simple_read`) still load all nine handler families through
+# the single `_dispatch_in_process` chain: 128 / 1,299,669 after this change.
+# Splitting that chain per family is a code move, not an import move.
+# Budget is the lane target: <= 70% of baseline on both axes.
+val HELP_BASE_FILES = 131
+val HELP_BASE_BYTES = 1323864
+val INFO_BASE_FILES = 131
+val INFO_BASE_BYTES = 1323864
+
+# What this spec is pinning: a `use` written inside a function body is not read
+# until that function runs, so the handler modules are reached only through the
+# dispatch path. Verified on a three-way fixture (no `use` / `use` in a
+# never-called fn / top-level `use`): 1 / 1 / 14 distinct `.spl` in the
+# interpreter lane. The module path in a function-local `use` must be ABSOLUTE
+# (`app.mcp.x`, not `.x`): a relative one resolves against the IMPORTING module,
+# so `use app.mcp.main_dispatch.{dispatch_tool_content}` from a test broke with
+# `semantic: expected lambda or function argument` (5 scenarios in
+# test/02_integration/app/mcp_context_ponytail_dispatch_spec.spl).
+# The JIT lane hoists one level, which is why the entry's own
+# wrapper alone only reached 124 and the family-local `use` lines inside
+# `main_dispatch` are what bring both lanes down.
+fn budget70(base: i64) -> i64:
+    return (base * 7) / 10
+
+fn have_strace() -> bool:
+    val (out, err, code) = process_run("sh", ["-c", "command -v strace >/dev/null 2>&1 && echo yes || echo no"])
+    return out.contains("yes")
+
+fn measure_binary() -> text:
+    val explicit = env_get("SIMPLE_ENTRY_CLOSURE_BIN")
+    if explicit != "":
+        return explicit
+    val (out, err, code) = process_run("sh", ["-c", "readlink -f bin/simple"])
+    return out.replace("\n", "")
+
+# Runs the entry under strace and returns (physical_files, source_bytes).
+# `stdin_body` empty => no stdin redirection (the --help entry).
+fn measure_closure(argv_tail: text, stdin_body: text) -> (i64, i64):
+    val stdin_path = "/tmp/mcp_entry_closure_stdin.jsonl"
+    var redirect = ""
+    if stdin_body != "":
+        file_write(stdin_path, stdin_body)
+        redirect = " < " + stdin_path
+    # Successful `.spl` openat lines -> realpath -> distinct -> count + size sum.
+    #
+    # `-f` is required (the loader reads from a worker thread, so an unfollowed
+    # trace sees zero opens), but a tool call may shell out to the CLI, and that
+    # child is a DIFFERENT entry whose closure is not this entry's. Children are
+    # excluded by PID, never by log position: now that handler modules load on
+    # first dispatch, some of this entry's own units are read AFTER the first
+    # shell-out, and a positional cut would score "loaded later" as "not loaded"
+    # (measured: the same tool call read 47 or 128 files depending only on where
+    # the cut fell). Every child re-execs, so pids named by any execve after the
+    # first — the first is the entry binary itself — are the children.
+    val script = "set -e; LOG=$(mktemp); "
+        + "strace -f -e trace=openat,execve -o \"$LOG\" " + measure_binary()
+        + " run src/app/mcp/main.spl " + argv_tail + redirect
+        + " >/dev/null 2>/dev/null || true; "
+        + "kids=$(grep 'execve(' \"$LOG\" | sed -n '2,$p' "
+        + "| sed -n 's/^\\([0-9][0-9]*\\) .*/\\1/p' | sort -u | paste -sd'|' -); "
+        + "if [ -n \"$kids\" ]; then grep -vE \"^($kids) \" \"$LOG\" > \"$LOG.f\"; else cp \"$LOG\" \"$LOG.f\"; fi; "
+        + "sed -n 's/.*openat([^,]*, \"\\([^\"]*\\.spl\\)\".*=[[:space:]]*\\([0-9][0-9]*\\)$/\\1/p' \"$LOG.f\" "
+        + "| sort -u | while IFS= read -r p; do readlink -f \"$p\"; done "
+        + "| sort -u | while IFS= read -r r; do [ -f \"$r\" ] && stat -c %s \"$r\"; done "
+        + "| awk '{n++; b+=$1} END {print n+0; print b+0}'; rm -f \"$LOG\" \"$LOG.f\""
+    val (out, err, code) = process_run("sh", ["-c", script])
+    val lines = out.split("\n")
+    if lines.len() < 2:
+        return (0, 0)
+    return (int(lines[0]), int(lines[1]))
+
+val INIT_FRAME = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"closure\",\"version\":\"1\"}}}\n"
+val CALL_FRAME = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_info\",\"arguments\":{}}}\n"
+
+describe "MCP entry closure (EntryClosureReceiptV1, strace-openat-realpath)":
+
+    it "loads at most 70 percent of the baseline closure for mcp-help":
+        if not have_strace():
+            skip("mcp-help entry closure", "strace is not installed on this host")
+            expect(true).to_equal(true)
+        else:
+            val bin = measure_binary()
+            print "[perf] binary = {bin}"
+            val (files, bytes) = measure_closure("--help", "")
+            print "[perf] mcp-help physical_files={files} baseline={HELP_BASE_FILES} budget={budget70(HELP_BASE_FILES)}"
+            print "[perf] mcp-help source_bytes={bytes} baseline={HELP_BASE_BYTES} budget={budget70(HELP_BASE_BYTES)}"
+            # Fail closed: a broken measurement pipeline yields 0, which would
+            # otherwise slip under every budget.
+            expect("measured>0: {files > 0}").to_equal("measured>0: true")
+            expect("files<=budget: {files <= budget70(HELP_BASE_FILES)}").to_equal("files<=budget: true")
+            expect("bytes<=budget: {bytes <= budget70(HELP_BASE_BYTES)}").to_equal("bytes<=budget: true")
+
+    it "loads at most 70 percent of the baseline closure for mcp-info-call":
+        if not have_strace():
+            skip("mcp-info-call entry closure", "strace is not installed on this host")
+            expect(true).to_equal(true)
+        else:
+            val (files, bytes) = measure_closure("", INIT_FRAME + CALL_FRAME)
+            print "[perf] mcp-info-call physical_files={files} baseline={INFO_BASE_FILES} budget={budget70(INFO_BASE_FILES)}"
+            print "[perf] mcp-info-call source_bytes={bytes} baseline={INFO_BASE_BYTES} budget={budget70(INFO_BASE_BYTES)}"
+            expect("measured>0: {files > 0}").to_equal("measured>0: true")
+            expect("files<=budget: {files <= budget70(INFO_BASE_FILES)}").to_equal("files<=budget: true")
+            expect("bytes<=budget: {bytes <= budget70(INFO_BASE_BYTES)}").to_equal("bytes<=budget: true")
