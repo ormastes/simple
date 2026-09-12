@@ -142,3 +142,94 @@ staleness). If confirmed, the interpreter's environment capture for nested `fn`s
 be snapshotting the module binding's *storage location* at closure-creation time
 rather than resolving it dynamically on each access when the enclosing frame later
 rebinds it.
+
+## Triage 2026-09-12 — reproduces, and the cell type is irrelevant
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+```
+SIMPLE_RUST_SEED_WARNING=0 bin/simple test test/01_unit/lib/std/concurrency/promise_spec.spl --no-session-daemon
+SPEC FILE VERDICT: outcome=ERROR declared>=19 executed=19 passed=12 failed=7 skipped=0 dropped=0
+```
+
+All 7 failures are `semantic: unknown static method new on class Promise` — i.e.
+the spec still has no `static fn new`, so the first half of the record (a genuinely
+missing constructor) is unchanged.
+
+Attempting the constructor again shows the second half is **broader** than the
+record says. The record blames "module-array push+reassign". Rewriting the cell as
+a CLASS instance (a reference type, no array and no module-level state) fails
+identically:
+
+```simple
+class Cell:
+    var state: PState
+
+static fn new(executor) -> P<T>:
+    val cell = Cell { state: PState.Pending }
+    fn resolve(v):
+        val cur = cell.state
+        if cur.is_pending():
+            cell.state = PState.Resolved(v)
+    fn reject(e):
+        ...
+    executor(resolve, reject)
+    return P { state: cell.state, callbacks: [] }
+
+fn main():
+    val p = P.new(\resolve, reject: resolve(100))
+    print("resolved=", p.is_resolved())
+```
+
+```
+resolved= false
+```
+
+So the container is not the variable: ANY write a nested `fn` makes to a captured
+enclosing local is dropped. Reduced further, with controls:
+
+```simple
+class Cell:
+    var n: i64
+
+fn bump(c: Cell):
+    c.n = c.n + 1
+
+fn main():
+    val c = Cell { n: 0 }
+    c.n = 5
+    print("direct=", c.n)
+    bump(c)
+    print("via-free-fn=", c.n)
+    fn nested():
+        c.n = 99
+    nested()
+    print("via-nested-fn=", c.n)
+```
+
+```
+$ SIMPLE_RUST_SEED_WARNING=0 bin/simple run g_ctrl.spl
+direct= 5
+via-free-fn= 6
+via-nested-fn= 6     <-- the nested fn's write of 99 is LOST
+```
+
+The two controls are what make this decisive. Direct assignment works, and mutation
+through a FREE function that takes the same class handle as a parameter works
+(0 -> 5 -> 6), so class reference semantics are intact. Only the write performed
+inside a nested `fn` that CAPTURES the enclosing local is dropped — and `Cell` is a
+class, i.e. a reference type, so this is not the "arrays are value types" copy
+semantics. The captured binding is being written in a scope that is discarded.
+
+Consequence: `Promise.new` cannot be implemented correctly in pure Simple on this
+engine, and the 7 red examples cannot be turned green without either the seed fix or
+an executor-free constructor that changes what the spec asserts. I did not weaken the
+spec to force green.
+
+Cross-reference: same root cause as
+`nested_fn_closure_mutation_not_propagated_2026-07-20`,
+`nested_fn_cannot_mutate_enclosing_it_block_var_2026-08-04` and
+`nested_fn_in_spec_block_loses_captured_local_2026-08-04`, all of which now carry
+this repro.
+
+- Status: OPEN (2026-09-12) — reproduced on 3d120a6f, diagnosed, needs a Rust-seed change

@@ -120,3 +120,20 @@ backend gap rather than a harness defect.
 - `doc/08_tracking/bug/capability_group_from_unsound_under_value_semantics_2026-08-09.md`
   — the P2 defect this is adjacent to but distinct from. That one is about
   PAIRING two accessors; this one bites a single accessor used correctly.
+
+## Re-check 2026-09-12 — not reproducible (second independent confirmation)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+(aarch64; the 2026-08-17 note above used the x86_64 binary, so this is a second
+platform as well as a second date).
+
+```
+SIMPLE_RUST_SEED_WARNING=0 bin/simple test test/01_unit/lib/debug/debug_target_ref_spec.spl --no-session-daemon
+SPEC FILE VERDICT: outcome=OK declared>=71 executed=71 passed=71 failed=0 skipped=0 dropped=0
+```
+
+Not vacuous: 71 examples declared, 71 executed, 0 dropped. The 2026-08-17 note
+called this a "candidate for close"; with a second confirmation on a different host
+architecture, closing it.
+
+- Status: CLOSED (2026-09-12) — not reproducible on 3d120a6f

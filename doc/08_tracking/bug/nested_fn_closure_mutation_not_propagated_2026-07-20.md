@@ -100,3 +100,56 @@ false-instead-of-true result. Not checked against the pure-Simple self-hosted
 compiler/interpreter (`src/compiler/`) -- only the Rust seed was probed, and
 per repo convention that seed's interpreter fallback is the default path
 `bin/simple test`/`bin/simple run` exercise when JIT lowering fails.
+
+## Triage 2026-09-12 — still reproduces; minimal repro with both controls
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+```simple
+class Cell:
+    var n: i64
+
+fn bump(c: Cell):
+    c.n = c.n + 1
+
+fn main():
+    val c = Cell { n: 0 }
+    c.n = 5
+    print("direct=", c.n)
+    bump(c)
+    print("via-free-fn=", c.n)
+    fn nested():
+        c.n = 99
+    nested()
+    print("via-nested-fn=", c.n)
+```
+
+```
+$ SIMPLE_RUST_SEED_WARNING=0 bin/simple run g_ctrl.spl
+direct= 5
+via-free-fn= 6
+via-nested-fn= 6     <-- the nested fn's write of 99 is LOST
+```
+
+The two controls are what make this decisive. Direct assignment works, and mutation
+through a FREE function that takes the same class handle as a parameter works
+(0 -> 5 -> 6), so class reference semantics are intact. Only the write performed
+inside a nested `fn` that CAPTURES the enclosing local is dropped — and `Cell` is a
+class, i.e. a reference type, so this is not the "arrays are value types" copy
+semantics. The captured binding is being written in a scope that is discarded.
+
+Blast radius measured in the same pass: this is what blocks
+`promise_new_push_reassign_same_scope_as_nested_closure_2026-07-29`.
+`test/01_unit/lib/std/concurrency/promise_spec.spl` is currently
+`declared>=19 executed=19 passed=12 failed=7`, every failure
+`semantic: unknown static method new on class Promise`, and a `static fn new`
+cannot be written correctly in pure Simple while this defect stands — a
+class-instance cell captured by the executor's `resolve`/`reject` closures loses
+the write exactly as above (probe returned `resolved= false`). So the record's
+"module-level array push+reassign" framing is narrower than the defect: the cell
+being an array is irrelevant.
+
+Not fixable from pure Simple: `bin/simple` is the Rust bootstrap seed, so this is
+`src/compiler_rust/compiler/src/interpreter/expr/control.rs`.
+
+- Status: OPEN (2026-09-12) — reproduced on 3d120a6f, minimal repro above, needs a Rust-seed change
