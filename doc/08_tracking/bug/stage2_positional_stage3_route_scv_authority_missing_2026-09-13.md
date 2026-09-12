@@ -59,10 +59,22 @@ that narrows it — that is the first thing to add.
 
 Two things worth checking before theorising, in this order:
 
-1. Whether the Stage-3-route child is launched with `SIMPLE_PACKAGE_INDEX_COLD_INIT=1`
-   at all. The error text recommends exactly that variable, and BOOT-5's and
-   BOOT-6's hand-run probes DID set it (`disc5.sh`, `disc6.sh`), which is
-   plausibly why neither ever saw this failure outside the harness.
+1. **MEASURED, and the answer is no.** The child is launched by
+   `scripts/check/check-bootstrap-stage2-struct-receiver.shs` (the `error:
+   stage2 failed the positional pure-Simple Stage-3 route` line is its :166).
+   `grep -c SIMPLE_PACKAGE_INDEX_COLD_INIT` on that file is **0** — the variable
+   the error text itself recommends appears nowhere in it — while the same env
+   block DOES set `SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage2_probe_dir/stage3-route-cache"`,
+   a FRESH directory, so nothing is warm and no index has ever been collected
+   there. Both BOOT-5's `disc5.sh` and BOOT-6's `disc6.sh` set
+   `SIMPLE_PACKAGE_INDEX_COLD_INIT=1`, which is why neither lane ever saw this
+   failure outside the harness.
+
+   This is the shape of `621a4d6b2ab` ("give Stage 2 a PATH so it can find
+   llc") exactly: a child under a curated env list that lacks one name it needs.
+   Adding the variable is NOT done here — out of this lane's scope, and it
+   should be established first whether cold init is the right answer or whether
+   the four empty inputs have an independent cause (check 2 below).
 2. Whether one of those four inputs is empty for a real reason (never produced
    by this run) or is a lost binding — this lane has just proven that this
    binary's codegen loses payloads bound by a pattern match
