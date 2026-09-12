@@ -1,6 +1,6 @@
 # Interpreter: a mutating call through a nested place clones the whole container per call
 
-- Status: OPEN (2026-09-12) — measured, mechanism located; fix in progress on `work/interp-perf-bugs`
+- Status: RESOLVED (2026-09-12) — landed on main in PR #562 (`571abad66a3`, place-aware kernel `try_place_mutation_in_place`): the eight quadratic shapes went 8.5–25.6× → 3.9–4.0× at 4× n; pinned by `test/05_perf/interp/interpreter_component_scaling_spec.spl` (23/23) and 4 PLACEMUT rows in `scripts/check/check-perf-regression-tests.shs`. Was: OPEN — measured, mechanism located
 - Found: 2026-09-12, while building the interpreter component scaling spec
   (`test/05_perf/interp/interpreter_component_scaling_spec.spl`)
 - Component: seed tree-walk interpreter —
