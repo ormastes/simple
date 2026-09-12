@@ -106,8 +106,12 @@ discovering it at the end:
 |---|---|
 | F17 frame, typed image upload | 259,523 |
 | − `font_atlas_payload_sha256` (this change) | −37,650 |
-| − the 8 full repacks, IF the per-owner mirror were built | −~32,000 |
-| **floor with both font fixes** | **~190,000** |
+| − the 8 full repacks, IF the per-owner mirror were built | −~29,000 |
+| **floor with both font fixes** | **~167,000** |
+
+Measured after the digest change alone: **191,872 ms**, and 196,121 ms with the
+font race fix of F18 also applied. The prediction above is therefore confirmed
+by measurement rather than left as arithmetic.
 
 The residual is not Vulkan-side work at all. The document pipeline is ~29,451 ms
 (`web_catalog_cold_render_profile_macos_2026-09-12.md`, of which the style

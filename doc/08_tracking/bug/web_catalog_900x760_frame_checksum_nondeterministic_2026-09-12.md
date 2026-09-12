@@ -446,19 +446,32 @@ sub-batch 2..N takes the impl's cache-hit branch. Only sub-batch 0 carries
 | two 900x760 renders | checksums **8316162126305609402** and **8316164145970244972** — DIFFER | **byte-identical**, `cmp` clean over all 2,052,015 bytes, checksum `8316155370661695245` on both |
 | **pixel (89,392)** | **`0x8b`=139** in one run, **`0xe2`=226** in the other | **`0x7c`=124 in BOTH** |
 | 300x253 | — | `cmp` clean against F17's reference PPM |
-| submits per frame | 22 | 23 — one per frame preserved (the count tracks frames, not dispatches) |
+| submits per frame | 22 | **22 — unchanged** |
 
 **139 and 226 are the exact two values this record measured before the cause was
 known, and 124 is the CPU oracle it named.** The fix does not merely make the
 page reproducible; it makes it reproduce the CPU value, which distinguishes
 "the race is gone" from "the race now loses consistently".
 
-**Cost, stated rather than buried: `font_composite` 29,459 -> 51,003 ms**, frame
-191,872 -> 215,249 ms. The partition is an O(n^2) interpreted scan per batch and
-every batch pays it, plus overlapping batches pay an extra params pack and
-dispatch. That is a real +24 s for correctness, and it is worth it -- a
-non-deterministic renderer cannot be pixel-tested at all, which is what blocked
-using 900x760 as an oracle in the first place. The obvious follow-up is to make
-the scan cheaper (sweep-line, or an early-out on batches below a size), not to
-undo the split. The frame is still well under both F17's 259,523 ms and the
-263,636 ms cpu_simd bar.
+**Cost: ~4 s.** Frame 191,872 -> 196,121 / 194,530 ms across two runs;
+`font_composite` 29,459 -> 29,529 ms, i.e. inside noise. The split adds a few
+dispatches to an existing command buffer, each already barrier-separated, and
+the O(n^2) overlap scan is cheap at these glyph counts.
+
+**One wrong turn, recorded because it is the trap anyone repeating this will
+hit.** The first version of `_vulkan_font_sub_batch` copied the obvious fields
+and let the rest default. `font_render_batch_atlas_owner_identity` folds
+`atlas_owner_generation` and `render_config_identity` as well, so every
+sub-batch presented as a NEW OWNER and forced a full 4 MB atlas repack:
+`pack_full` 8 -> 14, `font_atlas_pack_u32_to_u8` 28,949 -> 50,487 ms, frame
+215,249 ms. It was not a failure and no pixel changed -- only the cost tripled,
+and only the `pack_full` counter said so. Carrying every field restores
+`pack_full=8` and the 4 s figure above. A batch-narrowing helper must copy the
+batch exhaustively; a dropped field here is silent.
+
+A second, worse trap was caught before it shipped: the sub-batch loop first
+short-circuited on `status != "recorded"`, but the success vocabulary has TWO
+members -- the pooled path returns `"recorded"` and the non-pooled/oracle path
+returns `"executed"`. In oracle mode that would have silently dropped every
+sub-batch after the first. `_vulkan_font_status_is_failure` now names the three
+FAILURE statuses instead, so a new success status cannot become a dropped draw.

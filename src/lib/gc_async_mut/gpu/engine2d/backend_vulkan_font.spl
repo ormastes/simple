@@ -281,14 +281,35 @@ fn vulkan_font_partition_quads(quads: [FontRenderQuad]) -> [i64]:
         i = i + 1
     buckets
 
+fn _vulkan_font_status_is_failure(status: text) -> bool:
+    """Did a composite fail to draw? Named as a DENY-list, deliberately.
+
+    The success vocabulary has two members and they are reached by different
+    modes: the pooled frame-batching path returns `"recorded"` (queued into the
+    frame's command buffer) and the non-pooled/oracle path returns `"executed"`
+    (submitted and waited). An earlier version of the sub-batch loop tested
+    `status != "recorded"` and would have SILENTLY DROPPED every sub-batch after
+    the first in oracle mode -- glyphs missing from the frame with no error,
+    which is worse than the race the split exists to remove. Testing for the
+    three failure statuses instead means a new SUCCESS status cannot turn into a
+    dropped draw; a new FAILURE status would be caught by its own evidence.
+    """
+    status == "failed" or status == "rejected" or status == "unavailable"
+
 fn _vulkan_font_sub_batch(batch: FontRenderBatch, buckets: [i64],
                           want: i64) -> FontRenderBatch:
     """The original batch narrowed to the quads assigned sub-batch `want`.
 
-    Everything except `quads` and `dirty_rects` is carried through unchanged --
-    critically `atlas_generation` and `font_identity`, because those are what
-    make sub-batch 2..N take the impl's atlas cache-hit branch instead of
-    re-uploading and re-packing a 4 MB atlas per dispatch.
+    **Every** field except `quads` and `dirty_rects` is carried through, and the
+    list must stay exhaustive: the atlas cache-hit branch compares
+    `font_render_batch_atlas_owner_identity`, which folds `atlas_owner_generation`,
+    `render_config_identity` and `transform_identity` alongside the obvious
+    `font_identity`/`face_generation`/size. An earlier version of this function
+    omitted the first two and let them default, so every sub-batch looked like a
+    NEW OWNER and forced a full 4 MB repack: measured `pack_full` 8 -> 14 and
+    `font_atlas_pack_u32_to_u8` 28,949 -> 50,487 ms. A dropped field here does
+    not fail, it silently triples the cost of the thing this split exists to
+    make cheap.
 
     Only sub-batch 0 carries `dirty_rects`. They drive the mirror repack, which
     must happen once per real atlas change; replaying them on later sub-batches
@@ -311,7 +332,11 @@ fn _vulkan_font_sub_batch(batch: FontRenderBatch, buckets: [i64],
         atlas_pixels: batch.atlas_pixels,
         quads: members,
         atlas_generation: batch.atlas_generation,
-        dirty_rects: if want == 0: batch.dirty_rects else: [])
+        dirty_rects: if want == 0: batch.dirty_rects else: [],
+        atlas_owner_generation: batch.atlas_owner_generation,
+        render_config_identity: batch.render_config_identity,
+        execution_target: batch.execution_target,
+        execution_policy: batch.execution_policy)
 
 fn vulkan_font_partition_bucket_count(buckets: [i64]) -> i64:
     """How many dispatches `vulkan_font_partition_quads` implies. 1 when clean."""
@@ -1050,14 +1075,14 @@ impl VulkanBackend:
         """
         var evidence = self._composite_font_batch_impl(origin_x, origin_y,
             _vulkan_font_sub_batch(batch, buckets, 0), clock)
-        if evidence.status != "recorded" and evidence.status != "completed":
+        if _vulkan_font_status_is_failure(evidence.status):
             evidence.quad_count = batch.quads.len()
             return evidence
         var b: i64 = 1
         while b < bucket_count:
             evidence = self._composite_font_batch_impl(origin_x, origin_y,
                 _vulkan_font_sub_batch(batch, buckets, b), clock)
-            if evidence.status != "recorded" and evidence.status != "completed":
+            if _vulkan_font_status_is_failure(evidence.status):
                 evidence.quad_count = batch.quads.len()
                 return evidence
             b = b + 1

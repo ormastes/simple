@@ -174,26 +174,33 @@ The partition described in §3 is implemented. Two 900x760 renders are now
 **byte-identical** (`cmp` clean, checksum `8316155370661695245`) where before
 they differed, and **pixel (89,392) reads 124 — the CPU oracle value — in both**,
 where before it read 139 in one run and 226 in another. 300x253 is `cmp` clean
-against F17's reference PPM. One submit per frame is preserved.
+against F17's reference PPM. Submits per frame: **22, unchanged**.
 
 | | F17 | + image/digest fixes | + race fix |
 |---|---|---|---|
-| **frame 900x760** | 259,523 | **191,872** | **215,249** |
-| font_composite | 70,708 | 29,459 | 51,003 |
+| **frame 900x760** | 259,523 | **191,872** | **196,121 / 194,530** |
+| font_composite | 70,708 | 29,459 | 29,529 |
+| pack_full | 8 | 8 | 8 |
 | 900x760 reproducible | no | no | **yes** |
 
-The +24 s is the O(n^2) interpreted overlap scan every batch now pays, plus an
-extra params pack and dispatch for the batches that overlap. It is reported as a
-cost, not smoothed: a renderer that cannot reproduce its own output cannot be
-pixel-tested, which is exactly why 900x760 was unusable as an oracle. Making the
-scan cheaper (sweep-line, or an early-out below a glyph count) is the follow-up;
-undoing the split is not.
+**The race fix costs ~4 s** — the split adds a few dispatches to a command
+buffer whose dispatches are already barrier-separated, and the overlap scan is
+cheap at these glyph counts.
+
+An intermediate version cost 24 s and the counters said why: the sub-batch
+helper let `atlas_owner_generation` and `render_config_identity` default, so
+every sub-batch read as a new atlas owner and forced a full repack (`pack_full`
+8 -> 14, `font_atlas_pack_u32_to_u8` 28,949 -> 50,487 ms). Carrying every field
+restored it. Recorded because the failure was invisible except in `pack_full`:
+no error, no pixel change, just triple the cost.
 
 ### Final honest position on the target
 
-**≤150,000 ms: MISSED.** 191,872 ms without the race fix, 215,249 ms with it.
-The named remaining Vulkan term is 28,932 ms of full atlas repacks
-(`identity_changed=8`, one host mirror shared by two alternating font
-identities; a per-owner mirror removes it) and ~24 s of partition scan. Even
-both would leave ~162,000 ms, and that floor is host rasterization plus the
-29,451 ms document pipeline, not GPU work. The cpu_simd bar is 263,636 ms.
+**≤150,000 ms: MISSED.** 196,121 ms with everything applied, from F17's
+259,523 — a 24% reduction, and reproducible for the first time. The one named
+remaining Vulkan term is 29,021 ms of full atlas repacks
+(`identity_changed=8`: two alternating font identities share ONE host mirror; a
+per-owner mirror removes it), which would leave ~167,000 ms. That floor is host
+rasterization plus the 29,451 ms document pipeline, not GPU work — the presenter
+rasterizes the page on the CPU and uses the GPU as a pass-through. The cpu_simd
+bar on this page is 263,636 ms.
