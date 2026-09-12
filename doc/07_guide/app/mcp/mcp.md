@@ -415,7 +415,7 @@ For the operator workflow and HTTP route equivalents, see
 | `simple_implementation` | Trait impls | file, line |
 | `simple_folding_range` | Folding ranges | file |
 
-### Context (7 tools)
+### Context (9 tools)
 
 Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 `src/app/mcp/main_lazy_ctx_tools.spl`; specs:
@@ -431,6 +431,8 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 | `simple_ctx_batch_execute` | Run commands, index each output under `source#i`, answer queries in one call | commands |
 | `simple_ctx_fetch_and_index` | GET via the Simple http client (http/https only, no JS), cap bytes, strip tags, index | url |
 | `simple_ctx_stats` | Store location, chunk/source counts, bytes indexed/returned/saved, per-tool call counts | |
+| `simple_ctx_doctor` | Self-check checklist for the ctx store (schema version, store reachability, hook wiring) | |
+| `simple_ctx_upgrade` | Re-index / compact the chunk store and migrate it to the current schema version | |
 | `simple_token_stats` | Per-feature token savings (ctx-mimic, ponytail-mimic, total; 7-day window); `reset: true` or `args: "--reset"` clears the ledger | |
 | `simple_token_burn` | Code burn: which feature/tool spent the budget, ranked by bytes returned to the model, with tokens saved vs the unoptimized original | |
 | `simple_log_optimize` | Filter a clang/rust/ninja/cmake/simple build log through its plugin descriptor; no `log` argument lists the installed plugins | log |
