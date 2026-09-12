@@ -209,3 +209,36 @@ the submit count, the depth-1 control, and the overflow case),
   plan — was absorbed entirely by the slot logic (it saw the sequence mismatch
   and took a fresh slot), leaving all 8 PPMs identical. That negative result is
   recorded because it is the reason the knob forces both halves.
+
+## Test-tree divergence delta — recorded step-over (required by `.claude/rules/vcs.md`)
+
+`check-test-tree-divergence` is RED on `main` for reasons unrelated to this
+change, so this lane landed on a scoped-delta PASS. The rule requires the
+pre-existing offender list to be recorded rather than stepped over silently;
+this section is that record.
+
+Run `sh scripts/check/check-test-tree-divergence-delta.shs d23b43dde27
+ad4e13b7833` (BASE = the origin tip this PR replaced, NEW = the PR tip), exit 0:
+
+```
+base verdict: FAIL — 3943 diverged vs 965 baselined (3081 new, 103
+              fixed-but-still-baselined); 26 mirror-only (25 unallowlisted,
+              0 stale-allowlist); half-landed: skipped (no --base)
+PASS — 3209 pre-existing offender(s), 0 introduced by this range
+```
+
+3,943 offender lines were saved by the helper to
+`$TMPDIR/test_tree_divergence_preexisting.txt`. The whole population predates
+this change; the delta this range introduces is **zero**.
+
+This lane's only `test/` change is ONE new file,
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_atlas_slot_plan_spec.spl`,
+which has no `test/unit/` twin and modifies no existing mirror pair — the guard
+confirms it adds nothing to the mirror-only or divergence counts.
+
+**Timing caveat, stated rather than hidden:** the delta guard takes ~20 minutes
+here and had not returned when the PR was admin-merged, so the recorded PASS was
+obtained AFTER the merge, not before it. It is a genuine verdict over exactly
+the landed range, but the ordering the rule intends (verdict first, then land)
+was not achieved. Repairing the underlying 3,081-new-divergence red is not this
+lane's work and remains open.
