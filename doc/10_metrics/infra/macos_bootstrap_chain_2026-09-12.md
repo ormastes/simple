@@ -150,3 +150,47 @@ Also not done, and not silently: task item 2 asked for the pinned tool paths **p
 sha256** in the stage receipt. Only the absolute paths are pinned and forwarded; no
 digest is recorded or verified. The rejected candidate's own sha256 is recorded above,
 but the artifact was deleted in cleanup — reproduce in ~18 min from a virgin root.
+
+## Run 8 (2026-09-13) — the link nil is no longer reached; a new, earlier blocker
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+evidence root, worktree `agent-adcc9a67a5f248150`, carrying PR #702 (darwin link
+error-payload hardening: every `"" == ok` status on that path is site-named and
+reported unconditionally; the orchestrator refuses to format a nil into
+`Linking failed: ...`). Cold Rust seed, ~35 min. Stage 2 built clean again.
+
+Sanity verdict, verbatim:
+
+```
+error: sanity FAIL - frontend smoke exited 1 (bootstrap-mode pass: 0)
+bootstrap-sanity-error: version_status=0 version_output=simple-bootstrap 1.0.1-beta.1 unsupported_status=1 frontend_status=1 candidate_unchanged=true
+error: native capsule collection failed -- module, tag and detail follow
+scripts.check.cert.redeploy_gate.fixtures.hello_world
+native-capsule-receipt-invalid
+receipt-content-mismatch:expected-bytes=1648:actual-bytes=1648
+error: in-process native-build: build failed: 1 failed, 0 unverified, 0 not run, 0 ok of 1 unit(s) — ERROR: scripts.check.cert.redeploy_gate.fixtures.hello_world
+error: Stage 2 bootstrap compiler sanity failed
+warning: stage2 native-build failed (exit 2); Stage 3/full CLI unavailable
+```
+
+Stages reached: Stage 2 built, **not admitted**; Stage 3 not attempted.
+Rejected candidate preserved at
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`.
+
+What changed and what did not:
+
+- `Linking failed: nil` does NOT appear. The run now fails in `native_compile`,
+  before any link, so the run-7 site is not reached and the hardening is neither
+  proven nor disproven end to end. `stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`
+  stays OPEN.
+- The new blocker is filed as
+  `doc/08_tracking/bug/stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md`:
+  the expected and actual capsule receipts are both 1648 bytes and differ, which
+  by the verifier's own comment localises the fault to content — the fixed-width
+  `content_hash` field being the obvious candidate.
+- T1 reproducer for the bare-`""`-tail hypothesis (a `-> text` helper with
+  several `return "literal"` branches and a bare `""` tail, plus an explicit-tail
+  twin), native-built by this run's freshly built seed — the tier that emits the
+  Stage 2 binary — prints `BARE-TAIL-OK / EXPLICIT-TAIL-OK / AFTER-WRITE-OK`.
+  The minimal shape does not bite; whatever produced run 7's nil is narrower than
+  that.
