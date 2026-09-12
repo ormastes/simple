@@ -61,7 +61,54 @@ static Graph make_graph(int32_t enum_id) {
     return graph;
 }
 
-int main(void) {
+/* Same ABI fixture links independently against core-C and Rust bootstrap
+ * providers. It mirrors the typed text-array owner used by surface freezing. */
+static void check_retained_text_array(void) {
+    const char *persistent_bytes = "persistent surface name outside the transient retention scope";
+    const char *transient_bytes = "fresh logical surface name inside the transient retention scope";
+    const char *discarded_bytes = "discarded text not reachable from the retained surface names";
+    int64_t persistent = rt_string_new((const uint8_t*)persistent_bytes, strlen(persistent_bytes));
+    check(rt_transient_array_scope_begin() == 1, "text owner scope begins");
+    int64_t fresh = rt_string_new((const uint8_t*)transient_bytes, strlen(transient_bytes));
+    int64_t discarded = rt_string_new((const uint8_t*)discarded_bytes, strlen(discarded_bytes));
+    SplArray *unpaused = rt_array_new(1);
+    rt_array_push(unpaused, fresh);
+    check(rt_transient_heap_promote((int64_t)(uintptr_t)unpaused) == 0,
+          "unpaused graph promotion failure propagates");
+    check(rt_transient_array_scope_pause() == 1, "text owner scope pauses");
+    SplArray *names = rt_array_new(4);
+    rt_array_push(names, fresh);
+    rt_array_push(names, fresh); /* canonical alias of the logical name */
+    rt_array_push(names, persistent);
+    rt_array_push(names, persistent);
+    check(rt_transient_heap_promote((int64_t)(uintptr_t)names) == 1,
+          "mixed transient and persistent aliased texts promote as a graph");
+    check(rt_transient_heap_promote((int64_t)(uintptr_t)names) == 1,
+          "graph success is idempotent, not a membership predicate");
+    rt_array_free(names); /* shallow: do not leak the temporary owner */
+    check(rt_transient_array_scope_end() == 1, "text owner scope ends");
+    check(rt_string_len(fresh) == (int64_t)strlen(transient_bytes) &&
+              memcmp(rt_string_data(fresh), transient_bytes, strlen(transient_bytes)) == 0,
+          "fresh scalar text survives owner disposal and scope release");
+    check(rt_string_len(persistent) == (int64_t)strlen(persistent_bytes) &&
+              memcmp(rt_string_data(persistent), persistent_bytes, strlen(persistent_bytes)) == 0,
+          "pre-existing persistent scalar text survives");
+    check(rt_string_free(discarded) == 0, "unreachable transient text was reclaimed");
+    SplArray *outside = rt_array_new(1);
+    rt_array_push(outside, fresh);
+    check(rt_transient_heap_promote((int64_t)(uintptr_t)outside) == 0,
+          "missing scope graph promotion failure propagates");
+    rt_array_free(outside);
+    check(rt_string_free(fresh) == 1, "retained fresh text has final release ownership");
+    check(rt_string_free(persistent) == 1, "persistent text has final release ownership");
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--retained-text-array-only") == 0) {
+        check_retained_text_array();
+        printf("SELFCHECK %s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
+        return failures ? 1 : 0;
+    }
     const int64_t baseline = rt_heap_registry_count();
 
     check(rt_transient_array_scope_begin() == 1, "unpromoted scope begins");

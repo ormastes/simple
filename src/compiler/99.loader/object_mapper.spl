@@ -26,11 +26,39 @@ class SharedExecMapperStats:
 class SharedExecMapper:
     config: SharedExecMapperConfig
     records: Dict<text, SharedExecRecord>
+    owner_ref_counts: Dict<text, i64>
+    mapped_symbol_count: i64
+    mapped_owner_count: i64
     total_bytes: i64
     generation: i64
 
     static fn new(config: SharedExecMapperConfig) -> SharedExecMapper:
-        SharedExecMapper(config: config, records: {}, total_bytes: 0, generation: 0)
+        SharedExecMapper(
+            config: config,
+            records: {},
+            owner_ref_counts: {},
+            mapped_symbol_count: 0,
+            mapped_owner_count: 0,
+            total_bytes: 0,
+            generation: 0
+        )
+
+    me track_owner(owner_id: text):
+        if self.owner_ref_counts.has(owner_id):
+            self.owner_ref_counts[owner_id] = self.owner_ref_counts[owner_id] + 1
+        else:
+            self.owner_ref_counts[owner_id] = 1
+            self.mapped_owner_count = self.mapped_owner_count + 1
+
+    me untrack_owner(owner_id: text):
+        if not self.owner_ref_counts.has(owner_id):
+            return
+        val remaining = self.owner_ref_counts[owner_id] - 1
+        if remaining <= 0:
+            self.owner_ref_counts = self.owner_ref_counts.remove(owner_id)
+            self.mapped_owner_count = self.mapped_owner_count - 1
+        else:
+            self.owner_ref_counts[owner_id] = remaining
 
     me map_symbol(owner_id: text, symbol: text, code: [u8], allow_replace: bool) -> Result<i64, text>:
         if code.len() == 0:
@@ -44,6 +72,8 @@ class SharedExecMapper:
                 return Err("Failed to free existing mapping for " + symbol)
             self.total_bytes = self.total_bytes - old.size
             self.records = self.records.remove(symbol)
+            self.mapped_symbol_count = self.mapped_symbol_count - 1
+            self.untrack_owner(old.owner_id)
 
         val mapped = exec_mapping_map_rx(symbol, code)
         if mapped.is_err():
@@ -58,6 +88,8 @@ class SharedExecMapper:
             size: code.len() as i64,
             generation: self.generation
         )
+        self.mapped_symbol_count = self.mapped_symbol_count + 1
+        self.track_owner(owner_id)
         self.total_bytes = self.total_bytes + code.len() as i64
         Ok(address)
 
@@ -79,6 +111,8 @@ class SharedExecMapper:
             return false
         self.total_bytes = self.total_bytes - rec.size
         self.records = self.records.remove(symbol)
+        self.mapped_symbol_count = self.mapped_symbol_count - 1
+        self.untrack_owner(rec.owner_id)
         true
 
     me unmap_owner(owner_id: text) -> i64:
@@ -100,12 +134,9 @@ class SharedExecMapper:
             _ = self.unmap_symbol(name)
 
     fn stats() -> SharedExecMapperStats:
-        var owners: Set<text> = {}
-        for symbol in self.records.keys():
-            owners = owners.insert(self.records[symbol].owner_id)
         SharedExecMapperStats(
-            mapped_symbols: self.records.keys().len() as i64,
-            owner_count: owners.len() as i64,
+            mapped_symbols: self.mapped_symbol_count,
+            owner_count: self.mapped_owner_count,
             total_bytes: self.total_bytes,
             generation: self.generation
         )

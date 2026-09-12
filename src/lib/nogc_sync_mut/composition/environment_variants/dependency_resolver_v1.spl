@@ -1,0 +1,324 @@
+# Bounded dependency closure resolution for environment variants.
+#
+# Resolution is metadata-only.  It never opens an artifact or invokes a
+# loader.  A requirement identifies one immutable provider contract and exact
+# artifact; the matching descriptor supplies the concrete variant and version.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentArenaRangeV1,
+    VariantDependencyV1, VariantDescriptorV1,
+    variant_descriptor_validate_v1,
+    ENV_VARIANT_MAX_ARENA_BYTES_V1, ENV_VARIANT_MAX_FEATURE_WORDS_V1,
+    ENV_VARIANT_MAX_DEPENDENCIES_V1
+}
+
+pub const ENV_DEPENDENCY_RESOLVER_SCHEMA_V1: u16 = 1u16
+pub const ENV_DEPENDENCY_MAX_DEPTH_V1: u32 = 64u32
+pub const ENV_DEPENDENCY_MAX_COUNT_V1: u32 = 64u32
+pub const ENV_DEPENDENCY_MAX_CANDIDATES_V1: u32 = 256u32
+pub const ENV_DEPENDENCY_MAX_REQUIREMENTS_V1: u32 = 256u32
+
+pub enum EnvironmentDependencyResolutionErrorV1:
+    InvalidRoot
+    InvalidDescriptor
+    DependencyRangeInvalid
+    MissingProvider
+    ContractMismatch
+    VersionMismatch
+    ArtifactMismatch
+    DuplicateRequirement
+    DuplicateCandidate
+    CycleDetected
+    DepthExceeded
+    CountExceeded
+
+pub struct EnvironmentResolvedDependencyV1:
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    contract_identity: EnvironmentDigest256V1
+    contract_major: u16
+    contract_minor: u16
+    artifact_digest: EnvironmentDigest256V1
+    depth: u32
+
+pub struct EnvironmentDependencyResolutionV1:
+    schema_version: u16
+    root_provider_identity: EnvironmentDigest256V1
+    root_variant_identity: EnvironmentDigest256V1
+    resolved_dependencies: [EnvironmentResolvedDependencyV1]
+    closure_identity: EnvironmentDigest256V1
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or
+        value.w2 != 0u64 or value.w3 != 0u64
+
+fn _identity_equal_v1(
+    provider: EnvironmentDigest256V1, variant: EnvironmentDigest256V1,
+    left_provider: EnvironmentDigest256V1, left_variant: EnvironmentDigest256V1
+) -> bool:
+    _digest_equal_v1(provider, left_provider) and
+        _digest_equal_v1(variant, left_variant)
+
+fn _requirement_equal_v1(left: VariantDependencyV1, right: VariantDependencyV1) -> bool:
+    _digest_equal_v1(left.provider_identity, right.provider_identity) and
+        _digest_equal_v1(left.contract_identity, right.contract_identity) and
+        left.minimum_contract_major == right.minimum_contract_major and
+        left.minimum_contract_minor == right.minimum_contract_minor and
+        _digest_equal_v1(left.artifact_digest, right.artifact_digest)
+
+fn _descriptor_valid_v1(
+    descriptor: VariantDescriptorV1, dependencies: [VariantDependencyV1]
+) -> bool:
+    if not _dependency_range_valid_v1(descriptor, dependencies):
+        return false
+    # The contract validator's dependency arena is descriptor-local.  Copy
+    # only this descriptor's bounded range and normalize its offset so the
+    # resolver can still accept one shared requirement arena for all nodes.
+    var local_dependencies: [VariantDependencyV1] = []
+    var i: u32 = 0u32
+    while i < descriptor.dependencies.count:
+        local_dependencies.push(
+            dependencies[(descriptor.dependencies.offset + i) as i64])
+        i = i + 1u32
+    var normalized = descriptor
+    normalized.dependencies = EnvironmentArenaRangeV1(
+        offset: 0u32, count: descriptor.dependencies.count)
+    variant_descriptor_validate_v1(
+        normalized, ENV_VARIANT_MAX_ARENA_BYTES_V1,
+        ENV_VARIANT_MAX_FEATURE_WORDS_V1,
+        local_dependencies.len() as u32, local_dependencies) == Ok(())
+
+fn _dependency_range_valid_v1(
+    descriptor: VariantDescriptorV1, dependencies: [VariantDependencyV1]
+) -> bool:
+    descriptor.dependencies.count <= ENV_DEPENDENCY_MAX_COUNT_V1 and
+        descriptor.dependencies.offset <= dependencies.len() as u32 and
+        descriptor.dependencies.count <= dependencies.len() as u32 - descriptor.dependencies.offset
+
+fn _contract_version_satisfies_v1(
+    descriptor: VariantDescriptorV1, requirement: VariantDependencyV1
+) -> bool:
+    if descriptor.contract_major > requirement.minimum_contract_major:
+        return true
+    descriptor.contract_major == requirement.minimum_contract_major and
+        descriptor.contract_minor >= requirement.minimum_contract_minor
+
+fn _matching_stage_v1(
+    descriptor: VariantDescriptorV1, requirement: VariantDependencyV1
+) -> u16:
+    if not _digest_equal_v1(descriptor.provider_identity, requirement.provider_identity):
+        return 0u16
+    if not _digest_equal_v1(descriptor.contract_identity, requirement.contract_identity):
+        return 1u16
+    if not _contract_version_satisfies_v1(descriptor, requirement):
+        return 2u16
+    if not _digest_equal_v1(descriptor.artifact_digest, requirement.artifact_digest):
+        return 3u16
+    4u16
+
+fn _resolved_contains_v1(
+    resolved: [EnvironmentResolvedDependencyV1],
+    provider: EnvironmentDigest256V1, variant: EnvironmentDigest256V1
+) -> bool:
+    var i = 0
+    while i < resolved.len():
+        val current = resolved[i]
+        if _identity_equal_v1(provider, variant, current.provider_identity, current.variant_identity):
+            return true
+        i = i + 1
+    false
+
+fn _active_contains_v1(
+    active_providers: [EnvironmentDigest256V1],
+    active_variants: [EnvironmentDigest256V1],
+    provider: EnvironmentDigest256V1, variant: EnvironmentDigest256V1
+) -> bool:
+    var i = 0
+    while i < active_providers.len():
+        if _identity_equal_v1(provider, variant, active_providers[i], active_variants[i]):
+            return true
+        i = i + 1
+    false
+
+fn _push_u64_v1(out: [i64], value: u64):
+    out.push((value & 255u64) as i64)
+    out.push(((value >> 8u64) & 255u64) as i64)
+    out.push(((value >> 16u64) & 255u64) as i64)
+    out.push(((value >> 24u64) & 255u64) as i64)
+    out.push(((value >> 32u64) & 255u64) as i64)
+    out.push(((value >> 40u64) & 255u64) as i64)
+    out.push(((value >> 48u64) & 255u64) as i64)
+    out.push(((value >> 56u64) & 255u64) as i64)
+
+fn _push_u16_v1(out: [i64], value: u16):
+    out.push((value & 255u16) as i64)
+    out.push(((value >> 8u16) & 255u16) as i64)
+
+fn _push_digest_v1(out: [i64], value: EnvironmentDigest256V1):
+    _push_u64_v1(out, value.w0)
+    _push_u64_v1(out, value.w1)
+    _push_u64_v1(out, value.w2)
+    _push_u64_v1(out, value.w3)
+
+fn _read_u64_v1(bytes: [i64], offset: i64) -> u64:
+    (bytes[offset] as u64) |
+        ((bytes[offset + 1] as u64) << 8u64) |
+        ((bytes[offset + 2] as u64) << 16u64) |
+        ((bytes[offset + 3] as u64) << 24u64) |
+        ((bytes[offset + 4] as u64) << 32u64) |
+        ((bytes[offset + 5] as u64) << 40u64) |
+        ((bytes[offset + 6] as u64) << 48u64) |
+        ((bytes[offset + 7] as u64) << 56u64)
+
+fn _closure_identity_v1(
+    root: VariantDescriptorV1,
+    resolved: [EnvironmentResolvedDependencyV1]
+) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_u16_v1(material, ENV_DEPENDENCY_RESOLVER_SCHEMA_V1)
+    _push_digest_v1(material, root.provider_identity)
+    _push_digest_v1(material, root.variant_identity)
+    _push_digest_v1(material, root.contract_identity)
+    _push_u16_v1(material, root.contract_major)
+    _push_u16_v1(material, root.contract_minor)
+    _push_digest_v1(material, root.artifact_digest)
+    var i = 0
+    while i < resolved.len():
+        val item = resolved[i]
+        _push_digest_v1(material, item.provider_identity)
+        _push_digest_v1(material, item.variant_identity)
+        _push_digest_v1(material, item.contract_identity)
+        _push_u16_v1(material, item.contract_major)
+        _push_u16_v1(material, item.contract_minor)
+        _push_digest_v1(material, item.artifact_digest)
+        i = i + 1
+    val raw = sha256_bytes(material)
+    EnvironmentDigest256V1(
+        w0: _read_u64_v1(raw, 0), w1: _read_u64_v1(raw, 8),
+        w2: _read_u64_v1(raw, 16), w3: _read_u64_v1(raw, 24))
+
+fn _resolve_descriptor_v1(
+    descriptor: VariantDescriptorV1, descriptors: [VariantDescriptorV1],
+    dependencies: [VariantDependencyV1], depth: u32,
+    active_providers: [EnvironmentDigest256V1],
+    active_variants: [EnvironmentDigest256V1],
+    resolved: [EnvironmentResolvedDependencyV1]
+) -> Result<[EnvironmentResolvedDependencyV1], EnvironmentDependencyResolutionErrorV1>:
+    if depth > ENV_DEPENDENCY_MAX_DEPTH_V1:
+        return Err(EnvironmentDependencyResolutionErrorV1.DepthExceeded)
+    if not _descriptor_valid_v1(descriptor, dependencies):
+        return Err(EnvironmentDependencyResolutionErrorV1.InvalidDescriptor)
+    if not _dependency_range_valid_v1(descriptor, dependencies):
+        return Err(EnvironmentDependencyResolutionErrorV1.DependencyRangeInvalid)
+
+    var next = resolved
+    var local_requirements: [VariantDependencyV1] = []
+    var i: u32 = 0u32
+    while i < descriptor.dependencies.count:
+        val requirement = dependencies[(descriptor.dependencies.offset + i) as i64]
+        if not _digest_declared_v1(requirement.provider_identity) or
+           not _digest_declared_v1(requirement.contract_identity) or
+           not _digest_declared_v1(requirement.artifact_digest) or
+           requirement.minimum_contract_major == 0u16:
+            return Err(EnvironmentDependencyResolutionErrorV1.InvalidDescriptor)
+        var duplicate = false
+        var j = 0
+        while j < local_requirements.len():
+            if _requirement_equal_v1(requirement, local_requirements[j]):
+                duplicate = true
+            j = j + 1
+        if duplicate:
+            return Err(EnvironmentDependencyResolutionErrorV1.DuplicateRequirement)
+        local_requirements.push(requirement)
+
+        var provider_count = 0
+        var contract_count = 0
+        var version_count = 0
+        var exact_count = 0
+        var match_index = -1
+        var k = 0
+        while k < descriptors.len():
+            val candidate = descriptors[k]
+            val stage = _matching_stage_v1(candidate, requirement)
+            if stage > 0u16:
+                provider_count = provider_count + 1
+            if stage > 1u16:
+                contract_count = contract_count + 1
+            if stage > 2u16:
+                version_count = version_count + 1
+            if stage == 4u16:
+                exact_count = exact_count + 1
+                match_index = k
+            k = k + 1
+        if provider_count == 0:
+            return Err(EnvironmentDependencyResolutionErrorV1.MissingProvider)
+        if contract_count == 0:
+            return Err(EnvironmentDependencyResolutionErrorV1.ContractMismatch)
+        if version_count == 0:
+            return Err(EnvironmentDependencyResolutionErrorV1.VersionMismatch)
+        if exact_count == 0:
+            return Err(EnvironmentDependencyResolutionErrorV1.ArtifactMismatch)
+        if exact_count > 1:
+            return Err(EnvironmentDependencyResolutionErrorV1.DuplicateCandidate)
+
+        val target = descriptors[match_index]
+        if _active_contains_v1(
+            active_providers, active_variants,
+            target.provider_identity, target.variant_identity):
+            return Err(EnvironmentDependencyResolutionErrorV1.CycleDetected)
+        if not _resolved_contains_v1(next, target.provider_identity, target.variant_identity):
+            if next.len() >= ENV_DEPENDENCY_MAX_COUNT_V1 as i64:
+                return Err(EnvironmentDependencyResolutionErrorV1.CountExceeded)
+            var child_active_providers = active_providers
+            var child_active_variants = active_variants
+            child_active_providers.push(target.provider_identity)
+            child_active_variants.push(target.variant_identity)
+            val child = _resolve_descriptor_v1(
+                target, descriptors, dependencies, depth + 1u32,
+                child_active_providers, child_active_variants, next)
+            next = match child:
+                case Ok(value): value
+                case Err(reason): return Err(reason)
+            if next.len() >= ENV_DEPENDENCY_MAX_COUNT_V1 as i64:
+                return Err(EnvironmentDependencyResolutionErrorV1.CountExceeded)
+            next.push(EnvironmentResolvedDependencyV1(
+                provider_identity: target.provider_identity,
+                variant_identity: target.variant_identity,
+                contract_identity: target.contract_identity,
+                contract_major: target.contract_major,
+                contract_minor: target.contract_minor,
+                artifact_digest: target.artifact_digest,
+                depth: depth + 1u32))
+        i = i + 1u32
+    Ok(next)
+
+pub fn environment_dependency_resolve_v1(
+    root: VariantDescriptorV1, descriptors: [VariantDescriptorV1],
+    dependencies: [VariantDependencyV1]
+) -> Result<EnvironmentDependencyResolutionV1, EnvironmentDependencyResolutionErrorV1>:
+    if descriptors.len() > ENV_DEPENDENCY_MAX_CANDIDATES_V1 as i64 or
+       dependencies.len() > ENV_DEPENDENCY_MAX_REQUIREMENTS_V1 as i64:
+        return Err(EnvironmentDependencyResolutionErrorV1.CountExceeded)
+    if not _descriptor_valid_v1(root, dependencies) or
+       not _dependency_range_valid_v1(root, dependencies) or
+       not _digest_declared_v1(root.provider_identity) or
+       not _digest_declared_v1(root.variant_identity):
+        return Err(EnvironmentDependencyResolutionErrorV1.InvalidRoot)
+    var active_providers: [EnvironmentDigest256V1] = [root.provider_identity]
+    var active_variants: [EnvironmentDigest256V1] = [root.variant_identity]
+    val resolved = match _resolve_descriptor_v1(
+        root, descriptors, dependencies, 0u32,
+        active_providers, active_variants, []):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    Ok(EnvironmentDependencyResolutionV1(
+        schema_version: ENV_DEPENDENCY_RESOLVER_SCHEMA_V1,
+        root_provider_identity: root.provider_identity,
+        root_variant_identity: root.variant_identity,
+        resolved_dependencies: resolved,
+        closure_identity: _closure_identity_v1(root, resolved)))

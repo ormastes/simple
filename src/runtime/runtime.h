@@ -288,6 +288,8 @@ int64_t  rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_
 int64_t     rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value);
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
+/* Nullable tagged RuntimeValue: nil on failure, owned byte array on success. */
+int64_t     rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len);
 
 /* ===== Memory-Mapped File I/O ===== */
 
@@ -419,6 +421,10 @@ int64_t  rt_heap_registry_count(void);
 int8_t rt_transient_array_scope_begin(void);
 int8_t rt_transient_array_scope_pause(void);
 int8_t rt_transient_array_scope_end(void);
+/* Graph-operation success for a supported root in an active paused scope,
+ * never an ownership/membership query. Array roots support repeated promotion
+ * and persistent/aliased text children. Persistent leaf-root acceptance is
+ * provider-specific; callers retaining scalar texts use an explicit array. */
 int8_t rt_transient_heap_promote(int64_t value);
 /* Raw-allocation owner bridge. runtime_native.c owns the one transient graph
  * registry; an alternate rt_alloc provider must register through this API. */
@@ -938,6 +944,18 @@ typedef struct RtOwnedProcessCancelReceipt {
 #define RT_OWNED_PROCESS_ASYNC_VERSION 2
 #define RT_OWNED_PROCESS_INPUT_VERSION 3
 #define RT_OWNED_PROCESS_OPAQUE_V3_VERSION 1
+#define RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION 1
+#define RT_PROCESS_OBSERVATION_CAP_LIFECYCLE          (1ULL << 0)
+#define RT_PROCESS_OBSERVATION_CAP_PID                (1ULL << 1)
+#define RT_PROCESS_OBSERVATION_CAP_DIRECT_CHILD_RUSAGE (1ULL << 2)
+#define RT_PROCESS_OBSERVATION_CAP_CANCELLATION       (1ULL << 3)
+#define RT_PROCESS_OBSERVATION_CAP_INDEPENDENT_CAPTURE (1ULL << 4)
+#define RT_PROCESS_OBSERVATION_CAP_REQUIRED \
+    (RT_PROCESS_OBSERVATION_CAP_LIFECYCLE | \
+     RT_PROCESS_OBSERVATION_CAP_PID | \
+     RT_PROCESS_OBSERVATION_CAP_DIRECT_CHILD_RUSAGE | \
+     RT_PROCESS_OBSERVATION_CAP_CANCELLATION | \
+     RT_PROCESS_OBSERVATION_CAP_INDEPENDENT_CAPTURE)
 #define RT_OWNED_PROCESS_MAX_INPUT_BYTES (16U * 1024U * 1024U)
 typedef struct RtOwnedProcessTokenV2 {
     uint64_t high;
@@ -1017,6 +1035,7 @@ typedef struct RtOwnedProcessResultV2 {
 #define RT_PROCESS_EVIDENCE_TREE_CHARGE         (1ULL << 1)
 #define RT_PROCESS_EVIDENCE_TREE_PIDS           (1ULL << 2)
 #define RT_PROCESS_EVIDENCE_SAMPLED_TREE        (1ULL << 3)
+#define RT_PROCESS_EVIDENCE_OUTPUT_EOF          (1ULL << 4)
 typedef struct RtOwnedProcessObservationV1 {
     uint64_t version;
     uint64_t evidence_flags;
@@ -1131,6 +1150,19 @@ SplArray* rt_process_owned_v3_start_pinned_value(int64_t executable_handle,
                                                   int64_t timeout_ms,
                                                   int64_t term_grace_ms,
                                                   int64_t max_output_bytes);
+/* [adapter_version, available, capability_bits]. Querying never starts a
+ * process.  available=1 only when the complete required hosted provider is
+ * usable on the current host. */
+SplArray* rt_process_owned_v3_capabilities_value(void);
+/* Atomically specializes a fresh V3 lease's preallocated capture arena into
+ * independent stdout/stderr ceilings. Returns [version, accepted, errno]. */
+SplArray* rt_process_owned_v3_set_capture_limits_value(int64_t handle,
+                                                        int64_t stdout_limit,
+                                                        int64_t stderr_limit);
+/* [adapter_version, pid, wall_ms, observation_version, evidence_flags,
+ * user_ms, system_ms, direct_rss_bytes, tree_charge_bytes, io_read_bytes,
+ * io_write_bytes, pids_peak, termination_signal, eintr_retries, errno]. */
+SplArray* rt_process_owned_v3_observation_value(int64_t handle);
 SplArray* rt_process_owned_v3_poll_value(int64_t handle, int64_t wait_ms,
                                          int64_t stdout_capacity,
                                          int64_t stderr_capacity);
@@ -1139,6 +1171,29 @@ SplArray* rt_process_owned_v3_cancel_value(int64_t handle);
 SplArray* rt_process_owned_v3_result_value(int64_t handle);
 SplArray* rt_process_owned_v3_collect_value(int64_t handle);
 int       rt_process_owned_v3_release_value(int64_t handle);
+
+/* Process Observation V4. The common Simple module owns the canonical request
+ * codec and 64-word receipt schema. start_pinned is the sole spawning entry:
+ * executable and cwd handles are opaque, separately supplied capabilities and
+ * must match the canonical binding. Every operation result is
+ * [stdout_bytes, stderr_bytes, binding_digest, receipt_words]. */
+SplArray* rt_process_observation_v4_capabilities_value(void);
+int64_t   rt_process_observation_v4_pin_cwd_value(const char* path_data,
+                                                   uint64_t path_len);
+SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle);
+int       rt_process_observation_v4_close_cwd_value(int64_t handle);
+SplArray* rt_process_observation_v4_start_value(SplArray* binding);
+SplArray* rt_process_observation_v4_start_pinned_value(
+              int64_t executable_handle, int64_t cwd_handle,
+              SplArray* binding);
+SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
+                                                int64_t caller_wait_ns);
+SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
+                                                  int64_t caller_wait_ns);
+SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
+                                                   int64_t caller_wait_ns);
+SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
+                                                       SplArray* digest);
 
 /* ===== Process Piped (editor LSP transport) ===== */
 

@@ -17,14 +17,46 @@
 #   from decoded modules is byte-identical to one made in process.
 
 use compiler.hir.hir_types.{HirModule}
-use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
-use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader,
+    FLAT_POOL_CODEC_VERSION}
+use compiler.hir.hir_codec_support.{HirCodecWriter,
+    HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_module, hc_dec_hir_module}
+use std.common.encoding.utf8.{text_byte_len}
+use std.common.crypto.sha256.{sha256_text}
 
 val HIR_CODEC_VERSION: text = "spl-hircodec-v2"
+val HIR_CANONICAL_CODEC_VERSION: text = "spl-hircodec-canonical-v1"
+val HIR_CANONICAL_CODEC_RULES_V1: text =
+    "nil-before-present;i64-signed;symbol-id-signed;text-unsigned-utf8;" +
+    "stable-bottom-up-merge;duplicate-reject;strict-flatpool-text-v1"
 
 fn hir_codec_header() -> text:
     HIR_CODEC_VERSION + " " + FLAT_POOL_CODEC_VERSION
+
+fn hir_canonical_codec_header() -> text:
+    HIR_CANONICAL_CODEC_VERSION + " " + FLAT_POOL_CODEC_VERSION
+
+fn hir_canonical_codec_rules_identity_v1() -> text:
+    sha256_text(HIR_CANONICAL_CODEC_RULES_V1)
+
+fn hir_canonical_codec_identity_v1() -> text:
+    val header = hir_canonical_codec_header()
+    val rules = hir_canonical_codec_rules_identity_v1()
+    # Canonical identity preimage encoding is:
+    #   domain || decimal-UTF8-byte-length || ":" || header ||
+    #   decimal-UTF8-byte-length || ":" || SHA256(rules)
+    # Length framing keeps the two descriptor-bound components unambiguous
+    # without adding or repurposing a PortableBodyDescriptorV1 field.
+    sha256_text("hir-canonical-codec-identity-v1" +
+        text_byte_len(header).to_text() + ":" + header +
+        text_byte_len(rules).to_text() + ":" + rules)
+
+fn hir_canonical_codec_generated_available_v1() -> bool:
+    # The generator owns generated/hir_codec.spl. Keep canonical entry points
+    # closed until an admitted self-hosted runtime regenerates that artifact and
+    # an independent lane freezes/reviews its real-HIR golden bytes.
+    false
 
 # "" when the module carries a payload the codec refuses (see
 # hir_codec_support.spl); `hir_module_encode_reason` names it.
@@ -35,6 +67,28 @@ fn hir_module_encode(module: HirModule) -> text:
         return ""
     hir_codec_header() + "\n" + w.finish()
 
+# Canonical portable bytes use the separate canonical header and typed frozen
+# dictionary ordering. The generated encoder sorts a key snapshot when this
+# writer mode is selected; it does not mutate the source dictionaries.
+fn hir_module_encode_canonical(
+    module: HirModule,
+) -> Result<text, HirDecodeError>:
+    if not hir_canonical_codec_generated_available_v1():
+        return Err(HirDecodeError.Unavailable(
+            "canonical_codec_generator_stale"))
+    var w = HirCodecWriter.create_canonical()
+    hc_enc_hir_module(w, module)
+    if not w.ok:
+        if w.failure_kind == "bounds":
+            return Err(HirDecodeError.BoundsExceeded(w.unsupported))
+        return Err(HirDecodeError.Malformed("canonical_encode_refused"))
+    val encoded = w.finish_with_header(hir_canonical_codec_header())
+    if not w.ok:
+        if w.failure_kind == "bounds":
+            return Err(HirDecodeError.BoundsExceeded(w.unsupported))
+        return Err(HirDecodeError.Malformed("canonical_encode_refused"))
+    Ok(encoded)
+
 fn hir_module_encode_reason(module: HirModule) -> text:
     var w = HirCodecWriter.create()
     hc_enc_hir_module(w, module)
@@ -43,6 +97,8 @@ fn hir_module_encode_reason(module: HirModule) -> text:
     w.unsupported
 
 fn hir_module_decode(blob: text) -> HirModule?:
+    # Preserve the trusted legacy contract and its constructor exactly. The
+    # portable verifier below is the only path that selects strict bounds.
     if blob == "":
         return nil
     val nl = blob.index_of("\n")
@@ -54,11 +110,89 @@ fn hir_module_decode(blob: text) -> HirModule?:
     val module = hc_dec_hir_module(r)
     if not r.ok:
         return nil
-    # The encoder terminates every line with "\n", so split leaves exactly one
-    # trailing empty element; anything else is a framing error.
-    if r.pos != r.lines.len() - 1:
+    if r.pos != r.lines.len() - 1 or r.lines[r.pos] != "":
         return nil
     Some(module)
+
+pub enum HirDecodeError:
+    Malformed(detail: text)
+    BoundsExceeded(detail: text)
+    Unavailable(detail: text)
+
+fn _decode_error(r: FlatPoolReader) -> HirDecodeError:
+    if r.failure_kind == "bounds":
+        return HirDecodeError.BoundsExceeded(r.failure_detail)
+    HirDecodeError.Malformed(r.failure_detail)
+
+fn _hir_module_decode_bounded_impl(
+    blob: text,
+    limits: HirDecodeLimits,
+    observer: HirDecodeAuditObserver,
+) -> Result<HirModule, HirDecodeError>:
+    if not hir_canonical_codec_generated_available_v1():
+        return Err(HirDecodeError.Unavailable(
+            "canonical_codec_generator_stale"))
+    var r = FlatPoolReader.new_bounded(blob, limits.max_input_bytes,
+        limits.max_allocation_bytes, limits.max_nodes, limits.max_depth,
+        limits.max_work_units)
+    defer observer.capture(r)
+    if not r.ok:
+        return Err(_decode_error(r))
+    val header = r.next()
+    if not r.ok:
+        return Err(_decode_error(r))
+    if header != hir_canonical_codec_header():
+        r.reject_malformed("codec_header")
+        return Err(_decode_error(r))
+    val module = hc_dec_hir_module(r)
+    if not r.ok:
+        return Err(_decode_error(r))
+    # The canonical encoder terminates every line with a newline.  The split
+    # therefore retains one final empty element and no other unread content.
+    if r.pos != r.lines.len() - 1 or r.lines[r.pos] != "":
+        r.reject_malformed("trailing_or_missing_frame")
+        return Err(_decode_error(r))
+    val input_bytes = text_byte_len(blob)
+    val remaining_allocation = limits.max_allocation_bytes - r.live_reserved_bytes
+    val remaining_work = limits.max_work_units - r.charged_work_units
+    var writer = HirCodecWriter.create_canonical_bounded(input_bytes,
+        remaining_allocation, remaining_work)
+    # Registered immediately so every success/refusal path captures the real
+    # partial writer attempt exactly once. The outer reader capture then merges
+    # both logical ledgers independent of defer execution order.
+    defer observer.capture_reencode(writer)
+    hc_enc_hir_module(writer, module)
+    if not writer.ok:
+        if writer.failure_kind == "bounds":
+            r.reject_bounds(writer.unsupported)
+        else:
+            r.reject_malformed("canonical_encode_refused")
+        return Err(_decode_error(r))
+    val canonical = writer.finish_with_header(hir_canonical_codec_header())
+    if not writer.ok:
+        if writer.failure_kind == "bounds":
+            r.reject_bounds(writer.unsupported)
+        else:
+            r.reject_malformed("canonical_encode_refused")
+        return Err(_decode_error(r))
+    if canonical != blob:
+        r.reject_malformed("noncanonical_encoding")
+        return Err(_decode_error(r))
+    Ok(module)
+
+fn hir_module_decode_bounded_audited(
+    blob: text,
+    limits: HirDecodeLimits,
+    observer: HirDecodeAuditObserver,
+) -> Result<HirModule, HirDecodeError>:
+    _hir_module_decode_bounded_impl(blob, limits, observer)
+
+fn hir_module_decode_bounded(
+    blob: text,
+    limits: HirDecodeLimits,
+) -> Result<HirModule, HirDecodeError>:
+    hir_module_decode_bounded_audited(blob, limits,
+        HirDecodeAuditObserver.create(4 * 1024 * 1024))
 
 # --- in-process round-trip self-check (SIMPLE_HIR_CODEC_ROUNDTRIP=1) ---------
 #
@@ -104,6 +238,12 @@ fn hir_codec_roundtrip_line(rt: HirCodecRoundTrip, path: text) -> text:
         line = line + "\treason=" + rt.reason
     line
 
-export HIR_CODEC_VERSION, hir_codec_header
-export hir_module_encode, hir_module_encode_reason, hir_module_decode
+export HIR_CODEC_VERSION, HIR_CANONICAL_CODEC_VERSION
+export HIR_CANONICAL_CODEC_RULES_V1, hir_codec_header
+export hir_canonical_codec_header, hir_canonical_codec_rules_identity_v1
+export hir_canonical_codec_identity_v1
+export hir_canonical_codec_generated_available_v1
+export HirDecodeLimits, HirDecodeAuditUsage, HirDecodeAuditObserver, HirDecodeError
+export hir_module_encode, hir_module_encode_canonical, hir_module_encode_reason
+export hir_module_decode, hir_module_decode_bounded, hir_module_decode_bounded_audited
 export HirCodecRoundTrip, hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line

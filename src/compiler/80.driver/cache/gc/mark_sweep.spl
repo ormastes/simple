@@ -22,13 +22,11 @@
 # the reverse. It must never produce a dangling hit: nothing in trash/ is
 # served (cas_get / action_get never look there).
 
-@unsafe(reason: "raw mark-sweep runtime-owned directory-walk ABI", capabilities: [ffi])
-extern fn rt_dir_walk(root: text) -> [text]
 use compiler.driver.cache.cas_store.{ActionManifest, action_manifest_parse, cas_blob_path, cas_action_path}
-use std.file_system.{file_move}
-use std.io_runtime.{dir_create_all, dir_exists, file_exists, getpid, time_now_unix_micros}
+use std.io_runtime.{dir_create_all, dir_exists, dir_walk, file_exists, getpid, time_now_unix_micros}
 use compiler.driver.cache.lease.lease.{lease_list_active, CacheLease}
-use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use compiler.driver.cache.gc.reader_pin_gc_guard.{reader_pin_gc_authoritative_delete_available}
+use std.nogc_sync_mut.io_runtime.{file_move_cross_device, file_read_nullable}
 
 # Private direct-call wrappers prevent raw ABI spread without changing the
 # mark/sweep traversal, allocation behavior, or policy decisions.
@@ -39,8 +37,7 @@ fn mark_file_exists_raw(path: text) -> bool:
 
 @always_inline
 fn mark_file_move_raw(old_path: text, new_path: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        file_move(old_path, new_path)
+    file_move_cross_device(old_path, new_path)
 
 @always_inline
 fn mark_dir_create_all_raw(path: text) -> bool:
@@ -54,8 +51,7 @@ fn mark_dir_exists_raw(path: text) -> bool:
 
 @always_inline
 fn mark_dir_walk_raw(root: text) -> [text]:
-    unsafe(capabilities: [ffi]):
-        rt_dir_walk(root)
+    dir_walk(root)
 
 @always_inline
 fn mark_process_id_raw() -> i64:
@@ -81,12 +77,6 @@ fn move_to_trash(root: text, path: text) -> bool:
     val stamp = "{mark_process_id_raw()}-{mark_time_now_unix_micros_raw()}"
     val name = path.replace("/", "_")
     mark_file_move_raw(path, "{trash_dir(root)}/{name}-{stamp}")
-
-fn contains_digest(digests: [text], digest: text) -> bool:
-    for d in digests:
-        if d == digest:
-            return true
-    false
 
 # Collect every action-manifest file path under root/actions.
 fn list_action_paths(root: text) -> [text]:
@@ -137,10 +127,14 @@ fn read_pins(root: text) -> [text]:
 # pointing at them, per manifest_closure predicate).
 fn gc_select_roots(root: text) -> [text]:
     var roots = read_pins(root)
+    var seen: Dict<text, bool> = {}
+    for root_digest in roots:
+        seen[root_digest] = true
     for lease in lease_list_active(root):
         for d in lease.referenced_manifests:
-            if not contains_digest(roots, d):
+            if not seen.contains_key(d):
                 roots = roots.push(d)
+                seen[d] = true
     roots
 
 # Mark-and-sweep: every manifest on disk is itself retained (first-milestone
@@ -149,8 +143,14 @@ fn gc_select_roots(root: text) -> [text]:
 # (gc_select_roots) additionally guarantee pinned/leased manifests survive
 # even under a future policy that prunes manifests.
 fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
+    # Do not turn an incomplete local manifest walk into destructive authority.
+    # The qualified reader-pin/root snapshot issuer is not available yet.
+    if not reader_pin_gc_authoritative_delete_available():
+        return MarkSweepResult(marked_manifests: 0, marked_artifacts: 0,
+            trashed_manifests: 0, trashed_artifacts: 0)
     val action_paths = list_action_paths(root)
-    var marked_artifacts: [text] = []
+    var marked_artifact_paths: Dict<text, bool> = {}
+    var marked_artifact_count: i64 = 0
     var manifests_kept: i64 = 0
     var manifests_trashed: i64 = 0
 
@@ -163,8 +163,10 @@ fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
             case Some(manifest):
                 manifests_kept = manifests_kept + 1
                 for d in manifest.artifact_digests:
-                    if not contains_digest(marked_artifacts, d):
-                        marked_artifacts = marked_artifacts.push(d)
+                    val artifact_path = cas_blob_path(root, d)
+                    if not marked_artifact_paths.contains_key(artifact_path):
+                        marked_artifact_paths[artifact_path] = true
+                        marked_artifact_count = marked_artifact_count + 1
             case nil:
                 # unparseable manifest: not reachable, trash it
                 move_to_trash(root, path)
@@ -172,17 +174,13 @@ fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
 
     var trashed_blobs: i64 = 0
     for blob_path in list_blob_paths(root):
-        var referenced = false
-        for digest in marked_artifacts:
-            if blob_path == cas_blob_path(root, digest):
-                referenced = true
-        if not referenced:
+        if not marked_artifact_paths.contains_key(blob_path):
             move_to_trash(root, blob_path)
             trashed_blobs = trashed_blobs + 1
 
     MarkSweepResult(
         marked_manifests: manifests_kept,
-        marked_artifacts: marked_artifacts.len().to_i64(),
+        marked_artifacts: marked_artifact_count,
         trashed_manifests: manifests_trashed,
         trashed_artifacts: trashed_blobs,
     )

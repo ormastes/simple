@@ -1,0 +1,822 @@
+# Frontend adapter for the frozen three-payload semantic-reference contract.
+#
+# Macro expansion, generic bodies, and trait default bodies are admitted only
+# as embedded indexed TLD sections.  Concrete trait calls and call-only aspect
+# advice remain symbolic references: their signature/effect/object identities
+# are carried forward without copying implementation bodies.  Reverse
+# references are coordinator-owned and are intentionally absent here.
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1, ThreePayloadSemanticRefLocationV1,
+    ThreePayloadSemanticRefV1,
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.wire.{wire_envelope_len}
+use compiler.common.cache_contract.physical_tld_v1.{
+    PhysicalTldHeaderV1, PhysicalTldObjectV1, TldPayloadRoleV1, TldSectionRefV1,
+    physical_tld_header_valid_v1, physical_tld_object_encode_v1,
+    physical_tld_object_valid_v1, three_payload_contract_digest_valid_v1,
+    three_payload_contract_text_valid_v1,
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_key_equal_v1,
+    semantic_query_key_valid_v1, semantic_query_read_manifest_valid_v1,
+}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadSemanticRefV2, ThreePayloadClosureSealV2,
+    ThreePayloadFallbackV1, ThreePayloadSemanticBinding,
+    closure_coverage_dimension_v1, closure_coverage_root_valid_v1,
+    three_payload_closure_seal_digest_v2, three_payload_closure_seal_valid_v2,
+    three_payload_semantic_ref_valid_v2,
+}
+pub struct FrontendThreePayloadSemanticFactV1:
+    kind: ThreePayloadSemanticRefKindV1
+    stable_entity_id: text
+    callable_signature_digest: text
+    effect_digest: text
+    body_or_object_digest: text
+    embedded_section_index: i64?
+fn _kind_rank_v1(kind: ThreePayloadSemanticRefKindV1) -> i64:
+    match kind:
+        case ThreePayloadSemanticRefKindV1.MacroExpansion: 1
+        case ThreePayloadSemanticRefKindV1.GenericBody: 2
+        case ThreePayloadSemanticRefKindV1.TraitDefaultBody: 3
+        case ThreePayloadSemanticRefKindV1.TraitCallable: 4
+        case ThreePayloadSemanticRefKindV1.AspectCallable: 5
+        case ThreePayloadSemanticRefKindV1.ConcreteFunction: 6
+        case ThreePayloadSemanticRefKindV1.CtfeBody: 7
+fn _semantic_fact_key_v1(fact: FrontendThreePayloadSemanticFactV1) -> text:
+    "{_kind_rank_v1(fact.kind)}\u0000{fact.stable_entity_id}"
+fn _insert_semantic_fact_v1(
+    facts: [FrontendThreePayloadSemanticFactV1],
+    value: FrontendThreePayloadSemanticFactV1,
+) -> Result<[FrontendThreePayloadSemanticFactV1], text>:
+    val key = _semantic_fact_key_v1(value)
+    var inserted = false
+    var output: [FrontendThreePayloadSemanticFactV1] = []
+    for current in facts:
+        val current_key = _semantic_fact_key_v1(current)
+        if current_key == key:
+            if current.callable_signature_digest != value.callable_signature_digest or
+                current.effect_digest != value.effect_digest or
+                current.body_or_object_digest != value.body_or_object_digest or
+                current.embedded_section_index != value.embedded_section_index:
+                return Err("conflicting three-payload semantic reference: {value.stable_entity_id}")
+            return Ok(facts)
+        if not inserted and key < current_key:
+            output.push(value)
+            inserted = true
+        output.push(current)
+    if not inserted:
+        output.push(value)
+    Ok(output)
+fn _body_kind_v1(kind: ThreePayloadSemanticRefKindV1) -> bool:
+    kind == ThreePayloadSemanticRefKindV1.MacroExpansion or
+        kind == ThreePayloadSemanticRefKindV1.GenericBody or
+        kind == ThreePayloadSemanticRefKindV1.TraitDefaultBody or
+        kind == ThreePayloadSemanticRefKindV1.ConcreteFunction or
+        kind == ThreePayloadSemanticRefKindV1.CtfeBody
+pub fn build_three_payload_semantic_refs_v1(
+    facts: [FrontendThreePayloadSemanticFactV1],
+) -> Result<[ThreePayloadSemanticRefV1], text>:
+    var ordered: [FrontendThreePayloadSemanticFactV1] = []
+    for fact in facts:
+        if fact.stable_entity_id == "" or fact.callable_signature_digest == "" or
+            fact.effect_digest == "" or fact.body_or_object_digest == "":
+            return Err("three-payload semantic reference identity is incomplete")
+        if _body_kind_v1(fact.kind):
+            match fact.embedded_section_index:
+                case Some(index):
+                    if index < 0:
+                        return Err("embedded semantic section index is negative")
+                case nil:
+                    return Err("body semantic reference is not embedded")
+        else:
+            match fact.embedded_section_index:
+                case Some(_):
+                    return Err("symbolic callable reference embeds an implementation body")
+                case nil: pass
+        ordered = _insert_semantic_fact_v1(ordered, fact)?
+    var refs: [ThreePayloadSemanticRefV1] = []
+    for fact in ordered:
+        val location = if _body_kind_v1(fact.kind):
+            ThreePayloadSemanticRefLocationV1.EmbeddedTldSection
+        else:
+            ThreePayloadSemanticRefLocationV1.SymbolicObject
+        refs.push(ThreePayloadSemanticRefV1(
+            kind: fact.kind,
+            stable_entity_id: fact.stable_entity_id,
+            callable_signature_digest: fact.callable_signature_digest,
+            effect_digest: fact.effect_digest,
+            body_or_object_digest: fact.body_or_object_digest,
+            location: location,
+            embedded_section_index: fact.embedded_section_index,
+        ))
+    Ok(refs)
+export FrontendThreePayloadSemanticFactV1, build_three_payload_semantic_refs_v1
+# V2 is the strict adapter.  It preserves the V1 compatibility path above,
+# but binds selection contracts and complete coverage witnesses before common
+# admission sees the DTOs.
+pub struct FrontendThreePayloadSemanticFactV2:
+    kind: ThreePayloadSemanticRefKindV1
+    stable_entity_id: text
+    callable_signature_digest: text
+    effect_digest: text
+    body_or_object_digest: text
+    embedded: TldSectionRefV1?
+    selection_contract_digest: text
+fn _kind_rank_v2(kind: ThreePayloadSemanticRefKindV1) -> i64:
+    match kind:
+        case ThreePayloadSemanticRefKindV1.MacroExpansion: 1
+        case ThreePayloadSemanticRefKindV1.GenericBody: 2
+        case ThreePayloadSemanticRefKindV1.TraitDefaultBody: 3
+        case ThreePayloadSemanticRefKindV1.TraitCallable: 4
+        case ThreePayloadSemanticRefKindV1.AspectCallable: 5
+        case ThreePayloadSemanticRefKindV1.ConcreteFunction: 6
+        case ThreePayloadSemanticRefKindV1.CtfeBody: 7
+fn _semantic_fact_key_v2(fact: FrontendThreePayloadSemanticFactV2) -> text:
+    fact.stable_entity_id + "\u0000" + _kind_rank_v2(fact.kind).to_string()
+fn _embedded_equal_v2(left: TldSectionRefV1?, right: TldSectionRefV1?) -> bool:
+    match left:
+        case Some(left_section):
+            match right:
+                case Some(right_section):
+                    left_section.role == right_section.role and
+                        left_section.section_index == right_section.section_index and
+                        left_section.kind == right_section.kind and
+                        left_section.semantic_object_digest == right_section.semantic_object_digest and
+                        left_section.offset == right_section.offset and
+                        left_section.stored_bytes == right_section.stored_bytes and
+                        left_section.decoded_bytes == right_section.decoded_bytes and
+                        left_section.encoding_profile == right_section.encoding_profile
+                case nil: false
+        case nil: right == nil
+fn _insert_semantic_fact_v2(
+    facts: [FrontendThreePayloadSemanticFactV2],
+    value: FrontendThreePayloadSemanticFactV2,
+) -> Result<[FrontendThreePayloadSemanticFactV2], text>:
+    val key = _semantic_fact_key_v2(value)
+    var inserted = false
+    var output: [FrontendThreePayloadSemanticFactV2] = []
+    for current in facts:
+        val current_key = _semantic_fact_key_v2(current)
+        if current_key == key:
+            if current.callable_signature_digest != value.callable_signature_digest or
+                current.effect_digest != value.effect_digest or
+                current.body_or_object_digest != value.body_or_object_digest or
+                current.selection_contract_digest != value.selection_contract_digest or
+                not _embedded_equal_v2(current.embedded, value.embedded):
+                return Err("conflicting strict V2 semantic reference: {value.stable_entity_id}")
+            return Ok(facts)
+        if not inserted and key < current_key:
+            output.push(value)
+            inserted = true
+        output.push(current)
+    if not inserted:
+        output.push(value)
+    Ok(output)
+fn _body_kind_v2(kind: ThreePayloadSemanticRefKindV1) -> bool:
+    kind == ThreePayloadSemanticRefKindV1.MacroExpansion or
+        kind == ThreePayloadSemanticRefKindV1.GenericBody or
+        kind == ThreePayloadSemanticRefKindV1.TraitDefaultBody or
+        kind == ThreePayloadSemanticRefKindV1.ConcreteFunction or
+        kind == ThreePayloadSemanticRefKindV1.CtfeBody
+pub fn build_three_payload_semantic_refs_v2(
+    facts: [FrontendThreePayloadSemanticFactV2],
+    section_count: i64,
+    max_decode_bytes: i64,
+) -> Result<[ThreePayloadSemanticRefV2], text>:
+    if section_count < 0 or max_decode_bytes < 0:
+        return Err("strict V2 section bounds are negative")
+    var ordered: [FrontendThreePayloadSemanticFactV2] = []
+    for fact in facts:
+        val candidate = ThreePayloadSemanticRefV2(
+            kind: fact.kind, stable_entity_id: fact.stable_entity_id,
+            callable_signature_digest: fact.callable_signature_digest,
+            effect_digest: fact.effect_digest, body_or_object_digest: fact.body_or_object_digest,
+            embedded: fact.embedded, selection_contract_digest: fact.selection_contract_digest)
+        if not three_payload_semantic_ref_valid_v2(candidate, section_count, max_decode_bytes):
+            return Err("invalid strict V2 semantic reference: {fact.stable_entity_id}")
+        ordered = _insert_semantic_fact_v2(ordered, fact)?
+    var refs: [ThreePayloadSemanticRefV2] = []
+    for fact in ordered:
+        refs.push(ThreePayloadSemanticRefV2(
+            kind: fact.kind, stable_entity_id: fact.stable_entity_id,
+            callable_signature_digest: fact.callable_signature_digest,
+            effect_digest: fact.effect_digest, body_or_object_digest: fact.body_or_object_digest,
+            embedded: fact.embedded, selection_contract_digest: fact.selection_contract_digest))
+    refs
+pub fn validate_three_payload_coverage_roots_v2(
+    roots: [ClosureCoverageRootV1],
+) -> bool:
+    if roots.len() != 9: return false
+    var index: i64 = 0
+    for root in roots:
+        if root.dimension != closure_coverage_dimension_v1(index) or
+                not closure_coverage_root_valid_v1(root) or
+                root.coverage != SemanticCoverageV1.Complete:
+            return false
+        index = index + 1
+    true
+pub fn validate_three_payload_closure_seal_v2(value: ThreePayloadClosureSealV2) -> bool:
+    three_payload_closure_seal_valid_v2(value) and
+        validate_three_payload_coverage_roots_v2(value.coverage_roots)
+fn _section_equal_to_header_v2(left: TldSectionRefV1, right: TldSectionRefV1) -> bool:
+    left.role == right.role and left.section_index == right.section_index and
+        left.kind == right.kind and left.semantic_object_digest == right.semantic_object_digest and
+        left.offset == right.offset and left.stored_bytes == right.stored_bytes and
+        left.decoded_bytes == right.decoded_bytes and left.encoding_profile == right.encoding_profile
+pub fn semantic_refs_bound_to_physical_tld_v2(
+    refs: [ThreePayloadSemanticRefV2],
+    header: PhysicalTldHeaderV1,
+) -> bool:
+    if not physical_tld_header_valid_v1(header): return false
+    for reference in refs:
+        match reference.embedded:
+            case Some(section):
+                if section.role != header.role or section.section_index < 0 or
+                        section.section_index >= header.sections.len() or
+                        not _section_equal_to_header_v2(section, header.sections[section.section_index]):
+                    return false
+            case nil: pass
+    true
+pub fn three_payload_closure_seal_digest_checked_v2(value: ThreePayloadClosureSealV2) -> text:
+    if not validate_three_payload_closure_seal_v2(value): return ""
+    three_payload_closure_seal_digest_v2(value)
+export FrontendThreePayloadSemanticFactV2, build_three_payload_semantic_refs_v2
+export validate_three_payload_coverage_roots_v2, validate_three_payload_closure_seal_v2
+export semantic_refs_bound_to_physical_tld_v2
+export three_payload_closure_seal_digest_checked_v2
+# Read-only policy supplied by the existing preparation owner.  The two receipt
+# fields are compared, never minted here.  Keeping them out of the public
+# binding DTO prevents a binding value from presenting itself as authority.
+pub struct ThreePayloadSemanticBindBounds:
+    max_bindings: i64
+    max_sections: i64
+    max_retained_bytes: i64
+    max_decoded_bytes: i64
+    expected_input_generation_digest: text
+    expected_access_policy_digest: text
+    expected_owner_receipt_digest: text
+    presented_owner_receipt_digest: text
+    expected_module_id: text
+    presented_module_id: text
+pub enum ThreePayloadSemanticAuthorityState:
+    TypedObjectAuthorityUnavailable
+# The decoded objects retain the storage from which section values are sliced.
+# Per-role index arrays intentionally keep prior[0] distinct from init[0].
+pub struct ThreePayloadSemanticView:
+    module_id: text
+    authority_state: ThreePayloadSemanticAuthorityState
+    seal: ThreePayloadClosureSealV2
+    prior_owner: PhysicalTldObjectV1?
+    init_owner: PhysicalTldObjectV1
+    ordered_bindings: [ThreePayloadSemanticBinding]
+    prior_binding_indexes: [i64]
+    init_binding_indexes: [i64]
+    retained_bytes: i64
+    decoded_bytes: i64
+pub struct BoundSemanticInput:
+    binding: ThreePayloadSemanticBinding
+    section_bytes: [u8]?
+    symbolic_call: bool
+    read: SemanticQueryReadV1
+pub struct ThreePayloadBodySectionCandidate:
+    binding: ThreePayloadSemanticBinding
+    section_bytes: [u8]
+pub struct ThreePayloadBodyFactProjection:
+    semantic_use_kind: ThreePayloadSemanticRefKindV1
+    verified_object_kind: text
+    codec_identity: text
+    verifier_identity: text
+    rules_identity: text
+    semantic_profile_digest: text
+    raw_content_digest: text
+    module_name: text
+    selected_entry_name: text
+    exported_entry_count: i64
+    callable_signature_digest: text
+    normalized_effect_digest: text
+    transitive_effect_digest: text
+    dependency_digest: text
+pub struct ThreePayloadBodyFactMatch:
+    candidate: ThreePayloadBodySectionCandidate
+    projection: ThreePayloadBodyFactProjection
+    body_fingerprint: text
+    authority_state: ThreePayloadSemanticAuthorityState
+fn _semantic_use_rank(kind: ThreePayloadSemanticRefKindV1) -> i64:
+    match kind:
+        case MacroExpansion: 1
+        case GenericBody: 2
+        case TraitDefaultBody: 3
+        case TraitCallable: 4
+        case AspectCallable: 5
+        case ConcreteFunction: 6
+        case CtfeBody: 7
+fn _binding_key(binding: ThreePayloadSemanticBinding) -> text:
+    binding.stable_entity_id + "\u0000" + _semantic_use_rank(binding.semantic_use_kind).to_string()
+fn _binding_equal(left: ThreePayloadSemanticBinding,
+                  right: ThreePayloadSemanticBinding) -> bool:
+    left.stable_entity_id == right.stable_entity_id and
+        left.semantic_use_kind == right.semantic_use_kind and
+        left.object_ref.kind == right.object_ref.kind and
+        left.object_ref.schema == right.object_ref.schema and
+        left.object_ref.object_digest == right.object_ref.object_digest and
+        left.embedded_role == right.embedded_role and
+        left.embedded_section_index == right.embedded_section_index and
+        left.raw_section_digest == right.raw_section_digest and
+        left.access_policy_digest == right.access_policy_digest and
+        left.semantic_profile_digest == right.semantic_profile_digest and
+        left.callable_signature_digest == right.callable_signature_digest and
+        left.effect_digest == right.effect_digest and
+        left.selection_contract_digest == right.selection_contract_digest
+fn _binding_physical_object_equal(left: ThreePayloadSemanticBinding,
+                                  right: ThreePayloadSemanticBinding) -> bool:
+    left.object_ref.kind == right.object_ref.kind and
+        left.object_ref.schema == right.object_ref.schema and
+        left.object_ref.object_digest == right.object_ref.object_digest and
+        left.embedded_role == right.embedded_role and
+        left.embedded_section_index == right.embedded_section_index and
+        left.raw_section_digest == right.raw_section_digest
+fn _insert_binding(bindings: [ThreePayloadSemanticBinding],
+                   value: ThreePayloadSemanticBinding,
+) -> Result<[ThreePayloadSemanticBinding], ThreePayloadFallbackV1>:
+    val key = _binding_key(value)
+    var inserted = false
+    var result: [ThreePayloadSemanticBinding] = []
+    for current in bindings:
+        val current_key = _binding_key(current)
+        if current_key == key:
+            if _binding_equal(current, value): return Ok(bindings)
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        if not inserted and key < current_key:
+            result.push(value)
+            inserted = true
+        result.push(current)
+    if not inserted: result.push(value)
+    Ok(result)
+fn _binding_scalar_valid(binding: ThreePayloadSemanticBinding,
+                         seal: ThreePayloadClosureSealV2,
+                         bounds: ThreePayloadSemanticBindBounds) -> bool:
+    three_payload_contract_text_valid_v1(binding.stable_entity_id, false) and
+        binding.object_ref.kind == "portable_hir_object" and
+        binding.object_ref.schema == 2 and
+        three_payload_contract_digest_valid_v1(binding.object_ref.object_digest) and
+        binding.access_policy_digest == bounds.expected_access_policy_digest and
+        binding.semantic_profile_digest == seal.compiler_semantics_digest and
+        three_payload_contract_digest_valid_v1(binding.callable_signature_digest) and
+        three_payload_contract_digest_valid_v1(binding.effect_digest) and
+        three_payload_contract_digest_valid_v1(binding.selection_contract_digest)
+fn _binding_retained_bytes(binding: ThreePayloadSemanticBinding) -> i64:
+    binding.stable_entity_id.bytes().len() + binding.object_ref.kind.bytes().len() +
+        binding.access_policy_digest.bytes().len() +
+        binding.semantic_profile_digest.bytes().len() +
+        binding.callable_signature_digest.bytes().len() +
+        binding.effect_digest.bytes().len() +
+        binding.selection_contract_digest.bytes().len() + 32
+fn _binding_matches_ref(binding: ThreePayloadSemanticBinding,
+                        reference: ThreePayloadSemanticRefV2,
+                        prior: PhysicalTldObjectV1?, init: PhysicalTldObjectV1,
+) -> bool:
+    if binding.stable_entity_id != reference.stable_entity_id or
+            binding.semantic_use_kind != reference.kind or
+            binding.callable_signature_digest != reference.callable_signature_digest or
+            binding.effect_digest != reference.effect_digest or
+            binding.selection_contract_digest != reference.selection_contract_digest:
+        return false
+    match reference.embedded:
+        case Some(section):
+            val role = match binding.embedded_role:
+                case Some(value): value
+                case nil: return false
+            val section_index = match binding.embedded_section_index:
+                case Some(value): value
+                case nil: return false
+            val raw_digest = match binding.raw_section_digest:
+                case Some(value): value
+                case nil: return false
+            if role != section.role or section_index != section.section_index or
+                    raw_digest != section.semantic_object_digest or
+                    raw_digest != reference.body_or_object_digest:
+                return false
+            val owner = match role:
+                case PriorModuleTld:
+                    match prior:
+                        case Some(value): value
+                        case nil: return false
+                case PackageInitTld: init
+            if section_index < 0 or section_index >= owner.header.sections.len() or
+                    section_index >= owner.canonical_sections.len() or
+                    not _section_equal_to_header_v2(section, owner.header.sections[section_index]):
+                return false
+            sha256_u8_hex(owner.canonical_sections[section_index]) == raw_digest
+        case nil:
+            binding.embedded_role.is_none() and binding.embedded_section_index.is_none() and
+                binding.raw_section_digest.is_none() and
+                binding.object_ref.object_digest == reference.body_or_object_digest
+fn _object_role_valid(object: PhysicalTldObjectV1,
+                      expected: TldPayloadRoleV1) -> bool:
+    physical_tld_object_valid_v1(object) and object.header.role == expected
+fn _append_object_totals(object: PhysicalTldObjectV1, max_retained: i64,
+                         max_decoded: i64, retained: i64,
+                         decoded: i64) -> Result<[i64], ThreePayloadFallbackV1>:
+    var next_retained = retained
+    var next_decoded = decoded
+    for section in object.header.sections:
+        if section.section_index < 0 or section.section_index >= object.canonical_sections.len() or
+                section.decoded_bytes > max_decoded - next_decoded:
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        val body_bytes = object.canonical_sections[section.section_index].len()
+        if body_bytes > max_retained - next_retained:
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        next_retained = next_retained + body_bytes
+        next_decoded = next_decoded + section.decoded_bytes
+    Ok([next_retained, next_decoded])
+fn _preflight_add_size(current: i64, amount: i64,
+                       maximum: i64) -> Result<i64, ThreePayloadFallbackV1>:
+    if amount < 0 or current < 0 or current > maximum or amount > maximum - current:
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    Ok(current + amount)
+fn _physical_tld_wire_bytes_preflight(object: PhysicalTldObjectV1,
+                                      maximum: i64) -> Result<i64, ThreePayloadFallbackV1>:
+    if object.header.sections.len() != object.canonical_sections.len():
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    var header_bytes = _preflight_add_size(0, wire_envelope_len() + 8 + 1 + 32 + 32 + 8 + 4,
+        maximum)?
+    for section in object.header.sections:
+        header_bytes = _preflight_add_size(header_bytes,
+            1 + 8 + 4 + section.kind.bytes().len() + 32 + 8 + 8 + 8 + 4 +
+                section.encoding_profile.bytes().len(), maximum)?
+    var body_bytes: i64 = 0
+    for body in object.canonical_sections:
+        body_bytes = _preflight_add_size(body_bytes, body.len(), maximum)?
+    if body_bytes != object.header.payload_bytes:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    _preflight_add_size(header_bytes, body_bytes, maximum)
+pub fn bind_three_payload_semantic_inputs(
+    seal: ThreePayloadClosureSealV2,
+    decoded_prior: PhysicalTldObjectV1?,
+    decoded_init: PhysicalTldObjectV1,
+    bindings: [ThreePayloadSemanticBinding],
+    bounds: ThreePayloadSemanticBindBounds,
+) -> Result<ThreePayloadSemanticView, ThreePayloadFallbackV1>:
+    if bounds.max_bindings < 0 or bounds.max_sections < 0 or
+            bounds.max_retained_bytes < 0 or bounds.max_decoded_bytes < 0 or
+            bindings.len() > bounds.max_bindings:
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    if not three_payload_contract_digest_valid_v1(bounds.expected_input_generation_digest) or
+            not three_payload_contract_digest_valid_v1(bounds.expected_access_policy_digest) or
+            not three_payload_contract_digest_valid_v1(bounds.expected_owner_receipt_digest) or
+            not three_payload_contract_digest_valid_v1(bounds.presented_owner_receipt_digest) or
+            not three_payload_contract_text_valid_v1(bounds.expected_module_id, false) or
+            not three_payload_contract_text_valid_v1(bounds.presented_module_id, false):
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    if seal.input_generation_digest != bounds.expected_input_generation_digest:
+        return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+    if bounds.expected_owner_receipt_digest != bounds.presented_owner_receipt_digest:
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    if bounds.expected_module_id != bounds.presented_module_id:
+        return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+    # Measure both actual encoded input objects before whole-object encoding or
+    # hashing.  The seal must claim their exact aggregate wire size.
+    val init_wire_bytes = _physical_tld_wire_bytes_preflight(decoded_init,
+        bounds.max_retained_bytes)?
+    var input_wire_bytes = init_wire_bytes
+    match decoded_prior:
+        case Some(object):
+            val prior_wire_bytes = _physical_tld_wire_bytes_preflight(object,
+                bounds.max_retained_bytes)?
+            input_wire_bytes = _preflight_add_size(input_wire_bytes, prior_wire_bytes,
+                bounds.max_retained_bytes)?
+        case nil: pass
+    if seal.payload_bytes != input_wire_bytes: return Err(ThreePayloadFallbackV1.CorruptPayload)
+    var retained = _preflight_add_size(seal.payload_bytes, input_wire_bytes,
+        bounds.max_retained_bytes)?
+    for binding in bindings:
+        val cost = _binding_retained_bytes(binding)
+        if cost < 0 or cost > bounds.max_retained_bytes - retained:
+            return Err(ThreePayloadFallbackV1.BoundsExceeded)
+        retained = retained + cost
+    val prior_sections = match decoded_prior:
+        case Some(object): object.header.sections.len()
+        case nil: 0
+    if prior_sections > bounds.max_sections or
+            decoded_init.header.sections.len() > bounds.max_sections - prior_sections or
+            prior_sections + decoded_init.header.sections.len() != seal.section_count:
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    # Account the full aggregate before allocating binding indexes or slicing.
+    var decoded: i64 = 0
+    match decoded_prior:
+        case Some(object):
+            val totals = _append_object_totals(object, bounds.max_retained_bytes,
+                bounds.max_decoded_bytes, retained, decoded)?
+            retained = totals[0]
+            decoded = totals[1]
+        case nil: pass
+    val totals = _append_object_totals(decoded_init, bounds.max_retained_bytes,
+        bounds.max_decoded_bytes, retained, decoded)?
+    retained = totals[0]
+    decoded = totals[1]
+    if not validate_three_payload_closure_seal_v2(seal):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    if not _object_role_valid(decoded_init, TldPayloadRoleV1.PackageInitTld):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    match decoded_prior:
+        case Some(object):
+            if seal.prior_tld_digest.is_none() or
+                    not _object_role_valid(object, TldPayloadRoleV1.PriorModuleTld):
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+        case nil:
+            if seal.prior_tld_digest.is_some(): return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val init_wire = physical_tld_object_encode_v1(decoded_init)
+    if init_wire.len() == 0 or sha256_u8_hex(init_wire) != seal.init_tld_digest:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    match decoded_prior:
+        case Some(object):
+            val prior_wire = physical_tld_object_encode_v1(object)
+            val expected = match seal.prior_tld_digest:
+                case Some(value): value
+                case nil: return Err(ThreePayloadFallbackV1.CorruptPayload)
+            if prior_wire.len() == 0 or sha256_u8_hex(prior_wire) != expected:
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+        case nil: pass
+    var ordered: [ThreePayloadSemanticBinding] = []
+    for binding in bindings:
+        if not _binding_scalar_valid(binding, seal, bounds):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        ordered = _insert_binding(ordered, binding)?
+    if ordered.len() != seal.semantic_refs.len():
+        var binding_index: i64 = 0
+        for reference in seal.semantic_refs:
+            val reference_key = reference.stable_entity_id + "\u0000" +
+                _semantic_use_rank(reference.kind).to_string()
+            while binding_index < ordered.len() and
+                    _binding_key(ordered[binding_index]) < reference_key:
+                # A binding not named by the sealed closure is corrupt input.
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+            if binding_index >= ordered.len() or
+                    _binding_key(ordered[binding_index]) != reference_key:
+                return Err(if _body_kind_v2(reference.kind):
+                    ThreePayloadFallbackV1.ExternalBodyRequired
+                else:
+                    ThreePayloadFallbackV1.ExternalFacetRequired)
+            binding_index = binding_index + 1
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    var prior_indexes: [i64] = []
+    var init_indexes: [i64] = []
+    for _ in 0..prior_sections: prior_indexes.push(-1)
+    for _ in 0..decoded_init.header.sections.len(): init_indexes.push(-1)
+    var index: i64 = 0
+    while index < ordered.len():
+        val binding = ordered[index]
+        val reference = seal.semantic_refs[index]
+        if _binding_key(binding) != reference.stable_entity_id + "\u0000" +
+                _semantic_use_rank(reference.kind).to_string() or
+                not _binding_matches_ref(binding, reference, decoded_prior, decoded_init):
+            return Err(if reference.embedded.is_some():
+                ThreePayloadFallbackV1.ExternalBodyRequired
+            else:
+                ThreePayloadFallbackV1.ExternalFacetRequired)
+        match binding.embedded_role:
+            case Some(PriorModuleTld):
+                val section_index = binding.embedded_section_index.unwrap()
+                val owner_index = prior_indexes[section_index]
+                if owner_index < 0:
+                    prior_indexes[section_index] = index
+                elif not _binding_physical_object_equal(ordered[owner_index], binding):
+                    return Err(ThreePayloadFallbackV1.CorruptPayload)
+            case Some(PackageInitTld):
+                val section_index = binding.embedded_section_index.unwrap()
+                val owner_index = init_indexes[section_index]
+                if owner_index < 0:
+                    init_indexes[section_index] = index
+                elif not _binding_physical_object_equal(ordered[owner_index], binding):
+                    return Err(ThreePayloadFallbackV1.CorruptPayload)
+            case nil: pass
+        index = index + 1
+    Ok(ThreePayloadSemanticView(module_id: bounds.expected_module_id,
+        authority_state: ThreePayloadSemanticAuthorityState.TypedObjectAuthorityUnavailable,
+        seal: seal, prior_owner: decoded_prior,
+        init_owner: decoded_init, ordered_bindings: ordered,
+        prior_binding_indexes: prior_indexes, init_binding_indexes: init_indexes,
+        retained_bytes: retained, decoded_bytes: decoded))
+fn _binding_index(view: ThreePayloadSemanticView, key: text) -> i64:
+    var low: i64 = 0
+    var high: i64 = view.ordered_bindings.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        val candidate = _binding_key(view.ordered_bindings[middle])
+        if candidate < key: low = middle + 1
+        else: high = middle
+    if low < view.ordered_bindings.len() and _binding_key(view.ordered_bindings[low]) == key:
+        low
+    else:
+        -1
+fn _extractable_body_kind(kind: ThreePayloadSemanticRefKindV1) -> bool:
+    kind == ThreePayloadSemanticRefKindV1.MacroExpansion or kind == ThreePayloadSemanticRefKindV1.GenericBody or
+        kind == ThreePayloadSemanticRefKindV1.TraitDefaultBody or kind == ThreePayloadSemanticRefKindV1.ConcreteFunction or
+        kind == ThreePayloadSemanticRefKindV1.CtfeBody
+fn _projected_object_kind(kind: ThreePayloadSemanticRefKindV1) -> text:
+    if _extractable_body_kind(kind): "portable_hir_object" else: ""
+fn _body_fingerprint_field(value: text) -> text: value.bytes().len().to_string() + ":" + value
+pub fn extract_three_payload_body_section_candidate(view: ThreePayloadSemanticView,
+    kind: ThreePayloadSemanticRefKindV1, stable_entity: text,
+) -> Result<ThreePayloadBodySectionCandidate, ThreePayloadFallbackV1>:
+    if not _extractable_body_kind(kind): return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+    val index = _binding_index(view,
+        stable_entity + "\u0000" + _semantic_use_rank(kind).to_string())
+    if index < 0: return Err(ThreePayloadFallbackV1.ExternalBodyRequired)
+    if index >= view.seal.semantic_refs.len(): return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val binding = view.ordered_bindings[index]
+    if not _binding_matches_ref(binding, view.seal.semantic_refs[index], view.prior_owner,
+            view.init_owner): return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val role = match binding.embedded_role:
+        case Some(value): value
+        case nil: return Err(ThreePayloadFallbackV1.ExternalBodyRequired)
+    val section_index = match binding.embedded_section_index:
+        case Some(value): value
+        case nil: return Err(ThreePayloadFallbackV1.ExternalBodyRequired)
+    val owner = match role:
+        case PriorModuleTld:
+            match view.prior_owner:
+                case Some(value): value
+                case nil: return Err(ThreePayloadFallbackV1.ExternalBodyRequired)
+        case PackageInitTld: view.init_owner
+    if section_index < 0 or section_index >= owner.canonical_sections.len(): return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val bytes = owner.canonical_sections[section_index]
+    if binding.raw_section_digest != Some(sha256_u8_hex(bytes)): return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok(ThreePayloadBodySectionCandidate(binding: binding, section_bytes: bytes))
+pub fn match_three_payload_body_fact_projection(candidate: ThreePayloadBodySectionCandidate,
+    projection: ThreePayloadBodyFactProjection,
+) -> Result<ThreePayloadBodyFactMatch, ThreePayloadFallbackV1>:
+    val binding = candidate.binding
+    val expected_object_kind = _projected_object_kind(binding.semantic_use_kind)
+    if expected_object_kind == "": return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+    if projection.semantic_use_kind != binding.semantic_use_kind or
+            projection.verified_object_kind != expected_object_kind:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if (not three_payload_contract_text_valid_v1(projection.codec_identity, false) or
+            not three_payload_contract_digest_valid_v1(projection.verifier_identity) or
+            not three_payload_contract_text_valid_v1(projection.rules_identity, false) or not three_payload_contract_digest_valid_v1(projection.semantic_profile_digest) or
+            not three_payload_contract_digest_valid_v1(projection.raw_content_digest) or not three_payload_contract_digest_valid_v1(projection.callable_signature_digest) or
+            not three_payload_contract_digest_valid_v1(projection.normalized_effect_digest) or
+            not three_payload_contract_digest_valid_v1(projection.transitive_effect_digest) or not three_payload_contract_digest_valid_v1(projection.dependency_digest) or
+            not three_payload_contract_text_valid_v1(projection.module_name, false) or not three_payload_contract_text_valid_v1(projection.selected_entry_name, false) or
+            projection.exported_entry_count != 1 or binding.object_ref.kind != "portable_hir_object" or binding.object_ref.schema != 2 or not three_payload_contract_digest_valid_v1(binding.object_ref.object_digest) or not three_payload_contract_digest_valid_v1(binding.access_policy_digest) or not three_payload_contract_digest_valid_v1(binding.selection_contract_digest)):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if projection.semantic_profile_digest != binding.semantic_profile_digest: return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+    if (projection.raw_content_digest != sha256_u8_hex(candidate.section_bytes) or
+            Some(projection.raw_content_digest) != binding.raw_section_digest or
+            projection.module_name + "." + projection.selected_entry_name !=
+                binding.stable_entity_id or
+            projection.callable_signature_digest != binding.callable_signature_digest or
+            projection.normalized_effect_digest != binding.effect_digest):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val fingerprint = sha256_u8_hex(("three_payload_body_fact_v2" +
+        _body_fingerprint_field(_semantic_use_rank(binding.semantic_use_kind).to_string()) +
+        _body_fingerprint_field(projection.verified_object_kind) + _body_fingerprint_field(projection.codec_identity) +
+        _body_fingerprint_field(projection.verifier_identity) + _body_fingerprint_field(projection.rules_identity) +
+        _body_fingerprint_field(projection.semantic_profile_digest) + _body_fingerprint_field(projection.raw_content_digest) +
+        _body_fingerprint_field(binding.stable_entity_id) + _body_fingerprint_field(binding.object_ref.object_digest) +
+        _body_fingerprint_field(binding.callable_signature_digest) + _body_fingerprint_field(binding.effect_digest) +
+        _body_fingerprint_field(projection.transitive_effect_digest) + _body_fingerprint_field(projection.dependency_digest) +
+        _body_fingerprint_field(binding.access_policy_digest) + _body_fingerprint_field(binding.selection_contract_digest)).bytes())
+    Ok(ThreePayloadBodyFactMatch(candidate: candidate, projection: projection, body_fingerprint: fingerprint,
+        authority_state: ThreePayloadSemanticAuthorityState.TypedObjectAuthorityUnavailable))
+fn _kind_facet(kind: ThreePayloadSemanticRefKindV1) -> text:
+    match kind:
+        case MacroExpansion: "macro_expansion"
+        case GenericBody: "generic_body"
+        case TraitDefaultBody: "trait_default_body"
+        case TraitCallable: "trait_callable"
+        case AspectCallable: "aspect_callable"
+        case ConcreteFunction: "concrete_function"
+        case CtfeBody: "ctfe_body"
+fn _producer_key(binding: ThreePayloadSemanticBinding) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: _kind_facet(binding.semantic_use_kind),
+        stable_entity_id: binding.stable_entity_id,
+        semantic_profile_digest: binding.semantic_profile_digest,
+        parameter_digest: binding.selection_contract_digest)
+fn _call_contract_fingerprint(binding: ThreePayloadSemanticBinding) -> text:
+    sha256_u8_hex(("three_payload_call_contract_v1\u0000" +
+        binding.callable_signature_digest + binding.effect_digest +
+        binding.selection_contract_digest + binding.semantic_profile_digest).bytes())
+pub fn resolve_three_payload_semantic_input(
+    view: ThreePayloadSemanticView,
+    query: SemanticQueryKeyV1,
+    kind: ThreePayloadSemanticRefKindV1,
+    stable_entity: text,
+) -> Result<BoundSemanticInput, ThreePayloadFallbackV1>:
+    if not semantic_query_key_valid_v1(query):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val index = _binding_index(view,
+        stable_entity + "\u0000" + _semantic_use_rank(kind).to_string())
+    if index < 0:
+        return Err(if _body_kind_v2(kind): ThreePayloadFallbackV1.ExternalBodyRequired
+            else: ThreePayloadFallbackV1.ExternalFacetRequired)
+    val binding = view.ordered_bindings[index]
+    if query.semantic_profile_digest != binding.semantic_profile_digest:
+        return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+    # A qualified body decoder/type-checker is not available in this slice.
+    # Physical byte identity is therefore never promoted to semantic success.
+    if _body_kind_v2(kind): return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+    val read = SemanticQueryReadV1(producer: _producer_key(binding), consumer: query,
+        facet: _kind_facet(kind), ordinal: 0,
+        consumed_fingerprint: _call_contract_fingerprint(binding),
+        witness_digest: binding.access_policy_digest,
+        partition_id: binding.object_ref.kind + ":" + binding.object_ref.schema.to_string(),
+        completeness: SemanticCoverageV1.Complete)
+    Ok(BoundSemanticInput(binding: binding, section_bytes: nil,
+        symbolic_call: true, read: read))
+pub fn resolve_three_payload_verified_body_input(
+    view: ThreePayloadSemanticView,
+    query: SemanticQueryKeyV1,
+    body_fact: ThreePayloadBodyFactMatch,
+) -> Result<BoundSemanticInput, ThreePayloadFallbackV1>:
+    # "Verified" here means that the supplied body-fact projection still
+    # matches the sealed frontend view.  P09 remains the semantic/CAS authority,
+    # so this projection is conservative and the ordinary manifest builder
+    # continues to reject non-symbolic inputs.
+    if not semantic_query_key_valid_v1(query):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val checked_fact = match_three_payload_body_fact_projection(
+        body_fact.candidate, body_fact.projection)?
+    if checked_fact.body_fingerprint != body_fact.body_fingerprint or
+            not _binding_equal(checked_fact.candidate.binding,
+                body_fact.candidate.binding):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val binding = checked_fact.candidate.binding
+    if not _body_kind_v2(binding.semantic_use_kind):
+        return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+    val index = _binding_index(view, _binding_key(binding))
+    if index < 0 or not _binding_equal(view.ordered_bindings[index], binding):
+        return Err(ThreePayloadFallbackV1.ExternalBodyRequired)
+    if query.semantic_profile_digest != binding.semantic_profile_digest:
+        return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+    val candidate = extract_three_payload_body_section_candidate(view,
+        binding.semantic_use_kind, binding.stable_entity_id)?
+    if sha256_u8_hex(candidate.section_bytes) !=
+            sha256_u8_hex(checked_fact.candidate.section_bytes):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val read = SemanticQueryReadV1(producer: _producer_key(binding), consumer: query,
+        facet: _kind_facet(binding.semantic_use_kind), ordinal: 0,
+        consumed_fingerprint: checked_fact.body_fingerprint,
+        witness_digest: binding.access_policy_digest,
+        partition_id: binding.object_ref.kind + ":" + binding.object_ref.schema.to_string(),
+        completeness: SemanticCoverageV1.Conservative)
+    Ok(BoundSemanticInput(binding: binding,
+        section_bytes: Some(candidate.section_bytes), symbolic_call: false, read: read))
+pub fn build_three_payload_semantic_read_manifest(
+    view: ThreePayloadSemanticView,
+    query: SemanticQueryKeyV1,
+    inputs: [BoundSemanticInput],
+) -> Result<SemanticQueryReadManifestV1, ThreePayloadFallbackV1>:
+    if not semantic_query_key_valid_v1(query): return Err(ThreePayloadFallbackV1.CorruptPayload)
+    var ordered: [BoundSemanticInput] = []
+    for input in inputs:
+        if not input.symbolic_call or input.section_bytes.is_some() or
+                not semantic_query_key_equal_v1(input.read.consumer, query):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        val checked = resolve_three_payload_semantic_input(view, query,
+            input.binding.semantic_use_kind, input.binding.stable_entity_id)?
+        if not _binding_equal(checked.binding, input.binding):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+        val key = _binding_key(input.binding)
+        var inserted = false
+        var duplicate = false
+        var next: [BoundSemanticInput] = []
+        for current in ordered:
+            val current_key = _binding_key(current.binding)
+            if current_key == key:
+                duplicate = true
+                next.push(current)
+            else:
+                if not inserted and key < current_key:
+                    next.push(checked)
+                    inserted = true
+                next.push(current)
+        if not duplicate:
+            if not inserted: next.push(checked)
+            ordered = next
+    var reads: [SemanticQueryReadV1] = []
+    var ordinal: i64 = 0
+    for input in ordered:
+        val read = input.read
+        reads.push(SemanticQueryReadV1(producer: read.producer, consumer: query,
+            facet: read.facet, ordinal: ordinal,
+            consumed_fingerprint: read.consumed_fingerprint,
+            witness_digest: read.witness_digest, partition_id: read.partition_id,
+            completeness: read.completeness))
+        ordinal = ordinal + 1
+    val manifest = SemanticQueryReadManifestV1(schema: 1, consumer: query,
+        ordered_reads: reads)
+    if not semantic_query_read_manifest_valid_v1(manifest):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok(manifest)
+export ThreePayloadSemanticBindBounds, ThreePayloadSemanticView, BoundSemanticInput
+export ThreePayloadSemanticAuthorityState
+export ThreePayloadBodySectionCandidate, ThreePayloadBodyFactProjection, ThreePayloadBodyFactMatch
+export bind_three_payload_semantic_inputs, resolve_three_payload_semantic_input
+export resolve_three_payload_verified_body_input
+export extract_three_payload_body_section_candidate, match_three_payload_body_fact_projection
+export build_three_payload_semantic_read_manifest

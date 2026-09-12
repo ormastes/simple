@@ -1856,6 +1856,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         system::rt_process_owned_v3_adapter_unavailable
     );
     insert_simple!(
+        "rt_process_owned_v3_capabilities_value",
+        system::rt_process_owned_v3_capabilities_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_set_capture_limits_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_observation_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
         "rt_process_pin_executable_owned_value",
         system::rt_process_owned_v3_adapter_unavailable
     );
@@ -1871,6 +1883,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_owned_v3_start_pinned_value",
         system::rt_process_owned_v3_adapter_unavailable
     );
+    insert_simple!(
+        "rt_process_observation_v4_capabilities_value",
+        system::rt_process_observation_v4_capabilities_unavailable
+    );
+    insert_simple!("rt_process_observation_v4_pin_cwd_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_cwd_digest_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_close_cwd_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_start_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_start_pinned_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_poll_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_cancel_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_collect_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_ack_collect_value", system::rt_process_observation_v4_provider_unavailable);
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
     // Piped-process family -- present in the C runtime and declared by real

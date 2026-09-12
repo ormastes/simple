@@ -1,0 +1,149 @@
+use std.database.pure_sql.{PureDatabase, PureColumnTypeV1}
+use nogc_sync_mut.database.sql.types.{DbValue}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn usage():
+    print "Usage: pure_sql_reopen_process_runner.spl <write|read|write-schema|read-schema|reject> <db-path>"
+
+fn args() -> [text]:
+    rt_cli_get_args() ?? []
+
+fn run_write(path: text):
+    val db = PureDatabase.open_deferred(path).unwrap()
+    if not db.exec_sql("CREATE TABLE mm (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok():
+        panic("writer schema creation failed")
+    if not db.exec_sql("INSERT INTO mm (id,value) VALUES ('writer','one')").is_ok():
+        panic("writer insert failed")
+    if not db.checkpoint().is_ok():
+        panic("writer checkpoint failed")
+    print "PURE_SQL_WRITER_CHECKPOINTED"
+
+fn exact_framed_value() -> text:
+    "left|right\tline1\r\nline2%tail"
+
+fn run_write_framed(path: text):
+    val db = PureDatabase.open_deferred(path).unwrap()
+    if not db.exec_sql("CREATE TABLE framed (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok():
+        panic("framed writer schema creation failed")
+    if not db.exec("INSERT INTO framed (id,value) VALUES (?, ?)", [
+        DbValue.Text(value: "key"), DbValue.Text(value: exact_framed_value())
+    ]).is_ok():
+        panic("framed writer insert failed")
+    if not db.checkpoint().is_ok(): panic("framed writer checkpoint failed")
+    print "PURE_SQL_FRAMED_WRITER_CHECKPOINTED"
+
+fn run_read_framed(path: text):
+    val db = PureDatabase.open_deferred(path).unwrap()
+    val value = db.query_value("SELECT value FROM framed WHERE id = ?", [DbValue.Text(value: "key")]).unwrap().unwrap()
+    match value:
+        case Text(actual):
+            if actual != exact_framed_value(): panic("framed value changed across process reopen")
+        case _: panic("framed value recovered with wrong type")
+    print "PURE_SQL_FRAMED_READER_REOPENED"
+
+fn run_read(path: text):
+    val db = PureDatabase.open_deferred(path).unwrap()
+    val before = db.query("SELECT value FROM mm", []).unwrap()
+    if before.len() != 1:
+        panic("reader did not observe writer row")
+    if not db.exec_sql("CREATE TABLE IF NOT EXISTS mm (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok():
+        panic("reader schema reconciliation failed")
+    if not db.exec_sql("INSERT INTO mm (id,value) VALUES ('reader','two')").is_ok():
+        panic("reader insert failed")
+    if not db.checkpoint().is_ok():
+        panic("reader checkpoint failed")
+    val reopened = PureDatabase.open_deferred(path).unwrap()
+    val after = reopened.query("SELECT value FROM mm", []).unwrap()
+    if after.len() != 2:
+        panic("reader second reopen lost a row")
+    print "PURE_SQL_READER_REOPENED rows={after.len()}"
+
+fn run_write_schema(path: text):
+    val db = PureDatabase.open_deferred(path).unwrap()
+    if not db.exec_sql("CREATE TABLE typed (label TEXT, id INTEGER PRIMARY KEY, active BOOLEAN, score REAL, raw BLOB)").is_ok():
+        panic("schema writer creation failed")
+    if not db.checkpoint().is_ok():
+        panic("schema writer checkpoint failed")
+    print "PURE_SQL_SCHEMA_WRITER_CHECKPOINTED"
+
+fn run_read_schema(path: text):
+    val db = PureDatabase.open_deferred(path).unwrap()
+    val names = db.table_names().unwrap()
+    if names.len() != 1 or names[0] != "typed":
+        panic("schema reader table inventory mismatch")
+    val schema = db.describe_table("typed").unwrap().unwrap()
+    if schema.columns.len() != 5 or schema.primary_key_index != 1:
+        panic("schema reader shape mismatch")
+    if schema.columns[0].name != "label" or schema.columns[1].name != "id":
+        panic("schema reader order mismatch")
+    if schema.columns[0].declared_type != PureColumnTypeV1.Text:
+        panic("schema reader text type mismatch")
+    if schema.columns[1].declared_type != PureColumnTypeV1.Integer:
+        panic("schema reader integer type mismatch")
+    if schema.columns[2].declared_type != PureColumnTypeV1.Boolean:
+        panic("schema reader boolean type mismatch")
+    if schema.columns[3].declared_type != PureColumnTypeV1.Real:
+        panic("schema reader real type mismatch")
+    if schema.columns[4].declared_type != PureColumnTypeV1.Blob:
+        panic("schema reader blob type mismatch")
+    print "PURE_SQL_SCHEMA_READER_REOPENED columns={schema.columns.len()} pk={schema.primary_key_index}"
+
+fn run_reject(path: text):
+    val opened = PureDatabase.open_deferred(path)
+    if opened.is_ok():
+        panic("invalid or legacy image was accepted as PureDatabase")
+    print "PURE_SQL_IMAGE_REJECTED"
+
+fn run_publish(stage_path: text, destination_path: text):
+    val db = PureDatabase.open_deferred(stage_path).unwrap()
+    if not db.exec_sql("CREATE TABLE mm (id TEXT PRIMARY KEY, value TEXT NOT NULL)").is_ok():
+        panic("publication stage schema creation failed")
+    if not db.exec_sql("INSERT INTO mm (id,value) VALUES ('staged','bytes')").is_ok():
+        panic("publication stage insert failed")
+    if not db.checkpoint().is_ok():
+        panic("publication stage checkpoint failed")
+    val stage_bytes = file_read(stage_path)
+    if stage_bytes.len() <= "simple-pure-db-v3".len():
+        panic("publication stage did not contain a table image")
+    if not file_atomic_write(destination_path, stage_bytes):
+        panic("publication atomic write failed")
+    val destination_bytes = file_read(destination_path)
+    if stage_bytes != destination_bytes:
+        panic("published bytes differ from staged bytes")
+    val reopened = PureDatabase.open(destination_path).unwrap()
+    val rows = reopened.query("SELECT value FROM mm", []).unwrap()
+    if rows.len() != 1:
+        panic("published image did not reopen with its row")
+    print "PURE_SQL_PUBLICATION_VERIFIED bytes={stage_bytes.len()} rows={rows.len()}"
+
+fn main():
+    val argv = args()
+    if argv.len() < 3:
+        usage()
+        return
+    val mode = argv[1]
+    val path = argv[2]
+    if mode == "write":
+        run_write(path)
+    elif mode == "write-framed":
+        run_write_framed(path)
+    elif mode == "read-framed":
+        run_read_framed(path)
+    elif mode == "read":
+        run_read(path)
+    elif mode == "write-schema":
+        run_write_schema(path)
+    elif mode == "read-schema":
+        run_read_schema(path)
+    elif mode == "reject":
+        run_reject(path)
+    elif mode == "publish":
+        if argv.len() < 4:
+            usage()
+            return
+        run_publish(path, argv[3])
+    else:
+        usage()

@@ -1,5 +1,18 @@
-use std.common.crypto.sha256 (sha256_text)
-use compiler.common.cache_contract.snapshot_contract_v1 (LogicalSourcePathV1)
+#![allow(primitive_api)]
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.structural.wire.{wire_check_envelope, wire_envelope_len, wire_magic,
+    wire_put_envelope, wire_put_u8, wire_put_u32, wire_put_u64}
+use compiler.common.cache_contract.physical_tld_v1.{ThreePayloadContractReaderV1,
+    three_payload_contract_budget_v1, three_payload_contract_digest_valid_v1,
+    three_payload_contract_max_items_v1, three_payload_contract_max_payload_bytes_v1,
+    three_payload_contract_put_digest_v1, three_payload_contract_put_text_v1,
+    three_payload_contract_text_valid_v1}
+use compiler.common.cache_contract.snapshot_contract_v1.{CacheObjectRefV1,
+    LogicalSourcePathV1}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    SemanticScopeSummaryLiveRequestV1
+}
 
 pub struct PublicSummaryEntryV1:
     stable_symbol_id: text
@@ -62,3 +75,320 @@ pub struct PublicSummaryV1:
     reverse_reference_roots: [PublicSummaryEntryV1]
     declaration_graph_digest: text
     virtual_text_digest: text
+
+# Schema 1 remains the opaque legacy summary.  Schema 2 is an opt-in owner
+# profile; the CCH1 envelope wiring is deliberately owned by the cache codec.
+pub enum SummaryObjectReferenceRoleV2:
+    ExecutableBody
+    ConstBody
+    MacroBody
+    GenericBody
+    DefaultTraitBody
+    AdviceBody
+    ReverseNavigation
+
+pub struct SummaryObjectReferenceV2:
+    stable_symbol_id: text
+    role: SummaryObjectReferenceRoleV2
+    target: CacheObjectRefV1
+    access_policy_digest: text
+    semantic_profile_digest: text
+
+pub struct SummaryObjectReferenceDecodeV2:
+    ok: bool
+    references: [SummaryObjectReferenceV2]
+    error: text
+
+pub enum PublicSummaryReferenceCoverageV2:
+    Complete
+    LegacyReferenceCoverageUnknown
+
+pub struct PublicSummaryTypedReferenceProfileV2:
+    schema: i64
+    summary: PublicSummaryV1
+    references: [SummaryObjectReferenceV2]
+    producer_references: [SummaryObjectReferenceV2]
+    reverse_navigation_references: [SummaryObjectReferenceV2]
+    producer_semantic_digest: text
+
+fn _summary_reference_role_tag_v2(role: SummaryObjectReferenceRoleV2) -> i64:
+    match role:
+        case ExecutableBody: 1
+        case ConstBody: 2
+        case MacroBody: 3
+        case GenericBody: 4
+        case DefaultTraitBody: 5
+        case AdviceBody: 6
+        case ReverseNavigation: 7
+
+fn _summary_reference_role_from_tag_v2(tag: i64) -> SummaryObjectReferenceRoleV2?:
+    if tag == 1: return Some(SummaryObjectReferenceRoleV2.ExecutableBody)
+    if tag == 2: return Some(SummaryObjectReferenceRoleV2.ConstBody)
+    if tag == 3: return Some(SummaryObjectReferenceRoleV2.MacroBody)
+    if tag == 4: return Some(SummaryObjectReferenceRoleV2.GenericBody)
+    if tag == 5: return Some(SummaryObjectReferenceRoleV2.DefaultTraitBody)
+    if tag == 6: return Some(SummaryObjectReferenceRoleV2.AdviceBody)
+    if tag == 7: return Some(SummaryObjectReferenceRoleV2.ReverseNavigation)
+    nil
+
+fn _summary_reference_is_reverse_v2(value: SummaryObjectReferenceV2) -> bool:
+    match value.role:
+        case ReverseNavigation: true
+        case _: false
+
+pub fn public_summary_reference_valid_v2(value: SummaryObjectReferenceV2) -> bool:
+    if not three_payload_contract_text_valid_v1(value.stable_symbol_id, false) or
+            not three_payload_contract_digest_valid_v1(value.target.object_digest) or
+            not three_payload_contract_digest_valid_v1(value.access_policy_digest) or
+            not three_payload_contract_digest_valid_v1(value.semantic_profile_digest):
+        return false
+    if _summary_reference_is_reverse_v2(value):
+        return value.target.kind == "reverse_reference_shard" and value.target.schema == 1
+    value.target.kind == "portable_hir_object" and value.target.schema == 2
+
+fn _summary_reference_key_v2(value: SummaryObjectReferenceV2) -> text:
+    value.stable_symbol_id + "\u0000" +
+        _summary_reference_role_tag_v2(value.role).to_string()
+
+pub fn public_summary_sorted_references_v2(
+    values: [SummaryObjectReferenceV2],
+) -> Result<[SummaryObjectReferenceV2], text>:
+    if values.len() > three_payload_contract_max_items_v1():
+        return Err("public_summary_reference_count_exceeded")
+    var result: [SummaryObjectReferenceV2] = []
+    for value in values:
+        if not public_summary_reference_valid_v2(value):
+            return Err("invalid_public_summary_object_reference")
+        val key = _summary_reference_key_v2(value)
+        var inserted = false
+        var next: [SummaryObjectReferenceV2] = []
+        for current in result:
+            val current_key = _summary_reference_key_v2(current)
+            if current_key == key:
+                return Err("duplicate_public_summary_object_reference")
+            if not inserted and key < current_key:
+                next.push(value)
+                inserted = true
+            next.push(current)
+        if not inserted: next.push(value)
+        result = next
+    Ok(result)
+
+pub fn public_summary_reference_payload_encode_v2(
+    values: [SummaryObjectReferenceV2],
+) -> [u8]:
+    val sorted = match public_summary_sorted_references_v2(values):
+        case Ok(result): result
+        case Err(_): return []
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len() + 8 + 4)
+    budget.add_items(sorted.len())
+    for value in sorted:
+        budget.add_text(value.stable_symbol_id, false)
+        budget.add_bytes(1)
+        budget.add_text(value.target.kind, false)
+        budget.add_bytes(8)
+        budget.add_digest(value.target.object_digest)
+        budget.add_digest(value.access_policy_digest)
+        budget.add_digest(value.semantic_profile_digest)
+    if not budget.ok: return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("PSR2"), 2)
+    out = wire_put_u64(out, 2)
+    out = wire_put_u32(out, sorted.len())
+    for value in sorted:
+        out = three_payload_contract_put_text_v1(out, value.stable_symbol_id)
+        out = wire_put_u8(out, _summary_reference_role_tag_v2(value.role))
+        out = three_payload_contract_put_text_v1(out, value.target.kind)
+        out = wire_put_u64(out, value.target.schema)
+        out = three_payload_contract_put_digest_v1(out, value.target.object_digest)
+        out = three_payload_contract_put_digest_v1(out, value.access_policy_digest)
+        out = three_payload_contract_put_digest_v1(out, value.semantic_profile_digest)
+    out
+
+fn _summary_reference_decode_failure_v2(error: text) -> SummaryObjectReferenceDecodeV2:
+    SummaryObjectReferenceDecodeV2(ok: false, references: [], error: error)
+
+pub fn public_summary_reference_payload_decode_v2(
+    bytes: [u8],
+) -> SummaryObjectReferenceDecodeV2:
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1():
+        return _summary_reference_decode_failure_v2("public_summary_reference_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("PSR2"), 2):
+        return _summary_reference_decode_failure_v2("public_summary_reference_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(),
+        ok: true, error: "", retained_text_bytes: 0, retained_items: 0)
+    val schema = reader.read_u64_nonnegative()
+    if schema != 2:
+        return _summary_reference_decode_failure_v2("public_summary_reference_schema_mismatch")
+    val count = reader.read_count()
+    var values: [SummaryObjectReferenceV2] = []
+    var index: i64 = 0
+    while reader.ok and index < count:
+        val stable_symbol_id = reader.read_text(false)
+        val role = _summary_reference_role_from_tag_v2(reader.read_u8())
+        if role == nil:
+            return _summary_reference_decode_failure_v2("unknown_public_summary_reference_role")
+        val kind = reader.read_text(false)
+        val target_schema = reader.read_u64_nonnegative()
+        val object_digest = reader.read_digest()
+        val access_policy_digest = reader.read_digest()
+        val semantic_profile_digest = reader.read_digest()
+        val decoded_role = match role:
+            case Some(value): value
+            case nil: SummaryObjectReferenceRoleV2.ExecutableBody
+        values.push(SummaryObjectReferenceV2(stable_symbol_id: stable_symbol_id,
+            role: decoded_role, target: CacheObjectRefV1(kind: kind,
+                schema: target_schema, object_digest: object_digest),
+            access_policy_digest: access_policy_digest,
+            semantic_profile_digest: semantic_profile_digest))
+        index = index + 1
+    if not reader.finished():
+        return _summary_reference_decode_failure_v2(
+            if reader.error == "": "trailing_public_summary_reference_bytes" else: reader.error)
+    val sorted = match public_summary_sorted_references_v2(values):
+        case Ok(result): result
+        case Err(error): return _summary_reference_decode_failure_v2(error)
+    if public_summary_reference_payload_encode_v2(sorted) != bytes:
+        return _summary_reference_decode_failure_v2("noncanonical_public_summary_reference_bytes")
+    SummaryObjectReferenceDecodeV2(ok: true, references: sorted, error: "")
+
+pub fn public_summary_legacy_reference_coverage_v2(
+    summary: PublicSummaryV1,
+) -> PublicSummaryReferenceCoverageV2:
+    if summary.body_refs.len() == 0 and summary.reverse_reference_roots.len() == 0:
+        return PublicSummaryReferenceCoverageV2.Complete
+    PublicSummaryReferenceCoverageV2.LegacyReferenceCoverageUnknown
+
+pub fn public_summary_producer_semantic_digest_v2(
+    summary: PublicSummaryV1,
+    references: [SummaryObjectReferenceV2],
+) -> text:
+    val sorted = match public_summary_sorted_references_v2(references):
+        case Ok(result): result
+        case Err(_): return ""
+    var canonical = "simple.public.summary.semantic.v2\u0000" +
+        summary.snapshot_id + "\u0000" + summary.logical_path.repository_namespace_digest +
+        "\u0000" + summary.logical_path.module_relative_utf8 + "\u0000" +
+        summary.source_blob_digest + "\u0000" + summary.compiler_owner_digest +
+        "\u0000" + summary.grammar_digest + "\u0000" +
+        summary.declaration_graph_digest + "\u0000" + summary.virtual_text_digest
+    for value in sorted:
+        if _summary_reference_is_reverse_v2(value): continue
+        canonical = canonical + "\u0000" + _summary_reference_key_v2(value) +
+            "\u0000" + value.target.kind + "\u0000" + value.target.schema.to_string() +
+            "\u0000" + value.target.object_digest + "\u0000" +
+            value.access_policy_digest + "\u0000" + value.semantic_profile_digest
+    sha256_text(canonical)
+
+pub fn public_summary_typed_reference_profile_v2(
+    summary: PublicSummaryV1,
+    references: [SummaryObjectReferenceV2],
+) -> Result<PublicSummaryTypedReferenceProfileV2, text>:
+    if summary.schema != 1:
+        return Err("typed_public_summary_requires_legacy_semantic_schema_1")
+    match public_summary_legacy_reference_coverage_v2(summary):
+        case LegacyReferenceCoverageUnknown:
+            return Err("LegacyReferenceCoverageUnknown")
+        case Complete: pass
+    val sorted = public_summary_sorted_references_v2(references)?
+    if public_summary_reference_payload_encode_v2(sorted).len() == 0:
+        return Err("invalid_public_summary_reference_payload")
+    val semantic_digest = public_summary_producer_semantic_digest_v2(summary, sorted)
+    if semantic_digest == "": return Err("invalid_public_summary_semantic_identity")
+    var producer_references: [SummaryObjectReferenceV2] = []
+    var reverse_navigation_references: [SummaryObjectReferenceV2] = []
+    for value in sorted:
+        if _summary_reference_is_reverse_v2(value):
+            reverse_navigation_references.push(value)
+        else:
+            producer_references.push(value)
+    Ok(PublicSummaryTypedReferenceProfileV2(schema: 2, summary: summary,
+        references: sorted, producer_references: producer_references,
+        reverse_navigation_references: reverse_navigation_references,
+        producer_semantic_digest: semantic_digest))
+
+pub fn public_summary_typed_reference_profile_digest_v2(
+    profile: PublicSummaryTypedReferenceProfileV2,
+) -> text:
+    if profile.schema != 2 or profile.producer_semantic_digest !=
+            public_summary_producer_semantic_digest_v2(profile.summary, profile.references):
+        return ""
+    var derived: [SummaryObjectReferenceV2] = []
+    for value in profile.references:
+        if not _summary_reference_is_reverse_v2(value): derived.push(value)
+    val payload = public_summary_reference_payload_encode_v2(derived)
+    if payload != public_summary_reference_payload_encode_v2(profile.producer_references):
+        return ""
+    if payload.len() == 0: return ""
+    sha256_text("simple.public.summary.typed-reference-profile.v2\u0000" +
+        profile.producer_semantic_digest + "\u0000" + sha256_u8_hex(payload))
+
+pub fn public_summary_reverse_navigation_digest_v2(
+    profile: PublicSummaryTypedReferenceProfileV2,
+) -> text:
+    if profile.schema != 2: return ""
+    var derived: [SummaryObjectReferenceV2] = []
+    for value in profile.references:
+        if _summary_reference_is_reverse_v2(value): derived.push(value)
+    val payload = public_summary_reference_payload_encode_v2(derived)
+    if payload != public_summary_reference_payload_encode_v2(
+            profile.reverse_navigation_references): return ""
+    if payload.len() == 0: return ""
+    # This digest is generation-bound inspection metadata.  It is never an
+    # input to the producer semantic/profile identity above.
+    sha256_text("simple.public.summary.reverse-navigation.v2\u0000" +
+        sha256_u8_hex(payload))
+
+pub fn public_summary_typed_cch1_activation_available_v2() -> bool:
+    # Slice A owns CCH1 dispatch.  This remains false until its registry admits
+    # kind 3/schema 2 and verifies the complete summary-plus-reference bytes.
+    false
+
+# Reconstruct the exact public-summary set identity from the currently held
+# typed profiles.  Object digests remain separate because the CAS codec, not a
+# summary value, owns the outer object identity.
+pub fn public_summary_live_set_digest_v1(
+    object_digests: [text],
+    profiles: [PublicSummaryTypedReferenceProfileV2],
+) -> text:
+    if object_digests.len() != profiles.len() or
+            profiles.len() > three_payload_contract_max_items_v1():
+        return ""
+    var canonical = "simple.semantic-scope.summary-set.v1\n"
+    for index in 0..profiles.len():
+        val object_digest = object_digests[index]
+        val profile_digest = public_summary_typed_reference_profile_digest_v2(
+            profiles[index])
+        val reverse_navigation_digest = public_summary_reverse_navigation_digest_v2(
+            profiles[index])
+        if (not three_payload_contract_digest_valid_v1(object_digest) or
+                not three_payload_contract_digest_valid_v1(profile_digest) or
+                not three_payload_contract_digest_valid_v1(
+                    reverse_navigation_digest)):
+            return ""
+        canonical = canonical + object_digest + "\u0000" + profile_digest + "\n"
+    sha256_text(canonical)
+
+# Existing public-summary owner validation.  A copied set digest is accepted
+# only when it is reproduced from the exact typed profiles currently supplied
+# by that owner and remains bound to a well-formed scope identity.
+pub fn public_summary_validate_live_set_v1(
+    request: SemanticScopeSummaryLiveRequestV1,
+    object_digests: [text],
+    profiles: [PublicSummaryTypedReferenceProfileV2],
+) -> bool:
+    val identity = request.identity
+    if (identity.generation < 0 or identity.cancellation_epoch < 0 or
+            not three_payload_contract_digest_valid_v1(identity.writer_instance_digest) or
+            not three_payload_contract_digest_valid_v1(identity.manifest_digest) or
+            not three_payload_contract_digest_valid_v1(identity.pin_snapshot_digest) or
+            not three_payload_contract_digest_valid_v1(
+                identity.generation_closure_digest) or
+            not three_payload_contract_digest_valid_v1(identity.binding_digest) or
+            not three_payload_contract_digest_valid_v1(identity.query_domain_digest) or
+            not three_payload_contract_digest_valid_v1(identity.semantic_rules_digest)):
+        return false
+    val set_digest = public_summary_live_set_digest_v1(object_digests, profiles)
+    set_digest != "" and request.summary_count == profiles.len() and
+        request.public_summary_set_digest == set_digest

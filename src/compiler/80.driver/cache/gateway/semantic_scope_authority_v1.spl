@@ -1,0 +1,691 @@
+# codex-impl
+# Existing-writer integration seam for attempt-bound semantic completeness.
+#
+# This module performs a complete immutable preflight and revalidates the
+# existing durable writer, public-summary and prepared-attempt owners. Live
+# scope issuance stays closed until all five semantic owners expose
+# issuer-validated receipts. It never invokes a worker and never calls the
+# generation publisher.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_valid_v1,
+    generation_manifest_digest_v1
+}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1,
+    three_payload_contract_text_valid_v1
+}
+use compiler.common.cache_contract.public_summary_v1.{
+    PublicSummaryTypedReferenceProfileV2, SummaryObjectReferenceRoleV2,
+    public_summary_typed_reference_profile_digest_v2,
+    public_summary_reverse_navigation_digest_v2,
+    public_summary_validate_live_set_v1
+}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    SemanticScopeLiveIdentityV1, SemanticScopeWriterLiveRequestV1,
+    SemanticScopeSummaryLiveRequestV1, SemanticScopeAttemptLiveRequestV1,
+    SemanticScopeContributionLiveRequestV1,
+    L78BoundaryErrorV4, L78OwnerTokenV4, L78OwnedResultV4,
+    semantic_scope_live_requests_coherent_v1
+}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ThreePayloadClosureSealV2, ThreePayloadFallbackV1,
+    three_payload_closure_seal_valid_v2, three_payload_closure_seal_digest_v2
+}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectStageV1, PortablePortabilityV1
+}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedCasTypedIdentityV1, VerifiedGenerationRootV1,
+    VerifiedGenerationPinSnapshotV1, VerifiedCasClosureReceiptV1,
+    VerifiedGenerationDurableBindingV1,
+    verified_generation_recovery_projection_v1
+}
+use compiler.driver.cache.gateway.cache_writer_v1.{
+    writer_validate_live_semantic_scope_v1
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    PreparedThreePayloadV2, prepared_attempt_validate_live_v1
+}
+use compiler.semantics.semantic_scope_contribution_v1.{
+    SemanticScopeDimensionV1, SemanticScopeBodyUseProfileV1,
+    SemanticScopeDependencyEnumerationV1,
+    SemanticScopeContributionAuthorityV1,
+    SemanticScopeContributionProjectionV1,
+    SemanticScopeContributionCandidateV1,
+    semantic_scope_required_dimension_v1,
+    semantic_scope_body_use_profile_supported_v1,
+    semantic_scope_dependency_enumeration_valid_v1,
+    semantic_scope_contribution_projection_v1,
+    semantic_scope_contribution_port_available_v1,
+    semantic_owner_validate_live_contribution_v1
+}
+use compiler.hir.portable_body_semantics.{portable_embedded_body_profile_digest_v1}
+
+pub const SEMANTIC_SCOPE_REQUIRED_CONTRIBUTIONS_V1: i64 = 5
+pub const SEMANTIC_SCOPE_MAX_BODY_OBJECTS_V1: i64 = 1024
+pub const SEMANTIC_SCOPE_MAX_DEPENDENCY_EDGES_V1: i64 = 65536
+pub const SEMANTIC_SCOPE_MAX_RETAINED_BYTES_V1: i64 = 134217728
+
+pub enum SemanticScopePreflightErrorV1:
+    InvalidBinding
+    ExactManifestMismatch
+    PinOrClosureMismatch
+    PublicSummaryMismatch
+    DependencyEnumerationMismatch
+    UnsupportedProfile
+    BoundsExceeded
+
+pub struct SemanticScopePublicSummaryBindingV1:
+    object_digest: text
+    profile_digest: text
+    profile: PublicSummaryTypedReferenceProfileV2
+
+pub struct SemanticScopeWriterBindingV1:
+    writer_instance_digest: text
+    root: VerifiedGenerationRootV1
+    expected_parent_manifest_digest: text
+    snapshot_semantic_digest: text
+    snapshot_cas_object_digest: text
+    source_content_digest: text
+    module_id: text
+    query_domain_digest: text
+    compiler_owner_digest: text
+    grammar_digest: text
+    semantic_rules_digest: text
+    verifier_registry_digest: text
+    access_policy_digest: text
+    cancellation_epoch: i64
+    attempt_seal: ThreePayloadClosureSealV2
+    attempt_seal_digest: text
+    body_use_profile: SemanticScopeBodyUseProfileV1
+    dependency_enumeration: SemanticScopeDependencyEnumerationV1
+    max_contributions: i64
+    max_body_objects: i64
+    max_dependency_edges: i64
+    max_retained_bytes: i64
+
+pub struct SemanticScopePreflightV1:
+    binding_digest: text
+    generation: i64
+    manifest_digest: text
+    pin_epoch: i64
+    pin_snapshot_digest: text
+    generation_closure_digest: text
+    attempt_seal_digest: text
+    public_summary_set_digest: text
+    dependency_enumeration_digest: text
+
+# Opaque writer-owned live scope.  No public aggregate constructor exists.
+struct CacheSemanticScopeV1:
+    preflight: SemanticScopePreflightV1
+    module_id: text
+    query_domain_digest: text
+    semantic_rules_digest: text
+    cancellation_epoch: i64
+    active: bool
+
+# Opaque grant.  Public digests are projected only after this owner validates
+# the exact live scope and every issuer-owned contribution.
+struct CacheSemanticCompletenessV1:
+    preflight: SemanticScopePreflightV1
+    query_domain_digest: text
+    semantic_rules_digest: text
+    cancellation_epoch: i64
+    exact_seal_digest: text
+    owner_grant_digest: text
+
+pub struct SemanticScopeGrantProjectionV1:
+    binding_digest: text
+    generation: i64
+    manifest_digest: text
+    attempt_seal_digest: text
+    exact_seal_digest: text
+    dependency_enumeration_digest: text
+    owner_grant_digest: text
+
+pub struct SemanticScopeConsumptionBindingV1:
+    binding_digest: text
+    generation: i64
+    manifest_digest: text
+    attempt_seal_digest: text
+    query_domain_digest: text
+    semantic_rules_digest: text
+    cancellation_epoch: i64
+    dependency_enumeration_digest: text
+
+# Copied routing metadata paired with the existing semantic owner's candidate.
+# This is not a receipt and cannot construct contribution authority.
+pub struct SemanticScopeContributionLiveBindingV1:
+    candidate: SemanticScopeContributionCandidateV1
+    issuer_instance_digest: text
+    issuer_generation: i64
+    authority_serial: i64
+
+fn _digest_v1(value: text) -> bool:
+    three_payload_contract_digest_valid_v1(value)
+
+fn _identity_equal_v1(
+    left: VerifiedCasTypedIdentityV1,
+    right: VerifiedCasTypedIdentityV1,
+) -> bool:
+    left.kind == right.kind and left.digest == right.digest
+
+fn _expected_closure_v1(
+    root: VerifiedGenerationRootV1,
+    manifest: GenerationManifestV1,
+) -> [VerifiedCasTypedIdentityV1]:
+    var closure: [VerifiedCasTypedIdentityV1] = [
+        VerifiedCasTypedIdentityV1(kind: "generation_manifest",
+            digest: root.manifest_digest),
+        VerifiedCasTypedIdentityV1(kind: "compile_snapshot",
+            digest: manifest.snapshot_digest)]
+    for digest in manifest.summary_refs:
+        closure.push(VerifiedCasTypedIdentityV1(kind: "public_summary", digest: digest))
+    for digest in manifest.scope_refs:
+        closure.push(VerifiedCasTypedIdentityV1(kind: "worker_result", digest: digest))
+    for digest in manifest.rr_shard_refs:
+        closure.push(VerifiedCasTypedIdentityV1(kind: "reverse_reference_shard", digest: digest))
+    for digest in manifest.forward_manifest_refs:
+        closure.push(VerifiedCasTypedIdentityV1(kind: "forward_manifest", digest: digest))
+    for reference in manifest.portable_refs:
+        closure.push(VerifiedCasTypedIdentityV1(kind: "portable_hir_object",
+            digest: reference.content_digest))
+    for digest in manifest.diagnostic_refs:
+        closure.push(VerifiedCasTypedIdentityV1(kind: "diagnostic_manifest", digest: digest))
+    for digest in manifest.target_refs:
+        closure.push(VerifiedCasTypedIdentityV1(kind: "target_artifact", digest: digest))
+    closure
+
+fn _closure_exact_v1(
+    root: VerifiedGenerationRootV1,
+    manifest: GenerationManifestV1,
+    closure: VerifiedCasClosureReceiptV1,
+) -> bool:
+    val expected = _expected_closure_v1(root, manifest)
+    if closure.ordered_closure.len() != expected.len(): return false
+    for index in 0..expected.len():
+        if not _identity_equal_v1(closure.ordered_closure[index], expected[index]):
+            return false
+    true
+
+fn _summary_bindings_digest_v1(
+    summaries: [SemanticScopePublicSummaryBindingV1],
+) -> text:
+    var canonical = "simple.semantic-scope.summary-set.v1\n"
+    for summary in summaries:
+        canonical = canonical + summary.object_digest + "\u0000" +
+            summary.profile_digest + "\n"
+    sha256_text(canonical)
+
+fn _portable_ref_index_v1(manifest: GenerationManifestV1, digest: text) -> i64:
+    for index in 0..manifest.portable_refs.len():
+        if manifest.portable_refs[index].content_digest == digest: return index
+    -1
+
+fn _rr_ref_present_v1(manifest: GenerationManifestV1, digest: text) -> bool:
+    manifest.rr_shard_refs.index_of(digest) >= 0
+
+fn _summary_set_exact_v1(
+    binding: SemanticScopeWriterBindingV1,
+    manifest: GenerationManifestV1,
+    summaries: [SemanticScopePublicSummaryBindingV1],
+) -> SemanticScopePreflightErrorV1?:
+    if summaries.len() != manifest.summary_refs.len():
+        return Some(SemanticScopePreflightErrorV1.PublicSummaryMismatch)
+    var portable_seen: Dict<text, bool> = {}
+    var rr_seen: Dict<text, bool> = {}
+    for index in 0..summaries.len():
+        val summary = summaries[index]
+        if (summary.object_digest != manifest.summary_refs[index] or
+                not _digest_v1(summary.object_digest) or
+                summary.profile.schema != 2 or
+                public_summary_typed_reference_profile_digest_v2(summary.profile) !=
+                    summary.profile_digest or not _digest_v1(summary.profile_digest)):
+            return Some(SemanticScopePreflightErrorV1.PublicSummaryMismatch)
+        if not _digest_v1(public_summary_reverse_navigation_digest_v2(
+                summary.profile)):
+            return Some(SemanticScopePreflightErrorV1.PublicSummaryMismatch)
+        for reference in summary.profile.producer_references:
+            match reference.role:
+                case ExecutableBody:
+                    val object_index = _portable_ref_index_v1(manifest,
+                        reference.target.object_digest)
+                    if object_index < 0:
+                        return Some(SemanticScopePreflightErrorV1.PublicSummaryMismatch)
+                    val portable = manifest.portable_refs[object_index]
+                    if (reference.target.kind != "portable_hir_object" or
+                            reference.target.schema != 2 or portable.ir_schema != 2 or
+                            portable.stage != PortableObjectStageV1.Base or
+                            portable.portability != PortablePortabilityV1.Portable or
+                            portable.target_contract_digest.is_some() or
+                            portable.required_semantics_digest !=
+                                portable_embedded_body_profile_digest_v1() or
+                            reference.semantic_profile_digest !=
+                                portable.required_semantics_digest or
+                            reference.access_policy_digest != binding.access_policy_digest):
+                        return Some(SemanticScopePreflightErrorV1.UnsupportedProfile)
+                    portable_seen[portable.content_digest] = true
+                case ConstBody | MacroBody | GenericBody | DefaultTraitBody | AdviceBody:
+                    return Some(SemanticScopePreflightErrorV1.UnsupportedProfile)
+                case ReverseNavigation:
+                    return Some(SemanticScopePreflightErrorV1.PublicSummaryMismatch)
+        for reference in summary.profile.reverse_navigation_references:
+            if reference.role != SummaryObjectReferenceRoleV2.ReverseNavigation or
+                    reference.target.kind != "reverse_reference_shard" or
+                    reference.target.schema != 1 or
+                    not _rr_ref_present_v1(manifest, reference.target.object_digest):
+                return Some(SemanticScopePreflightErrorV1.PublicSummaryMismatch)
+            rr_seen[reference.target.object_digest] = true
+    for portable in manifest.portable_refs:
+        if not portable_seen.contains_key(portable.content_digest):
+            return Some(SemanticScopePreflightErrorV1.PublicSummaryMismatch)
+    for digest in manifest.rr_shard_refs:
+        if not rr_seen.contains_key(digest):
+            return Some(SemanticScopePreflightErrorV1.PublicSummaryMismatch)
+    nil
+
+fn _attempt_supported_v1(binding: SemanticScopeWriterBindingV1,
+        manifest: GenerationManifestV1) -> bool:
+    if not semantic_scope_body_use_profile_supported_v1(binding.body_use_profile):
+        return false
+    val has_bodies = manifest.portable_refs.len() > 0
+    match binding.body_use_profile:
+        case CallOnly:
+            if has_bodies: return false
+        case EmbeddedPureClosedFunctions:
+            if not has_bodies: return false
+        case MacroExpansion | GenericTemplate | TraitDefaultBody |
+                AroundAdvice | BodySensitiveAdvice:
+            return false
+    for reference in binding.attempt_seal.semantic_refs:
+        match reference.kind:
+            case MacroExpansion | GenericBody | TraitDefaultBody: return false
+            case TraitCallable | AspectCallable:
+                if reference.embedded.is_some(): return false
+    true
+
+fn _dependency_exact_v1(binding: SemanticScopeWriterBindingV1,
+        manifest: GenerationManifestV1) -> bool:
+    val dependencies = binding.dependency_enumeration
+    if not semantic_scope_dependency_enumeration_valid_v1(dependencies) or
+            dependencies.body_object_digests.len() != manifest.portable_refs.len():
+        return false
+    for index in 0..manifest.portable_refs.len():
+        if dependencies.body_object_digests[index] !=
+                manifest.portable_refs[index].content_digest:
+            return false
+    true
+
+fn _binding_limits_valid_v1(binding: SemanticScopeWriterBindingV1) -> bool:
+    binding.max_contributions == SEMANTIC_SCOPE_REQUIRED_CONTRIBUTIONS_V1 and
+        binding.max_body_objects >= 0 and
+        binding.max_body_objects <= SEMANTIC_SCOPE_MAX_BODY_OBJECTS_V1 and
+        binding.max_dependency_edges >= 0 and
+        binding.max_dependency_edges <= SEMANTIC_SCOPE_MAX_DEPENDENCY_EDGES_V1 and
+        binding.max_retained_bytes >= 0 and
+        binding.max_retained_bytes <= SEMANTIC_SCOPE_MAX_RETAINED_BYTES_V1 and
+        binding.dependency_enumeration.body_object_digests.len() <=
+            binding.max_body_objects and
+        binding.dependency_enumeration.edges.len() <= binding.max_dependency_edges
+
+fn _binding_canonical_v1(binding: SemanticScopeWriterBindingV1,
+        pins: VerifiedGenerationPinSnapshotV1,
+        closure: VerifiedCasClosureReceiptV1,
+        summary_set_digest: text) -> text:
+    "simple.cache.semantic-scope.binding.v1\u0000" +
+        binding.writer_instance_digest + "\u0000" +
+        binding.root.generation.to_string() + "\u0000" +
+        binding.root.manifest_digest + "\u0000" +
+        binding.expected_parent_manifest_digest + "\u0000" +
+        binding.snapshot_semantic_digest + "\u0000" +
+        binding.snapshot_cas_object_digest + "\u0000" +
+        binding.source_content_digest + "\u0000" + binding.module_id + "\u0000" +
+        binding.query_domain_digest + "\u0000" + binding.compiler_owner_digest +
+        "\u0000" + binding.grammar_digest + "\u0000" +
+        binding.semantic_rules_digest + "\u0000" +
+        binding.verifier_registry_digest + "\u0000" +
+        binding.access_policy_digest + "\u0000" +
+        binding.cancellation_epoch.to_string() + "\u0000" +
+        binding.attempt_seal_digest + "\u0000" + pins.epoch.to_string() +
+        "\u0000" + pins.snapshot_digest + "\u0000" + closure.closure_digest +
+        "\u0000" + closure.owner_seal_digest + "\u0000" + summary_set_digest +
+        "\u0000" + binding.dependency_enumeration.enumeration_digest + "\u0000" +
+        binding.max_contributions.to_string() + "\u0000" +
+        binding.max_body_objects.to_string() + "\u0000" +
+        binding.max_dependency_edges.to_string() + "\u0000" +
+        binding.max_retained_bytes.to_string()
+
+pub fn writer_semantic_scope_preflight_v1(
+    binding: SemanticScopeWriterBindingV1,
+    manifest: GenerationManifestV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    closure: VerifiedCasClosureReceiptV1,
+    durable: VerifiedGenerationDurableBindingV1,
+    summaries: [SemanticScopePublicSummaryBindingV1],
+) -> Result<SemanticScopePreflightV1, SemanticScopePreflightErrorV1>:
+    if (not _digest_v1(binding.writer_instance_digest) or
+            binding.root.generation < 0 or
+            not _digest_v1(binding.root.manifest_digest) or
+            not _digest_v1(binding.expected_parent_manifest_digest) or
+            not _digest_v1(binding.snapshot_semantic_digest) or
+            not _digest_v1(binding.snapshot_cas_object_digest) or
+            not _digest_v1(binding.source_content_digest) or
+            not three_payload_contract_text_valid_v1(binding.module_id, false) or
+            not _digest_v1(binding.query_domain_digest) or
+            not _digest_v1(binding.compiler_owner_digest) or
+            not _digest_v1(binding.grammar_digest) or
+            not _digest_v1(binding.semantic_rules_digest) or
+            not _digest_v1(binding.verifier_registry_digest) or
+            not _digest_v1(binding.access_policy_digest) or
+            binding.cancellation_epoch < 0):
+        return Err(SemanticScopePreflightErrorV1.InvalidBinding)
+    if not _binding_limits_valid_v1(binding):
+        return Err(SemanticScopePreflightErrorV1.BoundsExceeded)
+    if (not generation_manifest_valid_v1(manifest) or
+            generation_manifest_digest_v1(manifest) != binding.root.manifest_digest or
+            manifest.snapshot_digest != binding.snapshot_cas_object_digest or
+            binding.expected_parent_manifest_digest != binding.root.manifest_digest):
+        return Err(SemanticScopePreflightErrorV1.ExactManifestMismatch)
+    if (not three_payload_closure_seal_valid_v2(binding.attempt_seal) or
+            three_payload_closure_seal_digest_v2(binding.attempt_seal) !=
+                binding.attempt_seal_digest or
+            binding.attempt_seal.input_generation_digest !=
+                binding.expected_parent_manifest_digest or
+            binding.attempt_seal.snapshot_digest != binding.snapshot_semantic_digest or
+            binding.attempt_seal.source_digest != binding.source_content_digest):
+        return Err(SemanticScopePreflightErrorV1.InvalidBinding)
+    val recovered = verified_generation_recovery_projection_v1(pins, closure, durable)
+    if (not recovered.ok or closure.generation != binding.root.generation or
+            closure.root_manifest_digest != binding.root.manifest_digest or
+            closure.verifier_registry_digest != binding.verifier_registry_digest or
+            not _closure_exact_v1(binding.root, manifest, closure)):
+        return Err(SemanticScopePreflightErrorV1.PinOrClosureMismatch)
+    if val summary_error = _summary_set_exact_v1(binding, manifest, summaries):
+        return Err(summary_error)
+    if not _attempt_supported_v1(binding, manifest):
+        return Err(SemanticScopePreflightErrorV1.UnsupportedProfile)
+    if not _dependency_exact_v1(binding, manifest):
+        return Err(SemanticScopePreflightErrorV1.DependencyEnumerationMismatch)
+    val summary_set_digest = _summary_bindings_digest_v1(summaries)
+    val binding_digest = sha256_text(_binding_canonical_v1(binding, pins,
+        closure, summary_set_digest))
+    Ok(SemanticScopePreflightV1(binding_digest: binding_digest,
+        generation: binding.root.generation,
+        manifest_digest: binding.root.manifest_digest,
+        pin_epoch: pins.epoch, pin_snapshot_digest: pins.snapshot_digest,
+        generation_closure_digest: closure.closure_digest,
+        attempt_seal_digest: binding.attempt_seal_digest,
+        public_summary_set_digest: summary_set_digest,
+        dependency_enumeration_digest:
+            binding.dependency_enumeration.enumeration_digest))
+
+fn _semantic_scope_live_identity_v1(
+    binding: SemanticScopeWriterBindingV1,
+    preflight: SemanticScopePreflightV1,
+) -> SemanticScopeLiveIdentityV1:
+    SemanticScopeLiveIdentityV1(
+        writer_instance_digest: binding.writer_instance_digest,
+        generation: preflight.generation,
+        manifest_digest: preflight.manifest_digest,
+        pin_snapshot_digest: preflight.pin_snapshot_digest,
+        generation_closure_digest: preflight.generation_closure_digest,
+        binding_digest: preflight.binding_digest,
+        query_domain_digest: binding.query_domain_digest,
+        semantic_rules_digest: binding.semantic_rules_digest,
+        cancellation_epoch: binding.cancellation_epoch)
+
+# Validate the structural preflight against the existing writer, summary and
+# prepared-attempt owners, then ask every semantic issuer to validate its own
+# contribution.  This operation intentionally returns false today at the
+# semantic-owner step; it neither mints a scope nor weakens the existing closed
+# availability gates.
+pub fn writer_validate_semantic_scope_owner_ports_v1(
+    binding: SemanticScopeWriterBindingV1,
+    manifest: GenerationManifestV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    closure: VerifiedCasClosureReceiptV1,
+    durable: VerifiedGenerationDurableBindingV1,
+    summaries: [SemanticScopePublicSummaryBindingV1],
+    prepared: PreparedThreePayloadV2,
+    contributions: [SemanticScopeContributionLiveBindingV1],
+) -> bool:
+    val preflight = match writer_semantic_scope_preflight_v1(binding, manifest,
+            pins, closure, durable, summaries):
+        case Ok(value): value
+        case Err(_): return false
+    val identity = _semantic_scope_live_identity_v1(binding, preflight)
+    val writer_request = SemanticScopeWriterLiveRequestV1(identity: identity,
+        durable_binding_digest: closure.durable_journal_receipt_digest)
+    val summary_request = SemanticScopeSummaryLiveRequestV1(identity: identity,
+        public_summary_set_digest: preflight.public_summary_set_digest,
+        summary_count: summaries.len())
+    val attempt_request = SemanticScopeAttemptLiveRequestV1(identity: identity,
+        attempt_seal_digest: preflight.attempt_seal_digest,
+        source_content_digest: binding.source_content_digest,
+        snapshot_semantic_digest: binding.snapshot_semantic_digest)
+    var contribution_requests: [SemanticScopeContributionLiveRequestV1] = []
+    for index in 0..contributions.len():
+        val contribution = contributions[index]
+        contribution_requests.push(SemanticScopeContributionLiveRequestV1(
+            identity: identity, dimension_index: index,
+            contribution_digest: contribution.candidate.contribution_digest,
+            issuer_instance_digest: contribution.issuer_instance_digest,
+            issuer_generation: contribution.issuer_generation,
+            authority_serial: contribution.authority_serial))
+    if not semantic_scope_live_requests_coherent_v1(writer_request,
+            summary_request, attempt_request, contribution_requests):
+        return false
+    if not writer_validate_live_semantic_scope_v1(writer_request, pins, closure,
+            durable):
+        return false
+    var object_digests: [text] = []
+    var profiles: [PublicSummaryTypedReferenceProfileV2] = []
+    for summary in summaries:
+        object_digests.push(summary.object_digest)
+        profiles.push(summary.profile)
+    if not public_summary_validate_live_set_v1(summary_request, object_digests,
+            profiles):
+        return false
+    if not prepared_attempt_validate_live_v1(attempt_request, prepared):
+        return false
+    for index in 0..contributions.len():
+        if not semantic_owner_validate_live_contribution_v1(
+                contributions[index].candidate, contribution_requests[index]):
+            return false
+    true
+
+pub fn semantic_scope_authority_available_v1() -> bool:
+    # Existing writer, public-summary and prepared-attempt validators are now
+    # integrated above.  All five semantic contribution issuers still lack
+    # live owner state, so copied candidates cannot open this authority.
+    false
+
+pub fn semantic_scope_authority_blocker_v1() -> text:
+    "five_semantic_contribution_owner_receipts_unavailable"
+
+fn _preflight_fallback_v1(error: SemanticScopePreflightErrorV1
+) -> ThreePayloadFallbackV1:
+    match error:
+        case UnsupportedProfile: ThreePayloadFallbackV1.UnsupportedSemantics
+        case BoundsExceeded: ThreePayloadFallbackV1.BoundsExceeded
+        case ExactManifestMismatch | PinOrClosureMismatch:
+            ThreePayloadFallbackV1.ScopeGenerationMismatch
+        case PublicSummaryMismatch | DependencyEnumerationMismatch:
+            ThreePayloadFallbackV1.WitnessIncomplete
+        case InvalidBinding: ThreePayloadFallbackV1.CorruptPayload
+
+pub fn writer_begin_semantic_scope_v1(
+    binding: SemanticScopeWriterBindingV1,
+    manifest: GenerationManifestV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    closure: VerifiedCasClosureReceiptV1,
+    durable: VerifiedGenerationDurableBindingV1,
+    summaries: [SemanticScopePublicSummaryBindingV1],
+) -> Result<CacheSemanticScopeV1, ThreePayloadFallbackV1>:
+    val preflight = match writer_semantic_scope_preflight_v1(binding, manifest,
+            pins, closure, durable, summaries):
+        case Ok(value): value
+        case Err(error): return Err(_preflight_fallback_v1(error))
+    if (not semantic_scope_authority_available_v1() or
+            not semantic_scope_contribution_port_available_v1()):
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    Ok(CacheSemanticScopeV1(preflight: preflight, module_id: binding.module_id,
+        query_domain_digest: binding.query_domain_digest,
+        semantic_rules_digest: binding.semantic_rules_digest,
+        cancellation_epoch: binding.cancellation_epoch, active: true))
+
+fn _seal_canonical_v1(scope: CacheSemanticScopeV1,
+        contributions: [SemanticScopeContributionProjectionV1]) -> text:
+    var canonical = "simple.cache.semantic-completeness.seal.v1\n" +
+        scope.preflight.binding_digest + "\n" +
+        scope.preflight.manifest_digest + "\n" +
+        scope.preflight.attempt_seal_digest + "\n" +
+        scope.preflight.dependency_enumeration_digest + "\n"
+    for contribution in contributions:
+        canonical = canonical + contribution.contribution_digest + "\u0000" +
+            contribution.issuer_instance_digest + "\u0000" +
+            contribution.issuer_generation.to_string() + "\u0000" +
+            contribution.authority_serial.to_string() + "\n"
+    canonical
+
+pub fn writer_seal_semantic_completeness_v1(
+    scope: CacheSemanticScopeV1,
+    authorities: [SemanticScopeContributionAuthorityV1],
+    exact_seal_digest: text,
+) -> Result<CacheSemanticCompletenessV1, ThreePayloadFallbackV1>:
+    if not scope.active: return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    if authorities.len() != SEMANTIC_SCOPE_REQUIRED_CONTRIBUTIONS_V1:
+        return Err(ThreePayloadFallbackV1.MembershipIncomplete)
+    var projections: [SemanticScopeContributionProjectionV1] = []
+    for index in 0..authorities.len():
+        val projection = semantic_scope_contribution_projection_v1(authorities[index])
+        val expected = semantic_scope_required_dimension_v1(index)
+        if (expected.is_none() or projection.dimension != expected.unwrap() or
+                projection.scope_binding_digest != scope.preflight.binding_digest or
+                projection.query_domain_digest != scope.query_domain_digest or
+                not _digest_v1(projection.owner_rules_digest) or
+                not _digest_v1(projection.source_universe_digest) or
+                not _digest_v1(projection.contribution_digest) or
+                not _digest_v1(projection.issuer_instance_digest) or
+                projection.issuer_generation < 0 or projection.authority_serial <= 0):
+            return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+        if projection.dimension == SemanticScopeDimensionV1.BodyDependencyClosure and
+                projection.dependency_enumeration_digest !=
+                    scope.preflight.dependency_enumeration_digest:
+            return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+        projections.push(projection)
+    val computed_seal = sha256_text(_seal_canonical_v1(scope, projections))
+    if not _digest_v1(exact_seal_digest) or exact_seal_digest != computed_seal:
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    val owner_grant_digest = sha256_text(
+        "simple.cache.semantic-completeness.grant.v1\u0000" +
+        scope.preflight.binding_digest + "\u0000" + exact_seal_digest + "\u0000" +
+        scope.cancellation_epoch.to_string())
+    Ok(CacheSemanticCompletenessV1(preflight: scope.preflight,
+        query_domain_digest: scope.query_domain_digest,
+        semantic_rules_digest: scope.semantic_rules_digest,
+        cancellation_epoch: scope.cancellation_epoch,
+        exact_seal_digest: exact_seal_digest,
+        owner_grant_digest: owner_grant_digest))
+
+pub fn writer_semantic_completeness_projection_v1(
+    grant: CacheSemanticCompletenessV1,
+) -> SemanticScopeGrantProjectionV1:
+    SemanticScopeGrantProjectionV1(binding_digest: grant.preflight.binding_digest,
+        generation: grant.preflight.generation,
+        manifest_digest: grant.preflight.manifest_digest,
+        attempt_seal_digest: grant.preflight.attempt_seal_digest,
+        exact_seal_digest: grant.exact_seal_digest,
+        dependency_enumeration_digest: grant.preflight.dependency_enumeration_digest,
+        owner_grant_digest: grant.owner_grant_digest)
+
+pub fn writer_validate_semantic_completeness_v1(
+    grant: CacheSemanticCompletenessV1,
+    expected: SemanticScopeConsumptionBindingV1,
+) -> Result<SemanticScopeGrantProjectionV1, ThreePayloadFallbackV1>:
+    if (not _digest_v1(expected.binding_digest) or expected.generation < 0 or
+            not _digest_v1(expected.manifest_digest) or
+            not _digest_v1(expected.attempt_seal_digest) or
+            not _digest_v1(expected.query_domain_digest) or
+            not _digest_v1(expected.semantic_rules_digest) or
+            expected.cancellation_epoch < 0 or
+            not _digest_v1(expected.dependency_enumeration_digest)):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if (grant.preflight.binding_digest != expected.binding_digest or
+            grant.preflight.generation != expected.generation or
+            grant.preflight.manifest_digest != expected.manifest_digest or
+            grant.preflight.attempt_seal_digest != expected.attempt_seal_digest or
+            grant.preflight.dependency_enumeration_digest !=
+                expected.dependency_enumeration_digest or
+            grant.query_domain_digest != expected.query_domain_digest or
+            grant.semantic_rules_digest != expected.semantic_rules_digest or
+            grant.cancellation_epoch != expected.cancellation_epoch):
+        return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+    val owner_grant_digest = sha256_text(
+        "simple.cache.semantic-completeness.grant.v1\u0000" +
+        grant.preflight.binding_digest + "\u0000" + grant.exact_seal_digest +
+        "\u0000" + grant.cancellation_epoch.to_string())
+    if owner_grant_digest != grant.owner_grant_digest:
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    Ok(writer_semantic_completeness_projection_v1(grant))
+
+pub fn semantic_scope_worker_activation_available_v1() -> bool: false
+pub fn semantic_scope_publication_activation_available_v1() -> bool: false
+
+# Closed-by-default V4 scope seam. Production construction deliberately yields
+# no authority until a real live owner is installed by the driver.
+pub trait L78ScopePortV4:
+    me acquire(request: SemanticScopeAttemptLiveRequestV1
+    ) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>
+    me validate(token: L78OwnerTokenV4,
+                request: SemanticScopeAttemptLiveRequestV1
+    ) -> Result<(), L78BoundaryErrorV4>
+    me close(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>
+
+pub struct L78ClosedScopePortV4:
+    reason: text
+
+impl L78ScopePortV4 for L78ClosedScopePortV4:
+    me acquire(request: SemanticScopeAttemptLiveRequestV1
+    ) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me validate(token: L78OwnerTokenV4,
+                request: SemanticScopeAttemptLiveRequestV1
+    ) -> Result<(), L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me close(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+pub fn l78_closed_scope_port_v4(reason: text) -> L78ClosedScopePortV4:
+    L78ClosedScopePortV4(reason: reason)
+
+pub fn l78_acquire_scope_with_port_v4<P: L78ScopePortV4>(
+    owner: P,
+    request: SemanticScopeAttemptLiveRequestV1,
+) -> L78OwnedResultV4<P, L78OwnerTokenV4>:
+    val outcome = owner.acquire(request)
+    L78OwnedResultV4<P, L78OwnerTokenV4>(owner: owner, outcome: outcome)
+
+pub fn l78_validate_scope_with_port_v4<P: L78ScopePortV4>(
+    owner: P,
+    token: L78OwnerTokenV4,
+    request: SemanticScopeAttemptLiveRequestV1,
+) -> L78OwnedResultV4<P, L78OwnerTokenV4>:
+    val outcome = match owner.validate(token, request):
+        case Ok(_): Ok(token)
+        case Err(error): Err(error)
+    L78OwnedResultV4<P, L78OwnerTokenV4>(owner: owner, outcome: outcome)
+
+pub fn l78_close_scope_with_port_v4<P: L78ScopePortV4>(
+    owner: P,
+    token: L78OwnerTokenV4,
+) -> L78OwnedResultV4<P, ()>:
+    val outcome = owner.close(token)
+    L78OwnedResultV4<P, ()>(owner: owner, outcome: outcome)
+
+export CacheSemanticScopeV1, CacheSemanticCompletenessV1

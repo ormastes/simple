@@ -1,0 +1,1157 @@
+# codex-impl
+# Reverse references are coordinator-only scheduling data.  This module never
+# transports .rr bytes or semantic bodies into the restricted worker.
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.array.{array_sort_by}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_key_valid_v1,
+    semantic_query_key_equal_v1, semantic_query_key_canonical_v1,
+    semantic_query_key_budget_v1, semantic_query_read_budget_v1,
+    semantic_query_read_manifest_valid_v1, semantic_query_read_manifest_encode_v1
+}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceEdgeV1, ReverseReferenceShardV1, ReverseReferenceDeltaV1,
+    reverse_reference_edge_key_v1, reverse_reference_edge_budget_v1,
+    reverse_reference_shard_valid_v1, reverse_reference_shard_encode_v1,
+    reverse_reference_shard_decode_v1, reverse_reference_delta_valid_v1
+}
+use compiler.common.cache_contract.physical_tld_v1.{
+    ThreePayloadContractBudgetV1, three_payload_contract_digest_valid_v1,
+    three_payload_contract_text_valid_v1
+}
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{
+    CacheSemanticCompletenessV1, SemanticScopeGrantProjectionV1,
+    SemanticScopeConsumptionBindingV1, writer_validate_semantic_completeness_v1
+}
+use compiler.driver.cache.cas.verified_cas_store.{
+    VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1, verified_cas_put_v1, verified_cas_get_v1
+}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    L78BoundaryErrorV4, L78LimitsV4, L78OwnedResultV4, L78OwnerTokenV4
+}
+
+pub const AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1: i64 = 65536
+pub const AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1: i64 = 16777216
+
+pub struct ChangedSemanticFacetV1:
+    producer: SemanticQueryKeyV1
+    facet: text
+    dimension: text
+    old_fingerprint: text?
+    new_fingerprint: text?
+
+pub struct OldNewMembershipV1:
+    owner: SemanticQueryKeyV1
+    dimension: text
+    old_candidates: [SemanticQueryKeyV1]
+    new_candidates: [SemanticQueryKeyV1]
+    absence_witness_digest: text
+    coverage: SemanticCoverageV1
+
+pub struct VerifiedSccGroupV1:
+    partition_id: text
+    group_identity: text
+    member_queries: [SemanticQueryKeyV1]
+    receipt_digest: text
+
+pub struct VerifiedAffectedDomainV1:
+    dimension: text
+    candidate_root_digest: text
+    membership_root_digest: text
+    absence_root_digest: text
+    coverage: SemanticCoverageV1
+    receipt_digest: text
+
+pub struct VerifiedForwardManifestV1:
+    manifest_digest: text
+    manifest: SemanticQueryReadManifestV1
+    scc_group: VerifiedSccGroupV1
+    affected_domains: [VerifiedAffectedDomainV1]
+
+pub struct AffectedQueryPlanV1:
+    accepted: bool
+    rejection_reason: text
+    ordered_query_ids: [SemanticQueryKeyV1]
+    owner_modules: [text]
+    changed_dimensions: [text]
+    conservative_domain_receipt: text
+    scc_group_identities: [text]
+
+pub struct ReverseReferenceShardPersistV1:
+    ok: bool
+    digest: text
+    error: text
+
+pub struct ReverseReferenceShardReadV1:
+    ok: bool
+    present: bool
+    shard: ReverseReferenceShardV1?
+    error: text
+
+pub struct ReverseReferenceShardStageV1:
+    accepted: bool
+    rejection_reason: text
+    shards: [ReverseReferenceShardV1]
+
+pub struct L78RrPlanV4:
+    token: L78OwnerTokenV4
+    plan: AffectedQueryPlanV1
+
+pub trait L78AffectedDomainPortV4:
+    me plan(scope: L78OwnerTokenV4, changes: [ChangedSemanticFacetV1],
+        membership: [OldNewMembershipV1], groups: [VerifiedSccGroupV1],
+        limits: L78LimitsV4) -> Result<L78RrPlanV4, L78BoundaryErrorV4>
+    me validate(result: L78RrPlanV4, scope: L78OwnerTokenV4
+    ) -> Result<(), L78BoundaryErrorV4>
+    me close(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>
+
+# This is the only production factory while P03 has no live semantic-scope
+# issuer.  Diagnostic text never becomes an affected-domain capability.
+pub struct L78ClosedAffectedDomainPortV4:
+    reason: text
+
+impl L78AffectedDomainPortV4 for L78ClosedAffectedDomainPortV4:
+    me plan(scope: L78OwnerTokenV4, changes: [ChangedSemanticFacetV1],
+        membership: [OldNewMembershipV1], groups: [VerifiedSccGroupV1],
+        limits: L78LimitsV4) -> Result<L78RrPlanV4, L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me validate(result: L78RrPlanV4, scope: L78OwnerTokenV4
+    ) -> Result<(), L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me close(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+pub fn l78_closed_affected_domain_port_v4(
+        reason: text) -> L78ClosedAffectedDomainPortV4:
+    L78ClosedAffectedDomainPortV4(reason: reason)
+
+# Planning returns the updated concrete owner even when authority is missing.
+# A successful plan retains its RR-owned AffectedDomain token for validation,
+# publication and eventual close; this runner never closes the scope token.
+pub fn l78_plan_affected_with_port_v4<P: L78AffectedDomainPortV4>(owner: P,
+    scope: L78OwnerTokenV4, changes: [ChangedSemanticFacetV1],
+    membership: [OldNewMembershipV1], groups: [VerifiedSccGroupV1],
+    limits: L78LimitsV4,
+) -> L78OwnedResultV4<P, L78RrPlanV4>:
+    val outcome = owner.plan(scope, changes, membership, groups, limits)
+    L78OwnedResultV4<P, L78RrPlanV4>(owner: owner, outcome: outcome)
+
+struct AffectedQueryPartitionV1:
+    query: SemanticQueryKeyV1
+    partition_id: text
+
+# This value can be constructed only after the opaque writer grant validates.
+# Copyable domain receipts and digests never enter the planning core directly.
+struct AuthenticatedAffectedDomainV1:
+    grant: SemanticScopeGrantProjectionV1
+    query_domain_digest: text
+
+fn _query_text_v1(query: SemanticQueryKeyV1) -> text:
+    semantic_query_key_canonical_v1(query)
+
+fn _query_equal_v1(left: SemanticQueryKeyV1, right: SemanticQueryKeyV1) -> bool:
+    semantic_query_key_equal_v1(left, right)
+
+fn _query_valid_v1(query: SemanticQueryKeyV1) -> bool:
+    semantic_query_key_valid_v1(query)
+
+fn _query_index_v1(values: [SemanticQueryKeyV1], value: SemanticQueryKeyV1) -> i64:
+    var index = 0
+    for candidate in values:
+        if _query_equal_v1(candidate, value): return index
+        index = index + 1
+    -1
+
+fn _push_query_unique_v1(values: [SemanticQueryKeyV1], value: SemanticQueryKeyV1) -> [SemanticQueryKeyV1]:
+    var out = values
+    if _query_index_v1(out, value) < 0: out.push(value)
+    out
+
+fn _push_text_unique_v1(values: [text], value: text) -> [text]:
+    var out = values
+    if value != "" and out.index_of(value) < 0: out.push(value)
+    out
+
+fn _sort_queries_v1(values: [SemanticQueryKeyV1]) -> [SemanticQueryKeyV1]:
+    array_sort_by(values, \left, right:
+        val left_key = _query_text_v1(left)
+        val right_key = _query_text_v1(right)
+        if left_key < right_key: -1
+        elif left_key > right_key: 1
+        else: 0
+    )
+
+fn _sort_texts_v1(values: [text]) -> [text]:
+    array_sort_by(values, \left, right:
+        if left < right: -1
+        elif left > right: 1
+        else: 0
+    )
+
+fn _frame_v1(tag: text, value: text) -> text:
+    "{tag.len()}:{tag}{value.len()}:{value}"
+
+fn _optional_digest_text_v1(value: text?) -> text:
+    match value:
+        case Some(digest): "1" + digest
+        case nil: "0"
+
+fn _query_list_valid_unique_v1(values: [SemanticQueryKeyV1]) -> bool:
+    var seen: Dict<text, bool> = {}
+    for value in values:
+        if not _query_valid_v1(value): return false
+        val key = _query_text_v1(value)
+        if seen.contains_key(key): return false
+        seen[key] = true
+    true
+
+fn _query_partition_key_v1(value: AffectedQueryPartitionV1) -> text:
+    _query_text_v1(value.query) + "\u0000" + value.partition_id
+
+fn _push_query_partition_unique_v1(values: [AffectedQueryPartitionV1],
+        query: SemanticQueryKeyV1, partition_id: text) -> [AffectedQueryPartitionV1]:
+    val candidate = AffectedQueryPartitionV1(query: query,
+        partition_id: partition_id)
+    val key = _query_partition_key_v1(candidate)
+    for value in values:
+        if _query_partition_key_v1(value) == key: return values
+    var out = values
+    out.push(candidate)
+    out
+
+fn _changed_receipt_row_v1(change: ChangedSemanticFacetV1) -> text:
+    _frame_v1("producer", _query_text_v1(change.producer)) +
+        _frame_v1("facet", change.facet) + _frame_v1("dimension", change.dimension) +
+        _frame_v1("old", _optional_digest_text_v1(change.old_fingerprint)) +
+        _frame_v1("new", _optional_digest_text_v1(change.new_fingerprint))
+
+fn _membership_receipt_row_v1(membership: OldNewMembershipV1) -> text:
+    var pieces: [text] = [
+        _frame_v1("owner", _query_text_v1(membership.owner)),
+        _frame_v1("dimension", membership.dimension),
+        _frame_v1("absence", membership.absence_witness_digest),
+        _frame_v1("old_count", membership.old_candidates.len().to_string()),
+        _frame_v1("new_count", membership.new_candidates.len().to_string()),
+        _frame_v1("zero_match", if membership.new_candidates.len() == 0: "1" else: "0"),
+        _frame_v1("coverage", "complete"),
+    ]
+    for candidate in _sort_queries_v1(membership.old_candidates):
+        pieces.push(_frame_v1("old_candidate", _query_text_v1(candidate)))
+    for candidate in _sort_queries_v1(membership.new_candidates):
+        pieces.push(_frame_v1("new_candidate", _query_text_v1(candidate)))
+    pieces.join("")
+
+fn _verified_receipt_row_v1(verified: VerifiedForwardManifestV1) -> text:
+    var pieces: [text] = [
+        _frame_v1("manifest", verified.manifest_digest),
+        _frame_v1("scc", verified.scc_group.receipt_digest),
+    ]
+    var domain_receipts: [text] = []
+    for domain in verified.affected_domains: domain_receipts.push(domain.receipt_digest)
+    for receipt in _sort_texts_v1(domain_receipts):
+        pieces.push(_frame_v1("affected_domain", receipt))
+    pieces.join("")
+
+fn _coverage_usable_v1(coverage: SemanticCoverageV1) -> bool:
+    match coverage:
+        case Complete: true
+        # This coordinator has no bounded-domain receipt input yet, so a
+        # conservative declaration cannot be authenticated here.
+        case Conservative: false
+        case Unknown: false
+
+fn _changed_match_v1(producer: SemanticQueryKeyV1, facet: text,
+                     changes: [ChangedSemanticFacetV1]) -> bool:
+    for change in changes:
+        if _query_equal_v1(change.producer, producer) and change.facet == facet:
+            return true
+    false
+
+fn _membership_match_v1(producer: SemanticQueryKeyV1, facet: text,
+                        memberships: [OldNewMembershipV1]) -> bool:
+    for membership in memberships:
+        # A changed owner, a removed candidate, and an added candidate are all
+        # relevant.  Use the same canonical union that the receipt path binds.
+        if membership.dimension == facet and
+                _query_index_v1(old_new_membership_union_v1(membership), producer) >= 0:
+            return true
+    false
+
+fn _forward_valid_v1(verified: VerifiedForwardManifestV1) -> bool:
+    if not semantic_query_read_manifest_valid_v1(verified.manifest) or
+            verified.manifest_digest != sha256_u8_hex(
+                semantic_query_read_manifest_encode_v1(verified.manifest)):
+        return false
+    for read in verified.manifest.ordered_reads:
+        if not _coverage_usable_v1(read.completeness) or
+                read.partition_id != verified.scc_group.partition_id: return false
+    if verified.scc_group.partition_id == "" or
+            not three_payload_contract_digest_valid_v1(verified.scc_group.group_identity) or
+            not three_payload_contract_digest_valid_v1(verified.scc_group.receipt_digest) or
+            _query_index_v1(verified.scc_group.member_queries, verified.manifest.consumer) < 0:
+        return false
+    val expected_receipt = verified_scc_group_receipt_v1(verified.scc_group.partition_id,
+        verified.scc_group.group_identity, verified.scc_group.member_queries)
+    if expected_receipt == "" or verified.scc_group.receipt_digest != expected_receipt:
+        return false
+    for domain in verified.affected_domains:
+        val domain_receipt = verified_affected_domain_receipt_v1(domain)
+        if domain_receipt == "" or domain.receipt_digest == "" or
+                domain.receipt_digest != domain_receipt: return false
+    true
+
+pub fn verified_affected_domain_receipt_v1(domain: VerifiedAffectedDomainV1) -> text:
+    if domain.dimension == "" or domain.coverage != SemanticCoverageV1.Complete or
+            not three_payload_contract_digest_valid_v1(domain.candidate_root_digest) or
+            not three_payload_contract_digest_valid_v1(domain.membership_root_digest) or
+            not three_payload_contract_digest_valid_v1(domain.absence_root_digest):
+        return ""
+    sha256_text(_frame_v1("domain", domain.dimension) +
+        _frame_v1("candidate", domain.candidate_root_digest) +
+        _frame_v1("membership", domain.membership_root_digest) +
+        _frame_v1("absence", domain.absence_root_digest) + _frame_v1("coverage", "complete"))
+
+pub fn verified_scc_group_receipt_v1(partition_id: text, group_identity: text,
+                                     members: [SemanticQueryKeyV1]) -> text:
+    if (not three_payload_contract_text_valid_v1(partition_id, false) or
+            not three_payload_contract_digest_valid_v1(group_identity) or
+            members.len() == 0 or members.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1):
+        return ""
+    val budget = ThreePayloadContractBudgetV1(
+        remaining_bytes: AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+        remaining_items: AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1,
+        used_bytes: 0, ok: true)
+    budget.add_text(partition_id, false)
+    budget.add_digest(group_identity)
+    budget.add_items(members.len())
+    for member in members: semantic_query_key_budget_v1(budget, member)
+    if not budget.ok: return ""
+    var canonical = _frame_v1("domain", "simple.verified-scc-group.v1") +
+        _frame_v1("partition", partition_id) + _frame_v1("identity", group_identity)
+    val sorted_members = _sort_queries_v1(members)
+    var prior = ""
+    for member in sorted_members:
+        if not _query_valid_v1(member): return ""
+        val key = _query_text_v1(member)
+        if key == prior: return ""
+        canonical = canonical + _frame_v1("member", key)
+        prior = key
+    sha256_text(canonical)
+
+fn _scc_candidate_charge_frame_v1(budget: ThreePayloadContractBudgetV1,
+        tag: text, value: text, allow_empty: bool):
+    # `_frame_v1` renders decimal lengths plus both tags and values.  Two
+    # length prefixes, separators, and future larger decimal widths fit well
+    # inside this fixed surcharge; add_text then charges the exact UTF-8 data.
+    budget.add_bytes(32)
+    budget.add_text(tag, false)
+    budget.add_text(value, allow_empty)
+
+fn _scc_candidate_charge_query_v1(budget: ThreePayloadContractBudgetV1,
+        query: SemanticQueryKeyV1):
+    if not _query_valid_v1(query):
+        budget.ok = false
+        return
+    _scc_candidate_charge_frame_v1(budget, "kind", query.kind, false)
+    _scc_candidate_charge_frame_v1(budget, "stable_entity",
+        query.stable_entity_id, false)
+    _scc_candidate_charge_frame_v1(budget, "semantic_profile",
+        query.semantic_profile_digest, false)
+    _scc_candidate_charge_frame_v1(budget, "parameter",
+        query.parameter_digest, false)
+
+fn _scc_candidate_domain_preflight_v1(
+    partition: text,
+    consumer: SemanticQueryKeyV1,
+    groups: [VerifiedSccGroupV1],
+) -> bool:
+    if (not three_payload_contract_text_valid_v1(partition, false) or
+            not _query_valid_v1(consumer) or
+            groups.len() == 0 or groups.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1):
+        return false
+    val budget = ThreePayloadContractBudgetV1(
+        remaining_bytes: AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+        remaining_items: AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1,
+        used_bytes: 0, ok: true)
+    _scc_candidate_charge_frame_v1(budget, "requested_partition", partition, false)
+    _scc_candidate_charge_query_v1(budget, consumer)
+    budget.add_items(groups.len())
+    var member_rows: i64 = 0
+    for group in groups:
+        member_rows = _affected_query_domain_add_rows_v1(member_rows,
+            group.member_queries.len())
+        if (member_rows < 0 or
+                not three_payload_contract_text_valid_v1(group.partition_id, false) or
+                not three_payload_contract_digest_valid_v1(group.group_identity) or
+                not three_payload_contract_digest_valid_v1(group.receipt_digest) or
+                group.member_queries.len() == 0):
+            return false
+        budget.add_items(group.member_queries.len())
+        _scc_candidate_charge_frame_v1(budget, "partition",
+            group.partition_id, false)
+        _scc_candidate_charge_frame_v1(budget, "group_identity",
+            group.group_identity, false)
+        _scc_candidate_charge_frame_v1(budget, "receipt_digest",
+            group.receipt_digest, false)
+        _scc_candidate_charge_frame_v1(budget, "member_count",
+            group.member_queries.len().to_string(), false)
+        for member in group.member_queries:
+            _scc_candidate_charge_query_v1(budget, member)
+        if not budget.ok: return false
+    budget.ok
+
+pub fn affected_scc_group_candidate_v1(
+    partition: text,
+    consumer: SemanticQueryKeyV1,
+    groups: [VerifiedSccGroupV1],
+) -> VerifiedSccGroupV1?:
+    # Run the aggregate count/canonical-byte preflight before any receipt hash,
+    # query canonicalization, or member sorting.  Per-group budgets alone do
+    # not bound a large array of individually valid groups.
+    if not _scc_candidate_domain_preflight_v1(partition, consumer, groups):
+        return nil
+    var selected: VerifiedSccGroupV1? = nil
+    for group in groups:
+        val expected_receipt = verified_scc_group_receipt_v1(group.partition_id,
+            group.group_identity, group.member_queries)
+        if expected_receipt == "" or group.receipt_digest != expected_receipt:
+            return nil
+        if group.partition_id == partition and
+                _query_index_v1(group.member_queries, consumer) >= 0:
+            match selected:
+                case Some(existing):
+                    if existing.receipt_digest != group.receipt_digest: return nil
+                case nil:
+                    selected = Some(VerifiedSccGroupV1(
+                        partition_id: group.partition_id,
+                        group_identity: group.group_identity,
+                        member_queries: _sort_queries_v1(group.member_queries),
+                        receipt_digest: group.receipt_digest))
+    val selected_group = match selected:
+        case Some(value): value
+        case nil: return nil
+    var selected_members: Dict<text, bool> = {}
+    for member in selected_group.member_queries:
+        selected_members[_query_text_v1(member)] = true
+    # Different SCC receipts in one partition must be disjoint.  Checking the
+    # complete selected member set catches indirect overlaps such as [a,b]
+    # and [b,c], even when only `a` was the directly affected consumer.
+    for group in groups:
+        if (group.partition_id == partition and
+                group.receipt_digest != selected_group.receipt_digest):
+            for member in group.member_queries:
+                if selected_members.contains_key(_query_text_v1(member)): return nil
+    Some(selected_group)
+
+fn _scc_groups_v1(
+    verified_manifests: [VerifiedForwardManifestV1],
+) -> [VerifiedSccGroupV1]:
+    var groups: [VerifiedSccGroupV1] = []
+    for verified in verified_manifests: groups.push(verified.scc_group)
+    groups
+
+fn _dimension_proven_v1(dimension: text,
+        verified_manifests: [VerifiedForwardManifestV1]) -> bool:
+    for verified in verified_manifests:
+        for domain in verified.affected_domains:
+            if domain.dimension == dimension and
+                    domain.receipt_digest == verified_affected_domain_receipt_v1(domain): return true
+    false
+
+fn _affected_query_domain_add_rows_v1(rows: i64, additional: i64) -> i64:
+    if rows < 0 or additional < 0 or rows > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1 or
+            additional > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1 - rows: return -1
+    rows + additional
+
+fn _affected_query_domain_bounded_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+) -> bool:
+    var rows = _affected_query_domain_add_rows_v1(0, changed_facets.len())
+    rows = _affected_query_domain_add_rows_v1(rows, old_new_membership.len())
+    rows = _affected_query_domain_add_rows_v1(rows, verified_forward_manifests.len())
+    rows = _affected_query_domain_add_rows_v1(rows, rr_shards.len())
+    if rows < 0: return false
+    for membership in old_new_membership:
+        rows = _affected_query_domain_add_rows_v1(rows, membership.old_candidates.len())
+        rows = _affected_query_domain_add_rows_v1(rows, membership.new_candidates.len())
+        if rows < 0: return false
+    for verified in verified_forward_manifests:
+        rows = _affected_query_domain_add_rows_v1(rows,
+            verified.manifest.ordered_reads.len())
+        rows = _affected_query_domain_add_rows_v1(rows,
+            verified.scc_group.member_queries.len())
+        rows = _affected_query_domain_add_rows_v1(rows,
+            verified.affected_domains.len())
+        if rows < 0: return false
+    for shard in rr_shards:
+        rows = _affected_query_domain_add_rows_v1(rows, shard.sorted_edges.len())
+        if rows < 0: return false
+    true
+
+fn _affected_query_domain_budget_valid_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+) -> bool:
+    if not _affected_query_domain_bounded_v1(changed_facets, old_new_membership,
+            verified_forward_manifests, rr_shards): return false
+    val budget = ThreePayloadContractBudgetV1(
+        remaining_bytes: AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+        remaining_items: AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1,
+        used_bytes: 0, ok: true)
+    budget.add_items(changed_facets.len())
+    budget.add_items(old_new_membership.len())
+    budget.add_items(verified_forward_manifests.len())
+    budget.add_items(rr_shards.len())
+    if not budget.ok: return false
+    for change in changed_facets:
+        semantic_query_key_budget_v1(budget, change.producer)
+        budget.add_text(change.facet, false)
+        budget.add_text(change.dimension, false)
+        budget.add_optional_digest(change.old_fingerprint)
+        budget.add_optional_digest(change.new_fingerprint)
+        if not budget.ok: return false
+    for membership in old_new_membership:
+        semantic_query_key_budget_v1(budget, membership.owner)
+        budget.add_text(membership.dimension, false)
+        budget.add_digest(membership.absence_witness_digest)
+        budget.add_items(membership.old_candidates.len())
+        budget.add_items(membership.new_candidates.len())
+        for candidate in membership.old_candidates:
+            semantic_query_key_budget_v1(budget, candidate)
+            if not budget.ok: return false
+        for candidate in membership.new_candidates:
+            semantic_query_key_budget_v1(budget, candidate)
+            if not budget.ok: return false
+        if not budget.ok: return false
+    for verified in verified_forward_manifests:
+        semantic_query_key_budget_v1(budget, verified.manifest.consumer)
+        budget.add_items(verified.manifest.ordered_reads.len())
+        for read in verified.manifest.ordered_reads:
+            semantic_query_read_budget_v1(budget, read)
+            if not budget.ok: return false
+        budget.add_digest(verified.manifest_digest)
+        budget.add_text(verified.scc_group.partition_id, false)
+        budget.add_digest(verified.scc_group.group_identity)
+        budget.add_digest(verified.scc_group.receipt_digest)
+        budget.add_items(verified.scc_group.member_queries.len())
+        for member in verified.scc_group.member_queries:
+            semantic_query_key_budget_v1(budget, member)
+            if not budget.ok: return false
+        budget.add_items(verified.affected_domains.len())
+        for domain in verified.affected_domains:
+            budget.add_text(domain.dimension, false)
+            budget.add_digest(domain.candidate_root_digest)
+            budget.add_digest(domain.membership_root_digest)
+            budget.add_digest(domain.absence_root_digest)
+            budget.add_digest(domain.receipt_digest)
+            if not budget.ok: return false
+        if not budget.ok: return false
+    for shard in rr_shards:
+        budget.add_text(shard.partition_id, false)
+        budget.add_items(shard.sorted_edges.len())
+        for edge in shard.sorted_edges:
+            reverse_reference_edge_budget_v1(budget, edge)
+            if not budget.ok: return false
+        if not budget.ok: return false
+    budget.ok
+
+fn _affected_query_domain_inputs_valid_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+) -> bool:
+    if not _affected_query_domain_budget_valid_v1(changed_facets, old_new_membership,
+            verified_forward_manifests, rr_shards): return false
+    var dimensions: [text] = []
+    for change in changed_facets:
+        if (not _query_valid_v1(change.producer) or
+                not three_payload_contract_text_valid_v1(change.facet, false) or
+                not three_payload_contract_text_valid_v1(change.dimension, false)):
+            return false
+        match change.old_fingerprint:
+            case Some(digest):
+                if not three_payload_contract_digest_valid_v1(digest): return false
+            case nil: pass
+        match change.new_fingerprint:
+            case Some(digest):
+                if not three_payload_contract_digest_valid_v1(digest): return false
+            case nil: pass
+        dimensions = _push_text_unique_v1(dimensions, change.dimension)
+    for membership in old_new_membership:
+        if (not _query_valid_v1(membership.owner) or
+                not three_payload_contract_text_valid_v1(membership.dimension, false) or
+                not three_payload_contract_digest_valid_v1(membership.absence_witness_digest) or
+                not _coverage_usable_v1(membership.coverage) or
+                not _query_list_valid_unique_v1(membership.old_candidates) or
+                not _query_list_valid_unique_v1(membership.new_candidates)):
+            return false
+        dimensions = _push_text_unique_v1(dimensions, membership.dimension)
+    for verified in verified_forward_manifests:
+        if not _forward_valid_v1(verified): return false
+    for shard in rr_shards:
+        if not reverse_reference_shard_valid_v1(shard) or
+                not _coverage_usable_v1(shard.coverage): return false
+    if (changed_facets.len() > 0 or old_new_membership.len() > 0) and
+            verified_forward_manifests.len() == 0: return false
+    for dimension in dimensions:
+        if not _dimension_proven_v1(dimension, verified_forward_manifests): return false
+    true
+
+# Canonical data identity only.  Authority comes exclusively from an opaque
+# writer grant whose query_domain_digest equals this value.
+pub fn affected_query_domain_digest_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+) -> text:
+    if not _affected_query_domain_inputs_valid_v1(changed_facets,
+            old_new_membership, verified_forward_manifests, rr_shards): return ""
+    var pieces: [text] = [_frame_v1("domain", "simple.affected-query-domain.v1")]
+    var change_rows: [text] = []
+    for change in changed_facets: change_rows.push(_changed_receipt_row_v1(change))
+    for row in _sort_texts_v1(change_rows): pieces.push(_frame_v1("change", row))
+    var membership_rows: [text] = []
+    for membership in old_new_membership:
+        membership_rows.push(_membership_receipt_row_v1(membership))
+    for row in _sort_texts_v1(membership_rows): pieces.push(_frame_v1("membership", row))
+    var evidence_rows: [text] = []
+    for verified in verified_forward_manifests:
+        evidence_rows.push(_verified_receipt_row_v1(verified))
+    for shard in rr_shards:
+        evidence_rows.push(_frame_v1("rr", sha256_u8_hex(
+            reverse_reference_shard_encode_v1(shard))))
+    for row in _sort_texts_v1(evidence_rows): pieces.push(_frame_v1("evidence", row))
+    sha256_text(pieces.join(""))
+
+pub fn affected_query_domain_authority_available_v1() -> bool:
+    # Self-declared candidate/membership/absence roots are not proof that the
+    # admitted parent generation covered the complete changed domain.
+    false
+
+fn _reject_plan_v1(reason: text) -> AffectedQueryPlanV1:
+    AffectedQueryPlanV1(accepted: false, rejection_reason: reason,
+        ordered_query_ids: [], owner_modules: [], changed_dimensions: [],
+        conservative_domain_receipt: "", scc_group_identities: [])
+
+fn _plan_affected_queries_authenticated_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+    authority: AuthenticatedAffectedDomainV1?,
+) -> AffectedQueryPlanV1:
+    var dimensions: [text] = []
+    for change in changed_facets:
+        if not _query_valid_v1(change.producer) or change.facet == "" or change.dimension == "":
+            return _reject_plan_v1("invalid_changed_facet")
+        match change.old_fingerprint:
+            case Some(digest):
+                if not three_payload_contract_digest_valid_v1(digest):
+                    return _reject_plan_v1("invalid_changed_fingerprint")
+            case nil: pass
+        match change.new_fingerprint:
+            case Some(digest):
+                if not three_payload_contract_digest_valid_v1(digest):
+                    return _reject_plan_v1("invalid_changed_fingerprint")
+            case nil: pass
+        dimensions = _push_text_unique_v1(dimensions, change.dimension)
+    for membership in old_new_membership:
+        if not _query_valid_v1(membership.owner) or membership.dimension == "" or
+                not three_payload_contract_digest_valid_v1(membership.absence_witness_digest) or
+                not _coverage_usable_v1(membership.coverage):
+            return _reject_plan_v1("membership_or_absence_incomplete")
+        for candidate in membership.old_candidates:
+            if not _query_valid_v1(candidate): return _reject_plan_v1("membership_candidate_invalid")
+        for candidate in membership.new_candidates:
+            if not _query_valid_v1(candidate): return _reject_plan_v1("membership_candidate_invalid")
+        dimensions = _push_text_unique_v1(dimensions, membership.dimension)
+    for verified in verified_forward_manifests:
+        if not _forward_valid_v1(verified): return _reject_plan_v1("forward_manifest_unverified")
+    for shard in rr_shards:
+        if not reverse_reference_shard_valid_v1(shard) or not _coverage_usable_v1(shard.coverage):
+            return _reject_plan_v1("rr_shard_incomplete")
+    if (changed_facets.len() > 0 or old_new_membership.len() > 0) and
+            verified_forward_manifests.len() == 0:
+        return _reject_plan_v1("affected_evidence_incomplete")
+    for dimension in dimensions:
+        if not _dimension_proven_v1(dimension, verified_forward_manifests):
+            return _reject_plan_v1("affected_domain_incomplete")
+    # Even an empty affected set is a semantic claim (the zero-match case).
+    # It must be bound to the admitted generation; absence of change rows is
+    # never authority to skip complete-domain validation.
+    match authority:
+        case Some(authenticated):
+            if (not three_payload_contract_digest_valid_v1(
+                    authenticated.query_domain_digest) or
+                    not three_payload_contract_digest_valid_v1(
+                        authenticated.grant.binding_digest) or
+                    authenticated.grant.generation < 0 or
+                    not three_payload_contract_digest_valid_v1(
+                        authenticated.grant.manifest_digest) or
+                    not three_payload_contract_digest_valid_v1(
+                        authenticated.grant.exact_seal_digest) or
+                    not three_payload_contract_digest_valid_v1(
+                        authenticated.grant.owner_grant_digest)):
+                return _reject_plan_v1("affected_domain_authority_unavailable")
+        case nil:
+            return _reject_plan_v1("affected_domain_authority_unavailable")
+
+    var affected_pairs: [AffectedQueryPartitionV1] = []
+    # Existing reverse edges cover prior consumers and deletion/update cases.
+    for shard in rr_shards:
+        for edge in shard.sorted_edges:
+            if _changed_match_v1(edge.producer, edge.facet, changed_facets) or
+                    _membership_match_v1(edge.producer, edge.facet, old_new_membership):
+                affected_pairs = _push_query_partition_unique_v1(affected_pairs,
+                    edge.consumer, edge.partition_id)
+    # Verified forward reads cover newly added candidate/membership/absence
+    # cases where no old reverse edge can exist yet.
+    for verified in verified_forward_manifests:
+        for read in verified.manifest.ordered_reads:
+            if _changed_match_v1(read.producer, read.facet, changed_facets) or
+                    _membership_match_v1(read.producer, read.facet, old_new_membership):
+                affected_pairs = _push_query_partition_unique_v1(affected_pairs,
+                    verified.manifest.consumer, read.partition_id)
+
+    # Select the SCC by both partition and directly affected consumer.  A
+    # partition can contain several disjoint SCCs; conflating them over-invalidates
+    # work, while publishing only the direct consumer exposes a mixed epoch.
+    var affected: [SemanticQueryKeyV1] = []
+    var scc_identities: [text] = []
+    val groups = _scc_groups_v1(verified_forward_manifests)
+    for pair in affected_pairs:
+        val group = affected_scc_group_candidate_v1(pair.partition_id,
+            pair.query, groups)
+        if group.is_none(): return _reject_plan_v1("scc_witness_incomplete")
+        for member in group.unwrap().member_queries:
+            affected = _push_query_unique_v1(affected, member)
+        scc_identities = _push_text_unique_v1(scc_identities, group.unwrap().group_identity)
+
+    affected = _sort_queries_v1(affected)
+    var owners: [text] = []
+    for query in affected: owners = _push_text_unique_v1(owners, query.stable_entity_id)
+    val sorted_dimensions = _sort_texts_v1(dimensions)
+    val sorted_sccs = _sort_texts_v1(scc_identities)
+    var receipt_material = _frame_v1("domain", "simple.affected-query-plan.v1")
+    var change_rows: [text] = []
+    for change in changed_facets:
+        change_rows.push(_changed_receipt_row_v1(change))
+    for row in _sort_texts_v1(change_rows): receipt_material = receipt_material + _frame_v1("change", row)
+    var membership_rows: [text] = []
+    for membership in old_new_membership:
+        membership_rows.push(_membership_receipt_row_v1(membership))
+    for row in _sort_texts_v1(membership_rows): receipt_material = receipt_material + _frame_v1("membership", row)
+    var evidence_rows: [text] = []
+    for verified in verified_forward_manifests:
+        evidence_rows.push(_verified_receipt_row_v1(verified))
+    for shard in rr_shards:
+        evidence_rows.push(_frame_v1("rr", sha256_u8_hex(reverse_reference_shard_encode_v1(shard))))
+    for row in _sort_texts_v1(evidence_rows): receipt_material = receipt_material + _frame_v1("evidence", row)
+    for query in affected: receipt_material = receipt_material + _frame_v1("affected", _query_text_v1(query))
+    for dimension in sorted_dimensions: receipt_material = receipt_material + _frame_v1("dimension", dimension)
+    for scc in sorted_sccs: receipt_material = receipt_material + _frame_v1("scc_identity", scc)
+    match authority:
+        case Some(authenticated):
+            receipt_material = receipt_material +
+                _frame_v1("query_domain", authenticated.query_domain_digest) +
+                _frame_v1("authority_binding", authenticated.grant.binding_digest) +
+                _frame_v1("authority_generation", authenticated.grant.generation.to_string()) +
+                _frame_v1("authority_manifest", authenticated.grant.manifest_digest) +
+                _frame_v1("authority_attempt", authenticated.grant.attempt_seal_digest) +
+                _frame_v1("authority_scope", authenticated.grant.exact_seal_digest) +
+                _frame_v1("authority_dependencies",
+                    authenticated.grant.dependency_enumeration_digest) +
+                _frame_v1("authority_grant", authenticated.grant.owner_grant_digest)
+        case nil: pass
+    AffectedQueryPlanV1(accepted: true, rejection_reason: "",
+        ordered_query_ids: affected, owner_modules: _sort_texts_v1(owners),
+        changed_dimensions: sorted_dimensions,
+        conservative_domain_receipt: sha256_text(receipt_material),
+        scc_group_identities: sorted_sccs)
+
+pub fn plan_affected_queries_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+) -> AffectedQueryPlanV1:
+    if not _affected_query_domain_budget_valid_v1(changed_facets,
+            old_new_membership, verified_forward_manifests, rr_shards):
+        return _reject_plan_v1("affected_domain_bounds_exceeded")
+    _plan_affected_queries_authenticated_v1(changed_facets, old_new_membership,
+        verified_forward_manifests, rr_shards, nil)
+
+pub fn plan_affected_queries_with_authority_v1(
+    changed_facets: [ChangedSemanticFacetV1],
+    old_new_membership: [OldNewMembershipV1],
+    verified_forward_manifests: [VerifiedForwardManifestV1],
+    rr_shards: [ReverseReferenceShardV1],
+    grant: CacheSemanticCompletenessV1,
+    expected_authority: SemanticScopeConsumptionBindingV1,
+) -> AffectedQueryPlanV1:
+    if not _affected_query_domain_budget_valid_v1(changed_facets, old_new_membership,
+            verified_forward_manifests, rr_shards):
+        return _reject_plan_v1("affected_domain_bounds_exceeded")
+    val projection = match writer_validate_semantic_completeness_v1(
+            grant, expected_authority):
+        case Ok(value): value
+        case Err(ScopeGenerationMismatch):
+            return _reject_plan_v1("affected_domain_generation_mismatch")
+        case Err(_): return _reject_plan_v1("affected_domain_authority_unavailable")
+    val query_domain_digest = affected_query_domain_digest_v1(changed_facets,
+        old_new_membership, verified_forward_manifests, rr_shards)
+    if query_domain_digest == "": return _reject_plan_v1("affected_domain_incomplete")
+    if query_domain_digest != expected_authority.query_domain_digest:
+        return _reject_plan_v1("affected_domain_authority_mismatch")
+    _plan_affected_queries_authenticated_v1(changed_facets, old_new_membership,
+        verified_forward_manifests, rr_shards,
+        Some(AuthenticatedAffectedDomainV1(grant: projection,
+            query_domain_digest: query_domain_digest)))
+
+fn _read_edge_v1(read: SemanticQueryReadV1, manifest_digest: text) -> ReverseReferenceEdgeV1:
+    ReverseReferenceEdgeV1(producer: read.producer, facet: read.facet,
+        consumer: read.consumer, consumed_fingerprint: read.consumed_fingerprint,
+        forward_manifest_digest: manifest_digest, partition_id: read.partition_id)
+
+fn _edge_identity_v1(edge: ReverseReferenceEdgeV1) -> text:
+    reverse_reference_edge_key_v1(edge) + "\u0000" + edge.partition_id
+
+fn _edge_index_v1(edges: [ReverseReferenceEdgeV1], edge: ReverseReferenceEdgeV1) -> i64:
+    var index = 0
+    for candidate in edges:
+        if _edge_identity_v1(candidate) == _edge_identity_v1(edge): return index
+        index = index + 1
+    -1
+
+fn _sort_edges_v1(edges: [ReverseReferenceEdgeV1]) -> [ReverseReferenceEdgeV1]:
+    var out = edges
+    var index = 1
+    while index < out.len():
+        val held = out[index]
+        var cursor = index
+        while cursor > 0 and reverse_reference_edge_key_v1(held) <
+                reverse_reference_edge_key_v1(out[cursor - 1]):
+            out[cursor] = out[cursor - 1]
+            cursor = cursor - 1
+        out[cursor] = held
+        index = index + 1
+    out
+
+struct ReverseEdgeBuildV1:
+    valid: bool
+    edges: [ReverseReferenceEdgeV1]
+
+fn _build_edges_v1(reads: [SemanticQueryReadV1], manifest_digest: text) -> ReverseEdgeBuildV1:
+    var edges: [ReverseReferenceEdgeV1] = []
+    for read in reads:
+        val edge = _read_edge_v1(read, manifest_digest)
+        val index = _edge_index_v1(edges, edge)
+        if index < 0:
+            edges.push(edge)
+        else if edges[index].consumed_fingerprint != edge.consumed_fingerprint:
+            return ReverseEdgeBuildV1(valid: false, edges: [])
+    ReverseEdgeBuildV1(valid: true, edges: _sort_edges_v1(edges))
+
+pub fn stage_reverse_delta_v1(
+    old_reads: SemanticQueryReadManifestV1?,
+    new_reads: SemanticQueryReadManifestV1,
+) -> ReverseReferenceDeltaV1:
+    if not semantic_query_read_manifest_valid_v1(new_reads):
+        return ReverseReferenceDeltaV1(consumer: new_reads.consumer,
+            old_manifest_digest: nil, new_manifest_digest: "", inserted: [], removed: [])
+    match old_reads:
+        case Some(manifest):
+            if not semantic_query_read_manifest_valid_v1(manifest) or
+                    not _query_equal_v1(manifest.consumer, new_reads.consumer):
+                return ReverseReferenceDeltaV1(consumer: new_reads.consumer,
+                    old_manifest_digest: nil, new_manifest_digest: "", inserted: [], removed: [])
+        case nil: pass
+    val old_digest = match old_reads:
+        case Some(manifest): Some(sha256_u8_hex(semantic_query_read_manifest_encode_v1(manifest)))
+        case nil: nil
+    val new_digest = sha256_u8_hex(semantic_query_read_manifest_encode_v1(new_reads))
+    var old_edges: [ReverseReferenceEdgeV1] = []
+    match old_reads:
+        case Some(manifest):
+            val built = _build_edges_v1(manifest.ordered_reads, old_digest.unwrap())
+            if not built.valid:
+                return ReverseReferenceDeltaV1(consumer: new_reads.consumer,
+                    old_manifest_digest: nil, new_manifest_digest: "", inserted: [], removed: [])
+            old_edges = built.edges
+        case nil: pass
+    val built_new = _build_edges_v1(new_reads.ordered_reads, new_digest)
+    if not built_new.valid:
+        return ReverseReferenceDeltaV1(consumer: new_reads.consumer,
+            old_manifest_digest: nil, new_manifest_digest: "", inserted: [], removed: [])
+    val new_edges = built_new.edges
+    var inserted: [ReverseReferenceEdgeV1] = []
+    var removed: [ReverseReferenceEdgeV1] = []
+    for edge in new_edges:
+        val old_index = _edge_index_v1(old_edges, edge)
+        if old_index < 0 or old_edges[old_index].consumed_fingerprint != edge.consumed_fingerprint or
+                old_edges[old_index].forward_manifest_digest != edge.forward_manifest_digest:
+            inserted.push(edge)
+    for edge in old_edges:
+        val new_index = _edge_index_v1(new_edges, edge)
+        if new_index < 0 or new_edges[new_index].consumed_fingerprint != edge.consumed_fingerprint or
+                new_edges[new_index].forward_manifest_digest != edge.forward_manifest_digest:
+            removed.push(edge)
+    ReverseReferenceDeltaV1(consumer: new_reads.consumer,
+        old_manifest_digest: old_digest, new_manifest_digest: new_digest,
+        inserted: _sort_edges_v1(inserted), removed: _sort_edges_v1(removed))
+
+fn _membership_scheduler_preflight_v1(value: OldNewMembershipV1) -> bool:
+    # Cap raw collection cardinality before any candidate canonicalization.
+    if value.old_candidates.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1 - 1 or
+            value.new_candidates.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1 - 1 -
+                value.old_candidates.len():
+        return false
+    if (not _query_valid_v1(value.owner) or value.dimension == "" or
+            not three_payload_contract_digest_valid_v1(value.absence_witness_digest) or
+            not _coverage_usable_v1(value.coverage)):
+        return false
+    # Charge raw text/digests before unique checks construct canonical keys.
+    val budget = ThreePayloadContractBudgetV1(
+        remaining_bytes: AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+        remaining_items: AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1,
+        used_bytes: 0, ok: true)
+    budget.add_items(1 + value.old_candidates.len() + value.new_candidates.len())
+    semantic_query_key_budget_v1(budget, value.owner)
+    budget.add_text(value.dimension, false)
+    budget.add_digest(value.absence_witness_digest)
+    for candidate in value.old_candidates: semantic_query_key_budget_v1(budget, candidate)
+    for candidate in value.new_candidates: semantic_query_key_budget_v1(budget, candidate)
+    if not budget.ok: return false
+    _query_list_valid_unique_v1(value.old_candidates) and
+        _query_list_valid_unique_v1(value.new_candidates)
+
+# Membership is a scheduling input, not a worker input.  A removal can affect
+# the owner even when it no longer appears in either membership snapshot, so
+# include it explicitly and canonicalize the complete old/new union.  The map
+# makes de-duplication linear after the bounded preflight.
+pub fn old_new_membership_union_v1(value: OldNewMembershipV1) -> [SemanticQueryKeyV1]:
+    if not _membership_scheduler_preflight_v1(value): return []
+    var merged: [SemanticQueryKeyV1] = []
+    var seen: Dict<text, bool> = {}
+    val owner_key = _query_text_v1(value.owner)
+    seen[owner_key] = true
+    merged.push(value.owner)
+    for candidate in value.old_candidates:
+        val key = _query_text_v1(candidate)
+        if not seen.contains_key(key):
+            seen[key] = true
+            merged.push(candidate)
+    for candidate in value.new_candidates:
+        val key = _query_text_v1(candidate)
+        if not seen.contains_key(key):
+            seen[key] = true
+            merged.push(candidate)
+    _sort_queries_v1(merged)
+
+# This checks only the shape of non-authoritative scheduling preparation.  A
+# writer grant remains required before any zero-match plan can be admitted.
+pub fn old_new_membership_zero_match_witness_valid_v1(value: OldNewMembershipV1) -> bool:
+    value.new_candidates.len() == 0 and old_new_membership_union_v1(value).len() > 0
+
+fn _edge_exact_equal_v1(left: ReverseReferenceEdgeV1,
+        right: ReverseReferenceEdgeV1) -> bool:
+    _edge_identity_v1(left) == _edge_identity_v1(right) and
+        left.consumed_fingerprint == right.consumed_fingerprint and
+        left.forward_manifest_digest == right.forward_manifest_digest
+
+fn _shard_index_v1(shards: [ReverseReferenceShardV1], partition: text) -> i64:
+    var index = 0
+    for shard in shards:
+        if shard.partition_id == partition: return index
+        index = index + 1
+    -1
+
+fn _shards_valid_unique_v1(shards: [ReverseReferenceShardV1]) -> bool:
+    var partitions: Dict<text, bool> = {}
+    for shard in shards:
+        if (not reverse_reference_shard_valid_v1(shard) or
+                not _coverage_usable_v1(shard.coverage) or
+                partitions.contains_key(shard.partition_id)):
+            return false
+        partitions[shard.partition_id] = true
+    true
+
+# Per-shard codecs already reject an oversized shard.  Scheduling must also
+# reject an aggregate that would allocate an unbounded shard set or delta.
+fn _reverse_stage_preflight_v1(prior: [ReverseReferenceShardV1],
+        delta: ReverseReferenceDeltaV1) -> bool:
+    if prior.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1 or
+            delta.inserted.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1 or
+            delta.removed.len() > AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1:
+        return false
+    val budget = ThreePayloadContractBudgetV1(
+        remaining_bytes: AFFECTED_QUERY_DOMAIN_MAX_CANONICAL_BYTES_V1,
+        remaining_items: AFFECTED_QUERY_DOMAIN_MAX_ROWS_V1,
+        used_bytes: 0, ok: true)
+    budget.add_items(prior.len())
+    for shard in prior:
+        budget.add_text(shard.partition_id, false)
+        budget.add_items(shard.sorted_edges.len())
+        for edge in shard.sorted_edges: reverse_reference_edge_budget_v1(budget, edge)
+        if not budget.ok: return false
+    semantic_query_key_budget_v1(budget, delta.consumer)
+    budget.add_optional_digest(delta.old_manifest_digest)
+    budget.add_digest(delta.new_manifest_digest)
+    budget.add_items(delta.inserted.len())
+    budget.add_items(delta.removed.len())
+    for edge in delta.inserted:
+        reverse_reference_edge_budget_v1(budget, edge)
+        if not budget.ok: return false
+    for edge in delta.removed:
+        reverse_reference_edge_budget_v1(budget, edge)
+        if not budget.ok: return false
+    budget.ok
+
+fn _sort_shards_v1(shards: [ReverseReferenceShardV1]) -> [ReverseReferenceShardV1]:
+    array_sort_by(shards, \left, right:
+        if left.partition_id < right.partition_id: -1
+        elif left.partition_id > right.partition_id: 1
+        else: 0
+    )
+
+fn _stage_reject_v1(reason: text, prior: [ReverseReferenceShardV1]) -> ReverseReferenceShardStageV1:
+    ReverseReferenceShardStageV1(accepted: false, rejection_reason: reason,
+        shards: prior)
+
+# Prepare a candidate delta in coordinator memory.  The caller supplies whether
+# reevaluation succeeded; a failure returns the prior leaf set unchanged.  This
+# is not generation publication or an authority to replace a live generation.
+fn _stage_reverse_shards_delta_v1(prior: [ReverseReferenceShardV1],
+        delta: ReverseReferenceDeltaV1, reevaluation_succeeded: bool
+    ) -> ReverseReferenceShardStageV1:
+    if not reevaluation_succeeded:
+        return _stage_reject_v1("reevaluation_failed", prior)
+    if not _reverse_stage_preflight_v1(prior, delta):
+        return _stage_reject_v1("rr_stage_bounds_exceeded", prior)
+    # Both validators canonicalize edge/query identities, so they must follow
+    # the aggregate raw row/byte preflight above.
+    if not _shards_valid_unique_v1(prior):
+        return _stage_reject_v1("prior_rr_shards_invalid", prior)
+    if not reverse_reference_delta_valid_v1(delta):
+        return _stage_reject_v1("rr_delta_invalid", prior)
+    var staged = prior
+    for removed in delta.removed:
+        val shard_index = _shard_index_v1(staged, removed.partition_id)
+        if shard_index < 0:
+            return _stage_reject_v1("rr_delta_removed_edge_missing", prior)
+        var shard = staged[shard_index]
+        val edge_index = _edge_index_v1(shard.sorted_edges, removed)
+        if edge_index < 0 or not _edge_exact_equal_v1(shard.sorted_edges[edge_index], removed):
+            return _stage_reject_v1("rr_delta_removed_edge_missing", prior)
+        shard.sorted_edges.remove_at(edge_index)
+        staged[shard_index] = shard
+    for inserted in delta.inserted:
+        var shard_index = _shard_index_v1(staged, inserted.partition_id)
+        if shard_index < 0:
+            staged.push(ReverseReferenceShardV1(schema: 1,
+                partition_id: inserted.partition_id, coverage: SemanticCoverageV1.Complete,
+                sorted_edges: []))
+            shard_index = staged.len() - 1
+        var shard = staged[shard_index]
+        val edge_index = _edge_index_v1(shard.sorted_edges, inserted)
+        if edge_index >= 0:
+            if not _edge_exact_equal_v1(shard.sorted_edges[edge_index], inserted):
+                return _stage_reject_v1("rr_delta_insert_edge_conflict", prior)
+        else:
+            shard.sorted_edges.push(inserted)
+            shard.sorted_edges = _sort_edges_v1(shard.sorted_edges)
+            staged[shard_index] = shard
+    if not _shards_valid_unique_v1(staged):
+        return _stage_reject_v1("rr_stage_noncanonical", prior)
+    ReverseReferenceShardStageV1(accepted: true, rejection_reason: "",
+        shards: _sort_shards_v1(staged))
+
+# Genesis seeding is intentionally distinct from mutation routing.  It has no
+# prior generation and therefore cannot retain stale edges.  All post-genesis
+# changes use stage_reverse_shards_v1 and must present a complete old manifest,
+# including a complete manifest whose ordered read set is empty.
+pub fn seed_reverse_shards_v1(
+        new_reads: SemanticQueryReadManifestV1) -> ReverseReferenceShardStageV1:
+    if not semantic_query_read_manifest_valid_v1(new_reads):
+        return _stage_reject_v1("rr_manifest_incomplete", [])
+    val delta = stage_reverse_delta_v1(nil, new_reads)
+    if not reverse_reference_delta_valid_v1(delta):
+        return _stage_reject_v1("rr_manifest_incomplete", [])
+    _stage_reverse_shards_delta_v1([], delta, true)
+
+# The public mutation boundary receives whole manifests, validates their common
+# consumer identity, and recomputes the delta locally.  Callers cannot stage a
+# hand-assembled mixed-generation delta or infer an empty old read set from nil.
+pub fn stage_reverse_shards_v1(prior: [ReverseReferenceShardV1],
+        old_reads: SemanticQueryReadManifestV1?,
+        new_reads: SemanticQueryReadManifestV1,
+        reevaluation_succeeded: bool) -> ReverseReferenceShardStageV1:
+    if not semantic_query_read_manifest_valid_v1(new_reads):
+        return _stage_reject_v1("rr_manifest_incomplete", prior)
+    match old_reads:
+        case Some(old_manifest):
+            if not semantic_query_read_manifest_valid_v1(old_manifest) or
+                    not _query_equal_v1(old_manifest.consumer, new_reads.consumer):
+                return _stage_reject_v1("rr_manifest_incomplete", prior)
+        case nil: return _stage_reject_v1("rr_old_history_missing", prior)
+    val delta = stage_reverse_delta_v1(old_reads, new_reads)
+    if not reverse_reference_delta_valid_v1(delta):
+        return _stage_reject_v1("rr_manifest_incomplete", prior)
+    _stage_reverse_shards_delta_v1(prior, delta, reevaluation_succeeded)
+
+# The verified CAS owns write atomicity, no-replace publication, bounded reads,
+# canonical-kind verification and digest readback.  This facade merely binds
+# the RR schema to that owner and exposes typed coordinator results.
+pub fn persist_reverse_reference_shard_v1(root: text,
+        shard: ReverseReferenceShardV1) -> ReverseReferenceShardPersistV1:
+    if root == "" or not reverse_reference_shard_valid_v1(shard) or
+            not _coverage_usable_v1(shard.coverage):
+        return ReverseReferenceShardPersistV1(ok: false, digest: "",
+            error: "rr_shard_invalid")
+    val bytes = reverse_reference_shard_encode_v1(shard)
+    if bytes.len() == 0 or bytes.len() > VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1:
+        return ReverseReferenceShardPersistV1(ok: false, digest: "",
+            error: "rr_shard_bounds_exceeded")
+    match verified_cas_put_v1(root, "reverse_reference_shard", bytes):
+        case Ok(digest): ReverseReferenceShardPersistV1(ok: true, digest: digest, error: "")
+        case Err(_): ReverseReferenceShardPersistV1(ok: false, digest: "",
+            error: "rr_shard_persist_rejected")
+
+pub fn read_reverse_reference_shard_v1(root: text,
+        digest: text) -> ReverseReferenceShardReadV1:
+    if root == "" or not three_payload_contract_digest_valid_v1(digest):
+        return ReverseReferenceShardReadV1(ok: false, present: false, shard: nil,
+            error: "rr_shard_address_invalid")
+    match verified_cas_get_v1(root, "reverse_reference_shard", digest,
+            VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1):
+        case Err(_): ReverseReferenceShardReadV1(ok: false, present: false, shard: nil,
+            error: "rr_shard_read_rejected")
+        case Ok(lookup):
+            if not lookup.present:
+                return ReverseReferenceShardReadV1(ok: true, present: false, shard: nil,
+                    error: "")
+            val decoded = reverse_reference_shard_decode_v1(lookup.canonical_envelope)
+            if not decoded.ok:
+                return ReverseReferenceShardReadV1(ok: false, present: false, shard: nil,
+                    error: "rr_shard_decode_rejected")
+            match decoded.value:
+                case Some(shard):
+                    if not reverse_reference_shard_valid_v1(shard) or
+                            not _coverage_usable_v1(shard.coverage):
+                        return ReverseReferenceShardReadV1(ok: false, present: false,
+                            shard: nil, error: "rr_shard_incomplete")
+                    ReverseReferenceShardReadV1(ok: true, present: true,
+                        shard: Some(shard), error: "")
+                case nil: ReverseReferenceShardReadV1(ok: false, present: false, shard: nil,
+                    error: "rr_shard_decode_missing")

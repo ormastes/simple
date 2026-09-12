@@ -10,6 +10,26 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 
+int64_t rt_parser_mask_call_u8x32(int64_t function_address,
+                                  int64_t source_address,
+                                  int64_t first, int64_t second) {
+    if (function_address <= 0 || source_address <= 0 ||
+        first < 0 || first > 255 || second < 0 || second > 255) return -1;
+    typedef uint32_t (*parser_mask_fn)(const uint8_t *, uint8_t, uint8_t);
+    parser_mask_fn function = (parser_mask_fn)(uintptr_t)function_address;
+    return (int64_t)function((const uint8_t *)(uintptr_t)source_address,
+                             (uint8_t)first, (uint8_t)second);
+}
+
+int64_t rt_parser_lexical_mask_call_u8x32(int64_t function_address,
+                                          int64_t source_address,
+                                          int64_t needle) {
+    if (function_address <= 0 || source_address <= 0 || needle < 0 || needle > 255) return -1;
+    typedef uint32_t (*parser_lexical_mask_fn)(const uint8_t *, uint8_t);
+    parser_lexical_mask_fn function = (parser_lexical_mask_fn)(uintptr_t)function_address;
+    return (int64_t)function((const uint8_t *)(uintptr_t)source_address, (uint8_t)needle);
+}
+
 #if defined(_WIN32) || defined(_WIN64)
 #  include <windows.h>
 #  if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))

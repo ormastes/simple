@@ -1,0 +1,800 @@
+"""Canonical strict codecs for NBP1, NBO1, NBC1 and provenance-only NBAV."""
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.nogc_sync_mut.composition.native_build_payload_types_v1.*
+use std.nogc_sync_mut.composition.native_build_payload_preflight_v1.{
+    native_build_text_bytes_less_v1, native_build_reference_less_v1,
+    native_build_text_vector_preflight_v1, native_build_references_preflight_v1,
+    native_build_map_preflight_v1}
+
+pub val NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1: i64 = 16777120
+pub val NATIVE_BUILD_PAYLOAD_MAX_ITEMS_V1: i64 = 1048576
+pub val NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1: i64 = 1048576
+pub val NATIVE_BUILD_PAYLOAD_MAX_DEPTH_V1: i64 = 32
+pub val NATIVE_BUILD_AUTHORITY_BYTES_V1: i64 = 104
+pub val NATIVE_BUILD_CONTROL_BITS_V1: u64 = 511u64
+pub val NATIVE_BUILD_EXPLICIT_FIELD_BITS_V1: u64 = 255u64
+pub class NativeBuildPayloadBudgetV1:
+    max_items: i64
+    max_text_bytes: i64
+    max_depth: i64
+    items: i64
+    text_bytes: i64
+    collection_items_materialized: i64
+    failed: bool
+    me fn retain_items(count: i64) -> bool:
+        if self.failed or count < 0 or count > self.max_items - self.items:
+            self.failed = true
+            return false
+        self.items = self.items + count
+        true
+    me fn retain_text(count: i64) -> bool:
+        if self.failed or count < 0 or count > self.max_text_bytes - self.text_bytes:
+            self.failed = true
+            return false
+        self.text_bytes = self.text_bytes + count
+        true
+
+struct _NativeBuildFieldV1:
+    tag: i64
+    field_type: i64
+    value: [u8]
+struct _NativeBuildRecordDecodeV1:
+    ok: bool
+    fields: [_NativeBuildFieldV1]
+    error: text
+class _NativeBuildValueCursorV1:
+    bytes: [u8]
+    position: i64
+    failed: bool
+    me fn read_u32() -> u32:
+        if self.failed or self.position > self.bytes.len() - 4:
+            self.failed = true
+            return 0u32
+        val value = _read_u32_v1(self.bytes, self.position)
+        self.position = self.position + 4
+        value
+    me fn read_bytes(count: i64) -> [u8]:
+        if self.failed or count < 0 or self.position > self.bytes.len() - count:
+            self.failed = true
+            return []
+        val value = self.bytes[self.position..(self.position + count)]
+        self.position = self.position + count
+        value
+
+fn _push_u16_v1(buffer: [u8], value: i64) -> [u8]:
+    var out = buffer
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out
+
+fn _push_u32_v1(buffer: [u8], value: u32) -> [u8]:
+    var out = buffer
+    var shift: u32 = 0u32
+    while shift < 32u32:
+        out.push(((value >> shift) & 255u32) as u8)
+        shift = shift + 8u32
+    out
+
+fn _push_u64_v1(buffer: [u8], value: u64) -> [u8]:
+    var out = buffer
+    var shift: u64 = 0u64
+    while shift < 64u64:
+        out.push(((value >> shift) & 255u64) as u8)
+        shift = shift + 8u64
+    out
+
+fn _append_v1(buffer: [u8], values: [u8]) -> [u8]:
+    var out = buffer
+    for value in values: out.push(value)
+    out
+
+fn _read_u16_v1(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+
+fn _read_u32_v1(bytes: [u8], offset: i64) -> u32:
+    var value: u32 = 0u32
+    var index: i64 = 0
+    while index < 4:
+        value = value | ((bytes[offset + index] as u32) << ((index * 8) as u32))
+        index = index + 1
+    value
+
+fn _read_u64_v1(bytes: [u8], offset: i64) -> u64:
+    var value: u64 = 0u64
+    var index: i64 = 0
+    while index < 8:
+        value = value | ((bytes[offset + index] as u64) << ((index * 8) as u64))
+        index = index + 1
+    value
+
+fn _contains_zero_v1(bytes: [u8]) -> bool:
+    for value in bytes:
+        if value == 0u8: return true
+    false
+
+fn _all_zero_v1(bytes: [u8]) -> bool:
+    for value in bytes:
+        if value != 0u8: return false
+    true
+
+fn _text_valid_v1(value: text, allow_empty: bool) -> bool:
+    val bytes = value.bytes()
+    not ((bytes.len() == 0 and not allow_empty) or _contains_zero_v1(bytes))
+
+fn _text_bytes_v1(value: text) -> [u8]: value.bytes()
+
+fn _route_u32_v1(value: NativeBuildRouteV1) -> u32:
+    match value:
+        case NativeBuildRouteV1.NormalPure: 1u32
+        case NativeBuildRouteV1.BootstrapCompatibility: 2u32
+        case NativeBuildRouteV1.Stage4Pure: 3u32
+
+fn _route_from_u32_v1(value: u32) -> NativeBuildRouteV1?:
+    match value:
+        case 1u32: Some(NativeBuildRouteV1.NormalPure)
+        case 2u32: Some(NativeBuildRouteV1.BootstrapCompatibility)
+        case 3u32: Some(NativeBuildRouteV1.Stage4Pure)
+        case _: nil
+
+fn _source_profile_u32_v1(value: NativeBuildSourceProfileV1) -> u32:
+    match value:
+        case NativeBuildSourceProfileV1.FrozenSnapshot: 1u32
+        case NativeBuildSourceProfileV1.AnchoredLocal: 2u32
+
+fn _source_profile_from_u32_v1(value: u32) -> NativeBuildSourceProfileV1?:
+    match value:
+        case 1u32: Some(NativeBuildSourceProfileV1.FrozenSnapshot)
+        case 2u32: Some(NativeBuildSourceProfileV1.AnchoredLocal)
+        case _: nil
+
+fn _output_format_text_v1(value: NativeBuildOutputFormatV1) -> text:
+    match value:
+        case NativeBuildOutputFormatV1.Native: "native"
+        case NativeBuildOutputFormatV1.Smf: "smf"
+        case NativeBuildOutputFormatV1.Both: "both"
+
+fn _output_format_from_text_v1(value: text) -> NativeBuildOutputFormatV1?:
+    match value:
+        case "native": Some(NativeBuildOutputFormatV1.Native)
+        case "smf": Some(NativeBuildOutputFormatV1.Smf)
+        case "both": Some(NativeBuildOutputFormatV1.Both)
+        case _: nil
+
+fn _link_mode_text_v1(value: NativeBuildLinkModeV1) -> text:
+    match value:
+        case NativeBuildLinkModeV1.Dynload: "dynload"
+        case NativeBuildLinkModeV1.OneBinary: "one-binary"
+
+fn _link_mode_from_text_v1(value: text) -> NativeBuildLinkModeV1?:
+    match value:
+        case "dynload": Some(NativeBuildLinkModeV1.Dynload)
+        case "one-binary": Some(NativeBuildLinkModeV1.OneBinary)
+        case _: nil
+
+fn _hex_nibble_v1(value: text) -> i64:
+    val alphabet = "0123456789abcdef"
+    var index: i64 = 0
+    while index < 16:
+        if alphabet.substring(index, index + 1) == value: return index
+        index = index + 1
+    -1
+
+fn _digest_raw_v1(digest: text) -> [u8]:
+    var out: [u8] = []
+    if digest.len() != 64: return out
+    var index: i64 = 0
+    while index < 64:
+        val high = _hex_nibble_v1(digest.substring(index, index + 1))
+        val low = _hex_nibble_v1(digest.substring(index + 1, index + 2))
+        if high < 0 or low < 0: return []
+        out.push(((high << 4) | low) as u8)
+        index = index + 2
+    out
+
+fn _raw_digest_v1(bytes: [u8]) -> text:
+    if bytes.len() != 32: return ""
+    val alphabet = "0123456789abcdef"
+    var out = ""
+    for byte in bytes:
+        out = out + alphabet.substring(((byte as i64) >> 4) & 15,
+            (((byte as i64) >> 4) & 15) + 1)
+        out = out + alphabet.substring((byte as i64) & 15, ((byte as i64) & 15) + 1)
+    out
+
+fn _field_v1(tag: i64, field_type: i64, value: [u8]) -> _NativeBuildFieldV1:
+    _NativeBuildFieldV1(tag: tag, field_type: field_type, value: value)
+
+fn _record_encode_v1(magic: text, fields: [_NativeBuildFieldV1]) -> [u8]:
+    var expected: i64 = 1
+    var total_bytes: i64 = 16
+    for field in fields:
+        if field.tag != expected or field.field_type < 1 or field.field_type > 10:
+            return []
+        if field.value.len() > NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1 - total_bytes - 8:
+            return []
+        total_bytes = total_bytes + 8 + field.value.len()
+        expected = expected + 1
+    var body: [u8] = []
+    for field in fields:
+        body = _push_u16_v1(body, field.tag)
+        body.push(field.field_type as u8)
+        body.push(0u8)
+        body = _push_u32_v1(body, field.value.len() as u32)
+        body = _append_v1(body, field.value)
+    var out = magic.bytes()
+    if out.len() != 4: return []
+    out = _push_u16_v1(out, 1)
+    out = _push_u16_v1(out, 0)
+    out = _push_u32_v1(out, (16 + body.len()) as u32)
+    out = _push_u32_v1(out, fields.len() as u32)
+    out = _append_v1(out, body)
+    if out.len() > NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1: return []
+    out
+
+fn _record_decode_v1(bytes: [u8], magic: text, expected_types: [i64],
+        budget: NativeBuildPayloadBudgetV1, depth: i64) -> _NativeBuildRecordDecodeV1:
+    if bytes.len() < 16 or bytes.len() > NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1:
+        return _NativeBuildRecordDecodeV1(ok: false, fields: [], error: "record_size")
+    if depth > budget.max_depth or bytes[0..4] != magic.bytes() or
+            _read_u16_v1(bytes, 4) != 1 or _read_u16_v1(bytes, 6) != 0:
+        return _NativeBuildRecordDecodeV1(ok: false, fields: [], error: "record_identity")
+    if _read_u32_v1(bytes, 8) as i64 != bytes.len() or
+            _read_u32_v1(bytes, 12) as i64 != expected_types.len() or
+            not budget.retain_items(expected_types.len()):
+        return _NativeBuildRecordDecodeV1(ok: false, fields: [], error: "record_count")
+    var position: i64 = 16
+    var index: i64 = 0
+    while index < expected_types.len():
+        if position > bytes.len() - 8:
+            return _NativeBuildRecordDecodeV1(ok: false, fields: [], error: "field_truncated")
+        val tag = _read_u16_v1(bytes, position)
+        val field_type = bytes[position + 2] as i64
+        val reserved = bytes[position + 3]
+        val length = _read_u32_v1(bytes, position + 4) as i64
+        position = position + 8
+        if tag != index + 1 or field_type != expected_types[index] or reserved != 0u8:
+            return _NativeBuildRecordDecodeV1(ok: false, fields: [], error: "field_contract")
+        if position > bytes.len() or length > bytes.len() - position:
+            return _NativeBuildRecordDecodeV1(ok: false, fields: [], error: "field_range")
+        if ((field_type == 1 and length != 4) or
+                (field_type == 2 and length != 8) or
+                (field_type == 3 and length != 1) or
+                (field_type == 6 and length != 32)):
+            return _NativeBuildRecordDecodeV1(ok: false, fields: [], error: "field_length")
+        position = position + length
+        index = index + 1
+    if position != bytes.len():
+        return _NativeBuildRecordDecodeV1(ok: false, fields: [], error: "record_trailing_bytes")
+    var fields: [_NativeBuildFieldV1] = []
+    position = 16
+    index = 0
+    while index < expected_types.len():
+        val tag = _read_u16_v1(bytes, position)
+        val field_type = bytes[position + 2] as i64
+        val length = _read_u32_v1(bytes, position + 4) as i64
+        position = position + 8
+        fields.push(_field_v1(tag, field_type, bytes[position..(position + length)]))
+        position = position + length
+        index = index + 1
+    _NativeBuildRecordDecodeV1(ok: true, fields: fields, error: "")
+
+fn _u32_bytes_v1(value: u32) -> [u8]: _push_u32_v1([], value)
+fn _u64_bytes_v1(value: u64) -> [u8]: _push_u64_v1([], value)
+fn _bool_bytes_v1(value: bool) -> [u8]: [if value: 1u8 else: 0u8]
+
+fn _decode_u32_field_v1(field: _NativeBuildFieldV1) -> u32:
+    if field.value.len() != 4: return 4294967295u32
+    _read_u32_v1(field.value, 0)
+
+fn _decode_u64_field_v1(field: _NativeBuildFieldV1) -> u64:
+    if field.value.len() != 8: return 0u64 - 1u64
+    _read_u64_v1(field.value, 0)
+
+fn _decode_bool_field_v1(field: _NativeBuildFieldV1) -> i64:
+    if field.value.len() != 1 or field.value[0] > 1u8: return -1
+    field.value[0] as i64
+
+fn _decode_text_raw_v1(field: _NativeBuildFieldV1, allow_empty: bool,
+        budget: NativeBuildPayloadBudgetV1) -> text:
+    if (field.value.len() == 0 and not allow_empty) or
+            not budget.retain_text(field.value.len()) or _contains_zero_v1(field.value):
+        budget.failed = true
+        return ""
+    match validated_utf8_bytes_to_text_linear(field.value):
+        case Ok(value): value
+        case Err(_):
+            budget.failed = true
+            ""
+
+fn _encode_text_vector_v1(values: [text]) -> [u8]:
+    if values.len() > NATIVE_BUILD_PAYLOAD_MAX_ITEMS_V1: return []
+    var total_bytes: i64 = 4
+    var text_bytes: i64 = 0
+    for value in values:
+        if not _text_valid_v1(value, false): return []
+        val encoded = _text_bytes_v1(value)
+        if encoded.len() > NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1 - text_bytes or
+                encoded.len() > NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1 - total_bytes - 4:
+            return []
+        text_bytes = text_bytes + encoded.len()
+        total_bytes = total_bytes + 4 + encoded.len()
+    var out = _push_u32_v1([], values.len() as u32)
+    for value in values:
+        val bytes = _text_bytes_v1(value)
+        out = _push_u32_v1(out, bytes.len() as u32)
+        out = _append_v1(out, bytes)
+    out
+
+fn _decode_text_vector_v1(bytes: [u8], budget: NativeBuildPayloadBudgetV1) -> [text]:
+    val preflight = native_build_text_vector_preflight_v1(bytes,
+        budget.max_items - budget.items, budget.max_text_bytes - budget.text_bytes)
+    if not preflight.ok or not budget.retain_items(preflight.item_count) or
+            not budget.retain_text(preflight.text_bytes):
+        budget.failed = true
+        return []
+    val cursor = _NativeBuildValueCursorV1(bytes: bytes, position: 0, failed: false)
+    val count = cursor.read_u32() as i64
+    var out: [text] = []
+    var index: i64 = 0
+    while index < count and not cursor.failed:
+        val length = cursor.read_u32() as i64
+        val raw = cursor.read_bytes(length)
+        val decoded = match validated_utf8_bytes_to_text_linear(raw):
+            case Ok(value): value
+            case Err(_): ""
+        out.push(decoded)
+        budget.collection_items_materialized = budget.collection_items_materialized + 1
+        index = index + 1
+    if cursor.failed or cursor.position != bytes.len(): budget.failed = true
+    out
+
+fn _encode_references_v1(values: [NativeBuildReferenceV1]) -> [u8]:
+    if values.len() > NATIVE_BUILD_PAYLOAD_MAX_ITEMS_V1: return []
+    var total_bytes: i64 = 4
+    var text_bytes: i64 = 0
+    var index: i64 = 0
+    while index < values.len():
+        val value = values[index]
+        if index > 0 and not native_build_reference_less_v1(values[index - 1], value): return []
+        for text_value in [value.role, value.name, value.kind]:
+            if not _text_valid_v1(text_value, false): return []
+            val bytes = _text_bytes_v1(text_value)
+            if bytes.len() > NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1 - text_bytes or
+                    bytes.len() > NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1 - total_bytes - 4:
+                return []
+            text_bytes = text_bytes + bytes.len()
+            total_bytes = total_bytes + 4 + bytes.len()
+        if total_bytes > NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1 - 36: return []
+        total_bytes = total_bytes + 36
+        if _digest_raw_v1(value.digest).len() != 32: return []
+        index = index + 1
+    var out = _push_u32_v1([], values.len() as u32)
+    for value in values:
+        for text_value in [value.role, value.name, value.kind]:
+            val bytes = _text_bytes_v1(text_value)
+            out = _push_u32_v1(out, bytes.len() as u32)
+            out = _append_v1(out, bytes)
+        out = _push_u32_v1(out, value.schema)
+        val digest = _digest_raw_v1(value.digest)
+        out = _append_v1(out, digest)
+    out
+
+fn _decode_references_v1(bytes: [u8], budget: NativeBuildPayloadBudgetV1) -> [NativeBuildReferenceV1]:
+    val preflight = native_build_references_preflight_v1(bytes,
+        budget.max_items - budget.items, budget.max_text_bytes - budget.text_bytes)
+    if not preflight.ok or not budget.retain_items(preflight.item_count) or
+            not budget.retain_text(preflight.text_bytes):
+        budget.failed = true
+        return []
+    val cursor = _NativeBuildValueCursorV1(bytes: bytes, position: 0, failed: false)
+    val count = cursor.read_u32() as i64
+    var out: [NativeBuildReferenceV1] = []
+    var index: i64 = 0
+    while index < count and not cursor.failed:
+        val role_length = cursor.read_u32() as i64
+        val role = match validated_utf8_bytes_to_text_linear(cursor.read_bytes(role_length)):
+            case Ok(value): value
+            case Err(_): ""
+        val name_length = cursor.read_u32() as i64
+        val name = match validated_utf8_bytes_to_text_linear(cursor.read_bytes(name_length)):
+            case Ok(value): value
+            case Err(_): ""
+        val kind_length = cursor.read_u32() as i64
+        val kind = match validated_utf8_bytes_to_text_linear(cursor.read_bytes(kind_length)):
+            case Ok(value): value
+            case Err(_): ""
+        val schema = cursor.read_u32()
+        val digest = _raw_digest_v1(cursor.read_bytes(32))
+        out.push(NativeBuildReferenceV1(role: role, name: name, kind: kind,
+            schema: schema, digest: digest))
+        budget.collection_items_materialized = budget.collection_items_materialized + 1
+        index = index + 1
+    if cursor.failed or cursor.position != bytes.len(): budget.failed = true
+    out
+
+fn _encode_map_v1(values: [NativeBuildTextMapEntryV1]) -> [u8]:
+    if values.len() > NATIVE_BUILD_PAYLOAD_MAX_ITEMS_V1: return []
+    var total_bytes: i64 = 4
+    var text_bytes: i64 = 0
+    var index: i64 = 0
+    while index < values.len():
+        val value = values[index]
+        if not _text_valid_v1(value.key, false) or not _text_valid_v1(value.value, true):
+            return []
+        if index > 0 and not native_build_text_bytes_less_v1(values[index - 1].key,
+                value.key): return []
+        val key = _text_bytes_v1(value.key)
+        val map_value = _text_bytes_v1(value.value)
+        if key.len() > NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1 - text_bytes or
+                key.len() > NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1 - total_bytes - 4:
+            return []
+        text_bytes = text_bytes + key.len()
+        total_bytes = total_bytes + 4 + key.len()
+        if map_value.len() > NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1 - text_bytes or
+                map_value.len() > NATIVE_BUILD_PAYLOAD_MAX_BYTES_V1 - total_bytes - 4:
+            return []
+        text_bytes = text_bytes + map_value.len()
+        total_bytes = total_bytes + 4 + map_value.len()
+        index = index + 1
+    var out = _push_u32_v1([], values.len() as u32)
+    for value in values:
+        val key = _text_bytes_v1(value.key)
+        val map_value = _text_bytes_v1(value.value)
+        out = _push_u32_v1(out, key.len() as u32)
+        out = _append_v1(out, key)
+        out = _push_u32_v1(out, map_value.len() as u32)
+        out = _append_v1(out, map_value)
+    out
+
+fn _decode_map_v1(bytes: [u8], budget: NativeBuildPayloadBudgetV1) -> [NativeBuildTextMapEntryV1]:
+    val preflight = native_build_map_preflight_v1(bytes,
+        budget.max_items - budget.items, budget.max_text_bytes - budget.text_bytes)
+    if not preflight.ok or not budget.retain_items(preflight.item_count) or
+            not budget.retain_text(preflight.text_bytes):
+        budget.failed = true
+        return []
+    val cursor = _NativeBuildValueCursorV1(bytes: bytes, position: 0, failed: false)
+    val count = cursor.read_u32() as i64
+    var out: [NativeBuildTextMapEntryV1] = []
+    var index: i64 = 0
+    while index < count and not cursor.failed:
+        val key_length = cursor.read_u32() as i64
+        val key_raw = cursor.read_bytes(key_length)
+        val key = match validated_utf8_bytes_to_text_linear(key_raw):
+            case Ok(value): value
+            case Err(_): ""
+        val value_length = cursor.read_u32() as i64
+        val value_raw = cursor.read_bytes(value_length)
+        val value = match validated_utf8_bytes_to_text_linear(value_raw):
+            case Ok(decoded): decoded
+            case Err(_): ""
+        out.push(NativeBuildTextMapEntryV1(key: key, value: value))
+        budget.collection_items_materialized = budget.collection_items_materialized + 1
+        index = index + 1
+    if cursor.failed or cursor.position != bytes.len(): budget.failed = true
+    out
+
+fn _authority_encode_v1(value: NativeBuildAuthorityReferenceV1) -> [u8]:
+    if value.input_broker_token.len() != 32 or value.output_scope_token.len() != 32 or
+            _all_zero_v1(value.input_broker_token) or
+            _all_zero_v1(value.output_scope_token): return []
+    val digest = _digest_raw_v1(value.snapshot_digest)
+    if digest.len() != 32: return []
+    val digest_zero = digest == [0u8; 32]
+    if (value.snapshot_schema == 1u32 and digest_zero) or
+            (value.snapshot_schema == 0u32 and not digest_zero) or value.snapshot_schema > 1u32: return []
+    var out = _append_v1([], value.input_broker_token)
+    out = _append_v1(out, value.output_scope_token)
+    out = _push_u32_v1(out, value.snapshot_schema)
+    out = _push_u32_v1(out, 0u32)
+    _append_v1(out, digest)
+
+fn _authority_decode_v1(bytes: [u8], source_profile: NativeBuildSourceProfileV1) -> NativeBuildAuthorityReferenceV1?:
+    if bytes.len() != NATIVE_BUILD_AUTHORITY_BYTES_V1 or _read_u32_v1(bytes, 68) != 0u32:
+        return nil
+    val digest = _raw_digest_v1(bytes[72..104])
+    val value = NativeBuildAuthorityReferenceV1(input_broker_token: bytes[0..32],
+        output_scope_token: bytes[32..64], snapshot_schema: _read_u32_v1(bytes, 64),
+        snapshot_digest: digest)
+    if _authority_encode_v1(value).len() != 104: return nil
+    if (source_profile == NativeBuildSourceProfileV1.FrozenSnapshot and
+            value.snapshot_schema != 1u32) or
+            (source_profile == NativeBuildSourceProfileV1.AnchoredLocal and
+            value.snapshot_schema != 0u32): return nil
+    Some(value)
+
+fn _driver_failure_v1(error: text) -> NativeBuildDriverOptionsDecodeV1:
+    NativeBuildDriverOptionsDecodeV1(ok: false, value: nil, error: error)
+
+pub fn native_build_driver_options_encode_v1(value: NativeBuildDriverOptionsV1) -> [u8]:
+    val inputs = _encode_text_vector_v1(value.input_files)
+    val families = _encode_text_vector_v1(value.allowed_families)
+    if inputs.len() == 0 or families.len() == 0 or value.opt_level > 3u32: return []
+    var fields: [_NativeBuildFieldV1] = []
+    fields.push(_field_v1(1, 5, inputs))
+    val output_format_text = _output_format_text_v1(value.output_format)
+    val texts = [[2, 0], [3, 0], [10, 0], [12, 0], [13, 0], [14, 1],
+        [15, 0], [17, 0], [19, 1], [21, 1], [25, 0], [26, 1]]
+    val values = [value.output_file, output_format_text, value.profile, value.backend,
+        value.native_target, value.backend_plugin_path, value.interpreter_mode,
+        value.smf_output_mode, value.debug_trace_level, value.mcdc_mode_text,
+        value.build_mode, value.riscv_gen2_target]
+    var text_index: i64 = 0
+    var tag: i64 = 2
+    while tag <= 26:
+        if tag == 4: fields.push(_field_v1(tag, 3, _bool_bytes_v1(value.optimize)))
+        else if tag == 5: fields.push(_field_v1(tag, 1, _u32_bytes_v1(value.opt_level)))
+        else if tag == 6: fields.push(_field_v1(tag, 3, _bool_bytes_v1(value.release)))
+        else if tag == 7: fields.push(_field_v1(tag, 3, _bool_bytes_v1(value.debug_info)))
+        else if tag == 8: fields.push(_field_v1(tag, 3, _bool_bytes_v1(value.verbose)))
+        else if tag == 9: fields.push(_field_v1(tag, 1, _u32_bytes_v1(value.log_level)))
+        else if tag == 11: fields.push(_field_v1(tag, 3, _bool_bytes_v1(value.no_borrow_check)))
+        else if tag == 16: fields.push(_field_v1(tag, 3, _bool_bytes_v1(value.gc_off)))
+        else if tag == 18: fields.push(_field_v1(tag, 3, _bool_bytes_v1(value.low_memory)))
+        else if tag == 20: fields.push(_field_v1(tag, 3, _bool_bytes_v1(value.coverage_enabled)))
+        else if tag == 22: fields.push(_field_v1(tag, 2, _u64_bytes_v1(value.mcdc_owner_bytes)))
+        else if tag == 23: fields.push(_field_v1(tag, 2, _u64_bytes_v1(value.mcdc_global_bytes)))
+        else if tag == 24: fields.push(_field_v1(tag, 5, families))
+        else:
+            val allow_empty = texts[text_index][1] == 1
+            if not _text_valid_v1(values[text_index], allow_empty): return []
+            val encoded = _text_bytes_v1(values[text_index])
+            fields.push(_field_v1(tag, 4, encoded))
+            text_index = text_index + 1
+        tag = tag + 1
+    _record_encode_v1("NBO1", fields)
+
+fn _driver_types_v1() -> [i64]:
+    [5,4,4,3,1,3,3,3,1,4,3,4,4,4,4,3,4,3,4,3,4,2,2,5,4,4]
+
+fn _driver_decode_with_budget_v1(bytes: [u8], budget: NativeBuildPayloadBudgetV1,
+        depth: i64) -> NativeBuildDriverOptionsDecodeV1:
+    val record = _record_decode_v1(bytes, "NBO1", _driver_types_v1(), budget, depth)
+    if not record.ok: return _driver_failure_v1(record.error)
+    val fields = record.fields
+    val output_format_text = _decode_text_raw_v1(fields[2], false, budget)
+    val output_format = _output_format_from_text_v1(output_format_text)
+    if budget.failed or output_format == nil: return _driver_failure_v1("nbo1_field_value")
+    val input_files = _decode_text_vector_v1(fields[0].value, budget)
+    val output_file = _decode_text_raw_v1(fields[1], false, budget)
+    val optimize = _decode_bool_field_v1(fields[3])
+    val opt_level = _decode_u32_field_v1(fields[4])
+    val release = _decode_bool_field_v1(fields[5])
+    val debug_info = _decode_bool_field_v1(fields[6])
+    val verbose = _decode_bool_field_v1(fields[7])
+    val log_level = _decode_u32_field_v1(fields[8])
+    val profile = _decode_text_raw_v1(fields[9], false, budget)
+    val no_borrow = _decode_bool_field_v1(fields[10])
+    val backend = _decode_text_raw_v1(fields[11], false, budget)
+    val target = _decode_text_raw_v1(fields[12], false, budget)
+    val plugin = _decode_text_raw_v1(fields[13], true, budget)
+    val interpreter = _decode_text_raw_v1(fields[14], false, budget)
+    val gc_off = _decode_bool_field_v1(fields[15])
+    val smf_mode = _decode_text_raw_v1(fields[16], false, budget)
+    val low_memory = _decode_bool_field_v1(fields[17])
+    val trace = _decode_text_raw_v1(fields[18], true, budget)
+    val coverage = _decode_bool_field_v1(fields[19])
+    val mcdc_mode = _decode_text_raw_v1(fields[20], true, budget)
+    val owner_bytes = _decode_u64_field_v1(fields[21])
+    val global_bytes = _decode_u64_field_v1(fields[22])
+    val families = _decode_text_vector_v1(fields[23].value, budget)
+    val build_mode = _decode_text_raw_v1(fields[24], false, budget)
+    val riscv = _decode_text_raw_v1(fields[25], true, budget)
+    if (budget.failed or optimize < 0 or release < 0 or debug_info < 0 or verbose < 0 or
+            no_borrow < 0 or gc_off < 0 or low_memory < 0 or coverage < 0 or
+            opt_level > 3u32):
+        return _driver_failure_v1("nbo1_field_value")
+    val output_format_value = match output_format:
+        case Some(value): value
+        case nil: return _driver_failure_v1("nbo1_field_value")
+    val value = NativeBuildDriverOptionsV1(input_files: input_files,
+        output_file: output_file, output_format: output_format_value, optimize: optimize == 1,
+        opt_level: opt_level, release: release == 1, debug_info: debug_info == 1,
+        verbose: verbose == 1, log_level: log_level, profile: profile,
+        no_borrow_check: no_borrow == 1, backend: backend, native_target: target,
+        backend_plugin_path: plugin, interpreter_mode: interpreter, gc_off: gc_off == 1,
+        smf_output_mode: smf_mode, low_memory: low_memory == 1,
+        debug_trace_level: trace, coverage_enabled: coverage == 1,
+        mcdc_mode_text: mcdc_mode, mcdc_owner_bytes: owner_bytes,
+        mcdc_global_bytes: global_bytes, allowed_families: families,
+        build_mode: build_mode, riscv_gen2_target: riscv)
+    if native_build_driver_options_encode_v1(value) != bytes:
+        return _driver_failure_v1("nbo1_noncanonical")
+    NativeBuildDriverOptionsDecodeV1(ok: true, value: Some(value), error: "")
+
+pub fn native_build_driver_options_decode_v1(bytes: [u8]) -> NativeBuildDriverOptionsDecodeV1:
+    val budget = NativeBuildPayloadBudgetV1(max_items: NATIVE_BUILD_PAYLOAD_MAX_ITEMS_V1,
+        max_text_bytes: NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1,
+        max_depth: NATIVE_BUILD_PAYLOAD_MAX_DEPTH_V1, items: 0, text_bytes: 0,
+        collection_items_materialized: 0, failed: false)
+    _driver_decode_with_budget_v1(bytes, budget, 1)
+
+fn _controls_failure_v1(error: text) -> NativeBuildControlsDecodeV1:
+    NativeBuildControlsDecodeV1(ok: false, value: nil, error: error)
+
+pub fn native_build_controls_encode_v1(value: NativeBuildControlsV1) -> [u8]:
+    if value.per_file_timeout_ms == 0u64 or value.control_bits > NATIVE_BUILD_CONTROL_BITS_V1 or
+            value.explicit_field_bits > NATIVE_BUILD_EXPLICIT_FIELD_BITS_V1: return []
+    val texts = [_link_mode_text_v1(value.native_link_mode), value.runtime_bundle, value.runtime_path,
+        value.cpu_tuning, value.linker_script, value.cache_directory, value.cache_scope]
+    var fields: [_NativeBuildFieldV1] = []
+    var index: i64 = 0
+    while index < texts.len():
+        val allow_empty = index == 2 or index == 3 or index == 4 or index == 6
+        if not _text_valid_v1(texts[index], allow_empty): return []
+        val encoded = _text_bytes_v1(texts[index])
+        fields.push(_field_v1(index + 1, 4, encoded))
+        index = index + 1
+    fields.push(_field_v1(8, 1, _u32_bytes_v1(value.worker_threads)))
+    fields.push(_field_v1(9, 2, _u64_bytes_v1(value.per_file_timeout_ms)))
+    fields.push(_field_v1(10, 2, _u64_bytes_v1(value.control_bits)))
+    fields.push(_field_v1(11, 2, _u64_bytes_v1(value.explicit_field_bits)))
+    val digest = _digest_raw_v1(value.runtime_policy_digest)
+    if digest.len() != 32: return []
+    fields.push(_field_v1(12, 6, digest))
+    _record_encode_v1("NBC1", fields)
+
+fn _controls_decode_with_budget_v1(bytes: [u8], budget: NativeBuildPayloadBudgetV1,
+        depth: i64) -> NativeBuildControlsDecodeV1:
+    val record = _record_decode_v1(bytes, "NBC1", [4,4,4,4,4,4,4,1,2,2,2,6], budget, depth)
+    if not record.ok: return _controls_failure_v1(record.error)
+    val fields = record.fields
+    val link_mode_text = _decode_text_raw_v1(fields[0], false, budget)
+    val link_mode = _link_mode_from_text_v1(link_mode_text)
+    if budget.failed or link_mode == nil: return _controls_failure_v1("nbc1_field_value")
+    val bundle = _decode_text_raw_v1(fields[1], false, budget)
+    val runtime_path = _decode_text_raw_v1(fields[2], true, budget)
+    val cpu = _decode_text_raw_v1(fields[3], true, budget)
+    val linker = _decode_text_raw_v1(fields[4], true, budget)
+    val cache = _decode_text_raw_v1(fields[5], false, budget)
+    val scope = _decode_text_raw_v1(fields[6], true, budget)
+    val workers = _decode_u32_field_v1(fields[7])
+    val timeout = _decode_u64_field_v1(fields[8])
+    val controls = _decode_u64_field_v1(fields[9])
+    val explicit = _decode_u64_field_v1(fields[10])
+    val digest = _raw_digest_v1(fields[11].value)
+    if (budget.failed or timeout == 0u64 or controls > NATIVE_BUILD_CONTROL_BITS_V1 or
+            explicit > NATIVE_BUILD_EXPLICIT_FIELD_BITS_V1 or digest.len() != 64):
+        return _controls_failure_v1("nbc1_field_value")
+    val link_mode_value = match link_mode:
+        case Some(value): value
+        case nil: return _controls_failure_v1("nbc1_field_value")
+    val value = NativeBuildControlsV1(native_link_mode: link_mode_value, runtime_bundle: bundle,
+        runtime_path: runtime_path, cpu_tuning: cpu, linker_script: linker,
+        cache_directory: cache, cache_scope: scope, worker_threads: workers,
+        per_file_timeout_ms: timeout, control_bits: controls,
+        explicit_field_bits: explicit, runtime_policy_digest: digest)
+    if native_build_controls_encode_v1(value) != bytes:
+        return _controls_failure_v1("nbc1_noncanonical")
+    NativeBuildControlsDecodeV1(ok: true, value: Some(value), error: "")
+
+pub fn native_build_controls_decode_v1(bytes: [u8]) -> NativeBuildControlsDecodeV1:
+    val budget = NativeBuildPayloadBudgetV1(max_items: NATIVE_BUILD_PAYLOAD_MAX_ITEMS_V1,
+        max_text_bytes: NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1,
+        max_depth: NATIVE_BUILD_PAYLOAD_MAX_DEPTH_V1, items: 0, text_bytes: 0,
+        collection_items_materialized: 0, failed: false)
+    _controls_decode_with_budget_v1(bytes, budget, 1)
+
+fn _payload_failure_v1(error: text, collection_items_materialized: i64) -> NativeBuildPayloadDecodeV1:
+    NativeBuildPayloadDecodeV1(ok: false, value: nil,
+        collection_items_materialized: collection_items_materialized,
+        authority_available: false, execution_available: false, error: error)
+
+fn _payload_encode_with_identity_v1(value: NativeBuildPayloadV1,
+        identity: [u8]) -> [u8]:
+    val roots = _encode_text_vector_v1(value.source_roots)
+    val driver = native_build_driver_options_encode_v1(value.driver_options)
+    val controls = native_build_controls_encode_v1(value.native_controls)
+    val authority = _authority_encode_v1(value.authority)
+    val dependencies = _encode_references_v1(value.dependencies)
+    val context = _encode_map_v1(value.declared_context)
+    if not _text_valid_v1(value.effective_entry, false): return []
+    val entry = _text_bytes_v1(value.effective_entry)
+    val cli_digest = _digest_raw_v1(value.cli_provenance_digest)
+    val diagnostics_digest = _digest_raw_v1(value.rich_diagnostics_codec_digest)
+    if (identity.len() != 32 or roots.len() == 0 or driver.len() == 0 or
+            controls.len() == 0 or authority.len() != 104 or dependencies.len() == 0 or
+            context.len() == 0 or entry.len() == 0 or cli_digest.len() != 32 or
+            diagnostics_digest.len() != 32): return []
+    if (value.source_profile == NativeBuildSourceProfileV1.FrozenSnapshot and
+            value.authority.snapshot_schema != 1u32) or
+            (value.source_profile == NativeBuildSourceProfileV1.AnchoredLocal and
+            value.authority.snapshot_schema != 0u32): return []
+    val fields = [_field_v1(1, 6, identity),
+        _field_v1(2, 1, _u32_bytes_v1(_route_u32_v1(value.route))),
+        _field_v1(3, 1, _u32_bytes_v1(_source_profile_u32_v1(value.source_profile))),
+        _field_v1(4, 4, entry), _field_v1(5, 5, roots),
+        _field_v1(6, 7, driver), _field_v1(7, 7, controls),
+        _field_v1(8, 8, authority), _field_v1(9, 9, dependencies),
+        _field_v1(10, 10, context), _field_v1(11, 6, cli_digest),
+        _field_v1(12, 6, diagnostics_digest)]
+    _record_encode_v1("NBP1", fields)
+
+fn _domain_sha_v1(domain: text, bytes: [u8]) -> text:
+    var framed = domain.bytes()
+    framed.push(0u8)
+    framed = _append_v1(framed, bytes)
+    sha256_u8_hex(framed)
+
+pub fn native_build_payload_request_identity_v1(value: NativeBuildPayloadV1) -> text:
+    val zeroed = _payload_encode_with_identity_v1(value, [0u8; 32])
+    if zeroed.len() == 0: return ""
+    _domain_sha_v1("simple.native-build.request.v1", zeroed)
+
+pub fn native_build_payload_with_identity_v1(value: NativeBuildPayloadV1) -> NativeBuildPayloadV1?:
+    val digest = native_build_payload_request_identity_v1(value)
+    if digest.len() != 64: return nil
+    var out = value
+    out.request_identity = digest
+    Some(out)
+
+pub fn native_build_payload_encode_v1(value: NativeBuildPayloadV1) -> [u8]:
+    val expected = native_build_payload_request_identity_v1(value)
+    if expected.len() != 64 or value.request_identity != expected: return []
+    _payload_encode_with_identity_v1(value, _digest_raw_v1(value.request_identity))
+
+pub fn native_build_payload_decode_bounded_v1(bytes: [u8], max_items: i64,
+        max_text_bytes: i64, max_depth: i64) -> NativeBuildPayloadDecodeV1:
+    if (max_items < 0 or max_items > NATIVE_BUILD_PAYLOAD_MAX_ITEMS_V1 or
+            max_text_bytes < 0 or max_text_bytes > NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1 or
+            max_depth < 0 or max_depth > NATIVE_BUILD_PAYLOAD_MAX_DEPTH_V1):
+        return _payload_failure_v1("nbp1_invalid_budget", 0)
+    val budget = NativeBuildPayloadBudgetV1(max_items: max_items,
+        max_text_bytes: max_text_bytes, max_depth: max_depth,
+        items: 0, text_bytes: 0, collection_items_materialized: 0, failed: false)
+    val record = _record_decode_v1(bytes, "NBP1", [6,1,1,4,5,7,7,8,9,10,6,6],
+        budget, 1)
+    if not record.ok: return _payload_failure_v1(record.error,
+        budget.collection_items_materialized)
+    val fields = record.fields
+    val identity = _raw_digest_v1(fields[0].value)
+    val route = _route_from_u32_v1(_decode_u32_field_v1(fields[1]))
+    val source_profile = _source_profile_from_u32_v1(_decode_u32_field_v1(fields[2]))
+    if route == nil or source_profile == nil:
+        return _payload_failure_v1("nbp1_field_value", budget.collection_items_materialized)
+    val route_value = match route:
+        case Some(value): value
+        case nil: return _payload_failure_v1("nbp1_field_value", budget.collection_items_materialized)
+    val source_profile_value = match source_profile:
+        case Some(value): value
+        case nil: return _payload_failure_v1("nbp1_field_value", budget.collection_items_materialized)
+    val entry = _decode_text_raw_v1(fields[3], false, budget)
+    val roots = _decode_text_vector_v1(fields[4].value, budget)
+    val driver_result = _driver_decode_with_budget_v1(fields[5].value, budget, 2)
+    val controls_result = _controls_decode_with_budget_v1(fields[6].value, budget, 2)
+    val authority = _authority_decode_v1(fields[7].value, source_profile_value)
+    val dependencies = _decode_references_v1(fields[8].value, budget)
+    val context = _decode_map_v1(fields[9].value, budget)
+    val cli_digest = _raw_digest_v1(fields[10].value)
+    val diagnostics_digest = _raw_digest_v1(fields[11].value)
+    if (budget.failed or identity.len() != 64 or not driver_result.ok or
+            not controls_result.ok or authority == nil or cli_digest.len() != 64 or
+            diagnostics_digest.len() != 64): return _payload_failure_v1(
+            "nbp1_field_value", budget.collection_items_materialized)
+    val driver = match driver_result.value:
+        case Some(value): value
+        case nil: return _payload_failure_v1("nbp1_driver_missing", budget.collection_items_materialized)
+    val controls = match controls_result.value:
+        case Some(value): value
+        case nil: return _payload_failure_v1("nbp1_controls_missing", budget.collection_items_materialized)
+    val authority_value = match authority:
+        case Some(value): value
+        case nil: return _payload_failure_v1("nbp1_authority_missing", budget.collection_items_materialized)
+    val value = NativeBuildPayloadV1(request_identity: identity, route: route_value,
+        source_profile: source_profile_value, effective_entry: entry, source_roots: roots,
+        driver_options: driver, native_controls: controls, authority: authority_value,
+        dependencies: dependencies, declared_context: context,
+        cli_provenance_digest: cli_digest,
+        rich_diagnostics_codec_digest: diagnostics_digest)
+    if native_build_payload_encode_v1(value) != bytes:
+        return _payload_failure_v1("nbp1_identity_or_canonical",
+            budget.collection_items_materialized)
+    NativeBuildPayloadDecodeV1(ok: true, value: Some(value),
+        collection_items_materialized: budget.collection_items_materialized,
+        authority_available: false, execution_available: false, error: "")
+
+pub fn native_build_payload_decode_v1(bytes: [u8]) -> NativeBuildPayloadDecodeV1:
+    native_build_payload_decode_bounded_v1(bytes, NATIVE_BUILD_PAYLOAD_MAX_ITEMS_V1,
+        NATIVE_BUILD_PAYLOAD_MAX_TEXT_BYTES_V1, NATIVE_BUILD_PAYLOAD_MAX_DEPTH_V1)

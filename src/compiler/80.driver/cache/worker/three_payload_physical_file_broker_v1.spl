@@ -1,0 +1,343 @@
+# codex-impl
+# Inactive G5 physical-file prerequisite. The broker owns the only path-bearing
+# boundary, performs bounded no-follow reads, then hands path-free bytes to the
+# existing confined object broker. It does not activate the ordinary compiler.
+
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use common.cache_host_authority_v1.{
+    CacheRootAuthorityV1,
+    cache_host_root_valid_v1, cache_host_object_valid_v1,
+    cache_host_open_read_v1, cache_host_size_v1,
+    cache_host_pread_receipt_v1, cache_host_close_object_v1
+}
+use compiler.common.cache_contract.physical_tld_v1.{three_payload_contract_digest_valid_v1}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ThreePayloadClosureSealV2, ThreePayloadFallbackV1
+}
+use compiler.common.cache_contract.three_payload_execution_v3.{
+    ThreePayloadPhysicalReadReceiptV3
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{PreparedThreePayloadV2}
+use compiler.driver.cache.worker.three_payload_worker_io_v1.{
+    ThreePayloadWorkerPolicyV1, ThreePayloadObjectReadEvidenceV1,
+    read_three_payload_confined_objects_v1
+}
+
+pub struct ThreePayloadPhysicalFileSetV1:
+    source_path: text
+    prior_tld_path: text?
+    effective_init_tld_path: text
+
+pub struct ThreePayloadSemanticAccessCountsV1:
+    macro_body_refs: i64
+    generic_body_refs: i64
+    trait_default_body_refs: i64
+    trait_callable_refs: i64
+    aspect_callable_refs: i64
+    semantic_object_file_reads: i64
+
+pub struct ThreePayloadPhysicalReadReceiptV1:
+    ordinary_input_count: i64
+    distinct_source: i64
+    distinct_prior: i64
+    distinct_init: i64
+    successful_bounded_facade_read_operations: i64
+    successful_file_read_bytes: i64
+    rr_file_reads: i64
+    external_file_reads: i64
+
+pub struct ThreePayloadPhysicalFileEvidenceV1:
+    physical: ThreePayloadPhysicalReadReceiptV1
+    semantic: ThreePayloadSemanticAccessCountsV1
+    confined: ThreePayloadObjectReadEvidenceV1
+    # Exact path-free bytes read by this broker invocation.  The canonical
+    # owner parses this snapshot, never the caller's prepared byte copy.
+    prepared_snapshot: PreparedThreePayloadV2
+
+pub struct ThreePayloadControlIoObservationV1:
+    catalog_read_operations: i64
+    generation_pin_read_operations: i64
+    catalog_read_bytes: i64
+    generation_pin_read_bytes: i64
+    owner_receipt_digest: text
+
+pub fn validate_three_payload_control_io_observation_v1(
+        value: ThreePayloadControlIoObservationV1) -> bool:
+    value.catalog_read_operations == 1 and
+        value.generation_pin_read_operations == 1 and
+        value.catalog_read_bytes >= 0 and value.generation_pin_read_bytes >= 0 and
+        three_payload_contract_digest_valid_v1(value.owner_receipt_digest)
+
+fn _physical_paths_valid_v1(files: ThreePayloadPhysicalFileSetV1,
+                            prepared: PreparedThreePayloadV2) -> bool:
+    if files.source_path.len() <= 4 or not files.source_path.ends_with(".spl"):
+        return false
+    if files.effective_init_tld_path != "__init__.tld" and
+            not files.effective_init_tld_path.ends_with("/__init__.tld"):
+        return false
+    if files.source_path == files.effective_init_tld_path:
+        return false
+    val expected_prior = files.source_path.substring(0, files.source_path.len() - 4) + ".tld"
+    match files.prior_tld_path:
+        case Some(path):
+            if prepared.prior_tld_bytes.is_none() or path != expected_prior or
+                    path == files.effective_init_tld_path:
+                return false
+        case nil:
+            if prepared.prior_tld_bytes.is_some(): return false
+    true
+
+fn _physical_policy_preflight_v1(prepared: PreparedThreePayloadV2,
+                                 policy: ThreePayloadWorkerPolicyV1) -> Result<(), ThreePayloadFallbackV1>:
+    if policy.request_reverse_reference or policy.request_external_input:
+        return Err(ThreePayloadFallbackV1.ExternalFacetRequired)
+    if not three_payload_contract_digest_valid_v1(policy.executor_digest) or
+            policy.max_read_bytes <= 0 or policy.max_decode_bytes <= 0 or
+            policy.max_decoded_sections <= 0 or prepared.seal.payload_bytes < 0 or
+            prepared.seal.payload_bytes > policy.max_read_bytes or
+            prepared.seal.section_count < 0 or
+            prepared.seal.section_count > policy.max_decoded_sections or
+            prepared.seal.max_decode_bytes < 0 or
+            prepared.seal.max_decode_bytes > policy.max_decode_bytes:
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    Ok(())
+
+fn _physical_read_bounded_v1(path: text, remaining: i64) -> Result<[u8], ThreePayloadFallbackV1>:
+    if remaining <= 0: return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    match file_read_regular_no_follow_bounded(path, remaining):
+        case Ok(content): Ok(content.bytes())
+        case Err(_): Err(ThreePayloadFallbackV1.CorruptPayload)
+
+# V2 accepts only root-relative names.  The host authority performs the final
+# beneath-root and no-follow checks; this lexical gate prevents an absolute or
+# parent spelling from being presented as a payload role in the first place.
+fn _physical_relative_path_valid_v2(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("\\") or
+            path.index_of("\\") >= 0:
+        return false
+    val parts = path.split("/")
+    if parts.len() == 0: return false
+    for part in parts:
+        if part == "" or part == "." or part == "..": return false
+    true
+
+fn _physical_relative_paths_valid_v2(
+    files: ThreePayloadPhysicalFileSetV1,
+) -> bool:
+    if not _physical_relative_path_valid_v2(files.source_path) or
+            not _physical_relative_path_valid_v2(
+                files.effective_init_tld_path):
+        return false
+    match files.prior_tld_path:
+        case Some(path): _physical_relative_path_valid_v2(path)
+        case nil: true
+
+fn _zero_bytes_v2(count: i64) -> [u8]:
+    [0u8; count]
+
+# The opened object is owned and consumed entirely inside this helper.  Every
+# exit after a successful open closes the same handle exactly once.  Returned
+# bytes are a child-created value; no descriptor or path crosses into the
+# confined worker.
+fn _physical_root_read_bounded_v2(
+    root: CacheRootAuthorityV1,
+    relative: text,
+    remaining: i64,
+) -> Result<[u8], ThreePayloadFallbackV1>:
+    if remaining <= 0 or not _physical_relative_path_valid_v2(relative):
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    val object = cache_host_open_read_v1(root, relative)
+    if not cache_host_object_valid_v1(object):
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    val size = cache_host_size_v1(object, remaining)
+    if size < 0:
+        _ = cache_host_close_object_v1(object)
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    var bytes = _zero_bytes_v2(size)
+    val read_count = cache_host_pread_receipt_v1(object, 0, bytes)
+    val close_result = cache_host_close_object_v1(object)
+    if read_count != size:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if close_result != 1:
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    Ok(bytes)
+
+fn _semantic_access_counts_v1(prepared: PreparedThreePayloadV2) -> ThreePayloadSemanticAccessCountsV1:
+    var macro_bodies: i64 = 0
+    var generic_bodies: i64 = 0
+    var default_bodies: i64 = 0
+    var trait_calls: i64 = 0
+    var aspect_calls: i64 = 0
+    for reference in prepared.seal.semantic_refs:
+        match reference.kind:
+            case ThreePayloadSemanticRefKindV1.MacroExpansion: macro_bodies = macro_bodies + 1
+            case ThreePayloadSemanticRefKindV1.GenericBody: generic_bodies = generic_bodies + 1
+            case ThreePayloadSemanticRefKindV1.TraitDefaultBody: default_bodies = default_bodies + 1
+            case ThreePayloadSemanticRefKindV1.TraitCallable: trait_calls = trait_calls + 1
+            case ThreePayloadSemanticRefKindV1.AspectCallable: aspect_calls = aspect_calls + 1
+    ThreePayloadSemanticAccessCountsV1(macro_body_refs: macro_bodies,
+        generic_body_refs: generic_bodies, trait_default_body_refs: default_bodies,
+        trait_callable_refs: trait_calls, aspect_callable_refs: aspect_calls,
+        semantic_object_file_reads: 0)
+
+pub fn read_three_payload_physical_files_v1(
+    files: ThreePayloadPhysicalFileSetV1,
+    prepared: PreparedThreePayloadV2,
+    verified_seal: ThreePayloadClosureSealV2,
+    policy: ThreePayloadWorkerPolicyV1,
+) -> Result<ThreePayloadPhysicalFileEvidenceV1, ThreePayloadFallbackV1>:
+    # Reject policy and role confusion before the first file-read operation. In
+    # particular, there is no RR path field and a `.rr` masquerading as one of
+    # the three roles cannot pass this shape gate.
+    _physical_policy_preflight_v1(prepared, policy)?
+    if not _physical_paths_valid_v1(files, prepared):
+        return Err(ThreePayloadFallbackV1.ExternalFacetRequired)
+
+    var remaining = policy.max_read_bytes
+    val source = _physical_read_bounded_v1(files.source_path, remaining)?
+    remaining = remaining - source.len()
+    var prior: [u8]? = nil
+    var prior_count: i64 = 0
+    match files.prior_tld_path:
+        case Some(path):
+            val bytes = _physical_read_bounded_v1(path, remaining)?
+            remaining = remaining - bytes.len()
+            prior = Some(bytes)
+            prior_count = 1
+        case nil: pass
+    val init = _physical_read_bounded_v1(files.effective_init_tld_path, remaining)?
+
+    # Reconstruct the opaque prepared carrier from the actual file snapshots.
+    # Existing packer verification and confined-object IO remain authoritative;
+    # this broker adds no summary, CAS, RR, database, or publication owner.
+    val physical_prepared = PreparedThreePayloadV2(seal: prepared.seal,
+        seal_digest: prepared.seal_digest, source_bytes: source,
+        prior_tld_bytes: prior, prior_tld_header: prepared.prior_tld_header,
+        init_tld_bytes: init, init_tld_header: prepared.init_tld_header,
+        verified_semantic_object_digests: prepared.verified_semantic_object_digests)
+    val confined = read_three_payload_confined_objects_v1(
+        physical_prepared, verified_seal, policy)?
+    val physical_bytes = source.len() + init.len() + (match prior:
+        case Some(bytes): bytes.len()
+        case nil: 0)
+    val ordinary_input_count = 2 + prior_count
+    if physical_bytes != prepared.seal.payload_bytes or
+            confined.logical_receipt.logical_read_calls != ordinary_input_count or
+            confined.logical_receipt.rr_input_count != 0 or
+            confined.logical_receipt.external_input_count != 0:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok(ThreePayloadPhysicalFileEvidenceV1(
+        physical: ThreePayloadPhysicalReadReceiptV1(
+            ordinary_input_count: ordinary_input_count,
+            distinct_source: 1, distinct_prior: prior_count, distinct_init: 1,
+            successful_bounded_facade_read_operations: ordinary_input_count,
+            successful_file_read_bytes: physical_bytes, rr_file_reads: 0,
+            external_file_reads: 0),
+        semantic: _semantic_access_counts_v1(physical_prepared),
+        confined: confined,
+        prepared_snapshot: physical_prepared))
+
+# Descriptor-owned successor to the compatibility path above.  The root is an
+# admitted host capability and each role is opened beneath it without following
+# links.  This proves stable same-handle reads and bounded cleanup, but not that
+# two different handles cannot name one hard-linked inode; P06 object-identity
+# equality is still required before descriptor-alias admission can activate.
+pub fn read_three_payload_physical_files_from_root_v2(
+    root: CacheRootAuthorityV1,
+    files: ThreePayloadPhysicalFileSetV1,
+    prepared: PreparedThreePayloadV2,
+    verified_seal: ThreePayloadClosureSealV2,
+    policy: ThreePayloadWorkerPolicyV1,
+) -> Result<ThreePayloadPhysicalFileEvidenceV1, ThreePayloadFallbackV1>:
+    _physical_policy_preflight_v1(prepared, policy)?
+    if not cache_host_root_valid_v1(root):
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    if not _physical_paths_valid_v1(files, prepared) or
+            not _physical_relative_paths_valid_v2(files):
+        return Err(ThreePayloadFallbackV1.ExternalFacetRequired)
+
+    var remaining = policy.max_read_bytes
+    val source = _physical_root_read_bounded_v2(
+        root, files.source_path, remaining)?
+    remaining = remaining - source.len()
+    var prior: [u8]? = nil
+    var prior_count: i64 = 0
+    match files.prior_tld_path:
+        case Some(path):
+            val bytes = _physical_root_read_bounded_v2(root, path, remaining)?
+            remaining = remaining - bytes.len()
+            prior = Some(bytes)
+            prior_count = 1
+        case nil: pass
+    val init = _physical_root_read_bounded_v2(
+        root, files.effective_init_tld_path, remaining)?
+
+    val physical_prepared = PreparedThreePayloadV2(seal: prepared.seal,
+        seal_digest: prepared.seal_digest, source_bytes: source,
+        prior_tld_bytes: prior, prior_tld_header: prepared.prior_tld_header,
+        init_tld_bytes: init, init_tld_header: prepared.init_tld_header,
+        verified_semantic_object_digests:
+            prepared.verified_semantic_object_digests)
+    val confined = read_three_payload_confined_objects_v1(
+        physical_prepared, verified_seal, policy)?
+    val physical_bytes = source.len() + init.len() + (match prior:
+        case Some(bytes): bytes.len()
+        case nil: 0)
+    val ordinary_input_count = 2 + prior_count
+    if physical_bytes != prepared.seal.payload_bytes or
+            confined.logical_receipt.logical_read_calls !=
+                ordinary_input_count or
+            confined.logical_receipt.rr_input_count != 0 or
+            confined.logical_receipt.external_input_count != 0:
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok(ThreePayloadPhysicalFileEvidenceV1(
+        physical: ThreePayloadPhysicalReadReceiptV1(
+            ordinary_input_count: ordinary_input_count,
+            distinct_source: 1, distinct_prior: prior_count, distinct_init: 1,
+            successful_bounded_facade_read_operations: ordinary_input_count,
+            successful_file_read_bytes: physical_bytes, rr_file_reads: 0,
+            external_file_reads: 0),
+        semantic: _semantic_access_counts_v1(physical_prepared),
+        confined: confined,
+        prepared_snapshot: physical_prepared))
+
+pub fn three_payload_physical_receipt_project_v3(
+    evidence: ThreePayloadPhysicalFileEvidenceV1,
+) -> ThreePayloadPhysicalReadReceiptV3:
+    ThreePayloadPhysicalReadReceiptV3(
+        ordinary_input_count: evidence.physical.ordinary_input_count,
+        distinct_source: evidence.physical.distinct_source,
+        distinct_prior: evidence.physical.distinct_prior,
+        distinct_init: evidence.physical.distinct_init,
+        successful_bounded_facade_read_operations:
+            evidence.physical.successful_bounded_facade_read_operations,
+        successful_file_read_bytes:
+            evidence.physical.successful_file_read_bytes,
+        decoded_sections: evidence.confined.logical_receipt.decoded_sections,
+        largest_declared_decode_bytes:
+            evidence.confined.logical_receipt.largest_declared_decode_bytes,
+        measured_peak_decode_bytes: -1,
+        rr_file_reads: evidence.physical.rr_file_reads,
+        external_file_reads: evidence.physical.external_file_reads,
+        denied_input_attempts: 0,
+        macro_body_refs: evidence.semantic.macro_body_refs,
+        generic_body_refs: evidence.semantic.generic_body_refs,
+        trait_default_body_refs: evidence.semantic.trait_default_body_refs,
+        trait_callable_refs: evidence.semantic.trait_callable_refs,
+        aspect_callable_refs: evidence.semantic.aspect_callable_refs,
+        semantic_object_file_reads: evidence.semantic.semantic_object_file_reads)
+
+# Actual physical reads are useful G5 evidence, but semantic-body authority,
+# source-driven compilation, diagnostics parity, and admitted confinement are
+# separate gates. Keep ordinary compiler activation closed.
+pub fn three_payload_physical_worker_activation_available_v1() -> bool:
+    false
+
+# This narrower fact is intentionally distinct from ordinary activation.  The
+# broker can prove a sealed physical snapshot was read through the bounded
+# facade, but it cannot issue descriptors for semantic-body lookup, RR, native
+# lowering, or cache publication.  It is safe only as the V2 owner's preflight
+# for the existing sealed parse worker.
+pub fn three_payload_physical_parse_preflight_available_v1() -> bool:
+    true

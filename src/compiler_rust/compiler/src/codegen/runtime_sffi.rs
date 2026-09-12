@@ -1567,6 +1567,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_owned_v3_result_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_collect_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_release_value", &[I64], &[I32]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_capabilities_value", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_set_capture_limits_value", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_observation_value", &[I64], &[I64]),
     // Length-safe owned executable pinning. The path text expands to
     // (ptr,len); the digest is a runtime-owned byte-array handle.
     RuntimeFuncSpec::new("rt_process_pin_executable_owned_value", &[I64, I64], &[I64]),
@@ -1577,6 +1580,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64, I64, I64, I64, I64, I64],
         &[I64],
     ),
+    RuntimeFuncSpec::new("rt_process_observation_v4_capabilities_value", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_pin_cwd_value", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_cwd_digest_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_close_cwd_value", &[I64], &[I32]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_start_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_start_pinned_value", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_poll_value", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_cancel_value", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_collect_value", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_ack_collect_value", &[I64, I64], &[I64]),
     // rt_process_is_running(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
@@ -2599,6 +2612,17 @@ mod tests {
         let release = spec_for("rt_process_owned_v3_release_value").expect("owned V3 release runtime spec");
         assert_eq!(release.params, [I64]);
         assert_eq!(release.returns, [I32]);
+        let capabilities =
+            spec_for("rt_process_owned_v3_capabilities_value").expect("owned V3 capability runtime spec");
+        assert!(capabilities.params.is_empty());
+        assert_eq!(capabilities.returns, [I64]);
+        let limits = spec_for("rt_process_owned_v3_set_capture_limits_value")
+            .expect("owned V3 independent capture runtime spec");
+        assert_eq!(limits.params, [I64, I64, I64]);
+        assert_eq!(limits.returns, [I64]);
+        let observation = spec_for("rt_process_owned_v3_observation_value").expect("owned V3 observation runtime spec");
+        assert_eq!(observation.params, [I64]);
+        assert_eq!(observation.returns, [I64]);
     }
 
     #[test]

@@ -1970,11 +1970,6 @@ static int rt_fsync_path(const char* path) {
     fclose(file);
     return ok ? 1 : 0;
 }
-int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_fsync_path(path);
-}
 int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;

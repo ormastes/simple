@@ -38,15 +38,17 @@ struct SweeperStats:
 # GenerationSweeper
 # ============================================================================
 
-struct GenerationSweeper:
+class GenerationSweeper:
     current_epoch: i64
     symbol_last_used: Dict<text, i64>
+    tracked_count: i64
     config: SweeperConfig
 
 fn sweeper_new(config: SweeperConfig) -> GenerationSweeper:
     GenerationSweeper(
         current_epoch: 0,
         symbol_last_used: {},
+        tracked_count: 0,
         config: config
     )
 
@@ -62,6 +64,8 @@ fn sweeper_advance_epoch(self: GenerationSweeper) -> i64:
     self.current_epoch
 
 fn sweeper_mark_used(self: GenerationSweeper, symbol: text):
+    if not self.symbol_last_used.has(symbol):
+        self.tracked_count = self.tracked_count + 1
     self.symbol_last_used[symbol] = self.current_epoch
 
 # ============================================================================
@@ -94,13 +98,20 @@ fn sweeper_sweep(self: GenerationSweeper, exec_mapper: SharedExecMapper, jit_ori
 
     # Unmap and remove stale symbols.
     for symbol in stale:
-        val rec = exec_mapper.get_record(symbol)
-        if rec.?:
-            _ = exec_mapper.unmap_symbol(symbol)
+        var retire_tracking = false
+        if exec_mapper.unmap_symbol(symbol):
             freed = freed + 1
+            retire_tracking = true
             if self.config.verbose:
                 print "[sweeper] evicted stale symbol: {symbol} (age > {self.config.max_age})"
-        self.symbol_last_used = self.symbol_last_used.remove(symbol)
+        elif not exec_mapper.get_record(symbol).?:
+            # A symbol already absent from the mapper needs no retry.
+            retire_tracking = true
+        # A failed native free remains mapped and must stay eligible for a
+        # later sweep; never report or forget an unsuccessful eviction.
+        if retire_tracking:
+            self.symbol_last_used = self.symbol_last_used.remove(symbol)
+            self.tracked_count = self.tracked_count - 1
 
     freed
 
@@ -119,7 +130,7 @@ fn sweeper_stale_count(self: GenerationSweeper) -> i64:
     count
 
 fn sweeper_tracked_count(self: GenerationSweeper) -> i64:
-    self.symbol_last_used.keys().len()
+    self.tracked_count
 
 fn sweeper_stats(self: GenerationSweeper) -> SweeperStats:
     SweeperStats(
@@ -131,6 +142,7 @@ fn sweeper_stats(self: GenerationSweeper) -> SweeperStats:
 fn sweeper_reset(self: GenerationSweeper):
     self.current_epoch = 0
     self.symbol_last_used = {}
+    self.tracked_count = 0
 
 # ============================================================================
 # Exports

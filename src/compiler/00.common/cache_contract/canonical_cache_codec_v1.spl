@@ -2,8 +2,9 @@
 
 use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
 use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1, public_summary_declaration_graph_digest_v1, public_summary_normalized_signature_v1, public_summary_sorted_dependencies_v1}
-use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SourceBlobV1, SourceEncodingPolicyV1, CompileSnapshotV1, ResolutionWitnessV1, ResolutionCandidateV1, SnapshotSourceEntryV1, NegativeCandidateV1, DirectoryGenerationV1, GeneratedInputV1, NamedDigestV1, logical_source_path_valid_v1}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SourceBlobV1, SourceEncodingPolicyV1, GeneratedProvenanceV1, CompileSnapshotV1, ResolutionWitnessV1, ResolutionCandidateV1, SnapshotSourceEntryV1, NegativeCandidateV1, DirectoryGenerationV1, GeneratedInputV1, NamedDigestV1, CacheDependencyRoleV1, CacheObjectRefV1, CacheObjectDependencyV1, CacheVerifiedObjectViewV1, CacheVerifiedObjectViewDecodeV1, CacheDependencyPageV1, logical_source_path_valid_v1}
 use compiler.common.cache_contract.file_ast_v1.{FileAstNodeV1, FileAstV1}
 use compiler.common.cache_contract.semantic_read_set_v1.{SemanticEffectKindV1, SemanticReplayPolicyV1, SemanticReadEntryV1, SemanticReadSetV1}
 
@@ -150,7 +151,11 @@ pub fn canonical_cache_encode_envelope_v1(kind: i64, schema: i64, payload: [u8])
 fn _decode_failure_v1(message: text) -> CanonicalCacheDecodeV1:
     CanonicalCacheDecodeV1(ok: false, value: nil, error: message)
 
-pub fn canonical_cache_decode_envelope_v1(bytes: [u8]) -> CanonicalCacheDecodeV1:
+pub fn canonical_cache_decode_envelope_bounded_v1(bytes: [u8],
+        max_payload_bytes: i64) -> CanonicalCacheDecodeV1:
+    if max_payload_bytes < 0 or
+            max_payload_bytes > canonical_cache_max_payload_bytes_v1():
+        return _decode_failure_v1("invalid_payload_limit")
     val header = canonical_cache_header_bytes_v1()
     if bytes.len() < header: return _decode_failure_v1("truncated_envelope")
     var i = 0
@@ -163,6 +168,10 @@ pub fn canonical_cache_decode_envelope_v1(bytes: [u8]) -> CanonicalCacheDecodeV1
     val payload_len = _read_le_v1(bytes, 16, 8)
     if payload_len < 0 or payload_len > canonical_cache_max_payload_bytes_v1():
         return _decode_failure_v1("payload_bounds_exceeded")
+    # The caller's authority bound is checked from the fixed header before a
+    # payload slice, digest, object digest, or retained payload allocation.
+    if payload_len > max_payload_bytes:
+        return _decode_failure_v1("caller_payload_bounds_exceeded")
     if payload_len > bytes.len() - header:
         return _decode_failure_v1("truncated_payload")
     if payload_len != bytes.len() - header:
@@ -176,6 +185,10 @@ pub fn canonical_cache_decode_envelope_v1(bytes: [u8]) -> CanonicalCacheDecodeV1
         kind: _read_le_v1(bytes, 8, 2), schema: _read_le_v1(bytes, 10, 2),
         payload: payload, payload_digest: actual, object_digest: object_digest)
     CanonicalCacheDecodeV1(ok: true, value: value, error: "")
+
+pub fn canonical_cache_decode_envelope_v1(bytes: [u8]) -> CanonicalCacheDecodeV1:
+    canonical_cache_decode_envelope_bounded_v1(bytes,
+        canonical_cache_max_payload_bytes_v1())
 
 pub fn canonical_cache_object_digest_v1(envelope: [u8]) -> text:
     var framed: [u8] = []
@@ -290,6 +303,63 @@ pub fn canonical_source_blob_digest_v1(blob: SourceBlobV1) -> text:
     val encoded = canonical_source_blob_encode_v1(blob)
     if encoded.len() == 0: return ""
     canonical_cache_object_digest_v1(encoded)
+
+pub struct SourceBlobDecodeV1:
+    ok: bool
+    value: SourceBlobV1?
+    cas_object_digest: text
+    semantic_source_digest: text
+    error: text
+
+fn _source_blob_decode_failure_v1(error: text) -> SourceBlobDecodeV1:
+    SourceBlobDecodeV1(ok: false, value: nil, cas_object_digest: "",
+        semantic_source_digest: "", error: error)
+
+pub fn canonical_source_blob_decode_bounded_v1(bytes: [u8],
+        max_payload_bytes: i64, max_items: i64,
+        max_text_bytes: i64) -> SourceBlobDecodeV1:
+    if max_payload_bytes < 0 or max_payload_bytes > canonical_cache_max_payload_bytes_v1() or
+            max_items < 0 or max_items > canonical_cache_max_entries_v1() or
+            max_text_bytes < 0 or max_text_bytes > canonical_cache_max_text_bytes_v1():
+        return _source_blob_decode_failure_v1("invalid_source_decode_limits")
+    val decoded = canonical_cache_decode_envelope_bounded_v1(bytes,
+        max_payload_bytes)
+    if not decoded.ok: return _source_blob_decode_failure_v1(decoded.error)
+    val envelope = match decoded.value:
+        case Some(value): value
+        case nil: return _source_blob_decode_failure_v1("missing_source_envelope")
+    if envelope.kind != canonical_cache_kind_source_blob_v1() or envelope.schema != 1:
+        return _source_blob_decode_failure_v1("source_blob_schema_mismatch")
+    val cursor = _bounded_cursor_v1(envelope.payload, max_items, max_text_bytes)
+    val path = _bounded_path_v1(cursor)
+    val source_bytes = cursor.read_utf8_blob(max_payload_bytes)
+    val source_digest = cursor.read_digest()
+    val encoding_tag = cursor.read_u16()
+    if encoding_tag != 1: cursor.failed = true
+    val provenance_tag = cursor.read_u8()
+    var provenance: GeneratedProvenanceV1? = nil
+    if provenance_tag == 1:
+        if not cursor.reserve_items(1):
+            return _source_blob_decode_failure_v1("source_blob_item_limit_exceeded")
+        provenance = Some(GeneratedProvenanceV1(producer_digest: cursor.read_digest(),
+            input_manifest_digest: cursor.read_digest()))
+    else if provenance_tag != 0:
+        cursor.failed = true
+    if cursor.failed or cursor.position != cursor.bytes.len():
+        return _source_blob_decode_failure_v1("malformed_source_blob")
+    val value = SourceBlobV1(logical_path: path, source_bytes: source_bytes,
+        source_digest: source_digest, encoding_policy: SourceEncodingPolicyV1.Utf8Exact,
+        generated_provenance: provenance)
+    if canonical_source_blob_encode_v1(value) != bytes:
+        return _source_blob_decode_failure_v1("noncanonical_source_blob")
+    SourceBlobDecodeV1(ok: true, value: Some(value),
+        cas_object_digest: envelope.object_digest,
+        semantic_source_digest: source_digest, error: "")
+
+pub fn canonical_source_blob_decode_v1(bytes: [u8]) -> SourceBlobDecodeV1:
+    canonical_source_blob_decode_bounded_v1(bytes,
+        canonical_cache_max_payload_bytes_v1(), canonical_cache_max_entries_v1(),
+        canonical_cache_max_text_bytes_v1())
 
 fn _append_text_sequence_v1(buffer: [u8], values: [text]) -> CanonicalBufferAppendV1:
     if values.len() > canonical_cache_max_entries_v1(): return CanonicalBufferAppendV1(ok: false, bytes: buffer)
@@ -576,6 +646,250 @@ pub fn canonical_compile_snapshot_digest_v1(snapshot: CompileSnapshotV1) -> text
     if payload.len() == 0: return ""
     _domain_digest_v1("simple.compile.snapshot.v1\u0000", payload)
 
+pub struct CompileSnapshotDecodeV1:
+    ok: bool
+    value: CompileSnapshotV1?
+    cas_object_digest: text
+    semantic_snapshot_digest: text
+    physical_witness_authority_available: bool
+    error: text
+
+fn _snapshot_decode_failure_v1(error: text) -> CompileSnapshotDecodeV1:
+    CompileSnapshotDecodeV1(ok: false, value: nil, cas_object_digest: "",
+        semantic_snapshot_digest: "", physical_witness_authority_available: false,
+        error: error)
+
+pub fn canonical_compile_snapshot_decode_bounded_v1(bytes: [u8],
+        max_payload_bytes: i64, max_items: i64,
+        max_text_bytes: i64) -> CompileSnapshotDecodeV1:
+    if max_payload_bytes < 0 or max_payload_bytes > canonical_cache_max_payload_bytes_v1() or
+            max_items < 0 or max_items > canonical_cache_max_entries_v1() or
+            max_text_bytes < 0 or max_text_bytes > canonical_cache_max_text_bytes_v1():
+        return _snapshot_decode_failure_v1("invalid_snapshot_decode_limits")
+    val decoded = canonical_cache_decode_envelope_bounded_v1(bytes,
+        max_payload_bytes)
+    if not decoded.ok: return _snapshot_decode_failure_v1(decoded.error)
+    val envelope = match decoded.value:
+        case Some(value): value
+        case nil: return _snapshot_decode_failure_v1("missing_snapshot_envelope")
+    if envelope.kind != canonical_cache_kind_compile_snapshot_v1() or envelope.schema != 1:
+        return _snapshot_decode_failure_v1("compile_snapshot_schema_mismatch")
+    val cursor = _bounded_cursor_v1(envelope.payload, max_items, max_text_bytes)
+    val schema = cursor.read_u64()
+    val repository = cursor.read_digest()
+    val path_policy = cursor.read_digest()
+
+    var sources: [SnapshotSourceEntryV1] = []
+    var count = _bounded_count_v1(cursor)
+    var index: i64 = 0
+    while not cursor.failed and index < count:
+        sources.push(SnapshotSourceEntryV1(logical_path: _bounded_path_v1(cursor),
+            source_blob_digest: cursor.read_digest()))
+        index = index + 1
+
+    var witnesses: [ResolutionWitnessV1] = []
+    count = _bounded_count_v1(cursor)
+    index = 0
+    while not cursor.failed and index < count:
+        witnesses.push(_bounded_witness_v1(cursor))
+        index = index + 1
+
+    var negatives: [NegativeCandidateV1] = []
+    count = _bounded_count_v1(cursor)
+    index = 0
+    while not cursor.failed and index < count:
+        negatives.push(NegativeCandidateV1(anchor: _bounded_path_v1(cursor),
+            logical_candidate: _bounded_path_v1(cursor),
+            absence_witness_digest: cursor.read_digest()))
+        index = index + 1
+
+    var generations: [DirectoryGenerationV1] = []
+    count = _bounded_count_v1(cursor)
+    index = 0
+    while not cursor.failed and index < count:
+        generations.push(DirectoryGenerationV1(
+            anchor_logical_path: _bounded_path_v1(cursor),
+            stable_generation_digest: cursor.read_digest()))
+        index = index + 1
+
+    var generated: [GeneratedInputV1] = []
+    count = _bounded_count_v1(cursor)
+    index = 0
+    while not cursor.failed and index < count:
+        generated.push(GeneratedInputV1(logical_path: _bounded_path_v1(cursor),
+            producer_digest: cursor.read_digest(),
+            input_manifest_digest: cursor.read_digest()))
+        index = index + 1
+
+    val configuration = cursor.read_digest()
+    val target_layout = cursor.read_digest()
+    val compiler_owner = cursor.read_digest()
+    val runtime = cursor.read_digest()
+    val providers = _bounded_named_v1(cursor)
+    val components = _bounded_named_v1(cursor)
+    if cursor.failed or cursor.position != cursor.bytes.len():
+        return _snapshot_decode_failure_v1("malformed_compile_snapshot")
+    val value = CompileSnapshotV1(schema: schema,
+        repository_namespace_digest: repository, path_policy_digest: path_policy,
+        source_entries: sources, resolution_witnesses: witnesses,
+        negative_candidates: negatives, directory_generations: generations,
+        generated_inputs: generated, configuration_digest: configuration,
+        target_layout_digest: target_layout, compiler_owner_digest: compiler_owner,
+        runtime_digest: runtime, provider_manifests: providers,
+        toolchain_component_digests: components)
+    if canonical_compile_snapshot_encode_v1(value) != bytes:
+        return _snapshot_decode_failure_v1("noncanonical_compile_snapshot")
+    CompileSnapshotDecodeV1(ok: true, value: Some(value),
+        cas_object_digest: envelope.object_digest,
+        semantic_snapshot_digest: canonical_compile_snapshot_digest_v1(value),
+        # Physical identity and live witness digests were deliberately omitted
+        # from legacy snapshot bytes. Zero placeholders preserve semantic
+        # re-encoding but never recreate their authority.
+        physical_witness_authority_available: false, error: "")
+
+pub fn canonical_compile_snapshot_decode_v1(bytes: [u8]) -> CompileSnapshotDecodeV1:
+    canonical_compile_snapshot_decode_bounded_v1(bytes,
+        canonical_cache_max_payload_bytes_v1(), canonical_cache_max_entries_v1(),
+        canonical_cache_max_text_bytes_v1())
+
+class _CacheDependencyBuilderV1:
+    dependencies: [CacheObjectDependencyV1]
+    maximum: i64
+    ok: bool
+
+    me fn add(name: text, role: CacheDependencyRoleV1, target_kind: text,
+            schema: i64, digest: text):
+        if not self.ok: return
+        if self.dependencies.len() >= self.maximum or
+                _digest_hex_to_raw_v1(digest).len() != 32:
+            self.ok = false
+            return
+        self.dependencies.push(CacheObjectDependencyV1(name: name, role: role,
+            target_kind: target_kind, schema: schema, digest: digest))
+
+fn _object_view_failure_v1(error: text) -> CacheVerifiedObjectViewDecodeV1:
+    CacheVerifiedObjectViewDecodeV1(ok: false, value: nil, error: error)
+
+fn _snapshot_view_dependencies_v1(snapshot: CompileSnapshotV1,
+        maximum: i64) -> _CacheDependencyBuilderV1:
+    val out = _CacheDependencyBuilderV1(dependencies: [], maximum: maximum, ok: true)
+    for entry in snapshot.source_entries:
+        out.add("source:" + entry.logical_path.module_relative_utf8,
+            CacheDependencyRoleV1.SemanticFingerprint, "source_blob", 1,
+            entry.source_blob_digest)
+    for witness_index in 0..snapshot.resolution_witnesses.len():
+        val witness = snapshot.resolution_witnesses[witness_index]
+        val prefix = "resolution:" + witness_index.to_string() + ":"
+        out.add(prefix + "policy", CacheDependencyRoleV1.ExternalWitness, "", 0,
+            witness.resolver_policy_digest)
+        out.add(prefix + "trust", CacheDependencyRoleV1.ExternalWitness, "", 0,
+            witness.root_trust_digest)
+        for candidate_index in 0..witness.candidates.len():
+            val candidate = witness.candidates[candidate_index]
+            val candidate_prefix = prefix + "candidate:" + candidate_index.to_string() + ":"
+            out.add(candidate_prefix + "parent_generation",
+                CacheDependencyRoleV1.ExternalWitness, "", 0,
+                candidate.parent_directory_generation_digest)
+            out.add(candidate_prefix + "content",
+                CacheDependencyRoleV1.SemanticFingerprint, "source_blob", 1,
+                candidate.content_digest)
+            out.add(candidate_prefix + "symlink_chain",
+                CacheDependencyRoleV1.ExternalWitness, "", 0,
+                candidate.symlink_chain_digest)
+        for input_index in 0..witness.generated_input_digests.len():
+            out.add(prefix + "generated_input:" + input_index.to_string(),
+                CacheDependencyRoleV1.ExternalWitness, "", 0,
+                witness.generated_input_digests[input_index])
+    for index in 0..snapshot.negative_candidates.len():
+        out.add("absence:" + index.to_string(), CacheDependencyRoleV1.ExternalWitness,
+            "", 0, snapshot.negative_candidates[index].absence_witness_digest)
+    for index in 0..snapshot.directory_generations.len():
+        out.add("directory_generation:" + index.to_string(),
+            CacheDependencyRoleV1.ExternalWitness, "", 0,
+            snapshot.directory_generations[index].stable_generation_digest)
+    for index in 0..snapshot.generated_inputs.len():
+        val generated = snapshot.generated_inputs[index]
+        out.add("generated:" + index.to_string() + ":producer",
+            CacheDependencyRoleV1.ExternalWitness, "", 0, generated.producer_digest)
+        out.add("generated:" + index.to_string() + ":input_manifest",
+            CacheDependencyRoleV1.ExternalWitness, "", 0, generated.input_manifest_digest)
+    for pair in [["configuration", snapshot.configuration_digest],
+            ["target_layout", snapshot.target_layout_digest],
+            ["compiler_owner", snapshot.compiler_owner_digest],
+            ["runtime", snapshot.runtime_digest]]:
+        out.add(pair[0], CacheDependencyRoleV1.ExternalWitness, "", 0, pair[1])
+    for index in 0..snapshot.provider_manifests.len():
+        out.add("provider:" + snapshot.provider_manifests[index].name,
+            CacheDependencyRoleV1.ExternalWitness, "", 0,
+            snapshot.provider_manifests[index].digest)
+    for index in 0..snapshot.toolchain_component_digests.len():
+        out.add("toolchain:" + snapshot.toolchain_component_digests[index].name,
+            CacheDependencyRoleV1.ExternalWitness, "", 0,
+            snapshot.toolchain_component_digests[index].digest)
+    out
+
+pub fn verified_kind_object_view_v1(kind: text, bytes: [u8],
+        max_payload_bytes: i64, max_items: i64, max_text_bytes: i64,
+        max_dependencies: i64) -> CacheVerifiedObjectViewDecodeV1:
+    if max_dependencies < 0 or max_dependencies > canonical_cache_max_entries_v1():
+        return _object_view_failure_v1("invalid_dependency_limit")
+    if kind == "source_blob":
+        val decoded = canonical_source_blob_decode_bounded_v1(bytes,
+            max_payload_bytes, max_items, max_text_bytes)
+        if not decoded.ok: return _object_view_failure_v1(decoded.error)
+        val source = match decoded.value:
+            case Some(value): value
+            case nil: return _object_view_failure_v1("missing_source_blob")
+        val dependencies = _CacheDependencyBuilderV1(dependencies: [],
+            maximum: max_dependencies, ok: true)
+        match source.generated_provenance:
+            case Some(provenance):
+                dependencies.add("generated_producer",
+                    CacheDependencyRoleV1.ExternalWitness, "", 0,
+                    provenance.producer_digest)
+                dependencies.add("generated_input_manifest",
+                    CacheDependencyRoleV1.ExternalWitness, "", 0,
+                    provenance.input_manifest_digest)
+            case nil: pass
+        if not dependencies.ok:
+            return _object_view_failure_v1("dependency_limit_exceeded")
+        return CacheVerifiedObjectViewDecodeV1(ok: true,
+            value: Some(CacheVerifiedObjectViewV1(identity: CacheObjectRefV1(
+                kind: kind, schema: 1, object_digest: decoded.cas_object_digest),
+                semantic_digest: decoded.semantic_source_digest,
+                dependencies: dependencies.dependencies,
+                complete_object_dependencies: source.generated_provenance == nil)),
+            error: "")
+    if kind == "compile_snapshot":
+        val decoded = canonical_compile_snapshot_decode_bounded_v1(bytes,
+            max_payload_bytes, max_items, max_text_bytes)
+        if not decoded.ok: return _object_view_failure_v1(decoded.error)
+        val snapshot = match decoded.value:
+            case Some(value): value
+            case nil: return _object_view_failure_v1("missing_compile_snapshot")
+        val dependencies = _snapshot_view_dependencies_v1(snapshot, max_dependencies)
+        if not dependencies.ok:
+            return _object_view_failure_v1("dependency_limit_exceeded")
+        return CacheVerifiedObjectViewDecodeV1(ok: true,
+            value: Some(CacheVerifiedObjectViewV1(identity: CacheObjectRefV1(
+                kind: kind, schema: 1, object_digest: decoded.cas_object_digest),
+                semantic_digest: decoded.semantic_snapshot_digest,
+                dependencies: dependencies.dependencies,
+                # Source links are semantic digests and legacy live witness
+                # authority is absent. A later owner mapping is required.
+                complete_object_dependencies: false)), error: "")
+    _object_view_failure_v1("verified_object_kind_unavailable")
+
+pub fn verified_object_dependencies_v1(view: CacheVerifiedObjectViewV1,
+        cursor: i64, maximum: i64) -> CacheDependencyPageV1:
+    if cursor < 0 or maximum <= 0 or maximum > canonical_cache_max_entries_v1() or
+            cursor > view.dependencies.len():
+        return CacheDependencyPageV1(ok: false, dependencies: [], next_cursor: cursor,
+            complete: false, error: "invalid_dependency_page")
+    val end = (cursor + maximum).min(view.dependencies.len())
+    CacheDependencyPageV1(ok: true, dependencies: view.dependencies[cursor..end],
+        next_cursor: end, complete: end == view.dependencies.len(), error: "")
+
 pub fn canonical_file_ast_payload_v1(ast: FileAstV1) -> [u8]:
     var buffer: [u8] = []
     if ast.nodes.len() == 0 or ast.nodes.len() > canonical_cache_max_entries_v1(): return buffer
@@ -839,6 +1153,169 @@ class _CanonicalCursorV1:
             values.push(self.read_text())
             i = i + 1
         values
+
+class _CanonicalBoundedCursorV1:
+    bytes: [u8]
+    position: i64
+    failed: bool
+    max_items: i64
+    max_text_bytes: i64
+    retained_items: i64
+    retained_text_bytes: i64
+
+    me fn reserve_items(count: i64) -> bool:
+        if self.failed or count < 0 or count > self.max_items - self.retained_items:
+            self.failed = true
+            return false
+        self.retained_items = self.retained_items + count
+        true
+
+    me fn read_u8() -> i64:
+        if self.failed or self.position >= self.bytes.len():
+            self.failed = true
+            return -1
+        val value = self.bytes[self.position] as i64
+        self.position = self.position + 1
+        value
+
+    me fn read_u16() -> i64:
+        if self.failed or self.position > self.bytes.len() - 2:
+            self.failed = true
+            return -1
+        val value = _read_le_v1(self.bytes, self.position, 2)
+        self.position = self.position + 2
+        value
+
+    me fn read_u64() -> i64:
+        if self.failed or self.position > self.bytes.len() - 8:
+            self.failed = true
+            return -1
+        val value = _read_le_v1(self.bytes, self.position, 8)
+        self.position = self.position + 8
+        value
+
+    me fn read_text() -> text:
+        val count = self.read_u64()
+        if count < 0 or count > self.max_text_bytes - self.retained_text_bytes or
+                self.position > self.bytes.len() - count:
+            self.failed = true
+            return ""
+        val raw = self.bytes[self.position..(self.position + count)]
+        val value = match validated_utf8_bytes_to_text_linear(raw):
+            case Ok(decoded): decoded
+            case Err(_):
+                self.failed = true
+                return ""
+        self.position = self.position + count
+        self.retained_text_bytes = self.retained_text_bytes + count
+        value
+
+    me fn read_digest() -> text:
+        if self.failed or self.position > self.bytes.len() - 32:
+            self.failed = true
+            return ""
+        val value = _raw_digest_to_hex_v1(self.bytes, self.position)
+        self.position = self.position + 32
+        value
+
+    me fn read_blob(maximum: i64) -> [u8]:
+        val count = self.read_u64()
+        if count < 0 or count > maximum or self.position > self.bytes.len() - count:
+            self.failed = true
+            return []
+        val value = self.bytes[self.position..(self.position + count)]
+        self.position = self.position + count
+        value
+
+    me fn read_utf8_blob(maximum: i64) -> [u8]:
+        val count = self.read_u64()
+        if count < 0 or count > maximum or self.position > self.bytes.len() - count:
+            self.failed = true
+            return []
+        val value = self.bytes[self.position..(self.position + count)]
+        if validated_utf8_bytes_to_text_linear(value).is_err():
+            self.failed = true
+            return []
+        self.position = self.position + count
+        value
+
+fn _bounded_cursor_v1(bytes: [u8], max_items: i64,
+        max_text_bytes: i64) -> _CanonicalBoundedCursorV1:
+    _CanonicalBoundedCursorV1(bytes: bytes, position: 0, failed: false,
+        max_items: max_items, max_text_bytes: max_text_bytes,
+        retained_items: 0, retained_text_bytes: 0)
+
+fn _bounded_path_v1(cursor: _CanonicalBoundedCursorV1) -> LogicalSourcePathV1:
+    val repository_digest = cursor.read_digest()
+    val relative = cursor.read_text()
+    val tag = cursor.read_u16()
+    val semantics = if tag == 1: PathSemanticsV1.CaseSensitiveNfc else:
+        PathSemanticsV1.CaseFoldedNfc
+    if tag != 1 and tag != 2: cursor.failed = true
+    val path = LogicalSourcePathV1(repository_namespace_digest: repository_digest,
+        module_relative_utf8: relative, path_semantics: semantics)
+    if not logical_source_path_valid_v1(path): cursor.failed = true
+    path
+
+fn _bounded_count_v1(cursor: _CanonicalBoundedCursorV1) -> i64:
+    val count = cursor.read_u64()
+    if not cursor.reserve_items(count): return -1
+    count
+
+fn _bounded_candidate_v1(cursor: _CanonicalBoundedCursorV1) -> ResolutionCandidateV1:
+    val order = cursor.read_u64()
+    val logical = cursor.read_text()
+    val normalization = cursor.read_text()
+    val parent = cursor.read_digest()
+    val entry_kind = cursor.read_text()
+    val exists_tag = cursor.read_u8()
+    val selected_tag = cursor.read_u8()
+    if (exists_tag != 0 and exists_tag != 1) or
+            (selected_tag != 0 and selected_tag != 1): cursor.failed = true
+    ResolutionCandidateV1(order: order, logical_path: logical,
+        normalization_key: normalization,
+        physical_identity_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+        parent_directory_generation_digest: parent, entry_kind: entry_kind,
+        exists: exists_tag == 1, selected: selected_tag == 1,
+        content_digest: cursor.read_digest(),
+        symlink_chain_digest: cursor.read_digest())
+
+fn _bounded_digest_texts_v1(cursor: _CanonicalBoundedCursorV1) -> [text]:
+    var values: [text] = []
+    val count = _bounded_count_v1(cursor)
+    var index: i64 = 0
+    while not cursor.failed and index < count:
+        val digest = cursor.read_text()
+        if _digest_hex_to_raw_v1(digest).len() != 32: cursor.failed = true
+        values.push(digest)
+        index = index + 1
+    values
+
+fn _bounded_witness_v1(cursor: _CanonicalBoundedCursorV1) -> ResolutionWitnessV1:
+    val policy = cursor.read_digest()
+    val trust = cursor.read_digest()
+    val count = _bounded_count_v1(cursor)
+    var candidates: [ResolutionCandidateV1] = []
+    var index: i64 = 0
+    while not cursor.failed and index < count:
+        candidates.push(_bounded_candidate_v1(cursor))
+        index = index + 1
+    val selected_plus_one = cursor.read_u64()
+    val generated = _bounded_digest_texts_v1(cursor)
+    ResolutionWitnessV1(resolver_policy_digest: policy, root_trust_digest: trust,
+        candidates: candidates, selected_index: selected_plus_one - 1,
+        generated_input_digests: generated,
+        witness_digest: "0000000000000000000000000000000000000000000000000000000000000000")
+
+fn _bounded_named_v1(cursor: _CanonicalBoundedCursorV1) -> [NamedDigestV1]:
+    var values: [NamedDigestV1] = []
+    val count = _bounded_count_v1(cursor)
+    var index: i64 = 0
+    while not cursor.failed and index < count:
+        values.push(NamedDigestV1(name: cursor.read_text(),
+            digest: cursor.read_digest()))
+        index = index + 1
+    values
 
 fn _append_text_v1(buffer: [u8], value: text) -> CanonicalBufferAppendV1:
     val encoded = canonical_cache_encode_text_v1(value)

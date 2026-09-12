@@ -14,6 +14,9 @@ use app.spipe.evidence_registry.*
 
 fn digest(value: text) -> text: sha256_text(value)
 
+fn expect_surface_ready(label: text, ready: bool):
+    expect(if ready: label else: "not-ready:{label}").to_equal(label)
+
 fn auth() -> SummaryAuthV1:
     SummaryAuthV1(root_digest: digest("repo"), session_digest: digest("session"),
         capability_digest: digest("capability"), capability_admission_receipt: digest("admission"),
@@ -58,12 +61,14 @@ describe "registered virtual summary protocols":
         var gateway = gateway_with_summary(snapshot)
         install_virtual_source_consumers_from_gateway_v1(gateway, auth(), snapshot)
         val uri = "simple-summary://{snapshot}/pkg/example.spl/_tldr.spl"
-        expect(handle_virtual_summary_list_v1("1", "{\"logical_directory\":\"pkg\",\"max_entries\":8}").contains(uri)).to_equal(true)
-        expect(handle_virtual_summary_stat_v1("2", "{\"uri\":\"{uri}\"}").contains("\"status\":\"ready\"")).to_equal(true)
-        expect(handle_virtual_summary_read_v1("3", "{\"uri\":\"{uri}\",\"max_bytes\":65536}").contains("visible")).to_equal(true)
-        expect(handle_virtual_summary_page_v1("4", "{\"uri\":\"{uri}\",\"max_bytes\":4096,\"max_entries\":32}").contains("visible")).to_equal(true)
-        expect(handle_resources_read("5", uri).contains("visible")).to_equal(true)
-        expect(handle_resource_read("6", "{\"uri\":\"{uri}\"}").contains("visible")).to_equal(true)
+        val listed = handle_virtual_summary_list_v1("1", "{\"logical_directory\":\"pkg\",\"max_entries\":8}")
+        expect_surface_ready("mcp-list-uri", listed.contains(uri))
+        expect_surface_ready("mcp-list-path", listed.contains("\\\"path\\\":\\\"pkg/example.spl\\\""))
+        expect_surface_ready("mcp-stat", handle_virtual_summary_stat_v1("2", "{\"uri\":\"{uri}\"}").contains("\\\"status\\\":\\\"ready\\\""))
+        expect_surface_ready("mcp-read", handle_virtual_summary_read_v1("3", "{\"uri\":\"{uri}\",\"max_bytes\":65536}").contains("visible"))
+        expect_surface_ready("mcp-page", handle_virtual_summary_page_v1("4", "{\"uri\":\"{uri}\",\"max_bytes\":4096,\"max_entries\":32}").contains("visible"))
+        expect_surface_ready("mcp-resource-read", handle_resources_read("5", uri).contains("visible"))
+        expect_surface_ready("lsp-resource-read", handle_resource_read("6", "{\"uri\":\"{uri}\"}").contains("visible"))
         expect(compiler_virtual_source_read_registered_v1(uri, 65536).status).to_equal(VirtualSourceRegistrationStatusV1.Ready)
         expect(compiler_virtual_source_read_registered_v1("pkg/example.spl", 65536).status).to_equal(VirtualSourceRegistrationStatusV1.Miss)
         var registry = SPipeEvidenceRegistryV1.empty()

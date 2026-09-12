@@ -1,0 +1,792 @@
+#![allow(primitive_api)]
+# Frozen V1 semantic identity stream.
+#
+# This module encodes content identity only. It does not retain a semantic
+# owner, prove liveness, or issue an authority receipt. Structural children
+# can enter the stream only through typed APIs; callers cannot inject a
+# pre-encoded child or choose an opcode.
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new,
+    sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.string_core.{text_to_bytes}
+use std.common.encoding.utf8.{text_byte_len}
+use std.common.binary_io.{f32_to_bits, f64_to_bits}
+use compiler.common.cache_contract.semantic_owner_revision_v1.{
+    SemanticOwnerRevisionOwnerV1, SemanticOwnerRevisionV1,
+    SemanticOwnerRevisionSetV1,
+    semantic_owner_revision_set_valid_v1}
+pub const SEMANTIC_CANONICAL_STREAM_SCHEMA_V1: i64 = 1
+pub const SEMANTIC_CANONICAL_DEFAULT_MAX_BYTES_V1: i64 = 16777216
+pub const SEMANTIC_CANONICAL_DEFAULT_MAX_ITEMS_V1: i64 = 1048576
+pub const SEMANTIC_CANONICAL_DEFAULT_MAX_DEPTH_V1: i64 = 128
+pub const SEMANTIC_CANONICAL_DEFAULT_MAX_WORK_V1: i64 = 33554432
+const SEMANTIC_CANONICAL_SHA_STATE_WORK_V1: i64 = 204
+const SEMANTIC_CANONICAL_SHA_FINISH_WORK_V1: i64 = 512
+# Frozen wire opcodes. A wire change requires a new schema.
+pub const SEMANTIC_CANONICAL_OPCODE_BEGIN_V1: i64 = 0x01
+pub const SEMANTIC_CANONICAL_OPCODE_RECORD_V1: i64 = 0x10
+pub const SEMANTIC_CANONICAL_OPCODE_FIELD_V1: i64 = 0x11
+pub const SEMANTIC_CANONICAL_OPCODE_VARIANT_V1: i64 = 0x12
+pub const SEMANTIC_CANONICAL_OPCODE_SEQUENCE_V1: i64 = 0x13
+pub const SEMANTIC_CANONICAL_OPCODE_MAP_V1: i64 = 0x14
+pub const SEMANTIC_CANONICAL_OPCODE_SET_V1: i64 = 0x15
+pub const SEMANTIC_CANONICAL_OPCODE_OPTION_NONE_V1: i64 = 0x16
+pub const SEMANTIC_CANONICAL_OPCODE_OPTION_SOME_V1: i64 = 0x17
+pub const SEMANTIC_CANONICAL_OPCODE_BOOL_V1: i64 = 0x20
+pub const SEMANTIC_CANONICAL_OPCODE_I8_V1: i64 = 0x21
+pub const SEMANTIC_CANONICAL_OPCODE_I16_V1: i64 = 0x22
+pub const SEMANTIC_CANONICAL_OPCODE_I32_V1: i64 = 0x23
+pub const SEMANTIC_CANONICAL_OPCODE_I64_V1: i64 = 0x24
+pub const SEMANTIC_CANONICAL_OPCODE_U8_V1: i64 = 0x25
+pub const SEMANTIC_CANONICAL_OPCODE_U16_V1: i64 = 0x26
+pub const SEMANTIC_CANONICAL_OPCODE_U32_V1: i64 = 0x27
+pub const SEMANTIC_CANONICAL_OPCODE_U64_V1: i64 = 0x28
+pub const SEMANTIC_CANONICAL_OPCODE_F32_BITS_V1: i64 = 0x29
+pub const SEMANTIC_CANONICAL_OPCODE_F64_BITS_V1: i64 = 0x2a
+pub const SEMANTIC_CANONICAL_OPCODE_TEXT_V1: i64 = 0x2b
+pub const SEMANTIC_CANONICAL_OPCODE_BYTES_V1: i64 = 0x2c
+pub struct SemanticCanonicalLimitsV1:
+    max_bytes: i64
+    max_items: i64
+    max_depth: i64
+    max_work: i64
+pub struct SemanticCanonicalDigestV1:
+    digest: text
+    encoded_bytes: i64
+    encoded_items: i64
+    charged_work: i64
+pub enum SemanticRevisionErrorV1:
+    InvalidLimits
+    InvalidDomain
+    InvalidSchemaDigest
+    AlreadyFinished
+    ByteLimitExceeded
+    ItemLimitExceeded
+    WorkLimitExceeded
+    DepthLimitExceeded
+    NegativeCount
+    CountOverflow
+    ScalarOutOfRange
+    RootArityExceeded
+    RootArityMismatch
+    RecordFieldRequired
+    FieldParentRequired
+    ContainerArityExceeded
+    ContainerArityMismatch
+    ContainerKindMismatch
+    UnclosedContainer
+    DuplicateMapKey
+    DuplicateSetElement
+    InvalidSemanticOwnerRevisionSet
+    Sha256UpdateFailed
+    Sha256FinishFailed
+enum SemanticCanonicalFrameKindV1:
+    Record
+    Field
+    Variant
+    Sequence
+    Map
+    Set
+    OptionSome
+class SemanticCanonicalFrameV1:
+    kind: SemanticCanonicalFrameKindV1
+    expected_children: i64
+    header: [u8]
+    children: [[u8]]
+class SemanticCanonicalByteBuilderV1:
+    bytes: [u8]
+    me append(source: [u8]):
+        for byte in source: self.bytes.push(byte)
+pub class SemanticCanonicalStreamV1:
+    stream: Sha256StreamV1
+    limits: SemanticCanonicalLimitsV1
+    encoded_bytes: i64
+    encoded_items: i64
+    charged_work: i64
+    root_count: i64
+    frames: [SemanticCanonicalFrameV1]
+    error: SemanticRevisionErrorV1?
+    finished: bool
+pub fn semantic_canonical_limits_v1_default() -> SemanticCanonicalLimitsV1:
+    SemanticCanonicalLimitsV1(
+        max_bytes: SEMANTIC_CANONICAL_DEFAULT_MAX_BYTES_V1,
+        max_items: SEMANTIC_CANONICAL_DEFAULT_MAX_ITEMS_V1,
+        max_depth: SEMANTIC_CANONICAL_DEFAULT_MAX_DEPTH_V1,
+        max_work: SEMANTIC_CANONICAL_DEFAULT_MAX_WORK_V1)
+pub fn semantic_revision_error_code_v1(value: SemanticRevisionErrorV1) -> text:
+    match value:
+        case InvalidLimits: "invalid_limits"
+        case InvalidDomain: "invalid_domain"
+        case InvalidSchemaDigest: "invalid_schema_digest"
+        case AlreadyFinished: "already_finished"
+        case ByteLimitExceeded: "byte_limit_exceeded"
+        case ItemLimitExceeded: "item_limit_exceeded"
+        case WorkLimitExceeded: "work_limit_exceeded"
+        case DepthLimitExceeded: "depth_limit_exceeded"
+        case NegativeCount: "negative_count"
+        case CountOverflow: "count_overflow"
+        case ScalarOutOfRange: "scalar_out_of_range"
+        case RootArityExceeded: "root_arity_exceeded"
+        case RootArityMismatch: "root_arity_mismatch"
+        case RecordFieldRequired: "record_field_required"
+        case FieldParentRequired: "field_parent_required"
+        case ContainerArityExceeded: "container_arity_exceeded"
+        case ContainerArityMismatch: "container_arity_mismatch"
+        case ContainerKindMismatch: "container_kind_mismatch"
+        case UnclosedContainer: "unclosed_container"
+        case DuplicateMapKey: "duplicate_map_key"
+        case DuplicateSetElement: "duplicate_set_element"
+        case InvalidSemanticOwnerRevisionSet: "invalid_semantic_owner_revision_set"
+        case Sha256UpdateFailed: "sha256_update_failed"
+        case Sha256FinishFailed: "sha256_finish_failed"
+fn _limits_valid_v1(value: SemanticCanonicalLimitsV1) -> bool:
+    (value.max_bytes >= 0 and value.max_items >= 0 and
+        value.max_depth >= 0 and value.max_work >= 0)
+fn _schema_digest_valid_v1(value: text) -> bool:
+    if text_byte_len(value) != 64: return false
+    var index: i64 = 0
+    while index < 64:
+        val byte = value.byte_at(index)
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return false
+        index = index + 1
+    true
+fn _fits_v1(used: i64, delta: i64, maximum: i64) -> bool:
+    delta >= 0 and used >= 0 and maximum >= used and delta <= maximum - used
+fn _safe_add_v1(left: i64, right: i64) -> i64:
+    if left < 0 or right < 0 or left > 9223372036854775807 - right: return -1
+    left + right
+fn _safe_mul_v1(left: i64, right: i64) -> i64:
+    if left < 0 or right < 0: return -1
+    if left == 0 or right == 0: return 0
+    if left > 9223372036854775807 / right: return -1
+    left * right
+fn _fail_v1(value: SemanticCanonicalStreamV1, error: SemanticRevisionErrorV1):
+    if value.error.is_none(): value.error = Some(error)
+fn _mutation_ready_v1(value: SemanticCanonicalStreamV1) -> bool:
+    if value.error.is_some(): return false
+    if value.finished:
+        _fail_v1(value, SemanticRevisionErrorV1.AlreadyFinished)
+        return false
+    true
+fn _precharge_v1(value: SemanticCanonicalStreamV1, bytes: i64, items: i64,
+        work: i64) -> bool:
+    if value.error.is_some(): return false
+    if value.finished:
+        _fail_v1(value, SemanticRevisionErrorV1.AlreadyFinished)
+        return false
+    if not _fits_v1(value.encoded_bytes, bytes, value.limits.max_bytes):
+        _fail_v1(value, SemanticRevisionErrorV1.ByteLimitExceeded)
+        return false
+    if not _fits_v1(value.encoded_items, items, value.limits.max_items):
+        _fail_v1(value, SemanticRevisionErrorV1.ItemLimitExceeded)
+        return false
+    if not _fits_v1(value.charged_work, work, value.limits.max_work):
+        _fail_v1(value, SemanticRevisionErrorV1.WorkLimitExceeded)
+        return false
+    value.encoded_bytes = value.encoded_bytes + bytes
+    value.encoded_items = value.encoded_items + items
+    value.charged_work = value.charged_work + work
+    true
+fn _le_i64_v1(value: i64, width: i64) -> [u8]:
+    var result: [u8] = []
+    var shift: i64 = 0
+    while shift < width * 8:
+        result.push(((value >> shift) & 255) as u8)
+        shift = shift + 8
+    result
+fn _le_u64_v1(value: u64, width: i64) -> [u8]:
+    var result: [u8] = []
+    var shift: i64 = 0
+    while shift < width * 8:
+        result.push(((value >> shift) & 255u64) as u8)
+        shift = shift + 8
+    result
+fn _tag_size_v1(value: text) -> i64:
+    _safe_add_v1(8, text_byte_len(value))
+fn _append_tag_v1(target: SemanticCanonicalByteBuilderV1, value: text):
+    val encoded = text_to_bytes(value)
+    target.append(_le_i64_v1(encoded.len(), 8))
+    target.append(encoded)
+fn _begin_header_size_v1(domain: text, schema_digest: text) -> i64:
+    var size = _safe_add_v1(1, _tag_size_v1(domain))
+    size = _safe_add_v1(size, _tag_size_v1(schema_digest))
+    size
+fn _begin_header_v1(domain: text, schema_digest: text) -> [u8]:
+    val result = SemanticCanonicalByteBuilderV1(
+        bytes: [SEMANTIC_CANONICAL_OPCODE_BEGIN_V1 as u8])
+    _append_tag_v1(result, domain)
+    _append_tag_v1(result, schema_digest)
+    result.bytes
+# Canonical public constructor. Limits are admission policy, not digest data.
+pub fn semantic_canonical_begin_v1(domain: text, schema_digest: text,
+        limits: SemanticCanonicalLimitsV1
+    ) -> Result<SemanticCanonicalStreamV1, SemanticRevisionErrorV1>:
+    if not _limits_valid_v1(limits): return Err(SemanticRevisionErrorV1.InvalidLimits)
+    val domain_size = text_byte_len(domain)
+    if domain_size <= 0 or domain_size > 128:
+        return Err(SemanticRevisionErrorV1.InvalidDomain)
+    if not _schema_digest_valid_v1(schema_digest):
+        return Err(SemanticRevisionErrorV1.InvalidSchemaDigest)
+    val header_size = _begin_header_size_v1(domain, schema_digest)
+    # Final builder, UTF-8/LE temporaries, and SHA input are all charged.
+    val header_work = _safe_add_v1(_safe_mul_v1(header_size, 3),
+        SEMANTIC_CANONICAL_SHA_STATE_WORK_V1)
+    if header_size < 0 or header_work < 0:
+        return Err(SemanticRevisionErrorV1.CountOverflow)
+    # Validate the complete initial allocation before constructing SHA arrays.
+    if header_size > limits.max_bytes:
+        return Err(SemanticRevisionErrorV1.ByteLimitExceeded)
+    if header_work > limits.max_work:
+        return Err(SemanticRevisionErrorV1.WorkLimitExceeded)
+    val value = SemanticCanonicalStreamV1(stream: sha256_stream_v1_new(),
+        limits: limits, encoded_bytes: 0, encoded_items: 0, charged_work: 0,
+        root_count: 0, frames: [], error: nil, finished: false)
+    if not _precharge_v1(value, header_size, 0, header_work):
+        return Err(value.error.unwrap())
+    val header = _begin_header_v1(domain, schema_digest)
+    if not sha256_stream_v1_update(value.stream, header):
+        return Err(SemanticRevisionErrorV1.Sha256UpdateFailed)
+    Ok(value)
+pub fn semantic_canonical_stream_v1_ok(value: SemanticCanonicalStreamV1) -> bool:
+    value.error.is_none() and not value.finished
+pub fn semantic_canonical_stream_v1_error(
+        value: SemanticCanonicalStreamV1) -> SemanticRevisionErrorV1?:
+    value.error
+pub fn semantic_canonical_stream_v1_encoded_bytes(
+        value: SemanticCanonicalStreamV1) -> i64:
+    value.encoded_bytes
+pub fn semantic_canonical_stream_v1_encoded_items(
+        value: SemanticCanonicalStreamV1) -> i64:
+    value.encoded_items
+pub fn semantic_canonical_stream_v1_charged_work(
+        value: SemanticCanonicalStreamV1) -> i64:
+    value.charged_work
+fn _frame_slot_limit_v1(frame: SemanticCanonicalFrameV1) -> i64:
+    if frame.kind == SemanticCanonicalFrameKindV1.Map:
+        _safe_mul_v1(frame.expected_children, 2)
+    else:
+        frame.expected_children
+fn _child_slot_available_v1(value: SemanticCanonicalStreamV1,
+        child_is_field: bool) -> bool:
+    if not _mutation_ready_v1(value): return false
+    if value.frames.len() == 0:
+        if child_is_field:
+            _fail_v1(value, SemanticRevisionErrorV1.FieldParentRequired)
+            return false
+        if value.root_count >= 1:
+            _fail_v1(value, SemanticRevisionErrorV1.RootArityExceeded)
+            return false
+        return true
+    val parent = value.frames[value.frames.len() - 1]
+    if parent.kind == SemanticCanonicalFrameKindV1.Record and not child_is_field:
+        _fail_v1(value, SemanticRevisionErrorV1.RecordFieldRequired)
+        return false
+    if parent.kind != SemanticCanonicalFrameKindV1.Record and child_is_field:
+        _fail_v1(value, SemanticRevisionErrorV1.FieldParentRequired)
+        return false
+    val limit = _frame_slot_limit_v1(parent)
+    if limit < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return false
+    if parent.children.len() >= limit:
+        _fail_v1(value, SemanticRevisionErrorV1.ContainerArityExceeded)
+        return false
+    true
+fn _attach_precharged_v1(value: SemanticCanonicalStreamV1, encoded: [u8],
+        child_is_field: bool):
+    if value.error.is_some(): return
+    if not _child_slot_available_v1(value, child_is_field): return
+    if value.frames.len() == 0:
+        value.root_count = value.root_count + 1
+        if not sha256_stream_v1_update(value.stream, encoded):
+            _fail_v1(value, SemanticRevisionErrorV1.Sha256UpdateFailed)
+    else:
+        value.frames[value.frames.len() - 1].children.push(encoded)
+fn _scalar_precharge_v1(value: SemanticCanonicalStreamV1, byte_count: i64) -> bool:
+    if not _child_slot_available_v1(value, false): return false
+    val attachment_work = if value.frames.len() == 0: byte_count else: 1
+    val allocation_work = _safe_mul_v1(byte_count, 2)
+    val work = _safe_add_v1(allocation_work, attachment_work)
+    if work < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return false
+    _precharge_v1(value, byte_count, 1, work)
+fn _container_header_size_v1(kind: SemanticCanonicalFrameKindV1,
+        first_tag: text, second_tag: text) -> i64:
+    var size: i64 = 1
+    match kind:
+        case Record:
+            size = _safe_add_v1(size, _tag_size_v1(first_tag))
+            size = _safe_add_v1(size, 8)
+        case Field: size = _safe_add_v1(size, _tag_size_v1(first_tag))
+        case Variant:
+            size = _safe_add_v1(size, _tag_size_v1(first_tag))
+            size = _safe_add_v1(size, _tag_size_v1(second_tag))
+            size = _safe_add_v1(size, 8)
+        case Sequence:
+            size = _safe_add_v1(size, _tag_size_v1(first_tag))
+            size = _safe_add_v1(size, 8)
+        case Map:
+            size = _safe_add_v1(size, _tag_size_v1(first_tag))
+            size = _safe_add_v1(size, _tag_size_v1(second_tag))
+            size = _safe_add_v1(size, 8)
+        case Set:
+            size = _safe_add_v1(size, _tag_size_v1(first_tag))
+            size = _safe_add_v1(size, 8)
+        case OptionSome: size = size
+    size
+fn _container_opcode_v1(kind: SemanticCanonicalFrameKindV1) -> i64:
+    match kind:
+        case Record: SEMANTIC_CANONICAL_OPCODE_RECORD_V1
+        case Field: SEMANTIC_CANONICAL_OPCODE_FIELD_V1
+        case Variant: SEMANTIC_CANONICAL_OPCODE_VARIANT_V1
+        case Sequence: SEMANTIC_CANONICAL_OPCODE_SEQUENCE_V1
+        case Map: SEMANTIC_CANONICAL_OPCODE_MAP_V1
+        case Set: SEMANTIC_CANONICAL_OPCODE_SET_V1
+        case OptionSome: SEMANTIC_CANONICAL_OPCODE_OPTION_SOME_V1
+fn _container_header_v1(kind: SemanticCanonicalFrameKindV1,
+        first_tag: text, second_tag: text, count: i64) -> [u8]:
+    val result = SemanticCanonicalByteBuilderV1(
+        bytes: [_container_opcode_v1(kind) as u8])
+    match kind:
+        case Record:
+            _append_tag_v1(result, first_tag)
+            result.append(_le_i64_v1(count, 8))
+        case Field: _append_tag_v1(result, first_tag)
+        case Variant:
+            _append_tag_v1(result, first_tag)
+            _append_tag_v1(result, second_tag)
+            result.append(_le_i64_v1(count, 8))
+        case Sequence:
+            _append_tag_v1(result, first_tag)
+            result.append(_le_i64_v1(count, 8))
+        case Map:
+            _append_tag_v1(result, first_tag)
+            _append_tag_v1(result, second_tag)
+            result.append(_le_i64_v1(count, 8))
+        case Set:
+            _append_tag_v1(result, first_tag)
+            result.append(_le_i64_v1(count, 8))
+        case OptionSome: pass
+    result.bytes
+fn _begin_container_v1(value: SemanticCanonicalStreamV1,
+        kind: SemanticCanonicalFrameKindV1, first_tag: text,
+        second_tag: text, count: i64):
+    if not _mutation_ready_v1(value): return
+    if count < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.NegativeCount)
+        return
+    if kind == SemanticCanonicalFrameKindV1.Map and _safe_mul_v1(count, 2) < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    val child_is_field = kind == SemanticCanonicalFrameKindV1.Field
+    if not _child_slot_available_v1(value, child_is_field): return
+    if value.frames.len() >= value.limits.max_depth:
+        _fail_v1(value, SemanticRevisionErrorV1.DepthLimitExceeded)
+        return
+    val header_size = _container_header_size_v1(kind, first_tag, second_tag)
+    val header_allocation_work = _safe_mul_v1(header_size, 2)
+    # Include the header builder, frame object, child vector, and stack slot.
+    val work = _safe_add_v1(header_allocation_work, 4)
+    if header_size < 0 or work < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    if not _precharge_v1(value, header_size, 1, work): return
+    val header = _container_header_v1(kind, first_tag, second_tag, count)
+    value.frames.push(SemanticCanonicalFrameV1(kind: kind,
+        expected_children: count, header: header, children: []))
+fn _frame_output_len_v1(frame: SemanticCanonicalFrameV1) -> i64:
+    var total = frame.header.len()
+    for child in frame.children:
+        total = _safe_add_v1(total, child.len())
+        if total < 0: return -1
+    total
+fn _bytes_compare_v1(left: [u8], right: [u8]) -> i64:
+    var index: i64 = 0
+    while index < left.len() and index < right.len():
+        if left[index] < right[index]: return -1
+        if left[index] > right[index]: return 1
+        index = index + 1
+    if left.len() < right.len(): return -1
+    if left.len() > right.len(): return 1
+    0
+fn _ordered_close_work_v1(value: SemanticCanonicalStreamV1,
+        frame: SemanticCanonicalFrameV1, output_len: i64) -> i64:
+    val count = frame.expected_children
+    var maximum_key_bytes: i64 = 0
+    if frame.kind == SemanticCanonicalFrameKindV1.Map:
+        var index: i64 = 0
+        while index < frame.children.len():
+            if frame.children[index].len() > maximum_key_bytes:
+                maximum_key_bytes = frame.children[index].len()
+            index = index + 2
+    else:
+        for child in frame.children:
+            if child.len() > maximum_key_bytes: maximum_key_bytes = child.len()
+    val comparisons = _safe_mul_v1(count, count)
+    val compared_span = _safe_add_v1(maximum_key_bytes, 1)
+    val byte_compare_work = _safe_mul_v1(comparisons, compared_span)
+    var work = _safe_add_v1(output_len, count)
+    work = _safe_add_v1(work, comparisons)
+    work = _safe_add_v1(work, byte_compare_work)
+    val attachment = if value.frames.len() == 1: output_len else: 1
+    _safe_add_v1(work, attachment)
+fn _plain_close_work_v1(value: SemanticCanonicalStreamV1,
+        output_len: i64) -> i64:
+    val attachment = if value.frames.len() == 1: output_len else: 1
+    _safe_add_v1(output_len, attachment)
+fn _sorted_indices_v1(frame: SemanticCanonicalFrameV1) -> [i64]:
+    var result: [i64] = []
+    var index: i64 = 0
+    while index < frame.expected_children:
+        result.push(index)
+        index = index + 1
+    var outer: i64 = 1
+    while outer < result.len():
+        val held = result[outer]
+        var inner = outer
+        val held_child = if frame.kind == SemanticCanonicalFrameKindV1.Map:
+            frame.children[held * 2]
+        else:
+            frame.children[held]
+        while inner > 0:
+            val prior_index = result[inner - 1]
+            val prior_child = if frame.kind == SemanticCanonicalFrameKindV1.Map:
+                frame.children[prior_index * 2]
+            else:
+                frame.children[prior_index]
+            if _bytes_compare_v1(held_child, prior_child) >= 0: break
+            result[inner] = prior_index
+            inner = inner - 1
+        result[inner] = held
+        outer = outer + 1
+    result
+fn _ordered_duplicate_v1(frame: SemanticCanonicalFrameV1,
+        indices: [i64]) -> bool:
+    var index: i64 = 1
+    while index < indices.len():
+        val left_index = indices[index - 1]
+        val right_index = indices[index]
+        val left = if frame.kind == SemanticCanonicalFrameKindV1.Map:
+            frame.children[left_index * 2]
+        else:
+            frame.children[left_index]
+        val right = if frame.kind == SemanticCanonicalFrameKindV1.Map:
+            frame.children[right_index * 2]
+        else:
+            frame.children[right_index]
+        if _bytes_compare_v1(left, right) == 0: return true
+        index = index + 1
+    false
+fn _encode_plain_frame_v1(frame: SemanticCanonicalFrameV1) -> [u8]:
+    val result = SemanticCanonicalByteBuilderV1(bytes: [])
+    result.append(frame.header)
+    for child in frame.children: result.append(child)
+    result.bytes
+fn _encode_ordered_frame_v1(frame: SemanticCanonicalFrameV1,
+        indices: [i64]) -> [u8]:
+    val result = SemanticCanonicalByteBuilderV1(bytes: [])
+    result.append(frame.header)
+    for index in indices:
+        if frame.kind == SemanticCanonicalFrameKindV1.Map:
+            result.append(frame.children[index * 2])
+            result.append(frame.children[index * 2 + 1])
+        else:
+            result.append(frame.children[index])
+    result.bytes
+fn _close_container_v1(value: SemanticCanonicalStreamV1,
+        expected_kind: SemanticCanonicalFrameKindV1):
+    if value.error.is_some(): return
+    if value.finished:
+        _fail_v1(value, SemanticRevisionErrorV1.AlreadyFinished)
+        return
+    if value.frames.len() == 0:
+        _fail_v1(value, SemanticRevisionErrorV1.ContainerKindMismatch)
+        return
+    val frame = value.frames[value.frames.len() - 1]
+    if frame.kind != expected_kind:
+        _fail_v1(value, SemanticRevisionErrorV1.ContainerKindMismatch)
+        return
+    val slot_limit = _frame_slot_limit_v1(frame)
+    if slot_limit < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    if frame.children.len() != slot_limit:
+        _fail_v1(value, SemanticRevisionErrorV1.ContainerArityMismatch)
+        return
+    val output_len = _frame_output_len_v1(frame)
+    if output_len < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    val ordered = (frame.kind == SemanticCanonicalFrameKindV1.Map or
+        frame.kind == SemanticCanonicalFrameKindV1.Set)
+    val close_work = if ordered:
+        _ordered_close_work_v1(value, frame, output_len)
+    else:
+        _plain_close_work_v1(value, output_len)
+    if close_work < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    # Covers index allocation, all sort/duplicate byte comparisons, output
+    # allocation/copy, and parent/root attachment before any of them occurs.
+    if not _precharge_v1(value, 0, 0, close_work): return
+    var indices: [i64] = []
+    if ordered:
+        indices = _sorted_indices_v1(frame)
+        if _ordered_duplicate_v1(frame, indices):
+            if frame.kind == SemanticCanonicalFrameKindV1.Map:
+                _fail_v1(value, SemanticRevisionErrorV1.DuplicateMapKey)
+            else:
+                _fail_v1(value, SemanticRevisionErrorV1.DuplicateSetElement)
+            return
+    val encoded = if ordered:
+        _encode_ordered_frame_v1(frame, indices)
+    else:
+        _encode_plain_frame_v1(frame)
+    value.frames.pop()
+    _attach_precharged_v1(value, encoded,
+        frame.kind == SemanticCanonicalFrameKindV1.Field)
+pub fn semantic_canonical_begin_record_v1(value: SemanticCanonicalStreamV1,
+        type_tag: text, field_count: i64):
+    _begin_container_v1(value, SemanticCanonicalFrameKindV1.Record,
+        type_tag, "", field_count)
+pub fn semantic_canonical_end_record_v1(value: SemanticCanonicalStreamV1):
+    _close_container_v1(value, SemanticCanonicalFrameKindV1.Record)
+pub fn semantic_canonical_begin_field_v1(value: SemanticCanonicalStreamV1,
+        field_tag: text):
+    _begin_container_v1(value, SemanticCanonicalFrameKindV1.Field,
+        field_tag, "", 1)
+pub fn semantic_canonical_end_field_v1(value: SemanticCanonicalStreamV1):
+    _close_container_v1(value, SemanticCanonicalFrameKindV1.Field)
+pub fn semantic_canonical_begin_variant_v1(value: SemanticCanonicalStreamV1,
+        type_tag: text, variant_tag: text, arity: i64):
+    _begin_container_v1(value, SemanticCanonicalFrameKindV1.Variant,
+        type_tag, variant_tag, arity)
+pub fn semantic_canonical_end_variant_v1(value: SemanticCanonicalStreamV1):
+    _close_container_v1(value, SemanticCanonicalFrameKindV1.Variant)
+pub fn semantic_canonical_begin_sequence_v1(value: SemanticCanonicalStreamV1,
+        element_tag: text, count: i64):
+    _begin_container_v1(value, SemanticCanonicalFrameKindV1.Sequence,
+        element_tag, "", count)
+pub fn semantic_canonical_end_sequence_v1(value: SemanticCanonicalStreamV1):
+    _close_container_v1(value, SemanticCanonicalFrameKindV1.Sequence)
+pub fn semantic_canonical_begin_map_v1(value: SemanticCanonicalStreamV1,
+        key_tag: text, value_tag: text, count: i64):
+    _begin_container_v1(value, SemanticCanonicalFrameKindV1.Map,
+        key_tag, value_tag, count)
+pub fn semantic_canonical_end_map_v1(value: SemanticCanonicalStreamV1):
+    _close_container_v1(value, SemanticCanonicalFrameKindV1.Map)
+pub fn semantic_canonical_begin_set_v1(value: SemanticCanonicalStreamV1,
+        element_tag: text, count: i64):
+    _begin_container_v1(value, SemanticCanonicalFrameKindV1.Set,
+        element_tag, "", count)
+pub fn semantic_canonical_end_set_v1(value: SemanticCanonicalStreamV1):
+    _close_container_v1(value, SemanticCanonicalFrameKindV1.Set)
+# present=false emits a complete None. present=true opens an arity-one Some.
+pub fn semantic_canonical_begin_option_v1(value: SemanticCanonicalStreamV1,
+        present: bool):
+    if present:
+        _begin_container_v1(value, SemanticCanonicalFrameKindV1.OptionSome,
+            "", "", 1)
+    else:
+        semantic_canonical_write_option_none_v1(value)
+pub fn semantic_canonical_end_option_v1(value: SemanticCanonicalStreamV1):
+    _close_container_v1(value, SemanticCanonicalFrameKindV1.OptionSome)
+pub fn semantic_canonical_write_option_none_v1(value: SemanticCanonicalStreamV1):
+    if not _scalar_precharge_v1(value, 1): return
+    _attach_precharged_v1(value,
+        [SEMANTIC_CANONICAL_OPCODE_OPTION_NONE_V1 as u8], false)
+pub fn semantic_canonical_begin_option_some_v1(value: SemanticCanonicalStreamV1):
+    semantic_canonical_begin_option_v1(value, true)
+pub fn semantic_canonical_end_option_some_v1(value: SemanticCanonicalStreamV1):
+    semantic_canonical_end_option_v1(value)
+fn _write_signed_fixed_v1(value: SemanticCanonicalStreamV1, opcode: i64,
+        input: i64, width: i64):
+    val size = _safe_add_v1(1, width)
+    if size < 0 or not _scalar_precharge_v1(value, size): return
+    val encoded = SemanticCanonicalByteBuilderV1(bytes: [opcode as u8])
+    encoded.append(_le_i64_v1(input, width))
+    _attach_precharged_v1(value, encoded.bytes, false)
+fn _write_unsigned_fixed_v1(value: SemanticCanonicalStreamV1, opcode: i64,
+        input: u64, width: i64):
+    val size = _safe_add_v1(1, width)
+    if size < 0 or not _scalar_precharge_v1(value, size): return
+    val encoded = SemanticCanonicalByteBuilderV1(bytes: [opcode as u8])
+    encoded.append(_le_u64_v1(input, width))
+    _attach_precharged_v1(value, encoded.bytes, false)
+pub fn semantic_canonical_write_bool_v1(value: SemanticCanonicalStreamV1,
+        input: bool):
+    _write_unsigned_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_BOOL_V1,
+        if input: 1u64 else: 0u64, 1)
+pub fn semantic_canonical_write_i8_v1(value: SemanticCanonicalStreamV1, input: i64):
+    if not _mutation_ready_v1(value): return
+    if input < -128 or input > 127:
+        _fail_v1(value, SemanticRevisionErrorV1.ScalarOutOfRange)
+        return
+    _write_signed_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_I8_V1, input, 1)
+pub fn semantic_canonical_write_i16_v1(value: SemanticCanonicalStreamV1, input: i64):
+    if not _mutation_ready_v1(value): return
+    if input < -32768 or input > 32767:
+        _fail_v1(value, SemanticRevisionErrorV1.ScalarOutOfRange)
+        return
+    _write_signed_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_I16_V1, input, 2)
+pub fn semantic_canonical_write_i32_v1(value: SemanticCanonicalStreamV1, input: i64):
+    if not _mutation_ready_v1(value): return
+    if input < -2147483648 or input > 2147483647:
+        _fail_v1(value, SemanticRevisionErrorV1.ScalarOutOfRange)
+        return
+    _write_signed_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_I32_V1, input, 4)
+pub fn semantic_canonical_write_i64_v1(value: SemanticCanonicalStreamV1, input: i64):
+    _write_signed_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_I64_V1, input, 8)
+pub fn semantic_canonical_write_u8_v1(value: SemanticCanonicalStreamV1, input: i64):
+    if not _mutation_ready_v1(value): return
+    if input < 0 or input > 255:
+        _fail_v1(value, SemanticRevisionErrorV1.ScalarOutOfRange)
+        return
+    _write_unsigned_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_U8_V1,
+        input as u64, 1)
+pub fn semantic_canonical_write_u16_v1(value: SemanticCanonicalStreamV1, input: i64):
+    if not _mutation_ready_v1(value): return
+    if input < 0 or input > 65535:
+        _fail_v1(value, SemanticRevisionErrorV1.ScalarOutOfRange)
+        return
+    _write_unsigned_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_U16_V1,
+        input as u64, 2)
+pub fn semantic_canonical_write_u32_v1(value: SemanticCanonicalStreamV1, input: i64):
+    if not _mutation_ready_v1(value): return
+    if input < 0 or input > 4294967295:
+        _fail_v1(value, SemanticRevisionErrorV1.ScalarOutOfRange)
+        return
+    _write_unsigned_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_U32_V1,
+        input as u64, 4)
+pub fn semantic_canonical_write_u64_v1(value: SemanticCanonicalStreamV1, input: u64):
+    _write_unsigned_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_U64_V1, input, 8)
+pub fn semantic_canonical_write_f32_bits_v1(value: SemanticCanonicalStreamV1,
+        input: u32):
+    _write_unsigned_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_F32_BITS_V1,
+        input as u64, 4)
+pub fn semantic_canonical_write_f64_bits_v1(value: SemanticCanonicalStreamV1,
+        input: u64):
+    _write_unsigned_fixed_v1(value, SEMANTIC_CANONICAL_OPCODE_F64_BITS_V1,
+        input, 8)
+pub fn semantic_canonical_write_f32_v1(value: SemanticCanonicalStreamV1, input: f32):
+    semantic_canonical_write_f32_bits_v1(value, f32_to_bits(input))
+pub fn semantic_canonical_write_f64_v1(value: SemanticCanonicalStreamV1, input: f64):
+    semantic_canonical_write_f64_bits_v1(value, f64_to_bits(input))
+fn _write_length_scalar_v1(value: SemanticCanonicalStreamV1, opcode: i64,
+        payload: [u8]):
+    val size = _safe_add_v1(9, payload.len())
+    if size < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    if not _scalar_precharge_v1(value, size): return
+    val encoded = SemanticCanonicalByteBuilderV1(bytes: [opcode as u8])
+    encoded.append(_le_i64_v1(payload.len(), 8))
+    encoded.append(payload)
+    _attach_precharged_v1(value, encoded.bytes, false)
+pub fn semantic_canonical_write_text_v1(value: SemanticCanonicalStreamV1, input: text):
+    val payload_size = text_byte_len(input)
+    val size = _safe_add_v1(9, payload_size)
+    if size < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    # Charge UTF-8 allocation/conversion before text_to_bytes performs it.
+    if not _child_slot_available_v1(value, false): return
+    val attachment = if value.frames.len() == 0: size else: 1
+    var work = _safe_add_v1(_safe_mul_v1(size, 2), payload_size)
+    work = _safe_add_v1(work, attachment)
+    if work < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    if not _precharge_v1(value, size, 1, work): return
+    val payload = text_to_bytes(input)
+    val encoded = SemanticCanonicalByteBuilderV1(
+        bytes: [SEMANTIC_CANONICAL_OPCODE_TEXT_V1 as u8])
+    encoded.append(_le_i64_v1(payload.len(), 8))
+    encoded.append(payload)
+    _attach_precharged_v1(value, encoded.bytes, false)
+pub fn semantic_canonical_write_utf8_v1(value: SemanticCanonicalStreamV1, input: text):
+    semantic_canonical_write_text_v1(value, input)
+pub fn semantic_canonical_write_bytes_v1(value: SemanticCanonicalStreamV1,
+        input: [u8]):
+    _write_length_scalar_v1(value, SEMANTIC_CANONICAL_OPCODE_BYTES_V1, input)
+fn _owner_variant_tag_text_v1(value: SemanticOwnerRevisionOwnerV1) -> text:
+    match value:
+        case DeclarationsReexports: "1"
+        case TraitCandidatesCoherence: "2"
+        case AspectCandidatesOrdering: "3"
+        case MacroCtfeLookup: "4"
+        case BodyDependencyClosure: "5"
+fn _owner_revision_validation_work_v1(count: i64) -> i64:
+    # Two 64-byte digests plus fixed scalar/owner comparisons per revision.
+    _safe_add_v1(1, _safe_mul_v1(count, 140))
+# Copy validated revision fields, never a digest substituted for authority.
+pub fn semantic_canonical_write_owner_revision_set_v1(
+        value: SemanticCanonicalStreamV1, revisions: SemanticOwnerRevisionSetV1):
+    if not _mutation_ready_v1(value): return
+    val validation_work = _owner_revision_validation_work_v1(
+        revisions.revisions.len())
+    if validation_work < 0:
+        _fail_v1(value, SemanticRevisionErrorV1.CountOverflow)
+        return
+    if not _precharge_v1(value, 0, 0, validation_work): return
+    if not semantic_owner_revision_set_valid_v1(revisions):
+        _fail_v1(value, SemanticRevisionErrorV1.InvalidSemanticOwnerRevisionSet)
+        return
+    semantic_canonical_begin_record_v1(value, "SemanticOwnerRevisionSetV1", 2)
+    semantic_canonical_begin_field_v1(value, "schema")
+    semantic_canonical_write_i64_v1(value, revisions.schema)
+    semantic_canonical_end_field_v1(value)
+    semantic_canonical_begin_field_v1(value, "revisions")
+    semantic_canonical_begin_sequence_v1(value, "SemanticOwnerRevisionV1",
+        revisions.revisions.len())
+    for revision in revisions.revisions: _write_owner_revision_v1(value, revision)
+    semantic_canonical_end_sequence_v1(value)
+    semantic_canonical_end_field_v1(value)
+    semantic_canonical_end_record_v1(value)
+fn _write_owner_revision_v1(value: SemanticCanonicalStreamV1,
+        revision: SemanticOwnerRevisionV1):
+    semantic_canonical_begin_record_v1(value, "SemanticOwnerRevisionV1", 5)
+    semantic_canonical_begin_field_v1(value, "owner")
+    semantic_canonical_begin_variant_v1(value, "SemanticOwnerRevisionOwnerV1",
+        _owner_variant_tag_text_v1(revision.owner), 0)
+    semantic_canonical_end_variant_v1(value)
+    semantic_canonical_end_field_v1(value)
+    semantic_canonical_begin_field_v1(value, "owner_instance_digest")
+    semantic_canonical_write_text_v1(value, revision.owner_instance_digest)
+    semantic_canonical_end_field_v1(value)
+    semantic_canonical_begin_field_v1(value, "owner_generation")
+    semantic_canonical_write_i64_v1(value, revision.owner_generation)
+    semantic_canonical_end_field_v1(value)
+    semantic_canonical_begin_field_v1(value, "revision_digest")
+    semantic_canonical_write_text_v1(value, revision.revision_digest)
+    semantic_canonical_end_field_v1(value)
+    semantic_canonical_begin_field_v1(value, "authority_serial")
+    semantic_canonical_write_i64_v1(value, revision.authority_serial)
+    semantic_canonical_end_field_v1(value)
+    semantic_canonical_end_record_v1(value)
+pub fn semantic_canonical_finish_v1(value: SemanticCanonicalStreamV1
+    ) -> Result<SemanticCanonicalDigestV1, SemanticRevisionErrorV1>:
+    if val error = value.error: return Err(error)
+    if value.finished: return Err(SemanticRevisionErrorV1.AlreadyFinished)
+    if value.frames.len() != 0:
+        _fail_v1(value, SemanticRevisionErrorV1.UnclosedContainer)
+        return Err(SemanticRevisionErrorV1.UnclosedContainer)
+    if value.root_count != 1:
+        _fail_v1(value, SemanticRevisionErrorV1.RootArityMismatch)
+        return Err(SemanticRevisionErrorV1.RootArityMismatch)
+    if not _precharge_v1(value, 0, 0,
+            SEMANTIC_CANONICAL_SHA_FINISH_WORK_V1):
+        return Err(value.error.unwrap())
+    value.finished = true
+    val digest = sha256_stream_v1_finish_hex(value.stream)
+    if val result = digest:
+        Ok(SemanticCanonicalDigestV1(digest: result,
+            encoded_bytes: value.encoded_bytes,
+            encoded_items: value.encoded_items,
+            charged_work: value.charged_work))
+    else:
+        _fail_v1(value, SemanticRevisionErrorV1.Sha256FinishFailed)
+        Err(SemanticRevisionErrorV1.Sha256FinishFailed)
+export SemanticCanonicalLimitsV1, SemanticCanonicalDigestV1,
+    SemanticRevisionErrorV1, SemanticCanonicalStreamV1

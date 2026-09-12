@@ -1,0 +1,566 @@
+# Truthful, bounded lifecycle receipts for environment-selected providers.
+#
+# This module is deliberately a value-only state machine.  It does not load a
+# library, invoke a symbol, or inspect the host.  Adapters supply observed
+# identities and evidence, and this owner refuses to advance the receipt when
+# the observation is stale, incomplete, or out of order.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1
+}
+
+pub const ENV_VARIANT_RECEIPT_SCHEMA_V1: u16 = 1u16
+pub const ENV_VARIANT_RECEIPT_DESCRIPTOR_BYTES_V1: u32 = 224u32
+pub const ENV_VARIANT_RECEIPT_MAX_EVENTS_V1: u64 = 16u64
+pub const ENV_VARIANT_RECEIPT_MAX_EXECUTIONS_V1: u64 = 1048576u64
+pub const ENV_VARIANT_RECEIPT_MAX_COUNTER_V1: u64 = 0xffffffffffffffffu64
+
+pub enum EnvironmentVariantReceiptStateV1:
+    Discovered
+    MetadataValidated
+    SelfChecked
+    Eligible
+    Mapped
+    Callable
+    Bound
+    Active
+    Executed
+    Completed
+    Draining
+    Retired
+    Quarantined
+    Rollback
+    Fallback
+
+pub enum EnvironmentVariantReceiptErrorV1:
+    UnsupportedSchema
+    DescriptorTooShort
+    InvalidIdentity
+    InvalidGeneration
+    InvalidTransition
+    IdentityMismatch
+    MissingMetadataEvidence
+    MissingSelfCheckEvidence
+    MissingEligibilityEvidence
+    MissingMappingEvidence
+    MissingCallableEvidence
+    MissingBindingEvidence
+    MissingExecutionEvidence
+    MissingCompletionEvidence
+    MissingTerminalEvidence
+    OutstandingReferences
+    InvalidDrainCount
+    EventLimitExceeded
+    ExecutionLimitExceeded
+    InvalidExecutionCount
+    CounterOverflow
+    InvalidReceipt
+
+pub struct EnvironmentVariantReceiptIdentityV1:
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    provider_generation: u64
+
+pub struct EnvironmentVariantReceiptV1:
+    descriptor_size: u32
+    schema_version: u16
+    state: EnvironmentVariantReceiptStateV1
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    provider_generation: u64
+    metadata_digest: EnvironmentDigest256V1
+    eligibility_digest: EnvironmentDigest256V1
+    mapping_handle: u64
+    callable_handle: u64
+    binding_plan_digest: EnvironmentDigest256V1
+    execution_digest: EnvironmentDigest256V1
+    completion_digest: EnvironmentDigest256V1
+    self_check_digest: EnvironmentDigest256V1
+    state_evidence_digest: EnvironmentDigest256V1
+    execution_count: u64
+    outstanding_references: u64
+    event_sequence: u64
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+
+fn _identity_valid_v1(identity: EnvironmentVariantReceiptIdentityV1) -> bool:
+    _digest_declared_v1(identity.provider_identity) and
+    _digest_declared_v1(identity.variant_identity) and
+    _digest_declared_v1(identity.artifact_digest) and
+    _digest_declared_v1(identity.environment_identity) and
+    identity.environment_generation > 0u64 and identity.provider_generation > 0u64
+
+fn _state_needs_self_check_v1(state: EnvironmentVariantReceiptStateV1) -> bool:
+    state == EnvironmentVariantReceiptStateV1.SelfChecked or
+    state == EnvironmentVariantReceiptStateV1.Eligible or
+    state == EnvironmentVariantReceiptStateV1.Mapped or
+    state == EnvironmentVariantReceiptStateV1.Callable or
+    state == EnvironmentVariantReceiptStateV1.Bound or
+    state == EnvironmentVariantReceiptStateV1.Active or
+    state == EnvironmentVariantReceiptStateV1.Executed or
+    state == EnvironmentVariantReceiptStateV1.Completed or
+    state == EnvironmentVariantReceiptStateV1.Draining or
+    state == EnvironmentVariantReceiptStateV1.Quarantined or
+    state == EnvironmentVariantReceiptStateV1.Rollback or
+    state == EnvironmentVariantReceiptStateV1.Fallback or
+    state == EnvironmentVariantReceiptStateV1.Retired
+
+fn _state_needs_eligibility_v1(state: EnvironmentVariantReceiptStateV1) -> bool:
+    state == EnvironmentVariantReceiptStateV1.Eligible or
+    state == EnvironmentVariantReceiptStateV1.Mapped or
+    state == EnvironmentVariantReceiptStateV1.Callable or
+    state == EnvironmentVariantReceiptStateV1.Bound or
+    state == EnvironmentVariantReceiptStateV1.Active or
+    state == EnvironmentVariantReceiptStateV1.Executed or
+    state == EnvironmentVariantReceiptStateV1.Completed or
+    state == EnvironmentVariantReceiptStateV1.Draining or
+    state == EnvironmentVariantReceiptStateV1.Rollback or
+    state == EnvironmentVariantReceiptStateV1.Fallback or
+    state == EnvironmentVariantReceiptStateV1.Retired
+
+fn _state_needs_mapping_v1(state: EnvironmentVariantReceiptStateV1) -> bool:
+    state == EnvironmentVariantReceiptStateV1.Mapped or
+    state == EnvironmentVariantReceiptStateV1.Callable or
+    state == EnvironmentVariantReceiptStateV1.Bound or
+    state == EnvironmentVariantReceiptStateV1.Active or
+    state == EnvironmentVariantReceiptStateV1.Executed or
+    state == EnvironmentVariantReceiptStateV1.Completed or
+    state == EnvironmentVariantReceiptStateV1.Draining or
+    state == EnvironmentVariantReceiptStateV1.Rollback or
+    state == EnvironmentVariantReceiptStateV1.Fallback or
+    state == EnvironmentVariantReceiptStateV1.Retired
+
+fn _state_needs_callable_v1(state: EnvironmentVariantReceiptStateV1) -> bool:
+    state == EnvironmentVariantReceiptStateV1.Callable or
+    state == EnvironmentVariantReceiptStateV1.Bound or
+    state == EnvironmentVariantReceiptStateV1.Active or
+    state == EnvironmentVariantReceiptStateV1.Executed or
+    state == EnvironmentVariantReceiptStateV1.Completed or
+    state == EnvironmentVariantReceiptStateV1.Draining or
+    state == EnvironmentVariantReceiptStateV1.Rollback or
+    state == EnvironmentVariantReceiptStateV1.Fallback or
+    state == EnvironmentVariantReceiptStateV1.Retired
+
+fn _state_needs_binding_v1(state: EnvironmentVariantReceiptStateV1) -> bool:
+    state == EnvironmentVariantReceiptStateV1.Bound or
+    state == EnvironmentVariantReceiptStateV1.Active or
+    state == EnvironmentVariantReceiptStateV1.Executed or
+    state == EnvironmentVariantReceiptStateV1.Completed or
+    state == EnvironmentVariantReceiptStateV1.Draining or
+    state == EnvironmentVariantReceiptStateV1.Rollback or
+    state == EnvironmentVariantReceiptStateV1.Fallback or
+    state == EnvironmentVariantReceiptStateV1.Retired
+
+pub fn environment_variant_receipt_identity_equal_v1(
+    left: EnvironmentVariantReceiptIdentityV1,
+    right: EnvironmentVariantReceiptIdentityV1
+) -> bool:
+    _digest_equal_v1(left.provider_identity, right.provider_identity) and
+    _digest_equal_v1(left.variant_identity, right.variant_identity) and
+    _digest_equal_v1(left.artifact_digest, right.artifact_digest) and
+    _digest_equal_v1(left.environment_identity, right.environment_identity) and
+    left.environment_generation == right.environment_generation and
+    left.provider_generation == right.provider_generation
+
+pub fn environment_variant_receipt_identity_v1(
+    receipt: EnvironmentVariantReceiptV1
+) -> EnvironmentVariantReceiptIdentityV1:
+    EnvironmentVariantReceiptIdentityV1(
+        provider_identity: receipt.provider_identity,
+        variant_identity: receipt.variant_identity,
+        artifact_digest: receipt.artifact_digest,
+        environment_identity: receipt.environment_identity,
+        environment_generation: receipt.environment_generation,
+        provider_generation: receipt.provider_generation)
+
+pub fn environment_variant_receipt_state_rank_v1(
+    state: EnvironmentVariantReceiptStateV1
+) -> u16:
+    match state:
+        EnvironmentVariantReceiptStateV1.Discovered: 0u16
+        EnvironmentVariantReceiptStateV1.MetadataValidated: 1u16
+        EnvironmentVariantReceiptStateV1.SelfChecked: 2u16
+        EnvironmentVariantReceiptStateV1.Eligible: 3u16
+        EnvironmentVariantReceiptStateV1.Mapped: 4u16
+        EnvironmentVariantReceiptStateV1.Callable: 5u16
+        EnvironmentVariantReceiptStateV1.Bound: 6u16
+        EnvironmentVariantReceiptStateV1.Active: 7u16
+        EnvironmentVariantReceiptStateV1.Executed: 8u16
+        EnvironmentVariantReceiptStateV1.Completed: 9u16
+        EnvironmentVariantReceiptStateV1.Draining: 10u16
+        EnvironmentVariantReceiptStateV1.Retired: 11u16
+        EnvironmentVariantReceiptStateV1.Quarantined: 12u16
+        EnvironmentVariantReceiptStateV1.Rollback: 13u16
+        EnvironmentVariantReceiptStateV1.Fallback: 14u16
+
+pub fn environment_variant_receipt_state_name_v1(
+    state: EnvironmentVariantReceiptStateV1
+) -> text:
+    match state:
+        EnvironmentVariantReceiptStateV1.Discovered: "discovered"
+        EnvironmentVariantReceiptStateV1.MetadataValidated: "metadata-validated"
+        EnvironmentVariantReceiptStateV1.SelfChecked: "self-checked"
+        EnvironmentVariantReceiptStateV1.Eligible: "eligible"
+        EnvironmentVariantReceiptStateV1.Mapped: "mapped"
+        EnvironmentVariantReceiptStateV1.Callable: "callable"
+        EnvironmentVariantReceiptStateV1.Bound: "bound"
+        EnvironmentVariantReceiptStateV1.Active: "active"
+        EnvironmentVariantReceiptStateV1.Executed: "executed"
+        EnvironmentVariantReceiptStateV1.Completed: "completed"
+        EnvironmentVariantReceiptStateV1.Draining: "draining"
+        EnvironmentVariantReceiptStateV1.Retired: "retired"
+        EnvironmentVariantReceiptStateV1.Quarantined: "quarantined"
+        EnvironmentVariantReceiptStateV1.Rollback: "rollback"
+        EnvironmentVariantReceiptStateV1.Fallback: "fallback"
+
+pub fn environment_variant_receipt_transition_allowed_v1(
+    current: EnvironmentVariantReceiptStateV1,
+    next: EnvironmentVariantReceiptStateV1
+) -> bool:
+    (current == EnvironmentVariantReceiptStateV1.Discovered and
+        next == EnvironmentVariantReceiptStateV1.MetadataValidated) or
+    (current == EnvironmentVariantReceiptStateV1.MetadataValidated and
+        (next == EnvironmentVariantReceiptStateV1.SelfChecked)) or
+    (current == EnvironmentVariantReceiptStateV1.SelfChecked and
+        next == EnvironmentVariantReceiptStateV1.Eligible) or
+    (current == EnvironmentVariantReceiptStateV1.SelfChecked and
+        next == EnvironmentVariantReceiptStateV1.Quarantined) or
+    (current == EnvironmentVariantReceiptStateV1.Eligible and
+        next == EnvironmentVariantReceiptStateV1.Quarantined) or
+    (current == EnvironmentVariantReceiptStateV1.Eligible and
+        next == EnvironmentVariantReceiptStateV1.Mapped) or
+    (current == EnvironmentVariantReceiptStateV1.Mapped and
+        next == EnvironmentVariantReceiptStateV1.Callable) or
+    (current == EnvironmentVariantReceiptStateV1.Callable and
+        next == EnvironmentVariantReceiptStateV1.Bound) or
+    (current == EnvironmentVariantReceiptStateV1.Bound and
+        next == EnvironmentVariantReceiptStateV1.Active) or
+    (current == EnvironmentVariantReceiptStateV1.Bound and
+        next == EnvironmentVariantReceiptStateV1.Rollback) or
+    (current == EnvironmentVariantReceiptStateV1.Active and
+        next == EnvironmentVariantReceiptStateV1.Rollback) or
+    (current == EnvironmentVariantReceiptStateV1.Active and
+        next == EnvironmentVariantReceiptStateV1.Executed) or
+    (current == EnvironmentVariantReceiptStateV1.Active and
+        next == EnvironmentVariantReceiptStateV1.Fallback) or
+    (current == EnvironmentVariantReceiptStateV1.Executed and
+        next == EnvironmentVariantReceiptStateV1.Completed) or
+    (current == EnvironmentVariantReceiptStateV1.Completed and
+        next == EnvironmentVariantReceiptStateV1.Draining) or
+    (current == EnvironmentVariantReceiptStateV1.Draining and
+        next == EnvironmentVariantReceiptStateV1.Retired)
+
+pub fn environment_variant_receipt_validate_v1(
+    receipt: EnvironmentVariantReceiptV1
+) -> Result<(), EnvironmentVariantReceiptErrorV1>:
+    if receipt.schema_version != ENV_VARIANT_RECEIPT_SCHEMA_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.UnsupportedSchema)
+    if receipt.descriptor_size < ENV_VARIANT_RECEIPT_DESCRIPTOR_BYTES_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.DescriptorTooShort)
+    val identity = environment_variant_receipt_identity_v1(receipt)
+    if not _identity_valid_v1(identity):
+        return Err(EnvironmentVariantReceiptErrorV1.InvalidIdentity)
+    if receipt.event_sequence == ENV_VARIANT_RECEIPT_MAX_COUNTER_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.CounterOverflow)
+    if receipt.event_sequence > ENV_VARIANT_RECEIPT_MAX_EVENTS_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.EventLimitExceeded)
+    if receipt.execution_count == ENV_VARIANT_RECEIPT_MAX_COUNTER_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.CounterOverflow)
+    if receipt.execution_count > ENV_VARIANT_RECEIPT_MAX_EXECUTIONS_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.ExecutionLimitExceeded)
+    if receipt.state != EnvironmentVariantReceiptStateV1.Discovered and
+       not _digest_declared_v1(receipt.metadata_digest):
+        return Err(EnvironmentVariantReceiptErrorV1.MissingMetadataEvidence)
+    if _state_needs_self_check_v1(receipt.state) and
+       not _digest_declared_v1(receipt.self_check_digest):
+        return Err(EnvironmentVariantReceiptErrorV1.MissingSelfCheckEvidence)
+    if _state_needs_eligibility_v1(receipt.state) and
+       not _digest_declared_v1(receipt.eligibility_digest):
+        return Err(EnvironmentVariantReceiptErrorV1.MissingEligibilityEvidence)
+    if _state_needs_mapping_v1(receipt.state) and
+       receipt.mapping_handle == 0u64:
+        return Err(EnvironmentVariantReceiptErrorV1.MissingMappingEvidence)
+    if _state_needs_callable_v1(receipt.state) and
+       receipt.callable_handle == 0u64:
+        return Err(EnvironmentVariantReceiptErrorV1.MissingCallableEvidence)
+    if _state_needs_binding_v1(receipt.state) and
+       not _digest_declared_v1(receipt.binding_plan_digest):
+        return Err(EnvironmentVariantReceiptErrorV1.MissingBindingEvidence)
+    if (receipt.state == EnvironmentVariantReceiptStateV1.Executed or
+        receipt.state == EnvironmentVariantReceiptStateV1.Completed or
+        receipt.state == EnvironmentVariantReceiptStateV1.Draining or
+        receipt.state == EnvironmentVariantReceiptStateV1.Retired) and
+       (not _digest_declared_v1(receipt.execution_digest) or receipt.execution_count == 0u64):
+        return Err(EnvironmentVariantReceiptErrorV1.MissingExecutionEvidence)
+    if (receipt.state == EnvironmentVariantReceiptStateV1.Completed or
+        receipt.state == EnvironmentVariantReceiptStateV1.Draining or
+        receipt.state == EnvironmentVariantReceiptStateV1.Retired) and
+       not _digest_declared_v1(receipt.completion_digest):
+        return Err(EnvironmentVariantReceiptErrorV1.MissingCompletionEvidence)
+    if receipt.state == EnvironmentVariantReceiptStateV1.Quarantined or
+       receipt.state == EnvironmentVariantReceiptStateV1.Rollback or
+       receipt.state == EnvironmentVariantReceiptStateV1.Fallback:
+        if not _digest_declared_v1(receipt.state_evidence_digest):
+            return Err(EnvironmentVariantReceiptErrorV1.MissingTerminalEvidence)
+    if receipt.state == EnvironmentVariantReceiptStateV1.Retired and
+       receipt.outstanding_references != 0u64:
+        return Err(EnvironmentVariantReceiptErrorV1.OutstandingReferences)
+    Ok(())
+
+pub fn environment_variant_receipt_identity_matches_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1
+) -> bool:
+    environment_variant_receipt_identity_equal_v1(
+        environment_variant_receipt_identity_v1(receipt), identity)
+
+pub fn environment_variant_receipt_create_v1(
+    identity: EnvironmentVariantReceiptIdentityV1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    if not _identity_valid_v1(identity):
+        return Err(EnvironmentVariantReceiptErrorV1.InvalidIdentity)
+    Ok(EnvironmentVariantReceiptV1(
+        descriptor_size: ENV_VARIANT_RECEIPT_DESCRIPTOR_BYTES_V1,
+        schema_version: ENV_VARIANT_RECEIPT_SCHEMA_V1,
+        state: EnvironmentVariantReceiptStateV1.Discovered,
+        provider_identity: identity.provider_identity,
+        variant_identity: identity.variant_identity,
+        artifact_digest: identity.artifact_digest,
+        environment_identity: identity.environment_identity,
+        environment_generation: identity.environment_generation,
+        provider_generation: identity.provider_generation,
+        metadata_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        eligibility_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        mapping_handle: 0u64, callable_handle: 0u64,
+        binding_plan_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        execution_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        completion_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        self_check_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        state_evidence_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        execution_count: 0u64, outstanding_references: 0u64, event_sequence: 0u64))
+
+pub fn environment_variant_receipt_discover_v1(
+    identity: EnvironmentVariantReceiptIdentityV1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    environment_variant_receipt_create_v1(identity)
+
+fn _transition_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    next: EnvironmentVariantReceiptStateV1,
+    evidence: EnvironmentDigest256V1,
+    handle: u64,
+    executions: u64,
+    references: u64
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    val current_check = environment_variant_receipt_validate_v1(receipt)
+    if current_check != Ok(()):
+        return current_check
+    if not environment_variant_receipt_identity_matches_v1(receipt, identity):
+        return Err(EnvironmentVariantReceiptErrorV1.IdentityMismatch)
+    if receipt.event_sequence == ENV_VARIANT_RECEIPT_MAX_COUNTER_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.CounterOverflow)
+    if receipt.event_sequence >= ENV_VARIANT_RECEIPT_MAX_EVENTS_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.EventLimitExceeded)
+    if not environment_variant_receipt_transition_allowed_v1(receipt.state, next):
+        return Err(EnvironmentVariantReceiptErrorV1.InvalidTransition)
+    if next != EnvironmentVariantReceiptStateV1.Draining and
+       next != EnvironmentVariantReceiptStateV1.Retired and
+       not _digest_declared_v1(evidence):
+        return Err(EnvironmentVariantReceiptErrorV1.InvalidIdentity)
+    if next == EnvironmentVariantReceiptStateV1.Mapped and handle == 0u64:
+        return Err(EnvironmentVariantReceiptErrorV1.MissingMappingEvidence)
+    if next == EnvironmentVariantReceiptStateV1.Callable and handle == 0u64:
+        return Err(EnvironmentVariantReceiptErrorV1.MissingCallableEvidence)
+    if next == EnvironmentVariantReceiptStateV1.Executed and executions == 0u64:
+        return Err(EnvironmentVariantReceiptErrorV1.MissingExecutionEvidence)
+    if next == EnvironmentVariantReceiptStateV1.Executed and
+       executions == ENV_VARIANT_RECEIPT_MAX_COUNTER_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.CounterOverflow)
+    if next == EnvironmentVariantReceiptStateV1.Executed and
+       executions > ENV_VARIANT_RECEIPT_MAX_EXECUTIONS_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.ExecutionLimitExceeded)
+    if next != EnvironmentVariantReceiptStateV1.Executed and executions != 0u64:
+        return Err(EnvironmentVariantReceiptErrorV1.InvalidExecutionCount)
+    if next == EnvironmentVariantReceiptStateV1.Retired and
+       (references != 0u64 or receipt.outstanding_references != 0u64):
+        return Err(EnvironmentVariantReceiptErrorV1.OutstandingReferences)
+    var result = receipt
+    result.state = next
+    result.event_sequence = receipt.event_sequence + 1u64
+    if next == EnvironmentVariantReceiptStateV1.MetadataValidated:
+        result.metadata_digest = evidence
+    elif next == EnvironmentVariantReceiptStateV1.Eligible:
+        result.eligibility_digest = evidence
+    elif next == EnvironmentVariantReceiptStateV1.Mapped:
+        result.mapping_handle = handle
+    elif next == EnvironmentVariantReceiptStateV1.Callable:
+        result.callable_handle = handle
+    elif next == EnvironmentVariantReceiptStateV1.Bound:
+        result.binding_plan_digest = evidence
+    elif next == EnvironmentVariantReceiptStateV1.Executed:
+        result.execution_digest = evidence
+        result.execution_count = executions
+    elif next == EnvironmentVariantReceiptStateV1.Completed:
+        result.completion_digest = evidence
+    elif next == EnvironmentVariantReceiptStateV1.SelfChecked:
+        result.self_check_digest = evidence
+    elif next == EnvironmentVariantReceiptStateV1.Quarantined or
+         next == EnvironmentVariantReceiptStateV1.Rollback or
+         next == EnvironmentVariantReceiptStateV1.Fallback:
+        result.state_evidence_digest = evidence
+    elif next == EnvironmentVariantReceiptStateV1.Draining:
+        result.outstanding_references = references
+    elif next == EnvironmentVariantReceiptStateV1.Retired:
+        result.outstanding_references = 0u64
+    val result_check = environment_variant_receipt_validate_v1(result)
+    if result_check != Ok(()):
+        return result_check
+    Ok(result)
+
+pub fn environment_variant_receipt_metadata_validate_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    metadata_digest: EnvironmentDigest256V1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.MetadataValidated,
+        metadata_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_self_check_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    self_check_digest: EnvironmentDigest256V1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.SelfChecked,
+        self_check_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_mark_eligible_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    eligibility_digest: EnvironmentDigest256V1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Eligible,
+        eligibility_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_mark_mapped_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    mapping_handle: u64
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Mapped,
+        identity.artifact_digest, mapping_handle, 0u64, 0u64)
+
+pub fn environment_variant_receipt_mark_callable_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    callable_handle: u64
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Callable,
+        identity.artifact_digest, callable_handle, 0u64, 0u64)
+
+pub fn environment_variant_receipt_bind_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    binding_plan_digest: EnvironmentDigest256V1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Bound,
+        binding_plan_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_activate_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Active,
+        identity.artifact_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_execute_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    execution_digest: EnvironmentDigest256V1,
+    execution_count: u64
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Executed,
+        execution_digest, 0u64, execution_count, 0u64)
+
+pub fn environment_variant_receipt_quarantine_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    reason_digest: EnvironmentDigest256V1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Quarantined,
+        reason_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_rollback_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    rollback_digest: EnvironmentDigest256V1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Rollback,
+        rollback_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_fallback_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    fallback_digest: EnvironmentDigest256V1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Fallback,
+        fallback_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_complete_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    completion_digest: EnvironmentDigest256V1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Completed,
+        completion_digest, 0u64, 0u64, 0u64)
+
+pub fn environment_variant_receipt_begin_draining_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    outstanding_references: u64
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Draining,
+        identity.artifact_digest, 0u64, 0u64, outstanding_references)
+
+pub fn environment_variant_receipt_update_draining_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    remaining_references: u64
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    val current_check = environment_variant_receipt_validate_v1(receipt)
+    if current_check != Ok(()):
+        return current_check
+    if not environment_variant_receipt_identity_matches_v1(receipt, identity):
+        return Err(EnvironmentVariantReceiptErrorV1.IdentityMismatch)
+    if receipt.state != EnvironmentVariantReceiptStateV1.Draining:
+        return Err(EnvironmentVariantReceiptErrorV1.InvalidTransition)
+    if remaining_references >= receipt.outstanding_references:
+        return Err(EnvironmentVariantReceiptErrorV1.InvalidDrainCount)
+    if receipt.event_sequence == ENV_VARIANT_RECEIPT_MAX_COUNTER_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.CounterOverflow)
+    if receipt.event_sequence >= ENV_VARIANT_RECEIPT_MAX_EVENTS_V1:
+        return Err(EnvironmentVariantReceiptErrorV1.EventLimitExceeded)
+    var result = receipt
+    result.outstanding_references = remaining_references
+    result.event_sequence = receipt.event_sequence + 1u64
+    val result_check = environment_variant_receipt_validate_v1(result)
+    if result_check != Ok(()):
+        return result_check
+    Ok(result)
+
+pub fn environment_variant_receipt_retire_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentVariantReceiptErrorV1>:
+    _transition_v1(receipt, identity, EnvironmentVariantReceiptStateV1.Retired,
+        identity.artifact_digest, 0u64, 0u64, 0u64)

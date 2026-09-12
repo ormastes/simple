@@ -12,6 +12,8 @@ use compiler.loader.module_resolver.types.{ModuleResolver, ResolvedModule, Direc
 use compiler.common.error.{CompileError}
 use compiler.loader.module_resolver.fs_probe.{probe_file_exists, probe_dir_exists, clear_fs_probe_cache}
 use std.log.{debug}
+use std.nogc_sync_mut.path.{join_path as pure_path_join, parent_dir as pure_parent_dir}
+use std.nogc_sync_mut.io_runtime.{dir_list, env_get_nullable, file_read_nullable}
 
 # ============================================================================
 # Module Resolution
@@ -188,10 +190,91 @@ impl ModuleResolver:
         self.dir_cache[dir_path] = entries
         entries
 
+    fn tier_import_cache_key_v1(lib_dir: text, dotted: text) -> text:
+        """Injective cache identity for one diagnostic import query."""
+        "v1:{lib_dir.len()}:{lib_dir}{dotted.len()}:{dotted}"
+
+    fn pruned_tier_import_exists_v1(dir_path: text, dotted: text, at_lib_root: bool) -> bool:
+        """Find one dotted module without walking unrelated directory subtrees.
+
+        A dot may belong either to the import hierarchy or to an on-disk
+        filename/directory name, so only entries that are exact dotted
+        prefixes are followed. Hidden entries retain the legacy exclusion.
+        """
+        if dotted == "" or dotted.starts_with("."):
+            return false
+
+        val entries = self.cached_dir_list(dir_path)
+        for entry in entries:
+            if entry == "" or entry.starts_with("."):
+                continue
+
+            var is_exact_source = false
+            if entry.ends_with(".spl"):
+                val stem = entry.substring(0, entry.len() - 4)
+                is_exact_source = stem != "__init__" and stem == dotted
+
+            val prefix = "{entry}."
+            val is_relevant_dir = entry == dotted or dotted.starts_with(prefix)
+            if not is_exact_source and not is_relevant_dir:
+                continue
+
+            val full = path_join2(dir_path, entry)
+            if probe_dir_exists(full):
+                if at_lib_root and is_canonical_tier_v1(entry):
+                    continue
+
+                if entry == dotted:
+                    val init_path = path_join2(full, "__init__.spl")
+                    if probe_file_exists(init_path):
+                        return true
+
+                if dotted.starts_with(prefix):
+                    val remaining = dotted.substring(prefix.len(), dotted.len())
+                    if self.pruned_tier_import_exists_v1(full, remaining, false):
+                        return true
+                continue
+
+            if is_exact_source:
+                return true
+        false
+
+    fn tiers_for_import_v1(lib_dir: text, dotted: text) -> [text]:
+        """Return resolution-ordered locations containing one dotted import.
+
+        Results, including misses, are cached by the full lib-root/import
+        identity. The plain dotted entry remains a compatibility view for
+        existing diagnostic clients; cache authority is the framed key.
+        """
+        val cache_key = self.tier_import_cache_key_v1(lib_dir, dotted)
+        if self.tier_import_query_cache_v1.contains_key(cache_key):
+            return self.tier_import_query_cache_v1[cache_key]
+
+        var tiers: [text] = []
+        if probe_dir_exists(lib_dir):
+            for tier in TIER_DIAGNOSTIC_ORDER_V1:
+                val tier_dir = path_join2(lib_dir, tier)
+                if probe_dir_exists(tier_dir):
+                    if self.pruned_tier_import_exists_v1(tier_dir, dotted, false):
+                        tiers.push(tier)
+            if self.pruned_tier_import_exists_v1(lib_dir, dotted, true):
+                tiers.push("<lib-root>")
+
+        self.tier_import_query_cache_v1[cache_key] = tiers
+        if not tiers.is_empty():
+            self.tier_multiplicity[dotted] = tiers
+        tiers
+
     fn clear_cache():
         """Clear all resolution caches. Call between test runs."""
         self.resolution_cache = {}
         self.dir_cache = {}
+        self.tier_map_built = false
+        self.tier_multiplicity = {}
+        self.tier_import_query_cache_v1 = {}
+        self.tier_warned = {}
+        self.tier_warn_count = 0
+        self.tier_warn_mode_cache = ""
         clear_fs_probe_cache()
         self.resolve_count = 0
         self.cache_hit_count = 0
@@ -199,7 +282,7 @@ impl ModuleResolver:
 
     fn print_resolve_stats():
         """Print resolution statistics if SIMPLE_PROFILE env var is set."""
-        val profile_env = rt_env_get("SIMPLE_PROFILE")
+        val profile_env = env_get_nullable("SIMPLE_PROFILE")
         if profile_env.?:
             val hit_rate = if self.resolve_count > 0:
                 (self.cache_hit_count * 100) / self.resolve_count
@@ -225,16 +308,16 @@ impl ModuleResolver:
     #   "0"           -> silence
     #   "verbose"     -> warn on every occurrence
     #
-    # Perf: the tier-multiplicity map is built lazily ONCE per resolver
-    # (first tier-less std resolution), never a per-import directory
-    # scan. Each later occurrence costs two dict lookups.
+    # Perf: each distinct (lib root, dotted import) follows only matching
+    # dotted prefixes and is cached, including misses. Repeated occurrences
+    # perform framed-key construction plus dictionary lookups and no listing.
     # ------------------------------------------------------------------
 
     fn tier_warn_mode() -> text:
         """Resolve SIMPLE_AMBIGUOUS_IMPORT_WARN to on|off|verbose (cached)."""
         if self.tier_warn_mode_cache != "":
             return self.tier_warn_mode_cache
-        val env = rt_env_get("SIMPLE_AMBIGUOUS_IMPORT_WARN")
+        val env = env_get_nullable("SIMPLE_AMBIGUOUS_IMPORT_WARN")
         var mode = "on"
         if env.?:
             val v = env ?? ""
@@ -261,7 +344,7 @@ impl ModuleResolver:
 
     fn collect_tier_modules(dir: text, rel: text, tier: text):
         """Recursively record module sub-paths (.spl files and __init__.spl dirs)."""
-        val entries = dir_list(dir)
+        val entries = self.cached_dir_list(dir)
         for entry in entries:
             if entry == "" or entry.starts_with("."):
                 continue
@@ -298,7 +381,7 @@ impl ModuleResolver:
 
     fn collect_lib_root_modules(lib_dir: text, tier_names: [text]):
         """Record modules that live directly under `src/lib/`, not in a tier."""
-        val entries = dir_list(lib_dir)
+        val entries = self.cached_dir_list(lib_dir)
         for entry in entries:
             if entry == "" or entry.starts_with("."):
                 continue
@@ -331,16 +414,13 @@ impl ModuleResolver:
         if inner_segments.is_empty():
             return
         val dotted = inner_segments.join(".")
-        if mode != "verbose" and self.tier_warned.contains_key(dotted):
+        val warning_key = self.tier_import_cache_key_v1(lib_dir, dotted)
+        if mode != "verbose" and self.tier_warned.contains_key(warning_key):
             return
-        if not self.tier_map_built:
-            self.build_tier_multiplicity(lib_dir)
-        if not self.tier_multiplicity.contains_key(dotted):
-            return
-        val tiers = self.tier_multiplicity[dotted]
+        val tiers = self.tiers_for_import_v1(lib_dir, dotted)
         if tiers.len() < 2:
             return
-        self.tier_warned[dotted] = true
+        self.tier_warned[warning_key] = true
         self.tier_warn_count = self.tier_warn_count + 1
         # stdout on purpose: stderr from native-built compiler binaries can
         # be dropped, and the resolver stats above already print to stdout.
@@ -383,7 +463,7 @@ impl ModuleResolver:
                     pass
             else:
                 # Try numbered directory fallback (NN.segment pattern)
-                val numbered = find_numbered_dir(current, segment)
+                val numbered = self.find_numbered_dir(current, segment)
                 if numbered.?:
                     current = numbered ?? current
                 else:
@@ -425,7 +505,7 @@ impl ModuleResolver:
             return Ok(ResolvedModule.file(ssh_path, original_path.clone()))
 
         # Try numbered directory fallback for the last segment
-        val numbered_dir = find_numbered_dir(current, last)
+        val numbered_dir = self.find_numbered_dir(current, last)
         if numbered_dir.?:
             val nd = numbered_dir ?? ""
             val nd_init = path_join2(nd, "__init__.spl")
@@ -440,6 +520,30 @@ impl ModuleResolver:
         CompileError.semantic(
             "cannot resolve import: module `{last}` not found; create either {file_path} or {init_path}"
         ).with_note("check for typos in the import path")
+
+    fn find_numbered_dir(parent: text, segment: text) -> text?:
+        """Find an NN.name directory through the resolver-owned listing cache."""
+        if not probe_dir_exists(parent):
+            return nil
+
+        val entries = self.cached_dir_list(parent)
+        for entry in entries:
+            val dot_idx = entry.index_of(".")
+            if dot_idx.?:
+                val idx = dot_idx ?? 0
+                if idx >= 1 and idx <= 3:
+                    val prefix = entry.substring(0, idx)
+                    var all_digits = true
+                    for ch in prefix:
+                        if ch < "0" or ch > "9":
+                            all_digits = false
+                    if all_digits:
+                        val name = entry.substring(idx + 1)
+                        if name == segment:
+                            val full_path = path_join2(parent, entry)
+                            if probe_dir_exists(full_path):
+                                return Some(full_path)
+        nil
 
     fn get_exports(resolved: ResolvedModule) -> [text] | CompileError:
         """Get all symbols exported by a module.
@@ -560,19 +664,13 @@ impl ModuleResolver:
 # Helper Functions (SFFI Wrappers)
 # ============================================================================
 
-extern fn rt_path_join(a: text, b: text) -> text
-extern fn rt_path_parent(path: text) -> text
-extern fn rt_file_read_text(path: text) -> text
-
-use std.io_runtime.{dir_list}
-
 fn path_join2(a: text, b: text) -> text:
     """Join two path segments."""
-    rt_path_join(a, b)
+    pure_path_join(a, b)
 
 fn path_parent(path: text) -> text:
     """Get parent directory of a path."""
-    rt_path_parent(path)
+    pure_parent_dir(path)
 
 fn path_exists(path: text) -> bool:
     """Check if a path exists."""
@@ -588,12 +686,7 @@ fn file_exists(path: text) -> bool:
 fn file_read(path: text) -> text?:
     if not probe_file_exists(path):
         return nil
-    Some(rt_file_read_text(path) ?? "")
-
-extern fn rt_env_get(key: text) -> text
-
-# Module-level directory listing cache for free functions
-var _dir_listing_cache: {text: [text]} = {}
+    Some(file_read_nullable(path) ?? "")
 
 # ===== Tier Precedence for tier-less `use std.X` =====
 # Canonical, least-capability-first order. `common` is pure and cannot pull a
@@ -608,6 +701,22 @@ val TIER_PRECEDENCE: [text] = [
     "nogc_async_mut",
     "gc_async_mut",
 ]
+
+# Preserve the established user-visible ambiguity-warning order. This differs
+# from resolution precedence and must not be reused for candidate selection.
+val TIER_DIAGNOSTIC_ORDER_V1: [text] = [
+    "common",
+    "nogc_sync_mut",
+    "nogc_async_mut",
+    "gc_async_mut",
+    "nogc_async_mut_noalloc",
+]
+
+fn is_canonical_tier_v1(name: text) -> bool:
+    for tier in TIER_DIAGNOSTIC_ORDER_V1:
+        if name == tier:
+            return true
+    false
 
 fn tier_ordered_subdirs(subdirs: [text]) -> [text]:
     """Reorder a src/lib listing into fixed tier precedence.
@@ -629,177 +738,6 @@ fn tier_ordered_subdirs(subdirs: [text]) -> [text]:
             ordered.push(subdir)
     ordered
 
-fn cached_dir_list_global(dir_path: text) -> [text]:
-    """Module-level cached dir listing for free functions."""
-    if _dir_listing_cache.has(dir_path):
-        return _dir_listing_cache[dir_path]
-    val entries = dir_list(dir_path)
-    _dir_listing_cache[dir_path] = entries
-    entries
-
-fn find_numbered_dir(parent: text, segment: text) -> text?:
-    """Find a numbered directory matching a segment name.
-
-    Scans the parent directory for entries matching the pattern NN.name
-    where NN is a 1-3 digit numeric prefix and name matches the segment.
-    Returns the full path if found, nil otherwise.
-    Uses cached directory listings to avoid repeated rt_dir_list calls.
-    """
-    if not probe_dir_exists(parent):
-        return nil
-
-    val entries = cached_dir_list_global(parent)
-    for entry in entries:
-        val dot_idx = entry.index_of(".")
-        if dot_idx.?:
-            val idx = dot_idx ?? 0
-            if idx >= 1 and idx <= 3:
-                val prefix = entry.substring(0, idx)
-                # Verify prefix is all digits
-                var all_digits = true
-                for ch in prefix:
-                    if ch < "0" or ch > "9":
-                        all_digits = false
-                if all_digits:
-                    val name = entry.substring(idx + 1)
-                    if name == segment:
-                        val full_path = path_join2(parent, entry)
-                        if probe_dir_exists(full_path):
-                            return Some(full_path)
-    nil
-
-# ============================================================================
-# Usage Examples
-# ============================================================================
-#
-# # Create a resolver
-# val resolver = ModuleResolver.new("/home/user/myproject", "/home/user/myproject/src")
-#
-# # Resolve an absolute path
-# val result = resolver.resolve(
-#     ModulePath(segments: ["crate", "sys", "http"]),
-#     "/home/user/myproject/src/main.spl"
-# )
-#
-# match result:
-#     Ok(resolved):
-#         print "Resolved to: {resolved.path}"
-#         print "Is directory: {resolved.is_directory}"
-#
-#     Err(error):
-#         print "Error: {error.message}"
-#
-# # Resolve a relative path
-# val result = resolver.resolve(
-#     ModulePath(segments: ["utils", "strings"]),
-#     "/home/user/myproject/src/main.spl"
-# )
-#
-# # Get exports from a module
-# if val Ok(resolved) = result:
-#     if val Ok(exports) = resolver.get_exports(resolved):
-#         print "Exports: {exports.join(', ')}"
-#
-# # Get common uses for a file
-# val common_uses = resolver.get_common_uses("/home/user/myproject/src/sys/http.spl")
-# print "Common uses: {common_uses.len()}"
-#
-# ============================================================================
-# Resolution Algorithm
-# ============================================================================
-#
-# 1. Parse module path into segments
-#    Example: crate.sys.http -> ["crate", "sys", "http"]
-#
-# 2. Determine base directory:
-#    - If starts with "crate": use source_root
-#    - Otherwise: use parent directory of from_file
-#
-# 3. Navigate through all but last segment:
-#    - Join segment to current path
-#    - Check for __init__.spl (directory module)
-#    - If directory doesn't exist, return error
-#
-# 4. Resolve last segment (try in order):
-#    a. Directory with __init__.spl
-#    b. .spl file
-#    c. .shs file
-#    d. Error if none found
-#
-# 5. If relative resolution fails:
-#    - Try stdlib (if available)
-#    - Strip "std_lib" prefix if present
-#    - Resolve from stdlib_root
-#
-# 6. Return ResolvedModule with:
-#    - Filesystem path
-#    - Original module path
-#    - Is directory flag
-#    - Manifest (loaded on demand)
-#
-# ============================================================================
-# Error Codes
-# ============================================================================
-#
-# E1034 - Unresolved Import
-#   - Module path segment not found
-#   - Module file not found
-#   - Includes filesystem path in error message
-#
-# MODULE_NOT_FOUND
-#   - Empty module path
-#   - No segments provided
-#
-# ============================================================================
-# Performance Notes
-# ============================================================================
-#
-# - resolve: O(n) where n = number of segments (filesystem lookups)
-# - resolve_from_base: O(n) directory navigation + O(1) file checks
-# - get_exports: O(m) where m = number of exports
-# - get_common_uses: O(d) where d = directory depth
-#
-# Expected performance: Same as Rust (I/O bound, not CPU bound)
-#
-# Filesystem operations are the bottleneck:
-# - file_exists: ~0.1-1ms per call (OS cache helps)
-# - Multiple extension checks: ~0.3-3ms total
-#
-# ============================================================================
-# Robustness Checklist
-# ============================================================================
-#
-# Input Validation:
-# - [x] Non-empty path segments
-# - [x] Non-empty module path
-# - [x] Valid filesystem paths
-#
-# Error Handling:
-# - [x] Directory not found (E1034)
-# - [x] Module not found (E1034)
-# - [x] Empty path (MODULE_NOT_FOUND)
-# - [x] Detailed error messages with filesystem paths
-#
-# Resolution Logic:
-# - [x] Absolute paths (crate.*)
-# - [x] Relative paths (from current file)
-# - [x] Stdlib fallback
-# - [x] Multiple file extensions (.spl, .shs)
-# - [x] Directory modules (__init__.spl)
-#
-# Export Extraction:
-# - [x] Single exports
-# - [x] Aliased exports
-# - [x] Group exports
-# - [x] Glob exports (placeholder)
-# - [x] Public child modules
-#
-# Edge Cases:
-# - [x] Empty exports (returns empty list)
-# - [x] Non-directory module (returns empty exports)
-# - [x] No common uses (returns empty list)
-# - [x] Stdlib not found (fallback fails gracefully)
-#
 # ============================================================================
 # Type Domain Normalization
 # ============================================================================

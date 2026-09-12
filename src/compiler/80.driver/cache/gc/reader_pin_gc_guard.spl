@@ -1,0 +1,116 @@
+# codex-impl: fail-closed bridge from the existing reader-pin host owner to GC.
+#
+# The current host API can change an even reader epoch to odd, but its begin
+# call does not bind the expected journal generation. A higher-generation
+# reader can therefore enter between a separate validation and that call,
+# after which the old-generation GC cannot re-open admission. The host also
+# cannot enumerate every cross-process pin/root or unlink an exact opened
+# object. This bridge performs useful live pin validation and grace facts, but
+# refuses the mutation window before calling the insufficient primitive.
+
+use common.cache_host_authority_v1.{
+    CacheRootAuthorityV1, CacheReaderPinAuthorityV1,
+    cache_host_open_root_v1, cache_host_root_valid_v1,
+    cache_host_close_root_v1, cache_host_validate_reader_pin_v1,
+}
+use compiler.common.cache_contract.direct_read_pin_v1.{DirectReadPinV1}
+
+val READER_PIN_GC_MAX_EVEN_EPOCH: i64 = 0x7ffffffffffffffc
+
+pub enum ReaderPinGcGuardError:
+    InvalidInput
+    RootUnavailable
+    Released
+    PinGenerationMismatch
+    HostGenerationBindingUnavailable
+
+pub class ReaderPinGcGuard:
+    root: CacheRootAuthorityV1
+    even_epoch: i64
+    current_generation_value: i64
+    released: bool
+
+    pub fn reader_epoch() -> i64: self.even_epoch
+
+    pub fn generation() -> i64: self.current_generation_value
+
+    # This is a real host-capability validation, not a PID/refcount test. The
+    # current host API validates the pin's own retained root; it cannot prove
+    # that root equals this guard's root. Success is intentionally read-only
+    # and cannot be promoted into a GC mutation window.
+    pub fn validate_live_pin_identity(pin: DirectReadPinV1, now_monotonic_ms: i64
+        ) -> Result<(), ReaderPinGcGuardError>:
+        if self.released:
+            return Err(ReaderPinGcGuardError.Released)
+        if (pin.reader_admission_epoch != self.even_epoch or
+                pin.journal_superblock_generation != self.current_generation_value or
+                now_monotonic_ms < 0):
+            return Err(ReaderPinGcGuardError.PinGenerationMismatch)
+        val authority = reader_pin_authority(pin)
+        if authority.opaque_handle <= 0 or not cache_host_validate_reader_pin_v1(
+                authority, pin.reader_admission_epoch,
+                pin.journal_superblock_generation,
+                pin.pinned_manifest_digest, pin.process_instance_nonce,
+                pin.boot_identity_digest, pin.namespace_entry_digest,
+                now_monotonic_ms):
+            return Err(ReaderPinGcGuardError.PinGenerationMismatch)
+        Ok(())
+
+    # Guard entrypoint intended for the existing mark/sweep owner. It fails
+    # before mutating the host epoch. Do not replace this with a local
+    # mutex or caller-supplied root list: neither closes cross-process pins.
+    pub fn begin_authoritative_final_scan(expected_even_epoch: i64,
+            expected_generation: i64) -> Result<(), ReaderPinGcGuardError>:
+        if self.released:
+            return Err(ReaderPinGcGuardError.Released)
+        if (expected_even_epoch != self.even_epoch or
+                expected_generation != self.current_generation_value):
+            return Err(ReaderPinGcGuardError.PinGenerationMismatch)
+        Err(ReaderPinGcGuardError.HostGenerationBindingUnavailable)
+
+    pub me close() -> bool:
+        if self.released: return false
+        if cache_host_close_root_v1(self.root) != 0: return false
+        self.released = true
+        true
+
+pub fn reader_pin_gc_guard_open(root_path: text, reader_epoch: i64,
+        generation: i64) -> Result<ReaderPinGcGuard, ReaderPinGcGuardError>:
+    if root_path == "" or reader_epoch < 0 or reader_epoch % 2 != 0 or
+            reader_epoch > READER_PIN_GC_MAX_EVEN_EPOCH or generation < 0:
+        return Err(ReaderPinGcGuardError.InvalidInput)
+    val root = cache_host_open_root_v1(root_path)
+    if not cache_host_root_valid_v1(root):
+        return Err(ReaderPinGcGuardError.RootUnavailable)
+    Ok(ReaderPinGcGuard(root: root, even_epoch: reader_epoch,
+        current_generation_value: generation, released: false))
+
+# Converts the public pin transport record back to its opaque host capability.
+# This does not validate or mint authority; the host call still binds every
+# field and pin lifetime.
+pub fn reader_pin_authority(pin: DirectReadPinV1) -> CacheReaderPinAuthorityV1:
+    CacheReaderPinAuthorityV1(opaque_handle: pin.pin_id.to_i64() ?? -1)
+
+# Two completed generations and monotonic grace are necessary arithmetic
+# facts, but never sufficient deletion authority.
+pub fn reader_pin_gc_orphan_age_ready(tombstoned_generation: i64,
+        completed_generation: i64, tombstoned_monotonic_ms: i64,
+        now_monotonic_ms: i64, grace_ms: i64) -> bool:
+    if tombstoned_generation < 0 or completed_generation < 0 or
+            tombstoned_monotonic_ms < 0 or now_monotonic_ms < 0 or grace_ms < 0:
+        return false
+    if completed_generation < tombstoned_generation or
+            now_monotonic_ms < tombstoned_monotonic_ms:
+        return false
+    completed_generation - tombstoned_generation >= 2 and
+        now_monotonic_ms - tombstoned_monotonic_ms >= grace_ms
+
+pub fn reader_pin_gc_authoritative_delete_available() -> bool: false
+
+pub fn reader_pin_gc_delete_blocker() -> text:
+    "complete_host_root_pin_snapshot_and_descriptor_unlink_unavailable"
+
+# An apparently drained local refcount cannot disprove an external pin or an
+# admitted action/checkpoint root. Retain every old pack until the existing
+# host owner supplies the complete immutable root/pin snapshot.
+pub fn reader_pin_gc_retired_generation_must_retain() -> bool: true

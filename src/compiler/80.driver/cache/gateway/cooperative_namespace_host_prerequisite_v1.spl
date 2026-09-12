@@ -1,0 +1,395 @@
+"""Additive host prerequisite for the closed L8 cooperative namespace seam.
+
+This module does not create a second CAS, journal, selected-head owner, or GC
+owner. It freezes the selected-head codec, required host-capability inventory,
+writer/head revalidation rules, and durability outcome ordering needed by a
+descriptor-bound provider. The production issuer remains closed because the V3
+provider is not physically qualified. The additive API shapes now exist, but
+presence alone is not runtime authority and cannot replace same-descriptor
+evidence or complete root enumeration.
+
+The trace helpers below classify provider-internal evidence. Their public data
+is diagnostic only and can never mint a namespace or mutation capability.
+"""
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use common.cache_daemon_host_authority_v1.{
+    AuthenticatedPeerReceiptV1, CacheReadinessReceiptV1,
+    ExclusiveCacheLockReceiptV1, DurableWriterEpochV1}
+use common.cache_host_authority_v1.{CacheRootAuthorityV1}
+
+val CACHE_COOPERATIVE_SELECTED_HEAD_MAGIC_V1: text =
+    "simple.cache.cooperative-selected-head.v1"
+val CACHE_COOPERATIVE_MAX_JOURNAL_BYTES_V1: i64 = 16777216
+val CACHE_COOPERATIVE_SELECTED_HEAD_NAME_V1: text =
+    ".simple-cache-selected-head-v1"
+
+# This inventory records only whether a Simple-visible API shape exists. A
+# true `*_api_present` field is not runtime qualification or authority.
+pub struct CacheCooperativeNamespaceHostApiInventoryV1:
+    cross_process_per_root_gate_api_present: bool
+    opaque_writer_receipt_api_present: bool
+    writer_revalidation_api_present: bool
+    descriptor_bound_head_read_api_present: bool
+    descriptor_bound_immutable_sync_api_present: bool
+    descriptor_bound_journal_admission_api_present: bool
+    descriptor_bound_selected_head_replace_api_present: bool
+    selected_head_directory_sync_api_present: bool
+    exact_operation_recovery_api_present: bool
+    complete_namespace_union_api_present: bool
+    qualified_physical_scope: bool
+
+pub fn cache_cooperative_namespace_host_api_inventory_v1(
+) -> CacheCooperativeNamespaceHostApiInventoryV1:
+    CacheCooperativeNamespaceHostApiInventoryV1(
+        cross_process_per_root_gate_api_present: true,
+        opaque_writer_receipt_api_present: true,
+        writer_revalidation_api_present: true,
+        descriptor_bound_head_read_api_present: true,
+        descriptor_bound_immutable_sync_api_present: true,
+        descriptor_bound_journal_admission_api_present: true,
+        descriptor_bound_selected_head_replace_api_present: true,
+        selected_head_directory_sync_api_present: true,
+        exact_operation_recovery_api_present: true,
+        complete_namespace_union_api_present: true,
+        qualified_physical_scope: false)
+
+pub fn cache_cooperative_namespace_host_api_complete_v1(
+    inventory: CacheCooperativeNamespaceHostApiInventoryV1,
+) -> bool:
+    inventory.cross_process_per_root_gate_api_present and
+        inventory.opaque_writer_receipt_api_present and
+        inventory.writer_revalidation_api_present and
+        inventory.descriptor_bound_head_read_api_present and
+        inventory.descriptor_bound_immutable_sync_api_present and
+        inventory.descriptor_bound_journal_admission_api_present and
+        inventory.descriptor_bound_selected_head_replace_api_present and
+        inventory.selected_head_directory_sync_api_present and
+        inventory.exact_operation_recovery_api_present and
+        inventory.complete_namespace_union_api_present and
+        inventory.qualified_physical_scope
+
+# Diagnostic prerequisite ordering only. Even `Ready` is not an issuer
+# capability: callers cannot pass this enum to any mutation or GC operation.
+pub enum CacheCooperativeNamespaceHostPrerequisiteStateV1:
+    RootGateUnavailable
+    OpaqueWriterReceiptUnavailable
+    WriterRevalidationUnavailable
+    SelectedHeadReadUnavailable
+    ImmutableSyncUnavailable
+    JournalAdmissionUnavailable
+    SelectedHeadReplaceUnavailable
+    SelectedHeadDirectorySyncUnavailable
+    RestartReissueUnavailable
+    NamespaceUnionUnavailable
+    QualifiedEvidenceUnavailable
+    Ready
+
+pub fn cache_cooperative_namespace_host_next_missing_v1(
+    inventory: CacheCooperativeNamespaceHostApiInventoryV1,
+) -> CacheCooperativeNamespaceHostPrerequisiteStateV1:
+    if not inventory.cross_process_per_root_gate_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.RootGateUnavailable
+    if not inventory.opaque_writer_receipt_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.OpaqueWriterReceiptUnavailable
+    if not inventory.writer_revalidation_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.WriterRevalidationUnavailable
+    if not inventory.descriptor_bound_head_read_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.SelectedHeadReadUnavailable
+    if not inventory.descriptor_bound_immutable_sync_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.ImmutableSyncUnavailable
+    if not inventory.descriptor_bound_journal_admission_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.JournalAdmissionUnavailable
+    if not inventory.descriptor_bound_selected_head_replace_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.SelectedHeadReplaceUnavailable
+    if not inventory.selected_head_directory_sync_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.SelectedHeadDirectorySyncUnavailable
+    if not inventory.exact_operation_recovery_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.RestartReissueUnavailable
+    if not inventory.complete_namespace_union_api_present:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.NamespaceUnionUnavailable
+    if not inventory.qualified_physical_scope:
+        return CacheCooperativeNamespaceHostPrerequisiteStateV1.QualifiedEvidenceUnavailable
+    CacheCooperativeNamespaceHostPrerequisiteStateV1.Ready
+
+pub fn cache_cooperative_namespace_host_prerequisite_available_v1() -> bool:
+    cache_cooperative_namespace_host_api_complete_v1(
+        cache_cooperative_namespace_host_api_inventory_v1())
+
+pub fn cache_cooperative_namespace_selected_head_name_v1() -> text:
+    CACHE_COOPERATIVE_SELECTED_HEAD_NAME_V1
+
+pub struct CacheCooperativeSelectedHeadV1:
+    revision: i64
+    generation: i64
+    manifest_digest: text
+    accepted_journal_bytes: i64
+    accepted_journal_digest: text
+    operation_digest: text
+    writer_incarnation: i64
+    closure_digest: text
+    verifier_registry_digest: text
+    checksum: text
+
+fn _selected_head_body_v1(
+    revision: i64,
+    generation: i64,
+    manifest_digest: text,
+    accepted_journal_bytes: i64,
+    accepted_journal_digest: text,
+    operation_digest: text,
+    writer_incarnation: i64,
+    closure_digest: text,
+    verifier_registry_digest: text,
+) -> text:
+    CACHE_COOPERATIVE_SELECTED_HEAD_MAGIC_V1 + "\n" +
+        revision.to_string() + "\n" + generation.to_string() + "\n" +
+        manifest_digest + "\n" + accepted_journal_bytes.to_string() + "\n" +
+        accepted_journal_digest + "\n" + operation_digest + "\n" +
+        writer_incarnation.to_string() + "\n" + closure_digest + "\n" +
+        verifier_registry_digest
+
+fn _selected_head_checksum_v1(
+    revision: i64,
+    generation: i64,
+    manifest_digest: text,
+    accepted_journal_bytes: i64,
+    accepted_journal_digest: text,
+    operation_digest: text,
+    writer_incarnation: i64,
+    closure_digest: text,
+    verifier_registry_digest: text,
+) -> text:
+    sha256_text(_selected_head_body_v1(revision, generation, manifest_digest,
+        accepted_journal_bytes, accepted_journal_digest, operation_digest,
+        writer_incarnation, closure_digest, verifier_registry_digest))
+
+pub fn cache_cooperative_selected_head_v1(
+    revision: i64,
+    generation: i64,
+    manifest_digest: text,
+    accepted_journal_bytes: i64,
+    accepted_journal_digest: text,
+    operation_digest: text,
+    writer_incarnation: i64,
+    closure_digest: text,
+    verifier_registry_digest: text,
+) -> CacheCooperativeSelectedHeadV1:
+    CacheCooperativeSelectedHeadV1(
+        revision: revision, generation: generation,
+        manifest_digest: manifest_digest,
+        accepted_journal_bytes: accepted_journal_bytes,
+        accepted_journal_digest: accepted_journal_digest,
+        operation_digest: operation_digest,
+        writer_incarnation: writer_incarnation,
+        closure_digest: closure_digest,
+        verifier_registry_digest: verifier_registry_digest,
+        checksum: _selected_head_checksum_v1(revision, generation,
+            manifest_digest, accepted_journal_bytes, accepted_journal_digest,
+            operation_digest, writer_incarnation, closure_digest,
+            verifier_registry_digest))
+
+pub fn cache_cooperative_selected_head_valid_v1(
+    head: CacheCooperativeSelectedHeadV1,
+) -> bool:
+    head.revision >= 0 and head.generation >= 0 and
+        head.writer_incarnation >= 0 and head.accepted_journal_bytes >= 0 and
+        head.accepted_journal_bytes <= CACHE_COOPERATIVE_MAX_JOURNAL_BYTES_V1 and
+        sha256_lower_hex_valid(head.manifest_digest) and
+        sha256_lower_hex_valid(head.accepted_journal_digest) and
+        sha256_lower_hex_valid(head.operation_digest) and
+        sha256_lower_hex_valid(head.closure_digest) and
+        sha256_lower_hex_valid(head.verifier_registry_digest) and
+        sha256_lower_hex_valid(head.checksum) and
+        head.checksum == _selected_head_checksum_v1(
+            head.revision, head.generation, head.manifest_digest,
+            head.accepted_journal_bytes, head.accepted_journal_digest,
+            head.operation_digest, head.writer_incarnation,
+            head.closure_digest, head.verifier_registry_digest)
+
+pub fn cache_cooperative_selected_head_encode_v1(
+    head: CacheCooperativeSelectedHeadV1,
+) -> Result<text, text>:
+    if not cache_cooperative_selected_head_valid_v1(head):
+        return Err("cooperative selected head is invalid")
+    Ok(_selected_head_body_v1(head.revision, head.generation,
+        head.manifest_digest, head.accepted_journal_bytes,
+        head.accepted_journal_digest, head.operation_digest,
+        head.writer_incarnation, head.closure_digest,
+        head.verifier_registry_digest) + "\n" + head.checksum)
+
+pub fn cache_cooperative_selected_head_decode_v1(
+    encoded: text,
+) -> Result<CacheCooperativeSelectedHeadV1, text>:
+    if encoded.len() > 1024:
+        return Err("cooperative selected head exceeds the codec bound")
+    val fields = encoded.split("\n")
+    if fields.len() != 11 or fields[0] != CACHE_COOPERATIVE_SELECTED_HEAD_MAGIC_V1:
+        return Err("cooperative selected head shape is invalid")
+    val head = CacheCooperativeSelectedHeadV1(
+        revision: fields[1].to_i64(), generation: fields[2].to_i64(),
+        manifest_digest: fields[3], accepted_journal_bytes: fields[4].to_i64(),
+        accepted_journal_digest: fields[5], operation_digest: fields[6],
+        writer_incarnation: fields[7].to_i64(), closure_digest: fields[8],
+        verifier_registry_digest: fields[9], checksum: fields[10])
+    if not cache_cooperative_selected_head_valid_v1(head):
+        return Err("cooperative selected head checksum or fields are invalid")
+    # Reject non-canonical integer spellings and any parser normalization.
+    if cache_cooperative_selected_head_encode_v1(head).unwrap() != encoded:
+        return Err("cooperative selected head encoding is not canonical")
+    Ok(head)
+
+fn _selected_head_same_v1(
+    expected: CacheCooperativeSelectedHeadV1,
+    current: CacheCooperativeSelectedHeadV1,
+) -> bool:
+    expected.revision == current.revision and
+        expected.generation == current.generation and
+        expected.manifest_digest == current.manifest_digest and
+        expected.accepted_journal_bytes == current.accepted_journal_bytes and
+        expected.accepted_journal_digest == current.accepted_journal_digest and
+        expected.operation_digest == current.operation_digest and
+        expected.writer_incarnation == current.writer_incarnation and
+        expected.closure_digest == current.closure_digest and
+        expected.verifier_registry_digest == current.verifier_registry_digest and
+        expected.checksum == current.checksum
+
+pub fn cache_cooperative_selected_prefix_matches_journal_v1(
+    head: CacheCooperativeSelectedHeadV1,
+    journal: text,
+) -> bool:
+    if (not cache_cooperative_selected_head_valid_v1(head) or
+            journal.len() < head.accepted_journal_bytes):
+        return false
+    sha256_text(journal.slice(0, head.accepted_journal_bytes)) ==
+        head.accepted_journal_digest
+
+pub fn cache_cooperative_selected_prefix_v1(
+    head: CacheCooperativeSelectedHeadV1,
+    journal: text,
+) -> Result<text, text>:
+    if not cache_cooperative_selected_prefix_matches_journal_v1(head, journal):
+        return Err("selected head does not match the journal prefix")
+    Ok(journal.slice(0, head.accepted_journal_bytes))
+
+pub fn cache_cooperative_selected_head_matches_operation_and_prefix_v1(
+    head: CacheCooperativeSelectedHeadV1,
+    expected_revision: i64,
+    expected_operation_digest: text,
+    journal: text,
+) -> bool:
+    cache_cooperative_selected_prefix_matches_journal_v1(head, journal) and
+        head.revision == expected_revision and
+        head.operation_digest == expected_operation_digest
+
+pub enum CacheCooperativeNamespaceRevalidationV1:
+    Current
+    StaleWriter
+    StaleHead
+    InvalidHead
+
+# `current` must be decoded from a descriptor-bound read performed while the
+# existing per-root gate is held. Passing a caller-created record here does not
+# confer authority; this is the deterministic comparison used by that owner.
+pub fn cache_cooperative_namespace_revalidation_v1(
+    expected: CacheCooperativeSelectedHeadV1,
+    current: CacheCooperativeSelectedHeadV1,
+    expected_writer_incarnation: i64,
+    current_writer_incarnation: i64,
+) -> CacheCooperativeNamespaceRevalidationV1:
+    if (not cache_cooperative_selected_head_valid_v1(expected) or
+            not cache_cooperative_selected_head_valid_v1(current)):
+        return CacheCooperativeNamespaceRevalidationV1.InvalidHead
+    if (expected_writer_incarnation < 0 or current_writer_incarnation < 0 or
+            current_writer_incarnation != expected_writer_incarnation):
+        return CacheCooperativeNamespaceRevalidationV1.StaleWriter
+    if not _selected_head_same_v1(expected, current):
+        return CacheCooperativeNamespaceRevalidationV1.StaleHead
+    CacheCooperativeNamespaceRevalidationV1.Current
+
+pub enum CacheCooperativeNamespaceHostAdmissionFailureV1:
+    InvalidExpectedHead
+    InvalidWriterIncarnation
+    MissingPrerequisite(CacheCooperativeNamespaceHostPrerequisiteStateV1)
+
+# Pure validation/refusal classifier for callers that do not possess host
+# receipts.  This makes every local failure branch executable without ever
+# constructing or accepting a synthetic authority handle.
+pub fn cache_cooperative_namespace_host_admission_preflight_v1(
+    expected_head: CacheCooperativeSelectedHeadV1,
+    expected_writer_incarnation: i64,
+) -> Result<(), CacheCooperativeNamespaceHostAdmissionFailureV1>:
+    if not cache_cooperative_selected_head_valid_v1(expected_head):
+        return Err(CacheCooperativeNamespaceHostAdmissionFailureV1.InvalidExpectedHead)
+    if expected_writer_incarnation < 0:
+        return Err(CacheCooperativeNamespaceHostAdmissionFailureV1.InvalidWriterIncarnation)
+    Err(CacheCooperativeNamespaceHostAdmissionFailureV1.MissingPrerequisite(
+        cache_cooperative_namespace_host_next_missing_v1(
+            cache_cooperative_namespace_host_api_inventory_v1())))
+
+# These opaque arguments freeze the ownership boundary without treating their
+# independent presence as a combined root/lock/epoch capability. The existing
+# host exposes no operation that binds all of them to the selected head and the
+# complete namespace for the duration of publication. Therefore this function
+# unconditionally refuses and returns no authority object.
+pub fn cache_cooperative_namespace_host_admit_existing_head_v1(
+    root: CacheRootAuthorityV1,
+    lock: ExclusiveCacheLockReceiptV1,
+    peer: AuthenticatedPeerReceiptV1,
+    readiness: CacheReadinessReceiptV1,
+    readiness_nonce: [u8],
+    epoch: DurableWriterEpochV1,
+    expected_head: CacheCooperativeSelectedHeadV1,
+    expected_writer_incarnation: i64,
+) -> Result<(), CacheCooperativeNamespaceHostAdmissionFailureV1>:
+    # `Ready` cannot occur while qualified_physical_scope is false. A future
+    # provider must replace this refusal with one runtime-issued combined
+    # capability; returning Ok(()) must never become publication authority.
+    cache_cooperative_namespace_host_admission_preflight_v1(
+        expected_head, expected_writer_incarnation)
+
+pub struct CacheCooperativeDurabilityTraceV1:
+    writer_revalidated: bool
+    head_revalidated: bool
+    immutable_blobs_synced: bool
+    immutable_directories_synced: bool
+    journal_admitted: bool
+    head_replace_started: bool
+    head_replace_confirmed: bool
+    head_directory_synced: bool
+
+pub enum CacheCooperativeDurabilityOutcomeV1:
+    InvalidOrder
+    RejectedBeforeHeadReplacement
+    Indeterminate
+    Committed
+
+pub fn cache_cooperative_durability_trace_valid_v1(
+    trace: CacheCooperativeDurabilityTraceV1,
+) -> bool:
+    if trace.head_revalidated and not trace.writer_revalidated: return false
+    if trace.immutable_blobs_synced and not trace.head_revalidated: return false
+    if trace.immutable_directories_synced and not trace.immutable_blobs_synced:
+        return false
+    if trace.journal_admitted and not trace.immutable_directories_synced:
+        return false
+    if trace.head_replace_started and not trace.journal_admitted: return false
+    if trace.head_replace_confirmed and not trace.head_replace_started: return false
+    if trace.head_directory_synced and not trace.head_replace_confirmed: return false
+    true
+
+pub fn cache_cooperative_durability_outcome_v1(
+    trace: CacheCooperativeDurabilityTraceV1,
+) -> CacheCooperativeDurabilityOutcomeV1:
+    # Once replacement may have started, malformed/missing later evidence can
+    # no longer justify a definite rejection. Recovery must resolve it.
+    if (trace.head_replace_started or trace.head_replace_confirmed or
+            trace.head_directory_synced):
+        if (cache_cooperative_durability_trace_valid_v1(trace) and
+                trace.head_replace_confirmed and trace.head_directory_synced):
+            return CacheCooperativeDurabilityOutcomeV1.Committed
+        return CacheCooperativeDurabilityOutcomeV1.Indeterminate
+    if not cache_cooperative_durability_trace_valid_v1(trace):
+        return CacheCooperativeDurabilityOutcomeV1.InvalidOrder
+    CacheCooperativeDurabilityOutcomeV1.RejectedBeforeHeadReplacement

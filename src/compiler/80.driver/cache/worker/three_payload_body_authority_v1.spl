@@ -1,0 +1,231 @@
+# codex-impl
+# Driver composition for one verified embedded concrete body.  The frontend
+# supplies only a sealed physical section candidate; the HIR owner derives the
+# semantic facts; the live scope owner authenticates generation, pin, attempt,
+# issuer revisions, and the complete dependency enumeration.  No copied value
+# produced here is authority.  Full authority remains closed until the live
+# owner retains this body binding and accepts only executor-authenticated output.
+
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectStageV1, PortablePortabilityV1
+}
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1
+}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ThreePayloadFallbackV1, three_payload_closure_seal_digest_v2
+}
+use compiler.common.cache_contract.three_payload_worker_v1.{
+    ThreePayloadWorkerPolicyV1
+}
+use compiler.hir.hir_codec.{HirDecodeLimits}
+use compiler.hir.portable_body_profile_types.{
+    PortableBodyErrorV1, PortableBodyLimitsV1, PortableBodyEntryFactV1,
+    PortableBodyDescriptorV1
+}
+use compiler.hir.portable_object_profile_v1.{
+    verify_embedded_portable_hir_v1
+}
+use compiler.semantics.semantic_scope_contribution_v1.{
+    SemanticScopeDependencyEnumerationV1,
+    semantic_scope_dependency_enumeration_valid_v1
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    PreparedThreePayloadV2
+}
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{
+    SemanticScopeConsumptionBindingV1, SemanticScopeGrantProjectionV1
+}
+use compiler.driver.cache.gateway.semantic_scope_live_owner_v2.{
+    SemanticScopeLiveOwnerV2, LiveSemanticCompletenessV2
+}
+use compiler.frontend.cache_artifact.three_payload_semantic_closure.{
+    ThreePayloadSemanticView, ThreePayloadBodyFactProjection,
+    extract_three_payload_body_section_candidate,
+    match_three_payload_body_fact_projection
+}
+
+# Read-only evidence.  It is deliberately not named a grant or authority and
+# cannot reserve, run, finish, or publish without the opaque live-owner handle.
+pub struct ThreePayloadVerifiedBodyFactsV1:
+    descriptor: PortableBodyDescriptorV1
+    selected_entry: PortableBodyEntryFactV1
+    body_fingerprint: text
+    scope_dependency_enumeration_digest: text
+
+# Opaque, read-only preflight.  The current live owner cannot retain the body
+# fingerprint or expose its retained access-policy identity, so this is not a
+# worker reservation and must not be accepted as semantic body authority.
+struct ThreePayloadBodyPreflightV1:
+    scope: SemanticScopeGrantProjectionV1
+    facts: ThreePayloadVerifiedBodyFactsV1
+
+fn _portable_body_fallback_v1(
+    error: PortableBodyErrorV1,
+) -> ThreePayloadFallbackV1:
+    match error:
+        case PortableBodyErrorV1.BoundsExceeded(_):
+            ThreePayloadFallbackV1.BoundsExceeded
+        case PortableBodyErrorV1.InvalidProfileIdentity:
+            ThreePayloadFallbackV1.UnsupportedSemantics
+        case PortableBodyErrorV1.UnsupportedBodyKind:
+            ThreePayloadFallbackV1.UnsupportedSemantics
+        case PortableBodyErrorV1.UnsupportedSemantics(_):
+            ThreePayloadFallbackV1.UnsupportedSemantics
+        case PortableBodyErrorV1.AuthorityUnavailable(_):
+            ThreePayloadFallbackV1.AuthorityUnavailable
+        case PortableBodyErrorV1.EncodeRefused:
+            ThreePayloadFallbackV1.CorruptPayload
+        case PortableBodyErrorV1.DecodeRefused(_):
+            ThreePayloadFallbackV1.CorruptPayload
+
+fn _selected_entry_v1(
+    descriptor: PortableBodyDescriptorV1,
+    stable_entity: text,
+) -> Result<PortableBodyEntryFactV1, ThreePayloadFallbackV1>:
+    var selected: PortableBodyEntryFactV1? = nil
+    for entry in descriptor.exported_entries:
+        if descriptor.module_name + "." + entry.name == stable_entity:
+            if selected.is_some():
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+            selected = Some(entry)
+    match selected:
+        case Some(value): Ok(value)
+        case nil: Err(ThreePayloadFallbackV1.ExternalBodyRequired)
+
+fn _body_edge_key_v1(caller_id: i64, caller_name: text,
+                     callee_id: i64, callee_name: text) -> text:
+    val caller_id_text = caller_id.to_string()
+    val callee_id_text = callee_id.to_string()
+    caller_id_text.len().to_string() + ":" + caller_id_text + "\u0000" +
+        caller_name.len().to_string() + ":" + caller_name + "\u0000" +
+        callee_id_text.len().to_string() + ":" + callee_id_text + "\u0000" +
+        callee_name.len().to_string() + ":" + callee_name
+
+pub fn three_payload_body_graph_matches_scope_v1(
+    descriptor: PortableBodyDescriptorV1,
+    dependencies: SemanticScopeDependencyEnumerationV1,
+) -> bool:
+    if not semantic_scope_dependency_enumeration_valid_v1(dependencies):
+        return false
+    if dependencies.body_object_digests.index_of(
+            descriptor.raw_content_digest) < 0:
+        return false
+    var expected: Dict<text, bool> = {}
+    for edge in descriptor.dependency_edges:
+        val key = _body_edge_key_v1(edge.caller_symbol_id, edge.caller_name,
+            edge.callee_symbol_id, edge.callee_name)
+        if expected.contains(key): return false
+        expected[key] = true
+    var matched: i64 = 0
+    for scoped in dependencies.edges:
+        if scoped.body_object_digest == descriptor.raw_content_digest:
+            val key = _body_edge_key_v1(scoped.caller_symbol_id,
+                scoped.caller_name, scoped.callee_symbol_id,
+                scoped.callee_name)
+            if not expected.contains(key): return false
+            expected = expected.remove(key)
+            matched = matched + 1
+    matched == descriptor.dependency_edges.len() and expected.len() == 0
+
+pub fn verify_three_payload_body_facts_v1(
+    view: ThreePayloadSemanticView,
+    kind: ThreePayloadSemanticRefKindV1,
+    stable_entity: text,
+    scope_dependencies: SemanticScopeDependencyEnumerationV1,
+    decode_limits: HirDecodeLimits,
+    semantic_limits: PortableBodyLimitsV1,
+) -> Result<ThreePayloadVerifiedBodyFactsV1, ThreePayloadFallbackV1>:
+    # P1 is a concrete closed-function verifier.  Physical sections bearing
+    # macro/generic/default/CTFE/advice labels remain useful evidence, but their
+    # semantic owners have not supplied the lowering/selection proof needed to
+    # compose authority.
+    if kind != ThreePayloadSemanticRefKindV1.ConcreteFunction:
+        return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+    val candidate = extract_three_payload_body_section_candidate(
+        view, kind, stable_entity)?
+    val encoded = match validated_utf8_bytes_to_text_linear(
+            candidate.section_bytes):
+        case Ok(value): value
+        case Err(_): return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val descriptor = match verify_embedded_portable_hir_v1(encoded,
+            candidate.binding.semantic_profile_digest, decode_limits,
+            semantic_limits):
+        case Ok(value): value
+        case Err(error): return Err(_portable_body_fallback_v1(error))
+    if (descriptor.object_kind != candidate.binding.object_ref.kind or
+            descriptor.object_schema != candidate.binding.object_ref.schema or
+            descriptor.raw_content_digest !=
+                candidate.binding.object_ref.object_digest or
+            descriptor.stage != PortableObjectStageV1.Base or
+            descriptor.portability != PortablePortabilityV1.Portable or
+            descriptor.target_contract_digest.is_some()):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val selected = _selected_entry_v1(descriptor, stable_entity)?
+    val projection = ThreePayloadBodyFactProjection(
+        semantic_use_kind: kind,
+        verified_object_kind: descriptor.object_kind,
+        codec_identity: descriptor.codec_identity,
+        verifier_identity: descriptor.verifier_identity,
+        rules_identity: descriptor.rules_identity,
+        semantic_profile_digest: descriptor.semantic_profile_digest,
+        raw_content_digest: descriptor.raw_content_digest,
+        module_name: descriptor.module_name,
+        selected_entry_name: selected.name,
+        exported_entry_count: descriptor.exported_entries.len(),
+        callable_signature_digest: selected.signature_digest,
+        normalized_effect_digest: selected.normalized_effect_digest,
+        transitive_effect_digest: descriptor.transitive_effect_digest,
+        dependency_digest: descriptor.dependency_digest)
+    val matched = match_three_payload_body_fact_projection(candidate,
+        projection)?
+    if not three_payload_body_graph_matches_scope_v1(descriptor,
+            scope_dependencies):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    Ok(ThreePayloadVerifiedBodyFactsV1(descriptor: descriptor,
+        selected_entry: selected, body_fingerprint: matched.body_fingerprint,
+        scope_dependency_enumeration_digest:
+            scope_dependencies.enumeration_digest))
+
+pub fn preflight_three_payload_verified_body_v1(
+    scope_owner: SemanticScopeLiveOwnerV2,
+    grant: LiveSemanticCompletenessV2,
+    expected_scope: SemanticScopeConsumptionBindingV1,
+    scope_dependencies: SemanticScopeDependencyEnumerationV1,
+    view: ThreePayloadSemanticView,
+    prepared: PreparedThreePayloadV2,
+    policy: ThreePayloadWorkerPolicyV1,
+    kind: ThreePayloadSemanticRefKindV1,
+    stable_entity: text,
+    decode_limits: HirDecodeLimits,
+    semantic_limits: PortableBodyLimitsV1,
+) -> Result<ThreePayloadBodyPreflightV1, ThreePayloadFallbackV1>:
+    if (three_payload_closure_seal_digest_v2(view.seal) == "" or
+            three_payload_closure_seal_digest_v2(view.seal) !=
+                prepared.seal_digest or
+            expected_scope.dependency_enumeration_digest !=
+                scope_dependencies.enumeration_digest):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    # Both checks resolve the opaque retained row.  They revalidate the live
+    # direct pin, generation, prepared attempt, writer and five issuer rows;
+    # neither trusts the copied expected-scope value as authority.
+    val scope = scope_owner.validate_scope_v2(grant, expected_scope)?
+    scope_owner.validate_worker_admission_v2(grant, prepared, policy)?
+    val facts = verify_three_payload_body_facts_v1(view, kind, stable_entity,
+        scope_dependencies, decode_limits, semantic_limits)?
+    Ok(ThreePayloadBodyPreflightV1(scope: scope, facts: facts))
+
+pub fn three_payload_body_authority_available_v1() -> bool:
+    # Requires an owner-retained body fingerprint/access-policy binding and an
+    # executor-authenticated result path.  A generic worker DTO is not proof.
+    false
+
+pub fn three_payload_body_authority_blocker_v1() -> text:
+    "owner_retained_body_binding_executor_result_and_descriptor_identity_authority_unavailable"
+
+export ThreePayloadVerifiedBodyFactsV1, ThreePayloadBodyPreflightV1
+export verify_three_payload_body_facts_v1, three_payload_body_graph_matches_scope_v1
+export preflight_three_payload_verified_body_v1
+export three_payload_body_authority_available_v1
+export three_payload_body_authority_blocker_v1

@@ -1,9 +1,83 @@
 use std.common.crypto.sha256 (sha256_text)
+use std.common.binary_io.{bytes_to_string}
 use compiler.common.cache_contract.errors_v1.*
-use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1, ActionRootRecordV1}
+use compiler.driver.cache.journal.action_root_journal_v1.{
+    ActionRootJournalV1, ActionRootRecordV1, ActionRootPreparedAppendV1,
+    recover_action_root_journal_v1
+}
+use compiler.driver.cache.journal.checkpoint_superblock_v1.{
+    CheckpointSuperblockV1, CheckpointSelectionStateV1
+}
 use compiler.driver.cache.catalog.cache_catalog_projection (CacheCatalogProjectionV1)
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1
+}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    SemanticScopeWriterLiveRequestV1
+}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedGenerationPinSnapshotV1, VerifiedCasClosureReceiptV1,
+    VerifiedGenerationDurableBindingV1,
+    verified_generation_recovery_projection_v1
+}
 use common.cache_daemon_host_authority_v1.{AuthenticatedPeerReceiptV1, CacheReadinessReceiptV1,
-    DurableWriterEpochV1, cache_host_validate_readiness_v1}
+    ExclusiveCacheLockReceiptV1, DurableWriterEpochV1,
+    cache_host_validate_readiness_v1, cache_host_mutation_scope_available_v1,
+    cache_host_commit_journal_v1, cache_host_read_journal_v1,
+    CacheDurableHeadAuthorityV2, CacheHostGcWindowV2, CacheHostGcCandidateV2,
+    cache_host_capture_durable_head_v2, cache_host_durable_head_valid_v2,
+    cache_host_gc_begin_v2, cache_host_gc_window_valid_v2,
+    cache_host_gc_root_page_v2, cache_host_gc_pin_page_v2,
+    cache_host_gc_open_candidate_v2, cache_host_gc_candidate_valid_v2,
+    cache_host_gc_unlink_candidate_v2, cache_host_gc_finish_v2,
+    cache_host_gc_abort_v2, cache_host_release_durable_head_v2}
+use common.cache_host_authority_v1.{CacheRootAuthorityV1}
+
+val CACHE_WRITER_MAX_JOURNAL_BYTES_V1: i64 = 16777216
+val CACHE_WRITER_GC_MAX_ROOTS_V2: i64 = 65536
+val CACHE_WRITER_GC_MAX_PAGE_BYTES_V2: i64 = 1048576
+val CACHE_WRITER_GC_MAX_CANDIDATES_V2: i64 = 65536
+
+pub enum CacheWriterCommitOutcomeV1:
+    Committed
+    Replayed
+
+pub struct CacheWriterDurableReceiptV1:
+    outcome: CacheWriterCommitOutcomeV1
+    operation_digest: text
+    journal_digest: text
+    generation: i64
+    sequence: i64
+    projection_applied: bool
+    projection_digest: text
+
+# Audit fields are copied facts. Only host_authority is consumed as authority,
+# and its field stays private to this canonical writer module.
+pub class CacheWriterDurableHeadV2:
+    host_authority: CacheDurableHeadAuthorityV2
+    journal_generation: i64
+    journal_bytes: i64
+    journal_digest: text
+    selected_superblock_generation: i64
+    selected_superblock_digest: text
+    root_count: i64
+
+pub class CacheWriterGcWindowV2:
+    host_authority: CacheHostGcWindowV2
+    durable_head_digest: text
+    odd_reader_epoch: i64
+    max_page_bytes: i64
+
+pub class CacheWriterGcCandidateV2:
+    host_authority: CacheHostGcCandidateV2
+    kind: text
+    digest: text
+
+pub struct CacheWriterGcPageV2:
+    bytes: [u8]
+    next_cursor: i64
+    complete: bool
+
 
 fn _cache_error_v1(code: CacheErrorCodeV1) -> CacheErrorV1:
     CacheErrorV1(code: code, retry: RetryClassV1.Never, severity: ErrorSeverityV1.Error,
@@ -11,20 +85,63 @@ fn _cache_error_v1(code: CacheErrorCodeV1) -> CacheErrorV1:
             safe_context: cache_error_safe_context_v1(code), reason_digest: sha256_text("simple.cache.reject.v1\u0000" + cache_error_safe_context_v1(code)),
             bounded_detail: cache_error_safe_context_v1(code)))
 
+fn _cache_error_retry_v1(code: CacheErrorCodeV1, retry: RetryClassV1) -> CacheErrorV1:
+    val base = _cache_error_v1(code)
+    CacheErrorV1(code: base.code, retry: retry, severity: base.severity,
+        reject: base.reject)
+
+fn _same_mapping_v1(record: ActionRootRecordV1, action_digest: text,
+                    object_kind: text, object_digest: text,
+                    manifest_digest: text) -> bool:
+    record.action_digest == action_digest and record.object_kind == object_kind and
+        record.object_digest == object_digest and record.manifest_digest == manifest_digest
+
+fn _durable_mapping_v1(journal: ActionRootJournalV1, action_digest: text,
+                       object_kind: text, object_digest: text,
+                       manifest_digest: text) -> Result<ActionRootRecordV1?, CacheErrorV1>:
+    val recovery = recover_action_root_journal_v1(journal.bytes, journal.generation)
+    if recovery.quarantined_tail:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheJournalTailQuarantined,
+            RetryClassV1.RecoveryOnly))
+    var matched: ActionRootRecordV1? = nil
+    for record in recovery.records:
+        if record.action_digest == action_digest:
+            if not _same_mapping_v1(record, action_digest, object_kind,
+                    object_digest, manifest_digest):
+                return Err(_cache_error_v1(CacheErrorCodeV1.CacheNondeterminism))
+            matched = Some(record)
+    Ok(matched)
+
+fn _zero_bytes_v1(count: i64) -> [u8]:
+    var out: [u8] = []
+    var index = 0
+    while index < count:
+        out.push(0 as u8)
+        index = index + 1
+    out
+
 # Private and constructible only after runtime validation of opaque receipts.
 class CacheWriterAuthorityV1:
     host_admitted: bool
+    peer: AuthenticatedPeerReceiptV1
+    readiness: CacheReadinessReceiptV1
+    readiness_nonce: [u8]
+    epoch: DurableWriterEpochV1
 
     static fn admit(peer: AuthenticatedPeerReceiptV1, readiness: CacheReadinessReceiptV1,
                     readiness_nonce: [u8], epoch: DurableWriterEpochV1) -> Result<CacheWriterAuthorityV1, CacheErrorV1>:
         if cache_host_validate_readiness_v1(peer, readiness, readiness_nonce, epoch) != 1:
             return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
-        Ok(CacheWriterAuthorityV1(host_admitted: true))
+        Ok(CacheWriterAuthorityV1(host_admitted: true, peer: peer, readiness: readiness,
+            readiness_nonce: readiness_nonce, epoch: epoch))
 
     me append(journal: ActionRootJournalV1, catalog: CacheCatalogProjectionV1,
               action_digest: text, object_kind: text, object_digest: text,
               manifest_digest: text) -> Result<ActionRootRecordV1, CacheErrorV1>:
         if not self.host_admitted: return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
+        if cache_host_validate_readiness_v1(self.peer, self.readiness, self.readiness_nonce,
+                self.epoch) != 1:
+            return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
         val before = match catalog.lookup(action_digest):
             case Ok(value): value
             case Err(_): return Err(_cache_error_v1(CacheErrorCodeV1.CacheCorrupt))
@@ -38,6 +155,369 @@ class CacheWriterAuthorityV1:
                 before.manifest_digest != manifest_digest):
             return Err(_cache_error_v1(CacheErrorCodeV1.CacheNondeterminism))
         Ok(record)
+
+# The current host receipt ABI validates readiness as a point-in-time check,
+# but does not hold the writer epoch through the journal append.  Keep this
+# capability at the existing writer boundary so callers cannot accidentally
+# treat a successful readiness check as mutation-scoped authority.  The host
+# owner must replace this closed capability when it exposes an atomic
+# validate-and-commit operation.
+pub fn cache_writer_mutation_scope_available_v1() -> bool:
+    # Host byte admission exists on qualified Linux Rust providers, but the
+    # public generation route remains closed until its object kinds are
+    # admitted by verified CAS and marked by the existing GC owner.
+    false
+
+pub fn cache_writer_host_primitive_available_v1() -> bool:
+    cache_host_mutation_scope_available_v1()
+
+# This gate may become true only when the existing verified-CAS owner returns
+# an admitted object/root receipt whose generation closure is marked by the
+# existing GC owner.  Raw kind/digest strings never satisfy that contract.
+pub fn cache_writer_verified_cas_reachability_available_v1() -> bool:
+    false
+
+# Stable identity projection for the already-admitted writer receipt.  This is
+# an identity, not authority: callers must still present the exact live
+# durable/pin/closure values to `writer_validate_live_semantic_scope_v1`.
+pub fn cache_writer_semantic_scope_instance_digest_v1(
+    durable: VerifiedGenerationDurableBindingV1,
+    closure: VerifiedCasClosureReceiptV1,
+) -> text:
+    sha256_text("simple.cache.writer.semantic-scope-instance.v1\u0000" +
+        durable.writer_epoch.to_string() + "\u0000" + durable.host_receipt_digest +
+        "\u0000" + durable.operation_digest + "\u0000" +
+        closure.durable_journal_receipt_digest)
+
+# Existing-writer validation for the copied live-port request.  Recovery
+# revalidates the writer's durable receipt against the pinned, owner-sealed CAS
+# closure; the request alone can never satisfy this operation.
+pub fn writer_validate_live_semantic_scope_v1(
+    request: SemanticScopeWriterLiveRequestV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    closure: VerifiedCasClosureReceiptV1,
+    durable: VerifiedGenerationDurableBindingV1,
+) -> bool:
+    val recovered = verified_generation_recovery_projection_v1(pins, closure,
+        durable)
+    if not recovered.ok: return false
+    val identity = request.identity
+    if (identity.generation < 0 or identity.cancellation_epoch < 0 or
+            not three_payload_contract_digest_valid_v1(identity.binding_digest) or
+            not three_payload_contract_digest_valid_v1(identity.query_domain_digest) or
+            not three_payload_contract_digest_valid_v1(identity.semantic_rules_digest)):
+        return false
+    identity.writer_instance_digest ==
+            cache_writer_semantic_scope_instance_digest_v1(durable, closure) and
+        identity.generation == closure.generation and
+        identity.manifest_digest == closure.root_manifest_digest and
+        identity.pin_snapshot_digest == pins.snapshot_digest and
+        identity.generation_closure_digest == closure.closure_digest and
+        request.durable_binding_digest == closure.durable_journal_receipt_digest
+
+fn _read_durable_host_journal_v1(
+    lock: ExclusiveCacheLockReceiptV1,
+    peer: AuthenticatedPeerReceiptV1,
+    readiness: CacheReadinessReceiptV1,
+    readiness_nonce: [u8],
+    epoch: DurableWriterEpochV1,
+    generation: i64,
+) -> Result<ActionRootJournalV1, CacheErrorV1>:
+    val empty: [u8] = []
+    val count = cache_host_read_journal_v1(lock, peer, readiness,
+        readiness_nonce, epoch, empty)
+    if count < 0 or count > CACHE_WRITER_MAX_JOURNAL_BYTES_V1:
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheBoundsExceeded))
+    var bytes = _zero_bytes_v1(count)
+    if cache_host_read_journal_v1(lock, peer, readiness,
+            readiness_nonce, epoch, bytes) != count:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheSpoolReconcileFailed,
+            RetryClassV1.RecoveryOnly))
+    match ActionRootJournalV1.recovered(bytes_to_string(bytes), generation):
+        case Ok(value): Ok(value)
+        case Err(_): Err(_cache_error_retry_v1(
+            CacheErrorCodeV1.CacheJournalTailQuarantined,
+            RetryClassV1.RecoveryOnly))
+
+fn _prefix_bytes_v2(bytes: [u8], count: i64) -> [u8]:
+    var out: [u8] = []
+    var index = 0
+    while index < count:
+        out.push(bytes[index])
+        index = index + 1
+    out
+
+# The durable head is issued only after the canonical writer reads and decodes
+# the descriptor-bound journal and selects one exact current checkpoint. The
+# host rechecks those bytes under the existing writer mutation gate and returns
+# an opaque handle; copied digest fields never authorize GC begin.
+pub fn cache_writer_capture_durable_head_v2(
+    lock: ExclusiveCacheLockReceiptV1,
+    peer: AuthenticatedPeerReceiptV1,
+    readiness: CacheReadinessReceiptV1,
+    readiness_nonce: [u8],
+    epoch: DurableWriterEpochV1,
+    journal_generation: i64,
+    superblock: CheckpointSuperblockV1,
+) -> Result<CacheWriterDurableHeadV2, CacheErrorV1>:
+    if not cache_host_mutation_scope_available_v1():
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheUnavailable))
+    val journal = _read_durable_host_journal_v1(lock, peer, readiness,
+        readiness_nonce, epoch, journal_generation)?
+    val slot = match superblock.select_checked(journal.bytes):
+        case CheckpointSelectionStateV1.Selected(value): value
+        case _: return Err(_cache_error_retry_v1(
+            CacheErrorCodeV1.CacheSpoolReconcileFailed,
+            RetryClassV1.RecoveryOnly))
+    # A lagging checkpoint cannot claim the complete current admitted root set.
+    if slot.journal_bytes != journal.bytes.len() or
+            slot.journal_digest != sha256_text(journal.bytes):
+        return Err(_cache_error_retry_v1(
+            CacheErrorCodeV1.CacheSpoolReconcileFailed,
+            RetryClassV1.RecoveryOnly))
+    val recovered = recover_action_root_journal_v1(journal.bytes,
+        journal.generation)
+    if recovered.quarantined_tail:
+        return Err(_cache_error_retry_v1(
+            CacheErrorCodeV1.CacheJournalTailQuarantined,
+            RetryClassV1.RecoveryOnly))
+    if recovered.records.len() > CACHE_WRITER_GC_MAX_ROOTS_V2:
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheBoundsExceeded))
+    val host = cache_host_capture_durable_head_v2(lock, peer, readiness,
+        readiness_nonce, epoch, slot.journal_bytes, slot.journal_digest,
+        journal.generation, slot.generation, slot.checksum,
+        recovered.records.len())
+    if not cache_host_durable_head_valid_v2(host):
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.BoundedOnce))
+    Ok(CacheWriterDurableHeadV2(host_authority: host,
+        journal_generation: journal.generation,
+        journal_bytes: slot.journal_bytes,
+        journal_digest: slot.journal_digest,
+        selected_superblock_generation: slot.generation,
+        selected_superblock_digest: slot.checksum,
+        root_count: recovered.records.len()))
+
+pub fn cache_writer_begin_gc_window_v2(
+    root: CacheRootAuthorityV1,
+    head: CacheWriterDurableHeadV2,
+    expected_even_reader_epoch: i64,
+    max_root_count: i64,
+    max_page_bytes: i64,
+    max_candidates: i64,
+) -> Result<CacheWriterGcWindowV2, CacheErrorV1>:
+    if (expected_even_reader_epoch < 0 or
+            expected_even_reader_epoch % 2 != 0 or
+            expected_even_reader_epoch > 9223372036854775805 or
+            max_root_count < head.root_count or
+            max_root_count > CACHE_WRITER_GC_MAX_ROOTS_V2 or
+            max_page_bytes <= 0 or
+            max_page_bytes > CACHE_WRITER_GC_MAX_PAGE_BYTES_V2 or
+            max_candidates < 0 or
+            max_candidates > CACHE_WRITER_GC_MAX_CANDIDATES_V2):
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheBoundsExceeded))
+    val host = cache_host_gc_begin_v2(root, head.host_authority,
+        expected_even_reader_epoch, max_root_count, max_page_bytes,
+        max_candidates)
+    if not cache_host_gc_window_valid_v2(host):
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.AfterStateChange))
+    Ok(CacheWriterGcWindowV2(host_authority: host,
+        durable_head_digest: sha256_text(
+            "simple.cache.writer.gc-head.v2\u0000" +
+            head.journal_generation.to_string() + "\u0000" +
+            head.journal_bytes.to_string() + "\u0000" +
+            head.journal_digest + "\u0000" +
+            head.selected_superblock_generation.to_string() + "\u0000" +
+            head.selected_superblock_digest),
+        odd_reader_epoch: expected_even_reader_epoch + 1,
+        max_page_bytes: max_page_bytes))
+
+pub fn cache_writer_gc_root_page_v2(
+    window: CacheWriterGcWindowV2,
+    byte_cursor: i64,
+    capacity: i64,
+) -> Result<CacheWriterGcPageV2, CacheErrorV1>:
+    if byte_cursor < 0 or capacity <= 0 or capacity > window.max_page_bytes:
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheBoundsExceeded))
+    var bytes = _zero_bytes_v1(capacity)
+    val count = cache_host_gc_root_page_v2(window.host_authority,
+        byte_cursor, bytes)
+    if count < 0 or count > capacity:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.AfterStateChange))
+    val page = _prefix_bytes_v2(bytes, count)
+    Ok(CacheWriterGcPageV2(bytes: page, next_cursor: byte_cursor + count,
+        complete: count < capacity))
+
+pub fn cache_writer_gc_pin_page_v2(
+    window: CacheWriterGcWindowV2,
+    cursor: i64,
+    capacity: i64,
+) -> Result<CacheWriterGcPageV2, CacheErrorV1>:
+    if cursor < 0 or capacity <= 0 or capacity > window.max_page_bytes:
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheBoundsExceeded))
+    var bytes = _zero_bytes_v1(capacity)
+    val count = cache_host_gc_pin_page_v2(window.host_authority, cursor, bytes)
+    if count < 0 or count > capacity:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.AfterStateChange))
+    Ok(CacheWriterGcPageV2(bytes: _prefix_bytes_v2(bytes, count),
+        next_cursor: cursor + count, complete: count < capacity))
+
+pub fn cache_writer_gc_open_candidate_v2(
+    window: CacheWriterGcWindowV2,
+    kind: text,
+    digest: text,
+) -> Result<CacheWriterGcCandidateV2, CacheErrorV1>:
+    if kind == "" or not three_payload_contract_digest_valid_v1(digest):
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheCorrupt))
+    val host = cache_host_gc_open_candidate_v2(window.host_authority,
+        kind, digest)
+    if not cache_host_gc_candidate_valid_v2(host):
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheUnavailable))
+    Ok(CacheWriterGcCandidateV2(host_authority: host, kind: kind,
+        digest: digest))
+
+pub fn cache_writer_gc_unlink_candidate_v2(
+    window: CacheWriterGcWindowV2,
+    candidate: CacheWriterGcCandidateV2,
+) -> Result<(), CacheErrorV1>:
+    if cache_host_gc_unlink_candidate_v2(window.host_authority,
+            candidate.host_authority) != 1:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.RecoveryOnly))
+    Ok(())
+
+pub fn cache_writer_finish_gc_window_v2(
+    window: CacheWriterGcWindowV2,
+) -> Result<i64, CacheErrorV1>:
+    val next = cache_host_gc_finish_v2(window.host_authority,
+        window.odd_reader_epoch)
+    if next != window.odd_reader_epoch + 1:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.RecoveryOnly))
+    Ok(next)
+
+pub fn cache_writer_abort_gc_window_v2(
+    window: CacheWriterGcWindowV2,
+) -> Result<i64, CacheErrorV1>:
+    val next = cache_host_gc_abort_v2(window.host_authority,
+        window.odd_reader_epoch)
+    if next != window.odd_reader_epoch + 1:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.RecoveryOnly))
+    Ok(next)
+
+pub fn cache_writer_release_durable_head_v2(
+    head: CacheWriterDurableHeadV2,
+) -> Result<(), CacheErrorV1>:
+    if cache_host_release_durable_head_v2(head.host_authority) != 0:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.RecoveryOnly))
+    Ok(())
+
+pub fn cache_writer_commit_host_admitted_v1(
+    lock: ExclusiveCacheLockReceiptV1,
+    peer: AuthenticatedPeerReceiptV1,
+    readiness: CacheReadinessReceiptV1,
+    readiness_nonce: [u8],
+    epoch: DurableWriterEpochV1,
+    generation: i64,
+    catalog: CacheCatalogProjectionV1,
+    action_digest: text,
+    object_kind: text,
+    object_digest: text,
+    manifest_digest: text,
+) -> Result<CacheWriterDurableReceiptV1, CacheErrorV1>:
+    # Public semantic mutation remains closed before host IO or projection
+    # lookup until verified CAS and GC return an admitted reachability receipt.
+    if (not cache_writer_mutation_scope_available_v1() or
+            not cache_writer_verified_cas_reachability_available_v1()):
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheUnavailable))
+    if (not cache_host_mutation_scope_available_v1() or
+            cache_host_validate_readiness_v1(peer, readiness,
+                readiness_nonce, epoch) != 1):
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
+    # Replay/conflict decisions come only from the host-root journal read under
+    # the admitted lock/epoch.  Caller memory is not an authority input.
+    val journal = _read_durable_host_journal_v1(lock, peer, readiness,
+        readiness_nonce, epoch, generation)?
+    val durable = _durable_mapping_v1(journal, action_digest, object_kind,
+        object_digest, manifest_digest)?
+    if val existing = durable:
+        val projected = catalog.apply(existing, journal.generation).is_ok()
+        val projection_digest = if projected:
+            catalog.digest().unwrap()
+        else:
+            ""
+        return Ok(CacheWriterDurableReceiptV1(
+            outcome: CacheWriterCommitOutcomeV1.Replayed,
+            operation_digest: sha256_text("simple.action.root.replay.v1\u0000" +
+                journal.bytes), journal_digest: sha256_text(journal.bytes),
+            generation: journal.generation, sequence: existing.sequence,
+            projection_applied: projected, projection_digest: projection_digest))
+    # A projection is never authority, but an already-quarantined/conflicting
+    # row is a safe pre-admission refusal rather than a reason to append.
+    val prior = match catalog.lookup(action_digest):
+        case Ok(value): value
+        case Err(_): return Err(_cache_error_v1(CacheErrorCodeV1.CacheCorrupt))
+    if prior.quarantined or (prior.present and
+            (prior.object_kind != object_kind or prior.object_digest != object_digest or
+             prior.manifest_digest != manifest_digest)):
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheNondeterminism))
+    val prepared = match journal.prepare(action_digest, object_kind,
+            object_digest, manifest_digest):
+        case Ok(value): value
+        case Err(_): return Err(_cache_error_v1(CacheErrorCodeV1.CacheCorrupt))
+    val status = cache_host_commit_journal_v1(lock, peer, readiness,
+        readiness_nonce, epoch, prepared.expected_bytes,
+        prepared.expected_prefix_digest,
+        prepared.append_bytes.bytes())
+    if status == -2:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheSpoolReconcileFailed,
+            RetryClassV1.RecoveryOnly))
+    if status == 0:
+        return Err(_cache_error_retry_v1(CacheErrorCodeV1.CacheWriterEpochStale,
+            RetryClassV1.BoundedOnce))
+    if status != 1 and status != 2:
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
+    val record = match journal.accept_durable(prepared):
+        case Ok(value): value
+        case Err(_): return Err(_cache_error_retry_v1(
+            CacheErrorCodeV1.CacheSpoolReconcileFailed,
+            RetryClassV1.RecoveryOnly))
+    val projected = catalog.apply(record, journal.generation).is_ok()
+    val projection_digest = if projected:
+        catalog.digest().unwrap()
+    else:
+        ""
+    Ok(CacheWriterDurableReceiptV1(
+        outcome: if status == 1: CacheWriterCommitOutcomeV1.Committed else:
+            CacheWriterCommitOutcomeV1.Replayed,
+        operation_digest: prepared.operation_digest,
+        journal_digest: sha256_text(journal.bytes), generation: journal.generation,
+        sequence: record.sequence, projection_applied: projected,
+        projection_digest: projection_digest))
+
+pub fn cache_writer_recover_host_admitted_v1(
+    lock: ExclusiveCacheLockReceiptV1,
+    peer: AuthenticatedPeerReceiptV1,
+    readiness: CacheReadinessReceiptV1,
+    readiness_nonce: [u8],
+    epoch: DurableWriterEpochV1,
+    generation: i64,
+    catalog: CacheCatalogProjectionV1,
+) -> Result<ActionRootJournalV1, CacheErrorV1>:
+    # Host bytes alone are not semantic recovery authority.  Until verified
+    # CAS returns an owner-issued reachability receipt capable of validating
+    # every record's object and manifest closure, recovery must not read host
+    # bytes into the rebuildable PureDatabase projection.  Deliberately keep
+    # this exported surface closed even if the lower byte primitive is live.
+    if (not cache_writer_mutation_scope_available_v1() or
+            not cache_writer_verified_cas_reachability_available_v1()):
+        return Err(_cache_error_v1(CacheErrorCodeV1.CacheUnavailable))
+    Err(_cache_error_v1(CacheErrorCodeV1.CacheUnavailable))
 
 # The opaque host readiness/epoch pair is revalidated at every mutation. The
 # current unsupported provider returns -1, so the journal remains unchanged.
@@ -53,5 +533,6 @@ pub fn cache_writer_append_host_admitted_v1(
     object_digest: text,
     manifest_digest: text,
 ) -> Result<ActionRootRecordV1, CacheErrorV1>:
-    val authority = CacheWriterAuthorityV1.admit(peer, readiness, readiness_nonce, epoch)?
-    authority.append(journal, catalog, action_digest, object_kind, object_digest, manifest_digest)
+    # Compatibility entrypoint cannot hold the private lock receipt through
+    # durable admission.  It is now an unconditional fail-closed shim.
+    Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))

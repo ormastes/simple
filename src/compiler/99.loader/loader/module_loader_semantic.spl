@@ -23,19 +23,6 @@ fn text_array_push_unique(items: [text], value: text) -> [text]:
         return items
     items.push(value)
 
-fn text_array_intersects(left: [text], right: [text]) -> bool:
-    for item in left:
-        if text_array_contains(right, item):
-            return true
-    false
-
-fn text_array_intersects_key_set(items: [text], keys: Dict<text, bool>) -> bool:
-    """Return whether any item is present in an indexed text-key set."""
-    for item in items:
-        if keys.has(item):
-            return true
-    false
-
 # ============================================================================
 # Semantic export/dependency records
 # ============================================================================
@@ -61,33 +48,58 @@ fn _semantic_dependents_from_paths(
     Kept separate from the loader wrapper so the graph algorithm has direct
     correctness coverage without constructing mapped SMF modules.
     """
-    # Keep the fixed-point passes and output array for their established order,
-    # but index membership. The former nested array scans made dense semantic
-    # invalidation cubic in the number of modules/keys.
-    var changed_keys: Dict<text, bool> = {}
-    changed_keys[changed_key] = true
+    # Index each semantic key's direct modules once. Keep the ordered fixed-
+    # point pass so a newly-ready earlier module is still visited next pass.
+    var reverse_heads: Dict<text, i64> = {}
+    var reverse_dependents: [text] = []
+    var reverse_next: [i64] = []
+    for path in module_paths:
+        val exports = if semantic_exports.has(path): semantic_exports[path] else: []
+        val deps = if semantic_dependencies.has(path): semantic_dependencies[path] else: []
+        for key in exports:
+            var previous_head: i64 = -1
+            if reverse_heads.has(key): previous_head = reverse_heads[key]
+            val edge_index = reverse_dependents.len()
+            reverse_dependents.push(path)
+            reverse_next.push(previous_head)
+            reverse_heads[key] = edge_index
+        for key in deps:
+            var previous_head: i64 = -1
+            if reverse_heads.has(key): previous_head = reverse_heads[key]
+            val edge_index = reverse_dependents.len()
+            reverse_dependents.push(path)
+            reverse_next.push(previous_head)
+            reverse_heads[key] = edge_index
+
     var affected: [text] = []
     var affected_set: Dict<text, bool> = {}
+    var ready: Dict<text, bool> = {}
+    if reverse_heads.has(changed_key):
+        var edge_index = reverse_heads[changed_key]
+        while edge_index >= 0:
+            ready[reverse_dependents[edge_index]] = true
+            edge_index = reverse_next[edge_index]
     var progressed = true
     while progressed:
         progressed = false
         for path in module_paths:
             if affected_set.has(path):
                 continue
-            val exports = if semantic_exports.has(path):
-                semantic_exports[path]
-            else:
-                []
-            val deps = if semantic_dependencies.has(path):
-                semantic_dependencies[path]
-            else:
-                []
-            if text_array_intersects_key_set(exports, changed_keys) or text_array_intersects_key_set(deps, changed_keys):
+            if ready.has(path):
                 affected.push(path)
                 affected_set[path] = true
-                changed_keys[path] = true
+                if reverse_heads.has(path):
+                    var edge_index = reverse_heads[path]
+                    while edge_index >= 0:
+                        ready[reverse_dependents[edge_index]] = true
+                        edge_index = reverse_next[edge_index]
+                val exports = if semantic_exports.has(path): semantic_exports[path] else: []
                 for exported_key in exports:
-                    changed_keys[exported_key] = true
+                    if reverse_heads.has(exported_key):
+                        var edge_index = reverse_heads[exported_key]
+                        while edge_index >= 0:
+                            ready[reverse_dependents[edge_index]] = true
+                            edge_index = reverse_next[edge_index]
                 progressed = true
     affected
 
@@ -113,20 +125,25 @@ fn moduleloader_record_dependency_semantic_fingerprint(self: LazyModuleLoader, d
     deps[dependency_path] = fingerprint
     self.dependency_semantic_fingerprints[dependent_path] = deps
 
-fn moduleloader_semantic_cache_is_fresh(self: LazyModuleLoader, path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
+fn _semantic_cache_is_fresh_from_maps(
+    semantic_fingerprints: Dict<text, text>,
+    dependency_semantic_fingerprints: Dict<text, Dict<text, text>>,
+    path: text,
+    current_fingerprint: text,
+    current_dependencies: Dict<text, text>
+) -> bool:
     """Fail-closed semantic cache validation for loader/JIT artifacts."""
-    if not self.semantic_fingerprints.has(path):
+    if not semantic_fingerprints.has(path):
         return false
-    if self.semantic_fingerprints[path] != current_fingerprint:
-        return false
-
-    if not self.dependency_semantic_fingerprints.has(path):
-        return current_dependencies.keys().len() == 0
-
-    val stored_deps = self.dependency_semantic_fingerprints[path]
-    if stored_deps.keys().len() != current_dependencies.keys().len():
+    if semantic_fingerprints[path] != current_fingerprint:
         return false
 
+    if not dependency_semantic_fingerprints.has(path):
+        return current_dependencies.is_empty()
+
+    val stored_deps = dependency_semantic_fingerprints[path]
+    if stored_deps.len() != current_dependencies.len():
+        return false
     for dep_path in current_dependencies.keys():
         if not stored_deps.has(dep_path):
             return false
@@ -134,19 +151,27 @@ fn moduleloader_semantic_cache_is_fresh(self: LazyModuleLoader, path: text, curr
             return false
     true
 
-fn moduleloader_semantic_dependents_of(self: LazyModuleLoader, changed_path: text) -> [text]:
+fn moduleloader_semantic_cache_is_fresh(self: LazyModuleLoader, path: text, current_fingerprint: text, current_dependencies: Dict<text, text>) -> bool:
+    _semantic_cache_is_fresh_from_maps(
+        self.semantic_fingerprints, self.dependency_semantic_fingerprints,
+        path, current_fingerprint, current_dependencies)
+
+fn _semantic_fingerprint_dependents_from_paths(
+    module_paths: [text],
+    dependency_semantic_fingerprints: Dict<text, Dict<text, text>>,
+    changed_path: text
+) -> [text]:
     """Return transitive semantic dependents, including dependency cycles."""
     # Index each dependency's direct dependents once.  The outer fixed-point
     # passes below intentionally retain their established module order: a
     # newly-ready module earlier in that order is still visited next pass.
-    val module_paths = self.dependency_semantic_fingerprints.keys()
     # Append-only edge storage avoids value-semantic array bucket copy/writeback
     # when one dependency has many dependents.
     var reverse_heads: Dict<text, i64> = {}
     var reverse_dependents: [text] = []
     var reverse_next: [i64] = []
     for module_path in module_paths:
-        val deps = self.dependency_semantic_fingerprints[module_path]
+        val deps = dependency_semantic_fingerprints[module_path]
         for dependency_path in deps.keys():
             var previous_head: i64 = -1
             if reverse_heads.has(dependency_path):
@@ -180,6 +205,11 @@ fn moduleloader_semantic_dependents_of(self: LazyModuleLoader, changed_path: tex
                         edge_index = reverse_next[edge_index]
                 progressed = true
     affected
+
+fn moduleloader_semantic_dependents_of(self: LazyModuleLoader, changed_path: text) -> [text]:
+    _semantic_fingerprint_dependents_from_paths(
+        self.dependency_semantic_fingerprints.keys(),
+        self.dependency_semantic_fingerprints, changed_path)
 
 fn moduleloader_drop_semantic_cache_record(self: LazyModuleLoader, path: text):
     """Drop semantic cache metadata for one artifact."""

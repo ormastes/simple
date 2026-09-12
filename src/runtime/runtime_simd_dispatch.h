@@ -16,6 +16,13 @@
 
 #include <stdint.h>
 #include <stddef.h>
+
+int64_t rt_parser_mask_call_u8x32(int64_t function_address,
+                                  int64_t source_address,
+                                  int64_t first, int64_t second);
+int64_t rt_parser_lexical_mask_call_u8x32(int64_t function_address,
+                                          int64_t source_address,
+                                          int64_t needle);
 #include <stdbool.h>
 #include <string.h>
 

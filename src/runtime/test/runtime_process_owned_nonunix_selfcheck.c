@@ -14,6 +14,10 @@ int8_t rt_array_push(SplArray* array, int64_t value) {
     if (!array || array->len >= array->cap) return 0;
     array->items[array->len++].as_int = value; return 1;
 }
+int8_t rt_array_set(SplArray* array, int64_t index, int64_t value) {
+    if (!array || index < 0 || index >= array->len) return 0;
+    array->items[index].as_int = value; return 1;
+}
 int64_t rt_array_len(SplArray* array) { return array ? array->len : -1; }
 int64_t rt_array_get(SplArray* array, int64_t index) { return array->items[index].as_int; }
 int64_t rt_string_new(const uint8_t* data, uint64_t len) { (void)data; (void)len; return 7; }
@@ -26,6 +30,17 @@ int64_t rt_free_deep(int64_t value) { (void)value; return 1; }
 #include "../runtime_process_owned.c"
 
 int main(void) {
+    SplArray* capabilities = rt_process_owned_v3_capabilities_value();
+    assert(capabilities && rt_array_len(capabilities) == 3);
+    assert(rt_array_get(capabilities, 0) == RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION);
+    assert(rt_array_get(capabilities, 1) == 0);
+    assert(rt_array_get(capabilities, 2) == 0);
+    SplArray* limits = rt_process_owned_v3_set_capture_limits_value(1, 1, 1);
+    assert(limits && rt_array_len(limits) == 3);
+    assert(rt_array_get(limits, 1) == 0 && rt_array_get(limits, 2) == ENOTSUP);
+    SplArray* metadata = rt_process_owned_v3_observation_value(1);
+    assert(metadata && rt_array_len(metadata) == 15);
+    assert(rt_array_get(metadata, 1) == 0 && rt_array_get(metadata, 14) == ENOTSUP);
     RtOwnedProcessTokenV2 token;
     RtOwnedProcessStartReceiptV2 start;
     const char* argv[] = {"never-spawned", NULL};
