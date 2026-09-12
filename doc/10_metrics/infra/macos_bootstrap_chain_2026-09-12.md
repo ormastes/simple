@@ -711,3 +711,77 @@ and leaves a stale lock, so the next run fails with `timed out waiting for
 bootstrap output ownership`. Clear
 `.simple/storage/build/.simple-bootstrap-locks` after any killed run, and poll
 with short, unbounded foreground checks only.
+
+## Run 20 (2026-09-13) — the phase-2 promotion blocker was already fixed upstream; macOS converges with Linux on site 8
+
+**Headline correction, measured rather than assumed.** Run 19's blocker
+(`Module surface registry graph promotion failed after phase 2`) was cleared by
+`460aa9781cc`, the Linux BOOT-7 fix, which landed on `main` at 08:12 via PR #754
+— **after** run 19's PR #753 merged at 07:58. Run 19 measured a tree without it.
+An earlier draft of this entry credited the fix to this lane's rewrite of the
+24-operand `not rt_transient_heap_promote(a) or not ...(b) or ...` chain; that
+claim was withdrawn after it was tested rather than asserted.
+
+**The counterfactual, because a causal claim about a 25-minute lane deserves
+one.** Run 20's Stage 2 `native-build` was replayed verbatim from its own
+`stage3/aarch64-apple-darwin/stage2-command.transcript` against `origin/main` @
+`601bc2787b2` with the rewrite REVERTED (886 compiled, 0 failed, 450.3s). The
+resulting candidate runs the positional Stage-3 route with
+`grep -c 'promotion failed'` = **0**, logging
+`phase2:surface:file:promote-done` / `commit-done` / `released seq=2`. Phase 2
+promotes cleanly with no change of ours. The transcript replay is what made this
+affordable: 8.5 min of compile against a 25-minute lane, and it is the right
+instrument for any "was my change causal?" question on this chain.
+
+What this lane does contribute: a fail-closed diagnostic
+(`module_surfaces_promote_reason` — names the field, the surface index and its
+logical/canonical/package names, the registry cardinalities, and a scope
+sentinel that separates "the transient array scope is not active+paused, so the
+runtime answers false for EVERY value" from a genuinely unpromotable field), so
+the next occurrence of these 26 failure routes names itself instead of costing a
+cycle.
+
+Two operational notes that cost one cycle each and are not in the reproduction
+recipe above:
+
+- **The bootstrap needs `cargo` on PATH.** A PATH trimmed to
+  `/usr/bin:/bin:/usr/sbin:/sbin` (to dodge run 13's Homebrew `cmp` symlink trap)
+  dies in seconds with `error: failed to fingerprint Rust seed inputs`. The real
+  reason is only in `<evidence-root>/rust-authority-fingerprint-error.log`:
+  `fingerprint-step=resolve-rust-toolchain` / `resolver-frontend=absent`. Put
+  `/usr/bin` FIRST and keep `~/.cargo/bin` on the PATH.
+- **Run 19's "no candidate preserved" was a look-in-the-wrong-place error.** The
+  exit-3 arm already keeps it, at `stage2-rejected/<PLATFORM>/` with a
+  `rejection.env` — `bootstrap-from-scratch.sh:3091-3111` moves it OUT of
+  `stage2/<PLATFORM>/`, which is why that directory reads empty. No script
+  change was needed.
+
+Verdict: Stage 1 admitted, Stage 2 closure clean (886 compiled, 0 cached, 0
+failed), promotion message gone, and the Stage-3 route now advances through
+`parse`, `hir`, `monomorphize`, `mir` and `native_cache` before dying in
+`native_compile`:
+
+```
+  Stage 2: running bootstrap compiler sanity
+  Stage 2: proving struct receiver/runtime capability
+error: Stage 2 struct receiver/runtime capability failed
+    | .../check-bootstrap-stage2-struct-receiver.shs: line 162: 18351 Segmentation fault: 11  env SIMPLE_BINARY=...
+    | error: stage2 failed the positional pure-Simple Stage-3 route (status 139)
+exit:  3
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+macOS crash report `simple-2026-09-13-083808.ips`, triggered thread frame 0:
+`compiler__mir__mir_json__serialize_mir_function`. That is **site 8**
+(`doc/08_tracking/bug/stage2_stage3_route_segv_mir_json_shadow_witness_2026-09-13.md`),
+previously filed as a Linux BOOT-7 finding. The two lanes have converged: it is
+now the single `--stop-after-stage2` blocker on both, and it is not
+Linux-specific.
+
+Stages reached: Stage 1 admitted; Stage 2 built and rejected; Stage 3 not
+attempted; nothing deployed. Candidate preserved, not deployed:
+`.simple/storage/build/bootstrap-run20/stage2-rejected/aarch64-apple-darwin/simple`,
+139,327,000 bytes, sha256
+`630ad64b7194eec6873fdcd6382c83ecad4b23f760d303a57eac5b26f214e0ed` (mode 400 —
+copy out and `chmod +x` before a witness run). The ~40-second witness loop is
+therefore available on macOS for site 8.
