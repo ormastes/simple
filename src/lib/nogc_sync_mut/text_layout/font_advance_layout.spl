@@ -1,4 +1,5 @@
 use std.nogc_sync_mut.text_layout.font_types.{FontRenderQuad}
+use std.common.encoding.utf8.{text_codepoints}
 
 # Apply the producer-resolved per-character advances to an already rasterized
 # font batch. Atlas ownership stays in FontRenderer; only destination positions
@@ -31,29 +32,49 @@ fn _font_character_index(byte_offsets: [i64], byte_offset: i64) -> i64:
 # before the first write), matching the old "return the un-adjusted batch with
 # valid=false" contract.
 fn font_batch_apply_advances(content: text, natural_advances: [i32], advance_widths: [i32], mut quads: [FontRenderQuad]) -> bool:
-    var byte_offsets: [i64] = []
-    var shifts: [i32] = []
+    # Per CODEPOINT, decoded once. The old `for ch in content` walk paired the
+    # per-codepoint advance arrays with a byte-offset table, which the quads do
+    # not use -- see font_codepoint_utf8_len below.
+    val codepoints = text_codepoints(content)
+    val character_count = codepoints.len()
+    if character_count == 0:
+        return advance_widths.len() == 0 and natural_advances.len() == 0
+    val widths = font_advances_codepoint_arity(codepoints, advance_widths)
+    if widths.len() != character_count or natural_advances.len() != character_count:
+        return false
+    var byte_offsets: [i64] = [0; character_count]
+    var shifts: [i32] = [0; character_count]
     var byte_offset: i64 = 0
     var target_x: i64 = 0
     var natural_x: i64 = 0
-    var character_count: i64 = 0
-    for ch in content:
-        if character_count >= advance_widths.len() or character_count >= natural_advances.len():
-            return false
-        val advance = advance_widths[character_count]
-        val natural_advance = natural_advances[character_count]
+    var ci: i64 = 0
+    while ci < character_count:
+        val advance = widths[ci]
+        val natural_advance = natural_advances[ci]
         if (advance < 0 or natural_advance < 0 or
             target_x > 2147483647 - advance.to_i64() or
             natural_x > 2147483647 - natural_advance.to_i64()):
             return false
-        byte_offsets = byte_offsets.push(byte_offset)
-        shifts = shifts.push((target_x - natural_x).to_i32())
-        byte_offset = byte_offset + ch.len()
+        byte_offsets[ci] = byte_offset
+        shifts[ci] = (target_x - natural_x).to_i32()
+        byte_offset = byte_offset + font_codepoint_utf8_len(codepoints[ci])
         target_x = target_x + advance.to_i64()
         natural_x = natural_x + natural_advance.to_i64()
-        character_count = character_count + 1
-    if character_count != advance_widths.len() or character_count != natural_advances.len():
-        return false
+        ci = ci + 1
+
+    # Which index space do the quads carry? Both LayoutGlyph producers in
+    # font_renderer.spl increment `byte_offset` by 1 per codepoint, so it is a
+    # codepoint index there; the two spaces coincide on ASCII and the byte
+    # space runs strictly ahead on anything else, so "every quad index is below
+    # the codepoint count" identifies the codepoint space exactly. Decided once
+    # per batch, never per quad, so one stray index cannot split the run.
+    var codepoint_space = true
+    var probe: i64 = 0
+    while probe < quads.len():
+        val probe_offset = quads[probe].byte_offset
+        if probe_offset < 0 or probe_offset >= character_count:
+            codepoint_space = false
+        probe = probe + 1
 
     # Resolve every destination first; only commit once all of them are valid,
     # so a late rejection cannot leave a half-shifted run behind.
@@ -61,7 +82,7 @@ fn font_batch_apply_advances(content: text, natural_advances: [i32], advance_wid
     var index: i64 = 0
     while index < quads.len():
         val quad = quads[index]
-        val character_index = _font_character_index(byte_offsets, quad.byte_offset)
+        val character_index = if codepoint_space: quad.byte_offset else: _font_character_index(byte_offsets, quad.byte_offset)
         if character_index < 0:
             return false
         val shifted_x = quad.dst_x.to_i64() + shifts[character_index].to_i64()
@@ -81,3 +102,57 @@ fn font_batch_apply_advances(content: text, natural_advances: [i32], advance_wid
         )
         index = index + 1
     true
+
+# ---------------------------------------------------------------------------
+# Index-space helpers (2026-09-12).
+#
+# `ResolvedFontMetrics.advances` and `measure_text_advances` both carry ONE
+# entry per CODEPOINT. The staged quads, however, carry an index that is only
+# named `byte_offset`: the two LayoutGlyph producers in font_renderer.spl
+# increment it by 1 per codepoint, so on any non-ASCII run the quad index space
+# and a byte-offset table disagree and every lookup missed -- one em dash cost
+# the whole page. See doc/08_tracking/bug/
+# web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md.
+fn font_codepoint_utf8_len(codepoint: i64) -> i64:
+    if codepoint < 0: return 1
+    if codepoint < 128: return 1
+    if codepoint < 2048: return 2
+    if codepoint < 65536: return 3
+    4
+
+# Accepts BOTH conventions so the round-5 producer guard
+# (`_html_draw_ir_byte_advances`, advance on the lead byte and 0 on each
+# continuation byte) keeps working while the producer is switched over:
+#   len == codepoint count -> returned unchanged
+#   len == byte length     -> collapsed by summing each codepoint's byte span
+#                             (exact: the expansion preserves the total width)
+# Anything else -> [] so the caller can take the flat-advance fallback instead
+# of killing the composition.
+fn font_advances_codepoint_arity(codepoints: [i64], advances: [i32]) -> [i32]:
+    val character_count = codepoints.len()
+    if advances.len() == character_count:
+        return advances
+    var byte_length: i64 = 0
+    var ci: i64 = 0
+    while ci < character_count:
+        byte_length = byte_length + font_codepoint_utf8_len(codepoints[ci])
+        ci = ci + 1
+    if advances.len() != byte_length:
+        return []
+    var collapsed: [i32] = [0; character_count]
+    var byte_index: i64 = 0
+    ci = 0
+    while ci < character_count:
+        val span = font_codepoint_utf8_len(codepoints[ci])
+        var total: i64 = 0
+        var k: i64 = 0
+        while k < span:
+            val piece = advances[byte_index + k] as i64
+            if piece < 0 or total > 2147483647 - piece:
+                return []
+            total = total + piece
+            k = k + 1
+        collapsed[ci] = total.to_i32()
+        byte_index = byte_index + span
+        ci = ci + 1
+    collapsed

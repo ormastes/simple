@@ -579,3 +579,22 @@ seed-side, it is not reversible file-by-file, and a partial attempt is a silent
 wrong answer at the ABI boundary. It needs its own sequenced lane with an
 artifact-compatibility plan. The three controls above are the tripwire that
 keeps it honest in the meantime.
+
+
+## Re-check 2026-09-12 — evidence only, status deliberately unchanged
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/compiler/mir/enum_bare_name_collision_loud_miss_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/compiler/mir/enum_bare_name_collision_loud_miss_spec.spl outcome=OK declared>=14 executed=14 passed=14 failed=0 skipped=0 dropped=0
+```
+
+The spec is green, and this record is **not** being closed on that, because the
+residual scope is the 332-row collision enumeration and the owner decision it is blocked on; a green loud-miss spec does not retire the registry.
+
+Recording the green so the next triage pass does not re-run it expecting red,
+and so nobody mistakes a passing interpreter-lane spec for the lane that is
+actually open.

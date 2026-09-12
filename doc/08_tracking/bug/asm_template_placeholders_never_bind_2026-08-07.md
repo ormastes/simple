@@ -468,3 +468,20 @@ seed that builds the SimpleOS lanes, and the seed still cannot bind operands.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/01_unit/compiler/mir/inline_asm_output_writeback_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-12 — reproduced, left OPEN
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl outcome=ERROR declared>=7 executed=7 passed=5 failed=2 skipped=0 dropped=0
+```
+
+2 of 7 examples red, and the failures are `semantic: variable \`dst\` not found`
+/ `semantic: variable \`rax\` not found` — i.e. the named asm operands still do
+not bind, which is the reported defect, reproduced. Primary file
+`src/compiler/10.frontend/parser_types_expr.spl` is **fenced** by this fan-out
+(it appears in `egl_offlimits_v2.txt`), so no edit was attempted.

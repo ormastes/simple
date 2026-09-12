@@ -123,3 +123,71 @@ bin/simple run probe.spl && od -c out.txt
 
 ## Triage 2026-09-12
 Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.
+
+## Triage 2026-09-12 — root cause located, still OPEN (needs a Rust seed change)
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, sha256
+prefix `3d120a6f`).
+
+### Reproduced, and widened
+
+```spl
+val a = (123 as char).to_text()   # a_len=12  a=[<special:15>]
+val b = (125 as char).to_text()   # b_len=12  b=[<value:0x7d>]
+val c = (65  as char).to_text()   # c_len=19  c=[<invalid-heap:0x41>]
+```
+
+### Root cause
+
+The three different placeholder shapes are not three fallback paths — they are
+**one** defect seen through three tag values. `(N as char)` emits the raw
+machine scalar `N` where a *tagged* `RuntimeValue` word is expected, so
+`rt_to_string` decodes `N`'s own low 3 bits as the tag:
+
+| N | N & 7 | tag | payload (N >> 3) | rendered |
+|---|-------|-----|------------------|----------|
+| 123 | 3 | TAG_SPECIAL | 15 | `<special:15>` |
+| 125 | 5 | (no such tag) | — | `<value:0x7d>` |
+| 65  | 1 | TAG_HEAP | 0x41 as a pointer | `<invalid-heap:0x41>` |
+
+That is exactly the `value_to_display_string` match in
+`src/compiler_rust/runtime/src/value/sffi/io_print.rs:452-466`
+(`TAG_SPECIAL` arm -> `<special:{p}>`, `_` arm -> `<value:0x{:x}>`,
+`heap_value_to_display_string` -> `<invalid-heap:0x{:x}>` when `heap_type()`
+is `None`). The renderer is behaving correctly on the garbage it is handed.
+
+The garbage is produced one layer up, in
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs:549`
+`lower_cast_expr`. It has exactly one special case — `target == TypeId::STRING
+&& is_native_scalar(inner.ty)` routes to `emit_to_string` — and the comment
+there states the general hazard verbatim: *"MirInst::Cast is a plain value copy
+in codegen, so a raw int/float would masquerade as a STRING pointer"*. A cast
+to `char` takes the fall-through branch and emits a bare `MirInst::Cast`, i.e.
+the plain value copy, with no boxing or tagging.
+
+`is_native_scalar` (same file) lists I8..U64, F32/F64, BOOL — it does not list
+CHAR, and nothing else in the function distinguishes CHAR.
+
+### Fix direction
+
+Give `char` the same treatment `STRING` already has in `lower_cast_expr`:
+an int -> char cast must yield a properly tagged `RuntimeValue` (or, if `char`
+has no tagged representation, `to_text()` on it must route to a real
+`rt_char_to_string`-style conversion that builds the 1-code-point string),
+instead of a plain value copy. Whichever is chosen, the *other* branch of the
+original bug report still applies: if the form cannot be supported it must fail
+loudly rather than return a placeholder.
+
+### Why this is not fixed in this pass
+
+The change is in the Rust bootstrap seed
+(`src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs`), and the fan-out
+lane's bar is "GREEN unit specs on the deployed binary". Fixing the seed source
+cannot be demonstrated green without rebuilding and redeploying `bin/simple`,
+which this lane is explicitly forbidden to do. No permanently-red spec was added,
+per the project rule against landing a failing test.
+
+Open sub-question still unanswered: whether the pure-Simple mirror
+(`src/compiler/50.mir/**` cast lowering) carries the same gap. It was not
+audited here, and it is the path that matters once a self-hosted binary is
+deployed.
