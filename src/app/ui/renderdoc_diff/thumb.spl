@@ -1,0 +1,85 @@
+"""Thumbnail decoding and PIXEL comparison (MDSOC+ data layer).
+
+The exporter emits each thumbnail as base64 of RAW RGBA8 (`thumbFormat`
+`rgba8-64x64`, 16384 bytes / 21848 base64 characters), so a real pixel comparison
+needs a decode first. Comparing the base64 TEXT instead would not be a pixel
+metric at all — one changed byte can move two characters, and padding shifts the
+tail — so this module decodes to bytes and compares 4-byte pixels.
+
+The decoder is local and returns byte VALUES: the stdlib `base64_decode` family
+returns `text`, which is lossy for arbitrary binary.
+"""
+
+val _B64_ALPHABET: text = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+fn _b64_value(c: text) -> i64:
+    var i = 0
+    while i < 64:
+        if _B64_ALPHABET[i] == c:
+            return i
+        i = i + 1
+    -1
+
+fn rdoc_base64_decode(src: text) -> [i64]:
+    """Decode standard base64 to byte values. Unknown characters are skipped."""
+    var out: [i64] = []
+    var acc = 0
+    var bits = 0
+    var i = 0
+    while i < src.len():
+        val c = src[i]
+        if c == "=":
+            i = src.len()
+        else:
+            val v = _b64_value(c)
+            if v >= 0:
+                acc = acc * 64 + v
+                bits = bits + 6
+                if bits >= 8:
+                    bits = bits - 8
+                    var shifted = acc
+                    var s = 0
+                    while s < bits:
+                        shifted = shifted / 2
+                        s = s + 1
+                    out.push(shifted % 256)
+                    var keep = 1
+                    s = 0
+                    while s < bits:
+                        keep = keep * 2
+                        s = s + 1
+                    acc = acc % keep
+            i = i + 1
+    out
+
+fn rdoc_thumb_mismatch_pct(a_b64: text, b_b64: text) -> i64:
+    """Percentage of RGBA8 PIXELS that differ between two decoded thumbnails.
+
+    Returns -1 when either side carries no thumbnail. Pixels present on only one
+    side count as mismatched, so a truncated thumbnail cannot read as agreement.
+    """
+    if a_b64 == "" or b_b64 == "":
+        return -1
+    if a_b64 == b_b64:
+        return 0
+    val a = rdoc_base64_decode(a_b64)
+    val b = rdoc_base64_decode(b_b64)
+    val a_px = a.len() / 4
+    val b_px = b.len() / 4
+    var total = a_px
+    if b_px > total:
+        total = b_px
+    if total == 0:
+        return 0
+    var shared = a_px
+    if b_px < shared:
+        shared = b_px
+    var differing = total - shared
+    var p = 0
+    while p < shared:
+        val off = p * 4
+        if a[off] != b[off] or a[off + 1] != b[off + 1] or a[off + 2] != b[off + 2]
+            or a[off + 3] != b[off + 3]:
+            differing = differing + 1
+        p = p + 1
+    (differing * 100) / total
