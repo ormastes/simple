@@ -129,3 +129,63 @@ the signed target readback receipt.
 
 ## Triage 2026-09-12
 Rule B: ran `bin/simple test test/01_unit/lib/database/server/credential_zeroization_spec.spl` on the deployed seed; 5 of 6 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-12 — one real defect fixed, the rest is environmental
+
+- Status: OPEN (2026-09-12) — `authenticate` fixed; the zeroization half cannot
+  be verified on the seed interpreter, reason isolated below
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+- Spec: `test/01_unit/lib/database/server/credential_zeroization_spec.spl`
+
+RED as found, 1 of 6 passing:
+
+```
+✗ authenticates the same wire credential as the text registration path
+    semantic: nil is forbidden by the non-optional return contract of 'authenticate'
+✗ rejects a wrong credential registered through the byte path      (same error)
+✗ refuses to register an empty credential from bytes               (same error)
+✗ leaves the caller's buffer wipeable after registration
+    semantic: unknown extern function: rt_array_data_ptr_text
+✗ wipes an exact byte range without touching adjacent canaries     (same error)
+SPEC FILE VERDICT: ... outcome=ERROR declared>=6 executed=6 passed=1 failed=5
+```
+
+### Fixed (pure Simple)
+
+`CapabilityTable.authenticate` was `self.authenticate_principal(...).?`. On the
+**rejection** path `.?` yields the Optional's own nil rather than `false`, and
+the `-> bool` contract then refuses it. The practical effect is the security-
+relevant one: presenting a WRONG credential raised a semantic error instead of
+returning `false`. Replaced with an explicit `match` on `Some(_)` / `nil`.
+GREEN for the two deny-path examples; `passed=1 -> passed=3`.
+
+### Not fixed — isolated to the seed interpreter, not to this code
+
+The remaining three all reduce to one fact: **raw array storage pointers do not
+exist under `bin/simple test`.** Measured directly —
+
+```
+PTR=0                                          # rt_array_data_ptr([1,2,3,4])
+SLOTS=4 OVER=0 RESID=4 VERIFIED=false          # secure_zero_i64_slots on the same array
+```
+
+`rt_array_data_ptr` is registered in the interpreter but answers 0 (interpreter
+arrays are not raw-backed), and `rt_array_data_ptr_text` — its element-agnostic
+alias, present in BOTH runtimes (`src/runtime/runtime_native.c:7895`,
+`src/compiler_rust/runtime/src/value/collections.rs:1022`) — is not registered
+in the interpreter at all, hence `unknown extern function`.
+
+Consequence for the byte path: `_secure_zero_slots` fails closed on a 0 pointer,
+so `SecureZeroReport.verified()` is false, so `sha256_u8_hex_zeroizing` returns
+nil, so `register_authenticated_bytes` refuses and returns false. The digest
+itself is correct — computed the plain way it is byte-identical to the text path
+(`917dba90d38acdbee8da9fddb847682496d5b7a495a6de98aa181e9b07f1993a` from both),
+confirming this record's load-bearing interchangeability claim. The failure is
+the zeroization PRECONDITION, not the hash.
+
+This is correct fail-closed behaviour, not a second bug: the interpreter cannot
+prove a wipe it cannot address. It does mean the byte registration path is
+unusable under `bin/simple test` and this spec can only go fully green on a
+native/JIT lane, or after `rt_array_data_ptr_text` is registered in the
+interpreter and interpreter arrays expose real storage. Registering the extern
+is a `src/compiler_rust` change, outside this pass's pure-Simple scope.
