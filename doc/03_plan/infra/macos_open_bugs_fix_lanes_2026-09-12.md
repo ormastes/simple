@@ -71,3 +71,21 @@ Verify: `bin/simple test` on the sosix file_driver spec.
 
 ## Unclassified
 None — all 18 bugs + 1 todo assigned above.
+
+## PR status (2026-09-12, all 6 lanes landed)
+
+All six lanes shipped via separate PRs, each confirmed `MERGED` same day via
+`gh pr view <n> --json state,mergedAt`:
+
+| lane | PR | title | status |
+|---|---|---|---|
+| Lane 1 (bootstrap crash/blocker chain) | #587 | fix(bootstrap): retire the bare stage-binary paths, ratchet against their return, and re-audit the macOS Lane-1 records | merged |
+| Lane 2 (C runtime + push-gate portability) | #599 | fix(check): blocking push gate died with a shell trace and no verdict; verify 5 macOS lane-2 items (3 RESOLVED, 1 corrected) | merged — 3 items RESOLVED, 1 corrected; not a clean sweep of all 4, read the PR body for per-item detail |
+| Lane 3 (test runner on mac) | #594 | fix(test-runner): calibration gate for load-only simple test on macOS; honour --no-limits in safe mode | merged |
+| Lane 4 (GUI/Vulkan mac runtime faults) | #591 | fix(macos): GUI launcher SIGPIPE + winit gate; Vulkan-2D C-compare leg admitted on MoltenVK; vk2d parity | merged |
+| Lane 5 (CI/admission/docgen) | #588 | docs(infra): re-verify Lane 5 macOS CI/admission/docgen bug records | merged — a re-verification pass; read individual bug records for per-item resolved/still-blocked status |
+| Lane 6 (evidence/docs + sosix TODO) | #584 | docs(mac): lane 6 — wm_metal_glass evidence + sosix macOS provider verification | merged |
+
+Per-item fixed/blocked detail lives in the `doc/08_tracking/bug/*.md` records
+each PR touched, not duplicated here — this table only pins the lane-to-PR
+mapping and merge state.
