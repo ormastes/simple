@@ -175,9 +175,16 @@ entered a counted interpreter site, so a fast path ran" — no longer holds for
 the one-arg helper, two-arg helper and inline-expression matchers: they now bump
 `WHILE_INLINE_INT_ITERS` and therefore DO emit a block, carrying the iteration
 count they accelerated. That is strictly better (a number instead of an absence),
-but it changes the recipe. **The other sixteen `try_exec_*_while_loop` matchers
-still emit nothing**, so for those the old detector still applies. Bumping the
-counter in all nineteen is straightforward and is left as follow-up.
+but it changes the recipe. **The other eight of `exec_while`'s eleven
+`try_exec_*_while_loop` matchers still emit nothing**, so for those the old
+detector still applies. Bumping the counter in all eleven is straightforward and
+is left as follow-up.
+
+(Correction to `dcefd416d0a`'s commit message, which said "the other sixteen"
+and "all nineteen": 19 is the count of `let mut iterations = 0u64;` sites
+file-wide, which includes fast paths that are not while-loop matchers. The
+while-loop matcher count is **eleven** — `grep -c '^fn try_exec_.*_while_loop'`
+— of which three now bump the counter.)
 
 ### Suites, before -> after (base seed vs candidate seed, same host)
 
