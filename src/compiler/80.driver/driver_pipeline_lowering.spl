@@ -338,7 +338,29 @@ impl CompilerDriver:
             # (native_build_entry_struct_construction_buildfail_2026-07-20).
             # Guard: test/03_system/native/struct_construct_native.spl.
             var direct_lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
-            if not allow_bootstrap_shortcuts:
+            # Ambient bootstrap MIR semantics (MirLowering.ambient_bootstrap_enabled
+            # = allow_ambient_bootstrap_policy and SIMPLE_BOOTSTRAP == "1") send
+            # every module through lower_module's bootstrap-FLAT function loop.
+            # That loop reads `module.functions.keys()` and re-finds each entry
+            # through `hir_module_function`, which returns an `is_extern: true`
+            # placeholder on a miss -- so a module it cannot re-find contributes
+            # ZERO functions and the AOT backend reports "MIR module has no
+            # functions". SIMPLE_BOOTSTRAP=1 is not on its own enough to enter
+            # that path: the Stage-2 admission probe sets it while building
+            # hello_world.spl positionally (allow_bootstrap_shortcuts = true).
+            # Measured 2026-09-13 on the Stage-2 binary carrying the two sibling
+            # fixes, identical scrubbed environment, SIMPLE_BOOTSTRAP the only
+            # variable changed: with 0 the trace shows `[mir-lower]
+            # lower_function:start main` and the build succeeds; with 1 it shows
+            # `[mir-lower] function-loaded` followed straight by
+            # `lower_module:done` -- `main` skipped as extern -- and the build
+            # fails. Require that the bootstrap CLI really is part of this
+            # compile, the same predicate and the same ctx.sources identity the
+            # fixed-entry gate above and driver_aot_pipeline.spl's AOT dispatch
+            # already apply. Deliberately duplicated rather than shared:
+            # CompileContext lives in the fenced driver_types.spl. All three
+            # sites must move together.
+            if not (allow_bootstrap_shortcuts and bootstrap_entry_requested):
                 direct_lowering.use_explicit_semantic_policy()
             direct_lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
             # Crossmodule field-index prepass: the entry module is lowered
