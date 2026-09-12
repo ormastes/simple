@@ -307,3 +307,126 @@ budget of this lane. F45's single-entry probes do not reproduce it, and a
 single-entry probe built against a stale Stage 1 snapshot fails earlier for an
 unrelated reason (`unknown extern rt_env_vars`), so it is not a shortcut. The
 next session should bisect from the reproducer above rather than re-derive it.
+
+## 2026-09-13 — ROOT CAUSE NAMED: wrong field OFFSET (0 instead of 24), emitted by the RUST SEED
+
+Two premises this record and the task framing carried are **wrong**, and they
+matter for who owns the fix.
+
+**1. "Stage 1 is a self-hosted compiler" is false.** `stage2_seed_absolute`
+(`scripts/bootstrap/bootstrap-from-scratch.sh:2732`) resolves to
+`${stage2_runtime_authority}/simple`, and that binary self-identifies as
+`WARNING: this Rust-built Simple binary is a bootstrap seed only`. Stage 2 is
+built **by the Rust seed**, with `SIMPLE_NATIVE_BUILD_RUST=1` in its env block
+(`:2795`). Per `src/compiler_rust/driver/src/cli/native_build.rs:583-587`, that
+env var is exactly what routes `native-build` to the **Rust** pipeline —
+"plain `bin/simple native-build` runs the pure-Simple driver instead". So no
+line of `src/compiler/**` emitted the Stage-2 machine code, and
+`src/compiler/60.codegen` cannot be the fix site.
+
+**2. `interface_digest_of` is ruled out.** It has zero call sites
+(`.claude/rules/commands.md`), so there is no interface digest to be stale.
+
+### The defect, in instructions
+
+Producer — `FileFingerprint.from_file` in the biting Stage-2 binary
+(`objdump -d --disassemble-symbols=_compiler__driver__driver_build__incremental__FileFingerprint.from_file`):
+
+```
+bl   _rt_file_size
+mov  x21, x0
+mov  w0, #0x20            ; 32-byte struct, 4 slots
+bl   _rt_alloc
+stp  x19, x20, [x0]       ; path@0, content_hash@8
+stp  xzr, x21, [x8,#0x10] ; modified_time@16, size@24   <-- CORRECT
+orr  x2, x8, #0x1         ; low-bit tag the struct ptr
+b    _rt_enum_new         ; Some(payload)
+```
+
+The producer is correct: `size` is at byte offset **24**.
+
+Consumer — `driver_native_capsule_result_reason_v1`, the `if val fp = object_fp:
+... fp.size` site (`driver_aot_native_output.spl:983-986`):
+
+```
+bl   _rt_unwrap_or_self
+and  x24, x0, #0xfffffffffffffff8   ; untag
+ldr  x0, [x24]                       ; byte offset 0  <-- WRONG: reads `path`
+bl   _compiler__driver__driver_aot_native_output__driver_native_capsule_receipt_size_canary_v1
+```
+
+**`fp.size` is compiled as a load at offset 0, which is `path` — a `text` heap
+pointer.** That is the whole diagnosis. It explains every observation in this
+record: the value has the `0x8_…`/`0xB_…` tagged-heap shape; it is unstable
+across calls because `path` is freshly allocated each time; `content_hash`
+(offset 8) survived because its own read used a different, correct offset; and
+`runtime=632` from `rt_file_size` is stable and right.
+
+**"A fresh box per read" is NOT what happens and should not be repeated.** There
+is no box. It is a fixed load at the wrong offset returning a string pointer.
+
+### Not the shape — the CLOSURE
+
+Same source, same compiler binary, same `--mode dynload --entry-closure
+--source src/compiler --source src/app --source src/lib`, same
+`SIMPLE_NATIVE_BUILD_RUST=1`: a 58-unit entry that calls the real
+`FileFingerprint.from_file` and reads `fp.size` compiles to
+
+```
+and  x26, x0, #0xfffffffffffffff8
+ldr  x0, [x26, #0x18]     ; byte offset 24 -- CORRECT
+```
+
+and prints `632`. The 834-unit Stage-2 closure compiles the identical construct
+to offset 0. The defect is **closure-size / global-scope dependent**, not
+shape-dependent.
+
+### Where it goes wrong in the seed
+
+`src/compiler_rust/compiler/src/hir/lower/expr/access.rs` resolves a field
+access to a `field_index`. Line **252** is the precise, receiver-typed path
+(silent, and what the 58-unit build takes — `SIMPLE_TRACE_FIELD_GET=1` emits
+nothing for it). Lines **339 / 369 / 404 / 435** are **name-keyed fallbacks**
+used when the receiver's struct type is not known, ending at
+`NKM-LOCALBEST` (:435), which picks *the struct with the most fields that has a
+field of this name* — a heuristic that ignores the receiver entirely. In an
+834-unit closure many structs declare `size`, so this returns some other
+struct's index. The two trace channels that name it:
+`SIMPLE_TRACE_FIELD_GET=1` (`[FT2] <BRANCH>/<field> struct=<S> idx=<n> in <file>`)
+and `SIMPLE_DEBUG_FIELD_FAIL=1`.
+
+**Owner: `src/compiler_rust` (the seed). Not `src/compiler/**`.** No
+pure-Simple change can fix this; the source it miscompiles is already correct.
+
+### 5-second witness (no bootstrap needed)
+
+```
+env SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_RUNTIME_PATH=<stage2-runtime-authority> SIMPLE_BINARY=<stage2> \
+  <stage2-binary> native-build scripts/check/cert/redeploy_gate/fixtures/hello_world.spl \
+    --target aarch64-apple-darwin --runtime-bundle core-c-bootstrap \
+    --cache-dir <tmp> --runtime-path <stage2-runtime-authority> -o <tmp>/hello
+```
+
+`SIMPLE_PACKAGE_INDEX_COLD_INIT=1` is required or it dies at `load_sources`
+with `scv-authority-missing` before reaching the canary. Measured on the run-10
+`simple.rejected`: `[receipt-size-canary] ... field=46297340801:runtime=632`
+three times, then the link-nil failure. ~5 s.
+
+### Reproducer shape table (all built with the Rust seed, `--mode dynload
+`--entry-closure`, `SIMPLE_NATIVE_BUILD_RUST=1`)
+
+| # | shape | units | result |
+|---|---|---|---|
+| 1 | same-unit `class` + Optional bind, `.size` | 3 | PASS 632 |
+| 2 | cross-unit `class`, non-optional return | 3 | PASS 632 |
+| 3 | cross-unit `class` via Optional bind | 3 | PASS 632 |
+| 4 | cross-unit `Result<(text,i32),text>`, `t[0]` in `match Ok(t)` | 3 | PASS |
+| 5 | same-unit `struct` + Optional bind | 3 | PASS 632 |
+| 6 | cross-unit `struct` + `static fn ... -> S?` + extern-derived `i64` | 3 | PASS 632 |
+| 7 | REAL `FileFingerprint.from_file`, plain `if val fp =` bind | 58 | PASS 632 (`ldr [x,#0x18]`) |
+| 8 | REAL `FileFingerprint`, `if not fp.?:` guard then bind (the real code's shape) | 58 | PASS 632 |
+| 9 | the real Stage-2 closure | 834 | **FAIL — `ldr [x]`, offset 0** |
+
+Shape alone never bites. Only the full closure does, which is consistent with
+the name-keyed fallback above.

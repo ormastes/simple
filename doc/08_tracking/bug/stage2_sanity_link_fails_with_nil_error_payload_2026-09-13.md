@@ -190,3 +190,33 @@ codegen; the tuple element did not. `darwin_link_tool_unresolved_error` now prin
 literal line first and each value BARE on its own line, so a future nil localises
 instead of erasing the whole diagnostic. Regression spec:
 `test/01_unit/compiler/native/linker_resolution_no_tuple_spec.spl`.
+
+## 2026-09-13 — relationship to the receipt-size defect: RELATED FAMILY, NOT PROVEN IDENTICAL
+
+The sibling record
+`stage2_sanity_native_capsule_receipt_content_mismatch_2026-09-13.md` now has
+the receipt-size defect named at instruction level: `fp.size` on an
+optional-bound struct compiles to a load at **byte offset 0** (`ldr x0, [x24]`)
+instead of 24, so it returns the struct's `path` text pointer. The resolution
+site is name-keyed field lookup in the **Rust seed**
+(`src/compiler_rust/compiler/src/hir/lower/expr/access.rs`, fallbacks at
+:339/:369/:404/:435), reached only when the receiver's struct type is unknown;
+it bites at 834 units and not at 58.
+
+`linker_info[0]` is a **tuple element index**, not a named field, so it does not
+travel through that by-name resolution path and the two are **not proven to be
+one defect**. What they share is the family — a payload behind a wrapper
+(`Optional` / `Result`) read at the wrong offset once the payload's type is lost
+— but the tuple case needs its own instruction-level evidence before anyone
+merges the two.
+
+Also corrected here, because this record's framing assumed otherwise: **Stage 2
+is built by the RUST SEED**, not by a self-hosted Stage 1
+(`bootstrap-from-scratch.sh:2732` + `SIMPLE_NATIVE_BUILD_RUST=1` at :2795, which
+`src/compiler_rust/driver/src/cli/native_build.rs:583-587` documents as the
+switch into the Rust pipeline). Both defects are therefore owned by
+`src/compiler_rust`, and PR #717's source-level workaround (dropping the tuple)
+is a workaround, not a fix.
+
+A 5-second witness for both (no bootstrap) is recorded in the sibling file; the
+key missing knob was `SIMPLE_PACKAGE_INDEX_COLD_INIT=1`.
