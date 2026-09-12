@@ -1,6 +1,25 @@
 # A `(text, text)` tuple return reaches the caller as `nil` in a stage-2 native binary (2026-09-13)
 
-Status: OPEN. Worked around in the linker wrapper; the compiler defect is not fixed.
+Status: **UNCONFIRMED — probably a misattribution. Do not chase without a minimal
+native reproduction.** Corrected 2026-09-13, same day it was filed, by its own next run.
+
+Run 7 removed the tuple and reproduced the *identical* `Linking failed: nil`. More
+decisively, run 7's frontend failure log contains zero `[linker-wrapper]` lines, and
+`darwin_link_tool_unresolved_error` now prints unconditionally — so the error builder
+was never reached in run 7, and nothing on that path differs between runs 6 and 7, so it
+was very likely never reached in run 6 either. The `nil` predates the tuple and survives
+its removal. The tuple was the thing that had just been written, not the thing that
+failed; this record blamed it on that basis alone and never established that the quoted
+code executed.
+
+What remains true and worth keeping: the resolver on the darwin link path returns plain
+`text` rather than a tuple, and the error builder prints as well as returns. Both are
+cheap and make the channel harder to lose a message in, so neither is being reverted —
+but neither is evidence of a tuple defect. The live blocker is
+`doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md`.
+
+Historical text follows, retained so the reasoning that produced the misattribution
+stays visible.
 
 ## What was observed
 
