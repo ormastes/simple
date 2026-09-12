@@ -25,13 +25,14 @@ intended. The workaround used in that spec is to collect offenders in a helper
 and assert `expect(offenders.len()).to_equal(0)`, which loses the offending
 line from the failure message.
 
-## Note
+## What the workaround costs
 
-A second, unrelated observation from the same file, recorded here rather than
-lost: building the offender list with `var offenders: [text] = []` and
-`offenders.push(...)` INSIDE the `it` block did not accumulate — the same code
-in a top-level `fn` does. Not reduced to a minimal case; worth confirming
-before relying on array mutation inside a spec example body.
+The workaround used in that spec is a top-level helper that collects the
+offending lines and `expect(offenders.len()).to_equal(0)`. Verified to
+discriminate: adding one `use std.io.{file_exists}` back to the fixed
+`src/lib/nogc_async_mut/cli/cli_util.spl` turns the example red with
+`expected 1 to equal 0`. What is lost is the offending line itself — the
+message names a count, not the import that broke the rule.
 
 ## Suggested fix
 

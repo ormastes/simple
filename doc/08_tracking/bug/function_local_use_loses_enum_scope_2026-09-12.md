@@ -35,7 +35,7 @@ to the interpreter (expect ~100-1000x slowdown).
 
 That is a second defect, not the cause of the first. Discriminator: the
 UNMODIFIED entry (top-level `use`) run on the interpreter lane —
-`SIMPLE_EXECUTION_MODE=interpret bin/simple lint .perf2/hello.spl` — exits 0
+`SIMPLE_EXECUTION_MODE=interpret bin/simple lint hello.spl` — exits 0
 with `Lint passed: all files clean`. So the interpreter lane runs lint fine; the
 scope loss comes from the function-local import itself.
 
