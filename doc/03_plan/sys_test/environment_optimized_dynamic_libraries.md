@@ -86,9 +86,21 @@ encoder, mapped-callable result, and scalar oracle must be joined to the exact
 artifact inspection receipt before any parser promotion.
 
 Current GPU unit evidence covers exact provider/program/image/device/lease
-correlation and preserves `gpu_finished`, `completed`, and `retired` as separate
-states. It does not satisfy step 6: installed backends still lack the uniform
-submission/fence/timestamp/retirement authority required for real-device proof.
+correlation, native provider/resource/completion projection contracts and a
+fail-closed bridge consumer. The task-owner consumer is source-wired but does
+not have an executed SSpec receipt. Existing owner tests preserve
+`gpu_finished`, `completed`, and `retired` as separate states. This evidence
+does not satisfy the GPU production row: the device-image projection
+deliberately issues zero authority words, and installed backends still lack the
+uniform image-bound submission/fence/timestamp/retirement evidence required for
+real-device proof.
+
+The host-only substrate check
+`scripts/check/check-gpu-provider-abi-lifetime-v1.shs` separately covers sealed
+provider admission, owner-issued session/resource/completion capabilities,
+retained-unload rejection, exact-once terminal wait, staged checksum readback,
+and ordered retirement. That mock-provider evidence is not physical parser
+execution and cannot enable the frontend GPU flag.
 
 ## Completion rule
 

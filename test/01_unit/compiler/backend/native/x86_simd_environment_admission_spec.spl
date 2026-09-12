@@ -13,6 +13,8 @@ use std.spec.step
 use compiler.types.simd_capabilities.{
     X86SimdEligibilityV1,
     x86_simd_eligibility_from_raw,
+    x86_avx512_os_state_usable_from_raw,
+    x86_host_state_may_authorize_output,
     x86_avx_eligible,
     x86_avx2_eligible,
     x86_avx512f_eligible,
@@ -32,9 +34,9 @@ use compiler.backend.native.native_avx512_capability.{
 }
 
 fn full_eligibility() -> X86SimdEligibilityV1:
-    # CPUID.1 ECX: OSXSAVE + AVX; CPUID.7.0 EBX: AVX2/F/DQ/BW/VL.
+    # CPUID.1 ECX: XSAVE + OSXSAVE + AVX; CPUID.7.0 EBX: AVX2/F/DQ/BW/VL.
     x86_simd_eligibility_from_raw(
-        (1 << 27) + (1 << 28),
+        (1 << 26) + (1 << 27) + (1 << 28),
         (1 << 5) + (1 << 16) + (1 << 17) + (1 << 30) + (1 << 31),
         0xE6)
 
@@ -48,10 +50,24 @@ describe "x86 SIMD environment admission" :
         expect(x86_avx512bw_eligible(full)).to_be(true)
 
         step("Remove each CPU or OS prerequisite one at a time")
-        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw(1 << 28, (1 << 5) + (1 << 16), 0xE6))).to_be(false)
-        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw(1 << 27, (1 << 5) + (1 << 16), 0xE6))).to_be(false)
-        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 27) + (1 << 28), (1 << 5) + (1 << 16), 0x6))).to_be(false)
-        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 27) + (1 << 28), (1 << 5), 0xE6))).to_be(false)
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 27) + (1 << 28), (1 << 5) + (1 << 16), 0xE6))).to_be(false)
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 26) + (1 << 28), (1 << 5) + (1 << 16), 0xE6))).to_be(false)
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 26) + (1 << 27), (1 << 5) + (1 << 16), 0xE6))).to_be(false)
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 26) + (1 << 27) + (1 << 28), (1 << 5) + (1 << 16), 0x6))).to_be(false)
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 26) + (1 << 27) + (1 << 28), (1 << 5), 0xE6))).to_be(false)
+
+        step("Require XSAVE, OSXSAVE, and every XCR0 register-state bit")
+        val all_state = (1 << 26) + (1 << 27)
+        expect(x86_avx512_os_state_usable_from_raw(all_state, 0xE6)).to_be(true)
+        expect(x86_avx512_os_state_usable_from_raw(1 << 27, 0xE6)).to_be(false)
+        expect(x86_avx512_os_state_usable_from_raw(1 << 26, 0xE6)).to_be(false)
+        for xcr0 in [0xE4, 0xE2, 0xC6, 0xA6, 0x66]:
+            expect(x86_avx512_os_state_usable_from_raw(all_state, xcr0)).to_be(false)
+
+        step("Keep host register-state evidence out of cross-target authorization")
+        expect(x86_host_state_may_authorize_output(true, true)).to_be(true)
+        expect(x86_host_state_may_authorize_output(false, true)).to_be(false)
+        expect(x86_host_state_may_authorize_output(true, false)).to_be(false)
 
     it "should preserve the x86 target gate across Linux Windows BSD and macOS":
         step("Derive target policy independently from the runtime capability record")
@@ -94,7 +110,7 @@ describe "x86 SIMD environment admission" :
     it "should admit FMA with AVX-512F while keeping BW as an operation-specific subset":
         step("Use the common floating-point admission record")
         val f_only = x86_simd_eligibility_from_raw(
-            (1 << 27) + (1 << 28), (1 << 16) + (1 << 17), 0xE6)
+            (1 << 26) + (1 << 27) + (1 << 28), (1 << 16) + (1 << 17), 0xE6)
         expect(x86_avx512f_eligible(f_only)).to_be(true)
         expect(x86_avx512bw_eligible(f_only)).to_be(false)
         # FMA uses AVX-512F; byte/word operations must require BW separately.

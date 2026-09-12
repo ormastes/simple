@@ -19,6 +19,12 @@ use compiler.common.driver_core_types.{
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.driver.driver_source_pipeline_loading.*
 use compiler.driver.driver_source_pipeline_parsing.*
+use compiler.common.structural_contracts.environment_variant_policy_collection_v1.{
+    EnvironmentVariantPolicyCollectionV1}
+use compiler.common.structural_contracts.environment_variant_policy_v1.{
+    environment_variant_policy_resolve_v1}
+use compiler.frontend.frontend_advisory_preprocess_port_v1.{
+    frontend_advisory_policy_from_environment_decision_v1}
 
 # Same slot layout as cli_native_build_add_bootstrap_input (compile_targets.spl):
 # the driver reads bootstrap_input_0..5 and bootstrap_input_count.
@@ -43,7 +49,27 @@ fn driver_options_add_bootstrap_input(options: CompileOptions, input_path: text)
 # Runs phase 1 (load sources) and phase 2 (parse) only. In shard mode phase 2
 # exits the process itself; if it returns, the shard simply did not own any
 # module, and the caller treats that as success (sharding is best-effort).
-fn driver_run_parse_shard(input_files: [text], low_memory: bool) -> bool:
+fn driver_parse_shard_apply_environment_variant_policy_v1(
+    driver: CompilerDriver, collection: EnvironmentVariantPolicyCollectionV1
+) -> bool:
+    val decision = match environment_variant_policy_resolve_v1(collection.policy_inputs):
+        case Ok(value): value
+        case Err(_): return false
+    driver.ctx.frontend_advisory_policy =
+        frontend_advisory_policy_from_environment_decision_v1(decision)
+    driver.ctx.environment_variant_policy_digest = decision.policy_digest
+    # Selected callable sessions are process-local and are never serialized to
+    # a parse shard. This child receives only the typed reference policy.
+    driver.ctx.environment_variant_frontend_owner_id = 0u64
+    driver.ctx.environment_variant_frontend_session_id = 0u64
+    driver.ctx.environment_variant_frontend_generation = 0u64
+    driver.ctx.environment_variant_frontend_cache_identity = decision.policy_digest
+    true
+
+fn _driver_run_parse_shard(
+    input_files: [text], low_memory: bool,
+    collection: EnvironmentVariantPolicyCollectionV1?
+) -> bool:
     var options = driver_core_compile_options_default()
     for input in input_files:
         options = driver_options_add_bootstrap_input(options, input)
@@ -58,8 +84,22 @@ fn driver_run_parse_shard(input_files: [text], low_memory: bool) -> bool:
         streaming_module_surfaces_owner: ModuleSurfacesByName.empty(),
         streaming_surface_owner_ready: false,
         streaming_entry_source_index_owner: -1)
+    match collection:
+        case Some(value):
+            if not driver_parse_shard_apply_environment_variant_policy_v1(driver, value):
+                return false
+        case None: ()
     val (loaded_ctx, load_ok) = driver.load_sources_impl()
     driver.ctx = loaded_ctx
     if not load_ok:
         return false
     driver.parse_all_committing_impl()
+
+fn driver_run_parse_shard(input_files: [text], low_memory: bool) -> bool:
+    _driver_run_parse_shard(input_files, low_memory, None)
+
+pub fn driver_run_parse_shard_with_environment_variant_policy_v1(
+    input_files: [text], low_memory: bool,
+    collection: EnvironmentVariantPolicyCollectionV1
+) -> bool:
+    _driver_run_parse_shard(input_files, low_memory, Some(collection))

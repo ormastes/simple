@@ -409,7 +409,41 @@ int64_t  rt_host_dynlib_close(int64_t handle);
 int64_t  rt_gpu_provider_loaded(int64_t backend_bit);
 int64_t  rt_gpu_provider_abi_version(int64_t backend_bit);
 int64_t  rt_gpu_provider_backend_bits(int64_t backend_bit);
+int64_t  rt_gpu_provider_capability_bits(int64_t backend_bit);
+int64_t  rt_gpu_provider_identity(int64_t backend_bit);
+int64_t  rt_gpu_provider_generation(int64_t backend_bit);
+int64_t  rt_gpu_provider_artifact_digest_word(int64_t backend_bit, int64_t word);
+/* Bounded thread-local copy; valid until the next path query on this thread. */
 const char* rt_gpu_provider_path(int64_t backend_bit);
+/* Returns 0 while pinned calls are draining; retry to perform the close. */
+int64_t  rt_gpu_provider_unload(int64_t backend_bit);
+int64_t  rt_gpu_provider_session_open(int64_t backend_bit, int64_t device);
+int64_t  rt_gpu_provider_session_close(int64_t backend_bit, int64_t session);
+int64_t  rt_gpu_provider_resource_alloc(int64_t backend_bit, int64_t session,
+        int64_t size_bytes, int64_t flags, int64_t usage_bits);
+int64_t  rt_gpu_provider_resource_release(int64_t backend_bit, int64_t session,
+        int64_t resource);
+int64_t  rt_gpu_provider_submit_raw(int64_t backend_bit, int64_t session,
+        int64_t resource, int64_t format, int64_t data, int64_t length,
+        int64_t correlation_id);
+int64_t  rt_gpu_provider_wait_raw(int64_t backend_bit, int64_t session,
+        int64_t completion, int64_t timeout_ns, int64_t receipt_ptr);
+int64_t  rt_gpu_provider_readback_raw(int64_t backend_bit, int64_t session,
+        int64_t resource, int64_t bytes_ptr);
+int64_t  rt_gpu_provider_completion_release(int64_t backend_bit, int64_t session,
+        int64_t completion);
+int64_t  rt_gpu_provider_quarantine_drain(int64_t backend_bit);
+int64_t  rt_gpu_provider_session_authority_word(int64_t backend_bit,
+        int64_t session, int64_t word);
+int64_t  rt_gpu_provider_resource_authority_word(int64_t backend_bit,
+        int64_t session, int64_t resource, int64_t word);
+int64_t  rt_gpu_provider_completion_authority_word(int64_t backend_bit,
+        int64_t session, int64_t completion, int64_t word);
+/* Reserved typed projection for a future runtime-owned, exact-byte device
+ * image lease. Returns zero until an authenticated image owner is installed. */
+int64_t  rt_gpu_provider_device_image_authority_word(int64_t backend_bit,
+        int64_t session, int64_t image, int64_t word);
+int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
@@ -1792,6 +1826,7 @@ void     simd_text_init(void);
 bool     rt_simd_has_sse(void);
 bool     rt_simd_has_avx(void);
 bool     rt_simd_has_avx2(void);
+bool     rt_x86_avx512_os_state_usable(void);
 bool     rt_simd_has_neon(void);
 bool     rt_simd_has_rvv(void);
 
