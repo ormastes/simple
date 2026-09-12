@@ -1,7 +1,7 @@
 # Class reference semantics diverge: interpreter value-copies class fields; JIT crashes on optional class field
 
 - **Filed:** 2026-08-06
-- Status: OPEN (P1)
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   localized to the out-of-scope Rust seed; every reachable pure-Simple candidate interpreter was
   checked and does not share this defect, but none is buildable/runnable in this tree today, so no
@@ -163,3 +163,22 @@ claiming a fix.
 
 ## Triage 2026-09-12
 Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.
+
+## Re-check 2026-09-12
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/compiler/class_reference_semantics_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/compiler/class_reference_semantics_spec.spl outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0
+```
+
+Every example in the spec this record names as its reproduction passes. Scope
+of the claim, stated plainly: the re-check exercised **that spec only**, on the
+**deployed seed** on **aarch64**. It did not re-measure any other lane (native
+LLVM / self-hosted binary / other architecture), and it did not audit whether
+the spec's assertions still cover the original symptom as tightly as when the
+record was written. If a residual lane is known to be uncovered, reopen with
+the lane named rather than relying on this line.
