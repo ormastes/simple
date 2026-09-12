@@ -883,16 +883,54 @@ pub fn driver_native_capsule_result_reason_v1(
         return "receipt-missing:{receipt_path}"
     val object_fp = FileFingerprint.from_file(capsule.object_path)
     if not object_fp.?: return "object-fingerprint-failed:{capsule.object_path}"
-    var expected = ""
-    if val fp = object_fp:
-        expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
+    # The binding is ANNOTATED, and `!` is used instead of `if val fp = ...`,
+    # deliberately. Under native codegen an `if val` binding of an Optional
+    # returned by a CROSS-MODULE function loses the struct type, and a later
+    # `.size` is then resolved by FIELD NAME against a global index instead of
+    # this struct's layout. `FileFingerprint.size` is field 3, but the first
+    # `size` field registered in the build (e.g. `TypeLayout.size`) is field 0,
+    # so the read returned offset 0 -- the `path` text POINTER -- rendered as a
+    # decimal. Measured 2026-09-12: the same expression yielded 732750049 /
+    # 383756385 / 920329169 on different runs of an 1080-byte object, on BOTH
+    # the write and verify sides, producing an equal-length
+    # `receipt-content-mismatch:expected-bytes=1572:actual-bytes=1572`.
+    # `content_hash` is field 1 and happens to collide with nothing, which is
+    # why only the size was wrong. Do not "simplify" this back to `if val`.
+    # Compiler bug: doc/08_tracking/bug/
+    # native_optional_unwrap_field_index_by_name_collision_2026-09-12.md
+    val fp: FileFingerprint = object_fp!
+    val expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
     val actual = _sffi_file_read_text(receipt_path) ?? ""
     if actual != expected:
         # Report LENGTHS, not the two blobs: the receipt is ~1.3 KB and the
         # difference is what matters. A length pair that is equal while the texts
         # differ localises the mismatch to content; an unequal pair localises it
         # to truncation on read.
-        return "receipt-content-mismatch:expected-bytes={expected.len()}:actual-bytes={actual.len()}"
+        #
+        # ALSO name the first differing LINE and its two lengths. The byte
+        # counts alone cannot localise an equal-length mismatch: on 2026-09-12
+        # a garbage `fp.size` rendered 9 digits on BOTH sides, so the verdict
+        # read `expected-bytes=1572:actual-bytes=1572` and said nothing about
+        # WHICH of the four fields diverged. This adds no blob content and
+        # relaxes nothing -- the comparison above is still full-text equality.
+        val expected_lines = expected.split("\n")
+        val actual_lines = actual.split("\n")
+        var compared = expected_lines.len()
+        if actual_lines.len() < compared:
+            compared = actual_lines.len()
+        var differing = 0 - 1
+        var probe = 0
+        while probe < compared:
+            if differing < 0 and expected_lines[probe] != actual_lines[probe]:
+                differing = probe
+            probe = probe + 1
+        var where = "first-differing-line=none"
+        if differing >= 0:
+            val line_number = differing + 1
+            val expected_line_bytes = expected_lines[differing].len()
+            val actual_line_bytes = actual_lines[differing].len()
+            where = "first-differing-line={line_number}:expected-line-bytes={expected_line_bytes}:actual-line-bytes={actual_line_bytes}"
+        return "receipt-content-mismatch:expected-bytes={expected.len()}:actual-bytes={actual.len()}:{where}"
     ""
 
 pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
@@ -2218,9 +2256,12 @@ fn _compile_frozen_module_capsule(
             if not object_fp.?:
                 return _aot_compile_failure(name, "capsule-object-fingerprint-failed")
             val receipt_path = capsule.object_path + ".capsule-receipt"
-            var receipt = ""
-            if val fp = object_fp:
-                receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
+            # Annotated binding, same reason as the verifier's in
+            # `driver_native_capsule_result_reason_v1` -- an `if val` binding of
+            # a cross-module Optional loses the struct type and resolves
+            # `.size` by field NAME, writing a heap pointer into the receipt.
+            val fp: FileFingerprint = object_fp!
+            val receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
             if not _sffi_file_write_text(receipt_path, receipt):
                 return _aot_compile_failure(name, "capsule-receipt-write-failed")
             # Do not trust the write's own bool. A `file_write_text` name

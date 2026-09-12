@@ -6,6 +6,7 @@ use compiler.mir.mir_data.{MirModule}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint}
 use compiler.driver.driver_aot_native_output.{
     driver_native_capsule_result_valid_v1,
+    driver_native_capsule_result_reason_v1,
     driver_native_collect_capsule_result_v1,
     driver_native_capsule_inputs_valid_v1
 }
@@ -68,5 +69,31 @@ describe "native capsule result receipt":
                 ]:
                     _ = file_write(capsule.object_path + ".capsule-receipt", bad)
                     assert_false(driver_native_capsule_result_valid_v1(capsule))
+                _ = file_delete(capsule.object_path + ".capsule-receipt")
+                _ = file_delete(capsule.object_path)
+
+    it "names the first differing receipt line when the byte counts match":
+        # Regression pin for the 2026-09-12 Stage-2 blocker: a wrong `size`
+        # field that happens to render the SAME number of characters made the
+        # verdict read `expected-bytes=N:actual-bytes=N`, which localises
+        # nothing. The reason string must name WHICH line diverged. This only
+        # adds diagnosis -- the comparison itself is still full-text equality,
+        # so a receipt that differs anywhere is still rejected.
+        val batch = receipt_fixture()
+        if batch.ok:
+            val capsule = batch.find("receipt")
+            if capsule.ok:
+                _ = file_write(capsule.object_path, "object-v1")
+                val fingerprint = FileFingerprint.from_file(capsule.object_path)
+                if val fp = fingerprint:
+                    # Same character count as the true size (9 -> 8), so the
+                    # two receipts are byte-for-byte the same LENGTH.
+                    val skewed = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n8\n{fp.content_hash}\n"
+                    _ = file_write(capsule.object_path + ".capsule-receipt", skewed)
+                    val reason = driver_native_capsule_result_reason_v1(capsule)
+                    assert_true(reason.contains("receipt-content-mismatch"))
+                    assert_true(reason.contains("expected-bytes=") and
+                        reason.contains("actual-bytes="))
+                    assert_true(reason.contains("first-differing-line=4"))
                 _ = file_delete(capsule.object_path + ".capsule-receipt")
                 _ = file_delete(capsule.object_path)
