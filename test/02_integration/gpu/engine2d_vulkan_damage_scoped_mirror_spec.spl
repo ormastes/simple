@@ -88,6 +88,58 @@ describe "A partial frame refreshes exactly its damage rect":
                 expect(frame.pixels[0]).to_equal(0xFF445566u32)
                 expect(frame.pixels[W * H - 1]).to_equal(0xFF445566u32)
 
+    it "generalize: a damage-scoped frame's present receipt matches the full route's":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val b = VulkanBackend.create()
+            if not b.init(W, H):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                b.clear(BG)
+                b.read_pixels_with_source()
+                b.present()
+                val baseline_full = b.present_full_readback_count
+                b.draw_rect_filled(20, 30, 10, 10, FG)
+                b.read_pixels_with_source()
+                b.present()
+                # The damage arm must NOT clear `dirty`: that would send
+                # present() down its "not dirty" noop arm, whose receipt claims
+                # no readback happened at all on a frame that really did read
+                # back. Both flags stay true and no extra full download occurs.
+                val receipt = b.latest_frame_receipt()
+                expect(receipt.readback_completed).to_equal(true)
+                expect(receipt.host_cache_refresh_completed).to_equal(true)
+                expect(b.present_full_readback_count).to_equal(baseline_full)
+
+    it "contract: patching the mirror in place does NOT write through a handed-out readback":
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val b = VulkanBackend.create()
+            if not b.init(W, H):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                b.clear(BG)
+                val seed = b.read_pixels_with_source()
+                expect(seed.pixels[30 * W + 20]).to_equal(BG)
+                b.present()
+                b.draw_rect_filled(20, 30, 10, 10, FG)
+                val frame = b.read_pixels_with_source()
+                expect(frame.pixels[30 * W + 20]).to_equal(FG)
+                # The damage route is the FIRST path that writes into
+                # `self.host_buf` in place rather than rebinding a fresh array,
+                # so it is the first that could write through into pixels an
+                # earlier readback already handed out -- the exact hazard F8's
+                # readback spec pins ("no write-through into a handed-out
+                # readback array"), which its own examples never reach on this
+                # route. Measured here: the earlier handout is NOT disturbed,
+                # so a caller retaining readback pixels across frames (e.g.
+                # `state.validated_pixels` in simple_web_layout_engine2d_fast)
+                # still compares against what it was actually given.
+                expect(seed.pixels[30 * W + 20]).to_equal(BG)
+                expect(seed.pixels[0]).to_equal(BG)
+
     it "generalize: a frame with zero draws copies nothing":
         if not vulkan_available():
             skip("no Vulkan ICD on this host")

@@ -308,6 +308,11 @@ class VulkanBackend:
     # interpreted element writes spent patching the host mirror this frame.
     damage_rect_px: i64
     mirror_copy_iterations: i64
+    # What the readback that seeded the mirror actually transferred, carried
+    # across to present()'s dedup arm (which zeroes present_readback_bytes on
+    # entry) so the receipt describes the real download, not a nominal one.
+    readback_frame_bytes: i64
+    readback_frame_rects: i64
     # True when host_buf already holds THIS frame's device surface, so present()
     # must not download the whole framebuffer a second time. Set by the readback
     # that performed the download, cleared by every `dirty = true`. See
@@ -474,6 +479,8 @@ class VulkanBackend:
             pending_damage_hh: 0,
             damage_rect_px: 0,
             mirror_copy_iterations: 0,
+            readback_frame_bytes: 0,
+            readback_frame_rects: 0,
             host_mirror_frame_fresh: false,
             last_host_checksum: 0,
             present_readback_bytes: 0,
@@ -1863,15 +1870,44 @@ impl RenderBackend for VulkanBackend:
             expected_pixels += pixel_count
             total_rows += rh
             i += 4
-        val packed = vulkan_sffi_read_buffer_regions_bytes(
-            self.d_framebuffer, regions)
-        val packed_pixels = _bytes_to_pixel_array(
-            packed, expected_pixels.to_i32())
+        # Prefer the native per-row download used by `_refresh_host_frame_damage`:
+        # one call per damaged row, so the byte->u32 unpack never runs
+        # interpreted. `_bytes_to_pixel_array` below is that same unpack done
+        # one pixel at a time and is kept only as the fallback for lanes that
+        # do not offer the native arm.
+        var packed_pixels: [u32] = []
+        var native_rows = true
+        i = 0
+        while i < self.present_damage_rects.len():
+            val nx = self.present_damage_rects[i]
+            val ny = self.present_damage_rects[i + 1]
+            val nw = self.present_damage_rects[i + 2]
+            val nh = self.present_damage_rects[i + 3]
+            var nrow: i64 = 0
+            while nrow < nh and native_rows:
+                val src_px = (ny + nrow) * _i64(self.w) + nx
+                val band = vulkan_sffi_readback_u32_alloc(
+                    self.d_framebuffer, nw.to_i32(), src_px * 4)
+                if band.len().to_i64() != nw:
+                    native_rows = false
+                else:
+                    var bcol: i64 = 0
+                    while bcol < nw:
+                        packed_pixels.push(band[bcol])
+                        bcol = bcol + 1
+                nrow = nrow + 1
+            i += 4
+        if not native_rows or packed_pixels.len().to_i64() != expected_pixels:
+            val packed = vulkan_sffi_read_buffer_regions_bytes(
+                self.d_framebuffer, regions)
+            packed_pixels = _bytes_to_pixel_array(
+                packed, expected_pixels.to_i32())
         if packed_pixels.len().to_i64() != expected_pixels:
             self.last_error = "Vulkan damaged framebuffer readback byte count mismatch"
             return false
 
         var source_index: i64 = 0
+        var patched: i64 = 0
         i = 0
         while i < self.present_damage_rects.len():
             val x = self.present_damage_rects[i].to_i32()
@@ -1886,7 +1922,10 @@ impl RenderBackend for VulkanBackend:
                     source_index += 1
                     col += 1
                 row += 1
+            patched = patched + _i64(rw) * _i64(rh)
             i += 4
+        self.damage_rect_px = expected_pixels
+        self.mirror_copy_iterations = patched
         self.present_readback_bytes = expected_pixels * 4
         self.present_readback_rect_count = self.present_damage_rects.len().to_i64() / 4
         true
@@ -1925,13 +1964,23 @@ impl RenderBackend for VulkanBackend:
             # provenance stays satisfiable). The receipt fields below stay
             # truthful -- the mirror IS refreshed from the device for this
             # frame -- it is simply not downloaded twice.
-            self.present_readback_bytes = _i64(self.w) * _i64(self.h) * 4
-            self.present_readback_rect_count = 1
+            # Report what the readback ACTUALLY transferred. A damage-scoped
+            # readback moved only its rect, and overwriting that with the full
+            # surface size would make the receipt describe a download that did
+            # not happen.
+            if self.readback_frame_bytes > 0:
+                self.present_readback_bytes = self.readback_frame_bytes
+                self.present_readback_rect_count = self.readback_frame_rects
+            else:
+                self.present_readback_bytes = _i64(self.w) * _i64(self.h) * 4
+                self.present_readback_rect_count = 1
             self.frame_present_mode = "host-cache-from-readback"
             self.dirty = false
             self.frame_readback_completed = true
             self.frame_host_cache_refresh_completed = true
             self.host_mirror_frame_fresh = false
+            self.readback_frame_bytes = 0
+            self.readback_frame_rects = 0
             self._clear_present_damage()
             return
         if self.present_damage_valid and self.host_mirror_valid:
@@ -2005,9 +2054,14 @@ impl RenderBackend for VulkanBackend:
             # readback/present/readback spec pins that consumers treat a
             # readback as read-only), so no full-surface copy is needed.
             if self._refresh_host_frame_damage():
+                # Deliberately does NOT clear `dirty` or the frame union, so
+                # present() reaches the same `host_mirror_frame_fresh` dedup arm
+                # the full route reaches and the frame receipt stays identical
+                # for both routes. Clearing `dirty` here sent present() down its
+                # `not dirty` noop arm, whose receipt reports no readback at all.
                 self.host_mirror_frame_fresh = true
-                self._clear_frame_damage()
-                self.dirty = false
+                self.readback_frame_bytes = self.damage_rect_px * 4
+                self.readback_frame_rects = 1
                 if self.cpu_fallback_used:
                     return engine2d_readback(self.host_buf, "cpu_fallback")
                 return Engine2DReadback(
@@ -2046,6 +2100,8 @@ impl RenderBackend for VulkanBackend:
                 self.host_mirror_frame_fresh = true
                 # A full download re-establishes the whole surface.
                 self.damage_rect_px = _i64(self.w) * _i64(self.h)
+                self.readback_frame_bytes = self.damage_rect_px * 4
+                self.readback_frame_rects = 1
                 self._clear_frame_damage()
             if self.cpu_fallback_used:
                 return engine2d_readback(pixels, "cpu_fallback")
