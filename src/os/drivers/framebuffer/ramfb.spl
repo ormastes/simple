@@ -305,3 +305,49 @@ fn init_ramfb(arch: Architecture, fb_phys_addr: u64, width: u32, height: u32) ->
         pitch: pitch,
         bpp: 32
     )
+
+# ---------------------------------------------------------------------------
+# Firmware/scanout digest words
+#
+# `os.compositor.engine2d_render_evidence` imports both of these from this
+# module (line 17) and uses `FirmwareSha256` as a receipt field type, but
+# neither was ever declared here, so `simpleos_render_receipt` failed to
+# resolve for every caller.
+# Bug: doc/08_tracking/bug/engine2d_render_evidence_spec_missing_module_2026-08-08.md
+
+struct FirmwareSha256:
+    """A SHA-256 digest as four big-endian 64-bit words, word0 most significant."""
+    word0: u64
+    word1: u64
+    word2: u64
+    word3: u64
+
+fn _sha256_hex_nibble(byte: u8) -> i64:
+    """Value of one lower-case-or-upper-case hex digit, or -1."""
+    val code = byte.to_i64()
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 97 and code <= 102:
+        return code - 87
+    if code >= 65 and code <= 70:
+        return code - 55
+    -1
+
+fn parse_sha256_hex_words(hex_bytes: [u8]) -> FirmwareSha256?:
+    """Parse exactly 64 hex digits into four big-endian words; nil if malformed.
+
+    Byte-indexed and allocation-free on purpose: callers are kernel-side.
+    """
+    if hex_bytes.len() != 64:
+        return nil
+    var words: [u64] = [0u64, 0u64, 0u64, 0u64]
+    var index: i64 = 0
+    while index < 64:
+        val nibble = _sha256_hex_nibble(hex_bytes[index])
+        if nibble < 0:
+            return nil
+        val word_index = index / 16
+        words[word_index] = (words[word_index] << 4) | nibble.to_u64()
+        index = index + 1
+    Some(FirmwareSha256(
+        word0: words[0], word1: words[1], word2: words[2], word3: words[3]))
