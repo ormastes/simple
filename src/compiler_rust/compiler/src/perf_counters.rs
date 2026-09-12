@@ -59,6 +59,12 @@ counters!(
     // imported-module AST memo (hir::lower::import_loader::parsed_imported_module)
     IMPORT_AST_PARSES,
     IMPORT_AST_HITS,
+    // place-receiver mutation (`self.inner.xs.push(x)`, `rows[i].push(x)`,
+    // `self.d.insert(k, v)`, `arr[i].inc()`) — the in-place kernel in
+    // interpreter_helpers/patterns.rs::try_place_mutation_in_place.
+    PLACE_MUT_CALLS,
+    PLACE_MUT_COW_CLONES,
+    PLACE_MUT_COW_ELEMS_CLONED,
     // numbered-layer-directory memos (module_resolver::resolution)
     NUMBERED_DIR_MISSES,
     NUMBERED_DIR_HITS,

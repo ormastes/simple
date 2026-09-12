@@ -634,6 +634,22 @@ must_not_contain "LOADER28 env_value_nul_free must not slice"      "$LEXSTRUCT" 
 must_not_contain "LOADER28 token match must not slice per char"    "$LEXSTRUCT" "if chars[i] != value[i - start:i - start + 1]:"
 must_contain     "LOADER28 fingerprint memo per (len, path)"       "$AOTOUT" "var iface_memo: Dict<text, text> = {}"
 
+# --- PLACEMUT 2026-09-12: a mutating call through a nested place (self.inner.xs.push,
+# rows[i].push, self.d.insert, arr[i].inc(), self.inner.d[k] = v) evaluated the
+# receiver to a COPY and rebuilt the root, cloning the whole container per call
+# (ratios 8.5-25.6 at 4x n). Fix = one place-aware in-place kernel over
+# resolve_place + get_mut/make_mut per hop, wired from the statement and the
+# expression paths; 2-level index assignment mutates through the slot. Record:
+# doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md
+PATRS="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+PLACERS="$ROOT/src/compiler_rust/compiler/src/interpreter/place.rs"
+CALLSRS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/calls.rs"
+NODEXRS="$ROOT/src/compiler_rust/compiler/src/interpreter/node_exec.rs"
+must_contain     "PLACEMUT place-aware in-place kernel exists"    "$PATRS" "fn try_place_mutation_in_place("
+must_contain     "PLACEMUT slot walk uses make_mut per hop"        "$PLACERS" "fn place_slot_mut<"
+must_contain     "PLACEMUT expression path routes to the kernel"   "$CALLSRS" "patterns::try_place_mutation_in_place("
+must_contain     "PLACEMUT 2-level index assign mutates the slot"  "$NODEXRS" "let container_slot = match env.get_mut(root_name)"
+
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
     echo "ERROR — nothing was checked (no mechanism rows ran)"
