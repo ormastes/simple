@@ -1807,6 +1807,28 @@ int64_t  rt_sdl2_get_display_usable_h(int64_t index);
  * CROSS-PLATFORM: gated on `_MSC_VER && !__clang__`, so clang-cl (which DOES
  * accept the attribute, and whose weak-external lowering the SPL_CLI_ARGS_WEAK
  * note below depends on) is byte-identical, as are Linux, macOS and FreeBSD. */
+/* Windows <sys/stat.h> defines _S_IFMT/_S_IFDIR/_S_IFREG but none of the POSIX
+ * classification macros. runtime.c carried private copies of these, so every
+ * OTHER translation unit that used them -- runtime_native.c uses S_ISREG/S_ISDIR
+ * in nine places -- compiled them as implicit function calls instead, which C
+ * permits with only a warning and which then fail at link:
+ *
+ *     LNK2019: unresolved external symbol S_ISDIR referenced in
+ *              rt_io_file_meta_flags
+ *
+ * Defining them in the shared header fixes every consumer at once. The
+ * `#ifndef` guards keep runtime.c's own copies harmless, and POSIX hosts, which
+ * already provide the real macros, are unaffected. */
+#ifdef _WIN32
+#include <sys/stat.h>
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#endif
+
 #if defined(_MSC_VER) && !defined(__clang__)
 #  define SPL_WEAK
 #else

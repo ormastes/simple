@@ -1,0 +1,222 @@
+#!/bin/sh
+# GPU-boundary audit gate for the pure-Simple web renderer (Vulkan lane).
+#
+# Goal enforced: the web renderer must use GPU buffers and GPU operations with
+# MINIMAL CPU<->GPU interaction. The gate renders a page on the Vulkan lane with
+# EVERY level-gated counter armed, then classifies the captured log into audit
+# `key=value` lines plus a verdict.
+#
+# Verdict is always the LAST line of stdout, per the repo-wide convention:
+#   PASS  — <n> frame(s) audited, host_pixel_iterations=0, readbacks<=1, submits<=1   exit 0
+#   FAIL  — ... naming each violated invariant                                        exit 1
+#   ERROR — nothing was checked (<reason>)                                            exit 2
+#
+# Fail-closed rules, all of them deliberate:
+#   * a run that audited 0 frames is ERROR, never a pass — absence of a frame is
+#     absence of evidence;
+#   * a disarmed vk-timing table is ERROR, not a pass on unmeasured zeroes: three
+#     of the four invariants are sourced from its SFFI buckets;
+#   * a missing interpreter binary is ERROR, never a skip;
+#   * the renderer's exit status is read DIRECTLY into a variable on the line
+#     after the invocation, never through a pipe — a pipeline's `$?` is the last
+#     command's status and has produced false greens in this repo before.
+#
+# Why the SFFI timing buckets and not the census fields: the pooled-slot
+# counters `submits=` / `fences=` on the census line read 0 against 112 real
+# dispatches, because the slot a probe can reach is not always the instance that
+# drew (recorded in doc/10_metrics/ui/web_catalog_vulkan_per_op_attribution_macos_2026-09-12.md).
+# `sffi_submit_and_wait` / `sffi_dispatch` / `sffi_wait_fence` are the live ones.
+#
+# `--selftest` runs first, unconditionally, and is fatal (5 fixtures: a clean
+# frame must PASS, a frame carrying an interpreted per-pixel loop must FAIL, a
+# frame with 2 readbacks must FAIL, an empty log must ERROR, a disarmed timing
+# table must ERROR). Fixtures are classified by the SAME `audit_classify` a live
+# run uses, so a fixture cannot drift from production.
+#
+# Usage:
+#   sh scripts/check/check-web-vulkan-gpu-boundary-audit.shs [--selftest]
+#     [--page <html>] [--width N] [--height N] [--frames N]
+#     [--backend vulkan|cpu_simd] [--timeout SECONDS] [--out-dir DIR]
+#     [--upload-mode u32|bytes]
+#     [--classify-only <log>]
+
+set -u
+
+repo_root=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"
+    exit 2
+}
+cd "$repo_root" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+AUDIT_SPL="src/app/ui/chrome_showcase/gpu_boundary_audit.spl"
+
+PAGE="examples/06_io/ui/web_catalog/overview.html"
+WIDTH=900
+HEIGHT=760
+FRAMES=2
+BACKEND=vulkan
+TIMEOUT=1200
+OUT_DIR="build/perf/gpu_audit"
+SELFTEST_ONLY=0
+CLASSIFY_ONLY=""
+# Typed (`u32`) vs packed-byte staging upload. It changes only HOW the bytes
+# cross the SFFI boundary, never how MANY uploads or submits a frame performs,
+# so a `bytes` run is comparable on the COUNTS this gate gates on (ms are not).
+# It exists because an interpreter binary built before `rt_vulkan_copy_to_buffer_u32`
+# landed aborts the render with `unknown extern function`, which this gate would
+# otherwise report only as "no [audit-frame] record".
+UPLOAD_MODE=u32
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --page) PAGE="${2:-}"; shift ;;
+        --width) WIDTH="${2:-}"; shift ;;
+        --height) HEIGHT="${2:-}"; shift ;;
+        --frames) FRAMES="${2:-}"; shift ;;
+        --backend) BACKEND="${2:-}"; shift ;;
+        --timeout) TIMEOUT="${2:-}"; shift ;;
+        --out-dir) OUT_DIR="${2:-}"; shift ;;
+        --classify-only) CLASSIFY_ONLY="${2:-}"; shift ;;
+        --upload-mode) UPLOAD_MODE="${2:-}"; shift ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+    shift
+done
+
+# Interpreter binary. The deployed `bin/simple` on macOS is bootstrap-only (no
+# `run`), so an explicit SIMPLE_BIN is honoured first; absence is ERROR.
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ -z "$SIMPLE_BIN" ]; then
+    for cand in build/cargo-r2/release/simple src/compiler_rust/target/release/simple bin/simple; do
+        if [ -x "$cand" ]; then SIMPLE_BIN="$cand"; break; fi
+    done
+fi
+if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no runnable Simple interpreter; set SIMPLE_BIN)"
+    exit 2
+fi
+
+if [ ! -f "$AUDIT_SPL" ]; then
+    echo "ERROR — nothing was checked (missing $AUDIT_SPL)"
+    exit 2
+fi
+
+# --- selftest: fatal, always first -----------------------------------------
+st_out=$("$SIMPLE_BIN" run "$AUDIT_SPL" --selftest 2>&1)
+st_rc=$?
+st_line=$(printf '%s\n' "$st_out" | grep '^selftest:' | tail -1)
+case "$st_line" in
+    "selftest: "*" examples, 0 failures") : ;;
+    "") echo "ERROR — nothing was checked (selftest produced no verdict line, rc=$st_rc)"; exit 2 ;;
+    *)  echo "$st_line"; echo "ERROR — nothing was checked (selftest failed)"; exit 2 ;;
+esac
+echo "$st_line"
+if [ "$st_rc" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest exit $st_rc)"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — selftest only, ${st_line#selftest: }"
+    exit 0
+fi
+
+classify() {
+    _log="$1"
+    "$SIMPLE_BIN" run "$AUDIT_SPL" classify "$_log" 2>/dev/null | grep -E '^[a-z_]+=|^PASS |^FAIL |^ERROR '
+}
+
+if [ -n "$CLASSIFY_ONLY" ]; then
+    if [ ! -f "$CLASSIFY_ONLY" ]; then
+        echo "ERROR — nothing was checked (log not found: $CLASSIFY_ONLY)"
+        exit 2
+    fi
+    block=$(classify "$CLASSIFY_ONLY")
+    printf '%s\n' "$block"
+    v=$(printf '%s\n' "$block" | tail -1)
+    case "$v" in
+        PASS*) exit 0 ;;
+        FAIL*) exit 1 ;;
+        *)     exit 2 ;;
+    esac
+fi
+
+if [ ! -f "$PAGE" ]; then
+    echo "ERROR — nothing was checked (page not found: $PAGE)"
+    exit 2
+fi
+
+mkdir -p "$OUT_DIR" || { echo "ERROR — nothing was checked (cannot create $OUT_DIR)"; exit 2; }
+tag=$(basename "$PAGE" .html)_${WIDTH}x${HEIGHT}_${BACKEND}
+LOG="$OUT_DIR/$tag.log"
+
+# Binary identity is recorded with every run: other sessions replace this path
+# mid-session, and a timing number without it is unattributable.
+ident=$(stat -f '%z %m' "$SIMPLE_BIN" 2>/dev/null || stat -c '%s %Y' "$SIMPLE_BIN" 2>/dev/null)
+echo "binary=$SIMPLE_BIN identity_before=$ident upload_mode=$UPLOAD_MODE"
+
+# Portable bounded run: macOS ships no coreutils `timeout`.
+run_bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TIMEOUT" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$TIMEOUT" "$@"
+    else
+        perl -e 'my $t=shift; my $p=fork(); if(!$p){exec @ARGV; exit 127;}
+                 $SIG{ALRM}=sub{kill "KILL",$p; waitpid($p,0); exit 124;};
+                 alarm $t; waitpid($p,0); my $rc=$?; alarm 0;
+                 exit($rc & 127 ? 128+($rc & 127) : $rc >> 8);' "$TIMEOUT" "$@"
+    fi
+}
+
+# EVERY level-gated COUNTER the backend exposes is armed here. A counter left
+# unarmed is an invariant left unmeasured, which the classifier reports as
+# `unavailable` rather than 0.
+#
+# Deliberately NOT armed: `SIMPLE_VK_FONT_SELFCHECK=1`. It is a correctness
+# ORACLE, not a counter — it re-runs a FULL 1024x1024 atlas pack after every
+# incremental repack to compare against the mirror, which both inflates
+# `font_atlas_pack_u32_to_u8` and adds seconds of host per-pixel work that the
+# subject under audit does not perform. Arming it would make the audit measure
+# its own instrument. Run it separately when checking mirror correctness.
+SIMPLE_2D_BACKEND="$BACKEND" \
+SIMPLE_2D_BACKEND_STRICT=1 \
+SIMPLE_EXECUTION_MODE=interpreter \
+SIMPLE_VK_READBACK=native \
+SIMPLE_VK_IMAGE_UPLOAD="$UPLOAD_MODE" \
+SIMPLE_VK_RECT_UPLOAD="$UPLOAD_MODE" \
+SIMPLE_VK_TIMING=1 \
+SIMPLE_VK_ORDER_TRACE=1 \
+SIMPLE_VK_FONT_OVERLAP=1 \
+SIMPLE_VK_PRESENT_TRACE=1 \
+SIMPLE_WEB_PHASE_TRACE=1 \
+SIMPLE_WEB_STYLE_COUNTERS=1 \
+    run_bounded "$SIMPLE_BIN" run "$AUDIT_SPL" render "$PAGE" "$WIDTH" "$HEIGHT" "$FRAMES" \
+    > "$LOG" 2>&1
+render_rc=$?
+
+ident_after=$(stat -f '%z %m' "$SIMPLE_BIN" 2>/dev/null || stat -c '%s %Y' "$SIMPLE_BIN" 2>/dev/null)
+echo "identity_after=$ident_after log=$LOG render_rc=$render_rc"
+if [ "$ident" != "$ident_after" ]; then
+    echo "ERROR — nothing was checked (binary replaced mid-run: $ident -> $ident_after)"
+    exit 2
+fi
+if [ "$render_rc" -eq 124 ]; then
+    echo "could-not-complete-in-time page=$PAGE size=${WIDTH}x${HEIGHT} backend=$BACKEND timeout=${TIMEOUT}s"
+    echo "ERROR — nothing was checked (render exceeded ${TIMEOUT}s)"
+    exit 2
+fi
+
+block=$(classify "$LOG")
+if [ -z "$block" ]; then
+    echo "ERROR — nothing was checked (classifier produced no output for $LOG)"
+    exit 2
+fi
+printf '%s\n' "$block"
+
+verdict=$(printf '%s\n' "$block" | tail -1)
+case "$verdict" in
+    PASS*) exit 0 ;;
+    FAIL*) exit 1 ;;
+    *)     exit 2 ;;
+esac

@@ -1,0 +1,134 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/local/web_renderer_vs_chrome_speed_2026-09-05.md ; plan: doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ; architecture: doc/04_architecture/compiler/mdsoc_architecture_tobe.md ; design: doc/05_design/chromium_web_renderer_primitive_differential.md
+
+# Verdict classification for the web renderer's CPU<->GPU boundary audit.
+#
+# The subject is `audit_classify`: the ONE parser both `--selftest` and a live
+# `check-web-vulkan-gpu-boundary-audit.shs` run go through, so a fixture here
+# cannot drift from what the gate asserts on a real frame. Every fixture below
+# mirrors the log shape captured 2026-09-12 from css-layout.html at 300x253.
+#
+# Note what is deliberately NOT sourced from the census line: `submits=` and
+# `fences=` read 0 there against 112 real dispatches (the pooled slot a probe
+# reaches is not always the instance that drew), so the classifier reads the
+# `sffi_submit_and_wait` / `sffi_dispatch` / `sffi_wait_fence` vk-timing buckets
+# instead. A fixture that omits those buckets must therefore ERROR, not pass.
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use app.ui.chrome_showcase.gpu_boundary_audit.{
+    audit_classify,
+    audit_verdict_of,
+    audit_field,
+    audit_bucket_n,
+    audit_host_pixel_report,
+    audit_selftest
+}
+
+fn _frame_header() -> text:
+    ("audit page=p.html size=10x10 backend_requested=vulkan backend_reported=vulkan fallback_reason=\n" +
+     "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+     "draws[rect_opaque=3 readbacks=1 readback_pixels=100] | slot=vulkan@10x10 " +
+     "submits=0 fences=0 midframe_flushes=0 dispatches_last_frame=1 " +
+     "full_readbacks=0 cpu_fallback=false cpu_fallback_reason=\n")
+
+fn _timing_prelude() -> text:
+    ("vk-timing bucket n total_ms max_ms\n" +
+     "  font_atlas_dirty composites=0 gen_changed=0 identity_changed=0 pack_full=0 pack_incremental=0\n" +
+     "  image_composite_stats full_surface=0 small=0 max_px=1 upload_mode=u32 upload_reason=typed-requested reasons: ok=3\n" +
+     "  sffi_dispatch 3 1 0\n" +
+     "  sffi_submit_and_wait 1 5 5\n" +
+     "  sffi_wait_fence 1 0 0")
+
+describe("gpu boundary audit verdict classification"):
+    it("passes a frame with no host pixel loop, one readback and one submit"):
+        val v = audit_verdict_of(audit_classify(_frame_header() + _timing_prelude()))
+        expect(v.starts_with("PASS")).to_be(true)
+        expect(v.contains("host_pixel_iterations=0")).to_be(true)
+
+    it("fails a frame that still runs an interpreted per-pixel loop"):
+        val log = _frame_header() + _timing_prelude() + "\n  image_pack_u32_to_u8 7 900 200"
+        val v = audit_verdict_of(audit_classify(log))
+        expect(v.starts_with("FAIL")).to_be(true)
+        expect(v.contains("host_pixel_iterations=7")).to_be(true)
+        expect(v.contains("image_pack_u32_to_u8")).to_be(true)
+
+    it("fails a frame that reads back more than once"):
+        val log = ("audit page=p.html backend_reported=vulkan\n" +
+            "[audit-frame 1] ms=10 px=200 kind=cold\n" +
+            "draws[rect_opaque=3 readbacks=2 readback_pixels=200] | slot=vulkan@10x10 " +
+            "cpu_fallback=false\n" + _timing_prelude())
+        val v = audit_verdict_of(audit_classify(log))
+        expect(v.starts_with("FAIL")).to_be(true)
+        expect(v.contains("readbacks_per_frame=2")).to_be(true)
+
+    it("fails a frame that submits more than once"):
+        val log = _frame_header() + _timing_prelude().replace("sffi_submit_and_wait 1 5 5", "sffi_submit_and_wait 5 15 10")
+        val v = audit_verdict_of(audit_classify(log))
+        expect(v.starts_with("FAIL")).to_be(true)
+        expect(v.contains("submits_per_frame=5")).to_be(true)
+
+    it("fails a frame that fell back to the CPU, naming the reason"):
+        val log = (_frame_header().replace("cpu_fallback=false", "cpu_fallback=true") +
+            _timing_prelude())
+        val v = audit_verdict_of(audit_classify(log))
+        expect(v.starts_with("FAIL")).to_be(true)
+        expect(v.contains("cpu_fallback_count=1")).to_be(true)
+
+describe("gpu boundary audit fails closed rather than passing on unmeasured zeroes"):
+    it("errors on an empty log instead of reporting a vacuous pass"):
+        expect(audit_verdict_of(audit_classify("")).starts_with("ERROR")).to_be(true)
+
+    it("errors when a log carries no audited frame"):
+        val v = audit_verdict_of(audit_classify("some unrelated output\nwith no frame record"))
+        expect(v.starts_with("ERROR")).to_be(true)
+        expect(v.contains("nothing was checked")).to_be(true)
+
+    it("errors when vk-timing was disarmed, since three invariants go unmeasured"):
+        val log = _frame_header() + "vk-timing: disarmed (set SIMPLE_VK_TIMING=1)"
+        val v = audit_verdict_of(audit_classify(log))
+        expect(v.starts_with("ERROR")).to_be(true)
+        expect(v.contains("disarmed")).to_be(true)
+
+    it("errors on a non-Vulkan lane, where every boundary counter is a structural zero"):
+        # A cpu_simd run prints the timing header but fires no SFFI bucket and
+        # notes no readback, so submits/readbacks/host_pixel all read 0. Passing
+        # that would be the exact "unmeasured zero fakes a PASS" failure.
+        val log = ("audit page=p.html size=10x10 backend_requested=cpu_simd backend_reported=cpu_simd fallback_reason=\n" +
+            "[audit-frame 1] ms=10 px=100 kind=cold\n" +
+            "draws[rect_opaque=0 readbacks=0 readback_pixels=0] pool=empty\n" +
+            "vk-timing bucket n total_ms max_ms\n" +
+            "  font_atlas_dirty composites=0 pack_full=0 pack_incremental=0")
+        val v = audit_verdict_of(audit_classify(log))
+        expect(v.starts_with("ERROR")).to_be(true)
+        expect(v.contains("not the Vulkan lane")).to_be(true)
+
+    it("reports the unmeasured keys as unavailable rather than zero"):
+        val log = _frame_header() + "vk-timing: disarmed (set SIMPLE_VK_TIMING=1)"
+        val block = audit_classify(log)
+        expect(block.contains("submits_per_frame=unavailable")).to_be(true)
+        expect(block.contains("host_pixel_iterations=unavailable")).to_be(true)
+
+describe("gpu boundary audit log scraping"):
+    it("reads a key=value field only at a field boundary"):
+        expect(audit_field("a=1 submits=7 fences=2", "submits")).to_be("7")
+        expect(audit_field("a=1 resubmits=7", "submits")).to_be("")
+
+    it("reads the call count from a vk-timing bucket row"):
+        expect(audit_bucket_n("vk-timing bucket n total_ms max_ms\n  rect 187 239 14", "rect")).to_be(187)
+
+    it("names every host pixel bucket it counted"):
+        val (n, names) = audit_host_pixel_report("  font_atlas_pack_u32_to_u8 5 8940 4634")
+        expect(n).to_be(5)
+        expect(names.contains("font_atlas_pack_u32_to_u8:5")).to_be(true)
+
+    it("reports none when no host pixel loop ran"):
+        val (n, names) = audit_host_pixel_report("  rect 3 4 2")
+        expect(n).to_be(0)
+        expect(names).to_be("none")
+
+describe("gpu boundary audit selftest"):
+    it("reports zero failures across its fixtures"):
+        expect(audit_selftest()).to_be(0)

@@ -93,3 +93,17 @@ guards do this; seven tolerate an empty result. They are deliberately left alone
 the correct place to clear the environment is the entry point, and adding
 per-guard fallbacks turns fail-closed refusals into fail-open ones (attempted and
 reverted in this branch — see the revert commit).
+
+## Re-verified 2026-09-12 (macOS aarch64, linked worktree)
+
+Still fixed at `origin/main@b9667d6584f`. `scripts/hooks/pre-push-worktree-launcher`
+carries `unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX` before it resolves
+the worktree root (landed `191675c7373`), and `git config --get core.bare` returns
+nothing (exit 1) in this linked worktree after a session of guard runs — the key is
+absent, not `false` and not `true`.
+
+Recorded because the macOS push-gate lane re-opened this as a candidate blocker.
+It is not one. The alternative that was considered and is still **rejected**:
+adding a `--git-common-dir` fallback to the guards. That fails OPEN — it would let
+a guard keep running against a gitdir with no adjacent work tree instead of
+refusing, which is the opposite of what the verdict convention requires.

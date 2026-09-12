@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Purpose: Prove that a flex item with `width: auto` and no `flex-basis` in a
+`flex-wrap: wrap` container is sized to its max-content width, not to the whole
+container width.
+Audience: browser-engine layout maintainers.
+
+Before this fix the wrap branch of the row-flex layout gave every auto-width
+item `base_w_wrap = iw` (the full container inner width), so each item filled a
+line by itself and the container grew by one line per item. Chrome puts them
+side by side on one line. The non-wrapping branch already measured
+`intrinsic_text_width`; only the wrap branch did not.
+
+Chrome oracle (headless --dump-dom + getBoundingClientRect on
+examples/06_io/ui/web_catalog/overview.html at 900x760):
+  div.flex  top=271.78 h=80.00   (ONE line, not three)
+  ol        top=287.78 h=48.00 w=133.38
+  ul        top=287.78 h=48.00 w=150.28   <- same top as the ol
+"""
+
+# @req: REQ-BROWSER-ENGINE-FLEX-WRAP-AUTO-WIDTH-001 — auto-width wrap items are max-content sized.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 3%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 760
+
+# `.flex { display:flex; flex-wrap:wrap }` holding two auto-width lists, the
+# exact shape of the overview card's list row.
+val WRAP_ROW: text = (
+    "<html><body style=\"margin:0;font:16px/1.5 sans-serif\">" +
+    "<div id=\"row\" style=\"display:flex;flex-wrap:wrap\">" +
+    "<ol id=\"a\"><li>Ordered one</li><li>Ordered two</li></ol>" +
+    "<ul id=\"b\"><li>Unordered one</li><li>Unordered two</li></ul>" +
+    "</div></body></html>"
+)
+
+fn row_field(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(WRAP_ROW, VW, VH, id, field)
+
+describe "auto-width flex items in a wrapping row share one line":
+    it "AC-1: both lists sit on the SAME line (equal y)":
+        expect(row_field("b", "y")).to_equal(row_field("a", "y"))
+
+    it "AC-2: the wrapping container is one line tall (80 px), as Chrome reports":
+        # 16 px list margin-top + 48 px of list content + 16 px margin-bottom.
+        expect(row_field("row", "h")).to_equal("80")
+
+    it "AC-3: neither list is stretched to the container width":
+        assert_true(row_field("a", "w") != "810")
+        assert_true(row_field("a", "w") != row_field("row", "w"))
+
+    it "AC-4: the second list starts to the RIGHT of the first, not below":
+        assert_true(row_field("b", "x") != row_field("a", "x"))

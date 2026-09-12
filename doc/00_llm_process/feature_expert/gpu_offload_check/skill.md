@@ -449,6 +449,23 @@ census: `doc/01_research/ui/gpu_offload/cpu_gpu_boundary_census_2026-09-11.md`.
   87.7s. The bottleneck is interpreter-bound Draw IR/layout, not raster —
   do not read the GPU win as proof the raster path is fast end-to-end.
 
+- **CPU<->GPU boundary audit gate (2026-09-12):**
+  `scripts/check/check-web-vulkan-gpu-boundary-audit.shs` + aggregator
+  `src/app/ui/chrome_showcase/gpu_boundary_audit.spl` + spec
+  `test/01_unit/app/ui/gpu_boundary_audit_spec.spl`; bootstrap row
+  `web-vulkan-gpu-boundary-audit-selftest`. Emits `submits_per_frame`,
+  `readbacks_per_frame`, `host_pixel_iterations`, `uploads_per_frame`,
+  `atlas_full_repacks`, `fence_waits` and a PASS/FAIL/ERROR verdict.
+  **Read the counters from the `sffi_*` vk-timing buckets, never the pooled-slot
+  census fields** — `submits=`/`fences=` there read 0 against 17 real submits.
+  Two fail-closed rules a future change must not soften: a disarmed
+  `SIMPLE_VK_TIMING` and a `backend_reported` that is not `vulkan` both ERROR,
+  because every boundary counter would otherwise be a structural zero and PASS.
+  Measured result:
+  `doc/10_metrics/ui/web_4k_showcase_gpu_boundary_audit_macos_2026-09-12.md` —
+  the boundary is already node-scaled (identical counts at 900x760 and 4K); only
+  `readback_bytes` scales with pixels.
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,
