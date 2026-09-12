@@ -261,6 +261,14 @@ event task-start stage-engine building
     if [ "$memory_enforcement" = ulimit-v ]; then
         ulimit -v $((critical_memory * 1024)) || exit 70
     fi
+    # An explicit job count (user --jobs or SIMPLE_NATIVE_BUILD_THREADS) is
+    # passed through untouched; the scheduler's critical_cpu split is only the
+    # default when neither is given. Validation stays in bootstrap_select_jobs.
+    forced_jobs=$critical_cpu
+    [ -z "${SIMPLE_NATIVE_BUILD_THREADS:-}" ] || forced_jobs=
+    for engine_arg in "$@"; do
+        case "$engine_arg" in --jobs|--jobs=*) forced_jobs= ;; esac
+    done
     SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
     SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER="$generation_dir/stage2-cleanup.ready" \
     SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
@@ -269,19 +277,15 @@ event task-start stage-engine building
         my $jobs = shift @ARGV;
         my $engine = shift @ARGV;
         my @out;
-        my $skip_value = 0;
         for my $arg (@ARGV) {
-            if ($skip_value) { $skip_value = 0; next; }
-            if ($arg eq "--jobs") { $skip_value = 1; next; }
-            next if $arg =~ /^--jobs=/;
             next if $arg eq "--full-cli" || $arg eq "--deploy" ||
                 $arg eq "--release" || $arg eq "--clean-release";
             push @out, $arg;
         }
-        push @out, "--jobs=$jobs";
+        push @out, "--jobs=$jobs" if length $jobs;
         exec "/bin/sh", $engine, @out;
         die "exec stage engine failed: $!";
-    ' "$critical_cpu" "$engine" "$@" \
+    ' "$forced_jobs" "$engine" "$@" \
         >"$generation_dir/stage-engine.log" 2>&1
     rc=$?
     done_tmp="$engine_done.tmp.$$"
