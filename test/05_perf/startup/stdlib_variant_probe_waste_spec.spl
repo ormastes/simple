@@ -64,8 +64,26 @@ describe "stdlib variant probe waste":
         expect(source).to_contain("fn compute_var_roots_uncached(project_root: &Path) -> Vec<PathBuf>")
 
     it "spends no startup syscall on a variant root that cannot exist":
-        val (out, code) = run_sh("sh " + GATE
-            + " --max-cpu-config 20 --max-missing-variant-root 0 --max-var-sdn-opens 1 2>&1")
+        val (out, code) = run_sh("sh " + GATE + " --lane default"
+            + " --max-cpu-config 0 --max-missing-variant-root 0 --max-var-sdn-opens 1 2>&1")
+        print "[perf] " + out
+        expect(code).to_equal(0)
+        expect(out).to_contain("missing_variant_root=0")
+        expect(out).to_contain("cpu_config=0")
+        expect(out.contains("stats=0 ")).to_equal(false)
+
+    it "spends none on the interpreter lane either":
+        # `cpu_config` is NOT budgeted to 0 here. The interpreter lane still
+        # stats it once per resolution from `compute_cache_key`
+        # (`interpreter_module/path_resolution.rs:69`), which hashes
+        # `active_simd_tier_name()` into the resolution cache key so that a
+        # mid-process tier change invalidates it. That is pinned behaviour --
+        # `cache_key_changes_with_configured_active_tier_without_override`
+        # asserts the key changes when the config file is rewritten -- so it is
+        # a separate, reported finding, not something this row may silently
+        # optimise away. Measured 353 -> 132 as a side effect of the guard.
+        val (out, code) = run_sh("sh " + GATE + " --lane interpreter"
+            + " --max-cpu-config 200 --max-missing-variant-root 0 --max-var-sdn-opens 1 2>&1")
         print "[perf] " + out
         expect(code).to_equal(0)
         expect(out).to_contain("missing_variant_root=0")

@@ -20,9 +20,17 @@
 #
 # usage:
 #   sh scripts/check/check-stdlib-variant-probe-waste.shs [--selftest]
+#       [--lane default|interpreter]
 #       [--max-cpu-config N] [--max-missing-variant-root N]
 #       [--max-var-sdn-opens N]
 # env: SIMPLE_BIN (default ./bin/simple)
+#
+# The measured entry runs with the caller's lane environment CLEARED and the
+# requested lane set explicitly. Without that, the same binary scores
+# differently depending on who invoked the gate: the spec runner exports
+# SIMPLE_RUNTIME_MODE=interpreter / SIMPLE_EXECUTION_MODE=interpret, which is a
+# different resolution path, and a gate whose number depends on its caller is
+# not a gate.
 
 set -u
 
@@ -32,10 +40,12 @@ max_cpu=-1
 max_missing=-1
 max_var_sdn=-1
 selftest_only=0
+lane=default
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) selftest_only=1 ;;
+        --lane) shift; lane=$1 ;;
         --max-cpu-config) shift; max_cpu=$1 ;;
         --max-missing-variant-root) shift; max_missing=$1 ;;
         --max-var-sdn-opens) shift; max_var_sdn=$1 ;;
@@ -143,7 +153,17 @@ work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp -d failed)"; 
 trace="$work/trace"
 # Hermetic HOME: cpu_config.sdn is created on first use, so a warm HOME and a
 # cold one must not give different counters.
-HOME="$work/home" \
+case "$lane" in
+    default) lane_env="" ;;
+    interpreter) lane_env="SIMPLE_RUNTIME_MODE=interpreter SIMPLE_EXECUTION_MODE=interpret" ;;
+    *) rm -rf "$work"; echo "ERROR — nothing was checked (unknown lane $lane)"; exit 2 ;;
+esac
+
+# shellcheck disable=SC2086 # lane_env is a deliberate word-split assignment list
+env -u SIMPLE_RUNTIME_MODE -u SIMPLE_EXECUTION_MODE -u SIMPLE_NO_JIT \
+    -u SIMPLE_JIT_ENABLED -u SIMPLE_BINARY -u SIMPLE_SIMD_TIER \
+    -u SIMPLE_CPU_CONFIG_PATH -u SIMPLE_TEST_RESULT_FILE -u SIMPLE_TEST_DEPTH \
+    HOME="$work/home" $lane_env \
     timeout 300 strace -f -o "$trace" \
     -e trace=openat,stat,newfstatat,statx \
     "$SIMPLE_BIN" check --help >"$work/out" 2>"$work/err"
@@ -163,7 +183,7 @@ if [ "$stats" -eq 0 ]; then
     exit 2
 fi
 
-summary="stats=$stats cpu_config=$cpu missing_variant_root=$missing var_sdn_opens=$varsdn variants_init_opens=$vinit"
+summary="lane=$lane stats=$stats cpu_config=$cpu missing_variant_root=$missing var_sdn_opens=$varsdn variants_init_opens=$vinit"
 fail=""
 [ "$max_cpu" -ge 0 ] && [ "$cpu" -gt "$max_cpu" ] && fail="$fail cpu_config=$cpu>$max_cpu"
 [ "$max_missing" -ge 0 ] && [ "$missing" -gt "$max_missing" ] && fail="$fail missing_variant_root=$missing>$max_missing"
