@@ -33,19 +33,44 @@ Until `write_db_file_locked` was repaired (Option-vs-Result match defect in
 aborted and wrote nothing, so the clobber was masked by a second defect. With
 the writer working, the spec's writes land.
 
-## Partly addressed
+## Spec sites: DISARMED (2026-09-12)
 
-The "maintains reasonable memory footprint" scenario now uses
-`db.save_to(temp_db_path(...))`, which takes an explicit path, and no longer
-touches the tracked database. The other four sites are not converted here
-because they are paired with `TestDatabase.load()`, which has **no**
-`load_from(path)` counterpart — reading back from an isolated path needs a
-library addition, not a spec edit. Those four scenarios are additionally RED for
-unrelated pre-existing reasons (7 of 11 examples fail at
-`work/todofix-1-2026-09-12` base `79a67e79135`).
+**Correction to an earlier draft of this record**, which claimed
+`TestDatabase.load()` had no `load_from(path)` counterpart and that converting
+the remaining sites needed a library addition. That was wrong — it was based on
+grepping `src/lib/nogc_sync_mut/database/test.spl` and `test_db_compat.spl`
+rather than the class the spec actually imports. Both counterparts have existed
+all along:
 
-## Expected
+- `src/app/test_runner_new/test_db_core.spl:146` `static fn load_from(path: text)`
+  and `:161` `me save_to(path: text)`
+- `src/lib/nogc_sync_mut/test_runner/test_db_core.spl:189` / `:203`, likewise
 
-`TestDatabase.load_from(path)` beside the existing `save_to(path)`, then every
-scenario in this file pinned to an isolated path. No spec should be able to
-write a tracked artifact.
+Every `db.save()` and `TestDatabase.load()` call in **both** live copies of the
+spec (`test/01_unit/app/tooling/` and the `test/unit/` mirror) is now
+`save_to(temp_db_path(test_name))` / `load_from(temp_db_path(test_name))`. The
+count of global-path calls in those two files is 0, and `cleanup_temp_db` also
+clears the `{path}.lock` sidecar so a stale lock cannot make an isolated write
+silently produce nothing.
+
+### A second defect this exposed
+
+`"maintains bounded file size with window capping"` saved to the **tracked**
+database and then measured `file_size(temp_db_path(test_name))` — a path nothing
+ever wrote. Every sample in its `file_sizes` list came from a file that did not
+exist, so its growth-ratio assertion was measuring nothing at all. Pointing the
+save at the same path it measures makes that scenario real rather than merely
+safe.
+
+## Still OPEN: `save()` defaults to the tracked path
+
+Disarming the spec sites does not address the underlying hazard, which is why
+this record stays open: `save()` and `load()` silently target
+`doc/08_tracking/test/test_db.sdn`, so the *next* spec or tool that calls the
+zero-argument form re-arms the same clobber with nothing to warn its author. The
+repository has no gate asserting that a unit spec leaves tracked files clean.
+
+Worth considering: make the zero-argument `save()` refuse to run when a spec
+runner is the caller, or add a cheap post-suite check that
+`git status --porcelain doc/08_tracking/test/` is empty for any spec not
+explicitly allowlisted to write it.

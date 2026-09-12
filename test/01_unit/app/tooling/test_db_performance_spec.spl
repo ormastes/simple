@@ -74,6 +74,11 @@ fn cleanup_temp_db(test_name: text):
         file_delete(db_path)
     if file_exists("{db_path}.bak"):
         file_delete("{db_path}.bak")
+    # An aborted writer leaves the lock sidecar behind, and the next write then
+    # reports Ok while producing no file -- see
+    # doc/08_tracking/bug/test_db_stale_lock_silent_no_write_2026-09-12.md.
+    if file_exists("{db_path}.lock"):
+        file_delete("{db_path}.lock")
 
 fn peak_rss_kb() -> i64:
     """Peak resident set size of this process, in KiB, read from
@@ -136,12 +141,12 @@ describe "Test Database Performance":
 
             # Create database with 1000 tests
             var db = create_large_db(1000)
-            val save_result = db.save()
+            val save_result = db.save_to(temp_db_path(test_name))
             expect(save_result.ok.?).to_be(true)
 
             # Benchmark load operation
             val result = benchmark("Load 1K tests", 1, \:
-                val load_result = TestDatabase.load()
+                val load_result = TestDatabase.load_from(temp_db_path(test_name))
                 expect(load_result.ok == nil).to_equal(false)
             )
 
@@ -164,7 +169,7 @@ describe "Test Database Performance":
 
             # Benchmark save operation
             val result = benchmark("Save 1K tests", 1, \:
-                val save_result = db.save()
+                val save_result = db.save_to(temp_db_path(test_name))
                 expect(save_result.ok.?).to_be(true)
             )
 
@@ -188,7 +193,7 @@ describe "Test Database Performance":
 
             # Save
             val save_start = time_now_unix_micros()
-            val save_result = db.save()
+            val save_result = db.save_to(temp_db_path(test_name))
             val save_end = time_now_unix_micros()
             val save_ms = (save_end - save_start) / 1000
 
@@ -197,7 +202,7 @@ describe "Test Database Performance":
 
             # Load
             val load_start = time_now_unix_micros()
-            val load_result = TestDatabase.load()
+            val load_result = TestDatabase.load_from(temp_db_path(test_name))
             val load_end = time_now_unix_micros()
             val load_ms = (load_end - load_start) / 1000
 
@@ -387,7 +392,7 @@ describe "Test Database Performance":
                     )
 
                 # Save and record size
-                val save_result = db.save()
+                val save_result = db.save_to(temp_db_path(test_name))
                 expect(save_result.ok.?).to_be(true)
 
                 val db_path = temp_db_path(test_name)
