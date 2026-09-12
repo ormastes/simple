@@ -1,7 +1,7 @@
 # macOS Stage 2 sanity: the smoke unit fails native-capsule receipt verification (2026-09-13)
 
 Status: ROOT CAUSE FOUND. The receipt path is FIXED (PR #708 restored the
-fix PR #702 had clobbered; PR #710 split the gate). The remaining defect is
+fix PR #702 had clobbered; PR #712 split the gate). The remaining defect is
 in CODEGEN, not in this file, and now has a measured reproducer: run 9
 printed `field=34363944961:runtime=632` for the same object in the same
 process. See "Run 9" below. Original run-8 framing retained for history:
@@ -234,7 +234,7 @@ attempted. Rejected candidate preserved at
 
 ## Run 10 (2026-09-13) — capsule collection PASSES; this record's blocker is cleared
 
-Same command, virgin evidence root, carrying the split gate (PR #710). Stage 1
+Same command, virgin evidence root, carrying the split gate (PR #712). Stage 1
 admitted; Stage 2 built its closure clean; **the smoke build got past native
 capsule collection for the first time in this chain.** No
 `receipt-content-mismatch`, no `native-capsule-receipt-invalid`, no
@@ -285,10 +285,18 @@ optional-bound scalar (`i64`) field reads under `--mode=dynload --entry-closure`
 return a fresh tagged heap pointer per read — with a standalone reproducer that
 needs no bootstrap:
 
-- binary: the run-9/run-10 `simple.rejected` Stage 2 candidate
-  (run 9 copy preserved, sha256
+- binary: the **run-10** `simple.rejected` Stage 2 candidate, at
+  `.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`
+  inside worktree `agent-a87b4c8362f754818`, sha256
+  `67c9c3a25dc6fdda945c3677e5d8a3fe4629a1cd80ac1d6d898596bb9cd049b4`.
+  Use this one: it carries the ADVISORY canary, so it reaches the canary line
+  and keeps going instead of aborting. Run 9's binary (sha256
   `a9e61220cb17e438a959083ebb4554138dd2bc3bd333ea8de0ee1ce6c6aeb736`,
-  139044728 bytes);
+  139044728 bytes) reproduces the same defect in blocking form, but the only
+  copy was in a session scratchpad and should be assumed gone.
+  **Neither is tracked in git.** If the worktree is reclaimed, regenerate with
+  the Reproduction command above — the defect has reproduced on every run so
+  far, so a fresh Stage 2 is a reliable source of a fresh reproducer;
 - input: `scripts/check/cert/redeploy_gate/fixtures/hello_world.spl`;
 - signal: the `[receipt-size-canary]` line, which names both values.
 

@@ -81,7 +81,7 @@ with a warm seed, ~26 min cold. Stage 2 itself builds clean: 871 compiled, 0 fai
 ## Run 10 (2026-09-13): this site is now REACHED, and it is RED
 
 Runs 8 and 9 could not reach the linker — they failed earlier, in capsule
-collection. With that cleared (PRs #708 / #710), run 10's Stage 2 smoke build
+collection. With that cleared (PRs #708 / #712), run 10's Stage 2 smoke build
 reached the link and produced, verbatim:
 
 ```
