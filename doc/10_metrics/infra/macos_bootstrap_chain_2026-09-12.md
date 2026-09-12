@@ -131,3 +131,22 @@ prints — a returned string is only as trustworthy as the machinery carrying it
 - `${bootstrap_darwin_link_env}` is word-split, matching the existing windows env
   convention, so an Xcode path containing a space would break it. Default Xcode/CLT
   paths contain none; worth quoting if a custom toolchain path ever does.
+
+### Correction, same day: the tuple was a bystander
+
+The paragraph above ("A defect found by the fix, in the fix's own error channel") blamed
+a `(text, text)` tuple return for the `nil`. Run 7 disproves it: the tuple is gone and
+the `nil` is byte-identical, and run 7's failure log has zero `[linker-wrapper]` lines
+even though the error builder prints unconditionally — so that code was never reached.
+The `nil` predates the tuple and survives its removal. The tuple record is marked
+UNCONFIRMED accordingly. Mechanism for the original `darwin-link-tool-unresolved`
+therefore remains **undiscriminated**: PATH is ruled out, but `process_run` not
+answering, a nil from `.trim().split("\n")[0]` on the native path, and `file_exists` on
+that output are all still live. The discriminating experiment is 10 seconds, not 18
+minutes: run the rejected Stage 2 binary directly with `--verbose` and the pins
+exported, and read which `[linker-wrapper]` site it reaches. Do that first.
+
+Also not done, and not silently: task item 2 asked for the pinned tool paths **plus
+sha256** in the stage receipt. Only the absolute paths are pinned and forwarded; no
+digest is recorded or verified. The rejected candidate's own sha256 is recorded above,
+but the artifact was deleted in cleanup — reproduce in ~18 min from a virgin root.
