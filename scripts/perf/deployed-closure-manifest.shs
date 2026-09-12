@@ -1,0 +1,261 @@
+#!/bin/sh
+# deployed-closure-manifest.shs — produce a DeployedClosureManifestV1 (SDN)
+# for a deployment root (default: bin/release).
+#
+# Contract: doc/07_guide/perf/deployed_closure_manifest_v1.md (also mirrored
+# verbatim in the L5 wave plan under "DeployedClosureManifestV1"). Frozen for
+# the L5 wave — this producer implements it, it does not redesign it.
+#
+# What it walks: every REGULAR file reachable under <root> (recursively).
+# Point --root at the exact deployment surface you want measured:
+#   bin/release                 the per-triple compiler + companion binaries,
+#                                sidecars, and any tracked backup/legacy
+#                                artifacts sitting alongside them (this is
+#                                the surface .claude/rules/code-style.md's MCP
+#                                Servers section and
+#                                scripts/bootstrap/bootstrap-from-scratch.sh's
+#                                deploy step populate — see that script's
+#                                `deploy_dir=` block for exactly which names
+#                                it writes: simple, simple_seed,
+#                                simple_ui_backend, simple_mcp_server(+.sha256),
+#                                simple_lsp_mcp_server(+.sha256),
+#                                launcher.<program>, authority.*.env/.sdn)
+#   bin                          additionally sweeps the generated wrapper
+#                                scripts scripts/setup/setup.shs writes
+#                                directly into bin/ (simple_mcp_server,
+#                                simple_lsp_mcp_server, t32_mcp_server,
+#                                t32_lsp_mcp_server, and their .cmd twins) —
+#                                pass --wrapper-name for each one you want
+#                                classified as `wrapper` rather than `other`
+#                                (the top-level dispatcher scripts committed
+#                                directly under bin/release/, e.g.
+#                                bin/release/simple, are auto-detected: any
+#                                top-level file under <root> starting with a
+#                                `#!` shebang is a wrapper without needing the
+#                                flag)
+#
+# kind classification (see classify_kind() below for the exact rules):
+#   sidecar  — *.sha256
+#   smf      — *.smf
+#   wrapper  — launcher.* ; OR any top-level (directly under <root>) file
+#              whose first two bytes are `#!` ; OR a basename passed via
+#              --wrapper-name
+#   primary  — a file named exactly simple, simple_seed, simple_ui_backend,
+#              simple_mcp_server, simple_lsp_mcp_server or simple_native that
+#              sits INSIDE a subdirectory of <root> (a platform-triple dir)
+#   other    — everything else (authority.*.env/.sdn, unrecognised backups,
+#              lock files, etc.)
+#
+# primary_binary/primary_bytes: the single `kind=primary` row with the
+# greatest size (ties broken by the earliest relpath in sorted order). If no
+# file is classified `primary`, primary_binary is empty and primary_bytes 0
+# — this is not an error; a wrapper-only or fixture root may legitimately
+# have no primary binary.
+#
+# duplicated_bytes: for every distinct sha256 value seen in the walk, count
+# the number of DISTINCT inodes carrying it. If that count is > 1 (i.e. the
+# same content exists on disk more than once and at least one copy is not a
+# hardlink of another), every file row sharing that sha256 contributes its
+# size to duplicated_bytes — hardlinked siblings of an otherwise-duplicated
+# sha256 are included in the sum (they are not the problem, but the sha256 as
+# a whole is not fully deduplicated). A sha256 whose every occurrence shares
+# ONE inode (pure hardlink fan-out, however many links) contributes 0.
+#
+# Verdict convention shared with scripts/check/*.shs (this is a PRODUCER, not
+# a gate, so there is no PASS/FAIL — but ERROR keeps the same meaning and the
+# same exit code):
+#   ERROR — nothing was checked   exit 2   (no such root, root has 0 files,
+#                                            sha256 tool unavailable)
+#
+# Usage:
+#   sh scripts/perf/deployed-closure-manifest.shs <root> [--out <file>]
+#                                                  [--wrapper-name NAME]...
+#
+# <root> is required and positional. Read-only: this script NEVER writes,
+# moves, hardlinks or deletes anything under <root>.
+
+set -u
+SELF=$(basename "$0")
+
+die() {
+    echo "$SELF: ERROR — $1" >&2
+    exit 2
+}
+
+usage() {
+    echo "usage: $SELF <root> [--out <file>] [--wrapper-name NAME]..." >&2
+    exit 2
+}
+
+ROOT_ARG=
+OUT=
+WRAPPER_NAMES=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out)
+            [ $# -ge 2 ] || usage
+            OUT=$2
+            shift 2
+            ;;
+        --wrapper-name)
+            [ $# -ge 2 ] || usage
+            WRAPPER_NAMES="$WRAPPER_NAMES $2"
+            shift 2
+            ;;
+        -h | --help)
+            usage
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            usage
+            ;;
+        *)
+            if [ -z "$ROOT_ARG" ]; then
+                ROOT_ARG=$1
+                shift
+            else
+                usage
+            fi
+            ;;
+    esac
+done
+
+[ -n "$ROOT_ARG" ] || usage
+[ -d "$ROOT_ARG" ] || die "root does not exist or is not a directory: $ROOT_ARG"
+
+SHA_TOOL=
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_TOOL=sha256sum
+elif command -v shasum >/dev/null 2>&1; then
+    SHA_TOOL="shasum -a 256"
+else
+    die "no sha256sum/shasum on PATH — cannot compute file digests"
+fi
+
+sha256_of() {
+    $SHA_TOOL "$1" 2>/dev/null | awk '{print $1}'
+}
+
+is_wrapper_name() {
+    _n=$1
+    for _w in $WRAPPER_NAMES; do
+        [ "$_w" = "$_n" ] && return 0
+    done
+    return 1
+}
+
+# classify_kind <relpath-under-root>
+classify_kind() {
+    _rel=$1
+    _base=$(basename "$_rel")
+    _dir=$(dirname "$_rel")
+    case "$_base" in
+        *.sha256)
+            echo sidecar
+            return
+            ;;
+        *.smf)
+            echo smf
+            return
+            ;;
+        launcher.*)
+            echo wrapper
+            return
+            ;;
+    esac
+    if is_wrapper_name "$_base"; then
+        echo wrapper
+        return
+    fi
+    if [ "$_dir" = "." ]; then
+        _abs="$ROOT_ABS/$_rel"
+        if [ -r "$_abs" ] && [ "$(head -c 2 "$_abs" 2>/dev/null)" = '#!' ]; then
+            echo wrapper
+            return
+        fi
+    else
+        case "$_base" in
+            simple | simple_seed | simple_ui_backend | simple_mcp_server | simple_lsp_mcp_server | simple_native)
+                echo primary
+                return
+                ;;
+        esac
+    fi
+    echo other
+}
+
+ROOT_ABS=$(cd "$ROOT_ARG" && pwd) || die "cannot resolve root: $ROOT_ARG"
+
+WORK=$(mktemp -d) || die "mktemp -d failed"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+FILE_LIST="$WORK/files"
+find "$ROOT_ABS" -type f -print 2>/dev/null | LC_ALL=C sort >"$FILE_LIST"
+
+FILE_COUNT=$(wc -l <"$FILE_LIST" | tr -d ' ')
+[ "$FILE_COUNT" -gt 0 ] 2>/dev/null || die "root has 0 regular files: $ROOT_ABS"
+
+ROWS="$WORK/rows"
+: >"$ROWS"
+
+while IFS= read -r _abs; do
+    _rel=$(printf '%s\n' "$_abs" | sed "s#^$ROOT_ABS/##")
+    _size=$(stat -c '%s' "$_abs" 2>/dev/null) || die "stat failed on $_abs"
+    _inode=$(stat -c '%i' "$_abs" 2>/dev/null) || die "stat failed on $_abs"
+    _nlink=$(stat -c '%h' "$_abs" 2>/dev/null) || die "stat failed on $_abs"
+    _sha=$(sha256_of "$_abs")
+    [ -n "$_sha" ] || die "sha256 computation failed on $_abs"
+    _kind=$(classify_kind "$_rel")
+    # tab-separated intermediate row: relpath size sha256 inode nlink kind
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_rel" "$_size" "$_sha" "$_inode" "$_nlink" "$_kind" >>"$ROWS"
+done <"$FILE_LIST"
+
+# closure_bytes: sum of size over every row.
+CLOSURE_BYTES=$(awk -F'\t' '{s+=$2} END{print s+0}' "$ROWS")
+
+# primary: largest kind=primary row, ties broken by earliest relpath (rows
+# are already LC_ALL=C sorted by relpath because FILE_LIST was sorted before
+# ROWS was built in that order).
+PRIMARY_LINE=$(awk -F'\t' '$6=="primary"{print}' "$ROWS" | awk -F'\t' '{
+    if ($2+0 > best+0) { best=$2; line=$0 }
+} END { if (line != "") print line }')
+if [ -n "$PRIMARY_LINE" ]; then
+    PRIMARY_BINARY=$(printf '%s\n' "$PRIMARY_LINE" | awk -F'\t' '{print $1}')
+    PRIMARY_BYTES=$(printf '%s\n' "$PRIMARY_LINE" | awk -F'\t' '{print $2}')
+else
+    PRIMARY_BINARY=""
+    PRIMARY_BYTES=0
+fi
+
+# duplicated_bytes: group by sha256, count DISTINCT inodes per group; if > 1,
+# every row in that group contributes its size.
+DUP_SHAS="$WORK/dup_shas"
+awk -F'\t' '{print $3, $4}' "$ROWS" | LC_ALL=C sort -u |
+    awk '{c[$1]++} END{for (k in c) if (c[k] > 1) print k}' >"$DUP_SHAS"
+if [ -s "$DUP_SHAS" ]; then
+    DUPLICATED_BYTES=$(awk -F'\t' 'NR==FNR{dup[$1]=1; next} dup[$3]{s+=$2} END{print s+0}' "$DUP_SHAS" "$ROWS")
+else
+    DUPLICATED_BYTES=0
+fi
+
+MEASURED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+emit() {
+    echo "deployed_closure_manifest |schema, root, primary_binary, primary_bytes, closure_bytes, duplicated_bytes, file_count, measured_at_utc|"
+    printf '    "simple.deployed-closure-manifest/v1", "%s", "%s", %s, %s, %s, %s, "%s"\n' \
+        "$ROOT_ABS" "$PRIMARY_BINARY" "$PRIMARY_BYTES" "$CLOSURE_BYTES" "$DUPLICATED_BYTES" "$FILE_COUNT" "$MEASURED_AT"
+    echo "files |relpath, size, sha256, inode, nlink, kind|"
+    awk -F'\t' '{printf "    \"%s\", %s, \"%s\", %s, %s, \"%s\"\n", $1, $2, $3, $4, $5, $6}' "$ROWS"
+}
+
+if [ -n "$OUT" ]; then
+    emit >"$OUT" || die "cannot write $OUT"
+    echo "$SELF: wrote $OUT (root=$ROOT_ABS, file_count=$FILE_COUNT, primary_bytes=$PRIMARY_BYTES, closure_bytes=$CLOSURE_BYTES, duplicated_bytes=$DUPLICATED_BYTES)"
+else
+    emit
+fi
+exit 0
