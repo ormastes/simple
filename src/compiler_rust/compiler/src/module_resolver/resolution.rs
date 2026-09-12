@@ -990,7 +990,7 @@ impl ModuleResolver {
         let manifest = if let Some(manifest) = &resolved.manifest {
             Some(manifest.clone())
         } else if resolved.is_directory && resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
-            let mut source = std::fs::read_to_string(&resolved.path)
+            let mut source = crate::read_trace::rts(file!(), line!(), &resolved.path)
                 .map_err(|e| crate::error::factory::failed_to_read_file(&resolved.path, &e))?;
             if source.contains('\r') {
                 source = source.replace('\r', "");
