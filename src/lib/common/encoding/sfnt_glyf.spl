@@ -1,5 +1,5 @@
 use std.common.encoding.sfnt.{OtFont, OtTable, read_u16_be, read_i16_be, find_table, parse_offset_table}
-use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
+use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id, sfnt_cmap_glyph_ids_into}
 
 val SFNT_GLYPH_SELECTOR_CODEPOINT: i64 = 0
 val SFNT_GLYPH_SELECTOR_INDEX: i64 = 1
@@ -608,6 +608,71 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
         sgb_pixels: pixels
     ))
 
+# Metrics-only advance (2026-09-12). `sfnt_measure_glyph_into` below is already
+# raster-free, but it still calls `parse_sfnt_glyf_outline` + `_outline_bounds`
+# to produce the glyph's ink width/height -- decoding every contour and point of
+# the `glyf` entry. A caller that only wants the ADVANCE never looks at those:
+# the advance comes from `hmtx` alone, and this function computes it with the
+# byte-identical expression `_round_glyf_metric(horizontal[0] * scale)` that
+# `sfnt_measure_glyph_into` uses, so the two agree exactly by construction.
+# Measured on examples/06_io/ui/web_catalog/css-layout.html, the outline decode
+# was 3,442 ms of the 3,846 ms spent in `measure_text_advances` -- 29 ms per
+# advance-cache miss, and 89% of the whole measurement leaf.
+#
+# Writes meta[2] = advance, meta[3] = bearing_x, meta[6] = glyph_id and the
+# success cookie meta[7] = 310031. Width/height/bearing_y are NOT written --
+# a caller needing ink extents must use `sfnt_measure_glyph_into`.
+fn sfnt_glyph_advance_into(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, mut meta: [i64]):
+    if meta.len() < 20: return
+    meta[7] = 0
+    if blob.len() == 0 or size_px <= 0 or size_px > 512:
+        return
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return
+    var glyph_id: u32 = 0
+    if selector_kind == SFNT_GLYPH_SELECTOR_CODEPOINT and selector_value >= 0 and selector_value <= 1114111:
+        glyph_id = sfnt_cmap_glyph_id(font, selector_value as u32)
+    else if selector_kind == SFNT_GLYPH_SELECTOR_INDEX and selector_value > 0 and selector_value <= 4294967295:
+        glyph_id = selector_value as u32
+    else:
+        return
+    if glyph_id == 0:
+        return
+    val head_table = match find_table(font, 1751474532):
+        Some(value): value
+        None: return
+    val hhea_table = match find_table(font, 1751672161):
+        Some(value): value
+        None: return
+    val hmtx_table = match find_table(font, 1752003704):
+        Some(value): value
+        None: return
+    if not _table_is_bounded(font, head_table, 54) or not _table_is_bounded(font, hhea_table, 36) or not _table_is_bounded(font, hmtx_table, 4):
+        return
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
+    if units_per_em == 0 or long_metrics == 0:
+        return
+    var metric_end: i64 = 0
+    if (glyph_id as i64) < long_metrics:
+        metric_end = (glyph_id as i64 + 1) * 4
+    else:
+        metric_end = long_metrics * 4 + (glyph_id as i64 - long_metrics + 1) * 2
+    if metric_end > hmtx_table.length as i64:
+        return
+    val horizontal = match _hmtx(font, long_metrics, glyph_id):
+        Some(value): value
+        None: return
+    val scale = size_px as f64 / units_per_em as f64
+    meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+    meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
+    meta[6] = glyph_id as i64
+    meta[15] = selector_kind
+    meta[16] = selector_value
+    meta[17] = _round_glyf_metric(read_i16_be(font.blob, hhea_table.offset as i64 + 4) as f64 * scale)
+    meta[7] = 310031
+
 # Caller-owned metadata: width, height, advance, bearings, count, glyph, cookies, alpha.
 fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, mut meta: [i64]):
     if meta.len() > 7:
@@ -780,6 +845,20 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
         y = y + 1
     meta[9] = nonzero_alpha
     meta[8] = 310032
+
+# Blob-level batch glyph-id resolution: one table-directory parse and one cmap
+# parse for the whole `codepoints` array. See `sfnt_cmap_glyph_ids_into`.
+fn sfnt_blob_glyph_ids_into(blob: [u8], codepoints: [i64], mut out: [i64]):
+    var i: i64 = 0
+    while i < out.len():
+        out[i] = 0
+        i = i + 1
+    if blob.len() == 0:
+        return
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return
+    sfnt_cmap_glyph_ids_into(font, codepoints, out)
 
 fn sfnt_blob_glyph_exists(blob: [u8], codepoint: i64) -> bool:
     if blob.len() == 0 or codepoint < 0 or codepoint > 1114111:

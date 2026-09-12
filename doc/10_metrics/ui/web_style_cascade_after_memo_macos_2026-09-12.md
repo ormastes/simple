@@ -88,3 +88,36 @@ have been defensible.
 No frame-total line exists in this trace — the last phase boundary is
 `compose_shaping` — so no cold-frame total is claimed here. Raster is unchanged
 by this work and out of scope.
+
+## Appendix (2026-09-12, F14): the residual measurement leaf, measured
+
+The "Target not met, and the named reason" section above named two suspects for
+the 5,346 ms residual — uncached per-pair `horizontal_kern`, and a missing
+metrics-only entry point on the dylib backend — and said so by elimination
+rather than measurement. Direct counters say both are wrong, and name a third:
+
+| leaf | calls | ms | share of the measurement leaf |
+|---|---|---|---|
+| advance-cache misses | 108 | 3,442 | 89% |
+| ... the cmap re-parse inside them | 216 | 3,341 | 87% |
+| `horizontal_kern`, all calls, uncached | 2,455 | **26** | **0.7%** |
+| rasterize-for-metrics | **0** | **0** | **0%** |
+
+Resolving one codepoint to a glyph id re-parses the entire cmap (segment arrays
+plus the whole glyph-id array) at 15 ms a lookup, paid twice per miss — once by
+`has_glyph`, once by the advance. Fixed with a batched one-parse cmap entry
+point and a per-face ASCII glyph-id table.
+
+| page | `measure_text_advances` | style | pipeline |
+|---|---|---|---|
+| css-layout | 3,946 -> **450 ms** | 9,493 -> 5,685 ms | 10,406 -> 6,546 ms |
+| overview | 2,251 -> **188 ms** | 2,805 -> 733 ms | 2,874 -> 805 ms |
+
+Both pages' PPMs are byte-identical before vs after (`cmp`, 0 mismatches).
+
+**Measurement correction that applies to the tables above too:** the 13,084 /
+13,291 ms style and 5,346 ms measure figures were COLD first-process runs. The
+same unmodified tree, run warm, gives ~9,500 ms style and ~3,900 ms measure. The
+F14 before/after pairs here are warm-vs-warm, both sides rendered from a
+pristine `git archive HEAD` tree. Detail:
+`doc/08_tracking/bug/web_text_measurement_kern_uncached_2026-09-12.md`.
