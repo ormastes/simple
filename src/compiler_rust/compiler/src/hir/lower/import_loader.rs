@@ -11,63 +11,24 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
 
-thread_local! {
-    /// Per-process memo of PARSED imported modules, keyed by resolved path.
-    ///
-    /// `preregister_imported_type_names` and `load_imported_types` each read AND
-    /// fully re-parsed the imported file on every `use` that names it. Measured
-    /// with a call-site read trace on a lint of a TWO-LINE file: 2,672 reads at
-    /// the pre-register site and 611 at the load site out of 3,522 traced reads
-    /// -- `10.frontend/core/ast.spl` alone parsed 749 + 121 times. Both sites
-    /// consume the result immutably (`&imported_module.items`), and parsing is a
-    /// deterministic function of the file's bytes, so one parse per path per
-    /// process is observationally identical.
-    ///
-    /// `None` memoizes "unreadable or unparseable", which both sites previously
-    /// recomputed on every visit (the pre-register site silently skips, the load
-    /// site reports a module-resolution error).
-    ///
-    /// Per-PROCESS only -- a `src/lib/**` edit is still picked up by the next
-    /// run, so the "edit stdlib, no build needed" property is unchanged.
-    ///
-    /// Keyed by `normalize_path_key` (the interpreter loader's canonical key),
-    /// NOT by the raw resolved path. The repo reaches one physical file through
-    /// several spellings -- `src/std` is a symlink to `lib`, `src/compiler/common`
-    /// to `00.common`, and the resolver emits both relative and absolute forms --
-    /// and a raw key made each spelling its own unit: an extra read + full
-    /// re-parse per alias, and the same types registered twice into the lowerer.
-    static IMPORTED_MODULE_AST: std::cell::RefCell<
-        std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<simple_parser::ast::Module>>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// Read + parse an imported module, memoized per process. See `IMPORTED_MODULE_AST`.
+/// Read + parse an imported module, memoized per process.
+///
+/// The memo itself is `module_cache::PARSED_SOURCE_CACHE`, which the
+/// INTERPRETER's module loader also reads: a file both lanes reach is read once
+/// and parsed once instead of twice. It was a private `IMPORTED_MODULE_AST`
+/// here until 2026-09-12; the keying (`normalize_path_key`, so alias spellings
+/// of one physical file are one unit) and the "memoize unreadable/unparseable
+/// as `None`" behaviour are unchanged, only the owner moved.
+///
+/// `IMPORT_AST_PARSES` still counts the parses THIS lane caused, which is why
+/// the lookup and the fill are separate calls.
 pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync::Arc<simple_parser::ast::Module>> {
-    let key = crate::interpreter::normalize_path_key(path);
-    if let Some(hit) = IMPORTED_MODULE_AST.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(hit) = crate::interpreter::shared_source_lookup(path) {
         crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_HITS, 1);
-        return hit;
+        return hit.ast();
     }
     crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_PARSES, 1);
-    let parsed = match crate::read_trace::rts(file!(), line!(), path) {
-        Ok(mut source) => {
-            if source.contains('\r') {
-                source = source.replace('\r', "");
-            }
-            simple_parser::Parser::new(&source)
-                .parse()
-                .ok()
-                .map(std::sync::Arc::new)
-        }
-        Err(_) => None,
-    };
-    IMPORTED_MODULE_AST.with(|c| c.borrow_mut().insert(key, parsed.clone()));
-    parsed
-}
-
-/// Drop the imported-module parse memo.
-pub(crate) fn clear_imported_module_ast_cache() {
-    IMPORTED_MODULE_AST.with(|c| c.borrow_mut().clear());
+    crate::interpreter::shared_source(path).ast()
 }
 
 impl Lowerer {
@@ -724,17 +685,25 @@ impl Lowerer {
             }
             self.loaded_modules.insert(sibling_key);
 
-            let mut source = crate::read_trace::rts(file!(), line!(), &sibling_path).map_err(|e| {
-                LowerError::ModuleResolution(format!("Failed to read sibling module file {:?}: {}", sibling_path, e))
-            })?;
-            if source.contains('\r') {
-                source = source.replace('\r', "");
-            }
-
-            let mut parser = simple_parser::Parser::new(&source);
-            let sibling_module = parser
-                .parse()
-                .map_err(|e| LowerError::ModuleResolution(format!("Failed to parse sibling module: {}", e)))?;
+            // Shared memo, but the two failure messages are reproduced verbatim
+            // from the cached text: the cache keeps the io/parse error's
+            // `Display` rather than the error itself, precisely so a borrowed
+            // entry yields the same diagnostic a private read+parse did.
+            let sibling_module = match crate::interpreter::shared_source(&sibling_path) {
+                crate::interpreter::SharedSource::Parsed { ast: Ok(ast), .. } => ast,
+                crate::interpreter::SharedSource::Parsed { ast: Err(e), .. } => {
+                    return Err(LowerError::ModuleResolution(format!(
+                        "Failed to parse sibling module: {}",
+                        e
+                    )));
+                }
+                crate::interpreter::SharedSource::ReadError(e) => {
+                    return Err(LowerError::ModuleResolution(format!(
+                        "Failed to read sibling module file {:?}: {}",
+                        sibling_path, e
+                    )));
+                }
+            };
 
             imported_count += self.register_imported_symbols_from_items(&sibling_module.items, target)?;
         }
@@ -827,18 +796,11 @@ impl Lowerer {
         sibling_files.sort();
 
         for sibling_path in sibling_files {
-            let mut source = match crate::read_trace::rts(file!(), line!(), &sibling_path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            if source.contains('\r') {
-                source = source.replace('\r', "");
-            }
-
-            let mut parser = simple_parser::Parser::new(&source);
-            let sibling_module = match parser.parse() {
-                Ok(m) => m,
-                Err(_) => continue,
+            // Same memo as `load_imported_types`, so a sibling this lane (or
+            // the interpreter) already read is not read and parsed again. Both
+            // failure modes still skip the file silently, as before.
+            let Some(sibling_module) = parsed_imported_module(&sibling_path) else {
+                continue;
             };
 
             for item in &sibling_module.items {
@@ -1536,7 +1498,7 @@ mod imported_module_ast_memo_tests {
     #[test]
     fn repeated_import_of_the_same_module_parses_it_exactly_once() {
         crate::perf_counters::set_enabled(true);
-        clear_imported_module_ast_cache();
+        crate::interpreter::clear_parsed_source_cache();
         crate::perf_counters::IMPORT_AST_PARSES.store(0, Ordering::Relaxed);
         crate::perf_counters::IMPORT_AST_HITS.store(0, Ordering::Relaxed);
 
