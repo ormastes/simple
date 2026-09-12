@@ -85,27 +85,28 @@ fn _run(
     stdout_bytes: i64,
     stderr_bytes: i64,
     started: bool,
-    consumed: i64,
     polls: i64,
     cancels: i64,
-    collects: i64,
-    releases: i64,
-    cancel_first: bool,
+    reaps: i64,
     elapsed_ms: i64,
 ) -> LspQueryOwnedRunV1:
+    # Three invariants of this launcher are encoded as shared parameters rather
+    # than as separate inputs a caller could pass inconsistently: one poll per
+    # observation consumed, one release per collect (the child is never left
+    # unreaped), and a cancel only ever on a path that then collects.
     LspQueryOwnedRunV1(
         outcome: outcome, reason: reason, exit_code: exit_code,
         stdout_bytes: stdout_bytes, stderr_bytes: stderr_bytes, started: started,
-        observations_consumed: consumed, poll_count: polls, cancel_count: cancels,
-        collect_count: collects, release_count: releases,
-        cancel_before_collect: cancel_first, elapsed_ms: elapsed_ms)
+        observations_consumed: polls, poll_count: polls, cancel_count: cancels,
+        collect_count: reaps, release_count: reaps,
+        cancel_before_collect: cancels > 0, elapsed_ms: elapsed_ms)
 
 # A result that never reached a child: no poll, no cancel, no reap.
 fn lsp_query_owned_unavailable_v1(reason: text) -> LspQueryOwnedRunV1:
-    _run(LspQueryOwnedOutcomeV1.Unavailable, reason, -1, 0, 0, false, 0, 0, 0, 0, 0, false, 0)
+    _run(LspQueryOwnedOutcomeV1.Unavailable, reason, -1, 0, 0, false, 0, 0, 0, 0)
 
 fn _refused(reason: text) -> LspQueryOwnedRunV1:
-    _run(LspQueryOwnedOutcomeV1.Failed, reason, -1, 0, 0, false, 0, 0, 0, 0, 0, false, 0)
+    _run(LspQueryOwnedOutcomeV1.Failed, reason, -1, 0, 0, false, 0, 0, 0, 0)
 
 # The execution mode this process runs under.  An unset value is reported as
 # "unknown" and is NOT treated as a native lane.
@@ -163,7 +164,7 @@ fn lsp_query_owned_admit_v1(
     val reason = lsp_query_owned_launch_reason_v1(launch)
     if reason != "":
         return _refused(reason)
-    _run(LspQueryOwnedOutcomeV1.Pending, "", -1, 0, 0, true, 0, 0, 0, 0, 0, false, 0)
+    _run(LspQueryOwnedOutcomeV1.Pending, "", -1, 0, 0, true, 0, 0, 0, 0)
 
 # Drive the launcher over a caller-supplied observation sequence.  This is the
 # port every unit spec uses: the sequence stands in for the poll receipts a live
@@ -183,7 +184,7 @@ fn lsp_query_owned_run_observations_v1(
     val total = observations.len()
     if total == 0:
         return _run(LspQueryOwnedOutcomeV1.Failed, "no_observations", -1, 0, 0,
-            true, 0, 0, 1, 1, 1, true, 0)
+            true, 0, 1, 1, 0)
 
     var index: i64 = 0
     var elapsed: i64 = 0
@@ -195,26 +196,26 @@ fn lsp_query_owned_run_observations_v1(
             return _run(LspQueryOwnedOutcomeV1.Failed,
                 "owned_process_runtime_error_" + obs.runtime_error.to_text(),
                 obs.exit_code, obs.stdout_bytes, obs.stderr_bytes, true,
-                index, index, 0, 1, 1, false, elapsed)
+                index, 0, 1, elapsed)
         if obs.timed_out:
             return _run(LspQueryOwnedOutcomeV1.TimedOut, "child_timed_out",
                 obs.exit_code, obs.stdout_bytes, obs.stderr_bytes, true,
-                index, index, 1, 1, 1, true, elapsed)
+                index, 1, 1, elapsed)
         if obs.terminal:
             if obs.exit_code == 0:
                 return _run(LspQueryOwnedOutcomeV1.Completed, "", obs.exit_code,
                     obs.stdout_bytes, obs.stderr_bytes, true,
-                    index, index, 0, 1, 1, false, elapsed)
+                    index, 0, 1, elapsed)
             return _run(LspQueryOwnedOutcomeV1.Failed, "child_exit_nonzero",
                 obs.exit_code, obs.stdout_bytes, obs.stderr_bytes, true,
-                index, index, 0, 1, 1, false, elapsed)
+                index, 0, 1, elapsed)
         if elapsed >= launch.timeout_ms:
             return _run(LspQueryOwnedOutcomeV1.TimedOut, "launcher_deadline_exceeded",
                 obs.exit_code, obs.stdout_bytes, obs.stderr_bytes, true,
-                index, index, 1, 1, 1, true, elapsed)
+                index, 1, 1, elapsed)
 
     _run(LspQueryOwnedOutcomeV1.Failed, "observations_exhausted", -1, 0, 0, true,
-        total, total, 1, 1, 1, true, elapsed)
+        total, 1, 1, elapsed)
 
 # Live adapter.  Unreachable on a lane whose provider is unavailable — the
 # guard above returns before any extern is named, which is what keeps this file
@@ -281,8 +282,7 @@ fn lsp_query_owned_run_live_v1(
     val collected = match lease.collect():
         Ok(r) => r
         Err(e) => return _run(LspQueryOwnedOutcomeV1.Failed, "owned_process_collect_rejected",
-            exit_code, stdout_bytes, stderr_bytes, true, polls, polls, cancels, 0, 0,
-            cancels > 0, elapsed)
+            exit_code, stdout_bytes, stderr_bytes, true, polls, cancels, 0, elapsed)
     exit_code = collected.exit_code
     stdout_bytes = collected.stdout_seen
     stderr_bytes = collected.stderr_seen
@@ -291,8 +291,7 @@ fn lsp_query_owned_run_live_v1(
         reason = "child_exit_nonzero"
     val _released = lease.release()
     val _closed = pin.close()
-    _run(outcome, reason, exit_code, stdout_bytes, stderr_bytes, true, polls, polls,
-        cancels, 1, 1, cancels > 0, elapsed)
+    _run(outcome, reason, exit_code, stdout_bytes, stderr_bytes, true, polls, cancels, 1, elapsed)
 
 export LSP_QUERY_OWNED_MAX_POLLS_V1, LSP_QUERY_OWNED_OPT_IN_ENV_V1
 export LspQueryOwnedOutcomeV1, LspQueryOwnedProviderV1, LspQueryOwnedLaunchV1
