@@ -1,67 +1,103 @@
-# Spec for the Chrome-vs-Simple CSS layout geometry differ.
-# Run: <seed> run test/01_unit/app/ui/layout_geometry_diff_spec.spl
+"""
+## Purpose and audience
+Purpose: Prove the Chrome-vs-Simple CSS layout geometry differ correctly
+parses a Chrome geometry dump, compares box trees, clusters mismatches by
+CSS feature, and never silently drops a missing or extra element.
+Audience: browser-engine and UI showcase maintainers who compare Simple's
+web renderer output against a Chrome reference dump.
+"""
+
+# @cover src/app/ui/chrome_showcase/layout_geometry_diff.spl
+use std.spec.*
 use app.ui.chrome_showcase.layout_geometry_diff.{
     GeomBox, parse_chrome_geom, geometry_diff, classify_feature, selftest_report
 }
 
-var examples = 0
-var failures = 0
+describe "layout geometry differ — parsing a Chrome geometry dump":
+    it "AC-1: parse_chrome_geom skips non-GEOM lines and reads geometry and tag":
+        step("Parse a dump containing one noise line and two GEOM lines")
+        # @req REQ-UI-LAYOUT-GEOMETRY-DIFF-001
+        # @capture(assertion): parsed box count, geometry fields and tag
+        val dump = "noise\n" +
+            "GEOM|path:|body|0|0|900|600|display=block\n" +
+            "GEOM|path:0|div|10|10|100|50|display=flex\n"
+        val chrome = parse_chrome_geom(dump)
+        expect(chrome.len()).to_equal(2)
+        expect(chrome[1].x == 10 and chrome[1].w == 100).to_equal(true)
+        expect(chrome[1].tag).to_equal("div")
 
-fn check(name: text, ok: bool):
-    examples = examples + 1
-    if not ok:
-        failures = failures + 1
-        print("FAIL: " + name)
-    else:
-        print("ok: " + name)
+describe "layout geometry differ — comparing box trees":
+    it "AC-2: identical trees compare clean":
+        step("Diff a Chrome tree against an identical Simple tree")
+        # @req REQ-UI-LAYOUT-GEOMETRY-DIFF-002
+        # @capture(assertion): compared/mismatched counts
+        val dump = "GEOM|path:|body|0|0|900|600|display=block\n" +
+            "GEOM|path:0|div|10|10|100|50|display=flex\n"
+        val chrome = parse_chrome_geom(dump)
+        val same = [
+            GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+            GeomBox(key: "path:0", tag: "div", x: 10, y: 10, w: 100, h: 50, features: "")
+        ]
+        val r1 = geometry_diff(chrome, same, 1)
+        expect(r1.compared == 2 and r1.mismatched == 0).to_equal(true)
 
-fn main():
-    val dump = "noise\n" +
-        "GEOM|path:|body|0|0|900|600|display=block\n" +
-        "GEOM|path:0|div|10|10|100|50|display=flex\n"
-    val chrome = parse_chrome_geom(dump)
-    check("parse_chrome_geom skips non-GEOM lines", chrome.len() == 2)
-    check("parse_chrome_geom reads geometry", chrome[1].x == 10 and chrome[1].w == 100)
-    check("parse_chrome_geom reads tag", chrome[1].tag == "div")
+    it "AC-3: a 14px y shift is one mismatch, reported with delta and feature cluster":
+        step("Diff a Chrome tree against a Simple tree shifted 14px in y")
+        # @req REQ-UI-LAYOUT-GEOMETRY-DIFF-003
+        # @capture(assertion): mismatch count, delta-y and feature cluster
+        val dump = "GEOM|path:|body|0|0|900|600|display=block\n" +
+            "GEOM|path:0|div|10|10|100|50|display=flex\n"
+        val chrome = parse_chrome_geom(dump)
+        val shifted = [
+            GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+            GeomBox(key: "path:0", tag: "div", x: 10, y: 24, w: 100, h: 50, features: "")
+        ]
+        val r2 = geometry_diff(chrome, shifted, 1)
+        expect(r2.mismatched).to_equal(1)
+        expect(r2.rows[0].dy).to_equal(14)  # oracle: shifted fixture moves y by 24-10=14px
+        expect(r2.rows[0].feature).to_equal("flex")
 
-    val same = [
-        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
-        GeomBox(key: "path:0", tag: "div", x: 10, y: 10, w: 100, h: 50, features: "")
-    ]
-    val r1 = geometry_diff(chrome, same, 1)
-    check("identical trees compare clean", r1.compared == 2 and r1.mismatched == 0)
+    it "AC-4: an element absent from Simple is not a silent pass":
+        step("Diff a Chrome tree with two elements against a Simple tree missing one")
+        # @req REQ-UI-LAYOUT-GEOMETRY-DIFF-004
+        # @capture(assertion): missing_in_simple and compared counts
+        val dump = "GEOM|path:|body|0|0|900|600|display=block\n" +
+            "GEOM|path:0|div|10|10|100|50|display=flex\n"
+        val chrome = parse_chrome_geom(dump)
+        val missing = [
+            GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: "")
+        ]
+        val r3 = geometry_diff(chrome, missing, 1)
+        expect(r3.missing_in_simple == 1 and r3.compared == 1).to_equal(true)
 
-    val shifted = [
-        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
-        GeomBox(key: "path:0", tag: "div", x: 10, y: 24, w: 100, h: 50, features: "")
-    ]
-    val r2 = geometry_diff(chrome, shifted, 1)
-    check("a 14px y shift is one mismatch", r2.mismatched == 1)
-    check("delta y is reported", r2.rows[0].dy == 14)
-    check("mismatch is clustered by the chrome feature", r2.rows[0].feature == "flex")
+    it "AC-5: an element Chrome does not have is counted, not dropped":
+        step("Diff a Chrome tree against a Simple tree with one extra element")
+        # @req REQ-UI-LAYOUT-GEOMETRY-DIFF-005
+        # @capture(assertion): missing_in_chrome count
+        val dump = "GEOM|path:|body|0|0|900|600|display=block\n" +
+            "GEOM|path:0|div|10|10|100|50|display=flex\n"
+        val chrome = parse_chrome_geom(dump)
+        val extra = [
+            GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+            GeomBox(key: "path:0", tag: "div", x: 10, y: 10, w: 100, h: 50, features: ""),
+            GeomBox(key: "path:1", tag: "div", x: 0, y: 0, w: 1, h: 1, features: "")
+        ]
+        val r4 = geometry_diff(chrome, extra, 1)
+        expect(r4.missing_in_chrome).to_equal(1)
 
-    val missing = [
-        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: "")
-    ]
-    val r3 = geometry_diff(chrome, missing, 1)
-    check("an element absent from Simple is not a silent pass",
-          r3.missing_in_simple == 1 and r3.compared == 1)
+describe "layout geometry differ — feature classification":
+    it "AC-6: grid outranks flex, absolute and float are clustered, block-flow is the fallback":
+        step("Classify feature strings covering grid, absolute position, float and plain block flow")
+        # @req REQ-UI-LAYOUT-GEOMETRY-DIFF-006
+        # @capture(assertion): classify_feature bucket names
+        expect(classify_feature("display=grid;float=none")).to_equal("grid")
+        expect(classify_feature("display=block;position=absolute")).to_equal("position")
+        expect(classify_feature("display=block;position=static;float=left")).to_equal("float")
+        expect(classify_feature("display=block;position=static;float=none")).to_equal("block-flow")
 
-    val extra = [
-        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
-        GeomBox(key: "path:0", tag: "div", x: 10, y: 10, w: 100, h: 50, features: ""),
-        GeomBox(key: "path:1", tag: "div", x: 0, y: 0, w: 1, h: 1, features: "")
-    ]
-    val r4 = geometry_diff(chrome, extra, 1)
-    check("an element Chrome does not have is counted", r4.missing_in_chrome == 1)
-
-    check("grid outranks flex in classification",
-          classify_feature("display=grid;float=none") == "grid")
-    check("absolute position is clustered", classify_feature("display=block;position=absolute") == "position")
-    check("float is clustered", classify_feature("display=block;position=static;float=left") == "float")
-    check("plain block flow is the fallback bucket",
-          classify_feature("display=block;position=static;float=none") == "block-flow")
-
-    check("differ selftest passes", selftest_report().contains("SELFTEST PASS"))
-
-    print(examples.to_string() + " examples, " + failures.to_string() + " failures")
+describe "layout geometry differ — module selftest":
+    it "AC-7: the differ's own selftest reports PASS":
+        step("Run the differ's built-in selftest report")
+        # @req REQ-UI-LAYOUT-GEOMETRY-DIFF-007
+        # @capture(assertion): selftest_report() text
+        expect(selftest_report().contains("SELFTEST PASS")).to_equal(true)

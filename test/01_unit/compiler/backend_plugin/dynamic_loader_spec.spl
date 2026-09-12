@@ -35,6 +35,7 @@ code<->variant mapping.
 use std.spec
 use std.spec.step
 use std.fs.{read_file}
+use std.sffi.dynamic.{DynLib}
 use compiler.backend_plugin.dynamic_loader.*
 
 val DYNAMIC_LOADER_SOURCE =
@@ -120,3 +121,23 @@ describe "dynamic backend provider library lease":
         )
         step("Verify the unsupported variant retains its diagnostic detail")
         expect(unsupported.diagnostic()).to_equal("typed descriptor ABI is unavailable")
+
+    it "reports the retained library handle only while the lease is open":
+        # @req REQ-DYNLOADER-002
+        step("Construct an open lease over a synthetic library handle")
+        val open_lease = DynamicBackendPluginLease(
+            DynLib(handle: 7, path: ""), "/provider.so", "/stage", "d", 4096, false
+        )
+        # @capture(statistics): admitted handle for an open lease
+        step("Verify the admitted handle is the retained dlopen handle")
+        expect(open_lease.admitted_handle()).to_equal(7)
+
+        # Constructed closed rather than mutated; no provider code is invoked
+        # and `.close()` is never called on a synthetic handle.
+        step("Construct an already-closed lease over the same handle")
+        val closed_lease = DynamicBackendPluginLease(
+            DynLib(handle: 7, path: ""), "/provider.so", "/stage", "d", 4096, true
+        )
+        # @capture(statistics): admitted handle after close
+        step("Verify a closed lease reports a non-positive, fail-closed handle")
+        expect(closed_lease.admitted_handle()).to_equal(0)

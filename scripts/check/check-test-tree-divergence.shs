@@ -134,8 +134,10 @@ ALLOWLIST_PATH_REL="scripts/check/test_tree_mirror_only_allowlist.txt"
 generate=0
 ref=""
 base=""
+selftest_only=0
 while [ $# -gt 0 ]; do
     case "$1" in
+        --selftest) selftest_only=1; shift ;;
         --generate-baseline) generate=1; shift ;;
         --ref) ref="${2:-}"; [ -n "$ref" ] || die 2 "--ref requires a commit-ish argument"; shift 2 ;;
         --base) base="${2:-}"; [ -n "$base" ] || die 2 "--base requires a commit-ish argument"; shift 2 ;;
@@ -145,6 +147,181 @@ done
 if [ -n "$ref" ]; then
     git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null \
         || die 2 "--ref '$ref' does not resolve to a commit"
+fi
+
+# --- 0a. --selftest: fixtures, fatal, run before every scan -----------------
+# Fixture (1) is the one that matters for the 2026-09-12 batching rewrite: it
+# runs the NEW blob-id comparison and a REFERENCE implementation of the OLD
+# per-pair `git cat-file -e` + `git diff --quiet` loop over the same 3-pair
+# fixture repo, and requires byte-identical offender lists AND a byte-identical
+# verdict line. If the two ever disagree the guard aborts rather than reporting
+# a verdict computed by an unproven path.
+selftest_fail=0
+st_check() {
+    if [ "$1" = "ok" ]; then
+        echo "$SELF: selftest: PASS $2"
+    else
+        echo "$SELF: selftest: FAIL $2 — $3" >&2
+        selftest_fail=$((selftest_fail + 1))
+    fi
+}
+
+
+run_selftest() {
+    st_root=$(mktemp -d "${TMPDIR:-/tmp}/ttd_selftest.XXXXXX") || die 2 "mktemp failed (selftest)"
+    GIT_CONFIG_GLOBAL=/dev/null
+    GIT_CONFIG_SYSTEM=/dev/null
+    GIT_CONFIG_NOSYSTEM=1
+    export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
+
+    # --- fixture repo: 3 pairs, each with identical / diverged / mirror-only --
+    fx="$st_root/fx"
+    mkdir -p "$fx/scripts/check" || die 2 "selftest mkdir failed"
+    ( cd "$fx" && git init -q . ) || die 2 "selftest git init failed"
+    st_pairs=''
+    i=1
+    while [ "$i" -le 3 ]; do
+        c="test/0${i}_canon"; s="test/shadow${i}"
+        mkdir -p "$fx/$c/sub" "$fx/$s/sub" || die 2 "selftest mkdir failed"
+        printf 'same %s\n' "$i" > "$fx/$c/sub/same_spec.spl"
+        printf 'same %s\n' "$i" > "$fx/$s/sub/same_spec.spl"
+        printf 'canon %s\n' "$i" > "$fx/$c/sub/drift_spec.spl"
+        printf 'shadow %s\n' "$i" > "$fx/$s/sub/drift_spec.spl"
+        printf 'orphan %s\n' "$i" > "$fx/$s/sub/only_here_spec.spl"
+        # scratch files that must be excluded on the shadow side
+        printf 'x\n' > "$fx/$s/sub/.spipe_matchers_x"
+        printf 'x\n' > "$fx/$s/sub/.sspec_wrapped_entry_x"
+        if [ -z "$st_pairs" ]; then st_pairs="p$i:$c:$s"; else st_pairs="$st_pairs;p$i:$c:$s"; fi
+        i=$((i + 1))
+    done
+    # baseline covers only pair 1's drift => pairs 2 and 3 are NEW divergence
+    printf 'p1:sub/drift_spec.spl\n' > "$fx/scripts/check/test_tree_divergence_baseline.txt"
+    ( cd "$fx" && git add -A && git -c user.email=s@e -c user.name=s commit -q -m fixture ) \
+        || die 2 "selftest fixture commit failed"
+    fxref=$( cd "$fx" && git rev-parse HEAD ) || die 2 "selftest rev-parse failed"
+
+    # (1) batched (this script) vs the legacy per-pair implementation
+    st_out="$st_root/new.offenders"
+    st_verdict=$( cd "$fx" && TEST_TREE_DIVERGENCE_PAIRS="$st_pairs" \
+        TEST_TREE_DIVERGENCE_OUT="$st_out" TTD_SELFTEST_CHILD=1 \
+        sh "$SELF_PATH" --ref "$fxref" 2>/dev/null | tail -1 )
+    # legacy reference: exactly the pre-2026-09-12 loop (cat-file -e + diff --quiet)
+    st_ref_out="$st_root/legacy.offenders"
+    : > "$st_ref_out"
+    st_common=0; st_div=0; st_mo=0
+    st_oldifs="$IFS"
+    IFS=';'
+    for spec in $st_pairs; do
+        IFS="$st_oldifs"
+        lbl=$(printf '%s' "$spec" | cut -d: -f1)
+        cr=$(printf '%s' "$spec" | cut -d: -f2)
+        sr=$(printf '%s' "$spec" | cut -d: -f3)
+        for shp in $( cd "$fx" && git ls-tree -r --name-only "$fxref" -- "$sr" \
+                | /usr/bin/grep -E '\.spl$' \
+                | /usr/bin/grep -vE '/\.spipe_matchers_[^/]*$|/\.sspec_wrapped_entry_[^/]*$' ); do
+            rel=${shp#"$sr"/}
+            if ! ( cd "$fx" && git cat-file -e "$fxref:$cr/$rel" 2>/dev/null ); then
+                st_mo=$((st_mo + 1)); continue
+            fi
+            st_common=$((st_common + 1))
+            if ( cd "$fx" && git diff --quiet "$fxref:$cr/$rel" "$fxref:$shp" 2>/dev/null ); then
+                :
+            else
+                st_div=$((st_div + 1)); echo "$lbl:$rel" >> "$st_ref_out"
+            fi
+        done
+        IFS=';'
+    done
+    IFS="$st_oldifs"
+    sort -u "$st_ref_out" -o "$st_ref_out"
+    if cmp -s "$st_ref_out" "$st_out"; then
+        st_check ok "(1) batched offender list == legacy per-pair offender list (3 pairs)"
+    else
+        st_check no "(1) batched vs legacy offender list" "lists differ: $(diff "$st_ref_out" "$st_out" | tr '\n' ' ')"
+    fi
+    case "$st_verdict" in
+        "$SELF: FAIL — $st_div diverged vs 1 baselined (2 new, 0 fixed-but-still-baselined); $st_mo mirror-only ($st_mo unallowlisted, 0 stale-allowlist);"*)
+            st_check ok "(2) verdict line reproduces the legacy counts ($st_common compared, $st_div diverged, $st_mo mirror-only)" ;;
+        *)
+            st_check no "(2) verdict line vs legacy counts" "got: $st_verdict (legacy: common=$st_common diverged=$st_div mirror_only=$st_mo)" ;;
+    esac
+
+    # (3) a fully converged tree must PASS
+    fx2="$st_root/fx2"
+    mkdir -p "$fx2/scripts/check" "$fx2/test/01_canon/sub" "$fx2/test/shadow/sub" || die 2 "selftest mkdir failed"
+    printf 'same\n' > "$fx2/test/01_canon/sub/a_spec.spl"
+    printf 'same\n' > "$fx2/test/shadow/sub/a_spec.spl"
+    : > "$fx2/scripts/check/test_tree_divergence_baseline.txt"
+    ( cd "$fx2" && git init -q . && git add -A \
+        && git -c user.email=s@e -c user.name=s commit -q -m fixture ) \
+        || die 2 "selftest fixture2 commit failed"
+    fx2ref=$( cd "$fx2" && git rev-parse HEAD )
+    st_v2=$( cd "$fx2" && TEST_TREE_DIVERGENCE_PAIRS="q:test/01_canon:test/shadow" \
+        TEST_TREE_DIVERGENCE_OUT="$st_root/fx2.offenders" TTD_SELFTEST_CHILD=1 \
+        sh "$SELF_PATH" --ref "$fx2ref" 2>/dev/null | tail -1 )
+
+    case "$st_v2" in
+        "$SELF: PASS — 1 pairs checked, 0 diverged"*) st_check ok "(3) converged fixture PASSes" ;;
+        *) st_check no "(3) converged fixture PASSes" "got: $st_v2" ;;
+    esac
+
+    # (4) non-vacuity: a ref with no mirrored pair at all must ERROR, never pass
+    st_v3=$( cd "$fx2" && TEST_TREE_DIVERGENCE_PAIRS="q:test/nope_canon:test/nope_shadow" \
+        TEST_TREE_DIVERGENCE_OUT="$st_root/fx3.offenders" TTD_SELFTEST_CHILD=1 \
+        sh "$SELF_PATH" --ref "$fx2ref" 2>/dev/null | tail -1 )
+    case "$st_v3" in
+        "$SELF: ERROR"*) st_check ok "(4) empty pair table ERRORs (nothing compared)" ;;
+        *) st_check no "(4) empty pair table ERRORs" "got: $st_v3" ;;
+    esac
+
+    # (5) --base half-landed scan: one leg edited, twin untouched and still
+    # divergent. This fixture also pins the BSD-awk trap that made the scan
+    # ERROR on macOS for every --base run (a newline-separated pair table
+    # cannot be passed through `awk -v`; it is read from a file instead).
+    fx3="$st_root/fx3"
+    mkdir -p "$fx3/scripts/check" "$fx3/test/01_canon/sub" "$fx3/test/shadow/sub" || die 2 "selftest mkdir failed"
+    printf 'v1\n' > "$fx3/test/01_canon/sub/a_spec.spl"
+    printf 'v1\n' > "$fx3/test/shadow/sub/a_spec.spl"
+    : > "$fx3/scripts/check/test_tree_divergence_baseline.txt"
+    ( cd "$fx3" && git init -q . && git add -A \
+        && git -c user.email=s@e -c user.name=s commit -q -m base ) \
+        || die 2 "selftest fixture3 commit failed"
+    fx3base=$( cd "$fx3" && git rev-parse HEAD )
+    printf 'v2 canon only\n' > "$fx3/test/01_canon/sub/a_spec.spl"
+    printf 'q:sub/a_spec.spl\n' > "$fx3/scripts/check/test_tree_divergence_baseline.txt"
+    ( cd "$fx3" && git add -A \
+        && git -c user.email=s@e -c user.name=s commit -q -m 'edit one leg' ) \
+        || die 2 "selftest fixture3 commit2 failed"
+    fx3new=$( cd "$fx3" && git rev-parse HEAD )
+    st_v4=$( cd "$fx3" && TEST_TREE_DIVERGENCE_PAIRS="q:test/01_canon:test/shadow" \
+        TEST_TREE_DIVERGENCE_OUT="$st_root/fx4.offenders" TTD_SELFTEST_CHILD=1 \
+        sh "$SELF_PATH" --ref "$fx3new" --base "$fx3base" 2>/dev/null | tail -1 )
+    case "$st_v4" in
+        *"half-landed: 1 leg-edit(s) checked, 1 half-landed"*)
+            st_check ok "(5) --base half-landed scan reports the untouched divergent twin" ;;
+        *)
+            st_check no "(5) --base half-landed scan" "got: $st_v4" ;;
+    esac
+
+    rm -rf "$st_root"
+    # Do not leak the fixture git environment into the real scan below.
+    unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM
+    if [ "$selftest_fail" -gt 0 ]; then
+        die 2 "selftest FAILED ($selftest_fail fixture(s)) — refusing to report a verdict"
+    fi
+}
+
+SELF_PATH=$0
+case "$SELF_PATH" in /*) ;; *) SELF_PATH="$(pwd)/$SELF_PATH" ;; esac
+if [ "${TTD_SELFTEST_CHILD:-0}" != "1" ]; then
+    run_selftest
+    if [ "$selftest_only" -eq 1 ]; then
+        VERDICT_EMITTED=1
+        echo "$SELF: PASS — 5 selftest fixture(s) checked, 0 failures (no divergence scan performed in --selftest mode)"
+        exit 0
+    fi
+elif [ "$selftest_only" -eq 1 ]; then
+    die 2 "--selftest cannot run inside a selftest child"
 fi
 if [ -n "$base" ]; then
     [ -n "$ref" ] || die 2 "--base requires --ref (the half-landed check reads the range base..ref)"
@@ -200,6 +377,69 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/test_tree_divergence.XXXXXX") \
     || die 2 "mktemp failed"
 trap 'cl_t=$?; cleanup_extra="$work $work0"; cleanup "$cl_t"' EXIT HUP INT TERM QUIT PIPE
 
+# --- 2b. committed-content index (ONE git process per ref) -------------------
+# Until 2026-09-12 --ref mode spawned TWO git processes per shadow file
+# (`git cat-file -e` + `git diff --quiet`). At 6,119 shadow .spl paths that is
+# ~12k processes per ref, ~24k for the delta helper which runs the guard at
+# two refs — measured 10-20+ minutes on a loaded macOS host, and frequently
+# never returning, so every landing that day either waited or stepped over the
+# gate. A guard that is routed around protects nothing.
+#
+# The replacement reads the whole committed index in ONE `git ls-tree -r`
+# per ref and compares BLOB OBJECT IDS. That is not an approximation: git is
+# content-addressed, so two paths have the same blob id if and only if their
+# contents are byte-identical — exactly what `git diff --quiet <blob> <blob>`
+# answered (it compares content and ignores mode). Same verdict, same counts,
+# same offender list; see --selftest fixture (1), which runs the old per-pair
+# cat-file/diff implementation alongside this one and requires byte-identical
+# output.
+#
+# Parsing note: default `git ls-tree -r` output is "<mode> SP <type> SP <oid>
+# TAB <path>". We deliberately do NOT use `--format` (git >= 2.36 only; some
+# push hosts are older) nor `-z` (BSD awk has no RS="\0"). A path that git
+# quotes (leading '"', i.e. it contains a tab/newline/control byte) is
+# fail-closed as an ERROR rather than misparsed.
+ref_index="$work/ref_index.txt"
+if [ -n "$ref" ]; then
+    set --
+    idx_ifs="$IFS"
+    IFS='
+'
+    for line in $pairs_raw; do
+        IFS="$idx_ifs"
+        [ -n "$line" ] || continue
+        ic=$(printf '%s' "$line" | cut -d: -f2)
+        is=$(printf '%s' "$line" | cut -d: -f3)
+        [ -n "$ic" ] && [ -n "$is" ] \
+            || die 2 "malformed pair spec: '$line' (want label:canon_rel:shadow_rel)"
+        set -- "$@" "$ic" "$is"
+        IFS='
+'
+    done
+    IFS="$idx_ifs"
+    [ $# -gt 0 ] || die 2 "no pair directories to index"
+
+    git ls-tree -r "$ref" -- "$@" > "$work/ls_tree_raw.txt"
+    lr=$?
+    [ "$lr" -eq 0 ] || die 2 "git ls-tree -r failed (status $lr) at $ref"
+
+    awk -F'\t' '
+        {
+            n = split($1, a, " ")
+            if (n < 3) { print "malformed ls-tree record: " $0 > "/dev/stderr"; bad = 1; exit }
+            if (a[2] != "blob") next
+            if (substr($2, 1, 1) == "\"") {
+                print "quoted (escaped) path in ls-tree output: " $2 > "/dev/stderr"
+                bad = 1; exit
+            }
+            print $2 "\t" a[3]
+        }
+        END { if (bad) exit 3 }
+    ' "$work/ls_tree_raw.txt" > "$ref_index"
+    ar=$?
+    [ "$ar" -eq 0 ] || die 2 "could not parse git ls-tree output at $ref (status $ar)"
+fi
+
 current_diverged="$work/current_diverged.txt"
 : > "$current_diverged"
 mirror_only="$work/mirror_only.txt"
@@ -230,34 +470,49 @@ for line in $pairs_raw; do
         *)  shadow_dir="$toplevel/$shadow_rel" ;;
     esac
     if [ -n "$ref" ]; then
-        # Committed-content mode: enumerate/read via git, never the live WC —
-        # a dirty shared working copy must not affect this comparison.
-        git ls-tree -r --name-only "$ref" -- "$shadow_rel" 2>/dev/null \
-            | /usr/bin/grep -E '\.spl$' \
-            | /usr/bin/grep -vE '/\.spipe_matchers_[^/]*$|/\.sspec_wrapped_entry_[^/]*$' \
-            > "$work/shadow_files.txt"
-        fr=$?
-        [ "$fr" -eq 0 ] || die 2 "git ls-tree failed (status $fr) for $shadow_rel@$ref"
-
-        while IFS= read -r shpath; do
-            [ -n "$shpath" ] || continue
-            relpath=${shpath#"$shadow_rel"/}
-            canon_path="$canon_rel/$relpath"
-            if ! git cat-file -e "$ref:$canon_path" 2>/dev/null; then
-                # MIRROR-ONLY: file exists only in the shadow tree. Canonical-only
-                # is the norm (the shadow is a partial subset); mirror-only almost
-                # always means a spec was authored into the wrong tree.
-                echo "$label:$relpath" >> "$mirror_only"
-                continue
-            fi
-            total_common=$((total_common + 1))
-            if git diff --quiet "$ref:$canon_path" "$ref:$shpath" 2>/dev/null; then
-                total_identical=$((total_identical + 1))
-            else
-                total_diverged=$((total_diverged + 1))
-                echo "$label:$relpath" >> "$current_diverged"
-            fi
-        done < "$work/shadow_files.txt"
+        # Committed-content mode: read the pre-built blob-id index (section 2b),
+        # never the live WC — a dirty shared working copy must not affect this
+        # comparison, and per-file git processes must not make the guard
+        # unrunnable. Shadow-side filtering (.spl, matcher/wrapper scratch) is
+        # identical to what the old grep pipeline applied; the canonical side is
+        # unfiltered, exactly as the old `git cat-file -e` probe was.
+        counts=$(awk -F'\t' \
+            -v C="$canon_rel" -v S="$shadow_rel" -v L="$label" \
+            -v MO="$mirror_only" -v DV="$current_diverged" '
+            { oid[$1] = $2 }
+            END {
+                cp = C "/"; sp = S "/"
+                common = 0; ident = 0; diverged = 0
+                for (p in oid) {
+                    if (substr(p, 1, length(sp)) != sp) continue
+                    if (p !~ /\.spl$/) continue
+                    if (p ~ /\/\.spipe_matchers_[^\/]*$/) continue
+                    if (p ~ /\/\.sspec_wrapped_entry_[^\/]*$/) continue
+                    rel = substr(p, length(sp) + 1)
+                    canon = cp rel
+                    if (!(canon in oid)) {
+                        # MIRROR-ONLY: file exists only in the shadow tree.
+                        # Canonical-only is the norm (the shadow is a partial
+                        # subset); mirror-only almost always means a spec was
+                        # authored into the wrong tree.
+                        print L ":" rel >> MO
+                        continue
+                    }
+                    common++
+                    if (oid[canon] == oid[p]) ident++
+                    else { diverged++; print L ":" rel >> DV }
+                }
+                close(MO); close(DV)
+                print common " " ident " " diverged
+            }
+        ' "$ref_index")
+        ar=$?
+        [ "$ar" -eq 0 ] || die 2 "committed-content comparison failed (status $ar) for $shadow_rel@$ref"
+        set -- $counts
+        [ $# -eq 3 ] || die 2 "malformed comparison counts for $shadow_rel@$ref: '$counts'"
+        total_common=$((total_common + $1))
+        total_identical=$((total_identical + $2))
+        total_diverged=$((total_diverged + $3))
     else
         [ -d "$canon_dir" ]  || die 2 "canonical dir does not exist: $canon_dir"
         [ -d "$shadow_dir" ] || die 2 "shadow dir does not exist: $shadow_dir"
@@ -343,38 +598,61 @@ if [ -n "$ref" ] && [ -n "$base" ]; then
     sort -u "$work/range_files.txt" -o "$work/range_files.txt"
     : > "$work/half_landed.txt"
 
-    oldifs2="$IFS"
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
-        case "$f" in *.spl) ;; *) continue ;; esac
-        twin=""
-        IFS='
-'
-        for line in $pairs_raw; do
-            IFS="$oldifs2"
-            [ -n "$line" ] || continue
-            c=$(printf '%s' "$line" | cut -d: -f2)
-            s=$(printf '%s' "$line" | cut -d: -f3)
-            case "$f" in
-                "$c"/*) twin="$s/${f#"$c"/}"; break ;;
-                "$s"/*) twin="$c/${f#"$s"/}"; break ;;
-            esac
-            IFS='
-'
-        done
-        IFS="$oldifs2"
-        [ -n "$twin" ] || continue
-        # twin absent at the tip => mirror-only / canonical-only, handled in 3b
-        git cat-file -e "$ref:$twin" 2>/dev/null || continue
-        half_landed_checked=$((half_landed_checked + 1))
-        # twin edited in the same range => both legs moved, fine
-        if /usr/bin/grep -qxF "$twin" "$work/range_files.txt"; then continue; fi
-        # pair converged after the edit => a correct one-leg reconciliation
-        if git diff --quiet "$ref:$f" "$ref:$twin" 2>/dev/null; then continue; fi
-        echo "$f  (twin untouched and still divergent: $twin)" >> "$work/half_landed.txt"
-        n_half_landed=$((n_half_landed + 1))
-    done < "$work/range_files.txt"
-    IFS="$oldifs2"
+    # One awk pass over (blob index, range files) — the old loop spawned a
+    # `git cat-file -e`, a grep, a `git diff --quiet` and two `cut`s PER range
+    # file. Semantics preserved exactly, including the case where the edited
+    # leg itself no longer exists at the tip (deleted in the range): the old
+    # `git diff --quiet "$ref:$f" ...` failed there and recorded a half-landed
+    # offender, and so does the `!(f in oid)` branch below.
+    # The pair table is passed as a FILE, never `-v PAIRS=...`: it is newline
+    # separated and BSD awk rejects a literal newline in a -v assignment
+    # ("awk: newline in string"), which made this scan ERROR on every --base
+    # run on macOS.
+    printf '%s\n' "$pairs_raw" > "$work/pairs.txt"
+    hl_counts=$(awk -F'\t' -v OUT="$work/half_landed.txt" '
+        FNR == 1 { fileno++ }
+        fileno == 1 {
+            if ($0 == "") next
+            np++
+            split($0, fld, ":")
+            pc[np] = fld[2]; ps[np] = fld[3]
+            next
+        }
+        fileno == 2 { oid[$1] = $2; next }
+        { if ($0 != "") { n_range++; range[n_range] = $0; inrange[$0] = 1 } }
+        END {
+            checked = 0; half = 0
+            for (k = 1; k <= n_range; k++) {
+                f = range[k]
+                if (f !~ /\.spl$/) continue
+                twin = ""
+                for (i = 1; i <= np; i++) {
+                    if (pc[i] == "" || ps[i] == "") continue
+                    cp = pc[i] "/"; sp = ps[i] "/"
+                    if (substr(f, 1, length(cp)) == cp) { twin = sp substr(f, length(cp) + 1); break }
+                    if (substr(f, 1, length(sp)) == sp) { twin = cp substr(f, length(sp) + 1); break }
+                }
+                if (twin == "") continue
+                # twin absent at the tip => mirror-only / canonical-only, handled in 3b
+                if (!(twin in oid)) continue
+                checked++
+                # twin edited in the same range => both legs moved, fine
+                if (twin in inrange) continue
+                # pair converged after the edit => a correct one-leg reconciliation
+                if ((f in oid) && oid[f] == oid[twin]) continue
+                print f "  (twin untouched and still divergent: " twin ")" >> OUT
+                half++
+            }
+            close(OUT)
+            print checked " " half
+        }
+    ' "$work/pairs.txt" "$ref_index" "$work/range_files.txt")
+    hr=$?
+    [ "$hr" -eq 0 ] || die 2 "half-landed scan failed (status $hr) for $base..$ref"
+    set -- $hl_counts
+    [ $# -eq 2 ] || die 2 "malformed half-landed counts: '$hl_counts'"
+    half_landed_checked=$1
+    n_half_landed=$2
     half_landed_note="$half_landed_checked leg-edit(s) checked, $n_half_landed half-landed"
 fi
 
