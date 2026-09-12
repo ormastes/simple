@@ -1,0 +1,163 @@
+"""
+L02-A03 regression contract for the interpreter module namespace cache.
+
+The fixture uses real files under build/ so the assertions exercise the
+resolver and file-existence provider, not a source-text approximation.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.io.{dir_create_all, file_delete, file_write, file_exists}
+use compiler.core.interpreter.module_loader_resolve.{
+    resolve_module_path,
+    module_resolve_cache_reset,
+    module_resolve_uncached_count
+}
+
+val ROOT = "build/test-artifacts/l02-namespace-cache-isolation-v1"
+val CALLER_A = ROOT + "/caller-a/caller.spl"
+val CALLER_B = ROOT + "/caller-b/caller.spl"
+val MODULE = "namespace_probe_v1"
+val A_MODULE = ROOT + "/caller-a/namespace_probe_v1.spl"
+val B_MODULE = ROOT + "/caller-b/namespace_probe_v1.spl"
+val LOCAL_LIB = ROOT + "/caller-a/lib/io.spl"
+val B_LOCAL_LIB = ROOT + "/caller-b/lib/io.spl"
+val B_NAMESPACE_LIB = ROOT + "/caller-b/lib/l02_namespace_probe_v1.spl"
+val LOCAL_LIB_CALLER = ROOT + "/caller-a/local-candidate.spl"
+
+fn prepare_fixture():
+    dir_create_all(ROOT + "/caller-a/lib")
+    dir_create_all(ROOT + "/caller-b/lib")
+    file_delete(A_MODULE)
+    file_delete(B_MODULE)
+    file_delete(LOCAL_LIB)
+    file_delete(B_LOCAL_LIB)
+    file_delete(B_NAMESPACE_LIB)
+    file_write(CALLER_A, "# caller A")
+    file_write(CALLER_B, "# caller B")
+
+fn cleanup_fixture():
+    file_delete(A_MODULE)
+    file_delete(B_MODULE)
+    file_delete(LOCAL_LIB)
+    file_delete(B_LOCAL_LIB)
+    file_delete(B_NAMESPACE_LIB)
+    file_delete(CALLER_A)
+    file_delete(CALLER_B)
+
+fn check_l02_namespace_cache_isolation_v1() -> text:
+    prepare_fixture()
+
+    # Happy path: a caller-local hit must resolve to its own namespace.
+    if file_write(B_MODULE, "# caller B module") != true:
+        cleanup_fixture()
+        return "could not create caller-B module fixture"
+    module_resolve_cache_reset()
+    val caller_a_miss = resolve_module_path(MODULE, CALLER_A)
+    val caller_b_hit = resolve_module_path(MODULE, CALLER_B)
+    if caller_b_hit != B_MODULE:
+        cleanup_fixture()
+        return "caller-B hit did not resolve its local module"
+    if caller_a_miss == B_MODULE:
+        cleanup_fixture()
+        return "caller-A miss was contaminated by caller-B hit"
+    if module_resolve_uncached_count() != 2:
+        cleanup_fixture()
+        return "distinct caller namespaces did not each perform one uncached resolve"
+
+    # Identity boundary: a module/current-file delimiter must not make two
+    # distinct pairs alias the same cache entry. Both are deliberate misses;
+    # their attempted paths remain observably different.
+    module_resolve_cache_reset()
+    val delimiter_first = resolve_module_path("left|right", CALLER_A)
+    val delimiter_second = resolve_module_path("left", "right|" + CALLER_A)
+    if delimiter_first != "left|right.spl" or delimiter_second != "left.spl":
+        cleanup_fixture()
+        return "delimiter-bearing module/current-file identities were conflated"
+    if module_resolve_uncached_count() != 2:
+        cleanup_fixture()
+        return "delimiter-bearing identities did not each perform one uncached resolve"
+    module_resolve_cache_reset()
+
+    # Namespace boundary: std./lib.-prefixed names are still caller-sensitive.
+    # A module-only fast cache would incorrectly return caller A's local hit to B.
+    if file_write(LOCAL_LIB, "# caller A std.io") != true or file_write(B_LOCAL_LIB, "# caller B std.io") != true:
+        cleanup_fixture()
+        return "could not create namespace-prefixed hit fixtures"
+    module_resolve_cache_reset()
+    val std_hit_a = resolve_module_path("std.io", CALLER_A)
+    val std_hit_b = resolve_module_path("std.io", CALLER_B)
+    if std_hit_a != LOCAL_LIB or std_hit_b != B_LOCAL_LIB:
+        cleanup_fixture()
+        return "std-prefixed cross-caller hits were merged by a module-only cache"
+    if module_resolve_uncached_count() != 2:
+        cleanup_fixture()
+        return "std-prefixed cross-caller hits did not each resolve uncached"
+
+    file_delete(LOCAL_LIB)
+    if file_write(B_NAMESPACE_LIB, "# caller B lib namespace") != true:
+        cleanup_fixture()
+        return "could not create namespace-prefixed miss/hit fixture"
+    module_resolve_cache_reset()
+    val lib_miss_a = resolve_module_path("lib.l02_namespace_probe_v1", CALLER_A)
+    val lib_hit_b = resolve_module_path("lib.l02_namespace_probe_v1", CALLER_B)
+    if lib_miss_a != "lib/l02_namespace_probe_v1.spl" or lib_hit_b != B_NAMESPACE_LIB:
+        cleanup_fixture()
+        return "lib-prefixed caller-A miss hid caller-B existing file"
+    if module_resolve_uncached_count() != 2:
+        cleanup_fixture()
+        return "lib-prefixed miss/hit did not each resolve uncached"
+    module_resolve_cache_reset()
+
+    # Boundary: exact repeated hit and miss must do zero additional work.
+    val caller_a_first_after_reset = resolve_module_path(MODULE, CALLER_A)
+    val caller_b_first_after_reset = resolve_module_path(MODULE, CALLER_B)
+    val caller_a_second_after_reset = resolve_module_path(MODULE, CALLER_A)
+    val caller_b_second_after_reset = resolve_module_path(MODULE, CALLER_B)
+    if caller_a_first_after_reset != caller_a_miss or caller_b_first_after_reset != caller_b_hit:
+        cleanup_fixture()
+        return "post-reset first A/B resolves changed their cached results"
+    if caller_a_second_after_reset != caller_a_first_after_reset or caller_b_second_after_reset != caller_b_first_after_reset:
+        cleanup_fixture()
+        return "repeated hit or miss changed its cached result"
+    if module_resolve_uncached_count() != 2:
+        cleanup_fixture()
+        return "repeated hit or miss performed additional uncached work"
+
+    # Reset exposes a filesystem change: the previously missing A module now hits.
+    if file_write(A_MODULE, "# caller A module") != true:
+        cleanup_fixture()
+        return "could not create caller-A module fixture"
+    val cached_before_reset = resolve_module_path(MODULE, CALLER_A)
+    if cached_before_reset != caller_a_miss:
+        cleanup_fixture()
+        return "filesystem change leaked through before explicit cache reset"
+    module_resolve_cache_reset()
+    val caller_a_after_reset = resolve_module_path(MODULE, CALLER_A)
+    if caller_a_after_reset != A_MODULE:
+        cleanup_fixture()
+        return "cache reset did not expose caller-A filesystem change"
+    if module_resolve_uncached_count() != 1:
+        cleanup_fixture()
+        return "post-reset first resolve was not exactly one uncached operation"
+
+    # Error/ordering boundary: local candidate remains ahead of the family fallback.
+    if file_write(LOCAL_LIB, "# local candidate") != true:
+        cleanup_fixture()
+        return "could not create local candidate fixture"
+    module_resolve_cache_reset()
+    val local_candidate = resolve_module_path("std.io", LOCAL_LIB_CALLER)
+    if local_candidate != LOCAL_LIB:
+        cleanup_fixture()
+        return "candidate order no longer prefers the caller-local candidate"
+    if file_exists(local_candidate) != true:
+        cleanup_fixture()
+        return "candidate-order result was not a real file"
+
+    cleanup_fixture()
+    ""
+
+describe "L02 interpreter namespace cache isolation v1":
+    it "should isolate caller-local hits from caller-local misses and preserve reset semantics":
+        # @req L02-A03
+        step("exercise caller-A miss, caller-B hit, repeated cache reuse, and reset-visible creation")
+        expect(check_l02_namespace_cache_isolation_v1()).to_equal("")

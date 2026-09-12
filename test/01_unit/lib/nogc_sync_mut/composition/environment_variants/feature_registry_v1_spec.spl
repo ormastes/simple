@@ -1,0 +1,93 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.*
+
+describe "Environment feature registry V1":
+    it "expands stable x86 presets into one arena word":
+        val expansion = match environment_feature_registry_expand_v1(
+            ENV_FEATURE_X86_64_V3_V1, 4u32):
+            case Ok(value): value
+            case Err(_):
+                assert(false)
+                EnvironmentFeatureRegistryExpansionV1(
+                    entry: EnvironmentFeatureRegistryEntryV1(
+                        feature_id: 0u32, architecture: ENV_ARCH_UNKNOWN_V1,
+                        word_count: 0u32, feature_mask: 0u64),
+                    feature_set: EnvironmentFeatureSetV1(
+                        architecture: ENV_ARCH_UNKNOWN_V1,
+                        words: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)),
+                    words: [])
+        expect(expansion.feature_set.architecture).to_equal(ENV_ARCH_X86_64_V1)
+        expect(expansion.feature_set.words.offset).to_equal(4u32)
+        expect(expansion.feature_set.words.count).to_equal(1u32)
+        expect(expansion.words.len()).to_equal(1)
+        expect(environment_feature_registry_validate_v1(
+            expansion.feature_set, [0u64, 0u64, 0u64, 0u64, expansion.words[0]]))
+            .to_equal(Ok(()))
+
+    it "keeps AVX512 VBMI and VBMI2 as separate exact IDs":
+        expect(environment_feature_registry_id_subset_v1(
+            ENV_FEATURE_X86_64_V4_V1, ENV_FEATURE_X86_64_AVX512_VBMI_V1))
+            .to_equal(true)
+        expect(environment_feature_registry_id_subset_v1(
+            ENV_FEATURE_X86_64_V4_V1,
+            ENV_FEATURE_X86_64_AVX512_VBMI2_V1)).to_equal(true)
+        expect(environment_feature_registry_id_subset_v1(
+            ENV_FEATURE_X86_64_AVX512_VBMI_V1,
+            ENV_FEATURE_X86_64_AVX512_VBMI2_V1)).to_equal(false)
+        expect(ENV_FEATURE_X86_64_AVX512_VBMI_V1)
+            .to_equal(0x1110u32)
+        expect(ENV_FEATURE_X86_64_AVX512_VBMI2_V1)
+            .to_equal(0x1111u32)
+
+    it "accepts only architecture-local feature subsets":
+        val x86 = match environment_feature_registry_expand_v1(
+            ENV_FEATURE_X86_64_V2_V1, 0u32):
+            case Ok(value): value
+            case Err(_):
+                assert(false)
+                EnvironmentFeatureRegistryExpansionV1(
+                    entry: EnvironmentFeatureRegistryEntryV1(
+                        feature_id: 0u32, architecture: ENV_ARCH_UNKNOWN_V1,
+                        word_count: 0u32, feature_mask: 0u64),
+                    feature_set: EnvironmentFeatureSetV1(
+                        architecture: ENV_ARCH_UNKNOWN_V1,
+                        words: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)),
+                    words: [])
+        val neon = match environment_feature_registry_expand_v1(
+            ENV_FEATURE_AARCH64_NEON_V1, 1u32):
+            case Ok(value): value
+            case Err(_):
+                assert(false)
+                EnvironmentFeatureRegistryExpansionV1(
+                    entry: EnvironmentFeatureRegistryEntryV1(
+                        feature_id: 0u32, architecture: ENV_ARCH_UNKNOWN_V1,
+                        word_count: 0u32, feature_mask: 0u64),
+                    feature_set: EnvironmentFeatureSetV1(
+                        architecture: ENV_ARCH_UNKNOWN_V1,
+                        words: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)),
+                    words: [])
+        val arena = [x86.words[0], neon.words[0]]
+        expect(environment_feature_registry_subset_v1(
+            x86.feature_set, x86.feature_set, arena)).to_equal(true)
+        expect(environment_feature_registry_subset_v1(
+            x86.feature_set, neon.feature_set, arena)).to_equal(false)
+        expect(environment_feature_registry_id_subset_v1(
+            ENV_FEATURE_AARCH64_NEON_V1, ENV_FEATURE_X86_64_V4_V1))
+            .to_equal(false)
+
+    it "rejects unknown IDs, unsupported bits, and malformed arena ranges":
+        expect(environment_feature_registry_architecture_v1(0xffffffffu32))
+            .to_equal(ENV_ARCH_UNKNOWN_V1)
+        expect(environment_feature_registry_expand_v1(0xffffffffu32, 0u32))
+            .to_equal(Err(EnvironmentFeatureRegistryErrorV1.UnknownFeatureId))
+        val invalid = EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_RISCV64_V1,
+            words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32))
+        expect(environment_feature_registry_validate_v1(invalid, [2u64]))
+            .to_equal(Err(EnvironmentFeatureRegistryErrorV1.UnknownFeatureBits))
+        val out_of_range = EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_AARCH64_V1,
+            words: EnvironmentArenaRangeV1(offset: 2u32, count: 1u32))
+        expect(environment_feature_registry_validate_v1(out_of_range, [1u64]))
+            .to_equal(Err(EnvironmentFeatureRegistryErrorV1.InvalidArenaRange))

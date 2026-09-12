@@ -1,0 +1,67 @@
+# PureDatabase rollback restores pre-transaction dirty state in memory only.
+# @req REQ-LIB-DATABASE-TRANSACTION-IDENTITY-001
+
+use std.spec.*
+use std.database.pure_sql.{PureDatabase}
+use nogc_sync_mut.database.sql.types.{DbValue}
+use std.io_runtime.{file_delete, file_read}
+
+val PATH = "/tmp/pure_database_rollback_dirty_state.db"
+
+fn remove_store():
+    file_delete(PATH)
+    file_delete(PATH + ".commit.lock")
+
+fn count_id(db: PureDatabase, id: text) -> i64:
+    db.query("SELECT value FROM items WHERE id = ?", [DbValue.Text(value: id)]).unwrap().len()
+
+fn expect_deferred_values(db: PureDatabase):
+    val rows = db.query("SELECT value,payload FROM items WHERE id = ?", [
+        DbValue.Text(value: "before")
+    ]).unwrap()
+    expect(rows.len()).to_equal(1)
+    match rows[0].values[0]:
+        case Text(value): expect(value).to_equal("left\tright\nline")
+        case _: assert_true(false)
+    match rows[0].values[1]:
+        case Blob(value):
+            expect(value.len()).to_equal(3)
+            expect(value[0]).to_equal(1)
+            expect(value[1]).to_equal(2)
+            expect(value[2]).to_equal(3)
+        case _: assert_true(false)
+
+fn main() -> ():
+    describe("PureDatabase rollback dirty-state integration", fn() -> ():
+        it("keeps pre-BEGIN deferred edits dirty without publishing during ROLLBACK", fn() -> ():
+            remove_store()
+            val setup = PureDatabase.open(PATH).unwrap()
+            expect(setup.exec_sql("CREATE TABLE items (id TEXT PRIMARY KEY, value TEXT NOT NULL, payload BLOB)").is_ok()).to_equal(true)
+            val before = file_read(PATH)
+
+            val db = PureDatabase.open_deferred(PATH).unwrap()
+            expect(db.put("items", [
+                DbValue.Text(value: "before"),
+                DbValue.Text(value: "left\tright\nline"),
+                DbValue.Blob(value: [1u8, 2u8, 3u8])
+            ]).is_ok()).to_equal(true)
+            db.set_auto_checkpoint(true)
+            expect(db.exec_sql("BEGIN").is_ok()).to_equal(true)
+            expect(db.put("items", [
+                DbValue.Text(value: "inside"),
+                DbValue.Text(value: "discard"),
+                DbValue.Blob(value: [9u8])
+            ]).is_ok()).to_equal(true)
+            expect(db.exec_sql("ROLLBACK").is_ok()).to_equal(true)
+
+            expect(file_read(PATH)).to_equal(before)
+            expect(count_id(db, "before")).to_equal(1)
+            expect(count_id(db, "inside")).to_equal(0)
+            expect_deferred_values(db)
+            expect(db.checkpoint().is_ok()).to_equal(true)
+            val reopened = PureDatabase.open(PATH).unwrap()
+            expect(count_id(reopened, "before")).to_equal(1)
+            expect(count_id(reopened, "inside")).to_equal(0)
+            remove_store()
+        )
+    )

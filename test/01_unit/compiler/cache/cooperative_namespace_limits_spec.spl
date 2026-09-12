@@ -1,0 +1,69 @@
+# G4 unit contract for the closed namespace/GC seam.
+# @req REQ-CSM-007 REQ-CSM-009 REQ-CSM-012
+
+use std.spec.*
+use compiler.common.cache_contract.errors_v1.{CacheErrorCodeV1}
+use compiler.driver.cache.gateway.cooperative_namespace.*
+
+fn valid_limits() -> CacheCooperativeNamespaceLimitsV1:
+    CacheCooperativeNamespaceLimitsV1(
+        max_retained_roots: 1, max_reader_domains: 1, max_lease_records: 1)
+
+describe "G4 cooperative namespace limit and availability contract":
+    it "should accept only positive limits through the maximum":
+        step("Submit the bounded request")
+        expect(cache_cooperative_namespace_limits_valid_v1(valid_limits())).to_equal(true)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 65536,
+                max_reader_domains: 65536, max_lease_records: 65536))).to_equal(true)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 0,
+                max_reader_domains: 1, max_lease_records: 1))).to_equal(false)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: -1,
+                max_reader_domains: 1, max_lease_records: 1))).to_equal(false)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 65537,
+                max_reader_domains: 1, max_lease_records: 1))).to_equal(false)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 1,
+                max_reader_domains: 0, max_lease_records: 1))).to_equal(false)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 1,
+                max_reader_domains: -1, max_lease_records: 1))).to_equal(false)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 1,
+                max_reader_domains: 65537, max_lease_records: 1))).to_equal(false)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 1,
+                max_reader_domains: 1, max_lease_records: 0))).to_equal(false)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 1,
+                max_reader_domains: 1, max_lease_records: -1))).to_equal(false)
+        expect(cache_cooperative_namespace_limits_valid_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 1,
+                max_reader_domains: 1, max_lease_records: 65537))).to_equal(false)
+
+    it "should keep namespace and GC issuers closed until host authority exists":
+        step("Observe committed or unchanged state")
+        expect(cache_cooperative_namespace_capability_available_v1()).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_available_v1()).to_equal(false)
+        # No copied root/scope DTO is created here: open/begin/finish/abort
+        # remain an unexecuted MissingEvidence row until a genuine host-issued
+        # scope exists.
+
+    it "should expose typed preflight refusals without constructing authority":
+        step("Submit the bounded request")
+        val invalid_open = cache_cooperative_namespace_open_preflight_v1(
+            CacheCooperativeNamespaceLimitsV1(max_retained_roots: 0,
+                max_reader_domains: 1, max_lease_records: 1))
+        expect(invalid_open.unwrap_err().code).to_equal(
+            CacheErrorCodeV1.CacheBoundsExceeded)
+        expect(cache_cooperative_namespace_open_preflight_v1(
+            valid_limits()).unwrap_err().code).to_equal(CacheErrorCodeV1.CacheUnavailable)
+        expect(cache_cooperative_namespace_begin_preflight_v1(
+            -1, 1).unwrap_err().code).to_equal(CacheErrorCodeV1.CacheBoundsExceeded)
+        expect(cache_cooperative_namespace_begin_preflight_v1(
+            1, -1).unwrap_err().code).to_equal(CacheErrorCodeV1.CacheBoundsExceeded)
+        expect(cache_cooperative_namespace_begin_preflight_v1(
+            1, 1).unwrap_err().code).to_equal(CacheErrorCodeV1.CacheUnavailable)

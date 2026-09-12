@@ -1,0 +1,35 @@
+use std.spec.*
+use compiler.loader.parser_structural_source_buffer_v1.*
+use std.nogc_sync_mut.composition.environment_variants.structural_mask_leases_v1.*
+
+fn source_bytes() -> [u8]:
+    var bytes: [u8] = []
+    for i in 0..40: bytes.push((i % 251) as u8)
+    bytes
+
+describe "loader-owned parser structural source buffer V1":
+    it "consumes one exact transfer, publishes an opaque lease and closes once":
+        val source_owner = StructuralMaskLeaseOwnerV1.create()
+        val source = stable_source_buffer_lease_create_v1(
+            source_owner, 71u64, source_bytes(), 0u32).unwrap()
+        val transfer = stable_source_buffer_transfer_issue_v1(source_owner, source).unwrap()
+        val native_owner = ParserStructuralSourceBufferOwnerV1.create()
+        val mapped = parser_structural_source_buffer_map_v1(
+            native_owner, source_owner, transfer).unwrap()
+        expect(mapped.byte_length).to_equal(40u64)
+        expect(stable_source_buffer_transfer_validate_v1(source_owner, transfer)).to_equal(false)
+        expect(parser_structural_source_buffer_map_v1(native_owner, source_owner, transfer)).to_equal(
+            Err(ParserStructuralSourceBufferErrorV1.InvalidTransfer))
+        expect(parser_structural_source_buffer_close_v1(native_owner, mapped)).to_equal(Ok(()))
+        expect(parser_structural_source_buffer_close_v1(native_owner, mapped)).to_equal(
+            Err(ParserStructuralSourceBufferErrorV1.UnknownOrRetired))
+
+    it "rejects a source shorter than one SIMD block without consuming it":
+        val source_owner = StructuralMaskLeaseOwnerV1.create()
+        val source = stable_source_buffer_lease_create_v1(
+            source_owner, 72u64, [1u8, 2u8, 3u8], 0u32).unwrap()
+        val transfer = stable_source_buffer_transfer_issue_v1(source_owner, source).unwrap()
+        val native_owner = ParserStructuralSourceBufferOwnerV1.create()
+        expect(parser_structural_source_buffer_map_v1(native_owner, source_owner, transfer)).to_equal(
+            Err(ParserStructuralSourceBufferErrorV1.SourceTooShort))
+        expect(stable_source_buffer_transfer_validate_v1(source_owner, transfer)).to_equal(true)

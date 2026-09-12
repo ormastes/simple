@@ -1,0 +1,291 @@
+# Purpose: focused TDD evidence for guarded durable L7 generation publication.
+# @req REQ-CSM-003 REQ-CSM-007 REQ-CSM-008 REQ-CSM-012 REQ-CSM-024
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{text_to_bytes}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedGenerationPinV1, verified_generation_pin_snapshot_v1
+}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.*
+use test.fixtures.compiler.cache.three_payload_durable_packet_v1.{durable_packet_v1}
+
+fn durable_d(label: text) -> text: sha256_text(label)
+
+fn durable_publish_v1(owner: ThreePayloadGenerationDurableOwnerV1,
+        packet: ThreePayloadDurablePublicationPacketV1
+) -> Result<ThreePayloadGenerationPublicationReceiptV1,
+            ThreePayloadDurablePublicationFailureV1>:
+    owner.begin_guarded_publication_v1(packet)?
+    owner.mark_blobs_durable_v1(packet.pins)?
+    owner.mark_journal_durable_v1(packet.pins)?
+    owner.commit_checkpoint_and_activate_v1(packet.pins)
+
+describe "Three-payload durable generation owner V1":
+    it "keeps one reader-pin guard through blobs journal checkpoint and root activation":
+        step("Validate the packet before staging any durable publication state")
+        val owner = ThreePayloadGenerationDurableOwnerV1.empty()
+        val packet = durable_packet_v1(7, "guarded")
+        expect(owner.begin_guarded_publication_v1(packet)).to_equal(Ok(()))
+        expect(owner.publication_state_v1()).to_equal(
+            ThreePayloadDurablePublicationStateV1.Prepared)
+
+        step("Hold the exact guard while blobs and the journal become durable")
+        expect(owner.mark_blobs_durable_v1(packet.pins)).to_equal(Ok(()))
+        expect(owner.mark_journal_durable_v1(packet.pins)).to_equal(Ok(()))
+        expect(owner.active_generation_v1()).to_be_nil()
+
+        step("Advance the checked checkpoint before replacing the active root")
+        val receipt = owner.commit_checkpoint_and_activate_v1(packet.pins).unwrap()
+        expect(receipt.generation_digest).to_equal(packet.prepared.manifest_digest)
+        expect(owner.active_generation_v1().unwrap().generation).to_equal(7)
+        expect(owner.publication_state_v1()).to_equal(
+            ThreePayloadDurablePublicationStateV1.Ready)
+
+    it "recovers only the checkpointed generation after interruption":
+        val owner = ThreePayloadGenerationDurableOwnerV1.empty()
+        val prior = durable_packet_v1(7, "prior")
+        durable_publish_v1(owner, prior).unwrap()
+
+        step("Ignore blobs staged before a crash because no journal or checkpoint names them")
+        val next = durable_packet_v1(8, "next", prior.journal.bytes)
+        owner.begin_guarded_publication_v1(next).unwrap()
+        owner.mark_blobs_durable_v1(next.pins).unwrap()
+        val after_blobs = ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            owner.durable_snapshot_v1()).unwrap()
+        expect(after_blobs.active_generation_v1().unwrap().generation).to_equal(7)
+
+        step("Ignore a complete journal suffix until the alternate checkpoint admits it")
+        after_blobs.begin_guarded_publication_v1(next).unwrap()
+        after_blobs.mark_blobs_durable_v1(next.pins).unwrap()
+        after_blobs.mark_journal_durable_v1(next.pins).unwrap()
+        val after_journal = ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            after_blobs.durable_snapshot_v1()).unwrap()
+        expect(after_journal.active_generation_v1().unwrap().generation).to_equal(7)
+
+        step("Select the coherent newer generation after its checked checkpoint commits")
+        after_journal.begin_guarded_publication_v1(next).unwrap()
+        after_journal.mark_blobs_durable_v1(next.pins).unwrap()
+        after_journal.mark_journal_durable_v1(next.pins).unwrap()
+        after_journal.commit_checkpoint_and_activate_v1(next.pins).unwrap()
+        val restarted = ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            after_journal.durable_snapshot_v1()).unwrap()
+        expect(restarted.active_generation_v1().unwrap().generation).to_equal(8)
+
+    it "preserves the old root when the exact pin changes before journal or root commit":
+        val owner = ThreePayloadGenerationDurableOwnerV1.empty()
+        val prior = durable_packet_v1(7, "pin-prior")
+        durable_publish_v1(owner, prior).unwrap()
+        val next = durable_packet_v1(8, "pin-next", prior.journal.bytes)
+        owner.begin_guarded_publication_v1(next).unwrap()
+        owner.mark_blobs_durable_v1(next.pins).unwrap()
+
+        step("Reject a different valid pin epoch before making the journal visible")
+        val changed_pins = verified_generation_pin_snapshot_v1(next.pins.epoch + 2,
+            [VerifiedGenerationPinV1(pin_id: "replacement", root: next.root)], []).unwrap()
+        expect(owner.mark_journal_durable_v1(changed_pins)).to_equal(
+            Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked))
+        expect(owner.active_generation_v1().unwrap().generation).to_equal(7)
+        val restarted = ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            owner.durable_snapshot_v1()).unwrap()
+        expect(restarted.active_generation_v1().unwrap().generation).to_equal(7)
+
+        step("Reject copied pin identity when its protected root set changes before activation")
+        restarted.begin_guarded_publication_v1(next).unwrap()
+        restarted.mark_blobs_durable_v1(next.pins).unwrap()
+        restarted.mark_journal_durable_v1(next.pins).unwrap()
+        var forged_roots = next.pins
+        forged_roots.roots = []
+        expect(restarted.commit_checkpoint_and_activate_v1(forged_roots)).to_equal(
+            Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked))
+        expect(restarted.active_generation_v1().unwrap().generation).to_equal(7)
+
+        step("Recheck the same pin immediately before checkpoint and root activation")
+        val commit_guard = ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            restarted.durable_snapshot_v1()).unwrap()
+        commit_guard.begin_guarded_publication_v1(next).unwrap()
+        commit_guard.mark_blobs_durable_v1(next.pins).unwrap()
+        commit_guard.mark_journal_durable_v1(next.pins).unwrap()
+        expect(commit_guard.commit_checkpoint_and_activate_v1(changed_pins)).to_equal(
+            Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked))
+        expect(commit_guard.active_generation_v1().unwrap().generation).to_equal(7)
+        expect(ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            commit_guard.durable_snapshot_v1()).unwrap().active_generation_v1().unwrap().generation
+        ).to_equal(7)
+
+    it "gives revocation ordering priority over an uncommitted publication":
+        val owner = ThreePayloadGenerationDurableOwnerV1.empty()
+        val prior = durable_packet_v1(7, "revoke-prior")
+        durable_publish_v1(owner, prior).unwrap()
+        val next = durable_packet_v1(8, "revoke-next", prior.journal.bytes)
+        owner.begin_guarded_publication_v1(next).unwrap()
+        owner.mark_blobs_durable_v1(next.pins).unwrap()
+        owner.mark_journal_durable_v1(next.pins).unwrap()
+
+        step("Revoke before checkpoint, discard pending state, and refuse root activation")
+        expect(owner.revoke_reader_pin_guard_v1()).to_equal(
+            ThreePayloadReaderPinRevocationV1.Revoked)
+        expect(owner.commit_checkpoint_and_activate_v1(next.pins)).to_equal(
+            Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked))
+        expect(owner.begin_guarded_publication_v1(next)).to_equal(
+            Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked))
+        expect(owner.active_generation_v1().unwrap().generation).to_equal(7)
+        expect(ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            owner.durable_snapshot_v1()).unwrap().active_generation_v1().unwrap().generation
+        ).to_equal(7)
+
+    it "resolves cancellation lost acknowledgment and conflicts from durable state [importance=critical; importance_weight=3]":
+        val owner = ThreePayloadGenerationDurableOwnerV1.empty()
+        val prior = durable_packet_v1(7, "outcome-prior")
+        durable_publish_v1(owner, prior).unwrap()
+        val committed = durable_packet_v1(8, "outcome-committed", prior.journal.bytes)
+        durable_publish_v1(owner, committed).unwrap()
+
+        step("Treat cancellation and lost acknowledgment after CAS as committed")
+        val cancelled = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), committed.root,
+            ThreePayloadPublicationAttemptEventV1.CancellationAfterCas).unwrap()
+        expect(cancelled.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.CommittedActive)
+        expect(cancelled.active_generation).to_equal(8)
+        val lost = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), committed.root,
+            ThreePayloadPublicationAttemptEventV1.CasAcknowledgmentLost).unwrap()
+        expect(lost.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.CommittedActive)
+        val acknowledged = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), committed.root,
+            ThreePayloadPublicationAttemptEventV1.CasAcknowledged).unwrap()
+        expect(acknowledged.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.CommittedActive)
+        val inconsistent_precommit = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), committed.root,
+            ThreePayloadPublicationAttemptEventV1.PrecommitRefusal).unwrap()
+        expect(inconsistent_precommit.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown)
+
+        step("Keep a later durable publisher active when resolving an older attempt")
+        val later = durable_packet_v1(9, "outcome-later", committed.journal.bytes)
+        durable_publish_v1(owner, later).unwrap()
+        val superseded = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), committed.root,
+            ThreePayloadPublicationAttemptEventV1.CancellationAfterCas).unwrap()
+        expect(superseded.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.CommittedSuperseded)
+        expect(superseded.active_generation).to_equal(9)
+        val never_committed = durable_packet_v1(10, "outcome-loser", later.journal.bytes)
+        val conflict = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), never_committed.root,
+            ThreePayloadPublicationAttemptEventV1.CasConflict).unwrap()
+        expect(conflict.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.RefusedBeforeCommit)
+        expect(conflict.active_generation).to_equal(9)
+        val precommit = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), never_committed.root,
+            ThreePayloadPublicationAttemptEventV1.PrecommitRefusal).unwrap()
+        expect(precommit.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.RefusedBeforeCommit)
+        val inconsistent_conflict = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), committed.root,
+            ThreePayloadPublicationAttemptEventV1.CasConflict).unwrap()
+        expect(inconsistent_conflict.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown)
+        val lost_unrecorded = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), never_committed.root,
+            ThreePayloadPublicationAttemptEventV1.CasAcknowledgmentLost).unwrap()
+        expect(lost_unrecorded.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown)
+        val ack_unrecorded = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), never_committed.root,
+            ThreePayloadPublicationAttemptEventV1.CasAcknowledged).unwrap()
+        expect(ack_unrecorded.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown)
+        var same_generation_other_manifest = later.root
+        same_generation_other_manifest.manifest_digest = durable_d("other-manifest")
+        val same_generation = resolve_three_payload_durable_outcome_v1(
+            owner.durable_snapshot_v1(), same_generation_other_manifest,
+            ThreePayloadPublicationAttemptEventV1.CancellationAfterCas).unwrap()
+        expect(same_generation.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown)
+        expect(same_generation.active_manifest_digest).to_equal(
+            later.root.manifest_digest)
+
+        step("Keep a pruned commit identity indeterminate after acknowledgment loss")
+        var pruned = owner.durable_snapshot_v1()
+        var retained_without_candidate: [ThreePayloadRetainedDurableGenerationV1] = []
+        for retained in pruned.retained_generations:
+            if retained.root.manifest_digest != committed.root.manifest_digest:
+                retained_without_candidate.push(retained)
+        pruned.retained_generations = retained_without_candidate
+        val pruned_result = resolve_three_payload_durable_outcome_v1(pruned,
+            committed.root,
+            ThreePayloadPublicationAttemptEventV1.CasAcknowledgmentLost).unwrap()
+        expect(pruned_result.status).to_equal(
+            ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown)
+        expect(pruned_result.active_generation).to_equal(9)
+
+    it "rejects nondeterministic action replay and drops corrupt unselected recovery packets":
+        val owner = ThreePayloadGenerationDurableOwnerV1.empty()
+        val prior = durable_packet_v1(7, "deterministic-prior")
+        durable_publish_v1(owner, prior).unwrap()
+
+        step("Reject the same action identity when a newer generation names different output")
+        val conflict = durable_packet_v1(8, "different-output", prior.journal.bytes,
+            action_override: Some(prior.action_digest))
+        expect(owner.begin_guarded_publication_v1(conflict)).to_equal(
+            Err(ThreePayloadDurablePublicationFailureV1.NondeterministicAction))
+        expect(owner.active_generation_v1().unwrap().generation).to_equal(7)
+
+        step("Validate every retained checkpoint packet and keep only coherent recovery state")
+        val next = durable_packet_v1(8, "coherent-next", prior.journal.bytes)
+        durable_publish_v1(owner, next).unwrap()
+        var snapshot = owner.durable_snapshot_v1()
+        var old = snapshot.retained_generations[0]
+        var old_objects = old.objects
+        var corrupt = old_objects[2]
+        corrupt.canonical_bytes = text_to_bytes("corrupt-retained-object")
+        old_objects[2] = corrupt
+        old.objects = old_objects
+        var retained = snapshot.retained_generations
+        retained[0] = old
+        snapshot.retained_generations = retained
+        val recovered = ThreePayloadGenerationDurableOwnerV1.recover_v1(snapshot).unwrap()
+        expect(recovered.active_generation_v1().unwrap().generation).to_equal(8)
+        expect(recovered.durable_snapshot_v1().retained_generations.len()).to_equal(1)
+
+    it "fails closed for uncheckpointed first journals and ambiguous recovery packets":
+        step("Require quarantine when the first journal became durable without any checkpoint")
+        val interrupted = ThreePayloadGenerationDurableOwnerV1.empty()
+        val first = durable_packet_v1(7, "first-interrupted")
+        interrupted.begin_guarded_publication_v1(first).unwrap()
+        interrupted.mark_blobs_durable_v1(first.pins).unwrap()
+        interrupted.mark_journal_durable_v1(first.pins).unwrap()
+        expect(ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            interrupted.durable_snapshot_v1()).unwrap_err()).to_equal(
+                ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+
+        step("Reject duplicate selected packets instead of choosing by input order")
+        val committed = ThreePayloadGenerationDurableOwnerV1.empty()
+        durable_publish_v1(committed, first).unwrap()
+        var duplicate = committed.durable_snapshot_v1()
+        val duplicate_selected = duplicate.retained_generations[0]
+        duplicate.retained_generations.push(duplicate_selected)
+        expect(ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            duplicate).unwrap_err()).to_equal(
+                ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+
+        step("Reject a recovery packet inventory beyond the fixed two-slot plus tail bound")
+        var oversized = committed.durable_snapshot_v1()
+        var retained_1 = oversized.retained_generations[0]
+        var retained_2 = oversized.retained_generations[0]
+        var retained_3 = oversized.retained_generations[0]
+        retained_1.action_digest = durable_d("oversized-1")
+        retained_2.action_digest = durable_d("oversized-2")
+        retained_3.action_digest = durable_d("oversized-3")
+        oversized.retained_generations.push(retained_1)
+        oversized.retained_generations.push(retained_2)
+        oversized.retained_generations.push(retained_3)
+        expect(ThreePayloadGenerationDurableOwnerV1.recover_v1(
+            oversized).unwrap_err()).to_equal(
+                ThreePayloadDurablePublicationFailureV1.RecoveryRejected)

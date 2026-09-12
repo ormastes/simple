@@ -1,0 +1,89 @@
+# Purpose and audience: executable contract for the pure LSP query worker boundary.
+# @req REQ-APP-CLI-001
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run}
+use app.cli.lsp_query_worker.*
+
+fn fixture_path() -> text:
+    "build/test-artifacts/lsp_query_worker_protocol/input.spl"
+
+fn request(operation: text, payload: text) -> LspQueryWorkerRequest:
+    LspQueryWorkerRequest(version: 1, request_id: "req-7", workspace_root: "/workspace",
+        execution_generation: "gen-3", options: "mode=check", operation: operation,
+        payload: payload)
+
+describe "LSP query worker protocol":
+    it "round trips bounded versioned request and response frames":
+        val req = request("hover", "src/main.spl|1|Main")
+        val encoded_request = lsp_query_worker_request_encode(req)
+        expect(encoded_request).to_start_with("Content-Length:")
+        val decoded_request = lsp_query_worker_request_decode(encoded_request)
+        expect(decoded_request.ok).to_equal(true)
+        expect(decoded_request.error).to_equal("")
+        expect(decoded_request.request.request_id).to_equal("req-7")
+        expect(decoded_request.request.operation).to_equal("hover")
+        expect(decoded_request.request.payload).to_equal("src/main.spl|1|Main")
+
+        val response = LspQueryWorkerResponse(version: 1, request_id: "req-7",
+            execution_generation: "gen-3", status: 0, message: "", lines: ["Symbol: Main", "Location: src/main.spl:1"])
+        val encoded_response = lsp_query_worker_response_encode(response)
+        val decoded_response = lsp_query_worker_response_decode(encoded_response)
+        expect(decoded_response.ok).to_equal(true)
+        expect(decoded_response.response.status).to_equal(0)
+        expect(decoded_response.response.lines).to_equal(response.lines)
+
+    it "dispatches deterministically to a stdout-free adapter":
+        val path = fixture_path()
+        val _ = process_run("mkdir", ["-p", "build/test-artifacts/lsp_query_worker_protocol"])
+        file_write(path, "fn main():\n    print(1)\n")
+        val result = lsp_query_worker_dispatch(request("document-symbols", path))
+        expect(result.status).to_equal(0)
+        expect(result.request_id).to_equal("req-7")
+        expect(result.execution_generation).to_equal("gen-3")
+        expect(result.lines.join("\n").contains("main:fn:1")).to_equal(true)
+
+    it "rejects malformed and oversized frames with deterministic errors":
+        val malformed = lsp_query_worker_request_decode("Content-Length: 3\r\n\r\nabc")
+        expect(malformed.ok).to_equal(false)
+        expect(malformed.error).to_equal("wrong_field_count")
+
+        val oversized = lsp_query_worker_request_decode(
+            "Content-Length: 32769\r\n\r\n" + "x".repeat(32769))
+        expect(oversized.ok).to_equal(false)
+        expect(oversized.error).to_equal("payload_too_large")
+
+        val duplicate = lsp_query_worker_request_decode(
+            "Content-Length: 3\r\nContent-Length: 3\r\n\r\nabc")
+        expect(duplicate.ok).to_equal(false)
+        expect(duplicate.error).to_equal("duplicate_content_length")
+        val invalid_length = lsp_query_worker_request_decode(
+            "Content-Length: 3x\r\n\r\nabc")
+        expect(invalid_length.ok).to_equal(false)
+        expect(invalid_length.error).to_equal("invalid_content_length")
+
+    it "never emits a frame that violates its decoder bounds or line shape":
+        var oversized_id = request("hover", "src/main.spl|1|Main")
+        oversized_id.request_id = "r".repeat(16385)
+        expect(lsp_query_worker_request_encode(oversized_id)).to_equal("")
+
+        var oversized_body = request("hover", "p".repeat(16384))
+        oversized_body.options = "o".repeat(16384)
+        expect(lsp_query_worker_request_encode(oversized_body)).to_equal("")
+
+        val embedded_line = LspQueryWorkerResponse(
+            version: 1, request_id: "req-7", execution_generation: "gen-3",
+            status: 0, message: "", lines: ["first\nsecond"])
+        expect(lsp_query_worker_response_encode(embedded_line)).to_equal("")
+
+    it "rejects overflowing source positions instead of converting them to zero":
+        val result = lsp_query_worker_dispatch(request(
+            "hover", "src/main.spl|9223372036854775808|Main"))
+        expect(result.status).to_equal(1)
+        expect(result.message).to_equal("invalid_line")
+
+    it "returns a bounded error for unknown operations":
+        val result = lsp_query_worker_dispatch(request("not-a-query", ""))
+        expect(result.status).to_equal(1)
+        expect(result.message).to_equal("unknown_operation: not-a-query")
+        expect(result.lines).to_equal([])

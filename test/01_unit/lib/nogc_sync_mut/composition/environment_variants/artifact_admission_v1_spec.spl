@@ -1,0 +1,78 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn descriptor_v1() -> VariantDescriptorV1:
+    val empty = EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)
+    VariantDescriptorV1(
+        descriptor_size: 360u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+        provider_identity: d(1u64), variant_identity: d(2u64),
+        contract_identity: d(3u64), contract_major: 1u16, contract_minor: 0u16,
+        abi_digest: d(4u64), semantic_identity: d(5u64), grammar_identity: d(6u64),
+        program_identity: d(7u64), artifact_digest: d(8u64),
+        artifact_location: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32, required_abi_id: 1u32, required_object_format_id: 1u32,
+        required_endian_id: 1u16, required_pointer_width_bits: 64u16,
+        required_loader_permission_bits: 1u64,
+        required_cpu_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1, words: empty),
+        required_os_state_words: empty,
+        required_vector_state_mode: ENV_VECTOR_NONE_V1, required_vector_length_bits: 0u32,
+        required_device_api: 0u32, minimum_device_api_version: 0u32,
+        required_device_features: empty, required_memory_domain_bits: 0u64,
+        minimum_device_buffer_bytes: 0u64, minimum_workgroup_invocations: 0u32,
+        minimum_queue_family_count: 0u32, required_effect_bits: 0u64,
+        numerical_contract_id: 1u32, resource_layout_digest: d(9u64),
+        dependencies: empty, assurance_receipt_digest: d(10u64),
+        startup_budget_us: 1u64, max_session_bytes: 1u64,
+        max_inflight_operations: 1u32)
+
+fn receipt_v1(status: u16) -> ArtifactTrustVerificationReceiptV1:
+    ArtifactTrustVerificationReceiptV1(
+        descriptor_size: ENV_ARTIFACT_TRUST_RECEIPT_BYTES_V1,
+        schema_version: ENV_VARIANT_SCHEMA_V1, authentication_status: status,
+        receipt_identity: d(10u64), artifact_digest: d(8u64),
+        trust_policy_digest: d(20u64), verifier_identity: d(21u64),
+        verifier_generation: 7u64, verification_evidence_digest: d(22u64))
+
+describe "Authenticated artifact admission V1":
+    it "keeps exact-byte identity separate from authentication":
+        expect(artifact_exact_bytes_match_v1(d(8u64), d(8u64))).to_equal(true)
+        expect(artifact_map_load_eligible_v1(
+            descriptor_v1(), d(8u64), d(20u64), d(21u64), 7u64,
+            receipt_v1(ENV_ARTIFACT_TRUST_UNKNOWN_V1))).to_equal(false)
+        expect(artifact_admission_reason_v1(
+            descriptor_v1(), d(8u64), d(20u64), d(21u64), 7u64,
+            receipt_v1(ENV_ARTIFACT_TRUST_UNKNOWN_V1)))
+            .to_equal(ENV_ARTIFACT_ADMISSION_NOT_AUTHENTICATED_V1)
+
+    it "admits only an authenticated receipt bound to the exact artifact":
+        expect(artifact_map_load_eligible_v1(
+            descriptor_v1(), d(8u64), d(20u64), d(21u64), 7u64,
+            receipt_v1(ENV_ARTIFACT_TRUST_AUTHENTICATED_V1))).to_equal(true)
+        expect(artifact_admission_reason_v1(
+            descriptor_v1(), d(99u64), d(20u64), d(21u64), 7u64,
+            receipt_v1(ENV_ARTIFACT_TRUST_AUTHENTICATED_V1)))
+            .to_equal(ENV_ARTIFACT_ADMISSION_BYTE_DIGEST_MISMATCH_V1)
+
+    it "rejects stale verifier and wrong trust-policy authority":
+        expect(artifact_admission_reason_v1(
+            descriptor_v1(), d(8u64), d(23u64), d(21u64), 7u64,
+            receipt_v1(ENV_ARTIFACT_TRUST_AUTHENTICATED_V1)))
+            .to_equal(ENV_ARTIFACT_ADMISSION_TRUST_POLICY_MISMATCH_V1)
+        expect(artifact_admission_reason_v1(
+            descriptor_v1(), d(8u64), d(20u64), d(21u64), 8u64,
+            receipt_v1(ENV_ARTIFACT_TRUST_AUTHENTICATED_V1)))
+            .to_equal(ENV_ARTIFACT_ADMISSION_VERIFIER_MISMATCH_V1)
+
+    it "rejects a receipt not named by the descriptor":
+        var receipt = receipt_v1(ENV_ARTIFACT_TRUST_AUTHENTICATED_V1)
+        receipt.receipt_identity = d(24u64)
+        expect(artifact_admission_reason_v1(
+            descriptor_v1(), d(8u64), d(20u64), d(21u64), 7u64, receipt))
+            .to_equal(ENV_ARTIFACT_ADMISSION_RECEIPT_IDENTITY_MISMATCH_V1)

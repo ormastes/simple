@@ -1,0 +1,117 @@
+# Purpose and audience: executable three-payload admission evidence for compiler owners.
+# @req REQ-CSM-027
+
+use std.spec.step
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1,
+    ThreePayloadSemanticRefLocationV1,
+    ThreePayloadSemanticRefV1,
+    ThreePayloadClosureSealV1,
+    ThreePayloadWorkerReadCountersV1,
+    ThreePayloadAdmissionErrorV1,
+    three_payload_worker_admit_v1
+}
+
+fn embedded_ref(kind: ThreePayloadSemanticRefKindV1, name: text, section: i64) -> ThreePayloadSemanticRefV1:
+    ThreePayloadSemanticRefV1(
+        kind: kind, stable_entity_id: name,
+        callable_signature_digest: "signature", effect_digest: "effects",
+        body_or_object_digest: "body", location: ThreePayloadSemanticRefLocationV1.EmbeddedTldSection,
+        embedded_section_index: Some(section)
+    )
+
+fn symbolic_ref(kind: ThreePayloadSemanticRefKindV1, name: text) -> ThreePayloadSemanticRefV1:
+    ThreePayloadSemanticRefV1(
+        kind: kind, stable_entity_id: name,
+        callable_signature_digest: "signature", effect_digest: "effects",
+        body_or_object_digest: "object", location: ThreePayloadSemanticRefLocationV1.SymbolicObject,
+        embedded_section_index: nil
+    )
+
+fn warm_seal(refs: [ThreePayloadSemanticRefV1]) -> ThreePayloadClosureSealV1:
+    ThreePayloadClosureSealV1(
+        generation_digest: "generation", source_payload_digest: "source",
+        prior_tld_payload_digest: Some("prior-tld"),
+        package_init_tld_payload_digest: "init-tld",
+        membership_root_digest: "membership", absence_witness_root_digest: "absence",
+        semantic_refs: refs, section_count: 8, packed_bytes: 4096,
+        max_decode_bytes: 1024
+    )
+
+fn warm_reads(rr_reads: i64) -> ThreePayloadWorkerReadCountersV1:
+    ThreePayloadWorkerReadCountersV1(
+        source_payload_reads: 1, prior_tld_payload_reads: 1,
+        package_init_tld_payload_reads: 1, imported_summary_reads: 0,
+        exceptional_body_reads: 0, rr_reads: rr_reads
+    )
+
+describe "Three-payload incremental compile contract":
+    it "admits lazy embedded macro/default bodies and symbolic trait/aspect calls":
+        step("admits lazy embedded macro/default bodies and symbolic trait/aspect calls")
+        val refs = [
+            embedded_ref(ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.expand", 2),
+            embedded_ref(ThreePayloadSemanticRefKindV1.TraitDefaultBody, "Trait.default", 3),
+            symbolic_ref(ThreePayloadSemanticRefKindV1.TraitCallable, "Trait.call"),
+            symbolic_ref(ThreePayloadSemanticRefKindV1.AspectCallable, "Aspect.before")
+        ]
+        match three_payload_worker_admit_v1(warm_seal(refs), warm_reads(0)):
+            case Ok(_): assert_true(true)
+            case Err(_): assert_true(false)
+
+    it "rejects any worker rr read":
+        step("rejects any worker rr read")
+        match three_payload_worker_admit_v1(warm_seal([]), warm_reads(1)):
+            case Ok(_): assert_true(false)
+            case Err(error):
+                match error:
+                    case InvalidWorkerReads(reason): expect(reason).to_equal("rr_is_coordinator_only")
+                    case _: assert_true(false)
+
+    it "rejects external macro bodies and embedded call-only aspect bodies":
+        step("rejects external macro bodies and embedded call-only aspect bodies")
+        val external_macro = symbolic_ref(ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.external")
+        match three_payload_worker_admit_v1(warm_seal([external_macro]), warm_reads(0)):
+            case Ok(_): assert_true(false)
+            case Err(error):
+                match error:
+                    case InvalidSemanticReference(entity): expect(entity).to_equal("macro.external")
+                    case _: assert_true(false)
+
+        val aspect_body = embedded_ref(ThreePayloadSemanticRefKindV1.AspectCallable, "aspect.body", 4)
+        match three_payload_worker_admit_v1(warm_seal([aspect_body]), warm_reads(0)):
+            case Ok(_): assert_true(false)
+            case Err(error):
+                match error:
+                    case InvalidSemanticReference(entity): expect(entity).to_equal("aspect.body")
+                    case _: assert_true(false)
+
+        val out_of_bounds_macro = embedded_ref(
+            ThreePayloadSemanticRefKindV1.MacroExpansion, "macro.out-of-bounds", 8)
+        match three_payload_worker_admit_v1(warm_seal([out_of_bounds_macro]), warm_reads(0)):
+            case Ok(_): assert_true(false)
+            case Err(error):
+                match error:
+                    case InvalidSemanticReference(entity): expect(entity).to_equal("macro.out-of-bounds")
+                    case _: assert_true(false)
+
+    it "admits a cold compile with source and init tld only":
+        step("admits a cold compile with source and init tld only")
+        val warm = warm_seal([])
+        val cold = ThreePayloadClosureSealV1(
+            generation_digest: warm.generation_digest,
+            source_payload_digest: warm.source_payload_digest,
+            prior_tld_payload_digest: nil,
+            package_init_tld_payload_digest: warm.package_init_tld_payload_digest,
+            membership_root_digest: warm.membership_root_digest,
+            absence_witness_root_digest: warm.absence_witness_root_digest,
+            semantic_refs: [], section_count: warm.section_count,
+            packed_bytes: warm.packed_bytes, max_decode_bytes: warm.max_decode_bytes
+        )
+        val reads = ThreePayloadWorkerReadCountersV1(
+            source_payload_reads: 1, prior_tld_payload_reads: 0,
+            package_init_tld_payload_reads: 1, imported_summary_reads: 0,
+            exceptional_body_reads: 0, rr_reads: 0
+        )
+        match three_payload_worker_admit_v1(cold, reads):
+            case Ok(_): assert_true(true)
+            case Err(_): assert_true(false)

@@ -1,0 +1,102 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.catalog_identity_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn descriptor_v1(provider: u64, variant: u64, artifact: u64,
+                 dependency_offset: u32, dependency_count: u32) -> VariantDescriptorV1:
+    val empty = EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)
+    VariantDescriptorV1(
+        descriptor_size: 360u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+        provider_identity: d(provider), variant_identity: d(variant),
+        contract_identity: d(provider + 100u64), contract_major: 1u16,
+        contract_minor: 0u16, abi_digest: d(4u64), semantic_identity: d(5u64),
+        grammar_identity: d(6u64), program_identity: d(7u64),
+        artifact_digest: d(artifact),
+        artifact_location: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32, required_abi_id: 1u32, required_object_format_id: 1u32,
+        required_endian_id: 1u16, required_pointer_width_bits: 64u16,
+        required_loader_permission_bits: 1u64,
+        required_cpu_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1, words: empty),
+        required_os_state_words: empty, required_vector_state_mode: ENV_VECTOR_NONE_V1,
+        required_vector_length_bits: 0u32, required_device_api: 0u32,
+        minimum_device_api_version: 0u32, required_device_features: empty,
+        required_memory_domain_bits: 0u64, minimum_device_buffer_bytes: 0u64,
+        minimum_workgroup_invocations: 0u32, minimum_queue_family_count: 0u32,
+        required_effect_bits: 0u64, numerical_contract_id: 1u32,
+        resource_layout_digest: d(8u64),
+        dependencies: EnvironmentArenaRangeV1(
+            offset: dependency_offset, count: dependency_count),
+        assurance_receipt_digest: d(9u64), startup_budget_us: 10u64,
+        max_session_bytes: 100u64, max_inflight_operations: 2u32)
+
+fn dependency_v1(artifact: u64) -> VariantDependencyV1:
+    VariantDependencyV1(
+        provider_identity: d(20u64), contract_identity: d(120u64),
+        minimum_contract_major: 1u16, minimum_contract_minor: 0u16,
+        artifact_digest: d(artifact))
+
+describe "Canonical environment catalog identities V1":
+    it "computes stable distinct catalog and dependency-lock identities":
+        val first = descriptor_v1(10u64, 11u64, 12u64, 0u32, 1u32)
+        val second = descriptor_v1(20u64, 21u64, 22u64, 1u32, 0u32)
+        val left = environment_catalog_identity_compute_v1(
+            [65u8], [], [first, second], [dependency_v1(22u64)])
+        val right = environment_catalog_identity_compute_v1(
+            [65u8], [], [first, second], [dependency_v1(22u64)])
+        match left:
+            case Ok(left_identity):
+                match right:
+                    case Ok(right_identity):
+                        expect(left_identity).to_equal(right_identity)
+                        expect(left_identity.catalog_content_digest != left_identity.dependency_lock_digest)
+                            .to_equal(true)
+                    case Err(_): fail("second canonical identity must compute")
+            case Err(_): fail("first canonical identity must compute")
+
+    it "binds semantic descriptor and dependency changes independently":
+        val first = descriptor_v1(10u64, 11u64, 12u64, 0u32, 1u32)
+        val second = descriptor_v1(20u64, 21u64, 22u64, 1u32, 0u32)
+        val baseline = environment_catalog_identity_compute_v1(
+            [65u8], [], [first, second], [dependency_v1(22u64)])
+        var changed_first = first
+        changed_first.startup_budget_us = 11u64
+        val descriptor_changed = environment_catalog_identity_compute_v1(
+            [65u8], [], [changed_first, second], [dependency_v1(22u64)])
+        val dependency_changed = environment_catalog_identity_compute_v1(
+            [65u8], [], [first, second], [dependency_v1(23u64)])
+        match baseline:
+            case Ok(base):
+                match descriptor_changed:
+                    case Ok(changed):
+                        expect(base.catalog_content_digest != changed.catalog_content_digest).to_equal(true)
+                        expect(base.dependency_lock_digest).to_equal(changed.dependency_lock_digest)
+                    case Err(_): fail("semantic descriptor change must remain canonical")
+                match dependency_changed:
+                    case Ok(changed):
+                        expect(base.catalog_content_digest != changed.catalog_content_digest).to_equal(true)
+                        expect(base.dependency_lock_digest != changed.dependency_lock_digest).to_equal(true)
+                    case Err(_): fail("dependency change must remain canonical")
+            case Err(_): fail("baseline identity must compute")
+
+    it "rejects non-canonical descriptor order":
+        val first = descriptor_v1(10u64, 11u64, 12u64, 0u32, 0u32)
+        val second = descriptor_v1(20u64, 21u64, 22u64, 0u32, 0u32)
+        expect(environment_catalog_identity_compute_v1(
+            [65u8], [], [second, first], []))
+            .to_equal(Err(EnvironmentCatalogIdentityErrorV1.NonCanonicalDescriptorOrder))
+
+    it "rejects gaps and duplicate dependency ordering":
+        val gap = descriptor_v1(10u64, 11u64, 12u64, 1u32, 0u32)
+        expect(environment_catalog_identity_compute_v1(
+            [65u8], [], [gap], [dependency_v1(22u64)]))
+            .to_equal(Err(EnvironmentCatalogIdentityErrorV1.NonCanonicalDependencyPartition))
+        val duplicated = descriptor_v1(10u64, 11u64, 12u64, 0u32, 2u32)
+        expect(environment_catalog_identity_compute_v1(
+            [65u8], [], [duplicated], [dependency_v1(22u64), dependency_v1(22u64)]))
+            .to_equal(Err(EnvironmentCatalogIdentityErrorV1.NonCanonicalDependencyOrder))

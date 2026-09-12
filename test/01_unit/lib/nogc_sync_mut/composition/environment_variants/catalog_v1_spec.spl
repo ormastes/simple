@@ -1,0 +1,135 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.admission.*
+use std.nogc_sync_mut.composition.environment_variants.policy.*
+use std.nogc_sync_mut.composition.environment_variants.catalog_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn features(offset: u32) -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: offset, count: 1u32))
+
+fn snapshot() -> EnvironmentSnapshotV1:
+    EnvironmentSnapshotV1(
+        descriptor_size: 232u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        execution_architecture: ENV_ARCH_X86_64_V1,
+        os_id: 1u32, abi_id: 1u32, object_format_id: 1u32,
+        endian_id: 1u16, pointer_width_bits: 64u16,
+        snapshot_identity: d(1u64), snapshot_generation: 2u64,
+        execution_domain_identity: d(3u64),
+        hardware_features: features(0u32), os_usable_features: features(1u32),
+        policy_allowed_features: features(2u32),
+        vector_state_mode: ENV_VECTOR_FIXED_V1, vector_length_bits: 256u32,
+        loader_permission_bits: 1u64,
+        allowed_effect_bits: 1u64, numerical_contract_id: 1u32,
+        resource_layout_digest: d(25u64),
+        gpu_devices: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+
+fn descriptor(provider: u64, variant: u64, required_offset: u32, budget: u64) -> VariantDescriptorV1:
+    val empty = EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)
+    VariantDescriptorV1(
+        descriptor_size: 360u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: ENV_PLACEMENT_STATIC_V1,
+        provider_identity: d(provider), variant_identity: d(variant),
+        contract_identity: d(20u64), contract_major: 1u16, contract_minor: 0u16,
+        abi_digest: d(21u64), semantic_identity: d(22u64),
+        grammar_identity: d(23u64), program_identity: d(24u64),
+        artifact_digest: d(variant + 100u64),
+        artifact_location: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32, required_abi_id: 1u32,
+        required_object_format_id: 1u32, required_endian_id: 1u16,
+        required_pointer_width_bits: 64u16, required_loader_permission_bits: 1u64,
+        required_cpu_features: features(required_offset),
+        required_os_state_words: EnvironmentArenaRangeV1(offset: required_offset, count: 1u32),
+        required_vector_state_mode: ENV_VECTOR_FIXED_V1, required_vector_length_bits: 256u32,
+        required_device_api: 0u32, minimum_device_api_version: 0u32,
+        required_device_features: empty,
+        required_memory_domain_bits: 0u64, required_effect_bits: 0u64,
+        minimum_device_buffer_bytes: 0u64, minimum_workgroup_invocations: 0u32,
+        minimum_queue_family_count: 0u32,
+        numerical_contract_id: 1u32, resource_layout_digest: d(25u64),
+        dependencies: empty, assurance_receipt_digest: d(26u64),
+        startup_budget_us: budget, max_session_bytes: 4096u64,
+        max_inflight_operations: 4u32)
+
+fn catalog(rows: [VariantDescriptorV1]) -> EnvironmentVariantCatalogV1:
+    val result = environment_variant_catalog_create_v1(
+        d(40u64), 7u64, d(41u64), 1u32, 4u32, rows, [])
+    match result:
+        case Ok(value): value
+        case Err(_):
+            assert(false)
+            EnvironmentVariantCatalogV1(
+                catalog_digest: d(1u64), catalog_generation: 1u64,
+                dependency_lock_digest: d(2u64), arena_byte_count: 1u32,
+                feature_word_count: 1u32, descriptors: rows, dependencies: [])
+
+describe "Environment variant catalog V1":
+    it "computes canonical identities instead of accepting caller digests":
+        val first = environment_variant_catalog_create_canonical_v1(
+            [1u8], [1u64, 1u64, 1u64, 1u64], 7u64,
+            [descriptor(10u64, 11u64, 0u32, 10u64)], [])
+        val second = environment_variant_catalog_create_canonical_v1(
+            [2u8], [1u64, 1u64, 1u64, 1u64], 7u64,
+            [descriptor(10u64, 11u64, 0u32, 10u64)], [])
+        match first:
+            case Ok(left):
+                match second:
+                    case Ok(right):
+                        expect(left.catalog_digest == right.catalog_digest).to_equal(false)
+                        expect(left.dependency_lock_digest.w0 != 0u64 or
+                            left.dependency_lock_digest.w1 != 0u64 or
+                            left.dependency_lock_digest.w2 != 0u64 or
+                            left.dependency_lock_digest.w3 != 0u64).to_equal(true)
+                    case Err(_): assert(false)
+            case Err(_): assert(false)
+
+    it "rejects duplicate provider and variant identities":
+        val row = descriptor(10u64, 11u64, 0u32, 10u64)
+        expect(environment_variant_catalog_create_v1(
+            d(40u64), 7u64, d(41u64), 1u32, 4u32, [row, row], []))
+            .to_equal(Err(EnvironmentVariantCatalogErrorV1.DuplicateProviderVariant))
+
+    it "rejects an undeclared dependency lock identity":
+        val zero = d(0u64)
+        expect(environment_variant_catalog_create_v1(
+            d(40u64), 7u64, zero, 1u32, 4u32,
+            [descriptor(10u64, 11u64, 0u32, 10u64)], []))
+            .to_equal(Err(EnvironmentVariantCatalogErrorV1.InvalidDependencyLock))
+
+    it "selects deterministically independent of catalog order":
+        val higher = descriptor(10u64, 2005u64, 0u32, 10u64)
+        val lower = descriptor(10u64, 1008u64, 0u32, 10u64)
+        val first = environment_variant_catalog_select_v1(
+            catalog([higher, lower]), snapshot(), d(10u64), [1u64, 1u64, 1u64], [],
+            ENV_POLICY_PREFER_V1, d(0u64), 0u16, 0u64, 0u16, features(2u32))
+        val second = environment_variant_catalog_select_v1(
+            catalog([lower, higher]), snapshot(), d(10u64), [1u64, 1u64, 1u64], [],
+            ENV_POLICY_PREFER_V1, d(0u64), 0u16, 0u64, 0u16, features(2u32))
+        expect(first.selected_variant_identity).to_equal(second.selected_variant_identity)
+        expect(first.selected_variant_identity).to_equal(d(1008u64))
+        expect(first.dependency_lock_digest).to_equal(d(41u64))
+
+    it "admits an eligible fallback and captures the rejected preference":
+        val preferred = descriptor(10u64, 12u64, 3u32, 1u64)
+        val fallback = descriptor(10u64, 13u64, 0u32, 20u64)
+        val selected = environment_variant_catalog_select_v1(
+            catalog([preferred, fallback]), snapshot(), d(10u64),
+            [1u64, 1u64, 1u64, 8u64], [], ENV_POLICY_PREFER_V1,
+            d(12u64), 0u16, 0u64, 0u16, features(2u32))
+        expect(selected.selected_variant_identity).to_equal(d(13u64))
+        expect(selected.rejections.len()).to_equal(1)
+        expect(selected.rejections[0].reason_code)
+            .to_equal(ENV_ADMISSION_CPU_FEATURES_MISSING_V1)
+
+    it "returns no selection for a different logical provider":
+        val selected = environment_variant_catalog_select_v1(
+            catalog([descriptor(10u64, 12u64, 0u32, 1u64)]), snapshot(),
+            d(99u64), [1u64, 1u64, 1u64], [], ENV_POLICY_PREFER_V1,
+            d(0u64), 0u16, 0u64, 0u16, features(2u32))
+        expect(selected.selected_index).to_equal(-1)
+        expect(selected.rejections.len()).to_equal(0)

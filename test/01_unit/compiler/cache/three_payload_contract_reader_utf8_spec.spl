@@ -1,0 +1,37 @@
+"""Three-payload shared reader rejects malformed UTF-8 before construction."""
+
+use std.spec.*
+use std.common.structural.wire.{wire_put_u32}
+use compiler.common.cache_contract.physical_tld_v1.{ThreePayloadContractReaderV1}
+
+fn framed(raw: [u8]) -> [u8]:
+    var bytes: [u8] = []
+    bytes = wire_put_u32(bytes, raw.len())
+    for byte in raw: bytes.push(byte)
+    bytes
+
+fn expect_three_payload_reader_rejects_utf8_v1(raw: [u8]):
+    val bytes = framed(raw)
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: 0,
+        ok: true, error: "", retained_text_bytes: 0, retained_items: 0)
+    expect(reader.read_text(false)).to_equal("")
+    expect(reader.ok).to_equal(false)
+    expect(reader.error).to_equal("invalid_utf8_or_empty_text")
+    expect(reader.retained_text_bytes).to_equal(0)
+
+describe "ThreePayloadContractReaderV1 strict UTF-8":
+    it "accepts canonical multibyte UTF-8 without changing valid bytes":
+        val raw: [u8] = [0xEDu8, 0x95u8, 0x9Cu8, 0xF0u8, 0x9Fu8, 0x98u8, 0x80u8]
+        val bytes = framed(raw)
+        val reader = ThreePayloadContractReaderV1(data: bytes, offset: 0,
+            ok: true, error: "", retained_text_bytes: 0, retained_items: 0)
+        expect(reader.read_text(false)).to_equal("한😀")
+        expect(reader.ok).to_equal(true)
+        expect(reader.offset).to_equal(bytes.len())
+        expect(reader.retained_text_bytes).to_equal(raw.len())
+
+    it "rejects overlong surrogate truncated and invalid-continuation sequences":
+        expect_three_payload_reader_rejects_utf8_v1([0xC0u8, 0xAFu8])
+        expect_three_payload_reader_rejects_utf8_v1([0xEDu8, 0xA0u8, 0x80u8])
+        expect_three_payload_reader_rejects_utf8_v1([0xE2u8, 0x82u8])
+        expect_three_payload_reader_rejects_utf8_v1([0xE2u8, 0x28u8, 0xA1u8])

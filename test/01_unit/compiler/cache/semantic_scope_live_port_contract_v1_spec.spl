@@ -1,0 +1,154 @@
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+
+fn digest(ch: text) -> text:
+    ch.repeat(64)
+
+fn identity() -> SemanticScopeLiveIdentityV1:
+    SemanticScopeLiveIdentityV1(
+        writer_instance_digest: digest("a"),
+        generation: 7,
+        manifest_digest: digest("b"),
+        pin_snapshot_digest: digest("c"),
+        generation_closure_digest: digest("d"),
+        binding_digest: digest("e"),
+        query_domain_digest: digest("1"),
+        semantic_rules_digest: digest("2"),
+        cancellation_epoch: 3,
+    )
+
+fn writer_request(id: SemanticScopeLiveIdentityV1) -> SemanticScopeWriterLiveRequestV1:
+    SemanticScopeWriterLiveRequestV1(
+        identity: id,
+        durable_binding_digest: digest("3"),
+    )
+
+fn summary_request(id: SemanticScopeLiveIdentityV1) -> SemanticScopeSummaryLiveRequestV1:
+    SemanticScopeSummaryLiveRequestV1(
+        identity: id,
+        public_summary_set_digest: digest("4"),
+        summary_count: 11,
+    )
+
+fn attempt_request(id: SemanticScopeLiveIdentityV1) -> SemanticScopeAttemptLiveRequestV1:
+    SemanticScopeAttemptLiveRequestV1(
+        identity: id,
+        attempt_seal_digest: digest("5"),
+        source_content_digest: digest("6"),
+        snapshot_semantic_digest: digest("7"),
+    )
+
+fn contribution(id: SemanticScopeLiveIdentityV1, index: i64) -> SemanticScopeContributionLiveRequestV1:
+    SemanticScopeContributionLiveRequestV1(
+        identity: id,
+        dimension_index: index,
+        contribution_digest: digest("8"),
+        issuer_instance_digest: digest("9"),
+        issuer_generation: 7,
+        authority_serial: index + 1,
+    )
+
+fn contributions(id: SemanticScopeLiveIdentityV1) -> [SemanticScopeContributionLiveRequestV1]:
+    [
+        contribution(id, 0),
+        contribution(id, 1),
+        contribution(id, 2),
+        contribution(id, 3),
+        contribution(id, 4),
+    ]
+
+describe "semantic scope live-port structural contract":
+    it "lists every missing owner receipt and remains unavailable":
+        val plan = semantic_scope_live_port_plan_v1()
+        expect(semantic_scope_live_port_plan_valid_v1(plan)).to_equal(true)
+        expect(plan.requirements.len()).to_equal(4)
+        expect(plan.requirements[0].required_receipts).to_equal(1)
+        expect(plan.requirements[1].required_receipts).to_equal(1)
+        expect(plan.requirements[2].required_receipts).to_equal(1)
+        expect(plan.requirements[3].required_receipts).to_equal(5)
+        expect(semantic_scope_live_port_contract_available_v1()).to_equal(false)
+        expect(semantic_scope_live_port_contract_blocker_v1()).to_equal(
+            "writer_public_summary_attempt_and_five_semantic_contribution_owner_ports_unavailable"
+        )
+
+    it "accepts only one coherent structural request batch":
+        val id = identity()
+        expect(semantic_scope_live_requests_coherent_v1(
+            writer_request(id),
+            summary_request(id),
+            attempt_request(id),
+            contributions(id),
+        )).to_equal(true)
+
+        var wrong_generation = identity()
+        wrong_generation.generation = 8
+        expect(semantic_scope_live_requests_coherent_v1(
+            writer_request(id),
+            summary_request(wrong_generation),
+            attempt_request(id),
+            contributions(id),
+        )).to_equal(false)
+
+    it "requires exactly five ordered owner contributions":
+        val id = identity()
+        var missing = contributions(id)
+        missing.pop()
+        expect(semantic_scope_live_requests_coherent_v1(
+            writer_request(id), summary_request(id), attempt_request(id), missing,
+        )).to_equal(false)
+
+        var reordered = contributions(id)
+        reordered[3].dimension_index = 4
+        expect(semantic_scope_live_requests_coherent_v1(
+            writer_request(id), summary_request(id), attempt_request(id), reordered,
+        )).to_equal(false)
+
+    it "rejects malformed identities and non-owner receipt coordinates":
+        val id = identity()
+        var invalid_writer = writer_request(id)
+        invalid_writer.durable_binding_digest = "not-a-digest"
+        expect(semantic_scope_live_requests_coherent_v1(
+            invalid_writer, summary_request(id), attempt_request(id), contributions(id),
+        )).to_equal(false)
+
+        var invalid_contributions = contributions(id)
+        invalid_contributions[0].authority_serial = 0
+        expect(semantic_scope_live_requests_coherent_v1(
+            writer_request(id), summary_request(id), attempt_request(id), invalid_contributions,
+        )).to_equal(false)
+
+    it "pins ordinary reads to three payload files and RR to its coordinator":
+        val plan = semantic_scope_live_port_plan_v1()
+        expect(plan.ordinary_source_reads).to_equal(1)
+        expect(plan.ordinary_prior_tld_min).to_equal(0)
+        expect(plan.ordinary_prior_tld_max).to_equal(1)
+        expect(plan.ordinary_initializer_reads).to_equal(1)
+        expect(plan.worker_external_reads).to_equal(0)
+        expect(plan.worker_reverse_reference_reads).to_equal(0)
+        expect(plan.reverse_reference_coordinator_only).to_equal(true)
+
+        val three_file_owner = file_read(
+            "src/compiler/00.common/cache_contract/three_payload_worker_v1.spl"
+        )
+        expect(three_file_owner.contains("value.distinct_source == 1")).to_equal(true)
+        expect(three_file_owner.contains("value.distinct_prior == expected_prior")).to_equal(true)
+        expect(three_file_owner.contains("value.distinct_init == 1")).to_equal(true)
+        expect(three_file_owner.contains("value.external_input_count == 0")).to_equal(true)
+        expect(three_file_owner.contains("value.rr_input_count == 0")).to_equal(true)
+
+        val rr_owner = file_read(
+            "src/compiler/80.driver/cache/reference/reverse_reference_coordinator_v1.spl"
+        )
+        expect(rr_owner.contains("pub struct AffectedQueryPlanV1:")).to_equal(true)
+        expect(rr_owner.contains("pub fn plan_affected_queries_v1(")).to_equal(true)
+
+    it "exposes no copied authority or activation surface":
+        val source = file_read(
+            "src/compiler/00.common/cache_contract/semantic_scope_live_port_contract_v1.spl"
+        )
+        expect(source.contains("pub trait")).to_equal(false)
+        expect(source.contains("ProviderResult")).to_equal(false)
+        expect(source.contains("pub fn semantic_scope_live_requests_issue")).to_equal(false)
+        expect(source.contains("pub fn semantic_scope_live_requests_publish")).to_equal(false)
+        expect(source.contains("pub fn semantic_scope_live_requests_activate")).to_equal(false)

@@ -1,0 +1,39 @@
+# Profile-counter contract: one typed object owns one body-object reservation.
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use compiler.hir.portable_body_profile_types.{PortableBodyLimitsV1,
+    PortableBodyErrorV1}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1}
+
+fn one_object_limits() -> PortableBodyLimitsV1:
+    PortableBodyLimitsV1(max_body_objects: 1, max_functions: 1,
+        max_symbols: 1, max_scopes: 1, max_exports: 0, max_parameters: 0,
+        max_nodes: 1, max_graph_nodes: 1, max_dependency_edges: 0,
+        max_call_occurrences: 0, max_call_chain_depth: 1,
+        max_semantic_depth: 1, max_text_bytes: 0, max_encoded_bytes: 0,
+        max_retained_bytes: 0, max_work_units: 1)
+
+describe "Portable HIR profile body-object counter V1":
+    it "admits one body-object charge and refuses exactly one over":
+        val ledger = PortableBodyLedgerV1.create(one_object_limits()).unwrap()
+        expect(ledger.charge_body_objects(1)).to_equal(true)
+        expect(ledger.snapshot().body_objects).to_equal(1)
+        match ledger.charge_body_objects(1):
+            case false:
+                expect(ledger.snapshot().body_objects).to_equal(1)
+                match ledger.error():
+                    case PortableBodyErrorV1.BoundsExceeded(detail):
+                        expect(detail).to_equal("body object budget")
+                    case _: fail("one-over body-object charge lost its typed refusal")
+            case true: fail("one-over body-object charge was admitted")
+
+    it "delegates the sole object reservation to typed semantic validation":
+        val profile = read_file_text(
+            "src/compiler/20.hir/portable_object_profile_v1.spl")
+        val semantics = read_file_text(
+            "src/compiler/20.hir/portable_body_semantics.spl")
+        expect(profile).to_contain(
+            "portable_hir_semantic_facts_from_typed_v1(module,")
+        expect(profile).to_not_contain("ledger.charge_body_objects(1)")
+        expect(semantics.split("ledger.charge_body_objects(1)").len()).to_equal(2)

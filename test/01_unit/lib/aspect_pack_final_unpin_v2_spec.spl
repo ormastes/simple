@@ -1,0 +1,444 @@
+# codex-system-test
+# Focused executable contract for the aspect-pack-owned final-unpin reservation.
+
+use std.common.string_core.{text_to_bytes}
+use std.common.aspect_pack.{
+    ApkModuleSourceV1, ApkCatalogEntryV1, ApkFinalUnpinLeaseV2,
+    apk_build_pack_v1, apk_build_catalog_v1,
+    apk_loader_new_with_final_unpin_capacity_v2,
+    apk_loader_new_with_final_unpin_limits_v2,
+    apk_loader_owner_identity_v2, apk_loader_register_pack, apk_load_facet,
+    apk_loader_pending_final_unpins_v2,
+    apk_loader_unregister_pack, apk_loader_invalidate_catalog_v1,
+    apk_loader_select_profile, apk_loader_profile, apk_loader_last_error,
+    apk_facet_pin_v1, apk_unload_facet_v1, apk_facet_state_v1,
+    apk_facet_refcount_v1, apk_facet_unpin_v1,
+    apk_facet_prepare_unpin_v2,
+    apk_facet_prepare_zero_pin_unload_v2,
+    apk_facet_validate_final_unpin_v2,
+    apk_facet_mark_final_unpin_release_started_v2,
+    apk_facet_commit_final_unpin_v2, apk_facet_abort_final_unpin_v2,
+    apk_activation_stack_enter_v1, apk_activation_stack_exit_v1,
+    apk_binding_checked_next_generation_v2,
+    apk_final_unpin_checked_next_reservation_id_v2,
+    apk_final_unpin_terminal_count_v2, apk_final_unpin_terminal_capacity_v2,
+    APK_FC_BOUND, APK_FC_QUIESCING, APK_FC_UNLOADED
+}
+use std.spec.{describe, it, expect, step}
+
+struct FinalUnpinFixtureV2:
+    ld: i64
+    owner_identity: text
+    catalog: [u8]
+    first_key: text
+    second_key: text
+
+fn build_final_unpin_fixture_v2(capacity: i64) -> FinalUnpinFixtureV2:
+    var modules: [ApkModuleSourceV1] = []
+    modules.push(ApkModuleSourceV1(
+        module_id: "debug.first", aspect_id: "debug",
+        payload: text_to_bytes("first payload")))
+    modules.push(ApkModuleSourceV1(
+        module_id: "debug.second", aspect_id: "debug",
+        payload: text_to_bytes("second payload")))
+    val pack = apk_build_pack_v1(modules)
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(
+        facet_key: "debug/First", pack_path: "aspect/debug.apk",
+        module_id: "debug.first"))
+    entries.push(ApkCatalogEntryV1(
+        facet_key: "debug/Second", pack_path: "aspect/debug.apk",
+        module_id: "debug.second"))
+    val catalog = apk_build_catalog_v1(entries)
+    val ld = apk_loader_new_with_final_unpin_capacity_v2(capacity)
+    expect(pack.ok).to_equal(true)
+    expect(catalog.ok).to_equal(true)
+    expect(ld).to_be_greater_than(-1)
+    expect(apk_loader_register_pack(ld, "aspect/debug.apk", pack.bytes)).to_equal(true)
+    expect(apk_load_facet(ld, catalog.bytes, "debug/First").ok).to_equal(true)
+    expect(apk_load_facet(ld, catalog.bytes, "debug/Second").ok).to_equal(true)
+    FinalUnpinFixtureV2(
+        ld: ld, owner_identity: apk_loader_owner_identity_v2(ld),
+        catalog: catalog.bytes, first_key: "debug/First",
+        second_key: "debug/Second")
+
+fn reserve_final_pin_v2(fixture: FinalUnpinFixtureV2) -> ApkFinalUnpinLeaseV2:
+    expect(apk_facet_pin_v1(fixture.ld, fixture.first_key)).to_equal(true)
+    val unload = apk_unload_facet_v1(fixture.ld, fixture.first_key)
+    expect(unload.quiescing).to_equal(true)
+    val prepared = apk_facet_prepare_unpin_v2(
+        fixture.owner_identity, fixture.ld, fixture.first_key,
+        unload.generation)
+    expect(prepared.ok).to_equal(true)
+    expect(prepared.pin_consumed).to_equal(false)
+    expect(prepared.final_reserved).to_equal(true)
+    prepared.lease
+
+fn repeated_ascii_v2(count: i64) -> text:
+    var pieces: [text] = []
+    var i = 0
+    while i < count:
+        pieces.push("x")
+        i = i + 1
+    pieces.join("")
+
+fn build_single_key_fixture_v2(key: text, capacity: i64) -> FinalUnpinFixtureV2:
+    var modules: [ApkModuleSourceV1] = []
+    modules.push(ApkModuleSourceV1(
+        module_id: "bounded.key", aspect_id: "debug",
+        payload: text_to_bytes("bounded key payload")))
+    val pack = apk_build_pack_v1(modules)
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(
+        facet_key: key, pack_path: "aspect/bounded.apk",
+        module_id: "bounded.key"))
+    val catalog = apk_build_catalog_v1(entries)
+    val ld = apk_loader_new_with_final_unpin_capacity_v2(capacity)
+    expect(pack.ok).to_equal(true)
+    expect(catalog.ok).to_equal(true)
+    expect(apk_loader_register_pack(
+        ld, "aspect/bounded.apk", pack.bytes)).to_equal(true)
+    expect(apk_load_facet(ld, catalog.bytes, key).ok).to_equal(true)
+    FinalUnpinFixtureV2(ld: ld,
+        owner_identity: apk_loader_owner_identity_v2(ld),
+        catalog: catalog.bytes, first_key: key, second_key: "")
+
+fn build_final_unpin_limits_fixture_v2(capacity: i64,
+        max_reservation_id: i64) -> FinalUnpinFixtureV2:
+    var modules: [ApkModuleSourceV1] = []
+    modules.push(ApkModuleSourceV1(
+        module_id: "debug.first", aspect_id: "debug",
+        payload: text_to_bytes("first payload")))
+    modules.push(ApkModuleSourceV1(
+        module_id: "debug.second", aspect_id: "debug",
+        payload: text_to_bytes("second payload")))
+    val pack = apk_build_pack_v1(modules)
+    var entries: [ApkCatalogEntryV1] = []
+    entries.push(ApkCatalogEntryV1(
+        facet_key: "debug/First", pack_path: "aspect/limited.apk",
+        module_id: "debug.first"))
+    entries.push(ApkCatalogEntryV1(
+        facet_key: "debug/Second", pack_path: "aspect/limited.apk",
+        module_id: "debug.second"))
+    val catalog = apk_build_catalog_v1(entries)
+    val ld = apk_loader_new_with_final_unpin_limits_v2(
+        capacity, max_reservation_id)
+    expect(pack.ok).to_equal(true)
+    expect(catalog.ok).to_equal(true)
+    expect(ld).to_be_greater_than(-1)
+    expect(apk_loader_register_pack(
+        ld, "aspect/limited.apk", pack.bytes)).to_equal(true)
+    expect(apk_load_facet(ld, catalog.bytes, "debug/First").ok).to_equal(true)
+    expect(apk_load_facet(ld, catalog.bytes, "debug/Second").ok).to_equal(true)
+    FinalUnpinFixtureV2(
+        ld: ld, owner_identity: apk_loader_owner_identity_v2(ld),
+        catalog: catalog.bytes, first_key: "debug/First",
+        second_key: "debug/Second")
+
+describe "aspect-pack final-unpin V2 owner":
+    it "REQ-AFU2-001 should reject foreign and stale reservation coordinates":
+        step("Quiesce the generation and reject new pins")
+        val fixture = build_final_unpin_fixture_v2(2)
+        val lease = reserve_final_pin_v2(fixture)
+        val other_ld = apk_loader_new_with_final_unpin_capacity_v2(1)
+        val foreign = ApkFinalUnpinLeaseV2(
+            schema: lease.schema, loader_handle: other_ld,
+            aspect_owner_identity: lease.aspect_owner_identity,
+            facet_key: lease.facet_key, facet_generation: lease.facet_generation,
+            reservation_id: lease.reservation_id)
+        expect(apk_facet_validate_final_unpin_v2(foreign).error_code).to_equal(
+            "APK_FINAL_UNPIN_OWNER_MISMATCH")
+        val stale = ApkFinalUnpinLeaseV2(
+            schema: lease.schema, loader_handle: lease.loader_handle,
+            aspect_owner_identity: lease.aspect_owner_identity,
+            facet_key: lease.facet_key,
+            facet_generation: lease.facet_generation + 1,
+            reservation_id: lease.reservation_id)
+        expect(apk_facet_validate_final_unpin_v2(stale).error_code).to_equal(
+            "APK_FINAL_UNPIN_GENERATION_MISMATCH")
+        expect(apk_facet_refcount_v1(fixture.ld, fixture.first_key)).to_equal(1)
+
+    it "REQ-AFU2-002 should abort only before release starts and reject replay":
+        step("Quiesce the generation and reject new pins")
+        val fixture = build_final_unpin_fixture_v2(1)
+        val first = reserve_final_pin_v2(fixture)
+        val aborted = apk_facet_abort_final_unpin_v2(first)
+        expect(aborted.ok).to_equal(true)
+        expect(aborted.aborted).to_equal(true)
+        expect(apk_facet_state_v1(fixture.ld, fixture.first_key)).to_equal(
+            APK_FC_QUIESCING)
+        expect(apk_facet_refcount_v1(fixture.ld, fixture.first_key)).to_equal(1)
+        expect(apk_facet_validate_final_unpin_v2(first).error_code).to_equal(
+            "APK_FINAL_UNPIN_REPLAY")
+        val second = apk_facet_prepare_unpin_v2(
+            fixture.owner_identity, fixture.ld, fixture.first_key,
+            first.facet_generation)
+        expect(second.ok).to_equal(true)
+        expect(second.lease.reservation_id).to_be_greater_than(first.reservation_id)
+        expect(apk_facet_abort_final_unpin_v2(second.lease).ok).to_equal(true)
+
+    it "REQ-AFU2-003 should make release-start irreversible and commit once":
+        step("Release the final pin and retire every owned mapping")
+        val fixture = build_final_unpin_fixture_v2(1)
+        val lease = reserve_final_pin_v2(fixture)
+        val started = apk_facet_mark_final_unpin_release_started_v2(lease)
+        expect(started.ok).to_equal(true)
+        expect(started.release_started).to_equal(true)
+        expect(apk_facet_abort_final_unpin_v2(lease).error_code).to_equal(
+            "APK_FINAL_UNPIN_RELEASE_STARTED")
+        val committed = apk_facet_commit_final_unpin_v2(lease)
+        expect(committed.ok).to_equal(true)
+        expect(committed.committed).to_equal(true)
+        expect(apk_facet_state_v1(fixture.ld, fixture.first_key)).to_equal(
+            APK_FC_UNLOADED)
+        expect(apk_facet_validate_final_unpin_v2(lease).error_code).to_equal(
+            "APK_FINAL_UNPIN_REPLAY")
+
+    it "REQ-AFU2-004 should reserve and commit a zero-pin unload":
+        step("Release the final pin and retire every owned mapping")
+        val fixture = build_final_unpin_fixture_v2(1)
+        expect(apk_facet_state_v1(fixture.ld, fixture.second_key)).to_equal(
+            APK_FC_BOUND)
+        val generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key).generation
+        val prepared = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key, generation)
+        expect(prepared.ok).to_equal(true)
+        expect(prepared.final_reserved).to_equal(true)
+        expect(apk_facet_state_v1(fixture.ld, fixture.second_key)).to_equal(
+            APK_FC_QUIESCING)
+        expect(apk_facet_mark_final_unpin_release_started_v2(
+            prepared.lease).ok).to_equal(true)
+        expect(apk_facet_commit_final_unpin_v2(prepared.lease).ok).to_equal(true)
+        expect(apk_facet_state_v1(fixture.ld, fixture.second_key)).to_equal(
+            APK_FC_UNLOADED)
+
+    it "NFR-AFU2-001 should refuse capacity before a second reservation":
+        step("Quiesce the generation and reject new pins")
+        val fixture = build_final_unpin_fixture_v2(1)
+        val first = reserve_final_pin_v2(fixture)
+        val second_generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key).generation
+        val refused = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key,
+            second_generation)
+        expect(refused.ok).to_equal(false)
+        expect(refused.error_code).to_equal("APK_FINAL_UNPIN_CAPACITY")
+        expect(apk_facet_state_v1(fixture.ld, fixture.second_key)).to_equal(
+            APK_FC_BOUND)
+        expect(apk_facet_abort_final_unpin_v2(first).ok).to_equal(true)
+        val admitted = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key,
+            second_generation)
+        expect(admitted.ok).to_equal(true)
+        expect(apk_facet_abort_final_unpin_v2(admitted.lease).ok).to_equal(true)
+
+    it "REQ-AFU2-005 should consume ordinary pins before reserving the final pin":
+        val fixture = build_final_unpin_fixture_v2(1)
+        expect(apk_facet_pin_v1(fixture.ld, fixture.first_key)).to_equal(true)
+        expect(apk_facet_pin_v1(fixture.ld, fixture.first_key)).to_equal(true)
+        val unload = apk_unload_facet_v1(fixture.ld, fixture.first_key)
+        expect(unload.refcount).to_equal(2)
+        val ordinary = apk_facet_prepare_unpin_v2(
+            fixture.owner_identity, fixture.ld, fixture.first_key,
+            unload.generation)
+        expect(ordinary.ok).to_equal(true)
+        expect(ordinary.pin_consumed).to_equal(true)
+        expect(ordinary.final_reserved).to_equal(false)
+        expect(ordinary.remaining_refcount).to_equal(1)
+        val final_pin = apk_facet_prepare_unpin_v2(
+            fixture.owner_identity, fixture.ld, fixture.first_key,
+            unload.generation)
+        expect(final_pin.final_reserved).to_equal(true)
+        expect(apk_facet_abort_final_unpin_v2(final_pin.lease).ok).to_equal(true)
+
+    it "REQ-AFU2-006 should reject duplicate prepare and commit before release-start":
+        val fixture = build_final_unpin_fixture_v2(1)
+        val lease = reserve_final_pin_v2(fixture)
+        val duplicate = apk_facet_prepare_unpin_v2(
+            fixture.owner_identity, fixture.ld, fixture.first_key,
+            lease.facet_generation)
+        expect(duplicate.error_code).to_equal("APK_FINAL_UNPIN_ALREADY_STAGED")
+        expect(apk_facet_commit_final_unpin_v2(lease).error_code).to_equal(
+            "APK_FINAL_UNPIN_RELEASE_NOT_STARTED")
+        expect(apk_facet_validate_final_unpin_v2(lease).ok).to_equal(true)
+        expect(apk_facet_abort_final_unpin_v2(lease).ok).to_equal(true)
+
+    it "REQ-AFU2-007 should block every V1 escape while zero-pin release is pending":
+        val fixture = build_final_unpin_fixture_v2(1)
+        val generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key).generation
+        val pending = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key, generation)
+        expect(pending.ok).to_equal(true)
+        expect(apk_facet_refcount_v1(
+            fixture.ld, fixture.second_key)).to_equal(0)
+        expect(apk_facet_unpin_v1(fixture.ld, fixture.second_key)).to_equal(false)
+        expect(apk_unload_facet_v1(
+            fixture.ld, fixture.second_key).error_code).to_equal(
+                "APK_UNLOAD_FINAL_UNPIN_PENDING")
+        expect(apk_loader_invalidate_catalog_v1(fixture.ld)).to_equal(false)
+        expect(apk_loader_unregister_pack(
+            fixture.ld, "aspect/debug.apk")).to_equal(false)
+        apk_loader_select_profile(fixture.ld, "replacement")
+        expect(apk_loader_profile(fixture.ld)).to_equal("")
+        expect(apk_loader_last_error(fixture.ld)).to_contain(
+            "pending final unpin")
+        expect(apk_facet_validate_final_unpin_v2(pending.lease).ok).to_equal(true)
+        val aborted = apk_facet_abort_final_unpin_v2(pending.lease)
+        expect(aborted.ok).to_equal(true)
+        expect(aborted.refcount).to_equal(0)
+        expect(apk_facet_state_v1(
+            fixture.ld, fixture.second_key)).to_equal(APK_FC_QUIESCING)
+
+    it "REQ-AFU2-008 should reject release if activation starts after prepare":
+        val fixture = build_final_unpin_fixture_v2(1)
+        val generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key).generation
+        val pending = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key, generation)
+        expect(pending.ok).to_equal(true)
+        expect(apk_activation_stack_enter_v1(
+            fixture.ld, fixture.second_key)).to_equal(true)
+        expect(apk_facet_validate_final_unpin_v2(
+            pending.lease).error_code).to_equal("APK_FINAL_UNPIN_ACTIVATING")
+        expect(apk_facet_mark_final_unpin_release_started_v2(
+            pending.lease).error_code).to_equal("APK_FINAL_UNPIN_ACTIVATING")
+        expect(apk_facet_commit_final_unpin_v2(
+            pending.lease).error_code).to_equal("APK_FINAL_UNPIN_ACTIVATING")
+        expect(apk_facet_state_v1(
+            fixture.ld, fixture.second_key)).to_equal(APK_FC_QUIESCING)
+        expect(apk_facet_refcount_v1(
+            fixture.ld, fixture.second_key)).to_equal(0)
+        expect(apk_facet_validate_final_unpin_v2(
+            pending.lease).error_code).to_equal("APK_FINAL_UNPIN_ACTIVATING")
+        apk_activation_stack_exit_v1(fixture.ld, fixture.second_key)
+        expect(apk_facet_abort_final_unpin_v2(pending.lease).ok).to_equal(true)
+
+    it "REQ-AFU2-009 should keep reservation coordinates aligned through compaction":
+        val fixture = build_final_unpin_fixture_v2(1)
+        val generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key).generation
+        val pending = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key, generation)
+        expect(pending.ok).to_equal(true)
+        expect(apk_unload_facet_v1(fixture.ld, fixture.first_key).released).to_equal(true)
+        expect(apk_facet_validate_final_unpin_v2(pending.lease).ok).to_equal(true)
+        expect(apk_facet_mark_final_unpin_release_started_v2(
+            pending.lease).ok).to_equal(true)
+        expect(apk_facet_commit_final_unpin_v2(pending.lease).ok).to_equal(true)
+
+    it "REQ-AFU2-010 should reject a committed token after a real reload":
+        val fixture = build_final_unpin_fixture_v2(1)
+        val generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key).generation
+        val pending = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key, generation)
+        expect(apk_facet_mark_final_unpin_release_started_v2(
+            pending.lease).ok).to_equal(true)
+        expect(apk_facet_commit_final_unpin_v2(pending.lease).ok).to_equal(true)
+        val reloaded = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key)
+        expect(reloaded.ok).to_equal(true)
+        expect(reloaded.generation).to_be_greater_than(generation)
+        expect(apk_facet_validate_final_unpin_v2(
+            pending.lease).error_code).to_equal(
+                "APK_FINAL_UNPIN_GENERATION_MISMATCH")
+        expect(apk_facet_state_v1(
+            fixture.ld, fixture.second_key)).to_equal(APK_FC_BOUND)
+
+    it "NFR-AFU2-002 should reject oversized facet-key bytes before reservation":
+        val oversized_key = repeated_ascii_v2(4097)
+        val fixture = build_single_key_fixture_v2(oversized_key, 1)
+        val generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.first_key).generation
+        val refused = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.first_key, generation)
+        expect(refused.error_code).to_equal("APK_FINAL_UNPIN_KEY_TOO_LONG")
+        expect(apk_facet_state_v1(
+            fixture.ld, fixture.first_key)).to_equal(APK_FC_BOUND)
+
+    it "NFR-AFU2-003 should keep checked generation and reservation IDs nonwrapping":
+        expect(apk_binding_checked_next_generation_v2(0)).to_equal(1)
+        expect(apk_binding_checked_next_generation_v2(
+            9223372036854775807)).to_equal(0)
+        expect(apk_final_unpin_checked_next_reservation_id_v2(1)).to_equal(2)
+        expect(apk_final_unpin_checked_next_reservation_id_v2(
+            9223372036854775807)).to_equal(0)
+        expect(apk_final_unpin_checked_next_reservation_id_v2(-1)).to_equal(0)
+
+    it "NFR-AFU2-004 should cap terminal replay history and evict oldest rows":
+        val fixture = build_final_unpin_fixture_v2(1)
+        val first = reserve_final_pin_v2(fixture)
+        expect(apk_facet_abort_final_unpin_v2(first).ok).to_equal(true)
+        var newest = first
+        var i = 0
+        val capacity = apk_final_unpin_terminal_capacity_v2()
+        while i < capacity:
+            val prepared = apk_facet_prepare_unpin_v2(
+                fixture.owner_identity, fixture.ld, fixture.first_key,
+                first.facet_generation)
+            expect(prepared.ok).to_equal(true)
+            newest = prepared.lease
+            expect(apk_facet_abort_final_unpin_v2(newest).ok).to_equal(true)
+            i = i + 1
+        expect(apk_final_unpin_terminal_count_v2()).to_equal(capacity)
+        expect(apk_facet_validate_final_unpin_v2(first).error_code).to_equal(
+            "APK_FINAL_UNPIN_RESERVATION_MISMATCH")
+        expect(apk_facet_validate_final_unpin_v2(newest).error_code).to_equal(
+            "APK_FINAL_UNPIN_REPLAY")
+
+    it "REQ-AFU2-011 should refuse V1 unpin while a V2 final pin reservation is live":
+        val fixture = build_final_unpin_fixture_v2(1)
+        val lease = reserve_final_pin_v2(fixture)
+        expect(apk_facet_unpin_v1(fixture.ld, fixture.first_key)).to_equal(false)
+        expect(apk_loader_last_error(fixture.ld)).to_contain("reserved by V2")
+        expect(apk_facet_state_v1(
+            fixture.ld, fixture.first_key)).to_equal(APK_FC_QUIESCING)
+        expect(apk_facet_refcount_v1(fixture.ld, fixture.first_key)).to_equal(1)
+        expect(apk_facet_validate_final_unpin_v2(lease).ok).to_equal(true)
+        expect(apk_facet_abort_final_unpin_v2(lease).ok).to_equal(true)
+
+    it "NFR-AFU2-005 should reject nonpositive reservation-ID ceilings":
+        expect(apk_loader_new_with_final_unpin_limits_v2(1, 0)).to_equal(-1)
+        expect(apk_loader_new_with_final_unpin_limits_v2(1, -1)).to_equal(-1)
+
+    it "NFR-AFU2-006 should fail closed at a one-ID reservation ceiling":
+        val fixture = build_final_unpin_limits_fixture_v2(1, 1)
+        val first = reserve_final_pin_v2(fixture)
+        expect(first.reservation_id).to_equal(1)
+        expect(apk_facet_abort_final_unpin_v2(first).ok).to_equal(true)
+        val second_generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key).generation
+        val exhausted = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key,
+            second_generation)
+        expect(exhausted.ok).to_equal(false)
+        expect(exhausted.error_code).to_equal("APK_FINAL_UNPIN_ID_EXHAUSTED")
+        expect(apk_facet_state_v1(
+            fixture.ld, fixture.second_key)).to_equal(APK_FC_BOUND)
+        expect(apk_facet_refcount_v1(
+            fixture.ld, fixture.second_key)).to_equal(0)
+        expect(apk_loader_pending_final_unpins_v2(fixture.ld)).to_equal(0)
+        val retry = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key,
+            second_generation)
+        expect(retry.ok).to_equal(false)
+        expect(retry.error_code).to_equal("APK_FINAL_UNPIN_ID_EXHAUSTED")
+        expect(apk_facet_state_v1(
+            fixture.ld, fixture.second_key)).to_equal(APK_FC_BOUND)
+        expect(apk_loader_pending_final_unpins_v2(fixture.ld)).to_equal(0)
+
+    it "NFR-AFU2-007 should advance reservation IDs through a two-ID ceiling":
+        val fixture = build_final_unpin_limits_fixture_v2(1, 2)
+        val first = reserve_final_pin_v2(fixture)
+        expect(first.reservation_id).to_equal(1)
+        expect(apk_facet_abort_final_unpin_v2(first).ok).to_equal(true)
+        val second_generation = apk_load_facet(
+            fixture.ld, fixture.catalog, fixture.second_key).generation
+        val second = apk_facet_prepare_zero_pin_unload_v2(
+            fixture.owner_identity, fixture.ld, fixture.second_key,
+            second_generation)
+        expect(second.ok).to_equal(true)
+        expect(second.lease.reservation_id).to_equal(2)
+        expect(apk_facet_abort_final_unpin_v2(second.lease).ok).to_equal(true)

@@ -1,0 +1,51 @@
+"""L06-A04 refuses mutable-path activation until exact mapping identity exists."""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read_bytes, file_write_bytes, remove_file_if_exists}
+use os.smf.provider_loader.{provider_artifact_digest_v1}
+use std.nogc_sync_mut.composition.provider_generation.{ProviderActivationCandidateV1}
+use std.nogc_sync_mut.composition.provider_publication_owner_v1.{
+    PROVIDER_PUBLICATION_UNSTABLE_DIGEST, PROVIDER_PUBLICATION_DIGEST_MISMATCH,
+    PROVIDER_PUBLICATION_MAPPING_REQUIRED, PROVIDER_PUBLICATION_NOT_ACTIVE,
+    provider_publication_owner_new_v1, provider_publication_publish_path_v1,
+    provider_publication_publish_captured_v1, provider_publication_acquire_v1}
+
+val OWNER_PATH: text = "build/providers/l06-publication-owner.so"
+
+fn candidate_for(digest: text) -> ProviderActivationCandidateV1:
+    ProviderActivationCandidateV1(
+        provider_handle: 620u64, provider_identity_digest: 621u64,
+        implementation_digest: 701u64, abi_digest: 622u64,
+        expected_artifact_digest: digest, artifact_digest: digest,
+        query_symbol_address: 623, admitted: true, process_callable: true)
+
+describe "provider publication owner v1 fail-closed mapping boundary":
+    it "retains a stable same-size snapshot but refuses mutable-path activation":
+        step("Capture a whole provider image twice and retain its immutable bytes")
+        val owner = provider_publication_owner_new_v1()
+        expect(file_write_bytes(OWNER_PATH, [65u8, 65u8, 65u8, 65u8])).to_equal(true)
+        val digest = provider_artifact_digest_v1(file_read_bytes(OWNER_PATH))
+        val result = provider_publication_publish_path_v1(owner, OWNER_PATH,
+            candidate_for(digest))
+        expect(result.status).to_equal(PROVIDER_PUBLICATION_MAPPING_REQUIRED)
+        expect(result.observed_digest).to_equal(digest)
+        expect(result.observed_byte_count).to_equal(4)
+        step("No reader can receive a generation without an immutable mapping receipt")
+        expect(provider_publication_acquire_v1(owner).status).to_equal(PROVIDER_PUBLICATION_NOT_ACTIVE)
+        remove_file_if_exists(OWNER_PATH)
+
+    it "rejects a same-size rewrite observed between whole-pack captures":
+        step("Submit two four-byte images with distinct SHA-256 digests")
+        val owner = provider_publication_owner_new_v1()
+        val result = provider_publication_publish_captured_v1(owner, OWNER_PATH,
+            [66u8, 66u8, 66u8, 66u8], [67u8, 67u8, 67u8, 67u8],
+            candidate_for(provider_artifact_digest_v1([66u8, 66u8, 66u8, 66u8])))
+        expect(result.status).to_equal(PROVIDER_PUBLICATION_UNSTABLE_DIGEST)
+        expect(provider_publication_acquire_v1(owner).status).to_equal(PROVIDER_PUBLICATION_NOT_ACTIVE)
+
+    it "refuses a stable capture whose declared digest does not bind its bytes":
+        val owner = provider_publication_owner_new_v1()
+        val result = provider_publication_publish_captured_v1(owner, OWNER_PATH,
+            [68u8, 68u8, 68u8, 68u8], [68u8, 68u8, 68u8, 68u8],
+            candidate_for("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        expect(result.status).to_equal(PROVIDER_PUBLICATION_DIGEST_MISMATCH)
