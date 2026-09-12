@@ -19,6 +19,15 @@ fn input(platform: StoragePlatform, cli_user: text?, cli_worktree: text?, env: S
         worktree_metadata: "gitdir=/repo/simple/.git",
     )
 
+fn input_at(platform: StoragePlatform, cli_user: text?, cli_worktree: text?, worktree: text, env: StorageRootEnvironmentSnapshot) -> StorageRootResolverInput:
+    StorageRootResolverInput(
+        platform: platform,
+        cli: StorageRootOverrides(user_root: cli_user, worktree_root: cli_worktree),
+        environment: env,
+        canonical_worktree: worktree,
+        worktree_metadata: "gitdir=fixed/.git",
+    )
+
 describe "centralized storage root resolver":
     it "applies CLI then environment then platform precedence":
         val resolved = inspect_storage_roots(input(
@@ -63,3 +72,16 @@ describe "centralized storage root resolver":
         expect(first.roots.worktree_identity.w3).to_equal(second.roots.worktree_identity.w3)
         expect(first.inspection.warnings.len()).to_equal(0)
         expect(first.receipts.len()).to_equal(2)
+
+    it "normalizes the Windows extended-length prefix in the worktree identity":
+        # `path_absolute` answers `\?\C:\...` on Windows. Slashed, that is
+        # `//?/C:/...`: absolute by the POSIX test but not by the drive test, so
+        # the derived worktree root used to be `/?/C:/.../.simple/storage` — a
+        # path no Windows API can create. Both spellings name one directory, so
+        # the derived roots and the worktree identity must not fork.
+        val env = environment(nil, nil, Some("C:\\Users\\a\\AppData\\Local"), nil, nil)
+        val verbatim = resolve_storage_roots(input_at(StoragePlatform.Windows, nil, nil, "\\\\?\\C:\\Users\\a\\repo", env)).unwrap()
+        val plain = resolve_storage_roots(input_at(StoragePlatform.Windows, nil, nil, "C:\\Users\\a\\repo", env)).unwrap()
+        expect(verbatim.worktree_root.value).to_equal("C:/Users/a/repo/.simple/storage")
+        expect(plain.worktree_root.value).to_equal("C:/Users/a/repo/.simple/storage")
+        expect(verbatim.worktree_identity.w0).to_equal(plain.worktree_identity.w0)

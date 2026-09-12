@@ -982,3 +982,32 @@ fn test_coalesce_on_declared_optional_keeps_nil_check() {
         "`??` on a declared `i64?` must keep the presence check: {repr}"
     );
 }
+
+/// `Some(x)` boxes a real Option enum (`lower_builtin_call("Some", ..)`), but a
+/// `T?` STATIC type made `lower_try`'s flat-nullable branch assume the runtime
+/// word was already bare and return it unchanged — so `b!` handed the Option
+/// WRAPPER to the next consumer: `b!.len()` answered -1 and `"[" + b! + "]"`
+/// answered "". Silent wrong answers under JIT/native only; the tree-walk
+/// interpreter (`interpreter/expr.rs`, `try_unwrap_option_or_result`) was
+/// always correct, which is why no `.spl` spec caught it. `rt_unwrap_or_self`
+/// is the identity on a bare word and on every non-Option enum, and yields the
+/// payload only for the reserved OPTION_ENUM_ID.
+#[test]
+fn test_force_unwrap_of_flat_nullable_normalizes_a_boxed_some() {
+    for source in [
+        "fn probe(v: text?) -> i64:\n    v!.len()\n",
+        "fn probe(v: i64?) -> i64:\n    v!\n",
+        // Struct/class pointee: the same hazard one layer up — `tooling_paths.spl`
+        // memoizes `_tooling_roots = Some(roots)` as a `StorageRoots?` and then
+        // hands out `Ok(_tooling_roots!)`, so the cached read returned the Option
+        // wrapper typed as the struct.
+        "class Roots:\n    n: i64\n\nfn probe(v: Roots?) -> i64:\n    v!.n\n",
+    ] {
+        let module = parse_and_lower(source).unwrap();
+        let repr = format!("{:?}", module.functions[0].body);
+        assert!(
+            repr.contains("rt_unwrap_or_self"),
+            "force unwrap of a flat nullable must normalize a boxed Some: {repr}"
+        );
+    }
+}
