@@ -501,6 +501,66 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
     out_widths[i] = width
     IntrinsicWidthResult(width: width, widths: out_widths)
 
+# Max-content width of a flex item, used as its flex base size when it has
+# neither `flex-basis` nor a `width` (CSS: `flex-basis: content`).
+#
+# `intrinsic_text_width` above cannot serve here: it descends only into inline
+# and inline-block children, so a block container such as `<ol>` measures as
+# nothing but its own padding. This walks EVERY in-flow child — inline children
+# accumulate along the current line, each block child starts a new one — and the
+# widest line wins, which is the max-content rule.
+fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+    var inline_run = 0
+    var widest = 0
+    var c = child_index.first_child[i]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over this item's children during flex base sizing, bounded by the child list, not on any paint path
+        val cst = styles[c]
+        val ctag = nodes[c].tag
+        if ctag == "#text":
+            val txt: text = nodes[c].text_trimmed
+            if txt.len() > 0:
+                val resolved = cst.resolved_font_width
+                if resolved > 0:
+                    inline_run = inline_run + resolved
+                else:
+                    val glyph_w = style_char_w(cst)
+                    val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+                    inline_run = inline_run + (text_cell_width(txt) as i32) * ink_w
+        elif cst.display != "none" and cst.display != "marker":
+            val child_w = if cst.width_px > 0:
+                cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+            else:
+                flex_item_max_content_width(nodes, styles, child_index, c)
+            if cst.display == "inline" or cst.display == "inline-block":
+                inline_run = inline_run + child_w
+            else:
+                if inline_run > widest:
+                    widest = inline_run
+                inline_run = 0
+                if child_w > widest:
+                    widest = child_w
+        c = child_index.next_sibling[c]
+    if inline_run > widest:
+        widest = inline_run
+    widest + styles[i].pad_l + styles[i].pad_r + styles[i].border_l + styles[i].border_r
+
+# Flex base size for ONE item of a wrapping row. Items that state a basis, a
+# width, a percentage width (`width_px < 0`) or a non-zero `flex-grow` keep the
+# width the caller computed; only an item that states nothing at all is sized to
+# its max-content width, capped at the container's inner width.
+#
+# Without this, such an item was given `iw` — the whole container — so every
+# auto-width item wrapped onto a line of its own. The NON-wrapping branch of the
+# same layout already measured its items; only the wrap branch did not. See
+# doc/08_tracking/bug/web_flex_wrap_auto_width_item_fills_line_2026-09-12.md.
+fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
+    if cst.flex_basis_px > 0 or cst.width_px != 0 or cst.flex_grow != 0:
+        return caller_base_w
+    val max_content = flex_item_max_content_width(nodes, styles, child_index, item)
+    if max_content <= 0 or max_content >= iw:
+        return caller_base_w
+    max_content
+
 fn inline_text_advance_width(node: HNode, st: Style) -> i32:
     if node.tag != "#text":
         return 0
@@ -2018,7 +2078,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         cst
                     val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
                     val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
-                    val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                    var base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                    base_w_wrap = flex_wrap_auto_base_width(nodes, styles, child_index, fm, cst, iw, base_w_wrap)
                     val measured_ml = if cst.margin_l_auto: 0 else: cml
                     val measured_mr = if cst.margin_r_auto: 0 else: cmr
                     val item_auto_margins = (
@@ -2098,6 +2159,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             var line_h_wrap = 0
             var line_index_wrap = 0
             var flex_child_count_wrap = 0
+            var wrap_content_bottom = 0
             var fc_wrap_i = 0
             while fc_wrap_i < ordered_row_child_count:
                 val fc_wrap = ordered_row_children[fc_wrap_i]
@@ -2132,7 +2194,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         line_distribution.auto_margin
                     else:
                         cmr
-                    val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                    var base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                    base_w_wrap = flex_wrap_auto_base_width(nodes, styles, child_index, fc_wrap, cst, iw, base_w_wrap)
                     if (
                         flex_child_count_wrap > 0 and
                         line_index_wrap < line_count and
@@ -2195,12 +2258,24 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         out_bx = shifted.bx
                         out_by = shifted.by
                     cx_wrap = cx_wrap + out_bw[fc_wrap] + effective_cmr
+                    val item_bottom = out_by[fc_wrap] + out_bh[fc_wrap] + resolved_cst.margin_b
+                    if item_bottom > wrap_content_bottom:
+                        wrap_content_bottom = item_bottom
                     flex_child_count_wrap = flex_child_count_wrap + 1
                 fc_wrap_i = fc_wrap_i + 1
             var flex_h_wrap = if st.height_px > 0:
                 if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
             else:
                 total_line_h + st.pad_t + st.pad_b + border_y
+            if st.height_px <= 0 and wrap_content_bottom > y:
+                # `line_heights` above comes from `flex_item_outer_height`, which
+                # for an auto-height item can only estimate ONE line box. Once
+                # the items are really laid out their true heights are known, so
+                # an auto-height wrap container is grown to contain them. It is
+                # only ever grown, never shrunk, and never when `height` is set.
+                val measured_h = wrap_content_bottom - y + st.pad_b + st.border_b
+                if measured_h > flex_h_wrap:
+                    flex_h_wrap = measured_h
             if flex_h_wrap < 1:
                 flex_h_wrap = 1
             out_bh[i] = flex_h_wrap
