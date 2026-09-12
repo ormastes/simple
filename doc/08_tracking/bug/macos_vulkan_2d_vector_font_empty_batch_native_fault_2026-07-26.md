@@ -437,3 +437,34 @@ path emits the `[font-batch] degenerate ... quads=0` diagnostic and continues,
 which is why a producer defect surfaces as a native fault instead of a named
 error. Making that one edit would turn every future occurrence of this class into
 a legible failure rather than a 21-cycle investigation.
+
+## 2026-09-12 — NOT reproduced this pass, and the bug_db file pointer is wrong
+
+Host macOS arm64 (M4). Available binary: the Rust seed
+`/Users/ormastes/simple/build/cargo-r2/release/simple`
+(`stat -f '%z %m'` = `39528776 1789199850`). **No attempt was made to reproduce
+the fault, deliberately:** every documented occurrence is a NATIVE fault in a
+`native-build` artifact, and the acceptance gate above already exhausted three
+bounded no-bootstrap cycles proving that another probe on the interpreter or on
+an ad-hoc native diagnostic does not localize it. The prerequisite is a deployed
+self-hosted compiler carrying the 2026-07-27 receiver-lowering fix, and Stage 4
+deployment on this host is blocked in a separate lane (macOS bootstrap chain).
+No `lldb` backtrace is offered here because nothing was run that could fault.
+
+Two corrections for whoever schedules this next:
+
+- **`bug_db.sdn` names `src/os/compositor/host_compositor_core.spl` as this
+  bug's file. That is not where the seam is.** The degenerate-batch emitter is
+  `src/lib/gc_async_mut/gpu/engine2d/engine.spl:1740`, and the staging seam the
+  record identifies (`local quads -> FontRenderBatch.quads -> _stage_batch`) is
+  `src/lib/nogc_sync_mut/text_layout/font_renderer.spl:1323`
+  (`_stage_batch`) / `:1434` (`_stage_batch_with_config`). The compositor file
+  was not touched by this pass and appears to be a stale attribution. The row
+  itself is left alone — bug_db status/field edits belong to the docs lane.
+- Acceptance item 4 ("an empty or inconsistent `FontRenderBatch` must return a
+  named failure without dereferencing a nil aggregate") is the only part of this
+  bug that looks pure-Simple-fixable without a native build, and it lives in
+  `font_renderer.spl`, not in the compositor. Nothing in the round-2 plan assigns it: lane 2 was pointed at the compositor file, lane 3 owns the test runner, lane 4 the red specs. It is left unstarted here rather
+  than half-done -- it is outside lane 2's assigned files AND assigned to no lane at all, so it needs one.
+
+Status unchanged: **open, blocked on the macOS bootstrap/deploy lane.**

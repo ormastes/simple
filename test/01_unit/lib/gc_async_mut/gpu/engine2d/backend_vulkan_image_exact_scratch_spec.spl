@@ -83,6 +83,25 @@ fn oracle_image(side: i32) -> [u32]:
         k = k + 1
     out
 
+fn oracle_image_distinct(side: i32, salt: i64) -> [u32]:
+    """Same SIZE as `oracle_image(side)`, deliberately different CONTENT.
+
+    A small image is content-keyed: at or below `VK_IMAGE_INLINE_KEY_MAX_PIXELS`
+    (64 words) `_draw_image_composite_native_impl` digests the pixels and, on a
+    hit, reuses the already-resident device source and performs NO upload at all
+    (`image-upload-skipped`). 4x4 is 16 words, so uploading the SAME 4x4 image
+    three times legitimately packs ONCE -- which would make a reuse assertion
+    about the staging array vacuous rather than wrong. Salting each upload keeps
+    the SIZE constant (the thing the scratch is sized by) while forcing three
+    real packs, so `scratch_resizes` still witnesses reuse.
+    """
+    var out: [u32] = [0u32; side.to_i64() * side.to_i64()]
+    var k: i64 = 0
+    while k < out.len().to_i64():
+        out[k] = (4278190080 + ((k + 1) * 0x0F0703) + salt * 0x010101).to_i32().to_u32()
+        k = k + 1
+    out
+
 fn dst_index(k: i64, side: i32, at_x: i32, at_y: i32) -> i64:
     val sx = k % side.to_i64()
     val sy = k / side.to_i64()
@@ -174,12 +193,19 @@ describe "The byte image lane packs each composite exactly once, whatever preced
         # one, so the obvious worry is that it now allocates on every composite.
         # Three same-size uploads must resize exactly ONCE -- the reuse that
         # mattered is intact, and only a size CHANGE costs an allocation.
+        #
+        # The three images are SALTED (`oracle_image_distinct`) so each carries
+        # distinct content at an identical size. Repeating byte-identical pixels
+        # here hits the inline content key instead and skips uploads 2 and 3
+        # entirely, reading `packs=1 ... scratch_resizes=1` -- a PASS that
+        # proves nothing about the staging array, because the array is never
+        # touched a second time. Salting keeps this example about the scratch.
         val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
         e.vulkan_image_pack_evidence_reset()
         e.clear(GROUND)
-        e.draw_image(SMALL_AT, SMALL_AT, SMALL, SMALL, oracle_image(SMALL))
-        e.draw_image(SMALL_AT, 10i32, SMALL, SMALL, oracle_image(SMALL))
-        e.draw_image(SMALL_AT, 20i32, SMALL, SMALL, oracle_image(SMALL))
+        e.draw_image(SMALL_AT, SMALL_AT, SMALL, SMALL, oracle_image_distinct(SMALL, 1))
+        e.draw_image(SMALL_AT, 10i32, SMALL, SMALL, oracle_image_distinct(SMALL, 2))
+        e.draw_image(SMALL_AT, 20i32, SMALL, SMALL, oracle_image_distinct(SMALL, 3))
         e.finalize_compute_frame_no_readback()
         val evidence = e.vulkan_image_pack_evidence()
         e.shutdown()
