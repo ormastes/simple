@@ -99,3 +99,43 @@ re-run the five commands above unmodified; if `backend_readback_handle_contract_
 fail, coordinate with the Lane 4 owner (`host_compositor_core.spl`,
 `backend_rocm.spl`) before attributing the failures to this bug. Status stays
 **runtime unverified**; this entry only narrows the blocker.
+
+## Re-check 2026-09-12 — the handle-contract spec was rejecting a stronger contract
+
+- Status: OPEN (2026-09-12) — this record's own scope unchanged; its readback contract spec repaired
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+- Spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_readback_handle_contract_spec.spl`
+
+```
+RED   ✗ does not classify zero-handle helper readbacks as device readback
+        src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl: DirectX device_readback missing readback handle propagation
+        src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl: variable device_readback source missing framebuffer handle
+      SPEC FILE VERDICT: ... outcome=ERROR declared>=1 executed=1 passed=0 failed=1
+GREEN SPEC FILE VERDICT: ... outcome=OK    declared>=1 executed=1 passed=1 failed=0
+```
+
+Neither backend had regressed. Both had moved from
+`engine2d_readback_with_handle(pixels, source, handle)` to
+`engine2d_readback_with_identity(pixels, source, handle, identity)` — the same
+concrete handle in the same argument position, **plus** a device identity, i.e.
+strictly more provenance than the contract asks for. The spec matched the old
+call spelling as a literal substring, so the tightening read as a violation:
+
+- `backend_rocm.spl:698` — `engine2d_readback_with_identity(copy, source, self.d_framebuffer, self.device_identity)`
+- `backend_directx.spl:450` — `engine2d_readback_with_identity(self.native_cached_pixels, "device_readback", self.native_cached_handle, self.native_device_identity)`
+
+DirectX additionally relabelled its **emulated** DXVK/ICD round-trip from
+`device_readback` to `emulated_icd_readback` (`backend_directx.spl:466`), with an
+in-source rationale that no device is involved off native Windows. That is
+exactly the honesty this contract exists to enforce, and the old literal check
+punished it.
+
+Fixed spec-side by accepting the `*_with_identity` spelling alongside
+`*_with_handle`; no backend source was changed.
+
+**The widened gate still discriminates** — verified by sabotage, not assumed.
+Temporarily rewriting `backend_rocm.spl:698` to the zero-handle helper
+`engine2d_readback(copy, source)` makes the spec FAIL again with
+`backend_rocm.spl: variable device_readback source missing framebuffer handle`
+(`passed=0 failed=1`); the source was restored immediately afterwards and
+`git diff` on it is empty.
