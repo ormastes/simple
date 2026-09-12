@@ -152,29 +152,48 @@ by other lanes; this range introduces none of it and touches no mirrored test
 path. Offender list saved by the helper at
 `$TMPDIR/test_tree_divergence_preexisting.txt`.
 
-## Why `submits_per_frame` is still 17, and what it would take
+## `submits_per_frame` reaches 1 too — the flush was unnecessary
 
-The readback half of this defect is closed; the submit half is NOT, and is
-deliberately left rather than half-done.
+The first version of this fix flushed before the kernel, because the kernel
+samples framebuffer content earlier dispatches produced. That cost one queue
+submission per blurred rect -- exactly what the host path cost -- so the
+boundary crossing would have been gone while the submit count stood still.
 
-Measured before and after: **17 submits per frame, unchanged.** The blur is
-submit-neutral, not submit-free. The host path already cost one submit (the
-`_flush_for_host_fallback` before the readback); the device path spends the same
-one, because the kernel must READ framebuffer content that earlier batched
-dispatches produced, and the only barrier available at this seam is a queue
-submission. The copy-back is already batched (`_finish_image_composite` ->
-`_enqueue_image_composite`), so it adds nothing. The remaining ~16 submits have
-other producers — the frame runs 107 dispatches — and none of them is the blur.
+It is unnecessary. `rt_vulkan_dispatch` emits a **full memory barrier after
+every dispatch** (`vulkan_graphics_runtime_compute.rs:480-494`), so a kernel
+recorded later in the same command buffer already sees the earlier writes. Both
+kernels therefore go through `_enqueue_image_composite` when frame batching is
+on -- its binding layout (0 = framebuffer, 1 = source) is already exactly the
+one these kernels use -- and fall back to the immediate checked dispatch only
+when batching is off. The output buffer is a pooled `_acquire_image_source`
+slot, and a pooled source is skipped by the flush's free sweep, so being
+referenced by both the kernel dispatch and the copy-back is safe.
 
-Reaching `submits_per_frame=1` needs the batching machinery to accept a
-two-storage-buffer kernel and an intra-command-buffer barrier between the
-producer dispatches and the kernel that samples their output.
-`_enqueue_image_composite` is shaped for the single-source image-composite
-pipeline only. That is a change to the frame batcher, not to this kernel, and
-is not attempted here.
-
-**One correction for anyone picking that up:** do not implement the blur as a
+**One correction for anyone extending this:** do not implement the blur as a
 "separable box blur x3". The CPU reference (`emu_draw_blur_rect`) is a SINGLE
 box pass that keeps raw sums and divides once. A triple separable pass is a
-different filter and would break the byte-identical pixel result this change
-currently achieves.
+different filter and would break the byte-identical result.
+
+## Final measurement (rebased onto `origin/main` @ `7001fa826e6`)
+
+Same binary, same run conditions, pristine base vs. this branch:
+
+| key | pristine base | this branch |
+|---|---|---|
+| `readbacks_per_frame` | 2 | **1** |
+| `readback_bytes` | 5,472,000 | **2,736,000** |
+| `submits_per_frame` | 2 | **1** |
+| `uploads_per_frame` | 24 | **23** |
+| `host_pixel_iterations` | 15 | 15 |
+| gate `frame_digest` | `a15c50cd` | `a15c50cd` |
+| full-page FNV-1a digest | `4843334333553013069` | `4843334333553013069` |
+
+Verdict is still `FAIL`, honestly, on exactly one remaining violation:
+`host_pixel_iterations=15 (font_atlas_pack_u32_to_u8)`, which belongs to the
+font-atlas lane and is untouched here. Both invariants this lane owns —
+`readbacks_per_frame` and `submits_per_frame` — are now at 1.
+
+(The tables earlier in this record were taken against the older base
+`866825abefe`, where `submits_per_frame` read 17; sibling lanes have since
+removed the other fifteen. They are kept because the readback numbers and the
+attribution evidence were measured there.)

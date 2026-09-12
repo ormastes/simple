@@ -145,3 +145,21 @@ implementation and delegated to the host `emu_draw_blur_rect`: a whole-surface
 Still open here: the `image-composite w=888 h=384 mode=1` that precedes the
 blur is a 340,992-pixel host-sourced upload each frame — the remaining half of
 defect #4, a different producer, untouched by this change.
+
+### Final numbers, rebased onto `origin/main` @ `7001fa826e6`
+
+| key | pristine base | with device blur + glass |
+|---|---|---|
+| `readbacks_per_frame` | 2 | **1** |
+| `readback_bytes` | 5,472,000 | **2,736,000** |
+| `submits_per_frame` | 2 | **1** |
+| `uploads_per_frame` | 24 | **23** |
+| `frame_digest` | `a15c50cd` | `a15c50cd` |
+
+The kernels are RECORDED into the frame's command buffer rather than flushed:
+every `rt_vulkan_dispatch` already emits a full memory barrier, so no
+submission is needed to make the earlier dispatches' writes visible to a kernel
+that samples them. Flushing instead would have removed the readback while
+leaving the submit count where it was.
+
+Only `host_pixel_iterations=15 (font_atlas_pack_u32_to_u8)` still violates.
