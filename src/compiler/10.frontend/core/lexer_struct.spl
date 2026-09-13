@@ -1244,33 +1244,93 @@ impl CoreLexer:
     # ----- Indentation Handling -----
 
     me handle_indentation():
-        # Count leading whitespace
+        # A run of skippable lines is consumed ITERATIVELY, not recursively.
+        #
+        # The two skip branches below used to finish with `self.scan_token();
+        # return`, and scan_token() re-enters handle_indentation() for the
+        # next line -- so N consecutive comment-only (or whitespace-only)
+        # lines cost N nested interpreter frames. The seed interpreter's
+        # recursion guard rejects call 1000, so a ~450-line comment banner
+        # aborted the whole PROCESS with
+        #   error: stack overflow: recursion depth 1000 exceeded limit 1000 in function 'peek'
+        # -- naming `peek` only because it is the innermost call the guard
+        # happened to reject; peek() is not itself recursive, which is what
+        # misdirected the first investigations. The test runner lexes every
+        # spec's SOURCE in its own process, so one banner-heavy spec took
+        # `bin/simple test <dir>` down mid-sweep and silently dropped every
+        # later spec in that directory.
+        #
+        # Exactly the two cases scan_token() would have handled ITSELF before
+        # delegating back here -- end of input, and a line whose first
+        # character is the newline -- still go through scan_token_rescan(),
+        # so the token stream is unchanged. Those branches always emit a token
+        # (or run their own bounded continuation handling) and return, so they
+        # cost one frame that does not accumulate across lines.
+        # See doc/08_tracking/bug/lexer_comment_run_recursion_overflow_2026-09-13.md
         var indent_level: i64 = 0
-        while true:
-            val c: text = self.peek()
-            if c == " ":
-                indent_level = indent_level + 1
-                self.advance()
-            elif c == "\t":
-                indent_level = indent_level + 4
-                self.advance()
-            elif c == "\r":
-                # CRLF tolerance (#145): zero-width — "\r" only precedes "\n".
-                self.advance()
-            else:
-                break
+        var skipping_lines: bool = true
+        # scan_token() sets `cur_start = pos` for EVERY line it dispatches, so
+        # under the old recursion the token that finally gets emitted carried
+        # the start of the LAST line of the run, not the first. Track the same
+        # position here and restore it below, or `core_lexer_token_start` (read
+        # after every token, lexer.spl:599) would report a stale offset.
+        var line_start_pos: i64 = self.pos
+        while skipping_lines:
+            line_start_pos = self.pos
+            # Count leading whitespace
+            indent_level = 0
+            while true:
+                val c: text = self.peek()
+                if c == " ":
+                    indent_level = indent_level + 1
+                    self.advance()
+                elif c == "\t":
+                    indent_level = indent_level + 4
+                    self.advance()
+                elif c == "\r":
+                    # CRLF tolerance (#145): zero-width — "\r" only precedes "\n".
+                    self.advance()
+                else:
+                    break
 
-        # Skip blank lines and comment-only lines
-        val next_c: text = self.peek()
-        val is_blank: bool = next_c == "\n"
-        val is_end: bool = next_c == ""
-        val is_comment: bool = next_c == "#"
-        if is_blank:
-            self.advance()
-            self.at_line_start = true
-            self.scan_token()
-            return
-        if is_end:
+            # Skip blank lines and comment-only lines
+            val next_c: text = self.peek()
+            val is_blank: bool = next_c == "\n"
+            val is_comment: bool = next_c == "#"
+            if is_blank:
+                self.advance()
+                self.at_line_start = true
+                val after_blank: text = self.peek()
+                if after_blank == "" or after_blank == "\n":
+                    self.scan_token_rescan()
+                    return
+                continue
+            if is_comment:
+                # Skip comment, then the newline
+                while true:
+                    val cc: text = self.peek()
+                    val is_nl: bool = cc == "\n"
+                    val is_eof: bool = cc == ""
+                    val done: bool = is_nl or is_eof
+                    if done:
+                        break
+                    self.advance()
+                val peek_nl: text = self.peek()
+                if peek_nl == "\n":
+                    self.advance()
+                self.at_line_start = true
+                val after_comment: text = self.peek()
+                if after_comment == "" or after_comment == "\n":
+                    self.scan_token_rescan()
+                    return
+                continue
+            skipping_lines = false
+
+        self.cur_start = line_start_pos
+
+        # End of input reached while skipping this run of lines.
+        val at_input_end: bool = self.peek() == ""
+        if at_input_end:
             # EOF reached while consuming this line's indentation. Returning
             # here emitted NO token at all, so `self.cur_kind` kept whatever it
             # held -- and on the FIRST token of a file that is the CoreLexer
@@ -1284,29 +1344,14 @@ impl CoreLexer:
             self.at_line_start = false
             self.scan_token_rescan()
             return
-        if is_comment:
-            # Skip comment, then the newline
-            while true:
-                val cc: text = self.peek()
-                val is_nl: bool = cc == "\n"
-                val is_eof: bool = cc == ""
-                val done: bool = is_nl or is_eof
-                if done:
-                    break
-                self.advance()
-            val peek_nl: text = self.peek()
-            if peek_nl == "\n":
-                self.advance()
-            self.at_line_start = true
-            self.scan_token()
-            return
 
+        val line_first: text = self.peek()
         self.at_line_start = false
 
         # Leading-dot method-chain / leading-pipe pattern-alternative
         # continuation: a line starting with `.` or `|` continues the
         # previous expression — suppress Indent/Dedent.
-        if next_c == "." or next_c == "|":
+        if line_first == "." or line_first == "|":
             self.scan_token()
             return
 

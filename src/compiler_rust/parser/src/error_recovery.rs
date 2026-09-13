@@ -419,7 +419,12 @@ pub fn detect_common_mistake_lookahead(
     // - Variable names in patterns (e.g., val (saved_path, new, diff) = ...)
     // - After comma in destructuring (e.g., val (x, new, y) = ...)
     // - After opening paren in patterns (e.g., val (new, ...) = ...)
-    // - After operators (e.g., is_new or new)
+    // - After operators (e.g., is_new or new), comparison operators included
+    //   (e.g. `old.raw == new.raw`) — this allow-list previously carried the
+    //   arithmetic/logical operators only and missed every comparison, so
+    //   `x == new.y` (and !=, <, >, <=, >=) raised a bogus JavaNew hint even
+    //   though `x + new.y` did not. See
+    //   doc/08_tracking/bug/java_new_hint_fires_after_comparison_operators_2026-09-13.md.
     // Only flag standalone 'new Type()' pattern as a mistake
     if matches!(current.kind, TokenKind::New)
         && !matches!(
@@ -438,6 +443,12 @@ pub fn detect_common_mistake_lookahead(
                 | TokenKind::Minus
                 | TokenKind::Star
                 | TokenKind::Slash
+                | TokenKind::Eq
+                | TokenKind::NotEq
+                | TokenKind::Lt
+                | TokenKind::Gt
+                | TokenKind::LtEq
+                | TokenKind::GtEq
         )
     {
         return Some(CommonMistake::JavaNew);
@@ -743,6 +754,49 @@ mod tests {
         assert_eq!(
             detect_common_mistake(&void, &nl, Some(&name)),
             Some(CommonMistake::JavaVoid)
+        );
+    }
+
+    /// `new` is a legal Simple identifier after a comparison operator, not just
+    /// after the arithmetic/logical ones. Regression for the suite rows on
+    /// `if old.raw == new.raw:` in
+    /// src/lib/nogc_async_mut/fs_driver/fat32_stub.spl, which turned a style
+    /// hint into a hard parse ERROR and cost every importing spec its whole
+    /// run. See
+    /// doc/08_tracking/bug/java_new_hint_fires_after_comparison_operators_2026-09-13.md.
+    #[test]
+    fn test_new_after_comparison_operator_is_not_a_java_mistake() {
+        let new_tok = Token::new(TokenKind::New, Span::new(0, 3, 1, 1), "new".to_string());
+        let name = ident_token("raw");
+
+        for prev_kind in [
+            TokenKind::Eq,
+            TokenKind::NotEq,
+            TokenKind::Lt,
+            TokenKind::Gt,
+            TokenKind::LtEq,
+            TokenKind::GtEq,
+        ] {
+            let prev = Token::new(prev_kind, Span::new(0, 1, 1, 1), "".to_string());
+            assert_eq!(
+                detect_common_mistake(&new_tok, &prev, Some(&name)),
+                None,
+                "`new` after a comparison operator must not be flagged"
+            );
+        }
+    }
+
+    /// The positive case must keep firing — the fix above narrows the
+    /// allow-list, it must not disable the rule for the pattern it exists to
+    /// catch.
+    #[test]
+    fn test_java_new_declaration_still_detected() {
+        let new_tok = Token::new(TokenKind::New, Span::new(0, 3, 1, 1), "new".to_string());
+        let nl = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "".to_string());
+        let name = ident_token("Foo");
+        assert_eq!(
+            detect_common_mistake(&new_tok, &nl, Some(&name)),
+            Some(CommonMistake::JavaNew)
         );
     }
 
