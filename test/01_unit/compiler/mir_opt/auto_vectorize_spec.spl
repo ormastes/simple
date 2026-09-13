@@ -1824,3 +1824,105 @@ describe "a RUNTIME loop bound vectorizes and stays correct":
                 bad.push(n)
             n = n + 1
         expect(bad.len()).to_equal(0)
+
+# ============================================================================
+# Ops beyond add, and the recipes that must be REFUSED.
+#
+# `simd_binop_name` maps add/sub/mul/xor and `supports_elementwise_rewrite`
+# admits the same four, so sub and mul are not a future feature — they are
+# live, and until these examples existed nothing executed them.
+#
+# The refusals matter more than the acceptances. When the element/lane pair
+# has no vector type, or the op has no vector spelling,
+# `create_vector_loop_block` emits an EMPTY body. That is not an inert no-op:
+# the vector loop still advances the index by a whole vector each iteration,
+# so every element it steps over is never written. Measured before R4c: an
+# i64 recipe turned 3 blocks into 5 containing ZERO SIMD instructions.
+# ============================================================================
+
+fn op_recipe(op: text, element: text, n: i64) -> VectorRecipe:
+    VectorRecipe(
+        kind: VectorRecipeKind.Elementwise, header_block: make_block_id(1),
+        induction_var: make_local(4), trip_count: n, element_type: element,
+        vector_width: 4, op_name: op, note: "op coverage",
+        input_bases: [make_local(1), make_local(2)],
+        output_base: Some(make_local(3)), accumulator: nil, chunk_width: 4,
+        index_locals: [make_local(4)], store_value: nil, induction_update: make_local(4))
+
+fn op_loop_block(n: i64, mop: MirBinOp) -> MirBlock:
+    """`out[i] = a[i] <op> b[i]`, so the scalar control computes the SAME op."""
+    val insts = [
+        MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_int_const_op(n))),
+        gep(30, 1, 4), make_load_inst(10, 30),
+        gep(31, 2, 4), make_load_inst(11, 31),
+        make_binop_inst(12, mop, 10, 11),
+        gep(32, 3, 4), make_store_inst(32, 12),
+        make_add_const_inst(4, 4)
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 9))
+
+fn op_function(n: i64, mop: MirBinOp) -> MirFunction:
+    make_test_mir_function([diff_entry_block(n), op_loop_block(n, mop), diff_exit_block()], false)
+
+fn op_matches(op: text, mop: MirBinOp, n: i64) -> bool:
+    val scalar_out = run_and_read_output(op_function(n, mop), n)
+    val vector_out = run_and_read_output(
+        rewrite_elementwise_add(op_recipe(op, "i32", n), op_function(n, mop)), n)
+    if scalar_out.len() != n or vector_out.len() != n:
+        return false
+    var i: i64 = 0
+    while i < n:
+        if scalar_out[i.to_i32()] != vector_out[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+describe "elementwise sub and mul vectorize and stay correct":
+    it "subtraction produces identical memory":
+        step("a wrong op mapping would swap operands or pick Add and still")
+        step("emit a structurally perfect vector loop")
+        expect(op_matches("sub_elementwise", MirBinOp.Sub, 8)).to_equal(true)
+        expect(op_matches("sub_elementwise", MirBinOp.Sub, 12)).to_equal(true)
+
+    it "multiplication produces identical memory":
+        expect(op_matches("mul_elementwise", MirBinOp.Mul, 8)).to_equal(true)
+        expect(op_matches("mul_elementwise", MirBinOp.Mul, 12)).to_equal(true)
+
+    it "both are genuinely rewritten, not quietly declined":
+        step("otherwise the equality above passes by doing nothing")
+        for op in ["sub_elementwise", "mul_elementwise"]:
+            val before = diff_function(8).blocks.len()
+            val after = rewrite_elementwise_add(op_recipe(op, "i32", 8), diff_function(8)).blocks.len()
+            expect(after > before).to_equal(true)
+
+describe "a recipe with no vector lowering is REFUSED, not half-emitted":
+    it "declines an op with no vector spelling":
+        step("div has no SimdBinop mapping")
+        val before = diff_function(8).blocks.len()
+        val after = rewrite_elementwise_add(op_recipe("div_elementwise", "i32", 8), diff_function(8)).blocks.len()
+        expect(after).to_equal(before)
+
+    it "declines an element type the interpreter models no vector for":
+        step("i64 has no Vec type; this used to rewrite 3 blocks into 5 with")
+        step("ZERO SIMD instructions, advancing the index over elements it")
+        step("never wrote — a silent miscompile, not a missed optimization")
+        val before = diff_function(8).blocks.len()
+        val after = rewrite_elementwise_add(op_recipe("add_elementwise", "i64", 8), diff_function(8)).blocks.len()
+        expect(after).to_equal(before)
+
+    it "never emits a vector loop containing no vector work":
+        step("the invariant behind both refusals, stated directly")
+        for spec in [["add_elementwise", "i64"], ["div_elementwise", "i32"], ["add_elementwise", "u8"]]:
+            val f = rewrite_elementwise_add(op_recipe(spec[0], spec[1], 8), diff_function(8))
+            var simd = 0
+            for b in f.blocks:
+                for i in b.instructions:
+                    match i.kind:
+                        case MirSimdLoad(_, _, _, _), MirSimdStore(_, _, _), MirSimdBinop(_, _, _, _):
+                            simd = simd + 1
+                        case _: ()
+            # Either it declined (unchanged) or it emitted real vector work.
+            val declined = f.blocks.len() == diff_function(8).blocks.len()
+            expect(declined or simd > 0).to_equal(true)

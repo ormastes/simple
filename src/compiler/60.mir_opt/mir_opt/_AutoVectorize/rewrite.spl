@@ -47,7 +47,7 @@ use compiler.mir_opt.mir_opt.auto_vectorize_types (VectorLoopInfo, ArrayAccess)
 use compiler.mir_opt.mir_opt.auto_vectorize_analysis (DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only)
 use compiler.mir_opt.mir_opt.auto_vectorize_validate (VectorizabilityResult, check_vectorizability, get_vectorizable_type)
 use compiler.mir_opt.mir_opt.auto_vectorize_cost (CostEstimate, estimate_vectorization_cost, should_vectorize_loop)
-use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, element_size_bytes, vector_loop_locals)
+use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, element_size_bytes, vector_loop_locals, vector_mir_type, simd_binop_name)
 
 # ============================================================================
 # Main Auto-Vectorization Pass
@@ -362,6 +362,21 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     # the scalar body, which finishes it from whatever index the vector loop
     # stopped at — so a remainder is just the scalar loop doing its job, and
     # needs no special case at all.
+
+    # R4c: the element/lane pair must have a vector type, and the op must have
+    # a vector spelling. Otherwise `create_vector_loop_block` emits an EMPTY
+    # body — and an empty body is not a harmless no-op here, it is a
+    # miscompile: the loop still advances the index by a whole vector each
+    # time, so every element it steps over is never written at all.
+    #
+    # That was survivable when the emitted block was inert and nothing
+    # consumed it. It stopped being survivable the moment the vector loop
+    # became the thing that drives the index. Measured: an i64 recipe rewrote
+    # 3 blocks into 5 containing ZERO SIMD instructions.
+    if not vector_mir_type(recipe.element_type, recipe.chunk_width).?:
+        return func
+    if not simd_binop_name(recipe.op_name).?:
+        return func
 
     # R5: need an output base
     if not recipe.output_base.?:
