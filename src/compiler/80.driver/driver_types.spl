@@ -63,6 +63,10 @@ use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
     serialize_const_value}
 use std.common.crypto.sha256.{sha256_text}
+# `hash_text` / `file_read_nullable` are uniquely named and rt-backed (no
+# co-compiled duplicate signatures), which is why the native output lane
+# already routes its disk reads through them.
+use std.io_runtime.{file_read_nullable, hash_text}
 use std.common.mcdc.model.{McdcMode, mcdc_mode_from_text, mcdc_mode_name}
 use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
@@ -1062,6 +1066,54 @@ class CompileContext:
             if source.path == found_path: path_count = path_count + 1
         if path_count == 1: found_path else: ""
 
+    # Identity of the bytes source `index` actually compiled.
+    #
+    # Streaming surfaces RELEASE SourceFile.content in phase 3
+    # (driver_hir_pipeline_lowering.spl:497-506 -- reclaim + evict_sources,
+    # UNCONDITIONAL on that path, while the non-streaming equivalent at
+    # driver_orchestration.spl:276-278 is gated on --low-memory), and native
+    # capsules are frozen in phase 5. Hashing `source.content` there therefore
+    # digested an already-emptied text and froze sha256("") =
+    # e3b0c442...b855 as EVERY capsule's source identity, which the collect
+    # check then reported as `native-capsule-source-mutated` against a correct
+    # disk digest for sources that had not changed at all. Measured 2026-09-13
+    # on Stage-2 candidate ba3c25f30d76c9a8... with the redeploy gate's env:
+    #   +2411ms phase3:streaming_source_reclaim:sources:done reclaimed=1
+    #   +2413ms phase5:mode_dispatch:start
+    #   capsule-identity=e3b0c442...  disk-identity=7dfe1e7b...
+    # SIMPLE_STAGE3_STREAMING_SURFACES=0 emits no reclaim line and links.
+    # doc/08_tracking/bug/stage2_capsule_source_identity_is_sha256_of_empty_2026-09-13.md
+    #
+    # Recovery is fail-closed and keeps the mutated-source detector
+    # load-bearing: the bytes on disk are admitted as the compiled bytes ONLY
+    # when they still hash to the content hash captured at LOAD time
+    # (source_content_hashes_owner, driver_source_pipeline_loading.spl:845),
+    # under an index-alignment check against source_module_names_owner. A file
+    # edited since parse, a missing capture, a misaligned projection or an
+    # unreadable path all yield "" -- the capsule is then rejected by
+    # identity_valid()/driver_native_collect_capsule_result_v1, never admitted
+    # on a laundered digest. Contents that are still held hash exactly as
+    # before, so the non-streaming path is unchanged byte for byte.
+    fn frozen_native_source_identity_at_v1(index: i64) -> text:
+        val source = self.sources[index]
+        if source.content != "":
+            return sha256_text(source.content)
+        if self.source_content_hashes_owner.len() != self.sources.len():
+            return ""
+        if self.source_module_names_owner.len() != self.sources.len():
+            return ""
+        if self.source_module_names_owner[index] != source.module_name:
+            return ""
+        val captured_hash = self.source_content_hashes_owner[index]
+        if captured_hash == 0: return ""
+        if source.path == "": return ""
+        val disk_content = file_read_nullable(source.path) ?? ""
+        if disk_content == "": return ""
+        val raw_disk_hash = hash_text(disk_content)
+        val disk_hash = if raw_disk_hash == 0: 1 else: raw_disk_hash
+        if disk_hash != captured_hash: return ""
+        sha256_text(disk_content)
+
     fn frozen_native_cache_source_identity_v1(module_name: text) -> text:
         # Read the phase-1 identity owner, NOT `sources[].content`: by the time
         # capsules are frozen the content has been reclaimed and blanked, so
@@ -1069,18 +1121,16 @@ class CompileContext:
         # on `source_identities_owner`.
         var found_identity = ""
         var found_count = 0
-        val names = self.source_module_names_owner
-        val identities = self.source_identities_owner
         var index = 0
-        while index < names.len() and index < identities.len():
-            if names[index] == module_name:
-                found_identity = identities[index]
+        while index < self.sources.len():
+            if self.sources[index].module_name == module_name:
+                found_identity = self.frozen_native_source_identity_at_v1(index)
                 found_count = found_count + 1
             index = index + 1
         if found_count != 1: return ""
         # Fail closed rather than publish the digest of nothing: an empty
         # identity (or the digest of the empty string) means the capture never
-        # saw content, and must not be compared against a real file on disk.
+        # saw content and the disk re-read could not be verified against it.
         if found_identity == "" or found_identity == sha256_text(""): return ""
         found_identity
 
