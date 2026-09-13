@@ -169,3 +169,64 @@ bindings over cross-module optionals (`:996` `source_fp_val`, `:1960` `src_fp`,
 `:1514`/`:1518`/`:2303` `session`, `:2392` `obj_bytes`) either pass the struct
 whole or read only text-typed members, so none of them renders a numeric field
 into an identity string. Only the two receipt sites were exposed.
+
+## Root cause LOCATED (2026-09-13, lane BOOT-11) — and half of it fixed
+
+The 2026-09-12 reading above ("the access was resolved by field NAME against a
+global index") named the SYMPTOM at `resolve_field_index`. The producing
+asymmetry is one layer up and is exact:
+
+| callee's declared return | payload provenance registered | where |
+|---|---|---|
+| `-> T` | T's layout key -> `bootstrap_fn_ret_shape_register` | `module_lowering.spl:1122-1127,1155` |
+| `-> Result<T, E>` | ALSO the Ok payload's bare NAME -> `bootstrap_fn_ret_ok_shape_register` | `module_lowering.spl:1130-1153` |
+| `-> T?` | **nothing** | that `match` has no `Optional` arm |
+
+The method tier repeats it: `trait_impl_lowering.spl:228-241` fills
+`ret_struct_name` for `case Named(...)` and leaves it `""` for
+`case Optional(_)`, so `struct_method_return_names` — the map
+`remember_method_return_provenance` reads to seed `struct_value_syms` — is empty
+for every Optional-returning method, `FileFingerprint.from_file` included.
+
+The chain from there is mechanical:
+
+1. the call result gets no `struct_value_syms` entry;
+2. `if val fp = <that call>` is parsed as `stmt_if_val_decl(fp, <call>)` plus
+   `fp != nil` (`parser_stmts.spl:1415`), so `fp` is the option word itself;
+3. `lower_val` ALIASES rather than copies — `maybe_copy_struct_value`
+   (`mir_lowering_stmts.spl:544`) returns nil unless the local's MirType is
+   `Struct(...)`, which an optional's never is — so `fp` and the call result are
+   the SAME MIR local, still with no provenance;
+4. `fp.size` reaches `resolve_field_index` with its first (name-keyed) tier
+   empty, falls through to the numeric-`SymbolId` `field_map` tier that collides
+   across modules in an entry-closure build, and finally to the silent `0`.
+
+Index 0 is `path`, a `text` POINTER — which is why the observed values are
+9-digit, non-deterministic, and different on every run, and why
+`content_hash` looked correct (it is absent from the colliding layout, so a
+later tier answered it).
+
+**Fixed for the call-result tier** in `remember_call_hir_return`
+(`expr_dispatch.spl`), the one MIR site reached by all seven free-call,
+static-method and instance-method lowering paths that already receives the
+callee's name-keyed declared return type. It fails closed twice (payload symbol
+must be Class/Struct; its bare name must already be in `struct_field_order`) and
+never overwrites an existing entry. Spec:
+`test/01_unit/compiler/mir/optional_payload_struct_provenance_source_spec.spl`.
+Executable three-module fixture with its interpreter oracle:
+`test/fixtures/compiler/native_optional_payload_field/`.
+
+**Still open**, because the sites are fenced for that lane: `case Some(x):
+x.field` through `lower_enum_match`'s single-payload bind arm, which still falls
+back to the bare-keyed, last-writer-wins `enum_payload_struct_names`
+(`result_variant_payload_type` has no `Optional` arm, and
+`result_variant_payload_struct_name` accepts only a `MethodCall` scrutinee with
+variant `Ok`). The unapplied patch is in the BOOT-11 receipt.
+
+**Runtime proof is not available at `origin/main f26970e9d93`** and this is
+recorded rather than papered over: `native-build` fails for every input,
+including the redeploy gate's own `hello_world.spl`
+(`native_build_entry_closure_unknown_extern_rt_env_vars_2026-09-13.md`), and the
+pinned Stage-2 candidate SIGSEGVs at monomorphize
+(`stage2_candidate_segv_at_monomorphize_2026-09-13.md`). The fix above is
+source-level evidence plus a mechanical argument, not a measured before/after.
