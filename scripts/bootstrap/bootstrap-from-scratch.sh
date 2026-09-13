@@ -3311,6 +3311,26 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "--manifest=${stage2_compatibility_manifest_absolute}" \
       "--evidence=${stage2_compatibility_manifest_absolute}.not-published" \
       "--producer-path=${stage2_seed_absolute}" || exit 1
+    # Claim the lane BEFORE sealing the cache. resume-stage3-from-admitted.sh
+    # runs check-cache-scope-ownership.shs over this exact dir with lane
+    # `stage2` (:549); with no marker present the guard takes its "unowned or
+    # brand-new cache: claim it" branch and WRITES `.cache_scope` -- into a dir
+    # this line has already made read-only. The write failed `Permission
+    # denied`, the guard returned 2 => `ERROR — nothing was checked`, and
+    # Stage 3 aborted before doing any work, on a Stage 2 that was properly
+    # admitted. Stage 2 sealed a cache it never claimed, and Stage 3 could not
+    # claim it because it was sealed. Writing the marker here closes that
+    # ordering gap: the lane that owns the cache stamps it while the dir is
+    # still writable, and the resume then finds a matching marker and writes
+    # nothing. Fail closed, exactly like the resume side -- a cache already
+    # stamped by a FOREIGN lane is still refused, which is the property the
+    # guard exists for.
+    if [ -f "${bootstrap_cache_scope_guard}" ]; then
+      sh "${bootstrap_cache_scope_guard}" "${stage2_cache_absolute}" stage2 || {
+        echo "error: Stage 2 native cache belongs to a foreign lane scope" >&2
+        exit 1
+      }
+    fi
     chmod -R a-w "${stage2_cache_absolute}"
     if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
       chmod 400 "${stage2_compatibility_manifest_absolute}"
