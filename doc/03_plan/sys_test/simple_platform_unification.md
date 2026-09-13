@@ -92,3 +92,53 @@ budgets remain pending user selection.
 
 The three prior boot cycles are closed diagnostics. The Multiboot artifact
 reached `_start`, but weak providers invalidate qualification.
+
+## Executable checkpoint — 2026-09-14
+
+The earlier “executable SPipe is added with the first implementation slice”
+paragraph is superseded by this checkpoint. Canonical supporting executable:
+`test/03_system/os/feature/simple_platform_unification_spec.spl`; manual mirror:
+`doc/06_spec/03_system/os/feature/simple_platform_unification_spec.md`.
+The existing desktop/toolchain umbrella remains the production umbrella owner.
+
+| Requirement / acceptance | Executable scenario(s) | Evidence class | Current status |
+|---|---|---|---|
+| REQ-012,013,016 / UP-AC-005 | inspect dev plan; reject output alias; reject compiler/runtime mismatch | source-contract, actual production policy calls | MissingEvidence: native execution not run |
+| REQ-012,013,016 / UP-AC-005 | compose actual staged products; exact digest/manifest readback; refuse overwrite | image-admission | RED until actual products and native retained-root runner are available |
+| REQ-007,019 / UP-AC-006 | reject weak serial; reject generated stubs; reject missing symbols | source-contract, production admission policy | MissingEvidence: native execution not run; does not prove baseline boot |
+| REQ-007,019 / UP-AC-006 | inspect actual filesystem probe ELF | image-admission | RED until built artifact and provider inspection succeed; no guest claim |
+| REQ-010,017,018,019 / UP-AC-006 | guest-version | live-guest | RED: production cold-boot verifier absent |
+| REQ-010,017,018,019 / UP-AC-006 | guest-run | live-guest | RED: production cold-boot verifier absent |
+| REQ-010,017,018,019 / UP-AC-006 | guest-build | live-guest | RED: compiler/source/output binding absent |
+| REQ-010,017,018,019 / UP-AC-006 | guest-execute | live-guest | RED: guest-produced artifact execution absent |
+| REQ-018,019 / UP-AC-006 | persistence-write | live-guest | RED: synced NVFS derivative-state evidence absent |
+| REQ-018,019 / UP-AC-006 | reboot-read | live-guest | RED: distinct boot sessions and retained marker evidence absent |
+
+All rows above share the executable/manual paths given in this section; the
+fourteen scenarios are source coverage, not fourteen passing requirements.
+REQ-001..006,008..009,011,014..015,020..022 retain the delegated or missing
+coverage in the feature requirements table. This checkpoint does not close
+those rows, the full three-case-per-requirement design matrix, device/CPU
+performance, hardware execution, or the desktop umbrella.
+
+Frozen helpers are `prepare_image_args_v1`, `require_composed_image_v1`, and
+`require_unified_release_verifier_v1`. The final helper intentionally fails
+`MissingEvidence` for each distinct live stage. Its replacement must consume
+the production verifier, never reimplement release admission inside a test.
+Do not substitute `x64-nvme-fat32`, whose coverage is filesystem-only.
+
+Execution order: admit the pure-Simple native runner; run source-contract
+cases; stage real build products; run image-admission cases; implement and
+qualify the cold-boot producer/consumer; execute each live scenario with its
+fresh candidate/derived-state transaction. Retain `system-<pid>.img`, carrier
+and manifest identities, production receipts, boot/command transcripts, and
+compiler output evidence. Missing inputs fail; they are never opt-in skips.
+
+Validation status: native scenarios unexecuted. The canonical `bin/simple`
+docgen invocation unexpectedly resolved to a bootstrap-only Rust seed and
+failed with missing `scenario_indent`, exit 1; it created no manual. This is
+unadmitted diagnostic evidence only. The mirror is manually authored and
+generation remains MissingEvidence. Resume with the admitted executable and
+the exact command in the manual after fixing/admitting docgen. Complete/zero-
+stub generation and final high-capability review are still required; explicit
+live failures must never be counted as production completion.
