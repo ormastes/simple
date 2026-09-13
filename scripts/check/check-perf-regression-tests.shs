@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=244
+ROW_FLOOR=248
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -791,6 +791,48 @@ must_contain     "DAEMONLOCK fallback-branch example pins a live pid as alive" \
     "$DAEMONLOCKSPEC" "expect(pid_alive_and_named(my_pid, no_proc_root)).to_equal(true)"
 must_contain     "DAEMONLOCK fallback-branch example pins a dead pid as dead" \
     "$DAEMONLOCKSPEC" 'expect(pid_alive_and_named("999999999", no_proc_root)).to_equal(false)'
+# --- BLOCKSHADOW: block-scope shadow bookkeeping is not re-allocated per iteration
+# `exec_block` runs capture_node_scope_shadows before and
+# restore_block_scope_shadows after EVERY block execution, so a loop body that
+# declares a `val`/`var` -- 28,246 sites in src/lib/common, the most common
+# loop-body shape there -- paid the whole bookkeeping once per iteration. It was
+# allocating three owned copies of each declared name plus a dedup HashSet plus
+# a scratch Vec, and a fourth String and an Arc clone on the restore side.
+# These rows pin the borrowed-name form, the dropped HashSet, the two
+# owner-store paths that must keep passing `name` straight through, the
+# counters that make the path observable, and the parity spec's fail-closed
+# gates. See doc/08_tracking/bug/interpreter_block_scope_shadow_realloc_per_iteration_2026-09-13.md.
+BLOCKEXEC="$ROOT/src/compiler_rust/compiler/src/interpreter/block_exec.rs"
+BLOCKPARITY="$ROOT/test/05_perf/interp/block_scope_shadow_parity_spec.spl"
+must_contain     "BLOCKSHADOW captured names are borrowed, not cloned" \
+    "$BLOCKEXEC" "pub(crate) fn capture_node_scope_shadows<'a>(nodes: &'a [Node], env: &mut Env) -> Vec<(&'a str, Option<Value>)> {"
+must_contain     "BLOCKSHADOW restore accepts both the borrowed and the owned form" \
+    "$BLOCKEXEC" "pub(crate) fn restore_block_scope_shadows<N: AsRef<str>>(shadows: Vec<(N, Option<Value>)>, env: &mut Env) {"
+must_contain     "BLOCKSHADOW dedup is a linear scan over the names collected so far" \
+    "$BLOCKEXEC" "if shadows.iter().any(|(seen, _)| *seen == name) {"
+must_not_contain "BLOCKSHADOW no per-block dedup HashSet" \
+    "$BLOCKEXEC" "let mut seen = std::collections::HashSet::new();"
+must_contain     "BLOCKSHADOW single-identifier declaration needs no collection" \
+    "$BLOCKEXEC" "Node::Let(let_stmt) => match &let_stmt.pattern {"
+must_contain     "BLOCKSHADOW capture owner write passes the name through" \
+    "$BLOCKEXEC" "crate::interpreter::set_owned_global(owner, name, value.clone(), false);"
+must_contain     "BLOCKSHADOW restore owner probe passes the name through" \
+    "$BLOCKEXEC" "crate::interpreter::owned_global(owner, name)"
+must_contain     "BLOCKSHADOW pattern-name visitor carries the AST lifetime" \
+    "$ROOT/src/compiler_rust/compiler/src/interpreter/core_types.rs" \
+    "pub(crate) fn visit_pattern_binding_names<'p>(pattern: &'p simple_parser::ast::Pattern, visit: &mut impl FnMut(&'p str)) {"
+must_contain     "BLOCKSHADOW captured names are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "BLOCK_SHADOW_NAMES"
+must_contain     "BLOCKSHADOW owner-store probes are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "BLOCK_SHADOW_OWNER_PROBES"
+must_contain     "BLOCKSHADOW parity spec pins the path count, not a wall-clock ratio" \
+    "$BLOCKPARITY" "expect(r.names >= PAIR_N * PAIR_ROUNDS).to_equal(true)"
+must_contain     "BLOCKSHADOW parity spec pins one owner probe per captured name" \
+    "$BLOCKPARITY" "expect(r.probes <= r.names).to_equal(true)"
+must_contain     "BLOCKSHADOW parity spec is non-vacuous on the counter row" \
+    "$BLOCKPARITY" "expect(r.names > 0).to_equal(true)"
+must_contain     "BLOCKSHADOW parity spec keeps the module-global oracle" \
+    "$BLOCKPARITY" "assert_semantics(binary, \"sem_global_shadow.spl\", \"sem_global_shadow\", 4, \"30:9\")"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
