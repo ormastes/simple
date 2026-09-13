@@ -563,6 +563,8 @@ int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
 SplArray* rt_array_new(int64_t cap);
 SplArray* rt_array_new_uninit(int64_t cap);
+/* 1 when the array is packed bytes ([u8]), 0 when tagged int64 slots. */
+int rt_array_is_byte_packed(SplArray* value);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
 void      rt_array_free(SplArray* array);  /* shallow: preserves element handles */
 /* Deep array free. Returns 1 only if the ENTIRE structure was reclaimed, 0 if

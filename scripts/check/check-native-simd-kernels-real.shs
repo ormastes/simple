@@ -1,0 +1,76 @@
+#!/bin/sh
+# Fail when a NATIVE binary's SIMD kernels are absent, unused, or wrong.
+#
+# Every other SIMD gate here reads the Rust seed, which is the INTERPRETER. A
+# `native-build` binary links the C runtime instead, and until 2026-09-14 that
+# lane was broken three independent ways at once while every existing gate
+# stayed green:
+#
+#   1. ZERO AVX-512. The duplicate-body-under-target-attribute idiom every
+#      kernel uses is clang-only; GCC folds the identical bodies and compiles
+#      the survivor for the baseline target (measured: clang 13 zmm, gcc 0).
+#      The native link is gcc, so a shipped binary had 106 ymm and no zmm.
+#   2. EVERY span-returning kernel returned an empty array.
+#      `rt_array_new_uninit` set `cap` but never `len`, so the data was right
+#      and the length said 0; the Simple callers read that as "extern not
+#      backed" and silently fell back to scalar.
+#   3. The glyph mask blend read a PACKED-BYTE [u8] as tagged int64 slots and
+#      blended every glyph pixel against garbage — 819 mismatches out of 1640.
+#
+# None of those crashed. That is the point: this gate checks CONTENT and
+# INSTRUCTIONS in a real product binary, because a length check alone cannot
+# tell success from an in-place kernel's failure path returning its input, and
+# a parity test in the interpreter exercises the Rust twin instead.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> value(s) checked in a native binary, <z> zmm present
+#   FAIL — ... naming what diverged
+#   ERROR — nothing was checked
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+probe=$root/test/01_unit/check/native_simd_kernel_probe.spl
+bin=${SIMPLE_SEED_BINARY:-$root/src/compiler_rust/target/release/simple.exe}
+[ -f "$bin" ] || bin=$root/src/compiler_rust/target/release/simple
+out=${TMPDIR:-/tmp}/native_simd_probe.$$.exe
+trap 'rm -f "$out"' EXIT
+
+[ -f "$probe" ] || { echo "ERROR — nothing was checked (probe missing: $probe)"; exit 2; }
+[ -f "$bin" ]   || { echo "ERROR — nothing was checked (no seed binary at $bin)"; exit 2; }
+
+objdump=$(command -v llvm-objdump || true)
+[ -n "$objdump" ] || { echo "ERROR — nothing was checked (llvm-objdump not on PATH)"; exit 2; }
+
+# SIMPLE_NATIVE_BUILD_RUST=1 takes the Rust handler directly. The pure-Simple
+# driver spawns the DEPLOYED bin/simple as a worker, and a stale deployed
+# binary fails with `unknown extern function: rt_env_vars` — which is a stale
+# worker, not a missing extern.
+build_log=${TMPDIR:-/tmp}/native_simd_build.$$.log
+if ! SIMPLE_NATIVE_BUILD_RUST=1 "$bin" native-build "$probe" -o "$out" >"$build_log" 2>&1; then
+    echo "ERROR — nothing was checked (native-build failed; see $build_log)"
+    exit 2
+fi
+rm -f "$build_log"
+[ -f "$out" ] || { echo "ERROR — nothing was checked (native-build produced no binary)"; exit 2; }
+
+result=$("$out" 2>/dev/null | grep '^NATIVE-SIMD' | head -1)
+[ -n "$result" ] || { echo "ERROR — nothing was checked (probe produced no verdict line)"; exit 2; }
+
+checked=$(printf '%s\n' "$result" | sed -n 's/.*checked=\([0-9]*\).*/\1/p')
+bad=$(printf '%s\n' "$result" | sed -n 's/.*mismatches=\([0-9]*\).*/\1/p')
+[ "${checked:-0}" -gt 0 ] || { echo "ERROR — nothing was checked (probe compared 0 values)"; exit 2; }
+
+zmm=$("$objdump" -d "$out" 2>/dev/null | grep -c zmm || true)
+
+if [ "${bad:-1}" -ne 0 ]; then
+    echo "FAIL — $checked value(s) checked in a native binary, $bad wrong: $result"
+    exit 1
+fi
+if [ "${zmm:-0}" -lt 1 ]; then
+    # Absence of AVX-512 in a product binary is the original defect, not a nit.
+    echo "FAIL — $checked value(s) correct but the native binary contains NO zmm instructions"
+    exit 1
+fi
+
+echo "PASS — $checked value(s) checked in a native binary, $zmm zmm present"
+exit 0

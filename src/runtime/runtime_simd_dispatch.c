@@ -2539,10 +2539,18 @@ SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
     uint32_t fg_g = (s >> 8) & 255u;
     uint32_t fg_b = s & 255u;
 
+    /* A [u8] is PACKED BYTES in the native runtime and tagged int64 slots in
+       the boxed one, and this kernel serves both. Reading the wrong one blends
+       every glyph pixel against garbage — measured 819 mismatches out of 1640
+       in a native binary, while the interpreter path stayed green because it
+       uses the Rust twin. Resolve it from the array itself rather than
+       assuming. */
+    const int mask_packed = rt_array_is_byte_packed(mask);
+    const uint8_t* mask_bytes = (const uint8_t*)(uintptr_t)rt_array_data_ptr(mask);
     for (int64_t i = 0; i < count; i++) {
-        /* SplArray stores one tagged int64_t slot per element, so a [u8] must
-           be read slot-wise and unboxed rather than as packed bytes. */
-        uint32_t a = engine2d_unbox_pixel(mask_data[mask_offset + i]) & 255u;
+        uint32_t a = mask_packed
+            ? (uint32_t)mask_bytes[mask_offset + i]
+            : (engine2d_unbox_pixel(mask_data[mask_offset + i]) & 255u);
         uint32_t inv = 255u - a;
         uint32_t d = engine2d_unbox_pixel(dst_data[offset + i]);
         uint32_t r = (fg_r * a + ((d >> 16) & 255u) * inv) / 255u;
