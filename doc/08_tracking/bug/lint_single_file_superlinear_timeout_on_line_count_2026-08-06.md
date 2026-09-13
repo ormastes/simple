@@ -614,6 +614,13 @@ still not been localised; attach-based profiling remains blocked on this host
 `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
 Not proven here: any specific hot function or algorithmic cause.
 
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Already an "accepted cost property, gated" verdict as of the last entry —
+explicit prior guidance is that no perf change should be attempted
+opportunistically, and profiling is blocked on this host class
+(`ptrace_scope=1`, `perf_event_paranoid=4`). No new evidence gathered; left
+OPEN, unchanged.
 ## Triage 2026-09-13
 
 Same superlinear lint/check cost family already documented in
