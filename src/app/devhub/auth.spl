@@ -1,7 +1,7 @@
 # ITF CLI — Authentication helpers
 #
 # Builds auth headers for Confluence REST v2 (Basic auth with API token)
-# Delegates Jira auth to acli
+# Jira/Confluence: a configured token means REST directly, no login.
 
 use std.nogc_sync_mut.env.{env_get}
 use app.devhub.config.{ItfConfig, load_config, resolve_auth_token}
@@ -57,12 +57,26 @@ fn confluence_api_base(config: ItfConfig) -> text:
     confluence_rest_root(confluence_site(config))
 
 
+fn atlassian_token_ready(url: text, token: text, scheme: text, user: text) -> bool:
+    """Shared "token present -> no login" rule for Jira and Confluence: a
+    URL plus a token is enough to call REST directly, plus a user/email
+    unless the scheme is bearer (a Data Center PAT needs no user). When this
+    is true, callers must use the token and never start an interactive
+    login (acli or browser)."""
+    if url == "" or token == "":
+        return false
+    scheme == ATLASSIAN_AUTH_BEARER or user != ""
+
+
 fn check_confluence_auth(config: ItfConfig) -> bool:
-    """Check if Confluence auth is configured."""
-    val token = resolve_auth_token(config, "confluence")
-    token != "" and config.confluence_user != "" and config.confluence_url != ""
+    """True when Confluence REST credentials are configured (url + token,
+    plus confluence.user unless confluence.auth is bearer)."""
+    val scheme = atlassian_normalize_auth(config.confluence_auth, ATLASSIAN_AUTH_BASIC)
+    atlassian_token_ready(config.confluence_url, resolve_auth_token(config, "confluence"), scheme, config.confluence_user)
 
 
 fn check_jira_auth(config: ItfConfig) -> bool:
-    """Check if Jira auth is configured (acli handles its own auth)."""
-    config.jira_url != ""
+    """True when Jira REST credentials are configured (jira.url + a token
+    from env/token_cmd/auth.sdn, plus jira.email unless jira.auth is
+    bearer). When true, Jira commands use REST directly — no acli login."""
+    atlassian_token_ready(config.jira_url, resolve_auth_token(config, "jira"), jira_auth_scheme(config), config.jira_email)
