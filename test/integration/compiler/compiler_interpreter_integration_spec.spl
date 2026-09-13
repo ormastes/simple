@@ -38,6 +38,49 @@
 # - Module loader with SMF files
 
 
+# ============================================================================
+# Real Fixture Harness
+# ============================================================================
+#
+# These tests exercise the real `bin/simple` binary end to end (write a
+# fixture .spl file, run it, inspect stdout/stderr/exit code) rather than the
+# never-implemented `compile`/`compile_and_run`/`compile_to_hir` stubs at the
+# bottom of this file (those stay as documented dead stubs -- see the
+# TODOs still attached to them).
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_write_file(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_file_exists(path: text) -> bool
+
+struct ProcResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn find_simple_binary() -> text:
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    "bin/simple"
+
+fn fixture_root() -> text:
+    "/tmp/spl_cii_" + rt_getpid().to_text()
+
+fn write_fixture(subdir: text, filename: text, content: text) -> text:
+    val dir = fixture_root() + "/" + subdir
+    val _ = rt_dir_create_all(dir)
+    val path = dir + "/" + filename
+    val _ = rt_write_file(path, content)
+    path
+
+fn run_simple_file(path: text) -> ProcResult:
+    val result = rt_process_run(find_simple_binary(), ["run", path])
+    ProcResult(stdout: result[0], stderr: result[1], exit_code: result[2])
+
+fn run_simple_source(subdir: text, filename: text, content: text) -> ProcResult:
+    run_simple_file(write_fixture(subdir, filename, content))
+
 
 # ============================================================================
 # Test Group 1: End-to-End Compilation
@@ -263,11 +306,10 @@ describe "Memory Management Integration":
         pass
 
     it "handles stack overflow gracefully":
-        # TODO: Test deep recursion
-        # val source = "fn recurse(): recurse(); recurse()"
-        # val result = run(source)
-        # expect(result).to(be_err()
-        pass
+        val result = run_simple_source("deep_recursion", "main.spl",
+            "fn recurse(n: i64) -> i64:\n    return recurse(n + 1)\n\nprint(recurse(0))\n")
+        expect(result.exit_code).to_equal(1)
+        expect(result.stderr).to_contain("stack overflow")
 
 
 # ============================================================================
