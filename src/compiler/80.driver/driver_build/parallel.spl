@@ -282,13 +282,25 @@ impl BuildGraph:
             if visited.has(id):
                 continue
             var stack: [(i64, bool)] = [(id, false)]
-            while stack.?:
+            # `stack.len() > 0`, NOT `stack.?`. House style prefers `.?`, and this
+            # loop used it until 2026-09-13 — but `.?` on an EMPTY array evaluates
+            # TRUE under the seed's native codegen (aarch64-apple-darwin,
+            # --backend llvm), so this loop never terminated. It popped nil off the
+            # empty stack, `unwrap()` did not fail, `visited[nil] = true` did not
+            # make `visited.has(nil)` true, and the body settled into a 2-cycle that
+            # appended a nil to `order` forever — the Stage-2 Stage-3-route timeout
+            # (status 124) on both the macOS and Linux bootstrap lanes. `.len()` is
+            # correct in the same build at every iteration, so it is what guards
+            # here. This deviation is licensed by, and must be removed when the
+            # compiler defect is fixed:
+            # doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+            while stack.len() > 0:
                 # NOTE: `val entry = if val popped = stack.pop(): popped else: break`
                 # mis-evaluates to nil in the seed interpreter — an if-expression
                 # whose else arm diverges (break) returns nil even when the value
                 # arm is taken (only when the condition is an `if val` binding).
-                # The `while stack.?:` guard already ensures the stack is non-empty,
-                # so unwrap directly, matching the working sibling driver/parallel.spl.
+                # The loop guard above already ensures the stack is non-empty, so
+                # unwrap directly.
                 val (node, expanded) = stack.pop().unwrap()
                 if expanded:
                     order = order.push(node)

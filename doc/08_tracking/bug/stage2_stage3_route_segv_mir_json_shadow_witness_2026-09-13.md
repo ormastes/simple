@@ -215,3 +215,31 @@ which now runs on a real struct.
 
 The successor is filed separately:
 `stage2_stage3_route_native_compile_timeout_2026-09-13.md` (site 9).
+
+## Correction 2026-09-13: this is NOT yet confirmed fixed on macOS
+
+Chain runs 20/21 (`doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md`) recorded
+"status 139 -> 124, `serialize_mir_function` appears nowhere" and read that as the macOS
+confirmation of this fix. **That inference is unsound and is withdrawn here.**
+
+`serialize_mir_function` runs per build unit, *downstream* of
+`BuildGraph.topological_order()` (`src/compiler/80.driver/driver_build/parallel.spl:418,743`,
+called at the head of both build paths). Run 21's 124 is a timeout *inside*
+`topological_order` — every `sample` is self time there, with no callees — so the route
+never reached a unit compile and the code path this record is about **never executed**.
+The symbol's absence from the run-21 evidence is explained by dying earlier, not by the
+fix holding.
+
+Both lanes made the same inference independently; agreement between two unsound readings
+is not corroboration. The macOS verdict for this site is therefore **GATED ON site 9**
+(`stage2_stage3_route_native_compile_timeout_2026-09-13.md`) and can only be taken from a
+route that gets past the graph walk and actually compiles units. The Linux seed-LLVM
+disassembly evidence above is unaffected; what is unverified is aarch64/cranelift on macOS.
+
+Note also that run 20 and run 21 executed the **same compiled `topological_order`**
+(`parallel.spl` is byte-identical between them; only `driver_types.spl` changed), and run 20
+walked the graph fine before crashing ~90 s later in unit compilation. Same machine code,
+different behaviour, therefore site 9 is **data-dependent**: the site-8 fix changed what the
+`BuildGraph` contains (lookups that previously returned nil now hit). That is a load-bearing
+constraint on any site-9 diagnosis, and it rules out a pure "`pop()` does not shrink under
+native codegen" explanation on its own.
