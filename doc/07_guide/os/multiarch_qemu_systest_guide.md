@@ -48,6 +48,27 @@ produce QEMU acceptance evidence.
 
 ## Run the full sweep
 
+### Filesystem wrapper artifact admission (2026-09-13)
+
+`x64-nvme-fat32` and the toolchain VFS wrapper inspect the actual ELF symbol
+table before accepting a fresh build, either build cache, or a direct QEMU run.
+The check uses `llvm-readelf` or `readelf`; unavailable tools, stripped required
+symbols, strong undefined references, and required weak/null/non-section
+definitions fail with `phase=artifact-admission` and a reason/symbol diagnostic.
+The generated `_stubs_freestanding.c` object is rejected explicitly. Legitimate
+unrelated weak syscall defaults remain allowed; zero-sized strong entry aliases
+remain valid. `SIMPLE_ALLOW_FREESTANDING_STUBS=1` cannot bypass this admission.
+
+The required symbols come from the wrapper's storage, serial, runtime-text,
+entry, and counter dependencies in `src/os/fs_wrapper_artifact.spl`. A successful
+symbol check is a necessary link gate; it does not replace guest storage tests,
+firmware boot evidence, or the compiler-in-guest qualification sequence. Repair
+missing implementations in the shared provider/link composition; do not replace
+them with hand-written constant-return functions or relax the required set.
+
+Focused executable specification:
+`test/01_unit/os/qemu_runner_fs_artifact_spec.spl`.
+
 The specs boot the **existing** ELF (they do not rebuild). The harness test runner
 may cache results, so for a true fresh sweep boot each lane directly with its
 `<arch>_qemu_args()` from the contract, writing serial to

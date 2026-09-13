@@ -1,0 +1,102 @@
+# Pre-QEMU admission for the filesystem wrapper's required implementations.
+# Binary format validity and guest behavior remain separate acceptance gates.
+
+use app.io.mod.{process_run_timeout}
+
+pub struct FsWrapperArtifactAdmission:
+    admitted: bool
+    reason: text
+    symbol: text
+
+pub fn fs_wrapper_requires_artifact_admission(entry: text) -> bool:
+    entry == "examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl" or
+        entry == "examples/09_embedded/simple_os/arch/x86_64/toolchain_vfs_probe_entry.spl"
+
+pub fn fs_wrapper_required_symbols(entry: text) -> [text]:
+    """Required linked dependencies; unrelated weak syscall ABI defaults are allowed."""
+    if not fs_wrapper_requires_artifact_admission(entry): return []
+    var required = [
+        "__simple_entry_start", "serial_println", "rt_port_outb",
+        "rt_string_new_literal", "rt_string_concat", "rt_raw_i64_to_string",
+        "rt_native_eq"
+    ]
+    if entry.ends_with("/fs_test_entry.spl"):
+        required.push("spl_start")
+        required.push("simpleos_nvme_init")
+        required.push("simpleos_fat32_read_known_app")
+        required.push("simpleos_fat32_read_known_app_size")
+        required.push("examples__09_embedded__simple_os__arch__x86_64__fs_test_entry__test_failed")
+        required.push("examples__09_embedded__simple_os__arch__x86_64__fs_test_entry__test_passed")
+    else:
+        required.push("simpleos_fat32_read_path")
+        required.push("simpleos_fat32_read_path_size")
+        required.push("simpleos_fat32_path_read_buffer_addr")
+        required.push("rt_text_to_bytes")
+    required
+
+fn _fs_symbol_fields(line: text) -> [text]:
+    var fields: [text] = []
+    for field in line.replace("\t", " ").split(" "):
+        if field != "": fields.push(field)
+    fields
+
+fn _fs_symbol_nonzero_hex(value: text) -> bool:
+    if value == "": return false
+    var nonzero = false
+    for digit in value.chars():
+        if not "0123456789abcdefABCDEF".contains(digit): return false
+        if digit != "0": nonzero = true
+    nonzero
+
+fn _fs_symbol_section_defined(value: text) -> bool:
+    if value == "": return false
+    var nonzero = false
+    for digit in value.chars():
+        if not "0123456789".contains(digit): return false
+        if digit != "0": nonzero = true
+    nonzero
+
+pub fn fs_wrapper_symbol_admission(entry: text, symbols: text) -> FsWrapperArtifactAdmission:
+    """Validate GNU/LLVM readelf -W -s output, including stripped/missing rows.
+
+    Required functions may have size zero (the native entry aliases do), so
+    size alone is not evidence of a fabricated implementation. The generated
+    fallback object's FILE record and required-symbol bindings are checked.
+    This does not prove arbitrary strong function bodies implement semantics.
+    """
+    if not fs_wrapper_requires_artifact_admission(entry):
+        return FsWrapperArtifactAdmission(false, "unsupported-entry", "")
+    val required = fs_wrapper_required_symbols(entry)
+    var found: {text: bool} = {}
+    for line in symbols.split("\n"):
+        val fields = _fs_symbol_fields(line.trim())
+        if fields.len() != 8: continue
+        if not fields[0].ends_with(":"): continue
+        val symbol = fields[7]
+        if fields[3] == "FILE" and symbol == "_stubs_freestanding.c":
+            return FsWrapperArtifactAdmission(false, "generated-freestanding-stubs", symbol)
+        if fields[4] == "GLOBAL" and fields[6] == "UND":
+            return FsWrapperArtifactAdmission(false, "undefined-symbol", symbol)
+        if not required.contains(symbol): continue
+        if fields[4] != "GLOBAL":
+            return FsWrapperArtifactAdmission(false, "required-symbol-not-strong", symbol)
+        if not _fs_symbol_section_defined(fields[6]) or not _fs_symbol_nonzero_hex(fields[1]):
+            return FsWrapperArtifactAdmission(false, "required-symbol-not-defined", symbol)
+        val expected_kind = if symbol.ends_with("__test_failed") or symbol.ends_with("__test_passed"): "OBJECT" else: "FUNC"
+        if fields[3] != expected_kind and not (expected_kind == "FUNC" and fields[3] == "NOTYPE"):
+            return FsWrapperArtifactAdmission(false, "required-symbol-wrong-kind", symbol)
+        found[symbol] = true
+    for symbol in required:
+        if not found.contains_key(symbol):
+            return FsWrapperArtifactAdmission(false, "required-symbol-missing", symbol)
+    FsWrapperArtifactAdmission(true, "ready", "")
+
+pub fn inspect_fs_wrapper_artifact(entry: text, artifact: text) -> FsWrapperArtifactAdmission:
+    """Read the actual ELF at each admission boundary; never reuse a symbol receipt."""
+    if not fs_wrapper_requires_artifact_admission(entry):
+        return FsWrapperArtifactAdmission(false, "unsupported-entry", "")
+    for inspector in ["llvm-readelf", "readelf"]:
+        val (stdout, _stderr, status) = process_run_timeout(inspector, ["--wide", "--symbols", "--", artifact], 10000)
+        if status == 0:
+            return fs_wrapper_symbol_admission(entry, stdout)
+    FsWrapperArtifactAdmission(false, "symbol-inspection-failed", "")

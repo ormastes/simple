@@ -1,0 +1,118 @@
+"""
+Filesystem wrapper artifact admission
+
+Run `bin/simple test test/01_unit/os/qemu_runner_fs_artifact_spec.spl`.
+These symbol-table contracts prove that unavailable or fabricated filesystem
+implementations cannot reach QEMU through fresh, cached, or direct-run paths.
+They do not prove storage behavior, firmware boot, or compiler-in-guest execution.
+"""
+# @manual: primary
+# @req REQ-019
+# requirements: doc/02_requirements/feature/simple_platform_unification.md
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.fs_wrapper_artifact.{fs_wrapper_symbol_admission, fs_wrapper_requires_artifact_admission}
+
+val FS_ENTRY = "examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl"
+val TOOLCHAIN_ENTRY = "examples/09_embedded/simple_os/arch/x86_64/toolchain_vfs_probe_entry.spl"
+
+fn strong_fs_symbols() -> text:
+    "1: 0800001c 0 FUNC GLOBAL DEFAULT 1 __simple_entry_start\n" +
+    "2: 08000100 64 FUNC GLOBAL DEFAULT 1 serial_println\n" +
+    "3: 08000200 46 FUNC GLOBAL DEFAULT 1 rt_port_outb\n" +
+    "4: 08000300 48 FUNC GLOBAL DEFAULT 1 rt_string_new_literal\n" +
+    "5: 08000400 80 FUNC GLOBAL DEFAULT 1 rt_string_concat\n" +
+    "6: 08000500 56 FUNC GLOBAL DEFAULT 1 rt_raw_i64_to_string\n" +
+    "7: 08000600 64 FUNC GLOBAL DEFAULT 1 rt_native_eq\n" +
+    "8: 0800001c 0 FUNC GLOBAL DEFAULT 1 spl_start\n" +
+    "9: 08000700 128 FUNC GLOBAL DEFAULT 1 simpleos_nvme_init\n" +
+    "10: 08000800 192 FUNC GLOBAL DEFAULT 1 simpleos_fat32_read_known_app\n" +
+    "11: 08000900 176 FUNC GLOBAL DEFAULT 1 simpleos_fat32_read_known_app_size\n" +
+    "12: 08002000 8 OBJECT GLOBAL DEFAULT 3 examples__09_embedded__simple_os__arch__x86_64__fs_test_entry__test_failed\n" +
+    "13: 08002008 8 OBJECT GLOBAL DEFAULT 3 examples__09_embedded__simple_os__arch__x86_64__fs_test_entry__test_passed\n"
+
+describe "filesystem wrapper ELF symbol admission":
+    it "admits strong dependencies including valid zero-sized native entry aliases":
+        step("Inspect the wrapper's linked symbol table")
+        val admission = fs_wrapper_symbol_admission(FS_ENTRY, strong_fs_symbols())
+        expect(admission.admitted).to_equal(true)
+        expect(admission.reason).to_equal("ready")
+        expect(admission.symbol).to_equal("")
+
+    it "allows unrelated weak ABI fallbacks":
+        step("Keep optional syscall defaults separate from required filesystem implementations")
+        val symbols = strong_fs_symbols() + "14: 08003000 8 FUNC WEAK DEFAULT 1 spl_handle_optional_syscall\n"
+        expect(fs_wrapper_symbol_admission(FS_ENTRY, symbols).reason).to_equal("ready")
+
+    it "rejects the generated freestanding fallback object":
+        step("Reject the zero-return stub generator's retained FILE record")
+        val symbols = strong_fs_symbols() + "14: 00000000 0 FILE LOCAL DEFAULT ABS _stubs_freestanding.c\n"
+        val admission = fs_wrapper_symbol_admission(FS_ENTRY, symbols)
+        expect(admission.admitted).to_equal(false)
+        expect(admission.reason).to_equal("generated-freestanding-stubs")
+        expect(admission.symbol).to_equal("_stubs_freestanding.c")
+
+    it "rejects each required dependency if its binding is weak":
+        step("Reject a fabricated function or counter even when FILE records were stripped")
+        for row in strong_fs_symbols().trim().split("\n"):
+            val symbols = strong_fs_symbols().replace(row, row.replace("GLOBAL", "WEAK"))
+            val admission = fs_wrapper_symbol_admission(FS_ENTRY, symbols)
+            expect(admission.admitted).to_equal(false)
+            expect(admission.reason).to_equal("required-symbol-not-strong")
+
+    it "rejects every missing required dependency":
+        step("Require complete filesystem dependency evidence")
+        for row in strong_fs_symbols().trim().split("\n"):
+            val admission = fs_wrapper_symbol_admission(FS_ENTRY, strong_fs_symbols().replace(row, ""))
+            expect(admission.admitted).to_equal(false)
+            expect(admission.reason).to_equal("required-symbol-missing")
+
+    it "rejects any strong undefined symbol":
+        step("Fail an unresolved link even when the named filesystem dependencies exist")
+        val symbols = strong_fs_symbols() + "14: 00000000 0 NOTYPE GLOBAL DEFAULT UND missing_provider\n"
+        val admission = fs_wrapper_symbol_admission(FS_ENTRY, symbols)
+        expect(admission.reason).to_equal("undefined-symbol")
+        expect(admission.symbol).to_equal("missing_provider")
+
+    it "rejects zero addresses and non-section bindings":
+        step("Reject null, absolute, common, undefined, or malformed required definitions")
+        for address in ["00000000", "not-hex"]:
+            val symbols = strong_fs_symbols().replace("08000700", address)
+            expect(fs_wrapper_symbol_admission(FS_ENTRY, symbols).reason).to_equal("required-symbol-not-defined")
+        for section in ["0", "ABS", "COM", "UND", "bad"]:
+            val symbols = strong_fs_symbols().replace("128 FUNC GLOBAL DEFAULT 1 simpleos_nvme_init", "128 FUNC GLOBAL DEFAULT {section} simpleos_nvme_init")
+            val reason = fs_wrapper_symbol_admission(FS_ENTRY, symbols).reason
+            expect(reason).to_equal(if section == "UND": "undefined-symbol" else: "required-symbol-not-defined")
+
+    it "rejects data masquerading as the storage initializer":
+        step("Check required symbol kinds")
+        val symbols = strong_fs_symbols().replace("128 FUNC", "128 OBJECT")
+        expect(fs_wrapper_symbol_admission(FS_ENTRY, symbols).reason).to_equal("required-symbol-wrong-kind")
+
+    it "accepts valid assembly NOTYPE functions and whitespace variations":
+        step("Read GNU and LLVM symbol rows without depending on column spacing")
+        val symbols = strong_fs_symbols().replace("46 FUNC", "46 NOTYPE").replace(" ", "\t")
+        expect(fs_wrapper_symbol_admission(FS_ENTRY, symbols).reason).to_equal("ready")
+
+    it "fails closed on stripped or malformed symbol output":
+        step("Require symbol evidence rather than treating missing output as success")
+        for symbols in ["", "Symbol table contains 0 entries:\n", "not a symbol table", "1: 08000100 FUNC GLOBAL DEFAULT 1 serial_println"]:
+            expect(fs_wrapper_symbol_admission(FS_ENTRY, symbols).reason).to_equal("required-symbol-missing")
+
+    it "requires the toolchain wrapper's own path-read dependencies":
+        step("Select the path-read contract for the toolchain wrapper")
+        val symbols = strong_fs_symbols() +
+            "14: 08001000 48 FUNC GLOBAL DEFAULT 1 simpleos_fat32_read_path\n" +
+            "15: 08001100 48 FUNC GLOBAL DEFAULT 1 simpleos_fat32_read_path_size\n" +
+            "16: 08001200 48 FUNC GLOBAL DEFAULT 1 simpleos_fat32_path_read_buffer_addr\n" +
+            "17: 08001300 48 FUNC GLOBAL DEFAULT 1 rt_text_to_bytes\n"
+        expect(fs_wrapper_symbol_admission(TOOLCHAIN_ENTRY, symbols).reason).to_equal("ready")
+        val bad = symbols.replace("48 FUNC GLOBAL DEFAULT 1 simpleos_fat32_read_path\n", "8 FUNC WEAK DEFAULT 1 simpleos_fat32_read_path\n")
+        expect(fs_wrapper_symbol_admission(TOOLCHAIN_ENTRY, bad).reason).to_equal("required-symbol-not-strong")
+
+    it "does not silently admit unsupported wrapper entries":
+        step("Limit the policy to its two declared entry targets")
+        expect(fs_wrapper_requires_artifact_admission(FS_ENTRY)).to_equal(true)
+        expect(fs_wrapper_requires_artifact_admission(TOOLCHAIN_ENTRY)).to_equal(true)
+        expect(fs_wrapper_requires_artifact_admission("examples/other.spl")).to_equal(false)
+        expect(fs_wrapper_symbol_admission("examples/other.spl", strong_fs_symbols()).reason).to_equal("unsupported-entry")

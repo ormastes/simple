@@ -52,6 +52,7 @@ use os.toolchain_vfs_probe_contract.{
     toolchain_vfs_probe_serial_accepts_completion
 }
 use os.ssh_qemu_contract.{run_x64_ssh_probe}
+use os.fs_wrapper_artifact.{inspect_fs_wrapper_artifact}
 use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -186,6 +187,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val cached_build_matches = _last_successful_build_entry == target.entry and _last_successful_build_output == target.output and _last_successful_build_backend == backend_name and _last_successful_build_target == target.target_triple
     if (cached_build_matches and rt_file_exists(target.output) and
         (not _needs_elf32_wrap(target) or _elf32_multiboot_artifact_valid(target.output))):
+        if not _fs_wrapper_artifact_admitted(target): return false
         print "[build][{arch_label}] phase=native-build cached output={target.output}"
         return true
     val build_marker = if _is_riscv64_live_helper_target(target): _ssh_live_build_marker_value(backend) else: ""
@@ -196,6 +198,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val simple_bin = _find_simple_binary_for_target(target, backend_name)
     val stamp_content = _native_build_stamp_content(target, backend_name, args, simple_bin, log_mode)
     if build_marker == "" and _native_build_cache_hit(target, stamp_content, simple_bin):
+        if not _fs_wrapper_artifact_admitted(target): return false
         print "[build][{arch_label}] phase=native-build persistent-cache output={target.output}"
         _last_successful_build_entry = target.entry
         _last_successful_build_output = target.output
@@ -260,6 +263,11 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         return false
+    if not _fs_wrapper_artifact_admitted(target):
+        _write_bootstrap_result(target, false, false, backend_name)
+        _cleanup_generated_build_helpers(build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        return false
     if build_marker != "":
         print "[build][{arch_label}] phase=artifact OK marker={build_marker}"
     _write_bootstrap_result(target, true, false, backend_name)
@@ -274,6 +282,13 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
 
 fn _native_build_stamp_path(target: OsTarget) -> text:
     target.output + ".build_stamp"
+
+fn _fs_wrapper_artifact_admitted(target: OsTarget) -> bool:
+    if not _is_fs_wrapper_target(target): return true
+    val admission = inspect_fs_wrapper_artifact(target.entry, target.output)
+    if not admission.admitted:
+        print "[build] phase=artifact-admission FAILED reason={admission.reason} symbol={admission.symbol} output={target.output}"
+    admission.admitted
 
 fn _native_build_stamp_content(target: OsTarget, backend_name: text, args: [text], simple_bin: text, log_mode: text) -> text:
     "entry=" + target.entry + "\n" +
@@ -940,6 +955,7 @@ fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
         print "[run] ERROR: kernel binary not found: {target.output}"
         print "[run] Run 'bin/simple os build --arch={arch_display_name(target.arch)}' first"
         return false
+    if not _fs_wrapper_artifact_admitted(target): return false
     val cmd_parts = build_qemu_command_with_options(target, options)
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
