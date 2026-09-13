@@ -10428,7 +10428,15 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
  * Starts at a sentinel rather than zero so a readout is never ambiguous:
  * 77 = never called, 100 = succeeded, 1..10 name a rejected arm, and a literal
  * 0 means this extern is itself unresolved in the lane that read it. */
-static int64_t rt_rnf_last_failure = 77;
+#if defined(_MSC_VER)
+#define RT_RNF_TLS __declspec(thread)
+#else
+#define RT_RNF_TLS __thread
+#endif
+/* Thread-local, NOT a global: the bootstrap reads with 24 jobs in flight, so a
+ * concurrent successful read on another thread would overwrite the code before
+ * the failing caller could report it. */
+static RT_RNF_TLS int64_t rt_rnf_last_failure = 77;
 
 int64_t rt_file_read_regular_no_follow_last_failure(void) {
     return rt_rnf_last_failure;
