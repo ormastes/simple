@@ -1,6 +1,6 @@
 # BUG — `Compositor.render_all()` is unrunnable from most import sets: `Color` name collapse
 
-Status: OPEN (P2)
+Status: CLOSED (2026-09-13) -- named symptom (compile-time "unknown static method rgb on class Color") not reproducible via this doc's own reproducer
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 **Filed:** 2026-08-06 (WS-D6) · **Status:** OPEN · **Pre-existing:** yes, reproduced at HEAD
@@ -137,3 +137,41 @@ or fully qualifies genuinely ambiguous unaliased duplicate declarations.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/01_unit/os/compositor/compositor_occlusion_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-13 (BUGFIX-10 fanout)
+
+Re-ran this doc's own known reproducer:
+
+```
+$ bin/simple test test/01_unit/os/compositor/compositor_occlusion_spec.spl
+SPEC FILE VERDICT: ... declared>=10 executed=10 passed=7 failed=3 skipped=0 dropped=0
+Results: 10 total, 7 passed, 3 failed
+```
+
+The file now compiles and 7/10 examples pass — no
+`unknown static method rgb on class Color` anywhere in the output. This is
+consistent with the 2026-08-21 entry's production-consumer disambiguation
+(`os.drivers.framebuffer.fb_driver.Color as FbColor`), which this row's own
+prior entry said "makes the production ownership explicit" without
+claiming the underlying duplicate-registration defect itself was fixed.
+Whatever combination of that aliasing and this spec's current import set
+now avoids the collision in practice.
+
+**Found, not fixed, out of this row's scope:** the 3 remaining failures are
+a DIFFERENT, unrelated defect — an occlusion/pixel-culling count assertion
+(`expected 0 to equal 1`) in 3 of the 10 "WS-D6 compositor occlusion
+culling" examples (`strictly contained window`, `covered by the UNION of
+two windows`, `occluded pixel-surface window`). Not a `Color` symptom, not
+previously tracked under this bug id or found elsewhere in
+`doc/08_tracking/bug/`. Left unfixed and unfiled — orthogonal to this row
+and outside this lane's shard.
+
+Whether the compiler's underlying duplicate-short-name registration defect
+(two unaliased `Color` declarations sharing a slot) is itself fixed was not
+re-verified directly — this closes the row on its own named symptom being
+gone via the documented reproducer, not on a claim that the general
+compiler defect no longer exists.
+
+- Status: CLOSED (2026-09-13) — named symptom not reproducible via this
+  doc's own reproducer; 3 unrelated occlusion-culling failures found but
+  out of scope for this row.
