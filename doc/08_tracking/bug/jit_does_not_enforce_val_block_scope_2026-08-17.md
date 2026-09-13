@@ -74,3 +74,38 @@ interpreter arm does.
   arms).
 - Whether native/AOT behaves like the JIT or the interpreter — a third engine,
   untested.
+
+## Re-check 2026-09-13
+
+- Status: CLOSED (2026-09-13) — not reproducible with the described sibling-`if` shape on `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared main worktree), sha256 `3d120a6f9ab5`, `Simple Language v1.0.0-rc.1`.
+
+Built a standalone probe matching the described shape exactly (a `val`
+declared inside one `if` body, read in a sibling `if` body):
+
+```simple
+fn f(i: i64, clean_len: i64) -> i64:
+    if i + 2 < clean_len:
+        val idx3 = i + 100
+    if i + 3 < clean_len:
+        return idx3
+    return -1
+```
+
+```
+SIMPLE_EXECUTION_MODE=interpret bin/simple run <probe>   -> rc=1, "error: semantic: variable `idx3` not found"
+SIMPLE_EXECUTION_MODE=jit       bin/simple run <probe>   -> rc=1, same error
+```
+
+Under JIT, Cranelift codegen itself now fails to compile the out-of-scope
+reference (`GlobalLoad: unresolved identifier 'idx3'`) and the runtime falls
+back to the interpreter, which then raises the correct semantic error — so
+the end-to-end observable behavior (rc=1, hard error, no silent leak) now
+matches between engines for this shape, even though the mechanism is a
+codegen failure + fallback rather than genuine block-scope enforcement in
+the JIT itself. Not verified: whether a shape that does NOT trip a codegen
+failure (e.g. one where Cranelift can still assign the out-of-scope slot a
+register without erroring) still leaks silently — the "Not verified" bullets
+in the original report (loops, nested functions, match arms, `var`) remain
+unchecked. Given the specific filed repro no longer manifests the silent
+`rc=0` symptom, closing this instance; a narrower shape that still leaks
+would need its own report.
