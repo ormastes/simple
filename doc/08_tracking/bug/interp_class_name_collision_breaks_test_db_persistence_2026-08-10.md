@@ -93,3 +93,8 @@ co-compiled duplicate-symbol warning to classes so collisions are loud.
   for the cold-start fix) was landed with `//` comments — a parse error — and
   without `use std.spec.*`, so it had never executed. Both fixed; it now runs
   `executed=3 passed=3` and fails 2/3 under a sabotaged cold-start branch.
+
+## Triage 2026-09-13
+Reconfirmed: worked around by renames, diagnostic landed; by-name class
+resolution across modules remains OPEN, needing resolver-level work. Left
+as-is, no code change attempted.

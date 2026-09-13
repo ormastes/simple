@@ -50,3 +50,23 @@ Found incidentally while reproducing
 `native_empty_dict_text_value_sigsegv_2026-07-20` — the run-together line is what
 made the wrong value visible in the first place. Filed separately because it is a
 distinct defect in a different subsystem from that row.
+
+## Triage 2026-09-13
+
+Attempted to re-verify with a minimal 3-print probe via
+`bin/simple native-build --entry <probe> --output <bin>`. The build itself
+fails before reaching link/run:
+
+```
+error: semantic: unknown extern function: rt_env_vars
+error: native-build worker exited with code 1
+```
+
+This is a different, more upstream defect than the one this record
+describes (native-build cannot currently produce ANY artifact on this
+worktree, not even a trivial 3-print program), so the specific
+newline-dropping symptom could not be re-exercised. Binary: `bin/simple` =
+Rust seed `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the
+shared main worktree), sha256 `3d120a6f9ab5`. Left OPEN; the native-build
+`rt_env_vars` breakage blocking this re-check is not filed separately here
+for time — flagged for whoever next touches native-build.

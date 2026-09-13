@@ -42,3 +42,26 @@ the value produced by `generator(...)` should be printed directly first.
 Behaviour under the pure-Simple self-hosted compiler. The pure-Simple compiler
 has no `generator` builtin at all (`grep '"generator" =>' src/compiler` is
 empty), so its dispatch path differs and must be measured on its own.
+
+## Triage 2026-09-13
+
+Ran the exact repro on `bin/simple` = Rust seed
+`bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared main
+worktree), sha256 `3d120a6f9ab5`, `Simple Language v1.0.0-rc.1`.
+
+- `SIMPLE_EXECUTION_MODE=interpreter bin/simple run <repro>` -> prints
+  `[0, 1]`. **Correct — this path is fixed.**
+- `bin/simple run <repro>` (default execution mode, JIT/native) -> **SIGSEGV,
+  exit 139** ("Segmentation fault", `timeout: the monitored command dumped
+  core"). This is a *different and worse* symptom than the original report
+  (silent `[]`, exit 0) — the same underlying default-mode generator/iterator
+  dispatch defect now crashes instead of returning a wrong empty answer.
+
+Status stays OPEN: the default (non-interpreter) execution path — the one a
+plain `bin/simple run` takes — is still broken, and worse than filed. This is
+a JIT/native codegen dispatch defect (closure-backed iterator state machine
+under `iter_from_function`/`iter_take` mis-lowered), which lives in the
+Rust-seed backend, not in `src/lib/nogc_async_mut/generator.spl` itself (that
+file is correct, as proven by the interpreter-mode pass) — out of scope for a
+pure-Simple lane fix. Left OPEN for a seed-side lane; the interpreter-mode
+fix is recorded here so it is not re-investigated.

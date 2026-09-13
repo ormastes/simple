@@ -97,3 +97,14 @@ NOT PROVEN: the required arm64 durability proof was not produced. It needs a
 real-firmware arm64 boot with a power-cut/no-sync replay, which could not be run
 (bootstrap at ~98% CPU held the host all session). Board-run BLOCKED, stated
 explicitly rather than shipped as a QEMU-only or paper result.
+
+## Triage 2026-09-13
+
+Reconfirmed via source inspection: sector-write/FLUSH prerequisites are
+implemented per this record, but a filesystem-launched database server still
+cannot honestly acknowledge a commit surviving a fresh QEMU boot (same root
+cause tracked in the sibling record
+`fat32_database_atomic_replace_recovery_missing_2026-08-14.md`, where a
+unit-level crash/recovery spec is now green but the QEMU power-cut/reboot
+closure bar is unmet). Needs QEMU boot evidence to close, outside this
+lane's scope. Left OPEN (P2), no code change attempted.
