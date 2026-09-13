@@ -119,6 +119,29 @@ the retained direct legacy entrypoint with the default facade. Runtime
 qualification remains pending until an admitted self-hosted runner executes
 that coverage.
 
+The next scalar phase is intentionally fail-closed. Repository inspection
+found a shared scalar `ParseRuntime`, but it is a lexical DFA only: it has no
+generated Simple `GrammarProgram` or `ActionProgram` and cannot emit the
+compiler's AST/HIR, region, mapping, diagnostic, or invalidation semantics.
+`parser_provider_v1_canonical_scalar_required_cases()` therefore freezes a
+four-case ordered prerequisite (valid reset, invalid reset, valid append after
+the valid reset, and isolated invalid after the valid reset). Every case
+requires exact token, region, action/HIR, source-mapping, diagnostic,
+invalidation, and deterministic-hash comparison. The accompanying receipt
+truthfully reports no candidate engine, no execution, zero compared cases, and
+no qualification; it grants no admission and leaves `LegacyReference` as the
+default. A later generated Simple grammar/action engine must replace that
+negative evidence with real corpus execution before the candidate can enter
+the admission path.
+
+Each prerequisite row binds its literal source bytes, path, stable fixture
+identity, initial parser-error state, expected preserved state, and predecessor
+ordinal. Qualification replay starts from a fresh process/state arena for each
+provider: execute rows 0 and 1 independently, replay row 0 before row 2 and
+append row 2 without reset, then replay row 0, set the pinned initial error
+state, and execute row 3 with isolated-state preservation. A comparison that
+changes this order or substitutes source/path bytes is not this prerequisite.
+
 The native FlatAstBridge module-assembly entry uses the same admission
 function before its existing parser setup and transformation sequence. A
 provider-explicit entry exists for qualification tests and later selection
