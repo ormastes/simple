@@ -2,7 +2,32 @@
 
 - **Filed:** 2026-09-13
 - **Area:** app / test_runner_new (per-spec timeout budget)
-- **Status:** open. Blocks verification of two specs added in this change.
+- **Status:** FIXED 2026-09-13 (budget ladder + claim-before-execute).
+
+## Fix
+
+1. `src/app/test_runner_new/timeout_budget.spl` — `resolve_timeout_secs` is the
+   documented ladder: explicit `--timeout N` > `SIMPLE_TIMEOUT_SECONDS` >
+   900. `0` at either rung means unlimited (`TIMEOUT_UNLIMITED_SECS`, a
+   365-day finite budget so every downstream "<= 0 means absent" hop keeps
+   working and the daemon cap is bypassed). `timeout_value_is_well_formed`
+   separates "the caller asked for no limit" from "the caller wrote junk",
+   which the old parser could not: both returned 0.
+2. `src/app/test_runner_new/test_runner_client.spl` — `--timeout`/`--timeout=`
+   go through that ladder instead of `to_int`, so a malformed flag is ignored
+   rather than becoming a 0-second budget.
+3. `src/app/test_daemon/light_daemon.spl` + `light_protocol.spl` — a request is
+   CLAIMED (renamed to a non-pollable `.req.inflight` name) BEFORE its spec
+   runs, instead of being deleted after the response is written. A run killed
+   at the budget is therefore attempted exactly once; the owning client emits
+   its single `daemon-no-response` TIMEOUT verdict when its own deadline
+   expires. No retry flag is offered: a retried timeout is the defect.
+
+Specs: `test/01_unit/app/test_runner_new/client_timeout_env_spec.spl` (three
+new scenarios: 0 = unlimited, flag > env > default, well-formedness) and
+`test/01_unit/app/test_daemon/light_request_claim_spec.spl` (filesystem
+round-trip; proven RED under a sabotage that makes a claimed request pollable
+again). Contract documented in `doc/07_guide/infra/testing.md`.
 
 ## Symptom
 

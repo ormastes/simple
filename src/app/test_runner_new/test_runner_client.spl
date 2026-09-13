@@ -4,7 +4,7 @@ use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use app.io.cli_ops.{cli_current_exe_path}
-use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
+use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
 use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
 use std.test_runner.test_runner_args.{parse_test_args}
@@ -116,12 +116,18 @@ fn parse_client_run(args: [text]) -> ClientRun:
     var i = 0
     while i < args.len():
         val arg = args[i]
+        # An explicit flag outranks the environment, and `--timeout 0` means
+        # unlimited — the same contract SIMPLE_TIMEOUT_SECONDS=0 carries. A
+        # malformed flag value is IGNORED rather than turned into a 0-second
+        # budget by to_int(); the ladder in timeout_budget.spl owns both rules.
         if arg == "--timeout" and i + 1 < args.len():
-            timeout_secs = to_int(args[i + 1])
+            if timeout_value_is_well_formed(args[i + 1]):
+                timeout_secs = resolve_timeout_secs(args[i + 1], "")
             i = i + 2
             continue
         if arg.starts_with("--timeout="):
-            timeout_secs = to_int(arg[10:])
+            if timeout_value_is_well_formed(arg[10:]):
+                timeout_secs = resolve_timeout_secs(arg[10:], "")
             i = i + 1
             continue
         if not arg.starts_with("-"):
