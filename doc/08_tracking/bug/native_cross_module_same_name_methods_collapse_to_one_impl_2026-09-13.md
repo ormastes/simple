@@ -1,5 +1,8 @@
 # Native: same-named instance methods on sibling types in one module collapse to ONE implementation
 
+- **RESOLVED by PR #867** (2026-09-13,
+  `https://github.com/ormastes/simple/pull/867`, "fix(seed): type imported
+  static-method calls so sibling instance methods stop collapsing").
 - Filed: 2026-09-13
 - Supersedes the root-cause analysis in
   `native_u32_u64_span_roundtrip_loses_value_2026-09-13.md` (same symptom, wrong cause)
@@ -75,7 +78,63 @@ same-named methods are in the closure, and it is order/candidate dependent —
 which is why `U32be round-trips 0xCAFEBABE` is the one round-trip example that
 *passes*: it is the surviving implementation.
 
-## Suspected site (not fixed here — outside this lane's file ownership)
+## Actual root cause (PR #867) — HIR, not the mangler
+
+The suspected site below (`mangle.rs`) was a plausible guess but wrong on two
+counts: there is no emission-dedup site (bodies are emitted by reachability
+from bound calls — fixing resolution restored emission by itself), and
+`mangle_mir` is dead in the reproducing lane (`llvm` feature off,
+`--backend cranelift`), so it was never reached.
+
+The real defect is one line in `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs`:
+the qualified-import arm looked up a callee's return type by the **bare**
+method name (`self.named_callable_return_type(method)`), while
+`method_return_types` is keyed `Owner.method`. `U16le.of(0xBEEF)` therefore
+typed as `TypeId::ANY`, MIR could not qualify the `ANY` receiver, and the
+`.store(buf)` call fed to codegen lowered to a **bare** `store` — confirmed
+directly via added instrumentation:
+
+```
+[HIR-METHOD-RET] .store recv_ty=TypeId(14) recv_hir=Some(Any) -> Void
+[MIR-METHOD-DISPATCH] bare 'store' call: receiver ty = Any
+```
+
+Every name-keyed resolver downstream (in `codegen/instr/closures_structs.rs`,
+the actual load-bearing resolver in the cranelift lane) then bound the bare
+`store` to an arbitrary same-named candidate via a `HashMap` first-hit — hence
+the closure-dependent survivor.
+
+**Fix:** type the qualified-import callee lookup correctly in HIR (root fix),
+plus resolver hardening so ambiguity is refusal, not a coin flip — three
+`HashMap`-first-hit-and-break arms in `closures_structs.rs`/`mangle_mir` now
+collect distinct candidates and only bind when the scan agrees on exactly one,
+and the qualified branch prefers an exact owner match
+(`method_owner_matches`, understanding both `Owner.method` and
+`Owner_dot_method` spellings). A lone candidate is still accepted (needed for
+inherited trait defaults, e.g. `Button.render` resolving to the only emitted
+body `Widget.render`) — only a multi-candidate coin flip is removed.
+
+**Evidence (aarch64-apple-darwin):**
+
+| | `_dot_store` | `_dot_to_span` | result |
+|---|---|---|---|
+| before | 1 | 1 | every `to_span` returned 8 bytes of the u64 raw; 5/6 rows wrong |
+| after | 6 | 6 | all twelve values byte-identical to the interpreter |
+
+- Differential harness `bytes/ints_spec.spl` (the 5-6 `int-width-bitops` rows):
+  `FAIL — 6 divergent` -> `PASS — 1 spec compared, 0 divergent`.
+- Unit tests: sabotage-at-HEAD -> 2 red; with the fix -> 10 passed / 0 failed.
+- Full `simple-compiler` lib suite: 3989 passed / 35 failed vs baseline
+  3984 / 36 (35 pre-existing arm64/macOS reds) — zero new failures, one
+  pre-existing failure fixed.
+
+**Honest gap, not closed by this PR:** the full default differential sample
+(multi-hour run) was started on the pinned before-binary and had not returned
+when PR #867 was opened, so it was never re-measured against the after-binary.
+Only the `bytes/ints_spec.spl` targeted rows and the unit/lib-suite deltas
+above are confirmed; a fresh full-sample differential run is still owed.
+
+## Suspected site (original guess, wrong — kept for history)
 
 `src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`:
 
