@@ -17,21 +17,8 @@ use os.packages.os_packages.{os_version}
 use os.port.simpleos_multiplatform_build.{
     SimpleOsLaneContract,
     SimpleOsLaneKind,
-    simpleos_platform_default_entry,
-    simpleos_platform_disk_image_output,
-    simpleos_platform_linker_script,
-    simpleos_platform_native_target,
-    simpleos_platform_qemu_acceptance_lane,
-    simpleos_platform_qemu_cpu,
-    simpleos_platform_qemu_lane,
-    simpleos_platform_qemu_machine,
-    simpleos_platform_qemu_smoke_lane,
-    simpleos_platform_arch_name,
-    simpleos_platform_has_qemu_lane,
-    simpleos_platform_qemu_lane_or_smoke,
-    simpleos_platform_qemu_system,
-    simpleos_platform_kernel_output,
-    simpleos_platform_target_by_name
+    SimpleOsMachineTargetProjection,
+    simpleos_machine_target_projection
 }
 use os.desktop_qemu_contract.{
     clear_qemu_serial_log,
@@ -251,7 +238,7 @@ fn _platform_name_for_arch(arch: Architecture) -> text:
     arch_display_name(arch)
 
 fn _image_path_for_target(target: OsTarget) -> text:
-    simpleos_platform_disk_image_output(_platform_name_for_arch(target.arch))
+    simpleos_machine_target_projection(_platform_name_for_arch(target.arch)).disk_image_output
 
 fn _ensure_result_dir(arch: Architecture) -> bool:
     rt_dir_create_all(_result_arch_dir(arch))
@@ -425,33 +412,37 @@ fn _qemu_command_binary(target: OsTarget) -> text:
         return "qemu-system-x86_64"
     target.qemu_system
 
-fn _lane_to_target(platform_name: text, lane: SimpleOsLaneContract) -> OsTarget:
+fn _projected_lane_to_target(platform: SimpleOsMachineTargetProjection, lane: SimpleOsLaneContract) -> OsTarget:
     OsTarget(
-        arch: simpleos_platform_arch(platform_name),
+        arch: platform.arch,
         entry: lane.entry,
         linker_script: lane.linker_script,
-        target_triple: simpleos_platform_native_target(platform_name),
+        target_triple: platform.native_target,
         output: lane.output,
-        qemu_system: simpleos_platform_qemu_system(platform_name),
-        qemu_machine: simpleos_platform_qemu_machine(platform_name),
-        qemu_cpu: simpleos_platform_qemu_cpu(platform_name),
+        qemu_system: platform.qemu_system,
+        qemu_machine: platform.qemu_machine,
+        qemu_cpu: platform.qemu_cpu,
         qemu_memory: lane.qemu_memory,
         qemu_bios: lane.qemu_bios,
         qemu_extra: lane.qemu_extra,
         gui_mode: false
     )
 
+fn _lane_to_target(platform_name: text, lane: SimpleOsLaneContract) -> OsTarget:
+    _projected_lane_to_target(simpleos_machine_target_projection(platform_name), lane)
+
 fn catalog_os_target(platform_name: text, memory: text, qemu_extra: [text], gui_mode: bool) -> OsTarget:
     """Build a QEMU target from the shared SimpleOS platform catalog."""
+    val platform = simpleos_machine_target_projection(platform_name)
     OsTarget(
-        arch: simpleos_platform_arch(platform_name),
-        entry: simpleos_platform_default_entry(platform_name),
-        linker_script: simpleos_platform_linker_script(platform_name),
-        target_triple: simpleos_platform_native_target(platform_name),
-        output: simpleos_platform_kernel_output(platform_name),
-        qemu_system: simpleos_platform_qemu_system(platform_name),
-        qemu_machine: simpleos_platform_qemu_machine(platform_name),
-        qemu_cpu: simpleos_platform_qemu_cpu(platform_name),
+        arch: platform.arch,
+        entry: platform.default_entry,
+        linker_script: platform.linker_script,
+        target_triple: platform.native_target,
+        output: platform.kernel_output,
+        qemu_system: platform.qemu_system,
+        qemu_machine: platform.qemu_machine,
+        qemu_cpu: platform.qemu_cpu,
         qemu_memory: memory,
         qemu_bios: "",
         qemu_extra: qemu_extra,
@@ -459,23 +450,8 @@ fn catalog_os_target(platform_name: text, memory: text, qemu_extra: [text], gui_
     )
 
 fn simpleos_platform_arch(platform_name: text) -> Architecture:
-    # Workaround: avoid Option<large-struct> across function boundary (interpreter crash).
-    # Use index-based lookup via simpleos_platform_arch_name instead.
-    # arch_name values from catalog: "x86_64","x86","aarch64","arm","riscv64","riscv32"
-    val aname = simpleos_platform_arch_name(platform_name)
-    if aname == "x86_64":
-        return Architecture.X86_64
-    if aname == "x86" or aname == "x86_32":
-        return Architecture.X86
-    if aname == "riscv64":
-        return Architecture.Riscv64
-    if aname == "riscv32":
-        return Architecture.Riscv32
-    if aname == "aarch64" or aname == "arm64":
-        return Architecture.Arm64
-    if aname == "arm" or aname == "arm32" or aname == "armv7":
-        return Architecture.Arm32
-    Architecture.X86_64
+    """Resolve catalog-owned architecture without a capped name switch or x86 default."""
+    simpleos_machine_target_projection(platform_name).arch
 
 # ===========================================================================
 # Hardcoded Target Definitions
@@ -484,7 +460,8 @@ fn simpleos_platform_arch(platform_name: text) -> Architecture:
 fn get_target(arch: Architecture) -> OsTarget:
     """Returns hardcoded target config for the given architecture."""
     val platform_name = arch_display_name(arch)
-    _lane_to_target(platform_name, simpleos_platform_qemu_smoke_lane(platform_name))
+    val platform = simpleos_machine_target_projection(platform_name)
+    _projected_lane_to_target(platform, platform.qemu_smoke_lane)
 
 fn get_qemu_target(arch: Architecture) -> OsTarget:
     """Return the default QEMU/run target for an architecture.
@@ -495,18 +472,14 @@ fn get_qemu_target(arch: Architecture) -> OsTarget:
     Other architectures keep their existing direct boot targets unless the
     caller requests a named scenario.
     """
-    if arch == Architecture.Arm64:
-        return _lane_to_target("arm64", simpleos_platform_qemu_acceptance_lane("arm64"))
-    if arch == Architecture.Arm32:
-        return _lane_to_target("arm32", simpleos_platform_qemu_acceptance_lane("arm32"))
+    val platform = simpleos_machine_target_projection(arch_display_name(arch))
+    if arch == Architecture.Arm64 or arch == Architecture.Arm32 or arch == Architecture.Riscv32:
+        return _projected_lane_to_target(platform, platform.qemu_acceptance_lane)
     if arch == Architecture.Riscv64:
-        # Workaround: avoid if val Option<large-struct> (interpreter crash).
-        if simpleos_platform_has_qemu_lane("riscv64", "riscv64-virtio-fat32-smf"):
-            return _lane_to_target("riscv64", simpleos_platform_qemu_lane_or_smoke("riscv64", "riscv64-virtio-fat32-smf"))
-        return _lane_to_target("riscv64", simpleos_platform_qemu_acceptance_lane("riscv64"))
-    if arch == Architecture.Riscv32:
-        return _lane_to_target("riscv32", simpleos_platform_qemu_acceptance_lane("riscv32"))
-    get_target(arch)
+        if platform.has_qemu_lane("riscv64-virtio-fat32-smf"):
+            return _projected_lane_to_target(platform, platform.qemu_lane_or_smoke("riscv64-virtio-fat32-smf"))
+        return _projected_lane_to_target(platform, platform.qemu_acceptance_lane)
+    _projected_lane_to_target(platform, platform.qemu_smoke_lane)
 
 # ===========================================================================
 # Target Enumeration & Name Parsing

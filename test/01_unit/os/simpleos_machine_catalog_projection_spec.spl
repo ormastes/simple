@@ -1,0 +1,159 @@
+"""
+Behavioral contract for the single-catalog SimpleOS machine projection.
+
+The projection is the shared boundary for migrated runner/machine constructors:
+each entrypoint resolves one catalog row, retains its architecture and QEMU
+fields, and never wraps the full platform target in Option or Result.
+"""
+# codex-system-test
+# @req: REQ-SIMPLEOS-CATALOG-PROJECTION-001
+
+use std.spec.{describe, it, expect, step}
+use os.kernel.arch.arch_context.{Architecture}
+use os.port.simpleos_multiplatform_build.{
+    simpleos_machine_target_known, simpleos_machine_target_projection
+}
+use os.qemu_runner.{build_qemu_command, catalog_os_target, get_qemu_target, get_target}
+use os.machine_profile.{
+    arm32_machine_profile, arm64_machine_profile,
+    riscv32_machine_profile, riscv64_machine_profile
+}
+
+describe "REQ-SIMPLEOS-CATALOG-PROJECTION-001: single-catalog machine projection [importance=high; importance_weight=2]":
+    it "should project the x86_64 runner and machine fields [importance=high; importance_weight=2]":
+        step("Resolve the x86_64 alias through the shared platform catalog")
+        val target = simpleos_machine_target_projection("x86_64")
+
+        step("Check the complete x86_64 machine identity and smoke lane")
+        expect(target.canonical_name).to_equal("x86_64-simpleos")
+        expect(target.arch).to_equal(Architecture.X86_64)
+        expect(target.bits).to_equal(64)
+        expect(target.native_target).to_equal("x86_64-unknown-none")
+        expect(target.platform_slug).to_equal("x86_64")
+        expect(target.qemu_system).to_equal("qemu-system-x86_64")
+        expect(target.qemu_machine).to_equal("q35")
+        expect(target.qemu_cpu).to_equal("qemu64")
+        expect(target.qemu_serial_kind).to_equal("com1")
+        expect(target.qemu_smoke_lane.name).to_equal("x86_64-smoke")
+
+    it "should resolve canonical ARM64 and RISC-V aliases without an architecture switch [importance=high; importance_weight=2]":
+        step("Resolve architecture aliases owned by distinct catalog rows")
+        val arm = simpleos_machine_target_projection("aarch64")
+        val rv = simpleos_machine_target_projection("rv64")
+
+        step("Check catalog-owned identities rather than name-derived defaults")
+        expect(arm.canonical_name).to_equal("aarch64-simpleos")
+        expect(arm.arch).to_equal(Architecture.Arm64)
+        expect(arm.native_target).to_equal("aarch64-unknown-none")
+        expect(arm.qemu_system).to_equal("qemu-system-aarch64")
+        expect(rv.canonical_name).to_equal("riscv64gc-simpleos")
+        expect(rv.arch).to_equal(Architecture.Riscv64)
+        expect(rv.native_target).to_equal("riscv64-unknown-none")
+        expect(rv.qemu_system).to_equal("qemu-system-riscv64")
+
+    it "should resolve canonical alias native and clang identities to one row [importance=high; importance_weight=2]":
+        step("Resolve every supported lookup identity for x86_64")
+        val canonical = simpleos_machine_target_projection("x86_64-simpleos")
+        val alias_target = simpleos_machine_target_projection("x64")
+        val native_target = simpleos_machine_target_projection("x86_64-unknown-none")
+        val clang_target = simpleos_machine_target_projection("x86_64-unknown-none-elf")
+
+        step("Check every lookup retains the same canonical identity")
+        expect(canonical.canonical_name).to_equal("x86_64-simpleos")
+        expect(alias_target.canonical_name).to_equal(canonical.canonical_name)
+        expect(native_target.canonical_name).to_equal(canonical.canonical_name)
+        expect(clang_target.canonical_name).to_equal(canonical.canonical_name)
+
+    it "should project x86 ARM32 and RISC-V 32-bit aliases [importance=high; importance_weight=2]":
+        step("Resolve every remaining architecture through a catalog alias")
+        val x86 = simpleos_machine_target_projection("i686")
+        val arm32 = simpleos_machine_target_projection("armv7")
+        val rv32 = simpleos_machine_target_projection("rv32imac")
+
+        step("Check catalog-owned architecture and QEMU identities")
+        expect(x86.canonical_name).to_equal("i686-simpleos")
+        expect(x86.arch).to_equal(Architecture.X86)
+        expect(x86.native_target).to_equal("i686-unknown-none")
+        expect(x86.qemu_system).to_equal("qemu-system-i386")
+        expect(arm32.canonical_name).to_equal("armv7-simpleos")
+        expect(arm32.arch).to_equal(Architecture.Arm32)
+        expect(arm32.native_target).to_equal("armv7-unknown-none-eabihf")
+        expect(arm32.qemu_system).to_equal("qemu-system-arm")
+        expect(rv32.canonical_name).to_equal("riscv32imac-simpleos")
+        expect(rv32.arch).to_equal(Architecture.Riscv32)
+        expect(rv32.native_target).to_equal("riscv32-unknown-none")
+        expect(rv32.qemu_system).to_equal("qemu-system-riscv32")
+
+    it "should preserve named-lane selection and smoke fallback [importance=high; importance_weight=2]":
+        step("Resolve the RISC-V projection once and select lanes from it")
+        val target = simpleos_machine_target_projection("riscv64")
+
+        step("Check named lane membership and compatibility fallback")
+        expect(target.has_qemu_lane("riscv64-virtio-fat32-smf")).to_equal(true)
+        expect(target.qemu_lane_or_smoke("riscv64-virtio-fat32-smf").name).to_equal("riscv64-virtio-fat32-smf")
+        expect(target.has_qemu_lane("missing-lane")).to_equal(false)
+        expect(target.qemu_lane_or_smoke("missing-lane").name).to_equal("riscv64-smoke")
+
+    it "should retain QEMU argv ordering after projection [importance=high; importance_weight=2]":
+        step("Build a catalog-backed x86_64 runner target")
+        val target = catalog_os_target(
+            "amd64", "768M", ["-device", "virtio-rng-pci"], true
+        )
+
+        step("Render the production QEMU argv without launching QEMU")
+        expect(build_qemu_command(target)).to_equal([
+            "qemu-system-x86_64",
+            "-no-user-config", "-monitor", "none", "-net", "none",
+            "-machine", "q35", "-cpu", "qemu64", "-m", "768M",
+            "-serial", "none", "-no-reboot",
+            "-kernel", "build/os/simpleos_x86_64.elf",
+            "-device", "virtio-rng-pci"
+        ])
+
+    it "should keep the RISC-V default run lane catalog-driven [importance=high; importance_weight=2]":
+        step("Resolve the production default QEMU target for RISC-V")
+        val target = get_qemu_target(Architecture.Riscv64)
+        expect(target.arch).to_equal(Architecture.Riscv64)
+        expect(target.target_triple).to_equal("riscv64-unknown-none")
+        expect(target.output).to_equal("build/os/simpleos_riscv64_smf_fs.elf")
+        expect(target.qemu_system).to_equal("qemu-system-riscv64")
+
+    it "should build base and run targets for all six architectures [importance=high; importance_weight=2]":
+        step("Build both catalog projections for every architecture enum")
+        val architectures = [
+            Architecture.X86_64, Architecture.X86,
+            Architecture.Arm64, Architecture.Arm32,
+            Architecture.Riscv64, Architecture.Riscv32
+        ]
+        for arch in architectures:
+            val base = get_target(arch)
+            val run = get_qemu_target(arch)
+            expect(base.arch).to_equal(arch)
+            expect(run.arch).to_equal(arch)
+            expect(base.target_triple).to_equal(run.target_triple)
+            expect(base.qemu_system).to_equal(run.qemu_system)
+
+    it "should feed every public MachineProfile constructor [importance=high; importance_weight=2]":
+        step("Build the four public ARM and RISC-V machine profiles")
+        val arm64 = arm64_machine_profile()
+        val arm32 = arm32_machine_profile()
+        val rv64 = riscv64_machine_profile()
+        val rv32 = riscv32_machine_profile()
+        val arm_target = simpleos_machine_target_projection("aarch64")
+
+        step("Check constructor identities and one complete projection alignment")
+        expect(arm64.name).to_equal("simple-arm64")
+        expect(arm32.name).to_equal("simple-arm32")
+        expect(rv64.name).to_equal("simple-rv64")
+        expect(rv32.name).to_equal("simple-rv32")
+        expect(arm64.arch).to_equal(arm_target.arch)
+        expect(arm64.xlen).to_equal(arm_target.bits)
+        expect(arm64.target_triple).to_equal(arm_target.native_target)
+        expect(arm64.qemu_system).to_equal(arm_target.qemu_system)
+        expect(arm64.qemu_machine).to_equal(arm_target.qemu_machine)
+        expect(arm64.qemu_cpu).to_equal(arm_target.qemu_cpu)
+        expect(arm64.output).to_equal(arm_target.qemu_smoke_lane.output)
+
+    it "should preflight an unknown target without an x86_64 fallback [importance=high; importance_weight=2]":
+        step("Resolve a target name absent from the catalog")
+        expect(simpleos_machine_target_known("not-a-simpleos-target")).to_equal(false)
