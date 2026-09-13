@@ -164,8 +164,16 @@ pub fn llvm_first_duplicate_ssa_def(ir: text) -> text:
     are function-scoped, so `%l3` in two different functions is legal."""
     var seen: Dict<text, bool> = {}
     var current_fn = "<module>"
-    for line in ir.split("\n"):
-        val trimmed = line.trim()
+    # Index-based `while`, not `for ... in`: this runs inside the bootstrap
+    # compiler itself, and a mutation performed per iteration of a `for` body is
+    # the shape of
+    # doc/08_tracking/bug/class_instances_copy_on_bind_and_for_loop_drops_mutation_2026-08-04.md.
+    # A guard that silently stops recording is worse than no guard.
+    val lines = ir.split("\n")
+    var li = 0
+    while li < lines.len():
+        val trimmed = lines[li].trim()
+        li = li + 1
         if trimmed.starts_with("define "):
             seen = {}
             val at = trimmed.index_of("@")
@@ -221,6 +229,14 @@ fn llvm_bootstrap_ssa_function(
     val alloca_rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
     if alloca_rewritten.applied:
         return MirFunction.with_blocks(fn_, alloca_rewritten.blocks)
+    # A reject for any reason OTHER than "nothing needed slotting" means a
+    # function that MAY contain multi-def locals is handed to the emitter
+    # un-rewritten -- the path that produced the llc "multiple definition of
+    # local value" failures on the macOS Stage 2 lane. The text guard
+    # (llvm_assert_unique_ssa_defs) names the offending function and value; this
+    # names the REASON, which is what the repair needs, in the same log.
+    if alloca_rewritten.reason != "no slotted locals" and alloca_rewritten.reason != "empty function":
+        print "[llvm-ssa] fn={fn_.name} alloca-transform rejected: {alloca_rewritten.reason}"
     if bootstrap_mode:
         return fn_
     val rewritten = ssa_var_transform_blocks(fn_.blocks)
