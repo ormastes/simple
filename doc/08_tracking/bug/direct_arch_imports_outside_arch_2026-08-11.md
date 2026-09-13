@@ -70,3 +70,26 @@ Route all 7 imports through `os.kernel.arch.hal` (or `arch_adapt/`), re-run
 `bin/simple run src/os/port/multiarch_audit_report.spl`, and confirm the report
 reads `"direct_arch_imports_outside_arch": 0`. The spec then goes green on its
 own with no edit.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane)
+
+`bin/simple run src/os/port/multiarch_audit_report.spl` -> `build/multiarch/arch_loc_report.json`:
+`"direct_arch_imports_outside_arch": 8` (drifted from the original 7 — file
+set changed: `virtio_rng_mmio.spl:4`, `riscv_services.spl:7`,
+`tcp_baremetal_min.spl:7`, `riscv64_fs_exec_spawn.spl:16`,
+`x86_64_server_first_dispatch.spl:9`, `user_address_space.spl:93,102`,
+`vmm_core.spl:520`). Still reproduces, still real drift.
+
+Checked feasibility of the "route through `os.kernel.arch.hal`" unblock
+condition: `os.kernel.arch.hal` (`src/os/kernel/arch/hal.spl`) is a generic,
+already-populated HAL surface (`hal_paging_map`, `hal_flush_tlb`,
+`hal_context_save`, ...) with no equivalents for any of these 8 imports
+(`rv32_admit_secure_entropy_candidate`, `riscv64_display_initialize`,
+`rv64_boot_tcp_policy_link_anchor`, `Rv64ProcessStdoutResult`,
+`validate_enter_user_blocking_handoff`, `riscv64_vmm_map_page_in`,
+`hal_x86_64_read_cr3_raw`/`hal_x86_64_write_cr3_raw`). Adding portable
+equivalents for 8 distinct, arch-specific one-off APIs (entropy source,
+display init, TCP boot policy, process-stdout capture, user-entry
+validation, page mapping, CR3 access) is a real HAL design task per symbol,
+not a mechanical import rewrite — out of this lane's per-bug budget. Left
+OPEN, no change made.
