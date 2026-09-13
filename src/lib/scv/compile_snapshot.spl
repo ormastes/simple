@@ -131,7 +131,7 @@ fn scv_compile_snapshot_inventory_entries_v1(
             root + source_root
         else:
             root + "/" + source_root
-        val absolute = path_absolute(candidate).replace("\\", "/")
+        val absolute = scv_compile_snapshot_plain_path_v1(path_absolute(candidate))
         if (absolute == "" or (absolute != root and
                 not absolute.starts_with(root + "/"))):
             return nil
@@ -141,7 +141,7 @@ fn scv_compile_snapshot_inventory_entries_v1(
         roots = roots.push(absolute)
     var entries: [CompileSourceInventoryEntryV1] = []
     for entry in admitted.inventory!.entries:
-        val absolute = path_absolute("{root}/{entry.source_identity}").replace("\\", "/")
+        val absolute = scv_compile_snapshot_plain_path_v1(path_absolute("{root}/{entry.source_identity}"))
         var selected = false
         for source_root in roots:
             if absolute == source_root or absolute.starts_with(source_root + "/"):
@@ -256,15 +256,25 @@ fn scv_compile_snapshot_write_chunk_v1(
     file_exists(final_path) and
         scv_compile_snapshot_source_digest_v1(final_path) == digest
 
+# rt_path_absolute canonicalizes EXISTING paths on Windows into the verbatim
+# `\\?\C:\...` form but leaves not-yet-created ones (build/scv) plain, so the
+# cache-root ownership prefix check never matched and every Windows
+# native-build failed with snapshot-cache-root-not-owned.
+fn scv_compile_snapshot_plain_path_v1(path: text) -> text:
+    val slashed = path.replace("\\", "/")
+    if slashed.starts_with("//?/"):
+        return slashed[4:]
+    slashed
+
 fn scv_compile_snapshot_acquire_v1(
     root: text, cache_root: text, source_roots: [text]
 ) -> ScvCompileSnapshotV1:
     if root == "" or cache_root == "" or source_roots.len() == 0:
         return scv_compile_snapshot_invalid_v1("snapshot-input-invalid")
-    val canonical_root = path_absolute(root).replace("\\", "/")
+    val canonical_root = scv_compile_snapshot_plain_path_v1(path_absolute(root))
     if canonical_root == "":
         return scv_compile_snapshot_invalid_v1("snapshot-root-unavailable")
-    val owned_cache_root = path_absolute(cache_root).replace("\\", "/")
+    val owned_cache_root = scv_compile_snapshot_plain_path_v1(path_absolute(cache_root))
     val cache_rel = scv_rel_path(canonical_root, owned_cache_root)
     if (owned_cache_root == "" or owned_cache_root == canonical_root or
             not owned_cache_root.starts_with(canonical_root + "/") or
