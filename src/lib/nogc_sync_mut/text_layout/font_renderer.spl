@@ -3100,6 +3100,40 @@ var _fr_face_us: i64 = 0
 var _fr_faceid_us: i64 = 0
 var _fr_lineh_us: i64 = 0
 var _fr_uncached_calls: i64 = 0
+# Front-memo wrapper split (round 5). The `_fr_probe_*` set above covers only
+# the UNCACHED path; everything the wrapper does before it decides hit-or-miss
+# was unmeasured, which is exactly where a per-node cost hides when the memo is
+# working. `wcfg` is the per-call config+identity build in
+# resolve_font_metrics_with_language, `wcache` the cacheable predicate, `wkey`
+# the front-key concatenation (which embeds the whole content string), `wlook`
+# the two Dict operations on that key, `wpush` the memo fill.
+var _fr_wcfg_us: i64 = 0
+var _fr_wcfg_calls: i64 = 0
+var _fr_wcache_us: i64 = 0
+var _fr_wkey_us: i64 = 0
+var _fr_wlook_us: i64 = 0
+var _fr_wpush_us: i64 = 0
+
+fn _fr_probe_add_wcfg(us: i64):
+    if _fr_probe_armed():
+        _fr_wcfg_us = _fr_wcfg_us + us
+        _fr_wcfg_calls = _fr_wcfg_calls + 1
+
+fn _fr_probe_add_wcache(us: i64):
+    if _fr_probe_armed():
+        _fr_wcache_us = _fr_wcache_us + us
+
+fn _fr_probe_add_wkey(us: i64):
+    if _fr_probe_armed():
+        _fr_wkey_us = _fr_wkey_us + us
+
+fn _fr_probe_add_wlook(us: i64):
+    if _fr_probe_armed():
+        _fr_wlook_us = _fr_wlook_us + us
+
+fn _fr_probe_add_wpush(us: i64):
+    if _fr_probe_armed():
+        _fr_wpush_us = _fr_wpush_us + us
 
 fn _fr_probe_add_cls(us: i64):
     if _fr_probe_armed():
@@ -3147,10 +3181,42 @@ pub fn font_measure_probe_report() -> text:
         " uncached_calls={_fr_uncached_calls} cls_ms={_fr_cls_us / 1000} key_ms={_fr_key_us / 1000}" +
         " lookup_ms={_fr_lookup_us / 1000} face_ms={_fr_face_us / 1000}" +
         " faceid_ms={_fr_faceid_us / 1000} lineh_ms={_fr_lineh_us / 1000}" +
+        " wcfg_calls={_fr_wcfg_calls} wcfg_ms={_fr_wcfg_us / 1000}" +
+        " wcache_ms={_fr_wcache_us / 1000} wkey_ms={_fr_wkey_us / 1000}" +
+        " wlook_ms={_fr_wlook_us / 1000} wpush_ms={_fr_wpush_us / 1000}" +
+        " front_entries={_resolved_font_front_values.len()}" +
         " front_hits={_resolved_font_front_hits} front_misses={_resolved_font_front_misses}" +
         " id_hits={_resolved_font_metric_hits} id_misses={_resolved_font_metric_misses}"
 
-val RESOLVED_FONT_FRONT_CACHE_LIMIT: i64 = 512
+# Round 5: raised 512 -> 4096. Measured on the eight-page web catalog, the memo
+# SATURATED on page 4 of 8 (`front_entries` pinned at 512 from there on) and
+# every distinct string after that point took the full uncached path: across
+# pages 4-8 `front_misses` climbed 515 -> 661 while `front_hits` flatlined at
+# 945. The cap is a memory bound, not a correctness bound -- the key is exact
+# (family + size + language + length-prefixed render-config identity + the whole
+# content string), so a larger table can only turn a miss into a hit and can
+# never return a different answer. `push` on this array is amortised O(1) here
+# (measured: 0.03-0.04 ms per entry, flat from 15 to 512 entries), so the fill
+# cost stays linear rather than quadratic at the larger bound.
+# Round 5: the DEFAULT render-config identity is a pure function of the font
+# size -- `font_render_config_default_for_size` fills every other field with a
+# constant, and `font_render_config_identity` then runs ten
+# `font_render_config_normalize` calls and a twelve-part string concatenation
+# over those constants. It was rebuilt from scratch for every `#text` node, in
+# front of the memo, so even a memo HIT paid it. Keyed by `font_size` alone the
+# memo is exact: same size in, byte-identical identity string out. Sizes on a
+# page number in the dozens, so this table is bounded by the page's distinct
+# font sizes and needs no eviction.
+var _default_cfg_identity_by_size: Dict<i32, text> = {}
+
+fn _default_render_config_identity_for_size(font_size: i32) -> text:
+    if val cached = _default_cfg_identity_by_size.get(font_size):
+        return cached
+    val identity = font_render_config_identity(font_render_config_default_for_size(font_size))
+    _default_cfg_identity_by_size[font_size] = identity
+    identity
+
+val RESOLVED_FONT_FRONT_CACHE_LIMIT: i64 = 4096
 var _resolved_font_front_index: Dict<text, i64> = {}
 var _resolved_font_front_values: [ResolvedFontMetrics] = []
 var _resolved_font_front_hits: i64 = 0
@@ -3170,20 +3236,30 @@ fn _resolved_font_front_reset():
 
 fn _resolve_font_metrics_with_language_config(family: text, content: text, font_size: i32,
                                               language: text, render_config_identity: text) -> ResolvedFontMetrics:
-    if not _resolved_font_metrics_cacheable(family, content):
+    val _fr_wc0 = _fr_probe_now()
+    val _front_cacheable = _resolved_font_metrics_cacheable(family, content)
+    _fr_probe_add_wcache(_fr_probe_now() - _fr_wc0)
+    if not _front_cacheable:
         return _resolve_font_metrics_with_language_config_uncached(
             family, content, font_size, language, render_config_identity)
+    val _fr_wk0 = _fr_probe_now()
     val front_key = family + "\n" + font_size.to_string() + "\n" + language + "\n" +
         render_config_identity.len().to_string() + ":" + render_config_identity + "\n" + content
-    if _resolved_font_front_index.has(front_key):
+    _fr_probe_add_wkey(_fr_probe_now() - _fr_wk0)
+    val _fr_wl0 = _fr_probe_now()
+    val _front_present = _resolved_font_front_index.has(front_key)
+    _fr_probe_add_wlook(_fr_probe_now() - _fr_wl0)
+    if _front_present:
         _resolved_font_front_hits = _resolved_font_front_hits + 1
         return _resolved_font_front_values[_resolved_font_front_index[front_key]]
     _resolved_font_front_misses = _resolved_font_front_misses + 1
     val resolved = _resolve_font_metrics_with_language_config_uncached(
         family, content, font_size, language, render_config_identity)
+    val _fr_wp0 = _fr_probe_now()
     if resolved.valid and _resolved_font_front_values.len() < RESOLVED_FONT_FRONT_CACHE_LIMIT:
         _resolved_font_front_index[front_key] = _resolved_font_front_values.len()
         _resolved_font_front_values = _resolved_font_front_values.push(resolved)
+    _fr_probe_add_wpush(_fr_probe_now() - _fr_wp0)
     resolved
 
 fn _resolve_font_metrics_with_language_config_uncached(family: text, content: text, font_size: i32,
@@ -3285,7 +3361,11 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     # codepoint, so a byte-length comparison declared every non-ASCII run
     # invalid (or, when the advances were themselves byte-per-byte, agreed
     # with an inflated width).
-    val character_count = text_codepoints(content).len()
+    # Round 5: `codepoints` above is already `text_codepoints(content)` for this
+    # exact `content`, so recomputing it here walked every string a second time
+    # to arrive at the same number. Reusing the existing binding is exact, not
+    # an approximation of it.
+    val character_count = codepoints.len()
     val valid = identity != "" and advances.len() == character_count
     val resolved = ResolvedFontMetrics(
         valid: valid,
@@ -3314,8 +3394,9 @@ pub fn font_renderer_debug_resolve(family: text, content: text, font_size: i32, 
         " reason=" + m.reason
 
 fn resolve_font_metrics_with_language(family: text, content: text, font_size: i32, language: text) -> ResolvedFontMetrics:
-    val config = font_render_config_default_for_size(font_size)
-    val config_identity = font_render_config_identity(config)
+    val _fr_wg0 = _fr_probe_now()
+    val config_identity = _default_render_config_identity_for_size(font_size)
+    _fr_probe_add_wcfg(_fr_probe_now() - _fr_wg0)
     val resolved = _resolve_font_metrics_with_language_config(family, content, font_size, language, config_identity)
     resolved
 
