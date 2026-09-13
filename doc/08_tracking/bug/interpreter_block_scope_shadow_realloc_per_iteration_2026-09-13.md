@@ -22,18 +22,33 @@ the `(owner, name)` pair its `CURRENT_EXEC_MODULE` fallback probed with, where
 
 ## Measurement
 
-12-shape corpus at n=2,000,000 on the base seed. The isolating control pair is
-three body statements with the temporary hoisted out of the loop vs. the same
-three statements with it declared inside:
+The isolating control pair is three body statements with the temporary hoisted
+out of the loop vs. the same three statements with it declared inside, both at
+n = 2,000,000.
 
-| control | ns/iteration | note |
-|---|---:|---|
-| `acc = acc + (i % 7)` (2 stmts) | 10 | matched a native while matcher |
-| `t = i % 7; acc = acc + t; i = i + 1` | 1,376 | generic walk, no in-body decl |
-| `val t = i % 7; acc = acc + t; i = i + 1` | 2,819 | generic walk, one in-body decl |
+**The headline number is child USER CPU time**, because wall clock on this host
+does not survive its own control: an unchanged seed produced in-process ratios
+of 0.846 and 0.963 for a shape that does strictly more work
+(`perf_wall_clock_ratio_unmeasurable_on_loaded_host_2026-09-13.md`). Interleaved
+A/B with `/usr/bin/time -f '%U %S'`, 6 reps each:
 
-The declaration alone cost **1,443 ns/iteration** -- more than the whole rest of
-a three-statement generic iteration.
+| control | CPU ms, median | CPU ms, min |
+|---|---:|---:|
+| temporary hoisted out of the loop | 1,840 | 1,400 |
+| temporary declared in the body | 2,340 | 2,000 |
+
+**The declaration cost ~250 ns/iteration by medians, ~300 by minima** -- about
+20% of a ~1,170 ns/iteration generic walk.
+
+The 12-shape wall-clock corpus, taken at load 35-40, put the same pair at 1,376
+and 2,819 ns/iteration (a 1,443 ns overhead). Those figures are inflated by
+roughly 1.4x against CPU time and are **not comparable across runs**; they are
+retained only because the relative ORDER of the 12 shapes is stable under load,
+which is what the corpus was used for. The one wall figure that is load-free by
+construction is the matched control: `acc = acc + (i % 7)` with no declaration
+runs at **10 ns/iteration** because a native while matcher takes it, which is
+the separate 271x cliff filed as
+`interpreter_val_decl_in_loop_body_declines_every_matcher_2026-09-13.md`.
 
 ## Fix
 
@@ -44,10 +59,11 @@ block is captured" is preserved); the single-identifier declaration needs no
 collection at all; both owner-store paths pass `name` straight through. One
 owned String remains, the one `enter_block_local` hands to its map key.
 
-Before/after on child USER CPU time (wall clock is unusable here, see
-`perf_wall_clock_ratio_unmeasurable_on_loaded_host_2026-09-13.md`), interleaved
-A/B, 6 reps each: declaration overhead **250 -> 152 ns/iteration** by medians,
-**300 -> 150 ns/iteration** by minima.
+Before/after on child USER CPU time, same harness as above: declaration overhead
+**250 -> 152 ns/iteration** by medians, **300 -> 150 ns/iteration** by minima.
+That is a 39-50% cut in the bookkeeping, i.e. roughly 8-13% off a whole
+iteration of any loop body that declares a name -- a real win, not an
+order-of-magnitude one.
 
 Pinned by `test/05_perf/interp/block_scope_shadow_parity_spec.spl` (7 examples)
 and 14 `BLOCKSHADOW` rows in `scripts/check/check-perf-regression-tests.shs`.
