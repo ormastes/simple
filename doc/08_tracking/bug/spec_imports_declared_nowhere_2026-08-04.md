@@ -788,3 +788,9 @@ The 1003-name census this record is really about is untouched; only the
 hard-error module subset above was repaired.
 
 - Status: OPEN (2026-09-12) — census unchanged; the mechanical `std.lib.` subset (26 files) is repaired, 20 now green where 0 examples ran before
+
+## Triage 2026-09-13
+
+Explicitly recorded as "ARCHITECTURAL/OUT-OF-SCOPE-OPEN" per its own
+2026-08-10 triage. Leaving OPEN as recorded.
+
