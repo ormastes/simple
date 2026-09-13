@@ -9,7 +9,8 @@ End-of-day pipeline that turns the day's bug-report inbox into a per-bug
 markdown digest under `doc/08_tracking/debug/YYYY-MM-DD.md`. The dispatcher
 itself only routes; the heavy lifting lives in `spipe_loop --daily-debug`
 (orchestrated cycle) and the `bin/itf daily-debug` driver
-(`src/app/itf/cmd_daily_debug.spl`).
+(`src/app/devhub/cmd_daily_debug.spl` — `bin/itf` runs `src/app/devhub/main.spl`;
+`src/app/itf/` is an older copy nothing runs).
 
 ## Usage
 
