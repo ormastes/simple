@@ -1,0 +1,59 @@
+"""Focused contracts for the incremental SimpleOS image/shell CLI surface."""
+# codex-system-test
+# @req: REQ-016
+
+use std.spec.{describe, it, expect, step}
+use os.cli.{
+    handle_os,
+    simpleos_image_cli_unavailable_reason_v1,
+    simpleos_shell_cli_unavailable_reason_v1,
+    simpleos_shell_cli_inspection_requested_v1
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn cli_source_v1() -> text:
+    rt_file_read_text("src/os/cli.spl") ?? ""
+
+describe "REQ-016: SimpleOS image and shell CLI projections [importance=high; importance_weight=2]":
+    it "fails image composition closed until the verified production owner is wired":
+        step("Read the operator-facing unavailable reason")
+        val reason = simpleos_image_cli_unavailable_reason_v1()
+
+        step("Require materialized evidence and the shared manifest authority")
+        expect(reason).to_contain("materialized NVFS artifact evidence")
+        expect(reason).to_contain("SimpleOsImageManifestV1")
+
+        step("Invoke the command and require non-zero rejection")
+        expect(handle_os(["image"])).to_equal(1)
+
+    it "limits shell to sealed inspection until an interactive provider exists":
+        step("Read the interactive-launch unavailable reason")
+        val reason = simpleos_shell_cli_unavailable_reason_v1()
+        expect(reason).to_contain("stdin-attached process provider")
+
+        step("Reject launch without either inert inspection mode")
+        expect(simpleos_shell_cli_inspection_requested_v1([])).to_equal(false)
+        expect(handle_os(["shell"])).to_equal(1)
+
+        step("Recognize only the established sealed inspection switches")
+        expect(simpleos_shell_cli_inspection_requested_v1(["--show-plan"])).to_equal(true)
+        expect(simpleos_shell_cli_inspection_requested_v1(["--print-command"])).to_equal(true)
+        expect(simpleos_shell_cli_inspection_requested_v1(["--debug-gui"])).to_equal(false)
+
+        step("Inspect the bounded command dispatcher source")
+        val source = cli_source_v1()
+
+        step("Require only inspection to delegate without adding another runner")
+        expect(source).to_contain("fn handle_os_shell(args: [text]) -> i64:")
+        expect(source).to_contain("if simpleos_shell_cli_inspection_requested_v1(args):")
+        expect(source).to_contain("return handle_os_run(args)")
+        expect(source).to_contain("\"shell\":\n            handle_os_shell(rest)")
+
+    it "labels image unavailable while advertising the interactive shell":
+        step("Inspect the help source")
+        val source = cli_source_v1()
+
+        step("Require honest image status and the shell command")
+        expect(source).to_contain("Compose a verified OS image (currently unavailable)")
+        expect(source).to_contain("Inspect interactive QEMU launch (launch unavailable)")

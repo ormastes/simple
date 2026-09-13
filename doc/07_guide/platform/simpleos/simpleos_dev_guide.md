@@ -583,6 +583,20 @@ If you need a working proof lane today, use:
 
 ---
 
+### Unified image and shell commands
+
+`simple os shell --show-plan` and `simple os shell --print-command` reuse the
+sealed QEMU inspection owner. Interactive launch currently fails closed: the
+established runner captures stdout/stderr and does not attach host stdin. The
+command remains unavailable until a `ProcessLaunchSpecV1`-capable interactive
+provider owns the session; it does not introduce another machine policy.
+
+`simple os image` is recognized but currently fails closed. The legacy
+installer builder can emit descriptor fallbacks and placeholder payloads; the
+command will remain unavailable until a production owner binds materialized
+NVFS artifact evidence to `SimpleOsImageManifestV1`. It never creates a
+placeholder image, signs, publishes, or writes physical media.
+
 ## 5. Simple Compiler Bootstrap
 
 ### 5.1 Bootstrap Path
