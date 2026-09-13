@@ -188,17 +188,39 @@ fn storage_identity_text_v1(value: text) -> text:
     "{value.len()}:{value}"
 
 fn native_capsule_sorted_symbol_ids_v1(keys: [SymbolId]) -> [SymbolId]:
-    var result = keys
+    # Sorts an int permutation and never binds a struct element to a local.
+    # Binding one (`val temporary = result[i]`) COPIES the struct under native
+    # codegen, and a Dict keyed by a struct is keyed by object IDENTITY
+    # (rt_core_dict_hash mixes the raw pointer, runtime_native.c:9220; and
+    # rt_native_eq answers 0 for two distinct struct allocations,
+    # runtime_native.c:4002). So every swapped key used to come back as a fresh
+    # object its own dict no longer resolved, and the caller's
+    # `module.functions[symbol]` answered nil -- site 8's SEGV in
+    # serialize_mir_function. The comparison and the resulting permutation are
+    # the same as the bubble sort this replaces.
+    var ids: [i64] = []
+    var order: [i64] = []
     var i = 0
-    while i < result.len():
+    while i < keys.len():
+        ids.push(keys[i].id)
+        order.push(i)
+        i = i + 1
+    i = 0
+    while i < order.len():
         var j = i + 1
-        while j < result.len():
-            if result[j].id < result[i].id:
-                val temporary = result[i]
-                result[i] = result[j]
-                result[j] = temporary
+        while j < order.len():
+            if ids[j] < ids[i]:
+                val swapped_id = ids[i]
+                ids[i] = ids[j]
+                ids[j] = swapped_id
+                val swapped_index = order[i]
+                order[i] = order[j]
+                order[j] = swapped_index
             j = j + 1
         i = i + 1
+    var result: [SymbolId] = []
+    for index in order:
+        result.push(keys[index])
     result
 
 fn native_capsule_type_def_identity_v1(type_def: MirTypeDef) -> text:
