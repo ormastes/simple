@@ -353,6 +353,21 @@ impl MirTextCodegen for MirToLlvm:
         # consults this to mangle only a colliding local definition's own
         # symbol -- ordinary named calls to any other function are
         # unaffected.
+        # Cross-module symbol identity (site 13, macOS Stage 2): a call into
+        # another module is emitted as `<logical module>.<fn>`, so a non-entry
+        # module must DEFINE its functions under that same spelling or the
+        # link fails with an undefined symbol. Recorded before any function is
+        # emitted, and consulted by llvm_function_symbol_name, so the `define`
+        # and every intra-module call move together.
+        # Bare names only: `Type.method` / `Type.static` already carry their
+        # owner and are not module-prefixed (same rule as the flat bootstrap
+        # path, _MirLowering/bootstrap_globals.spl).
+        # See doc/08_tracking/bug/stage2_cross_module_call_mangling_asymmetry_undefined_symbol_2026-09-13.md
+        self.module_qualified_symbol_names = {}
+        if not is_entry_module and module.name != "":
+            for fn_qualify in module.functions.values():
+                if not fn_qualify.name.contains("."):
+                    self.module_qualified_symbol_names[fn_qualify.name] = "{module.name}.{fn_qualify.name}"
         for fn_owner in module.functions.values():
             if mir_runtime_owned_call_name(fn_owner.name):
                 self.owned_name_has_local[fn_owner.name] = true

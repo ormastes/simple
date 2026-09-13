@@ -294,8 +294,18 @@ bootstrap_stage3_verify_frontend_status_receipt() {
             "${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-grace-config || return 1
         [ "$bootstrap_stage3_collector_bytes" -le \
             "$bootstrap_stage3_collector_max" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-over-cap || return 1
+        # `$(( ))` normalises wc's output before comparing. BSD/macOS `wc -c <f`
+        # right-pads its count ("     653"), so the string compare this used to
+        # be was false for EVERY probe on macOS even when the numbers matched --
+        # the byte equality itself is unchanged and still fails closed on a
+        # truncated or substituted log. GNU wc does not pad, which is why this
+        # only ever fired here. See doc/08_tracking/bug/
+        # stage2_sanity_receipt_bounded_bytes_authority_path_2026-09-13.md
+        bootstrap_stage3_probe_log_actual_bytes=$((
+            $(wc -c <"$bootstrap_stage3_probe_log_authority")
+        )) || return 1
         [ "$bootstrap_stage3_collector_bytes" = \
-            "$(wc -c <"$bootstrap_stage3_probe_log_authority")" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-bytes || return 1
+            "$bootstrap_stage3_probe_log_actual_bytes" ] || bootstrap_stage3_frontend_reject "$bootstrap_stage3_frontend_probe" bounded-bytes || return 1
     done
     [ "$(bootstrap_stage3_manifest_value p2_add_log_path "$bootstrap_stage3_frontend_status_file")" = "$bootstrap_stage3_frontend_log_display" ] || return 1
 }

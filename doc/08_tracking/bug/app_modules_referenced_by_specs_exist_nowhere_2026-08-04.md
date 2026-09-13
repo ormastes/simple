@@ -1,6 +1,100 @@
 # Three app modules/symbols their specs import exist nowhere in the tree
 
-- Status: PARTIALLY-RESOLVED (2026-09-12) — 3 of the 4 specs green; see Triage 2026-09-12
+## Re-triaged 2026-09-13 — 2 of 3 fixed, 1 repaired here, and a regression the spec was written to prevent has re-appeared
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`),
+Windows, `SIMPLE_BINARY=<abs> simple test`.
+
+| spec | reported | measured 2026-09-13 |
+|---|---|---|
+| `test/01_unit/app/build/feature_flags_spec.spl` | 0 passed, 1 failed — `Cannot resolve module: app.build.feature_flags` | **17 total, 17 passed, 0 failed** |
+| `test/01_unit/app/build/opt_remarks_spec.spl` | 0 passed, 1 failed — `Cannot resolve module: app.build.opt_remarks` | **13 total, 13 passed, 0 failed** |
+| `test/01_unit/app/cli/cli_os_spec.spl` | 0 passed, 7 failed — `function handle_os_inline not found` (×7) | **7 total, 6 passed, 1 failed** after the repair below |
+| `test/01_unit/app/cli/os_build_dispatch_spec.spl` | 0 passed, 1 failed | 1 total, 0 passed, 1 failed — **still red, and for a worse reason than filed** |
+
+`src/app/build/feature_flags.spl` and `src/app/build/opt_remarks.spl` both exist
+now; 30 examples run where 0 did. Those two rows are closed.
+
+### `cli_os_spec` — repaired in this pass
+
+`handle_os_inline` does not exist and never will: the symbol was **renamed**,
+not lost. The live entry point is `fn handle_os(args: [text]) -> i64` at
+`src/os/cli.spl:312` — *identical signature* — and it is genuinely wired into
+the CLI (`src/app/cli/_CliMain/main_and_help.spl:50` imports it, `:624` does
+`return handle_os(os_args)`). So this entry's claim that `simple os …` is "a
+real CLI surface a user can invoke today and get nothing back" is **stale** for
+the `os` case; the dispatch is present.
+
+Repaired both copies of the spec (`test/01_unit/app/cli/` and the legacy
+`test/unit/app/cli/`): `use app.cli.main.{handle_os_inline}` ->
+`use os.cli.{handle_os}`, and the call sites likewise. Result **6 of 7 pass**
+where 0 ran before. Note the legacy copy was a *half-done* migration — its
+bodies already said `handle_os` while its import line still said
+`handle_os_inline`, which is why it failed too. The two copies were divergent
+and unbaselined (`unit:app/cli/cli_os_spec.spl` is absent from
+`scripts/check/test_tree_divergence_baseline.txt`); they are now byte-identical,
+which removes an unbaselined offender rather than creating one.
+
+The single survivor is a real product defect newly exposed by making the spec
+run: `dispatches os targets successfully` fails with
+`semantic: class SimpleOsPlatformBuildTarget has no field named userland_target`.
+Not investigated here.
+
+### `os_build_dispatch_spec` — NOT stale. It is red because its invariant is now violated
+
+This one is a source-text assertion over
+`src/app/cli/_CliMain/args_and_os_commands.spl`. That file still exists, but
+**none** of the three strings it asserts on are in it any more:
+`fn handle_os_build_inline(args: [text]) -> i64:`,
+`val target = get_target(arch_value)`, and the negative assertion's
+`get_qemu_target(arch_value)` + `build_os(target)` pair. The OS build dispatch
+moved to `src/os/cli.spl` (`fn handle_os_build` at `:160`).
+
+The tempting conclusion is "stale spec, retarget or delete it". **Do not.** Read
+what the third assertion is for: it requires that
+`val target = get_qemu_target(...)` followed by `val ok = build_os(target)` be
+**absent** — the spec exists to stop the OS build using QEMU targets instead of
+kernel smoke targets. In the code that replaced it, `src/os/cli.spl:192-193`:
+
+```
+val target = get_qemu_target(arch.unwrap())
+val ok = build_os(target)
+```
+
+**Exactly one site, and it is the one the spec guarded.** `:192-193` sits
+inside `fn handle_os_build` (`:160`-`:201`). The same
+`get_qemu_target` + `build_os` pair also appears at `:240-241` and `:297-298`,
+but those are in `handle_os_run` and `handle_os_test` — the spec never guarded
+the run or test paths, and using QEMU targets *there* may well be correct by
+design. Do not count them.
+
+Two checks on whether the build-path change was deliberate, both run
+2026-09-13:
+
+- `get_target` is **not** gone — it still exists as
+  `fn get_target(arch: Architecture) -> OsTarget` at
+  `src/os/_QemuRunner/runner_targets.spl:484`. So the spec's *positive*
+  assertion still names a live function; this is not an invariant that was
+  superseded because its subject disappeared.
+- `git log -S 'handle_os_build_inline' -- src/app/cli` returns only large
+  mechanical commits — a squashed 64-commit merge (`d9ce3993221`), a
+  `fix(merge): repair 1136 unparseable .spl files from the share-history merge`
+  (`e9da588ee61`), and a worktree-branch merge (`e274cd33719`). **None states an
+  intentional change of build target policy.**
+
+That is evidence of accidental decoupling during merge repair, not proof of it —
+a deliberate change could still have been squashed into one of those commits
+without a message. Stated as evidence, not verdict.
+
+So this row stays OPEN, and it is not "a symbol that exists nowhere". It is **a
+guard that lost contact with the code it guards**, and the one build-path site
+it forbade is present again. Retargeting the spec at `src/os/cli.spl` must be
+done *together with* an owner decision on whether `handle_os_build` should use
+`get_qemu_target` or `get_target` — flipping the spec to match current code
+would ratify the very thing it was written to forbid, and deleting it would
+retire the question silently.
+
+**Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** high — 19 spec examples cannot run, and two of the three are real
 CLI surfaces (`simple os …`, `simple build --target-feature …`) that a user can
@@ -67,78 +161,3 @@ dependencies (`os_parse_log_arg`, `os_log_arg_error`, `os_parse_scenario_arg`,
 `get_scenario`, `build_scenario`, `arch_from_name`, `get_qemu_target`,
 `build_os`, `_export_os_log_mode_inline`, `_restore_os_log_mode_inline`) are
 themselves absent and touch the SimpleOS/QEMU build path.
-
-## Triage 2026-09-12
-
-Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
-
-Re-ran all four specs from the symptom table.
-
-| spec | 2026-08-04 | now |
-|---|---|---|
-| `test/01_unit/app/build/feature_flags_spec.spl` | 0 passed, 1 failed | **OK 17/17** — module landed since |
-| `test/01_unit/app/build/opt_remarks_spec.spl` | 0 passed, 1 failed | **OK 13/13** — module landed since |
-| `test/01_unit/app/cli/cli_os_spec.spl` | 0 passed, 7 failed | 6/7 (was `handle_os_inline` not found ×7) |
-| `test/01_unit/app/cli/os_build_dispatch_spec.spl` | 0 passed, 1 failed | **OK 1/1** |
-
-Rows 1 and 2 were fixed by other work; rows 3 and 4 are fixed here.
-
-`handle_os_inline` / `handle_os_build_inline` now exist in
-`src/app/cli/_CliMain/args_and_os_commands.spl` (re-exported by
-`app.cli.main`), so the unified CLI dispatches `os` without delegating to a
-separate entry file. `handle_os_build_inline` deliberately uses `get_target`
-(the per-platform kernel SMOKE lane) rather than `get_qemu_target` (the
-filesystem-backed ACCEPTANCE lane), which is what
-`os_build_dispatch_spec.spl` pins; validation rejects a bad `--log`, a bare
-`--arch`/`--target`/`--scenario`, an unknown scenario and an unknown
-architecture before `SIMPLE_OS_LOG_MODE` is ever exported, so a rejected
-command leaves the caller's environment byte-identical (the spec asserts this).
-Everything else delegates to the existing `os.cli.handle_os`; nothing was
-duplicated.
-
-Blast radius checked — the other three specs that import `app.cli.main` are
-unaffected: `cli_helpers_cycle_spec` 1/1, `cli_unknown_subcommand_exit_code_spec`
-4/4, `static_startup_fast_path_spec` 3/3.
-
-**The one remaining failure is NOT this bug.** `cli_os_spec`'s "dispatches os
-targets successfully" now fails with
-`semantic: unknown variant or method 'Riscv64' on enum Architecture`, which is
-the bare-name registry collision tracked in
-`bare_name_registry_collision_trigger_conditions_2026-07-30.md`. Widening the
-CLI's module graph to reach `os.cli` pulled a second `enum Architecture` into
-the same flat name registry. That record was open precisely because five lanes
-failed to reproduce the collision; a 10-line reproducer derived from this
-failure is recorded there today.
-
-**Unmeasured, flagged rather than assumed:** dispatching `os` inline widens
-`app.cli.main`'s import graph to reach `os.cli` and `os.qemu_runner`. The
-startup-time cost of that was NOT measured. `static_startup_fast_path_spec.spl`
-stayed green but it is a structural assertion, not a timing one, so it would not
-catch a regression; `.claude/rules/commands.md` flags CLI startup as
-perf-sensitive. Weighed against the bug's own severity — a user could invoke
-`simple os` and get nothing back — the wiring was judged the right trade, but
-someone should measure it.
-
-## Triage 2026-09-13
-Attempted to re-verify `test/01_unit/app/cli/cli_os_spec.spl` (the one
-remaining 6/7 row from 2026-09-12): timed out at 120s with no verdict line
-on this shared, loaded host (`rc=124`). Not conclusive evidence of a
-regression — the 2026-09-12 run completed and this pass's host is under
-concurrent multi-session load. Rows 1, 2 and 4 not re-run this pass (no
-reason to expect them to have moved). Status left as PARTIALLY-RESOLVED
-per 2026-09-12; no code change attempted.
-## Re-check 2026-09-13 (BUGFIX-12 shard 22)
-
-Confirmed by content: `handle_os_build_inline` (line 407) and
-`handle_os_inline` (line 445) are both still present in
-`src/app/cli/_CliMain/args_and_os_commands.spl`, matching the 2026-09-12
-fix. The doc's own 2026-09-12 triage already established the one remaining
-`cli_os_spec` failure is NOT this bug — it is the separately-tracked
-`bare_name_registry_collision_trigger_conditions_2026-07-30.md` (still present
-in the tree). All four originally-listed specs are accounted for: 3 fully
-green, 1 blocked by a different, already-filed bug.
-
-Status: RESOLVED (2026-09-13) — all four specs' `app.*` module-resolution
-failures fixed; the residual `cli_os_spec` failure is out of this doc's scope
-per the 2026-09-12 finding, tracked in
-`bare_name_registry_collision_trigger_conditions_2026-07-30.md`.

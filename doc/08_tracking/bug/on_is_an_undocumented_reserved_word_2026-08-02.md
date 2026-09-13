@@ -1,5 +1,43 @@
 # `on` is an undocumented reserved word — `val on = ...` fails to parse
 
+## Re-measured 2026-09-13 — still OPEN, but the failure has MOVED
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe`, `simple run <file>`
+(Windows). The reported repro no longer fails the reported way — but `on` is
+still unusable, so this entry stays OPEN. Do not close it on the old repro.
+
+What changed: the diagnostic is no longer
+`Unexpected token: expected pattern, found On` at the *binding*. `val on = 1`
+now binds fine. The parser now dies at the *use* site, claiming `on` starts an
+AOP advice declaration:
+
+```
+Unexpected token: expected pointcut expression 'pc{...}', found <next token>
+```
+
+Measured matrix (each a whole 2-4 line program, top level unless noted):
+
+| program | result |
+|---|---|
+| `fn main() -> i64:` / `val on = 1` / `print "{on}"` / `0` + `main()` | **prints 1 — works** |
+| `val on = 1` / `print on` | FAIL `expected pointcut expression 'pc{...}', found Newline` |
+| `var on = 5` / `print on + 1` | FAIL `... found Plus` |
+| `var on = 5` / `on = on + 1` / `print on` | FAIL `... found Newline` |
+| `fn f(on: i64) -> i64:` / `on + 1` | FAIL `... found Plus` |
+
+So: `on` is accepted as a *binder* (and inside `{...}` string interpolation,
+which is lexed separately), and rejected everywhere it is *read*. That is a
+worse state than reported, not a better one — the original error at least
+pointed at `on`; the new one names `pc{...}`, an AOP construct the user never
+wrote, so it is even further from naming the cause.
+
+The requested resolutions below are unchanged and still apply; item 2 (say so
+in the diagnostic) is now strictly more urgent.
+
+**Not fixed here:** the parser lives in `src/compiler_rust/**` for this lane,
+which was off-limits during this pass (concurrent bootstrap).
+
+
 - **Filed:** 2026-08-02
 - **Status:** OPEN
 - **Severity:** low (clear compile error, no silent miscompile) but it costs a
@@ -52,24 +90,3 @@ The grammar position that consumes `on` was not identified — it does not appea
 as a keyword string in the pure-Simple lexer or in
 `src/compiler_rust/compiler/src/lexer/token.rs` under a plain `"on"` match, so
 whatever introduces the `On` token is indirect. Finding it is part of the fix.
-
-## Re-check 2026-09-13
-
-Not reproducible: `val on = 1` now parses and runs cleanly on the deployed
-seed:
-
-```
-fn main() -> i64:
-    val on = 1
-    print "{on}"
-    0
-```
-prints `1`. `on` is no longer hard-reserved — confirmed in source too:
-`src/compiler/10.frontend/core/tokens.spl:436-441` explicitly documents `on`
-as NOT globally reserved (fixed by a prior bug,
-`doc/08_tracking/bug/aop_on_hard_keyword_blocks_identifier_2026-07-25.md`),
-recognized as a soft keyword only at the module-body AOP-advice dispatch
-site (`current_ident_is_on_advice_decl()` in `enum_module_body.spl`), exactly
-resolution option 1 this doc requested ("make `on` a soft keyword").
-
-- Status: CLOSED (2026-09-13) — already fixed (prior bug aop_on_hard_keyword_blocks_identifier_2026-07-25), verified not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)
