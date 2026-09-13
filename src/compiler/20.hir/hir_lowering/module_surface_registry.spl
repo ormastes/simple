@@ -380,31 +380,56 @@ fn module_surface_promote_fields(surface: ModuleSurface):
     runs `module_surfaces_retained_alignment_error` AFTER
     `_sffi_transient_array_scope_end()`, which reads the names back out of the
     dead scope — the real post-condition, at the only moment it means anything.
+
+    Linux S3-1 (2026-09-14, doc/08_tracking/bug/
+    stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md): on the real
+    832-surface `bootstrap_main.spl` closure the Stage-2 native candidate hung
+    for 45+ minutes at ~46 GB RSS, one core pegged. Two live `gdb -batch -ex
+    run -ex bt` captures both stopped inside `rt_transient_heap_promote` ->
+    `TRANSIENT_HEAP_SCOPE.with(..)` -> `Vec<RuntimeValue>::retain(..)`
+    (src/compiler_rust/runtime/src/value/collections.rs:2078):
+    `TransientHeapScope.objects` is a `Vec` of every transient allocation
+    tracked since the scope began, and EVERY promote call does a full O(N)
+    linear scan+filter over it. That per-call cost lives in the Rust runtime
+    and cannot be fixed from here. What this file DOES control is the call
+    COUNT: 24 individual promote calls per surface, each paying that O(N)
+    scan, is 24x more expensive than it needs to be. `module_surface_promote`
+    (a few lines above) already proves the batched shape is safe for exactly
+    this promote function: collect many roots into ONE `[Any]` array and
+    promote it once — the reachability walk inside `rt_transient_heap_promote`
+    already recurses into an array's elements via `transient_heap_children`,
+    so a single call over an array of all 24 fields promotes the same set of
+    values a single call would from any one of them. This cuts calls/surface
+    from 24 to 1 (23,296 -> 832 across the real closure, once
+    `module_surface_promote_freeze_names` below does the same). Pinned by
+    `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`.
     """
-    val _composite_names = rt_transient_heap_promote(surface.composite_names)
-    val _enum_names = rt_transient_heap_promote(surface.enum_names)
-    val _trait_names = rt_transient_heap_promote(surface.trait_names)
-    val _callable_names = rt_transient_heap_promote(surface.callable_names)
-    val _type_alias_names = rt_transient_heap_promote(surface.type_alias_names)
-    val _constant_names = rt_transient_heap_promote(surface.constant_names)
-    val _composite_values = rt_transient_heap_promote(surface.composite_values)
-    val _enum_values = rt_transient_heap_promote(surface.enum_values)
-    val _trait_values = rt_transient_heap_promote(surface.trait_values)
-    val _callable_values = rt_transient_heap_promote(surface.callable_values)
-    val _type_alias_values = rt_transient_heap_promote(surface.type_alias_values)
-    val _constant_values = rt_transient_heap_promote(surface.constant_values)
-    val _import_target_indices = rt_transient_heap_promote(surface.import_target_indices)
-    val _import_target_names = rt_transient_heap_promote(surface.import_target_names)
-    val _import_resolution_traces = rt_transient_heap_promote(surface.import_resolution_traces)
-    val _import_item_offsets = rt_transient_heap_promote(surface.import_item_offsets)
-    val _import_item_names = rt_transient_heap_promote(surface.import_item_names)
-    val _import_item_aliases = rt_transient_heap_promote(surface.import_item_aliases)
-    val _import_item_has_alias = rt_transient_heap_promote(surface.import_item_has_alias)
-    val _export_route_sources = rt_transient_heap_promote(surface.export_route_sources)
-    val _export_route_locals = rt_transient_heap_promote(surface.export_route_locals)
-    val _export_route_target_indices = rt_transient_heap_promote(surface.export_route_target_indices)
-    val _export_route_target_names = rt_transient_heap_promote(surface.export_route_target_names)
-    val _export_route_is_glob = rt_transient_heap_promote(surface.export_route_is_glob)
+    var fields: [Any] = []
+    fields.push(surface.composite_names)
+    fields.push(surface.enum_names)
+    fields.push(surface.trait_names)
+    fields.push(surface.callable_names)
+    fields.push(surface.type_alias_names)
+    fields.push(surface.constant_names)
+    fields.push(surface.composite_values)
+    fields.push(surface.enum_values)
+    fields.push(surface.trait_values)
+    fields.push(surface.callable_values)
+    fields.push(surface.type_alias_values)
+    fields.push(surface.constant_values)
+    fields.push(surface.import_target_indices)
+    fields.push(surface.import_target_names)
+    fields.push(surface.import_resolution_traces)
+    fields.push(surface.import_item_offsets)
+    fields.push(surface.import_item_names)
+    fields.push(surface.import_item_aliases)
+    fields.push(surface.import_item_has_alias)
+    fields.push(surface.export_route_sources)
+    fields.push(surface.export_route_locals)
+    fields.push(surface.export_route_target_indices)
+    fields.push(surface.export_route_target_names)
+    fields.push(surface.export_route_is_glob)
+    val _promoted = rt_transient_heap_promote(fields)
 
 fn module_surface_promote_scope_sentinel() -> bool:
     """Promote a freshly built carrier to tell a scope/linkage fault from a field fault.
@@ -468,7 +493,7 @@ fn module_surface_promote_freeze_names(surface: ModuleSurface):
     `preferred_registry_name` with FRESHLY allocated strings, and it runs inside
     the registry retention scope. The surface's own raw allocation belongs to an
     older, already-ended per-file scope, so the graph walk inside
-    `rt_transient_heap_promote(registry)` never reaches those strings: ending the
+    `rt_transient_heap_promote` applied to `registry` never reaches those strings: ending the
     scope free()s them and every later reader holds a dangling handle. That is
     the Stage-3 `phase3:hir:validate:value_struct_layouts` SIGSEGV — the freed
     `logical_name` is what `validation_module_keys` carries, so the validator
@@ -499,6 +524,32 @@ fn module_surface_promote_freeze_names(surface: ModuleSurface):
     `module_surfaces_retained_alignment_error` AFTER
     `_sffi_transient_array_scope_end()`, and that check reads these names back
     from the dead scope (module_surface_registry_index.spl:321).
+
+    Linux S3-1 (2026-09-14, BOOT-18): briefly batched into one
+    `rt_transient_heap_promote` call over a constructed `[Any]` array, the same
+    shape as `module_surface_promote_fields` above (each call pays an O(N)
+    native scan over the whole transient-scope tracking vector — see
+    doc/08_tracking/bug/stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md
+    — so 4 calls/surface instead of 1 is 4x more of that cost than needed).
+
+    Reverted (BOOT-19, 2026-09-14): `scripts/check/check-transient-scope-text-field-promotion.shs`
+    is a static push-gate ratchet against the exact SIGSEGV above
+    (doc/08_tracking/bug/stage3_module_surface_freeze_names_freed_value_struct_layouts_segv_2026-09-06.md)
+    and it greps the committed source for four literal
+    `rt_transient_heap_promote` calls, one per `surface.<field>`; it has no
+    allowlist/baseline and is deliberately not semantic, so the batched
+    `names.push(...)` shape reads as "not promoted" even though every field is
+    still reachable through the array. The batching precedent
+    (`module_surface_promote`/`module_surface_promote_fields`) is proven safe
+    only for arrays of ARRAYS — `transient_heap_children` recursing into a
+    scalar `text` element inside a scope-promote array was never exercised by
+    either BOOT-18 Stage-3 run (both stopped earlier, at the unrelated S3-2 HIR
+    import-surface defect, before reaching this phase's real 832-surface
+    scale). The four calls below are direct again, keeping the gate's proven
+    literal safety net; the load-bearing 24->1 cut in
+    `module_surface_promote_fields` above is untouched. This is 4 calls/surface
+    here (3,328 total) instead of 1 (832 total) — still 5.6x below the 28
+    calls/surface (23,296 total) this file carried before S3-1.
     """
     val _logical = rt_transient_heap_promote(surface.logical_name)
     val _canonical = rt_transient_heap_promote(surface.canonical_name)

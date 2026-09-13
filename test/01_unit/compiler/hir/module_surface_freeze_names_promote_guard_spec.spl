@@ -17,6 +17,25 @@
 # 0x782ee81 and all three answer 1.
 #
 # See doc/08_tracking/bug/stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md
+#
+# Updated (Linux S3-1, 2026-09-14): `module_surface_promote_fields` now
+# batches its retained ARRAY fields into one `[Any]` array and calls
+# `rt_transient_heap_promote` once instead of once per field
+# (doc/08_tracking/bug/stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md
+# — each call pays an O(N) native scan over the whole transient-scope
+# tracking vector, so 24 calls/surface was 24x more of that cost than
+# needed). Its positive assertion below is retargeted to the new
+# `fields.push(...)` shape.
+#
+# `module_surface_promote_freeze_names` was briefly batched the same way
+# (BOOT-18) and then reverted (BOOT-19, same date): the push gate
+# `scripts/check/check-transient-scope-text-field-promotion.shs` greps the
+# committed source for the four literal `rt_transient_heap_promote(surface.<field>)`
+# call sites, has no baseline/allowlist, and cannot be edited from this lane —
+# see `module_surface_promote_field_batching_spec.spl`'s header for the full
+# reasoning. Its positive assertion below is back to the direct-call shape.
+# The negative guards against reinstating the repeat-promote post-condition
+# are unchanged and still hold either way.
 use std.spec
 use std.io.{file_read}
 
@@ -41,6 +60,9 @@ describe "freeze-name promotion does not gate on a repeat promote":
         val gates_on_repeat_promote = registry.contains(
             "if rt_transient_heap_promote(surface.logical_name) or")
         expect(gates_on_repeat_promote).to_be_false()
+        val gates_on_repeat_promote_names = registry.contains(
+            "if rt_transient_heap_promote(names) or")
+        expect(gates_on_repeat_promote_names).to_be_false()
 
     it "records why the repeat-promote premise is unsound":
         val registry = file_read(REGISTRY)
@@ -62,6 +84,7 @@ describe "freeze-name promotion does not gate on a repeat promote":
         expect(registry.len() > 4000).to_be_true()
         expect(registry).to_contain("fn module_surface_promote_fields(")
         expect(registry).to_contain(
-            "rt_transient_heap_promote(surface.composite_names)")
+            "fields.push(surface.composite_names)")
+        expect(registry).to_contain("rt_transient_heap_promote(fields)")
         expect(registry.contains("fn module_surface_promote_field(")).to_be_false()
         expect(registry.contains("val _first = rt_transient_heap_promote(value)")).to_be_false()
