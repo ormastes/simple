@@ -1,0 +1,364 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+
+# Seed interpreter OWNED-RECEIVER METHOD CALL budget and parity.
+#
+# `obj.method(a, b)` on a class instance is the most frequent interpreted shape
+# in `src/lib/common/**` (21,601 call sites measured 2026-09-13, against 10,859
+# `[i]` reads and 5,774 `.push(`). It is dispatched by the owned-receiver kernel
+# in `interpreter_helpers/patterns.rs` (statement context) and
+# `interpreter/expr/calls.rs` (expression context), both of which land in
+# `interpreter_method/special/execution.rs::find_and_exec_method_with_self_owned_values`.
+#
+# Measured on this host at n = 2,000,000 on child USER CPU time (wall clock does
+# not survive its own control here — PERF-6 recorded in-process ratios of 0.85
+# and 0.96 for a shape doing strictly MORE work): a script-local `me` call cost
+# ~2,130 ns/iteration and the same call on a class defined in an IMPORTED module
+# ~2,950 ns, against a ~1,100 ns generic-walk floor.
+#
+# Per call, that kernel used to:
+#   * probe the class/impl method tables TWICE — once in a
+#     `object_method_exists`-shaped pre-check made before the receiver could be
+#     taken out of its slot, then the identical lookup again inside the executor;
+#   * allocate FOUR owned `String` copies — the pre-check's `class.clone()`, the
+#     frame's `class_name.to_string()`, the `"self"` key, and the receiver's
+#     name for the write-back pair.
+#
+# This spec pins BOTH halves of removing that:
+#
+#   budget    - one dispatch per call, ONE method-table probe per dispatch, and
+#               a bounded number of owned `String` allocations per dispatch,
+#               pinned as COUNTS because wall-clock ratios do not survive this
+#               host;
+#   semantics - seven call behaviours the kernel exists to provide, byte-identical
+#               to the values the pre-change seed produced.
+#
+# The semantics oracles are literal values recorded from the BASE seed
+# (sha256 6903816380d27188..., built from origin/main d522cc98da2) before the
+# change. A candidate that disagrees with any of them has changed behaviour,
+# which is the thing this spec exists to forbid.
+#
+# Non-vacuity: every child runs under SIMPLE_PERF_COUNTERS=1 with
+# SIMPLE_PERF_COUNTERS_OUT. A run whose counters file has no
+# `interp-perf-counters:` header, whose RESULT line is missing, whose child
+# exited non-zero, or whose `MECALL_CALLS` row is absent, FAILS — it is never
+# silently treated as a pass. That is what makes this spec RED on a seed that
+# predates the counters.
+
+use std.spec.step
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Iterations in budget_owned_call.spl. Must track that fixture.
+val BUDGET_N = 200000
+val FIXTURES = "test/05_perf/interp/fixtures/owned_call"
+
+# --- process plumbing -------------------------------------------------------
+
+fn sh(script: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", script])
+
+fn path_is_exec(p: text) -> bool:
+    if p.len() == 0:
+        return false
+    val (_o, _e, code) = sh("test -x '" + p + "'")
+    code == 0
+
+# Resolve the interpreter under test. `SIMPLE_PERF_SELF_BIN` wins so a lane can
+# point this spec at the candidate seed it just built; otherwise the usual
+# in-tree locations are probed. Returns "" when nothing is runnable, which the
+# scenarios turn into a FAIL rather than a skip.
+#
+# TRAP (PERF-6, 2026-09-13): the test runner DROPS `SIMPLE_PERF_SELF_BIN` in
+# DIRECTORY mode while propagating it in single-file mode, so a directory run
+# falls through to whatever `bin/simple` points at — in a fresh worktree a
+# hand-linked DEPLOYED seed that may predate the change under test. Every
+# scenario therefore prints the resolved binary before asserting.
+#
+# NOTE: `{` and `}` inside a Simple text literal are INTERPOLATION, so no shell
+# snippet in this file may use `${VAR}`. Use `$VAR` and `sed -E`.
+fn simple_binary() -> text:
+    val (env_out, _e, _c) = sh("printf %s \"$SIMPLE_PERF_SELF_BIN\"")
+    val override = env_out.trim()
+    if path_is_exec(override):
+        return override
+    # The runner BINDS child execution to the binary that invoked it and
+    # publishes that choice as `SIMPLE_BINARY` (test_runner_single.spl, the
+    # `child binary:` line). Reading it second means a directory-mode run —
+    # which drops `SIMPLE_PERF_SELF_BIN` — still measures the seed the suite was
+    # actually invoked with (`<seed> test <dir>`), instead of falling through to
+    # the deployed `bin/simple`. Note that `SIMPLE_BINARY=<private seed>
+    # bin/simple test` does NOT work: the runner refuses a binary that is not the
+    # canonical invoking candidate. Invoke the seed itself.
+    val (bin_out, _be, _bc) = sh("printf %s \"$SIMPLE_BINARY\"")
+    val runner_binary = bin_out.trim()
+    if path_is_exec(runner_binary):
+        return runner_binary
+    val candidates = [
+        "src/compiler_rust/target/release/simple",
+        "bin/release/x86_64-unknown-linux-gnu/simple",
+        "bin/release/aarch64-unknown-linux-gnu/simple",
+        "bin/release/linux-x86_64/simple",
+        "bin/simple",
+    ]
+    for c in candidates:
+        if path_is_exec(c):
+            return c
+    ""
+
+struct RunOut:
+    ok: i64
+    elapsed_us: i64
+    acc: text
+    iters: i64
+    header: i64
+    calls: i64
+    lookups: i64
+    strallocs: i64
+    containers: i64
+    rc: i64
+    raw: text
+
+# Run one fixture in a child process with the perf counters armed and bring back
+# nine machine-readable fields.
+#
+# All extraction happens in the CHILD SHELL, and every numeric field is emitted
+# as a digit string with -1 as the "not found" sentinel, because `text.to_i64()`
+# in this seed NEVER fails (it returns 0 for "" and "abc" and the character code
+# for a one-character string), so a `?? default` fallback is dead code and an
+# unparseable field would arrive as a plausible number. See
+# doc/08_tracking/bug/text_to_i64_never_nil_2026-09-12.md. The separate `ok`
+# flag is the only thing this spec trusts to mean "the child produced a RESULT".
+fn run_fixture(binary: text, fixture: text) -> RunOut:
+    val script = "d=$(mktemp -d) || exit 9; "
+        + "SIMPLE_EXECUTION_MODE=interpreter SIMPLE_PERF_COUNTERS=1 "
+        + "SIMPLE_PERF_COUNTERS_OUT=\"$d/c.txt\" "
+        + "timeout 900 '" + binary + "' run '" + fixture + "' > \"$d/o.txt\" 2>\"$d/e.txt\"; rc=$?; "
+        + "line=$(grep -m1 '^RESULT ' \"$d/o.txt\" 2>/dev/null); "
+        + "el=$(printf '%s' \"$line\" | sed -nE 's/.*elapsed_us=(-?[0-9]+).*/\\1/p'); "
+        + "ac=$(printf '%s' \"$line\" | sed -nE 's/.*acc=([-0-9:a-z]+).*/\\1/p'); "
+        + "it=$(printf '%s' \"$line\" | sed -nE 's/.*iters=(-?[0-9]+).*/\\1/p'); "
+        + "hd=$(grep -c 'interp-perf-counters:' \"$d/c.txt\" 2>/dev/null); "
+        + "ca=$(sed -nE 's/^ +MECALL_CALLS +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "lk=$(sed -nE 's/^ +MECALL_METHOD_LOOKUPS +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "sa=$(sed -nE 's/^ +MECALL_STRING_ALLOCS +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "co=$(sed -nE 's/^ +MECALL_CONTAINER_ALLOCS +([0-9]+) *$/\\1/p' \"$d/c.txt\" 2>/dev/null); "
+        + "ok=1; "
+        + "[ -n \"$el\" ] || ok=0; [ -n \"$ac\" ] || ok=0; [ -n \"$it\" ] || ok=0; "
+        + "[ -n \"$el\" ] || el=-1; [ -n \"$ac\" ] || ac=-1; [ -n \"$it\" ] || it=-1; "
+        + "[ -n \"$hd\" ] || hd=-1; [ -n \"$ca\" ] || ca=-1; "
+        + "[ -n \"$lk\" ] || lk=-1; [ -n \"$sa\" ] || sa=-1; [ -n \"$co\" ] || co=-1; "
+        + "printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' \"$ok\" \"$el\" \"$ac\" \"$it\" \"$hd\" \"$ca\" \"$lk\" \"$sa\" \"$co\" \"$rc\"; "
+        + "rm -rf \"$d\""
+    val (out, _err, _code) = sh(script)
+    val parts = out.trim().split("|")
+    if parts.len() != 10:
+        return RunOut(ok: 0, elapsed_us: -1, acc: "", iters: -1, header: -1, calls: -1,
+            lookups: -1, strallocs: -1, containers: -1, rc: -1, raw: out)
+    val ok = parts[0].trim().to_i64() ?? -1
+    val el = parts[1].trim().to_i64() ?? -1
+    val it = parts[3].trim().to_i64() ?? -1
+    val hd = parts[4].trim().to_i64() ?? -1
+    val ca = parts[5].trim().to_i64() ?? -1
+    val lk = parts[6].trim().to_i64() ?? -1
+    val sa = parts[7].trim().to_i64() ?? -1
+    val co = parts[8].trim().to_i64() ?? -1
+    val rc = parts[9].trim().to_i64() ?? -1
+    RunOut(ok: ok, elapsed_us: el, acc: parts[2].trim(), iters: it, header: hd, calls: ca,
+        lookups: lk, strallocs: sa, containers: co, rc: rc, raw: out)
+
+# Run a fixture that is EXPECTED to fail, and bring back its exit code plus
+# whether the diagnostic the base seed produced is still produced. An error path
+# that stops erroring is a parity break exactly like a changed value.
+struct ErrOut:
+    rc: i64
+    matched: i64
+    raw: text
+
+fn run_error_fixture(binary: text, fixture: text, needle: text) -> ErrOut:
+    val script = "d=$(mktemp -d) || exit 9; "
+        + "SIMPLE_EXECUTION_MODE=interpreter "
+        + "timeout 900 '" + binary + "' run '" + fixture + "' > \"$d/o.txt\" 2>\"$d/e.txt\"; rc=$?; "
+        + "m=$(cat \"$d/o.txt\" \"$d/e.txt\" 2>/dev/null | grep -c -- '" + needle + "'); "
+        + "[ -n \"$m\" ] || m=-1; "
+        + "printf '%s|%s' \"$rc\" \"$m\"; rm -rf \"$d\""
+    val (out, _err, _code) = sh(script)
+    val parts = out.trim().split("|")
+    if parts.len() != 2:
+        return ErrOut(rc: -1, matched: -1, raw: out)
+    ErrOut(rc: parts[0].trim().to_i64() ?? -1, matched: parts[1].trim().to_i64() ?? -1, raw: out)
+
+# Fail-closed gate every scenario runs before asserting anything else: the child
+# must have exited 0, emitted a counters block, reported the iteration count the
+# fixture was written for, and reached the owned-receiver kernel at least once.
+# A binary whose counters report has no MECALL_CALLS row (`calls == -1`) fails
+# here rather than passing vacuously.
+fn assert_ran(tag: text, r: RunOut, expect_iters: i64):
+    print "[perf] {tag}: ok={r.ok} rc={r.rc} iters={r.iters} elapsed_us={r.elapsed_us} header={r.header} CALLS={r.calls} LOOKUPS={r.lookups} STRALLOCS={r.strallocs} CONTAINERS={r.containers} acc={r.acc}"
+    expect(r.raw.len() > 0).to_equal(true)
+    expect(r.ok).to_equal(1)
+    expect(r.rc).to_equal(0)
+    expect(r.header).to_equal(1)
+    expect(r.iters).to_equal(expect_iters)
+    expect(r.calls > 0).to_equal(true)
+    expect(r.lookups >= 0).to_equal(true)
+    expect(r.strallocs >= 0).to_equal(true)
+    expect(r.containers >= 0).to_equal(true)
+
+fn assert_semantics(binary: text, fixture: text, tag: text, expect_iters: i64, oracle: text):
+    val r = run_fixture(binary, FIXTURES + "/" + fixture)
+    assert_ran(tag, r, expect_iters)
+    print "[perf] {tag}: acc={r.acc} oracle={oracle}"
+    expect(r.acc.len() > 0).to_equal(true)
+    expect(r.acc).to_equal(oracle)
+
+describe "seed interpreter: an owned-receiver method call does bounded per-call work":
+    # @manual scenario evidence
+    it "dispatches once, probes the method table once, and allocates a bounded number of strings":
+        step("dispatches once, probes the method table once, and allocates a bounded number of strings")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        val r = run_fixture(binary, FIXTURES + "/budget_owned_call.spl")
+        assert_ran("budget_owned_call", r, BUDGET_N)
+        expect(r.acc).to_equal("200000")
+        # THE REGRESSION LOCK IS A COUNT, NOT A TIME. One dispatch per call...
+        expect(r.calls >= BUDGET_N).to_equal(true)
+        expect(r.calls <= BUDGET_N + 1000).to_equal(true)
+        # ...ONE method-table probe per dispatch. The pre-change kernel probed
+        # twice (pre-check, then the same lookup inside the executor), so a
+        # change that reintroduces the duplicate lookup lands at 2N and fails.
+        expect(r.lookups <= r.calls).to_equal(true)
+        expect(r.lookups > 0).to_equal(true)
+        # ...and at most THREE owned Strings allocated per dispatch on this path.
+        # The pre-change kernel allocated FOUR: the frame's `"self"` key, the
+        # self object's class name, the receiver's own name for the write-back
+        # pair — and a fourth, `class.clone()`, whose only job was to carry the
+        # class name across the `env.remove` the borrow checker forced. That
+        # fourth is gone; the other three are irreducible while `Env` is keyed by
+        # `String`, `Value::Object` owns its class name, and the write-back pair
+        # is `(String, Value)`. Three is therefore the achieved number, stated as
+        # such rather than as an aspiration: a change that reintroduces a fourth
+        # fails here.
+        expect(r.strallocs <= r.calls * 3).to_equal(true)
+        expect(r.strallocs >= r.calls).to_equal(true)
+        # A loose absolute ceiling that catches a catastrophic regression only:
+        # 20 us/call, against the 2.1-3.4 us/call measured across every sample
+        # on both seeds. The headroom is deliberately large — this host showed a
+        # 2.2x spread between two samples of the SAME binary — so this is a
+        # catastrophe detector, not a budget. The budget is the counts above.
+        expect(r.elapsed_us <= BUDGET_N * 20).to_equal(true)
+
+    # @manual scenario evidence
+    it "a wholly-positional call builds no argument-routing containers at all":
+        step("a wholly-positional call builds no argument-routing containers at all")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        val r = run_fixture(binary, FIXTURES + "/budget_owned_call_args.spl")
+        assert_ran("budget_owned_call_args", r, BUDGET_N)
+        expect(r.acc).to_equal("600000")
+        expect(r.calls >= BUDGET_N).to_equal(true)
+        # THE RATCHET. `c.add2(1, 2)` is wholly positional with exactly as many
+        # arguments as parameters, so argument `i` fills parameter `i` and none
+        # of the routing containers is needed: not the `Vec<&Parameter>` of
+        # bindable parameters, not the `Vec<Option<Value>>` of routed values, and
+        # not the write-back side's second `Vec<&Parameter>`. Three per call
+        # before; zero now. A change that drops the positional fast path lands at
+        # 3 * BUDGET_N and fails here — which is the point, because at ~275 ns per
+        # argument the TIME difference is below this host's measurement noise
+        # while the COUNT is exact.
+        expect(r.containers).to_equal(0)
+        # Two arguments add two owned String keys to the three the call itself
+        # allocates (the "self" key, the self object's class name, the receiver's
+        # name for the write-back pair).
+        expect(r.strallocs <= r.calls * 5).to_equal(true)
+        # ...and a lower bound, so a counter that silently stops being bumped
+        # fails here instead of passing the ceiling vacuously.
+        expect(r.strallocs >= r.calls * 3).to_equal(true)
+        expect(r.lookups <= r.calls).to_equal(true)
+
+describe "seed interpreter: owned-receiver call semantics are unchanged by the budget fix":
+    # @manual scenario evidence
+    it "a me method mutates the caller's receiver and a plain fn method does not":
+        step("a me method mutates the caller's receiver and a plain fn method does not")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        assert_semantics(binary, "sem_self_mutation.spl", "sem_self_mutation", 10, "20:25")
+
+    # @manual scenario evidence
+    it "default parameter values are evaluated for the arguments not supplied":
+        step("default parameter values are evaluated for the arguments not supplied")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        assert_semantics(binary, "sem_defaults.spl", "sem_defaults", 3, "111:214:220")
+
+    # @manual scenario evidence
+    it "labelled arguments bind by name, out of order and mixed with a positional one":
+        step("labelled arguments bind by name, out of order and mixed with a positional one")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        assert_semantics(binary, "sem_labelled.spl", "sem_labelled", 2, "43:12")
+
+    # @manual scenario evidence
+    it "a container argument passed by identifier is written back into the caller":
+        step("a container argument passed by identifier is written back into the caller")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        # Both spellings: positional `f.fill(buf)` and labelled `f.fill(xs: buf2)`.
+        # The labelled one is why the write-back loop re-resolves the parameter by
+        # name instead of zipping positionally.
+        assert_semantics(binary, "sem_container_writeback.spl", "sem_container_writeback", 2, "3:7:8:3:8")
+
+    # @manual scenario evidence
+    it "a chained call on a temporary does not overwrite the root binding":
+        step("a chained call on a temporary does not overwrite the root binding")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        assert_semantics(binary, "sem_chained.spl", "sem_chained", 3, "3:5:3")
+
+    # @manual scenario evidence
+    it "a module global mutated inside a method body is live for the caller after the call":
+        step("a module global mutated inside a method body is live for the caller after the call")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        # This is the behaviour the frame's global publish/sync exists for: four
+        # calls each add 3 to a module global the caller reads afterwards.
+        assert_semantics(binary, "sem_module_global.spl", "sem_module_global", 4, "12")
+
+    # @manual scenario evidence
+    it "too many arguments are still rejected with the same diagnostic":
+        step("too many arguments are still rejected with the same diagnostic")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        val e = run_error_fixture(binary, FIXTURES + "/sem_error_arity.spl", "expects 1 argument")
+        print "[perf] sem_error_arity: rc={e.rc} matched={e.matched} raw={e.raw}"
+        expect(e.raw.len() > 0).to_equal(true)
+        expect(e.rc).to_equal(1)
+        expect(e.matched).to_equal(1)
+
+    # @manual scenario evidence
+    it "a variadic parameter on a method is rejected exactly as the base seed rejects it":
+        step("a variadic parameter on a method is rejected exactly as the base seed rejects it")
+        val binary = simple_binary()
+        expect(path_is_exec(binary)).to_equal(true)
+        print "[perf] binary={binary}"
+        # RECORDED BASE BEHAVIOUR, NOT AN ENDORSEMENT: `me addall(self, nums...)`
+        # called as `s.addall(1, 2, 3)` fails with "expects 1 argument(s), but 3
+        # were provided", while the same variadic on a FREE function works
+        # (`addall(1,2,3)` -> 6). The owned-receiver binder has no variadic case.
+        # Filed as doc/08_tracking/bug/interpreter_variadic_param_unsupported_on_class_methods_2026-09-13.md;
+        # pinned here so the budget fix neither silently repairs nor silently
+        # worsens it.
+        val e = run_error_fixture(binary, FIXTURES + "/sem_varargs.spl", "expects 1 argument")
+        print "[perf] sem_varargs: rc={e.rc} matched={e.matched} raw={e.raw}"
+        expect(e.raw.len() > 0).to_equal(true)
+        expect(e.rc).to_equal(1)
+        expect(e.matched).to_equal(1)
