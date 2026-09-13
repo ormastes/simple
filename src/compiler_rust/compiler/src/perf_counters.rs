@@ -131,6 +131,41 @@ counters!(
     FILTERED_DICT_EVICTIONS,
     FILTERED_DICT_PINNED_SKIPS,
     FILTERED_DICT_RETAINED_MAX,
+    // --- owned-receiver method call (`obj.m(a, b)` on a class instance) ---
+    // The most frequent interpreted shape in src/lib/common (21,601 call sites
+    // measured 2026-09-13). CALLS counts dispatches through the owned-receiver
+    // kernel; the other two count per-call work that kernel used to REPEAT, so a
+    // change that reintroduces it is visible as a COUNT and not only as a time —
+    // which matters because wall-clock ratios do not survive this host.
+    MECALL_CALLS,
+    // Class/impl method-table probes (`lookup_class_method_index` /
+    // `lookup_impl_method_index`). Was 2 per owned-receiver call: an
+    // existence pre-check made before the receiver could be taken out of its
+    // slot, then the identical lookup again inside the executor. The resolved
+    // method is now threaded through, so this tracks MECALL_CALLS.
+    MECALL_METHOD_LOOKUPS,
+    // Owned `String` copies allocated per owned-receiver call: the frame's
+    // `"self"` key, the self object's class name, and the receiver's own name
+    // for the write-back pair. The pre-change kernel allocated a FOURTH, a
+    // `class.clone()` whose only job was to carry the class name across the
+    // `env.remove` that the borrow checker forced — deleted by resolving the
+    // method under the same borrow.
+    MECALL_STRING_ALLOCS,
+    // Heap-allocating temporary CONTAINERS built per owned-receiver call while
+    // binding arguments and writing mutated container arguments back: a
+    // `Vec<&Parameter>` of the bindable parameters, a `Vec<Option<Value>>` of
+    // routed values, and a second `Vec<&Parameter>` on the write-back side —
+    // three per call, none of which survives the call, and all three of which a
+    // wholly-positional call (the overwhelmingly common spelling) needs for
+    // nothing. Counted, not just timed, because a per-call saving of this size
+    // sits below this host's measurement noise while being exactly reproducible
+    // as a COUNT.
+    //
+    // Reading the number: three per call before; **zero** now on the positional
+    // path, and **two** on the labelled/default path, whose routing still needs
+    // the parameter list and the routed-value slots. The write-back's vector is
+    // gone in both cases — it is an iterator now.
+    MECALL_CONTAINER_ALLOCS,
 );
 
 #[inline(always)]

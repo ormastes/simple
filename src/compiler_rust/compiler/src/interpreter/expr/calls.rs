@@ -9,7 +9,7 @@ use crate::value::Value;
 
 use super::super::{
     evaluate_call, evaluate_call_args, evaluate_method_call, exec_function_with_values, exec_method_function,
-    find_and_exec_method_with_self, find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums,
+    exec_resolved_method_with_self_owned_values, find_and_exec_method_with_self, resolve_object_method, ClassDef, Enums,
     set_owned_global, Env, FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
     MODULE_GLOBALS,
 };
@@ -163,14 +163,14 @@ pub(super) fn eval_call_expr(
                 // of deep-copying the dict on every call (value semantics are
                 // kept: a second owner still forces the copy-on-write clone).
                 let owned_call = match env.get(var_name) {
-                    Some(Value::Object { class, .. }) => object_method_exists(classes, impl_methods, class, method),
-                    _ => false,
+                    Some(Value::Object { class, .. }) => resolve_object_method(classes, impl_methods, class, method),
+                    _ => None,
                 };
-                if owned_call {
+                if let Some(resolved) = owned_call {
                     let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     if let Some(Value::Object { class, fields }) = env.remove(var_name) {
-                        let (result, new_self) = match find_and_exec_method_with_self_owned_values(
-                            method,
+                        let (result, new_self) = exec_resolved_method_with_self_owned_values(
+                            &resolved,
                             &arg_vals,
                             args,
                             &class,
@@ -180,10 +180,7 @@ pub(super) fn eval_call_expr(
                             classes,
                             enums,
                             impl_methods,
-                        )? {
-                            Some(pair) => pair,
-                            None => unreachable!("object_method_exists checked before the receiver was taken"),
-                        };
+                        )?;
                         write_back_identifier_receiver(env, var_name, new_self);
                         return Ok(Some(result));
                     }
@@ -289,13 +286,13 @@ pub(super) fn eval_call_expr(
                             fields: parent_fields, ..
                         }) => match parent_fields.get(field) {
                             Some(Value::Object { class: field_class, .. }) => {
-                                object_method_exists(classes, impl_methods, field_class, method)
+                                resolve_object_method(classes, impl_methods, field_class, method)
                             }
-                            _ => false,
+                            _ => None,
                         },
-                        _ => false,
+                        _ => None,
                     };
-                    if owned_field_call {
+                    if let Some(resolved) = owned_field_call {
                         let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                         let taken = match env.get_mut(var_name) {
                             Some(Value::Object {
@@ -308,8 +305,8 @@ pub(super) fn eval_call_expr(
                             fields: field_fields,
                         }) = taken
                         {
-                            let (result, updated_field) = match find_and_exec_method_with_self_owned_values(
-                                method,
+                            let (result, updated_field) = exec_resolved_method_with_self_owned_values(
+                                &resolved,
                                 &arg_vals,
                                 args,
                                 &field_class,
@@ -319,10 +316,7 @@ pub(super) fn eval_call_expr(
                                 classes,
                                 enums,
                                 impl_methods,
-                            )? {
-                                Some(pair) => pair,
-                                None => unreachable!("object_method_exists checked before the field was taken"),
-                            };
+                            )?;
                             if let Some(Value::Object {
                                 fields: parent_fields, ..
                             }) = env.get_mut(var_name)

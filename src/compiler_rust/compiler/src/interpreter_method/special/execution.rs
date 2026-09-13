@@ -21,6 +21,7 @@ thread_local! {
 }
 
 pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_name: &str) -> Option<usize> {
+    crate::perf_counters::bump(&crate::perf_counters::MECALL_METHOD_LOOKUPS, 1);
     METHOD_INDEX_CLASS.with(|cache| {
         // Fast path: probe with &str — avoids String allocation when entry exists (common case)
         {
@@ -52,6 +53,7 @@ pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_
 }
 
 pub fn lookup_impl_method_index(methods: &[Arc<FunctionDef>], class_name: &str, method_name: &str) -> Option<usize> {
+    crate::perf_counters::bump(&crate::perf_counters::MECALL_METHOD_LOOKUPS, 1);
     METHOD_INDEX_IMPL.with(|cache| {
         // Fast path: probe with &str — avoids String allocation when entry exists (common case)
         {
@@ -287,24 +289,58 @@ pub fn exec_function_with_self_return(
     Ok((result, updated_self))
 }
 
-/// True when `class` has a class-body or impl-block method named `method`.
-/// Used by the owned-receiver fast paths to decide BEFORE taking a receiver
-/// out of its slot that the call will dispatch here (and not to a lambda
-/// field, `method_missing`, or UFCS).
-pub fn object_method_exists(
+/// The class-body or impl-block method `class` dispatches `method` to, resolved
+/// ONCE.
+///
+/// The owned-receiver fast paths have to know, BEFORE the receiver can be taken
+/// out of its slot, that the call will dispatch here and not to a lambda field,
+/// `method_missing`, or UFCS. They used to answer that with a bool
+/// (`object_method_exists`) and then resolve the very same name AGAIN inside the
+/// executor — two probes of the thread-local method-index cache per call, each
+/// one a `HashMap<String, _>` lookup plus a `RefCell` borrow plus a second
+/// `HashMap<String, usize>` lookup inside it, on the single most frequent
+/// interpreted shape in `src/lib/common` (21,601 call sites). Returning the
+/// resolution collapses both probes into one.
+///
+/// The result borrows nothing: `Class` holds an `Arc<ClassDef>` (the same clone
+/// the executor already made) and `Impl` an `Arc<FunctionDef>`, so the caller
+/// can drop every borrow of `env`, `classes` and `impl_methods` — which is what
+/// lets the receiver be MOVED out of its slot afterwards — and the class name no
+/// longer has to be copied into an owned `String` to survive that move.
+pub enum ResolvedMethod {
+    Class(Arc<ClassDef>, usize),
+    Impl(Arc<FunctionDef>),
+}
+
+impl ResolvedMethod {
+    pub fn def(&self) -> &FunctionDef {
+        match self {
+            // The index was validated against `methods[idx].name` by
+            // `lookup_class_method_index` while the Arc was cloned, and an
+            // `Arc<ClassDef>` is immutable, so it cannot have gone stale here.
+            ResolvedMethod::Class(class_def, idx) => &class_def.methods[*idx],
+            ResolvedMethod::Impl(func) => func.as_ref(),
+        }
+    }
+}
+
+pub fn resolve_object_method(
     classes: &HashMap<String, Arc<ClassDef>>,
     impl_methods: &ImplMethods,
     class: &str,
     method: &str,
-) -> bool {
-    classes
-        .get(class)
-        .map(|cd| lookup_class_method_index(cd, class, method).is_some())
-        .unwrap_or(false)
-        || impl_methods
-            .get(class)
-            .map(|ms| lookup_impl_method_index(ms, class, method).is_some())
-            .unwrap_or(false)
+) -> Option<ResolvedMethod> {
+    if let Some(class_def) = classes.get(class) {
+        if let Some(idx) = lookup_class_method_index(class_def, class, method) {
+            return Some(ResolvedMethod::Class(Arc::clone(class_def), idx));
+        }
+    }
+    if let Some(methods) = impl_methods.get(class) {
+        if let Some(idx) = lookup_impl_method_index(methods, class, method) {
+            return Some(ResolvedMethod::Impl(Arc::clone(&methods[idx])));
+        }
+    }
+    None
 }
 
 /// MECALL-OWNED (2026-08-22): zero-copy `me` call with PRE-EVALUATED args.
@@ -337,6 +373,12 @@ pub fn exec_function_with_self_return_values(
     class_name: &str,
     fields: Arc<HashMap<String, Value>>,
 ) -> Result<(Value, Value), CompileError> {
+    crate::perf_counters::bump(&crate::perf_counters::MECALL_CALLS, 1);
+    // Two owned `String`s: the frame's `"self"` key and the self object's class
+    // name. Both are irreducible while `Env` is keyed by `String` and
+    // `Value::Object` owns its class name; the third is the receiver's own name
+    // at the call site, counted there.
+    crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 2);
     publish_and_repoint(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
     local_env.insert(
@@ -373,24 +415,41 @@ pub fn exec_function_with_self_return_values(
     sync_owned_captured_globals(func, &local_env, outer_env);
     let result = result?;
 
-    let non_self_params: Vec<_> = func.params.iter().filter(|p| p.name != "self").collect();
-    for (param, arg) in non_self_params.into_iter().zip(arg_exprs.iter()) {
-        // A labelled argument does not sit at its positional slot, so the zip
-        // above would write the container back into the wrong variable.
-        let param = match &arg.name {
-            Some(name) => match func.params.iter().find(|p| &p.name == name) {
-                Some(p) => p,
-                None => continue,
-            },
-            None => param,
-        };
-        if let simple_parser::ast::Expr::Identifier(var_name) = &arg.value {
-            if let Some(updated_arg) = local_env.get(&param.name).cloned() {
-                if matches!(
-                    updated_arg,
-                    Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
-                ) {
-                    outer_env.insert(var_name.clone(), updated_arg);
+    // Container write-back. Only an argument spelled as a bare identifier can be
+    // written back at all, so a call with none — the common case — needs no
+    // parameter list built for it. The list itself is an iterator now rather
+    // than a `Vec`: `zip` consumes the parameters positionally exactly as the
+    // collected vector did, and the labelled case still re-resolves the
+    // parameter by name below (a labelled argument does not sit at its
+    // positional slot, so zipping alone would write the container back into the
+    // wrong variable).
+    if arg_exprs
+        .iter()
+        .any(|arg| matches!(&arg.value, simple_parser::ast::Expr::Identifier(_)))
+    {
+        let non_self_params = func.params.iter().filter(|p| p.name != "self");
+        for (param, arg) in non_self_params.zip(arg_exprs.iter()) {
+            let param = match &arg.name {
+                Some(name) => match func.params.iter().find(|p| &p.name == name) {
+                    Some(p) => p,
+                    None => continue,
+                },
+                None => param,
+            };
+            if let simple_parser::ast::Expr::Identifier(var_name) = &arg.value {
+                // Decide on a BORROW, then clone only the value that is
+                // actually written back: the pre-change shape cloned every
+                // identifier argument's value just to ask what kind it was, and
+                // threw the clone away for every scalar.
+                let is_container = matches!(
+                    local_env.get(&param.name),
+                    Some(Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_))
+                );
+                if is_container {
+                    if let Some(updated_arg) = local_env.get(&param.name).cloned() {
+                        crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
+                        outer_env.insert(var_name.clone(), updated_arg);
+                    }
                 }
             }
         }
@@ -403,13 +462,17 @@ pub fn exec_function_with_self_return_values(
     Ok((result, updated_self))
 }
 
-/// Owned-receiver dispatch with pre-evaluated args; see
-/// `exec_function_with_self_return_values`. Returns `Ok(None)` when the class
-/// has no such method, in which case the caller still owns nothing (it must
-/// check `object_method_exists` BEFORE moving the receiver out of its slot).
+/// Owned-receiver dispatch with pre-evaluated args against an ALREADY resolved
+/// method; see `resolve_object_method` and `exec_function_with_self_return_values`.
+///
+/// This replaces `find_and_exec_method_with_self_owned_values`, which re-resolved
+/// the method name it had just been told exists and therefore returned an
+/// `Option` its callers all had to treat as `unreachable!()`. Taking the
+/// resolution as an argument removes both the second probe and the impossible
+/// arm.
 #[allow(clippy::too_many_arguments)]
-pub fn find_and_exec_method_with_self_owned_values(
-    method: &str,
+pub fn exec_resolved_method_with_self_owned_values(
+    resolved: &ResolvedMethod,
     arg_vals: &[Value],
     arg_exprs: &[Argument],
     class: &str,
@@ -419,44 +482,19 @@ pub fn find_and_exec_method_with_self_owned_values(
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Result<Option<(Value, Value)>, CompileError> {
-    if let Some(class_def) = classes.get(class).cloned() {
-        if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
-            let func = &class_def.methods[idx];
-            return exec_function_with_self_return_values(
-                func,
-                arg_vals,
-                arg_exprs,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-                class,
-                fields,
-            )
-            .map(Some);
-        }
-    }
-    if let Some(methods) = impl_methods.get(class) {
-        if let Some(idx) = lookup_impl_method_index(methods, class, method) {
-            let func = &methods[idx];
-            return exec_function_with_self_return_values(
-                func,
-                arg_vals,
-                arg_exprs,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-                class,
-                fields,
-            )
-            .map(Some);
-        }
-    }
-    Ok(None)
+) -> Result<(Value, Value), CompileError> {
+    exec_function_with_self_return_values(
+        resolved.def(),
+        arg_vals,
+        arg_exprs,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        class,
+        fields,
+    )
 }
 
 /// Evaluate a call's arguments in `env` (receiver still in place).

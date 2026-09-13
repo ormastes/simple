@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use super::super::{
     evaluate_call_args, evaluate_expr, evaluate_method_call_with_self_update, find_and_exec_method_with_self,
-    find_and_exec_method_with_self_owned_values, lookup_class_method_index, lookup_impl_method_index,
-    object_method_exists, Enums, ImplMethods, CONST_NAMES, MODULE_GLOBALS,
+    exec_resolved_method_with_self_owned_values, lookup_class_method_index, lookup_impl_method_index,
+    resolve_object_method, ResolvedMethod, Enums, ImplMethods, CONST_NAMES, MODULE_GLOBALS,
 };
 
 use super::args::{eval_arg, eval_arg_usize};
@@ -429,8 +429,9 @@ enum PlaceMutation {
     Array,
     /// `{K: V}` leaf reached by a `DICT_MUTATING_METHODS` method.
     Dict,
-    /// Object leaf whose class (carried here) defines the method.
-    Object(String),
+    /// Object leaf whose class (carried here) defines the method, together
+    /// with the method itself, resolved once while the slot was still borrowed.
+    Object(String, ResolvedMethod),
 }
 
 /// In-place mutation through an arbitrary PLACE receiver — the single kernel for
@@ -517,9 +518,14 @@ pub(crate) fn try_place_mutation_in_place(
             PlaceMutation::Array
         }
         Some(Value::Dict(_)) if DICT_MUTATING_METHODS.contains(&method) => PlaceMutation::Dict,
-        Some(Value::Object { class, .. }) if object_method_exists(classes, impl_methods, class, method) => {
-            PlaceMutation::Object(class.clone())
-        }
+        // The class name IS needed past the borrow here — the slot is re-read
+        // after argument evaluation and must still hold an object of the same
+        // class — so this one keeps its `clone()`. The resolution rides along so
+        // the executor does not probe the method table a second time.
+        Some(Value::Object { class, .. }) => match resolve_object_method(classes, impl_methods, class, method) {
+            Some(resolved) => PlaceMutation::Object(class.clone(), resolved),
+            None => return Ok(None),
+        },
         _ => return Ok(None),
     };
 
@@ -639,7 +645,7 @@ pub(crate) fn try_place_mutation_in_place(
             }
             Value::Dict(Arc::clone(entries))
         }
-        PlaceMutation::Object(class) => {
+        PlaceMutation::Object(class, resolved) => {
             // MECALL-OWNED: arguments first (so `f(self.x)`-style operands still
             // see the receiver in place), then the object is MOVED out of its slot
             // so the callee owns it at refcount 1 and `self.f = v` inside the
@@ -659,8 +665,8 @@ pub(crate) fn try_place_mutation_in_place(
             // Leaving `Value::Nil` behind on an `Err` is unobservable for the same
             // reason the identifier fast path gives: TryError unwinds to the
             // enclosing function boundary and every other CompileError aborts.
-            let Some((call_result, updated_self)) = find_and_exec_method_with_self_owned_values(
-                method,
+            let (call_result, updated_self) = exec_resolved_method_with_self_owned_values(
+                &resolved,
                 &arg_vals,
                 args,
                 &class,
@@ -670,10 +676,7 @@ pub(crate) fn try_place_mutation_in_place(
                 classes,
                 enums,
                 impl_methods,
-            )?
-            else {
-                unreachable!("object_method_exists checked before the element was taken")
-            };
+            )?;
             let mut pending = Some(updated_self);
             if let Some(slot) = place::place_slot_mut(env, &target) {
                 *slot = pending.take().expect("set immediately above");
@@ -870,20 +873,25 @@ fn handle_method_call_with_self_update_inner(
             // non-self reference-typed argument such as `buf`. See
             // doc/08_tracking/bug/bytebuffer_struct_param_mutation_not_persisted_2026-09-01.md.
             if let Value::Object { class, fields } = &inner_result {
-                if object_method_exists(classes, impl_methods, class, method) {
+                if let Some(resolved) = resolve_object_method(classes, impl_methods, class, method) {
                     let eval_args = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
-                    if let Some((outer_result, updated_inner_self)) = find_and_exec_method_with_self_owned_values(
-                        method,
-                        &eval_args,
-                        args,
-                        class,
-                        Arc::clone(fields),
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )? {
+                    {
+                        // `_updated_inner_self` is deliberately dropped: the
+                        // write-back gate below keys on `inner_update`'s own
+                        // self, not on the outer call's receiver (see the
+                        // 2026-09-01 bug note).
+                        let (outer_result, _updated_inner_self) = exec_resolved_method_with_self_owned_values(
+                            &resolved,
+                            &eval_args,
+                            args,
+                            class,
+                            Arc::clone(fields),
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
                         if let Some((ref obj_name, ref inner_self)) = inner_update {
                             // Same gate as the non-owned fallback below, and for
                             // the same reason: overwrite the ROOT binding with
@@ -1065,13 +1073,13 @@ fn handle_method_call_with_self_update_inner(
                         fields: parent_fields, ..
                     }) => match parent_fields.get(field) {
                         Some(Value::Object { class: field_class, .. }) => {
-                            object_method_exists(classes, impl_methods, field_class, method)
+                            resolve_object_method(classes, impl_methods, field_class, method)
                         }
-                        _ => false,
+                        _ => None,
                     },
-                    _ => false,
+                    _ => None,
                 };
-                if owned_field_call {
+                if let Some(resolved) = owned_field_call {
                     let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     let taken = match env.get_mut(parent_name) {
                         Some(Value::Object {
@@ -1084,8 +1092,8 @@ fn handle_method_call_with_self_update_inner(
                         fields: field_fields,
                     }) = taken
                     {
-                        let (result, updated_field) = match find_and_exec_method_with_self_owned_values(
-                            method,
+                        let (result, updated_field) = exec_resolved_method_with_self_owned_values(
+                            &resolved,
                             &arg_vals,
                             args,
                             &field_class,
@@ -1095,10 +1103,7 @@ fn handle_method_call_with_self_update_inner(
                             classes,
                             enums,
                             impl_methods,
-                        )? {
-                            Some(pair) => pair,
-                            None => unreachable!("object_method_exists checked before the field was taken"),
-                        };
+                        )?;
                         if let Some(Value::Object {
                             fields: parent_fields, ..
                         }) = env.get_mut(parent_name)
@@ -1335,19 +1340,20 @@ fn handle_method_call_with_self_update_inner(
 
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
             // Handle Object mutations — fast path with zero-copy field mutations
-            if let Some(Value::Object { ref class, .. }) = env.get(obj_name) {
-                let class_name = class.clone();
-                // Pre-check method exists via cached index before taking from env
-                let method_found = classes
-                    .get(&class_name)
-                    .map(|cd| lookup_class_method_index(cd, &class_name, method).is_some())
-                    .unwrap_or(false)
-                    || impl_methods
-                        .get(&class_name)
-                        .map(|ms| lookup_impl_method_index(ms, &class_name, method).is_some())
-                        .unwrap_or(false);
-
-                if method_found {
+            // Resolve the method UNDER the receiver borrow, so neither the class
+            // name nor a second method-table probe has to survive the
+            // `env.remove` below. The pre-change shape copied the class name
+            // into an owned `String` purely to end the borrow, then re-resolved
+            // the same name inside the executor: two probes and one allocation
+            // per call on the hottest interpreted shape there is.
+            // The outer `Option` is "the receiver is an Object" (which selects
+            // this arm at all); the inner one is "its class defines `method`".
+            let receiver_method = match env.get(obj_name) {
+                Some(Value::Object { class, .. }) => Some(resolve_object_method(classes, impl_methods, class, method)),
+                _ => None,
+            };
+            if let Some(resolved) = receiver_method {
+                if let Some(resolved) = resolved {
                     // Take ownership: Arc refcount drops to 1 -> zero-copy mutations.
                     // MECALL-OWNED (2026-08-22): the args are evaluated HERE, while
                     // the receiver is still in env (so `me.field` args resolve), and
@@ -1360,8 +1366,8 @@ fn handle_method_call_with_self_update_inner(
                     // function boundary and every other CompileError aborts.
                     let arg_vals = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     if let Some(Value::Object { class, fields }) = env.remove(obj_name) {
-                        match find_and_exec_method_with_self_owned_values(
-                            method,
+                        let (result, updated_self) = exec_resolved_method_with_self_owned_values(
+                            &resolved,
                             &arg_vals,
                             args,
                             &class,
@@ -1371,13 +1377,9 @@ fn handle_method_call_with_self_update_inner(
                             classes,
                             enums,
                             impl_methods,
-                        ) {
-                            Ok(Some((result, updated_self))) => {
-                                return Ok((result, Some((obj_name.clone(), updated_self))));
-                            }
-                            Ok(None) => unreachable!(),
-                            Err(e) => return Err(e),
-                        }
+                        )?;
+                        crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
+                        return Ok((result, Some((obj_name.clone(), updated_self))));
                     }
                 } else {
                     // Method not in class/impl — use full dispatch for method_missing/UFCS/lambdas
