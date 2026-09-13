@@ -1,0 +1,179 @@
+"""
+## Purpose and audience
+Purpose: prove that every `extern fn rt_*` declared by
+`src/compiler/30.types/simd_capabilities.spl` is backed in BOTH runtime lanes —
+the C lane (`src/runtime/runtime_native.c`) and the Rust runtime crate
+(`src/compiler_rust/runtime/src/**`) — because that module is inside the Stage-2
+compiler closure and Stage 2 links against the Rust lane.
+Audience: runtime, bootstrap and SIMD maintainers.
+
+## Why this spec exists (site 15, 2026-09-13)
+`doc/08_tracking/bug/stage2_link_rust_runtime_lane_missing_rt_cpuid_cpu_is_twins_2026-09-13.md`.
+Stage 2 stopped linking at all:
+
+    mold: error: undefined symbol: rt_cpuid
+    mold: error: undefined symbol: rt_cpu_is_riscv64
+    mold: error: undefined symbol: rt_cpu_is_x86_64
+    mold: error: undefined symbol: rt_cpu_is_aarch64
+
+while `rt_xgetbv`, declared two lines away in the SAME Simple module, resolved.
+The C lane defines all eleven externs this module declares; the Rust runtime
+crate defined only seven of them — rt_xgetbv among them, the four above not.
+`34b96e29837` (2026-09-13 13:51) added the first import edge that pulls this
+module into the Stage-2 closure, which is why the gap only surfaced then.
+
+## Why this is a SOURCE scan and not a call
+Calling `rt_cpuid()` from a spec cannot reproduce the defect. The seed
+interpreter backs all of these names out of
+`src/compiler_rust/compiler/src/interpreter_extern/simd.rs:2340-2363`, which is
+an entry in the interpreter's extern TABLE in the *compiler* crate — not a
+linkable `extern "C"` symbol in the *runtime* crate. A call therefore passes in
+both the working and the broken case. The same limitation is written down in
+`test/01_unit/lib/crypto/rt_black_box_extern_backing_spec.spl`: an interpreter
+green says nothing about a natively linked binary. The only thing observable
+from Simple that discriminates is which lane DEFINES the symbol, so that is what
+is asserted here.
+
+The Rust-side pattern is deliberately `extern "C" fn <name>(` scoped to
+`src/compiler_rust/runtime/src/**`. A repo-wide grep for the bare name
+false-greens on the interpreter crate's `pub fn rt_cpuid(args: &[Value])`.
+
+## Fails closed on vacuity
+A scan that reads nothing must not look like a pass. Every input is size-checked
+before any per-symbol assertion: fewer than 5 declared externs, a short
+`runtime_native.c`, or fewer than 100 discovered `.rs` files each make the file
+go red rather than green.
+
+## Compatibility and limitations
+Reads repo-relative source paths only; no clock, network or build artifact.
+It proves both lanes DEFINE the symbol, not that the two definitions agree in
+behaviour — the CPU predicates are compile-time constants of the build target,
+and a same-process A/B is impossible because the two runtimes are never linked
+into one process.
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file_text, dir_list_optional, is_dir}
+
+fn simd_decl_path() -> text:
+    "src/compiler/30.types/simd_capabilities.spl"
+
+fn c_lane_path() -> text:
+    "src/runtime/runtime_native.c"
+
+fn rust_lane_root() -> text:
+    "src/compiler_rust/runtime/src"
+
+# Names declared as `extern fn rt_<name>(...)` by the SIMD capability module.
+# Read out of the module itself so a newly added extern is covered the day it
+# lands, rather than from a list this spec would have to remember to update.
+fn declared_extern_names() -> [text]:
+    val source = read_file_text(simd_decl_path())
+    var names: [text] = []
+    for line in source.split("\n"):
+        val t = line.trim()
+        if not t.starts_with("extern fn rt_"):
+            continue
+        val after = t.substring(10, t.len())
+        val open = after.index_of("(")
+        if open <= 0:
+            continue
+        val name = after.substring(0, open).trim()
+        if not names.contains(name):
+            names.push(name)
+    names
+
+# A C definition in runtime_native.c starts at column 0, names the symbol with
+# an open paren, and — unlike a header prototype — carries no semicolon.
+fn c_lane_defines(source: text, name: text) -> bool:
+    for line in source.split("\n"):
+        if line.starts_with(" ") or line.starts_with("\t"):
+            continue
+        if not line.contains("{name}("):
+            continue
+        if line.contains(";"):
+            continue
+        return true
+    false
+
+# Every `.rs` file under the Rust RUNTIME crate. The compiler crate is excluded
+# on purpose: its interpreter extern table is not a link-time symbol.
+fn rust_lane_files() -> [text]:
+    var pending: [text] = [rust_lane_root()]
+    var files: [text] = []
+    var guard = 0
+    while pending.len() > 0 and guard < 20000:
+        guard = guard + 1
+        val dir = pending.pop() ?? ""
+        if dir == "":
+            break
+        val entries = dir_list_optional(dir) ?? []
+        for entry in entries:
+            val full = "{dir}/{entry}"
+            if is_dir(full):
+                pending.push(full)
+                continue
+            if full.ends_with(".rs"):
+                files.push(full)
+    files
+
+fn rust_lane_defined_names(names: [text]) -> [text]:
+    var found: [text] = []
+    for path in rust_lane_files():
+        val source = read_file_text(path)
+        if source == "":
+            continue
+        for name in names:
+            if found.contains(name):
+                continue
+            if source.contains("extern \"C\" fn {name}("):
+                found.push(name)
+    found
+
+describe "simd_capabilities externs are backed in both runtime lanes":
+
+    # VACUITY GUARD. A parse that found nothing would make every assertion
+    # below trivially true, so the scan size is asserted first.
+    it "parses at least the five externs the module is known to declare":
+        val names = declared_extern_names()
+        expect(names.len() >= 5).to_equal(true)
+
+    # VACUITY GUARD. An empty or truncated read of the C runtime would make the
+    # C-lane rows pass by accident.
+    it "reads a full runtime_native.c":
+        val source = read_file_text(c_lane_path())
+        expect(source.len() > 100000).to_equal(true)
+
+    # VACUITY GUARD. A failed directory walk would report zero Rust definitions
+    # and turn this spec into a permanent false RED.
+    it "walks at least 100 .rs files under the Rust runtime crate":
+        expect(rust_lane_files().len() >= 100).to_equal(true)
+
+    # DISCRIMINATING. The C lane was never the broken half; this row is the
+    # control that proves the scan can find a definition at all.
+    it "the C lane defines every declared extern":
+        val names = declared_extern_names()
+        val source = read_file_text(c_lane_path())
+        var missing: [text] = []
+        for name in names:
+            if not c_lane_defines(source, name):
+                missing.push(name)
+        expect(missing).to_equal([])
+
+    # DISCRIMINATING. This is the assertion the whole file exists for. Before
+    # the fix it names rt_cpuid, rt_cpu_is_x86_64, rt_cpu_is_aarch64 and
+    # rt_cpu_is_riscv64 — exactly the four symbols mold could not resolve.
+    it "the Rust runtime lane defines every declared extern":
+        val names = declared_extern_names()
+        val found = rust_lane_defined_names(names)
+        var missing: [text] = []
+        for name in names:
+            if not found.contains(name):
+                missing.push(name)
+        expect(missing).to_equal([])
+
+    # DISCRIMINATING. rt_xgetbv resolved while its four siblings did not, so a
+    # fix that somehow dropped it would trade one link failure for another.
+    it "keeps rt_xgetbv backed in the Rust lane":
+        val found = rust_lane_defined_names(["rt_xgetbv"])
+        expect(found).to_equal(["rt_xgetbv"])
