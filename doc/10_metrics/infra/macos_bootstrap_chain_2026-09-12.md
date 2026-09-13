@@ -1758,3 +1758,83 @@ diagnostic, wait for F71's PR before re-attributing.
 Origins for run 30's three symbol classes, with a fix commit each, are recorded in
 `doc/08_tracking/bug/stage2_link_undefined_cpu_probe_and_surface_symbols_2026-09-13.md`
 rather than repeated here.
+
+## Runs 32-34 (2026-09-13, lane F72) — site 18 root-caused and CLEARED; site 19 exposed
+
+Lane all three runs: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`,
+worktree `agent-a0e562ca3e5681c38`, cold Rust seed each time.
+
+### Run 32 — died before Stage 2: stale `Cargo.lock` (PR #893)
+
+```
+Building Rust seed compiler + runtime library...
+error: rust-seed-build failed with exit 101
+error: cannot update the lock file .../src/compiler_rust/Cargo.lock because --locked was passed to prevent this
+```
+
+`2cc924ff877` (18:49) dropped `"tempfile"` from the `simple-native-all` lock entry
+while `native_all/Cargo.toml` still declares it as a dev-dependency, so every
+hermetic `cargo build --locked --offline` seed build on every lane failed.
+Restored (the one line cargo regenerates offline) as PR #893.
+
+### Run 33 — site 18 reproduced with the diagnostic; verdict verbatim
+
+```
+  real log:  .../stage3/aarch64-apple-darwin/stage2-sanity.env.frontend-failure.log
+  1 diagnostic line(s) found there. First 5:
+    | candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+PASS — 1 check(s), stage stage2 failed (exit 2) and said why
+  warning: stage2 native-build failed (exit 2); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Probe log: `PLUG-E-K1-POLICY: bootstrap backend composition admission failed
+(selected policy 'llvm-cranelift'; ...)` followed by an EMPTY line where the new
+per-sub-check `k1-table:` dump should have been -- the dump itself was a victim
+of the same miscompile. Candidate `stage2/aarch64-apple-darwin/simple.rejected`,
+139,502,712 B, sha256 `769bed4ef539a9d4…`.
+
+**Root cause, found in seconds with fixtures built by the seed, NOT by rebuilding:**
+every enum `match` compiled by the seed's `native-build` (llvm AND cranelift)
+took its LAST arm (`q_mixed=30,30,30` vs interpreter `10,20,30`). `df7ac9f6cc2`
+(13:33) made typed matches call `rt_enum_check_variant(subject, enum_id, disc)`;
+the seed's HIR lowering folds `enum_id` from the BARE type name while
+`qualify_enum_runtime_names` later qualifies the constructor's `EnumUnit` name,
+so ctor and check never agree (`id=0 -> 10`, `id=hash("Mixed") -> 10`,
+`id=<stamped> -> 30`). `BackendKind.to_text()` is a `match self`, so the K1
+validator's `name != entry.kind.to_text()` refused the composition. The bug
+record's `34b96e29837` suspect is retracted. Corroboration: the same candidate's
+`compile --format=smf` dies with `E-AST-SEMANTIC-UNHANDLED: TypeKind`.
+Fix (seed, `native_project/mangle.rs`) + 2 Rust tests: PR #898. Fixtures rebuilt
+with the fixed seed under both backends equal the interpreter.
+
+### Run 34 — on landed main (`c1329f766a2`): site 18 CLEARED, site 19 exposed
+
+`stage2-sanity.env`: `status=pass frontend_smoke_status=0
+frontend_smoke_bootstrap0_raw_status=0 frontend_smoke_bootstrap1_ran=true
+frontend_smoke_bootstrap1_raw_status=0`; `hello_world_positional_raw_status=0
+probe=complete`; zero `PLUG-E-K1` lines. The positional hello-world builds and
+runs on both bootstrap legs for the first time on macOS. Verdict, verbatim:
+
+```
+  real log:  .../stage3/aarch64-apple-darwin/stage2-receiver.log
+  2 diagnostic line(s) found there. First 5:
+    | error: stage2 failed the positional pure-Simple Stage-3 route (status 1)
+    | error: in-process native-build: Module surface registry graph promotion failed after phase 2: field composite_names of surface[0] logical=.Users.ormastes.simple..claude.worktrees.agent_a0e562ca3e5681c38.scripts.check.cert.redeploy_gate.fixtures.stage2_module_path_naming canonical=<same> package=.Users.ormastes.simple..claude.worktrees.agent_a0e562ca3e5681c38.scripts.check.cert.redeploy_gate.fixtures (scope sentinel promote=true, surfaces=2)
+PASS — 1 check(s), stage stage2 failed (exit 3) and said why
+  warning: stage2 native-build failed (exit 3); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+The failure has moved one probe later, into `bootstrap_stage2_positional_stage3_route`
+(the candidate compiling the module-path-naming fixture through its in-process
+route). That is **site 19**. The two existing records for this message
+(`stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md`, FIXED by
+`460aa9781cc`/`592041db98a` on Linux BOOT-7; `stage2_sanity_module_surface_registry_promotion_fails_2026-09-13.md`,
+CLOSED as already-fixed) do not cover this: the tree carries both fixes and the
+field named is `composite_names`. Not investigated here -- unrelated to K1 and
+out of this lane's scope; filed as
+`doc/08_tracking/bug/stage2_positional_stage3_route_surface_promotion_composite_names_2026-09-13.md`.
+Rejected candidate preserved at `stage2-rejected/aarch64-apple-darwin/simple`,
+139,504,696 B, sha256 `70f1a6517183d74c1a855f4761235dd2c62d52a63bfa3c36f7c5fb53b83f2703`.
+Stage 3, the full CLI and Stage 4 were not reached; **nothing was deployed**.
