@@ -347,31 +347,21 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     if recipe.trip_count >= 0 and recipe.trip_count < recipe.chunk_width:
         return func
 
-    # R4: dynamic trip count (-1) — runtime trip count unknown, cannot build static
-    # exit guard in create_vector_loop_block or static peel body clone.
-    # Refuse until a SCEV/runtime-guard path is added in a follow-up wave.
-    if recipe.trip_count < 0:
-        return func
-    # R4b: a trip count that is not a whole number of chunks is REFUSED.
-    #
-    # This was previously claimed resolved ("handled by create_peeling_block
-    # emitting a scalar body clone for the remainder"). It is not handled, and
-    # the execution-level differential test over trip counts 4..17 is what
-    # finally showed it. Two independent wrong answers:
-    #
-    #   * the peel block emits exactly ONE cloned iteration no matter how many
-    #     remain, then leaves the loop — so for trip 9 only out[0] is written
-    #     and elements 1..8 keep their old contents; and
-    #   * it terminates at a hard-coded `header + 3`, a block that does not
-    #     exist on any CFG with a real continuation (the same assumption D3
-    #     removed from the vector path but not from this one).
-    #
-    # Refusing costs the remainder loops an optimization. Not refusing miscompiles
-    # them. Lift this only together with a real peel that runs `trip % chunk`
-    # iterations and exits to the resolved exit block, and extend the
-    # differential sweep to prove it.
-    if recipe.trip_count % recipe.chunk_width != 0:
-        return func
+    # R4 used to refuse a dynamic trip count outright, which meant this pass
+    # declined essentially all real code: a request body, a row set, a
+    # framebuffer sized at runtime have no compile-time length. The bound is
+    # now taken as an OPERAND from the loop header, so a runtime length is
+    # vectorized exactly like a constant one — see `_loop_bound_operand` and
+    # the `%i <= n - VF` guard in `create_vector_loop_block`. What remains a
+    # decline is a header with no recognisable `i < n` test at all, handled
+    # below where the operand is resolved.
+    # A trip count that is not a whole number of chunks is no longer refused.
+    # R4b existed because the old "peel" block ran exactly ONE iteration and
+    # branched to a block that did not exist (D7), so a remainder was a
+    # miscompile. The vector loop now hands the tail to an unmodified clone of
+    # the scalar body, which finishes it from whatever index the vector loop
+    # stopped at — so a remainder is just the scalar loop doing its job, and
+    # needs no special case at all.
 
     # R5: need an output base
     if not recipe.output_base.?:
@@ -443,16 +433,62 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
         if block.id.id == recipe.header_block.id:
             body_blocks_for_peel.push(block)
 
-    # Create the three new BBs (Wave L3b: all with sound terminators)
-    val align_block  = create_alignment_check_block(ctx, loop_info)
-    val vec_block    = create_vector_loop_block(ctx, recipe.header_block.id, recipe.input_bases, out_base, recipe.op_name, recipe.trip_count, exit_block_id)
-    val peel_block   = create_peeling_block(ctx, loop_info, body_blocks_for_peel)
+    # The loop needs exactly one body block to clone as its remainder.
+    if body_blocks_for_peel.len() != 1:
+        return func
+
+    # The bound the vector loop guards against. An OPERAND, so a runtime
+    # length works as well as a constant; nil means the header has no
+    # recognisable `i < n` test and we decline rather than invent one.
+    # Candidate index locals: the recipe's induction variable and index
+    # locals, PLUS whatever feeds them through an add-const in the header.
+    #
+    # That last step is not optional. The matcher reports the increment's DEST
+    # as the induction variable — `%5` for `%5 = %4 + 1` — while the loop
+    # compares the pre-increment name `%4`. Without following the `+ const`
+    # edge backwards, the candidate set is {5}, no comparison mentions 5, and
+    # every loop the driver offers is declined. That is exactly what happened:
+    # the end-to-end examples went red while the direct-rewrite ones passed,
+    # because their fixture happens to increment the compared local in place.
+    var index_candidates: [LocalId] = [recipe.induction_var]
+    for il in recipe.index_locals:
+        index_candidates.push(il)
+    for blk in func.blocks:
+        if blk.id.id == recipe.header_block.id:
+            for inst in blk.instructions:
+                match inst.kind:
+                    case BinOp(d, op, left, right):
+                        var is_add = false
+                        match op:
+                            case Add: is_add = true
+                            case _: pass_do_nothing
+                        var rhs_const = false
+                        match right.kind:
+                            case Const(_, _): rhs_const = true
+                            case _: pass_do_nothing
+                        if is_add and rhs_const:
+                            var dest_is_candidate = false
+                            for c in index_candidates:
+                                if c.id == d.id:
+                                    dest_is_candidate = true
+                            if dest_is_candidate:
+                                match left.kind:
+                                    case Copy(src): index_candidates.push(src)
+                                    case _: pass_do_nothing
+                    case _: pass_do_nothing
+    val bound_opt = _loop_bound(func, recipe.header_block.id, index_candidates)
+    if not bound_opt.?:
+        return func
+    val lb = bound_opt.unwrap()
 
     # Splice: replace header block; keep blocks before it and all blocks after it.
     # Defect B fix: patch any predecessor block whose terminator targets the
     # original header_block.id to point to the new alignment-check block instead.
     val orig_header_id = recipe.header_block.id
-    val new_header_id  = align_block.id.id
+    # align_check takes the header's own id (ctx.next_local == header id), so
+    # this is that id — stated directly rather than read off a block that is
+    # now constructed further down, once the remainder block id is known.
+    val new_header_id  = orig_header_id
 
     # Loop versioning. When the alias oracle could not separate the bases
     # statically, the entry point becomes a runtime range check that branches
@@ -464,8 +500,29 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     for block in func.blocks:
         if block.id.id > max_block_id:
             max_block_id = block.id.id
-    val guard_id  = max_block_id + 1
-    val scalar_id = max_block_id + 2
+    # The splice also OCCUPIES header+0 (align_check) and header+2 (vec_loop),
+    # so the new ids must clear those as well as every existing block. On a
+    # single-block function header IS max_block_id, and taking max+1/max+2
+    # alone put the scalar clone on the vector loop's own id — the two blocks
+    # then shared an id and lookup, being first-match, silently resolved to
+    # whichever came first.
+    var reserved = max_block_id
+    if orig_header_id + 2 > reserved:
+        reserved = orig_header_id + 2
+    val guard_id  = reserved + 1
+    val scalar_id = reserved + 2
+
+    # The scalar clone is now ALWAYS built, because it is two things at once:
+    # the alias-guard fallback it always was, and the remainder loop the
+    # vector path falls into when fewer than a full vector remain. Those never
+    # conflict — a run takes one entry or the other — and sharing one block
+    # keeps a single copy of the scalar semantics instead of the old "peel"
+    # block's separate, wrong one.
+    val align_block = create_alignment_check_block(
+        ctx, loop_info, lb.bound, lb.index, scalar_id)
+    val vec_block   = create_vector_loop_block(
+        ctx, recipe.header_block.id, recipe.input_bases, out_base,
+        recipe.op_name, lb.bound, lb.index, scalar_id)
 
     val elt = element_size_bytes(recipe.element_type)
     val span_bytes = if recipe.trip_count > 0 and elt > 0: recipe.trip_count * elt else: 0
@@ -526,18 +583,17 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
             guard_id, out_base, recipe.input_bases, span_bytes,
             new_header_id, scalar_id, first_temp))
 
-    # Insert alignment-check at the header position, then vec and peel
+    # Alignment-check at the header position, then the vector loop. There is
+    # no peel block any more: the scalar clone below is the remainder.
     new_blocks.push(align_block)
     new_blocks.push(vec_block)
-    new_blocks.push(peel_block)
 
     # Blocks after the original header (continuation / exit)
     for block in func.blocks:
         if block.id.id > orig_header_id:
             new_blocks.push(block)
 
-    if guard_usable:
-        new_blocks.push(create_scalar_version_block(body_blocks_for_peel[0], scalar_id))
+    new_blocks.push(create_scalar_version_block(body_blocks_for_peel[0], scalar_id))
 
     # The vector loop's own temporaries must be declared too, WITH their
     # vector types. The guard temporaries were given this treatment (D4) and
@@ -555,6 +611,52 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
         all_locals.push(vl)
     spliced.locals = all_locals
     spliced
+
+struct LoopBound:
+    """The loop's `i < n`, as the pass needs it: which local, against what."""
+    index: LocalId
+    bound: MirOperand
+
+fn _loop_bound(func: MirFunction, header_id: i64, candidates: [LocalId]) -> LoopBound?:
+    """The header's induction test, returning BOTH halves.
+
+    Two things come out of one instruction, and taking only one of them was a
+    bug. The BOUND is what the vector loop guards against — an operand, so a
+    runtime length works as well as a constant, which is the whole reason a
+    loop over a request body or a row set can be vectorized now. The INDEX is
+    whichever local that test actually compares, and it must be that one
+    rather than the recipe's nominal `induction_var`: the pattern matcher
+    names the increment's DEST (`%5` in `%5 = %4 + 1`) while the loop compares
+    the pre-increment name (`%4`). Indexing on the recipe's answer found no
+    comparison at all and declined every loop the driver fed it.
+
+    `candidates` is the set of locals that may legitimately be the index — the
+    recipe's induction variable plus its index locals. Restricting to that set
+    keeps this from latching onto an unrelated comparison in the body.
+
+    Returns nil when the header has no such test, which is a decline, never a
+    guess: vectorizing against an invented bound reads past the end of the
+    arrays.
+    """
+    for blk in func.blocks:
+        if blk.id.id == header_id:
+            for inst in blk.instructions:
+                match inst.kind:
+                    case BinOp(_, op, left, right):
+                        var is_cmp = false
+                        match op:
+                            case Lt: is_cmp = true
+                            case Le: is_cmp = true
+                            case _: pass_do_nothing
+                        if is_cmp:
+                            match left.kind:
+                                case Copy(l):
+                                    for c in candidates:
+                                        if c.id == l.id:
+                                            return Some(LoopBound(index: l, bound: right))
+                                case _: pass_do_nothing
+                    case _: pass_do_nothing
+    nil
 
 fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
     """Return new_id as BlockId if id.id == old_id, otherwise return id unchanged."""

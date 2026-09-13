@@ -444,3 +444,82 @@ attribute: `scripts/check/check-simd-kernels-vectorized.shs`, measured
 five kernels once carried the AVX-512 attribute and contained zero zmm
 instructions, which no parity test can detect since a scalar kernel returns
 identical answers.
+
+## SUPERSEDED — runtime trip counts are now vectorized
+
+The section above ("What Active does and does not mean for the DB and web
+servers") concluded that the answer for server code is **no**, because R4
+refused any loop whose length is not a compile-time constant. That conclusion
+was correct about the code as it stood and wrong as a place to stop: the
+refusal was a limitation to remove, not a fact to document. It has been
+removed.
+
+### What changed
+
+**The loop bound is an OPERAND, not a number.** `_loop_bound` reads the
+header's `i < n` test and returns both halves — the bound operand and the local
+being compared. `Copy(n_local)` is as usable as `Const(1024)`, so a request
+body, a row set or a framebuffer sized at runtime vectorizes exactly like a
+fixed-length array.
+
+**The guard asks whether a whole vector fits**, not whether iterations remain:
+`%lim = bound - VF; %cond = %i <= %lim`. An `%i < n` test would enter the body
+with fewer than VF elements left and read past the end of all three arrays.
+
+**The remainder is the scalar loop itself.** The vector loop indexes on the
+loop's own induction variable and, when fewer than VF elements remain, branches
+into an unmodified clone of the scalar body — which re-tests its own `i < n`
+and finishes from exactly where the vector loop stopped. The old "peel" block
+is deleted. That one change also retires R4b (D7): a remainder is no longer a
+special case that had to be refused, it is just the scalar loop doing its job.
+
+The scalar clone was already being built as the alias-guard fallback. It now
+serves both roles, so there is one copy of the scalar semantics instead of the
+peel block's separate and wrong one.
+
+### Two defects found while doing it
+
+**Block-id collision.** The splice occupies `header+0` (align_check) and
+`header+2` (vec_loop), while the clone took `max_block_id+2`. On a
+single-block function `header == max_block_id`, so the clone landed on the
+vector loop's own id and first-match lookup silently resolved to whichever came
+first. New ids now clear both the existing blocks and the splice's own.
+
+**The index local was the wrong one.** The pattern matcher reports the
+increment's DEST as the induction variable — `%5` for `%5 = %4 + 1` — while the
+loop compares the pre-increment name `%4`. Indexing on the recipe's answer
+found no comparison and declined every loop the driver offered. The candidate
+set now follows the `+ const` edge backwards, and the vector loop indexes on
+whichever local the bound actually tests. The symptom was sharp: the
+end-to-end driver examples went red while the direct-rewrite ones stayed green,
+because their fixture happens to increment the compared local in place.
+
+### Evidence
+
+`auto_vectorize_spec.spl` 101/101, `auto_vectorize_avx512_chain_spec.spl` 7/7.
+
+The load-bearing examples are executions, not shapes:
+
+  * a scalar control with the bound in a local, which must run and be right
+    before any vector claim means anything;
+  * the rewrite fires with `trip_count = -1` — previously an unconditional
+    decline; and
+  * **identical memory for every runtime length 1..20**, including lengths
+    shorter than a single vector, where the preheader guard must send control
+    straight to the scalar loop without reading anything.
+
+And the chain closes for the runtime case: a dynamic-bound loop fed to
+`x86_plan_avx512_fixed` returns `ok=true, avx512-frame-values-planned`. A loop
+whose length the compiler does not know now reaches real AVX-512 selection.
+
+Four specs that pinned the old refusals are inverted, each naming why. The
+too-short refusal (trip 3 with VF 4) is unchanged and still declines — that one
+is a genuine "not worth a vector", not a limitation.
+
+### Still true from the superseded section
+
+The op must still be elementwise **add**, and the alias oracle must still clear
+the bases or the runtime range guard must cover them. The hand-written kernels
+listed there remain the source of the DB and web servers' AVX-512 today; what
+has changed is that the pass is no longer structurally incapable of helping
+them.
