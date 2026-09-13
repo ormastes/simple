@@ -13,4 +13,5 @@ mod tests {
     include!("value_tests_async.rs");
     include!("value_tests_pointers.rs");
     include!("value_tests_strict_mem.rs");
+    include!("value_tests_nonlocal_overlay.rs");
 }
