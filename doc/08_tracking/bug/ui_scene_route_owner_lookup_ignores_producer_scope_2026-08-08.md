@@ -107,3 +107,14 @@ owner records in one table:
 - `src/lib/common/ui/ui_web_packed_producer.spl:260-272`
 - Design authority: `doc/05_design/ui/unified_packed_ui_scene.md` sections 2.4, 4.1
 - Feature wiki: `doc/00_llm_process/feature_expert/unified_packed_ui_scene/skill.md`
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Re-confirmed unchanged at `f26970e9d93`: `_ui_scene_find_owner_by_semantic_id`
+still at `src/lib/common/ui/ui_scene_event_route.spl:60`, still scans on
+`semantic_id` alone with no producer scoping, still called from
+`ui_scene_event_route.spl:104`. Still not reproducible against real data — no
+assembler yet places two producers' owner records in one table (per "Why not
+fixed here" above). This is a design decision for the scene-assembler owner
+(thread a producer id onto the command/range row), not a local repair, and
+stays out of BUGFIX-12 scope. Leaving OPEN, no code change.

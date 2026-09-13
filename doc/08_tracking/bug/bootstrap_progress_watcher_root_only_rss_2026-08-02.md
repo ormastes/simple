@@ -45,3 +45,14 @@ this fix deliberately does not change it.
 
 ## Triage 2026-09-12
 Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.
+
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+Confirmed by content: `tree_rss_kb` is present in
+`scripts/bootstrap/bootstrap-progress-watch.shs` (and its check script
+`check-bootstrap-progress-watch.shs`), matching the "Fix" section above. The
+header's stale "OPEN (unverified 2026-09-12)" line understated the doc's own
+"Fixed for future canonical runs" status.
+
+Status: RESOLVED (2026-09-13) — tree-RSS fields confirmed present by content
+inspection; the fix described above is intact.

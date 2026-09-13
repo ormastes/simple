@@ -178,3 +178,12 @@ already fixed; no source change was made by this lane.
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Confirmed by content: `match_enum_variant_pattern`
+(`src/compiler/10.frontend/core/interpreter/eval.spl:1136`) still has the
+Option::Some/None unwrap-before-tag-compare fix, matching the "Fix landed"
+section above. Pure-Simple interpreter side stays RESOLVED; the Rust-seed
+side is a separate, still-open, out-of-scope defect per the re-measurement
+above. No change made.

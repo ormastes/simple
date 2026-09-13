@@ -79,3 +79,13 @@ Either of:
   29.07, 22.51`.
 - Binary provenance: `readlink -f bin/simple` (self-hosted binary per repo
   default tooling policy).
+
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+`uptime` at this shard's start: `load average: 28.82, 31.59, 29.21` — still
+well above the "roughly <= 10" unblock threshold, consistent with the
+documented environmental cause. Per the doc's own guidance this is not fixed
+by widening the timeout; a real fix (splitting the pixel-content examples out
+of the timed critical path, or a reserved/serialized slot) is a perf-suite
+architecture change out of scope for a shard triage pass. Did not re-run the
+suite (would reproduce the same contention-driven timeout). Leaving OPEN.

@@ -104,3 +104,12 @@ Nothing to reproduce: there is no code path to run, so no `Results:` line
 applies. Remains a design gap; the blocker is upstream of prevention-mock
 scope — the runner needs per-example persistence of module-level spec state
 before any file- or directory-wide scope can be honest rather than fail-open.
+
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+`src/lib/nogc_sync_mut/spec.spl` still has `prevent_file()` as a plain
+forwarder to `prevent()`, and no per-directory config/setup hook exists in
+`src/app/test_runner_new/` or `test_config.spl`. This is an architectural gap
+in the test runner (per-example persistence of module-level spec state),
+explicitly scoped as "verify and record" with no code path to reproduce —
+out of scope for a shard fix. No change made. Leaving OPEN, doc-only.

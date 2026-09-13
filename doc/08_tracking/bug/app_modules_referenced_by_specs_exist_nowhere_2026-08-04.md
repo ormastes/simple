@@ -118,3 +118,19 @@ catch a regression; `.claude/rules/commands.md` flags CLI startup as
 perf-sensitive. Weighed against the bug's own severity — a user could invoke
 `simple os` and get nothing back — the wiring was judged the right trade, but
 someone should measure it.
+
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+Confirmed by content: `handle_os_build_inline` (line 407) and
+`handle_os_inline` (line 445) are both still present in
+`src/app/cli/_CliMain/args_and_os_commands.spl`, matching the 2026-09-12
+fix. The doc's own 2026-09-12 triage already established the one remaining
+`cli_os_spec` failure is NOT this bug — it is the separately-tracked
+`bare_name_registry_collision_trigger_conditions_2026-07-30.md` (still present
+in the tree). All four originally-listed specs are accounted for: 3 fully
+green, 1 blocked by a different, already-filed bug.
+
+Status: RESOLVED (2026-09-13) — all four specs' `app.*` module-resolution
+failures fixed; the residual `cli_os_spec` failure is out of this doc's scope
+per the 2026-09-12 finding, tracked in
+`bare_name_registry_collision_trigger_conditions_2026-07-30.md`.

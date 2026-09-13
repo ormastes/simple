@@ -78,3 +78,10 @@ correct against a REAL OS-level resource" (not proven) is the same
 distinction the WP-3.5 lint-redeploy finding drew for lint checks: source
 correctness and reachable/verified correctness are not the same claim, and
 this repo has been burned before by conflating them.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+`test/fixture/io/tiny_1x1.png` still present; root cause is
+`rt_image_load`/stb_image (`src/runtime/runtime_image.c`) rejecting a
+standards-valid 1x1 PNG, a native runtime issue out of scope for `src/lib`.
+No new fixture attempted. No code change. Leaving OPEN.

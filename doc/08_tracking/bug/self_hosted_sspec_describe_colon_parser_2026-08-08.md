@@ -43,3 +43,23 @@ runtime: that would diverge from repository SSpec convention and hide the
 runtime regression. The owner must add a minimal parser regression around a
 single `describe`/`it` pair, repair the parser, rebuild a provenance-qualified
 self-hosted binary, then rerun the focused Caret spec and regenerate its manual.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Repro needs an actually-deployed self-hosted binary (bootstrap output), which
+is out of scope for this shard (bootstrap is a separate sanctioned pipeline,
+not a shard-triage action, and this worktree only has the Rust seed linked at
+`bin/simple`). Source-level lead: `grep -rn '"describe"' src/compiler/` finds
+no `describe`/`it` special-casing in `src/compiler/10.frontend/core/parser.spl`
+or its `_Parser*` siblings — SSpec `describe "...":` / `it "...":` headers are
+ordinary call-expressions followed by a colon+indented block, i.e. this needs
+the *generic* "call-expression statement may open a colon block" grammar rule,
+not a `describe`-specific one. `unexpected token in expression: ':'` firing at
+that call means the self-hosted statement parser only allows a trailing `:`
+block after specific keyword-led statements (`if`/`while`/`for`/`fn`/etc.),
+not after an arbitrary primary/call expression — that's the gap to close in
+the self-hosted parser's statement dispatch, most likely in
+`_ParserDecls`/`_ParserPrimary` where `"unexpected token in expression"` is
+raised (`src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl`,
+`_ParserPrimary/primary_expr.spl`). Needs a self-hosted-build verification
+loop this shard cannot run. Leaving OPEN with this direction recorded.
