@@ -163,3 +163,12 @@ symbol as any text node did.
   (diffed byte-identical against the pre-sabotage copy afterward). No separate
   sabotage was needed for Defect 2 since it shares the identical guarded code
   path.
+
+## Triage 2026-09-13
+Reconfirmed via source inspection: `browser_renderer.spl` still has 0
+references to `text_painter.spl` (`grep -c text_painter
+browser_renderer.spl` -> 0, unchanged). Defect 1 (text blanks the whole
+frame) and Defect 2 (class selectors) both still apply per this record.
+Wiring the painter into the render path correctly, without breaking the
+already-pixel-exact box painting, needs careful render-pipeline work
+beyond a single-bug budget. Left OPEN (P1), no code change attempted.
