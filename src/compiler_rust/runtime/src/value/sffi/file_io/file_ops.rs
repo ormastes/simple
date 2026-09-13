@@ -352,8 +352,15 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
 /// extern is itself unresolved in the lane that read it. Zero used to collapse
 /// all three of those onto one number, which is how a readout of "arm 0" got
 /// read as a success it was not.
-static READ_NO_FOLLOW_LAST_FAILURE: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(READ_NF_NEVER_CALLED);
+/// Thread-local, NOT a global. A process-wide cell is worthless here: the
+/// bootstrap reads with 24 jobs in flight, so a concurrent successful read on
+/// another thread overwrites the code before the failing caller can report it.
+/// Measured — the first cut was a global atomic and answered "read succeeded"
+/// for a call that had plainly returned nil.
+thread_local! {
+    static READ_NO_FOLLOW_LAST_FAILURE: std::cell::Cell<i64> =
+        const { std::cell::Cell::new(READ_NF_NEVER_CALLED) };
+}
 
 // Failure-arm codes. Small integers so the value crosses the SFFI boundary
 // without allocating inside a path that is already failing.
@@ -371,14 +378,14 @@ const READ_NF_READ: i64 = 9;
 const READ_NF_BAD_UTF8_CONTENT: i64 = 10;
 
 fn read_no_follow_fail(code: i64) -> RuntimeValue {
-    READ_NO_FOLLOW_LAST_FAILURE.store(code, std::sync::atomic::Ordering::Relaxed);
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(code));
     RuntimeValue::NIL
 }
 
 /// Read the arm code recorded by the most recent bounded no-follow read.
 #[no_mangle]
 pub extern "C" fn rt_file_read_regular_no_follow_last_failure() -> i64 {
-    READ_NO_FOLLOW_LAST_FAILURE.load(std::sync::atomic::Ordering::Relaxed)
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.get())
 }
 
 #[no_mangle]
@@ -441,7 +448,7 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     if std::str::from_utf8(&raw).is_err() {
         return read_no_follow_fail(READ_NF_BAD_UTF8_CONTENT);
     }
-    READ_NO_FOLLOW_LAST_FAILURE.store(READ_NF_OK, std::sync::atomic::Ordering::Relaxed);
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(READ_NF_OK));
     rt_string_new(raw.as_ptr(), raw.len() as u64)
 }
 
