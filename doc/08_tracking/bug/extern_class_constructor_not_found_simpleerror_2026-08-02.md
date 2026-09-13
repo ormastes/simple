@@ -85,3 +85,21 @@ all. Two shapes are possible and the tree does not say which is intended:
    real construction path and the 16 consumers need re-pointing at it.
 
 Do not close by deleting the imports: all 16 are live uses.
+
+## Triage 2026-09-13
+
+Reproduced exactly as filed on base a6450c9d6f5 (seed sha256 prefix
+3d120a6f9ab5704b): `error[E1002]: function 'SimpleError' not found`,
+preceded by `HIR lowering error: Unsupported feature: cannot infer
+field type while lowering main: struct 'SimpleError' field 'message'`
+after JIT fallback to the interpreter -- both engines fail the same
+way, not just the JIT. The doc explicitly frames this as needing an
+owner decision (is extern class meant to be constructible from Simple
+at all, or does error() need a different construction path) before any
+fix, and the underlying HIR field-type-inference gap for extern class
+is very likely Rust-seed-side (this binary's JIT/HIR lowering).
+Deciding the design question and/or patching Rust seed HIR lowering
+is out of this lane's scope. Leaving OPEN, no attempt (per the doc's
+own "do not close by deleting the imports" and "do not fake a
+workaround" guidance).
+
