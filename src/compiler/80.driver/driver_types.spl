@@ -543,6 +543,15 @@ class CompileContext:
     # eviction. Zero is reserved for unavailable/missing, so a real zero hash
     # is remapped to one by the producer and validator.
     source_content_hashes_owner: [i64]
+    # sha256 of each source's content, captured in phase 1 BEFORE any source
+    # eviction. `sources[].content` and `source_contents_owner` are both freed
+    # and blanked before native output runs (reclaim_source_contents ->
+    # reclaim_streaming_source_contents_owner -> evict_sources), so hashing
+    # them at capsule-freeze time yields sha256("") =
+    # e3b0c442...b855 and turns `native-capsule-source-mutated` into a false
+    # positive against a file that was never mutated. This array is never
+    # reclaimed: a 64-char digest per source is the whole cost.
+    source_identities_owner: [text]
     source_module_names_owner: [text]
     native_sources_fingerprint: text
     modules: Dict<text, ParserModule>
@@ -710,6 +719,7 @@ class CompileContext:
             source_authored_paths_owner: [],
             source_contents_owner: [],
             source_content_hashes_owner: [],
+            source_identities_owner: [],
             source_module_names_owner: [],
             native_sources_fingerprint: "",
             modules: {},
@@ -1053,13 +1063,26 @@ class CompileContext:
         if path_count == 1: found_path else: ""
 
     fn frozen_native_cache_source_identity_v1(module_name: text) -> text:
+        # Read the phase-1 identity owner, NOT `sources[].content`: by the time
+        # capsules are frozen the content has been reclaimed and blanked, so
+        # hashing it returns sha256("") for every module. See the field comment
+        # on `source_identities_owner`.
         var found_identity = ""
         var found_count = 0
-        for source in self.sources:
-            if source.module_name == module_name:
-                found_identity = sha256_text(source.content)
+        val names = self.source_module_names_owner
+        val identities = self.source_identities_owner
+        var index = 0
+        while index < names.len() and index < identities.len():
+            if names[index] == module_name:
+                found_identity = identities[index]
                 found_count = found_count + 1
-        if found_count == 1: found_identity else: ""
+            index = index + 1
+        if found_count != 1: return ""
+        # Fail closed rather than publish the digest of nothing: an empty
+        # identity (or the digest of the empty string) means the capture never
+        # saw content, and must not be compared against a real file on disk.
+        if found_identity == "" or found_identity == sha256_text(""): return ""
+        found_identity
 
     fn freeze_native_module_capsules_v1(
         module_names: [text], object_base: text, backend_name: text,
