@@ -3469,8 +3469,90 @@ pub fn simple_web_enforce_details_visibility(
 #     merged strings mostly DO contain `overflow`, so the scan is added and the
 #     original work still runs.
 #
-# What is left to try is folding the six lookups into ONE table probe INLINE in
-# `_normalize_final_overflow_axes`, with no array crossing a function boundary.
+# Round 11 does the third thing: the three answers a declaration block can give
+# (`overflow-x`, `overflow-y`, `scrollbar-width`) are a PURE function of that
+# block, and `_normalize_final_overflow_axes` asked for them twelve times per
+# node over only FOUR distinct strings. They are now computed once per distinct
+# block and memoized as a THREE-element array. That is not design 1: the copy
+# that crosses a boundary here is three short strings, never the several-hundred
+# entry table, and on a hit no table is built, probed or scanned at all.
+# The per-block builder below is byte-identical in semantics to
+# `_final_overflow_axis_in_decls` / `_scrollbar_width_in_decls`, which are kept
+# as the oracle that
+# `test/01_unit/lib/gpu/browser_engine/web_overflow_triple_memo_equivalence_spec.spl`
+# checks it against.
+val OVERFLOW_TRIPLE_MEMO_LIMIT: i32 = 4096
+var _overflow_triple_memo: Dict<text, [text]> = {}
+var _overflow_triple_memo_hits: i64 = 0
+var _overflow_triple_memo_misses: i64 = 0
+
+pub fn overflow_triple_memo_hits() -> i64:
+    _overflow_triple_memo_hits
+
+pub fn overflow_triple_memo_misses() -> i64:
+    _overflow_triple_memo_misses
+
+pub fn overflow_triple_memo_reset():
+    _overflow_triple_memo = {}
+    _overflow_triple_memo_hits = 0
+    _overflow_triple_memo_misses = 0
+
+# [overflow-x, overflow-y, scrollbar-width] for ONE declaration block, with the
+# shorthand/longhand cascade resolved exactly as `_final_overflow_axis_in_decls`
+# resolves it: a longhand wins only when its entry index is strictly greater
+# than the shorthand's, a two-token shorthand splits x/y, and anything else
+# falls back to the whole trimmed+lowered shorthand value.
+fn _overflow_triple_build(decls: text) -> [text]:
+    val table = decl_table_build(decls)
+    val shorthand_at = decl_tbl_last_index(table, "overflow")
+    var shorthand_x = ""
+    var shorthand_y = ""
+    if shorthand_at >= 0:
+        val raw = decl_tbl_get(table, "overflow").trim().lower()
+        var parts: [text] = []
+        for part in raw.split(" "):  # cpu-lane-loop-ok: detector false positive: iterates the tokens of ONE `overflow` shorthand value, which CSS defines as 1 or 2 tokens
+            if part != "":
+                parts.push(part)
+        if parts.len() >= 2:
+            shorthand_x = parts[0]
+            shorthand_y = parts[1]
+        else:
+            shorthand_x = raw
+            shorthand_y = raw
+    var x = shorthand_x
+    if decl_tbl_last_index(table, "overflow-x") > shorthand_at:
+        x = decl_tbl_get(table, "overflow-x").trim().lower()
+    var y = shorthand_y
+    if decl_tbl_last_index(table, "overflow-y") > shorthand_at:
+        y = decl_tbl_get(table, "overflow-y").trim().lower()
+    val scrollbar = decl_tbl_get(table, "scrollbar-width").trim().lower()
+    [x, y, scrollbar]
+
+fn _overflow_triple(decls: text) -> [text]:
+    if decls == "":
+        return ["", "", ""]
+    if _overflow_triple_memo.has(decls):
+        _overflow_triple_memo_hits = _overflow_triple_memo_hits + 1
+        return _overflow_triple_memo[decls]
+    _overflow_triple_memo_misses = _overflow_triple_memo_misses + 1
+    val triple = _overflow_triple_build(decls)
+    if (_overflow_triple_memo.len() as i32) < OVERFLOW_TRIPLE_MEMO_LIMIT:
+        _overflow_triple_memo[decls] = triple
+    triple
+
+# Equivalence oracle for the round-11 overflow triple memo: returns "OK" when
+# the memoized triple agrees with the per-axis scanning originals on `decls`,
+# and a describing line when it does not. Exported so a spec can drive it over
+# adversarial declaration blocks.
+pub fn simple_web_layout_debug_overflow_triple_equivalence(decls: text) -> text:
+    val triple = _overflow_triple(decls)
+    val want_x = _final_overflow_axis_in_decls(decls, "overflow-x")
+    val want_y = _final_overflow_axis_in_decls(decls, "overflow-y")
+    val want_sw = _scrollbar_width_in_decls(decls)
+    if triple[0] == want_x and triple[1] == want_y and triple[2] == want_sw:
+        return "OK"
+    "MISMATCH x={triple[0]}/{want_x} y={triple[1]}/{want_y} sw={triple[2]}/{want_sw}"
+
 fn _final_overflow_axis_in_decls(decls: text, axis: text) -> text:
     if decls == "":
         return ""
@@ -3491,23 +3573,6 @@ fn _final_overflow_axis_in_decls(decls: text, axis: text) -> text:
             return parts[1]
         return raw
     ""
-
-fn _final_overflow_axis(
-    normal: text, inline_normal: text, important: text,
-    inline_important: text, axis: text
-) -> text:
-    val inline_important_value = _final_overflow_axis_in_decls(
-        inline_important, axis
-    )
-    if inline_important_value != "":
-        return inline_important_value
-    val important_value = _final_overflow_axis_in_decls(important, axis)
-    if important_value != "":
-        return important_value
-    val inline_value = _final_overflow_axis_in_decls(inline_normal, axis)
-    if inline_value != "":
-        return inline_value
-    _final_overflow_axis_in_decls(normal, axis)
 
 fn _scrollbar_width_in_decls(decls: text) -> text:
     if decls == "":
@@ -3551,24 +3616,37 @@ fn _normalize_final_overflow_axes(
     st: Style, normal: text, inline_normal: text, important: text,
     inline_important: text
 ) -> Style:
-    val x_raw = _final_overflow_axis(
-        normal, inline_normal, important, inline_important, "overflow-x"
-    )
-    val y_raw = _final_overflow_axis(
-        normal, inline_normal, important, inline_important, "overflow-y"
-    )
+    # One memoized triple per cascade origin (four probes) replaces the twelve
+    # `decl_table_build` + backwards-scan lookups this used to do per node.
+    # Origin precedence is unchanged: inline-important, then important, then
+    # inline-normal, then normal — the same order the per-axis resolver walked.
+    val t_normal = _overflow_triple(normal)
+    val t_inline = _overflow_triple(inline_normal)
+    val t_important = _overflow_triple(important)
+    val t_inline_important = _overflow_triple(inline_important)
+    var x_raw = t_inline_important[0]
+    if x_raw == "":
+        x_raw = t_important[0]
+    if x_raw == "":
+        x_raw = t_inline[0]
+    if x_raw == "":
+        x_raw = t_normal[0]
+    var y_raw = t_inline_important[1]
+    if y_raw == "":
+        y_raw = t_important[1]
+    if y_raw == "":
+        y_raw = t_inline[1]
+    if y_raw == "":
+        y_raw = t_normal[1]
     val x = if x_raw == "": "visible" else: x_raw
     val y = if y_raw == "": "visible" else: y_raw
-    var scrollbar_width = _scrollbar_width_in_decls(normal)
-    val inline_width = _scrollbar_width_in_decls(inline_normal)
-    if inline_width != "":
-        scrollbar_width = inline_width
-    val important_width = _scrollbar_width_in_decls(important)
-    if important_width != "":
-        scrollbar_width = important_width
-    val inline_important_width = _scrollbar_width_in_decls(inline_important)
-    if inline_important_width != "":
-        scrollbar_width = inline_important_width
+    var scrollbar_width = t_normal[2]
+    if t_inline[2] != "":
+        scrollbar_width = t_inline[2]
+    if t_important[2] != "":
+        scrollbar_width = t_important[2]
+    if t_inline_important[2] != "":
+        scrollbar_width = t_inline_important[2]
     var normalized = st
     if scrollbar_width != "":
         normalized.scrollbar_width_none = scrollbar_width == "none"
@@ -3966,6 +4044,23 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 empty_cells_hide = (
                     inline_empty_cells_decl.trim().lower() == "hide"
                 )
+            # Round 11 measured a memo here and it is an HONEST NEGATIVE, kept
+            # as a note so the next round does not rebuild it. Round 10 named
+            # this call as the ~247 ms `tail_inline` bucket and proposed
+            # extending the cascade memo over it. That was implemented keyed on
+            # the cascade memo's ENTRY INDEX (a complete identity for the `st`
+            # entering this call, and short, so a hit pays no concat or hash of
+            # the multi-kilobyte merged block) plus `inline_normal`, and
+            # instrumented: over the whole eight-page catalog it measured
+            # **0 hits, 51 misses, 0 nodes skipped**. The catalog carries
+            # exactly 51 nodes with an inline `style` attribute and no two of
+            # them share a (cascade identity, inline block) pair, so there is
+            # nothing for any memo to hit. `tail_inline` was 287 ms before and
+            # 288 ms after.
+            # The cost is therefore ~4.8 ms per CALL, not per repeat: the
+            # applier probes ~283 property names against the Style regardless
+            # of how few declarations the inline block carries. Making that
+            # cheaper is an `apply_decls` change, not a memo.
             st = apply_decls_without_display_on_writing_mode(
                 st, inline_normal, em_base, logical_writing_mode
             )
