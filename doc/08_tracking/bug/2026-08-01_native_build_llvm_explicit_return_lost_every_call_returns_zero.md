@@ -8,6 +8,10 @@
   compiler interpreted by the Rust seed). The seed's own interpreter (`simple run`)
   is NOT affected — it never goes through this HIR/MIR/LLVM path.
 
+## Closed 2026-09-13 — Already Fixed
+
+Root cause 1 fixed: statements.spl line 450 now uses `if val rt_val_e = rt_val:` instead of `case Some(...)` for nullable binding. Root cause 2 fixed: core_codegen.spl fast paths now call `mark_instruction_dest_defined` before returning. Verified in source and documented with SIMPLE_MIR_RET_TRACE probe.
+
 ## Summary
 
 Any user-defined function whose value left the body through an explicit `return`
