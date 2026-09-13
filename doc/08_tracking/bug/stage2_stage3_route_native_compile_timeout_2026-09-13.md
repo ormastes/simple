@@ -234,3 +234,24 @@ bootstrap closure. Site 10 is therefore **not** provably the only remaining
 obstacle to Stage-2 admission — another call site could hit the same `.?` defect.
 That census belongs to the compiler-fix lane; until it exists, treat "site 10 is
 the last blocker" as unverified.
+
+### Site 10 update 2026-09-13 (lane run 23)
+
+**10b (capsule identity over empty content) is FIXED and proven on a lane.**
+`frozen_native_cache_source_identity_v1` hashed `SourceFile.content` after
+phase 3 had already reclaimed and blanked it, so every module froze
+`sha256("")`. Identity is now captured in the phase-1 owner-promotion loop
+(`CompileContext.source_identities_owner`) and an empty digest is rejected
+fail-closed as `capsule-identity-empty`. Run 23 shows no
+`native-capsule-source-mutated` and no `e3b0c442…b855` anywhere.
+
+**10a (duplicate local value) is OPEN and localized.** Run 23:
+`module.ll:114:3: error: multiple definition of local value named 'l22'` /
+`%l22 = add i64 %l35, 0  ; copy` — the INTEGER arm of `translate_copy`
+(`_MirToLlvm/core_codegen.spl:1869`), where run 22 hit the ptr arm (`:1865`,
+`%l14`). Same instruction kind, so the site is `translate_copy` emitting a
+second definition of an already-defined MIR local. Not a `%t`/`%l` namespace
+collision — `fresh_local()` emits `%t{n}` by construction. `defined_locals`
+already records the first definition and is simply never used to refuse the
+second. Full evidence and the `module_logical_name_from_path` hypothesis:
+`doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md` § Run 23.
