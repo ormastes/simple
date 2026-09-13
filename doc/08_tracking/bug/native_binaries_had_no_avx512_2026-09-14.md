@@ -195,3 +195,43 @@ reasoned rather than tested.
 `glyph parity 6/6`, `soft-shadow parity 9/9`, `rounded interior 7/7`,
 `check-simd-kernels-vectorized 11/11`,
 `check-native-simd-kernels-real PASS — 2460 values, 88 zmm`.
+
+## The two numbers that were missing
+
+**Soft-shadow kernel: 5.8x.** Measured in NATIVE binaries, because the native
+clocks are unusable (below) and the interpreter could not run the scalar
+baseline in tolerable time. Two binaries identical but for the path under test,
+plus a no-op binary to subtract startup; min of 5 runs each:
+
+    40000 rows x 600 px = 24M shadow pixels
+    startup (no-op)  92 ms
+    scalar          1345 ms  ->  1253 ms of work
+    kernel           308 ms  ->   216 ms of work
+
+An earlier attempt at 4000 rows was DISCARDED rather than reported: startup
+varied 80-185 ms, which was larger than the signal. Scaling the work 10x put it
+an order of magnitude above the noise. Parity was proven separately
+(`pixel_diffs=0`) before any timing was believed — a fast wrong answer is not a
+speedup.
+
+**A third native defect: the clocks return -1.** `rt_time_now_micros`,
+`rt_time_now_nanos` and `rt_time_ms` all answer -1 in a native binary while the
+program around them runs correctly. Any in-binary benchmark silently reports
+zero elapsed time. Not fixed here; it is why the measurement above is external.
+
+## GPU and CPU in one test
+
+`test/01_unit/check/gpu_cpu_simd_combined_spec.spl`, 3/3. It dispatches a real
+Vulkan compute clear, reads the pixels back, computes the same fill through the
+CPU SIMD span kernel, and compares them — **4096 pixels, bit-for-bit**. Then it
+exercises the AVX-512 CPU kernels against their oracles in the same process, so
+a regression in either lane fails one test.
+
+Comparing PIXELS rather than frame times is the point. A stubbed GPU path still
+returns plausible timings: earlier in this work `default = []` left the vulkan
+feature off, and every GPU benchmark was a no-op that still produced numbers.
+Absence of a device is reported as a skip with a reason, never as agreement.
+
+Writing it found a real bug in my own dispatch: `clear` is a 1D dispatch with
+`local_size_x=256`, and a 2D 8x8 dispatch covered exactly half the buffer —
+2048 of 4096 pixels differing, which is what a half-covered buffer looks like.
