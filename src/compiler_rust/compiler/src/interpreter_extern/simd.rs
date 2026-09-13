@@ -2514,23 +2514,60 @@ pub fn rt_engine2d_blend_const_span_pct_u32(args: &[Value]) -> Result<Value, Com
                 .to_string(),
         ));
     }
-    let mut dst = unpack_u32_array("rt_engine2d_blend_const_span_pct_u32(dst)", &args[0])?;
+    // Returns ONLY the blended span, never the whole destination.
+    //
+    // The first cut unpacked and repacked the ENTIRE framebuffer, and
+    // fb_rect_opacity_clip calls this once per row — so the cost was
+    // O(rows x fb_len) boxed Value copies instead of O(rows x span). The
+    // original benchmark used rect == whole buffer, which hid it completely.
+    // Re-measured with a 10x50 rect on a 1920x384 buffer: 1214 ms against the
+    // scalar loop's 1116 ms, i.e. a REGRESSION on the shape that actually
+    // occurs. Returning just the span removes the fb_len term entirely.
     let offset_raw = require_u64_value("rt_engine2d_blend_const_span_pct_u32(offset)", &args[1])? as i64;
     let count_raw = require_u64_value("rt_engine2d_blend_const_span_pct_u32(count)", &args[2])? as i64;
     let color = require_u32_value("rt_engine2d_blend_const_span_pct_u32(color)", &args[3])?;
     let opacity_pct = require_u64_value("rt_engine2d_blend_const_span_pct_u32(opacity_pct)", &args[4])? as i64;
 
     if offset_raw < 0 || count_raw <= 0 {
-        return Ok(pack_u32_array(dst));
+        return Ok(pack_u32_array(Vec::new()));
     }
     let offset = offset_raw as usize;
-    if offset >= dst.len() {
-        return Ok(pack_u32_array(dst));
+    // Read only the requested window out of the destination.
+    let mut span = unpack_u32_window("rt_engine2d_blend_const_span_pct_u32(dst)", &args[0], offset, count_raw as usize)?;
+    if span.is_empty() {
+        return Ok(pack_u32_array(Vec::new()));
     }
-    let count = (count_raw as usize).min(dst.len() - offset);
     let pct = opacity_pct.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    blend_const_span_pct_dispatch(&mut dst[offset..offset + count], color, pct);
-    Ok(pack_u32_array(dst))
+    blend_const_span_pct_dispatch(&mut span, color, pct);
+    Ok(pack_u32_array(span))
+}
+
+/// Unpack `count` elements starting at `offset`, clamped to the array's real
+/// length. O(count), not O(len) — the whole point of the span-returning ABI.
+fn unpack_u32_window(
+    name: &str,
+    value: &Value,
+    offset: usize,
+    count: usize,
+) -> Result<Vec<u32>, CompileError> {
+    let items = match value {
+        Value::Array(items) => items,
+        Value::FrozenArray(items) => items,
+        other => {
+            return Err(CompileError::runtime(format!(
+                "{name}: expected [u32] array, got {:?}",
+                other
+            )))
+        }
+    };
+    if offset >= items.len() {
+        return Ok(Vec::new());
+    }
+    let end = (offset + count).min(items.len());
+    items[offset..end]
+        .iter()
+        .map(|item| require_u32_value(name, item))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

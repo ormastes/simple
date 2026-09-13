@@ -2285,6 +2285,123 @@ SplArray* rt_engine2d_blend_const_span_pct_u32(SplArray* dst, int64_t offset,
     return dst;
 }
 
+/* ---------------------------------------------------------------------------
+ * DB row-bitmap word kernels and byte-span scans — native twins.
+ *
+ * These MUST exist here, not only in the interpreter registry. The seed's
+ * linker (`check_no_fake_rt_stubs`) refuses to fabricate a stub for an `rt_*`
+ * name, so an extern with no native twin makes every native build that reaches
+ * it fail to link — and `simd_scan.spl` is pulled in by http_core.spl and
+ * db/accel.spl, i.e. by every HTTP and DB consumer.
+ *
+ * Semantics mirror the Rust bridges in interpreter_extern/simd.rs exactly,
+ * including the zero-extend rule for indices past the end of an operand.
+ * ------------------------------------------------------------------------- */
+
+static int db_bitmap_span(SplArray* array, int64_t limit, int64_t* out_n) {
+    if (!array || limit <= 0) return 0;
+    int64_t len = rt_array_len(array);
+    if (limit > len) return 0;
+    *out_n = limit;
+    return 1;
+}
+
+SplArray* rt_db_bitmap_and_u32(SplArray* lhs, SplArray* rhs, int64_t limit) {
+    int64_t n = 0;
+    if (!db_bitmap_span(lhs, limit, &n)) return NULL;
+    if (!db_bitmap_span(rhs, limit, &n)) return NULL;
+    SplArray* out = rt_array_new_uninit(n);
+    if (!out) return NULL;
+    const int64_t* l = (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs);
+    const int64_t* r = (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs);
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!l || !r || !o) return NULL;
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t a = engine2d_unbox_pixel(l[i]);
+        uint32_t b = engine2d_unbox_pixel(r[i]);
+        o[i] = engine2d_box_pixel(a & b);
+    }
+    return out;
+}
+
+SplArray* rt_db_bitmap_or_u32(SplArray* lhs, SplArray* rhs, int64_t limit,
+                              int64_t lhs_words, int64_t rhs_words) {
+    if (limit <= 0) return NULL;
+    int64_t ll = lhs ? rt_array_len(lhs) : 0;
+    int64_t rl = rhs ? rt_array_len(rhs) : 0;
+    int64_t lw = lhs_words < ll ? lhs_words : ll;
+    int64_t rw = rhs_words < rl ? rhs_words : rl;
+    if (lw < 0) lw = 0;
+    if (rw < 0) rw = 0;
+    SplArray* out = rt_array_new_uninit(limit);
+    if (!out) return NULL;
+    const int64_t* l = lhs ? (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs) : NULL;
+    const int64_t* r = rhs ? (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs) : NULL;
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!o) return NULL;
+    for (int64_t i = 0; i < limit; i++) {
+        uint32_t a = (l && i < lw) ? engine2d_unbox_pixel(l[i]) : 0u;
+        uint32_t b = (r && i < rw) ? engine2d_unbox_pixel(r[i]) : 0u;
+        o[i] = engine2d_box_pixel(a | b);
+    }
+    return out;
+}
+
+SplArray* rt_db_bitmap_andnot_u32(SplArray* lhs, SplArray* rhs, int64_t limit,
+                                  int64_t rhs_words) {
+    int64_t n = 0;
+    if (!db_bitmap_span(lhs, limit, &n)) return NULL;
+    int64_t rl = rhs ? rt_array_len(rhs) : 0;
+    int64_t rw = rhs_words < rl ? rhs_words : rl;
+    if (rw < 0) rw = 0;
+    SplArray* out = rt_array_new_uninit(n);
+    if (!out) return NULL;
+    const int64_t* l = (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs);
+    const int64_t* r = rhs ? (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs) : NULL;
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!l || !o) return NULL;
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t a = engine2d_unbox_pixel(l[i]);
+        uint32_t b = (r && i < rw) ? engine2d_unbox_pixel(r[i]) : 0u;
+        o[i] = engine2d_box_pixel(a & (0xFFFFFFFFu ^ b));
+    }
+    return out;
+}
+
+int64_t rt_simd_find_byte_span(SplArray* bytes, int64_t start, int64_t needle) {
+    if (!bytes || start < 0) return -1;
+    int64_t len = rt_array_len(bytes);
+    if (start >= len) return -1;
+    /* SplArray stores one int64_t slot per element (tagged), NOT packed bytes,
+       so a `[u8]` must be read slot-wise and unboxed — casting the data
+       pointer to uint8_t* reads three bytes of tag for every real byte. */
+    const int64_t* p = (const int64_t*)(uintptr_t)rt_array_data_ptr(bytes);
+    if (!p) return -1;
+    uint32_t target = (uint32_t)(needle & 0xFF);
+    for (int64_t i = start; i < len; i++) {
+        if ((engine2d_unbox_pixel(p[i]) & 0xFFu) == target) return i;
+    }
+    return -1;
+}
+
+int64_t rt_simd_bytes_equal_span(SplArray* lhs, int64_t lhs_start,
+                                 SplArray* rhs, int64_t rhs_start, int64_t len) {
+    if (!lhs || !rhs || lhs_start < 0 || rhs_start < 0 || len < 0) return 0;
+    if (lhs_start + len > rt_array_len(lhs)) return 0;
+    if (rhs_start + len > rt_array_len(rhs)) return 0;
+    /* Slot-wise for the same reason as rt_simd_find_byte_span: memcmp over the
+       raw data pointer would compare tag bytes, not element values. */
+    const int64_t* a = (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs);
+    const int64_t* b = (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs);
+    if (!a || !b) return 0;
+    for (int64_t i = 0; i < len; i++) {
+        uint32_t av = engine2d_unbox_pixel(a[lhs_start + i]) & 0xFFu;
+        uint32_t bv = engine2d_unbox_pixel(b[rhs_start + i]) & 0xFFu;
+        if (av != bv) return 0;
+    }
+    return 1;
+}
+
 /* Scalar fallback stubs — no-op placeholders until pure Simple or
    hardware-accelerated implementations are wired in. */
 

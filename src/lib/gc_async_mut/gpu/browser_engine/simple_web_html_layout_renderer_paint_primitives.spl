@@ -199,23 +199,40 @@ fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
         py = py + 1
     out
 
+# The kernel returns ONLY the blended span, not the whole framebuffer.
+#
+# It used to return the whole thing, which meant one unpack+repack of the
+# ENTIRE framebuffer per row. Measured with a 10x50 rect on a 1920x384 buffer,
+# that was 1214 ms against the scalar loop's 1116 ms — a REGRESSION on the
+# shape that actually occurs. The original 333 ms -> 1 ms measurement used a
+# rect covering the whole buffer, which hid the fb_len term completely.
 @unsafe(reason: "percent-opacity constant-colour span blend; bounds are enforced inside the kernel", capabilities: [ffi])
 extern fn rt_engine2d_blend_const_span_pct_u32(dst: [u32], offset: i64, count: i64, color: u32, opacity_pct: i64) -> [u32]
 
 fn fb_blend_const_row_opacity(fb: [u32], offset: i32, count: i32, color: u32, opacity_pct: i32) -> [u32]:
     """Blend one constant colour across a row span at an integer percent opacity.
 
-    Falls back to the scalar twin when the native kernel is unavailable — an
-    unbacked extern returns nil rather than failing, so a nil result must be
-    treated as "not backed" and never written back to the framebuffer.
+    Falls back to the scalar twin when the native kernel is unavailable. An
+    unbacked extern returns nil, so a result whose length is not exactly the
+    requested span is treated as "not backed" and never written back.
     """
     if count <= 0:
         return fb
-    val blended = rt_engine2d_blend_const_span_pct_u32(
-        fb, offset.to_i64(), count.to_i64(), color, opacity_pct.to_i64())
-    if blended.len() == fb.len():
-        return blended
-    _scalar_blend_const_row_opacity(fb, offset, count, color, opacity_pct)
+    var out = fb
+    if offset < 0 or offset >= out.len():
+        return out
+    var n = count
+    if offset + n > out.len():
+        n = out.len() - offset
+    val span = rt_engine2d_blend_const_span_pct_u32(
+        out, offset.to_i64(), n.to_i64(), color, opacity_pct.to_i64())
+    if span.len() != n:
+        return _scalar_blend_const_row_opacity(fb, offset, count, color, opacity_pct)
+    var i = 0
+    while i < n:
+        out[offset + i] = span[i]
+        i = i + 1
+    out
 
 fn _scalar_blend_const_row_opacity(fb: [u32], offset: i32, count: i32, color: u32, opacity_pct: i32) -> [u32]:
     """Scalar reference path — bit-identical to the kernel by construction.
