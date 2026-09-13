@@ -74,3 +74,7 @@ bin/simple test test/03_system/gui/web_css/web_css_visibility_containment_spec.s
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/03_system/gui/web_css/web_css_visibility_containment_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Confirmed still failing as designed: `bin/simple test test/03_system/gui/web_css/web_css_visibility_containment_spec.spl --no-session-daemon --sequential` reproduces `expected 40 to equal 5`. This is a deliberately-scoped-out feature gap (the layout engine's own header comment explains a "measure without laying out" pass is needed, and faking it would silently produce wrong sizes) — not a mechanical bug. Implementing intrinsic-sizing machinery in `simple_web_html_layout_renderer_layout.spl` is a layout-engine architecture change well beyond this pass's per-bug budget. Leaving OPEN, no code change made.
