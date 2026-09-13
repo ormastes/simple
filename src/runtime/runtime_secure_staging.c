@@ -93,36 +93,47 @@ int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
 }
 
 #if defined(_WIN32)
-/* Create a directory without the MAX_PATH ceiling. See the call site for why.
- * The path separator and the extended-length prefix are built from the numeric
- * code point (92) rather than written literally, purely to keep this source
- * free of escape sequences. */
-static BOOL rt_secure_create_directory_long(const char* path,
-                                            SECURITY_ATTRIBUTES* attributes) {
+/* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
+ * leaves it long, add the extended-length ("\\?\") prefix so a WIDE Win32
+ * call is not itself capped at MAX_PATH (a wide call is not exempt on its
+ * own -- only the prefix lifts the ceiling, to ~32767). `out` must hold at
+ * least 32768 wchar_t. Returns 0 (leaving `out` untouched) when the path
+ * cannot be widened/qualified at all, so callers fall back to the ANSI call
+ * for a normal-length or otherwise-unrepresentable path. The path separator
+ * and prefix are built from the numeric code point (92) rather than written
+ * literally, purely to keep this source free of escape sequences. */
+static int rt_secure_widen_long_path(const char* path, wchar_t* out) {
     static const wchar_t sep = (wchar_t)92;
-    wchar_t wide[32768], full[32768], prefixed[32768];
+    wchar_t wide[32768], full[32768];
     wchar_t* scan;
     DWORD n;
     size_t len;
     if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide,
                             (int)(sizeof(wide) / sizeof(wide[0]))) == 0) {
-        return CreateDirectoryA(path, attributes);
+        return 0;
     }
     for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
     n = GetFullPathNameW(wide, (DWORD)(sizeof(full) / sizeof(full[0])), full, NULL);
-    if (n == 0 || n >= sizeof(full) / sizeof(full[0])) {
-        return CreateDirectoryA(path, attributes);
-    }
+    if (n == 0 || n >= sizeof(full) / sizeof(full[0])) return 0;
     /* Already extended-length, or a UNC path: hand it over unchanged. */
     if (full[0] == sep && full[1] == sep) {
-        return CreateDirectoryW(full, attributes);
+        memcpy(out, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        return 1;
     }
     len = wcslen(full);
-    if (len + 5 >= sizeof(prefixed) / sizeof(prefixed[0])) {
+    if (len + 5 >= 32768) return 0;
+    out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+    memcpy(out + 4, full, (len + 1) * sizeof(wchar_t));
+    return 1;
+}
+
+/* Create a directory without the MAX_PATH ceiling. See the call site for why. */
+static BOOL rt_secure_create_directory_long(const char* path,
+                                            SECURITY_ATTRIBUTES* attributes) {
+    wchar_t prefixed[32768];
+    if (!rt_secure_widen_long_path(path, prefixed)) {
         return CreateDirectoryA(path, attributes);
     }
-    prefixed[0] = sep; prefixed[1] = sep; prefixed[2] = L'?'; prefixed[3] = sep;
-    memcpy(prefixed + 4, full, (len + 1) * sizeof(wchar_t));
     return CreateDirectoryW(prefixed, attributes);
 }
 #endif
@@ -137,6 +148,18 @@ static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
     if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
     fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
             stage, (unsigned long)GetLastError(), detail ? detail : "");
+    fflush(stderr);
+}
+
+/* Same convention as rt_secure_temp_dir_diag above, for the publish call.
+ * Name the Win32 error rather than leaving every non-EEXIST failure to
+ * collapse into the caller's generic "AOT object publication failed" --
+ * that message alone cost a diagnosis cycle (see the long-path fix below).
+ * SIMPLE_QUIET_SECURE_TEMP_DIAG=1 silences, matching the sibling diag. */
+static void rt_file_publish_noreplace_diag(const char* stage) {
+    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
+    fprintf(stderr, "rt_file_publish_noreplace: %s failed (GetLastError=%lu)\n",
+            stage, (unsigned long)GetLastError());
     fflush(stderr);
 }
 #endif
@@ -186,8 +209,34 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
     if (!secure_copy_path(staged_ptr, staged_len, staged, sizeof(staged)) ||
         !secure_copy_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
 #if defined(_WIN32)
+    /* The AOT native-build cache path nests <repo>/.simple/storage/.../
+     * stage2-home/.cache/simple/v1/projects/<64-hex>/native-build/
+     * simple-aot-diagnostic-<32-hex>/message.module.o -- routinely over 260
+     * chars. MoveFileExA is an ANSI entry point and is capped at MAX_PATH
+     * regardless of the underlying filesystem's real limit, so this "second"
+     * move destination -- the one already inside that long tree -- failed
+     * with ERROR_PATH_NOT_FOUND (3), rendered four layers up as the opaque
+     * "AOT object publication failed". Prefer the wide, extended-length-
+     * prefixed call so both endpoints can exceed MAX_PATH; keep the ANSI
+     * call as the fallback for a path that cannot be widened. */
+    {
+        wchar_t wide_staged[32768], wide_dest[32768];
+        if (rt_secure_widen_long_path(staged, wide_staged) &&
+            rt_secure_widen_long_path(destination, wide_dest)) {
+            if (MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH)) return 1;
+            DWORD werror = GetLastError();
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_file_publish_noreplace_diag("MoveFileExW");
+            return -1;
+        }
+    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    DWORD error = GetLastError(); return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_file_publish_noreplace_diag("MoveFileExA");
+        return -1;
+    }
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;

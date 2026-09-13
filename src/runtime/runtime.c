@@ -2797,9 +2797,35 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) ||
         !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
 #if defined(_WIN32)
+    /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
+     * underlying filesystem's real limit; the AOT native-build cache path
+     * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/simple-aot-diagnostic-<32-hex>/message.module.o)
+     * routinely exceeds it, failing with ERROR_PATH_NOT_FOUND (3). Prefer the
+     * wide, extended-length-prefixed call (rt_widen_long_path_rc, already
+     * used by the bounded reader above) so both endpoints can exceed
+     * MAX_PATH. Twin of the same fix in runtime_native.c. */
+    {
+        wchar_t* wide_staged = rt_widen_long_path_rc(staged);
+        wchar_t* wide_dest = wide_staged ? rt_widen_long_path_rc(destination) : NULL;
+        if (wide_staged && wide_dest) {
+            BOOL ok = MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH);
+            DWORD werror = ok ? 0 : GetLastError();
+            free(wide_staged); free(wide_dest);
+            if (ok) return 1;
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
+            return -1;
+        }
+        free(wide_staged); free(wide_dest);
+    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    DWORD error = GetLastError();
-    return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
+        return -1;
+    }
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
