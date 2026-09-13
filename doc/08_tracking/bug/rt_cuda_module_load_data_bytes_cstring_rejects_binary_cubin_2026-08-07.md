@@ -75,3 +75,7 @@ SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_RUST_SEED_WARNING=0 bin/simple test \
   test/02_integration/os/crypto/x25519mlkem768_cuda_binary_execution_spec.spl \
   --no-cache --no-cover-check
 ```
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Record already states the fix location is entirely inside src/compiler_rust and needs real CUDA hardware to verify -- explicitly architectural-open and out of pure-Simple scope. No change made.
