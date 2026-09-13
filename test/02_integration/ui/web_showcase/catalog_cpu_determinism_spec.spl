@@ -1,0 +1,119 @@
+"""
+# The web renderer showcase catalog draws every page, the same way twice
+## Purpose and audience
+For the engineers who own the Simple web renderer showcase
+(`src/app/ui/chrome_showcase/catalog.spl` and
+`std.gc_async_mut.gpu.browser_engine.simple_web_renderer`). The showcase
+catalog is the eight-page browser-feature demo that the Chrome comparison,
+the GPU boundary audit and the 4K lane all render. If a page stops drawing,
+or draws differently on two identical requests, every one of those lanes
+reports noise instead of a regression.
+## Operator workflow
+Run: SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \\
+     bin/simple test test/02_integration/ui/web_showcase/catalog_cpu_determinism_spec.spl
+Each catalog tab is composed from the tracked showcase HTML source, rendered
+twice on the CPU backend at a small headless size, and the two frame digests
+are compared.
+## Compatibility and limitations
+CPU (`cpu_simd`) backend only, so the scenario runs on any host with no GPU
+and no display. The render size is deliberately small: cost is dominated by
+layout rather than pixel count, and a single page costs tens of seconds under
+the interpreter. No frame-time is asserted -- see the sibling 4K scenario for
+why no timing budget is pinned in this repo.
+## Verification guidance and troubleshooting
+A determinism failure names the tab whose two digests diverged: the renderer
+grew a frame-to-frame dependency (uninitialised buffer, clock, or hash seed).
+A blank-frame failure names the tab that produced a uniform buffer, which
+means layout or paint dropped the page rather than mis-drawing it.
+"""
+# Lifecycle: doc/01_research/local/web_renderer_vs_chrome_speed_2026-09-05.md ;
+# doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/05_design/chromium_web_renderer_primitive_differential.md
+# @manual_section: web-showcase-catalog-cpu
+# @tag: ui, web, showcase, renderer, integration, ci, slow
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend}
+use app.ui.chrome_showcase.catalog.{
+    chrome_catalog_tabs, chrome_catalog_page, CHROME_CATALOG_SOURCE}
+use app.ui.chrome_showcase.gpu_boundary_audit.{audit_frame_digest}
+use app.ui.chrome_showcase.frame.{chrome_frame_nonblank}
+
+val SHOWCASE_W: i32 = 320
+val SHOWCASE_H: i32 = 180
+
+describe "web renderer showcase catalog on the CPU backend":
+
+    it "draws all eight showcase pages without leaving any of them blank":
+        # @req REQ-UI-WEBSHOWCASE-001
+        # @capture(statistics): per-tab pixel count and blank/non-blank verdict
+        step("Compose every catalog tab from the tracked showcase source and render it on cpu_simd")
+        val tabs = chrome_catalog_tabs()
+        val source = read_file(CHROME_CATALOG_SOURCE)
+        var blank_tabs: [text] = []
+        var rendered = 0
+        var report = ""
+        for tab in tabs:
+            val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(
+                chrome_catalog_page(source, tab), SHOWCASE_W, SHOWCASE_H, "cpu_simd")
+            val nonblank = chrome_frame_nonblank(pixels)
+            report = report + "{tab} px={pixels.len()} nonblank={nonblank}\n"
+            if not nonblank:
+                blank_tabs = blank_tabs + [tab]
+            rendered = rendered + 1
+        print(report)
+
+        step("Every tab produced ink, and the catalog really has the documented eight pages")
+        # oracle: chrome_catalog_tabs() in src/app/ui/chrome_showcase/catalog.spl:23
+        #         is the 7 panel tabs plus "tab-bar"
+        expect(rendered).to_equal(8)
+        expect(blank_tabs).to_equal([])
+
+    it "produces an identical frame digest when the same page is rendered twice":
+        # @req REQ-UI-WEBSHOWCASE-002
+        # @capture(statistics): first and second frame digest per tab
+        step("Render each catalog tab twice on cpu_simd and compare the two frame digests")
+        val tabs = chrome_catalog_tabs()
+        val source = read_file(CHROME_CATALOG_SOURCE)
+        var unstable_tabs: [text] = []
+        var compared = 0
+        var digest_report = ""
+        for tab in tabs:
+            val html = chrome_catalog_page(source, tab)
+            val first = audit_frame_digest(
+                simple_web_render_html_to_pixels_with_engine2d_backend(
+                    html, SHOWCASE_W, SHOWCASE_H, "cpu_simd"))
+            val second = audit_frame_digest(
+                simple_web_render_html_to_pixels_with_engine2d_backend(
+                    html, SHOWCASE_W, SHOWCASE_H, "cpu_simd"))
+            digest_report = digest_report + "{tab} first={first} second={second}\n"
+            if first != second:
+                unstable_tabs = unstable_tabs + [tab]
+            compared = compared + 1
+        print(digest_report)
+
+        step("No tab changed its digest between the two renders")
+        # oracle: audit_frame_digest (gpu_boundary_audit.spl:417) is a pure FNV-1a
+        #         over the frame, so equal frames must yield equal digests
+        expect(compared).to_equal(8)
+        expect(unstable_tabs).to_equal([])
+
+    it "reports distinct digests for pages that draw different content":
+        # @req REQ-UI-WEBSHOWCASE-003
+        # @capture(statistics): digest of the overview tab against every other tab
+        step("Render the overview tab and confirm at least one other tab differs from it")
+        # An all-tabs-identical digest would make the determinism scenario above
+        # pass vacuously, so this is the adverse twin that keeps it honest.
+        val tabs = chrome_catalog_tabs()
+        val source = read_file(CHROME_CATALOG_SOURCE)
+        val overview = audit_frame_digest(
+            simple_web_render_html_to_pixels_with_engine2d_backend(
+                chrome_catalog_page(source, tabs[0]), SHOWCASE_W, SHOWCASE_H, "cpu_simd"))
+        val other = audit_frame_digest(
+            simple_web_render_html_to_pixels_with_engine2d_backend(
+                chrome_catalog_page(source, tabs[2]), SHOWCASE_W, SHOWCASE_H, "cpu_simd"))
+        print("overview={overview} {tabs[2]}={other}")
+
+        step("The two different pages did not collapse to the same frame")
+        expect(overview == other).to_equal(false)
