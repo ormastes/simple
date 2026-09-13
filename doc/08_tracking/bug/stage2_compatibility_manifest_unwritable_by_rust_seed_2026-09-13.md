@@ -80,3 +80,47 @@ Stage 2 built, both capability probes PASS, admission receipt and parent receipt
 published; Stage 3, the full CLI and Stage 4 were never reached. Nothing was
 deployed. The candidate that reached this point:
 `.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple`.
+
+## RESOLVED 2026-09-13 — option 2 (producer-scoped gate), with the option-1 path measured dead
+
+Option 1 ("teach the seed to write the manifest") was rejected on evidence, not
+preference: the writer returns `m2-receipt-<reason>`
+(`driver_aot_native_output.spl:415-418`) unless
+`reverse_reference_read_current_admitted_v1`
+(`80.driver/cache/reverse_reference_receipt.spl:243`) finds a generation pointer
+and `<digest>.receipt` under the Phase-2 cache root. Those receipts are written
+only by that pure-Simple module — `grep -rl 'reverse_reference|current-admitted'
+src/compiler_rust/` is EMPTY. So "minimal emission mirroring the writer" is
+actually a port of the whole M2 reuse-admission authority into Rust, as a second
+authoritative implementation of a trust mechanism. Running the pure-Simple writer
+inside the Stage-2 candidate against a seed-written cache fails at the same line,
+so that variant is unsatisfiable too.
+
+Not macOS-specific: `bootstrap-from-scratch.sh` pins `can_full_bootstrap=0`
+("Force manual bootstrap"), so on EVERY OS Stage 2's producer is the admitted
+Rust seed unless `--stage2-parent`/`--pure-simple` supplies an admitted
+pure-Simple parent. The gate was only ever satisfiable on that producer; no
+Linux run on the default lane ever crossed it either.
+
+The gate is kept and scoped on a POSITIVE producer fact that the script already
+computes BEFORE Stage 2 runs (`bootstrap_stage2_parent_override`, set only after
+`admit-stage2-parent.shs` verified an admitted pure-Simple release, plus the
+`--pure-simple` flag) — never "the file is missing, so skip".
+
+- `scripts/check/lib/bootstrap-stage3/phase2-compat-manifest.shs` —
+  `bootstrap_phase2_compat_producer_kind` and
+  `bootstrap_phase2_compat_manifest_gate`, 12 fatal selftest fixtures.
+- `scripts/check/check-stage2-compat-manifest-gate.shs` — wrapper; selftest runs
+  first and is fatal. Verdict is the last stdout line: PASS 0 / FAIL 1 / ERROR 2.
+- pure-simple producer: manifest must exist AND carry the frozen schema header
+  `simple-phase2-phase3-compatibility-v1`
+  (`phase_compatibility_manifest.spl:166`) — strictly stronger than the old bare
+  `[ -f ]`. rust-seed producer: absence is admitted only with a
+  `<manifest>.not-published` evidence record naming the producer; a manifest that
+  IS present is still schema-checked.
+- Fail-closed downstream is unchanged: Stage 3 still receives
+  `SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ` (that env vector is bound into
+  `bootstrap_stage3_args_sha256` and the canonical env-name lists, so it must not
+  change); `driver_admit_phase2_compatibility_manifest_v1` refuses the absent
+  path, `[M3] reject manifest` is printed, and Phase 3 does a clean build with
+  ZERO Phase-2 reuse. No reuse is ever admitted without a manifest.
