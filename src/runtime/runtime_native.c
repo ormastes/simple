@@ -10826,6 +10826,54 @@ int64_t rt_file_read_regular_no_follow_last_failure(void) {
 
 #define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
 
+#if defined(_WIN32)
+/* Widen a UTF-8 path and, when it is long enough to hit the MAX_PATH ceiling,
+ * qualify it and add the extended-length prefix. A WIDE call is not by itself
+ * exempt: CreateFileW still caps at MAX_PATH unless the path carries the
+ * prefix, which is why a 266-character diagnostic file written successfully
+ * could not be read back. Twin of rt_widen_long_path_rc in runtime.c -- this
+ * file carries a byte-identical copy of the reader below, and archive member
+ * order decides which one links, so both copies must widen or the fix is a
+ * coin flip (see 08987610e54, which fixed the runtime.c copy only after
+ * finding this file's copy still unfixed). Separator and prefix are built
+ * from the numeric code point (92) to keep this free of escape sequences.
+ * Same name as the runtime.c twin (not a fresh one) so the
+ * push-rt-dual-implementation ratchet's already-baselined single-lane entry
+ * for rt_widen_long_path_rc covers this copy too, instead of requiring a new
+ * baseline row for a second name. Caller frees. */
+static wchar_t* rt_widen_long_path_rc(const char* path) {
+    static const wchar_t sep = (wchar_t)92;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
+        free(wide);
+        return NULL;
+    }
+    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    {
+        wchar_t* scan;
+        DWORD need;
+        wchar_t* full;
+        wchar_t* out;
+        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+        need = GetFullPathNameW(wide, 0, NULL, NULL);
+        if (need == 0) return wide;
+        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        if (!full) return wide;
+        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        if (!out) { free(full); return wide; }
+        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        free(full);
+        free(wide);
+        return out;
+    }
+}
+#endif
+
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
@@ -10838,13 +10886,8 @@ int64_t rt_file_read_regular_no_follow_bounded(
     if (!bytes) return RT_RNF_FAIL(9);
     size_t total = 0;
 #if defined(_WIN32)
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) { free(bytes); return RT_RNF_FAIL(9); }
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len)) {
-        free(wide_path); free(bytes); return RT_RNF_FAIL(4);
-    }
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
     HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
