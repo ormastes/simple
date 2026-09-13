@@ -72,7 +72,7 @@ does not use it for this code, and the table above is what that lane does.
 |---|---|---|
 | `src/compiler/80.driver/driver_build/parallel.spl:285` | `[(i64, bool)]` | **FIXED** by this lane (`while stack.len() > 0:`) — it was the Stage-2 admission blocker |
 | `src/compiler/90.tools/context_pack.spl:58` | `[text]` | untouched: the path is FENCED for this lane (`scratchpad/egl_offlimits_v2.txt`) |
-| `src/compiler/10.frontend/parser/test_analyzer.spl:233` | `[TestGroup]` | untouched: outside the admission path. Open question, recorded not asserted — this flush loop should diverge by the same reading, yet test runs do not hang, so the function is probably demoted to the tree-walk lane (`compilability.rs:683` says ExistsCheck "requires runtime type inspection"). Someone should measure it. |
+| `src/compiler/10.frontend/parser/test_analyzer.spl:233` | `[TestGroup]` | untouched: outside the admission path. Open question, recorded not asserted — this flush loop should diverge by the same reading, yet test runs do not hang, so the function is probably demoted to the tree-walk lane, which gets this right: `is_condition_present` (`interpreter_control.rs:188`) special-cases `ExistsCheck` to mean "not Nil" and the tree-walk `ExistsCheck` arm returns Nil for an empty Array, while `compilability.rs:683` marks `ExistsCheck` as "requires runtime type inspection" — a plausible demotion trigger. Someone should measure it. |
 
 The optional-receiver sites (`gc.spl` `while current.?:`, `persistent_symbol_table.spl`
 `while scope_id.?:`) are correct uses and are NOT affected.

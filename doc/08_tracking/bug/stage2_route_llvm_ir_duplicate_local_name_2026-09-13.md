@@ -46,13 +46,15 @@ defined exactly once per function.
 
 ## Next step for whoever picks this up
 
-The `.ll` is deleted even with `SIMPLE_BOOTSTRAP=1` and
-`SIMPLE_KEEP_LLVM_IR=1` (the guard at
-`src/compiler/70.backend/backend/llvm_backend_tools.spl:242-243` skips ITS
-cleanup in that case, so something else removes the stage dir — probably
-`rt_secure_temp_dir`'s own teardown). Making that retention actually work is the
-first step; without the IR, line 102 cannot be attributed to a MIR instruction.
-A cheap alternative is to emit the module to a caller-chosen path.
+The `.ll` is deleted even with `SIMPLE_BOOTSTRAP=1` and `SIMPLE_KEEP_LLVM_IR=1`.
+Located, not guessed: the guard those variables control
+(`src/compiler/70.backend/backend/llvm_backend_tools.spl:242-243`) is on the
+SUCCESS path, while every failure path goes through `llvm_object_stage_fail`
+(`:273-281`), which calls `dir_remove(stage_dir, true)` **unconditionally** and
+consults no environment variable. So on an llc error the staging dir — and with
+it `module.ll` — is always removed. Making that honour `SIMPLE_KEEP_LLVM_IR` (or
+emitting the module to a caller-chosen path) is step one; without the IR, line
+102 cannot be attributed to a MIR instruction.
 
 Do NOT raise `STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS`: it is no longer even
 involved — the route fails fast now.

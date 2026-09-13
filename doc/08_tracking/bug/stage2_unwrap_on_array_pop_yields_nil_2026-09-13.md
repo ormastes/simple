@@ -71,14 +71,25 @@ marked visited and the DFS re-expands forever. VmRSS 40 MB -> 6 GB in 121 s
 
 The shared Rust seed's **cranelift** lane gets form A RIGHT
 (`u8:true;u7:false;`, probe `scratchpad/boot9/probe/popfix.spl`). The LLVM lane
-does not. So this is a backend-visible divergence, not a uniform language
-behaviour, and "it works on my engine" proves nothing here.
+does not. So form A is a backend-visible divergence, not a uniform language
+behaviour, and "it works on my engine" proves nothing here. (The `??`
+double-evaluation below is NOT lane-specific — it was measured in both.)
 
-The same probe also found **`??` double-evaluates its left operand** in the
-cranelift lane: `val (n, f) = s.pop() ?? (-1, true)` printed only `c7:false;`
-for a two-element stack — two pops in one iteration. So `??` is NOT a safe
-replacement for `.unwrap()` on a `pop()`, and the fix used the index-read form
-instead. That double-evaluation deserves its own investigation.
+The same probe also found that **`??` evaluates its left operand TWICE**, and a
+follow-up probe with an iteration counter and length logging
+(`scratchpad/boot9/probe/qq.spl`, **LLVM** lane, same seed) isolates it rather
+than inferring it:
+
+```
+[it1 len_before2 len_after0 n=7 f=false] iters=1
+```
+
+One iteration of `val (n, f) = s2.pop() ?? (-1, true)` drops the length by TWO
+and binds `7` — the SECOND pop's element. So `??` is not a safe replacement for
+`.unwrap()` on a `pop()` (the first probe's single `c7:false;` in the cranelift
+lane is the same defect, not a lane quirk), which is why the fix uses the
+index-read form. The double evaluation deserves its own record and fix; it is
+not scoped to one backend.
 
 ## Fix applied (bootstrap blocker only)
 
