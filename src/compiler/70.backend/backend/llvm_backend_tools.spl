@@ -13,7 +13,7 @@ use compiler.mir_opt.mod.{OptLevel}
 use compiler.interp.interpreter.llvm.tools.*
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists,
-    file_is_regular_no_follow, file_size_raw}
+    file_is_regular_no_follow, file_size_raw, file_read_text}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_sync_mut.path.{dirname}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
@@ -275,6 +275,25 @@ fn llvm_object_stage_fail(
     message: text, status: i64
 ) -> i64:
     var final_message = message
+    # Preserve the IR the diagnostic NAMES, unconditionally, beside the
+    # caller-owned diagnostic file -- BEFORE the staging directory is removed
+    # below. SIMPLE_LLVM_KEEP_STAGE=1 keeps the staging directory, but the
+    # staging lives UNDER the caller's probe directory (e.g.
+    # check-bootstrap-stage2-struct-receiver.shs), which removes itself on exit
+    # -- so an llc rejection like "module.ll:114:3: multiple definition of local
+    # value named 'l22'" still named a file that no longer existed by the time
+    # anyone read the message. `diagnostic_path` is caller-owned and survives
+    # that teardown, so the copy goes there.
+    # See doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md (run 23).
+    var kept_ir_note = ""
+    if diagnostic_path != "":
+        val staged_ir = stage_dir + "/module.ll"
+        if file_exists(staged_ir):
+            val ir_text = file_read_text(staged_ir)
+            if ir_text != "":
+                val kept_ir = "{diagnostic_path}.module.ll"
+                if file_write(kept_ir, ir_text):
+                    kept_ir_note = "; IR kept at {kept_ir}"
     # SIMPLE_LLVM_KEEP_STAGE=1 preserves module.ll/module.o for diagnosis. The
     # staging directory is otherwise removed on failure, which makes an llc
     # rejection ("module.ll:109:3: ...") unreadable: the file it names is gone
@@ -283,6 +302,7 @@ fn llvm_object_stage_fail(
         final_message = "{message}; staging kept at {stage_dir}"
     elif not dir_remove(stage_dir, true):
         final_message = "{message}; private staging cleanup failed"
+    final_message = final_message + kept_ir_note
     backend_aot_write_diagnostic(diagnostic_path, final_message)
     if status == 0: 1 else: status
 
