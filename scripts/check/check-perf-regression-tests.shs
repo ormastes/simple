@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=234
+ROW_FLOOR=240
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -756,6 +756,28 @@ must_contain     "WHILESHAPE parity spec ratio pin"  "$WHILEPARITY" "expect(slow
 must_contain     "WHILESHAPE parity spec absolute pin" "$WHILEPARITY" "expect(slow * 2 <= PERF_N).to_equal(true)"
 must_contain     "WHILESHAPE parity spec is non-vacuous on the counter" \
     "$WHILEPARITY" "expect(r.counter >= 0).to_equal(true)"
+
+# --- 2026-09-13 (PERF-5 target 1): daemon_lock_alive() shelled out to
+# /bin/sh via process_run_timeout on every call (up to 8 execve("/bin/sh")
+# per `simple test <spec>` with a warm daemon). Fixed to answer in-process
+# via file_exists("/proc/<pid>") (mirroring light_daemon.spl's own
+# pid_is_live()) plus a plain /proc/<pid>/cmdline text read. These rows pin
+# the shell-out's absence and the in-process replacement's presence, plus
+# the perf pin that would catch a regression back to the shell.
+CLIENTSPL="$ROOT/src/app/test_runner_new/test_runner_client.spl"
+DAEMONLOCKSPEC="$ROOT/test/05_perf/test_runner/daemon_lock_alive_shell_spawn_spec.spl"
+must_not_contain "DAEMONLOCK daemon_lock_alive no longer shells out" \
+    "$CLIENTSPL" "process_run_timeout("
+must_not_contain "DAEMONLOCK daemon_lock_alive no longer shells to kill -0" \
+    "$CLIENTSPL" 'kill -0 \"$pid\"'
+must_contain     "DAEMONLOCK liveness answered via /proc existence, in-process" \
+    "$CLIENTSPL" 'not file_exists("/proc/{pid}")'
+must_contain     "DAEMONLOCK identity answered via a plain cmdline text read" \
+    "$CLIENTSPL" 'read_file_text_result("/proc/{pid}/cmdline")'
+must_contain     "DAEMONLOCK perf pin exists and is fail-closed on an unreadable trace" \
+    "$DAEMONLOCKSPEC" "expect(sh_count >= 0).to_equal(true)"
+must_contain     "DAEMONLOCK perf pin budgets zero /bin/sh spawns, not a shrunk count" \
+    "$DAEMONLOCKSPEC" "expect(sh_count <= 0).to_equal(true)"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

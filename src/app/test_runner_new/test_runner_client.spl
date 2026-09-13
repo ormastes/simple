@@ -198,11 +198,10 @@ fn daemon_lock_alive() -> bool:
     `sleep 1800` pid in the lock, the old probe reported
     "Test daemon: running (pid: N)".
 
-    Deliberately conservative in two directions:
+    Deliberately conservative in one direction, and Linux-only in a second
+    (behavior CHANGED from the shell version — see note below):
       * A D-state (uninterruptible) daemon still MATCHES its cmdline, so it is
         reported alive and is never disturbed — it may be making progress.
-      * Where /proc is unavailable (non-Linux), the cmdline probe cannot run
-        and the kill -0 answer stands, exactly as before.
     Only the lock FILE is ever removed, and only for a PID that is provably not
     the daemon; no process is ever signalled. Bug:
     stale_daemon_lock_fakes_total_red_2026-08-09.
@@ -218,18 +217,31 @@ fn daemon_lock_alive() -> bool:
     pipeline matched. Measured 2026-09-13: this call site alone was 2 of the
     3 `/bin/sh` shell-outs on a `simple test <spec>` invocation (the third is
     ensure_daemon()'s own daemon-spawn, unrelated to this function). See
-    test/05_perf/test_runner/daemon_lock_alive_shell_spawn_spec.spl."""
+    test/05_perf/test_runner/daemon_lock_alive_shell_spawn_spec.spl.
+
+    BEHAVIOR CHANGE from the old shell version: the old probe's liveness check
+    was real `kill -0`, which works without /proc; only its IDENTITY check
+    (cmdline) was /proc-gated, so on a host with no /proc the old code still
+    answered "alive" for any live PID. This version's liveness check is
+    ITSELF `file_exists("/proc/<pid>")`, so on a host with no /proc it now
+    always answers "dead" (fail-closed: ensure_daemon() respawns every run
+    instead of trusting an unverifiable lock). Accepted because
+    light_daemon.spl's own pid_is_live() already documents this whole lane as
+    "Linux-only" — this brings the client's liveness check in line with the
+    daemon side's own stated platform scope rather than introducing a new
+    inconsistency."""
     if not file_exists(LIGHT_LOCK):
         return false
     val pid = lock_holder_pid()
     if pid == "" or not file_exists("/proc/{pid}"):
         return false
-    match read_file_text_result("/proc/{pid}/cmdline"):
+    val cmdline_result = read_file_text_result("/proc/{pid}/cmdline")
+    if not cmdline_result.is_ok():
         # Unreadable cmdline (permission, or /proc unavailable on non-Linux):
         # the kill -0-equivalent liveness answer above stands, exactly as the
         # old shell probe's `test -r ... || exit 0` did.
-        case Err(_): true
-        case Ok(cmdline): cmdline.contains("light_daemon")
+        return true
+    cmdline_result.unwrap_or("").contains("light_daemon")
 
 fn lock_holder_pid() -> text:
     if not file_exists(LIGHT_LOCK):
