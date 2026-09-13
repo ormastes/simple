@@ -2122,6 +2122,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_engine2d_simd_blend_const_span_u32",
         simd::rt_engine2d_simd_blend_const_span_u32
     );
+    insert_simple!(
+        "rt_engine2d_blend_const_span_pct_u32",
+        simd::rt_engine2d_blend_const_span_pct_u32
+    );
     insert_simple!("rt_engine2d_simd_copy_row_u32", simd::rt_engine2d_simd_copy_row_u32);
     insert_simple!("rt_engine2d_simd_blend_row_u32", simd::rt_engine2d_simd_blend_row_u32);
     insert_simple!("rt_simd_aes_round_last_u8x16", simd::rt_simd_aes_round_last_u8x16);
