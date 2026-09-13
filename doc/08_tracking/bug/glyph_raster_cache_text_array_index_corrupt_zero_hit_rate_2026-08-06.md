@@ -235,3 +235,16 @@ representable as small integers without a lookup step of its own).
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Root-caused to the interpreter lane (bin/simple test / Rust seed
+tree-walk interpreter): a free function that .push()es onto a
+module-level array does not write back to the caller's view of that
+array. Confirmed this is the Rust seed's interpreter, not the
+pure-Simple 95.interp tree (same binary this worktree deploys). Fix
+needs a codegen/interpreter investigation into module-global
+resolution across free-function calls -- out of pure-Simple scope.
+Existing spec test/01_unit/language/text_array_index_readback_spec.spl
+left RED as designed. Leaving OPEN.
+
