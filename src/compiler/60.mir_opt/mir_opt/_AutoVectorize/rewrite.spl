@@ -627,7 +627,10 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     # Blocks after the original header (continuation / exit)
     for block in func.blocks:
         if block.id.id > orig_header_id:
-            new_blocks.push(block)
+            # Patched as well. A lowered `while` puts its cond block AFTER the
+            # body as often as before it, and an unpatched cond still branches
+            # to the header id that no longer exists.
+            new_blocks.push(_patch_terminator_target(block, orig_header_id, entry_id))
 
     new_blocks.push(create_scalar_version_block(body_blocks_for_peel[0], scalar_id))
 
@@ -674,8 +677,34 @@ fn _loop_bound(func: MirFunction, header_id: i64, candidates: [LocalId]) -> Loop
     guess: vectorizing against an invented bound reads past the end of the
     arrays.
     """
+    # The header first, then any block that BRANCHES TO the header.
+    #
+    # A lowered `while` does not keep its test in the body. It emits
+    #     while_cond: %c = i < n; If(%c, while_body, while_exit)
+    #     while_body: ...; i += 1; Goto(while_cond)
+    # and the pattern matcher matches the BODY. Looking only in the body found
+    # no comparison and declined, which meant this pass fired on single-block
+    # fixtures and on nothing the compiler actually produces. The test is one
+    # edge away, in the block that jumps here.
+    val in_header = _find_bound_in(func, header_id, candidates)
+    if in_header.?:
+        return in_header
     for blk in func.blocks:
-        if blk.id.id == header_id:
+        if blk.id.id != header_id and _branches_to(blk, header_id):
+            val found = _find_bound_in(func, blk.id.id, candidates)
+            if found.?:
+                return found
+    nil
+
+fn _branches_to(blk: MirBlock, target_id: i64) -> bool:
+    match blk.terminator:
+        case Goto(t): t.id == target_id
+        case If(_, t, e): t.id == target_id or e.id == target_id
+        case _: false
+
+fn _find_bound_in(func: MirFunction, block_id: i64, candidates: [LocalId]) -> LoopBound?:
+    for blk in func.blocks:
+        if blk.id.id == block_id:
             for inst in blk.instructions:
                 match inst.kind:
                     case BinOp(_, op, left, right):
