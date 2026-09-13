@@ -269,3 +269,8 @@ grep -cE 'tcp_|connect|bind|listen'     test/02_integration/app/ui.web/ws_e2e_sp
 comm -12 <(cd test/unit && find . -name '*_spec.spl'|sort) \
          <(cd test/01_unit && find . -name '*_spec.spl'|sort) | wc -l                    # 5005
 ```
+
+## Triage 2026-09-13
+Reconfirmed: measurement/characterization record, not a single localized
+code defect, per its own 2026-08-09 re-confirmation. Left as-is, no code
+change attempted.
