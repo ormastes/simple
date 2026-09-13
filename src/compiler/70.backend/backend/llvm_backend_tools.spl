@@ -274,8 +274,23 @@ fn llvm_object_stage_fail(
     stage_dir: text, diagnostic_path: text,
     message: text, status: i64
 ) -> i64:
+    # SIMPLE_KEEP_LLVM_IR=1 retains the private staging dir (and with it
+    # `module.ll`) on the FAILURE paths too. Until 2026-09-13 the knob only
+    # covered the SUCCESS path (`:242`, where the .ll is deleted after a green
+    # llc), while every failure path came through here and removed the whole
+    # staging dir unconditionally -- so on an llc rejection the one artifact
+    # that names the defect was always destroyed. That cost BOOT-9 a full lane:
+    # `module.ll:102:3: error: multiple definition of local value named 'l13'`
+    # could not be attributed to a MIR instruction because line 102 no longer
+    # existed anywhere. Fail-closed by construction: the default (knob unset)
+    # removes the dir exactly as before, and when the knob IS set the retained
+    # path is APPENDED to the diagnostic so a retained dir can never be
+    # mistaken for a cleaned one.
     var final_message = message
-    if not dir_remove(stage_dir, true):
+    val keep_ir = (rt_env_get("SIMPLE_KEEP_LLVM_IR") ?? "") == "1"
+    if keep_ir:
+        final_message = "{message}; retained LLVM IR staging dir: {stage_dir}"
+    elif not dir_remove(stage_dir, true):
         final_message = "{message}; private staging cleanup failed"
     backend_aot_write_diagnostic(diagnostic_path, final_message)
     if status == 0: 1 else: status

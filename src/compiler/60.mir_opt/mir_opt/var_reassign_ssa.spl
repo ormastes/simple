@@ -937,7 +937,29 @@ fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
 fn ssa_term_operand_payloads_valid(term: MirTerminator) -> bool:
     match term:
         case Ret(value):
-            if value != nil: ssa_operand_local_payload_valid(value.unwrap()) else: true
+            # `?? <invalid sentinel>`, NEVER `.unwrap()`. Measured 2026-09-13 on
+            # the Stage-2 candidate 99ba0cf430d255a4 (BOOT-10): every function
+            # whose terminator is `Ret(Some(<local>))` was refused here with
+            # reason "invalid terminator operands", so the alloca-slot transform
+            # never ran on it and its multi-def locals reached llc as duplicate
+            # `%lN` definitions -- `module_logical_name_from_path`'s `mod_path`
+            # is written 10 times, and llc rejected the module with "multiple
+            # definition of local value named 'l13'". The SAME MIR shape is
+            # admitted under the seed interpreter (probe: applied=true
+            # reason=ready), which localises the divergence to `.unwrap()` on an
+            # optional: it lowers to `rt_enum_payload`, which yields nil/raw 0
+            # on this lane (the Call arm below documents the identical hazard,
+            # and doc/08_tracking/bug/stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md
+            # is the filed defect). A `Ret(None)`-terminated function -- `main`
+            # -- was slotted correctly, which is exactly why this looked healthy.
+            # The sentinel is deliberately an INVALID operand (local id -1), so
+            # if the `??` itself ever misfires the gate still REJECTS rather
+            # than admitting an operand it never inspected.
+            if value != nil:
+                val ret_operand = value ?? MirOperand(kind: MirOperandKind.Copy(ssa_local(-1)))
+                ssa_operand_local_payload_valid(ret_operand)
+            else:
+                true
         case If(cond, _, _): ssa_operand_local_payload_valid(cond)
         case Switch(value, _, _): ssa_operand_local_payload_valid(value)
         case CallTerminator(_, func, args, _, _, _, _):
@@ -1334,8 +1356,16 @@ fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
     var result = locals
     match term:
         case Ret(value):
+            # Same `.unwrap()`-on-an-optional hazard as the admission gate in
+            # ssa_term_operand_payloads_valid: a nil here silently drops the
+            # RETURN as a use of the returned local, which is bug #2 of
+            # llvm_constants_lost_ret_zero_2026-08-01 all over again (a
+            # cross-block-live definition reaching llc with no def -> `ret 0`).
+            # ssa_operand_push_local re-validates, so the -1 sentinel is dropped
+            # rather than mistaken for local 0.
             if value != nil:
-                result = ssa_operand_push_local(result, value.unwrap())
+                val ret_use = value ?? MirOperand(kind: MirOperandKind.Copy(ssa_local(-1)))
+                result = ssa_operand_push_local(result, ret_use)
         case If(cond, _, _):
             result = ssa_operand_push_local(result, cond)
         case Switch(value, _, _):
@@ -1642,8 +1672,14 @@ fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], 
 fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirTerminator, i64):
     match term:
         case Ret(value):
+            # Third site of the same `.unwrap()` hazard. Once the function IS
+            # admitted, this is what loads a slotted local back out of its slot
+            # for the `ret`; a nil here leaves the terminator reading the
+            # un-slotted `%lN` (llc "use of undefined value") or takes the
+            # emitter's not-defined zero fallback (`ret <ty> 0`).
             if value != nil:
-                val r = ssa_alloca_rewrite_operand(value.unwrap(), slot_keys, slot_values, next_temp)
+                val ret_value = value ?? MirOperand(kind: MirOperandKind.Copy(ssa_local(-1)))
+                val r = ssa_alloca_rewrite_operand(ret_value, slot_keys, slot_values, next_temp)
                 (r[1], MirTerminator.Ret(Some(r[0])), r[2])
             else:
                 ([], term, next_temp)
