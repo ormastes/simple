@@ -237,3 +237,10 @@ residual scope is the SIMD-vs-scalar timing comparison in §3, which is a perf m
 Recording the green so the next triage pass does not re-run it expecting red,
 and so nobody mistakes a passing interpreter-lane spec for the lane that is
 actually open.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Residual scope (§3, SIMD-vs-scalar timing under a C runtime build without
+swapping the shared binary) is unchanged and out of scope for a shard triage
+pass. §1/§2/D-F8 remain resolved per the notes above. No change made.
+Leaving OPEN (P3) as documented.
