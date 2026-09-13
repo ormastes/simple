@@ -629,6 +629,76 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
     ));
 }
 
+/// Site 18 (macOS Stage 2, 2026-09-13): HIR folds the enum-id argument of
+/// `rt_enum_check_variant` into an integer from the BARE enum name, while the
+/// constructor's `EnumUnit` name is qualified by `qualify_enum_runtime_names`.
+/// The check therefore expected `hash("Mixed")` against a value stamped
+/// `hash("pkg.owner.Mixed")`, every arm failed and the match fell to its last
+/// arm -- `BackendKind.to_text()` returned the wrong text and the K1 backend
+/// table validator refused the Stage 2 composition. Both sides must agree.
+fn enum_match_check_ids_after_qualify(module_name: &str) -> (Vec<i64>, Vec<String>) {
+    use crate::mir::MirInst;
+
+    let source = "enum Mixed:\n    A\n    B\n    Custom(text)\n\nfn pick(m: Mixed) -> i64:\n    match m:\n        case A: 10\n        case B: 20\n        case Custom(_): 30\n\nfn build() -> Mixed:\n    Mixed.B\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let lowered = crate::hir::Lowerer::new().lower_module(&ast).expect("enum match module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("enum match module should reach MIR");
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        module_name,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let mut check_ids = Vec::new();
+    let mut ctor_names = Vec::new();
+    for func in &mir.functions {
+        let mut const_ints = std::collections::HashMap::new();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::ConstInt { dest, value } = inst {
+                    const_ints.insert(*dest, *value);
+                }
+            }
+        }
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::Call { target, args, .. } if target.name() == "rt_enum_check_variant" => {
+                        check_ids.push(const_ints[&args[1]]);
+                    }
+                    MirInst::EnumUnit { enum_name, .. } => ctor_names.push(enum_name.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(!check_ids.is_empty(), "expected rt_enum_check_variant calls in the lowered match");
+    assert!(!ctor_names.is_empty(), "expected an EnumUnit constructor");
+    (check_ids, ctor_names)
+}
+
+#[test]
+fn enum_match_check_id_is_qualified_like_its_constructor() {
+    let qualified = crate::codegen::shared::enum_runtime_type_id("pkg.owner.Mixed");
+    let (check_ids, ctor_names) = enum_match_check_ids_after_qualify("pkg.owner");
+    assert!(ctor_names.iter().all(|name| name == "pkg.owner.Mixed"), "{ctor_names:?}");
+    assert!(
+        check_ids.iter().all(|&id| id == i64::from(qualified)),
+        "check ids {check_ids:?} must equal the qualified ctor id {qualified}"
+    );
+}
+
+#[test]
+fn enum_match_check_id_stays_bare_without_a_module_name() {
+    let bare = crate::codegen::shared::enum_runtime_type_id("Mixed");
+    let (check_ids, ctor_names) = enum_match_check_ids_after_qualify("");
+    assert!(ctor_names.iter().all(|name| name == "Mixed"), "{ctor_names:?}");
+    assert!(check_ids.iter().all(|&id| id == i64::from(bare)), "{check_ids:?} vs {bare}");
+}
+
 #[test]
 fn enum_runtime_identity_collision_is_reported_before_codegen() {
     let root = std::path::PathBuf::from("/tmp/enum-runtime-identity/src");

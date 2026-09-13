@@ -1,6 +1,6 @@
 # Site 16: the Stage-2 candidate refuses a POSITIONAL entry — `PLUG-E-K1-POLICY: bootstrap backend composition admission failed`
 
-- Status: OPEN (2026-09-13)
+- Status: ROOT-CAUSED, fix landing (2026-09-13, macOS F72 lane) -- see "Root cause" at the end; the MIR-lowering suspect below is retracted
 - Area: `src/app/cli/bootstrap_main.spl` in-process native-build route / K1 static
   backend composition admission / Stage-2 sanity gate
 - Found by: BOOT-15, run B (`build/bootstrap-boot15b`, head `a59b81f9e1c`,
@@ -174,3 +174,51 @@ This also sharpens the suspect: a defect in small-fixed-array indexing or enum e
 under MIR lowering is consistent with `34b96e29837` being the only commit in the
 BOOT-13 -> here span that rewrites `function_lowering.spl` and `mir_instruction_graph.spl`
 — still a suspect, still not proven.
+
+## Root cause (2026-09-13, macOS lane F72 / chain site 18) -- the suspect above is WRONG
+
+`validate_k1_static_backend_table_v1` is not miscompiled by MIR lowering; **every
+enum `match` compiled by the Rust seed's `native-build` takes its LAST arm**, so
+`BackendKind.to_text()` (a `match self`) returns the wrong text and
+`_table_is_sorted_v1`'s `name != entry.kind.to_text()` fails. Reproduced in
+seconds outside the lane with a 40-line fixture built by the seed
+(`SIMPLE_NATIVE_BUILD_RUST=1`, both `--backend llvm` and `cranelift`):
+
+```
+interp:  q_mixed=10,20,30 u_mixed=10,20,30 q_unit=1,2 u_unit=1,2
+native:  q_mixed=30,30,30 u_mixed=30,30,30 q_unit=2,2 u_unit=2,2
+```
+
+and the discriminating probe (`rt_enum_new` with a chosen enum id, then `match`):
+`id=0 -> 10` (wildcard accepted), `id=hash("Mixed") -> 10`, but
+`id=<the id the constructor actually stamped> -> 30`. The constructor and the
+check disagree on the enum's runtime identity:
+
+- `df7ac9f6cc2` (2026-09-13 13:33) made typed enum matches call
+  `rt_enum_check_variant(subject, enum_id, discriminant)`. The Rust seed's HIR
+  lowering (`compiler/src/hir/lower/expr/control.rs`, `enum_runtime_id_for_type`
+  / `enum_runtime_id_for_pattern`, plus the sibling sites in `expr/mod.rs` and
+  `stmt_lowering.rs`) folds `enum_id` into an INTEGER literal from the BARE
+  `HirType::Enum { name }` -- `hash("Mixed")`.
+- The constructor's `MirInst::EnumUnit { enum_name }` is later rewritten by
+  `pipeline/native_project/mangle.rs::qualify_enum_runtime_names` to the
+  qualified runtime name -- `hash("pkg.owner.Mixed")` -- but an already-folded
+  integer cannot be rewritten, so the two never agree for any enum declared in a
+  real module. The seed's own unit test used a bare, module-less enum name, which
+  is the one case that agrees.
+
+That is why the Linux BOOT-13 candidate (built before 13:33) got past K1 and
+every later candidate did not, on both platforms. `34b96e29837` is not involved.
+The same defect also makes the candidate's own `compile --format=smf` die with
+`E-AST-SEMANTIC-UNHANDLED: TypeKind at ast_semantic_encode_type` (a `match` over
+`TypeKind` falling to its default arm) -- corroboration, not a second bug.
+
+**Fix:** `qualify_enum_runtime_names` now also routes the folded enum-id
+`ConstInt` feeding each `rt_enum_check_variant` call through the SAME `qualify`
+the constructor uses (ids 0/1 -- Result/Option -- untouched), so ctor and check
+agree by construction. Pinned by two Rust tests in
+`pipeline/native_project/tests.rs` (`enum_match_check_id_is_qualified_like_its_constructor`,
+`..._stays_bare_without_a_module_name`). The K1 gate, the validator and
+`to_text()` are unchanged. This has to live in the seed: the seed is the
+producer of Stage 2, and no pure-Simple change can correct a seed miscompile of
+the Stage 2 binary.
