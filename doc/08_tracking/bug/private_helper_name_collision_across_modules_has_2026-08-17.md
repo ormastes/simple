@@ -311,3 +311,11 @@ function) is what needs correcting, at the same seed sites listed above.
 
 ## Triage 2026-09-12
 Rule B: ran `bin/simple test test/01_unit/app/build/build_targets_spec.spl` on the deployed seed; 1 of 34 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Reconfirmed: `bin/simple test test/01_unit/app/build/build_targets_spec.spl`
+-> `Results: 34 total, 33 passed, 1 failed`, matching the 2026-09-12
+re-verification exactly. Root cause (private `_has` helper name collision
+across modules) is a name-resolution defect needing scope-aware resolver
+work, out of a single-bug budget. Left OPEN, no code change attempted.
