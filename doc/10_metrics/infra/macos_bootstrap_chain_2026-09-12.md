@@ -1706,3 +1706,55 @@ producer fact, with schema checking the old `[ -f ]` never had, and a
 receives `MANIFEST_READ` and still admits ZERO Phase-2 reuse without a manifest
 (verified by reading `phase_compatibility_read_manifest_io_v1`, which returns
 `valid=false` on an absent file rather than aborting). Nothing was deployed.
+
+### Run 31 (2026-09-13) — site 17 CLEARED; Stage 2 links; next blocker is K1 composition
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, worktree
+`agent-a887bdd4081fec17c`, tip carrying PR #873 (classes 2 and 3) over a main that
+already carried PR #846 (class 1). Cold Rust seed, `Native build jobs: 5`.
+
+**Site 17 is cleared, and this run proves it rather than inferring it.**
+`/usr/bin/grep -c "Undefined symbols|__sffi_enum_discriminant|module_surfaces_promote_reason|rt_cpu_is_"`
+over `logs/aarch64-apple-darwin/stage2-native-build.log` returns **0**. Run 30's
+six undefined symbols are gone and Stage 2 produced a linked candidate binary —
+the first time this lane has got past the link since run 29.
+
+Verdict, verbatim:
+
+```
+exit:  2
+  diagnosis: the PRIMARY log carries no diagnostic text, but a sibling log
+             written by another sub-step of this stage does. The stage did
+             not fail where the primary log was produced.
+  real log:  .../stage3/aarch64-apple-darwin/stage2-sanity.env.frontend-failure.log
+  1 diagnostic line(s) found there. First 5:
+    | candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+PASS — 1 check(s), stage stage2 failed (exit 2) and said why
+  warning: stage2 native-build failed (exit 2); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+The failure has moved **past the link into the candidate's own sanity smoke**, and
+the real diagnostic is:
+
+```
+PLUG-E-K1-POLICY: bootstrap backend composition admission failed
+(selected policy 'llvm-cranelift'; 'unselected' means the fail-closed stub bound
+instead of a committed K1 composition)
+```
+
+That is **site 18**, already filed by the #846 lane as
+`doc/08_tracking/bug/stage2_sanity_positional_route_k1_composition_admission_failed_2026-09-13.md`.
+It is a backend-composition admission gate, not a link or a symbol problem, and it
+needs an owner the same way site 16 did. Stage 3, the full CLI and Stage 4 were
+never reached; **nothing was deployed**.
+
+Separately flagged by a peer lane and NOT what this run hit: a seed `native-build`
+regression at origin/main producing `method 'len' not found on type 'i64'` on a
+three-line hello world (lane F71). This run's smoke failed on the K1 policy line
+instead, so the two are distinct; if a later rerun shows the `len`/`i64`
+diagnostic, wait for F71's PR before re-attributing.
+
+Origins for run 30's three symbol classes, with a fix commit each, are recorded in
+`doc/08_tracking/bug/stage2_link_undefined_cpu_probe_and_surface_symbols_2026-09-13.md`
+rather than repeated here.
