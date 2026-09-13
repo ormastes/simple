@@ -122,3 +122,37 @@ early and returns background white, turning a byte-exactness assertion into a
 load-dependent coin flip — see
 `doc/08_tracking/bug/web_paint_wallclock_budget_flake_2026-07-31.md`. Arming only
 one side would have been worse than not arming at all.
+
+## Fix 2026-09-13 — duplicate declaration renamed away
+
+- Status: RESOLVED (2026-09-13) — spec test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_duplicate_public_entry_binding_spec.spl
+
+Applied the suggested fix: `simple_web_renderer.spl:88`'s
+`pub fn simple_web_render_html_to_pixels_with_engine2d_backend` — the losing,
+never-actually-called declaration — was renamed to
+`simple_web_render_html_to_pixels_with_resolved_engine2d_backend`. It had no
+internal callers within `simple_web_renderer.spl` itself (confirmed by grep
+before renaming), so this is a pure rename with no behavior change for any of
+the ~50 real call sites, all of which already relied on
+`simple_web_engine2d_renderer.spl`'s body (the one now unambiguously bound).
+
+New spec `web_renderer_duplicate_public_entry_binding_spec.spl` source-scans
+both renderer files and asserts exactly one `pub fn
+simple_web_render_html_to_pixels_with_engine2d_backend(` declaration exists
+across them (fails closed if either file reads empty). RED before the rename:
+`2 examples, 1 failure` (2 declarations found). GREEN after: `2 examples, 0
+failures`.
+
+Regression check: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl`
+verdict is byte-identical before/after this change —
+`11 examples, 4 passed, 7 failed` both times (pre-existing reds, unrelated to
+this fix; not introduced by it).
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
+(symlinked from the shared main worktree), sha256 `3d120a6f9ab5`,
+`Simple Language v1.0.0-rc.1`.
+
+The compiler-side ask in "Suggested fix" above (extend
+`compiler_cross_module_private_symbol_collision` to fire on duplicate public
+definitions with *identical* signatures) is Rust-seed work and stays open as a
+separate follow-up; this record closes the concrete instance that was found.
