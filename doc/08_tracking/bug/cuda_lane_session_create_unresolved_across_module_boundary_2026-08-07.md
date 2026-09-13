@@ -1,6 +1,6 @@
 # CudaLaneSession.create() unresolved across module boundary (blocks B2 live verification)
 
-Status: OPEN (P2)
+Status: CLOSED (2026-09-13) -- not reproducible; CudaLaneSession.create() now resolves across the module boundary on the redeployed seed
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 Date: 2026-08-07
@@ -99,6 +99,41 @@ be re-triaged as such (not an environment issue).
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/02_integration/gpu_lane/cuda_lane_session_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
 
+## Re-check 2026-09-13 (BUGFIX-10 fanout) — the "Unblock condition" happened; not reproducible
+
+Re-ran all three commands the record's own "Unblock condition" section
+names, against the current deployed seed
+(`/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`):
+
+```
+$ bin/simple run scratchpad/probe_cuda_lane.spl   # 4-line minimal repro from this doc
+[jit-fallback] unresolved external symbol 'cuda_module_load_binary': whole module dropped to the interpreter
+[INFO] JIT compilation failed, falling back to interpreter: ...
+rc=0
+```
+
+No "Function 'create' not found" — `CudaLaneSession.create()` resolves
+cleanly across the module boundary now; the only diagnostic is the expected
+CUDA-hardware-unavailable JIT fallback, not a resolution failure.
+
+```
+$ bin/simple test test/02_integration/gpu_lane/cuda_lane_session_spec.spl
+SPEC FILE VERDICT: ... declared>=4 executed=4 passed=3 failed=1
+```
+
+3/4 pass, including all "pure helpers (no CUDA hardware required)" examples
+— a strictly different, better outcome than the doc's recorded "no `main`
+function... test-runner: no examples executed". The one remaining failure
+(`should probe cleanly, and on a live host allocate the arena...`,
+`expected cuda-lane-arena-guard-init-failed to equal ''`) is exactly what
+its own name says: no CUDA hardware in this sandbox, not a resolution
+defect. This matches the doc's own prediction: "If `CudaLaneSession.create()`
+still fails to resolve on a genuinely self-hosted deployed binary, this
+becomes a real B1/B2 code defect" — it resolves fine, so it does not.
+
+- Status: CLOSED (2026-09-13) — not reproducible on `f26970e9d93`; the
+  module-boundary resolution failure this bug names is gone. The remaining
+  single spec failure is a live-GPU-hardware precondition, not this defect.
 ## Triage 2026-09-13
 
 Requires real CUDA/GPU execution to verify B2 lane resolution across
