@@ -1,0 +1,464 @@
+# Purpose and audience: executable unit evidence for the bounded SimpleOS image value contract.
+# @codex-impl
+# @req REQ-SIMPLEOS-IMAGE-MANIFEST-V1
+
+use std.spec.*
+use std.spec.step
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_X86_64_FIRMWARE
+}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.contracts.execution.simpleos_image_manifest_v1.{
+    SimpleOsImageArtifactRoleV1,
+    SimpleOsImageProviderTierV1,
+    SimpleOsImageCarrierKindV1,
+    SimpleOsImageFilesystemV1,
+    SimpleOsImageVolumeRoleV1,
+    SimpleOsImageManifestErrorV1,
+    SimpleOsImageArtifactV1,
+    SimpleOsImageProviderV1,
+    SimpleOsImageCarrierV1,
+    SimpleOsImageVolumeV1,
+    SimpleOsImageRootV1,
+    SimpleOsImageSnapshotV1,
+    SimpleOsImageOverlayV1,
+    SimpleOsImageBaselineV1,
+    SimpleOsImageEntryV1,
+    SimpleOsImageManifestV1,
+    SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA,
+    SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS,
+    simpleos_image_identity_valid_v1,
+    simpleos_image_manifest_validate_v1,
+    simpleos_image_manifest_canonical_v1,
+    simpleos_image_manifest_digest_v1
+}
+
+fn image_digest(marker: text) -> text:
+    "000000000000000000000000000000000000000000000000000000000000000" + marker
+
+fn repeated_image_text(count: i64) -> text:
+    var pieces: [text] = []
+    var i = 0
+    while i < count:
+        pieces.push("x")
+        i = i + 1
+    pieces.join("")
+
+fn two_digit_image_id(value: i64) -> text:
+    if value < 10: "0" + value.to_text() else: value.to_text()
+
+fn image_artifact(
+    artifact_id: text,
+    role: SimpleOsImageArtifactRoleV1,
+    path: text,
+    marker: text,
+    required: bool,
+    baseline: bool
+) -> SimpleOsImageArtifactV1:
+    SimpleOsImageArtifactV1(
+        artifact_id: artifact_id, role: role, image_path: path,
+        digest: image_digest(marker), required: required, baseline: baseline)
+
+fn valid_image_manifest() -> SimpleOsImageManifestV1:
+    SimpleOsImageManifestV1(
+        schema_version: SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA,
+        target_id: SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+        profile_id: "dev",
+        build_id: "build-20260913",
+        source_id: "source-a1b2c3",
+        kernel: image_artifact(
+            "kernel.simpleos", SimpleOsImageArtifactRoleV1.Kernel,
+            "/boot/simpleos-kernel.elf", "1", true, true),
+        services: [
+            image_artifact(
+                "service.display", SimpleOsImageArtifactRoleV1.Service,
+                "/system/display.smf", "2", false, false),
+            image_artifact(
+                "service.init", SimpleOsImageArtifactRoleV1.Service,
+                "/system/init.smf", "3", true, true)
+        ],
+        runtime: [
+            image_artifact(
+                "runtime.loader", SimpleOsImageArtifactRoleV1.Runtime,
+                "/system/loader.smf", "4", true, true),
+            image_artifact(
+                "runtime.selector", SimpleOsImageArtifactRoleV1.Runtime,
+                "/system/variant-selector.smf", "5", true, true)
+        ],
+        compiler: [image_artifact(
+            "compiler.simple", SimpleOsImageArtifactRoleV1.Compiler,
+            "/compiler/simple.smf", "6", true, false)],
+        providers: [
+            SimpleOsImageProviderV1(
+                artifact: image_artifact(
+                    "provider.parser.scalar", SimpleOsImageArtifactRoleV1.Provider,
+                    "/system/providers/parser/scalar.smf", "7", true, true),
+                interface_id: "parser.v1",
+                tier: SimpleOsImageProviderTierV1.Baseline),
+            SimpleOsImageProviderV1(
+                artifact: image_artifact(
+                    "provider.parser.simd", SimpleOsImageArtifactRoleV1.Provider,
+                    "/system/providers/parser/simd.smf", "8", false, false),
+                interface_id: "parser.v1",
+                tier: SimpleOsImageProviderTierV1.Optimized)
+        ],
+        symbols: [image_artifact(
+            "symbols.kernel", SimpleOsImageArtifactRoleV1.Symbols,
+            "/symbols/simpleos-kernel.sym", "9", false, false)],
+        carrier: SimpleOsImageCarrierV1(
+            kind: SimpleOsImageCarrierKindV1.RawDiskImage,
+            format_id: "raw-v1", digest: image_digest("a"), byte_length: 4096u64),
+        root: SimpleOsImageRootV1(
+            volume_id: "volume.system", filesystem: SimpleOsImageFilesystemV1.Nvfs,
+            mount_point: "/", snapshot_id: "snapshot.system",
+            overlay_id: "overlay.system"),
+        volumes: [
+            SimpleOsImageVolumeV1(
+                volume_id: "volume.mutable", role: SimpleOsImageVolumeRoleV1.Mutable,
+                filesystem: SimpleOsImageFilesystemV1.Nvfs,
+                digest: image_digest("b"), byte_length: 1024u64, writable: true),
+            SimpleOsImageVolumeV1(
+                volume_id: "volume.system", role: SimpleOsImageVolumeRoleV1.System,
+                filesystem: SimpleOsImageFilesystemV1.Nvfs,
+                digest: image_digest("c"), byte_length: 2048u64, writable: false)
+        ],
+        snapshot: SimpleOsImageSnapshotV1(
+            present: true, snapshot_id: "snapshot.system",
+            volume_id: "volume.system", digest: image_digest("d")),
+        overlay: SimpleOsImageOverlayV1(
+            present: true, overlay_id: "overlay.system",
+            base_snapshot_id: "snapshot.system",
+            upper_volume_id: "volume.mutable", digest: image_digest("e")),
+        firmware_profile: SIMPLEOS_TARGET_V1_X86_64_FIRMWARE,
+        sosix_version: "sosix-v1",
+        entry: SimpleOsImageEntryV1(
+            artifact_id: "service.init", symbol: "simpleos-init"),
+        baseline: SimpleOsImageBaselineV1(
+            kernel_artifact_id: "kernel.simpleos",
+            init_artifact_id: "service.init",
+            loader_artifact_id: "runtime.loader",
+            selector_artifact_id: "runtime.selector"))
+
+fn validation_error(manifest: SimpleOsImageManifestV1) -> SimpleOsImageManifestErrorV1:
+    match simpleos_image_manifest_validate_v1(manifest):
+        case Ok(_): SimpleOsImageManifestErrorV1.None
+        case Err(error): error
+
+fn manifest_digest(manifest: SimpleOsImageManifestV1) -> text:
+    match simpleos_image_manifest_digest_v1(manifest):
+        case Ok(digest): digest
+        case Err(_):
+            expect(false).to_equal(true)
+            ""
+
+fn expect_digest_change(original: SimpleOsImageManifestV1, changed: SimpleOsImageManifestV1):
+    expect(manifest_digest(changed) == manifest_digest(original)).to_equal(false)
+
+describe "SimpleOS image manifest v1":
+    it "should validate a bounded backend-neutral image description deterministically":
+        step("Build a valid image value with separate product and storage sections")
+        val manifest = valid_image_manifest()
+        expect(validation_error(manifest)).to_equal(SimpleOsImageManifestErrorV1.None)
+
+        step("Canonicalize and digest the same value twice")
+        val first_canonical = simpleos_image_manifest_canonical_v1(manifest)
+        val second_canonical = simpleos_image_manifest_canonical_v1(valid_image_manifest())
+        match first_canonical:
+            case Err(_): expect(false).to_equal(true)
+            case Ok(first):
+                match second_canonical:
+                    case Err(_): expect(false).to_equal(true)
+                    case Ok(second): expect(first).to_equal(second)
+        expect(hash256_hex_valid(manifest_digest(manifest))).to_equal(true)
+
+    it "should bind target profile build and source identities into the digest":
+        step("Change each canonical identity independently")
+        val original = valid_image_manifest()
+        var target = valid_image_manifest()
+        target.target_id = "aarch64-unknown-simpleos"
+        target.firmware_profile = "RawLoader"
+        expect_digest_change(original, target)
+        var profile = valid_image_manifest()
+        profile.profile_id = "runtime"
+        expect_digest_change(original, profile)
+        var build = valid_image_manifest()
+        build.build_id = "build-20260914"
+        expect_digest_change(original, build)
+        var source = valid_image_manifest()
+        source.source_id = "source-d4e5f6"
+        expect_digest_change(original, source)
+
+    it "should reject noncanonical identity target profile and firmware values":
+        step("Reject normalization-dependent and unknown identifiers")
+        expect(simpleos_image_identity_valid_v1("Build Upper")).to_equal(false)
+        expect(simpleos_image_identity_valid_v1("build..two")).to_equal(false)
+        var bad_target = valid_image_manifest()
+        bad_target.target_id = "x86_64-linux-gnu"
+        expect(validation_error(bad_target)).to_equal(SimpleOsImageManifestErrorV1.InvalidTarget)
+        var bad_profile = valid_image_manifest()
+        bad_profile.profile_id = "full"
+        expect(validation_error(bad_profile)).to_equal(SimpleOsImageManifestErrorV1.InvalidProfile)
+        var bad_firmware = valid_image_manifest()
+        bad_firmware.firmware_profile = "RawLoader"
+        expect(validation_error(bad_firmware)).to_equal(SimpleOsImageManifestErrorV1.InvalidFirmware)
+
+    it "should keep kernel services runtime compiler providers and symbols distinct":
+        step("Change one artifact in every typed section")
+        val original = valid_image_manifest()
+        var kernel = valid_image_manifest()
+        kernel.kernel.digest = image_digest("f")
+        expect_digest_change(original, kernel)
+        var services = valid_image_manifest()
+        var service_item = services.services[0]
+        service_item.digest = image_digest("f")
+        services.services = [service_item, services.services[1]]
+        expect_digest_change(original, services)
+        var runtime = valid_image_manifest()
+        var runtime_item = runtime.runtime[0]
+        runtime_item.digest = image_digest("f")
+        runtime.runtime = [runtime_item, runtime.runtime[1]]
+        expect_digest_change(original, runtime)
+        var compiler = valid_image_manifest()
+        var compiler_item = compiler.compiler[0]
+        compiler_item.digest = image_digest("f")
+        compiler.compiler = [compiler_item]
+        expect_digest_change(original, compiler)
+        var providers = valid_image_manifest()
+        var provider_item = providers.providers[0]
+        var provider_artifact = provider_item.artifact
+        provider_artifact.digest = image_digest("f")
+        provider_item.artifact = provider_artifact
+        providers.providers = [provider_item, providers.providers[1]]
+        expect_digest_change(original, providers)
+        var symbols = valid_image_manifest()
+        var symbols_item = symbols.symbols[0]
+        symbols_item.digest = image_digest("f")
+        symbols.symbols = [symbols_item]
+        expect_digest_change(original, symbols)
+
+        step("Reject a section whose artifact carries another section role")
+        var wrong_role = valid_image_manifest()
+        var wrong_role_item = wrong_role.compiler[0]
+        wrong_role_item.role = SimpleOsImageArtifactRoleV1.Runtime
+        wrong_role.compiler = [wrong_role_item]
+        expect(validation_error(wrong_role)).to_equal(
+            SimpleOsImageManifestErrorV1.ArtifactRoleMismatch)
+
+    it "should require the baseline kernel init loader and selector":
+        step("Break each mandatory baseline reference independently")
+        var kernel = valid_image_manifest()
+        kernel.baseline.kernel_artifact_id = "kernel.missing"
+        expect(validation_error(kernel)).to_equal(
+            SimpleOsImageManifestErrorV1.MissingBaselineKernel)
+        var init = valid_image_manifest()
+        init.baseline.init_artifact_id = "service.missing"
+        expect(validation_error(init)).to_equal(
+            SimpleOsImageManifestErrorV1.MissingBaselineInit)
+        var loader = valid_image_manifest()
+        loader.baseline.loader_artifact_id = "runtime.missing"
+        expect(validation_error(loader)).to_equal(
+            SimpleOsImageManifestErrorV1.MissingBaselineLoader)
+        var selector = valid_image_manifest()
+        selector.baseline.selector_artifact_id = "runtime.missing"
+        expect(validation_error(selector)).to_equal(
+            SimpleOsImageManifestErrorV1.MissingBaselineSelector)
+
+    it "should require every optimized provider to remain optional":
+        step("Mark an optimized parser provider as boot-required")
+        var manifest = valid_image_manifest()
+        var optimized = manifest.providers[1]
+        var optimized_artifact = optimized.artifact
+        optimized_artifact.required = true
+        optimized.artifact = optimized_artifact
+        manifest.providers = [manifest.providers[0], optimized]
+        expect(validation_error(manifest)).to_equal(
+            SimpleOsImageManifestErrorV1.OptimizedProviderRequired)
+
+    it "should validate carrier root volumes snapshot and overlay linkage":
+        step("Reject a non-NVFS root and an unlinked writable overlay")
+        var root = valid_image_manifest()
+        root.root.filesystem = SimpleOsImageFilesystemV1.Fat32
+        expect(validation_error(root)).to_equal(SimpleOsImageManifestErrorV1.InvalidRoot)
+        var overlay = valid_image_manifest()
+        overlay.overlay.base_snapshot_id = "snapshot.other"
+        expect(validation_error(overlay)).to_equal(SimpleOsImageManifestErrorV1.InvalidOverlay)
+
+        step("Accept an image with explicitly absent snapshot and overlay values")
+        var flat = valid_image_manifest()
+        flat.root.snapshot_id = ""
+        flat.root.overlay_id = ""
+        flat.snapshot = SimpleOsImageSnapshotV1(
+            present: false, snapshot_id: "", volume_id: "", digest: "")
+        flat.overlay = SimpleOsImageOverlayV1(
+            present: false, overlay_id: "", base_snapshot_id: "",
+            upper_volume_id: "", digest: "")
+        expect(validation_error(flat)).to_equal(SimpleOsImageManifestErrorV1.None)
+
+    it "should bind provider storage snapshot overlay and entry facts into the digest":
+        step("Change representative valid facts from every image-assembly layer")
+        val original = valid_image_manifest()
+        var provider = valid_image_manifest()
+        var provider_item = provider.providers[0]
+        provider_item.interface_id = "parser.v2"
+        provider.providers = [provider_item, provider.providers[1]]
+        expect_digest_change(original, provider)
+        var carrier = valid_image_manifest()
+        carrier.carrier.format_id = "raw-v2"
+        expect_digest_change(original, carrier)
+        var volume = valid_image_manifest()
+        var volume_item = volume.volumes[0]
+        volume_item.digest = image_digest("f")
+        volume.volumes = [volume_item, volume.volumes[1]]
+        expect_digest_change(original, volume)
+        var snapshot = valid_image_manifest()
+        snapshot.snapshot.digest = image_digest("f")
+        expect_digest_change(original, snapshot)
+        var overlay = valid_image_manifest()
+        overlay.overlay.digest = image_digest("f")
+        expect_digest_change(original, overlay)
+        var entry = valid_image_manifest()
+        entry.entry.symbol = "simpleos-start"
+        expect_digest_change(original, entry)
+
+    it "should reject invalid digests guest paths and duplicate artifact facts":
+        step("Reject malformed immutable artifact facts")
+        var digest = valid_image_manifest()
+        digest.kernel.digest = "abc"
+        expect(validation_error(digest)).to_equal(SimpleOsImageManifestErrorV1.InvalidDigest)
+        var path = valid_image_manifest()
+        path.kernel.image_path = "/boot/../kernel.elf"
+        expect(validation_error(path)).to_equal(SimpleOsImageManifestErrorV1.InvalidPath)
+        var duplicate = valid_image_manifest()
+        var duplicate_item = duplicate.compiler[0]
+        duplicate_item.artifact_id = "service.display"
+        duplicate.compiler = [duplicate_item]
+        expect(validation_error(duplicate)).to_equal(
+            SimpleOsImageManifestErrorV1.DuplicateOrUnsortedArtifact)
+        var path_alias = valid_image_manifest()
+        var alias_provider = path_alias.providers[1]
+        var alias_artifact = alias_provider.artifact
+        alias_artifact.image_path = path_alias.kernel.image_path
+        alias_provider.artifact = alias_artifact
+        path_alias.providers = [path_alias.providers[0], alias_provider]
+        expect(validation_error(path_alias)).to_equal(
+            SimpleOsImageManifestErrorV1.DuplicateArtifactPath)
+
+    it "should reject unsorted canonical sections and volumes":
+        step("Reverse canonical artifact and volume order")
+        var artifacts = valid_image_manifest()
+        artifacts.runtime = [artifacts.runtime[1], artifacts.runtime[0]]
+        expect(validation_error(artifacts)).to_equal(
+            SimpleOsImageManifestErrorV1.DuplicateOrUnsortedArtifact)
+        var volumes = valid_image_manifest()
+        volumes.volumes = [volumes.volumes[1], volumes.volumes[0]]
+        expect(validation_error(volumes)).to_equal(
+            SimpleOsImageManifestErrorV1.DuplicateOrUnsortedVolume)
+
+    it "should reject a section above its fixed artifact ceiling":
+        step("Build one more compiler row than the contract permits")
+        var manifest = valid_image_manifest()
+        var items: [SimpleOsImageArtifactV1] = []
+        var i = 0
+        while i <= SIMPLEOS_IMAGE_MANIFEST_V1_MAX_SECTION_ARTIFACTS:
+            items.push(image_artifact(
+                "compiler.extra", SimpleOsImageArtifactRoleV1.Compiler,
+                "/compiler/extra.smf", "f", false, false))
+            i = i + 1
+        manifest.compiler = items
+        expect(validation_error(manifest)).to_equal(
+            SimpleOsImageManifestErrorV1.SectionLimitExceeded)
+
+    it "should reject total artifact volume carrier and text budget overflow":
+        step("Exceed the cross-section artifact ceiling without exceeding a section ceiling")
+        var total = valid_image_manifest()
+        var service_items: [SimpleOsImageArtifactV1] = []
+        var runtime_items: [SimpleOsImageArtifactV1] = []
+        var compiler_items: [SimpleOsImageArtifactV1] = []
+        var provider_items: [SimpleOsImageProviderV1] = []
+        var symbol_items: [SimpleOsImageArtifactV1] = []
+        var i = 0
+        while i < 52:
+            service_items.push(image_artifact(
+                "service.same", SimpleOsImageArtifactRoleV1.Service,
+                "/system/service.smf", "1", false, false))
+            runtime_items.push(image_artifact(
+                "runtime.same", SimpleOsImageArtifactRoleV1.Runtime,
+                "/system/runtime.smf", "2", false, false))
+            compiler_items.push(image_artifact(
+                "compiler.same", SimpleOsImageArtifactRoleV1.Compiler,
+                "/compiler/compiler.smf", "3", false, false))
+            provider_items.push(SimpleOsImageProviderV1(
+                artifact: image_artifact(
+                    "provider.same", SimpleOsImageArtifactRoleV1.Provider,
+                    "/system/provider.smf", "4", false, false),
+                interface_id: "provider.v1",
+                tier: SimpleOsImageProviderTierV1.Optimized))
+            symbol_items.push(image_artifact(
+                "symbols.same", SimpleOsImageArtifactRoleV1.Symbols,
+                "/symbols/symbols.sym", "5", false, false))
+            i = i + 1
+        total.services = service_items
+        total.runtime = runtime_items
+        total.compiler = compiler_items
+        total.providers = provider_items
+        total.symbols = symbol_items
+        expect(validation_error(total)).to_equal(
+            SimpleOsImageManifestErrorV1.TotalArtifactLimitExceeded)
+
+        step("Exceed the volume count and carrier capacity independently")
+        var volume_count = valid_image_manifest()
+        var volume_items: [SimpleOsImageVolumeV1] = []
+        i = 0
+        while i < 17:
+            volume_items.push(SimpleOsImageVolumeV1(
+                volume_id: "volume.same", role: SimpleOsImageVolumeRoleV1.Mutable,
+                filesystem: SimpleOsImageFilesystemV1.Nvfs,
+                digest: image_digest("6"), byte_length: 1u64, writable: true))
+            i = i + 1
+        volume_count.volumes = volume_items
+        expect(validation_error(volume_count)).to_equal(
+            SimpleOsImageManifestErrorV1.InvalidVolume)
+        var carrier_size = valid_image_manifest()
+        carrier_size.carrier.byte_length = 2048u64
+        expect(validation_error(carrier_size)).to_equal(
+            SimpleOsImageManifestErrorV1.InvalidCarrier)
+
+        step("Reject a one-byte overflow at the unsigned carrier boundary")
+        var near_u64 = valid_image_manifest()
+        near_u64.carrier.byte_length = 18446744073709551614u64
+        var near_mutable = near_u64.volumes[0]
+        near_mutable.byte_length = 18446744073709551613u64
+        var near_system = near_u64.volumes[1]
+        near_system.byte_length = 2u64
+        near_u64.volumes = [near_mutable, near_system]
+        expect(validation_error(near_u64)).to_equal(
+            SimpleOsImageManifestErrorV1.InvalidCarrier)
+
+        step("Exceed the aggregate text budget with individually bounded canonical paths")
+        var text_budget = valid_image_manifest()
+        var wide_services: [SimpleOsImageArtifactV1] = [text_budget.services[0]]
+        val long_path_body = repeated_image_text(4060)
+        i = 0
+        while i < 33:
+            val suffix = two_digit_image_id(i)
+            wide_services.push(image_artifact(
+                "service.extra" + suffix, SimpleOsImageArtifactRoleV1.Service,
+                "/system/" + long_path_body + suffix + ".smf",
+                "7", false, false))
+            i = i + 1
+        wide_services.push(text_budget.services[1])
+        text_budget.services = wide_services
+        expect(validation_error(text_budget)).to_equal(
+            SimpleOsImageManifestErrorV1.TextBudgetExceeded)
+
+    it "should reject canonicalization and digesting when validation fails":
+        step("Submit an invalid image value to both identity-producing APIs")
+        var manifest = valid_image_manifest()
+        manifest.entry.artifact_id = "service.display"
+        match simpleos_image_manifest_canonical_v1(manifest):
+            case Ok(_): expect(false).to_equal(true)
+            case Err(error): expect(error).to_equal(SimpleOsImageManifestErrorV1.InvalidEntry)
+        match simpleos_image_manifest_digest_v1(manifest):
+            case Ok(_): expect(false).to_equal(true)
+            case Err(error): expect(error).to_equal(SimpleOsImageManifestErrorV1.InvalidEntry)
