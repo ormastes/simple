@@ -237,3 +237,9 @@ residual scope is the SIMD-vs-scalar timing comparison in §3, which is a perf m
 Recording the green so the next triage pass does not re-run it expecting red,
 and so nobody mistakes a passing interpreter-lane spec for the lane that is
 actually open.
+
+## Triage 2026-09-13
+Reconfirmed: PARTIALLY RESOLVED / OPEN (P3) status unchanged per this
+record's own detailed §1/§2/§3 breakdown. Not re-measured this pass
+(perf-sensitive, needs a controlled benchmark run). Left as-is, no code
+change attempted.
