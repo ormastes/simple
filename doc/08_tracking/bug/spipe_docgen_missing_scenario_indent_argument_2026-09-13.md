@@ -2,7 +2,21 @@
 
 - **Filed:** 2026-09-13
 - **Area:** app / spipe_docgen (`src/app/spipe_docgen/`)
-- **Status:** open; blocks doc generation for all sspec files on this host
+- **Status:** FIXED 2026-09-13.
+
+## Fix
+
+`parser.spl:1097` now passes the `continuation` array, derived in place from
+the lines the caller handed in, so the public 2-argument shape of
+`scenario_at_is_unconditional_pending` is preserved (three call sites in
+generator.spl plus `spec_kw_line_spec.spl` depend on it). The signature side
+was NOT reverted: the history shows `continuation` was added deliberately in
+PR #373 so a fixture's column-0 string body no longer ends a scenario early,
+and four of the five call sites already pass it.
+
+Verified: all six specs in `test/02_integration/ui/web_showcase/` generate with
+`Stubs: 0/6 (0%)`, `6 complete`. New end-to-end scenario:
+`test/01_unit/app/spipe_docgen/docgen_end_to_end_spec.spl`.
 
 ## Symptom
 

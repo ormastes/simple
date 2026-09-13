@@ -3,7 +3,7 @@
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
-use app.test_daemon.light_protocol.{light_request_deadline, light_request_parse, timeout_verdict_line, has_verdict_line, exit_code_reason}
+use app.test_daemon.light_protocol.{light_request_deadline, light_request_parse, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
 
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{dir_list}
@@ -111,7 +111,7 @@ fn basename(path: text) -> text:
     parts[parts.len() - 1]
 
 fn handle_request(binary: text, name: text):
-    if not name.ends_with(".req"):
+    if not light_request_is_pollable(name):
         return
     val req_path = if name.contains("/"): name else: "{LIGHT_REQ_DIR}/{name}"
     # Another poller already consumed this request. Returning WITHOUT writing a
@@ -135,6 +135,24 @@ fn handle_request(binary: text, name: text):
         return
     val timeout_ms = deadline.1
     val timeout_secs = (timeout_ms + 999) / 1000
+    # CLAIM the request before executing it: rename `<id>.req` to
+    # `<id>.req.inflight`, which the poll loop does not list. Until 2026-09-13
+    # the `.req` file stayed in place for the whole run and was deleted only
+    # after the response was written, so a worker (or this daemon) killed at
+    # the budget left the request re-servable — and the next poll, or a
+    # successor daemon spawned by another client, started the SAME spec again,
+    # forever. An over-budget spec then looked "still running" instead of
+    # failing once, which is how two investigations mistook the loop for
+    # slowness. The claim bounds it: a killed run is never retried, and the
+    # owning client reports exactly one `daemon-no-response` TIMEOUT verdict
+    # when its own deadline expires.
+    # Bug: doc/08_tracking/bug/web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13.md
+    val inflight_path = light_request_inflight_path(req_path)
+    if not file_rename(req_path, inflight_path):
+        # Could not claim it (another poller won the race, or the rename
+        # failed). Do not execute: an unclaimed run is exactly the retry loop
+        # this guard exists to prevent.
+        return
     val (stdout, stderr, code) = process_run_bounded(
         binary,
         ["run", "src/app/test_runner_new/test_runner_single.spl", test_path, "--no-session-daemon", "--sequential", "--timeout", timeout_secs.to_string()],
@@ -157,6 +175,7 @@ fn handle_request(binary: text, name: text):
         if out_code == 0:
             out_code = 1
     atomic_write_text(response_path(name), "{out_code}\n{body}")
+    file_delete(inflight_path)
     file_delete(req_path)
 
 fn lock_owner_pid() -> text:
@@ -238,7 +257,7 @@ fn main() -> i64:
         # wired in test_runner_client.spl.
         var i = 0
         while i < entries.len():
-            if entries[i].ends_with(".req"):
+            if light_request_is_pollable(entries[i]):
                 handle_request(binary, entries[i])
                 i = entries.len()
             else:
