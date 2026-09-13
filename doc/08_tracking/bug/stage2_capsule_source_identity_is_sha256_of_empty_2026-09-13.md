@@ -1,6 +1,6 @@
 # Site 12: the Stage-2 candidate freezes every native capsule's source identity as sha256("")
 
-- **Status:** OPEN (2026-09-13)
+- **Status:** OPEN (2026-09-13) — cause ISOLATED to `SIMPLE_STAGE3_STREAMING_SURFACES=1`, fix blocked (fenced files)
 - **Lane:** BOOT-10, measured on the pinned Stage-2 candidate
   `build/bootstrap-boot9b/stage2-rejected/aarch64-unknown-linux-gnu/simple`,
   sha256 `99ba0cf430d255a4141edfc7…`, 152198272 B (pin
@@ -68,27 +68,36 @@ empty in the candidate. The check that fires is
 `driver_native_disk_source_identity`, which reads the file directly and is
 correct.
 
-Two candidate causes, not yet separated:
+## CAUSE ISOLATED (2026-09-13) — `SIMPLE_STAGE3_STREAMING_SURFACES=1`
 
-1. **A native-codegen struct-field-binding defect** — the same class this tree
-   already documents at `driver_aot_native_output.spl:855-872`, where a
-   match-bound `case Ok(source): sha256_text(source.content)` read field 0
-   (`path`) instead of `content` on a Stage-2-compiled compiler and produced the
-   digest of the PATH STRING. Supporting evidence from the same runs: the
-   candidate's own canary fires —
-   `[receipt-size-canary] optional-bound scalar field read miscompiled: field=907999041:runtime=1592`
-   (`driver_aot_native_output.spl:989`), i.e. an optional-bound `fp.size` read
-   returned 907999041 where the real object size is 1592.
-2. **Ordering against `SIMPLE_STAGE3_STREAMING_SURFACES=1`** — the gate sets it,
-   and the build log shows `phase2:surface:file:released path=…` for every file
-   before the capsule batch is frozen, so `source.content` could be legitimately
-   empty by then.
+One variable, same candidate (`ba3c25f30d76c9a8…`, the Stage-2 binary from
+`build/bootstrap-boot10a`), same fixture `f1.spl`, everything else identical:
 
-Cause 1 is the better-supported of the two (the canary is the candidate
-reporting a field read it knows is wrong, in the same file), but neither has
-been isolated with a one-variable run; the discriminator would be a build with
-`SIMPLE_STAGE3_STREAMING_SURFACES=0`, which this lane did not run because the
-files are fenced.
+| `SIMPLE_STAGE3_STREAMING_SURFACES` | `native-capsule-source-mutated` lines | outcome |
+|---|---|---|
+| **1** (what the gate sets) | **3** | `build failed: 1 failed, 0 unverified, 0 not run, 0 ok of 1 unit(s)` |
+| **0** | **0** | `phase=link state=succeeded … succeeded=1`, binary linked |
+
+So it is an **ordering defect, not a codegen field-binding defect**: streaming
+surfaces release each file's text (`phase2:surface:file:released path=…`) before
+`freeze_native_module_capsules_v1` runs, so `frozen_native_cache_source_identity_v1`
+(`driver_types.spl:1055`) hashes an already-released `source.content` and gets
+`sha256("")`. The identity must be captured while the surface is still held (or
+read from disk, as `driver_native_disk_source_identity` already does), not at
+freeze time.
+
+**Explicitly NOT the cause, though it looked like one:** the candidate's
+`[receipt-size-canary] optional-bound scalar field read miscompiled` line fires in
+BOTH legs — 3 times with streaming OFF (`field=742848097:runtime=1256`), where the
+build SUCCEEDS. It is a real, separate miscompile of an optional-bound `fp.size`
+read (`driver_aot_native_output.spl:989`) and is worth its own record, but it does
+not produce the empty capsule identity.
+
+Reproduce the split with `BOOT10_STREAM=0` / `BOOT10_STREAM=1`:
+```sh
+CAND=scratchpad/boot10/pin/cand.boot10a.stage2 BOOT10_STREAM=0 \
+  sh scratchpad/boot10/fxrun.sh scratchpad/boot10/fx/f1.spl f1stream0
+```
 
 ## Repro
 
