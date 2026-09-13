@@ -393,6 +393,31 @@ fn array_join_stays_a_static_string_builtin() {
 }
 
 #[test]
+fn text_receiver_join_is_not_typed_as_unrelated_user_join_method() {
+    // `Thread.join() -> i64?` (std.concurrent.thread) used to win the by-name
+    // `.join` fallback, so `"/" + "/".join(parts)` was rejected as Add on an
+    // unwrapped optional.
+    let module = parse_and_lower(
+        "class Thread:\n    handle: i64\n    fn join() -> i64?:\n        nil\n\nfn joined(parts: [text]) -> text:\n    return \"/\" + \"/\".join(parts)\n",
+    )
+    .expect("text-receiver join must lower");
+    let joined = module
+        .functions
+        .iter()
+        .find(|function| function.name == "joined")
+        .expect("joined");
+    let returned = joined
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .expect("joined return");
+    assert_eq!(returned.ty, TypeId::STRING);
+}
+
+#[test]
 fn text_rfind_uses_string_method_lowering() {
     let module = parse_and_lower(
         r#"struct text:
