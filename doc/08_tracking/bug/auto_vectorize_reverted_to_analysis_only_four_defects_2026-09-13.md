@@ -1,6 +1,8 @@
 # AutoVectorize reverted to AnalysisOnly — four defects found hours after the flip
 
-- **Status:** open — Active is the correct destination; these gate it
+- **Status:** all four defects FIXED 2026-09-13. The pass stays AnalysisOnly:
+  fixing the defects is not the same as proving the rewrite correct, and the
+  remaining gate is an execution-level differential test (step 6 below).
 - **Found:** 2026-09-13, adversarial review of the Active flip
 - **Where:** `src/compiler/60.mir_opt/mir_opt/_AutoVectorize/rewrite.spl`,
   `auto_vectorize_codegen.spl`, `auto_vectorize_validate.spl`
@@ -80,3 +82,47 @@ the silent miscompilation the oracle was built to prevent.
 6. Add an execution-level differential test (the MIR interpreter exposes
    `execute_function`) comparing vectorized against scalar output, which is the
    check no structural test can substitute for.
+
+## Fixed 2026-09-13
+
+**D1 — real element width.** `get_instruction_type` no longer guesses; it
+returns nil. `get_instruction_type_in(func, inst)` resolves the dest local's
+declared type from `func.locals` via `mir_type_element_name`, which maps the
+scalar MIR kinds and returns nil for anything else. nil means DECLINE, never a
+default width. Pinned: f64/i64/f32 map correctly, Unit/Bool return nil, the old
+`Some("f32")` guess is gone, and `element_size_bytes` gives 4 vs 8 for the
+32/64-bit lanes whose distinction the guess erased.
+
+**D2 — an unbounded guard declines.** `if emit_guard and not guard_usable:
+return func`. It previously fell through and spliced the blocks with no guard
+for a recipe the oracle had explicitly refused to clear. Pinned with a recipe
+carrying an unmappable element type: block count must be unchanged.
+
+**D3 — the exit block is resolved.** The header's real terminator is read out
+of `func.blocks` and its non-self successor becomes the exit; a header naming
+no block, or with no resolvable exit edge, declines instead of inventing
+`header + 3`. Pinned with an orphan header id.
+
+That fix also exposed a fixture bug of exactly the kind this record describes:
+`make_elementwise_mul_recipe` claimed `header_block: 1` while
+`make_elementwise_block_mul` IS block 2, so the mul rewrite had only ever
+"worked" because the old code invented an exit. The fixture now names its own
+block.
+
+**D4 — guard temporaries are declared locals.** They are numbered from one past
+the highest existing local id (the convention used elsewhere) and appended to
+`func.locals` with an I64 type, instead of starting at an arbitrary constant
+and never being declared. Pinned: the local count grows, and no id is
+duplicated.
+
+`auto_vectorize_spec.spl`: 88/88.
+
+## Still required before Active
+
+Step 6 of the list above, unchanged and unmet: an **execution-level
+differential test** comparing vectorized output against scalar output. The MIR
+interpreter exposes `execute_function`, so it is buildable. Every check in
+place today is structural — it verifies the emitted blocks have the right
+shape, not that running them produces the right numbers. That is the
+substitution no amount of structural testing can make, and it is why the four
+fixes here do not by themselves justify flipping the status.
