@@ -57,6 +57,10 @@ rem passthrough tool returns "centralized child storage environment is
 rem unavailable". Interpreter mode is also FASTER to first reply here
 rem (measured 2026-09-13, initialize: 1.20s interpreter vs 3.27s JIT).
 rem Seed defect: doc/08_tracking/bug/seed_jit_some_constructor_corrupts_value_2026-09-13.md
+rem Interpreter is also what keeps tools/call alive until a fixed seed is
+rem deployed: the seed JIT segfaults (rc 139) on the dispatch path. See
+rem doc/08_tracking/bug/seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md
+rem and doc/08_tracking/bug/seed_jit_function_local_use_segfaults_2026-09-13.md.
 if "%SIMPLE_EXECUTION_MODE%"=="" set "SIMPLE_EXECUTION_MODE=interpreter"
 rem This branch deliberately runs the seed runtime; its banner is acknowledged.
 if "%SIMPLE_RUST_SEED_WARNING%"=="" set "SIMPLE_RUST_SEED_WARNING=0"
