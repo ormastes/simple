@@ -231,3 +231,18 @@ is the only remaining hard toolchain dependency — everything else needed
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+The artifact-gap files this doc's "Current state" section says were fixed
+(but "not committed, per task instructions" in that worktree) are now present
+in THIS tree: `src/os/crypto/x25519_mlkem768/kernels/ml_kem_ntt_forward.comp`
+and `scripts/check/check-x25519mlkem768-vulkan-ntt.shs` both exist at
+`f26970e9d93`. Did not re-run the physical Vulkan verification (needs
+`glslangValidator` + a Vulkan-capable device; out of scope for this shard's
+environment check). The originally-filed defect (missing artifact/generator)
+is resolved by these files' presence.
+
+Status: CLOSED (2026-09-13) — artifact gap resolved, source/script present in
+this tree; physical device re-verification not re-run (environment-gated, not
+required to confirm the filed gap is closed).
