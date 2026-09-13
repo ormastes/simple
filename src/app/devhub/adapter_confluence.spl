@@ -1,14 +1,26 @@
-# ITF CLI — Confluence REST v2 Adapter
+# ITF CLI — Confluence REST adapter (curl transport, v1 content API)
 #
-# Direct HTTP calls to Confluence Cloud REST API v2
-# Endpoints: /api/v2/pages, /api/v2/spaces
-# Auth: Basic auth (email:api_token)
+# One resource shape for both deployments — the v1 content API:
+#   Cloud        {url}/rest/api/content...   (url = https://x.atlassian.net/wiki)
+#   Data Center  {url}/rest/api/content...   (url = https://host[:port][/confluence])
+# Data Center has no v2 `/pages` API, so the previous v2 paths 404'd there.
+# Auth comes from app.devhub.auth.confluence_auth_header: Basic
+# base64(user:token) by default (Cloud), `Bearer <PAT>` with
+# `confluence.auth: bearer` (Data Center). A configured token is used
+# directly — this adapter never starts a login.
+#
+# Transport: `curl` via process_run, like adapter_jira_curl. The previous
+# std.nogc_sync_mut.http_client transport overflowed the stack on the first
+# call: the root shim's `add_header` (src/lib/nogc_sync_mut/http_client.spl)
+# resolves its `request_add_header` alias back onto itself and recurses
+# forever — and even without that, http_client has no transport (it only
+# builds request tuples), so no request was ever sent.
 
-use std.nogc_sync_mut.http_client.{http_get, http_post, http_put, http_delete, create_headers, add_header, response_get_status_code, response_get_body, response_is_success}
-use std.json.{json_parse, json_serialize, json_pretty, json_object_get, json_object, json_string, json_number, json_array, json_array_get, json_array_length, json_get_type, json_object_keys, json_object_has}
-use app.devhub.config.{ItfConfig, load_config, load_auth_token}
-use app.devhub.auth.{confluence_auth_header, confluence_api_base}
-use app.devhub.errors.{ItfError, itf_error_from_http}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.json.{json_parse, json_serialize, json_object_get, json_array_get, json_array_length, json_get_type}
+use app.devhub.config.{ItfConfig}
+use app.devhub.auth.{confluence_auth_header}
+use app.devhub.atlassian_site.{atlassian_strip_slash}
 use std.common.text_advanced.{escape_json}
 
 
@@ -43,61 +55,68 @@ class ConfluenceSearchResult:
 
 
 # ============================================================================
-# Internal HTTP helpers
+# URL + argv builders (pure, exposed for unit tests)
 # ============================================================================
 
-fn _confluence_headers(config: ItfConfig) -> list:
-    """Build standard headers for Confluence REST calls."""
-    val auth = confluence_auth_header(config)
-    var headers = create_headers()
-    headers = add_header(headers, "Content-Type", "application/json")
-    headers = add_header(headers, "Accept", "application/json")
-    if auth != "":
-        headers = add_header(headers, "Authorization", auth)
-    headers
-
-
-fn _confluence_get(config: ItfConfig, path: text) -> (i64, text):
-    """Make authenticated GET to Confluence REST v2."""
-    val base = confluence_api_base(config)
+fn confluence_content_root(config: ItfConfig) -> text:
+    """`{url}/rest/api/content` for both Cloud (url carries /wiki) and Data
+    Center (url carries any context path). "" when no URL is configured."""
+    val base = atlassian_strip_slash(config.confluence_url)
     if base == "":
-        return (0, "")
-    val url = "{base}{path}"
-    val headers = _confluence_headers(config)
-    val response = http_get(url)
-    # Note: http_get returns a tuple; we extract status and body
-    val status = response_get_status_code(response)
-    val body = response_get_body(response)
-    (status, body)
+        return ""
+    "{base}/rest/api/content"
 
 
-fn _confluence_post(config: ItfConfig, path: text, payload: text) -> (i64, text):
-    """Make authenticated POST to Confluence REST v2."""
-    val base = confluence_api_base(config)
-    val url = "{base}{path}"
-    val response = http_post(url, payload)
-    val status = response_get_status_code(response)
-    val body = response_get_body(response)
-    (status, body)
+fn _confluence_curl_argv(auth: text, method: text, url: text, payload: text, query: [text]) -> [text]:
+    """curl argv; `-w "\n%{http_code}"` puts the status on the last line.
+    `query` entries are `name=value` pairs sent URL-encoded with -G."""
+    var argv: [text] = ["-s", "-S", "-X", method, "-H", "Accept: application/json"]
+    if auth != "":
+        argv = argv + ["-H", "Authorization: {auth}"]
+    if payload != "":
+        argv = argv + ["-H", "Content-Type: application/json", "-d", payload]
+    if query.len() > 0:
+        argv = argv + ["-G"]
+        for q in query:
+            argv = argv + ["--data-urlencode", q]
+    argv + ["-w", "\n%\{http_code\}", url]
 
 
-fn _confluence_put(config: ItfConfig, path: text, payload: text) -> (i64, text):
-    """Make authenticated PUT to Confluence REST v2."""
-    val base = confluence_api_base(config)
-    val url = "{base}{path}"
-    val response = http_put(url, payload)
-    val status = response_get_status_code(response)
-    val body = response_get_body(response)
-    (status, body)
+fn _confluence_split_response(stdout: text) -> (text, i64):
+    """Split curl stdout into (body, http_code); code 0 when unparseable."""
+    if stdout == "":
+        return ("", 0)
+    var idx = stdout.len() - 1
+    var found = -1
+    while idx >= 0:
+        if stdout[idx] == "\n":
+            found = idx
+            break
+        idx = idx - 1
+    val tail = if found < 0: stdout.trim() else: stdout[found + 1:stdout.len()].trim()
+    val body = if found < 0: "" else: stdout[0:found]
+    if tail.len() != 3:
+        return (stdout, 0)
+    var code: i64 = 0
+    for ch in tail:
+        if ch < "0" or ch > "9":
+            return (stdout, 0)
+        code = code * 10 + (ch.to_i64() - "0".to_i64())
+    (body, code)
 
 
-fn _confluence_delete_req(config: ItfConfig, path: text) -> (i64, text):
-    """Make authenticated DELETE to Confluence REST v2."""
-    val base = confluence_api_base(config)
-    val url = "{base}{path}"
-    val response = http_delete(url)
-    val status = response_get_status_code(response)
-    val body = response_get_body(response)
+fn _confluence_request(config: ItfConfig, method: text, path: text, payload: text, query: [text]) -> (i64, text):
+    """Authenticated request; returns (http_status, body_or_error). Status 0
+    means transport failure (no URL, curl missing, connection refused)."""
+    val root = confluence_content_root(config)
+    if root == "":
+        return (0, "confluence.url not configured")
+    val argv = _confluence_curl_argv(confluence_auth_header(config), method, "{root}{path}", payload, query)
+    val (stdout, stderr, exit_code) = process_run("curl", argv)
+    val (body, status) = _confluence_split_response(stdout)
+    if exit_code != 0 or status == 0:
+        val detail = if stderr.trim() != "": stderr.trim() else: "curl exit {exit_code}"
+        return (0, "transport error: {detail}")
     (status, body)
 
 
@@ -106,44 +125,57 @@ fn _confluence_delete_req(config: ItfConfig, path: text) -> (i64, text):
 # ============================================================================
 
 fn _parse_page_ref(json_obj: any) -> PageRef:
-    """Parse a page JSON object into PageRef."""
+    """Parse a v1 content JSON object into PageRef."""
     val id = _json_str(json_obj, "id")
     val title = _json_str(json_obj, "title")
     val status = _json_str(json_obj, "status")
-    val space_id = _json_str(json_obj, "spaceId")
 
-    # Version is nested: { "version": { "number": N } }
+    var space_key = ""
+    val space_obj = json_object_get(json_obj, "space")
+    if space_obj != nil:
+        space_key = _json_str(space_obj, "key")
+
     var version = 0
     val version_obj = json_object_get(json_obj, "version")
     if version_obj != nil:
-        val num_val = json_object_get(version_obj, "number")
-        if num_val != nil:
-            version = _json_int(version_obj, "number")
+        version = _json_int(version_obj, "number")
 
-    # Build web URL from _links.webui if available
+    # _links.base + _links.webui gives the absolute page URL.
     var url = ""
     val links = json_object_get(json_obj, "_links")
     if links != nil:
-        url = _json_str(links, "webui")
+        val webui = _json_str(links, "webui")
+        if webui != "":
+            url = _json_str(links, "base") + webui
 
-    PageRef(id: id, title: title, space_id: space_id, version: version, status: status, url: url)
+    PageRef(id: id, title: title, space_id: space_key, version: version, status: status, url: url)
 
 
 fn _parse_page_list_item(json_obj: any) -> PageListItem:
-    """Parse a page JSON into PageListItem (lightweight)."""
-    val id = _json_str(json_obj, "id")
-    val title = _json_str(json_obj, "title")
-    val space_id = _json_str(json_obj, "spaceId")
-    val status = _json_str(json_obj, "status")
-    val last_modified = _json_str(json_obj, "version")
-
-    # Try to extract createdAt or version.createdAt
+    """Parse a v1 content JSON into PageListItem (lightweight)."""
+    val ref = _parse_page_ref(json_obj)
     var modified = ""
     val version_obj = json_object_get(json_obj, "version")
     if version_obj != nil:
-        modified = _json_str(version_obj, "createdAt")
+        modified = _json_str(version_obj, "when")
+    PageListItem(id: ref.id, title: ref.title, space_id: ref.space_id, status: ref.status, last_modified: modified)
 
-    PageListItem(id: id, title: title, space_id: space_id, status: status, last_modified: modified)
+
+fn _parse_results(body: text) -> (bool, [PageListItem], text):
+    """Parse a `{results: [...]}` listing response."""
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, [], "invalid JSON response")
+    val results_arr = json_object_get(parsed, "results")
+    if results_arr == nil:
+        return (true, [], body)
+    var items: [PageListItem] = []
+    val arr_len = json_array_length(results_arr)
+    var i = 0
+    while i < arr_len:
+        items = items + [_parse_page_list_item(json_array_get(results_arr, i))]
+        i = i + 1
+    (true, items, body)
 
 
 fn _json_str(obj: any, key: text) -> text:
@@ -171,7 +203,6 @@ fn _json_int(obj: any, key: text) -> i64:
     if value == nil:
         return 0
     val s = json_serialize(value)
-    # Parse integer from string
     var result = 0
     for ch in s:
         if ch >= "0" and ch <= "9":
@@ -179,62 +210,40 @@ fn _json_int(obj: any, key: text) -> i64:
     result
 
 
+fn _empty_ref() -> PageRef:
+    PageRef(id: "", title: "", space_id: "", version: 0, status: "", url: "")
+
+
+fn _ok(status: i64) -> bool:
+    status >= 200 and status < 300
+
+
 # ============================================================================
 # Public API
 # ============================================================================
 
-fn confluence_list_pages(config: ItfConfig, space_id: text, limit: i64) -> (bool, [PageListItem], text):
-    """List pages in a space.
-
-    Returns: (success, items, raw_json_for_--json_mode)
-    """
-    var path = "/pages?body-format=storage&limit={limit}"
-    if space_id != "":
-        path = "/pages?space-id={space_id}&limit={limit}"
-
-    val (status, body) = _confluence_get(config, path)
-    if status < 200 or status >= 300:
+fn confluence_list_pages(config: ItfConfig, space_key: text, limit: i64) -> (bool, [PageListItem], text):
+    """List pages in a space. Returns: (success, items, raw_json_for_--json_mode)"""
+    var query = ["type=page", "limit={limit}", "expand=version,space"]
+    if space_key != "":
+        query = query + ["spaceKey={space_key}"]
+    val (status, body) = _confluence_request(config, "GET", "", "", query)
+    if not _ok(status):
         return (false, [], body)
-
-    val parsed = json_parse(body)
-    if parsed == nil:
-        return (false, [], "invalid JSON response")
-
-    val results_arr = json_object_get(parsed, "results")
-    if results_arr == nil:
-        return (true, [], body)
-
-    var items: [PageListItem] = []
-    val arr_len = json_array_length(results_arr)
-    var i = 0
-    while i < arr_len:
-        val item = json_array_get(results_arr, i)
-        items = items + [_parse_page_list_item(item)]
-        i = i + 1
-
-    (true, items, body)
+    _parse_results(body)
 
 
 fn confluence_get_page(config: ItfConfig, page_id: text) -> (bool, PageContent, text):
-    """Get a single page with storage body.
-
-    Returns: (success, page_content, raw_json)
-    """
-    val path = "/pages/{page_id}?body-format=storage"
-    val (status, body) = _confluence_get(config, path)
-
-    if status < 200 or status >= 300:
-        val empty = PageContent(ref: PageRef(id: "", title: "", space_id: "", version: 0, status: "", url: ""), body_storage: "")
+    """Get a single page with storage body. Returns: (success, page_content, raw_json)"""
+    val (status, body) = _confluence_request(config, "GET", "/{page_id}", "", ["expand=body.storage,version,space"])
+    val empty = PageContent(ref: _empty_ref(), body_storage: "")
+    if not _ok(status):
         return (false, empty, body)
 
     val parsed = json_parse(body)
     if parsed == nil:
-        val empty = PageContent(ref: PageRef(id: "", title: "", space_id: "", version: 0, status: "", url: ""), body_storage: "")
         return (false, empty, "invalid JSON response")
 
-    val ref = _parse_page_ref(parsed)
-
-    # Extract body.storage.value
     var storage_body = ""
     val body_obj = json_object_get(parsed, "body")
     if body_obj != nil:
@@ -242,103 +251,64 @@ fn confluence_get_page(config: ItfConfig, page_id: text) -> (bool, PageContent, 
         if storage_obj != nil:
             storage_body = _json_str(storage_obj, "value")
 
-    val content = PageContent(ref: ref, body_storage: storage_body)
-    (true, content, body)
+    (true, PageContent(ref: _parse_page_ref(parsed), body_storage: storage_body), body)
 
 
-fn confluence_create_page(config: ItfConfig, space_id: text, title: text, body_storage: text, parent_id: text) -> (bool, PageRef, text):
-    """Create a new page.
-
-    Returns: (success, page_ref, raw_json)
-    """
-    # Build request payload
-    var payload = "\{\"spaceId\": \"{space_id}\", \"status\": \"current\", \"title\": \"{escape_json(title)}\", \"body\": \{\"representation\": \"storage\", \"value\": \"{escape_json(body_storage)}\"\}"
+fn confluence_create_page(config: ItfConfig, space_key: text, title: text, body_storage: text, parent_id: text) -> (bool, PageRef, text):
+    """Create a new page. Returns: (success, page_ref, raw_json)"""
+    var payload = "\{\"type\": \"page\", \"title\": \"{escape_json(title)}\", \"space\": \{\"key\": \"{escape_json(space_key)}\"\}, \"body\": \{\"storage\": \{\"value\": \"{escape_json(body_storage)}\", \"representation\": \"storage\"\}\}"
     if parent_id != "":
-        payload = payload + ", \"parentId\": \"{parent_id}\""
+        payload = payload + ", \"ancestors\": [\{\"id\": \"{escape_json(parent_id)}\"\}]"
     payload = payload + "\}"
 
-    val (status, resp_body) = _confluence_post(config, "/pages", payload)
-
-    if status < 200 or status >= 300:
-        val empty = PageRef(id: "", title: "", space_id: "", version: 0, status: "", url: "")
-        return (false, empty, resp_body)
-
+    val (status, resp_body) = _confluence_request(config, "POST", "", payload, [])
+    if not _ok(status):
+        return (false, _empty_ref(), resp_body)
     val parsed = json_parse(resp_body)
     if parsed == nil:
-        val empty = PageRef(id: "", title: "", space_id: "", version: 0, status: "", url: "")
-        return (false, empty, "invalid JSON response")
-
-    val ref = _parse_page_ref(parsed)
-    (true, ref, resp_body)
+        return (false, _empty_ref(), "invalid JSON response")
+    (true, _parse_page_ref(parsed), resp_body)
 
 
 fn confluence_update_page(config: ItfConfig, page_id: text, title: text, body_storage: text, version: i64, message: text) -> (bool, PageRef, text):
-    """Update a page. Requires current version number.
-
-    Returns: (success, updated_ref, raw_json)
-    """
+    """Update a page. Requires current version number. Returns: (success, updated_ref, raw_json)"""
     val new_version = version + 1
-    var payload = "\{\"id\": \"{page_id}\", \"status\": \"current\", \"title\": \"{escape_json(title)}\", \"body\": \{\"representation\": \"storage\", \"value\": \"{escape_json(body_storage)}\"\}, \"version\": \{\"number\": {new_version}"
+    var payload = "\{\"id\": \"{escape_json(page_id)}\", \"type\": \"page\", \"title\": \"{escape_json(title)}\", \"body\": \{\"storage\": \{\"value\": \"{escape_json(body_storage)}\", \"representation\": \"storage\"\}\}, \"version\": \{\"number\": {new_version}"
     if message != "":
         payload = payload + ", \"message\": \"{escape_json(message)}\""
     payload = payload + "\}\}"
 
-    val (status, resp_body) = _confluence_put(config, "/pages/{page_id}", payload)
-
-    if status < 200 or status >= 300:
-        val empty = PageRef(id: "", title: "", space_id: "", version: 0, status: "", url: "")
-        return (false, empty, resp_body)
-
+    val (status, resp_body) = _confluence_request(config, "PUT", "/{page_id}", payload, [])
+    if not _ok(status):
+        return (false, _empty_ref(), resp_body)
     val parsed = json_parse(resp_body)
     if parsed == nil:
-        val empty = PageRef(id: "", title: "", space_id: "", version: 0, status: "", url: "")
-        return (false, empty, "invalid JSON response")
-
-    val ref = _parse_page_ref(parsed)
-    (true, ref, resp_body)
+        return (false, _empty_ref(), "invalid JSON response")
+    (true, _parse_page_ref(parsed), resp_body)
 
 
 fn confluence_delete_page(config: ItfConfig, page_id: text) -> (bool, text):
-    """Delete a page.
-
-    Returns: (success, error_message)
-    """
-    val (status, body) = _confluence_delete_req(config, "/pages/{page_id}")
-    if status >= 200 and status < 300:
+    """Delete a page. Returns: (success, error_message)"""
+    val (status, body) = _confluence_request(config, "DELETE", "/{page_id}", "", [])
+    if _ok(status):
         (true, "")
     else:
         (false, body)
 
 
-fn confluence_search_pages(config: ItfConfig, query: text, space_id: text, limit: i64) -> (bool, [PageListItem], text):
-    """Search pages by title.
+fn confluence_search_cql(query: text, space_key: text) -> text:
+    """CQL for a title search, optionally scoped to a space."""
+    val q = query.replace("\"", "\\\"")
+    var cql = "type=page and title~\"{q}\""
+    if space_key != "":
+        cql = cql + " and space=\"{space_key}\""
+    cql
 
-    Returns: (success, items, raw_json)
-    """
-    var path = "/pages?title={query}&limit={limit}"
-    if space_id != "":
-        path = "/pages?title={query}&space-id={space_id}&limit={limit}"
 
-    val (status, body) = _confluence_get(config, path)
-    if status < 200 or status >= 300:
+fn confluence_search_pages(config: ItfConfig, query: text, space_key: text, limit: i64) -> (bool, [PageListItem], text):
+    """Search pages by title via CQL. Returns: (success, items, raw_json)"""
+    val params = ["cql={confluence_search_cql(query, space_key)}", "limit={limit}", "expand=version,space"]
+    val (status, body) = _confluence_request(config, "GET", "/search", "", params)
+    if not _ok(status):
         return (false, [], body)
-
-    val parsed = json_parse(body)
-    if parsed == nil:
-        return (false, [], "invalid JSON response")
-
-    val results_arr = json_object_get(parsed, "results")
-    if results_arr == nil:
-        return (true, [], body)
-
-    var items: [PageListItem] = []
-    val arr_len = json_array_length(results_arr)
-    var i = 0
-    while i < arr_len:
-        val item = json_array_get(results_arr, i)
-        items = items + [_parse_page_list_item(item)]
-        i = i + 1
-
-    (true, items, body)
-
-
+    _parse_results(body)
