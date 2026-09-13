@@ -66,6 +66,26 @@ interpolation, and no length-dependent behavior, for either seed
 
 ## Blocking issue — native-build could not be run to completion
 
+> **UPDATE 2026-09-13 — the `method 'len' not found on type 'i64'` half of this
+> blocker is RESOLVED.** Root cause: `native_noop_normalized_invocation_v1`
+> framed `aspect.mcdc_mode` (an `i64`, default 0) into a `[text]` literal without
+> `.to_text()`, and `native_noop_frame_v1` calls `value.len()` on every element.
+> It ran on the default native-build path before any user logic, which is why a
+> 3-line program with no `.len()` hit it. Introduced `e0fa5ef45e2` (2026-09-07);
+> fixed by `aspect.mcdc_mode.to_text()` in
+> `src/compiler/80.driver/cache/native_noop_admission.spl:57`. Full analysis:
+> `doc/08_tracking/bug/native_build_noop_invocation_frames_raw_i64_mcdc_mode_2026-09-13.md`.
+>
+> **This record's own claim (the 2-byte span `+` chain) remains OPEN and
+> untested** — `native-build` still does not complete, now for two *different*
+> reasons: `scv-authority-missing`
+> (`stage3_step_omits_package_index_cold_init_scv_authority_missing_2026-09-13.md`)
+> and a `(scope, msg)` arity mismatch after `aop_weave`
+> (`native_build_aop_weave_one_arg_call_binds_log_scope_msg_2026-09-13.md`).
+> The note below that this shares a cause with the `rt_env_vars` record is
+> **not** borne out: that is a distinct defect.
+
+
 Every attempt to natively build even a **trivial** program on this tree fails
 before reaching codegen for the reproducer's own logic, with a semantic error
 in unrelated whole-program scope:
