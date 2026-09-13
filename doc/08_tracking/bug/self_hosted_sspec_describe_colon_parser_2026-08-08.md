@@ -43,3 +43,9 @@ runtime: that would diverge from repository SSpec convention and hide the
 runtime regression. The owner must add a minimal parser regression around a
 single `describe`/`it` pair, repair the parser, rebuild a provenance-qualified
 self-hosted binary, then rerun the focused Caret spec and regenerate its manual.
+
+## Triage 2026-09-13
+Reconfirmed: release-blocking self-hosted parser gap for standard SSpec
+suite syntax. Needs self-hosted parser work (src/compiler/10.frontend),
+significant scope beyond a single-bug budget given it's release-blocking
+and needs careful verification. Left OPEN, no code change attempted.
