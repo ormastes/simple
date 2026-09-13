@@ -523,3 +523,43 @@ the bases or the runtime range guard must cover them. The hand-written kernels
 listed there remain the source of the DB and web servers' AVX-512 today; what
 has changed is that the pass is no longer structurally incapable of helping
 them.
+
+## D9 — an unlowerable recipe was rewritten into a loop that skips elements
+
+Found while checking a claim I had made carelessly: that the pass rewrites only
+elementwise ADD. It does not — `supports_elementwise_rewrite` and
+`simd_binop_name` both admit add, sub, mul and xor, and sub and mul really are
+rewritten. Nothing had ever EXECUTED them, which is why the claim survived.
+
+Probing the other direction found a live miscompile. When
+`vector_mir_type(element, lanes)` has no vector type for the pair, or
+`simd_binop_name(op)` has no spelling, `create_vector_loop_block` emits an
+**empty body** — deliberately, as D5's fix, so that a shape nothing implements
+stays visible instead of being handed to a backend.
+
+That was survivable while the emitted block was inert. It stopped being
+survivable when the vector loop became the thing that drives the induction
+variable: an empty body still advances the index by a whole vector every
+iteration, so every element it steps over is **never written**. Measured: an
+i64 recipe turned 3 blocks into 5 containing **zero** SIMD instructions, and
+the caller accepted it because the block count changed.
+
+R4c refuses both cases before the splice. Pinned three ways:
+
+  * div (no vector spelling) and i64 (no vector type) leave the block count
+    unchanged;
+  * an invariant example over `{i64 add, i32 div, u8 add}` asserting that each
+    either declined or emitted real vector work — never a vector loop with no
+    vector work in it; and
+  * execution-level differential tests for **sub** and **mul** at trip counts 8
+    and 12, against a scalar control computing the same op, plus a positive pin
+    that both are genuinely rewritten so the equality cannot pass by declining.
+
+`auto_vectorize_spec.spl` 107/107, chain 7/7, alias 15/15.
+
+### Correction
+
+An earlier summary of this work said "only elementwise add is rewritten;
+sub/mul/div are matched and logged". That was wrong for sub and mul, right for
+div, and it was asserted from reading a stale docstring rather than from
+running anything. The tests above now settle it by execution.
