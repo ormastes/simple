@@ -559,19 +559,20 @@ pub(crate) fn bind_args_with_values_named(
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
 ) -> Result<HashMap<String, Value>, CompileError> {
-    let params_to_bind: Vec<_> = params
-        .iter()
-        .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
-        .collect();
+    let skip_self = self_mode.should_skip_self();
+    let is_bindable = |p: &&Parameter| !(skip_self && p.name == METHOD_SELF);
+    // Counted without materialising the parameter list: the `Vec` below is
+    // needed only by the labelled/default routing path.
+    let bindable_len = params.iter().filter(|p| is_bindable(p)).count();
 
-    if args.len() > params_to_bind.len() {
+    if args.len() > bindable_len {
         let ctx = ErrorContext::new()
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("check the function signature and provide the correct number of arguments");
         return Err(CompileError::semantic_with_context(
             format!(
                 "function expects {} argument(s), but {} were provided",
-                params_to_bind.len(),
+                bindable_len,
                 args.len()
             ),
             ctx,
@@ -640,8 +641,38 @@ pub(crate) fn bind_args_with_values_named(
         eprintln!(
             "[DEBUG bind_args_with_values] called with {} args, {} params",
             args.len(),
-            params_to_bind.len()
+            bindable_len
         );
+    }
+
+    // WHOLLY-POSITIONAL FAST PATH. When every argument is positional and there
+    // are exactly as many as there are bindable parameters, the routing below
+    // is an identity: argument `i` fills parameter `i`, no default is consulted,
+    // and no parameter is claimed by name. Taking that case directly saves the
+    // two `Vec`s the routing needs (the parameter list and the routed-value
+    // slots), neither of which outlives the call, on the most frequent
+    // interpreted call shape there is. Everything the general path does to each
+    // value — await, trait-object wrap, unit validation, coercion — is done
+    // here in the same order, against the same parameter, so a value that binds
+    // differently under the two paths is a bug in this equivalence and not a
+    // deliberate difference.
+    if args.len() == bindable_len && arg_exprs.iter().all(|arg| arg.name.is_none()) {
+        for (param, value) in params.iter().filter(is_bindable).zip(args.iter()) {
+            let value = await_value(value.clone())?;
+            let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
+            validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+            crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
+            bound.insert(param.name.clone(), value);
+        }
+        copy_value_type_params(&mut bound, params, classes);
+        return Ok(bound);
+    }
+
+    let params_to_bind: Vec<_> = params.iter().filter(is_bindable).collect();
+    if bindable_len > 0 {
+        // The parameter list and the routed-value slots below; both die with
+        // the call.
+        crate::perf_counters::bump(&crate::perf_counters::MECALL_CONTAINER_ALLOCS, 2);
     }
 
     // Route each supplied value to the parameter it actually names. A named
@@ -714,6 +745,7 @@ pub(crate) fn bind_args_with_values_named(
 
         let value = coerce_param(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
         validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+        crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 1);
         bound.insert(param.name.clone(), value);
     }
 
