@@ -123,17 +123,54 @@ fn classify(detail: text, build_log: text, build_rc: i64, native_rc: i64) -> tex
     if native_rc >= 128 or native_rc < 0:
         return "crash"
     val d: text = detail.to_lower()
-    if d.contains("nil") or d.contains("null") or d.contains("none"):
+    if d == "":
+        return "unclassified"
+    if d.contains("nil") or d.contains("null") or d.contains("none") or d.contains("option"):
         return "nil-payload"
-    if d.contains("-1") or d.contains("sentinel") or d.contains("index_of"):
+    if d.contains("index_of") or d.contains("sentinel") or d.contains("-1"):
         return "sentinel"
-    if d.contains("true") or d.contains("false") or d.contains("taken"):
+    if d.contains(".?") or d.contains("truthy") or d.contains("falsy") or d.contains("taken"):
         return "truthiness"
     if d.contains("unwrap") or d.contains("poll") or d.contains("rebind") or d.contains("no method"):
         return "rebind"
-    if d == "":
-        return "missing-example"
+    if d.contains("<<") or d.contains(">>") or d.contains("u64") or d.contains("u32") or d.contains("u16") or d.contains("u8"):
+        return "int-width-bitops"
+    if d.contains("dict") or d.contains("map[") or d.contains(".get("):
+        return "dict"
     return "other"
+
+# The native spec runner prints a bare `  NAME fail` with NO failure detail, so the
+# failure TEXT cannot classify a divergence — classifying on it labelled every real
+# codegen divergence `missing-example`. The SOURCE of the failing `it` block is both
+# available and a better input: every class name here is a code-shape name (`.?` is
+# truthiness, `.unwrap`/`Poll` is the mangler rebind, `index_of`/`-1` is the sentinel
+# family, shifts and sized ints are the width family), so the shape that diverged is
+# what we want to read.
+fn it_block_source(spec_path: text, name: text) -> text:
+    if not file_exists(spec_path):
+        return ""
+    val src = file_read(spec_path)
+    val lines = src.split("\n")
+    var i = 0
+    var found = -1
+    while i < lines.len():
+        val li: text = lines[i]
+        val lt: text = li.trim()
+        if lt.starts_with("it ") and lt.contains(name):
+            found = i
+        i = i + 1
+    if found < 0:
+        return ""
+    var out = ""
+    var k = found + 1
+    while k < lines.len():
+        val lk: text = lines[k]
+        val t: text = lk.trim()
+        if t.starts_with("it ") or t.starts_with("describe "):
+            break
+        out = out + t + " "
+        k = k + 1
+    return out
 
 # Collect the lines that follow a failing example, as its failure detail.
 fn detail_after(body: text, name: text) -> text:
@@ -271,6 +308,31 @@ fn main() -> i64:
             class_counts = class_counts + cls2 + "\n"
             continue
 
+        # The SUMMARY pair is the primary oracle; per-example names only refine it.
+        #
+        # Why: a spec's own `print` output interleaves on the same line as the native
+        # runner's example verdict (`  test full line 1tokens: [t, t]\nlen: 2\n pass`),
+        # so name-keyed matching alone reported `_cmm_debug_spec.spl` as 2 divergences
+        # when both lanes in fact said `2 examples, 0 failures`. Two lanes that agree on
+        # (examples, failures) have not diverged, whatever the line layout did. Only when
+        # the pair differs — or one lane cannot be parsed — is the per-example diff run,
+        # and then it is naming WHICH example, not deciding THAT there was a divergence.
+        val native_n = summary_examples_of(native_body)
+        val interp_f = summary_failures_of(interp_body)
+        val native_f = summary_failures_of(native_body)
+        if native_n == interp_n and native_f == interp_f and native_f >= 0:
+            continue
+
+        if native_n < 0:
+            # The native lane printed no summary at all: it died partway through the
+            # suite. That is a divergence in itself and the per-example diff below
+            # will name the last example it reached.
+            divergent = divergent + 1
+            md_rows = md_rows + "| `" + spec + "` | (whole spec) | " + interp_n.to_text() + " examples, " + interp_f.to_text() + " failures | no summary line (rc=" + native_rc.to_text() + ") | truncated-run |\n"
+            sdn_rows = sdn_rows + "  - spec: \"" + sdn_escape(spec) + "\"\n    example: \"(whole spec)\"\n    interp: \"" + interp_n.to_text() + "/" + interp_f.to_text() + "\"\n    native: \"no summary, rc=" + native_rc.to_text() + "\"\n    class: \"truncated-run\"\n"
+            class_counts = class_counts + "truncated-run\n"
+            continue
+
         # per-example diff
         val ilines = interp_body.split("\n")
         for il in ilines:
@@ -302,7 +364,12 @@ fn main() -> i64:
                 detail = detail_after(native_body, name)
             else:
                 detail = detail_after(interp_body, name)
-            val cls4 = classify(detail, build_log, build_rc, native_rc)
+            # Prefer the failing `it` block's SOURCE. The native runner emits no
+            # failure detail at all, so transcript text alone classifies nothing.
+            var basis = it_block_source(spec, name)
+            if basis == "":
+                basis = detail
+            val cls4 = classify(basis, build_log, build_rc, native_rc)
             md_rows = md_rows + "| `" + spec + "` | " + name + " | " + pf(ipass) + " | " + pf(npass) + " | " + cls4 + " |\n"
             sdn_rows = sdn_rows + "  - spec: \"" + sdn_escape(spec) + "\"\n    example: \"" + sdn_escape(name) + "\"\n    interp: \"" + pf(ipass) + "\"\n    native: \"" + pf(npass) + "\"\n    class: \"" + cls4 + "\"\n    detail: \"" + sdn_escape(detail) + "\"\n    bypass: \"" + sdn_escape(bypass) + "\"\n"
             class_counts = class_counts + cls4 + "\n"
