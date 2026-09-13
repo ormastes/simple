@@ -959,7 +959,7 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
         };
 
         eprintln!("{}: {}", level_str, hint.message);
-        eprintln!("  --> {}:{}:{}", path.display(), hint.span.line, hint.span.column);
+        eprintln!("  --> {}:{}:{}", crate::display_path::display_path(path), hint.span.line, hint.span.column);
 
         // Show source line with caret
         if let Some(line) = hint.span.line.checked_sub(1).and_then(|i| source_lines.get(i)) {
@@ -2034,7 +2034,7 @@ pub fn collect_direct_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>,
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
@@ -2086,7 +2086,7 @@ fn collect_imported_module_paths_internal(
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
@@ -2278,7 +2278,7 @@ fn load_module_with_imports_internal(
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
 
     // Display error hints (warnings, etc.) from parser

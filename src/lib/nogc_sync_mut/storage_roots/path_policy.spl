@@ -13,11 +13,29 @@ pub val STORAGE_PATH_SEGMENT_MAX_BYTES: i64 = 120
 fn _slash(path: text) -> text:
     path.replace("\\", "/")
 
+fn _strip_extended_length_prefix(slashed: text) -> text:
+    """Drop Windows' `\\\\?\\` extended-length prefix, which is spelling, not a path.
+
+    Mirrors `resolver._strip_extended_length_prefix`. `rt_path_absolute`
+    answers the verbatim spelling on Windows (`std::fs::canonicalize` always
+    emits `\\\\?\\`), so `validate_storage_containment` compared
+    `/?/C:/Users/.../.simple/storage` against `C:/Users/.../.simple/storage`
+    and reported `SymlinkEscape` for every well-formed path — which is how
+    every MCP CLI tool answered "centralized worktree storage is unavailable"
+    on Windows. `//?/UNC/host/share` is the verbatim spelling of
+    `\\\\host\\share` and maps back to `//host/share`.
+    """
+    if slashed.starts_with("//?/UNC/"):
+        return "//" + slashed.substring(8)
+    if slashed.starts_with("//?/"):
+        return slashed.substring(4)
+    slashed
+
 fn _windows_absolute(path: text) -> bool:
     path.len() >= 3 and path.substring(1, 2) == ":" and path.substring(2, 3) == "/"
 
 fn _canonical_lexical(path: text) -> text?:
-    val source = _slash(path.trim())
+    val source = _strip_extended_length_prefix(_slash(path.trim()))
     if source == "" or (not source.starts_with("/") and not _windows_absolute(source)):
         return nil
     val windows = _windows_absolute(source)

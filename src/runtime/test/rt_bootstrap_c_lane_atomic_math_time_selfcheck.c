@@ -25,11 +25,24 @@
  *      src/runtime/test/rt_bootstrap_c_lane_atomic_math_time_selfcheck.c \
  *      rn.o -lpthread -lm -ldl -o selfcheck && ./selfcheck
  */
+#if defined(_WIN32)
+/* The UCRT only declares M_PI and friends when _USE_MATH_DEFINES is defined
+ * before <math.h>. Without it this TU does not even parse on Windows, which
+ * left the push-blocking C-runtime gate RED on every Windows host. */
+#define _USE_MATH_DEFINES
+#endif
+
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 extern int64_t rt_time_monotonic_ns(void);
 extern int64_t rt_simple_abi_version(void);
@@ -81,8 +94,14 @@ static int failures = 0;
 
 static void check_time(void) {
     int64_t a = rt_time_monotonic_ns();
+#if defined(_WIN32)
+    /* Windows has no nanosleep; Sleep() takes milliseconds. Same oracle: a
+     * real 20ms sleep must make the monotonic clock strictly advance. */
+    Sleep(20);
+#else
     struct timespec ts = {0, 20 * 1000 * 1000}; /* 20ms */
     nanosleep(&ts, NULL);
+#endif
     int64_t b = rt_time_monotonic_ns();
     CHECK(a >= 0, "rt_time_monotonic_ns first reading must be non-negative");
     CHECK(b > a, "rt_time_monotonic_ns must strictly increase across a real sleep");
