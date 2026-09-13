@@ -802,14 +802,27 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
     val cache_scope_root = _sffi_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
-fn driver_native_frozen_source_lookup(
-    source_paths: [text], source_contents: [text], source_module_names: [text],
+pub fn driver_native_capsule_identity_empty_v1(identity: text) -> bool:
+    """True when a frozen source identity carries no content.
+
+    Both `""` and the sha256 of the EMPTY string are rejected: the second is
+    what a capture produces when it hashes source text that has already been
+    reclaimed, and it is never a legitimate identity for a source file the
+    compiler actually read (an empty file is not admitted as a source)."""
+    identity == "" or identity == sha256_text("")
+
+pub fn driver_native_frozen_source_lookup(
+    source_paths: [text], source_identities: [text], source_module_names: [text],
     module_name: text
 ) -> (text, text):
     """Return the unique physical path and full-content identity retained by
     phase 1. Malformed inventories, duplicate module names, and path aliases
-    fail closed instead of admitting an object under an ambiguous source."""
-    if source_paths.len() != source_contents.len() or
+    fail closed instead of admitting an object under an ambiguous source.
+
+    Takes the phase-1 IDENTITY owner, never the content owner: source text is
+    freed and the content owner emptied long before native output runs, so
+    hashing it here produced sha256("") for every module."""
+    if source_paths.len() != source_identities.len() or
             source_paths.len() != source_module_names.len():
         return ("", "")
     var found_path = ""
@@ -819,7 +832,7 @@ fn driver_native_frozen_source_lookup(
     while source_index < source_module_names.len():
         if source_module_names[source_index] == module_name:
             found_path = source_paths[source_index]
-            identity = sha256_text(source_contents[source_index])
+            identity = source_identities[source_index]
             module_count = module_count + 1
         source_index = source_index + 1
     if module_count != 1 or found_path == "":
@@ -837,7 +850,7 @@ fn driver_native_frozen_source_lookup(
 
 fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
     val (path, _) = driver_native_frozen_source_lookup(
-        ctx.source_paths_owner, ctx.source_contents_owner,
+        ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
     path
 
@@ -845,63 +858,9 @@ fn driver_native_module_source_identity(
     ctx: CompileContext, module_name: text
 ) -> text:
     val (_, identity) = driver_native_frozen_source_lookup(
-        ctx.source_paths_owner, ctx.source_contents_owner,
+        ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
     identity
-
-fn driver_native_disk_source_identity(source_path: text) -> text:
-    """sha256 of the bytes currently on disk at `source_path`; "" when absent.
-
-    Read the file DIRECTLY rather than through `SourceFile.load` + a
-    match-bound payload field. Measured 2026-09-07 on a Stage-2-compiled
-    compiler (sha256 a11d1c06…848a95): the previous form
-
-        match SourceFile.load(source_path):
-            case Ok(source): sha256_text(source.content)
-            case Err(_): ""
-
-    returned `sha256_text(source_path)` -- the digest of the PATH STRING --
-    because the `case Ok(source)` payload's `.content` read yielded field 0
-    (`path`) instead of `content`. Proven twice with distinct modules: for
-    `build/capsule-repro/sub/hw_fresh_a.spl` it produced
-    009f18fc41410f2512f4fc413689d7fa0f17b3cef6bbad4c1ab488994e1c170b, which is
-    exactly `sha256` of that path text, while the correct content digest is
-    2976a380c6fdfee06ca2b9452d65bc6a3514862c2a626d64e982503241ada42a; the same
-    held for `hw_fresh_b.spl` (47d1543b…). Interpreted under the Rust seed the
-    identical expression returns the correct content digest, so this is a
-    native-codegen field-binding defect, not a source-level one. Its effect was
-    that EVERY capsule verification compared a content digest against a path
-    digest and reported `native-capsule-source-mutated`, which is what blocked
-    Stage 2's sanity gate on a three-line hello world.
-
-    Reading the raw bytes is also the STRICTLY CORRECT counterpart of the
-    frozen side: `source_identity` is `sha256_text(source.content)` over
-    content that `_driver_cached_entry_source_scan` obtained from a raw
-    `rt_file_read_text`, never through `SourceFile.load`. `SourceFile.load`
-    additionally strips a coverage-wrapper marker line
-    (`source_file_coverage_identity`), so for `simple_cov_*` /
-    `spipe_wrapped_*` inputs it would have disagreed with the frozen digest
-    even with correct codegen. The `""`-on-empty behaviour matches
-    `SourceFile.load`, which returns Err for an empty file.
-
-    The underlying field-binding defect is NOT fixed here and is tracked in
-    doc/08_tracking/bug/stage2_capsule_source_mutated_and_unreportable_reason_2026-09-07.md
-    -- it will misread any other `case Ok(record):` field read the same way.
-    """
-    val content = _sffi_file_read_text(source_path) ?? ""
-    if content == "": return ""
-    sha256_text(content)
-
-fn driver_native_module_source_identity(
-    ctx: CompileContext, module_name: text
-) -> text:
-    var identity = ""
-    var count = 0
-    for source in ctx.sources:
-        if source.module_name == module_name:
-            identity = sha256_text(source.content)
-            count = count + 1
-    if count == 1: identity else: ""
 
 fn driver_native_disk_source_identity(source_path: text) -> text:
     """sha256 of the bytes currently on disk at `source_path`; "" when absent.
@@ -959,7 +918,7 @@ pub fn driver_native_capsule_result_reason_v1(
     if not _sffi_file_exists(capsule.object_path):
         return "object-missing:{capsule.object_path}"
     if capsule.cache_source != "":
-        if capsule.source_identity == "":
+        if driver_native_capsule_identity_empty_v1(capsule.source_identity):
             return "source-identity-empty:{capsule.cache_source}"
         val disk_identity = driver_native_disk_source_identity(capsule.cache_source)
         if disk_identity != capsule.source_identity:
@@ -1074,6 +1033,14 @@ pub fn driver_native_collect_capsule_result_v1(
         if capsule.source_identity == "":
             return _collect_failure(module_name, "native-capsule-source-mutated",
                 "frozen-identity-absent"
+                    + " cache-source={capsule.cache_source}")
+        # The digest of the EMPTY string is never a legitimate source identity:
+        # it means the capture hashed content that had already been reclaimed.
+        # Name that separately -- reported as a mutation it sent three Stage-2
+        # lanes chasing a file that was never touched.
+        if driver_native_capsule_identity_empty_v1(capsule.source_identity):
+            return _collect_failure(module_name, "capsule-identity-empty",
+                "frozen identity is the digest of empty content"
                     + " cache-source={capsule.cache_source}")
         val disk_identity = driver_native_disk_source_identity(capsule.cache_source)
         if disk_identity != capsule.source_identity:

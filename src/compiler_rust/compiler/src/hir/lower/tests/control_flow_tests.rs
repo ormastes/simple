@@ -140,7 +140,7 @@ fn test_exists_check_uses_presence_predicate_without_nil_equality() {
     let repr = format!("{:?}", module.functions[0].body);
 
     assert!(
-        repr.contains("BuiltinCall") && repr.contains("rt_is_some"),
+        repr.contains("BuiltinCall") && repr.contains("rt_is_present"),
         "existence check did not use presence predicate: {repr}"
     );
     assert!(
@@ -178,7 +178,7 @@ fn test_exists_check_in_condition_position_stays_bool() {
     assert!(
         matches!(
             &condition.kind,
-            HirExprKind::BuiltinCall { name, .. } if name == "rt_is_some"
+            HirExprKind::BuiltinCall { name, .. } if name == "rt_is_present"
         ),
         "if-condition `.?` did not lower to the bare presence predicate: {condition:?}"
     );
@@ -198,7 +198,7 @@ fn test_implicit_exists_check_in_bool_method_stays_bool() {
     let repr = format!("{:?}", func.body);
     assert_eq!(func.return_type, TypeId::BOOL);
     assert!(
-        repr.contains("rt_is_some") && !repr.contains("Nil"),
+        repr.contains("rt_is_present") && !repr.contains("Nil"),
         "implicit bool method return retained optional value form: {repr}"
     );
 }
@@ -877,7 +877,7 @@ fn test_exists_check_in_nested_match_tail_of_bool_fn_stays_bool() {
          so the caller branches on the non-zero nil sentinel: {repr}"
     );
     assert!(
-        repr.contains("rt_is_some"),
+        repr.contains("rt_is_present"),
         "`.?` in a nested match arm lost its presence predicate: {repr}"
     );
 }
