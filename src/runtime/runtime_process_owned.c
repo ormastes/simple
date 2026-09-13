@@ -4220,6 +4220,655 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint6
 
 #else
 
+/* --- Win32 real implementation of the SYNCHRONOUS bounded family ------
+ * Everything this branch does NOT implement (the async token-lease family,
+ * the v3 opaque-handle surface, the observation-v4 family) is deliberately
+ * left to the shared fallback stubs below, so a future family added there is
+ * automatically covered on Windows too. Only the definitions Win32 really
+ * implements are fenced out of that fallback, via
+ * RT_OWNED_WIN32_SYNC_IMPLEMENTED. */
+#if defined(_WIN32)
+
+/* ---------------------------------------------------------------------------
+ * Win32 bounded child capsule.
+ *
+ * Until 2026-09-13 the guard above was the ONLY non-stub branch, so on Windows
+ * every bounded spawn fell into the ENOTSUP `#else` and returned rc=-1 with
+ * runtime_error=ENOTSUP. That is the root cause of the ctx_tools /
+ * ctx_batch_scale / token_stats spec failures and of check-mcp-native-smoke:
+ * `run_in_execution_resource_scope` (src/lib/nogc_sync_mut/io/resource_scope.spl)
+ * calls rt_process_run_owned_observed_bounded_value, which could never run a
+ * child at all.
+ *
+ * Scope, stated plainly: this branch implements the SYNCHRONOUS bounded family
+ * (`rt_process_run_owned_bounded`, `..._observed_bounded`, and the two
+ * `*_value` ABI wrappers) — the family the failing specs actually reach. The
+ * asynchronous token-lease family (`rt_process_owned_start_v2/v3`, `poll_v2`,
+ * `cancel_v2`, `result_v2`, and the `rt_process_owned_v3_*` opaque-handle
+ * surface) is NOT implemented here and keeps its honest ENOTSUP answer below.
+ *
+ * Bounded semantics are provided by a job object rather than a process group:
+ * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE means the whole child tree dies with the
+ * job, which is Windows' equivalent of the POSIX branch's kill-the-group
+ * behaviour, and TerminateJobObject is the deadline action.
+ * ------------------------------------------------------------------------- */
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <errno.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+#define RT_OWNED_ABI_MAX_TIMEOUT_MS 3600000
+#define RT_OWNED_ABI_MAX_OUTPUT_BYTES (16U * 1024U * 1024U)
+#ifndef RT_OWNED_HOST_MALLOC
+#define RT_OWNED_HOST_MALLOC malloc
+#define RT_OWNED_HOST_CALLOC calloc
+#define RT_OWNED_HOST_FREE free
+#endif
+
+/* One pipe end pair plus the capped capture state for that stream. */
+typedef struct OwnedWinStream {
+    HANDLE read_end;
+    HANDLE write_end;
+    char* buf;
+    uint64_t cap;      /* buffer capacity in bytes, including the NUL slot */
+    uint64_t seen;     /* total bytes the child produced */
+    uint64_t kept;     /* bytes actually retained in buf */
+    int truncated;
+} OwnedWinStream;
+
+/* CommandLineToArgvW inverse. Returns the byte count written (or that WOULD be
+ * written when dst is NULL). Getting this wrong is the classic Windows spawn
+ * bug: a path containing a space silently splits into two arguments. */
+static size_t owned_win_quote_arg(const char* arg, char* dst) {
+    size_t w = 0;
+    int need_quote = (arg[0] == '\0');
+    const char* scan = arg;
+    while (*scan && !need_quote) {
+        if (*scan == ' ' || *scan == '\t' || *scan == '\n' || *scan == '\v' || *scan == '"') {
+            need_quote = 1;
+        }
+        scan++;
+    }
+    if (!need_quote) {
+        size_t n = strlen(arg);
+        if (dst) memcpy(dst, arg, n);
+        return n;
+    }
+    if (dst) dst[w] = '"';
+    w++;
+    const char* p = arg;
+    for (;;) {
+        size_t bs = 0;
+        while (*p == '\\') { bs++; p++; }
+        if (*p == '\0') {
+            /* Backslashes immediately before the closing quote are doubled. */
+            for (size_t i = 0; i < bs * 2; i++) { if (dst) dst[w] = '\\'; w++; }
+            break;
+        }
+        if (*p == '"') {
+            for (size_t i = 0; i < bs * 2 + 1; i++) { if (dst) dst[w] = '\\'; w++; }
+            if (dst) dst[w] = '"';
+            w++;
+            p++;
+        } else {
+            for (size_t i = 0; i < bs; i++) { if (dst) dst[w] = '\\'; w++; }
+            if (dst) dst[w] = *p;
+            w++;
+            p++;
+        }
+    }
+    if (dst) dst[w] = '"';
+    w++;
+    return w;
+}
+
+/* argv[0] is the program; the caller guarantees a NULL terminator. */
+static char* owned_win_build_cmdline(const char* const* argv) {
+    size_t total = 0;
+    for (size_t i = 0; argv[i]; i++) {
+        if (i) total += 1;
+        total += owned_win_quote_arg(argv[i], NULL);
+    }
+    char* line = (char*)RT_OWNED_HOST_MALLOC(total + 1);
+    if (!line) return NULL;
+    size_t w = 0;
+    for (size_t i = 0; argv[i]; i++) {
+        if (i) line[w++] = ' ';
+        w += owned_win_quote_arg(argv[i], line + w);
+    }
+    line[w] = '\0';
+    return line;
+}
+
+static WCHAR* owned_win_widen(const char* s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    WCHAR* w = (WCHAR*)RT_OWNED_HOST_MALLOC((size_t)n * sizeof(WCHAR));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n) <= 0) {
+        RT_OWNED_HOST_FREE(w);
+        return NULL;
+    }
+    return w;
+}
+
+static int owned_win_is_file(const WCHAR* p) {
+    DWORD a = GetFileAttributesW(p);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* Resolve an explicit application path, or NULL to let CreateProcessW do its
+ * own PATH search from the command line (the right answer for a bare `node` or
+ * `cmd`). CreateProcess does NOT append `.exe` to a path that already contains
+ * a separator, so a caller passing `bin/simple` must be probed for
+ * `bin/simple.exe` here — the runtime twin of the wrapper `.exe` gap. */
+static WCHAR* owned_win_resolve_exe(const char* cmd) {
+    int has_sep = (strchr(cmd, '/') != NULL) || (strchr(cmd, '\\') != NULL);
+    WCHAR* w = owned_win_widen(cmd);
+    if (!w) return NULL;
+    for (WCHAR* q = w; *q; q++) {
+        if (*q == L'/') *q = L'\\';
+    }
+    if (owned_win_is_file(w)) return w;
+    size_t n = wcslen(w);
+    WCHAR* w2 = (WCHAR*)RT_OWNED_HOST_MALLOC((n + 5) * sizeof(WCHAR));
+    if (w2) {
+        memcpy(w2, w, n * sizeof(WCHAR));
+        w2[n] = L'.'; w2[n + 1] = L'e'; w2[n + 2] = L'x'; w2[n + 3] = L'e'; w2[n + 4] = L'\0';
+        if (owned_win_is_file(w2)) {
+            RT_OWNED_HOST_FREE(w);
+            return w2;
+        }
+        RT_OWNED_HOST_FREE(w2);
+    }
+    RT_OWNED_HOST_FREE(w);
+    /* No such file: with a separator this will fail in CreateProcessW and be
+     * reported as ENOENT; without one, PATH search is the correct behaviour. */
+    (void)has_sep;
+    return NULL;
+}
+
+static void owned_win_close(HANDLE* h) {
+    if (*h && *h != INVALID_HANDLE_VALUE) {
+        CloseHandle(*h);
+        *h = NULL;
+    }
+}
+
+/* Drain whatever is already buffered in one pipe. Anonymous pipes have no
+ * overlapped mode, so PeekNamedPipe is what keeps this single-threaded loop
+ * from blocking in ReadFile. Returns 0 when the pipe reached EOF. */
+static int owned_win_drain(OwnedWinStream* s) {
+    if (!s->read_end) return 0;
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(s->read_end, NULL, 0, NULL, &avail, NULL)) {
+            owned_win_close(&s->read_end);
+            return 0;
+        }
+        if (avail == 0) return 1;
+        char chunk[4096];
+        DWORD want = avail > (DWORD)sizeof(chunk) ? (DWORD)sizeof(chunk) : avail;
+        DWORD got = 0;
+        if (!ReadFile(s->read_end, chunk, want, &got, NULL) || got == 0) {
+            owned_win_close(&s->read_end);
+            return 0;
+        }
+        s->seen += got;
+        if (s->cap > 0) {
+            uint64_t room = s->cap - 1 - s->kept;
+            uint64_t take = got < room ? (uint64_t)got : room;
+            if (take) {
+                memcpy(s->buf + s->kept, chunk, (size_t)take);
+                s->kept += take;
+            }
+            if ((uint64_t)got > take) s->truncated = 1;
+        } else {
+            s->truncated = 1;
+        }
+    }
+}
+
+static int64_t owned_win_filetime_ms(const FILETIME* ft) {
+    ULARGE_INTEGER u;
+    u.LowPart = ft->dwLowDateTime;
+    u.HighPart = ft->dwHighDateTime;
+    return (int64_t)(u.QuadPart / 10000ULL); /* 100ns ticks -> ms */
+}
+
+static bool owned_win_run_bounded_impl(const char* cmd, const char* const* argv,
+                                       int64_t timeout_ms, uint64_t max_output_bytes,
+                                       char* out, uint64_t out_cap,
+                                       char* err, uint64_t err_cap,
+                                       RtOwnedProcessReceipt* receipt,
+                                       RtOwnedProcessObservationV1* observation) {
+    if (!receipt) return false;
+    memset(receipt, 0, sizeof(*receipt));
+    if (observation) {
+        memset(observation, 0, sizeof(*observation));
+        observation->version = RT_OWNED_PROCESS_OBSERVATION_VERSION;
+    }
+    receipt->version = RT_OWNED_PROCESS_RECEIPT_VERSION;
+    receipt->exit_code = -1;
+    /* Validation mirrors the POSIX branch byte for byte, including
+     * `timeout_ms <= 0` being EINVAL rather than "no deadline". */
+    if (!cmd || !argv || !argv[0] || timeout_ms <= 0 ||
+        (out_cap && !out) || (err_cap && !err)) {
+        receipt->runtime_error = EINVAL;
+        if (observation) observation->runtime_error = EINVAL;
+        return false;
+    }
+    if (timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS) timeout_ms = RT_OWNED_ABI_MAX_TIMEOUT_MS;
+    if (out_cap) out[0] = '\0';
+    if (err_cap) err[0] = '\0';
+    (void)max_output_bytes; /* the caps carried by out_cap/err_cap are authority */
+
+    OwnedWinStream so = {NULL, NULL, out, out_cap, 0, 0, 0};
+    OwnedWinStream se = {NULL, NULL, err, err_cap, 0, 0, 0};
+    HANDLE job = NULL;
+    HANDLE child_stdin = INVALID_HANDLE_VALUE;
+    char* cmdline = NULL;
+    WCHAR* wcmdline = NULL;
+    WCHAR* wapp = NULL;
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof(pi));
+    int rt_err = 0;
+
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+
+    if (!CreatePipe(&so.read_end, &so.write_end, &sa, 0) ||
+        !CreatePipe(&se.read_end, &se.write_end, &sa, 0)) {
+        rt_err = EMFILE;
+        goto done;
+    }
+    /* The parent's read ends must NOT be inheritable, or the child holds a
+     * duplicate of them and the reader never observes EOF. */
+    if (!SetHandleInformation(so.read_end, HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(se.read_end, HANDLE_FLAG_INHERIT, 0)) {
+        rt_err = EINVAL;
+        goto done;
+    }
+
+    /* A bounded child gets an empty stdin, never the parent's. */
+    child_stdin = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &sa, OPEN_EXISTING, 0, NULL);
+    if (child_stdin == INVALID_HANDLE_VALUE) {
+        rt_err = ENOENT;
+        goto done;
+    }
+
+    job = CreateJobObjectW(NULL, NULL);
+    if (!job) { rt_err = EAGAIN; goto done; }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+    memset(&jeli, 0, sizeof(jeli));
+    jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
+        rt_err = EINVAL;
+        goto done;
+    }
+
+    cmdline = owned_win_build_cmdline(argv);
+    if (!cmdline) { rt_err = ENOMEM; goto done; }
+    wcmdline = owned_win_widen(cmdline);
+    if (!wcmdline) { rt_err = ENOMEM; goto done; }
+    wapp = owned_win_resolve_exe(cmd); /* NULL => PATH search from the cmdline */
+
+    /* Inherit EXACTLY the three std handles. A bare bInheritHandles=TRUE hands
+     * the child every inheritable handle in the process, so two concurrent
+     * bounded spawns leak each other's pipe write ends and neither reader ever
+     * sees EOF — the shape that makes a concurrent scale test hang to timeout. */
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)RT_OWNED_HOST_MALLOC(attr_size);
+    if (!attrs) { rt_err = ENOMEM; goto done; }
+    if (!InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size)) {
+        RT_OWNED_HOST_FREE(attrs);
+        attrs = NULL;
+        rt_err = EINVAL;
+        goto done;
+    }
+    HANDLE inherit[3];
+    inherit[0] = child_stdin;
+    inherit[1] = so.write_end;
+    inherit[2] = se.write_end;
+    if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                   inherit, sizeof(inherit), NULL, NULL)) {
+        rt_err = EINVAL;
+        goto done;
+    }
+
+    STARTUPINFOEXW si;
+    memset(&si, 0, sizeof(si));
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = child_stdin;
+    si.StartupInfo.hStdOutput = so.write_end;
+    si.StartupInfo.hStdError = se.write_end;
+    si.lpAttributeList = attrs;
+
+    /* CREATE_SUSPENDED so the child is inside the job before it can fork any
+     * grandchild that would otherwise escape the bound. */
+    if (!CreateProcessW(wapp, wcmdline, NULL, NULL, TRUE,
+                        EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                        NULL, NULL, &si.StartupInfo, &pi)) {
+        DWORD gle = GetLastError();
+        rt_err = (gle == ERROR_FILE_NOT_FOUND || gle == ERROR_PATH_NOT_FOUND) ? ENOENT
+               : (gle == ERROR_ACCESS_DENIED) ? EACCES
+               : EINVAL;
+        memset(&pi, 0, sizeof(pi));
+        goto done;
+    }
+    receipt->pid = (int64_t)pi.dwProcessId;
+    receipt->process_group_id = (int64_t)pi.dwProcessId;
+    receipt->start_identity = (uint64_t)pi.dwProcessId;
+
+    if (!AssignProcessToJobObject(job, pi.hProcess)) {
+        /* Without the job the bound cannot be honoured; refuse rather than run
+         * an unbounded child. */
+        TerminateProcess(pi.hProcess, 1);
+        rt_err = EPERM;
+        goto done;
+    }
+    ResumeThread(pi.hThread);
+
+    /* The parent must drop its copies of the write ends or the reads below
+     * never reach EOF, because the parent itself keeps the pipe open. */
+    owned_win_close(&so.write_end);
+    owned_win_close(&se.write_end);
+    owned_win_close(&child_stdin);
+
+    ULONGLONG started = GetTickCount64();
+    int child_done = 0;
+    for (;;) {
+        int so_open = owned_win_drain(&so);
+        int se_open = owned_win_drain(&se);
+        if (!child_done && WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
+            child_done = 1;
+        }
+        if (child_done && !so_open && !se_open) break;
+        ULONGLONG elapsed = GetTickCount64() - started;
+        if (!receipt->kill_sent && elapsed >= (ULONGLONG)timeout_ms) {
+            receipt->timed_out = 1;
+            receipt->term_sent = 1;
+            receipt->kill_sent = 1;
+            /* Windows has no graceful group signal; the job terminate IS the
+             * kill, so term_sent and kill_sent are set together rather than
+             * pretending a TERM grace period happened. */
+            TerminateJobObject(job, 1);
+        }
+        if (child_done && receipt->kill_sent) break;
+        Sleep(2);
+    }
+    /* One last drain after the child exited: bytes can still sit in the pipe. */
+    (void)owned_win_drain(&so);
+    (void)owned_win_drain(&se);
+
+    if (WaitForSingleObject(pi.hProcess, receipt->kill_sent ? 2000 : 0) == WAIT_OBJECT_0 || child_done) {
+        DWORD code = 0;
+        if (GetExitCodeProcess(pi.hProcess, &code) && code != STILL_ACTIVE) {
+            receipt->exit_code = (int64_t)(int32_t)code;
+            receipt->reaped = 1;
+        }
+    }
+    if (receipt->timed_out) receipt->exit_code = -1;
+
+    if (observation) {
+        FILETIME ct, xt, kt, ut;
+        if (GetProcessTimes(pi.hProcess, &ct, &xt, &kt, &ut)) {
+            observation->system_cpu_ms = owned_win_filetime_ms(&kt);
+            observation->user_cpu_ms = owned_win_filetime_ms(&ut);
+            observation->evidence_flags |= RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE;
+        }
+        JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION acct;
+        memset(&acct, 0, sizeof(acct));
+        if (QueryInformationJobObject(job, JobObjectBasicAndIoAccountingInformation,
+                                      &acct, sizeof(acct), NULL)) {
+            observation->io_read_bytes = (int64_t)acct.IoInfo.ReadTransferCount;
+            observation->io_write_bytes = (int64_t)acct.IoInfo.WriteTransferCount;
+            observation->pids_peak = (int64_t)acct.BasicInfo.TotalProcesses;
+            observation->evidence_flags |= RT_PROCESS_EVIDENCE_TREE_PIDS;
+        }
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION peak;
+        memset(&peak, 0, sizeof(peak));
+        if (QueryInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                      &peak, sizeof(peak), NULL)) {
+            observation->peak_tree_charge_bytes = (int64_t)peak.PeakJobMemoryUsed;
+            observation->peak_direct_child_rss_bytes = (int64_t)peak.PeakProcessMemoryUsed;
+            observation->evidence_flags |= RT_PROCESS_EVIDENCE_TREE_CHARGE;
+        }
+        /* Windows delivers no POSIX termination signal; leaving this 0 is the
+         * honest answer, not a relabelling of the timeout kill. */
+        observation->termination_signal = 0;
+    }
+
+done:
+    receipt->stdout_bytes_seen = so.seen;
+    receipt->stderr_bytes_seen = se.seen;
+    receipt->stdout_bytes_kept = so.kept;
+    receipt->stderr_bytes_kept = se.kept;
+    receipt->stdout_truncated = so.truncated;
+    receipt->stderr_truncated = se.truncated;
+    if (out_cap) out[so.kept < out_cap ? so.kept : out_cap - 1] = '\0';
+    if (err_cap) err[se.kept < err_cap ? se.kept : err_cap - 1] = '\0';
+    receipt->runtime_error = rt_err;
+
+    if (pi.hThread) CloseHandle(pi.hThread);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    if (attrs) {
+        DeleteProcThreadAttributeList(attrs);
+        RT_OWNED_HOST_FREE(attrs);
+    }
+    owned_win_close(&so.read_end);
+    owned_win_close(&so.write_end);
+    owned_win_close(&se.read_end);
+    owned_win_close(&se.write_end);
+    /* owned_win_close NULLs as it closes, so this is correct on both the
+     * success path (already closed before the read loop) and every goto. A
+     * bare CloseHandle here would be handed NULL after a successful run. */
+    owned_win_close(&child_stdin);
+    /* Closing the job kills anything still alive in it (KILL_ON_JOB_CLOSE). */
+    if (job) CloseHandle(job);
+    RT_OWNED_HOST_FREE(cmdline);
+    RT_OWNED_HOST_FREE(wcmdline);
+    RT_OWNED_HOST_FREE(wapp);
+    if (observation && !observation->runtime_error) observation->runtime_error = rt_err;
+    return rt_err == 0;
+}
+
+bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
+                                  int64_t timeout_ms, uint64_t max_output_bytes,
+                                  char* out, uint64_t out_cap,
+                                  char* err, uint64_t err_cap,
+                                  RtOwnedProcessReceipt* receipt) {
+    return owned_win_run_bounded_impl(cmd, argv, timeout_ms, max_output_bytes,
+                                      out, out_cap, err, err_cap, receipt, NULL);
+}
+
+bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
+                                           int64_t timeout_ms, uint64_t max_output_bytes,
+                                           char* out, uint64_t out_cap,
+                                           char* err, uint64_t err_cap,
+                                           RtOwnedProcessReceipt* receipt,
+                                           RtOwnedProcessObservationV1* observation) {
+    if (!observation) return false;
+    return owned_win_run_bounded_impl(cmd, argv, timeout_ms, max_output_bytes,
+                                      out, out_cap, err, err_cap, receipt, observation);
+}
+
+bool rt_process_owned_terminate(int64_t pid, uint64_t identity) {
+    if (pid <= 0 || identity == 0 || (uint64_t)pid != identity) return false;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+    if (!h) return false;
+    BOOL ok = TerminateProcess(h, 1);
+    CloseHandle(h);
+    return ok ? true : false;
+}
+bool rt_process_owned_cancel(uint64_t slot, uint64_t generation, int64_t pid,
+                             uint64_t identity, RtOwnedProcessCancelReceipt* receipt) {
+    (void)slot; (void)generation;
+    if (!receipt) return false;
+    memset(receipt, 0, sizeof(*receipt));
+    receipt->version = RT_OWNED_PROCESS_CANCEL_RECEIPT_VERSION;
+    receipt->pid = pid;
+    receipt->start_identity = identity;
+    if (rt_process_owned_terminate(pid, identity)) {
+        receipt->accepted = 1;
+        receipt->term_sent = 1;
+        return true;
+    }
+    receipt->runtime_error = ESRCH;
+    return false;
+}
+
+bool rt_process_owned_cancel_value(uint64_t slot, uint64_t generation,
+                                   int64_t pid, uint64_t identity) {
+    RtOwnedProcessCancelReceipt receipt;
+    return rt_process_owned_cancel(slot, generation, pid, identity, &receipt);
+}
+#ifndef RT_PROCESS_OWNED_CORE_ONLY
+/* Same stable numeric ABI as the POSIX branch: 19 receipt words, then 11
+ * observation words. The order below MUST stay identical to
+ * owned_run_bounded_value_impl above — the Simple facade indexes it. */
+static int64_t* owned_win_run_bounded_value_impl(const char* cmd_data, uint64_t cmd_len,
+                                                 SplArray* args, int64_t timeout_ms,
+                                                 int64_t max_output_bytes,
+                                                 int include_observation) {
+    if (!cmd_data || cmd_len > SIZE_MAX - 1 || timeout_ms < 0 || max_output_bytes < 0) return NULL;
+    if (!args || memchr(cmd_data, '\0', (size_t)cmd_len) != NULL) return NULL;
+    if (timeout_ms > RT_OWNED_ABI_MAX_TIMEOUT_MS) timeout_ms = RT_OWNED_ABI_MAX_TIMEOUT_MS;
+    if (max_output_bytes > (int64_t)RT_OWNED_ABI_MAX_OUTPUT_BYTES) {
+        max_output_bytes = (int64_t)RT_OWNED_ABI_MAX_OUTPUT_BYTES;
+    }
+    char* cmd = (char*)RT_OWNED_HOST_MALLOC((size_t)cmd_len + 1);
+    if (!cmd) return NULL;
+    memcpy(cmd, cmd_data, (size_t)cmd_len);
+    cmd[cmd_len] = '\0';
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) {
+        RT_OWNED_HOST_FREE(cmd);
+        return NULL;
+    }
+    char** argv = (char**)RT_OWNED_HOST_CALLOC((size_t)argc + 2, sizeof(char*));
+    char* out = NULL;
+    char* err = NULL;
+    SplArray* fields = NULL;
+    int64_t* tuple = NULL;
+    int64_t stdout_value = 0;
+    int64_t stderr_value = 0;
+    RtOwnedProcessReceipt receipt;
+    RtOwnedProcessObservationV1 observation;
+    if (!argv) goto fail;
+    argv[0] = cmd;
+    for (int64_t i = 0; i < argc; i++) {
+        int64_t value = rt_array_get(args, i);
+        int64_t arg_len = rt_string_len(value);
+        const uint8_t* arg_data = rt_string_data(value);
+        if (arg_len < 0 || !arg_data || (uint64_t)arg_len > SIZE_MAX - 1 ||
+            memchr(arg_data, '\0', (size_t)arg_len) != NULL) {
+            goto fail;
+        }
+        argv[i + 1] = (char*)RT_OWNED_HOST_MALLOC((size_t)arg_len + 1);
+        if (!argv[i + 1]) goto fail;
+        memcpy(argv[i + 1], arg_data, (size_t)arg_len);
+        argv[i + 1][arg_len] = '\0';
+    }
+
+    uint64_t limit = (uint64_t)max_output_bytes;
+    if (limit > SIZE_MAX - 1) goto fail;
+    size_t capacity = (size_t)limit + 1;
+    out = (char*)RT_OWNED_HOST_MALLOC(capacity);
+    err = (char*)RT_OWNED_HOST_MALLOC(capacity);
+    if (!out || !err) goto fail;
+
+    if (include_observation) {
+        (void)rt_process_run_owned_observed_bounded(cmd, (const char* const*)argv, timeout_ms,
+                                                    limit, out, capacity, err, capacity,
+                                                    &receipt, &observation);
+    } else {
+        memset(&observation, 0, sizeof(observation));
+        (void)rt_process_run_owned_bounded(cmd, (const char* const*)argv, timeout_ms, limit,
+                                           out, capacity, err, capacity, &receipt);
+    }
+    fields = rt_array_new(include_observation ? 30 : 19);
+    if (!fields) goto fail;
+#define OWNED_WIN_PUSH(value) do { if (!rt_array_push(fields, rt_value_int((int64_t)(value)))) goto fail; } while (0)
+    OWNED_WIN_PUSH(receipt.version); OWNED_WIN_PUSH(receipt.slot); OWNED_WIN_PUSH(receipt.generation);
+    OWNED_WIN_PUSH(receipt.pid); OWNED_WIN_PUSH(receipt.process_group_id);
+    OWNED_WIN_PUSH(receipt.start_identity);
+    OWNED_WIN_PUSH(receipt.stdout_bytes_seen); OWNED_WIN_PUSH(receipt.stderr_bytes_seen);
+    OWNED_WIN_PUSH(receipt.stdout_bytes_kept); OWNED_WIN_PUSH(receipt.stderr_bytes_kept);
+    OWNED_WIN_PUSH(receipt.exit_code); OWNED_WIN_PUSH(receipt.timed_out);
+    OWNED_WIN_PUSH(receipt.term_sent); OWNED_WIN_PUSH(receipt.kill_sent);
+    OWNED_WIN_PUSH(receipt.identity_revalidated); OWNED_WIN_PUSH(receipt.reaped);
+    OWNED_WIN_PUSH(receipt.stdout_truncated); OWNED_WIN_PUSH(receipt.stderr_truncated);
+    OWNED_WIN_PUSH(receipt.runtime_error);
+    if (include_observation) {
+        OWNED_WIN_PUSH(observation.version); OWNED_WIN_PUSH(observation.evidence_flags);
+        OWNED_WIN_PUSH(observation.user_cpu_ms); OWNED_WIN_PUSH(observation.system_cpu_ms);
+        OWNED_WIN_PUSH(observation.peak_direct_child_rss_bytes);
+        OWNED_WIN_PUSH(observation.peak_tree_charge_bytes);
+        OWNED_WIN_PUSH(observation.io_read_bytes); OWNED_WIN_PUSH(observation.io_write_bytes);
+        OWNED_WIN_PUSH(observation.pids_peak); OWNED_WIN_PUSH(observation.termination_signal);
+        OWNED_WIN_PUSH(observation.runtime_error);
+    }
+#undef OWNED_WIN_PUSH
+
+    stdout_value = rt_string_new((const uint8_t*)out, receipt.stdout_bytes_kept);
+    stderr_value = rt_string_new((const uint8_t*)err, receipt.stderr_bytes_kept);
+    if (!stdout_value || !stderr_value) goto fail;
+    tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
+    if (!tuple) goto fail;
+    tuple[0] = stdout_value;
+    tuple[1] = stderr_value;
+    tuple[2] = (int64_t)(uintptr_t)fields;
+    for (int64_t i = 1; i <= argc; i++) RT_OWNED_HOST_FREE(argv[i]);
+    RT_OWNED_HOST_FREE(argv); RT_OWNED_HOST_FREE(cmd);
+    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err);
+    return tuple;
+
+fail:
+    if (argv) {
+        for (int64_t i = 1; i <= argc; i++) RT_OWNED_HOST_FREE(argv[i]);
+    }
+    RT_OWNED_HOST_FREE(argv); RT_OWNED_HOST_FREE(cmd);
+    RT_OWNED_HOST_FREE(out); RT_OWNED_HOST_FREE(err);
+    if (stdout_value) (void)RT_OWNED_FREE_VALUE(stdout_value);
+    if (stderr_value) (void)RT_OWNED_FREE_VALUE(stderr_value);
+    if (fields) rt_array_free(fields);
+    if (tuple) rt_free(tuple);
+    return NULL;
+}
+
+int64_t* rt_process_run_owned_bounded_value(const char* cmd_data, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return owned_win_run_bounded_value_impl(cmd_data, cmd_len, args, timeout_ms,
+                                            max_output_bytes, 0);
+}
+
+int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd_data, uint64_t cmd_len,
+                                                     SplArray* args, int64_t timeout_ms,
+                                                     int64_t max_output_bytes) {
+    return owned_win_run_bounded_value_impl(cmd_data, cmd_len, args, timeout_ms,
+                                            max_output_bytes, 1);
+}
+#endif /* RT_PROCESS_OWNED_CORE_ONLY */
+
+#define RT_OWNED_WIN32_SYNC_IMPLEMENTED 1
+#endif /* _WIN32 */
+
 #include <errno.h>
 #include <string.h>
 
@@ -4273,6 +4922,9 @@ bool rt_process_owned_input_receipt_v3(RtOwnedProcessTokenV2 token,
     return false;
 }
 
+/* Win32 implements this for real above; only the non-unix fallback needs the
+ * ENOTSUP answer. */
+#ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
                                            int64_t timeout_ms, uint64_t max_output_bytes,
                                            char* out, uint64_t out_cap, char* err,
@@ -4285,6 +4937,7 @@ bool rt_process_run_owned_observed_bounded(const char* cmd, const char* const* a
     return rt_process_run_owned_bounded(cmd, argv, timeout_ms, max_output_bytes,
                                         out, out_cap, err, err_cap, receipt);
 }
+#endif
 
 bool rt_process_owned_poll_v2(RtOwnedProcessTokenV2 token, int64_t wait_ms,
                               char* out, uint64_t out_cap, char* err,
@@ -4330,6 +4983,7 @@ bool rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
     return rt_process_owned_result_v2(token, result);
 }
 
+#ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 bool rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                                   int64_t timeout_ms, uint64_t max_output_bytes,
                                   char* out, uint64_t out_cap, char* err,
@@ -4366,9 +5020,11 @@ bool rt_process_owned_cancel_value(uint64_t slot, uint64_t generation,
     (void)slot; (void)generation; (void)pid; (void)identity;
     return false;
 }
+#endif
 
 
 #ifndef RT_PROCESS_OWNED_CORE_ONLY
+#ifndef RT_OWNED_WIN32_SYNC_IMPLEMENTED
 int64_t* rt_process_run_owned_bounded_value(const char* cmd, uint64_t cmd_len, SplArray* args,
                                             int64_t timeout_ms,
                                             int64_t max_output_bytes) {
@@ -4429,6 +5085,7 @@ int64_t* rt_process_run_owned_observed_bounded_value(const char* cmd, uint64_t c
     tuple[2] = (int64_t)(uintptr_t)fields;
     return tuple;
 }
+#endif /* RT_OWNED_WIN32_SYNC_IMPLEMENTED */
 
 static SplArray* owned_v3_unsupported_words(int64_t count, int64_t error_index) {
     SplArray* values = rt_array_new(count);
