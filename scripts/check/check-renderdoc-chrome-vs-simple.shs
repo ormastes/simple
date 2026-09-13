@@ -10,12 +10,18 @@
 # All counting logic is pure Simple (src/app/ui/renderdoc_metrics/main.spl); this
 # script resolves inputs, runs it per page, and prints key=value status lines.
 #
-# Three modes, chosen by what the host actually has — never by a flag that could turn
+# Four modes, chosen by what the host actually has — never by a flag that could turn
 # a real check into a vacuous one:
 #
 #   --selftest       drive the real Simple counter over committed fixture event JSONs
 #                    under test/fixtures/renderdoc/. Needs no RenderDoc and no .rdc,
 #                    so it runs on macOS. FATAL and runs first in every other mode.
+#   --trace-derived  count submits/readbacks PER FRAME from the renderer's own
+#                    SIMPLE_VK_ORDER_TRACE / vk-timing logs under --trace-dir
+#                    (default build/perf/gpu_audit), by delegating every number to
+#                    check-web-vulkan-gpu-boundary-audit.shs --classify-only. No
+#                    RenderDoc needed; see the trace-derived section below for why
+#                    it must not grow a counter of its own.
 #   (no renderdoccmd) exit 2 with
 #                    "ERROR — nothing was checked (renderdoccmd not found; run on the
 #                    Linux lane)". RenderDoc has no macOS build; absence of the tool
@@ -38,13 +44,20 @@ PAGES="${RDOC_CVS_PAGES:-html css-layout css-paint animation forms-media tab-bar
 SELFTEST_ONLY=0
 
 usage() {
-    echo "usage: check-renderdoc-chrome-vs-simple.shs [--selftest] [--page NAME]... [--out DIR]" >&2
+    echo "usage: check-renderdoc-chrome-vs-simple.shs [--selftest] [--trace-derived] [--trace-dir DIR] [--page NAME]... [--out DIR]" >&2
 }
+
+TRACE_DERIVED=0
+TRACE_DIR="${RDOC_CVS_TRACE_DIR:-build/perf/gpu_audit}"
+AUDIT_GATE="scripts/check/check-web-vulkan-gpu-boundary-audit.shs"
+TRACE_FIXTURES="$FIXTURES/trace"
 
 EXPLICIT_PAGES=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) SELFTEST_ONLY=1; shift ;;
+        --trace-derived) TRACE_DERIVED=1; shift ;;
+        --trace-dir) shift; [ $# -gt 0 ] || { usage; exit 2; }; TRACE_DIR="$1"; shift ;;
         --page) shift; [ $# -gt 0 ] || { usage; exit 2; }; EXPLICIT_PAGES="$EXPLICIT_PAGES $1"; shift ;;
         --out) shift; [ $# -gt 0 ] || { usage; exit 2; }; OUT_DIR="$1"; shift ;;
         -h|--help) usage; exit 2 ;;
@@ -147,6 +160,70 @@ selftest() {
     expect_case empty       chrome_html.events.json empty.events.json            2 "ERROR — nothing was checked"
     # A missing file is ERROR too, not a FAIL and not a pass.
     expect_case missing     chrome_html.events.json nonexistent.events.json      2 "ERROR — nothing was checked"
+    trace_selftest
+}
+
+# --- trace-derived counting ---------------------------------------------------
+#
+# The RenderDoc path above counts `presents` and `copies` out of an exported .rdc
+# event stream. The trace-derived path answers the same submit/readback question
+# from the renderer's OWN instrumentation, which is the only thing available on a
+# host with no RenderDoc (macOS, every time).
+#
+# It owns NO counting logic. Every number comes from
+# `check-web-vulkan-gpu-boundary-audit.shs --classify-only`, which runs the audit's
+# `audit_classify` — the same parser the official gate's verdict comes from. That
+# is deliberate and is the whole point of this mode: on 2026-09-13 this document's
+# own metrics record disagreed with the gate (3 submits vs 1) purely because the
+# figures had been hand-copied out of run TOTALS from lane documents written in a
+# different configuration, then read as per-frame counts. Two tools that share one
+# parser cannot drift that way; two tools that each count for themselves already
+# did. See doc/10_metrics/ui/renderdoc_chrome_vs_simple_2026-09-13.md.
+classify_trace_log() {
+    # classify_trace_log <log>; stdout = audit key=value block + verdict
+    # The audit gate resolves its own interpreter and ERRORs without one; hand it
+    # the binary this script already resolved so the two cannot pick different ones.
+    SIMPLE_BIN="$SIMPLE_BIN" sh "$AUDIT_GATE" --classify-only "$1" 2>&1
+}
+
+trace_expect_case() {
+    # trace_expect_case <name> <fixture-log> <want-rc> <want-substring>
+    name="$1"; lf="$2"; want_rc="$3"; want_text="$4"
+    SELFTEST_COUNT=$((SELFTEST_COUNT + 1))
+    log="$OUT_DIR/selftest-trace-$name.log"
+    set +e
+    classify_trace_log "$TRACE_FIXTURES/$lf" >"$log" 2>&1
+    rc=$?
+    set -e
+    verdict="$(grep -E '^(PASS|FAIL|ERROR) ' "$log" | tail -1)"
+    ok=1
+    [ "$rc" = "$want_rc" ] || ok=0
+    case "$verdict" in
+        *"$want_text"*) ;;
+        *) ok=0 ;;
+    esac
+    if [ "$ok" = "1" ]; then
+        echo "selftest ok   trace-$name -> rc=$rc $verdict"
+    else
+        SELFTEST_FAILED=$((SELFTEST_FAILED + 1))
+        echo "selftest FAIL trace-$name -> rc=$rc (want $want_rc) $verdict (want '$want_text')" >&2
+    fi
+}
+
+trace_selftest() {
+    if [ ! -f "$AUDIT_GATE" ]; then
+        SELFTEST_FAILED=$((SELFTEST_FAILED + 1))
+        echo "selftest FAIL trace-wiring -> $AUDIT_GATE missing; trace-derived mode has no counter" >&2
+        return
+    fi
+    # THE regression fixture: three frames, each with exactly one submit and one
+    # readback. A counter that SUMS across frames reports 3 and FAILs; the shared
+    # parser reads the last, steady frame and reports 1. This is the exact shape
+    # that produced the wrong `css-layout` row.
+    trace_expect_case per_frame  three_frame_clean.trace.txt        0 "PASS — 3 frame(s) audited"
+    # And the counter is not simply blind to multiplicity: a final frame that
+    # really did submit and read back three times must FAIL, naming both.
+    trace_expect_case multi      three_frame_multi_submit.trace.txt 1 "FAIL — 3 frame(s) audited"
 }
 
 selftest
@@ -165,6 +242,43 @@ echo "renderdoc_cvs_selftest_fixtures=$SELFTEST_COUNT"
 if [ "$SELFTEST_ONLY" = "1" ]; then
     echo "renderdoc_cvs_status=pass"
     echo "RENDERDOC CHROME-VS-SIMPLE: PASS — $SELFTEST_COUNT selftest fixture(s) checked, 0 failed"
+    exit 0
+fi
+
+# --- trace-derived lane -------------------------------------------------------
+if [ "$TRACE_DERIVED" = "1" ]; then
+    if [ ! -d "$TRACE_DIR" ]; then
+        echo "renderdoc_cvs_status=blocked:no-trace-dir"
+        echo "RENDERDOC CHROME-VS-SIMPLE: ERROR — nothing was checked (no audit logs under $TRACE_DIR; run check-web-vulkan-gpu-boundary-audit.shs first)"
+        exit 2
+    fi
+    logs_checked=0
+    logs_failed=0
+    for tlog in "$TRACE_DIR"/*.log "$TRACE_DIR"/*/*.log; do
+        [ -f "$tlog" ] || continue
+        base="$(basename "$tlog" .log)"
+        rep="$OUT_DIR/trace-$base.report.txt"
+        set +e
+        classify_trace_log "$tlog" >"$rep" 2>&1
+        rc=$?
+        set -e
+        logs_checked=$((logs_checked + 1))
+        echo "renderdoc_cvs_trace_$base=$(grep -E '^(PASS|FAIL|ERROR) ' "$rep" | tail -1)"
+        grep -E '^(frames_audited|submits_per_frame|readbacks_per_frame|dispatches_per_frame|host_pixel_iterations)=' "$rep" || true
+        [ "$rc" = "0" ] || logs_failed=$((logs_failed + 1))
+    done
+    if [ "$logs_checked" = "0" ]; then
+        echo "renderdoc_cvs_status=blocked:no-trace-logs"
+        echo "RENDERDOC CHROME-VS-SIMPLE: ERROR — nothing was checked (0 audit log(s) under $TRACE_DIR)"
+        exit 2
+    fi
+    if [ "$logs_failed" != "0" ]; then
+        echo "renderdoc_cvs_status=fail"
+        echo "RENDERDOC CHROME-VS-SIMPLE: FAIL — $logs_failed of $logs_checked trace log(s) violated a per-frame GPU-boundary invariant"
+        exit 1
+    fi
+    echo "renderdoc_cvs_status=pass"
+    echo "RENDERDOC CHROME-VS-SIMPLE: PASS — $logs_checked trace log(s) counted per frame, 0 invariant failures"
     exit 0
 fi
 
