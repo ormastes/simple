@@ -91,3 +91,9 @@ VERDICT; trusting the verdict`), which is why a dead scraper is silent.
 ## Triage 2026-09-12
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Re-check 2026-09-13
+
+Ran `SIMPLE_TEST_RUNNER_DEBUG=1 bin/simple test test/01_unit/lib/std_hash_facade_spec.spl --no-session-daemon` on the deployed seed (`bin/release/aarch64-unknown-linux-gnu/simple`, hand-linked from `/home/yoon/dev/simple`): `has_sum=1 sum_p=8 sum_f=0` — matches the real per-file result. Also probed a deliberately failing 2-example spec (one fail, one pass): `has_sum=1 sum_p=1 sum_f=1`, correctly tracking the real failure (discriminates pass-vs-fail, not a stuck constant). `parse_child_example_summary`/`extract_number_before` (now at `src/app/test_runner_new/test_runner_single.spl:429,581`) correctly skip ANSI digit runs and sum across describe blocks — the scraper is not returning zero on the current binary.
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)
