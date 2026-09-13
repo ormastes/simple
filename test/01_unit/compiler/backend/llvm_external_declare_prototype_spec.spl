@@ -1,0 +1,110 @@
+# Site 13, second half: the auto-`declare` for a callee this module does not
+# define must carry the callee's real prototype, not `i64 (...)`.
+#
+# The Stage-2 candidate emitted
+#   declare i64 @compiler.common.module_path_naming.module_logical_name_from_path(...)
+# beside
+#   %l1 = call ptr @compiler.common.module_path_naming.module_logical_name_from_path(ptr %l0)
+# -- a return type and a parameter list that disagree with every call to it.
+# llc tolerated the varargs shape, so this is not itself the link blocker
+# (that was the NAME, fixed separately), but a declaration that contradicts its
+# own call sites is a miscompile waiting for a stricter consumer.
+#
+# The fallback is deliberately preserved: when a callee's parameter types were
+# never recorded, `(...)` is still emitted. A guessed prototype is worse than
+# none, and `symbol_to_operand` degrades to an empty parameter list whenever a
+# callee's symbol carries no function type.
+
+use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+val EXTERNAL_CALLEE = "other.module.declared_callee"
+
+fn ptr_t() -> MirType:
+    MirType(kind: MirTypeKind.Opaque("str"))
+
+fn mk_fn(sym: i64, name: text, params: [MirType], locals: [MirLocal], insts: [MirInst]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym),
+        name: name,
+        signature: MirSignature(params: params, return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: insts, terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn external_ref(name: text, params: [MirType]) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), MirType(kind: MirTypeKind.FuncPtr(
+        MirSignature(params: params, return_type: ptr_t(), is_variadic: false)))))
+
+fn caller_calling(name: text, params: [MirType]) -> MirFunction:
+    val arg = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(7), MirType.i64()))
+    var args: [MirOperand] = []
+    if params.len() > 0:
+        args = args.push(arg)
+    val call = MirInst(kind: MirInstKind.Call(Some(LocalId(id: 10)), external_ref(name, params), args), span: nil)
+    mk_fn(2, "declare_proto_caller", [],
+        [MirLocal(id: LocalId(id: 10), name: Some("r"), type_: ptr_t(), kind: LocalKind.Temp, is_ghost: false)],
+        [call])
+
+fn module_with(caller_fn: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[caller_fn.symbol] = caller_fn
+    MirModule(name: "test.llvm.declare_proto", functions: functions, statics: {}, constants: {}, types: {})
+
+fn emit(caller_fn: MirFunction) -> text:
+    val translator = MirToLlvm.create("test.llvm.declare_proto", CodegenTarget.X86_64, nil)
+    translator.translate_module(module_with(caller_fn))
+
+describe "external declare prototype":
+    it "declares a recorded external callee with its real return and parameter types":
+        val output = emit(caller_calling(EXTERNAL_CALLEE, [ptr_t()]))
+        # Vacuity: a run that emitted no IR, or no declare at all, must FAIL.
+        expect(output.len() > 0).to_equal(true)
+        expect(output.contains("@" + EXTERNAL_CALLEE)).to_equal(true)
+        expect(output.contains("declare ptr @" + EXTERNAL_CALLEE + "(ptr)")).to_equal(true)
+        expect(output.contains("declare i64 @" + EXTERNAL_CALLEE + "(...)")).to_equal(false)
+
+    it "keeps the varargs fallback when no parameter types were recorded":
+        var no_params: [MirType] = []
+        val output = emit(caller_calling(EXTERNAL_CALLEE, no_params))
+        expect(output.len() > 0).to_equal(true)
+        expect(output.contains("declare ptr @" + EXTERNAL_CALLEE + "(...)")).to_equal(true)
+
+    it "emits no declare for a function this module defines":
+        # The intra-module half of site 13: with one name on both sides the
+        # provider stops declaring what it defines.
+        val local_callee = mk_fn(3, "declare_proto_local", [], [], [])
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[local_callee.symbol] = local_callee
+        val caller_fn = caller_calling("declare_proto_local", [])
+        functions[caller_fn.symbol] = caller_fn
+        val translator = MirToLlvm.create("test.llvm.declare_proto", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(
+            MirModule(name: "test.llvm.declare_proto", functions: functions, statics: {}, constants: {}, types: {}))
+        expect(output.contains("define ")).to_equal(true)
+        expect(output.contains("@declare_proto_local")).to_equal(true)
+        expect(output.contains("declare ptr @declare_proto_local")).to_equal(false)
+        expect(output.contains("declare i64 @declare_proto_local")).to_equal(false)

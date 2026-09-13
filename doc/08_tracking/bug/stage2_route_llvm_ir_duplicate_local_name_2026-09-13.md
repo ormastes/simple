@@ -1,5 +1,6 @@
 # Site 11: the Stage-2 route now REACHES llc and emits invalid IR (duplicate local name)
 
+- **Status:** FIXED (2026-09-13, BOOT-10, commit `be454c32040`) — verified by a full
 - **Status:** FIXED (2026-09-13) — the three `Ret`-arm reads now use
   `?? ssa_unreachable_operand_fallback()`, landed on `main` via PR #794
   (`ccd13727443`); this record's measurement below is the BOOT-10 evidence.

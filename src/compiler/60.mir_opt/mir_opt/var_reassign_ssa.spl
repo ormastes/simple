@@ -1350,6 +1350,13 @@ fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
     var result = locals
     match term:
         case Ret(value):
+            # Same `.unwrap()`-on-an-optional hazard as the admission gate in
+            # ssa_term_operand_payloads_valid: a nil here silently drops the
+            # RETURN as a use of the returned local, which is bug #2 of
+            # llvm_constants_lost_ret_zero_2026-08-01 all over again (a
+            # cross-block-live definition reaching llc with no def -> `ret 0`).
+            # ssa_operand_push_local re-validates, so the -1 sentinel is dropped
+            # rather than mistaken for local 0.
             if value != nil:
                 result = ssa_operand_push_local(result, value ?? ssa_unreachable_operand_fallback())
         case If(cond, _, _):
@@ -1658,6 +1665,11 @@ fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], 
 fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirTerminator, i64):
     match term:
         case Ret(value):
+            # Third site of the same `.unwrap()` hazard. Once the function IS
+            # admitted, this is what loads a slotted local back out of its slot
+            # for the `ret`; a nil here leaves the terminator reading the
+            # un-slotted `%lN` (llc "use of undefined value") or takes the
+            # emitter's not-defined zero fallback (`ret <ty> 0`).
             if value != nil:
                 val r = ssa_alloca_rewrite_operand(value ?? ssa_unreachable_operand_fallback(), slot_keys, slot_values, next_temp)
                 (r[1], MirTerminator.Ret(Some(r[0])), r[2])
