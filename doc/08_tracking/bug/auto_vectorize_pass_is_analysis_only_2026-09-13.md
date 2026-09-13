@@ -47,9 +47,9 @@ diagnostic. Making `@must(simd)` genuinely fatal requires that channel first.
   — the receipt now reports this distinctly as
   `pattern-recognised-but-this-wave-emits-no-rewrite-for-it` rather than
   blaming the pattern matcher);
-- cannot resolve a dynamic trip count — see
-  `doc/08_tracking/bug/auto_vectorize_loop_bounds_detection_fails_2026-09-13.md`,
-  which keeps every `for i in 0..n` loop out of reach;
+- CLOSED 2026-09-13: bounds detection was never broken — that record was a
+  fixture defect, now resolved. The rewriter still declines a *dynamic* trip
+  count (guard R4), a narrower limitation than previously believed.
 - has no alias oracle from `55.borrow` (listed as N1-followup in
   `rewrite.spl:64-69`).
 
@@ -67,6 +67,24 @@ because there is no narrower-width fallback. The cost model
 cost, so e.g. trip 24 goes from 3 vector iterations with no remainder to 1
 vector iteration plus 8 scalar, and more loops fail the `speedup > 1.5` gate.
 
-A width ladder that retries 512 -> 256 -> 128 before declining is the fix, and
-it must land with or before the status flip — otherwise `@must(simd)` on a
-trip-12 loop passes on an AVX2 host and fails on an AVX-512 one.
+**CLOSED 2026-09-13.** `_narrow_recipe_to_trip_count`
+(`_AutoVectorize/rewrite.spl`) steps 512 -> 256 -> 128 before declining, floored
+at 4 lanes, and leaves a dynamic trip count alone. Pinned by a spec example that
+sweeps trip counts 4..40 and asserts **zero** cases where an 8-lane plan
+vectorizes and a 16-lane plan refuses.
+
+## The one remaining hard gate: no alias oracle
+
+`check_array_aliasing` (`auto_vectorize_analysis.spl:290`) only compares
+accesses that share the same `base_array.id`, and `are_indices_independent`
+(`:320`) admits a pair only when BOTH indices are the induction variable — so it
+is conservative *within* one base array. What it cannot do is prove that two
+DIFFERENT base locals do not point at the same memory. `out[i] = a[i] + b[i]`
+where `out` and `a` are distinct locals aliasing one buffer would be vectorized
+unsoundly.
+
+That is a miscompilation risk, not a missed optimization, and it is why this
+status must NOT be flipped without the alias oracle from `55.borrow` that
+`rewrite.spl:64-69` already lists as the follow-up. Flipping it is an owner
+decision gated on that proof — the same proof `PatternIdiom` and
+`PredicatePromote` are also waiting on.
