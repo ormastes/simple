@@ -622,6 +622,18 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
 # Writes meta[2] = advance, meta[3] = bearing_x, meta[6] = glyph_id and the
 # success cookie meta[7] = 310031. Width/height/bearing_y are NOT written --
 # a caller needing ink extents must use `sfnt_measure_glyph_into`.
+#
+# meta[18] = the SAME advance in MILLI-pixels (2026-09-13, round 12). meta[2]
+# is rounded to a whole pixel and must stay that way -- every existing consumer
+# reads it -- but rounding each glyph independently is what made a run of eight
+# Menlo `M` (1233/2048 em = 9.633 px at 16) measure 8 x 10 = 80 px where Chrome
+# accumulates fractionally and reports round(77.06) = 77. `measure_text_advances`
+# sums meta[18] and emits `round(cum[i+1]) - round(cum[i])`, so the run total is
+# the rounded exact total and every glyph position is an integer snap of the
+# exact pen -- which is what Skia's subpixel positioning produces. Both fields
+# come from one `horizontal[0] * scale`, so they can never disagree about the
+# face. A face with whole-pixel advances yields meta[18] == meta[2] * 1000 and
+# the emitted array is byte-identical to the pre-round-12 one.
 fn sfnt_glyph_advance_into(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, mut meta: [i64]):
     if meta.len() < 20: return
     meta[7] = 0
@@ -666,6 +678,7 @@ fn sfnt_glyph_advance_into(blob: [u8], selector_kind: i64, selector_value: i64, 
         None: return
     val scale = size_px as f64 / units_per_em as f64
     meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+    meta[18] = _round_glyf_metric(horizontal[0] as f64 * scale * 1000.0)
     meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
     meta[6] = glyph_id as i64
     meta[15] = selector_kind
@@ -734,6 +747,7 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
         meta[0] = 0
         meta[1] = 0
         meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+        meta[18] = _round_glyf_metric(horizontal[0] as f64 * scale * 1000.0)
         meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
         meta[4] = 0
         meta[5] = 0
@@ -772,6 +786,7 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
     meta[0] = width
     meta[1] = height
     meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+    meta[18] = _round_glyf_metric(horizontal[0] as f64 * scale * 1000.0)
     meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
     meta[4] = _round_glyf_metric(bounds.top * scale)
     meta[5] = width * height

@@ -35,6 +35,7 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
       --strategy) bootstrap_strategy_expect_value=1 ;;
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
       --help|--validate-bootstrap-receipt|--stop-after-stage2|--stop-after-stage3|\
+      --produce-stage3-receipt=*|\
       --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|--diagnostic-sweep)
         bootstrap_strategy_bypass=1
         ;;
@@ -175,6 +176,16 @@ Options:
                      `simple build bootstrap`; required before any stage starts
   --validate-bootstrap-receipt
                      Validate authorization and exit without starting a stage
+  --produce-stage3-receipt=<typed-reason>
+                     Only with `--full-bootstrap --stop-after-stage2`. After the
+                     Stage 2 admission is published, run the canonical producer
+                     (scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs)
+                     against the just-admitted parent and write
+                     <output>/stage3-planner-admission.receipt, then print the
+                     exact `--resume-stage3-from-admitted` command. The reason is
+                     yours to type; it is validated by the producer's allow-list
+                     and never defaulted. Fail-closed: a producer failure fails
+                     the run and no receipt is written.
   --stop-after-stage3
                      Stop after producing and independently verifying the
                      provenance-bound Stage 3 compiler. Requires a planner
@@ -278,6 +289,10 @@ bootstrap_strategy="${SIMPLE_BOOTSTRAP_STRATEGY:-normal}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
 validate_bootstrap_receipt=0
+# Typed reason used to auto-produce the Stage-3 planner receipt at the end of a
+# trust-root Stage-2 lane. Empty means 'do not produce' -- the reason is NEVER
+# invented here; the operator types it, exactly as the planner policy requires.
+produce_stage3_receipt_reason=''
 stop_after_stage3=0
 stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
@@ -298,6 +313,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --validate-bootstrap-receipt)
       validate_bootstrap_receipt=1
+      ;;
+    --produce-stage3-receipt=*)
+      produce_stage3_receipt_reason=${1#*=}
       ;;
     --stop-after-stage3)
       stop_after_stage3=1
@@ -465,6 +483,18 @@ esac
 # This is the common staged-bootstrap boundary, including Windows forwarding
 # and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
 # Stage 1 without the canonical receipt produced by the pure-Simple planner.
+# Checked BEFORE the trust-root chain below, on the raw flags that select that
+# lane, so the refusal is what the caller sees rather than the generic
+# reason-receipt diagnostic. Fail closed rather than silently ignore: a receipt
+# the caller believes was produced, but was not, is exactly the failure mode
+# this gate exists to stop. Pinned by
+# scripts/check/check-bootstrap-stage3-receipt-autowire.shs.
+if [ -n "${produce_stage3_receipt_reason}" ] &&
+   { [ "${stop_after_stage2}" -ne 1 ] || [ "${full_bootstrap}" -ne 1 ] ||
+     { [ -n "${bootstrap_receipt_path}" ] && [ -f "${bootstrap_receipt_path}" ]; }; }; then
+  echo "bootstrap-policy-error: produce-stage3-receipt-requires-stage2-trust-root-lane" >&2
+  exit 64
+fi
 bootstrap_stage2_trust_root=0
 bootstrap_stage2_parent_override=
 bootstrap_stage2_parent_authority=
@@ -3235,6 +3265,46 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "error: could not publish producer-bound Stage 2 parent receipts" >&2
             exit 1
           }
+          # Close the operational gap recorded in
+          # doc/08_tracking/bug/stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md
+          # (site 20): every receipt the Stage 3 gate reads now has a producer,
+          # but nothing invoked the LAST one, so a seed-rooted lane admitted a
+          # Stage 2 and then had no way to reach Stage 3. The producer below
+          # re-verifies the parent authority itself (stage2 binary + the two
+          # receipts published immediately above) and refuses on any mismatch,
+          # so invoking it here grants no trust the operator did not already
+          # establish -- it only removes a manual transcription step. The typed
+          # reason is still the operator's: no default, no invention.
+          if [ -n "${produce_stage3_receipt_reason}" ]; then
+            stage3_planner_receipt="${output_dir}/stage3-planner-admission.receipt"
+            rm -f "${stage3_planner_receipt}"
+            # The producer allowlists its --bootstrap-output to <repo>/build/**
+            # or to the root named by SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT.
+            # Centralized storage puts this run's output outside <repo>/build,
+            # so without this the producer refuses its own lane's directory with
+            # bootstrap-output-outside-allowlisted-root. The value passed is not
+            # a caller-chosen path: it is exactly ${output_dir}, the directory
+            # this script already selected, created and locked, so the allowlist
+            # is narrowed to this run's own output and nothing else. An
+            # explicitly configured root still wins.
+            if ! env "SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-${output_dir}}" \
+              sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
+              "--target=//bootstrap:stage3" \
+              "--reason=${produce_stage3_receipt_reason}" \
+              "--parent-compiler=${stage2_bin}" \
+              "--bootstrap-output=${output_dir}" \
+              "--out=${stage3_planner_receipt}"; then
+              echo "error: could not produce the Stage 3 planner admission receipt" >&2
+              rm -f "${stage3_planner_receipt}"
+              exit 1
+            fi
+            [ -f "${stage3_planner_receipt}" ] || {
+              echo "error: Stage 3 planner admission producer wrote no receipt" >&2
+              exit 1
+            }
+            echo "bootstrap-policy: stage3-planner-receipt=${stage3_planner_receipt}"
+            echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=${output_dir} --bootstrap-receipt=${stage3_planner_receipt}"
+          fi
         fi
         # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
         if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then

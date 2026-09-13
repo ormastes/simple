@@ -2448,6 +2448,68 @@ SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
     return out;
 }
 
+/* ---------------------------------------------------------------------------
+ * Soft box-shadow coverage span — native twin of
+ * rt_engine2d_blend_cov_span_u32.
+ *
+ * Mirrors fb_soft_box_shadow's inner blend exactly: `/256` FLOOR with alpha in
+ * 0..=256 inclusive, and `cov == 0` skips the pixel entirely rather than
+ * blending with a == 0. This is NOT the mask twin above (/255, inv = 255 - a)
+ * nor the percent blend (/100 + 50); at a == 128 this computes
+ * (s*128 + d*128)/256 where the mask path computes (s*128 + d*127)/255, so
+ * substituting either shifts every partially covered shadow pixel.
+ *
+ * cov_y and alpha arrive packed as cov_y * 1024 + alpha, keeping the ABI at
+ * six arguments; both are bounded well below 1024 by construction.
+ *
+ * Returns ONLY the blended span, matching the Rust bridge's ABI — returning
+ * the whole destination would make the cost O(rows x buffer).
+ * ------------------------------------------------------------------------- */
+SplArray* rt_engine2d_blend_cov_span_u32(SplArray* dst, int64_t offset,
+                                         SplArray* colcov, int64_t count,
+                                         int64_t cov_y_and_alpha, int64_t color) {
+    if (!dst || !colcov || offset < 0 || count <= 0 || cov_y_and_alpha < 0) return NULL;
+    if (offset + count > rt_array_len(dst)) return NULL;
+    if (count > rt_array_len(colcov)) return NULL;
+
+    const int64_t* dst_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    const int64_t* cov_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(colcov);
+    if (!dst_data || !cov_data) return NULL;
+
+    SplArray* out = rt_array_new_uninit(count);
+    if (!out) return NULL;
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!o) return NULL;
+
+    int64_t cov_y = cov_y_and_alpha / 1024;
+    int64_t alpha = cov_y_and_alpha % 1024;
+    uint32_t s = (uint32_t)(uint64_t)color;
+    int64_t sr = (int64_t)((s >> 16) & 255u);
+    int64_t sg = (int64_t)((s >> 8) & 255u);
+    int64_t sb = (int64_t)(s & 255u);
+
+    for (int64_t i = 0; i < count; i++) {
+        /* SplArray stores one tagged int64_t slot per element, so an [i32]
+           must be read slot-wise and unboxed rather than as packed words. */
+        int64_t cc = (int64_t)engine2d_unbox_pixel(cov_data[i]);
+        uint32_t d = engine2d_unbox_pixel(dst_data[offset + i]);
+        int64_t cov = (cc * cov_y) / 256;
+        if (cov <= 0) {
+            o[i] = engine2d_box_pixel(d);
+            continue;
+        }
+        int64_t a = (cov * alpha) / 255;
+        if (a > 256) a = 256;
+        int64_t inv = 256 - a;
+        int64_t r = (sr * a + (int64_t)((d >> 16) & 255u) * inv) / 256;
+        int64_t g = (sg * a + (int64_t)((d >> 8) & 255u) * inv) / 256;
+        int64_t b = (sb * a + (int64_t)(d & 255u) * inv) / 256;
+        o[i] = engine2d_box_pixel(0xff000000u | ((uint32_t)r << 16)
+                                  | ((uint32_t)g << 8) | (uint32_t)b);
+    }
+    return out;
+}
+
 /* Scalar fallback stubs — no-op placeholders until pure Simple or
    hardware-accelerated implementations are wired in. */
 

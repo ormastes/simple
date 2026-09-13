@@ -1,3 +1,15 @@
+> **RESOLVED 2026-09-13 (macOS lane F74 r2).** The claim "nothing in the repo
+> ever WRITES the two receipts the gate reads" is no longer true and has not
+> been for some time: `bootstrap_stage3_write_stage2_admission_receipt`
+> (`scripts/check/lib/bootstrap-stage3/sanity.shs:571`) writes the Stage-2
+> admission receipt and `scripts/bootstrap/publish-stage2-parent-receipts.shs`
+> writes the sanity + provenance pair, both wired into the trust-root Stage-2
+> lane. The remaining gap — nothing invoked
+> `produce-bootstrap-planner-admission-v2.shs`, so the chain had no entry point
+> — is closed by `--produce-stage3-receipt=<typed-reason>`, pinned by
+> `scripts/check/check-bootstrap-stage3-receipt-autowire.shs`. See
+> `doc/08_tracking/bug/stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md`.
+
 # bootstrap planner-admission-v2 is circular, and its receipt cannot express an imported parent
 
 - **Date:** 2026-08-18

@@ -240,6 +240,9 @@ fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
 @unsafe(reason: "percent-opacity constant-colour span blend; bounds are enforced inside the kernel", capabilities: [ffi])
 extern fn rt_engine2d_blend_const_span_pct_u32(dst: [u32], offset: i64, count: i64, color: u32, opacity_pct: i64) -> [u32]
 
+@unsafe(reason: "soft box-shadow coverage-span blend kernel", capabilities: [ffi])
+extern fn rt_engine2d_blend_cov_span_u32(dst: [u32], offset: i64, colcov: [i32], count: i64, cov_y_and_alpha: i64, color: u32) -> [u32]
+
 fn fb_blend_const_row_opacity(fb: [u32], offset: i32, count: i32, color: u32, opacity_pct: i32) -> [u32]:
     """Blend one constant colour across a row span at an integer percent opacity.
 
@@ -613,6 +616,75 @@ fn _phi256(z256: i32) -> i32:
         b = 256
     a + ((b - a) * frac) / 128
 
+# One soft-shadow row through the native coverage-span kernel.
+#
+# The shadow's coverage is SEPARABLE — colcov[x] * cov_y / 256 — so a whole row
+# is one precomputed column table scaled by a per-row constant. That is exactly
+# the shape a span kernel wants, and it is why this primitive gets a kernel of
+# its own rather than reusing one: its blend is `/256` FLOOR with alpha in
+# 0..=256, while the percent kernel rounds via `/100 + 50` and the mask kernel
+# uses `/255` with `inv = 255 - a`. At a = 128 this computes
+# `(s*128 + d*128)/256` where the mask kernel computes `(s*128 + d*127)/255`.
+# Substituting either shifts every shadow pixel.
+fn fb_blend_cov_row(fb: [u32], offset: i32, colcov: [i32], count: i32, cov_y: i32, alpha: i32, color: u32) -> [u32]:
+    """Blend one coverage row span; falls back to the scalar twin if unbacked."""
+    if count <= 0:
+        return fb
+    var out = fb
+    if offset < 0 or offset >= out.len():
+        return out
+    var n = count
+    if offset + n > out.len():
+        n = out.len() - offset
+    if n <= 0 or colcov.len() < n:
+        return _scalar_blend_cov_row(fb, offset, colcov, count, cov_y, alpha, color)
+    # cov_y and alpha are packed to keep the extern at six arguments; both are
+    # bounded well below 1024 by construction (cov_y <= 256 from _phi256,
+    # alpha <= 255).
+    val packed = (cov_y.to_i64() * 1024) + alpha.to_i64()
+    val span = rt_engine2d_blend_cov_span_u32(
+        out, offset.to_i64(), colcov, n.to_i64(), packed, color)
+    if span.len() != n:
+        return _scalar_blend_cov_row(fb, offset, colcov, count, cov_y, alpha, color)
+    out.write_span(span, offset.to_i64(), 0, n.to_i64())
+    out
+
+fn _scalar_blend_cov_row(fb: [u32], offset: i32, colcov: [i32], count: i32, cov_y: i32, alpha: i32, color: u32) -> [u32]:
+    """Scalar reference — the exact arithmetic fb_soft_box_shadow used inline.
+
+    Clamped to the buffer exactly as the kernel clamps it, so the two agree on
+    an over-long count instead of one walking off the end of the row.
+    """
+    var out = fb
+    if count <= 0 or offset < 0 or offset >= out.len():
+        return out
+    var n = count
+    if offset + n > out.len():
+        n = out.len() - offset
+    if n > colcov.len():
+        n = colcov.len()
+    val sr = (((color >> 16) & 255u32) as i32)
+    val sg = (((color >> 8) & 255u32) as i32)
+    val sb = ((color & 255u32) as i32)
+    var i = 0
+    while i < n:
+        val cov = (colcov[i] * cov_y) / 256
+        if cov > 0:
+            var a = (cov * alpha) / 255
+            if a > 256:
+                a = 256
+            val idx = offset + i
+            val d = out[idx]
+            val dr = (((d >> 16) & 255u32) as i32)
+            val dg = (((d >> 8) & 255u32) as i32)
+            val db = ((d & 255u32) as i32)
+            val nr = (sr * a + dr * (256 - a)) / 256
+            val ng = (sg * a + dg * (256 - a)) / 256
+            val nb = (sb * a + db * (256 - a)) / 256
+            out[idx] = argb(nr, ng, nb)
+        i = i + 1
+    out
+
 fn fb_soft_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, blur: i32, alpha: i32, clip: ClipRect) -> [u32]:
     if blur <= 0 or alpha <= 0 or w <= 0 or h <= 0:
         return fb
@@ -670,24 +742,10 @@ fn fb_soft_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: 
         val cyr = _phi256(((y1 - py) * 512) / blur)
         val cov_y = (cyl * cyr) / 256
         if cov_y > 0:
-            val row = py * fbw
-            var px = rx0
-            while px < rx1:
-                val cov = (colcov[px - rx0] * cov_y) / 256
-                if cov > 0:
-                    var a = (cov * alpha) / 255
-                    if a > 256:
-                        a = 256
-                    val idx = row + px
-                    val d = out[idx]
-                    val dr = (((d >> 16) & 255u32) as i32)
-                    val dg = (((d >> 8) & 255u32) as i32)
-                    val db = ((d & 255u32) as i32)
-                    val nr = (sr * a + dr * (256 - a)) / 256
-                    val ng = (sg * a + dg * (256 - a)) / 256
-                    val nb = (sb * a + db * (256 - a)) / 256
-                    out[idx] = argb(nr, ng, nb)
-                px = px + 1
+            # One native call per row, replacing ~15 interpreted integer ops
+            # per pixel. `colcov` is already built once per shadow above.
+            out = fb_blend_cov_row(out, py * fbw + rx0, colcov, rx1 - rx0,
+                cov_y, alpha, color)
         py = py + 1
     out
 

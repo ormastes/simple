@@ -388,3 +388,41 @@ its first run — `:disabled` never matches in the text path on EITHER branch
 false), so "fixing" it to match a disabled element is a semantic change, not a
 refactor. Add new selector shapes to the adversarial fixture, not to a catalog
 page. Measurements: `doc/10_metrics/ui/web_perf_round9_2026-09-13.md`.
+
+## Font faces: the generic families are resolved by the HOST (round 11)
+
+The catalog declares nothing but `font: 16px/1.5 sans-serif` plus the UA
+monospace for `<code>`, and `lang="en"`. Chrome therefore resolved those
+generics with the host's own defaults — on macOS **Helvetica** and **Menlo** —
+so any advance-width comparison against the bundled Noto faces is comparing two
+different typefaces. Ground truth at 16 px: Menlo `M` = 1233/2048 em =
+**9.633 px** (exactly Chrome's measured 9.63), Helvetica regular-to-bold
+`abcdefg` = **+4.4 px** (exactly Chrome's +4).
+
+Three traps, all of which cost a round each:
+
+1. **`FontRasterizer.load_selected` is a PATH ALLOWLIST, not a format check**
+   (`spl_fonts.spl`). A path with no entry in the pinned registry is refused
+   before the file is opened. Round 9 read that rejection as "macOS TTFs are
+   malformed"; nothing about the file was ever inspected. The unmanaged lane
+   beside it (`load_unmanaged`) is the way in — and it must REFUSE a
+   registry-owned path, or it becomes a bypass for asset-root enforcement.
+2. **`ttcf` is a real format gap.** `parse_offset_table` admits `1.0`, `OTTO`,
+   `true` and `typ1` — never `ttcf` — and Menlo/Helvetica ship only as
+   collections. A collection face's table offsets are absolute from the FILE
+   start, so slicing produces garbage; `sfnt_ttc_extract_face` repacks a face
+   into a standalone blob instead, which is why glyf/cmap/hmtx and the atlas
+   composite needed no change at all.
+3. **The language/category coverage matrix silently replaces the family.**
+   Under any `lang` other than `und` it substitutes its witness family and the
+   bundled lookup then answers with that asset ALONE — which discards both an
+   explicit `@font-face` source and the platform face. Face routing that works
+   under `und` can be completely dead on every real page. Always probe with the
+   page's actual `lang`.
+
+Also: `resolved_font_advances` is `[i32]`, one integer per codepoint, so a
+per-char 9.633 rounds to 10 and eight of them give 80 where Chrome accumulates
+fractionally to 77. A face swap cannot fix that; the contained fix is to emit
+`round(cum[i+1]) − round(cum[i])` from milli-px advances inside
+`measure_text_advances`. Measurements:
+`doc/10_metrics/ui/web_chrome_parity_round11_2026-09-13.md`.
