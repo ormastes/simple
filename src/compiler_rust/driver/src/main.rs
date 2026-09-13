@@ -996,29 +996,6 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         env_override: "SIMPLE_CACHE_RUST",
         needs_rust_flags: &[],
     },
-    // LLM Caret apps. Without these rows a bare `simple caret` fell through to
-    // file resolution, which walks the exe's ancestors and parsed the POSIX
-    // `bin/caret` shell launcher as Simple source.
-    CommandEntry {
-        name: "caret",
-        app_path: "src/app/llm_caret/main.spl",
-        rust_handler: Handler::Custom(|_| {
-            eprintln!("error: caret app not found (run from project root)");
-            1
-        }),
-        env_override: "",
-        needs_rust_flags: &[],
-    },
-    CommandEntry {
-        name: "cs",
-        app_path: "src/app/llm_caret/cs_main.spl",
-        rust_handler: Handler::Custom(|_| {
-            eprintln!("error: cs app not found (run from project root)");
-            1
-        }),
-        env_override: "",
-        needs_rust_flags: &[],
-    },
     // Environment management
     CommandEntry {
         name: "env",
