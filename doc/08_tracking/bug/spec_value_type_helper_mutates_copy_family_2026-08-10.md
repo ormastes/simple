@@ -1,5 +1,22 @@
 # Spec helpers that take a struct BY VALUE and mutate it — third vacuity family
 
+## Triage 2026-09-13 — all three "Left RED" specs now GREEN
+Re-ran all three "Left RED (real defects — do not weaken)" specs named below:
+`lease_grant_spec.spl` (16/16, was 4/10) and `busy_contract_spec.spl` (7/7,
+was 3/6) were already fixed by another change (their spec-local `struct
+LeaseManager` reimplementation is gone; they now exercise the real library
+type). `request_queue_spec.spl` (both `test/01_unit/lib/service/` and
+`test/unit/lib/service/`) was still RED, 7/8, on the exact defect this doc
+describes: `struct RequestQueue`'s `next_id: i64` field mutation in
+`_next_queue_id`/`enqueue` landed on a by-value copy, so two calls both
+produced `"req-1"`. Fixed by changing `struct RequestQueue` to `class
+RequestQueue` in BOTH trees (identical fix, files stay byte-identical, no new
+test-tree divergence) — the same `struct`->`class` pattern already used for
+`TFB` in `report_spec.spl`. GREEN: `SPEC FILE VERDICT: ... outcome=OK
+declared>=8 executed=8 passed=8 failed=0` on both paths. This closes the
+"Left RED" section below; the family is otherwise unaffected (the `class`
+non-value-type callers listed as "Not affected" needed no change).
+
 - **ID:** spec_value_type_helper_mutates_copy_family_2026-08-10
 - **Status:** PARTIALLY FIXED (2 specs fixed; 3 left RED, see below)
 - **Found by:** sweep following `6f8f3230db4` (dbfs BTree delete spec)
