@@ -90,3 +90,16 @@ native-build half is unchanged on the new seed: the run was still inside
 native-build when the 3000s harness timeout killed it (SIGTERM -> exit 143),
 i.e. Cause 2 (native-build worker never finishes the 60-line fixture) does NOT
 reproduce as fixed. Status unchanged: PARTIALLY FIXED.
+
+## Triage 2026-09-13
+
+Re-ran `sh scripts/check/check-native-trailing-default-param.shs`: FAILs the
+same way as before, but the failure is now further upstream than this
+record's own Cause 2 — the fixture's native-build fails outright with
+`error: semantic: unknown extern function: rt_env_vars`, a separate,
+already-tracked defect (`doc/08_tracking/bug/native_entry_closure_requires_unavailable_rt_env_vars_2026-09-09.md`)
+blocking native-build entirely on this worktree, not specific to trailing
+default params. The guard-shape half of this record (verdict-line ERROR
+behavior) is unaffected and still correctly reports a real error rather than
+a silent pass. Left OPEN; no new code change here, cross-referencing the
+blocking defect instead of re-diagnosing it.
