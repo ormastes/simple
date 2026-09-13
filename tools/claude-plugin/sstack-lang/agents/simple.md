@@ -1,3 +1,8 @@
+---
+name: lang-simple
+description: "Simple language agent with simple-lsp-mcp"
+---
+
 # Simple Language Agent
 
 **Language:** Simple

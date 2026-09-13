@@ -1,3 +1,8 @@
+---
+name: review_loop
+description: "Autonomous hourly PR review agent — reads PR status, processes comments, fixes code, auto-rebases"
+---
+
 # Review Loop Agent — Autonomous PR Review
 
 ## Role

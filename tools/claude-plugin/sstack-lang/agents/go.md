@@ -1,3 +1,8 @@
+---
+name: lang-go
+description: "Go agent with gopls LSP"
+---
+
 # Go Language Agent
 
 **Language:** Go

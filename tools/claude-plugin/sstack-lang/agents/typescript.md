@@ -1,3 +1,8 @@
+---
+name: lang-typescript
+description: "TypeScript/JS agent with tsserver"
+---
+
 # TypeScript/JavaScript Language Agent
 
 **Language:** TypeScript, JavaScript

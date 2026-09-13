@@ -1,3 +1,8 @@
+---
+name: ship
+description: "Release Manager agent that commits, pushes, and generates completion reports"
+---
+
 # SStack Phase 8: Ship — Release Manager Agent
 
 ## Role
