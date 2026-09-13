@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=248
+ROW_FLOOR=287
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -886,6 +886,54 @@ must_contain     "LOCALUSEENUM node_exec publishes imported enums" \
 must_contain     "LOCALUSEENUM spec keeps the module-scope control fixture" \
     "$ROOT/test/01_unit/compiler/loader/function_local_use_enum_scope_spec.spl" \
     "entry_top_level_use.spl"
+
+# --- 2026-09-13 (PERF-7): the owned-receiver method call resolved its method
+# TWICE. `obj.m(a, b)` on a class instance is the most frequent interpreted
+# shape in src/lib/common (21,601 call sites). Every one of the six owned-receiver
+# fast paths asked `object_method_exists` whether the class had the method —
+# probing the thread-local method-index cache — and then re-resolved the SAME
+# name inside `find_and_exec_method_with_self_owned_values`, because the bool
+# answer could not carry the resolution across the `env.remove` that takes the
+# receiver out of its slot. The class name was copied into an owned `String` for
+# the same reason. `resolve_object_method` returns the resolution itself (an
+# `Arc<ClassDef>` + index, or an `Arc<FunctionDef>`), which borrows nothing, so
+# one probe and no copy suffice. These rows pin the mechanism, the absence of
+# both retired helpers, the counters that make the ratio observable, and the
+# spec's count budget.
+MECALLEXEC="$ROOT/src/compiler_rust/compiler/src/interpreter_method/special/execution.rs"
+MECALLPAT="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+MECALLCALLS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/calls.rs"
+MECALLSPEC="$ROOT/test/05_perf/interp/owned_method_call_parity_spec.spl"
+must_contain     "MECALL single-probe resolver exists" \
+    "$MECALLEXEC" "pub fn resolve_object_method("
+must_contain     "MECALL resolution borrows nothing (survives the receiver move)" \
+    "$MECALLEXEC" "Class(Arc<ClassDef>, usize),"
+must_contain     "MECALL executor takes the resolution instead of a name" \
+    "$MECALLEXEC" "pub fn exec_resolved_method_with_self_owned_values("
+must_not_contain "MECALL the bool pre-check is gone" \
+    "$MECALLEXEC" "pub fn object_method_exists("
+must_not_contain "MECALL the re-resolving executor is gone" \
+    "$MECALLEXEC" "pub fn find_and_exec_method_with_self_owned_values("
+must_contain     "MECALL statement path resolves under the receiver borrow" \
+    "$MECALLPAT" "Some(resolve_object_method(classes, impl_methods, class, method))"
+must_not_contain "MECALL statement path no longer copies the class name to cross the borrow" \
+    "$MECALLPAT" "let class_name = class.clone();"
+must_contain     "MECALL expression path resolves once too" \
+    "$MECALLCALLS" "Some(Value::Object { class, .. }) => resolve_object_method(classes, impl_methods, class, method),"
+must_contain     "MECALL dispatches are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_CALLS"
+must_contain     "MECALL method-table probes are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_METHOD_LOOKUPS"
+must_contain     "MECALL per-call String allocations are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_STRING_ALLOCS"
+must_contain     "MECALL every method-table probe is counted, at the probe itself" \
+    "$MECALLEXEC" "crate::perf_counters::bump(&crate::perf_counters::MECALL_METHOD_LOOKUPS, 1);"
+must_contain     "MECALL parity spec pins one probe per dispatch" \
+    "$MECALLSPEC" "expect(r.lookups <= r.calls).to_equal(true)"
+must_contain     "MECALL parity spec pins the allocation budget" \
+    "$MECALLSPEC" "expect(r.strallocs <= r.calls * 3).to_equal(true)"
+must_contain     "MECALL parity spec is non-vacuous on the dispatch counter" \
+    "$MECALLSPEC" "expect(r.calls > 0).to_equal(true)"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
