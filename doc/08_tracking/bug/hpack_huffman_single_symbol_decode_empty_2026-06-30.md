@@ -1,6 +1,11 @@
 # Bug: HPACK huffman single-symbol decode returns empty; concat-built [u8] encodes wrong
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — both the huffman symptom and its `[u8]` concat root cause are gone
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Entry repro 1: `hpack_huffman_decode(hpack_huffman_encode([97]), 0, enc.len()).unwrap().len()` prints `1` (was `0`).
+- **measured** Entry repro 2 (the documented ROOT CAUSE): `var p: [u8] = []; p = p + [97]; p[0]` prints `97` (was `8`).
+- **measured** The localization cases also pass: `var c:[u8]=[10]; var e:[u8]=[97]; (c+e)` yields `10,97` (was `10,0`).
 
 **Date:** 2026-06-30
 **Severity:** Medium — `hpack_huffman_decode` drops short payloads; blocks
@@ -133,6 +138,3 @@ concat corrupts, with a minimal non-huffman repro; fix in the interpreter (seed)
 or rework the huffman loops to avoid the offending array pattern (e.g. index
 assignment into a pre-sized array instead of push/concat). Multi-hour; same
 class as the other interpreter array bugs.
-
-## Triage 2026-09-12
-Not re-run in this pass (would require assembling a focused huffman encode/decode harness, not a trivial <=3 min check); older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

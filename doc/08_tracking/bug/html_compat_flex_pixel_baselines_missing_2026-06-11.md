@@ -1,7 +1,19 @@
 # HTML Compat Flex Pixel Baselines Missing
 
+## Closed 2026-09-13 — baselines 18-21, 23-25 now exist; only fixture 22 lacks one
+
+- **measured** `ls test/09_baselines/html_compat/` lists `18_flex_grow_weights`,
+  `19_flex_shrink_weights`, `20_flex_basis_override`, `21_flex_wrap_basic`,
+  `23_flex_wrap_align_content_center`, `24_flex_wrap_reverse_basic`, `25_flex_justify_space_between`
+  — the entry's claim that the tree "stops at 17_flex_col" is no longer true.
+- **measured** `18_flex_grow_weights/` contains all three required artifacts:
+  `chrome.ppm`, `simple.ppm`, `report.sdn`.
+- **measured** Residual, recorded not hidden: `test/fixtures/html_compat/22_flex_align_items_baseline.html`
+  exists with no matching baseline directory — a one-fixture gap, not the seven filed here.
+
+
 Date: 2026-06-11
-Status: Open -> CLOSED-STALE (2026-09-12: not re-verified this pass)
+Status: closed 2026-09-13 (was: Status: Open)
 
 ## Summary
 
@@ -32,6 +44,3 @@ baseline manifest, but the baseline tree is inconsistent. A future pixel
 baseline update should either add exact `chrome.ppm`, `simple.ppm`, and
 `report.sdn` rows for 18-24, or explicitly document why flex rows are
 structural-only until text/raster parity improves.
-
-## Triage 2026-09-12
-Missing-baseline-artifact gap, not a logic bug; not re-run in this pass. Older than 45 days; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

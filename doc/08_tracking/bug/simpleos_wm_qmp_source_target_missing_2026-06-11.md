@@ -1,7 +1,17 @@
 # SimpleOS WM QMP Source Target Requires Initialized Submodule
 
+## Closed 2026-09-13 — already Resolved in-entry (submodule init + SIMPLE_BINARY propagation)
+
+- **inferred** Entry status: Resolved. The companion entry
+  `simpleos_wm_host_qmp_mouse_input_no_framebuffer_delta_2026-06-11.md` independently
+  confirms it: the source-entry blocker is resolved once the `simple_os` submodule is
+  initialized and the wrapper propagates `SIMPLE_BINARY`.
+- **inferred** What remains in that companion entry is the framebuffer-delta defect, a
+  different failure downstream of this one; this target-resolution bug is done.
+
+
 Date: 2026-06-11
-Status: Resolved
+Status: closed 2026-09-13 (was: Status: Resolved)
 
 ## Summary
 

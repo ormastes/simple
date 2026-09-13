@@ -1,6 +1,11 @@
 # Interp: enum method not found in nested/chained call context
 
-**Status:** FIXED in seed source; pending seed rebuild + deploy to default `bin/simple`
+## Closed 2026-09-13 — nested enum-method dispatch works on the deployed seed
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Ran the entry's `enum Color` + `class Box` fence with a `main` that calls `Box.create().color().label()` in nested position: prints `green`, exit 0, no dispatch error.
+
+**Status:** Closed (fixed + deployed) 2026-09-13
 **Found:** 2026-06-29 (noise sweep — riscv64 target spec)
 **Area:** interpreter / method dispatch (Rust seed)
 

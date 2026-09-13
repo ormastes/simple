@@ -1,9 +1,17 @@
 # Bug: LLVM backend never emits `__module_init` — heap-typed module-global initializers are dropped (left null)
 
+## Closed 2026-09-13 — confirmed resolved: `generate_module_init` is present and called
+- **measured** — `src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs:585` defines
+  `fn generate_module_init(&self, module_ir: &MirModule)` and `:1839` calls
+  `self.generate_module_init(module)?;`.
+- **inferred** — the entry already records RESOLVED 2026-06-15 with the rv64 oracle reaching
+  `GET /health (HTTP)... PASS (200)`; the symbols it names still exist, so the fix has not
+  been reverted. The rv64 QEMU oracle itself cannot run from this Windows host.
+
 - **ID:** llvm_backend_missing_module_init_heap_globals_2026-06-15
 - **Severity:** P1 (silent: any `var/val X: [T] = [...]`, `= "..."`, or struct-literal module-global is null at runtime under the LLVM backend; `.len()`/index/field/method on it derefs null)
 - **Backend:** LLVM (target-independent — reproduced on `x86_64-unknown-linux-gnu` host and `riscv64-unknown-none` kernel)
-- **Status:** RESOLVED 2026-06-15 — LLVM backend now emits `__module_init_<prefix>`
+- **Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
   for heap-typed module globals (mirrors cranelift `generate_module_init`); rv64
   boot calls `__simple_call_module_inits` after heap init; init-caller compiled
   with `-mcmodel=medany`. Oracle `scripts/qemu/qemu_rv64_http_test.shs

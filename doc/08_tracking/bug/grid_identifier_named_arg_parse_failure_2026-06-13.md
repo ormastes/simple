@@ -1,8 +1,13 @@
 # Bug: `grid` as class field / named constructor argument fails to parse
 
+## Closed 2026-09-13 — Already fixed (2026-06-14 lexer named-arg mapping); no longer reproduces
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `class P: grid: i64` + `val p = P(grid: 7)` + `print "grid={p.grid}"` runs clean and prints `grid=7`. No `Unexpected token: expected Newline, found Integer`.
+- **inferred**: matches the Resolution note — `TokenKind::Grid => Some("grid")` in the named-arg helper. The follow-up suggestion (revert `grid_dim`/`block_dim` in `src/lib/nogc_sync_mut/gpu/queue.spl`) is optional cosmetics, not this defect, and is deliberately left alone.
+
 - **Date:** 2026-06-13
 - **Severity:** P2 (grammar regression — common identifier unusable in named-arg position)
-- **Status:** resolved (2026-06-14)
+- **Status:** CLOSED 2026-09-13 (resolved 2026-06-14, re-verified)
 - **Area:** parser (likely GPU launch grammar `kernel<<<grid, block>>>(args)` token handling)
 
 ## Resolution (2026-06-14)

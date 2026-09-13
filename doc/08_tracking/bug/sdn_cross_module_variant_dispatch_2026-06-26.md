@@ -1,8 +1,14 @@
 # Bug: SdnValue cross-module variant dispatch fails in interpreter
 
+## Closed 2026-09-13 — cross-module SdnValue method dispatch works on primitive-bearing documents
+- **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`, caller module != `std.sdn.value`): `parse("x: hello").unwrap().type_name()` printed `type=dict` and `.as_dict()` succeeded (`ok-as_dict`) — a Dict containing a String primitive, exactly the shape this entry says fails.
+- **measured**: no `unknown variant or method 'String' on enum SdnValue` error appeared.
+- **inferred**: the API also changed — `parse()` now returns a `Result`, so the entry's literal snippet fails with `Function 'Result.type_name' not found`; that is an API move, not the dispatch defect.
+- **inferred**: `test/01_unit/lib/common/roundtrip_spec.spl` was not re-run; `bin/simple test` is broken on this Windows host.
+
 **ID:** sdn_cross_module_variant_dispatch_2026-06-26
 **Severity:** P2 (test blocker)
-**Status:** CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Symptom
 
@@ -48,35 +54,3 @@ because they avoid the problematic dispatch.
 Seed interpreter fix in `src/compiler_rust/`: the method lookup for cross-module
 enum values must not walk contained-value variants to resolve dispatch. Intra-module
 method calls on SdnValue should bypass the cross-module variant registry.
-
-## Re-check 2026-09-12 (BUGFIX-5)
-
-Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
-(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
-at base `89c5e3f865d`.
-
-Cross-module probe (`bin/simple run`), a document whose Dict holds exactly the
-primitive variants the record says trigger the failure (String, Int, Float,
-Bool), with the calls the record names — `type_name()`, `is_dict()`, `get()`,
-`as_str()`:
-
-```
-type_name=dict
-is_dict=true
-x.as_str=hello
-x.type_name=string
-```
-
-No `unknown variant or method 'String' on enum SdnValue`. The affected spec is
-green too, and it is not vacuous — it round-trips Int/String/Bool/Null through
-`parse` and matches on `SdnValue.Int` / `.String` / `.Bool` / `.Null` in a
-module other than `std.sdn.value`:
-
-```
-$ bin/simple test test/01_unit/lib/common/roundtrip_spec.spl --no-session-daemon
-SPEC FILE VERDICT: test/01_unit/lib/common/roundtrip_spec.spl outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0
-```
-
-Record said "5/6 tests fail"; now 6/6 pass. No code change made. Closing.
-
-- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, 0ce26e5c97a, spec test/01_unit/lib/common/roundtrip_spec.spl

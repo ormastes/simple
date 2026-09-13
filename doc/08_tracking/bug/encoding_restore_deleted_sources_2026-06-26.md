@@ -1,5 +1,9 @@
 # Encoding Source Restoration 2026-06-26
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — restoration landed; all named sources present on disk
+- **measured**: all 23 restored source files listed here exist under `src/lib/common/encoding/` (29 files present, a superset).
+- **measured** (`bin/simple run`, Windows Rust seed): `use std.common.encoding.utf8.*` and `std.common.encoding.base58.*` resolve and run.
+- **inferred**: this entry is a restoration record rather than a live defect; its work product is verifiably in the tree.
 
 ## Summary
 Restored 23 deleted source files and 27 deleted spec files from git history. All files were deleted in commit `a8569120c13ce0a3ca86cb913d6ee61e6a012c6f` and parent commits; they were recovered from the parent commit using `git show <parent>:<path>`.
@@ -41,6 +45,3 @@ Both runners show identical behavior, indicating the restored sources are workin
 
 ## Status
 Restored from git history on 2026-06-26. All files recovered from parents of deletion commit `a8569120c13ce0a3ca86cb913d6ee61e6a012c6f`.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

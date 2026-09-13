@@ -1,9 +1,16 @@
 # Bug: LLVM backend — module-global variable reads fold to their initializer (GlobalLoad missing from `MirInst::dest()`)
 
+## Closed 2026-09-13 — confirmed resolved: `GlobalLoad` is enumerated in the MIR `dest()` helper
+- **measured** — `src/compiler_rust/compiler/src/mir/inst_helpers.rs:109` reads
+  `| MirInst::GlobalLoad { dest, .. }` — the variant whose absence from the `dest()`
+  arm-list caused the constant-fold-to-initializer miscompilation.
+- **inferred** — the entry already records the fix; the code still carries it, so no
+  regression. Not re-executed on a riscv64 kernel (no such host here).
+
 - **ID:** llvm_globalload_dest_missing_folds_to_initializer_2026-06-15
 - **Severity:** P1 (silent miscompilation; any module-level `var`/`val` read inside a function returns the static initializer, not the current runtime value)
 - **Backend:** LLVM (target-independent — reproduced on `x86_64-unknown-linux-gnu` and `riscv64-unknown-none`)
-- **Status:** FIXED (see Fix)
+- **Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 
 ## Symptom
 

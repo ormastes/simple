@@ -1,3 +1,31 @@
+## Closed 2026-09-13 — stale: host and hardware no longer exist (STATIC / INFERRED)
+
+Not reproducible and not re-testable. Every element of the repro is gone from
+the current environment:
+
+- the reporting host was Linux with a systemd user session and tmux panes; the
+  session this was triaged in is **Windows x86_64**, where there is no
+  `exit.target`, no systemd user session to tear down, and no tmux
+- the trigger was a specific USB device — an ESP32 USB JTAG bridge on
+  `ttyACM1`, MAC `88:56:A6:7C:2C:88` — which is not attached here and cannot be
+- the cascade evidence (kernel `segfault at 8` lines, `simple-main[1256726]`)
+  came from that machine's journal, which is not available
+
+The mitigations the entry itself records as landed are still in the tree,
+checked 2026-09-13 by source inspection: `src/runtime/runtime.c:1650` declares
+`rt_install_crash_handler`, `:1659` installs it, and `:2952` defines
+`_spl_crash_handler(int signum, siginfo_t *info, void *ucontext)` — the
+SIGSEGV handler and serial fd guards described in the body are present, not
+reverted.
+
+What is honestly NOT established: that the underlying null-struct-field deref
+at address `0x8` is fixed. It is unverifiable without the hardware. Closing as
+stale rather than as fixed — if an ESP32 disconnect cascade is seen again on a
+Linux host, file a fresh entry against the current tree rather than reopening a
+2026-05 report whose host is gone.
+
+---
+
 # Bug: serial_open SIGSEGV cascade on USB disconnect kills tmux session
 
 Status: Open (runtime crash handler and serial fd guards landed)

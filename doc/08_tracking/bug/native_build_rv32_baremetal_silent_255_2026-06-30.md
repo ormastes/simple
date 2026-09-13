@@ -1,8 +1,13 @@
 # rv32 native-build: silent 255 FIXED; freestanding runtime completed
 
+## Closed 2026-09-13 — entry already records Status: RESOLVED
+
+- **inferred** The entry's own `**Status:** RESOLVED.` line, with the fix narrative, is the closing evidence.
+- **inferred** No fresh measurement: the rv32 baremetal `native-build` + QEMU lane needs a Linux host with the RISC-V toolchain; this triage ran on Windows, and a bootstrap is running concurrently on this clone.
+
 **Date:** 2026-06-30
 **Area:** compiler / native-build (LLVM backend, `riscv32-unknown-none`) + freestanding RISC-V runtime
-**Status:** RESOLVED.
+**Status:** Closed (resolved) 2026-09-13.
 
 ## Symptom (original)
 

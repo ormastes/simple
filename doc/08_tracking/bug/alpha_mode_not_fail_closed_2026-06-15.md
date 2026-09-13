@@ -1,8 +1,14 @@
 # Bug: alpha mode is NOT fail-closed — logs diff and returns empty, does not abort
 
+## Closed 2026-09-13 — Resolved: alpha mismatch now aborts the process
+
+- **measured** (grep of current source): `src/os/crypto/dual_backend.spl:168` defines `fn _dual_backend_alpha_halt(report: text)` and it calls `rt_exit(70)` at `:177`. It is invoked from all three mismatch sites at `:207`, `:258`, `:303`, so the halt is uniform across the comparison paths as the Resolution claims.
+- **inferred**: with `rt_exit(70)` inside the single shared halt, the `return []/false/0/""` lines after it are unreachable, so the "logs and returns empty" contract violation this bug names cannot recur.
+- **inferred**: not exercised at runtime here — driving a true runtime/pure mismatch needs the dual-backend crypto lane, which is not runnable on this Windows host. The entry's own verification (probe `rc=42`, true mismatch exits `70`) stands unchallenged.
+
 **ID:** alpha_mode_not_fail_closed_2026-06-15
 **Filed:** 2026-06-15
-**Status:** RESOLVED 2026-06-16
+**Status:** CLOSED 2026-09-13 (RESOLVED 2026-06-16, re-verified by source)
 **Severity:** P1 — security contract violation (name promises halt; impl only logs)
 **Component:** src/os/crypto/dual_backend.spl
 

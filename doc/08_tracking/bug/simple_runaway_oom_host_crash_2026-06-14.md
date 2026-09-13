@@ -1,5 +1,10 @@
 # Bug: Runaway `simple` process OOMs the whole host (session crash)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — Stale by host: the machine and its kernel OOM evidence no longer exist
+
+- **inferred**: every datum in this entry is properties of one Linux box that is not this host — 125 GiB RAM plus 8 GiB swap, `/` at 83% with 642 GB free, five kernel `global_oom` kills with `task_memcg=/system.slice/docker-….scope`, and unlimited docker scopes. This triage runs on Windows 11 with no docker scopes and no kernel OOM log to consult.
+- **inferred**: the evidence is a `dl` kernel-log window from 2026-06-14 04:36-05:32. It cannot be re-read, and the five named pids are long gone, so neither reproduction nor clearance is possible from here.
+- **measured**: both repo paths the entry cites still exist, so nothing was deleted — this is stale by environment, not by removed code. If runaway `simple` memory growth recurs, it should be filed fresh against a live host with a current measurement.
 
 - **Date:** 2026-06-14
 - **Severity:** P1 (takes down the entire machine / agent session)
@@ -67,6 +72,3 @@ is killed at the 4 GB cap instead of thrashing host swap into a global OOM.
   accumulates unboundedly. Hunt which spec/input balloons and add per-spec
   reclamation or process isolation. Tracked separately — the cap above prevents
   the host crash regardless of which leak fires.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

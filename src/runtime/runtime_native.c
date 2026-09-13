@@ -10451,15 +10451,15 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
  * Starts at a sentinel rather than zero so a readout is never ambiguous:
  * 77 = never called, 100 = succeeded, 1..10 name a rejected arm, and a literal
  * 0 means this extern is itself unresolved in the lane that read it. */
-#if defined(_MSC_VER)
-#define RT_RNF_TLS __declspec(thread)
-#else
-#define RT_RNF_TLS __thread
-#endif
 /* Thread-local, NOT a global: the bootstrap reads with 24 jobs in flight, so a
  * concurrent successful read on another thread would overwrite the code before
- * the failing caller could report it. */
-static RT_RNF_TLS int64_t rt_rnf_last_failure = 77;
+ * the failing caller could report it.
+ *
+ * Spelled `_Thread_local` to match this tree's existing TLS (runtime_native.c
+ * and runtime_timestamp.c) rather than a fresh __declspec/__thread macro: one
+ * spelling already proven on every toolchain here beats a second one that has
+ * to be re-argued. */
+static _Thread_local int64_t rt_rnf_last_failure = 77;
 
 int64_t rt_file_read_regular_no_follow_last_failure(void) {
     return rt_rnf_last_failure;

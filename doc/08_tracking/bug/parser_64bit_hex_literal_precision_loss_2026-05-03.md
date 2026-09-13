@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: RESOLVED (already fixed). The lexer at `src/compiler_rust/parser/src/lexer/numbers.rs:57-64`
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Parser: 64-bit hex literals lose precision (silent truncation)
 
 Status: RESOLVED (already fixed). The lexer at `src/compiler_rust/parser/src/lexer/numbers.rs:57-64`

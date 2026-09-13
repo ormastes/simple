@@ -1,6 +1,11 @@
 # SimpleOS nvme checker: multi-device preflight mis-flagged as duplicate field
 
-**Status:** FIXED
+## Closed 2026-09-13 — ordering fix is in the tree: device-count check now precedes duplicate-field
+
+- **inferred** `src/app/simpleos_nvme_serial_check/main.spl:434-436` shows `if _preflight_device_count(...) > 1: return "physical-nvme-preflight-multiple-devices"` executing BEFORE `_preflight_duplicate_field_reason(...)`, which is exactly the ordering the entry's root cause required; line 433 carries the explanatory comment.
+- **inferred** The checker's own spec was not re-run: `bin/simple test` is unusable on this Windows host (empty `Compilation failed:` on scratch specs; outer-bound timeout on a repo spec).
+
+**Status:** Closed (fixed) 2026-09-13
 **Found:** 2026-06-29 (noise sweep — simpleos_nvme_serial_check_spec)
 **Area:** app / SimpleOS nvme serial checker (`src/app/simpleos_nvme_serial_check/main.spl`)
 

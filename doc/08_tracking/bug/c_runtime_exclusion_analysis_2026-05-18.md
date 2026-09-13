@@ -1,6 +1,35 @@
+## Closed 2026-09-13 — superseded (STATIC / INFERRED, not re-measured)
+
+This is a removal audit, not a defect, and its last live blocker has been
+transferred to a tracked owner decision. Checked 2026-09-13 by file existence
+and by reading the current todo DB:
+
+- every C file listed under "Removed (zero callers)" is recorded deleted in the
+  body with a dated reason; nothing in that table needs further action
+- `hosted_cocoa.c` / `hosted_win32.c` — already closed in-body 2026-05-30 as
+  stale unbuilt duplicates. Both files are still on disk but remain unbuilt; the
+  active hosted ABI resolves through the Rust `spl_hosted_runtime` crate
+- `runtime.c` — present, and still bootstrap-only exactly as described. Its
+  removal is gated on a build-system flag, which is build work, not a bug
+- `runtime_db.c` — present. This was the audit's one hard blocker ("cannot
+  remove without a pure-Simple or Rust SQLite replacement"). That question is no
+  longer open here: it is owned by **todo 285** (`doc/08_tracking/todo/todo_db.sdn:287`,
+  P1, runtime), under the repo's "No external SQLite" directive — `rt_sqlite_*`
+  (24 symbols) must be backed by Simple's embedded engine
+  (`src/lib/nogc_sync_mut/db/dbfs_engine/`), and `runtime_sqlite.c` is explicitly
+  called out there as a C wrapper over the real library whose fate (delete / keep
+  for a non-bootstrap lane / reimplement) is an owner decision
+
+Nothing actionable remains in this entry that is not already tracked elsewhere,
+so it is closed as superseded rather than left open as a duplicate of todo 285.
+No measurement was taken: this host is Windows x86_64 and the audit's evidence
+is link-time symbol analysis on a Linux build lane.
+
+---
+
 # C Runtime Exclusion Analysis
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Status: Open — audit still tracks removable C runtime candidates and blocked removals.
 
 **Date:** 2026-05-18
 **Last audited:** 2026-05-30 (follow-up pass — hosted_cocoa/hosted_win32 classified as stale unbuilt C duplicates; active hosted ABI resolves through Rust stubs/real-gated crate)
@@ -264,6 +293,3 @@ symbols — they provide equivalent functionality at the stdlib layer.
 | random | `src/lib/common/random_pure.spl` | 21/21 |
 | time_utils | `src/lib/common/time_utils.spl` | 53/53 |
 | audio_effects | `src/lib/common/audio_effects.spl` | 7/7 |
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

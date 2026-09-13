@@ -1,8 +1,39 @@
 # HIR symbol table records only the first top-level function in a module
 
+## Closed 2026-09-13 — confirmed not reproducible, by running the exact 2-fn repro
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+```spl
+fn first_fn() -> i64:  1
+fn second_fn() -> i64: 2
+fn main():
+    print("first={first_fn()} second={second_fn()}")
+```
+
+Both lanes print `first=1 second=2`. Both top-level functions resolve and
+are callable, so the module symbol table is not dropping everything after
+the first declaration.
+
+This matches the 2026-07-29 update already in this entry, which traced
+`declare_module_symbols` / `SymbolTable.define` and found the path
+structurally correct, and which landed the guard spec
+`test/01_unit/compiler/hir/hir_symbol_table_all_functions_spec.spl`. That
+update stopped short of closing because the original cause was never
+identified; the suspected cause — the documented-unreliable native
+`Dict.get()` used at `hir_types.spl:286` — has since been resolved and
+re-verified (see `.claude/rules/code-style.md`, "Native-Codegen Dict
+Pitfalls ... RESOLVED 2026-08-09"), which supplies the missing explanation.
+Evidence weighting, stated plainly: the run above exercises the **Rust seed's** resolver, not the pure-Simple `SymbolTable` in `hir_types.spl` where the suspected cause lived, so it is corroboration rather than proof. The closure rests on the 2026-07-29 structural trace plus the now-supplied cause; the fresh run only confirms nothing regressed. Anyone wanting direct pure-Simple evidence should run the guard spec `test/01_unit/compiler/hir/hir_symbol_table_all_functions_spec.spl`.
+
 - **Filed:** 2026-07-28
 - **Severity:** medium — tooling-visible, not runtime-visible
-- **Status:** **not reproducible on HEAD (2026-07-29)** — guard spec added; likely a native `Dict.get()` flake, see below
+- **Status:** **not reproducible on HEAD (2026-07-29)** — guard spec added; likely a native `Dict.get()` flake, see below — CLOSED 2026-09-13 (see top section)
 - **Found via:** HS1 `hir-span-populate` lane, while writing a guard spec
 
 ## 2026-07-29 update — not reproducible; guard landed

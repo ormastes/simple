@@ -1,7 +1,13 @@
 # BUG: seed interpreter poisons cross-module struct field access to `Option` under a broad import closure
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — Does not reproduce: the broad-import closure type-checks and runs
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple run examples/06_io/ui/responsive_showcase_gui.spl` — the exact app named in the report — compiles and begins executing. It ends only at the harness's own `error: example timed out after 10s` (a GUI event loop), never at `semantic: undefined field: unknown property or method 'kind' on Option`. The loop element over `[DrawCmd]` is typed correctly again.
+- **inferred**: the entry pins the regression to a Rust seed built 2026-06-13 14:57 and absent from the 2026-06-06 macOS deploy — a narrow seed window, long superseded by the v1.0.0-rc.1 seed deployed here.
+- Caveat: measured on the Windows seed, not the macOS `aarch64-apple-darwin-macho` build the gate ran on, and the CPU/Metal `check-responsive-showcase-evidence` lanes were not re-run.
 
 - **ID:** `seed_crossmodule_struct_field_option_poison`
+- **Status:** CLOSED 2026-09-13 (does not reproduce)
 - **Severity:** P1 (false-RED on a green GUI gate; blocks any `run --mode=interpreter` app that
   imports the engine2d CPU backend + the widget builder + draw-cmd projector together)
 - **Found:** 2026-06-14, `check-responsive-showcase-evidence` CPU + Metal lanes.
@@ -120,6 +126,3 @@ tests; the 190 crate-wide failures are pre-existing, in `value::matches_type`, r
 selection and module path-resolution — subsystems this change never touches). NOTE: a full 3-stage
 bootstrap was NOT run (interpreter-only change; disk-constrained env) — run `bin/simple build
 bootstrap` to fully certify.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

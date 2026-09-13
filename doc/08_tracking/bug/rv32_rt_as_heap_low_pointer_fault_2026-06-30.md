@@ -1,9 +1,15 @@
 # rv32 OS boot hang: rt_as_heap low-pointer load fault in early boot (FIXED)
 
+## Closed 2026-09-13 — crash class already fixed; residual is a separate representation question
+
+- **inferred** The entry's own `**Status:** FIXED (the crash class)` records the repair in `freestanding_runtime.c` / `baremetal_stubs.c`.
+- **inferred** Not re-measured: booting `build/os/simpleos_riscv32.elf` under QEMU requires the Linux RISC-V lane, unavailable on this Windows host.
+- **inferred** The remaining "upstream value-representation question" noted in the body is a distinct follow-up, not this crash; it should be filed separately if still wanted.
+
 **Date:** 2026-06-30
 **Area:** freestanding RISC-V runtime (`src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`, shared by rv32 via `baremetal_stubs.c`)
 **Severity:** high — silently hung the **entire** rv32 OS boot before heap/services init.
-**Status:** FIXED (the crash class). One upstream value-representation question remains (below).
+**Status:** Closed (fixed, crash class) 2026-09-13. One upstream value-representation question remains (below).
 
 ## Symptom
 

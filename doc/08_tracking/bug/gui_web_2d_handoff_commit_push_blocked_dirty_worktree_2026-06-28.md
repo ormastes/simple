@@ -1,6 +1,9 @@
 # GUI/Web/2D Handoff Commit Push Blocked By Dirty Worktree
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — the blocked commit landed on origin/main
+- **measured**: `git log --all --grep=...handoff contract` finds `5efec791397` (2026-06-28) and `git merge-base --is-ancestor 5efec791397 origin/main` reports ON_MAIN.
+- **measured**: the jj revision this entry names, `9396eebc3b79`, is not a valid object here (`git cat-file -t` -> "Not a valid object name") — it was rewritten into the landed sha above.
+- **inferred**: the blocker was transient worktree state in a session that no longer exists, and the landing policy is now PR-only (.claude/rules/vcs.md, ruleset since 2026-09-05), superseding the sync file-count guard path described here.
 
 Date: 2026-06-28
 
@@ -86,6 +89,3 @@ Vulkan/RenderDoc, macOS Metal/Xcode GPU Capture, Windows D3D12/PIX, iOS
 Tauri/WKWebView Metal, Android Tauri/WebView Vulkan, retained 4K/8K current
 source performance, full HTML/CSS inventory, production GUI/Web parity, and
 cross-platform freshness.
-
-## Triage 2026-09-12
-Point-in-time VCS/push state (jj revision pkmpz/9396eebc3b79) is not re-testable this far out; older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

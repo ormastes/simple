@@ -1,8 +1,16 @@
 # Bug: interpreter "Function 'str.bytes' not found"
 
+## Closed 2026-09-13 — `.bytes()` / `.chars()` present and correct
+
+- **measured** `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) on
+  `val s = "abc"; print(s.bytes().len()); print(s.chars().len())` prints `3` and `3`, exit 0.
+- **inferred** Entry status already read FIXED 2026-06-13 (JIT/AOT `.bytes()`/`.chars()`
+  added); this run confirms it on the currently deployed seed.
+
+
 **ID:** interpreter_str_bytes_missing_2026-06-12
 **Severity:** P2
-**Status:** FIXED 2026-06-13 (JIT/AOT `.bytes()`/`.chars()` added). Original
+Status: closed 2026-09-13 (was: **Status:** FIXED 2026-06-13 (JIT/AOT `.bytes()`/`.chars()` added). Original)
 interpreter symptom no longer reproduces (interpreter already handles `bytes`).
 **Date:** 2026-06-12
 

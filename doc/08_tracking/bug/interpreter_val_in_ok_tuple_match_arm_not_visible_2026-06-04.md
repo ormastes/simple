@@ -1,6 +1,13 @@
 # Bug: `val` declared inside an `Ok((a, b))` tuple-match arm is not visible later in the same arm
 
-Status: Fixed (2026-06-12, commit 964a30ebe86)
+## Closed 2026-09-13 — Does not reproduce: a `val` bound inside an `Ok((a, b))` arm is visible
+
+- **measured** Ran the minimal shape as a program on the Rust seed (`v1.0.0-rc.1`): `match get(): Ok((a, b)): val joined = a + b; print(joined)` over `Result<(text, text), text>` printed `xy` — no "not found" error.
+- **measured** No JIT bailout or semantic diagnostic appeared in the run output.
+- **inferred** The entry already recorded `Fixed (2026-06-12)`; the run above re-confirms it on the current binary. Executed via `bin/simple run`, not inside a spec `it` block, because `bin/simple test` is unusable on this host.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 **Date:** 2026-06-04
 **Area:** Interpreter, pattern-match arm scoping (SPipe `it` blocks)

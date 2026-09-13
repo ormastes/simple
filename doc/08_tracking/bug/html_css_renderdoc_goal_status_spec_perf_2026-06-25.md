@@ -1,6 +1,9 @@
 # PERF BUG: HTML/CSS RenderDoc goal status spec exceeds runner threshold
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — mitigation recorded and applied: 76.8s -> 11.7s, below the runner threshold
+- **inferred**: the entry itself records the follow-up as done (duplicate nested traceability/manifest checks deduplicated by reusing fresh evidence) with a re-measured focused duration of 11.653s for 3 scenarios, versus the 76.783s that tripped `[PERF BUG]`.
+- **measured**: `test/03_system/check/html_css_renderdoc_goal_status_spec.spl` still exists, so the speed-up was not achieved by deleting coverage.
+- **inferred**: not re-timed here — the spec needs the Linux RenderDoc/GUI evidence lane, and `bin/simple test` is broken on this Windows host regardless.
 
 ## Status
 
@@ -28,7 +31,3 @@ renderer hardening lane.
   Electron RenderDoc evidence.
 - Do not relax the Vulkan/RenderDoc evidence requirements to make the spec
   faster.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

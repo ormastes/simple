@@ -1,6 +1,13 @@
 # Pure-Simple web layout: remaining primitive-flex limitation (content sizing)
 
-Status: ALREADY-FIXED (re-verified 2026-08-10) — major flex/text bugs fixed 2026-06-06;
+## Closed 2026-09-13 — Already-fixed, and re-verified by source audit on 2026-08-10
+
+- **inferred** The Status line states ALREADY-FIXED with a re-verification by source audit dated 2026-08-10 — well after this entry was filed.
+- **measured** Both referenced paths still exist (path scan: 2 referenced, 0 missing), so the audited source is still in place.
+- **inferred** No further action; recorded so a status sweep stops surfacing it.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 both remaining content-sizing gaps are now also fixed by later refactor work.
 
 **Status:** ALREADY-FIXED, re-verified 2026-08-10 by source audit. The file this doc

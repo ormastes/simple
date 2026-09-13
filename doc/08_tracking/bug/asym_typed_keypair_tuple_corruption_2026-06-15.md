@@ -1,9 +1,14 @@
 # Bug: asym_typed_keypair — tuple-element corruption risk on cross-module return
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — Does not reproduce: cross-module tuple elements survive intact
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): module A returns `([u8], [u8])` as `([1u8, 2u8], [3u8, 4u8])`; module B accesses `k.0[0] k.0[1] k.1[0] k.1[1]` and prints `1 2 3 4`. No corruption at the cross-module tuple-element accessor.
+- **inferred**: the entry was filed as a "corruption risk" with a workaround already applied and no live crash, referencing `feedback_tuple4_element_corruption.md`. With the accessor now correct, the `Ed25519KeyPair` wrapper in `asym.spl` is optional simplification, not a defect.
+- Deliberately NOT done here: removing that wrapper. It is a public signature change in `src/lib`, outside this triage's remit, and the entry itself frames it as a follow-up.
 
 **ID:** asym_typed_keypair_tuple_corruption_2026-06-15
 **Date:** 2026-06-15
-**Severity:** Workaround applied — no current crash
+**Status:** CLOSED 2026-09-13 (does not reproduce). **Severity:** Workaround applied — no current crash
 
 ## Summary
 
@@ -24,6 +29,3 @@ same module as the core call — so the corruption window is closed.
 Fix the interpreter tuple-element accessor to correctly handle cross-module
 tuple return; then `Ed25519KeyPair` can be removed and the function signature
 simplified to return `(SecretKey, PublicKey)` directly.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

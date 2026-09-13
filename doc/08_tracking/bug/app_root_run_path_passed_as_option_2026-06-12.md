@@ -1,7 +1,15 @@
 # Bug: app root `run src/app/main.spl` receives its own script path as an option (stage4)
 
+## Closed 2026-09-13 — resolved 2026-06-14 in-entry; CLI path handling verified working
+
+- **inferred** Entry status: resolved (2026-06-14).
+- **measured** `bin/simple run <absolute path>.spl` and `bin/simple compile <path> -o <path>`
+  both accept positional paths correctly on this host (many repros executed today, including
+  Windows drive-letter absolute paths) — the path-parsed-as-option failure does not reproduce.
+
+
 Date: 2026-06-12
-Status: resolved (2026-06-14)
+Status: closed 2026-09-13 (was: Status: resolved (2026-06-14))
 Severity: medium (blocks `--dynsmf-status` evidence path; 2 integration its red)
 
 ## Resolution (2026-06-14)

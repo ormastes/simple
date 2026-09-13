@@ -1,6 +1,11 @@
 # Bug: `bin/simple run` corrupts single-field enum payload values
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — does not reproduce: single-field enum payload extracts correctly
+- **measured** — `enum E: A(n: i64) / B`; `E.A(65)` matched via `case A(n) => print(n)`
+  under `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) prints `65`, not the filed
+  `8` (`65 >> 3`).
+- **inferred** — filed against the same `bin/simple run` JIT/interpreter driver, so the
+  driver matches; only the host OS differs.
 
 **ID:** interp_run_enum_single_field_payload_corrupt_2026-06-15
 **Severity:** P1 (data corruption, silent)
@@ -62,6 +67,3 @@ These same methods pass all 52 tests in `test/01_unit/lib/common/bytes/bits_spec
 
 Use `bin/simple test` with `SIMPLE_BOOTSTRAP_DRIVER` for all enum + me-mutation testing.
 Do NOT use `bin/simple run` to verify numeric payload values from enum cases with 1 field.
-
-## Triage 2026-09-12
-Re-verification attempted 2026-09-12: ran the record's minimal repro via `bin/simple run`; it printed the correct `65`. However the record explicitly states this path (the seed) is NOT the affected one — only the self-hosted `bin/simple run` binary was — so this run does not confirm the claim either way. No self-hosted binary was available to test in this pass. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

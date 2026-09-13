@@ -1,9 +1,14 @@
 # Class constructor: out-of-declaration-order named args drop fields
 
+## Closed 2026-09-13 — out-of-order named args bind to the correct fields
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's own fence prints `out-of-order named args -> x=1 y=2 z=3 (expected 1 2 3)` — the dropped/zeroed field is gone.
+
 **Date:** 2026-06-30
 **Severity:** medium
 **Component:** compiler/interpreter (class literal construction with named args)
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/common/privilege/store_spec.spl` now PASSes)
+**Status:** Closed (fixed, execution-verified) 2026-09-13
 
 ## Summary
 
@@ -99,6 +104,3 @@ Every field lands on its declared name. No field is dropped.
 Scope: the **Rust seed's** interpreter lane. The pure-Simple interpreter
 (`test_interp.spl`, the file the work package attributed this row to) was not
 separately measured.
-
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/lib/common/privilege/store_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
