@@ -350,3 +350,7 @@ being small and well-specified. Whoever owns that path should apply it; it is
 the single highest-leverage item in this triage (it unmasks 25 of 135 failures).
 **Not proven:** the remaining 129 failures were not re-run (`cargo test` needs
 an isolated `CARGO_TARGET_DIR` and competes with the live bootstrap).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: Rust seed (cargo test -p simple-compiler --lib), needs a seed rebuild to re-run. No change made.
