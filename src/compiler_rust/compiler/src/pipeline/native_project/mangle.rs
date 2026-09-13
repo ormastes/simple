@@ -143,26 +143,12 @@ pub(crate) fn qualify_enum_runtime_names(
     // hash("pkg.owner.Mixed") and the check expects hash("Mixed"): every arm
     // of every typed enum `match` fails and control falls to the last arm
     // (macOS Stage 2 site 18: `BackendKind.to_text()` returned the wrong arm, so
-    // the K1 backend-table validator refused the composition). Route the
-    // folded id back through the SAME `qualify` the ctor uses; ids 0 and 1 are
-    // the reserved Result/Option lanes and stay untouched.
-    let mut bare_enum_ids: std::collections::HashMap<u32, Option<String>> = std::collections::HashMap::new();
-    for bare in known_enums.iter().chain(local_enums.iter()) {
-        let id = crate::codegen::shared::enum_runtime_type_id(bare);
-        if id <= 1 {
-            continue;
-        }
-        match bare_enum_ids.entry(id) {
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(Some(bare.clone()));
-            }
-            std::collections::hash_map::Entry::Occupied(mut slot) => {
-                if slot.get().as_deref() != Some(bare.as_str()) {
-                    slot.insert(None);
-                }
-            }
-        }
-    }
+    // the K1 backend-table validator refused the composition; also site 16,
+    // BOOT-16). The rewrite for `rt_enum_check_variant`'s folded id lives below,
+    // after this pass finishes qualifying constructors -- see `id_remap` /
+    // `requalify_enum_check_variant_ids`, which inserts a fresh `ConstInt`
+    // rather than mutating a shared constant vreg in place (a bare id can feed
+    // more than one call).
 
     for func in &mut mir.functions {
         for block in &mut func.blocks {
@@ -188,46 +174,100 @@ pub(crate) fn qualify_enum_runtime_names(
                 }
             }
         }
-        if !bare_enum_ids.is_empty() {
-            let mut const_ints: std::collections::HashMap<crate::mir::VReg, i64> = std::collections::HashMap::new();
-            for block in &func.blocks {
-                for inst in &block.instructions {
-                    if let MirInst::ConstInt { dest, value } = inst {
-                        const_ints.insert(*dest, *value);
-                    }
-                }
-            }
-            let mut rewrites: std::collections::HashMap<crate::mir::VReg, i64> = std::collections::HashMap::new();
-            for block in &func.blocks {
-                for inst in &block.instructions {
-                    let MirInst::Call { target, args, .. } = inst else { continue };
-                    if target.name() != "rt_enum_check_variant" || args.len() != 3 {
-                        continue;
-                    }
-                    let Some(&folded) = const_ints.get(&args[1]) else { continue };
-                    let Ok(folded_id) = u32::try_from(folded) else { continue };
-                    let Some(Some(bare)) = bare_enum_ids.get(&folded_id) else { continue };
-                    let qualified = qualify(bare)?;
-                    let qualified_id = i64::from(crate::codegen::shared::enum_runtime_type_id(&qualified));
-                    if qualified_id != folded {
-                        rewrites.insert(args[1], qualified_id);
-                    }
-                }
-            }
-            if !rewrites.is_empty() {
-                for block in &mut func.blocks {
-                    for inst in &mut block.instructions {
-                        if let MirInst::ConstInt { dest, value } = inst {
-                            if let Some(new_value) = rewrites.get(dest) {
-                                *value = *new_value;
-                            }
-                        }
-                    }
+    }
+
+    // The match side never reaches the rewrite above. `rt_enum_check_variant`
+    // carries its enum identity as an INTEGER, hashed from the BARE declared
+    // name back in HIR lowering (`hir/lower/expr/control.rs`:
+    // `enum_runtime_id_for_type` / `enum_runtime_id_for_pattern`, plus the
+    // `is_ok`/`is_err` shortcut in `mir/lower/lowering_expr_call.rs`), long
+    // before this pass exists to qualify anything. Construction is qualified
+    // here and only then hashed by codegen, so the two sides named DIFFERENT
+    // identities for the same enum: `rid("<module>.Kind")` vs `rid("Kind")`.
+    // `rt_enum_check_variant` answers 0 on an id mismatch, so in a natively
+    // compiled binary no match arm ran at all — site 16, the cause of
+    // `BackendKind.to_text()` returning garbage and of the K1 table refusal.
+    // Route both through the one canonical runtime name by remapping the baked
+    // constant through the same `qualify` closure the constructors took.
+    let mut id_remap: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for bare in local_enums.iter().chain(known_enums.iter()) {
+        let Ok(qualified) = qualify(bare) else {
+            continue;
+        };
+        if &qualified == bare {
+            continue;
+        }
+        let from = i64::from(crate::codegen::shared::enum_runtime_type_id(bare));
+        let to = i64::from(crate::codegen::shared::enum_runtime_type_id(&qualified));
+        // Identity 0/1 are the reserved Result/Option lane and 0 doubles as the
+        // "erased subject, discriminant only" marker. Never rewrite those.
+        if from != to && from > 1 {
+            if let Some(existing) = id_remap.insert(from, to) {
+                if existing != to {
+                    // Two bare names hashed onto one id and disagree on the
+                    // qualified answer. Rewriting either way could be wrong, so
+                    // leave the constant alone rather than guess.
+                    id_remap.remove(&from);
                 }
             }
         }
     }
+    if !id_remap.is_empty() {
+        for func in &mut mir.functions {
+            requalify_enum_check_variant_ids(func, &id_remap);
+        }
+    }
     Ok(())
+}
+
+/// Repoint every `rt_enum_check_variant` enum-id operand at the qualified
+/// identity its constructor uses.
+///
+/// A fresh `ConstInt` is inserted before the call rather than the existing one
+/// being mutated in place: the same constant vreg can legitimately feed other
+/// operands, and rewriting it there would corrupt them.
+fn requalify_enum_check_variant_ids(
+    func: &mut crate::mir::MirFunction,
+    id_remap: &std::collections::HashMap<i64, i64>,
+) -> usize {
+    use crate::mir::MirInst;
+
+    let mut consts: std::collections::HashMap<crate::mir::VReg, i64> = std::collections::HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let MirInst::ConstInt { dest, value } = inst {
+                consts.insert(*dest, *value);
+            }
+        }
+    }
+
+    let mut pending: Vec<(usize, usize, i64)> = Vec::new();
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        for (inst_idx, inst) in block.instructions.iter().enumerate() {
+            let MirInst::Call { target, args, .. } = inst else {
+                continue;
+            };
+            if target.name() != "rt_enum_check_variant" || args.len() < 2 {
+                continue;
+            }
+            let Some(qualified) = consts.get(&args[1]).and_then(|current| id_remap.get(current)) else {
+                continue;
+            };
+            pending.push((block_idx, inst_idx, *qualified));
+        }
+    }
+
+    let rewritten = pending.len();
+    // Descending order so an insertion never shifts a later target's index.
+    for (block_idx, inst_idx, value) in pending.into_iter().rev() {
+        let dest = func.new_vreg();
+        let block = &mut func.blocks[block_idx];
+        block.instructions.insert(inst_idx, MirInst::ConstInt { dest, value });
+        if let MirInst::Call { args, .. } = &mut block.instructions[inst_idx + 1] {
+            args[1] = dest;
+        }
+    }
+    rewritten
 }
 
 /// The Optional/Result helper methods, which codegen lowers as builtins.
@@ -1692,5 +1732,126 @@ mod tests {
         }
         assert!(!is_enum_helper_method("len"));
         assert!(!is_enum_helper_method("to_string"));
+    }
+}
+
+/// Site 16: construction and match must name the SAME enum runtime identity.
+///
+/// The construction side (`MirInst::EnumUnit` / `EnumWith`) is qualified by
+/// `qualify_enum_runtime_names` above and only then hashed by codegen, so its
+/// id is `rid("<module>.Kind")`. The match side bakes `rid("Kind")` — the BARE
+/// declared name — as an integer constant back in HIR lowering
+/// (`hir/lower/expr/control.rs::enum_runtime_id_for_type` /
+/// `enum_runtime_id_for_pattern`), which this pass never used to see because it
+/// is an integer by the time MIR exists. `rt_enum_check_variant` answers 0 on an
+/// id mismatch, so in a natively compiled binary NO match arm ran.
+#[cfg(test)]
+mod enum_identity_agreement_tests {
+    use crate::mir::{MirInst, MirModule};
+    use std::collections::HashMap;
+
+    const SOURCE: &str = "enum Kind:\n    Cranelift\n    Interpreter\n    Llvm\n\nfn num3(k: Kind) -> i64:\n    match k:\n        case Cranelift: 11\n        case Interpreter: 22\n        case Llvm: 33\n\nfn main():\n    print \"{num3(Kind.Cranelift)}\"\n";
+
+    fn lower_and_qualify(runtime_module_name: &str) -> MirModule {
+        let mut parser = simple_parser::Parser::new(SOURCE);
+        let parsed = parser.parse().expect("fixture must parse");
+        let hir = crate::hir::lower::lower(&parsed).expect("fixture must lower to HIR");
+        let mut mir = crate::mir::lower_to_mir(&hir).expect("fixture must lower to MIR");
+        super::qualify_enum_runtime_names(
+            &mut mir,
+            runtime_module_name,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("qualification must succeed");
+        mir
+    }
+
+    /// Every id codegen will bake for a construction of an enum.
+    fn construction_ids(mir: &MirModule) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for func in &mir.functions {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let enum_name = match inst {
+                        MirInst::EnumUnit { enum_name, .. } | MirInst::EnumWith { enum_name, .. } => enum_name,
+                        _ => continue,
+                    };
+                    ids.push(i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
+                }
+            }
+        }
+        ids
+    }
+
+    /// Every id a `rt_enum_check_variant` call will compare against.
+    fn check_ids(mir: &MirModule) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for func in &mir.functions {
+            let mut consts = HashMap::new();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let MirInst::ConstInt { dest, value } = inst {
+                        consts.insert(*dest, *value);
+                    }
+                }
+            }
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let MirInst::Call { target, args, .. } = inst else {
+                        continue;
+                    };
+                    if target.name() != "rt_enum_check_variant" || args.len() < 2 {
+                        continue;
+                    }
+                    ids.push(
+                        *consts
+                            .get(&args[1])
+                            .unwrap_or_else(|| panic!("check-variant enum id operand {:?} is not a ConstInt", args[1])),
+                    );
+                }
+            }
+        }
+        ids
+    }
+
+    fn agree(runtime_module_name: &str) {
+        let mir = lower_and_qualify(runtime_module_name);
+        let built = construction_ids(&mir);
+        let checked = check_ids(&mir);
+        // Vacuity guards: a run that found no construction or no match test
+        // proves nothing and must fail rather than pass silently.
+        assert!(!built.is_empty(), "fixture produced no enum construction under {runtime_module_name}");
+        assert!(!checked.is_empty(), "fixture produced no rt_enum_check_variant under {runtime_module_name}");
+        let built_unique: std::collections::BTreeSet<i64> = built.iter().copied().collect();
+        let checked_unique: std::collections::BTreeSet<i64> = checked.iter().copied().collect();
+        assert_eq!(
+            built_unique, checked_unique,
+            "construction and match must name one runtime identity under {runtime_module_name}"
+        );
+    }
+
+    #[test]
+    fn construction_and_match_agree_on_the_enum_runtime_id() {
+        agree("aa.zz");
+        agree("bbbb.zz");
+    }
+
+    /// The identity is module-qualified by design (the declaring-module name is
+    /// what `imports.rs` registers, and the collision checks depend on it), so
+    /// the shared id legitimately differs between two module names. What must
+    /// never differ is construction vs match WITHIN one build.
+    #[test]
+    fn the_shared_id_follows_the_declaring_module_name() {
+        let aa = check_ids(&lower_and_qualify("aa.zz"));
+        let bbbb = check_ids(&lower_and_qualify("bbbb.zz"));
+        assert!(!aa.is_empty() && !bbbb.is_empty(), "both runs must produce match tests");
+        assert_ne!(aa[0], bbbb[0], "two module names must not collide onto one id");
+        assert_eq!(
+            aa[0],
+            i64::from(crate::codegen::shared::enum_runtime_type_id("aa.zz.Kind")),
+            "the shared id must be the declaring-module-qualified name's id"
+        );
     }
 }
