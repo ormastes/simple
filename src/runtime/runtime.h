@@ -855,6 +855,8 @@ int64_t  rt_gpu_atomic_xchg_i64(int64_t a, int64_t b);  /* NAMED TRAP */
 int64_t  rt_gpu_atomic_cmpxchg_i64(int64_t a, int64_t b, int64_t c);  /* NAMED TRAP */
 int8_t   rt_is_none(int64_t value);
 int8_t   rt_is_some(int64_t value);
+/* `.?` presence: nil/None or an EMPTY array/dict/string is absent. */
+int8_t   rt_is_present(int64_t value);
 double   rt_math_pow(double base, double exponent);
 int64_t  rt_dict_new(int64_t cap_hint);
 int64_t  rt_dict_get(int64_t dict, int64_t key);
