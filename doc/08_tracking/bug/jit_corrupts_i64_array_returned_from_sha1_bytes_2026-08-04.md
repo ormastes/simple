@@ -231,3 +231,8 @@ sink under the JIT, so `(5,6).get(0)` binds as `40`. That IS "a raw tagged word
 read as if already untagged", it is minimal, and `sha1`'s context type is
 `(list, list, i64, i64)` read via `ctx.get(2)` / `ctx.get(3)`. It is a strong
 candidate contributor here and is filed separately with a 5-line reproducer.
+
+## Triage 2026-09-13
+Reconfirmed: JIT tag-corruption defect on i64 arrays returned from
+sha1_bytes, Rust-seed/Cranelift codegen issue. Out of scope for a
+pure-Simple lane. Left OPEN, no code change attempted.
