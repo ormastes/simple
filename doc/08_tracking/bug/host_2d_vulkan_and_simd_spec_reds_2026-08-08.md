@@ -118,3 +118,8 @@ cases added by this task, all passing).
 **Unblock condition:** update the spec's `file_read()` target(s) to the
 current file(s) containing the MIR dispatch string for
 `rt_engine2d_simd_fill_span_u32` / `rt_engine2d_simd_copy_span_u32`.
+
+## Triage 2026-09-13
+Reconfirmed: this is a multi-item catalog of host 2D Vulkan/SIMD spec reds
+found during primitive-rendering verification, mixed severity, not a
+single fixable defect. Left as-is, no code change attempted.
