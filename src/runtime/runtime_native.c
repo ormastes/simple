@@ -6988,11 +6988,46 @@ SplArray* rt_array_new(int64_t cap) {
 }
 
 SplArray* rt_array_new_uninit(int64_t cap) {
-    return rt_core_array_new_fill(cap, 0, 0);
+    /* `cap` elements that EXIST but hold undefined values — that is what
+       "uninit" means to every caller, all of which allocate n, fill n and
+       return. `rt_core_array_new_fill` only sets `cap`; `len` stays 0 from the
+       calloc of the header, so without this the array comes back with correct
+       data and a length of ZERO.
+       That is not a crash, which is why it survived: a Simple caller checks
+       `span.len() != n`, reads it as "extern not backed", and silently falls
+       back to the scalar path. Measured in a native binary, EVERY
+       span-returning C kernel was dead this way — the DB bitmap ops, the glyph
+       mask blend, and the soft-shadow coverage blend — while the in-place
+       kernels next to them worked fine and made the lane look healthy.
+       `rt_array_repeat` already sets `len` by hand after the same call; this
+       makes the constructor itself honest instead of requiring every caller to
+       remember. */
+    SplArray* a = rt_core_array_new_fill(cap, 0, 0);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (array) {
+        array->len = cap > 0 ? cap : 0;
+    }
+    return a;
 }
 
 SplArray* rt_array_new_with_cap_u64(int64_t cap) {
     return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
+}
+
+/* Is this array stored as PACKED BYTES rather than tagged int64 slots?
+ *
+ * `[u8]` takes the packed representation (RT_CORE_ARRAY_FLAG_BYTES); every
+ * other element type takes one tagged slot each. A kernel in another
+ * translation unit cannot see the flag, so it has to guess — and
+ * `rt_engine2d_blend_mask_span_u32` guessed "tagged slots" for its glyph mask,
+ * read packed bytes as int64 words, and blended every glyph pixel against
+ * garbage. It went unnoticed because the interpreter path uses the Rust twin,
+ * which unpacks correctly.
+ */
+int rt_array_is_byte_packed(SplArray* value) {
+    RtCoreArray* array = rt_core_array_ptr(value);
+    if (!array) return 0;
+    return (array->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
 }
 
 void rt_array_free(SplArray* value) {

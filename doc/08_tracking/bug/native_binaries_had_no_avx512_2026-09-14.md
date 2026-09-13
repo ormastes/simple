@@ -90,3 +90,68 @@ and is not yet true. What is now true: the toolchain-level blocker is
 understood and fixed for one kernel with exact-parity evidence, native-build
 works, and the remaining gap is a specific, named allocation defect rather than
 an unknown.
+
+## Resolved — all three native defects, with a gate
+
+The "still open" section above named one symptom (`rt_db_bitmap_and_u32`
+returning empty) and one hypothesis (in-place kernels work, allocating ones
+fail). The hypothesis was right and the cause was more general than the DB.
+
+**Defect 2 — `rt_array_new_uninit` never set `len`.** It calls
+`rt_core_array_new_fill`, which sets `cap` and leaves `len` at the calloc zero.
+So every kernel that allocates n, fills n and returns handed back an array with
+**correct data and a length of zero**. `rt_array_repeat` already set `len` by
+hand after the same call; nothing else did. All 7 callers are span kernels that
+want `len == cap`, so the constructor now sets it — the name means "n elements,
+values uninitialized".
+
+Measured across every allocating extern, before and after:
+
+    mask_span   len=0 -> 4
+    bitmap_and  len=0 -> 4
+    bitmap_and (limit=2) len=0 -> 2
+
+This was invisible because nothing failed. A Simple caller checks
+`span.len() != n`, reads the mismatch as "extern not backed", and falls back to
+scalar — the documented, correct fallback doing exactly its job over a bug.
+
+**Defect 3 — the glyph mask blend read packed bytes as tagged slots.** With the
+length fixed, the content check turned up **819 mismatches out of 1640** in the
+mask kernel while the DB and coverage kernels were exact. A `[u8]` is
+`RT_CORE_ARRAY_FLAG_BYTES` (packed) in the native runtime and one tagged int64
+slot per element in the boxed one; the C twin assumed slots unconditionally and
+blended every glyph pixel against garbage. The flag was private to
+`runtime_native.c`, so the kernel could not ask — hence a public
+`rt_array_is_byte_packed`, and the kernel now resolves the representation from
+the array instead of assuming it.
+
+After all three: **2460 values checked in a native binary, 0 mismatches, 7 zmm
+present.**
+
+### The gate
+
+`scripts/check/check-native-simd-kernels-real.shs`, driving
+`test/01_unit/check/native_simd_kernel_probe.spl`. It builds a real native
+binary, runs it, and checks CONTENT against oracles for the DB bitmap AND, the
+glyph mask blend and the soft-shadow coverage blend — then disassembles the
+binary and fails if it contains no zmm.
+
+Content, not length, is the point: an in-place kernel's failure path returns
+its input, so a length check cannot distinguish success from failure. That trap
+is why the percent blend looked healthy — `len=4` was returned by both the
+working and the failing path, and it took comparing `0xFF7F7F7F` against the
+input to tell them apart.
+
+Advisory in CI (`continue-on-error`): it needs a built seed and llvm-objdump
+and exits 2 without them, which as a blocking gate would fail every runner that
+has neither.
+
+### What is now true
+
+A shipped native binary carries real AVX-512 and its SIMD kernels return
+correct values. The DB bitmap path is AVX-512 accelerated end to end — kernel
+present, reached by the caller, and bit-exact over 40 lengths. The glyph and
+soft-shadow paths are correct and reached; their kernels remain
+auto-vectorized rather than explicit-lane, so on a gcc link they are AVX2. The
+explicit-lane treatment given to the DB AND is owed to them next, and the gate
+above will show it the moment it lands.
