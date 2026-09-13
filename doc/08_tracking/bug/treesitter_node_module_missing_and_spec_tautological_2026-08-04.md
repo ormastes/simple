@@ -77,3 +77,11 @@ need a decision this lane cannot make alone:
    implementation goes red.
 
 Blocked on (1): the owner of `#PARSER-NODE-API-001` / "Phase 2.3".
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Confirmed unchanged: `find src/lib -iname '*treesitter_node*'` still returns
+nothing; `std.parser.treesitter_node` still does not exist. Explicitly
+blocked on an owner decision (implement the API or delete the spec) that
+this lane cannot make unilaterally, per the record's own "Why not fixed
+now". Left OPEN, unchanged.
