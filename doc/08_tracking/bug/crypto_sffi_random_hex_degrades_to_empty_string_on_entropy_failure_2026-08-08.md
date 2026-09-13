@@ -99,3 +99,20 @@ no longer contains `rt_random_hex(length) ?? ""`. Line 366 now reads
 states "FAILS CLOSED. This used to be `rt_random_hex(length) ?? ""`, which turned a
 ..." — i.e. the fail-open degradation is gone and the doc block records it.
 Closing.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane) — confirmed fixed and tested, CLOSED
+
+`random_hex`/`random_salt` now declare `-> text?` and route through
+`checked_entropy_hex` (`crypto_sffi.spl:74-82`). Ran both regression specs:
+
+```
+bin/simple test test/01_unit/lib/nogc_sync_mut/io/secure_entropy_hex_validator_spec.spl
+Results: 1 total, 1 passed, 0 failed
+bin/simple test test/01_unit/lib/nogc_sync_mut/io/crypto_sffi_entropy_fail_closed_spec.spl
+Results: 10 total, 10 passed, 0 failed
+```
+
+Status: CLOSED (2026-09-13) — verified fixed and tested green on
+`a6450c9d6f5` (`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 prefix
+`3d120a6f`). The top-of-file "CLAIMED-OFFHOST 2026-08-17" note is now moot —
+the fix already landed and is covered by regression specs.
