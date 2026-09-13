@@ -72,3 +72,26 @@ be pixel twins:
 
 Either way the number belongs somewhere enforceable; today it is measured by
 nothing.
+
+## RESOLVED 2026-09-13 — the twins were supposed to match, and now do
+
+Both questions above are answered by the code itself rather than by an owner
+decision: the CPU and Vulkan Engine2D backends ARE twins, and the divergence
+was a single deviating implementation.
+
+`backend_vulkan.spl:2917 draw_shadow_rect` painted a box-shadow as a flat
+alpha rect padded by `blur_r` plus a blur. Every other backend already
+delegated to the shared `emu_draw_shadow_rect`
+(`backend_emu_adv.spl:283`), whose own comment (:276-279) documents the
+flat-fill-then-blur shape as the *previous, wrong* implementation it replaced.
+Vulkan was the sole holdout; it now delegates to the same function.
+
+Measured after the fix with the same probes: `overview` at 160x90 goes
+**29.33% -> 0.00%** (4224 -> 0 differing pixels, max_delta 37 -> 0), and all 8
+catalog pages at 320x180 report 0 differing pixels.
+
+The budget this record asked for is now pinned in
+`catalog_vulkan_twin_spec.spl` (<= 0.5% of pixels, max_delta <= 8), with a
+device-free formula pin in
+`test/01_unit/lib/gpu/engine2d_shadow_rect_twin_formula_spec.spl`. Full
+measurement record: `doc/10_metrics/ui/engine2d_twin_parity_2026-09-13.md`.
