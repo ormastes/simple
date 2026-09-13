@@ -192,3 +192,67 @@ under gdb, let RSS climb to a few GB, interrupt, and walk the stack — and, giv
 first whether the allocation is another struct-copy shape: every `val` binding, field read and
 argument of a struct type allocates, so a copy inside a hot loop over modules or symbols would
 look exactly like this. See `dict_struct_key_identity_keyed_copied_key_misses_2026-09-13.md`.
+
+---
+
+## MEASURED CAUSE (BOOT-9, 2026-09-13) — `BuildGraph.topological_order` never returns
+
+Not inferred. The pinned candidate was launched UNDER gdb (`gdb -p` is refused
+here; harness `scratchpad/boot9/gdb9.sh`, log `gdb9.log`, RSS series
+`gdb9.rss`) on the gate's own fixture and env, and interrupted three times once
+VmRSS passed 6 GB (6 037 772 kB, 8 847 448 kB, 8 689 316 kB). All three stacks
+are IDENTICAL in frames and in depth — a runaway loop, not recursion:
+
+```
+#0  <hashbrown::map::HashMap<usize, ()>>::insert
+#1  <std::collections::hash::set::HashSet<usize>>::insert
+#2  simple_runtime::value::heap::register_heap_ptr
+#3  <simple_runtime::value::core::RuntimeValue>::from_heap_ptr
+#4  rt_tuple_new
+#5  compiler__driver__driver_build__parallel__BuildGraph.topological_order
+#6  compiler__driver__driver_build__parallel__ParallelBuilder.build
+#7  compiler__driver__driver_aot_native_output__CompilerDriver._compile_to_native_with_backend_session
+...
+#12 main
+```
+
+The return address in frame 5 is `0x381b400`, the instruction after
+`bl rt_tuple_new` at `0x381b3fc` — i.e. `stack = stack.push((node, true))`,
+reached through `visited[node] = true` (`rt_index_set` at `0x381b3e8`). Every
+allocated tuple is registered in the runtime's heap-pointer `HashSet`, which
+only grows; that set, not the tuples, is what turns the loop into 1.9 GB per
+45 s.
+
+The loop's only exit is `rt_is_some` on the stack ARRAY:
+
+```
+381b350: mov  x0, x23
+381b354: bl   3f10cbc <rt_is_some>
+381b36c: b.ne 381b2a8            ; dead: rt_is_some(array) is always true
+```
+
+Source: `while stack.?:`. `.?` on a collection receiver lowers to `rt_is_some`,
+which is true for any non-nil array including `[]`. Once the DFS drained, every
+iteration popped nil, re-pushed `(nil, true)` and grew `order` — forever. Full
+analysis, the cross-lane truth table and the census of the other
+collection-receiver `.?` sites:
+`dotq_on_empty_collection_reads_present_2026-09-13.md`.
+
+**Lane-independent, so it is cheap to reproduce without a bootstrap.** The seed
+`simple run` lane (sha256 `3d120a6f9ab5704b...`) on a 3-unit chain prints
+`units=3` and never prints the order (killed at 150 s; probe
+`scratchpad/boot9/probe/topo.spl`, RED log `scratchpad/boot9/red_topo.log`).
+After the fix the same probe answers `ORDER=0,1,2,`.
+
+## Fix
+
+`src/compiler/80.driver/driver_build/parallel.spl:285` — `while stack.?:` ->
+`while stack.len() > 0:`. Same DFS, same comparison, no design change. Spec
+`test/01_unit/compiler/driver/build_graph_topological_order_terminates_spec.spl`
+(RED `2 examples, 2 failures` -> GREEN `2 examples, 0 failures`). The
+behavioural example re-reads the source and refuses to EXECUTE the loop if the
+divergent spelling returns, so a regression fails loudly instead of hanging a
+suite; the structural example is the assertion in that case.
+
+The gate's `STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS` was NOT raised and must not
+be: 180 s was reporting a real defect.

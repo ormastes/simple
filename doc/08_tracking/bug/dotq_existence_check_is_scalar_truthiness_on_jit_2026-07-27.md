@@ -3,7 +3,12 @@
 - **Filed:** 2026-07-27
 - **Lane:** NILQ
 - **Severity:** High (silent wrong-branch; no diagnostic)
-- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+- **Status:** OPEN (2026-09-13) — reopened per this record's own instruction: a fresh
+  repro against the current seed exists for the empty-collection row, filed as
+  `dotq_on_empty_collection_reads_present_2026-09-13.md` (it diverges a `while coll.?:`
+  drain loop and was the Stage-2 admission blocker, bootstrap site 9). The other rows of
+  the truth table below are still un-re-verified; this reopen does not vouch for them.
+  (Was: CLOSED-STALE 2026-09-12: not re-verifiable from the record; reopen with a fresh repro.)
 - **Engines affected:** JIT / native default engine only. The interpreter is correct.
 
 ## Specification
