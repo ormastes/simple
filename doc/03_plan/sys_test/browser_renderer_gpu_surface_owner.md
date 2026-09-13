@@ -94,3 +94,57 @@ a display receipt assertion. No Chrome/C comparison is admitted by this plan.
 Run every criterion once on the final changed implementation, at most two
 focused repair cycles in this escalation. Static documentation checks do not
 replace production, device or SPipe execution.
+
+## Canonical Vulkan lifetime acceptance, 2026-09-14
+
+**Planned / TEST_BLOCKED**, not executed evidence. The
+[driver-owner migration](../../05_design/vulkan_canonical_driver_owner_migration.md)
+must implement the complete production cut before these cases can pass.
+The framebuffer-only candidate and its new test were removed. Existing
+`vulkan_session_release_identity_spec.spl` and
+`vulkan_session_release_teardown_spec.spl` construct positive fields and call
+`retain`; replace those fabricated-authority expectations with issued references
+or explicit rejection as part of the code migration.
+
+Implement focused lifecycle specs under `test/01_unit/lib/gpu/engine2d/` and
+production cases under `test/02_integration/rendering/`. A device-free adapter
+supplies controlled native outcomes to the same private owner transitions.
+Production must not export that adapter or caller-selected identity admission.
+
+| Case | Sequence and decisive assertion |
+|---|---|
+| Forgery | Set every public scalar positive without an issued record; validity/retain/allocation/command/release reject with zero native calls |
+| Retained copies | Init A, retain into B, copy A into C, release A; C is revoked, B operates, and pipelines remain until B and its resources release |
+| Duplicate release | Release the same reference/surface/command through copied values; at most one native release and unrelated references stay valid |
+| Exact framebuffer | Vary handle, width, height, bytes, usage including `0x10`, kind, owner epoch and reference/surface generations individually; reject before mutation |
+| ABA | Reuse the same native handle and slot after release; old lease cannot submit/free, while the new generation remains live |
+| Exhaustion | Fill each reference/surface/dependency table and exhaust generations/nonces; reject before allocation, never wrap or reuse an exhausted slot |
+| Partial init | Fail each shader/pipeline acquisition and cleanup result; release only acquired resources and retain every unresolved handle |
+| Failed release | Fail buffer/descriptor/pipeline release; dependent session remains pinned, its slot cannot recycle, and teardown success is not published |
+| Copy before record | Copy A to B with local command zero, record through A, close B; canonical pending work is observed and resources stay pinned |
+| Copy after record | Copy after recording, retire through A, flush/close B; no second native end/submit/discard or descriptor release |
+| All producers | Repeat both copy cases for primitive, image, packed font and unpacked font paths; the same canonical owner receives actual producer calls |
+| Pooled dependencies | Replace an atlas/image/parameter allocation while a recording reads it; old storage stays pinned and stale copies cannot free the replacement |
+| Two surfaces | Interleave A/B acquisitions and recording, close A, continue B; B retains its exact pools, pipelines, session and pending work |
+| Owner thread | Foreign-thread entry rejects before registry/native mutation; creating-thread handles remain usable |
+| Mutex failure | Failed lock performs no native action; failed unlock quarantines ownership and publishes no success |
+| Admission remains off | Exact managed framebuffer membership still leaves context/async false until the native port exists; no full DrawIR serialization on the unavailable path |
+
+The injected trace must distinguish allocation, recording, submit, compute
+completion, destruction and presenter release. Assert actual adapter calls and
+exact resource identities, not counters set by tests after no-op operations.
+Injection proves transitions only; it cannot admit a live Vulkan row.
+
+Reserve `step("Retain two managed Vulkan surfaces")`,
+`step("Copy a backend before and after recording")`,
+`step("Reject stale framebuffer and recording leases")`, and
+`step("Close only the canonical surface owner")`, with helpers
+`open_managed_vulkan_surface_pair`, `assert_managed_vulkan_lifetimes`, and
+`assert_vulkan_native_call_counts`. Unimplemented setup/provider branches must
+`fail(...)`. Generate a mirrored manual only through admitted SPipe execution.
+
+After device-free execution, run the same production paths on admitted Pure
+Simple and capture controlled output with binary/source identity. Native
+context, presenter and performance gates remain separate. Run each changed
+criterion once, at most three fix/check cycles for this unit. Source matching
+does not establish copy semantics, mutex behavior or native lifetime execution.

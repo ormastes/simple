@@ -75,3 +75,29 @@ No new sidecar owns a parallel scheduler or foreign-policy implementation.
 Rust remains background/reference work. Keep each new implementation file
 below 800 lines. The shared helpers in the existing system test plan remain
 reserved; no value-fixture test substitutes for their real provider path.
+
+## 2026-09-14 canonical Vulkan ownership cut
+
+Status: **implementation required**. Astra reviewed the recovered candidate
+after two Sol attempts, removed its unsafe wiring, and defined the
+[complete migration](../../05_design/vulkan_canonical_driver_owner_migration.md).
+Do not reopen the rejected framebuffer-table-only task.
+
+| Work package | Owner | Required output |
+|---|---|---|
+| Registry/lifecycle | Sol | Private module-global raw-mutex authority; issued reference/surface/recording handles; bounded generations and quarantine |
+| Production migration | Same Sol package | Session, backend, primitive/image helpers, both font paths, x86 wrapper, provider probe and resident arena consume that authority |
+| Focused tests | Same Sol package | Injected adapter over actual transitions, forged-authority rejection, copy-before/after-record and real admission mismatches |
+| Final review | Astra | All retain/release/native-call paths reviewed together; source PASS distinguished from runtime TEST_BLOCKED/PASS |
+| Merge | Root | Exact reviewed files only; preserve damaged directory and unrelated lanes; no async/performance done mark from documentation |
+
+The code migration and callers are one acceptance unit. Sidecars may inspect
+independently but cannot merge a framebuffer table ahead of recording/pool and
+retain migration. Maximum three implementation/check cycles. Reserve manual
+helper names `open_managed_vulkan_surface_pair`,
+`assert_managed_vulkan_lifetimes`, and `assert_vulkan_native_call_counts`;
+unimplemented helpers fail explicitly. Injection cannot mint production tokens.
+No admitted general Pure Simple test runner is currently known for this lane;
+the root bootstrap compiler receipt is insufficient. Rust remains background
+reference work. No new waits/readbacks or native ABI changes are part of this
+package. Native-context and presenter support require separate executable proof.
