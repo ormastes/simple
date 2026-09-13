@@ -366,3 +366,57 @@ atomic's initial value, the success code, and what an unresolved extern returns.
 Three states on one number is not a measurement. A diagnostic code space must
 make "I was never set" distinguishable from every real answer before its
 readout is worth anything.
+
+## 2026-09-13 (later) — the readout is now trustworthy, and it still says "read succeeded"
+
+The first diagnostic was a process-wide atomic. That is worthless here: the
+bootstrap reads with 24 jobs in flight, so a concurrent successful read on
+another thread overwrites the code before the failing caller reports it. It
+was made thread-local in both runtimes (Rust `thread_local!` Cell, C
+`__declspec(thread)`/`__thread`) precisely so its answer could be believed.
+
+The answer did not change:
+
+    AOT diagnostic wrote 29 bytes but is unreadable
+      (regular no-follow bounded file read returned nil (read succeeded))
+
+That line is emitted by `backend_aot_write_diagnostic` itself — the write and
+the read-back are the same function, the same thread, microseconds apart — and
+it occurs 4 times per failing run. So on one thread, uncontended:
+
+- the reader reaches `rt_string_new(raw.as_ptr(), raw.len())` and returns,
+- the Simple `text?` is PRESENT (`content.?` is true, so the word is not NIL),
+- and the word inside does not decode as a heap string (`.len()` is -1).
+
+### What this does NOT support
+
+A plain Optional-lowering bug. The exact driver shape — a real extern declared
+`-> text?`, assigned into a declared `text?` slot, unwrapped, measured — was
+run against the fresh seed in all three execution modes (default, interpreter,
+jit) and returns the correct length every time. Three modules were NOT
+rewritten to drop the Optional on the strength of a hypothesis this measurement
+contradicts.
+
+`Some(...)` into a declared slot IS corrupt on the deployed seed
+(`var b: text? = nil; b = Some("hello")` gives `len -1`, while
+`val a = Some("hello")` gives `len 5`) and IS fixed on the fresh seed, so that
+is a real but separate defect and not this one.
+
+### Where the remaining suspicion sits
+
+Something between `rt_string_new` allocating and the caller decoding, that a
+small single-purpose probe does not reproduce but a loaded 24-job compiler
+does. Premature reclamation of an extern-allocated string, or a
+mixed-vintage heap representation across the frozen `spl_hosted_runtime` rlib
+and the freshly built runtime, both fit; neither is yet measured. Note that the
+rlib's `-36e87d0608124df2` suffix is cargo's metadata hash and is stable across
+content changes, so its constancy across rebuilds proves nothing either way —
+an earlier reading of it as "not rebuilt" was wrong.
+
+### Methodology note
+
+Two diagnostics in a row were themselves defective before they were
+informative: first a code space where 0 meant three different things, then a
+global cell in a 24-thread program. Both produced confident, wrong readings.
+An instrument has to be validated against the conditions it will be read
+under, not just the conditions it was written under.
