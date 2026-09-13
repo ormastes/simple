@@ -1,4 +1,5 @@
 use app.io.env_ops.{env_get, env_set}
+use os.qemu_cli_plan_v1.{qemu_cli_inspect_plan_v1}
 use os.qemu_runner.{
     OsTarget,
     arch_display_name,
@@ -106,6 +107,8 @@ fn print_os_help():
     print "  --all              Test all architectures (with 'test' command)"
     print "  --scenario=<name>  Named QEMU scenario (for run/test/build)"
     print "  --debug-gui        Keep GUI targets windowed while exposing serial logs"
+    print "  --show-plan        Validate a typed QEMU plan; rejects lanes pending argv projection"
+    print "  --print-command    Print sealed POSIX argv; rejects lanes/hosts pending parity"
     print "  --log=<on|off>     Compile normal OS logging in or out (default: on)"
     print ""
     print "Architectures:"
@@ -208,6 +211,12 @@ fn handle_os_run(args: [text]) -> i64:
     val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
     if not _export_os_log_mode(log_mode):
         return 1
+    val show_plan = os_has_flag(args, "--show-plan")
+    val print_command = os_has_flag(args, "--print-command")
+    if show_plan and print_command:
+        _restore_os_log_mode(old_log_mode)
+        print "Error: --show-plan and --print-command are mutually exclusive"
+        return 1
     val scenario_name = os_parse_scenario_arg(args)
     val scenario_error = _os_scenario_arg_error(scenario_name)
     if scenario_error != "":
@@ -215,6 +224,10 @@ fn handle_os_run(args: [text]) -> i64:
         print scenario_error
         return 1
     if scenario_name != "":
+        if show_plan or print_command:
+            _restore_os_log_mode(old_log_mode)
+            print "Error: typed QEMU inspection is not yet available for named scenarios"
+            return 1
         if not scenario_exists(scenario_name):
             _restore_os_log_mode(old_log_mode)
             print "Error: unknown scenario '{scenario_name}'"
@@ -238,6 +251,18 @@ fn handle_os_run(args: [text]) -> i64:
     val arch = arch_from_name(arch_name)
     if arch.?:
         val target = get_qemu_target(arch.unwrap())
+        if show_plan or print_command:
+            val outcome = qemu_cli_inspect_plan_v1(
+                arch_name, target.output, target.qemu_memory, target.qemu_bios,
+                target.qemu_extra,
+                print_command)
+            _restore_os_log_mode(old_log_mode)
+            if not outcome.ok():
+                print "Error: {outcome.error()}"
+                return 1
+            for line in outcome.lines_copy():
+                print line
+            return 0
         val built = build_os(target)
         if not built:
             _restore_os_log_mode(old_log_mode)

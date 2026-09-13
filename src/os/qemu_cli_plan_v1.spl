@@ -1,0 +1,295 @@
+# Host-probed, inspect-only QEMU CLI plan owner.
+#
+# This is the sole impure bridge between `simple os run --show-plan` /
+# `--print-command` and the pure target/spec/host-adapter/launch-plan chain.
+# Normal `simple os run` deliberately remains on the established runner until
+# the typed plan reproduces every scenario and lane argument.
+
+use app.io.mod.{file_exists, file_hash_sha256, process_run_timeout}
+use os.port.simpleos_multiplatform_build.{
+    simpleos_machine_target_known, simpleos_machine_target_projection
+}
+use os.port.qemu_host_adapters_v1.{
+    QemuHostProbeInputsV1, QemuHostAdapterErrorV1,
+    LinuxQemuHostV1, WindowsQemuHostV1, MacQemuHostV1, FreeBsdQemuHostV1
+}
+use os.port.qemu_machine_plan_v1.{
+    QemuMachineImageKindV1, QemuFirmwareKindV1, QemuStorageKindV1,
+    QemuDisplayKindV1, QemuNetworkKindV1, QemuConsoleKindV1,
+    QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuAcceleratorRequestV1,
+    QemuMachinePlanErrorV1, QemuLaunchPlanV1,
+    qemu_machine_spec_from_projection_v1, qemu_launch_plan_bind_v1
+}
+
+pub class QemuCliInspectOutcomeV1:
+    _ok: bool
+    _error: text
+    _lines: [text]
+
+impl QemuCliInspectOutcomeV1:
+    pub fn ok() -> bool: self._ok
+    pub fn error() -> text: self._error
+    pub fn lines_copy() -> [text]:
+        var result: [text] = []
+        for line in self._lines:
+            result.push(line)
+        result
+
+class _QemuSettingsV1:
+    host: text
+    accelerator: text
+    x86_32_bin: text
+    x86_64_bin: text
+    arm32_bin: text
+    arm64_bin: text
+    riscv32_bin: text
+    riscv64_bin: text
+
+fn _qemu_cli_reject_v1(reason: text) -> QemuCliInspectOutcomeV1:
+    QemuCliInspectOutcomeV1(_ok: false, _error: reason, _lines: [])
+
+fn _qemu_setting_value_v1(output: text, key: text) -> text:
+    val prefix = key + "="
+    for raw_line in output.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with(prefix):
+            return line[prefix.len():]
+    ""
+
+fn _qemu_settings_parse_v1(output: text) -> _QemuSettingsV1:
+    _QemuSettingsV1(
+        host: _qemu_setting_value_v1(output, "simple_qemu_host"),
+        accelerator: _qemu_setting_value_v1(output, "simple_qemu_accelerator"),
+        x86_32_bin: _qemu_setting_value_v1(output, "simple_qemu_x86_32_bin"),
+        x86_64_bin: _qemu_setting_value_v1(output, "simple_qemu_x86_64_bin"),
+        arm32_bin: _qemu_setting_value_v1(output, "simple_qemu_arm32_bin"),
+        arm64_bin: _qemu_setting_value_v1(output, "simple_qemu_arm64_bin"),
+        riscv32_bin: _qemu_setting_value_v1(output, "simple_qemu_riscv32_bin"),
+        riscv64_bin: _qemu_setting_value_v1(output, "simple_qemu_riscv64_bin"))
+
+fn _qemu_settings_binary_v1(settings: _QemuSettingsV1, target_id: text) -> text:
+    match target_id:
+        case "i686-simpleos": settings.x86_32_bin
+        case "x86_64-simpleos": settings.x86_64_bin
+        case "armv7-simpleos": settings.arm32_bin
+        case "aarch64-simpleos": settings.arm64_bin
+        case "riscv32imac-simpleos": settings.riscv32_bin
+        case "riscv64gc-simpleos": settings.riscv64_bin
+        case _: ""
+
+fn _qemu_accelerator_v1(name: text) -> QemuAcceleratorV1?:
+    match name:
+        case "kvm": QemuAcceleratorV1.Kvm
+        case "hvf": QemuAcceleratorV1.Hvf
+        case "whpx": QemuAcceleratorV1.Whpx
+        case "nvmm": QemuAcceleratorV1.Nvmm
+        case "tcg": QemuAcceleratorV1.Tcg
+        case _: nil
+
+fn _qemu_resolve_executable_v1(host: text, configured: text) -> text:
+    if configured.contains("/") or configured.contains("\\"):
+        return configured
+    val locator = if host == "windows": "where" else: "which"
+    val (stdout, _, status) = process_run_timeout(locator, [configured], 5000)
+    if status != 0:
+        return ""
+    for line in stdout.split("\n"):
+        val candidate = line.trim()
+        if candidate.len() > 0:
+            return candidate
+    ""
+
+fn _qemu_path_directory_v1(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    val slash = normalized.rfind("/")
+    if slash <= 0:
+        return ""
+    normalized[:slash]
+
+fn _qemu_memory_mib_v1(value: text) -> u64:
+    val normalized = value.trim().upper()
+    if normalized.ends_with("G"):
+        val number = normalized[:normalized.len() - 1]
+        return (int(number) * 1024) as u64
+    if normalized.ends_with("M"):
+        return int(normalized[:normalized.len() - 1]) as u64
+    int(normalized) as u64
+
+fn _qemu_shell_quote_v1(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+pub fn qemu_cli_shell_display_v1(executable: text, argv: [text]) -> text:
+    var parts: [text] = [_qemu_shell_quote_v1(executable)]
+    for value in argv:
+        parts.push(_qemu_shell_quote_v1(value))
+    parts.join(" ")
+
+fn _qemu_host_error_text_v1(error: QemuHostAdapterErrorV1) -> text:
+    match error:
+        case QemuHostAdapterErrorV1.None: "none"
+        case QemuHostAdapterErrorV1.InvalidProbe: "invalid host probe"
+        case QemuHostAdapterErrorV1.MissingExecutable: "QEMU executable not found"
+        case QemuHostAdapterErrorV1.MissingFirmware: "QEMU firmware not found"
+        case QemuHostAdapterErrorV1.AcceleratorUnavailable: "QEMU accelerator unavailable"
+
+fn _qemu_plan_error_text_v1(error: QemuMachinePlanErrorV1) -> text:
+    match error:
+        case QemuMachinePlanErrorV1.None: "none"
+        case QemuMachinePlanErrorV1.InvalidSchema: "invalid schema"
+        case QemuMachinePlanErrorV1.InvalidTargetProjection: "invalid target projection"
+        case QemuMachinePlanErrorV1.InvalidImage: "invalid image"
+        case QemuMachinePlanErrorV1.InvalidFirmware: "invalid firmware"
+        case QemuMachinePlanErrorV1.InvalidMachine: "invalid machine"
+        case QemuMachinePlanErrorV1.InvalidCpu: "invalid CPU"
+        case QemuMachinePlanErrorV1.InvalidMemory: "invalid memory"
+        case QemuMachinePlanErrorV1.InvalidCpuCount: "invalid CPU count"
+        case QemuMachinePlanErrorV1.InvalidHostResolution: "invalid host resolution"
+        case QemuMachinePlanErrorV1.DuplicateAccelerator: "duplicate accelerator"
+        case QemuMachinePlanErrorV1.AcceleratorUnavailable: "accelerator unavailable"
+        case QemuMachinePlanErrorV1.CanonicalTooLarge: "canonical plan too large"
+        case QemuMachinePlanErrorV1.ArgvTooLarge: "QEMU argv too large"
+
+fn _qemu_accelerator_text_v1(value: QemuAcceleratorV1) -> text:
+    match value:
+        case QemuAcceleratorV1.Kvm: "kvm"
+        case QemuAcceleratorV1.Hvf: "hvf"
+        case QemuAcceleratorV1.Whpx: "whpx"
+        case QemuAcceleratorV1.Nvmm: "nvmm"
+        case QemuAcceleratorV1.Tcg: "tcg"
+
+fn _qemu_cli_render_plan_v1(
+    host: text,
+    target_id: text,
+    target_triple: text,
+    machine: text,
+    cpu: text,
+    memory_mib: u64,
+    image_path: text,
+    image_digest: text,
+    plan: QemuLaunchPlanV1,
+    print_command: bool
+) -> [text]:
+    val argv = plan.argv_copy()
+    if print_command:
+        return [qemu_cli_shell_display_v1(plan.executable_path(), argv)]
+    [
+        "Host:        {host}",
+        "Guest:       SimpleOS {target_id}",
+        "Target:      {target_triple}",
+        "QEMU:        {plan.executable_path()}",
+        "Accelerator: {_qemu_accelerator_text_v1(plan.accelerator())}",
+        "Firmware:    " + (if plan.firmware_path() == "": "none" else: plan.firmware_path()),
+        "Image:       {image_path}",
+        "Image SHA256:{image_digest}",
+        "Machine:     {machine}",
+        "CPU:         {cpu}",
+        "Memory:      {memory_mib} MiB",
+        "CPUs:        1",
+        "Plan SHA256: {plan.argv_digest()}",
+        "Sealed:      true"
+    ]
+
+pub fn qemu_cli_inspect_plan_v1(
+    requested_target: text,
+    image_path: text,
+    qemu_memory: text,
+    qemu_bios: text,
+    legacy_lane_argv: [text],
+    print_command: bool
+) -> QemuCliInspectOutcomeV1:
+    if not simpleos_machine_target_known(requested_target):
+        return _qemu_cli_reject_v1("unknown SimpleOS target '{requested_target}'")
+    val target = simpleos_machine_target_projection(requested_target)
+    if legacy_lane_argv.len() > 0:
+        return _qemu_cli_reject_v1(
+            "typed QEMU inspection is unavailable: selected lane has unprojected legacy argv")
+    if qemu_bios == "none" or qemu_bios == "default":
+        return _qemu_cli_reject_v1(
+            "typed QEMU inspection is unavailable: firmware sentinel '{qemu_bios}' is not projected")
+    if not file_exists(image_path):
+        return _qemu_cli_reject_v1("SimpleOS image not found: {image_path}")
+    val image_digest = file_hash_sha256(image_path)
+    if image_digest.len() != 64:
+        return _qemu_cli_reject_v1("could not hash SimpleOS image: {image_path}")
+
+    val settings_script = "scripts/qemu/simple-qemu-settings.shs"
+    if not file_exists(settings_script):
+        return _qemu_cli_reject_v1("QEMU settings command not found: {settings_script}")
+    val (settings_out, settings_err, settings_status) = process_run_timeout(
+        "sh", [settings_script, "--print"], 5000)
+    if settings_status != 0:
+        val detail = settings_err.trim()
+        return _qemu_cli_reject_v1(
+            if detail == "": "QEMU settings probe failed" else: "QEMU settings probe failed: {detail}")
+    val settings = _qemu_settings_parse_v1(settings_out)
+    if (settings.host != "linux" and settings.host != "windows" and
+        settings.host != "macos" and settings.host != "freebsd"):
+        return _qemu_cli_reject_v1("unsupported QEMU host: {settings.host}")
+    if print_command and settings.host == "windows":
+        return _qemu_cli_reject_v1(
+            "--print-command is unavailable on Windows until a shell dialect is selected")
+    val selected_accelerator = _qemu_accelerator_v1(settings.accelerator)
+    if selected_accelerator == nil:
+        return _qemu_cli_reject_v1("unsupported QEMU accelerator: {settings.accelerator}")
+    val configured_binary = _qemu_settings_binary_v1(settings, target.canonical_name)
+    if configured_binary == "":
+        return _qemu_cli_reject_v1("QEMU executable is unresolved for {target.canonical_name}")
+    val executable_path = _qemu_resolve_executable_v1(settings.host, configured_binary)
+    if executable_path == "" or not file_exists(executable_path):
+        return _qemu_cli_reject_v1("QEMU executable not found: {configured_binary}")
+
+    var firmware_required = qemu_bios != ""
+    var firmware_path = qemu_bios
+    if firmware_required and not file_exists(firmware_path):
+        return _qemu_cli_reject_v1("QEMU firmware not found: {firmware_path}")
+    val accelerator = selected_accelerator.unwrap()
+    val probe = QemuHostProbeInputsV1(
+        target_id: target.canonical_name,
+        executable_name: target.qemu_system + (if settings.host == "windows": ".exe" else: ""),
+        qemu_bin_dir: _qemu_path_directory_v1(executable_path),
+        executable_available: true,
+        firmware_required: firmware_required,
+        firmware_override_path: firmware_path,
+        firmware_override_available: firmware_required,
+        discovered_firmware_path: "",
+        discovered_firmware_available: false,
+        # The settings authority reports a host-wide preference, not proof
+        # that this guest ISA can use the native accelerator. Admit only the
+        # architecture-independent TCG fact until the probe schema carries a
+        # host/guest compatibility observation.
+        native_accelerator_available: false,
+        tcg_available: true)
+    val host_outcome = match settings.host:
+        case "linux": LinuxQemuHostV1(probe: probe).resolve(target)
+        case "windows": WindowsQemuHostV1(probe: probe).resolve(target)
+        case "macos": MacQemuHostV1(probe: probe).resolve(target)
+        case _: FreeBsdQemuHostV1(probe: probe).resolve(target)
+    if not host_outcome.admitted():
+        return _qemu_cli_reject_v1(_qemu_host_error_text_v1(host_outcome.error()))
+    if host_outcome.resolution().executable_path != executable_path.replace("\\", "/"):
+        return _qemu_cli_reject_v1(
+            "QEMU executable policy mismatch: settings resolved {executable_path}, " +
+            "adapter selected {host_outcome.resolution().executable_path}")
+
+    val memory_mib = _qemu_memory_mib_v1(qemu_memory)
+    val spec = qemu_machine_spec_from_projection_v1(
+        target, image_path, image_digest, QemuMachineImageKindV1.Kernel,
+        if firmware_required: QemuFirmwareKindV1.Bios else: QemuFirmwareKindV1.None,
+        if firmware_required: "catalog" else: "", memory_mib, 1u16,
+        QemuStorageKindV1.None, QemuDisplayKindV1.None,
+        QemuNetworkKindV1.None, QemuConsoleKindV1.SerialStdio,
+        QemuAcceleratorRequestV1(
+            kind: QemuAcceleratorRequestKindV1.Auto,
+            accelerator: accelerator))
+    val plan = qemu_launch_plan_bind_v1(spec, host_outcome.resolution())
+    if not plan.admitted() or not plan.sealed_valid():
+        return _qemu_cli_reject_v1("QEMU launch plan rejected: {_qemu_plan_error_text_v1(plan.error())}")
+    QemuCliInspectOutcomeV1(
+        _ok: true,
+        _error: "",
+        _lines: _qemu_cli_render_plan_v1(
+            settings.host, target.canonical_name, target.native_target,
+            target.qemu_machine, target.qemu_cpu, memory_mib,
+            image_path, image_digest, plan, print_command))
+
+export QemuCliInspectOutcomeV1, qemu_cli_shell_display_v1, qemu_cli_inspect_plan_v1
