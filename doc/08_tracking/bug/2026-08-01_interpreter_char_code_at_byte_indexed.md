@@ -5,6 +5,10 @@
 - **Severity:** High — the canonical default lane was the wrong one
 - **Area:** `src/compiler/10.frontend/core/interpreter/`
 
+## Closed 2026-09-13 — Already Fixed
+
+Entry documents complete verification via behavioral test of pure-Simple interpreter. Fix applied to both `eval_methods.spl` and the live copy in `_EvalOps/access_literal_assign_eval.spl`. Regression guard added: `test/01_unit/compiler/interpreter/text_char_code_at_codepoint_spec.spl` (3 examples, 0 failures).
+
 ## Summary
 
 `text.char_code_at(i)` is CHARACTER (codepoint) indexed in every lane except the

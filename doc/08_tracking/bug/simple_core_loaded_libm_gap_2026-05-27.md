@@ -1,6 +1,10 @@
-# Simple Core Loaded libm Gap
+## Closed 2026-09-13 — policy superseded, libm now deliberately kept
 
-Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+Status: CLOSED — resolved then superseded (reviewed 2026-09-13). The size/DT_NEEDED parity was already recorded resolved in the body with Linux measurements. It could NOT be re-measured here: this host is Windows x86_64, and the whole repro (`ldd`, `libc.so.6`, `/lib64/ld-linux-x86-64.so.2`, the audit script) is Linux-only — so the closure below is STATIC/INFERRED, not measured. Static state at `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`: `-Wl,--as-needed` is still emitted (2 sites), but the named verification test `linker_tests::link_inputs_require_libm_detects_math_symbols_only_when_referenced` NO LONGER EXISTS — it was replaced by `core_lane_keeps_platform_libm` (linker.rs:3167), which asserts the opposite policy: `should_omit_platform_library("m", true, true) == false`, i.e. the core lane now deliberately KEEPS libm and only drops `unwind`/`sqlite3`. The "omit -lm unless math symbols are referenced" mechanism this entry describes as Current Work has therefore been superseded by a later design decision. Nothing here is actionable; closing rather than reopening against a policy that was changed on purpose.
+
+---
+
+# Simple Core Loaded libm Gap
 
 Date: 2026-05-27
 

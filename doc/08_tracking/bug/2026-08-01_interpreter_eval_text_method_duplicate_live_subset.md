@@ -5,6 +5,10 @@
 **Filed by:** follow-up from commit `113f0864c7a`
 **Area:** pure-Simple interpreter, text builtin method dispatch
 
+## Closed 2026-09-13 — Already Fixed
+
+Duplicate definition removed. Verified: `grep -l "fn eval_text_method" src/compiler/10.frontend/core/interpreter/*.spl src/compiler/10.frontend/core/interpreter/_EvalOps/*.spl` returns only the live copy at `_EvalOps/access_literal_assign_eval.spl`.
+
 ## Symptom
 
 `text` methods `byte_at`, `slice`, `char_at`, `parse_int`, `to_upper`,
