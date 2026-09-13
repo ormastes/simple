@@ -1,5 +1,7 @@
 # Site 9: Stage 2's Stage-3 route allocates without bound in `native_compile` (killed at 124)
 
+# Site 9: Stage 2's Stage-3 route now times out in `native_compile` (status 124)
+
 - Status: OPEN (2026-09-13)
 - Found: bootstrap lane BOOT-8, `work/bootstrap-full-6-2026-09-12` at `272482747da`,
   run `build/bootstrap-boot8a` (08:11:19 -> 08:33:13, 22m, load ~23-35, `--jobs=10`).
@@ -152,6 +154,128 @@ Discriminate by printing `self.units.keys().len()` and an iteration counter from
 `topological_order`, or by checking whether `pop()` shrinks natively in a fixture
 built by the run-21 candidate (which builds now that site 8 is fixed).
 
+## What is NOT yet known
+
+The replay was run (`scratchpad/boot8/probe9.sh`, same env and fixture as the gate, ceiling
+raised 180 s -> 2400 s, pinned candidate `95763bffee64a74e...`). It reaches exactly the same
+point — `native_cache` 2/2 at `elapsed_ms=7734`, then `native_compile` on
+`compiler.common.module_path_naming`, then `[NATIVE] codegen: 2 uncached module(s),
+concurrency=1` — and emits nothing further. The compiler process (pid 3170289, the child of
+`timeout`) was sampled directly from `/proc`, 45 s apart:
+
+| sample | utime (ticks) | stime | state | VmRSS |
+|---|---|---|---|---|
+| t0 | 8109 | 273 | R | 4 584 240 kB |
+| s1 | 8417 | 279 | R | 4 754 708 kB |
+| s2 | 11290 | 327 | R | 6 289 820 kB |
+| s3 | 14486 | 457 | R | 8 972 872 kB |
+| s4 | 17392 | 503 | R | 10 517 536 kB |
+| final | 22118 | — | R | **12 963 184 kB** |
+
+CPU is live (≈66 % of one core) so it is not deadlocked, **and RSS grows monotonically at about
+1.9 GB per 45 s with no sign of converging** — 4.6 GB to 13.0 GB in roughly five minutes, for
+TWO modules. Raising the timeout cannot fix this: the process would exhaust the host's 121 GB
+rather than finish. It was killed by PID at 13 GB (`rc=143`) instead of being left to OOM a
+shared box. **So `STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS` must NOT be raised** — the 180 s
+ceiling is reporting a real unbounded-allocation defect in the pure-Simple native codegen path,
+and the timeout is currently the only thing containing it.
+
+## Next step for whoever picks this up
+
+The allocating function is not yet named. `gdb -p <pid>` is **refused on this host**
+(`ptrace_scope=1`; `ptrace: Inappropriate ioctl for device`, `No stack.` — the probe is
+`setsid`'d and so is not a ptrace-eligible descendant). BOOT-7 got its stacks by launching the
+candidate UNDER gdb rather than attaching (`scratchpad/boot7/gdb9.sh` + `trace9.py`); the
+adapted harness for this lane is already in place at `scratchpad/boot8/gdb_site9.sh` +
+`trace_boot8.py`, pointed at this candidate and this run's runtime authority. Run the probe
+under gdb, let RSS climb to a few GB, interrupt, and walk the stack — and, given site 8, check
+first whether the allocation is another struct-copy shape: every `val` binding, field read and
+argument of a struct type allocates, so a copy inside a hot loop over modules or symbols would
+look exactly like this. See `dict_struct_key_identity_keyed_copied_key_misses_2026-09-13.md`.
+
+---
+
+## MEASURED CAUSE (BOOT-9, 2026-09-13) — `BuildGraph.topological_order` never returns
+
+Not inferred. The pinned candidate was launched UNDER gdb (`gdb -p` is refused
+here; harness `scratchpad/boot9/gdb9.sh`, log `gdb9.log`, RSS series
+`gdb9.rss`) on the gate's own fixture and env, and interrupted three times once
+VmRSS passed 6 GB (6 037 772 kB, 8 847 448 kB, 8 689 316 kB). All three stacks
+are IDENTICAL in frames and in depth — a runaway loop, not recursion:
+
+```
+#0  <hashbrown::map::HashMap<usize, ()>>::insert
+#1  <std::collections::hash::set::HashSet<usize>>::insert
+#2  simple_runtime::value::heap::register_heap_ptr
+#3  <simple_runtime::value::core::RuntimeValue>::from_heap_ptr
+#4  rt_tuple_new
+#5  compiler__driver__driver_build__parallel__BuildGraph.topological_order
+#6  compiler__driver__driver_build__parallel__ParallelBuilder.build
+#7  compiler__driver__driver_aot_native_output__CompilerDriver._compile_to_native_with_backend_session
+...
+#12 main
+```
+
+The return address in frame 5 is `0x381b400`, the instruction after
+`bl rt_tuple_new` at `0x381b3fc` — i.e. `stack = stack.push((node, true))`,
+reached through `visited[node] = true` (`rt_index_set` at `0x381b3e8`). Every
+allocated tuple is registered in the runtime's heap-pointer `HashSet`, which
+only grows; that set, not the tuples, is what turns the loop into 1.9 GB per
+45 s.
+
+The loop's only exit is `rt_is_some` on the stack ARRAY:
+
+```
+381b350: mov  x0, x23
+381b354: bl   3f10cbc <rt_is_some>
+381b36c: b.ne 381b2a8            ; dead: rt_is_some(array) is always true
+```
+
+Source: `while stack.?:`. `.?` on a collection receiver lowers to `rt_is_some`,
+which is true for any non-nil array including `[]`. Once the DFS drained, every
+iteration popped nil, re-pushed `(nil, true)` and grew `order` — forever. Full
+analysis, the cross-lane truth table and the census of the other
+collection-receiver `.?` sites:
+`dotq_on_empty_collection_reads_present_2026-09-13.md`.
+
+**Lane-independent, so it is cheap to reproduce without a bootstrap.** The seed
+`simple run` lane (sha256 `3d120a6f9ab5704b...`) on a 3-unit chain prints
+`units=3` and never prints the order (killed at 150 s; probe
+`scratchpad/boot9/probe/topo.spl`, RED log `scratchpad/boot9/red_topo.log`).
+After the fix the same probe answers `ORDER=0,1,2,`.
+
+## Fix
+
+`src/compiler/80.driver/driver_build/parallel.spl:285` — `while stack.?:` ->
+`while stack.len() > 0:`. Same DFS, same comparison, no design change. Spec
+`test/01_unit/compiler/driver/build_graph_topological_order_terminates_spec.spl`
+(RED `2 examples, 2 failures` -> GREEN `2 examples, 0 failures`). The
+behavioural example re-reads the source and refuses to EXECUTE the loop if the
+divergent spelling returns, so a regression fails loudly instead of hanging a
+suite; the structural example is the assertion in that case.
+
+The gate's `STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS` was NOT raised and must not
+be: 180 s was reporting a real defect.
+
+## Site 9 fixed; the same loop then exposed site 10 (2026-09-13, BOOT-9)
+
+Run `build/bootstrap-boot9a` (09:06:58 -> 09:30:26, head `3fdf82ea1d2`) built a
+new candidate `ac5a205d9030bea6...` (152198144 B) whose `topological_order`
+carries no `rt_is_some` at all — the loop head is now a direct array-length
+read (`ldr x8,[x21,#8]; cmp x8,#0; b.le exit` at `0x381b358`), so site 9's
+dead exit branch is gone and the fix is proven IN the codegen that matters.
+
+The route still exited `124`, and the classification run says it is the same
+KIND of defect one step further in, not a slow build: VmRSS 40 MB -> 6.07 GB in
+121 s (`scratchpad/boot9/gdb10.rss`), three interrupts again all naming
+`BuildGraph.topological_order -> rt_tuple_new -> register_heap_ptr`. The cause
+is `val (node, expanded) = stack.pop().unwrap()`: `rt_array_pop` returns the
+element raw and `.unwrap()` lowers to `rt_enum_payload`, which nils a non-enum.
+Measured in the exact Stage-2-compiling lane and directly in the candidate —
+see `stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md`. Fixed by reading the
+top by index and truncating.
+
+The ceiling was still not raised.
 ## RESOLVED 2026-09-13 — and BOTH candidate causes above were wrong
 
 Root cause: **`.?` on an empty array evaluates TRUE under native codegen**, so

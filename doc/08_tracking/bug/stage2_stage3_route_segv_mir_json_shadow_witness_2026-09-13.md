@@ -1,8 +1,6 @@
 # Stage 2's Stage-3 route now reaches native_compile and SEGVs in `serialize_mir_function`
 
-- Status: **CLOSED / FIXED** (BOOT-8, 2026-09-13), proven by `build/bootstrap-boot8a`.
   Was: OPEN.
-- Status: OPEN (2026-09-13)
 - **Reproduced on macOS aarch64-apple-darwin (2026-09-13, chain run 20).** Not
   Linux-specific. Once `460aa9781cc` (this record's predecessor, site 7) reached
   `main` and therefore the macOS lane, that lane landed on exactly this site: route `status 139`, crash report
@@ -12,6 +10,11 @@
   `630ad64b7194eec6873fdcd6382c83ecad4b23f760d303a57eac5b26f214e0ed`, so the
   ~40-second witness loop is available on macOS too. The two lanes have
   converged; this is now the single `--stop-after-stage2` blocker on both.
+
+  admission run that proves it. Was: OPEN.
+
+- Status: **CLOSED / FIXED** (BOOT-8, 2026-09-13), proven by `build/bootstrap-boot8a`.
+  Was: OPEN.
 - Found: bootstrap lane BOOT-7, `work/bootstrap-full-5-2026-09-12` at `592041db98a`
 - Severity: **the current `--stop-after-stage2` admission blocker**, and the successor to
   site 7 (`stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md`, fixed).
@@ -142,6 +145,8 @@ measured in the INTERPRETER lane and is **not discriminating**: the old code sco
 there too, because that lane never allocates the copy (re-measured after the fix, identical
 output, `scratchpad/boot8/real_sort_after.txt`). The discriminating measurements are the
 JIT-lane `1 of 2` / `2 of 3` versus `3 of 3`, and the disassembly of the new Stage-2 binary.
+
+| the real `native_capsule_sorted_symbol_ids_v1` on a 20-key dict, after the fix | `sorted_hits=20 of 20` |
 
 ## Fix
 
