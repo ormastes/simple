@@ -184,15 +184,60 @@ fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
         x1 = clip.x1
     if y1 > clip.y1:
         y1 = clip.y1
+    # Row kernel instead of a per-pixel loop. `blend_opacity` is ~15 integer
+    # ops per pixel, which is the regime where the gather/extern/scatter round
+    # trip pays for itself — the same regime as simd_blend_row (measured 0 ms
+    # vs 13 ms), and unlike a constant fill, where it is a documented loss.
+    #
+    # The kernel carries PERCENT semantics (/100, +50). It is deliberately not
+    # rt_engine2d_simd_blend_const_span_u32, which is straight-alpha src-over
+    # (/255, +128) and would shift every rendered pixel.
     var py = y0
     while py < y1:
         val row = py * fbw
-        var px = x0
-        while px < x1:
-            val idx = row + px
-            out[idx] = blend_opacity(color, out[idx], opacity_pct)
-            px = px + 1
+        out = fb_blend_const_row_opacity(out, row + x0, x1 - x0, color, opacity_pct)
         py = py + 1
+    out
+
+@unsafe(reason: "percent-opacity constant-colour span blend; bounds are enforced inside the kernel", capabilities: [ffi])
+extern fn rt_engine2d_blend_const_span_pct_u32(dst: [u32], offset: i64, count: i64, color: u32, opacity_pct: i64) -> [u32]
+
+fn fb_blend_const_row_opacity(fb: [u32], offset: i32, count: i32, color: u32, opacity_pct: i32) -> [u32]:
+    """Blend one constant colour across a row span at an integer percent opacity.
+
+    Falls back to the scalar twin when the native kernel is unavailable — an
+    unbacked extern returns nil rather than failing, so a nil result must be
+    treated as "not backed" and never written back to the framebuffer.
+    """
+    if count <= 0:
+        return fb
+    val blended = rt_engine2d_blend_const_span_pct_u32(
+        fb, offset.to_i64(), count.to_i64(), color, opacity_pct.to_i64())
+    if blended.len() == fb.len():
+        return blended
+    _scalar_blend_const_row_opacity(fb, offset, count, color, opacity_pct)
+
+fn _scalar_blend_const_row_opacity(fb: [u32], offset: i32, count: i32, color: u32, opacity_pct: i32) -> [u32]:
+    """Scalar reference path — bit-identical to the kernel by construction.
+
+    The span is clamped to the buffer exactly as the kernel clamps it. This is
+    not defensive dressing: without it the twin walks off the end of the row
+    for an over-long count while the kernel stops, so the two disagree on the
+    one input where disagreement is a memory-safety bug rather than a rounding
+    difference. The parity spec pins that case.
+    """
+    var out = fb
+    if count <= 0 or offset < 0 or offset >= out.len():
+        return out
+    var remaining = out.len() - offset
+    var n = count
+    if n > remaining:
+        n = remaining
+    var i = 0
+    while i < n:
+        val idx = offset + i
+        out[idx] = blend_opacity(color, out[idx], opacity_pct)
+        i = i + 1
     out
 
 fn fb_rounded_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
