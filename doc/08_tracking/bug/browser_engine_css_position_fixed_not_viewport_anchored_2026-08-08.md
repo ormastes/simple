@@ -93,3 +93,38 @@ fix blind, without first locating and understanding that transform, risks
 exactly the kind of regression `.claude/rules/testing.md` warns against.
 Deferring the code fix; leaving OPEN with this refined root-cause note so the
 next owner does not have to re-discover the X/Y asymmetry from scratch.
+
+## Correction 2026-09-13 (BUGFIX-12 shard 22)
+
+The X/Y-asymmetry claim in the previous triage note above is **wrong** —
+retracting it. It rested on assuming `expect(fx.x).to_equal(1)` aborted the
+`it` block on failure so that only the y-failure printed. Checked
+`fail_assertion` in `src/lib/nogc_sync_mut/spec.spl:1075` — it only pushes
+onto `current_test_errors`, it does not abort; a throwaway probe spec
+(`expect(1).to_equal(2); expect(3).to_equal(4)`) confirms the reporter prints
+only the LAST accumulated failure, not the first. So "only one failure line
+printed" proves nothing about whether the x assertion passed.
+
+Re-checked directly by calling `simple_web_layout_render_html_draw_ir` (the
+same function the spec uses) on the identical fixture and printing
+`fx.x`/`fx.y` from the actual `DrawIrCommand`: **`fx.x=21`, `fx.y=22`** — BOTH
+axes are ancestor-anchored, matching the layout box exactly (no separate
+paint-time transform exists; `DrawIrCommand.x`/`.y` mirror `bx`/`by`
+directly). The doc's original root-cause and fix sketch are correct and
+unchallenged; there is no X/Y asymmetry to explain.
+
+**Why the fix is still deferred rather than landed:** `absolute_child_x`/
+`absolute_child_y` need a **viewport width** to anchor a fixed box's `left`/
+`right` against, but `layout`/`layout_with_style`
+(`simple_web_html_layout_renderer_layout.spl:1399,1558`) only thread
+`viewport_h` — the `w` parameter is the CURRENT container's shrinking inner
+width, not the original viewport width, at every one of the four
+`position_absolute` dispatch sites (lines ~2338/2579/2838/2940) where a
+`position_fixed` branch would need to go. Adding a `viewport_w` parameter
+means widening both functions' signatures and every recursive call site in
+this 3300-line file (mirroring how `viewport_h` was already threaded) — a
+real, mechanical but wide-blast-radius signature change, not a local
+one-branch fix, and past a shard's budget to do safely with the current host
+running 300-900s per test invocation. Leaving OPEN with this corrected,
+complete diagnosis; the next owner can implement the sketch directly once
+`viewport_w` threading is done.
