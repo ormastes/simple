@@ -357,7 +357,7 @@ pub(super) fn build_vreg_types(
                         "rt_env_get" | "rt_get_env" | "rt_file_read_text" | "rt_file_read_text_rv" => {
                             Some(TypeId::STRING)
                         }
-                        "rt_is_some" | "rt_is_none" => Some(TypeId::BOOL),
+                        "rt_is_some" | "rt_is_present" | "rt_is_none" => Some(TypeId::BOOL),
                         "rt_string_eq" | "rt_native_eq" | "rt_native_neq" | "rt_native_cmp" => Some(TypeId::I64),
                         // Array/collection length returns a native i64. Recording
                         // it here types the `len()` result VReg so a CHAINED
@@ -1545,6 +1545,31 @@ mod tests {
         // Non-float returns keep the pre-existing i64-default behaviour, so
         // this fix stays scoped to the float-reinterpret path.
         assert_eq!(map.get(&int_result), None);
+    }
+
+    /// The Cranelift lane must stamp `.?`'s presence call BOOL, exactly as it
+    /// already does for `rt_is_some`. Without this the branch terminator tests
+    /// a raw tagged word.
+    /// doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+    #[test]
+    fn build_vreg_types_stamps_rt_is_present_call_bool() {
+        let mut func = MirFunction::new("test".to_string(), TypeId::BOOL, Visibility::Private);
+        let value = func.new_vreg();
+        let present = func.new_vreg();
+
+        let entry = func.block_mut(BlockId(0)).unwrap();
+        entry.instructions.push(MirInst::ConstInt { dest: value, value: 3 });
+        entry.instructions.push(MirInst::Call {
+            dest: Some(present),
+            target: CallTarget::from_name("rt_is_present"),
+            args: vec![value],
+        });
+        entry.terminator = Terminator::Return(Some(present));
+
+        assert_eq!(
+            build_vreg_types(&func, &HashMap::new()).get(&present).copied(),
+            Some(TypeId::BOOL)
+        );
     }
 
     #[test]

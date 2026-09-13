@@ -992,6 +992,39 @@ pub fn rt_string_concat(left: i64, right: i64) -> i64:
 pub fn rt_strcat_tagged(left: i64, right: i64) -> i64:
     return rt_string_concat(left, right)
 
+# Presence predicate for the postfix `.?` operator -- the simple-core twin of
+# rt_is_present in src/runtime/runtime_native.c and of the Rust runtime's
+# rt_is_present. `.?` is absent for nil/None AND for an EMPTY array, dict or
+# string; 0, false, tuples, closures and structs stay present, exactly as the
+# tree-walk interpreter's Expr::ExistsCheck arm decides it. It lives here
+# rather than beside rt_is_some in core_values.spl because the array/dict/
+# string kind probes it needs are this file's (see rt_len just below).
+# doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+pub fn rt_is_present(value: i64) -> i8:
+    if value == 3:
+        return 0
+    var payload = value
+    # Unwrap the canonical Option layer (enum id 1, Some=0 / None=1) first.
+    if _sffi_core_string_rt_enum_id(value) == 1:
+        val disc = _sffi_core_string_rt_enum_discriminant(value)
+        if disc == 1:
+            return 0
+        payload = _sffi_core_string_rt_enum_payload(value)
+    if payload == 3:
+        return 0
+    val sptr = string_ptr(payload)
+    if sptr > 0:
+        return if string_len_ptr(sptr) > 0: 1 else: 0
+    if (payload & 7) == 1 and payload > 4095:
+        val kind = _sffi_core_string_spl_load_u8(payload & -8, 0)
+        if kind == 2:
+            return if _sffi_core_string_rt_array_len(payload) > 0: 1 else: 0
+        if kind == 6:
+            return if _sffi_core_string_rt_dict_len(payload) > 0: 1 else: 0
+    # Every other value is present -- re-deciding by truthiness is the
+    # "0 is falsy" landmine.
+    return 1
+
 pub fn rt_len(value: i64) -> i64:
     val ptr = string_ptr(value)
     if ptr > 0:

@@ -1878,6 +1878,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_is_contract_violation",
     "rt_is_none",
     "rt_is_some",
+    "rt_is_present",
     "rt_log_clear_scope_levels",
     "SCOPE_LEVELS_dot_has",
     // Array predicate/closure helpers. Codegen emits these names; without a
