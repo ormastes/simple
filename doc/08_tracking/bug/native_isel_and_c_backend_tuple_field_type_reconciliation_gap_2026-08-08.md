@@ -111,3 +111,12 @@ File/track "native isel backends have no float register class" as its own
 follow-up if float-typed tuple/struct fields on the native-isel (non-LLVM,
 non-C) backend path are in scope for near-term work; do not attempt a
 GetField-only patch there.
+
+## Triage 2026-09-13
+Reconfirmed: C backend fix is static-verified but native-run verification
+is pending a build slot (native-build is currently broken on this worktree
+by an unrelated rt_env_vars registration gap, see
+native_entry_closure_requires_unavailable_rt_env_vars_2026-09-09.md, which
+blocks obtaining that build slot here too). Native isel float-field gap
+remains open, blocked on a larger register-class gap per this record. Left
+as-is, no code change attempted.
