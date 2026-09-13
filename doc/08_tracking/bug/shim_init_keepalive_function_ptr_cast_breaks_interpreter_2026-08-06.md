@@ -109,3 +109,7 @@ scope (broad language-feature addition, not a narrow bug fix).
 `shim_init()`) remains the correct mitigation and still passes. Leaving
 **OPEN — ARCHITECTURAL** (requires Rust-seed interpreter runtime work, out of
 scope for this sweep).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs interpreter support for function-pointer-to-u64 casts, an interpreter semantic gap, not a bounded local fix. No change made.

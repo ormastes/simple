@@ -70,3 +70,13 @@ review. A passing focused command alone is not admission evidence.
 
 Cross-links: [agent remediation order](../../03_plan/agent_tasks/spipe_knowledge_compiler.md#wave-5-admission-remediation-execution-order-2026-08-26)
 and [W5A publisher gates](../../03_plan/sys_test/spipe_knowledge_compiler.md#224-ordered-remediation-gates-blocking-test-execution).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of scope for this lane: the affected code is JavaScript
+(`examples/05_stdlib/spipe/src/**/*.js`), not `.spl`/`.shs`, and the record's
+own "Accepted prior evidence and boundary" section states "No P2 source repair
+is authorized in the capped session" and requires a two-independent-process
+barrier reproducer plus an independent highest-capability review before any
+fix lands — well beyond this lane's per-bug budget and outside the pure-Simple
+fix path this lane is scoped to. Left OPEN, no change made.

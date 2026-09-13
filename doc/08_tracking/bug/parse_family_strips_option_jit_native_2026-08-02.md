@@ -275,3 +275,7 @@ PARSE_BAD_IS_NONE=true    # "zz".parse_i64().is_none()
 (identical on interpret and jit). Probe `_scratch/p_opt.spl`. The **native**
 half of this record's title is UNTESTED: `native-build` is unreachable on this
 host, failing with `native-capsule-receipt-invalid` for the unmodified seed too.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: JIT/native seed defect with a staged migration plan already designed; fix surface is the Rust seed. No change made.

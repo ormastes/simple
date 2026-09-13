@@ -311,3 +311,48 @@ could not be compared; the specs that do run were identical on both binaries
 The right end state is still to stop erasing these receivers to ANY, so the
 fallback never runs — this change only makes the fallback stop reading outside
 the object while that work is outstanding.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Re-ran the regression spec on `origin/main` at `a6450c9d6f5` (worktree
+`/home/yoon/dev/simple-bugfix-7`), using the deployed Rust seed at
+`bin/simple` -> `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(sha256 prefix `3d120a6f9ab5704b`, built 2026-09-06 — the "smallest index"
+tie-break described above at `type_resolver.rs:684,749,878,986,1001` IS present
+in that seed's source tree at this commit):
+
+```
+$ ./bin/simple test test/03_system/compiler/native_struct_field_access_regression_spec.spl
+✗ compiles and reads a text field from a local struct
+    expected  to equal A
+✗ reads an erased-receiver field from the receiver's own allocation
+    expected 200435659 to equal 42
+✗ resolves the erased-receiver field independently of declaration order
+    expected 6423471132564495090 to equal 7
+Results: 3 total, 0 passed, 3 failed
+```
+
+This is WORSE than the 2026-09-06 update's recorded post-fix state
+(`3 total, 2 passed, 1 failed`) — all three scenarios fail now, including
+scenario 1 which the 2026-09-06 note does not mention failing at all, and
+scenario 2's wrong value (`200435659`, not the `3257846563034067813` string
+fragment quoted above) differs from the originally-diagnosed garbage read, so
+this is not simply "the same bug, unfixed" — it looks like a different or
+additional regression on top of the documented fix, or a test-harness/env
+divergence (the doc's own "interpreter caveat" section warns a spec that
+doesn't `env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE` a child process
+can pass vacuously on a broken binary; a similar env-inheritance issue could
+equally make a real native-codegen scenario fail differently under the test
+runner's own execution mode instead of exercising native codegen at all).
+
+Diagnosis is inconclusive without deeper Rust-seed debugging (disassembly or
+`SIMPLE_TRACE_FIELD_GET=1` tracing as the original diagnosis used) and without
+knowing whether the deployed seed binary is byte-identical to `a6450c9d6f5`'s
+`src/compiler_rust` tree or merely close to it — that requires a fresh seed
+build, which is out of scope for this lane (Rust seed, budget, and this lane
+does not own a private `CARGO_TARGET_DIR`). Recommend: (1) rebuild the seed
+fresh from `a6450c9d6f5` in an isolated `CARGO_TARGET_DIR` and re-run this exact
+spec to rule out binary/source skew before assuming a fix regression; (2) if it
+reproduces on a fresh build, re-run with `SIMPLE_TRACE_FIELD_GET=1` per the
+2026-09-06 repro recipe to find the current byte offsets for all three
+scenarios. Left OPEN — no change made in this lane.

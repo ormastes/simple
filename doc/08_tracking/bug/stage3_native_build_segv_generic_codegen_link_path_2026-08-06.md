@@ -1133,3 +1133,7 @@ stage2/stage3 from current source, then require
 `sh scripts/check/check-no-call-zero.shs <new binaries>` to report `PASS` before
 re-running the `hello.spl` repro. A rebuild was out of scope for this wave
 (clobbers ~16 concurrent lanes).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: self-hosted stage3 native-build SIGSEGV, needs a bootstrap build to reproduce/verify -- out of budget for a shared host. No change made.

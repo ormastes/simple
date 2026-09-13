@@ -223,3 +223,7 @@ Not fixable from pure Simple: `bin/simple` is the Rust bootstrap seed, so this i
 `src/compiler_rust/compiler/src/interpreter/expr/control.rs`.
 
 - Status: OPEN (2026-09-12) — reproduced on 3d120a6f, minimal repro above, needs a Rust-seed change
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Already confirmed multiple times (2026-08-04, 2026-08-09) as a Rust-seed interpreter closure/scope defect, out of scope per 'fix .spl not Rust'. No change made.

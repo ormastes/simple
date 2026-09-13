@@ -282,3 +282,10 @@ is a sweep with an unknown blast radius, and doing it half-way — enforcing und
 one profile only, or with an escape hatch — is exactly the "normalize the
 workaround" outcome the project rules forbid. It needs an owner and a measured
 count of current violations first.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: this asks for a new whole-program type-checking feature
+(enforce declared return types across all engines), a large, high-blast-radius
+change to src/compiler/30.types/type_system/checker.spl — not a bounded bug
+fix. No change made.

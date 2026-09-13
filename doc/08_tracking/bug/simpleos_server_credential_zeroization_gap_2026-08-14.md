@@ -189,3 +189,7 @@ unusable under `bin/simple test` and this spec can only go fully green on a
 native/JIT lane, or after `rt_array_data_ptr_text` is registered in the
 interpreter and interpreter arrays expose real storage. Registering the extern
 is a `src/compiler_rust` change, outside this pass's pure-Simple scope.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane)
+
+`bin/simple test test/01_unit/lib/database/server/credential_zeroization_spec.spl` -> `Results: 6 total, 3 passed, 3 failed`, matching the 2026-09-12 post-fix state exactly. No regression, nothing new to add. Left OPEN as scoped (remaining 3 need `rt_array_data_ptr_text` registered in the interpreter, a Rust seed change).

@@ -19,3 +19,8 @@ This is a 13-line record whose evidence lives in
 requires a Stage-2 native build plus running HTTP and database servers.
 `src/app/postgres_mimic_server/main.spl` is a 2.2 KB argument-parsing entry
 point with no statically visible defect. Classify as blocked-on-deploy.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Reconfirmed blocked-on-deploy (needs a Stage-2 native build + running HTTP/DB
+servers, not available to this lane). No change made.

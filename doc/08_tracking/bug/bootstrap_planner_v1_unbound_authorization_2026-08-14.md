@@ -149,3 +149,7 @@ authority — the public verifier rejects every body until an independently
 admitted Stage 2 parent can build and execute the planner under an owned
 pre-exec lock. A green source-contract spec is evidence for the source boundary
 only, which is precisely the scope this record assigns it.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: bootstrap planner/receipt authorization design gap, needs a bootstrap run to verify. No change made.
