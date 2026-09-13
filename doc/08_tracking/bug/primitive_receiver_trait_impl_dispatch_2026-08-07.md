@@ -832,3 +832,21 @@ Duration: 3848ms
   in-repo status is UNVERIFIED-BY-`test`, VERIFIED-RED-BY-`run` (its three
   `it` blocks assert exactly the `PASS ...` lines the probe transcripts above
   show absent).
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Read the full history (834 lines). Root causes are now pinned to two
+Rust-seed sites (`closures_structs.rs:1778-1800` no receiver-type gate;
+`interpreter/expr/calls.rs` unsigned-receiver dispatch gap) — both out of
+scope for a pure-Simple bugfix lane. The one remaining pure-Simple residual,
+`trait_impl_lowering.spl:249-251`'s bare-name registration for trait
+DEFAULT methods, is not independently safe to attempt in this pass: it sits
+inside the same primitive-dispatch registration scheme this record already
+found subtly wrong twice (Defect B's `primitive_type_key` fix), P1 severity
+means a careless edit risks breaking working trait dispatch broadly, and the
+record itself notes this fix can only be observed by content review (not by
+`bin/simple run`) until a bootstrap rebuild — no fast RED/GREEN loop is
+available. Exceeds the 45-minute budget to do safely. Leaving OPEN,
+unchanged; direction is already fully documented above (mirror the
+`primitive_type_key`-qualified registration pattern instead of the bare
+`default_fn.name`).
