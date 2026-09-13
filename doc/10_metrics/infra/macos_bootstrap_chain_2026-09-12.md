@@ -1077,3 +1077,89 @@ they make the next lane self-diagnosing instead of another evidence run:
    `translate_copy` — it converts the llc rejection into a compiler-side
    diagnostic naming the MIR function and block, which is the information the
    fix actually needs.
+
+## Run 24 — the guard fires, and it names the reason: `invalid terminator operands`
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+root, worktree `agent-a341b458ad89118a2`, carrying PR #784 (the fail-closed SSA
+guard + the alloca-transform reject log + the `module.ll` keep). Seed rebuilt
+(2m53s), Stage 1 admitted, Stage 2 built **clean**:
+`Build complete: 886 compiled, 0 cached, 0 failed` / `418.7s compile + 10.5s link
+= 429.3s total` / `136084 KB`
+(`logs/aarch64-apple-darwin/stage2-native-build.log`). Verdict, verbatim:
+
+```
+error: stage2 failed the positional pure-Simple Stage-3 route (status 134)
+PASS — 1 check(s), stage stage2 failed (exit 3) and said why
+  warning: stage2 native-build failed (exit 3); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+`status 134` is SIGABRT — the new guard, not llc. Stage 3 / full CLI were never
+reached, so there is no candidate to smoke-check and nothing was deployed.
+
+### What the lane now says that it could not say before
+
+From `stage3/aarch64-apple-darwin/stage2-receiver.log`, verbatim:
+
+```
+llvm-emitter-ssa-violation::%l50 = getelementptr i8, ptr %l3, i64 0  ; copy -- a value is defined twice in one function
+[llvm-ssa] fn=module_logical_name_from_path alloca-transform rejected: invalid terminator operands
+[llvm-ssa] fn=_module_path_naming_strip_numbered_dirs alloca-transform rejected: invalid terminator operands
+[llvm-ssa] fn=_module_path_naming_text_index_of alloca-transform rejected: invalid terminator operands
+```
+
+Three findings, in order of weight:
+
+1. **Run 23's hypothesis is CONFIRMED, and its mechanism is now named.**
+   `src/compiler/common/module_path_naming.spl` is the failing unit, and the
+   reason the emitter saw un-renamed multi-def locals is that
+   `ssa_alloca_transform_blocks` **refused all three of its functions** with
+   `invalid terminator operands`. That reject comes from
+   `ssa_term_operand_payloads_valid` -> `ssa_operand_local_payload_valid`
+   (`60.mir_opt/mir_opt/var_reassign_ssa.spl:885-947`), whose own comment says
+   why it exists: *"Struct-backed operands can arrive as nil in the staged-native
+   lane."* So the root cause is NOT that the transform is too narrow by design —
+   it is that a terminator operand's payload is **lost in transport inside the
+   native Stage-2 candidate**, the transform correctly refuses to decode a nil,
+   and the whole function then bypasses the only mechanism that would have made
+   it SSA. Same defect family as `var_reassign_ssa.spl:35` ("Returning MirInst +
+   [MirInst] through nested anonymous tuples can ... lose the defining
+   instruction and appended Store in a pure-Simple bootstrap binary").
+2. **The defect is native-lane-only, which is why no seed probe reproduced it.**
+   Under the Sep-5 seed interpreter, the same `module_path_naming.spl` lowers and
+   emits with **zero** duplicate `%l` definitions and **zero** rejects, as do a
+   `var` re-assigned in a loop, a copy of a copy, and a struct-receiver method
+   with a loop-carried accumulator (all four are now pinned in
+   `test/01_unit/compiler/backend/llvm_emitter_ssa_violation_guard_spec.spl`).
+   Any future probe of this site must run in the native lane; a green seed run
+   proves nothing about it.
+3. **`text.substring` and `text.index_of` diverge in the native lane, measured.**
+   The violation line above reads `llvm-emitter-ssa-violation::%l50 = ...` — an
+   EMPTY function name, and a value "name" that is the whole instruction text.
+   Both come from `substring(0, idx)` returning the entire string natively. The
+   duplicate was still caught (the two definitions were byte-identical), but a
+   duplicate whose two definitions differed on the right-hand side would have
+   been MISSED. The guard now extracts both the function name and the value name
+   with `split`, which yields the bare token on both lanes. This is worth a
+   record of its own: a `substring` that ignores its end index is not a
+   diagnostics bug, it is a text-primitive miscompile in the Stage-2 candidate.
+
+### Correction to run 23's recommendation #1
+
+`llvm_object_stage_fail` does now copy `module.ll` to
+`"{diagnostic_path}.module.ll"` before the staging teardown, and that is the
+right fix for every llc-side failure — but it does **not** help this one, and no
+`.module.ll` was produced this run. The guard aborts inside `translate_module`,
+before any IR file is written. The IR-keep is retained for the failure classes it
+does cover.
+
+### Next move for site 10b
+
+Stop looking in `_MirToLlvm/**`: the emitter is now provably fail-closed on this
+class. The open question is why a `Ret`/`If`/`Switch` operand payload reads as
+nil inside the Stage-2 candidate for these three functions and not under the
+seed. Dump the refused terminators from the native lane (the reject log already
+names the functions, so the scope is three functions in one file), and treat a
+`substring` that ignores its end index as a candidate common cause rather than a
+separate cosmetic issue.

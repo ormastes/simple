@@ -176,18 +176,28 @@ pub fn llvm_first_duplicate_ssa_def(ir: text) -> text:
         li = li + 1
         if trimmed.starts_with("define "):
             seen = {}
-            val at = trimmed.index_of("@")
-            if at >= 0:
-                val rest = trimmed.substring(at + 1, trimmed.len())
-                val paren = rest.index_of("(")
-                current_fn = if paren >= 0: rest.substring(0, paren) else: rest
+            # Same reason as the value-name extraction below: take the `@name(`
+            # token by splitting, not by slicing. On run 24 the native lane's
+            # slice produced an EMPTY function name, which is exactly the piece
+            # of the diagnostic that matters.
+            current_fn = trimmed
+            for tok in trimmed.split(" "):
+                if tok.starts_with("@"):
+                    val paren = tok.index_of("(")
+                    current_fn = if paren > 0: tok.split("(")[0] else: tok
             continue
         if not trimmed.starts_with("%"):
             continue
         val eq = trimmed.index_of(" = ")
         if eq < 0:
             continue
-        val name = trimmed.substring(0, eq)
+        # `split(" ")[0]`, NOT `substring(0, eq)`: measured on the run-24 Stage 2
+        # candidate, the native lane's `substring` returned the WHOLE line here,
+        # so the seen-key degenerated to the full instruction text -- which still
+        # catches two byte-identical definitions (it did) but would MISS a
+        # duplicate whose two definitions differ on the right-hand side. `split`
+        # is a different primitive and yields the bare `%lN` on both lanes.
+        val name = trimmed.split(" ")[0]
         if seen.has(name):
             return "{current_fn}:{name}"
         seen[name] = true
