@@ -1,0 +1,125 @@
+"""A single `simple lint <file>` run must not re-open the same package
+`__init__.spl` once per import site.
+
+Measured 2026-09-13 (SIMPLE_EXECUTION_MODE=interpret -- the default JIT lane
+segfaults on `lint` when the invoked binary's own path is inside cwd's tree,
+filed by PERF-5: doc/08_tracking/bug/lint_default_lane_segfault_from_worktree_bin_path_2026-09-13.md)
+on `bin/simple lint test/05_perf/fixtures/interpreter_startup/hello.spl`:
+
+| path                                    | opens (before) | call site |
+|------------------------------------------|---:|---|
+| `variants/__init__.spl`                   | 76 | `module_resolver::var_overlay::compute_var_roots`, called from `interpreter_module::path_resolution::resolve_module_path_uncached` once per unresolved-import resolution attempt |
+| `fix/rules/impl_/__init__.spl`            | 28-29 | `pipeline::module_loader::load_module_with_imports_internal`, recursing once per submodule imported from that package |
+
+Both were attributed with gdb breakpoints on the real glibc `open64`
+functions (`__libc_open64` / `__GI___open64_nocancel`), printing a backtrace
+on every hit whose pathname argument matched -- `strace -k` is not available
+on this host's strace build, and manual Rust-ABI register decoding of the
+`read_trace::rts` wrapper's arguments was unreliable, so this is the ground
+truth, not a guess:
+
+* `variants/__init__.spl`: the DEPLOYED seed binary's `compute_var_roots` is
+  fully inlined with NO cache check (confirmed by disassembling
+  `simple_compiler::module_resolver::var_overlay::compute_var_roots` in the
+  deployed `bin/simple` -- it goes straight from function entry to
+  `Path::join`/`read_to_string`, no thread-local HashMap lookup at all) even
+  though the CURRENT SOURCE at this worktree's base (`d522cc98da2`) already
+  has `VAR_ROOTS_CACHE`, a thread-local memo landed by an earlier lane
+  (`git log` on `var_overlay.rs` shows `8533c416681`/`7bb5ef796a6`, both
+  ancestors of this worktree's HEAD). This is a STALE DEPLOYED BINARY, not a
+  live source bug -- redeploying the seed from current source fixes this
+  target with no further code change. See
+  doc/08_tracking/bug/deployed_seed_binary_missing_var_roots_cache_fix_2026-09-13.md.
+
+* `fix/rules/impl_/__init__.spl`: a REAL, present-day source bug, fixed in
+  this change. `load_module_with_imports_internal`'s de-dup
+  (`if flatten_imports && !visited.insert(path.clone())`) only fires when
+  `flatten_imports` is true. A plain (non-glob, non-nested-flatten) member
+  import recurses with `flatten_imports=false` for the imported module, which
+  skips that check entirely and falls straight through to a fresh
+  `fs::read_to_string` -- so a package `__init__.spl` imported by many
+  sibling submodules (as `lint_checks.spl`'s dependency tree does here) is
+  re-read from disk once per submodule, never memoized. Fixed by
+  `MODULE_SOURCE_TEXT_CACHE`, a small per-process thread-local memo of the
+  CRLF-normalized raw source text keyed by the already-canonicalized path
+  (`src/compiler_rust/compiler/src/pipeline/module_loader.rs`), consulted
+  regardless of `flatten_imports`. It caches only the raw text, not the
+  parsed+capability-validated `Module`, so a call with a different
+  `target_arch` (cfg-stripping is per-call, after the cache) or different
+  `importing_capabilities` is unaffected -- byte-identical parse/validate
+  behaviour, one fewer disk read.
+
+Re-measured on this lane's own candidate binary (built from this fix,
+`src/compiler_rust/target/release/simple`, sha256 `31b41c306aa9...`):
+`variants/__init__.spl` 76 -> **1** (confirms the stale-binary theory --
+`var_overlay.rs` was not touched by this change); `fix/rules/impl_/__init__.spl`
+28-29 -> **2**, stable across repeated runs. The residual 2 is NOT this
+function still leaking -- a second gdb pass shows the two opens are two
+DIFFERENT PATH SPELLINGS of the same physical, symlinked directory
+(`src/compiler/tools` -> `90.tools`): one open of
+`.../90.tools/fix/rules/impl_/__init__.spl` through this fix's cache
+(`pipeline::module_loader::load_module_with_imports_internal`), one open of
+`.../compiler/tools/fix/rules/impl_/__init__.spl` (the symlink spelling,
+uncanonicalized) through the INTERPRETER's separate cross-lane cache
+(`module_cache::shared_source`). That is a pre-existing, larger, cross-lane
+duplication (the same class `PARSED_SOURCE_CACHE`'s own doc comment already
+describes for the lowerer/interpreter pair) and is out of scope here -- see
+the bug record for the full backtraces.
+
+This spec's `fix/rules/impl_/__init__.spl` row must be at or under budget on
+ANY correctly-fixed binary (seed or self-hosted, this worktree's private
+candidate or a later official redeploy). The `variants/__init__.spl` row is
+recorded for visibility but is NOT gated here -- gating it would fail on
+every OFFICIAL deployed binary until whoever owns the redeploy schedule
+actually redeploys, which is a deploy-cadence fact, not a code defect this
+lane introduced or can fix by editing a `.spl`/`.rs` file. See the two bug
+records above for the full split.
+
+Fails closed: an strace that captured nothing, or a count that did not
+parse, is a FAIL, not a pass.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val FIXTURE: text = "test/05_perf/fixtures/interpreter_startup/hello.spl"
+
+# `fix/rules/impl_/__init__.spl` measured 28-29 opens before this lane's fix,
+# 2 after (stable across repeated runs on the candidate binary) -- the
+# residual 2 is a documented, separate, cross-lane path-spelling duplication
+# (see this file's header), not this function still leaking. The ceiling
+# gives headroom above the measured 2 for that residual plus a little slack,
+# while still catching a real regression back toward "once per submodule"
+# (28-29).
+val IMPL_INIT_OPEN_CEILING: i64 = 6
+
+fn run_sh(command: text) -> (text, i64):
+    val result = process_run("sh", ["-c", command])
+    (result.0 + result.1, result.2)
+
+fn parse_field(blob: text, key: text) -> i64:
+    for token in blob.split(" "):
+        if token.starts_with(key + "="):
+            return token.substring(key.len() + 1, token.len()).trim().to_i64()
+    -1
+
+describe "lint's repeated package-__init__.spl opens":
+    it "does not re-open fix/rules/impl_/__init__.spl once per submodule import":
+        step("strace a lint run under the interpreter lane (the default lane segfaults here)")
+        val script = "tmp=$(mktemp -d); b=$SIMPLE_BINARY; "
+            + "test -n \"$b\" || b=bin/simple; "
+            + "SIMPLE_EXECUTION_MODE=interpret strace -f -e trace=openat -o $tmp/tr "
+            + "$b lint " + FIXTURE + " >/dev/null 2>&1; "
+            + "echo tracelines=$(wc -l < $tmp/tr) "
+            + "variants=$(grep -c 'variants/__init__[.]spl' $tmp/tr) "
+            + "impl_init=$(grep -c 'fix/rules/impl_/__init__[.]spl' $tmp/tr); "
+            + "rm -rf $tmp"
+        val (out, _code) = run_sh(script)
+        expect(out.len()).to_be_greater_than(0)
+        step("fail closed when strace captured nothing")
+        val trace_lines = parse_field(out, "tracelines")
+        expect(trace_lines).to_be_greater_than(0)
+        step("budget: fix/rules/impl_/__init__.spl")
+        val impl_init_opens = parse_field(out, "impl_init")
+        expect(impl_init_opens).to_be_greater_than(0)
+        expect(impl_init_opens).to_be_less_than(IMPL_INIT_OPEN_CEILING)
