@@ -186,3 +186,7 @@ Already guarded: `src/compiler/70.backend/linker/test/smf_layout_parity_spec.spl
 pins the Simple side byte-for-byte and records `RUST_SEED_HEADER_SIZE = 96`,
 `RUST_SECTION_TABLE_OFFSET = 24`, `RUST_ENTRY_POINT_OFFSET = 48`,
 `RUST_APP_TYPE_OFFSET = 80` — all matching the table above.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Record explicitly states this is architectural and confirmed out of scope for a unilateral fix (needs a dual-write migration, would invalidate cached artifacts). No change made.

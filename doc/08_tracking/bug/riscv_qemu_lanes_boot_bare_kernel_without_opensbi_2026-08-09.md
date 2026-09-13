@@ -125,3 +125,7 @@ required by the board-evidence bar.
   `-kernel` with `qemu_bios: ""`, where the rule wants OVMF pflash. Same family,
   separate fix.
 - `.claude/rules/board-runnable.md` already records the aarch64 EFI-stub gap.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: RISC-V QEMU/OpenSBI board-runnable rule violation, needs a QEMU boot to verify; spec is deliberately left RED per the record itself. No change made.

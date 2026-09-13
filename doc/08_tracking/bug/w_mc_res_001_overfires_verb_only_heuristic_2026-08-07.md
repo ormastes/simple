@@ -216,3 +216,7 @@ inside this file (in-scope, already done); the remaining 160-finding residual
 needs the resource-registry consumption wiring, which crosses into the
 shared lint-rule-dispatch machinery this worker was told not to touch. No
 code change made in this pass.**
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: fixing a verb-only lint heuristic overfiring on ~208 findings needs a real disambiguation design (handle-acquire vs value-constructor), not a bounded fix. No change made.

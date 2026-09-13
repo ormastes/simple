@@ -599,3 +599,7 @@ path, with the executed-decisions denominator caveat above.
 
 ## Triage 2026-09-12
 Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: coverage tooling gap spans the deployed binary CLI, MIR lowering branch probes, and the spipe/.spl runner path -- a large cross-cutting feature, not a bounded fix. No change made.

@@ -30,3 +30,7 @@ Run the exact 1/4/32 MiB oracle on an admitted self-hosted Stage 4 and prove
 packed storage with bounded RSS on an admitted self-hosted binary: correct
 length, content, and checksum plus peak RSS no greater than four times payload
 without baseline subtraction. The admitted self-hosted memory row remains open.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: the fix surface is src/compiler_rust/compiler/src/value.rs (Rust interpreter byte-allocation path), needs a seed rebuild to verify any change. No change made.

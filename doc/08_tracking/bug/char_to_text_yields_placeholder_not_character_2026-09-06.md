@@ -191,3 +191,39 @@ Open sub-question still unanswered: whether the pure-Simple mirror
 (`src/compiler/50.mir/**` cast lowering) carries the same gap. It was not
 audited here, and it is the path that matters once a self-hosted binary is
 deployed.
+
+## Triage 2026-09-13 (BUGFIX-7 lane) — reconfirmed on `a6450c9d6f5`, pure-Simple mirror audited
+
+Re-ran the exact repro from this record on `bin/simple run` (deployed Rust seed,
+`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 prefix `3d120a6f`) at
+`a6450c9d6f5` — identical output byte-for-byte to the 2026-09-12 triage
+(`a_len=12 [<special:15>]`, `b_len=12 [<value:0x7d>]`, `c_len=19
+[<invalid-heap:0x41>]`). Still reproduces; not a regression, not fixed.
+
+Answered the open sub-question: the pure-Simple mirror
+`me lower_cast_expr` at
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:2277-2330` has the
+**same structural gap**, and arguably a *wider* one — it has no `STRING`
+special case either (unlike the Rust seed's `lowering_expr_ops.rs`, which at
+least special-cases `target == TypeId::STRING`). Every branch in this function
+ends at `cast_builder.emit_cast(mir_operand_copy(operand_local), mir_target)`
+(line 2328) — the same "plain value copy" the Rust bug record identifies as
+the defect — for every scalar cast target, `char` included, with no boxing or
+tagging step and no dedicated `emit_to_string`-style helper anywhere in this
+file (`grep -n "emit_to_string" expr_dispatch.spl` — 0 hits).
+
+This CANNOT be turned into a demonstrable RED->GREEN unit spec by this lane:
+this pure-Simple source is the self-hosted compiler's own MIR lowering, only
+exercised end-to-end by a self-hosted `bin/release/<target>/simple` running
+`native-build`/`compile`. No such binary exists on this host or in this
+worktree (only the Rust seed, confirmed via `bin/simple --version` printing
+"bootstrap seed only"), so a spec that drives this code path would either (a)
+not execute it at all (falling through to the seed's own Rust codegen, which
+is a different implementation entirely), or (b) require standing up a
+self-hosted deploy first — out of scope for this lane (no bootstrap, per the
+fan-out brief). Left OPEN, no code change made. Whoever next has a self-hosted
+binary should: write the reproduction as a `.spl` fixture, run it through
+`bin/simple native-build`/`compile` on that binary, confirm the same
+`<special:N>` / `<value:0xNN>` shape, then fix `lower_cast_expr` to special-case
+`char` (and audit whether `STRING` needs the same treatment there, since this
+mirror lacks even that).

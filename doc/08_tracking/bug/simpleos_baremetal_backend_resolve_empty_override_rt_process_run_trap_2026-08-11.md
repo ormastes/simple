@@ -310,3 +310,7 @@ objdump -dr build/os/simpleos_wm_simple_web_check_32.elf | grep rt_process_run
 
 ## Triage 2026-09-12
 Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a fresh baremetal QEMU boot + serial-log evidence to verify the remaining deeper trap. No change made.
