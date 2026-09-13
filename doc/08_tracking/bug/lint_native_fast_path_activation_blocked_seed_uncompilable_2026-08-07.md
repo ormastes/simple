@@ -71,3 +71,7 @@ Stage 3 self-host block. Both blockers are owned by other tracked docs
 (`t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md`)
 and are out of scope to fix here per `.claude/rules/bootstrap.md` (no ad-hoc
 seed hand-copy). No code changed.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a seed rebuild to activate the native lint fast path, blocked by pre-existing Rust E0425 errors. No change made.

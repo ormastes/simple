@@ -59,3 +59,35 @@ hard errors (`jit.rs:157`). Whether it covers this path was not tested.
 
 Found incidentally while working the os/runtime slice; the reporting lane's scope
 did not cover the JIT, so it is filed rather than patched.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Reproduced on `a6450c9d6f5` with `rt_totally_undeclared_symbol_zzz` (Rust
+seed, `bin/release/aarch64-unknown-linux-gnu/simple`):
+
+```
+SIMPLE_EXECUTION_MODE=interpret bin/simple run probe.spl   -> rc=1, correct
+SIMPLE_EXECUTION_MODE=jit       bin/simple run probe.spl   -> rc=0, len=0
+```
+
+matching the documented shape (this repo's build reports `len=0`, not
+`len=-1` — a detail difference, same defect class: a wrong value with rc=0).
+
+Answered two of the three "Not verified" questions:
+
+- **`SIMPLE_JIT_STRICT=1` is not the relevant knob** (or does not exist under
+  that name in this build) — testing it changed nothing.
+- **The real opt-in is `SIMPLE_STRICT_EXTERN=1`**, and it DOES make this fatal:
+  `SIMPLE_EXECUTION_MODE=jit SIMPLE_STRICT_EXTERN=1 bin/simple run probe.spl`
+  -> `rc=1`, `error: extern 'rt_...' (argc=1) is declared in Simple but backed
+  by no implementation; SIMPLE_STRICT_EXTERN=1 refuses to substitute nil for
+  it.` So the safety mechanism already exists; it is merely not the default,
+  which is exactly the record's own fix direction ("belongs behind an
+  explicit opt-in flag" — it already is one, but the ask was arguably for
+  fatal-by-default).
+
+Not fixed here: the actual behavior (interpreter_sffi.rs / JIT extern
+resolution path) is Rust seed source, and making a mode's *default* stricter
+requires a rebuild+redeploy to verify — out of scope for this lane. Third
+question (declared-but-missing-at-link-time extern) not tested; out of budget.
+Left OPEN.

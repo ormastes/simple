@@ -1267,3 +1267,9 @@ phases here.
 
 Neither is this bug's termination reproduced. Reproducing it still needs a
 Stage 2 and a canonical Stage 3, neither of which exists in this worktree.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: verification needs "one future canonical build" (a full Stage 3
+bootstrap run to measure RSS), which this lane does not run (no bootstrap per
+the fan-out brief). No change made.

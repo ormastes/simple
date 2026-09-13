@@ -126,3 +126,33 @@ no regression harness available in this pass.
 - "Spec DSL = Rust intrinsics in bdd.rs, .spl spec-libs unreachable on seed" —
   this bug is the first case where that architecture is externally visible as a
   spec failure rather than as dead code.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane) — reproduces GREEN, CLOSED
+
+Ran the record's own exact reproduction, unmodified:
+
+```
+$ bin/simple test test/01_unit/lib/nogc_sync_mut/spec_bool_expect_spec.spl
+Results: 3 total, 3 passed, 0 failed
+```
+
+The file is unchanged (`use std.spec.*` at the top, `expect_not(false)` in
+the second example, verified by reading it) — this is the identical shape
+that used to hit `semantic: function 'expect_not' not found`. It no longer
+does. `bdd.rs` still has **no** `"expect_not"` entry
+(`grep -n '"expect_not"' src/compiler_rust/compiler/src/interpreter_call/bdd.rs`
+— 0 hits), so option 1 above was not what fixed this; something in the
+wildcard-export-expansion path (option 2) evidently now resolves it, or a
+different mechanism entirely. The mechanism was not identified, only the
+outcome verified. Note this is NOT a blanket fix for the whole class: the
+sibling record `prevention_mock_deferred_arming_impossible_2026-08-07`'s
+Defect 3 (`get_test_count` via `use std.spec.*`) was re-checked in this same
+session and still fails identically — so this appears to be a narrower,
+name-specific fix rather than a general wildcard-resolution repair.
+
+Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`
+(`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 prefix `3d120a6f`).
+The linter's `expect_not` auto-fix suggestion can be trusted again for this
+specific name; whether other wildcard-dropped `spec.spl` names remain broken
+(per the still-reproducing `get_test_count` case) is untouched by this
+verification.

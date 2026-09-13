@@ -57,3 +57,7 @@ sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
 ```
 
 Serial: `build/simpleos_wm_fullscreen_evidence/serial.log` (440 lines; rejection near the end).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a QEMU OVMF pflash boot to verify the WM content-provenance rejection path. No change made.

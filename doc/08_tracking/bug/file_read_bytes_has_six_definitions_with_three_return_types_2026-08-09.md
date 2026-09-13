@@ -218,3 +218,29 @@ runtime symbol returns. Worth its own stream.
 The sibling `rt_time_now_nanos` epoch divergence is filed separately at
 `doc/08_tracking/bug/rt_time_now_nanos_interpreter_uses_wall_clock_epoch_2026-08-09.md`
 (not fixed: `runtime_native.c:9124` marks that symbol as owned by another lane).
+
+## Re-check 2026-09-13 (BUGFIX-7 lane) — full convergence has landed, CLOSED
+
+`grep -rn "fn file_read_bytes" src/ --include=*.spl` now returns exactly
+**one** definition (`src/lib/nogc_sync_mut/io_runtime.spl:285`). Every other
+site named in this record now re-exports it
+(`use std.io_runtime.{file_read_bytes}` in `sffi/io.spl` and
+`io/file_ops.spl`) or carries an explicit comment recording that it was
+deliberately removed (`file_system/file_ops.spl` in both `nogc_sync_mut` and
+`nogc_async_mut`, citing this bug id).
+
+```
+bin/simple test test/01_unit/lib/nogc_sync_mut/file_read_bytes_single_definition_spec.spl
+Results: 5 total, 5 passed, 0 failed
+```
+
+The "exactly one definition" assertion that was RED by design is now green
+along with the rest. The earlier revert's cause (compiler hangs under host
+load) evidently did not recur when this landed — someone retried the
+convergence "on a quiet machine" as this record's own note suggested.
+
+Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`
+(`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 prefix `3d120a6f`). The
+two out-of-scope items noted above (47-way `rt_file_read_bytes` extern
+re-declaration; the `scv` `& 0xFF` mask cleanup) are unaddressed and not part
+of this record's own single-definition claim.

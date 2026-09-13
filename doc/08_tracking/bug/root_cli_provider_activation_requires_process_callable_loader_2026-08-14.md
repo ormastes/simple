@@ -63,3 +63,11 @@ implementations into the root CLI, or fall back to the Rust seed.
 
 ## Triage 2026-09-12
 Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: this is a design-level integration gap (root CLI SCI
+command-registry hook binding admitted providers), not a bounded bug fix —
+its own "Unblock condition" section requires focused native/SMF admission
+tests plus a generic dispatch hook, well beyond a single-bug budget. No
+change made.

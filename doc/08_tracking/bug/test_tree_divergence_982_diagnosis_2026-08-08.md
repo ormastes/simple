@@ -153,3 +153,7 @@ different sessions/commits over time, not one bulk artifact.
   because one side was deleted" in the `comm -13` reporting — the current
   "now IDENTICAL" wording is factually wrong for the deleted-canonical case
   and could cause a future reviewer to skip actually deleting the orphan.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: 982-file test-tree divergence needs the check-test-tree-divergence.shs baseline machinery and careful reviewed diffing, well beyond a single-bug budget. No change made.

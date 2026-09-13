@@ -50,3 +50,7 @@ scope for the gate-oracle task that found this):
 sh scripts/check/check-compiler-provenance.shs   # default binary set, includes the stale artifact -> FAIL
 sh scripts/check/check-compiler-provenance.shs bin/release/x86_64-unknown-linux-gnu/simple   # PASS on its own
 ```
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a fresh redeploy/provenance check of build/redeploy_out artifacts, a bootstrap-deploy operation this lane does not run. No change made.

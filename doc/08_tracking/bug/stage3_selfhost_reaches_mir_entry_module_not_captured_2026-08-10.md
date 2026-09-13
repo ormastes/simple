@@ -193,3 +193,9 @@ for still requires one incremental debug bootstrap, which was not run here.
 ## Triage 2026-09-12
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: the record's own status says the fix candidate needs "a full
+stage-3 run" to validate, which requires a bootstrap this lane does not run.
+No change made.

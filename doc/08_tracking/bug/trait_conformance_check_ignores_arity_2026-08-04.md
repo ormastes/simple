@@ -699,3 +699,53 @@ close the call-site hole where a missing argument reads as nil sentinel `3`.
 It also compares **arity only** — parameter *types* are still never checked, so
 a same-arity type drift remains invisible, exactly as the title of this bug
 says. Both are separate lanes.
+
+## Fix 2026-09-13 (BUGFIX-7 lane) — the armed arity check found a real, previously-hidden defect
+
+Re-ran the reference oracle checker this record's own "standing gate" names:
+
+```
+bin/simple run scripts/check/check-trait-arity.spl
+FAIL -- 3 Tier-A arity drift(s)
+```
+
+Two of the three were real: `test/02_integration/storage/dbfs/fat32_no_regression_spec.spl`
+and its (diverged) mirror `test/integration/storage/dbfs/fat32_no_regression_spec.spl`
+each declare `MockFat32BlockDevice.read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>`
+against the `BlockDevice` trait's declared `fn read_sector(lba: u64) -> Result<[u8], text>`
+(1 param) — a 2-arg buffer-mutation shape versus the trait's 1-arg
+return-the-bytes convention, exactly the drift class this bug documents. Under
+`bin/simple test` (where the armed interpreter-path check actually runs),
+**this made the entire spec file fail to compile — 0 examples executed** —
+which is worse than the silent-wrong-arity hazard the record describes: the
+armed check is doing its job, but nobody had re-run these two files since it
+was armed, so the check had gone from "silent" to "loud but unnoticed."
+
+Fixed both files' `MockFat32BlockDevice.read_sector` to the trait's declared
+1-arg/return-bytes shape (every real caller in `src/lib/nogc_sync_mut/fs_driver/`
+already calls `device.read_sector(lba)` with one argument; the correct
+reference impl `RamBlockDevice` in `fat32_stub.spl` already uses this shape,
+with its own comment explaining why: buffer-mutation doesn't propagate under
+interpreter value semantics).
+
+Before: both files failed to compile (`declared>=N executed=0`, arity error
+naming `MockFat32BlockDevice.read_sector`).
+After: `test/02_integration/...` is 3/4 passing (1 unrelated pre-existing
+FAT32 rename defect filed separately as
+`fat32_atomic_replace_lifecycle_fserror_corrupt_2026-09-13.md`);
+`test/integration/...` is 3/3 passing after also fixing a second,
+independent, newly-exposed bug in the same file (a self-referential string
+check that could never pass — see that file's diff).
+
+Re-ran the oracle: `FAIL -- 1 Tier-A arity drift(s)` — the one remaining hit
+is `test/01_unit/compiler/traits/conformance/probe_wrong_arity.spl`, a
+**deliberate negative-control fixture** (its own header: "Deliberately
+ill-formed... A conforming compiler must reject this file"), not a real
+defect; the checker script itself doesn't exclude known fixture files from
+its repo-wide scan, which is a separate, minor concern in the checker, not in
+product code.
+
+Status: two real Tier-A arity drifts fixed and verified; the standing gate's
+one remaining hit is a known-good fixture. Left OPEN overall (parameter
+*types* are still never compared, per the record's own "still not covered"
+section — that is unchanged by this fix).

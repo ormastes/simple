@@ -35,3 +35,9 @@ Remaining evidence is deliberately split:
   rerun the original `check` command to close the host crash report.
 - Run the canonical live checker on physical JH7110 hardware to close the
   board acceptance gate. Host success must not be presented as device evidence.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: remaining work needs an x86_64 self-hosted runtime rebuild (none
+available; this host is aarch64 with only the Rust seed) and physical JH7110
+board access. No change made. Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, sha 3d120a6f).
