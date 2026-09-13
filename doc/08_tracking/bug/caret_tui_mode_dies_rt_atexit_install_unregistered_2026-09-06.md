@@ -4,6 +4,18 @@ Date: 2026-09-06
 Status: FIXED IN SOURCE — awaiting a seed deploy (see "Fix" below)
 Area: `src/compiler_rust/compiler/src/interpreter_extern/terminal.rs` (Rust seed interpreter)
 
+## Windows update (2026-09-13)
+
+Still reproduces on Windows: `bin/simple.exe`, `bin/release/x86_64-pc-windows-msvc/simple.exe`
+(dated 2026-09-01) and the `C:/tool-fix` copy are byte-identical and predate this bridge. Any
+module that falls back to the interpreter and reaches `terminal_install_recovery()` dies with
+`error: semantic: unknown extern function: rt_atexit_install`. Caret always fell back, because
+`std.common.net.http_core.normalize_path` failed HIR lowering (see
+`seed_receiver_text_join_resolves_to_thread_join_optional_2026-09-13.md`). With that fixed,
+caret JITs (`SIMPLE_JIT_STRICT=1 ... main.spl --help` exits 0), and the JIT lane resolves the
+extern (the probe returns `recovery=false`, with no error). The interpreter lane still needs a
+Windows seed redeploy.
+
 ## Fix (2026-09-06)
 
 Bridged in `interpreter_extern/terminal.rs` and registered in
