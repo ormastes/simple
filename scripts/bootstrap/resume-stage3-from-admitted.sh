@@ -363,32 +363,62 @@ stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
-if [ -n "$stage2_compile_stack_mib" ]; then
-  stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=$stage2_library_path" \
+# The Stage-2 build-args vector is reconstructed from the RECORDED transcript --
+# every env VALUE and the argv verbatim -- not from a hand-written copy of
+# bootstrap-from-scratch.sh:2827. The hand-written copy was stale in both halves
+# and no Stage 3 resume could verify any Stage 2 the current engine produces:
+#
+#   env  -- it omitted SIMPLE_ABI_POLICY, SIMPLE_PLUGIN_MANIFEST_POLICY,
+#           SIMPLE_KERNEL_K1_POLICY, SIMPLE_COVERAGE_CUTOVER_STATE,
+#           SIMPLE_K1_COMPOSITION_SHA256_BEFORE, SIMPLE_FRONTEND_CACHE,
+#           SIMPLE_FRONTEND_CACHE_DIR,
+#           SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE and
+#           SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT, all of which the engine
+#           hashes;
+#   argv -- it omitted the k1 composition `--source <repo>/src/compositions/
+#           kernel_llvm_cranelift`, which the engine passes FIRST.
+#
+# Measured on the macOS Stage 2 admitted 2026-09-13: the hand-list computed
+# e0b89ae21d0a…, the receipt recorded 126998d2176d…, and Stage 3 refused with
+# `bootstrap-stage3-admission-mismatch: build_args_sha256`. Rebuilt from the
+# transcript the two are identical. The env NAMES and their order stay pinned
+# here (they are the engine's vector, and
+# bootstrap_stage3_stage2_canonical_env_names is the allowlist); only the values
+# and the argv come from the transcript, so a future engine change to a VALUE or
+# to argv can no longer rot this reconstruction. The recorded digest remains the
+# authority -- this makes the recomputation faithful, it does not relax it.
+set --
+while IFS= read -r stage2_transcript_line; do
+  case "$stage2_transcript_line" in argv:*) ;; *) continue ;; esac
+  stage2_transcript_argv=${stage2_transcript_line#argv:}
+  stage2_transcript_argv=${stage2_transcript_argv#*:}
+  set -- "$@" "$stage2_transcript_argv"
+done <"$stage2_transcript"
+[ "$#" -gt 0 ] || exit 1
+[ "$1" = native-build ] || exit 1
+stage2_env_value() {
+  bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
+}
+stage2_args=$(bootstrap_stage3_args_sha256 \
+  "RUST_LOG=$(stage2_env_value RUST_LOG)" \
+  "LIBRARY_PATH=$stage2_library_path" \
   "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
-  native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
-  --source src/lib --entry-closure --threads "$stage2_threads" \
-  --compile-stack-mib "$stage2_compile_stack_mib" \
-  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path "$runtime" -o "$stage2")
-else
-  stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=$stage2_library_path" \
-  "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
-  native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
-  --source src/lib --entry-closure --threads "$stage2_threads" \
-  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path "$runtime" -o "$stage2")
-fi
+  "SIMPLE_BOOTSTRAP=1" \
+  "SIMPLE_ABI_POLICY=$(stage2_env_value SIMPLE_ABI_POLICY)" \
+  "SIMPLE_PLUGIN_MANIFEST_POLICY=$(stage2_env_value SIMPLE_PLUGIN_MANIFEST_POLICY)" \
+  "SIMPLE_KERNEL_K1_POLICY=$(stage2_env_value SIMPLE_KERNEL_K1_POLICY)" \
+  "SIMPLE_COVERAGE_CUTOVER_STATE=$(stage2_env_value SIMPLE_COVERAGE_CUTOVER_STATE)" \
+  "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=$(stage2_env_value SIMPLE_K1_COMPOSITION_SHA256_BEFORE)" \
+  "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+  "SIMPLE_NATIVE_BUILD_RUST=1" \
+  "SIMPLE_NO_STUB_FALLBACK=1" \
+  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" \
+  "SIMPLE_FRONTEND_CACHE=$(stage2_env_value SIMPLE_FRONTEND_CACHE)" \
+  "SIMPLE_FRONTEND_CACHE_DIR=$(stage2_env_value SIMPLE_FRONTEND_CACHE_DIR)" \
+  "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
+  "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
+  "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
+  "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
   "$stage2_sanity" "$stage2_sanity" "$(dirname -- "$stage2_sanity")" \
   "$stage2" "$root"
