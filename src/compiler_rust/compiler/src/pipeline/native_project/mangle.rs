@@ -1694,3 +1694,124 @@ mod tests {
         assert!(!is_enum_helper_method("to_string"));
     }
 }
+
+/// Site 16: construction and match must name the SAME enum runtime identity.
+///
+/// The construction side (`MirInst::EnumUnit` / `EnumWith`) is qualified by
+/// `qualify_enum_runtime_names` above and only then hashed by codegen, so its
+/// id is `rid("<module>.Kind")`. The match side bakes `rid("Kind")` — the BARE
+/// declared name — as an integer constant back in HIR lowering
+/// (`hir/lower/expr/control.rs::enum_runtime_id_for_type` /
+/// `enum_runtime_id_for_pattern`), which this pass never used to see because it
+/// is an integer by the time MIR exists. `rt_enum_check_variant` answers 0 on an
+/// id mismatch, so in a natively compiled binary NO match arm ran.
+#[cfg(test)]
+mod enum_identity_agreement_tests {
+    use crate::mir::{MirInst, MirModule};
+    use std::collections::HashMap;
+
+    const SOURCE: &str = "enum Kind:\n    Cranelift\n    Interpreter\n    Llvm\n\nfn num3(k: Kind) -> i64:\n    match k:\n        case Cranelift: 11\n        case Interpreter: 22\n        case Llvm: 33\n\nfn main():\n    print \"{num3(Kind.Cranelift)}\"\n";
+
+    fn lower_and_qualify(runtime_module_name: &str) -> MirModule {
+        let mut parser = simple_parser::Parser::new(SOURCE);
+        let parsed = parser.parse().expect("fixture must parse");
+        let hir = crate::hir::lower::lower(&parsed).expect("fixture must lower to HIR");
+        let mut mir = crate::mir::lower_to_mir(&hir).expect("fixture must lower to MIR");
+        super::qualify_enum_runtime_names(
+            &mut mir,
+            runtime_module_name,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("qualification must succeed");
+        mir
+    }
+
+    /// Every id codegen will bake for a construction of an enum.
+    fn construction_ids(mir: &MirModule) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for func in &mir.functions {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let enum_name = match inst {
+                        MirInst::EnumUnit { enum_name, .. } | MirInst::EnumWith { enum_name, .. } => enum_name,
+                        _ => continue,
+                    };
+                    ids.push(i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
+                }
+            }
+        }
+        ids
+    }
+
+    /// Every id a `rt_enum_check_variant` call will compare against.
+    fn check_ids(mir: &MirModule) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for func in &mir.functions {
+            let mut consts = HashMap::new();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let MirInst::ConstInt { dest, value } = inst {
+                        consts.insert(*dest, *value);
+                    }
+                }
+            }
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let MirInst::Call { target, args, .. } = inst else {
+                        continue;
+                    };
+                    if target.name() != "rt_enum_check_variant" || args.len() < 2 {
+                        continue;
+                    }
+                    ids.push(
+                        *consts
+                            .get(&args[1])
+                            .unwrap_or_else(|| panic!("check-variant enum id operand {:?} is not a ConstInt", args[1])),
+                    );
+                }
+            }
+        }
+        ids
+    }
+
+    fn agree(runtime_module_name: &str) {
+        let mir = lower_and_qualify(runtime_module_name);
+        let built = construction_ids(&mir);
+        let checked = check_ids(&mir);
+        // Vacuity guards: a run that found no construction or no match test
+        // proves nothing and must fail rather than pass silently.
+        assert!(!built.is_empty(), "fixture produced no enum construction under {runtime_module_name}");
+        assert!(!checked.is_empty(), "fixture produced no rt_enum_check_variant under {runtime_module_name}");
+        let built_unique: std::collections::BTreeSet<i64> = built.iter().copied().collect();
+        let checked_unique: std::collections::BTreeSet<i64> = checked.iter().copied().collect();
+        assert_eq!(
+            built_unique, checked_unique,
+            "construction and match must name one runtime identity under {runtime_module_name}"
+        );
+    }
+
+    #[test]
+    fn construction_and_match_agree_on_the_enum_runtime_id() {
+        agree("aa.zz");
+        agree("bbbb.zz");
+    }
+
+    /// The identity is module-qualified by design (the declaring-module name is
+    /// what `imports.rs` registers, and the collision checks depend on it), so
+    /// the shared id legitimately differs between two module names. What must
+    /// never differ is construction vs match WITHIN one build.
+    #[test]
+    fn the_shared_id_follows_the_declaring_module_name() {
+        let aa = check_ids(&lower_and_qualify("aa.zz"));
+        let bbbb = check_ids(&lower_and_qualify("bbbb.zz"));
+        assert!(!aa.is_empty() && !bbbb.is_empty(), "both runs must produce match tests");
+        assert_ne!(aa[0], bbbb[0], "two module names must not collide onto one id");
+        assert_eq!(
+            aa[0],
+            i64::from(crate::codegen::shared::enum_runtime_type_id("aa.zz.Kind")),
+            "the shared id must be the declaring-module-qualified name's id"
+        );
+    }
+}
