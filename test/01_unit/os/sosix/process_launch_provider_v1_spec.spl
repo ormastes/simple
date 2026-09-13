@@ -1,0 +1,161 @@
+# @cover src/lib/common/contracts/execution/process_launch_spec_v1.spl 80%
+# @cover src/os/sosix/process_launch_provider_v1.spl 90%
+"""# SOSIX Process Launch Provider V1 Specification
+
+Compiler and application launches retain one provider-neutral description.
+SimpleOS admits it through a process-service capability; invalid input never
+reaches the provider callback.
+"""
+
+use std.spec
+use std.common.contracts.execution.process_launch_spec_v1.*
+use os.sosix.core.capability_ref.SosixCapabilityRef
+use os.sosix.process_launch_provider_v1.*
+
+fn _stdio(mode: text, capability_name: text) -> ProcessLaunchIoV1:
+    ProcessLaunchIoV1(mode: mode, capability_name: capability_name)
+
+fn _launch() -> ProcessLaunchSpecV1:
+    ProcessLaunchSpecV1(
+        executable: "/system/compiler/simple.smf",
+        argv: ["simple", "build", "/user/hello.spl"],
+        environment: ["SIMPLE_LIB=/system/lib"], cwd: "/user",
+        stdin: _stdio("inherit", ""),
+        stdout: _stdio("capability", "compiler.stdout"),
+        stderr: _stdio("capability", "compiler.stderr"),
+        namespace_name: "compiler", resources: ProcessLaunchResourcesV1(
+            memory_bytes: 536870912, cpu_time_us: 30000000,
+            open_handles: 256),
+        cpu_affinity: [0, 1], runtime_profile: "simpleos-userland-v1",
+        capabilities: ["fs.read", "fs.write", "process.spawn"],
+        service_grants: ["vfs", "loader"])
+
+fn _accept_compiler_launch(
+    service: SosixCapabilityRef, launch: ProcessLaunchSpecV1
+) -> i64:
+    if (service.slot == 19 and service.generation == 4 and
+        launch.argv.len() == 3 and launch.environment[0] == "SIMPLE_LIB=/system/lib" and
+        launch.stdout.capability_name == "compiler.stdout"):
+        return 73
+    -5
+
+var _poisoned_callback_calls: i64 = 0
+
+fn _poisoned_callback(
+    service: SosixCapabilityRef, launch: ProcessLaunchSpecV1
+) -> i64:
+    _poisoned_callback_calls = _poisoned_callback_calls + 1
+    service.slot as i64 + launch.argv.len() as i64
+
+describe "SOSIX process launch provider v1":
+    it "dispatches a complete compiler launch through the process service":
+        val plan = sosix_process_launch_plan_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch())
+        expect(plan.accepted).to_be(true)
+        expect(plan.reason).to_equal("ready")
+        expect(sosix_process_launch_dispatch_v1(
+            plan, _accept_compiler_launch)).to_equal(73)
+
+    it "rejects malformed environment before provider dispatch":
+        _poisoned_callback_calls = 0
+        var launch = _launch()
+        launch.environment = ["MISSING_SEPARATOR"]
+        val plan = sosix_process_launch_plan_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), launch)
+        expect(plan.accepted).to_be(false)
+        expect(plan.reason).to_equal("invalid-environment-entry")
+        expect(sosix_process_launch_dispatch_v1(
+            plan, _poisoned_callback)).to_equal(-22)
+        expect(_poisoned_callback_calls).to_equal(0)
+
+    it "rejects invalid service capability and forged plans":
+        _poisoned_callback_calls = 0
+        val launch = _launch()
+        val invalid = sosix_process_launch_plan_v1(
+            SosixCapabilityRef(slot: 19, generation: 0), launch)
+        expect(invalid.reason).to_equal("invalid-process-service-capability")
+        val forged = SosixProcessLaunchPlanV1(
+            accepted: true, reason: "ready",
+            service: SosixCapabilityRef(slot: 19, generation: 0),
+            launch: launch)
+        expect(sosix_process_launch_dispatch_v1(
+            forged, _poisoned_callback)).to_equal(-22)
+        expect(_poisoned_callback_calls).to_equal(0)
+
+    it "rejects invalid stdio resource and affinity shapes":
+        var launch = _launch()
+        launch.stdin = _stdio("capability", "")
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "invalid-stdio-binding")
+        launch = _launch()
+        launch.resources.memory_bytes = -1
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "invalid-resource-limit")
+        launch = _launch()
+        launch.cpu_affinity = [-1]
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "invalid-cpu-affinity")
+        launch = _launch()
+        launch.namespace_name = ""
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "missing-namespace")
+
+    it "retains an owned vector projection after admission":
+        var launch = _launch()
+        var service = SosixCapabilityRef(slot: 19, generation: 4)
+        val plan = sosix_process_launch_plan_v1(
+            service, launch)
+        service.generation = 8
+        launch.argv[1] = "run"
+        launch.environment[0] = "SIMPLE_LIB=/forged"
+        launch.stdout.capability_name = "forged.stdout"
+        launch.resources.memory_bytes = 1
+        launch.capabilities[0] = "process.signal"
+        expect(plan.launch.argv[1]).to_equal("build")
+        expect(plan.launch.environment[0]).to_equal("SIMPLE_LIB=/system/lib")
+        expect(plan.launch.stdout.capability_name).to_equal("compiler.stdout")
+        expect(plan.launch.resources.memory_bytes).to_equal(536870912)
+        expect(plan.launch.capabilities[0]).to_equal("fs.read")
+        expect(plan.service.generation).to_equal(4)
+
+    it "bounds launch vectors and bytes before semantic scans":
+        var launch = _launch()
+        var many: [text] = []
+        var i: i64 = 0
+        while i < PROCESS_LAUNCH_MAX_VECTOR_ITEMS_V1 + 1:
+            many.push("cap.{i}")
+            i = i + 1
+        launch.capabilities = many
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "vector-item-limit-exceeded")
+        launch = _launch()
+        launch.executable = "x".repeat(PROCESS_LAUNCH_MAX_ELEMENT_BYTES_V1 + 1)
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "launch-value-byte-limit-exceeded")
+        launch = _launch()
+        launch.argv[1] = "bad\0arg"
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "launch-value-byte-limit-exceeded")
+        launch = _launch()
+        launch.executable = "😀".repeat(1025)
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "launch-value-byte-limit-exceeded")
+        launch = _launch()
+        var aggregate: [text] = []
+        i = 0
+        while i < 17:
+            aggregate.push("x".repeat(4096))
+            i = i + 1
+        launch.argv = aggregate
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "launch-value-byte-limit-exceeded")
+
+    it "rejects duplicate authority names":
+        var launch = _launch()
+        launch.capabilities = ["fs.read", "fs.read"]
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "duplicate-capability-name")
+        launch = _launch()
+        launch.service_grants = ["vfs", "vfs"]
+        expect(process_launch_spec_validate_v1(launch).reason).to_equal(
+            "duplicate-service-grant")

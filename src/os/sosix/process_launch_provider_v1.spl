@@ -1,0 +1,56 @@
+"""SimpleOS SOSIX adapter for the shared process launch contract.
+
+The adapter shape-checks a generation-bearing process-service reference and
+then dispatches the unchanged shared launch value to the injected service
+owner. The owner must resolve capability liveness, process-service authority,
+and requested grants before effects. This adapter does not call the private
+kernel ABI and cannot bypass the SimpleOS process service.
+"""
+
+use std.common.contracts.execution.process_launch_spec_v1.{
+    ProcessLaunchSpecV1,
+    process_launch_spec_validate_v1,
+    process_launch_spec_copy_v1
+}
+use os.sosix.core.capability_ref.{
+    SosixCapabilityRef,
+    sosix_capability_ref_is_valid
+}
+
+pub struct SosixProcessLaunchPlanV1:
+    accepted: bool
+    reason: text
+    service: SosixCapabilityRef
+    launch: ProcessLaunchSpecV1
+
+pub fn sosix_process_launch_plan_v1(
+    service: SosixCapabilityRef,
+    launch: ProcessLaunchSpecV1
+) -> SosixProcessLaunchPlanV1:
+    if not sosix_capability_ref_is_valid(service):
+        return SosixProcessLaunchPlanV1(
+            accepted: false, reason: "invalid-process-service-capability",
+            service: service, launch: launch)
+    val check = process_launch_spec_validate_v1(launch)
+    if not check.accepted:
+        return SosixProcessLaunchPlanV1(
+            accepted: false, reason: check.reason,
+            service: service, launch: launch)
+    val owned_service = SosixCapabilityRef(
+        slot: service.slot, generation: service.generation)
+    SosixProcessLaunchPlanV1(
+        accepted: true, reason: "ready", service: owned_service,
+        launch: process_launch_spec_copy_v1(launch))
+
+pub fn sosix_process_launch_dispatch_v1(
+    plan: SosixProcessLaunchPlanV1,
+    dispatch_to_service: fn(SosixCapabilityRef, ProcessLaunchSpecV1) -> i64
+) -> i64:
+    """Dispatch shape-admitted input; the owner performs live authority checks."""
+    val canonical = sosix_process_launch_plan_v1(plan.service, plan.launch)
+    if not plan.accepted or plan.reason != "ready" or not canonical.accepted:
+        return -22
+    dispatch_to_service(canonical.service, canonical.launch)
+
+export SosixProcessLaunchPlanV1
+export sosix_process_launch_plan_v1, sosix_process_launch_dispatch_v1

@@ -1,0 +1,199 @@
+"""Provider-neutral process launch value contract.
+
+Applications and compiler tooling construct this bounded value. SOSIX providers
+translate it to their native process service; this module performs no process,
+environment, filesystem, or kernel operation.
+"""
+
+pub const PROCESS_LAUNCH_MAX_VECTOR_ITEMS_V1: i64 = 128
+pub const PROCESS_LAUNCH_MAX_ELEMENT_BYTES_V1: i64 = 4096
+pub const PROCESS_LAUNCH_MAX_TOTAL_BYTES_V1: i64 = 65536
+
+pub struct ProcessLaunchIoV1:
+    mode: text
+    capability_name: text
+
+pub struct ProcessLaunchResourcesV1:
+    memory_bytes: i64
+    cpu_time_us: i64
+    open_handles: i64
+
+pub struct ProcessLaunchSpecV1:
+    executable: text
+    argv: [text]
+    environment: [text]
+    cwd: text
+    stdin: ProcessLaunchIoV1
+    stdout: ProcessLaunchIoV1
+    stderr: ProcessLaunchIoV1
+    namespace_name: text
+    resources: ProcessLaunchResourcesV1
+    cpu_affinity: [i64]
+    runtime_profile: text
+    capabilities: [text]
+    service_grants: [text]
+
+pub struct ProcessLaunchCheckV1:
+    accepted: bool
+    reason: text
+
+fn _launch_check_v1(accepted: bool, reason: text) -> ProcessLaunchCheckV1:
+    ProcessLaunchCheckV1(accepted: accepted, reason: reason)
+
+fn _launch_text_bytes_v1(value: text) -> i64:
+    if value.len() > PROCESS_LAUNCH_MAX_ELEMENT_BYTES_V1:
+        return -1
+    val raw = value.bytes()
+    if raw.len() > PROCESS_LAUNCH_MAX_ELEMENT_BYTES_V1:
+        return -1
+    for byte in raw:
+        if byte == 0:
+            return -1
+    raw.len() as i64
+
+fn _launch_accumulate_v1(total: i64, value: text) -> i64:
+    if total < 0:
+        return -1
+    val size = _launch_text_bytes_v1(value)
+    if size < 0 or total > PROCESS_LAUNCH_MAX_TOTAL_BYTES_V1 - size:
+        return -1
+    total + size
+
+fn _launch_io_validate_v1(io: ProcessLaunchIoV1) -> bool:
+    if io.mode == "inherit" or io.mode == "null":
+        return io.capability_name == ""
+    if io.mode == "capability":
+        return (io.capability_name.trim() != "" and
+            _launch_text_bytes_v1(io.capability_name) >= 0)
+    false
+
+fn _launch_vector_count_valid_v1(values: [text]) -> bool:
+    values.len() as i64 <= PROCESS_LAUNCH_MAX_VECTOR_ITEMS_V1
+
+fn _launch_text_vector_has_duplicates_v1(values: [text]) -> bool:
+    var i: i64 = 0
+    while i < values.len() as i64:
+        var j = i + 1
+        while j < values.len() as i64:
+            if values[i] == values[j]:
+                return true
+            j = j + 1
+        i = i + 1
+    false
+
+pub fn process_launch_spec_validate_v1(
+    spec: ProcessLaunchSpecV1
+) -> ProcessLaunchCheckV1:
+    """Fail closed before a provider observes an invalid launch request."""
+    # Bound cardinality and every byte string before trim/search/equality work.
+    # Later semantic scans are therefore capped independently of caller input.
+    if (not _launch_vector_count_valid_v1(spec.argv) or
+        not _launch_vector_count_valid_v1(spec.environment) or
+        not _launch_vector_count_valid_v1(spec.capabilities) or
+        not _launch_vector_count_valid_v1(spec.service_grants) or
+        spec.cpu_affinity.len() as i64 > PROCESS_LAUNCH_MAX_VECTOR_ITEMS_V1):
+        return _launch_check_v1(false, "vector-item-limit-exceeded")
+    var total = 0
+    total = _launch_accumulate_v1(total, spec.executable)
+    total = _launch_accumulate_v1(total, spec.cwd)
+    total = _launch_accumulate_v1(total, spec.namespace_name)
+    total = _launch_accumulate_v1(total, spec.runtime_profile)
+    total = _launch_accumulate_v1(total, spec.stdin.mode)
+    total = _launch_accumulate_v1(total, spec.stdin.capability_name)
+    total = _launch_accumulate_v1(total, spec.stdout.mode)
+    total = _launch_accumulate_v1(total, spec.stdout.capability_name)
+    total = _launch_accumulate_v1(total, spec.stderr.mode)
+    total = _launch_accumulate_v1(total, spec.stderr.capability_name)
+    if total < 0:
+        return _launch_check_v1(false, "launch-value-byte-limit-exceeded")
+    for value in spec.argv:
+        total = _launch_accumulate_v1(total, value)
+        if total < 0:
+            return _launch_check_v1(false, "launch-value-byte-limit-exceeded")
+    for value in spec.environment:
+        total = _launch_accumulate_v1(total, value)
+        if total < 0:
+            return _launch_check_v1(false, "launch-value-byte-limit-exceeded")
+    for value in spec.capabilities:
+        total = _launch_accumulate_v1(total, value)
+        if total < 0:
+            return _launch_check_v1(false, "launch-value-byte-limit-exceeded")
+    for value in spec.service_grants:
+        total = _launch_accumulate_v1(total, value)
+        if total < 0:
+            return _launch_check_v1(false, "launch-value-byte-limit-exceeded")
+
+    if spec.executable.trim() == "":
+        return _launch_check_v1(false, "missing-executable")
+    if spec.cwd.trim() == "":
+        return _launch_check_v1(false, "missing-cwd")
+    if spec.namespace_name.trim() == "":
+        return _launch_check_v1(false, "missing-namespace")
+    if spec.runtime_profile.trim() == "":
+        return _launch_check_v1(false, "missing-runtime-profile")
+    if spec.argv.len() == 0 or spec.argv[0].trim() == "":
+        return _launch_check_v1(false, "missing-argv-zero")
+    if (not _launch_io_validate_v1(spec.stdin) or
+        not _launch_io_validate_v1(spec.stdout) or
+        not _launch_io_validate_v1(spec.stderr)):
+        return _launch_check_v1(false, "invalid-stdio-binding")
+    if (spec.resources.memory_bytes < 0 or spec.resources.cpu_time_us < 0 or
+        spec.resources.open_handles < 0):
+        return _launch_check_v1(false, "invalid-resource-limit")
+    for cpu in spec.cpu_affinity:
+        if cpu < 0:
+            return _launch_check_v1(false, "invalid-cpu-affinity")
+    for value in spec.environment:
+        val separator = value.index_of("=")
+        if separator <= 0 or value.trim().starts_with("="):
+            return _launch_check_v1(false, "invalid-environment-entry")
+    for value in spec.capabilities:
+        if value.trim() == "":
+            return _launch_check_v1(false, "invalid-capability-name")
+    for value in spec.service_grants:
+        if value.trim() == "":
+            return _launch_check_v1(false, "invalid-service-grant")
+    if _launch_text_vector_has_duplicates_v1(spec.capabilities):
+        return _launch_check_v1(false, "duplicate-capability-name")
+    if _launch_text_vector_has_duplicates_v1(spec.service_grants):
+        return _launch_check_v1(false, "duplicate-service-grant")
+    _launch_check_v1(true, "ready")
+
+fn _launch_copy_text_vector_v1(values: [text]) -> [text]:
+    var copied: [text] = []
+    for value in values:
+        copied.push(value)
+    copied
+
+fn _launch_copy_i64_vector_v1(values: [i64]) -> [i64]:
+    var copied: [i64] = []
+    for value in values:
+        copied.push(value)
+    copied
+
+pub fn process_launch_spec_copy_v1(spec: ProcessLaunchSpecV1) -> ProcessLaunchSpecV1:
+    """Create an owned projection after the caller has validated `spec`."""
+    ProcessLaunchSpecV1(
+        executable: spec.executable,
+        argv: _launch_copy_text_vector_v1(spec.argv),
+        environment: _launch_copy_text_vector_v1(spec.environment),
+        cwd: spec.cwd,
+        stdin: ProcessLaunchIoV1(
+            mode: spec.stdin.mode, capability_name: spec.stdin.capability_name),
+        stdout: ProcessLaunchIoV1(
+            mode: spec.stdout.mode, capability_name: spec.stdout.capability_name),
+        stderr: ProcessLaunchIoV1(
+            mode: spec.stderr.mode, capability_name: spec.stderr.capability_name),
+        namespace_name: spec.namespace_name,
+        resources: ProcessLaunchResourcesV1(
+            memory_bytes: spec.resources.memory_bytes,
+            cpu_time_us: spec.resources.cpu_time_us,
+            open_handles: spec.resources.open_handles),
+        cpu_affinity: _launch_copy_i64_vector_v1(spec.cpu_affinity),
+        runtime_profile: spec.runtime_profile,
+        capabilities: _launch_copy_text_vector_v1(spec.capabilities),
+        service_grants: _launch_copy_text_vector_v1(spec.service_grants))
+
+export ProcessLaunchIoV1, ProcessLaunchResourcesV1, ProcessLaunchSpecV1
+export ProcessLaunchCheckV1, process_launch_spec_validate_v1
+export process_launch_spec_copy_v1
