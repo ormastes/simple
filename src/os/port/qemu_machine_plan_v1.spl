@@ -1,0 +1,570 @@
+# QEMU machine specification and launch-plan v1.
+#
+# Guest policy is projected from the single SimpleOS platform catalog. Host
+# adapters discover executable, firmware, and ordered accelerator availability
+# and pass those facts into this pure binder. This module performs no probing
+# and launches no process.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use os.port.simpleos_multiplatform_build.{SimpleOsMachineTargetProjection}
+
+pub enum QemuMachineImageKindV1:
+    Kernel
+    RawDisk
+
+pub enum QemuFirmwareKindV1:
+    None
+    Bios
+    Uefi
+
+pub enum QemuStorageKindV1:
+    None
+    VirtioBlock
+    Nvme
+
+pub enum QemuDisplayKindV1:
+    None
+    VirtioGpu
+    Ramfb
+
+pub enum QemuNetworkKindV1:
+    None
+    VirtioNetUser
+
+pub enum QemuConsoleKindV1:
+    None
+    SerialStdio
+
+pub enum QemuAcceleratorV1:
+    Kvm
+    Hvf
+    Whpx
+    Tcg
+
+pub enum QemuAcceleratorRequestKindV1:
+    Auto
+    Prefer
+    Require
+
+pub enum QemuMachinePlanErrorV1:
+    None
+    InvalidSchema
+    InvalidTargetProjection
+    InvalidImage
+    InvalidFirmware
+    InvalidMachine
+    InvalidCpu
+    InvalidMemory
+    InvalidCpuCount
+    InvalidHostResolution
+    DuplicateAccelerator
+    AcceleratorUnavailable
+    CanonicalTooLarge
+    ArgvTooLarge
+
+pub struct QemuAcceleratorRequestV1:
+    kind: QemuAcceleratorRequestKindV1
+    accelerator: QemuAcceleratorV1
+
+pub class QemuMachineSpecV1:
+    _schema_version: u16
+    _target_id: text
+    _target_triple: text
+    _image_path: text
+    _image_digest: text
+    _image_kind: QemuMachineImageKindV1
+    _firmware_kind: QemuFirmwareKindV1
+    _firmware_id: text
+    _machine: text
+    _cpu: text
+    _memory_mib: u64
+    _cpu_count: u16
+    _storage: QemuStorageKindV1
+    _display: QemuDisplayKindV1
+    _network: QemuNetworkKindV1
+    _console: QemuConsoleKindV1
+    _accelerator: QemuAcceleratorRequestV1
+
+pub struct QemuHostResolutionV1:
+    # Migration seam: host adapters translate the existing
+    # scripts/qemu/simple-qemu-settings.shs discovery output into this value.
+    # This contract never repeats command/path/accelerator probing.
+    host_adapter_id: text
+    executable_path: text
+    firmware_path: text
+    available_accelerators: [QemuAcceleratorV1]
+
+pub class QemuLaunchPlanV1:
+    _schema_version: u16
+    _admitted: bool
+    _error: QemuMachinePlanErrorV1
+    _target_id: text
+    _source_spec_digest: text
+    _executable_path: text
+    _firmware_path: text
+    _accelerator: QemuAcceleratorV1
+    _argv: [text]
+    _argv_digest: text
+    _seal_digest: text
+
+impl QemuLaunchPlanV1:
+    pub fn schema_version() -> u16: self._schema_version
+    pub fn admitted() -> bool: self._admitted
+    pub fn error() -> QemuMachinePlanErrorV1: self._error
+    pub fn target_id() -> text: self._target_id
+    pub fn source_spec_digest() -> text: self._source_spec_digest
+    pub fn executable_path() -> text: self._executable_path
+    pub fn firmware_path() -> text: self._firmware_path
+    pub fn accelerator() -> QemuAcceleratorV1: self._accelerator
+    pub fn argv_digest() -> text: self._argv_digest
+
+    pub fn argv_copy() -> [text]:
+        """Return an owned copy; the sealed launch snapshot remains private."""
+        var result: [text] = []
+        for value in self._argv:
+            result.push(value)
+        result
+
+    pub fn argv_len() -> i64: self._argv.len()
+
+    pub fn sealed_valid() -> bool:
+        if not self._admitted:
+            if (self._error == QemuMachinePlanErrorV1.None or
+                self._argv.len() != 0 or self._executable_path.len() != 0):
+                return false
+            return _qemu_launch_seal_digest_v1(
+                self._schema_version, self._admitted, self._error, self._target_id,
+                self._source_spec_digest, self._executable_path, self._firmware_path,
+                self._accelerator, self._argv_digest) == self._seal_digest
+        if (self._error != QemuMachinePlanErrorV1.None or
+            not hash256_hex_valid(self._source_spec_digest) or
+            not hash256_hex_valid(self._argv_digest) or
+            not _qemu_path_valid_v1(self._executable_path) or
+            self._argv.len() == 0 or self._argv.len() > QEMU_LAUNCH_PLAN_V1_MAX_ARGV):
+            return false
+        var writer = _QemuCanonicalWriterV1(pieces: [])
+        for value in self._argv:
+            writer.append(value)
+        if sha256_u8_hex(writer.finish().bytes()) != self._argv_digest:
+            return false
+        _qemu_launch_seal_digest_v1(
+            self._schema_version, self._admitted, self._error, self._target_id,
+            self._source_spec_digest, self._executable_path, self._firmware_path,
+            self._accelerator, self._argv_digest) == self._seal_digest
+
+pub const QEMU_MACHINE_SPEC_V1_SCHEMA: u16 = 1u16
+pub const QEMU_LAUNCH_PLAN_V1_SCHEMA: u16 = 1u16
+pub const QEMU_MACHINE_SPEC_V1_MAX_TEXT_BYTES: i64 = 4096
+pub const QEMU_MACHINE_SPEC_V1_MAX_CANONICAL_BYTES: i64 = 32768
+pub const QEMU_LAUNCH_PLAN_V1_MAX_ARGV: i64 = 64
+
+fn _qemu_text_atom_valid_v1(value: text, max_bytes: i64) -> bool:
+    if value.len() == 0 or value.len() > max_bytes:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 33 or code > 126:
+            return false
+        i = i + 1
+    true
+
+fn _qemu_path_valid_v1(value: text) -> bool:
+    if (value.len() == 0 or value.len() > QEMU_MACHINE_SPEC_V1_MAX_TEXT_BYTES or
+        value.contains(",")):
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 32 or code > 126:
+            return false
+        i = i + 1
+    true
+
+fn _qemu_catalog_option_valid_v1(value: text) -> bool:
+    """Accept catalog identifiers, never QEMU comma-separated suboptions."""
+    if value.len() == 0 or value.len() > 128:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        if not alpha and not digit and code != 45 and code != 46 and code != 95:
+            return false
+        i = i + 1
+    true
+
+fn _qemu_accelerator_text_v1(value: QemuAcceleratorV1) -> text:
+    match value:
+        case QemuAcceleratorV1.Kvm: "kvm"
+        case QemuAcceleratorV1.Hvf: "hvf"
+        case QemuAcceleratorV1.Whpx: "whpx"
+        case QemuAcceleratorV1.Tcg: "tcg"
+
+fn _qemu_accelerator_request_text_v1(value: QemuAcceleratorRequestKindV1) -> text:
+    match value:
+        case QemuAcceleratorRequestKindV1.Auto: "auto"
+        case QemuAcceleratorRequestKindV1.Prefer: "prefer"
+        case QemuAcceleratorRequestKindV1.Require: "require"
+
+fn _qemu_image_kind_text_v1(value: QemuMachineImageKindV1) -> text:
+    match value:
+        case QemuMachineImageKindV1.Kernel: "kernel"
+        case QemuMachineImageKindV1.RawDisk: "raw-disk"
+
+fn _qemu_firmware_kind_text_v1(value: QemuFirmwareKindV1) -> text:
+    match value:
+        case QemuFirmwareKindV1.None: "none"
+        case QemuFirmwareKindV1.Bios: "bios"
+        case QemuFirmwareKindV1.Uefi: "uefi"
+
+fn _qemu_storage_kind_text_v1(value: QemuStorageKindV1) -> text:
+    match value:
+        case QemuStorageKindV1.None: "none"
+        case QemuStorageKindV1.VirtioBlock: "virtio-block"
+        case QemuStorageKindV1.Nvme: "nvme"
+
+fn _qemu_display_kind_text_v1(value: QemuDisplayKindV1) -> text:
+    match value:
+        case QemuDisplayKindV1.None: "none"
+        case QemuDisplayKindV1.VirtioGpu: "virtio-gpu"
+        case QemuDisplayKindV1.Ramfb: "ramfb"
+
+fn _qemu_network_kind_text_v1(value: QemuNetworkKindV1) -> text:
+    match value:
+        case QemuNetworkKindV1.None: "none"
+        case QemuNetworkKindV1.VirtioNetUser: "virtio-net-user"
+
+fn _qemu_console_kind_text_v1(value: QemuConsoleKindV1) -> text:
+    match value:
+        case QemuConsoleKindV1.None: "none"
+        case QemuConsoleKindV1.SerialStdio: "serial-stdio"
+
+fn _qemu_plan_error_text_v1(value: QemuMachinePlanErrorV1) -> text:
+    match value:
+        case QemuMachinePlanErrorV1.None: "none"
+        case QemuMachinePlanErrorV1.InvalidSchema: "invalid-schema"
+        case QemuMachinePlanErrorV1.InvalidTargetProjection: "invalid-target-projection"
+        case QemuMachinePlanErrorV1.InvalidImage: "invalid-image"
+        case QemuMachinePlanErrorV1.InvalidFirmware: "invalid-firmware"
+        case QemuMachinePlanErrorV1.InvalidMachine: "invalid-machine"
+        case QemuMachinePlanErrorV1.InvalidCpu: "invalid-cpu"
+        case QemuMachinePlanErrorV1.InvalidMemory: "invalid-memory"
+        case QemuMachinePlanErrorV1.InvalidCpuCount: "invalid-cpu-count"
+        case QemuMachinePlanErrorV1.InvalidHostResolution: "invalid-host-resolution"
+        case QemuMachinePlanErrorV1.DuplicateAccelerator: "duplicate-accelerator"
+        case QemuMachinePlanErrorV1.AcceleratorUnavailable: "accelerator-unavailable"
+        case QemuMachinePlanErrorV1.CanonicalTooLarge: "canonical-too-large"
+        case QemuMachinePlanErrorV1.ArgvTooLarge: "argv-too-large"
+
+class _QemuCanonicalWriterV1:
+    pieces: [text]
+
+    me append(value: text):
+        self.pieces.push(value.len().to_text())
+        self.pieces.push(":")
+        self.pieces.push(value)
+
+    fn finish() -> text:
+        self.pieces.join("")
+
+fn _qemu_launch_seal_digest_v1(
+    schema_version: u16,
+    admitted: bool,
+    error: QemuMachinePlanErrorV1,
+    target_id: text,
+    source_spec_digest: text,
+    executable_path: text,
+    firmware_path: text,
+    accelerator: QemuAcceleratorV1,
+    argv_digest: text
+) -> text:
+    var writer = _QemuCanonicalWriterV1(pieces: [])
+    writer.append("qemu-launch-plan-seal-v1")
+    writer.append(schema_version.to_text())
+    writer.append(if admitted: "1" else: "0")
+    writer.append(_qemu_plan_error_text_v1(error))
+    writer.append(target_id)
+    writer.append(source_spec_digest)
+    writer.append(executable_path)
+    writer.append(firmware_path)
+    writer.append(_qemu_accelerator_text_v1(accelerator))
+    writer.append(argv_digest)
+    sha256_u8_hex(writer.finish().bytes())
+
+pub fn qemu_machine_spec_from_projection_v1(
+    target: SimpleOsMachineTargetProjection,
+    image_path: text,
+    image_digest: text,
+    image_kind: QemuMachineImageKindV1,
+    firmware_kind: QemuFirmwareKindV1,
+    firmware_id: text,
+    memory_mib: u64,
+    cpu_count: u16,
+    storage: QemuStorageKindV1,
+    display: QemuDisplayKindV1,
+    network: QemuNetworkKindV1,
+    console: QemuConsoleKindV1,
+    accelerator: QemuAcceleratorRequestV1
+) -> QemuMachineSpecV1:
+    """Project QEMU guest policy from one already-resolved catalog row."""
+    QemuMachineSpecV1(
+        _schema_version: QEMU_MACHINE_SPEC_V1_SCHEMA,
+        _target_id: target.canonical_name,
+        _target_triple: target.native_target,
+        _image_path: image_path,
+        _image_digest: image_digest,
+        _image_kind: image_kind,
+        _firmware_kind: firmware_kind,
+        _firmware_id: firmware_id,
+        _machine: target.qemu_machine,
+        _cpu: target.qemu_cpu,
+        _memory_mib: memory_mib,
+        _cpu_count: cpu_count,
+        _storage: storage,
+        _display: display,
+        _network: network,
+        _console: console,
+        _accelerator: accelerator)
+
+pub fn qemu_machine_spec_validate_v1(spec: QemuMachineSpecV1) -> QemuMachinePlanErrorV1:
+    if spec._schema_version != QEMU_MACHINE_SPEC_V1_SCHEMA:
+        return QemuMachinePlanErrorV1.InvalidSchema
+    if (not _qemu_text_atom_valid_v1(spec._target_id, 128) or
+        not _qemu_text_atom_valid_v1(spec._target_triple, 128)):
+        return QemuMachinePlanErrorV1.InvalidTargetProjection
+    if not _qemu_path_valid_v1(spec._image_path) or not hash256_hex_valid(spec._image_digest):
+        return QemuMachinePlanErrorV1.InvalidImage
+    if spec._firmware_kind == QemuFirmwareKindV1.None:
+        if spec._firmware_id.len() != 0:
+            return QemuMachinePlanErrorV1.InvalidFirmware
+    elif not _qemu_text_atom_valid_v1(spec._firmware_id, 128):
+        return QemuMachinePlanErrorV1.InvalidFirmware
+    if not _qemu_catalog_option_valid_v1(spec._machine):
+        return QemuMachinePlanErrorV1.InvalidMachine
+    if not _qemu_catalog_option_valid_v1(spec._cpu):
+        return QemuMachinePlanErrorV1.InvalidCpu
+    if spec._memory_mib < 16u64 or spec._memory_mib > 1048576u64:
+        return QemuMachinePlanErrorV1.InvalidMemory
+    if spec._cpu_count < 1u16 or spec._cpu_count > 4096u16:
+        return QemuMachinePlanErrorV1.InvalidCpuCount
+    if spec._image_kind == QemuMachineImageKindV1.Kernel and spec._storage != QemuStorageKindV1.None:
+        return QemuMachinePlanErrorV1.InvalidImage
+    if spec._image_kind == QemuMachineImageKindV1.RawDisk and spec._storage == QemuStorageKindV1.None:
+        return QemuMachinePlanErrorV1.InvalidImage
+    QemuMachinePlanErrorV1.None
+
+fn _qemu_machine_spec_canonical_build_v1(spec: QemuMachineSpecV1) -> text:
+    var writer = _QemuCanonicalWriterV1(pieces: [])
+    writer.append("qemu-machine-spec-v1")
+    writer.append(spec._schema_version.to_text())
+    writer.append(spec._target_id)
+    writer.append(spec._target_triple)
+    writer.append(spec._image_path)
+    writer.append(spec._image_digest)
+    writer.append(_qemu_image_kind_text_v1(spec._image_kind))
+    writer.append(_qemu_firmware_kind_text_v1(spec._firmware_kind))
+    writer.append(spec._firmware_id)
+    writer.append(spec._machine)
+    writer.append(spec._cpu)
+    writer.append(spec._memory_mib.to_text())
+    writer.append(spec._cpu_count.to_text())
+    writer.append(_qemu_storage_kind_text_v1(spec._storage))
+    writer.append(_qemu_display_kind_text_v1(spec._display))
+    writer.append(_qemu_network_kind_text_v1(spec._network))
+    writer.append(_qemu_console_kind_text_v1(spec._console))
+    writer.append(_qemu_accelerator_request_text_v1(spec._accelerator.kind))
+    writer.append(_qemu_accelerator_text_v1(spec._accelerator.accelerator))
+    writer.finish()
+
+pub fn qemu_machine_spec_canonical_v1(spec: QemuMachineSpecV1) -> text:
+    """Return the deterministic length-prefixed encoding, or empty on invalid input."""
+    if qemu_machine_spec_validate_v1(spec) != QemuMachinePlanErrorV1.None:
+        return ""
+    val canonical = _qemu_machine_spec_canonical_build_v1(spec)
+    if canonical.len() > QEMU_MACHINE_SPEC_V1_MAX_CANONICAL_BYTES:
+        return ""
+    canonical
+
+pub fn qemu_machine_spec_digest_v1(spec: QemuMachineSpecV1) -> text:
+    """Return SHA-256 of valid canonical policy, or empty on invalid input."""
+    val canonical = qemu_machine_spec_canonical_v1(spec)
+    if canonical.len() == 0:
+        return ""
+    sha256_u8_hex(canonical.bytes())
+
+fn _qemu_accelerator_available_v1(
+    available: [QemuAcceleratorV1],
+    candidate: QemuAcceleratorV1
+) -> bool:
+    for value in available:
+        if value == candidate:
+            return true
+    false
+
+fn _qemu_host_validate_v1(
+    spec: QemuMachineSpecV1,
+    host: QemuHostResolutionV1
+) -> QemuMachinePlanErrorV1:
+    if (not _qemu_text_atom_valid_v1(host.host_adapter_id, 128) or
+        not _qemu_path_valid_v1(host.executable_path)):
+        return QemuMachinePlanErrorV1.InvalidHostResolution
+    if spec._firmware_kind == QemuFirmwareKindV1.None:
+        if host.firmware_path.len() != 0:
+            return QemuMachinePlanErrorV1.InvalidHostResolution
+    elif not _qemu_path_valid_v1(host.firmware_path):
+        return QemuMachinePlanErrorV1.InvalidHostResolution
+    if host.available_accelerators.len() == 0 or host.available_accelerators.len() > 4:
+        return QemuMachinePlanErrorV1.InvalidHostResolution
+    var i = 0
+    while i < host.available_accelerators.len():
+        var j = i + 1
+        while j < host.available_accelerators.len():
+            if host.available_accelerators[i] == host.available_accelerators[j]:
+                return QemuMachinePlanErrorV1.DuplicateAccelerator
+            j = j + 1
+        i = i + 1
+    QemuMachinePlanErrorV1.None
+
+fn _qemu_select_accelerator_v1(
+    request: QemuAcceleratorRequestV1,
+    available: [QemuAcceleratorV1]
+) -> QemuAcceleratorV1?:
+    if request.kind == QemuAcceleratorRequestKindV1.Auto:
+        return available[0]
+    if _qemu_accelerator_available_v1(available, request.accelerator):
+        return request.accelerator
+    if (request.kind == QemuAcceleratorRequestKindV1.Prefer and
+        _qemu_accelerator_available_v1(available, QemuAcceleratorV1.Tcg)):
+        return QemuAcceleratorV1.Tcg
+    nil
+
+fn _qemu_launch_argv_v1(
+    spec: QemuMachineSpecV1,
+    firmware_path: text,
+    accelerator: QemuAcceleratorV1
+) -> [text]:
+    var argv = [
+        "-no-user-config", "-nodefaults", "-monitor", "none",
+        "-machine", spec._machine,
+        "-cpu", spec._cpu,
+        "-m", "{spec._memory_mib}M",
+        "-smp", spec._cpu_count.to_text(),
+        "-accel", _qemu_accelerator_text_v1(accelerator)
+    ]
+    if spec._firmware_kind != QemuFirmwareKindV1.None:
+        argv.push("-bios")
+        argv.push(firmware_path)
+    if spec._image_kind == QemuMachineImageKindV1.Kernel:
+        argv.push("-kernel")
+        argv.push(spec._image_path)
+    else:
+        argv.push("-drive")
+        argv.push("file={spec._image_path},format=raw,if=none,id=root")
+        if spec._storage == QemuStorageKindV1.VirtioBlock:
+            argv.push("-device")
+            argv.push("virtio-blk-pci,drive=root")
+        else:
+            argv.push("-device")
+            argv.push("nvme,drive=root,serial=simpleos")
+    if spec._display == QemuDisplayKindV1.None:
+        argv.push("-display")
+        argv.push("none")
+    elif spec._display == QemuDisplayKindV1.VirtioGpu:
+        argv.push("-device")
+        argv.push("virtio-gpu")
+    else:
+        argv.push("-device")
+        argv.push("ramfb")
+    if spec._network == QemuNetworkKindV1.None:
+        argv.push("-net")
+        argv.push("none")
+    else:
+        argv.push("-netdev")
+        argv.push("user,id=net0")
+        argv.push("-device")
+        argv.push("virtio-net-pci,netdev=net0")
+    if spec._console == QemuConsoleKindV1.SerialStdio:
+        argv.push("-serial")
+        argv.push("stdio")
+    else:
+        argv.push("-serial")
+        argv.push("none")
+    argv
+
+fn _qemu_rejected_plan_v1(
+    spec: QemuMachineSpecV1,
+    error: QemuMachinePlanErrorV1
+) -> QemuLaunchPlanV1:
+    val seal_digest = _qemu_launch_seal_digest_v1(
+        QEMU_LAUNCH_PLAN_V1_SCHEMA, false, error, spec._target_id,
+        "", "", "", QemuAcceleratorV1.Tcg, "")
+    QemuLaunchPlanV1(
+        _schema_version: QEMU_LAUNCH_PLAN_V1_SCHEMA,
+        _admitted: false,
+        _error: error,
+        _target_id: spec._target_id,
+        _source_spec_digest: "",
+        _executable_path: "",
+        _firmware_path: "",
+        _accelerator: QemuAcceleratorV1.Tcg,
+        _argv: [],
+        _argv_digest: "",
+        _seal_digest: seal_digest)
+
+pub fn qemu_launch_plan_bind_v1(
+    spec: QemuMachineSpecV1,
+    host: QemuHostResolutionV1
+) -> QemuLaunchPlanV1:
+    """Bind host facts to guest policy without probing or executing QEMU."""
+    val spec_error = qemu_machine_spec_validate_v1(spec)
+    if spec_error != QemuMachinePlanErrorV1.None:
+        return _qemu_rejected_plan_v1(spec, spec_error)
+    val source_digest = qemu_machine_spec_digest_v1(spec)
+    if source_digest.len() == 0:
+        return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.CanonicalTooLarge)
+    val host_error = _qemu_host_validate_v1(spec, host)
+    if host_error != QemuMachinePlanErrorV1.None:
+        return _qemu_rejected_plan_v1(spec, host_error)
+    val selected = _qemu_select_accelerator_v1(spec._accelerator, host.available_accelerators)
+    if selected == nil:
+        return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.AcceleratorUnavailable)
+    val accelerator = selected.unwrap()
+    val argv = _qemu_launch_argv_v1(spec, host.firmware_path, accelerator)
+    if argv.len() > QEMU_LAUNCH_PLAN_V1_MAX_ARGV:
+        return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.ArgvTooLarge)
+    var argv_writer = _QemuCanonicalWriterV1(pieces: [])
+    for value in argv:
+        argv_writer.append(value)
+    val argv_canonical = argv_writer.finish()
+    val argv_digest = sha256_u8_hex(argv_canonical.bytes())
+    val seal_digest = _qemu_launch_seal_digest_v1(
+        QEMU_LAUNCH_PLAN_V1_SCHEMA, true, QemuMachinePlanErrorV1.None,
+        spec._target_id, source_digest, host.executable_path, host.firmware_path,
+        accelerator, argv_digest)
+    QemuLaunchPlanV1(
+        _schema_version: QEMU_LAUNCH_PLAN_V1_SCHEMA,
+        _admitted: true,
+        _error: QemuMachinePlanErrorV1.None,
+        _target_id: spec._target_id,
+        _source_spec_digest: source_digest,
+        _executable_path: host.executable_path,
+        _firmware_path: host.firmware_path,
+        _accelerator: accelerator,
+        _argv: argv,
+        _argv_digest: argv_digest,
+        _seal_digest: seal_digest)
+
+export QemuMachineImageKindV1, QemuFirmwareKindV1, QemuStorageKindV1
+export QemuDisplayKindV1, QemuNetworkKindV1, QemuConsoleKindV1
+export QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuMachinePlanErrorV1
+export QemuAcceleratorRequestV1, QemuMachineSpecV1, QemuHostResolutionV1
+export QemuLaunchPlanV1
+export QEMU_MACHINE_SPEC_V1_SCHEMA, QEMU_LAUNCH_PLAN_V1_SCHEMA
+export QEMU_MACHINE_SPEC_V1_MAX_TEXT_BYTES, QEMU_MACHINE_SPEC_V1_MAX_CANONICAL_BYTES
+export QEMU_LAUNCH_PLAN_V1_MAX_ARGV
+export qemu_machine_spec_from_projection_v1, qemu_machine_spec_validate_v1
+export qemu_machine_spec_canonical_v1, qemu_machine_spec_digest_v1
+export qemu_launch_plan_bind_v1

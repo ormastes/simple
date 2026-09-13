@@ -1,0 +1,226 @@
+"""Focused contract coverage for deterministic QEMU machine planning."""
+# codex-system-test
+# @req: REQ-SIMPLEOS-QEMU-PLAN-001
+
+use std.spec.{describe, it, expect, step}
+use os.port.simpleos_multiplatform_build.{simpleos_machine_target_projection}
+use os.port.qemu_machine_plan_v1.{
+    QemuMachineImageKindV1, QemuFirmwareKindV1, QemuStorageKindV1,
+    QemuDisplayKindV1, QemuNetworkKindV1, QemuConsoleKindV1,
+    QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuMachinePlanErrorV1,
+    QemuAcceleratorRequestV1, QemuHostResolutionV1,
+    qemu_machine_spec_from_projection_v1, qemu_machine_spec_validate_v1,
+    qemu_machine_spec_canonical_v1, qemu_machine_spec_digest_v1,
+    qemu_launch_plan_bind_v1
+}
+
+val HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn kernel_spec(
+    request_kind: QemuAcceleratorRequestKindV1,
+    accelerator: QemuAcceleratorV1,
+    memory_mib: u64 = 2048u64,
+    cpu_count: u16 = 4u16
+):
+    qemu_machine_spec_from_projection_v1(
+        simpleos_machine_target_projection("x86_64"),
+        "build/release/simpleos-x86_64.elf",
+        HASH_A,
+        QemuMachineImageKindV1.Kernel,
+        QemuFirmwareKindV1.None,
+        "",
+        memory_mib,
+        cpu_count,
+        QemuStorageKindV1.None,
+        QemuDisplayKindV1.None,
+        QemuNetworkKindV1.None,
+        QemuConsoleKindV1.SerialStdio,
+        QemuAcceleratorRequestV1(kind: request_kind, accelerator: accelerator))
+
+fn host(available: [QemuAcceleratorV1]) -> QemuHostResolutionV1:
+    QemuHostResolutionV1(
+        host_adapter_id: "linux-x86_64",
+        executable_path: "/usr/bin/qemu-system-x86_64",
+        firmware_path: "",
+        available_accelerators: available)
+
+describe "REQ-SIMPLEOS-QEMU-PLAN-001: sealed machine specification and host binding [importance=high; importance_weight=2]":
+    it "projects guest policy from the single platform target and binds deterministic argv":
+        step("Project the x86_64 QEMU policy from the resolved platform catalog row")
+        val spec = kernel_spec(QemuAcceleratorRequestKindV1.Auto, QemuAcceleratorV1.Tcg)
+
+        step("Validate and encode the same policy deterministically")
+        expect(qemu_machine_spec_validate_v1(spec)).to_equal(QemuMachinePlanErrorV1.None)
+        val canonical = qemu_machine_spec_canonical_v1(spec)
+        val digest = qemu_machine_spec_digest_v1(spec)
+        expect(canonical).to_start_with("20:qemu-machine-spec-v1")
+        expect(digest).to_equal("b06b7e8e695e8fe4d9150dd7addf0cf90681edcd696d77055805daf252dd6d90")
+        expect(qemu_machine_spec_digest_v1(spec)).to_equal(digest)
+
+        step("Bind ordered Linux host facts without probing or launching QEMU")
+        val plan = qemu_launch_plan_bind_v1(spec, host([QemuAcceleratorV1.Kvm, QemuAcceleratorV1.Tcg]))
+        expect(plan.admitted()).to_equal(true)
+        expect(plan.error()).to_equal(QemuMachinePlanErrorV1.None)
+        expect(plan.target_id()).to_equal("x86_64-simpleos")
+        expect(plan.source_spec_digest()).to_equal(digest)
+        expect(plan.executable_path()).to_equal("/usr/bin/qemu-system-x86_64")
+        expect(plan.accelerator()).to_equal(QemuAcceleratorV1.Kvm)
+        expect(plan.argv_copy()).to_equal([
+            "-no-user-config", "-nodefaults", "-monitor", "none",
+            "-machine", "q35", "-cpu", "qemu64", "-m", "2048M",
+            "-smp", "4", "-accel", "kvm", "-kernel",
+            "build/release/simpleos-x86_64.elf", "-display", "none",
+            "-net", "none", "-serial", "stdio"])
+        expect(plan.argv_digest()).to_equal("0121b388a2b0fe5d4af249a81c5e06e48cfa41d0d2781d91656667f46d226bff")
+        expect(plan.sealed_valid()).to_equal(true)
+
+        step("Mutate a copy without changing the sealed launch snapshot")
+        var copied_argv = plan.argv_copy()
+        copied_argv.push("-S")
+        expect(copied_argv.len()).to_equal(plan.argv_len() + 1)
+        expect(plan.argv_len()).to_equal(22)
+        expect(plan.sealed_valid()).to_equal(true)
+
+    it "keeps KVM HVF WHPX and TCG in the host execution domain":
+        step("Bind one required accelerator for each supported host family")
+        val kvm = qemu_launch_plan_bind_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Require, QemuAcceleratorV1.Kvm),
+            host([QemuAcceleratorV1.Kvm, QemuAcceleratorV1.Tcg]))
+        val hvf = qemu_launch_plan_bind_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Require, QemuAcceleratorV1.Hvf),
+            host([QemuAcceleratorV1.Hvf, QemuAcceleratorV1.Tcg]))
+        val whpx = qemu_launch_plan_bind_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Require, QemuAcceleratorV1.Whpx),
+            host([QemuAcceleratorV1.Whpx, QemuAcceleratorV1.Tcg]))
+        val tcg = qemu_launch_plan_bind_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Require, QemuAcceleratorV1.Tcg),
+            host([QemuAcceleratorV1.Tcg]))
+
+        step("Retain the selected host accelerator without changing guest target identity")
+        expect(kvm.accelerator()).to_equal(QemuAcceleratorV1.Kvm)
+        expect(hvf.accelerator()).to_equal(QemuAcceleratorV1.Hvf)
+        expect(whpx.accelerator()).to_equal(QemuAcceleratorV1.Whpx)
+        expect(tcg.accelerator()).to_equal(QemuAcceleratorV1.Tcg)
+        expect(kvm.target_id()).to_equal(hvf.target_id())
+        expect(kvm.target_id()).to_equal(whpx.target_id())
+        expect(kvm.target_id()).to_equal(tcg.target_id())
+
+    it "falls back only for prefer and fails closed for unavailable require":
+        step("Prefer KVM on a host where only portable TCG is admitted")
+        val preferred = qemu_launch_plan_bind_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Prefer, QemuAcceleratorV1.Kvm),
+            host([QemuAcceleratorV1.Tcg]))
+        expect(preferred.admitted()).to_equal(true)
+        expect(preferred.accelerator()).to_equal(QemuAcceleratorV1.Tcg)
+
+        step("Require KVM on the same host and retain an empty non-executable plan")
+        val required = qemu_launch_plan_bind_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Require, QemuAcceleratorV1.Kvm),
+            host([QemuAcceleratorV1.Tcg]))
+        expect(required.admitted()).to_equal(false)
+        expect(required.error()).to_equal(QemuMachinePlanErrorV1.AcceleratorUnavailable)
+        expect(required.executable_path()).to_equal("")
+        expect(required.argv_len()).to_equal(0)
+        expect(required.sealed_valid()).to_equal(true)
+        expect(required.sealed_valid()).to_equal(true)
+
+    it "accepts exact resource boundaries and rejects values beyond them":
+        step("Validate the inclusive memory and CPU boundaries")
+        expect(qemu_machine_spec_validate_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Auto, QemuAcceleratorV1.Tcg, 16u64, 1u16)
+        )).to_equal(QemuMachinePlanErrorV1.None)
+        expect(qemu_machine_spec_validate_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Auto, QemuAcceleratorV1.Tcg, 1048576u64, 4096u16)
+        )).to_equal(QemuMachinePlanErrorV1.None)
+
+        step("Reject memory and CPU requests immediately outside the bounds")
+        expect(qemu_machine_spec_validate_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Auto, QemuAcceleratorV1.Tcg, 15u64, 1u16)
+        )).to_equal(QemuMachinePlanErrorV1.InvalidMemory)
+        expect(qemu_machine_spec_validate_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Auto, QemuAcceleratorV1.Tcg, 16u64, 0u16)
+        )).to_equal(QemuMachinePlanErrorV1.InvalidCpuCount)
+        expect(qemu_machine_spec_validate_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Auto, QemuAcceleratorV1.Tcg, 1048577u64, 1u16)
+        )).to_equal(QemuMachinePlanErrorV1.InvalidMemory)
+        expect(qemu_machine_spec_validate_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Auto, QemuAcceleratorV1.Tcg, 16u64, 4097u16)
+        )).to_equal(QemuMachinePlanErrorV1.InvalidCpuCount)
+
+    it "rejects mismatched image storage and malformed host discovery facts":
+        step("Reject a kernel image that claims a block storage attachment")
+        val bad_image = qemu_machine_spec_from_projection_v1(
+            simpleos_machine_target_projection("x86_64"),
+            "build/release/simpleos-x86_64.elf", HASH_A,
+            QemuMachineImageKindV1.Kernel,
+            QemuFirmwareKindV1.None, "",
+            2048u64, 4u16, QemuStorageKindV1.VirtioBlock,
+            QemuDisplayKindV1.None, QemuNetworkKindV1.None,
+            QemuConsoleKindV1.None,
+            QemuAcceleratorRequestV1(
+                kind: QemuAcceleratorRequestKindV1.Auto,
+                accelerator: QemuAcceleratorV1.Tcg))
+        expect(qemu_machine_spec_validate_v1(bad_image)).to_equal(QemuMachinePlanErrorV1.InvalidImage)
+
+        step("Reject catalog projection text that attempts QEMU suboption injection")
+        var injected_target = simpleos_machine_target_projection("x86_64")
+        injected_target.qemu_machine = "q35,firmware=/tmp/other.fd"
+        val injected = qemu_machine_spec_from_projection_v1(
+            injected_target,
+            "build/release/simpleos-x86_64.elf", HASH_A,
+            QemuMachineImageKindV1.Kernel,
+            QemuFirmwareKindV1.None, "",
+            2048u64, 4u16, QemuStorageKindV1.None,
+            QemuDisplayKindV1.None, QemuNetworkKindV1.None,
+            QemuConsoleKindV1.None,
+            QemuAcceleratorRequestV1(
+                kind: QemuAcceleratorRequestKindV1.Auto,
+                accelerator: QemuAcceleratorV1.Tcg))
+        expect(qemu_machine_spec_validate_v1(injected)).to_equal(QemuMachinePlanErrorV1.InvalidMachine)
+
+        step("Reject duplicate accelerators rather than letting host order become ambiguous")
+        val duplicate = qemu_launch_plan_bind_v1(
+            kernel_spec(QemuAcceleratorRequestKindV1.Auto, QemuAcceleratorV1.Tcg),
+            host([QemuAcceleratorV1.Tcg, QemuAcceleratorV1.Tcg]))
+        expect(duplicate.admitted()).to_equal(false)
+        expect(duplicate.error()).to_equal(QemuMachinePlanErrorV1.DuplicateAccelerator)
+        expect(duplicate.argv_len()).to_equal(0)
+
+    it "binds UEFI and explicit disk device policy without discovering host paths":
+        step("Project a RISC-V raw-disk guest policy with a firmware identity")
+        val spec = qemu_machine_spec_from_projection_v1(
+            simpleos_machine_target_projection("riscv64"),
+            "build/release/simpleos-riscv64.img", HASH_A,
+            QemuMachineImageKindV1.RawDisk,
+            QemuFirmwareKindV1.Uefi, "uefi-riscv64",
+            512u64, 2u16, QemuStorageKindV1.VirtioBlock,
+            QemuDisplayKindV1.VirtioGpu, QemuNetworkKindV1.VirtioNetUser,
+            QemuConsoleKindV1.SerialStdio,
+            QemuAcceleratorRequestV1(
+                kind: QemuAcceleratorRequestKindV1.Auto,
+                accelerator: QemuAcceleratorV1.Tcg))
+        val resolved = QemuHostResolutionV1(
+            host_adapter_id: "freebsd-x86_64",
+            executable_path: "/usr/local/bin/qemu-system-riscv64",
+            firmware_path: "/usr/local/share/qemu/edk2-riscv64-code.fd",
+            available_accelerators: [QemuAcceleratorV1.Tcg])
+
+        step("Bind the discovered paths and retain explicit storage display and network policy")
+        val plan = qemu_launch_plan_bind_v1(spec, resolved)
+        expect(plan.admitted()).to_equal(true)
+        expect(plan.firmware_path()).to_equal("/usr/local/share/qemu/edk2-riscv64-code.fd")
+        expect(plan.argv_copy()).to_contain("virtio-blk-pci,drive=root")
+        expect(plan.argv_copy()).to_contain("virtio-gpu")
+        expect(plan.argv_copy()).to_contain("virtio-net-pci,netdev=net0")
+
+        step("Reject an unresolved firmware path before producing argv")
+        val unresolved = QemuHostResolutionV1(
+            host_adapter_id: "freebsd-x86_64",
+            executable_path: "/usr/local/bin/qemu-system-riscv64",
+            firmware_path: "",
+            available_accelerators: [QemuAcceleratorV1.Tcg])
+        val rejected = qemu_launch_plan_bind_v1(spec, unresolved)
+        expect(rejected.admitted()).to_equal(false)
+        expect(rejected.error()).to_equal(QemuMachinePlanErrorV1.InvalidHostResolution)
+        expect(rejected.argv_len()).to_equal(0)
+        expect(rejected.sealed_valid()).to_equal(true)
