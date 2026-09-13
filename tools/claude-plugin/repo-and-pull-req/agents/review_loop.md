@@ -140,7 +140,7 @@ esac
 For `target=gh`: read and follow
 `skills/git/gh_pull_req_review.md` (which itself branches on `--level`).
 For `target=bb`: read and follow
-`skills/bb/bb_pull_req_review.md` (Agent C scope).
+`skills/bb_pull_req_review/SKILL.md` (Agent C scope).
 
 Both sub-skills:
 - Fetch comments newer than `LAST_CHECK`

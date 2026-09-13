@@ -1,3 +1,8 @@
+---
+name: minio_ls
+description: "MinIO List Skill"
+---
+
 # MinIO List Skill
 
 List buckets, prefixes, and objects via `mc ls --json`.

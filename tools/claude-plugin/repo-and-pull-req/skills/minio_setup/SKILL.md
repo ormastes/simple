@@ -1,3 +1,8 @@
+---
+name: minio_setup
+description: "MinIO Setup Skill"
+---
+
 # MinIO Setup Skill
 
 Interactive setup for the MinIO Client (`mc`) and ITF integration.

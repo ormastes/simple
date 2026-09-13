@@ -1,3 +1,8 @@
+---
+name: bb_setup
+description: "Bitbucket Setup Skill"
+---
+
 # Bitbucket Setup Skill
 
 Interactive setup for Bitbucket Cloud REST 2.0 integration via `bin/simple itf bb`.

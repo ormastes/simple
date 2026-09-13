@@ -1,3 +1,8 @@
+---
+name: minio_share
+description: "MinIO Share Skill"
+---
+
 # MinIO Share Skill
 
 Generate a presigned download URL via `mc share download --json`.
