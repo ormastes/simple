@@ -7,6 +7,7 @@
 #   LBA 4+   DBFS arena and persisted namespace
 
 use std.fs_driver.mem_block_device.{MemBlockDevice}
+use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.nvfs_superblock.{
     nvfs_superblock_set_device, nvfs_superblock_format_disk
 }
@@ -15,6 +16,7 @@ use std.db.dbfs_engine.superblock.{
 }
 use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
 use std.fs_driver.types.{OpenFlags, Path, MountOptions}
+use std.common.crypto.sha256.{sha256_u8_hex}
 
 pub struct NvfsImageSeed:
     """One file to persist through the NVFS POSIX DBFS-backed provider."""
@@ -35,6 +37,28 @@ val NVFS_IMAGE_UUID_HI: u64 = 0x53494D504C454653u64
 val NVFS_IMAGE_UUID_LO: u64 = 0x4E564653524F4F54u64
 val NVFS_IMAGE_DBFS_UUID_HI: u64 = 0x53494D504C454653u64
 val NVFS_IMAGE_DBFS_UUID_LO: u64 = 0x444246534241434Bu64
+pub const NVFS_IMAGE_CARRIER_FORMAT_V1: text = "nvfs-dbfs-raw-v1"
+
+pub struct NvfsImageByteIdentityV1:
+    """Identity of the exact single-volume carrier bytes before host I/O."""
+    digest: text
+    byte_length: u64
+
+pub struct NvfsImageMaterializationReceiptV1:
+    """Verified successful write of one DBFS-backed NVFS raw root image.
+
+    This is materialization evidence only.  It grants no boot, release, or
+    publication admission.
+    """
+    output_path: text
+    provider_id: text
+    carrier_format_id: text
+    carrier_digest: text
+    carrier_byte_length: u64
+    root_digest: text
+    root_byte_length: u64
+    bytes_verified_before_write: bool
+    write_completed: bool
 
 fn _nvfs_image_valid_path(path: text) -> bool:
     if path == "" or not path.starts_with("/"):
@@ -94,13 +118,63 @@ pub fn _nvfs_image_mem_device(cfg: NvfsImageConfig) -> Result<MemBlockDevice, te
         return seeded
     Ok(dev)
 
-pub fn build_nvfs_rootfs_image(
+pub fn _nvfs_image_byte_identity_v1(
+    dev: MemBlockDevice
+) -> Result<NvfsImageByteIdentityV1, text>:
+    """Hash the exact bytes that `write_to_file` will receive.
+
+    The current image is one raw, single-volume NVFS carrier backed by DBFS;
+    consequently this identity is also the root-volume identity.  A future
+    partitioned carrier must introduce explicit byte-range identities instead
+    of reusing this contract.
+    """
+    val sector_count = dev.sector_count()
+    if sector_count < NVFS_IMAGE_MIN_SECTORS or
+        sector_count > NVFS_IMAGE_MAX_SECTORS or
+        dev.sector_size() != NVFS_IMAGE_SECTOR_SIZE:
+        return Err("nvfs image device geometry is unsupported")
+    val expected = sector_count * (NVFS_IMAGE_SECTOR_SIZE as u64)
+    val raw = dev.bytes()
+    if (raw.len() as u64) != expected:
+        return Err("nvfs image backing byte count does not match device geometry")
+    Ok(NvfsImageByteIdentityV1(
+        digest: sha256_u8_hex(raw),
+        byte_length: expected))
+
+pub fn build_nvfs_rootfs_image_with_receipt_v1(
     cfg: NvfsImageConfig, output_path: text
-) -> Result<bool, text>:
-    """Write an NVFS POSIX DBFS-backed raw image to output_path."""
+) -> Result<NvfsImageMaterializationReceiptV1, text>:
+    """Materialize and identify an actual DBFS-backed NVFS root image."""
     if output_path == "":
         return Err("nvfs image output path is empty")
     val dev_result = _nvfs_image_mem_device(cfg)
     if dev_result.is_err():
         return Err(dev_result.unwrap_err())
-    dev_result.unwrap().write_to_file(output_path)
+    val dev = dev_result.unwrap()
+    val identity_result = _nvfs_image_byte_identity_v1(dev)
+    if identity_result.is_err():
+        return Err(identity_result.unwrap_err())
+    val identity = identity_result.unwrap()
+    val wrote = dev.write_to_file(output_path)
+    if wrote.is_err():
+        return Err(wrote.unwrap_err())
+    if not wrote.unwrap():
+        return Err("nvfs image write did not complete")
+    Ok(NvfsImageMaterializationReceiptV1(
+        output_path: output_path,
+        provider_id: NVFS_IMAGE_PROVIDER,
+        carrier_format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+        carrier_digest: identity.digest,
+        carrier_byte_length: identity.byte_length,
+        root_digest: identity.digest,
+        root_byte_length: identity.byte_length,
+        bytes_verified_before_write: true,
+        write_completed: true))
+
+pub fn build_nvfs_rootfs_image(
+    cfg: NvfsImageConfig, output_path: text
+) -> Result<bool, text>:
+    """Write an NVFS POSIX DBFS-backed raw image to output_path."""
+    match build_nvfs_rootfs_image_with_receipt_v1(cfg, output_path):
+        case Ok(_): Ok(true)
+        case Err(err): Err(err)

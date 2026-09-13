@@ -10,6 +10,10 @@ use std.common.contracts.execution.simpleos_target_v1.{
 }
 use std.common.contracts.execution.simpleos_image_manifest_v1.*
 use os.installer.image_builder_manifest_adapter_v1.*
+use os.port.nvfs_image.{
+    NvfsImageMaterializationReceiptV1, NVFS_IMAGE_PROVIDER,
+    NVFS_IMAGE_CARRIER_FORMAT_V1
+}
 
 fn digest(marker: text) -> text:
     "000000000000000000000000000000000000000000000000000000000000000" + marker
@@ -94,6 +98,60 @@ fn projection_receipt(
             manifest: candidate, output: output))
 
 describe "SimpleOS image-builder manifest adapter v1":
+    it "projects a verified NVFS materialization receipt without release claims":
+        step("convert exact single-volume carrier and root identities")
+        val output = simpleos_nvfs_materialization_output_evidence_v1(
+            NvfsImageMaterializationReceiptV1(
+                output_path: "build/simpleos-x86_64.img",
+                provider_id: NVFS_IMAGE_PROVIDER,
+                carrier_format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+                carrier_digest: digest("a"), carrier_byte_length: 8192u64,
+                root_digest: digest("a"), root_byte_length: 8192u64,
+                bytes_verified_before_write: true, write_completed: true),
+            "volume.system")
+        expect(output.carrier_materialized).to_equal(true)
+        expect(output.root_materialized).to_equal(true)
+        expect(output.root_marker_only).to_equal(false)
+        expect(output.root_filesystem).to_equal(SimpleOsImageFilesystemV1.Nvfs)
+        var candidate = manifest()
+        candidate.carrier = SimpleOsImageCarrierV1(
+            kind: SimpleOsImageCarrierKindV1.RawDiskImage,
+            format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+            digest: digest("a"), byte_length: 8192u64)
+        candidate.volumes = [SimpleOsImageVolumeV1(
+            volume_id: "volume.system",
+            role: SimpleOsImageVolumeRoleV1.System,
+            filesystem: SimpleOsImageFilesystemV1.Nvfs,
+            digest: digest("a"), byte_length: 8192u64, writable: false)]
+        expect(projection_receipt(candidate, output).accepted).to_equal(true)
+
+    it "fails closed when an NVFS receipt does not prove the completed write":
+        step("clear completed-write evidence before projection")
+        val output = simpleos_nvfs_materialization_output_evidence_v1(
+            NvfsImageMaterializationReceiptV1(
+                output_path: "build/simpleos-x86_64.img",
+                provider_id: NVFS_IMAGE_PROVIDER,
+                carrier_format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+                carrier_digest: digest("a"), carrier_byte_length: 8192u64,
+                root_digest: digest("a"), root_byte_length: 8192u64,
+                bytes_verified_before_write: true, write_completed: false),
+            "volume.system")
+        expect(output.carrier_materialized).to_equal(false)
+        expect(output.root_materialized).to_equal(false)
+
+        step("reject a receipt attributed to a different provider")
+        val wrong_provider = simpleos_nvfs_materialization_output_evidence_v1(
+            NvfsImageMaterializationReceiptV1(
+                output_path: "build/simpleos-x86_64.img",
+                provider_id: "fat32-marker",
+                carrier_format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+                carrier_digest: digest("a"), carrier_byte_length: 8192u64,
+                root_digest: digest("a"), root_byte_length: 8192u64,
+                bytes_verified_before_write: true, write_completed: true),
+            "volume.system")
+        expect(wrong_provider.carrier_materialized).to_equal(false)
+        expect(wrong_provider.root_materialized).to_equal(false)
+
     it "projects only exact independently verified carrier and NVFS root facts":
         step("Project a fully materialized output whose identities match the manifest")
         val receipt = projection_receipt(manifest(), evidence())
