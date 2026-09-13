@@ -597,6 +597,21 @@ command will remain unavailable until a production owner binds materialized
 NVFS artifact evidence to `SimpleOsImageManifestV1`. It never creates a
 placeholder image, signs, publishes, or writes physical media.
 
+`simple os bootstrap --show-plan` is the non-mutating bootstrap inspection
+surface. It validates the same sealed QEMU run-plan preview used by
+`simple os run`, then
+prints the target-native compiler qualification sequence as three bounded
+`ProcessLaunchSpecV1` requests. The sequence requires an admitted
+`EnvironmentSnapshotV1`, a dev `SimpleOsImageManifestV1`, and atomic
+release-evidence receipts. It explicitly reports `Qualified: false` and does
+not build, boot, download, sign, publish, or claim guest success.
+
+`simple os bootstrap` without `--show-plan` fails closed until a production
+owner can bind those authorities and commit the complete cold-boot evidence
+chain. The preview does not prove a release-firmware boot; that remains a
+separate required receipt. `--print-command` is rejected because bootstrap is a receipt-bound
+sequence, not a single shell command.
+
 ## 5. Simple Compiler Bootstrap
 
 ### 5.1 Bootstrap Path

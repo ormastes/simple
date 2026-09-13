@@ -1,4 +1,4 @@
-# SimpleOS image and shell CLI projections
+# SimpleOS image, shell, and bootstrap CLI projections
 
 Requirement: `REQ-016`
 
@@ -23,3 +23,21 @@ than adding another QEMU policy owner.
 The OS help marks both actual interactive shell launch and image composition
 unavailable while exposing their safe inspection/diagnostic surfaces. No
 source-only projection is advertised as a working producer.
+
+## Bootstrap inspection is receipt-oriented
+
+`simple os bootstrap` fails closed unless `--show-plan` is present. The plan
+first inspects the current sealed QEMU run lane and then describes the required
+`EnvironmentSnapshotV1`, `SimpleOsImageManifestV1`, and release-evidence
+admissions. It does not build, boot, download, sign, or publish anything.
+
+The three guest operations are bounded `ProcessLaunchSpecV1` values:
+
+1. `simple --version`
+2. `simple build hello.spl -o hello`
+3. `./hello`
+
+Inspection always ends with `Qualified: false`; only the eventual evidence
+producer may report qualification after a cold boot and receipt commit.
+The inspected run lane is not release-firmware evidence; the plan names that
+receipt as a separate prerequisite rather than upgrading preview evidence.

@@ -7,8 +7,16 @@ use os.cli.{
     handle_os,
     simpleos_image_cli_unavailable_reason_v1,
     simpleos_shell_cli_unavailable_reason_v1,
-    simpleos_shell_cli_inspection_requested_v1
+    simpleos_shell_cli_inspection_requested_v1,
+    simpleos_bootstrap_cli_unavailable_reason_v1,
+    simpleos_bootstrap_guest_launch_specs_v1,
+    simpleos_bootstrap_guest_specs_valid_v1,
+    simpleos_bootstrap_plan_lines_v1
 }
+use std.common.contracts.execution.process_launch_spec_v1.{
+    process_launch_spec_validate_v1
+}
+use app.io.env_ops.{env_get, env_set}
 
 extern fn rt_file_read_text(path: text) -> text
 
@@ -57,3 +65,57 @@ describe "REQ-016: SimpleOS image and shell CLI projections [importance=high; im
         step("Require honest image status and the shell command")
         expect(source).to_contain("Compose a verified OS image (currently unavailable)")
         expect(source).to_contain("Inspect interactive QEMU launch (launch unavailable)")
+
+    it "models bootstrap qualification as bounded guest process requests":
+        step("Construct the inert target-native compiler qualification sequence")
+        val specs = simpleos_bootstrap_guest_launch_specs_v1()
+
+        step("Require exactly version, compile, and execute requests")
+        expect(specs.len()).to_equal(3)
+        expect(specs[0].argv.join(" ")).to_equal("simple --version")
+        expect(specs[1].argv.join(" ")).to_equal("simple build hello.spl -o hello")
+        expect(specs[2].argv.join(" ")).to_equal("hello")
+
+        step("Validate every request through the shared ProcessLaunchSpecV1 contract")
+        expect(simpleos_bootstrap_guest_specs_valid_v1()).to_equal(true)
+        for spec in specs:
+            expect(process_launch_spec_validate_v1(spec).accepted).to_equal(true)
+
+    it "keeps bootstrap execution fail-closed while exposing an honest plan":
+        step("Require every admission authority in the unavailable reason")
+        val reason = simpleos_bootstrap_cli_unavailable_reason_v1()
+        expect(reason).to_contain("EnvironmentSnapshotV1")
+        expect(reason).to_contain("SimpleOsImageManifestV1")
+        expect(reason).to_contain("QemuLaunchPlanV1")
+        expect(reason).to_contain("ProcessLaunchSpecV1")
+
+        step("Reject execution without explicit read-only inspection")
+        expect(handle_os(["bootstrap"])).to_equal(1)
+
+        step("Route explicit inspection through target validation without launching")
+        val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
+        expect(env_set("SIMPLE_OS_LOG_MODE", "bootstrap-inspection-sentinel")).to_equal(true)
+        expect(handle_os(["bootstrap", "--show-plan", "--arch=unknown"])).to_equal(1)
+        expect(env_get("SIMPLE_OS_LOG_MODE") ?? "").to_equal("bootstrap-inspection-sentinel")
+        expect(env_set("SIMPLE_OS_LOG_MODE", old_log_mode)).to_equal(true)
+
+        step("Reject an ambiguous request for both plan and command rendering")
+        expect(handle_os(["bootstrap", "--show-plan", "--print-command"])).to_equal(1)
+
+        step("Preserve normal log-option validation without exporting a mode")
+        expect(handle_os(["bootstrap", "--show-plan", "--log=garbage"])).to_equal(1)
+        expect(handle_os(["bootstrap", "--show-plan", "--log"])).to_equal(1)
+
+        step("Require the plan to disclaim guest execution and qualification")
+        val plan = simpleos_bootstrap_plan_lines_v1().join("\n")
+        expect(plan).to_contain("inspection only; no guest was booted")
+        expect(plan).to_contain("Qualified: false")
+        expect(plan).to_contain("release-firmware receipt")
+        expect(plan).to_contain("release-evidence ledger")
+
+        step("Require the dispatcher and help to expose the bounded command")
+        val source = cli_source_v1()
+        expect(source).to_contain("fn handle_os_bootstrap(args: [text]) -> i64:")
+        expect(source).to_contain("_handle_os_inspection_v1(args, false)")
+        expect(source).to_contain("\"bootstrap\":\n            handle_os_bootstrap(rest)")
+        expect(source).to_contain("Inspect target-native compiler qualification")
