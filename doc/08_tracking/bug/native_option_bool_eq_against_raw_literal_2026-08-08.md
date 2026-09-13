@@ -1,6 +1,9 @@
 # Native `Option<bool>` equality against a raw bool literal returns wrong answer
 
-Status: open
+Status: RESOLVED for 50.mir content (2026-09-13) — see Re-check below. Seed-level
+parity (Rust seed native codegen) is a separate, still-open architectural
+question tracked under the same family as
+`native_inlined_option_return_representation_mismatch_2026-08-02.md`.
 Severity: P1 native semantic parity (silent wrong output, no spec can see it)
 Family: same underlying defect class as
 `doc/08_tracking/bug/native_inlined_option_return_representation_mismatch_2026-08-02.md`
@@ -175,3 +178,17 @@ confirmed live" verification methodology left an unguarded
 `eprint("MARKER_RT_IS_NONE_ARM_REACHED")` behind at `expr_dispatch.spl:2239`;
 that stray probe was removed in this lane and is now guarded by
 `test/01_unit/compiler/mir/mir_lowering_no_stray_debug_marker_spec.spl`.
+
+## Re-check 2026-09-13 (BUGFIX-11)
+
+Re-ran the guard spec on the deployed seed
+(`/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`,
+50,093,192 B, 2026-09-06 09:59): `bin/simple test
+test/01_unit/compiler/mir/mir_lowering_no_stray_debug_marker_spec.spl` ->
+`4 examples, 0 failures`, `PASS`. Confirmed
+`eprint("MARKER_RT_IS_NONE_ARM_REACHED")` is absent from
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (`grep` returns
+nothing) and the `ensure_option_handle`/`rt_native_eq` routing at
+`expr_dispatch.spl:2256-2312` is unchanged from the verdict above. No further
+code change made here — status updated from `open` to reflect the
+already-landed fix for the 50.mir path.
