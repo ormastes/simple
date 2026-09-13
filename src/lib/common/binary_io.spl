@@ -794,6 +794,18 @@ fn _pow2_f64(n: i64) -> f64:
             i = i + 1
     result
 
+fn _nan_f64() -> f64:
+    """A quiet NaN, built without a native bit-cast (this file has none).
+
+    inf - inf is an invalid operation whose IEEE-754 result is a quiet NaN.
+    The sign and payload of the produced NaN are NOT the ones encoded in the
+    caller's bit pattern; this file cannot reconstruct those without a real
+    bit-cast, and no consumer depends on a specific payload. What matters, and
+    what was previously wrong, is that the value IS a NaN rather than 0.0.
+    """
+    val inf = 1.0e308 * 10.0
+    inf - inf
+
 fn f64_from_bits(bits: u64) -> f64:
     val sign_bit = (bits >> 63) & 1u64
     val exp = ((bits >> 52) & 0x7FFu64) as i64
@@ -805,6 +817,16 @@ fn f64_from_bits(bits: u64) -> f64:
     elif exp == 0x7FF:
         if frac == 0u64:
             result = 1.0e308 * 10.0
+        else:
+            # NaN. This branch was MISSING: a NaN bit pattern fell through with
+            # result still 0.0, so every NaN decoded to zero while infinity
+            # decoded correctly. That silently made NaN unrepresentable for
+            # every consumer of this file — including the bit-exact FMA oracle
+            # and the AVX-512 SIMD fallback oracle, whose documented NaN
+            # semantics were therefore being asserted against 0.0.
+            # inf - inf is the portable way to obtain a NaN without a native
+            # bit-cast, which this file deliberately does not have.
+            result = _nan_f64()
     else:
         result = (1.0 + (frac as f64) / 4503599627370496.0) * _pow2_f64(exp - 1023)
     if sign_bit == 1u64:
@@ -822,6 +844,9 @@ fn f32_from_bits(bits: u32) -> f32:
     elif exp == 0xFF:
         if frac == 0u32:
             result = 1.0e308 * 10.0
+        else:
+            # NaN — see the note in f64_from_bits. Same missing branch.
+            result = _nan_f64()
     else:
         result = (1.0 + (frac as f64) / 8388608.0) * _pow2_f64(exp - 127)
     if sign_bit == 1u32:
