@@ -312,3 +312,7 @@ runs — consistent with the 2026-08-07 measurement (~23 bytes/element) and
   the promotion `NOTE` block and still exited 0 (WARN, not FAIL, by design).
   Restored; diff against backup clean; final re-run exits 0 with both PASS
   lines.
+
+## Triage 2026-09-13
+Reconfirmed: this is a "premise refuted, no code built on it" finding, not
+an active defect. Left as-is, no code change attempted.
