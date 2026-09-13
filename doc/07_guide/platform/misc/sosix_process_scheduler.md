@@ -131,6 +131,13 @@ SOSIX process isolation tests:
   budget by period, and records overrun/miss trace events.
 - `execve` copies argv/envp vectors through reusable VMM copy-in helpers before
   `build_user_process_image`.
+  SOSIX now supplies the vectors through a scoped userlib allocation rather
+  than discarding caller args/envp. The empty-argv default is `[path]`; explicit
+  empty argv[0], embedded NUL and invalid UTF-8 are rejected before syscall.
+  Kernel string copy-in preserves UTF-8 bytes without codepoint expansion.
+  See [execve vector design](../../../05_design/os/sosix_execve_vectors_v1.md)
+  for precise limits and ownership. Physical/guest execution remains
+  `MissingEvidence`; source and authored fixture specs are not qualification.
 - `dataset_create_from_file` snapshots exact fd bytes at `(offset, len)` into a
   sealed immutable dataset, restoring the open-file-description offset and
   closing the dataset builder on failure.

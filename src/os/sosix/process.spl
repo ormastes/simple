@@ -3,6 +3,7 @@
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 use os.kernel.errno.{EINVAL, EIO}
 use os.userlib.syscall_raw.{syscall}
+use os.userlib.execve.{user_execve}
 
 extern fn rt_copy_user_byte(ptr_addr: u64) -> u8
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
@@ -31,7 +32,6 @@ val _SOSIX_SYS_GETPID: u64 = 4
 val _SOSIX_SYS_SIGNAL: u64 = 7
 val _SOSIX_SYS_SPAWN_BINARY: u64 = 13
 val _SOSIX_SYS_FORK: u64 = 57
-val _SOSIX_SYS_EXECVE: u64 = 59
 val _SOSIX_SYS_WAITPID: u64 = 61
 
 var sosix_process_req_states: [u8; 64] = [0; 64]
@@ -112,16 +112,15 @@ fn sosix_process_fork() -> u64:
     _sosix_process_complete(req, SOSIX_PROCESS_OP_FORK, syscall(_SOSIX_SYS_FORK, 0, 0, 0, 0, 0))
 
 fn sosix_process_execve(path: text, args: [text], envp: [text]) -> u64:
-    """Start an execve request."""
+    """Execute synchronously with scoped argv/envp storage, then record completion.
+
+    Raw addresses never enter the request table. A nonreturning successful
+    exec replaces the caller; a returned errno completes the existing request.
+    """
     val req = sosix_process_alloc_request()
     if req >= SOSIX_PROCESS_MAX_REQUESTS:
         return req
-    val _ignored_args = args
-    val _ignored_envp = envp
-    if path.len() == 0:
-        return _sosix_process_complete(req, SOSIX_PROCESS_OP_EXECVE, 0 - EINVAL as i64)
-    val path_ptr = rt_string_data(path) as u64
-    _sosix_process_complete(req, SOSIX_PROCESS_OP_EXECVE, syscall(_SOSIX_SYS_EXECVE, path_ptr, path.len().to_u64(), 0, 0, 0))
+    _sosix_process_complete(req, SOSIX_PROCESS_OP_EXECVE, user_execve(path, args, envp))
 
 fn sosix_process_spawn(path: text, args: [text], priority: u8) -> u64:
     """Start a spawn-binary request."""
