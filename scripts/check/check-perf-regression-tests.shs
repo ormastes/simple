@@ -835,6 +835,57 @@ must_contain     "BLOCKSHADOW parity spec is non-vacuous on the counter row" \
     "$BLOCKPARITY" "expect(r.names > 0).to_equal(true)"
 must_contain     "BLOCKSHADOW parity spec keeps the module-global oracle" \
     "$BLOCKPARITY" "assert_semantics(binary, \"sem_global_shadow.spl\", \"sem_global_shadow\", 4, \"30:9\")"
+# --- TOOLHELP: `lint|fmt|fix|test --help` must not load the implementation ---
+# 2026-09-13. A tool command's real entry resolved its whole implementation
+# closure before main() could reach its help branch: 533 `.spl` opens / 9.4 s
+# for `lint --help`, 10,151 / 74 s for `test --help` (which then printed
+# `unknown option: --help` and no help at all). Fixed by DISPATCHING a different,
+# closure-free entry for a help request, in BOTH dispatchers. The mechanism is
+# the routing plus the thinness of the entry it routes to: an import added to
+# either leaf silently gives the closure back.
+# doc/08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md
+TOOLHELP="$ROOT/src/app/cli/tool_help.spl"
+TOOLHELPENTRY="$ROOT/src/app/cli/tool_help_entry.spl"
+DRIVERMAIN="$ROOT/src/compiler_rust/driver/src/main.rs"
+must_contain     "TOOLHELP route predicate has one Simple owner" \
+    "$TOOLHELP" "fn tool_help_entry_for(command: text, rest: [text]) -> text:"
+must_contain     "TOOLHELP help text owner imports nothing" \
+    "$TOOLHELP" "# This module imports NOTHING on purpose"
+must_contain     "TOOLHELP thin entry reads argv through the closure-free leaf" \
+    "$TOOLHELPENTRY" "use app.cli.entry_args."
+must_not_contain "TOOLHELP thin entry must not reach the CLI hub" \
+    "$TOOLHELPENTRY" "use std.cli.cli_util"
+must_not_contain "TOOLHELP thin entry must not import an implementation" \
+    "$TOOLHELPENTRY" "use app.io.cli_lint_commands"
+must_contain     "TOOLHELP seed driver routes a help request" \
+    "$DRIVERMAIN" "if let Some(help_app) = tool_help_entry_for(entry.name, &ctx.args[1..]) {"
+must_contain     "TOOLHELP seed driver admits the thin entry to dispatch" \
+    "$DRIVERMAIN" "app_relative_path != TOOL_HELP_ENTRY"
+must_contain     "TOOLHELP pure-Simple dispatcher routes identically" \
+    "$ROOT/src/app/cli/dispatch.spl" "val help_app = tool_help_entry_for(entry.name, args[1:args.len()])"
+must_contain     "TOOLHELP lint entry help text pinned equal to the shared owner" \
+    "$ROOT/test/01_unit/app/cli/tool_help_route_spec.spl" \
+    "holds lint_entry's own help text equal to the shared owner's, line for line"
+must_contain     "TOOLHELP budget spec clears the nested-test guard" \
+    "$ROOT/test/05_perf/startup/tool_help_closure_budget_spec.spl" "unset SIMPLE_TEST_DEPTH"
+must_contain     "TOOLHELP budget spec fails closed on an empty trace" \
+    "$ROOT/test/05_perf/startup/tool_help_closure_budget_spec.spl" \
+    "expect(parse_field(out, \"tracelines\")).to_be_greater_than(0)"
+
+# --- LOCALUSEENUM: a block-scoped `use` must publish its enums -------------
+# 2026-09-13. Both block-scoped `use` arms handed the module loader a local
+# CLONE of the enum map and dropped it, so a function-local import loaded the
+# module's FUNCTIONS and lost its ENUMS ("enum `X` not found in this scope").
+# doc/08_tracking/bug/function_local_use_loses_enum_scope_2026-09-12.md
+must_contain     "LOCALUSEENUM block_execution publishes imported enums" \
+    "$ROOT/src/compiler_rust/compiler/src/interpreter_call/block_execution.rs" \
+    "if !enums.contains_key(enum_name) {"
+must_contain     "LOCALUSEENUM node_exec publishes imported enums" \
+    "$ROOT/src/compiler_rust/compiler/src/interpreter/node_exec.rs" \
+    "if !enums.contains_key(enum_name) {"
+must_contain     "LOCALUSEENUM spec keeps the module-scope control fixture" \
+    "$ROOT/test/01_unit/compiler/loader/function_local_use_enum_scope_spec.spl" \
+    "entry_top_level_use.spl"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

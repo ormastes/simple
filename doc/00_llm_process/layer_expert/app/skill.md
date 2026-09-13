@@ -64,3 +64,34 @@ Same family, already recorded:
 The push-side protocol this implements is `.claude/rules/vcs.md` § "Sync must
 never clobber (anti-revert protocol)"; the PR-landing mechanics are in
 `.claude/skills/spipe.md` § "Landing a PR here".
+
+## A CLI entry's `--help` costs its whole import closure (2026-09-13)
+
+A `src/app/cli/*_entry.spl` resolves every top-level `use` before `main()` runs,
+so the help branch inside `main()` is reached only after the implementation
+closure has loaded: `simple lint --help` cost 533 `.spl` opens / 9.4 s and
+`simple test --help` 10,151 / 74 s before printing `Error: unknown option:
+--help`. Nothing written INSIDE the entry fixes this on the seed — the JIT lane
+flattens the whole import closure before codegen, so `use lazy` is loaded
+eagerly and a function-local `use` becomes an unresolved external that de-JITs
+the module.
+
+What works is choosing a DIFFERENT entry for a help request, in the dispatcher,
+the way the driver already selects among the three `test` runners by args:
+`src/app/cli/tool_help.spl` (text + predicates, zero imports) behind
+`tool_help_entry.spl` (two leaf imports) — 8 opens, ~100 ms. Both dispatchers
+must route identically (`driver/src/main.rs` and `src/app/cli/dispatch.spl`),
+and a new `app_path` MUST be added to `dispatch_to_simple_app`'s allowlist or
+dispatch returns None and the driver reports "pure-Simple tool unavailable".
+Record: [subcommand_help_loads_implementation_closure_2026-09-12.md](../../../08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md).
+
+Two traps met while pinning it:
+
+- **`{...}` inside a Simple string literal interpolates.** A spec asserting
+  `to_contain("use app.cli.tool_help.{tool_help_entry_for}")` evaluated the name
+  instead of matching it; a sibling literal died with `variable get_cli_args not
+  found`. Match import groups with brace-free substrings.
+- **A spec that shells out to `simple test` measures nothing.** The nested run
+  sees `SIMPLE_TEST_DEPTH >= 1` and refuses, so an open-count budget PASSES
+  vacuously on a handful of opens. `unset SIMPLE_TEST_DEPTH` before measuring,
+  and assert on the printed content as well as the count.

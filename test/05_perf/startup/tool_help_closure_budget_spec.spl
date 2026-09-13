@@ -1,0 +1,135 @@
+"""`simple lint|fmt|fix|test --help` must not load the command's implementation.
+
+Measured on the deployed seed (sha256 3d120a6f9ab5704b..., aarch64, load ~40)
+with `strace -f -e trace=openat`, counting `.spl` opens:
+
+| entry              | `.spl` opens |     wall | printed |
+|--------------------|-------------:|---------:|---------|
+| `simple lint --help` |          533 |  9.4 s+ | 4 lines of usage |
+| `simple fmt --help`  |          533 |  5.6 s  | 6 lines of usage |
+| `simple test --help` |       10,151 | 74 s    | `Error: unknown option: --help` |
+
+`SIMPLE_PERF_COUNTERS=1` reports `VT_CALLS 1` for the lint case: the process
+executes essentially no interpreted work, and all of it is module loading for a
+branch that never runs. `use lazy` defers nothing on this interpreter and a
+function-local `use` drops the importing module out of the JIT, so a help
+request is instead DISPATCHED to a different, closure-free entry
+(`src/app/cli/tool_help_entry.spl`, two leaf imports). Routing lives in both
+dispatchers and is pinned structurally by
+test/01_unit/app/cli/tool_help_route_spec.spl; this spec pins the measured cost
+and the fact that help is actually printed.
+See doc/08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md
+
+Every measured example fails closed: an strace that captured no syscall lines,
+or a count that did not parse, is a FAIL and not a pass. `SIMPLE_BINARY`
+selects the binary under measurement; it defaults to `bin/simple`.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+# `simple check --help` already measures 81 opens through the same argv leaf
+# (app.cli.entry_args) plus six more imports, and the help entry carries only
+# two leaves, so the measured value must land well under this. The ceiling keeps
+# headroom for unrelated stdlib growth while staying an order of magnitude below
+# the 533/10,151 the implementation closures cost.
+val HELP_SPL_OPEN_CEILING: i64 = 120
+
+fn run_sh(command: text) -> (text, i64):
+    val result = process_run("sh", ["-c", command])
+    (result.0 + result.1, result.2)
+
+fn parse_field(blob: text, key: text) -> i64:
+    for token in blob.split(" "):
+        if token.starts_with(key + "="):
+            return token.substring(key.len() + 1, token.len()).trim().to_i64()
+    -1
+
+fn measure_script(args: text, out_file: text) -> text:
+    # SIMPLE_TEST_DEPTH must be cleared: this spec runs INSIDE `simple test`,
+    # and a nested `simple test` sees depth >= 1 and refuses to run at all, so
+    # the measurement would be a few opens of nothing and the budget would pass
+    # vacuously. The content assertions below are what catch that, but clearing
+    # the variable is what makes the number real.
+    "unset SIMPLE_TEST_DEPTH; tmp=$(mktemp -d); b=$SIMPLE_BINARY; "
+        + "test -n \"$b\" || b=bin/simple; "
+        + "strace -f -e trace=openat -o $tmp/tr timeout 300 $b " + args
+        + " > $tmp/out 2> $tmp/err; "
+        + "cp $tmp/out " + out_file + "; cat $tmp/err >> " + out_file + "; "
+        + "echo tracelines=$(wc -l < $tmp/tr) splopens=$(grep -c '[.]spl' $tmp/tr) "
+        + "outbytes=$(wc -c < " + out_file + "); "
+        + "rm -rf $tmp"
+
+fn read_measured_output(path: text) -> text:
+    val (out, _code) = run_sh("cat " + path + " 2>/dev/null; rm -f " + path)
+    out
+
+describe "tool help closure budget":
+    it "keeps `simple lint --help` inside its source-open budget and still prints help":
+        step("count .spl opens for a help-only invocation")
+        val marker = "/tmp/tool_help_budget_lint_help.out"
+        val (out, _code) = run_sh(measure_script("lint --help", marker))
+        expect(out.len()).to_be_greater_than(0)
+        step("fail closed when strace captured nothing")
+        expect(parse_field(out, "tracelines")).to_be_greater_than(0)
+        step("fail closed when the invocation printed nothing")
+        expect(parse_field(out, "outbytes")).to_be_greater_than(0)
+        step("budget")
+        val spl_opens = parse_field(out, "splopens")
+        expect(spl_opens).to_be_greater_than(0)
+        expect(spl_opens).to_be_less_than(HELP_SPL_OPEN_CEILING)
+        step("and the four lines of lint usage really were printed")
+        val printed = read_measured_output(marker)
+        expect(printed).to_contain("Usage: simple lint <file-or-directory>")
+
+    it "keeps `simple fmt --help` inside the same budget":
+        val marker = "/tmp/tool_help_budget_fmt_help.out"
+        val (out, _code) = run_sh(measure_script("fmt --help", marker))
+        expect(out.len()).to_be_greater_than(0)
+        expect(parse_field(out, "tracelines")).to_be_greater_than(0)
+        expect(parse_field(out, "outbytes")).to_be_greater_than(0)
+        val spl_opens = parse_field(out, "splopens")
+        expect(spl_opens).to_be_greater_than(0)
+        expect(spl_opens).to_be_less_than(HELP_SPL_OPEN_CEILING)
+        val printed = read_measured_output(marker)
+        expect(printed).to_contain("Usage: simple fmt <file.spl>")
+
+    it "prints real help for `simple test --help` instead of loading the runner":
+        step("count .spl opens, and keep the printed bytes for inspection")
+        val marker = "/tmp/tool_help_budget_test_help.out"
+        val (out, _code) = run_sh(measure_script("test --help", marker))
+        expect(out.len()).to_be_greater_than(0)
+        expect(parse_field(out, "tracelines")).to_be_greater_than(0)
+        expect(parse_field(out, "outbytes")).to_be_greater_than(0)
+        step("budget: the whole test-runner closure cost 10,151 opens")
+        val spl_opens = parse_field(out, "splopens")
+        expect(spl_opens).to_be_greater_than(0)
+        expect(spl_opens).to_be_less_than(HELP_SPL_OPEN_CEILING)
+        step("and it must print help, not `unknown option`")
+        val printed = read_measured_output(marker)
+        expect(printed.len()).to_be_greater_than(0)
+        expect(printed).to_contain("simple test [path] [options]")
+        expect(printed).to_contain("--list-runs")
+        var unknown_option_lines = 0
+        for line in printed.split("\n"):
+            if line.split("unknown option").len() > 1:
+                unknown_option_lines = unknown_option_lines + 1
+        expect(unknown_option_lines).to_equal(0)
+
+    it "leaves `simple lint <file> --help` on the real lint path":
+        step("a target plus --help is not a help request and must not print usage")
+        val marker = "/tmp/tool_help_budget_lint_target.out"
+        val script = "unset SIMPLE_TEST_DEPTH; tmp=$(mktemp -d); b=$SIMPLE_BINARY; test -n \"$b\" || b=bin/simple; "
+            + "printf 'fn main() -> i64:\\n    0\\n' > $tmp/probe.spl; "
+            + "timeout 300 $b lint $tmp/probe.spl --help > " + marker + " 2>&1; "
+            + "echo rc=$? outbytes=$(wc -c < " + marker + "); rm -rf $tmp"
+        val (out, _code) = run_sh(script)
+        expect(out.len()).to_be_greater_than(0)
+        expect(parse_field(out, "outbytes")).to_be_greater_than(0)
+        val printed = read_measured_output(marker)
+        expect(printed.len()).to_be_greater_than(0)
+        var usage_lines = 0
+        for line in printed.split("\n"):
+            if line.split("Usage: simple lint").len() > 1:
+                usage_lines = usage_lines + 1
+        expect(usage_lines).to_equal(0)
