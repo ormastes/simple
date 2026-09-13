@@ -1,0 +1,146 @@
+#!/bin/sh
+# Advisory guard: does the deployed runner binary predate an extern its own
+# committed source declares?
+#
+# WHY THIS EXISTS (PR #959 / follow-up 2026-09-14): the shared runner
+# build/cargo-r2/release/simple was built 2026-09-12, one commit before
+# 08770cc5025 (2026-09-14) added the extern rt_engine2d_blend_cov_span_u32
+# (registered in interpreter_extern/mod.rs, declared in
+# src/lib/gc_async_mut/gpu/browser_engine/
+# simple_web_html_layout_renderer_paint_primitives.spl). On the stale binary
+# that extern silently returned nil at the interpreter dispatch layer, so a
+# renderer primitive quietly stopped painting — no crash, no error, just
+# wrong geometry. Nothing in the push-tier guards checks binary-vs-source
+# FRESHNESS; this is that missing axis.
+#
+# SCOPE: this checks whether a *deployed, already-built* binary is stale
+# relative to `.spl` files under src/lib/** that declare `extern fn rt_*`.
+# It cannot check symbol presence directly — interpreter-dispatched externs
+# are registered into a runtime HashMap via `insert_simple!`, not exported
+# as linkable/nm-visible symbols, so `nm` on the binary proves nothing (this
+# was verified empirically against the freshly rebuilt binary in this same
+# incident: 0 nm hits for rt_engine2d_blend_cov_span_u32 despite the
+# capability-probe path proving it dispatches correctly). The proxy used
+# instead: an extern's DECLARING FILE committed strictly after the binary's
+# build time is a candidate the binary cannot possibly have picked up,
+# UNLESS that exact symbol is already in the known-unbacked baseline
+# (scripts/check/unbacked_extern_baseline.txt) — a baselined symbol is
+# already known to be unimplemented everywhere and is not new drift this
+# guard should flag.
+#
+# Verdict, last line of stdout:
+#   PASS  — <n> extern(s) checked, 0 newer than <binary>       exit 0
+#   ERROR — nothing was checked (<reason>)                     exit 2
+#   The command itself never FAILs (exit 1) — a stale binary is reported as
+#   an ERROR-class finding (advisory), not treated as a hard defect, because
+#   the correct remediation is "rebuild", which this guard cannot do itself.
+#
+# --selftest runs 2 fixtures and is fatal.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+selftest() {
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+
+    # Fixture 1: binary newer than every extern-declaring file -> PASS.
+    mkdir -p "$tmp/pass/src/lib/x"
+    cat > "$tmp/pass/src/lib/x/f.spl" <<'EOF'
+extern fn rt_something_old(a: i64) -> i64
+EOF
+    touch -t 202601010000 "$tmp/pass/src/lib/x/f.spl"
+    : > "$tmp/pass/binary"
+    chmod +x "$tmp/pass/binary"
+    touch -t 202601020000 "$tmp/pass/binary"
+
+    out=$(scan "$tmp/pass/binary" "$tmp/pass/src/lib" "$tmp/pass/baseline.txt") || {
+        echo "SELFTEST FAIL: expected PASS on fresh binary, got: $out" >&2; exit 1
+    }
+    case "$out" in
+        "PASS — "*"0 newer than"*) ;;
+        *) echo "SELFTEST FAIL: unexpected pass text: $out" >&2; exit 1 ;;
+    esac
+
+    # Fixture 2: extern declared AFTER the binary, not baselined -> ERROR
+    # naming it.
+    mkdir -p "$tmp/stale/src/lib/x"
+    : > "$tmp/stale/binary"
+    chmod +x "$tmp/stale/binary"
+    touch -t 202601010000 "$tmp/stale/binary"
+    cat > "$tmp/stale/src/lib/x/f.spl" <<'EOF'
+extern fn rt_new_thing_u32(a: i64) -> i64
+EOF
+    touch -t 202601020000 "$tmp/stale/src/lib/x/f.spl"
+    : > "$tmp/stale/baseline.txt"
+
+    if out=$(scan "$tmp/stale/binary" "$tmp/stale/src/lib" "$tmp/stale/baseline.txt" 2>&1); then
+        echo "SELFTEST FAIL: expected ERROR on stale binary, got PASS: $out" >&2
+        exit 1
+    fi
+    case "$out" in
+        *"rt_new_thing_u32"*) ;;
+        *) echo "SELFTEST FAIL: stale case did not name the symbol: $out" >&2; exit 1 ;;
+    esac
+
+    trap - EXIT
+    rm -rf "$tmp"
+    echo "SELFTEST PASS — 2 fixture(s) checked"
+}
+
+# scan <binary> <lib-root> <baseline-file>
+# Emits the verdict on stdout, returns 0 on PASS, 2 on ERROR.
+scan() {
+    _bin="$1"
+    _lib_root="$2"
+    _baseline="$3"
+
+    [ -x "$_bin" ] || { echo "ERROR — nothing was checked (no executable binary at $_bin)"; return 2; }
+    [ -d "$_lib_root" ] || { echo "ERROR — nothing was checked (no lib root at $_lib_root)"; return 2; }
+
+    _bin_mtime=$(stat -f '%m' "$_bin" 2>/dev/null || stat -c '%Y' "$_bin" 2>/dev/null) || {
+        echo "ERROR — nothing was checked (cannot stat $_bin)"; return 2;
+    }
+
+    _checked=0
+    _newer=""
+    for f in $(find "$_lib_root" -name '*.spl' -type f 2>/dev/null); do
+        _syms=$(grep -o 'extern fn rt_[A-Za-z0-9_]*' "$f" 2>/dev/null | sed 's/^extern fn //' || true)
+        [ -z "$_syms" ] && continue
+        _f_mtime=$(stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null) || continue
+        for s in $_syms; do
+            _checked=$((_checked + 1))
+            if [ "$_f_mtime" -gt "$_bin_mtime" ]; then
+                if [ -f "$_baseline" ] && grep -qx "$s" "$_baseline" 2>/dev/null; then
+                    continue
+                fi
+                _newer="$_newer $s($f)"
+            fi
+        done
+    done
+
+    if [ "$_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 extern fn rt_* declarations found under $_lib_root)"
+        return 2
+    fi
+
+    if [ -n "$_newer" ]; then
+        echo "ERROR — $_checked extern(s) checked, binary $_bin ($(date -r "$_bin_mtime" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$_bin_mtime")) predates declaring source for:$_newer"
+        return 2
+    fi
+
+    echo "PASS — $_checked extern(s) checked, 0 newer than $_bin"
+    return 0
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    selftest
+    exit 0
+fi
+
+BIN="${1:-${SIMPLE_BIN:-$ROOT_DIR/build/cargo-r2/release/simple}}"
+LIB_ROOT="${2:-$ROOT_DIR/src/lib}"
+BASELINE="${3:-$ROOT_DIR/scripts/check/unbacked_extern_baseline.txt}"
+
+selftest
+scan "$BIN" "$LIB_ROOT" "$BASELINE"
