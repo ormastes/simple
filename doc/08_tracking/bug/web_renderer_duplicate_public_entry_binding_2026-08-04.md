@@ -122,3 +122,7 @@ early and returns background white, turning a byte-exactness assertion into a
 load-dependent coin flip — see
 `doc/08_tracking/bug/web_paint_wallclock_budget_flake_2026-07-31.md`. Arming only
 one side would have been worse than not arming at all.
+
+## Triage 2026-09-13
+
+Confirmed both declarations are still present (duplicate unchanged). The suggested fix (rename `simple_web_renderer.spl:98`'s definition) is low-risk in isolation, but the symbol name `simple_web_render_html_to_pixels_with_engine2d_backend` is referenced across 35+ files in `src/` and `test/` (browser-engine specs, app renderers, WM-compare tooling) — verifying that a rename does not silently rebind any of those imports to the wrong module needs checking each caller's actual import path, which exceeds this pass's per-bug budget given the size of the remaining shard. Leaving OPEN, no code change made.
