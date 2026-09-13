@@ -485,3 +485,22 @@ The underlying language/runtime defect is unchanged and still OPEN. Lint rule
 documented here, which is the more dangerous one because the payload outlives
 the expression. Extending `OPTME001` to optional-typed fields whose payload has
 `me` methods is the natural next step.
+
+## Triage 2026-09-13
+
+Re-ran the "Minimal reproducer" verbatim (`SIMPLE_EXECUTION_MODE=interpreter
+bin/simple run`, `bin/simple` = Rust seed
+`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`):
+
+```
+A n=0     (still wrong -- expected A n=2)
+B n=2     (still correct)
+```
+
+Unchanged from the filed symptom. This is an interpreter/runtime value-copy
+semantics defect on `T?`-typed bindings (the unwrap inside a `me` call appears
+to mutate a temporary rather than the underlying `Some` payload in place),
+not a `src/lib`/`src/app` logic bug — fixing it means changing how the
+interpreter represents/copies `Optional<Class>` payloads across a mutating
+method call, which is core language-runtime work well outside a single-file,
+<45-minute pure-Simple change. Left OPEN; no code change attempted here.
