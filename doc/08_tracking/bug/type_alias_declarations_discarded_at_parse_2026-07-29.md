@@ -65,3 +65,33 @@ loss.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Re-check 2026-09-13
+
+- Status: RESOLVED (2026-09-13, prior lane) — verified, not newly authored
+
+`src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl` no longer
+skips `type X = Y` to newline. The `elif par_kind_get() == 35:` arm now
+captures the name and aliased-type tag and calls
+`module_add_decl(decl_type_alias(ta_name, ta_type_tag, 0))`, tagged inline as
+"lane TAL1" for this bug id. `decl_type_alias` exists
+(`10.frontend/core/_Ast/decl_nodes.spl:637`), and
+`_FlatAstBridge/module_assembly.spl:1052,1195` threads the captured aliases
+into `module.type_aliases` (a real `Dict<text, ParserTypeAlias>`, no longer
+hardcoded `{}` — that hardcode survives only in `convert_nodes.spl:233`'s
+`flat_empty_module`, which is correct for a module with no declarations at
+all).
+
+All three specs named in this fix's own comment/family are green on
+`bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
+(symlinked from the shared main worktree), sha256 `3d120a6f9ab5`:
+
+```
+test/01_unit/compiler/frontend/type_alias_survives_parse_spec.spl  -> 3 examples, 0 failures
+test/01_unit/compiler/frontend/type_alias_capture_spec.spl         -> 4 examples, 0 failures
+test/01_unit/compiler/semantics/semantic_alias_registry_spec.spl   -> 10 examples, 0 failures
+```
+
+The last of those is the "Fix direction" step 3 registry this record asked
+for (`semantic_api/alias_registry.spl`), also already landed. No new code
+change needed; this record was stale relative to the tree.
