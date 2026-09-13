@@ -203,3 +203,12 @@ Note for whoever takes it: silent coercion is arguably worse than the old
 pass-through for diagnosis, because `got=true` looks correct. A spec that
 pins "`take_bool(42)` is rejected" is the right guard and would sit RED today,
 so none is added here.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+No new evidence to add. The remaining gap (no compile-time type-check
+rejecting a non-bool value at a `bool`-typed parameter) is a
+language-semantics decision with repo-wide blast radius, already
+re-investigated once (2026-08-10) and confirmed to have no minimal
+`.spl`-side fix available — every option needs a policy call this lane
+cannot make unilaterally. Status left as PARTIALLY-RESOLVED, unchanged.
