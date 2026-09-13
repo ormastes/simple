@@ -166,3 +166,54 @@ would move the gate.
 - `src/app/cli/cli_helpers.spl` — `print_cli_help`
 - `src/app/cli/dispatch.spl`, `src/app/cli/dispatch/__init__.spl` — the shadowed pair
 - `src/app/cli/surface_alignment.spl`, `src/app/cli/bootstrap_check.spl` — registries 4 and 5
+
+## Re-check 2026-09-13 (BUGFIX-7 lane) — fixed the remaining gap, spec is 9/9 GREEN
+
+RED (re-measured; the spec has been rewritten since this record's earlier
+sections — now 9 examples, not 15):
+
+```
+bin/simple test test/01_unit/app/cli_help_alignment_spec.spl
+Results: 9 total, 5 passed, 4 failed
+  ✗ matches the live dispatch, help, and table source surfaces  — expected [tags, cs] to equal []
+  ✗ every dispatch-table entry has a dispatch branch             — expected [tags, cs] to equal []
+  ✗ the undocumented-command count does not exceed its baseline  — expected 1 to be less than 1
+  ✗ every dispatchable command is advertised in help text        — expected [build-progress] to equal []
+```
+
+Root cause: `dispatch/table.spl` declares `tags` (`src/app/tag_query/main.spl`)
+and `cs` (`src/app/llm_caret/cs_main.spl`) with no executing dispatch branch
+(dead table entries, same class as the 2026-08-11 22-entry fix this record
+already references); `build-progress` (dispatched via
+`str_eq(args[0], "build-progress")` in `main_and_help.spl`) had no help-text
+line; and the `app.cli.help_surface_inventory`/`command_registry.spl`
+generated-inventory helper (used by the first assertion) had no registry rows
+for any of the three, so it disagreed with the live-extracted source.
+
+Fix:
+- `src/app/cli/_CliMain/main_and_help.spl`: added
+  `elif str_eq(first, "tags"): return cli_run_file("src/app/tag_query/main.spl", ...)`
+  and the equivalent for `cs` -> `src/app/llm_caret/cs_main.spl`.
+- `src/app/cli/cli_helpers.spl`: added help lines for `tags`, `cs`, and
+  `build-progress`.
+- `src/app/cli/command_registry.spl`: added registry rows for `tags`, `cs`,
+  `build-progress` so `cli_surface_snapshot_v1()` agrees with live source.
+
+GREEN:
+
+```
+Results: 9 total, 9 passed, 0 failed
+```
+
+Nearby suite check (before/after unaffected):
+`test/01_unit/app/cli/dispatch_table_app_path_resolves_spec.spl` 3/3,
+`test/01_unit/app/cli/cli_helpers_cycle_spec.spl` 1/1, both unchanged.
+`test/01_unit/app/cli_command_inventory_spec.spl` (14/23) and
+`test/01_unit/app/cli_dispatch_unit_spec.spl` (parse-error, pre-existing
+unclosed-backtick in that spec file itself) are unaffected by this change —
+the former asserts against a hardcoded literal list independent of live
+source (`all_commands.len()` on its own array literal, confirmed by reading
+the assertion), the latter is a parse error in a file this change never
+touched.
+
+Status: RESOLVED (2026-09-13) — spec green.
