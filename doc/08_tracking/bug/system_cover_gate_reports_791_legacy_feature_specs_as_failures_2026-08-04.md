@@ -102,3 +102,8 @@ scope assessment both still hold:
   architectural/deferred, not silently downgraded.
 
 No code changed for this doc; only this confirmation note.
+
+## Triage 2026-09-13
+Reconfirmed: architectural, root cause unchanged per the 2026-08-10
+re-verification. Test-runner/legacy-feature-suite annotation gap. Left
+as-is, no code change attempted.
