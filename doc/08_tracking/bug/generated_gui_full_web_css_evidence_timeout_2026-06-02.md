@@ -1,9 +1,16 @@
 # Generated GUI Full Web CSS Evidence Timeout
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — Resolved by the fixture change recorded in the body: the evidence example no longer pulls full WM/web CSS
+
+- **inferred** The entry itself records the resolution: the evidence fixture was switched from `app.ui.web.html.generate_css("light")` to a compact production-widget CSS subset, so the ~38 KB artifact that blew the 60 s watchdog is no longer generated.
+- **measured** Both referenced artifacts still exist — `scripts/check/check-electron-generated-gui-web-parity-evidence.shs` and `examples/06_io/ui/generated_gui_web_parity_expected.spl` — so this is a live lane, not a removed one.
+- **inferred** The gate is an Electron/Linux evidence check and cannot be executed on this Windows triage host; closing on the recorded fixture fix rather than a re-run.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Status
-open
+closed (2026-09-13 triage)
 
 ## Context
 `examples/06_io/ui/generated_gui_web_parity_expected.spl` briefly imported
@@ -44,5 +51,3 @@ full-CSS evidence lane that reports CSS size, parse/layout time, and max RSS.
 SIMPLE_TIMEOUT_SECONDS=60 SIMPLE_LIB=src bin/simple run examples/06_io/ui/generated_gui_web_parity_expected.spl --mode=interpreter --clean
 ```
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

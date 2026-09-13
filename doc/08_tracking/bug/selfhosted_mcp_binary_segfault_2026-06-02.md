@@ -1,6 +1,6 @@
 ---
 id: selfhosted_mcp_binary_segfault_2026-06-02
-status: CLOSED
+status: CLOSED (2026-09-13 triage)
 severity: high
 discovered: 2026-06-02
 discovered_by: MCP server smoke test (initialize JSON-RPC)
@@ -9,6 +9,13 @@ closed_by: stage4 self-hosted deploy + workaround already applied
 related: bin/release/linux-x86_64/simple_mcp_server
 related: src/app/mcp/main.spl
 ---
+
+## Closed 2026-09-13 — Already closed 2026-06-12; recorded here so a status sweep agrees
+
+- **inferred** The entry's frontmatter already carries `status: CLOSED`, `closed: 2026-06-12`, `closed_by: stage4 self-hosted deploy + workaround already applied`.
+- **measured** No self-hosted MCP binary exists to re-probe on this host: the `simple-mcp` server reports `CONNECTION_CLOSED` this session and `bin/simple` is the Rust seed (`v1.0.0-rc.1`), not the self-hosted binary the segfault was filed against.
+- **inferred** Re-verification would require a Linux self-hosted deploy; no evidence contradicts the recorded closure.
+
 
 # Self-hosted simple_mcp_server binary segfaults on initialize
 

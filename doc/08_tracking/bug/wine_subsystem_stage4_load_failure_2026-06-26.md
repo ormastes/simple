@@ -1,7 +1,12 @@
 # Bug: Wine subsystem — all 127 specs fail (missing source modules)
 
+## Closed 2026-09-13 — the restoration landed; wine sources are in the tree
+- **measured**: `ls src/lib/common/wine_*.spl | wc -l` = 83, including 11 `wine_dll_*.spl`; `src/lib/common/pe_coff_header.spl` exists — the files this entry restored are committed, not staged-and-lost.
+- **inferred**: the 13 files with no git history remain unrecoverable, as this entry already states; that is a scope note, not an open regression.
+- **inferred**: the 127 specs were not re-run; `bin/simple test` is broken on this Windows host (a trivial spec reports a false `outer-bound-timeout`).
+
 **Date:** 2026-06-26
-**Status:** RESOLVED (74 files restored from git history; 13 files have no history)
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 **Severity:** P2 (large feature gap, no regression — never worked)
 **Classification:** both-seed-and-stage4 / missing-source → DELETED-AND-RESTORED
 

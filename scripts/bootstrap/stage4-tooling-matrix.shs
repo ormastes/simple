@@ -56,6 +56,8 @@ scope=full
 resume=0
 source_root=$(pwd -P)
 timeout_seconds=${STAGE4_MATRIX_TIMEOUT_SECONDS:-1800}
+phase_live_manifest=${STAGE4_PHASE_LIVE_MANIFEST:-}
+phase_live_credential_home=${HOME:-${USERPROFILE:-}}
 
 for arg in "$@"; do
   case "$arg" in
@@ -183,6 +185,8 @@ trap 'rm -f "$config_tmp" "$matrix_tmp"' EXIT INT TERM HUP
   echo "git_head=$(git_head_or_missing)"
   echo "git_tracked_dirty_hash=$(git_tracked_dirty_hash)"
   echo "timeout_seconds=$timeout_seconds"
+  echo "phase_live_manifest=$phase_live_manifest"
+  echo "phase_live_manifest_hash=$(file_hash_or_missing "$phase_live_manifest")"
 } >"$config_tmp"
 
 {
@@ -226,6 +230,10 @@ trap 'rm -f "$config_tmp" "$matrix_tmp"' EXIT INT TERM HUP
     printf 'fix\trequired\tessential_tools\n'
     printf 'verify\trequired\tcompiler_full_tests\n'
     printf 'spipe_docgen\trequired\tcompiler_full_tests\n'
+    printf 'spipe_suite\trequired\tcompiler_full_tests,spipe_docgen\n'
+    printf 'devhub_suite\trequired\tcompiler_full_tests\n'
+    printf 'caret_suite\trequired\tcompiler_full_tests\n'
+    printf 'phase_live_services\trequired\tmcp_protocol,lsp_protocol,spipe_suite,devhub_suite,caret_suite\n'
     printf 'native_build\trequired\tredeploy_sanity,compiler_full_tests\n'
     printf 'security\trequired\tlibrary_check\n'
     printf 'build\trequired\tcompiler_check\n'
@@ -531,6 +539,34 @@ task_input_fingerprint() {
       spipe_docgen)
         path_fingerprint "$(tool_output cli)"
         path_fingerprint "$source_root/test/fixtures/pure_simple_tooling/sibling_describe_green_spec.spl"
+        ;;
+      spipe_suite)
+        path_fingerprint "$(tool_output cli)"
+        path_fingerprint "$source_root/test/01_unit/app/spipe"
+        path_fingerprint "$source_root/test/01_unit/app/spipe_docgen"
+        path_fingerprint "$source_root/test/02_integration/spipe"
+        path_fingerprint "$source_root/test/03_system/tools/spipe"
+        ;;
+      devhub_suite)
+        path_fingerprint "$(tool_output cli)"
+        path_fingerprint "$source_root/test/01_unit/app/devhub"
+        path_fingerprint "$source_root/test/03_system/app/devhub"
+        path_fingerprint "$source_root/test/03_system/native/stage4_devhub_daily_time_owner_contract.spl"
+        path_fingerprint "$source_root/test/03_system/native/devhub_wiki_help_import_scope.spl"
+        ;;
+      caret_suite)
+        path_fingerprint "$(tool_output cli)"
+        path_fingerprint "$source_root/test/01_unit/app/llm_caret"
+        path_fingerprint "$source_root/test/03_system/app/llm_caret"
+        path_fingerprint "$source_root/test/03_system/llm_caret_multi_manager_spec.spl"
+        path_fingerprint "$source_root/test/03_system/llm_caret_agent_backends_spec.spl"
+        ;;
+      phase_live_services)
+        path_fingerprint "$(tool_output cli)"
+        path_fingerprint "$(tool_output mcp)"
+        path_fingerprint "$(tool_output lsp)"
+        path_fingerprint "$source_root/scripts/check/check-bootstrap-phase-live.py"
+        path_fingerprint "$phase_live_manifest"
         ;;
       native_build|run)
         path_fingerprint "$(tool_output cli)"
@@ -1195,6 +1231,27 @@ make_test_manifest() {
   printf '%s\n' "$manifest_path"
 }
 
+make_suite_manifest() {
+  suite_manifest_task=$1
+  shift
+  suite_manifest_dir="$work_root/manifests"
+  suite_manifest_path="$suite_manifest_dir/$suite_manifest_task.txt"
+  suite_manifest_tmp="$suite_manifest_path.tmp.$$"
+  mkdir -p "$suite_manifest_dir"
+  : >"$suite_manifest_tmp"
+  for suite_manifest_input in "$@"; do
+    if [ -d "$suite_manifest_input" ]; then
+      find "$suite_manifest_input" -type f -name '*_spec.spl' -print >>"$suite_manifest_tmp"
+    elif [ -f "$suite_manifest_input" ]; then
+      printf '%s\n' "$suite_manifest_input" >>"$suite_manifest_tmp"
+    fi
+  done
+  LC_ALL=C sort -u "$suite_manifest_tmp" -o "$suite_manifest_tmp"
+  [ -s "$suite_manifest_tmp" ] || return 1
+  mv "$suite_manifest_tmp" "$suite_manifest_path"
+  printf '%s\n' "$suite_manifest_path"
+}
+
 run_manifest_test_task() {
   manifest_test_task=$1
   manifest_expected_total=$2
@@ -1485,6 +1542,51 @@ run_gate_command() {
         "$source_root/test/fixtures/pure_simple_tooling/sibling_describe_green_spec.spl" \
         --output "$docgen_out" || gate_status=$?
       [ "$gate_status" -ne 0 ] || [ -n "$(find "$docgen_out" -type f -size +0c -print -quit 2>/dev/null)" ] || gate_status=1
+      ;;
+    spipe_suite)
+      spipe_manifest=$(make_suite_manifest "$gate_task" \
+        "$source_root/test/01_unit/app/spipe" \
+        "$source_root/test/01_unit/app/spipe_docgen" \
+        "$source_root/test/02_integration/spipe" \
+        "$source_root/test/03_system/tools/spipe") || gate_status=1
+      [ "$gate_status" -ne 0 ] || run_manifest_test_task "$gate_task" - "$spipe_manifest" || gate_status=$?
+      ;;
+    devhub_suite)
+      devhub_manifest=$(make_suite_manifest "$gate_task" \
+        "$source_root/test/01_unit/app/devhub" \
+        "$source_root/test/03_system/app/devhub" \
+        "$source_root/test/03_system/native/stage4_devhub_daily_time_owner_contract.spl" \
+        "$source_root/test/03_system/native/devhub_wiki_help_import_scope.spl") || gate_status=1
+      [ "$gate_status" -ne 0 ] || run_manifest_test_task "$gate_task" - "$devhub_manifest" || gate_status=$?
+      ;;
+    caret_suite)
+      caret_manifest=$(make_suite_manifest "$gate_task" \
+        "$source_root/test/01_unit/app/llm_caret" \
+        "$source_root/test/03_system/app/llm_caret" \
+        "$source_root/test/03_system/llm_caret_multi_manager_spec.spl" \
+        "$source_root/test/03_system/llm_caret_agent_backends_spec.spl") || gate_status=1
+      [ "$gate_status" -ne 0 ] || run_manifest_test_task "$gate_task" - "$caret_manifest" || gate_status=$?
+      ;;
+    phase_live_services)
+      if [ ! -f "$phase_live_manifest" ] || ! command -v python >/dev/null 2>&1; then
+        printf 'BLOCKED: phase live manifest and host Python verifier required\nresume: set STAGE4_PHASE_LIVE_MANIFEST to an admitted phase-4 manifest, then start a new matrix ID (the manifest is frozen in config)\n' >"$gate_log"
+        write_identity_snapshot "$gate_task" after
+        write_task_input_snapshot "$gate_task" after
+        write_task_receipt "$gate_task" BLOCKED_UPSTREAM phase-live-prerequisite-missing "$gate_input" "$gate_log" - -
+        write_summary
+        return 0
+      fi
+      run_logged "$gate_task" python "$source_root/scripts/check/check-bootstrap-phase-live.py" \
+        --manifest "$phase_live_manifest" --output "$work_root/outputs/phase-live" \
+        --expect-phase 4 --expect-cli "$cli_output" --expect-mcp "$(tool_output mcp)" \
+        --expect-lsp "$(tool_output lsp)" --credential-home "$phase_live_credential_home" || gate_status=$?
+      if [ "$gate_status" -eq 2 ] && grep -Eq '^(mcp|lsp_mcp|spipe_plugin|caret|devhub|jira|confluence|github)=(BLOCKED|UNSUPPORTED):' "$gate_log"; then
+        write_identity_snapshot "$gate_task" after
+        write_task_input_snapshot "$gate_task" after
+        write_task_receipt "$gate_task" BLOCKED_UPSTREAM phase-live-service-unavailable "$gate_input" "$gate_log" - -
+        write_summary
+        return 0
+      fi
       ;;
     native_build)
       native_cache="$work_rel/cache/native-build"

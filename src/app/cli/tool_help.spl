@@ -1,0 +1,196 @@
+# Help text and help-route predicates for the pure-Simple tool commands.
+#
+# Why this module exists: a subcommand's `--help` used to load the subcommand's
+# whole implementation closure before `main()` could reach its help branch.
+# `src/app/cli/lint_entry.spl` resolves `use app.io.cli_lint_commands.{...}`
+# before main() runs, and `src/app/test_runner_new/main.spl` resolves the whole
+# test-runner closure, so on the deployed seed (sha256 3d120a6f9ab5704b...,
+# aarch64) `simple lint --help` cost 533 `.spl` opens and `simple test --help`
+# cost 10,151 opens / 74 s and then printed `Error: unknown option: --help`
+# instead of any help at all.
+# See doc/08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md
+#
+# `use lazy` cannot fix that on the seed (it is loaded eagerly there --
+# use_lazy_is_a_no_op_in_the_rust_seed_2026-09-12.md) and a function-local `use`
+# drops the importing module out of the JIT, so the help text lives in this
+# leaf module instead, reached by the thin `tool_help_entry.spl`. `lint_entry.spl`
+# keeps its own copy of the same text rather than importing this module -- its
+# source closure is pinned to the file by another lane's exact ceilings -- and
+# the two copies are held equal by a spec instead of by an import. Both
+# dispatchers -- the Rust seed driver (`src/compiler_rust/driver/src/main.rs`)
+# and the pure-Simple one (`src/app/cli/dispatch.spl`) -- route a help request
+# for these commands to that entry, so no implementation closure is loaded.
+#
+# This module imports NOTHING on purpose: every import here is paid by every
+# `--help`.
+
+# The thin entry both dispatchers route a tool help request to.
+val TOOL_HELP_ENTRY: text = "src/app/cli/tool_help_entry.spl"
+
+fn tool_help_entry_path() -> text:
+    """Path of the thin help entry. Both dispatchers must name exactly this."""
+    TOOL_HELP_ENTRY
+
+fn lint_family_help_requested(rest: [text]) -> bool:
+    """`lint|fmt|fix` help rule, the same rule as lint_entry's own
+    `args_request_help`, which is a SEPARATE implementation on purpose: adding an
+    import to `lint_entry.spl` would push its source closure past the exact
+    ceilings another lane pins in check_lint_entry_closure_spec.spl. The two are
+    held equal by test/01_unit/app/cli/tool_help_route_spec.spl (text, line for
+    line) and end to end by the budget spec's `lint <file> --help` example.
+
+    `rest` is the argument list AFTER the command token. Help iff there is no
+    further argument, or exactly one and it is `--help`/`-h`. Deliberately NOT
+    "any argument is --help": `simple lint foo.spl --help` lints `foo.spl`
+    today and must keep doing so.
+    """
+    if rest.len() == 0:
+        return true
+    rest.len() == 1 and (rest[0] == "--help" or rest[0] == "-h")
+
+fn test_help_requested(rest: [text]) -> bool:
+    """`test` help rule: a `--help`/`-h` anywhere in the arguments.
+
+    Every position is an error today (`unknown option: --help`), so there is no
+    behaviour to preserve, and this matches the seed's own unreached
+    `handle_test_rust` predicate. A bare `simple test` runs the suite and is
+    NOT a help request.
+    """
+    for arg in rest:
+        if arg == "--help" or arg == "-h":
+            return true
+    false
+
+fn tool_help_entry_for(command: text, rest: [text]) -> text:
+    """The app path to dispatch for a tool help request, or "" for none."""
+    if command == "lint" or command == "fmt" or command == "fix":
+        if lint_family_help_requested(rest):
+            return TOOL_HELP_ENTRY
+        return ""
+    if command == "test":
+        if test_help_requested(rest):
+            return TOOL_HELP_ENTRY
+        return ""
+    ""
+
+fn lint_help_lines() -> [text]:
+    [
+        "Usage: simple lint <file-or-directory> [more-targets...] [--mcp-perf] [--simd]",
+        "",
+        "Runs lint passes on Simple source files.",
+        "--mcp-perf currently fails closed until its repository scanner has a production owner."
+    ]
+
+fn fmt_help_lines() -> [text]:
+    [
+        "Usage: simple fmt <file.spl> [--check] [--write] [--diff]",
+        "",
+        "Options:",
+        "  --check  Check if file is formatted (exit 1 if not)",
+        "  --write  Format file in place",
+        "  --diff   Show formatting diff"
+    ]
+
+fn fix_help_lines() -> [text]:
+    [
+        "Usage: simple fix <file.spl> [--dry-run] [--fix-all]",
+        "",
+        "Options:",
+        "  --dry-run   Show what would be fixed without applying",
+        "  --fix-all   Apply all fixes regardless of confidence",
+        "  --fix-id=ID Apply only fixes matching ID prefix"
+    ]
+
+fn test_help_lines() -> [text]:
+    """Ported from the seed driver's `test_help_text()`
+    (src/compiler_rust/driver/src/cli/help.rs:261), which is reachable only
+    through the `SIMPLE_TEST_RUNNER_RUST=1` repair escape hatch and so could
+    not simply be moved. The two copies are held equal by
+    test/01_unit/app/cli/tool_help_route_spec.spl, which compares the option
+    flags named by each. The Rust copy's leading `Simple Test Runner v<VERSION>`
+    banner is deliberately not reproduced: reading the version here would cost
+    an import, which is the whole defect this module exists to avoid.
+    """
+    [
+        "Usage:",
+        "  simple test [path] [options]",
+        "",
+        "Filters:",
+        "  --unit                  Run unit tests only",
+        "  --integration           Run integration tests only",
+        "  --system                Run system tests only",
+        "  --tag <name>            Filter by tag",
+        "  --only-slow             Run slow tests only",
+        "  --only-skipped          Run skipped tests only",
+        "",
+        "Output:",
+        "  --list                  List tests without running them",
+        "  --list-ignored          List ignored tests only",
+        "  --format <text|json|doc>",
+        "  --json                  Shorthand for --format json",
+        "  --doc                   Shorthand for --format doc",
+        "  --watch                 Watch and auto-rerun on changes",
+        "  --screenshots           Capture GUI screenshots for tagged tests",
+        "  --refresh-screenshots   Force recapture of GUI screenshots",
+        "  --screenshot-output <dir>  Screenshot output directory (default: doc/06_spec/image)",
+        "",
+        "Doctests:",
+        "  --doctest, --sdoctest   Run all doctest modes",
+        "  --doctest-src           Run src doctests",
+        "  --doctest-doc           Run doc/ doctests",
+        "  --doctest-md            Run README-style markdown doctests",
+        "  --doctest-src-dir <dir>",
+        "  --doctest-doc-dir <dir>",
+        "  --doctest-md-dir <dir>",
+        "",
+        "Execution:",
+        "  --mode <interpreter|smf|native>",
+        "  --compile               Shorthand for --mode=native (compile specs and run as subprocess)",
+        "  --compile=<mode>        Explicit form: --compile=native|smf|interpreter",
+        "  --clean                 Bypass unchanged-test cache for this run",
+        "  --force-rebuild         Rebuild cached compile artifacts",
+        "  --keep-artifacts        Preserve compile artifacts after run",
+        "  --parallel, -p          Enable parallel execution",
+        "  --sequential            Force sequential execution",
+        "  --threads, -j <N>       Set worker threads",
+        "  --timeout <sec>         Safe-mode timeout",
+        "  --fail-fast             Stop on first failure",
+        "  --unstable              Run each unit in its own process and continue to the end of the",
+        "                          list, classifying outcomes (OK/ERROR/CRASHED/TERMINATED/TIMEOUT/",
+        "                          NOT_RUN). TERMINATED and TIMEOUT are unverified, not failures.",
+        "                          Default: ON for the bootstrap path, OFF for interactive runs",
+        "  --no-unstable           Force unstable mode off",
+        "",
+        "Run Management:",
+        "  --list-runs             Show tracked test runs",
+        "  --cleanup-runs          Mark stale/dead runs as crashed",
+        "  --prune-runs <N>        Keep only the most recent N runs",
+        "  --runs-status <status>  Filter listed runs by status",
+        "",
+        "Examples:",
+        "  simple test",
+        "  simple test test/unit/",
+        "  simple test --sdoctest README.md",
+        "  simple test --list-runs"
+    ]
+
+fn tool_help_lines(command: text) -> [text]:
+    """Help text for one tool command, one array element per printed line."""
+    if command == "lint":
+        return lint_help_lines()
+    if command == "fmt":
+        return fmt_help_lines()
+    if command == "fix":
+        return fix_help_lines()
+    if command == "test":
+        return test_help_lines()
+    ["Usage: simple lint|fmt|fix [options] [path]"]
+
+fn print_tool_help(command: text):
+    """Print one tool command's help. Byte-identical to what the entry printed
+    inline before this module existed."""
+    for line in tool_help_lines(command):
+        print line
+
+export tool_help_entry_path, tool_help_entry_for, print_tool_help, tool_help_lines
+export lint_family_help_requested, test_help_requested

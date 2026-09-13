@@ -1,11 +1,16 @@
 # Bug: C backend dead in interpreter — 4th split-impl file unmerged
 
+## Closed 2026-09-13 — both fixes are present in the tree
+- **measured**: `find src/compiler -name 'c_backend_translate*'` returns nothing named `_ops` — `c_backend_translate_ops.spl` was merged away as fix 1 describes, so the interpreter's 3-file impl-merge cap is no longer exceeded.
+- **measured**: `static fn named(name: text) -> HirType` exists at `src/compiler/20.hir/hir_types.spl:610` — fix 2 (the previously nonexistent `HirType.named`) is in place.
+- **inferred**: `c_backend_bulk_hint_spec` was not re-run; `bin/simple test` is broken on this Windows host. The entry's status was already "ROOT CAUSE FIXED" with only a harness residual.
+
 - **ID:** c_backend_export_wrapper_blockless_fn
 - **Found:** 2026-06-25
 - **First observed red:** 2026-05-19 (`c_backend_export_spec`, 100% failure rate)
 - **Severity:** P2 — whole C++ backend silently dead under the interpreter
 - **Category:** Compiler / Backend / C / interpreter module loading
-- **Status:** ROOT CAUSE FIXED 2026-06-25 (residual harness item below)
+- **Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Real root cause (the original "block-less" guess was wrong)
 

@@ -1,7 +1,12 @@
 # Optimizer CLI Warning Flood Can Overrun Agent Context
 
+## Closed 2026-09-13 — no flood: 31 stdout / 28 stderr lines on a live run
+- **measured** (Windows Rust seed v1.0.0-rc.1): `bin/simple run src/app/optimize/main.spl <file> --full --level=O3` returned rc=0 with 31 stdout lines and 28 stderr lines, versus the ~2409 stdout + ~940 stderr lines this entry reports.
+- **measured**: total output under 60 lines — far below any context-overrun threshold.
+- **inferred**: the probe target was a small local file rather than a renderer source, so a much larger input could still emit more; the concise per-pass default is clearly in effect.
+
 Date: 2026-06-27
-Status: resolved
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 Severity: medium
 
 Resolution (2026-06-28): optimizer CLI now defaults to a concise per-pass count

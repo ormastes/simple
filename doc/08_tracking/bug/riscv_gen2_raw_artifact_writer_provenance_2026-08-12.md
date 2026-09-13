@@ -102,3 +102,9 @@ defect in this file.
 
 Classification for this sweep: **already-fixed as filed; triage verdict was a
 false positive.**
+
+## Triage 2026-09-13
+Reconfirmed: exported bypass already removed per this record; the
+language-level authority gap (compiler cannot enforce a provenance/VHDL
+pairing invariant) remains unresolved and needs type-system-level work.
+Left as-is, no code change attempted.

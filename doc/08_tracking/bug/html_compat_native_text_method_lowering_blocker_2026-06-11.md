@@ -1,6 +1,17 @@
 # html_compat native text method lowering blocker
 
-**Status:** RESOLVED (2026-09-12, re-verified: source confirms `String.substring`→`rt_slice` mapping is present in codegen/llvm; body already carried pass evidence)
+## Closed 2026-09-13 — stale by host; the named blocker is resolved in-entry
+
+- **inferred** The entry's only repro is pinned to a dead Linux checkout:
+  `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/bin/simple compile ... --native`. That
+  absolute path does not exist on any current host, so the recipe cannot be re-run.
+- **inferred** The entry itself states the blocker "is resolved for `substring` in this
+  slice" (seed LLVM builtin-method path → `rt_slice`; pure-Simple MIR mirrors typed
+  `text.substring`/`text.slice`), and carries two `status=pass` evidence rows.
+- **measured** The probe source survives (`src/app/wm_compare/html_compat_geometry_probe_native_full_smoke.spl`),
+  but the native lane is not exercisable here: `native-build` fails on this Windows host
+  with `SCV-E-SNAPSHOT: snapshot-cache-root-not-owned` before codegen.
+
 
 Date: 2026-06-11
 
@@ -77,6 +88,3 @@ through that path and returns `status=pass`.
 The native smoke should remain focused on both `06_card_panel` and
 `24_flex_wrap_reverse_basic` so future native work continues proving real
 layout output instead of only linking.
-
-## Triage 2026-09-12
-Re-verified via source grep rather than a fresh native build: `src/compiler_rust/compiler/src/codegen/llvm/{mod.rs,functions.rs}` still map `substring`/`slice` to `rt_slice`, confirming the landed fix the body describes is still in place. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

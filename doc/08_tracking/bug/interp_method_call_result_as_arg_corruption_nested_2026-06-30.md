@@ -1,6 +1,9 @@
 # Interpreter: method-call result passed directly as a method argument is corrupted (nested subprocess) - 2026-06-30
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — a method-call result passed directly as an argument is no longer corrupted
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Reconstructed the `band.mark_valid(band.alloc_page())` shape as a class with `alloc_page()`/`mark_valid(ppn)`: two nested calls record `marked=0,1`, i.e. each `mark_valid` received exactly the ppn its `alloc_page()` returned.
 
 ## Status
 
@@ -62,7 +65,3 @@ The firmware's `CONVENTIONS.md` records this alongside the other call-boundary d
 - Test/selftest code using `obj.m(other.method(...))` can fail only when run nested under the
   test runner while passing standalone — easy to miss (the file-level verdict can still read
   PASS). Core firmware service paths use the free-function idiom and are unaffected.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

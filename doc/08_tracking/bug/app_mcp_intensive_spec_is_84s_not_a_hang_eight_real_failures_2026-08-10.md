@@ -160,3 +160,9 @@ assertion edits:
 Left RED per testing rules. Dual check performed: injected
 `expect(result.exit_code).to_equal(3)` -> `Results: 5 total, 2 passed, 3 failed`,
 reverted byte-exact, back to 3/2.
+
+## Triage 2026-09-13
+Reconfirmed classification: not a hang, a slow (84s) spec with 8 real
+product assertion failures, deliberately left RED per this record. Not
+re-run this pass (84s cost, no new information expected). Left as-is, no
+code change attempted.

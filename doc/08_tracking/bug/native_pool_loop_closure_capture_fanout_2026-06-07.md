@@ -1,6 +1,14 @@
 # Native Pool Loop Closure Capture Fanout Mismatch
 
-Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+## Closed 2026-09-13 — Recorded fixed in the entry body
+
+- **inferred** Status `likely-fixed (triaged 2026-06-11)` with resolved/fixed content in the body.
+- **measured** No surviving broken product path is named (path scan: 0 backticked source paths).
+- **measured** The native lane cannot be re-run here: `bin/simple compile --native` fails with `ld: cannot find -lsimple_runtime` / `ld: cannot find -lc`.
+- **inferred** Closing on the recorded fix; re-file with a native transcript if pool-loop capture fan-out misbehaves again.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 

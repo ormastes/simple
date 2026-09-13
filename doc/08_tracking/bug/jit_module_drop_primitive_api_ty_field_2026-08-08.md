@@ -1,6 +1,6 @@
 # `check-no-jit-module-drop.shs` DROP: `primitive_api.spl` struct 'String' field 'ty'
 
-Status: OPEN (P2)
+Status: CLOSED (2026-09-13) -- not reproducible; live compile verified
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 workaround; guard correctly stays red. Live re-compile verification blocked by
 an unrelated environment breakage (see "Environment blocker" below).
@@ -252,6 +252,26 @@ therefore no tree-wide `PASS`/`FAIL` verdict line to quote. The close rests on t
 source content, which is decisive for this specific defect; the tree-wide sweep
 would only add breadth, not settle this row.
 
+## Re-check 2026-09-13 (BUGFIX-10 fanout) — live compile confirms the close
+
+The two prior 2026-08-17 closes rested on source-content review only ("not
+proven" by a live run, both times, due to environment/host contention). This
+pass ran the guard's own reproduction command directly against the deployed
+seed (`readlink -f bin/simple` ->
+`/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`):
+
+```
+$ timeout 60 bin/simple compile src/compiler/35.semantics/lint/primitive_api.spl -o /tmp/primitive_api_out.smf
+Compiled src/compiler/35.semantics/lint/primitive_api.spl -> /tmp/primitive_api_out.smf
+$ echo $?
+0
+```
+
+No "cannot infer field type" diagnostic, exit 0, `.smf` produced. This is the
+first live (not content-only) confirmation for this bug. Closing for real.
+
+- Status: CLOSED (2026-09-13) — not reproducible on `f26970e9d93`; live
+  compile of the named file now succeeds cleanly (see command above).
 ## Triage 2026-09-13
 
 JIT-module-drop guard defect requiring live re-compile verification,

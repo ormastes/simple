@@ -1,5 +1,12 @@
 # Bootstrap: warning references stage2-capability.log that was never written
 
+- Status: RESOLVED (2026-09-13) — confirmed in current source:
+  `scripts/bootstrap/bootstrap-from-scratch.sh:3662` does `rm -f
+  "${log_dir}/stage2-capability.log"` before the probe, and :3691-3693
+  guarantees the file exists (writes a placeholder if the probe never ran)
+  before the :3696 warning references it. Matches this doc's own "Fix"
+  section below verbatim. No further action.
+
 - **Date:** 2026-08-17
 - Status: OPEN (P3)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).

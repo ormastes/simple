@@ -1,5 +1,21 @@
 # `set` method: dict returns nil on the JIT; array/tuple silently no-op when a dict `.set` shares the module
 
+### Re-verification 2026-09-13 — unchanged, still OPEN
+
+Defect 1's minimal repro re-run on the Rust seed `build/vt4/bootstrap/simple.exe`
+(Windows), same two lanes:
+
+- default JIT: `ret=nil`, `b=2` — **still exactly as reported**; mutation lands,
+  the return value is nil.
+- `SIMPLE_EXECUTION_MODE=interpret`: `ret={a: 1, b: 2}`, `b=2` — still correct.
+
+Six weeks on from the 2026-08-10 re-verification, the divergence is byte-for-byte
+the same. Root cause and scope assessment below are unchanged, and the fix site
+is still `src/compiler_rust/**` (off-limits to a .spl/.shs-only lane, and
+off-limits again during this pass because a bootstrap was running). Leaving
+ARCHITECTURAL-OPEN.
+
+
 Date: 2026-08-02
 Status: ARCHITECTURAL-OPEN — re-verified 2026-08-09 and again fresh
 2026-08-10; still architectural/out-of-scope for a .spl/.shs-only lane.

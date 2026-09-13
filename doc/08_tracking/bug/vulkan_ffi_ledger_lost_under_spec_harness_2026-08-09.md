@@ -1,5 +1,13 @@
 # `VulkanFfi` rejection ledger never accumulates under the spec harness (works under `bin/simple run`)
 
+## Triage 2026-09-13
+OPEN, out of scope for this pass: the doc's own investigation already
+eliminated the two most obvious hypotheses (plain class mutator, trait-impl
+mutator shape) and states root cause NOT isolated -- this needs a bisection
+between the spec harness's module-loading path and bin/simple run's, which is
+a multi-hour investigation per the doc's own trail, not a contained fix. Left
+OPEN as characterized.
+
 **Filed:** 2026-08-09 (stream F4)
 **Subject:** `src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl`
 **Status:** root cause NOT isolated. Two candidate factors narrowed, both

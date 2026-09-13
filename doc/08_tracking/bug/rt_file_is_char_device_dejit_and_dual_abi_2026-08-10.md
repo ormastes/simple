@@ -1,5 +1,12 @@
 # `rt_file_is_char_device`: whole-repo de-JIT (stale seed) + dual-ABI wrong answer
 
+## Triage 2026-09-13 — CLOSED, both defects already resolved per the doc's own body
+Defect A (whole-repo de-JIT): doc's own re-verification already found it no
+longer reproduces on the deployed seed. Defect B (dual ABI): doc's own body
+says "FIXED". Confirmed src/lib/nogc_sync_mut/io_runtime.spl:52's
+rt_file_is_char_device declaration is unchanged and was always correct per
+the doc. No further action.
+
 **Date:** 2026-08-10
 **Status:** RED (defect B); defect A fixed in source, stale in deployed binary
 **Found while:** unblocking the spec-vacuity census driver

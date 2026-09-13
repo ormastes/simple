@@ -1,6 +1,8 @@
 # Cross-module type-name collision: `ContractExpr`/`ContractExprKind` resolve to the wrong module
 
-**Status:** OPEN (unverified 2026-09-12)
+- Status: RESOLVED (2026-08-17, re-verified 2026-09-13) — the 2026-09-12
+  triage sweep's generic "OPEN (unverified)" stamp was stale and is corrected
+  here; see "Re-check 2026-09-13" at the bottom.
 
 **Date:** 2026-08-17. **Status:** FIXED 2026-08-17 (verified by execution — see "Verification 2026-08-17" at the bottom). The narrower interpreter hardening described under "Unblock condition" remains a separate, still-open hazard.
 
@@ -137,3 +139,17 @@ re-confirmed by execution.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Re-check 2026-09-13
+
+- Status: RESOLVED (2026-09-13) — `bin/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl` -> `6 examples, 0 failures` (one more example than the 2026-08-17 re-run's 5, still all green).
+
+The 2026-09-12 triage row above was a generic Rule-D stamp applied without
+reading the rest of this record, which already carried a real FIXED status
+and execution evidence from the same day the bug was filed. Restored the
+correct top-line status. Binary: `bin/simple` = Rust seed
+`bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared
+main worktree), sha256 `3d120a6f9ab5`. The `ContractExpr` instance of this
+collision family stays fixed; the general mechanism (any future same-named
+class/enum pair in a co-compiled closure) remains a live latent hazard per
+the "Unblock condition" section, unchanged by this re-check.

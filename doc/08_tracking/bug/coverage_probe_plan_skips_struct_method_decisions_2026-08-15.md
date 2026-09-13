@@ -1,5 +1,14 @@
 # Coverage probe plan attributes 0 lines/decisions to executed struct methods
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: this shard's file column names
+`src/compiler_rust/compiler/src/mir/lower/lowering_coverage.rs` — Rust seed
+MIR coverage-lowering, not pure-Simple `src/lib`/`src/app`/`src/compiler`
+source. The repro also requires a `--coverage` run plus a real Vulkan
+struct-method spec to confirm against, which is not a cheap, isolated repro
+within this pass's budget either way. Left OPEN, no doc content changed
+beyond this line.
+
 **Date:** 2026-08-15
 **Status:** OPEN
 **Severity:** P3 — coverage measurement blind spot, not a runtime defect

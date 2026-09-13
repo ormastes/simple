@@ -1,5 +1,18 @@
 # BUG: --emit-smf produces 219-byte stub regardless of module content
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — the 219-byte stub behaviour is gone; the SMF path now carries real object content
+
+- **measured** `bin/simple compile <module>.spl --emit-smf -o out.smf` (Rust seed
+  v1.0.0-rc.1, Windows) no longer silently emits a 219-byte stub. It now runs a real
+  import/relocation preservation step and reports
+  `codegen: Failed to preserve SMF imports/relocations from object code: ... relocation
+  source section .rdata$.refptr is not executable code` — a genuine object-code path.
+- **measured** `build/dynsmf/` (the seven 219-byte stubs this entry enumerated) no longer
+  exists in the tree.
+- **inferred** The filed P1 (content silently dropped, exit 0) is therefore fixed/superseded.
+  The COFF `.rdata$.refptr` rejection above is a *different*, Windows-specific defect in the
+  new path and is not this entry; it needs its own record if it blocks a lane.
+
 
 **ID:** emit_smf_stub_drops_module_content_2026-06-12
 **Severity:** P1 (blocks binary distribution of UI artifacts)
@@ -57,6 +70,3 @@ a stub. Use `verify --strict` to fail on stub artifacts.
 
 - doc/05_design/compiler/language_design/codegen/smf_to_object_challenge.md
 - doc/08_tracking/bug/serialization_smf_stub_only_no_spl_source_2026-05-30.md
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

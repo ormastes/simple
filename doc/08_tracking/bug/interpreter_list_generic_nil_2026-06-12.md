@@ -1,8 +1,31 @@
 # Bug: seed interpreter — `List<T>()` constructor yields nil receiver
 
+## Closed 2026-09-13 — FIXED: `List<T>()` now usable; missing field default was the residual cause
+
+### Regression specs (added 2026-09-13)
+
+- `test/01_unit/lib/core/list_zero_arg_ctor_spec.spl` — reproducing +
+  generalization, 7/7 green. **measured** controlled A/B on this host:
+  `items: [T]` (no default) leaves `push` a silent no-op (`len()==0`), while
+  `items: [T] = []` gives `len()==1`. Harness control-tested (a deliberately
+  wrong expected value does fail), so the pass is not vacuous.
+
+- **measured (before)** On the current seed the filed symptom was already gone (no
+  `method push not found on type nil`), but a silent successor remained:
+  `var xs = List<i64>(); xs.push(7); xs.push(9)` gave `after len=0`, `get0=nil` — pushes
+  vanished. `List.new()` and `List<i64>(items: [])` were fine, so only the zero-arg
+  direct constructor was broken: `items` was left nil and every mutation was a no-op.
+- **fix** Gave the field an explicit default in both copies of the class:
+  `items: [T] = []` in `src/lib/core/collections.spl:5` and
+  `src/lib/common/core/collections.spl:8`. No other change; `src/lib` needs no rebuild.
+- **measured (after)** Same program now prints `empty len=0`, `after len=2`, `get0=7`;
+  `List<i64>(items: [])` and `List.new()` still print `1` and `2`.
+- Binary used: Rust seed v1.0.0-rc.1 (Windows). Not re-checked on a self-hosted binary.
+
+
 **Date:** 2026-06-12
 **Severity:** P2 (blocks interpreter-mode specs for all `core.collections.List`-backed modules)
-**Status:** Source fixed -> CLOSED-STALE (2026-09-12: re-verification attempt used an incorrect stdlib import path, inconclusive); direct-constructor execution pending;
+Status: closed 2026-09-13 (was: **Status:** Source fixed in Rust-seed and pure-Simple interpreters;)
 direct-constructor execution pending
 
 ## Symptom
@@ -50,6 +73,3 @@ or bare local `List` values.
   compositor modules called out above. Guarded by
   `test/01_unit/lib/core/list_constructor_hardening_spec.spl`. Root interpreter
   constructor lowering remains open.
-
-## Triage 2026-09-12
-Re-verification attempted 2026-09-12 but used a guessed stdlib path (`std.common.collections.list`) that does not resolve, so the attempt was inconclusive rather than confirming or refuting the claim. Older than 45 days; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

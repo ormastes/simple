@@ -315,6 +315,11 @@ printf 'fake spec\n' >"$fake_root/test/02_integration/app/cli/stage4_tools_only_
 printf 'fake spec\n' >"$fake_root/test/02_integration/app/mcp_stdio_integration_spec.spl"
 printf 'fake spec\n' >"$fake_root/test/02_integration/app/simple_lsp_mcp_stdio_spec.spl"
 printf 'fake spec\n' >"$fake_root/test/02_integration/app/simple_lsp_mcp_log_modes_spec.spl"
+mkdir -p "$fake_root/test/01_unit/app/spipe" "$fake_root/test/01_unit/app/devhub" \
+  "$fake_root/test/01_unit/app/llm_caret"
+printf 'fake spipe suite spec\n' >"$fake_root/test/01_unit/app/spipe/fake_spec.spl"
+printf 'fake devhub suite spec\n' >"$fake_root/test/01_unit/app/devhub/fake_spec.spl"
+printf 'fake caret suite spec\n' >"$fake_root/test/01_unit/app/llm_caret/fake_spec.spl"
 
 runner="$fake_root/scripts/bootstrap/stage4-tooling-matrix.shs"
 common_args="--source-root=$fake_root --compiler-manifest=$manifest --cli-journal=$fake_root/build/journals/cli.env --mcp-journal=$fake_root/build/journals/mcp.env --lsp-journal=$fake_root/build/journals/lsp.env --linker=$fake_linker --timeout-seconds=30 --build-jobs=16"
@@ -329,8 +334,8 @@ unset FAKE_GATE_DELAY
 summary="$fake_root/build/mini_builds/stage4_tooling_full/summary.env"
 grep -Fxq 'overall=BLOCKED' "$summary" || fail "unfinished required rows did not remain fail-closed"
 grep -Fxq 'admission_eligible=false' "$summary" || fail "blocked matrix claimed admission eligibility"
-grep -Fxq 'terminal_count=49' "$summary" || fail "full matrix did not terminalize"
-grep -Fxq 'passed=44' "$summary" || fail "full matrix PASS distribution changed"
+grep -Fxq 'terminal_count=52' "$summary" || fail "full matrix did not terminalize"
+grep -Fxq 'passed=47' "$summary" || fail "full matrix PASS distribution changed"
 grep -Fxq 'failed=0' "$summary" || fail "full matrix masked a failed row"
 grep -Fxq 'blocked=2' "$summary" || fail "full matrix blocked-row distribution changed"
 grep -Fxq 'remaining=0' "$summary" || fail "full matrix retained pending rows"
@@ -343,7 +348,7 @@ full_parallel_max=$(awk -F '\t' '$1 == "full" && $3 > max { max=$3 } END { print
 [ "$full_parallel_max" -le 16 ] || fail "scheduler exceeded the effective jobs bound"
 schedule="$fake_root/build/mini_builds/stage4_tooling_full/scheduler/schedule.tsv"
 schedule_rows=$(wc -l <"$schedule" | tr -d ' ')
-[ "$((schedule_rows - 1))" -eq 49 ] || fail "scheduler manifest row count changed"
+[ "$((schedule_rows - 1))" -eq 52 ] || fail "scheduler manifest row count changed"
 tail -n +2 "$schedule" | cut -f1 >"$fixture/schedule-order"
 cut -f1 "$fake_root/build/mini_builds/stage4_tooling_full/matrix.tsv" >"$fixture/matrix-order"
 cmp -s "$fixture/schedule-order" "$fixture/matrix-order" || fail "parent aggregation lost manifest order"
@@ -419,6 +424,15 @@ for test_task in format_fixed_focused_regression compiler_bootstrap_tests compil
     *) expected_count=1 ;;
   esac
   grep -Fxq "executed_test_count=$expected_count" "$test_receipt" || fail "$test_task count missing"
+done
+for suite_task in spipe_suite devhub_suite caret_suite; do
+  suite_receipt="$fake_root/build/mini_builds/stage4_tooling_full/state/$suite_task.env"
+  grep -Fxq 'result=PASS' "$suite_receipt" || fail "$suite_task did not PASS"
+  grep -Fxq 'test_executed=true' "$suite_receipt" || fail "$suite_task did not prove execution"
+  grep -Fxq 'executed_test_count=1' "$suite_receipt" || fail "$suite_task exact inventory count missing"
+  grep -Fxq 'support_status=supported' "$suite_receipt" || fail "$suite_task was not supported"
+  grep -Fq "matrix_hash=" "$suite_receipt" || fail "$suite_task matrix binding missing"
+  grep -Fq "compiler_manifest_hash=" "$suite_receipt" || fail "$suite_task candidate binding missing"
 done
 for blocked_stdio in mcp_stdio_integration lsp_stdio_integration; do
   grep -Fxq 'result=BLOCKED_UPSTREAM' \

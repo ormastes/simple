@@ -1,5 +1,11 @@
 # A2 target IR recovered and landed
 
+## Triage 2026-09-13
+Confirmed CLOSED: re-ran test/01_unit/compiler/build_graph/target_graph_spec.spl
+-- 9/9 passing, matching this doc's own CLOSED 2026-08-17 claim
+("recovered in df2e577a89; focused target graph spec passes 9/9") exactly.
+No further action.
+
 **Date:** 2026-08-10
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).

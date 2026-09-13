@@ -227,6 +227,10 @@ Specs added:
 defective: its `header` is a locally built `"P6\n{width} {height}\n255\n"`,
 always ASCII, so byte length and codepoint count coincide by construction.
 
+## Triage 2026-09-13
+Reconfirmed: 2 sites already fixed and landed per this record; 2 systemic
+root causes are filed as living outside src/lib (compiler/runtime level),
+correctly not patched here. Left as-is, no code change attempted.
 ## Re-check 2026-09-13 (BUGFIX-12 shard 22) — all 4 "confirmed broken, NOT fixed" sites are now fixed
 
 Re-verified each site in the "Confirmed broken, NOT fixed" table against

@@ -20,6 +20,22 @@ itself prove that direct execution of a real `.spl` file is broken. A fixed
 binary must make `simple run --help` exit zero, print run usage, and perform no
 source-file open for a path named `--help`.
 
+## Re-check 2026-09-13
+
+- Status: OPEN (P2) — reproduces identically on Linux, not Windows-specific
+
+```
+$ bin/simple run --help
+error: compile failed: io: Cannot read "--help": No such file or directory (os error 2)
+```
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
+(symlinked from the shared main worktree), sha256 `3d120a6f9ab5`,
+`Simple Language v1.0.0-rc.1`. Confirms the defect is in the shared
+`src/compiler_rust/driver/src/main.rs` CLI arg parsing, not a
+Windows-platform-specific path. Rust seed source, out of scope for a
+pure-Simple lane fix; left OPEN, no code change attempted.
+
 ## Relationship
 
 The currently deployed binary is independently disqualified by

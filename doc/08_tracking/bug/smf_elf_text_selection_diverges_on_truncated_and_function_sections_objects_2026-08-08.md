@@ -1,5 +1,6 @@
 # SMF ELF: code/reloc section selection still diverges on truncated objects, and `-ffunction-sections` is made consistent rather than correct
 
+- **Status:** CLOSED (2026-09-13) -- not reproducible on f26970e9d93; all three items already fixed, see Re-check below
 - **Status:** RESOLVED (2026-09-13) for items 1-2 — see "Re-check / RESOLVED 1-2" near
   the bottom; item 3 (linker's own `elf_parser.spl`) remains OPEN, latent, no
   production consumer.
@@ -123,6 +124,41 @@ relocatable object `sh_addr` is 0, i.e. it would read from the ELF magic.
 `SHT_RELA` (4). Not a regression, and x86_64 objects use RELA, but a 32-bit or
 ARM object would yield zero relocations with no diagnostic.
 
+## Re-check 2026-09-13 (BUGFIX-10 fanout)
+
+Re-read `src/compiler/80.driver/smf_elf_parser.spl` and
+`src/compiler/70.backend/linker/elf_parser.spl` on base `f26970e9d93`. All
+three items are already fixed:
+
+1. **Truncated-object divergence**: `_find_text_section_index` no longer
+   exists as a standalone scan — both `extract_code_from_object` and
+   `extract_elf_relocations` now derive their section set from the single
+   shared `_find_text_section_indices` helper (`smf_elf_parser.spl:33-58`),
+   which carries the `end_off <= object_code.len()` bounds check inline, so
+   the two call sites cannot disagree by construction.
+2. **`-ffunction-sections` truncation**: `extract_code_from_object`
+   (`smf_elf_parser.spl:106-127`) now concatenates ALL `.text*` PROGBITS
+   sections in index order, and `extract_elf_relocations`
+   (`smf_elf_parser.spl:178-207`) rebases each section's `SHT_RELA` entries
+   by that same section's running offset in the merged blob (`base_offsets`)
+   — matching the "real fix" the report asked for, not just a
+   detect-and-fail interim step.
+3. **Linker's own `elf_parser.spl`**: `elf_parse_object`
+   (`elf_parser.spl:375-391`) now tags every relocation with `section_idx`
+   (the RELA section index) and `target_section_idx` (`sh_info`, the section
+   it applies to) via the `ElfRelocation` struct
+   (`elf_parser.spl:64-70`) — the exact "add a target-section field" fix
+   suggested.
+
+Verified against the deployed seed (`readlink -f bin/simple` ->
+`/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`):
+`test/01_unit/compiler/driver/smf_elf_rela_text_section_spec.spl` (7/7 PASS)
+and `test/01_unit/compiler/backend/linker/elf_parser_spec.spl` (16/16 PASS)
+both green, covering these exact scenarios (multi-`.text.<fn>` concatenation,
+truncated-section rejection, tagged relocations). No further action needed.
+
+- Status: CLOSED (2026-09-13) — not reproducible on `f26970e9d93`; all three
+  items already fixed, existing suites green (see above).
 ## Re-check / RESOLVED 1-2 (2026-09-13, BUGFIX-6 lane)
 
 `src/compiler/80.driver/smf_elf_parser.spl` now implements exactly the two

@@ -17,7 +17,7 @@ ERROR: 1 unit(s)
 ```
 
 **Equal byte counts on a content mismatch.** That is not a truncation, and the
-reason string is built to say so (`driver_aot_native_output.spl:895` reports
+reason string is built to say so (`driver_aot_native_output.spl:967` reports
 lengths precisely so an equal pair localises the fault to content).
 
 ## Cause, measured

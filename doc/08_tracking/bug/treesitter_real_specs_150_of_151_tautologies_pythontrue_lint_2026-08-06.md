@@ -203,6 +203,19 @@ SPEC FILE VERDICT: <path> declared>=N executed=N passed=N failed=N dropped=N
 shapes. Grep it with `/usr/bin/grep -a` (ugrep is the default `grep` here, and log output contains
 control bytes).
 
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Same family as `non_discriminating_spec_family_2026-08-08` in this shard.
+The record's own "Disposition proposed" is explicitly "NOT taken — needs
+approval": (1) the PythonTrue lint false-positive fix touches the Rust seed's
+hot parser-error-recovery path (`error_recovery.rs`, `parser_impl/core.rs`,
+`parser_helpers.rs`) plus two `.spl` mirrors, and a seed change is out of
+scope for a pure-Simple bugfix lane and unobservable without a rebuild; (2)
+uncommenting ~150 real assertions across 4 files is a large rewrite exceeding
+this lane's 45-minute budget per bug; (3) marking the specs `tag: ["skip"]`
+explicitly requires approval this session does not have (CLAUDE.md: "NEVER
+skip failing tests without approval"). No safe action available within
+scope. Left OPEN, unchanged.
 ## Triage 2026-09-13
 
 Restoring the 150 commented-out real assertions across 4 treesitter

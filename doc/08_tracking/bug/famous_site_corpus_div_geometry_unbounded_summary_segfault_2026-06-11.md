@@ -1,7 +1,16 @@
 # Famous-Site Corpus Div Geometry Unbounded Summary Segfault
 
+## Closed 2026-09-13 — entry already resolved against the current runtime
+
+- **inferred** Entry status is `resolved-current-runtime` with an in-file `status=pass`
+  evidence row; no later entry reopens the div-geometry summary segfault.
+- **measured** The generic compiled-path OOB segfault that underpinned this cluster
+  (`compiled_array_oob_read_segfault_2026-06-11.md`) no longer reproduces on the current
+  seed (`OOB val nil`, rc=0).
+
+
 Date: 2026-06-11
-Status: resolved-current-runtime
+Status: closed 2026-09-13 (was: Status: resolved-current-runtime)
 
 ## Summary
 

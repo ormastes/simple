@@ -91,6 +91,10 @@ produce on real single-buffer hardware.
   conformance spec exists yet; filed separately as a gap below)
 - `src/lib/common/svmg/ref_vm.spl` (Task D2)
 
+## Triage 2026-09-13
+Reconfirmed: documented divergence, not blocking, per this record. Needs a
+live Vulkan device to re-verify meaningfully; not attempted here. Left as
+open/documented, no code change attempted.
 ## Re-check 2026-09-13 (BUGFIX-12 shard 22)
 
 `src/lib/common/svmg/ref_vm.spl` still present and unchanged in shape (still

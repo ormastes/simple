@@ -1,5 +1,29 @@
 # `??` on a raw i64 treats the value 3 as nil (JIT sentinel collision)
 
+## Closed 2026-09-13 — fix re-verified by running; no longer reproduces
+
+**Status: CLOSED (fixed and re-verified).**
+
+The entry was already marked FIXED (seed HIR lowering, 2026-08-04) but carried
+no post-fix transcript. Re-ran both reported expressions on the Rust seed
+`build/vt4/bootstrap/simple.exe`:
+
+```
+val xs = [0, 1, 2, 3, 4, 5]
+print "idx3 {xs[3] ?? -1}"      # JIT: 3   (was -1)   interpret: 3
+val a: i64 = 3
+print "a {a ?? 99}"             # JIT: 3   (was 99)   interpret: 3
+```
+
+Both the array-index form and the plain `val a: i64 = 3` form now yield `3` on
+the default **JIT** lane — the only lane that was ever wrong — and `interpret`
+still agrees, so the fix did not regress the previously-correct lane. The
+`TAG_SPECIAL == 3` sentinel no longer swallows the literal integer 3.
+
+MEASURED. Not re-checked: the standalone native lane, which the entry records as
+failing closed rather than silently wrong, so it was never a source of bad data.
+
+
 - **Status:** FIXED (seed HIR lowering, 2026-08-04)
 - **Engines:** JIT only. Interpreter was always correct. Standalone native fails
   closed (see "Native scope correction").

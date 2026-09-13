@@ -1,5 +1,12 @@
 # W-MC-RES-001 app-code triage — 2026-08-08
 
+## Triage 2026-09-13
+Confirmed CLOSED for the shard-assigned scope (src/app/debug/remote/dwarf.spl):
+re-ran the doc's own re-verification grep -- the standalone dwarf_load
+forwarder is still gone, line ~116 is still the explanatory comment. Matches
+the doc's own 2026-08-17 ALREADY-FIXED-CLOSED classification exactly. No
+further action.
+
 **Status:** OPEN (unverified 2026-09-12)
 
 Scope: all `src/app/` + `src/os/` files containing an `rt_[a-z0-9_]*_(open|create|new|alloc|acquire|copy|clone|load)(` call

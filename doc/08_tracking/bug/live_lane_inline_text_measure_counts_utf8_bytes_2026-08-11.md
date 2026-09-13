@@ -1,6 +1,6 @@
 # Live browser lane measures inline text by UTF-8 BYTES, not characters
 
-**Status:** OPEN (unverified 2026-09-12)
+**Status:** RESOLVED — restored 2026-09-13, a 2026-09-12 generic triage stamp had overwritten this record's own already-RESOLVED verdict (see bottom)
 
 - **Date:** 2026-08-11
 - Status: OPEN (P2)
@@ -198,3 +198,18 @@ Status: RESOLVED. No source change was needed by this lane.
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-13
+
+Re-executed the proof: `s.len()` -> 6 (bytes), `text_cell_width(s)` -> 4
+(correct cells) for `s = "aé漢"`, on `bin/simple` = Rust seed
+`bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared
+main worktree), sha256 `3d120a6f9ab5`. Matches the 2026-08-17 RESOLVED
+verdict exactly. Restored the top-line status the 2026-09-12 bulk pass had
+downgraded to a generic "OPEN (unverified)" without reading the rest of the
+record (that pass's own note says "no cheap repro attempted... left open" —
+it did not check whether the record already carried a verified RESOLVED).
+The `engine2d/helpers_text.spl` site remains correctly documented as a
+separate, still-open, NOT-safely-fixable-in-isolation defect (shadow-root
+edit-invisibility trap) — this restore concerns only the two originally-filed
+call sites in `simple_web_html_layout_renderer_layout.spl`.

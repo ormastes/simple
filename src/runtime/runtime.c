@@ -1618,6 +1618,13 @@ int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     return enum_value && enum_value->discriminant == (int32_t)expected;
 }
 
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant) {
+    SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
+    if (!enum_value || enum_value->discriminant != (int32_t)expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
+}
+
 void rt_bdd_describe_start_rv(int64_t name_rv) {
     (void)name_rv;
 }
@@ -1872,15 +1879,15 @@ static wchar_t* rt_widen_long_path_rc(const char* path) {
  * Starts at a sentinel rather than zero so a readout is never ambiguous:
  * 77 = never called, 100 = succeeded, 1..10 name a rejected arm, and a literal
  * 0 means this extern is itself unresolved in the lane that read it. */
-#if defined(_MSC_VER)
-#define RT_RNF_TLS __declspec(thread)
-#else
-#define RT_RNF_TLS __thread
-#endif
 /* Thread-local, NOT a global: the bootstrap reads with 24 jobs in flight, so a
  * concurrent successful read on another thread would overwrite the code before
- * the failing caller could report it. */
-static RT_RNF_TLS int64_t rt_rnf_last_failure = 77;
+ * the failing caller could report it.
+ *
+ * Spelled `_Thread_local` to match this tree's existing TLS (runtime_native.c
+ * and runtime_timestamp.c) rather than a fresh __declspec/__thread macro: one
+ * spelling already proven on every toolchain here beats a second one that has
+ * to be re-argued. */
+static _Thread_local int64_t rt_rnf_last_failure = 77;
 
 int64_t rt_file_read_regular_no_follow_last_failure(void) {
     return rt_rnf_last_failure;

@@ -4,6 +4,24 @@ Date: 2026-08-10
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 Status: CLOSED 2026-08-17 (all four missing owners implemented and verified)
+
+## Regression note 2026-09-13
+`paint_tree_walker_spec.spl` is no longer 6/6 (this doc's closing snapshot):
+now 4/6, 2 failures, both "expected 0 [to be greater than 0 / to equal 2]"
+(the DrawRect op count never increments). Root-caused to a DIFFERENT,
+newly-discovered interpreter defect, not a regression in this doc's four
+owners: `SkCanvas.draw_rect` records through `self.recorder`, an
+`Option<SkPictureRecorder>`, via `if val rec = self.recorder: rec.record(op)`
+-- and `if val x = opt_class_field:` unwrap binds a COPY of the class
+instance rather than the same reference, so the mutation is silently lost.
+Isolated and filed as
+`option_class_unwrap_binding_copies_instead_of_referencing_2026-09-13.md`
+(minimal repro included there, independent of Skia). This record's own four
+owners (form_state, event/hit_test, paint_tree_walker module, the walker
+logic itself) are still genuinely present and functioning for the cases that
+don't route through this Option-unwrap mutation path; not reverting this
+record's CLOSED status, since the newly discovered defect is a distinct,
+separately-filed bug.
 Lane verified: host x86_64-unknown-linux-gnu, `bin/simple` = Rust bootstrap seed,
 interpreter path (JIT fell back: `HIR lowering error: Cannot infer field type:
 struct 'CompileOptions' field 'mode' [in src/app/test_runner_new/main.spl]`).

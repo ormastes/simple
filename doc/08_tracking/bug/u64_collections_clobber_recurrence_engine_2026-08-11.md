@@ -1,5 +1,13 @@
 # The `collections.rs` clobber is ONE commit replayed 6 times — and it is still armed
 
+## Triage 2026-09-13
+CLOSED for the acute recurrence -- confirming the doc's own conclusion:
+collections.rs is 6649 lines (grown, not clobbered) and still carries
+HeapObjectType::UInt, and the doc's own text already says "tree is healthy
+tree is healthy ... No new guard is warranted." The residual source-clone
+hygiene items (1-3) cannot be done from this worktree. No further action.
+
+
 **Status:** OPEN (unverified 2026-09-12)
 
 - **Date:** 2026-08-11
