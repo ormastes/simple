@@ -47,6 +47,8 @@ original `itf` config format:
 
 ```bash
 devhub auth login --confluence --url https://company.atlassian.net/wiki --user you@co.com --token TOKEN
+# Confluence Data Center: Bearer personal access token, no --user needed
+devhub auth login --confluence --url https://wiki.corp:8090/confluence --deployment datacenter --auth bearer --token PAT
 # Jira Data Center: Bearer personal access token, no --user needed
 devhub auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT
 # Jira Cloud: basic auth, email + API token
@@ -594,10 +596,6 @@ Honest, currently-open gaps — do not expect these to work:
 - **`rm --recursive`/`rb --force`/`mirror --remove`** are all capped at 1000
   objects per side (no batch `DeleteObjects` call in the adapter); over the
   cap, they refuse and point you at the real `mc` CLI.
-- **`auth login --confluence` has no `--deployment`/`--auth` flags** and still
-  requires `--user`. Those flags exist for `--jira` only. For a Confluence
-  Data Center PAT, write `confluence.deployment`/`confluence.auth: bearer`
-  into `config.sdn` by hand (see the `wiki` facade).
 - **`std.nogc_sync_mut.http_client` `add_header` recurses forever.** Its
   `request_add_header` alias resolves back onto itself, and the shim has no
   transport. devhub's Confluence and Bitbucket adapters avoid it by using `curl`.
