@@ -75,3 +75,8 @@ credential records are still never rewritten to v2 on a config write.
 
 Status: OPEN (unchanged). Severity remains LOW-MED — a stale-format record is
 still readable; this is a migration gap, not a wrong-result defect.
+
+## Triage 2026-09-13
+Reconfirmed: v1 credential records still never get rewritten to a newer
+format; needs a config writer/owner design decision, not a quick fix.
+Left OPEN (P3), no code change attempted.
