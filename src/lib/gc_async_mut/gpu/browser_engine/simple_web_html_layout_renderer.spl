@@ -49,6 +49,64 @@ fn _simple_web_extract_keyframes(html: text) -> KeyframeRegistry:
         return KeyframeRegistry.new()
     extract_keyframes(html)
 
+pub fn simple_web_layout_element_geometry_lines(html: text, width: i32, height: i32) -> [text]:
+    """One `GEOM|<nth-path>|<tag>|<x>|<y>|<w>|<h>` line per LAID-OUT ELEMENT, in
+    document order — the enumeration the Chrome geometry differ compares
+    against.
+
+    Why this exists rather than reading the Draw IR: the differ used to build
+    its element list from Draw IR COMMANDS, so an element that paints nothing
+    emitted no command and entered no list. **Measured, that accounts for one
+    row of the eight-page difference, not the desync** — round 8 supposed the
+    paintless boxes WERE the `<li>` desync and that is retracted here; the
+    desync was tree construction (see html_tree_builder.spl's
+    `find_tag_in_list_item_scope`). Enumerating elements is still the right
+    scheme, because Chrome's side walks `document.body.querySelectorAll('*')`
+    and a command list can never be proved to cover it.
+
+    The key is `_simple_web_node_target_key`, the same function the hit-test and
+    animation target keys use, so there is ONE nth-path scheme in this file
+    rather than a second one that can drift from it."""
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    # Every parameter explicit — same reason as simple_web_layout_debug_layout_by_id.
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(
+        nodes,
+        styles,
+        child_index,
+        0,
+        0,
+        0,
+        width,
+        height,
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        empty_starts,
+        empty_ends,
+        neg_one_i32_list(node_count)
+    )
+    var out: [text] = []
+    var i = 0
+    while i < node_count:  # cpu-lane-loop-ok: one pass over the parsed node list emitting the differ's element rows; bound is node_count and this entry is tooling-only, not on any paint path
+        if _simple_web_layout_element(nodes[i]):
+            val key = _simple_web_node_target_key(nodes, child_index, i)
+            if key != "":
+                out.push(
+                    "GEOM|" + key + "|" + nodes[i].tag + "|" +
+                    boxes.bx[i].to_string() + "|" + boxes.by[i].to_string() + "|" +
+                    boxes.bw[i].to_string() + "|" + boxes.bh[i].to_string()
+                )
+        i = i + 1
+    out
+
 pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32, id: text, field: text) -> text:
     _web_budget_begin(WEB_RENDER_BUDGET_MS)
     val nodes = parse_html(html)

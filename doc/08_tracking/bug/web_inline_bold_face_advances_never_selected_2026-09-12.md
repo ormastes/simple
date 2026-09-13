@@ -161,3 +161,53 @@ now superseded by direct measurement on this host:
 Step 1 is verified by reading; steps 2-4 were NOT attempted in round 8 (the
 round's budget went to CSS 2.1 §17 automatic table layout). The record stays
 OPEN, but the blocking reason recorded in round 7 is retracted.
+
+## Round 9 (2026-09-13, macOS) — round 8's blocker is NOT on this path; the real one is the TTF loader
+
+Round 8's closure order started at `font_render_config_valid`'s weight gate.
+Measured, that function is **not on the web renderer's metric path at all**:
+`resolve_font_metrics_with_language` resolves a FAMILY
+(`_resolve_font_metrics_with_language_config`) and never constructs a
+`FontRenderConfig`, so the validator gates only `resolve_font_metrics_configured`
+and relaxing it would change no advance. Step 1 is retracted.
+
+Steps 2-4 were then implemented on the family axis, which is the route that does
+reach both measurement and the Draw IR glyph run: a bold candidate list beside
+`browser_sans/serif/mono_font_candidates` (macOS `Arial Bold.ttf`, Linux
+DejaVu/Liberation/Nimbus `-Bold`) handed to the metric call as the existing
+`__simple_font_face__|<path>|<family>` value at the two `st.font_family` call
+sites. It produced **zero** advance delta, and the probes say why:
+
+```
+load assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf -> true
+     id=sha256=a3041811...;axes=wght=100          <- CONTROL, loads fine
+load /System/Library/Fonts/Supplemental/Arial.ttf        -> false  id=
+load /System/Library/Fonts/Supplemental/Arial Bold.ttf   -> false  id=
+```
+
+`FontRenderer.try_load_runtime_ttf` **rejects macOS system TTFs outright**,
+regular and bold alike, while loading the bundled asset in the same process.
+Round 8's "both exist as plain TTFs" was true of the FILES and false of what the
+loader will accept. The bold plumbing was therefore REVERTED rather than landed:
+on this host it can never change an advance, and on Linux it would swap the
+FAMILY (Noto -> DejaVu Bold), which is not a weight change and is unverifiable
+here. Shipping it would have been dead code with a parity-shaped name.
+
+**Third blocker, and the route that is actually pure-Simple:** every bundled
+candidate is a VARIABLE font and the resolved identity already carries
+`axes=wght=100`. The closure is a `wght=700` INSTANCE of the bundled variable
+face, not a static system file — i.e. fvar/HVAR instancing in the TTF loader,
+plus a weight axis on the metric request. Until that exists, no bold advance is
+reachable from this lane. Left OPEN, not worked around.
+
+Two separate defects found while measuring, filed here rather than fixed:
+
+1. `font_renderer.spl` (`_resolve_font_metrics_with_language_config_uncached`)
+   replaces an explicit `__simple_font_face__|` family with a language/category
+   asset whenever `language != "und"`, so a CSS `@font-face` local source is
+   silently discarded. Measured: four different explicit faces all resolved to
+   the same bundled Noto sha256.
+2. `browser_font_candidates_for_family` tests `lower.contains("serif")` in a
+   chain where `"sans-serif"` also matches it. The existing ordering happens to
+   test `"sans"` first and is safe; any sibling list written without that order
+   sends every sans-serif run to a serif face (observed while writing one).
