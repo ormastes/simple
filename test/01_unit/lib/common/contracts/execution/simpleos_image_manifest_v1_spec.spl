@@ -152,6 +152,37 @@ fn manifest_digest(manifest: SimpleOsImageManifestV1) -> text:
             expect(false).to_equal(true)
             ""
 
+# Independent wire oracle provenance:
+# - generated 2026-09-13 by a standalone Node.js script using only
+#   Buffer.byteLength, explicit field data, and length-prefix concatenation;
+# - SHA-256 computed over the resulting UTF-8 bytes with node:crypto;
+# - the script did not import or execute Simple manifest production code.
+# The deliberately awkward fixed chunks pin bytes, rather than reconstructing
+# fields with a helper equivalent to the implementation under test.
+fn pinned_valid_manifest_canonical_bytes() -> text:
+    [
+        "26:simpleos-image-manifest-v11:123:x86_64-unknown-simpleos3:dev14:build-2026091313:source-a1b2c310:LimineBios8:sosix-v1",
+        "15:kernel.simpleos6:kernel25:/boot/simpleos-kernel.elf64:0000000000000000000000000000000000000000000000000",
+        "000000",
+        "0000000011:11:11:215:service.display7:service19:/system/display.smf64:000000000000000000000000000000000000000000",
+        "00000000000000000000021:01:012:service.init7:service16:/system/init.smf64:00000000000000000000000000000000000000",
+        "000000000000000000000000031:11:11:214:runtime.loader7:runtime18:/system/loader.smf64:000000000000000000000000000",
+        "00000000000000000000000000000000000041:11:116:runtime.selector7:runtime28:/system/variant-selector.smf64:0000000",
+        "0000000000000000000000000000000000000000000000000000000051:11:11:115:compiler.simple8:compiler20:/compiler/simpl",
+        "e.smf64:00000000000000000000000000000000000000000000000000000000000000061:11:01:222:provider.parser.scalar8:prov",
+        "ider35:/system/providers/parser/scalar.smf64:00000000000000000000000000000000000000000000000000000000000000071:1",
+        "1:19:parser.v18:baseline20:provider.parser.simd8:provider33:/system/providers/parser/simd.smf64:0000000000000000",
+        "0000000000000000000000000000000000000000000000081:01:09:parser.v19:optimized1:114:symbols.kernel7:symbols28:/sym",
+        "bols/simpleos-kernel.sym64:00000000000000000000000000000000000000000000000000000000000000091:01:014:raw_disk_ima",
+        "ge6:raw-v164:000000000000000000000000000000000000000000000000000000000000000a4:409613:volume.system4:nvfs1:/15:s",
+        "napshot.system14:overlay.system1:214:volume.mutable7:mutable4:nvfs64:0000000000000000000000000000000000000000000",
+        "00000000000000000000b4:10241:113:volume.system6:system4:nvfs64:0000000000000000000000000000000000000000000000000",
+        "00000000000000c4:20481:01:115:snapshot.system13:volume.system64:000000000000000000000000000000000000000000000000",
+        "000000000000000d1:114:overlay.system15:snapshot.system14:volume.mutable64:00000000000000000000000000000000000000",
+        "0000000000000000000000000e12:service.init13:simpleos-init15:kernel.simpleos12:service.init14:runtime.loader16:ru",
+        "ntime.selector"
+    ].join("")
+
 fn expect_digest_change(original: SimpleOsImageManifestV1, changed: SimpleOsImageManifestV1):
     expect(manifest_digest(changed) == manifest_digest(original)).to_equal(false)
 
@@ -171,6 +202,18 @@ describe "SimpleOS image manifest v1":
                     case Err(_): expect(false).to_equal(true)
                     case Ok(second): expect(first).to_equal(second)
         expect(hash256_hex_valid(manifest_digest(manifest))).to_equal(true)
+
+    it "should match independently pinned canonical bytes and SHA-256":
+        step("Compare the complete canonical UTF-8 byte sequence with the external oracle")
+        val expected = pinned_valid_manifest_canonical_bytes()
+        expect(expected.len()).to_equal(2037)
+        match simpleos_image_manifest_canonical_v1(valid_image_manifest()):
+            case Err(_): expect(false).to_equal(true)
+            case Ok(actual): expect(actual).to_equal(expected)
+
+        step("Compare the production digest with the externally computed SHA-256")
+        expect(manifest_digest(valid_image_manifest())).to_equal(
+            "87fbdf46453452b6f9f6f46c028489b4b59914754049dfb3ceee6a1590c5e9bb")
 
     it "should bind target profile build and source identities into the digest":
         step("Change each canonical identity independently")
@@ -424,15 +467,25 @@ describe "SimpleOS image manifest v1":
         expect(validation_error(carrier_size)).to_equal(
             SimpleOsImageManifestErrorV1.InvalidCarrier)
 
-        step("Reject a one-byte overflow at the unsigned carrier boundary")
-        var near_u64 = valid_image_manifest()
-        near_u64.carrier.byte_length = 18446744073709551614u64
-        var near_mutable = near_u64.volumes[0]
-        near_mutable.byte_length = 18446744073709551613u64
-        var near_system = near_u64.volumes[1]
-        near_system.byte_length = 2u64
-        near_u64.volumes = [near_mutable, near_system]
-        expect(validation_error(near_u64)).to_equal(
+        step("Accept an aggregate that exactly fills a maximum-u64 carrier")
+        var exact_u64 = valid_image_manifest()
+        exact_u64.carrier.byte_length = 18446744073709551615u64
+        var exact_mutable = exact_u64.volumes[0]
+        exact_mutable.byte_length = 18446744073709551613u64
+        var exact_system = exact_u64.volumes[1]
+        exact_system.byte_length = 2u64
+        exact_u64.volumes = [exact_mutable, exact_system]
+        expect(validation_error(exact_u64)).to_equal(SimpleOsImageManifestErrorV1.None)
+
+        step("Reject a mathematical max-u64-plus-one sum without wrapping")
+        var overflow_u64 = valid_image_manifest()
+        overflow_u64.carrier.byte_length = 18446744073709551615u64
+        var overflow_mutable = overflow_u64.volumes[0]
+        overflow_mutable.byte_length = 18446744073709551614u64
+        var overflow_system = overflow_u64.volumes[1]
+        overflow_system.byte_length = 2u64
+        overflow_u64.volumes = [overflow_mutable, overflow_system]
+        expect(validation_error(overflow_u64)).to_equal(
             SimpleOsImageManifestErrorV1.InvalidCarrier)
 
         step("Exceed the aggregate text budget with individually bounded canonical paths")
