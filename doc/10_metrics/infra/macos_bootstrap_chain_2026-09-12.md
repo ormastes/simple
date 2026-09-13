@@ -1573,3 +1573,83 @@ was filed independently by the BOOT-12 lane in PR #795, which measured the same
 defect on Linux under `ld.lld` — that PR files the record, PR #800 carries the
 fix, and the two have no source overlap. PR #793 touches
 `60.mir_opt/var_reassign_ssa.spl` only.
+
+## Runs 28-29 — sites 14 and 15 fixed; the lane now dies four steps later, at site 16
+
+Lane both runs: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`,
+same virgin root, worktree `agent-aee4c61a47998a6a9`. Each run cleared exactly one
+blocker and exposed the next, so read them as one sequence.
+
+### Run 28 — site 14 cleared, verbatim
+
+```
+  Stage 2: running bootstrap compiler sanity
+  Stage 2: proving struct receiver/runtime capability
+error: could not publish producer-bound Stage 2 parent receipts
+```
+
+**Zero `stage2-sanity-error:` lines** where run 27 had two, and the immutable
+admission artefacts were published for the first time on macOS:
+
+```
+.../stage3/aarch64-apple-darwin/stage2-admitted/
+  -r-------- admission.env  (2647 B)
+  -r-x------ simple         (139,352,344 B)
+```
+
+Site 14's fix (`$(( ))` around `wc -c`, PR #800) is therefore verified by the
+lane, not just by reasoning. What failed is the step AFTER admission: the
+producer-bound parent receipts that seed the next run's trust root.
+
+**Site 15, measured:** `publish-stage2-parent-receipts.shs` asserts
+`[ "$(field candidate_path)" = "$candidate" ]` under `set -eu` with a bare `[ ]`,
+so a mismatch exits 1 with no message. Three of four path fields matched; the
+fourth did not — the caller passed the mutable build output
+`.../stage2/<triple>/simple` while the receipt records the immutable
+`.../stage2-admitted/simple`. The two are byte-identical
+(`c85d2aa186e45c8a…`, `cp -p` + sha-verified), so the fix changes which path is
+NAMED, not which bytes are bound. The existing producer test cannot catch this:
+its fixture always writes `candidate_path=$candidate`, and no test invokes the
+caller. Filed:
+`doc/08_tracking/bug/stage2_parent_receipts_bound_to_preadmission_path_2026-09-13.md`.
+
+### Run 29 — site 15 cleared, verbatim
+
+```
+Stage 2: admitted parent → bootstrap_main.spl
+  Stage 2: running bootstrap compiler sanity
+  Stage 2: proving struct receiver/runtime capability
+error: Stage 2 did not publish its compatibility manifest
+```
+
+The parent-receipt error is gone. The new one is **site 16**, and it is the first
+in this chain that is NOT a one-line fix:
+`bootstrap-from-scratch.sh:3288` is fail-closed on a manifest whose only writer
+(`driver_emit_phase2_compatibility_manifest_v1`,
+`src/compiler/80.driver/driver_aot_native_output.spl:2051`) is **pure-Simple**,
+while this lane's Stage 2 is built by the **Rust seed** (`mode: manual (seed →
+bootstrap_main → bootstrap_main)`), and the seed implements the hook nowhere —
+`/usr/bin/grep -rn "PHASE2_COMPATIBILITY_MANIFEST" src/compiler_rust/` returns
+nothing. The build log carries zero `[M3 ledger]` lines and no manifest exists on
+disk. The gate is unsatisfiable on this lane by construction. Two repairs are
+possible and both move a contract, so it needs an owner:
+`doc/08_tracking/bug/stage2_compatibility_manifest_unwritable_by_rust_seed_2026-09-13.md`.
+
+### Where Stage 2 actually stands now
+
+Built, both capability probes PASS (`bootstrap_stage2_struct_receiver`,
+`bootstrap_stage2_positional_stage3_route`), sanity evidence verified, admission
+receipt published, parent receipts published. Stage 3, the full CLI and Stage 4
+were never reached; **nothing was deployed**. Four blockers were cleared in this
+sequence (13 emitter, 14 `wc` padding, 15 caller path) and the fifth is filed.
+
+Chain for whoever picks this up: site 15's parent receipts are exactly the
+"parent authority" that
+`scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs` requires to mint
+the planner admission receipt, which `--resume-stage3-from-admitted` needs via
+`SIMPLE_BOOTSTRAP_REASON_RECEIPT` (`bootstrap-from-scratch.sh:634-640`; resume
+also forbids `--full-bootstrap`/`--deploy` and permits only `--jobs=1`). So
+clearing site 16 should unlock Stage 3, and Stage 4 follows through
+`bootstrap-strategy.sh`, which mints the lineage admission locally — no remote
+scheduler — with `SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE=1` forcing `deploy=0` so
+`bin/release` is never touched.
