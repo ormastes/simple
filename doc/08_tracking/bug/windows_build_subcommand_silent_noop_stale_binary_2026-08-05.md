@@ -265,3 +265,9 @@ this file parse" should be aware the result is not evidence of correctness.
    redeploy-gate/identity-marker check documented in the 2026-08-01 doc so this
    class of incident (stale-but-plausible binary silently serving an old command
    surface) is caught automatically instead of discovered by a silent no-op.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still unreproducible on this Linux host (no Windows binary present). No
+change made. Leaving OPEN — architectural, needs a native-Windows or WSL
+environment.
