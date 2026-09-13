@@ -116,3 +116,42 @@ describe "last-child bottom margin collapses through its block":
         val plain = probe(
             "<div id=\"x\"><p id=\"q\">t</p></div>", "x", "h").to_i32()
         expect(bordered - plain).to_equal(18)
+
+    it "AC-9: a flex item is a formatting-context root — nothing collapses through":
+        # Chrome: 56 (probe2.html #f) = 16 + 24 + 16.
+        expect(probe(
+            "<div style=\"display:flex\"><div id=\"x\"><p id=\"q\">t</p></div></div>",
+            "x", "h")).to_equal("56")
+
+    it "AC-10: a grid item likewise":
+        # Chrome: 56 (probe2.html #g).
+        expect(probe(
+            "<div style=\"display:grid\"><div id=\"x\"><p id=\"q\">t</p></div></div>",
+            "x", "h")).to_equal("56")
+
+    it "AC-11: a table cell is a BFC root, so both margins stay inside":
+        # Chrome: 58 for `<td><p>t</p></td>` (probe2.html #td) — the cell keeps
+        # the 16 px top and bottom margins; 58 vs 56 is the UA border-spacing
+        # the cell box picks up, which Simple does not model yet, so the
+        # assertion is that the margin did NOT escape (>= 56), not the exact
+        # Chrome figure. Table geometry as a whole is still open. No explicit
+        # cell guard exists in the helper: a cell's display is "table-cell",
+        # which the display test already rejects; this AC pins that, so a
+        # future widening of the display test cannot silently break cells.
+        val cell = probe(
+            "<table><tbody><tr><td id=\"x\"><p id=\"q\">t</p></td></tr></tbody></table>",
+            "x", "h").to_i32()
+        expect(cell).to_be_greater_than(55)
+
+    it "AC-12: a trailing margin escaping a self-collapsing child is not lost":
+        # `<div><p style="margin:32px 0"></p></div>` is self-collapsing to a
+        # single 32 px margin; the next sibling must sit 32 px below the
+        # wrapper's top, not 16 (margin dropped) and not 48 (double-counted).
+        # Chrome: the following <p> starts 32 px after the wrapper's origin.
+        val marker = probe(
+            "<div id=\"m\"><p style=\"margin:32px 0\"></p></div><p id=\"x\">x</p>",
+            "m", "y").to_i32()
+        val nxt = probe(
+            "<div id=\"m\"><p style=\"margin:32px 0\"></p></div><p id=\"x\">x</p>",
+            "x", "y").to_i32()
+        expect(nxt - marker).to_equal(32)

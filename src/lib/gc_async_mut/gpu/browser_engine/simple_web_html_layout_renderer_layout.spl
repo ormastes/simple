@@ -300,7 +300,8 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         baseline_i = baseline_i + 1
     InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height)
 
-fn block_bottom_margin_collapses_through(node: HNode, st: Style) -> bool:
+fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
+    val node = nodes[i]
     # CSS 2.2 8.3.1: a block's bottom margin collapses with the bottom margin
     # of its last in-flow child when nothing establishes a bottom edge between
     # them -- no bottom padding, no bottom border, and no height/clamp/overflow
@@ -327,6 +328,16 @@ fn block_bottom_margin_collapses_through(node: HNode, st: Style) -> bool:
         return false
     if node.has_widget_panel_class:
         return false
+    # Flex and grid ITEMS are independent formatting contexts too (Flexbox 4,
+    # Grid 6): margins never collapse through them, and the containing flex
+    # row sizes itself from the item's outer height. Chrome measures the item
+    # in `<div style="display:flex"><div id="f"><p>t</p></div></div>` at
+    # 56 px; letting the 16 px escape would shrink the row with it.
+    val parent = nodes[i].parent
+    if parent >= 0:
+        val pdisp = styles[parent].display
+        if pdisp == "flex" or pdisp == "inline-flex" or pdisp == "grid" or pdisp == "inline-grid":
+            return false
     true
 
 fn relative_layout_result(child_index: HtmlChildIndex, node_index: i32, st: Style, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], height: i32) -> LayoutResult:
@@ -3295,7 +3306,10 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 out_by[c] = cy
                 prev_margin_b = collapse_margins_signed(
                     prev_margin_b_before_child,
-                    collapse_margins_signed(resolved_cst_margin_t, resolved_cst_margin_b))
+                    collapse_margins_signed(
+                        resolved_cst_margin_t,
+                        collapse_margins_signed(
+                            resolved_cst_margin_b, child.trailing_margin_b)))
             else:
                 # The child's own trailing margin (one that collapsed through
                 # it, CSS 2.2 8.3.1) collapses with the child's declared
@@ -3316,7 +3330,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_bx = aligned.bx
             out_by = aligned.by
             cy = cy + aligned.height
-        if block_bottom_margin_collapses_through(nodes[i], st):
+        if block_bottom_margin_collapses_through(nodes, styles, i, st):
             trailing_margin_b = prev_margin_b
         else:
             cy = cy + prev_margin_b
@@ -3341,10 +3355,6 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             h = fill_bottom_blk - y
     if h < 1:
         h = 1
-    if h != (cy - y) + st.pad_b + st.border_b:
-        # An explicit/clamped height establishes a bottom edge, so nothing
-        # collapses through after all.
-        trailing_margin_b = 0
     out_bh[i] = h
     val placed = relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
     LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b)
