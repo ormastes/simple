@@ -1,6 +1,6 @@
 # A2 record-ring layout diverges from D2/ref_vm's (no head-counter word)
 
-**Status:** OPEN (unverified 2026-09-12)
+**Status:** RESOLVED (2026-09-13) -- documented as intentionally distinct formats (suggested fix option 2)
 
 Date: 2026-08-07
 Found by: Task B3 (cuda_vm per-launch executor)
@@ -64,3 +64,24 @@ never route around silently).
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Resolved 2026-09-13 (BUGFIX-10 fanout)
+
+Applied suggested fix option 2 (documenting the two formats as intentionally
+distinct, since no current caller mixes them and unifying the wire formats
+would be a behavior change to `MailboxArena`, out of scope for a
+documentation-only fix): added a loud, symmetric cross-reference warning
+docstring to both `MailboxArena.record_ring_offset()`
+(`src/lib/nogc_sync_mut/test_runner/gpu_mailbox.spl`) and `read_records()`
+(`src/lib/common/svmg/ref_vm.spl`), each naming this bug id and the other
+file, so a future reader cannot assume the two RECORD rings interoperate.
+
+No behavior changed (docstrings only). Re-ran both modules' existing
+suites to confirm no regression: `test/01_unit/lib/svmg/ref_vm_spec.spl`
+(19/19 PASS) and `test/01_unit/lib/test_runner/gpu_mailbox_spec.spl`
+(19/19 PASS), both unchanged from before the edit. No new spec added — a
+docstring has no observable behavior to lock with an assertion; the
+existing suites already guard the underlying byte-layout logic.
+
+- Status: RESOLVED (2026-09-13) — cross-reference warnings added to both
+  files; no code behavior changed.
