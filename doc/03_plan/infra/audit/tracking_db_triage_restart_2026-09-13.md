@@ -11,18 +11,17 @@ Scope is **DB files only** — record `.md` files are not edited.
 |------|--------|
 | Pass 1: small-model verify + Opus review, 970 rows | DONE — landed PR #844 (`ae75278524a`) |
 | bug_db structural repair (duplicate `bugs_active`/`bugs` blocks, stale 2nd CRC line) | DONE — #844 |
-| todo_db id-collision repair (sync `13ca132a222` appended a re-scan with ids restarting at 0) | DONE — this change |
-| Pass 2: deeper recheck of the rows still open after pass 1 | NOT DONE — run `wf_c8e6d553-6a1` abandoned (21/35 bug chunks verified, 0 reviewed, no results applied) |
+| todo_db id-collision repair (sync `13ca132a222` appended a re-scan with ids restarting at 0) | DONE upstream — `febc47524a4` (pass-1 ids 0..295 preserved, 0 closures reopened) |
+| Pass 2 (clean restart, run `wf_0a7c1b6a-a9e`, 890 rows / 37 chunks of 25) | DONE — every row verified and Opus-reviewed (after a spend-limit stop and resume); 162 closures, 159 applied (3 todos already closed upstream) |
 
-Pass-1 result: bugs 189 fixed / 461 closed; bugs_active 23 fixed / 1 closed;
-todos 124 closed. Open now: bugs 663, bugs_active 18, todos 209 (201 open + 8 blocked).
+Pass-2 verdicts: bugs 113 fixed / 24 stale / 17 invalid / 527 still open;
+todos 5 fixed / 1 stale / 2 invalid / 201 still open. Where the first (pre-limit) and
+final Opus reviews disagreed, the row stays open (4 rows). Todo rows with ids >= 296
+were matched to `origin/main` by (description, file, line), since upstream renumbered them.
 
-### todo_db repair detail
-`13ca132a222` ("chore(sync): session work products") wrote a 559-row `todos` table:
-the 296 original rows plus 263 rows from a stale local `todo-scan` numbered 0..262,
-so 263 ids collided. Resolution: keep the 296 original rows (byte-identical to the
-#844 version), drop 226 appended rows already present by (description, file), and
-renumber the 37 genuinely new rows to 296..332. Result: 333 rows, 0 duplicate ids.
+After pass 2: bugs 279 fixed / 522 closed / 509 open / 3 pending;
+bugs_active 26 fixed / 3 closed / 10 open / 3 pending; todos 143 closed / 184 open / 8 blocked.
+A future pass should target only rows whose status is still open on `origin/main`.
 
 ## Restart from a clean workflow
 
