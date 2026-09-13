@@ -1,0 +1,183 @@
+# @cover src/os/services/pm_process_launch_v1.spl 90%
+"""Focused process-manager launch authority and translation behavior."""
+
+use std.spec
+use std.common.contracts.execution.process_launch_spec_v1.*
+use os.sosix.core.capability_ref.SosixCapabilityRef
+use os.services.pm_service.PmService
+use os.services.pm_process_launch_v1.*
+
+var _executions: i64 = 0
+var _last_executable: text = ""
+var _last_stdout_capability: text = ""
+
+fn _service_live(service: SosixCapabilityRef) -> bool:
+    service.slot == 19 and service.generation == 4
+
+fn _service_stale(service: SosixCapabilityRef) -> bool:
+    val _unused = service
+    false
+
+fn _can_launch(service: SosixCapabilityRef) -> bool:
+    _service_live(service)
+
+fn _deny_launch(service: SosixCapabilityRef) -> bool:
+    val _unused = service
+    false
+
+fn _capability_live(service: SosixCapabilityRef, name: text) -> bool:
+    _service_live(service) and (
+        name == "compiler.stdout" or name == "fs.read" or
+        name == "fs.write" or name == "process.spawn")
+
+fn _capability_missing(service: SosixCapabilityRef, name: text) -> bool:
+    _service_live(service) and name != "fs.write"
+
+fn _stdio_capability_missing(service: SosixCapabilityRef, name: text) -> bool:
+    _service_live(service) and name != "compiler.stdout"
+
+fn _grant_live(service: SosixCapabilityRef, name: text) -> bool:
+    _service_live(service) and (name == "vfs" or name == "loader")
+
+fn _grant_missing(service: SosixCapabilityRef, name: text) -> bool:
+    _service_live(service) and name != "loader"
+
+fn _execute(request: PmProcessLaunchRequestV1) -> i64:
+    _executions = _executions + 1
+    _last_executable = request.executable
+    _last_stdout_capability = request.stdout.capability_name
+    if (request.argv.len() == 3 and request.argv[0] == "simple" and
+        request.argv[1] == "build" and
+        request.argv[2] == "/user/hello.spl" and
+        request.environment.len() == 1 and
+        request.environment[0] == "SIMPLE_LIB=/system/lib" and
+        request.cwd == "/user" and request.namespace_name == "compiler" and
+        request.runtime_profile == "simpleos-userland-v1" and
+        request.stdin.kind == PmStdioBindingKindV1.Inherit and
+        request.stdout.kind == PmStdioBindingKindV1.Capability and
+        request.stderr.kind == PmStdioBindingKindV1.Null and
+        request.resources.memory_bytes == 536870912 and
+        request.resources.cpu_time_us == 30000000 and
+        request.resources.open_handles == 256 and
+        request.cpu_affinity == [0, 1] and
+        request.capabilities == ["fs.read", "fs.write", "process.spawn"] and
+        request.service_grants == ["vfs", "loader"]):
+        return 73
+    -5
+
+fn _execute_fail(request: PmProcessLaunchRequestV1) -> i64:
+    val _unused = request
+    _executions = _executions + 1
+    -12
+
+fn _launch() -> ProcessLaunchSpecV1:
+    ProcessLaunchSpecV1(
+        executable: "/system/compiler/simple.smf",
+        argv: ["simple", "build", "/user/hello.spl"],
+        environment: ["SIMPLE_LIB=/system/lib"], cwd: "/user",
+        stdin: ProcessLaunchIoV1(mode: "inherit", capability_name: ""),
+        stdout: ProcessLaunchIoV1(
+            mode: "capability", capability_name: "compiler.stdout"),
+        stderr: ProcessLaunchIoV1(mode: "null", capability_name: ""),
+        namespace_name: "compiler",
+        resources: ProcessLaunchResourcesV1(
+            memory_bytes: 536870912, cpu_time_us: 30000000,
+            open_handles: 256),
+        cpu_affinity: [0, 1], runtime_profile: "simpleos-userland-v1",
+        capabilities: ["fs.read", "fs.write", "process.spawn"],
+        service_grants: ["vfs", "loader"])
+
+fn _ready_pm() -> PmService:
+    var pm = PmService.new()
+    pm.pm_init()
+    pm
+
+describe "SimpleOS PM ProcessLaunchSpecV1 execution boundary":
+    it "translates and executes an authorized compiler launch":
+        _executions = 0
+        _last_executable = ""
+        _last_stdout_capability = ""
+        var pm = _ready_pm()
+        val result = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch(),
+            _service_live, _can_launch, _capability_live, _grant_live,
+            _execute)
+        expect(result.accepted).to_be(true)
+        expect(result.reason).to_equal("launched")
+        expect(result.process_id).to_equal(73)
+        expect(_executions).to_equal(1)
+        expect(_last_executable).to_equal("/system/compiler/simple.smf")
+        expect(_last_stdout_capability).to_equal("compiler.stdout")
+
+    it "fails closed while the process manager is not initialized":
+        _executions = 0
+        var pm = PmService.new()
+        val result = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch(),
+            _service_live, _can_launch, _capability_live, _grant_live,
+            _execute)
+        expect(result.reason).to_equal("process-service-not-ready")
+        expect(_executions).to_equal(0)
+
+    it "rejects stale service generation and missing launch authority":
+        _executions = 0
+        var pm = _ready_pm()
+        val stale = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch(),
+            _service_stale, _can_launch, _capability_live, _grant_live,
+            _execute)
+        expect(stale.reason).to_equal("stale-process-service-capability")
+        val denied = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch(),
+            _service_live, _deny_launch, _capability_live, _grant_live,
+            _execute)
+        expect(denied.reason).to_equal("process-launch-authority-denied")
+        expect(_executions).to_equal(0)
+
+    it "rejects any unresolved capability or service grant before execution":
+        _executions = 0
+        var pm = _ready_pm()
+        val missing_cap = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch(),
+            _service_live, _can_launch, _capability_missing, _grant_live,
+            _execute)
+        expect(missing_cap.reason).to_equal(
+            "requested-capability-not-live:fs.write")
+        val missing_grant = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch(),
+            _service_live, _can_launch, _capability_live, _grant_missing,
+            _execute)
+        expect(missing_grant.reason).to_equal(
+            "requested-service-grant-not-live:loader")
+        expect(_executions).to_equal(0)
+
+    it "resolves capability-backed stdio through the same live authority":
+        _executions = 0
+        var pm = _ready_pm()
+        val missing_stdio = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch(),
+            _service_live, _can_launch, _stdio_capability_missing, _grant_live,
+            _execute)
+        expect(missing_stdio.reason).to_equal(
+            "stdio-capability-not-live:compiler.stdout")
+        expect(_executions).to_equal(0)
+
+    it "rejects malformed contracts and execution failures":
+        _executions = 0
+        var pm = _ready_pm()
+        var malformed = _launch()
+        malformed.environment = ["MISSING_EQUALS"]
+        val invalid = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), malformed,
+            _service_live, _can_launch, _capability_live, _grant_live,
+            _execute)
+        expect(invalid.reason).to_equal("invalid-environment-entry")
+        expect(_executions).to_equal(0)
+        val failed = pm.pm_process_launch_v1(
+            SosixCapabilityRef(slot: 19, generation: 4), _launch(),
+            _service_live, _can_launch, _capability_live, _grant_live,
+            _execute_fail)
+        expect(failed.accepted).to_be(false)
+        expect(failed.reason).to_equal("process-execution-failed")
+        expect(failed.process_id).to_equal(-12)
+        expect(_executions).to_equal(1)
