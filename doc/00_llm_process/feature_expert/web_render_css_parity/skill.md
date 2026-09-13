@@ -366,3 +366,25 @@ Chrome itself hits the 90 s screenshot alarm on every page. Budget the geometry
 differ instead, and never A/B across two trees: check the two
 `browser_engine/*.spl` files out at `HEAD~1` in the SAME worktree for the before
 side (`.claude/rules/testing.md` § Measurement traps).
+
+**Selector matching is pre-parsed now (round 9, 2026-09-13).** Every selector
+part is parsed ONCE into a `ParsedSel` record on `RuleBuckets.parsed_groups`,
+where `build_rule_buckets` runs; the per-node path
+(`simple_match_parsed` / `_pseudo_ctx_matches_parsed` /
+`selector_group_matches_node_parsed`) never touches selector TEXT. The text
+functions (`simple_match`, `_pseudo_ctx_matches`,
+`selector_group_matches_node_parts`) are retained and are exercised ONLY by the
+equivalence oracle — **if you change selector semantics you must change BOTH
+sides**, or
+`test/01_unit/browser_engine/web_selector_parsed_equivalence_spec.spl` fails.
+That spec is the contract: 177,949 comparisons over the 8 catalog pages plus an
+adversarial fixture, both paths, per node.
+
+**The trap that spec exists for:** the catalog stylesheets contain only **25
+distinct selectors**, so catalog-only coverage proves almost nothing about
+selector semantics. The adversarial fixture caught a real behaviour change on
+its first run — `:disabled` never matches in the text path on EITHER branch
+(both the `_is_interaction_state_pseudo` arm and the catch-all arm return
+false), so "fixing" it to match a disabled element is a semantic change, not a
+refactor. Add new selector shapes to the adversarial fixture, not to a catalog
+page. Measurements: `doc/10_metrics/ui/web_perf_round9_2026-09-13.md`.

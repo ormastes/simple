@@ -138,6 +138,11 @@ class RuleBuckets:
     id_key_dict: Dict<text, i32>
     class_key_dict: Dict<text, i32>
     tag_key_dict: Dict<text, i32>
+    # Selector parts of every rule, pre-parsed ONCE here instead of re-parsed
+    # from selector TEXT on every candidate x node pair. Indexed exactly like
+    # rules.group_parts: [rule][comma-group][part]. See "Pre-parsed selector
+    # parts (round 9)" below.
+    parsed_groups: [[[ParsedSel]]]
 
 fn _css_root_prefix_is_preamble(prefix: text) -> bool:
     var remaining = prefix.trim()
@@ -1671,6 +1676,623 @@ fn simple_match_ctx(sel: text, tag: text, cls: text, class_words: [text], id: te
         return false
     _pseudo_ctx_matches(sel, nodes, ctx, idx)
 
+# ---------------------------------------------------------------------------
+# Pre-parsed selector parts (round 9)
+#
+# `simple_match` / `simple_match_ctx` re-parse the selector TEXT of every
+# candidate rule on EVERY node: base splitting, `.a.b` class splitting inside
+# `class_has_all`, `[...]` group walking, `^=`/`$=`/`=` probing inside
+# `attr_selector_matches`, the pseudo-class chain walk (twice -- once in
+# `simple_match`, once in `_pseudo_ctx_matches`), the `:not()/:is()/:where()`
+# and `:has()` comma splits, and `_nth_child_matches`' `an+b` parse. All of
+# that is node-INDEPENDENT, and the catalog pages run it ~4000x per render.
+#
+# `parse_selector_part` derives the same information ONCE per selector part,
+# at `build_rule_buckets` time, into `ParsedSel`. The per-node path
+# (`simple_match_parsed` / `_pseudo_ctx_matches_parsed`) then consumes only
+# the record and never touches selector text again.
+#
+# Semantics are byte-identical by construction: the parser uses the SAME
+# splitting/scanning code the text matcher uses, and `dead` is set ONLY for
+# the cases where the text path returns `false` regardless of the node
+# (a `::` pseudo-element, a malformed attribute/pseudo/functional argument,
+# an unknown pseudo-class name, and every interaction-state pseudo --
+# `:disabled` included, see _pseudo_code_for for why that one is subtle).
+# Node-dependent arms (`:root`, `:root[...]`) stay runtime.
+# Equivalence is pinned by web_selector_parsed_equivalence_spec.spl, which
+# runs BOTH paths over every selector of the 8 catalog stylesheets and an
+# adversarial fixture list, for every node, and compares per node.
+#
+# Residuals (deliberately left as text, both rare in the catalogs):
+#   - `:not()/:is()/:where()` options and `:has()` options are pre-SPLIT but
+#     not recursively pre-parsed; they still run the text `simple_match`.
+#   - the `:root[attr]` attribute expression stays text.
+# ---------------------------------------------------------------------------
+
+# Pseudo-class codes. Unknown names never reach here (they set `dead`).
+val PSEUDO_NOT: i32 = 1
+val PSEUDO_ANY: i32 = 2          # :is() / :where()
+val PSEUDO_ROOT: i32 = 5
+val PSEUDO_EMPTY: i32 = 6
+val PSEUDO_FIRST_CHILD: i32 = 7
+val PSEUDO_LAST_CHILD: i32 = 8
+val PSEUDO_ONLY_CHILD: i32 = 9
+val PSEUDO_NTH_CHILD: i32 = 10
+val PSEUDO_HAS: i32 = 11
+
+# Attribute operators, in the order `attr_selector_matches` probes them.
+val ATTR_OP_PRESENT: i32 = 0     # bare [name]
+val ATTR_OP_EXACT: i32 = 1       # =
+val ATTR_OP_PREFIX: i32 = 2      # ^=
+val ATTR_OP_SUFFIX: i32 = 3      # $=
+
+class ParsedAttr:
+    name: text
+    op: i32
+    want: text
+    want_lower: text
+    ci: bool
+
+# kind: 0 = ordinary compound part, 1 = empty part, 2 = `>` child combinator.
+class ParsedSel:
+    kind: i32
+    dead: bool
+    check_tag: bool
+    want_tag: text
+    check_id: bool
+    want_id: text
+    want_classes: [text]
+    attr_tests: [ParsedAttr]
+    pseudo_codes: [i32]
+    # Non-empty only for `:root[expr]`; a functional argument on `root`
+    # (`:root(x)`) is ignored by the text path and is ignored here too.
+    pseudo_root_attrs: [text]
+    # Pre-split options for :not/:is/:where/:has. EMPTY has two meanings, by
+    # pseudo: for :not/:is/:where the part is already `dead`, so it never
+    # reaches evaluation; for :has it means "the split failed", which
+    # `simple_match` passes through and `_pseudo_ctx_matches` rejects.
+    pseudo_opts: [[text]]
+    pseudo_nth_kind: [i32]       # 0 odd, 1 even, 2 an+b, 3 plain literal
+    pseudo_nth_a: [i32]
+    pseudo_nth_b: [i32]
+
+fn _dead_parsed_sel() -> ParsedSel:
+    ParsedSel(
+        kind: 0, dead: true, check_tag: false, want_tag: "", check_id: false,
+        want_id: "", want_classes: [], attr_tests: [], pseudo_codes: [],
+        pseudo_root_attrs: [], pseudo_opts: [], pseudo_nth_kind: [],
+        pseudo_nth_a: [], pseudo_nth_b: []
+    )
+
+# Split a `.a.b.c` compound class list exactly the way class_has_all() does:
+# on `.`, skipping empty segments (so "", ".", "a..b" behave identically).
+fn _split_class_wants(wants: text) -> [text]:
+    val wants_len = wants.len()
+    var out: [text] = []
+    var start = 0
+    var i = 0
+    while i <= wants_len:  # cpu-lane-loop-ok: splits ONE compound class selector on `.` at parse time (once per selector part, never per node); bound is that compound's text length
+        if i == wants_len or wants[i:i + 1] == ".":
+            if i > start:
+                out.push(wants.substring(start, i))
+            start = i + 1
+        i = i + 1
+    out
+
+# Pre-parse ONE `[...]` expression the way attr_selector_matches() reads it.
+fn _parse_attr_test(expr: text) -> ParsedAttr:
+    var raw = expr.trim()
+    if raw.len() == 0:
+        # attr_selector_matches returns false for an empty expression;
+        # parsed_attr_matches reproduces that from an empty presence test.
+        return ParsedAttr(name: "", op: ATTR_OP_PRESENT, want: "", want_lower: "", ci: false)
+    var case_insensitive = false
+    if raw.ends_with(" i") or raw.ends_with(" I"):
+        case_insensitive = true
+        raw = raw.substring(0, raw.len() - 2).trim()
+    elif raw.ends_with(" s") or raw.ends_with(" S"):
+        raw = raw.substring(0, raw.len() - 2).trim()
+    val prefix_op = text_index_of(raw, "^=")
+    if prefix_op >= 0:
+        val name = raw.substring(0, prefix_op).trim()
+        val want = unquote_css_attr_value(raw.substring(prefix_op + 2, raw.len()))
+        return ParsedAttr(name: name, op: ATTR_OP_PREFIX, want: want, want_lower: want.lower(), ci: case_insensitive)
+    val suffix_op = text_index_of(raw, "$=")
+    if suffix_op >= 0:
+        val name = raw.substring(0, suffix_op).trim()
+        val want = unquote_css_attr_value(raw.substring(suffix_op + 2, raw.len()))
+        return ParsedAttr(name: name, op: ATTR_OP_SUFFIX, want: want, want_lower: want.lower(), ci: case_insensitive)
+    val exact_op = text_index_of(raw, "=")
+    if exact_op >= 0:
+        val name = raw.substring(0, exact_op).trim()
+        val want = unquote_css_attr_value(raw.substring(exact_op + 1, raw.len()))
+        return ParsedAttr(name: name, op: ATTR_OP_EXACT, want: want, want_lower: want.lower(), ci: case_insensitive)
+    ParsedAttr(name: raw, op: ATTR_OP_PRESENT, want: "", want_lower: "", ci: case_insensitive)
+
+fn parsed_attr_matches(attrs: text, t: ParsedAttr) -> bool:
+    if t.op == ATTR_OP_PREFIX:
+        val actual = attr_value(attrs, t.name)
+        if t.ci:
+            return actual.len() > 0 and actual.lower().starts_with(t.want_lower)
+        return actual.len() > 0 and actual.starts_with(t.want)
+    if t.op == ATTR_OP_SUFFIX:
+        val actual = attr_value(attrs, t.name)
+        if t.ci:
+            return actual.len() > 0 and actual.lower().ends_with(t.want_lower)
+        return actual.len() > 0 and actual.ends_with(t.want)
+    if t.op == ATTR_OP_EXACT:
+        if t.ci:
+            return attr_value(attrs, t.name).lower() == t.want_lower
+        return attr_value(attrs, t.name) == t.want
+    if t.name.len() == 0:
+        # Mirrors attr_selector_matches' empty-expression rejection.
+        return false
+    attr_value(attrs, t.name).len() > 0 or attr_name_present(attrs, t.name)
+
+# Split a functional pseudo argument on top-level commas exactly the way
+# _pseudo_list_matches() and the `:has` arm of _pseudo_ctx_matches() do.
+# Returns an empty list when those splitters would have returned false.
+fn _split_pseudo_options(arg: text) -> [text]:
+    var options: [text] = []
+    var opt_count = 0
+    var depth = 0
+    var i = 0
+    val arg_len = arg.len()
+    var option_start = 0
+    while i < arg_len:  # cpu-lane-loop-ok: splits ONE functional pseudo argument on top-level commas at parse time (once per selector part); bound is that argument's length
+        val ch = arg[i:i + 1]
+        if ch == "(":
+            depth = depth + 1
+            if depth > 32:
+                return []
+        elif ch == ")":
+            depth = depth - 1
+            if depth < 0:
+                return []
+        elif ch == "," and depth == 0:
+            if opt_count >= 16:
+                return []
+            val option = arg.substring(option_start, i).trim()
+            if option.len() == 0:
+                return []
+            options.push(option)
+            opt_count = opt_count + 1
+            option_start = i + 1
+        i = i + 1
+    if depth != 0:
+        return []
+    val tail = arg.substring(option_start, arg_len).trim()
+    if tail.len() == 0 or opt_count >= 16:
+        return []
+    options.push(tail)
+    options
+
+fn _pseudo_code_for(name: text) -> i32:
+    if name == "not":
+        return PSEUDO_NOT
+    if name == "is" or name == "where":
+        return PSEUDO_ANY
+    if name == "root":
+        return PSEUDO_ROOT
+    if name == "empty":
+        return PSEUDO_EMPTY
+    if name == "first-child":
+        return PSEUDO_FIRST_CHILD
+    if name == "last-child":
+        return PSEUDO_LAST_CHILD
+    if name == "only-child":
+        return PSEUDO_ONLY_CHILD
+    if name == "nth-child":
+        return PSEUDO_NTH_CHILD
+    if name == "has":
+        return PSEUDO_HAS
+    # hover/active/focus/focus-visible/focus-within/visited/target/checked/
+    # placeholder-shown/autofill are unconditionally unsatisfied for a static
+    # render, and every other name is unknown; both make the part dead.
+    #
+    # `:disabled` is in that same dead set, which is NOT obvious from
+    # _is_interaction_state_pseudo() and was caught only by the adversarial
+    # half of web_selector_parsed_equivalence_spec.spl. In simple_match()'s
+    # elif-chain, `:disabled` on an element WITHOUT the attribute takes the
+    # `_is_interaction_state_pseudo` arm (which answers `not
+    # attrs.contains("disabled")` = true) and returns false; on an element
+    # WITH the attribute that arm answers false, so the chain falls through
+    # to the final `pseudo != empty/first-child/last-child/only-child/
+    # nth-child/has` arm -- which is also true -- and returns false again.
+    # So `:disabled` never matches on EITHER branch. That is pre-existing
+    # renderer behaviour, and this pre-parse reproduces it exactly rather
+    # than quietly "fixing" it; see the round 9 metrics record.
+    0 - 1
+
+# Pre-decode an `:nth-child()` argument the way _nth_child_matches() reads it.
+fn _parse_nth(expr: text) -> [i32]:
+    val e = expr.trim()
+    if e == "odd":
+        return [0, 0, 0]
+    if e == "even":
+        return [1, 0, 0]
+    val n_idx = text_index_of(e, "n")
+    if n_idx >= 0:
+        val a_str = e.substring(0, n_idx).trim()
+        val a = if a_str == "" or a_str == "+": 1 elif a_str == "-": 0 - 1 else: parse_int(a_str)
+        val after_n = e.substring(n_idx + 1, e.len()).trim()
+        val b = if after_n.len() == 0: 0 else: parse_int(after_n)
+        return [2, a, b]
+    [3, 0, parse_int(e)]
+
+fn _nth_matches_parsed(kind: i32, a: i32, b: i32, pos: i32) -> bool:
+    if kind == 0:
+        return (pos % 2) == 1
+    if kind == 1:
+        return (pos % 2) == 0
+    if kind == 2:
+        if a == 0:
+            return pos == b
+        val rem = pos - b
+        if rem < 0:
+            return false
+        return (rem % a) == 0
+    b == pos
+
+# Derive the ParsedSel record for ONE selector-group part. Mirrors
+# simple_match()'s check order exactly; see the header comment above.
+fn parse_selector_part(part: text) -> ParsedSel:
+    if part.len() == 0:
+        return ParsedSel(
+            kind: 1, dead: false, check_tag: false, want_tag: "", check_id: false,
+            want_id: "", want_classes: [], attr_tests: [], pseudo_codes: [],
+            pseudo_root_attrs: [], pseudo_opts: [], pseudo_nth_kind: [],
+            pseudo_nth_a: [], pseudo_nth_b: []
+        )
+    if part == ">":
+        return ParsedSel(
+            kind: 2, dead: false, check_tag: false, want_tag: "", check_id: false,
+            want_id: "", want_classes: [], attr_tests: [], pseudo_codes: [],
+            pseudo_root_attrs: [], pseudo_opts: [], pseudo_nth_kind: [],
+            pseudo_nth_a: [], pseudo_nth_b: []
+        )
+    val sel = part
+    # Pseudo-element selectors never match the host element.
+    if text_index_of(sel, "::") >= 0:
+        return _dead_parsed_sel()
+    var base = sel
+    val colon = text_index_of(base, ":")
+    if colon >= 0:
+        base = base.substring(0, colon)
+    var attr_tests: [ParsedAttr] = []
+    var node_base = base
+    val attr_start = text_index_of(base, "[")
+    if attr_start >= 0:
+        val attr_end = text_index_of(base, "]")
+        if attr_end < attr_start:
+            return _dead_parsed_sel()
+        node_base = base.substring(0, attr_start).trim()
+        var group_start = attr_start
+        var group_count = 0
+        while group_start >= 0 and group_count < 32:  # cpu-lane-loop-ok: walks the bracket groups of ONE compound selector at parse time, capped at 32
+            group_count = group_count + 1
+            val rest = base.substring(group_start + 1, base.len())
+            val rel_end = text_index_of(rest, "]")
+            if rel_end < 0:
+                return _dead_parsed_sel()
+            attr_tests.push(_parse_attr_test(rest.substring(0, rel_end)))
+            val tail = rest.substring(rel_end + 1, rest.len())
+            val next_rel = text_index_of(tail, "[")
+            if next_rel < 0:
+                group_start = 0 - 1
+            else:
+                group_start = group_start + 1 + rel_end + 1 + next_rel
+    # Base compound: mirrors base_selector_matches()'s branch structure.
+    var check_tag = false
+    var want_tag = ""
+    var check_id = false
+    var want_id = ""
+    var want_classes: [text] = []
+    if node_base.len() == 0 or node_base == "*":
+        # Universal / empty base: base_selector_matches returns true outright.
+        var base_is_universal = true
+    elif node_base[0:0 + 1] == ".":
+        want_classes = _split_class_wants(node_base.substring(1, node_base.len()))
+    elif node_base[0:0 + 1] == "#":
+        val id_dot = find_from(node_base, ".", 1)
+        check_id = true
+        if id_dot >= 0:
+            want_id = node_base.substring(1, id_dot)
+            want_classes = _split_class_wants(node_base.substring(id_dot + 1, node_base.len()))
+        else:
+            want_id = node_base.substring(1, node_base.len())
+    else:
+        val hash = text_index_of(node_base, "#")
+        if hash > 0:
+            check_tag = true
+            want_tag = node_base.substring(0, hash)
+            check_id = true
+            val dot2 = find_from(node_base, ".", hash + 1)
+            if dot2 >= 0:
+                want_id = node_base.substring(hash + 1, dot2)
+                want_classes = _split_class_wants(node_base.substring(dot2 + 1, node_base.len()))
+            else:
+                want_id = node_base.substring(hash + 1, node_base.len())
+        else:
+            val dot = text_index_of(node_base, ".")
+            check_tag = true
+            if dot >= 0:
+                want_tag = node_base.substring(0, dot)
+                want_classes = _split_class_wants(node_base.substring(dot + 1, node_base.len()))
+            else:
+                want_tag = node_base
+    # Pseudo-class chain: one parse, replacing the two independent walks in
+    # simple_match() and _pseudo_ctx_matches().
+    var pseudo_codes: [i32] = []
+    var pseudo_root_attrs: [text] = []
+    var pseudo_opts: [[text]] = []
+    var pseudo_nth_kind: [i32] = []
+    var pseudo_nth_a: [i32] = []
+    var pseudo_nth_b: [i32] = []
+    if colon >= 0:
+        var pseudo_pos = colon
+        var pseudo_count = 0
+        while pseudo_pos < sel.len():  # cpu-lane-loop-ok: walks the pseudo-class chain of ONE selector at parse time; bound is that selector's length, pseudo_count capped at 32
+            pseudo_count = pseudo_count + 1
+            if pseudo_count > 32 or sel[pseudo_pos:pseudo_pos + 1] != ":":
+                return _dead_parsed_sel()
+            val name_start = pseudo_pos + 1
+            var name_end = name_start
+            # cpu-lane-loop-ok: scans ONE pseudo-class NAME until `:`, `(` or `[`; bound is that name's length
+            while (
+                name_end < sel.len() and sel[name_end:name_end + 1] != ":" and
+                sel[name_end:name_end + 1] != "(" and sel[name_end:name_end + 1] != "["
+            ):
+                name_end = name_end + 1
+            val pseudo = sel.substring(name_start, name_end)
+            if pseudo.len() == 0:
+                return _dead_parsed_sel()
+            var arg = ""
+            # Only the `:root[...]` form carries an attribute test. A
+            # FUNCTIONAL argument on `root` (`:root(x)`) is parsed and then
+            # ignored by the text path, whose `root` arm checks only
+            # `tag != "html"` -- so it must not become an attribute test here.
+            var root_attr = ""
+            if name_end < sel.len() and sel[name_end:name_end + 1] == "(":
+                var functional_depth = 1
+                var close = name_end + 1
+                while close < sel.len() and functional_depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE functional pseudo argument at parse time; paren depth capped at 32
+                    val ch = sel[close:close + 1]
+                    if ch == "(":
+                        functional_depth = functional_depth + 1
+                        if functional_depth > 32:
+                            return _dead_parsed_sel()
+                    elif ch == ")":
+                        functional_depth = functional_depth - 1
+                    close = close + 1
+                if functional_depth != 0:
+                    return _dead_parsed_sel()
+                arg = sel.substring(name_end + 1, close - 1).trim()
+                pseudo_pos = close
+            else:
+                pseudo_pos = name_end
+                if (
+                    pseudo == "root" and pseudo_pos < sel.len() and
+                    sel[pseudo_pos:pseudo_pos + 1] == "["
+                ):
+                    val attr_close = find_from(sel, "]", pseudo_pos + 1)
+                    if attr_close < 0:
+                        return _dead_parsed_sel()
+                    root_attr = sel.substring(pseudo_pos + 1, attr_close)
+                    pseudo_pos = attr_close + 1
+            val code = _pseudo_code_for(pseudo)
+            if code < 0:
+                return _dead_parsed_sel()
+            var opts: [text] = []
+            if code == PSEUDO_NOT or code == PSEUDO_ANY:
+                # `simple_match` splits :not/:is/:where itself and returns
+                # false when the split fails, regardless of the node.
+                opts = _split_pseudo_options(arg)
+                if opts.len() == 0:
+                    return _dead_parsed_sel()
+            elif code == PSEUDO_HAS:
+                # `:has` is NOT dead on a split failure. `simple_match`'s
+                # elif-chain excludes `has`, so it never inspects the
+                # argument and passes `ul:has()` through as MATCHING; only
+                # `_pseudo_ctx_matches` splits it and rejects. That
+                # distinction is invisible on a rightmost part (both end up
+                # false) but decides an ANCESTOR part, where only
+                # `simple_match` runs. An empty opts list here reproduces it:
+                # `simple_match_parsed` ignores HAS entirely and
+                # `_pseudo_ctx_matches_parsed` returns false on empty opts.
+                opts = _split_pseudo_options(arg)
+            var nth_kind = 0
+            var nth_a = 0
+            var nth_b = 0
+            if code == PSEUDO_NTH_CHILD:
+                val nth = _parse_nth(arg)
+                nth_kind = nth[0]
+                nth_a = nth[1]
+                nth_b = nth[2]
+            pseudo_codes.push(code)
+            pseudo_root_attrs.push(root_attr)
+            pseudo_opts.push(opts)
+            pseudo_nth_kind.push(nth_kind)
+            pseudo_nth_a.push(nth_a)
+            pseudo_nth_b.push(nth_b)
+    ParsedSel(
+        kind: 0, dead: false, check_tag: check_tag, want_tag: want_tag,
+        check_id: check_id, want_id: want_id, want_classes: want_classes,
+        attr_tests: attr_tests, pseudo_codes: pseudo_codes,
+        pseudo_root_attrs: pseudo_root_attrs, pseudo_opts: pseudo_opts,
+        pseudo_nth_kind: pseudo_nth_kind, pseudo_nth_a: pseudo_nth_a,
+        pseudo_nth_b: pseudo_nth_b
+    )
+
+fn parse_selector_group(parts: [text]) -> [ParsedSel]:
+    var out: [ParsedSel] = []
+    var i = 0
+    val n = parts.len()
+    while i < n:  # cpu-lane-loop-ok: pre-parses the parts of ONE selector group, once per style invalidation; bound is that group's part count
+        out.push(parse_selector_part(parts[i]))
+        i = i + 1
+    out
+
+# Node-independent-work-free equivalent of simple_match().
+fn simple_match_parsed(
+    p: ParsedSel, tag: text, cls: text, class_words: [text], id: text, attrs: text
+) -> bool:
+    if p.dead or p.kind != 0:
+        return false
+    if p.check_tag and p.want_tag != tag:
+        return false
+    if p.check_id and p.want_id != id:
+        return false
+    var ci = 0
+    val class_wanted = p.want_classes.len()
+    while ci < class_wanted:  # cpu-lane-loop-ok: checks the pre-split class wants of ONE compound selector against ONE node; bound is that compound's class count
+        if not class_words_has(class_words, p.want_classes[ci]):
+            return false
+        ci = ci + 1
+    var ai = 0
+    val attr_count = p.attr_tests.len()
+    while ai < attr_count:  # cpu-lane-loop-ok: checks the pre-parsed attribute tests of ONE compound selector against ONE node; capped at 32 at parse time
+        if not parsed_attr_matches(attrs, p.attr_tests[ai]):
+            return false
+        ai = ai + 1
+    var pi = 0
+    val pseudo_count = p.pseudo_codes.len()
+    while pi < pseudo_count:  # cpu-lane-loop-ok: evaluates the pre-parsed pseudo-class chain of ONE selector against ONE node; capped at 32 at parse time
+        val code = p.pseudo_codes[pi]
+        if code == PSEUDO_NOT:
+            val opts = p.pseudo_opts[pi]
+            var j = 0
+            val opt_count = opts.len()
+            while j < opt_count:  # cpu-lane-loop-ok: walks the <=16 pre-split :not() options, returning false at the first that matches
+                if simple_match(opts[j], tag, cls, class_words, id, attrs, 1):
+                    return false
+                j = j + 1
+        elif code == PSEUDO_ANY:
+            val opts = p.pseudo_opts[pi]
+            var any_matched = false
+            var j = 0
+            val opt_count = opts.len()
+            while j < opt_count and not any_matched:  # cpu-lane-loop-ok: walks the <=16 pre-split :is()/:where() options, stopping at the first that matches
+                any_matched = simple_match(opts[j], tag, cls, class_words, id, attrs, 1)
+                j = j + 1
+            if not any_matched:
+                return false
+        elif code == PSEUDO_ROOT:
+            if tag != "html":
+                return false
+            val root_attr = p.pseudo_root_attrs[pi]
+            if root_attr.len() > 0 and not attr_selector_matches(attrs, root_attr):
+                return false
+        pi = pi + 1
+    true
+
+# Node-independent-work-free equivalent of _pseudo_ctx_matches(). Consumes the
+# SAME pre-parsed chain simple_match_parsed() walks, so the duplicate
+# pseudo-chain walk of the two-pass text path disappears with it.
+fn _pseudo_ctx_matches_parsed(
+    p: ParsedSel, nodes: [HNode], ctx: SelectorContext, idx: i32
+) -> bool:
+    var pi = 0
+    val pseudo_count = p.pseudo_codes.len()
+    while pi < pseudo_count:  # cpu-lane-loop-ok: evaluates the positional arms of ONE selector's pre-parsed pseudo chain; capped at 32 at parse time
+        val code = p.pseudo_codes[pi]
+        if code == PSEUDO_EMPTY:
+            if not _node_is_empty(ctx, idx):
+                return false
+        elif code == PSEUDO_FIRST_CHILD:
+            if _child_position(ctx, idx) != 1:
+                return false
+        elif code == PSEUDO_LAST_CHILD:
+            if _child_position(ctx, idx) != _sibling_count(ctx, idx):
+                return false
+        elif code == PSEUDO_ONLY_CHILD:
+            if _sibling_count(ctx, idx) != 1:
+                return false
+        elif code == PSEUDO_NTH_CHILD:
+            if not _nth_matches_parsed(
+                p.pseudo_nth_kind[pi], p.pseudo_nth_a[pi], p.pseudo_nth_b[pi],
+                _child_position(ctx, idx)
+            ):
+                return false
+        elif code == PSEUDO_HAS:
+            val opts = p.pseudo_opts[pi]
+            var matched = false
+            var j = 0
+            val opt_count = opts.len()
+            while j < opt_count and not matched:  # cpu-lane-loop-ok: walks the <=16 pre-split :has() options, stopping at the first that matches
+                matched = _has_option_matches(nodes, ctx, idx, opts[j])
+                j = j + 1
+            if not matched:
+                return false
+        pi = pi + 1
+    true
+
+fn simple_match_ctx_parsed(
+    p: ParsedSel, tag: text, cls: text, class_words: [text], id: text,
+    attrs: text, nodes: [HNode], ctx: SelectorContext, idx: i32
+) -> bool:
+    if not simple_match_parsed(p, tag, cls, class_words, id, attrs):
+        return false
+    _pseudo_ctx_matches_parsed(p, nodes, ctx, idx)
+
+fn selector_group_matches_node_parsed(
+    nodes: [HNode], ctx: SelectorContext, idx: i32, parsed: [ParsedSel]
+) -> bool:
+    if _wsc_armed():
+        val t0 = _wsc_now_us()
+        val matched = _selector_group_matches_node_parsed_inner(nodes, ctx, idx, parsed)
+        _wsc_add_selector(_wsc_now_us() - t0)
+        return matched
+    _selector_group_matches_node_parsed_inner(nodes, ctx, idx, parsed)
+
+fn _selector_group_matches_node_parsed_inner(
+    nodes: [HNode], ctx: SelectorContext, idx: i32, parsed: [ParsedSel]
+) -> bool:
+    var right = parsed.len() - 1
+    while right >= 0 and parsed[right].kind == 1:  # cpu-lane-loop-ok: skips trailing empty parts of ONE selector group; bound is that group's part count
+        right = right - 1
+    if right < 0:
+        return false
+    val nd = nodes[idx]
+    if not simple_match_ctx_parsed(
+        parsed[right], nd.tag, nd.class_attr, nd.class_words, nd.id_attr,
+        nd.attrs_raw, nodes, ctx, idx
+    ):
+        return false
+    var ancestor = nd.parent
+    var want = right - 1
+    var require_direct = false
+    while want >= 0:  # cpu-lane-loop-ok: walks ONE selector group's parts right-to-left matching ancestors; bound is that group's part count (<=256)
+        val part = parsed[want]
+        if part.kind == 1:
+            want = want - 1
+        elif part.kind == 2:
+            require_direct = true
+            want = want - 1
+        else:
+            if require_direct:
+                if ancestor < 0:
+                    return false
+                val anc = nodes[ancestor]
+                if simple_match_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                    ancestor = anc.parent
+                    require_direct = false
+                else:
+                    return false
+            else:
+                var found = false
+                while ancestor >= 0 and not found:  # cpu-lane-loop-ok: descendant-combinator ancestor walk up the parent chain of one node; bound is that node's tree depth
+                    val anc = nodes[ancestor]
+                    if simple_match_parsed(part, anc.tag, anc.class_attr, anc.class_words, anc.id_attr, anc.attrs_raw):
+                        found = true
+                    else:
+                        ancestor = anc.parent
+                if not found:
+                    return false
+                ancestor = nodes[ancestor].parent
+            want = want - 1
+    not require_direct
+
 fn split_selector_groups(sel: text) -> [text]:
     var depth = 0
     var i = 0
@@ -2171,7 +2793,24 @@ fn build_rule_buckets(rules: Rules, trace_stages: bool = false) -> RuleBuckets:
         else:
             fallback_rules[bucket_idx] = rule_idx
         entry_i = entry_i + 1
-    RuleBuckets(id_keys: id_keys, id_rules: id_rules, class_keys: class_keys, class_rules: class_rules, tag_keys: tag_keys, tag_rules: tag_rules, fallback_rules: fallback_rules, id_key_dict: id_key_dict, class_key_dict: class_key_dict, tag_key_dict: tag_key_dict)
+    # Pre-parse every selector part ONCE, here, so the per-node match path
+    # never re-scans selector text. Uses the SAME splitting helpers the text
+    # matcher uses; see parse_selector_part().
+    var parsed_groups: [[[ParsedSel]]] = []
+    var pr = 0
+    while pr < rule_count:  # cpu-lane-loop-ok: pre-parses the selector parts of every extracted rule; bound is the rule count, once per style invalidation
+        val pgroups = rules.group_parts[pr]
+        var parsed_rule: [[ParsedSel]] = []
+        var pg = 0
+        val pgroup_count = pgroups.len()
+        while pg < pgroup_count:  # cpu-lane-loop-ok: pre-parses the comma-groups of ONE rule (<=CSS_SELECTOR_GROUP_CAP)
+            parsed_rule.push(parse_selector_group(pgroups[pg]))
+            pg = pg + 1
+        parsed_groups.push(parsed_rule)
+        pr = pr + 1
+    if trace_stages:
+        print "[layout-trace] bucket_stage=selectors-parsed rules={parsed_groups.len()}"
+    RuleBuckets(id_keys: id_keys, id_rules: id_rules, class_keys: class_keys, class_rules: class_rules, tag_keys: tag_keys, tag_rules: tag_rules, fallback_rules: fallback_rules, id_key_dict: id_key_dict, class_key_dict: class_key_dict, tag_key_dict: tag_key_dict, parsed_groups: parsed_groups)
 
 fn dict_key_index(d: Dict<text, i32>, keys: [text], key: text) -> i32:
     dict_key_index_count(d, keys, key, keys.len() as i32)
@@ -3004,7 +3643,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         val _sb_t0 = if _wsc_armed(): _wsc_now_us() else: 0
         while specificity_i < candidates_raw.len():  # cpu-lane-loop-ok: walks the bucketed candidate rules of ONE node computing each rule's matched specificity; bound is that node's candidate count, not the full rule set
             val specificity_rule = candidates_raw[specificity_i]
-            val specificity_groups = rules.group_parts[specificity_rule]
+            val specificity_groups = rule_buckets.parsed_groups[specificity_rule]
             val precomputed_specificities = rules.group_specificities[specificity_rule]
             var matched_specificity = -1
             var group_i = 0
@@ -3013,7 +3652,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 if (selector_group_budget_count & 255) == 0 and _web_budget_expired():
                     specificity_expired = true
                     break
-                if selector_group_matches_node_parts(
+                if selector_group_matches_node_parsed(
                     nodes, selector_ctx, i, specificity_groups[group_i]
                 ):
                     val group_specificity = precomputed_specificities[group_i]
@@ -3492,6 +4131,81 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     if solid_material_entry_count > 0:
         print "[web-style-producer] solid-entries-ready count={solid_material_entry_count} len={material_entries[1].len()}"
     styles
+
+# Debug-only equivalence oracle for the pre-parsed selector path (round 9).
+# Runs BOTH the selector-TEXT matcher and the ParsedSel matcher over every
+# distinct selector part of `html`'s stylesheets x every node (base match AND
+# full-context match), and over every real candidate group the renderer would
+# evaluate for that node, and reports the first disagreement. `max_nodes < 0`
+# means every node. Consumed by
+# test/01_unit/browser_engine/web_selector_parsed_equivalence_spec.spl, which
+# runs it over the eight catalog pages and an adversarial selector fixture.
+pub fn simple_web_layout_debug_selector_parse_equivalence(html: text, max_nodes: i32) -> text:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    val rules = extract_css(html)
+    val child_index = build_child_index(nodes)
+    val ctx = build_selector_context(nodes, child_index)
+    val buckets = build_rule_buckets(rules)
+    var parts: [text] = [""; 4096]
+    var part_count = 0
+    var r = 0
+    val rule_count = rules.group_parts.len()
+    while r < rule_count:  # cpu-lane-loop-ok: debug-only oracle: collects the distinct selector parts of the extracted rules; bound is the rule count
+        val groups = rules.group_parts[r]
+        var g = 0
+        val group_count = groups.len()
+        while g < group_count:  # cpu-lane-loop-ok: debug-only oracle: walks ONE rule's comma-groups
+            val gp = groups[g]
+            var p = 0
+            val gp_count = gp.len()
+            while p < gp_count:  # cpu-lane-loop-ok: debug-only oracle: walks ONE group's parts
+                val txt = gp[p]
+                if part_count < 4096 and not text_seen_before(parts, part_count, txt):
+                    parts[part_count] = txt
+                    part_count = part_count + 1
+                p = p + 1
+            g = g + 1
+        r = r + 1
+    var checked = 0
+    val node_count = nodes.len()
+    val node_limit = if max_nodes < 0 or max_nodes > node_count: node_count else: max_nodes
+    var i = 0
+    while i < node_limit:  # cpu-lane-loop-ok: debug-only oracle: compares both matcher paths for every node of the document
+        val nd = nodes[i]
+        var k = 0
+        while k < part_count:  # cpu-lane-loop-ok: debug-only oracle: compares both matcher paths for every distinct selector part against ONE node
+            val txt = parts[k]
+            val parsed = parse_selector_part(txt)
+            val base_text = simple_match(txt, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw)
+            val base_parsed = simple_match_parsed(parsed, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw)
+            if base_text != base_parsed:
+                return "MISMATCH base node={i} sel={txt} text={base_text} parsed={base_parsed}"
+            val ctx_text = simple_match_ctx(txt, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, i)
+            val ctx_parsed = simple_match_ctx_parsed(parsed, nd.tag, nd.class_attr, nd.class_words, nd.id_attr, nd.attrs_raw, nodes, ctx, i)
+            if ctx_text != ctx_parsed:
+                return "MISMATCH ctx node={i} sel={txt} text={ctx_text} parsed={ctx_parsed}"
+            checked = checked + 2
+            k = k + 1
+        val cands = style_rule_candidates(nd, buckets)
+        var ci = 0
+        val cand_count = cands.len()
+        while ci < cand_count:  # cpu-lane-loop-ok: debug-only oracle: compares both group matchers over ONE node's real candidate rules
+            val ri = cands[ci]
+            val text_groups = rules.group_parts[ri]
+            val parsed_rule_groups = buckets.parsed_groups[ri]
+            var gi = 0
+            val tg_count = text_groups.len()
+            while gi < tg_count:  # cpu-lane-loop-ok: debug-only oracle: walks ONE candidate rule's comma-groups
+                val group_text = selector_group_matches_node_parts(nodes, ctx, i, text_groups[gi])
+                val group_parsed = selector_group_matches_node_parsed(nodes, ctx, i, parsed_rule_groups[gi])
+                if group_text != group_parsed:
+                    return "MISMATCH group node={i} rule={ri} group={gi} text={group_text} parsed={group_parsed}"
+                checked = checked + 1
+                gi = gi + 1
+            ci = ci + 1
+        i = i + 1
+    "ok checked={checked} parts={part_count} nodes={node_limit}"
 
 pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) -> text:
     _web_budget_begin(WEB_RENDER_BUDGET_MS)
