@@ -188,3 +188,8 @@ untested larger/original shape. No fix attempted — this remains a black-box
 characterization, and diagnosing further requires tracing the seed's SSpec
 runner internals (`src/compiler_rust/**`), which is out of this session's
 edit scope.
+
+## Triage 2026-09-13
+Reconfirmed: not reproducible on a genuinely Linux-built seed per this
+record's own 2026-08-10 narrowing; root cause not diagnosed and marked
+compiler-internal / out of scope. Left as-is, no code change attempted.
