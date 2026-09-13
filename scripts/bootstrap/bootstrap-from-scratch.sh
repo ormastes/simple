@@ -3208,8 +3208,19 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
           stage2_parent_dir=$(dirname -- "${stage2_bin}")
           stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
           stage2_parent_provenance="${stage2_parent_dir}/stage2-provenance.receipt"
+          # Bind the parent receipts to the IMMUTABLE ADMITTED copy, which is the
+          # candidate the admission receipt itself names (`candidate_path=`).
+          # Passing "${stage2_bin}" instead made
+          # publish-stage2-parent-receipts.shs fail its own
+          # `[ "$(field candidate_path)" = "$candidate" ]` precondition and, under
+          # `set -eu`, exit 1 with no message -- surfacing only as
+          # "could not publish producer-bound Stage 2 parent receipts". The two
+          # files are byte-identical (the admitted copy is `cp -p`'d from the
+          # build output and sha-verified above), so this changes what is NAMED,
+          # not what is bound. See doc/08_tracking/bug/
+          # stage2_parent_receipts_bound_to_preadmission_path_2026-09-13.md
           sh "${repo_root}/scripts/bootstrap/publish-stage2-parent-receipts.shs" \
-            "$(absolute_path "${stage2_bin}")" \
+            "$(absolute_path "${stage2_admitted_bin}")" \
             "${stage2_admission_receipt_absolute}" \
             "$(absolute_path "${stage3_source_before}")" \
             "$(absolute_path "${runtime_admitted_snapshot}")" \
