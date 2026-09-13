@@ -1,7 +1,7 @@
 # `src/lib/<name>.spl` facades shadow tier modules via `src/std -> lib` (family)
 
 - **Date:** 2026-08-08
-- **Status:** 2 fixed, 2 open (this file), 12 audited innocent
+- **Status:** 3 fixed, 1 open (theoretical, no live consumer impact) (this file) — see "Re-check 2026-09-13", 12 audited innocent
 - **Area:** module resolution / stdlib surface
 
 ## Mechanism (confirmed in source and empirically)
@@ -117,3 +117,42 @@ the returned value, and each run is paired with a fabricated-symbol control that
 must produce `error[E1002]`. Probes ran against a tree pinned to `origin/main`
 containing only `src/lib` plus the `src/std -> lib` symlink, with the facade
 `mv`-ed away for the ablation arm.
+
+## Re-check 2026-09-13 (BUGFIX-10 fanout)
+
+**OPEN 1 (`std.log`) is already FIXED in the tree** (base `f26970e9d93`):
+`src/lib/log.spl:1034` now carries a narrow
+`export use lib.nogc_sync_mut.log.{clear_scopes, get_level, get_log_level,
+log_debug, log_error, log_info, log_verbose, set_scope_level, trace}` with a
+comment explaining the circular-import and nil-guard fixes that unblocked it.
+No spec previously locked this reachability path, so one was added:
+`test/01_unit/lib/log_facade_scope_level_reachability_spec.spl`. TDD evidence
+(bin/simple SHA `readlink -f bin/simple` -> the deployed seed hard-linked from
+`/home/yoon/dev/simple/bin/simple`):
+
+```
+RED  (export-use block commented out): SPEC FILE VERDICT ... outcome=ERROR declared>=4 executed=4 passed=0 failed=4
+                                        semantic: function `clear_scopes`/`set_scope_level`/`get_log_level`/`log_debug` not found
+GREEN (block restored, no src change): SPEC FILE VERDICT ... outcome=OK    declared>=4 executed=4 passed=4 failed=0
+```
+
+**OPEN 2 (`std.pe_coff_header`) confirmed still open, but currently inert**:
+`src/lib/pe_coff_header.spl` (32 lines, own `PeHeaderSummary` with different
+fields) still shadows `src/lib/common/pe_coff_header.spl`'s 30 `pe_*`
+functions with no re-export, and the class-field collision described above is
+still real (`grep` confirms `class PeHeaderSummary` and `optional_header` only
+in the `common/` copy). However: every current consumer of the `common/`
+implementation (`src/lib/common/wine_*.spl`, the wine dynload specs) imports
+it via the fully-qualified `use lib.common.pe_coff_header...` path, never
+through the shadowed `std.pe_coff_header` facade path — confirmed by
+`grep -rln "common.pe_coff_header"`. The only two consumers of
+`std.pe_coff_header` (`src/compiler/70.backend/linker/pe_inspect.spl`,
+`pe_parser.spl`) use only the facade's OWN
+`PeHeaderSummary`/`parse_pe_header_summary`/`pe_rva_to_file_offset` and never
+reach for the 30 `common/` functions. So the collision is real but has zero
+live blast radius today; the class-merge/rename fix remains out of scope for
+a bugfix-lane change (touches linker consumers) and is left OPEN, unchanged
+from the original "Suggested" direction.
+
+Status: RESOLVED for OPEN 1 (regression-locked by the new spec, commit
+follows in this lane); OPEN 2 unchanged (OPEN, no live impact).
