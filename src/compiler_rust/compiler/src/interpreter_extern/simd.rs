@@ -2532,3 +2532,171 @@ pub fn rt_engine2d_blend_const_span_pct_u32(args: &[Value]) -> Result<Value, Com
     blend_const_span_pct_dispatch(&mut dst[offset..offset + count], color, pct);
     Ok(pack_u32_array(dst))
 }
+
+// ---------------------------------------------------------------------------
+// DB row-bitmap word kernels (query execution hot path).
+//
+// `RowBitmap::and_with` / `or_with` / `and_not` / `count` in
+// src/lib/nogc_sync_mut/db/accel.spl are word-wise u32 loops over the row
+// bitmap — the innermost work of every filtered scan, posting-list intersect
+// and union. In the interpreter each iteration is an interpreted step; these
+// kernels replace the whole loop with one call.
+//
+// `or_with` and `and_not` take explicit word counts because the Simple loops
+// treat an index past the end of either operand as a zero word rather than
+// clamping the span. The kernels reproduce that exactly instead of shortening
+// the result, which would silently drop set rows.
+//
+// As with the renderer kernel, each tier is the SAME source loop re-emitted
+// under `#[target_feature]`, so a wider tier changes speed and never results.
+// ---------------------------------------------------------------------------
+
+macro_rules! db_bitmap_tiers {
+    ($scalar:ident, $avx512:ident, $avx2:ident, $dispatch:ident, $($arg:ident: $ty:ty),*) => {
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512bw")]
+        unsafe fn $avx512(out: &mut [u32], $($arg: $ty),*) { $scalar(out, $($arg),*) }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2")]
+        unsafe fn $avx2(out: &mut [u32], $($arg: $ty),*) { $scalar(out, $($arg),*) }
+
+        fn $dispatch(out: &mut [u32], $($arg: $ty),*) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::is_x86_feature_detected!("avx512bw")
+                    && std::is_x86_feature_detected!("avx512f")
+                {
+                    // SAFETY: guarded by the runtime feature probe above.
+                    unsafe { $avx512(out, $($arg),*) };
+                    return;
+                }
+                if std::is_x86_feature_detected!("avx2") {
+                    // SAFETY: guarded by the runtime feature probe above.
+                    unsafe { $avx2(out, $($arg),*) };
+                    return;
+                }
+            }
+            $scalar(out, $($arg),*)
+        }
+    };
+}
+
+#[inline(always)]
+fn db_bitmap_and_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32]) {
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = lhs[i] & rhs[i];
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_and_scalar,
+    db_bitmap_and_avx512,
+    db_bitmap_and_avx2,
+    db_bitmap_and_dispatch,
+    lhs: &[u32],
+    rhs: &[u32]
+);
+
+#[inline(always)]
+fn db_bitmap_or_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32], lhs_words: usize, rhs_words: usize) {
+    for (i, o) in out.iter_mut().enumerate() {
+        let l = if i < lhs_words { lhs[i] } else { 0 };
+        let r = if i < rhs_words { rhs[i] } else { 0 };
+        *o = l | r;
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_or_scalar,
+    db_bitmap_or_avx512,
+    db_bitmap_or_avx2,
+    db_bitmap_or_dispatch,
+    lhs: &[u32],
+    rhs: &[u32],
+    lhs_words: usize,
+    rhs_words: usize
+);
+
+#[inline(always)]
+fn db_bitmap_andnot_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32], rhs_words: usize) {
+    for (i, o) in out.iter_mut().enumerate() {
+        let r = if i < rhs_words { rhs[i] } else { 0 };
+        *o = lhs[i] & (0xFFFF_FFFFu32 ^ r);
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_andnot_scalar,
+    db_bitmap_andnot_avx512,
+    db_bitmap_andnot_avx2,
+    db_bitmap_andnot_dispatch,
+    lhs: &[u32],
+    rhs: &[u32],
+    rhs_words: usize
+);
+
+/// Shared prologue: unpack both operands and the word limit, or return Nil so
+/// the Simple caller falls back to its scalar twin rather than producing a
+/// short bitmap (which would silently drop set rows).
+fn db_bitmap_operands(
+    name: &str,
+    args: &[Value],
+    expected: usize,
+) -> Result<Option<(Vec<u32>, Vec<u32>, usize)>, CompileError> {
+    if args.len() != expected {
+        return Err(CompileError::runtime(format!(
+            "{name} expects {expected} arguments"
+        )));
+    }
+    let lhs = unpack_u32_array(name, &args[0])?;
+    let rhs = unpack_u32_array(name, &args[1])?;
+    let limit_raw = require_u64_value(name, &args[2])? as i64;
+    if limit_raw < 0 {
+        return Ok(None);
+    }
+    Ok(Some((lhs, rhs, limit_raw as usize)))
+}
+
+pub fn rt_db_bitmap_and_u32(args: &[Value]) -> Result<Value, CompileError> {
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_and_u32", args, 3)? else {
+        return Ok(Value::Nil);
+    };
+    if limit > lhs.len() || limit > rhs.len() {
+        return Ok(Value::Nil);
+    }
+    let mut out = vec![0u32; limit];
+    db_bitmap_and_dispatch(&mut out, &lhs, &rhs);
+    Ok(pack_u32_array(out))
+}
+
+pub fn rt_db_bitmap_or_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_db_bitmap_or_u32 expects 5 arguments (lhs, rhs, limit, lhs_words, rhs_words)".to_string(),
+        ));
+    }
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_or_u32", args, 5)? else {
+        return Ok(Value::Nil);
+    };
+    let lhs_words = (require_u64_value("rt_db_bitmap_or_u32(lhs_words)", &args[3])? as usize).min(lhs.len());
+    let rhs_words = (require_u64_value("rt_db_bitmap_or_u32(rhs_words)", &args[4])? as usize).min(rhs.len());
+    let mut out = vec![0u32; limit];
+    db_bitmap_or_dispatch(&mut out, &lhs, &rhs, lhs_words, rhs_words);
+    Ok(pack_u32_array(out))
+}
+
+pub fn rt_db_bitmap_andnot_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_db_bitmap_andnot_u32 expects 4 arguments (lhs, rhs, limit, rhs_words)".to_string(),
+        ));
+    }
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_andnot_u32", args, 4)? else {
+        return Ok(Value::Nil);
+    };
+    if limit > lhs.len() {
+        return Ok(Value::Nil);
+    }
+    let rhs_words = (require_u64_value("rt_db_bitmap_andnot_u32(rhs_words)", &args[3])? as usize).min(rhs.len());
+    let mut out = vec![0u32; limit];
+    db_bitmap_andnot_dispatch(&mut out, &lhs, &rhs, rhs_words);
+    Ok(pack_u32_array(out))
+}
