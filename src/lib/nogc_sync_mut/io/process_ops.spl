@@ -1118,13 +1118,55 @@ pub fn process_observation_owner_start_pinned_v4(
 # Process Execution
 # ============================================================================
 
+fn _windows_path_exts() -> [text]:
+    """%PATHEXT% entries in order, or .COM;.EXE;.BAT;.CMD when unset."""
+    var exts: [text] = []
+    val raw = env_get("PATHEXT")
+    if raw != nil:
+        for e in raw.split(";"):
+            if e.trim() != "":
+                exts.push(e.trim())
+    if exts.len() == 0:
+        exts = [".COM", ".EXE", ".BAT", ".CMD"]
+    exts
+
+
+fn _windows_resolve_cmd(cmd: text) -> text:
+    """Resolve a bare command name the way cmd.exe does: for each PATH
+    directory (cwd first), try each PATHEXT extension. Directory order wins
+    over extension order, so a fixture `curl.cmd` earlier on PATH beats a
+    System32 `curl.exe`. `.cmd`/`.bat` results need no wrapper here: the
+    runtime already launches batch files via `cmd.exe /d /c` with safe
+    argument escaping."""
+    val exts = _windows_path_exts()
+    val lower = cmd.lower()
+    for e in exts:
+        if lower.ends_with(e.lower()):
+            return cmd
+    if cmd.contains("/") or cmd.contains("\\"):
+        for e in exts:
+            if file_exists(cmd + e):
+                return cmd + e
+        return cmd
+    var dirs: [text] = ["."]
+    val path_env = env_get("PATH")
+    if path_env != nil:
+        for d in path_env.split(";"):
+            val dir = d.trim().replace("\"", "")
+            if dir != "":
+                dirs.push(dir)
+    for dir in dirs:
+        for e in exts:
+            val candidate = dir + "\\" + cmd + e
+            if file_exists(candidate):
+                return candidate
+    cmd
+
+
 fn _resolve_process_cmd(cmd: text) -> text:
     var resolved_cmd = cmd
     if _is_windows_platform():
-        if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
-            val check = _process_run_raw("where", [cmd + ".exe"])
-            if check.2 == 0:
-                resolved_cmd = cmd + ".exe"
+        resolved_cmd = _windows_resolve_cmd(cmd)
     else:
         if not cmd.contains("/"):
             val check = _process_run_raw("which", [cmd])
