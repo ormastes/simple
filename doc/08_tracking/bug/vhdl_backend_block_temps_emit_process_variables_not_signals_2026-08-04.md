@@ -83,6 +83,18 @@ revived the file and took it to 18 passed / 15 failed. **The same stale
 files under `test/01_unit/compiler/` (backend/native, backend, native,
 mir_opt/cipher) — those are outside this lane's scope and were not touched.**
 
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Re-ran the named repro: `bin/simple test test/02_integration/compiler/vhdl_backend_e2e_spec.spl`
+now reports `declared>=33 executed=41 passed=11 failed=30` (the spec has
+grown to 41 examples since this doc's 33/18-passed baseline; pass count is
+lower, consistent with the underlying contract divergence being unresolved
+and possibly more assertions of the `<name> <= ...` shape having been added
+since). This remains a VHDL-backend design decision this doc's own "Why not
+fixed now" section correctly declines to make unilaterally (process
+`variable` vs architecture `signal` semantics are not equivalent for
+multi-driver/feedback paths) — not a test-repair or a call this lane should
+make. Left OPEN, unchanged.
 ## Fix 2026-09-13 (BUGFIX-6 lane) — swept the remaining stale `MirTerminator.Return` sites
 
 The doc noted "at least 8 further `.spipe_matchers_*` spec files" still used

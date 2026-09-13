@@ -103,6 +103,20 @@ class MirToLlvm:
     # simple_provider_query_v1. See
     # doc/08_tracking/bug/export_c_custom_name_ignored_under_no_mangle_2026-08-14.md
     export_symbol_names: Dict<text, text>
+    # Module-qualified emitted symbol names, keyed by the BARE MIR function
+    # name, populated by translate_module for a NON-entry module only.
+    #
+    # A cross-module call site carries the callee's fully-qualified dotted
+    # name (`compiler.common.module_path_naming.module_logical_name_from_path`
+    # -- see _MirLoweringExpr/method_calls_literals.spl symbol_to_operand),
+    # while the callee module's own `define` used the bare MIR name. Nothing
+    # then defined the qualified symbol and the link failed with
+    # "undefined symbol: compiler.common.module_path_naming.module_logical_name_from_path".
+    # Qualifying here fixes BOTH sides at once: the `define` and any
+    # intra-module call both resolve through llvm_function_symbol_name, so
+    # they move together and stay linkable.
+    # See doc/08_tracking/bug/stage2_cross_module_call_mangling_asymmetry_undefined_symbol_2026-09-13.md
+    module_qualified_symbol_names: Dict<text, text>
     # Asm-embedding contract (design A.2), keyed by MIR function name AND by
     # emitted symbol: @naked / @section / @align / @global placement that
     # translate_function needs on the `define` line and at the terminator.
@@ -199,6 +213,13 @@ class MirToLlvm:
             return name
         if mir_runtime_owned_call_name(name) and self.owned_name_has_local.has(name):
             return mir_runtime_owned_local_symbol(name)
+        # Cross-module linkability: a non-entry module's own functions are
+        # emitted (and called) under `<logical module>.<fn>`, the same
+        # spelling every cross-module call site already uses. Runs LAST so
+        # `main`, `@export("C")`, `@global`, `--no-mangle` and the
+        # runtime-owned rules all keep priority.
+        if self.module_qualified_symbol_names.has(name):
+            return self.module_qualified_symbol_names[name]
         name
 
     fn is_unsigned_mir_kind(kind: MirTypeKind) -> bool:
@@ -334,6 +355,7 @@ class MirToLlvm:
             global_static_types: {},
             owned_name_has_local: {},
             export_symbol_names: {},
+            module_qualified_symbol_names: {},
             fn_naked: {},
             fn_section: {},
             fn_align: {},

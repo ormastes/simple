@@ -1,5 +1,13 @@
 # No installed CLI/demo binary can drive lavapipe to a raw pixel dump without new host code
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: the doc's own finding already establishes
+this needs new host code (no existing CLI/demo binary can drive lavapipe to a
+raw pixel dump, and the .spl-only scope constraint the doc names still
+applies) -- a Vulkan-hardware feature build, not a contained bugfix. Left
+OPEN.
+
+
 Status: OPEN (P3)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 

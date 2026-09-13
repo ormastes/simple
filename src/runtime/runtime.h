@@ -51,6 +51,14 @@ void rt_set_macro_trace(bool enabled);
 bool rt_is_macro_trace_enabled(void);
 void rt_set_debug_mode(bool enabled);
 
+/* Fail-closed host capability probes used by compiler SIMD dispatch. */
+int64_t rt_getauxval(int64_t key);
+bool rt_is_darwin_arm64(void);
+int32_t rt_sysctlbyname_i32(int64_t name);
+int32_t rt_riscv_read_vlenb(void);
+bool rt_riscv_has_v_ext(void);
+int32_t rt_cuda_sm_version(int32_t device);
+
 /* ===== Recoverable language exception frames =====
  *
  * Frames are fixed-capacity, per-thread runtime storage.  The compiler owns
@@ -781,6 +789,7 @@ int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
+int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
@@ -858,6 +867,28 @@ int8_t   rt_is_some(int64_t value);
 /* `.?` presence: nil/None or an EMPTY array/dict/string is absent. */
 int8_t   rt_is_present(int64_t value);
 double   rt_math_pow(double base, double exponent);
+/* Core-C-only lane twins of Rust-runtime-only kernels (runtime_native.c; see
+ * the block beside rt_array_pop and doc/08_tracking/bug/
+ * core_c_bootstrap_runtime_lane_missing_rt_utf8_math_array_symbols_2026-09-13.md).
+ * The byte arguments are tagged RuntimeValues, not pointers. */
+double   rt_math_sqrt(double x);
+double   rt_math_exp(double x);
+double   rt_math_cbrt(double x);
+double   rt_math_sin(double x);
+double   rt_math_cos(double x);
+double   rt_math_tan(double x);
+double   rt_math_hypot(double x, double y);
+/* IEEE-754 minNum/maxNum (fmin/fmax), matching Rust f64::min / f64::max. */
+double   rt_math_min(double a, double b);
+double   rt_math_max(double a, double b);
+int64_t  rt_utf8_count_codepoints(int64_t bytes_value);
+int8_t   rt_utf8_validate(int64_t bytes_value);
+int64_t  rt_utf8_find_invalid(int64_t bytes_value);
+int64_t  rt_numeric_dot_f64(int64_t lhs_value, int64_t rhs_value);
+/* Removes and RETURNS the element at `index` (tagged). NIL for a non-array
+ * receiver or an out-of-range index; a negative index is out of range here,
+ * it does NOT count from the end. */
+int64_t  rt_array_remove(int64_t array_value, int64_t index);
 int64_t  rt_dict_new(int64_t cap_hint);
 int64_t  rt_dict_get(int64_t dict, int64_t key);
 int8_t   rt_dict_set(int64_t dict, int64_t key, int64_t value);

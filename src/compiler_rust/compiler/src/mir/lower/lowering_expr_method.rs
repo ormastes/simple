@@ -256,8 +256,12 @@ impl<'a> MirLowerer<'a> {
                             kind: crate::hir::HirExprKind::Integer(Self::enum_variant_discriminant(variant_name)),
                             ty: TypeId::I64,
                         };
-                        let args = [receiver.clone(), expected];
-                        return self.lower_builtin_call_expr("rt_enum_check_discriminant", &args, TypeId::BOOL);
+                        let expected_enum_id = HirExpr {
+                            kind: crate::hir::HirExprKind::Integer(0),
+                            ty: TypeId::I64,
+                        };
+                        let args = [receiver.clone(), expected_enum_id, expected];
+                        return self.lower_builtin_call_expr("rt_enum_check_variant", &args, TypeId::BOOL);
                     }
                 }
                 _ => {}

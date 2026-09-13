@@ -1,6 +1,9 @@
 # Kill Monitor Generic RSS Gap - 2026-06-27
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — generic RSS cap is present in the monitor script
+- **measured**: `grep -c KILL_ANY_MEM_MB scripts/resource/kill_simple_monitor.shs` = 5 — the generic non-protected-process cap this entry adds is in the tree.
+- **inferred**: the monitor is a Linux/procfs RSS watchdog and was not executed on this Windows host; the fix is verified present, not verified running.
+- **inferred**: the entry's own status was already "Fixed"; this closure records that the change survived and was not reverted.
 
 ## Status
 
@@ -32,7 +35,3 @@ offending command line disappeared with the process.
 Expected result:
 
 `PASS kill_simple_monitor: killed [1001 1002 3004] (simple mem, simple cpu, generic mem), spared healthy/protected/young/root-owned`
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

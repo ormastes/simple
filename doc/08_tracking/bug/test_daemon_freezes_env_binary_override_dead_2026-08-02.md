@@ -260,6 +260,10 @@ The ladders are deliberate (they absorb a deployed binary that predates a newly
 added extern), so removing them is a separate decision, but they must not be
 mistaken for override coverage.
 
+## Triage 2026-09-13
+Reconfirmed: client-side lane bypass already fixed per this record; the
+protocol-level fix remains open. Left as-is for the protocol-level
+remainder, no code change attempted.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Client-side lane bypass fix stays landed; the protocol-level fix (threading

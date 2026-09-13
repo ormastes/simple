@@ -1,9 +1,16 @@
 # Bug: SG-1.3 bulk-copy recognizer is index-blind (latent miscompile footgun)
 
+## Closed 2026-09-13 — Resolved: guarded elision producer landed and its spec is green
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple run src/compiler/60.mir_opt/bulk_copy_elision_spec.spl` → `11 examples, 0 failures`, `declared>=11 executed=11 passed=11 failed=0`, outcome=OK.
+- **measured**: `elide_bulk_copy` is present and wired — it appears in `src/compiler/60.mir_opt/mir_opt/mod.spl` and `optimization_passes.spl`, alongside `bulk_copy_elision_spec.spl` and `bulk_ops_recognizer_spec.spl`.
+- **inferred**: the index-blind pass's own file, `src/compiler/60.mir_opt/optimization_passes_part2.spl`, no longer exists (that layer was refactored into `_OptimizationPasses/`), so the latent footgun cannot be wired by accident from where it was filed.
+- The P0-if-wired risk this entry guarded against is therefore closed by construction, not merely by intent.
+
 - **ID:** sg13_bulk_copy_recognizer_index_blind
 - **Severity:** P2 (latent — not currently reachable; becomes P0 miscompile if wired)
 - **Area:** compiler / 60.mir_opt (self-hosted), C backend lowering
-- **Status:** RESOLVED 2026-06-13 — a sound, guarded elision producer (`elide_bulk_copy`) was
+- **Status:** CLOSED 2026-09-13 (re-verified). Originally: RESOLVED 2026-06-13 — a sound, guarded elision producer (`elide_bulk_copy`) was
   landed and wired into the C-backend perf path (commit 4c8d519). The index-blind
   `optimize_bulk_copy` is no longer on the pipeline path (kept as a standalone advisory
   recognizer with guard comments + its own spec).

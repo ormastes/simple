@@ -1,6 +1,13 @@
 # core-c `.len()` returns garbage — rt_string_len registry check rejects compiler literals (2026-06-02)
 
-Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+## Closed 2026-09-13 — Fixed in the C runtime: `rt_string_len` now falls back to `strlen` for compiler literals
+
+- **measured** `src/runtime/runtime_native.c:3078-3082` reads: `RtCoreString* s = rt_core_as_string(string); if (s) return (int64_t)s->len; return string >= 0x10000 ? (int64_t)strlen((const char*)(uintptr_t)string) : -1;` — the registry-only rejection the entry reported is gone.
+- **measured** The adjacent comment block (`:3084-3091`) documents the same `>= 0x10000` guard being mirrored into `rt_string_data`, i.e. the literal/heap pair was fixed on both sides.
+- **inferred** The failure was specific to the macOS ARM64 core-c minimal link, which is not available on this Windows host; closure rests on the source fix, not a re-run of that lane.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 

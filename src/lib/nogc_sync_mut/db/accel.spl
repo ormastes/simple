@@ -7,6 +7,7 @@
 use std.simd.{detect_profile, profile_name, simd_width, SimdTier}
 
 use std.common.string_core.{text_to_bytes}
+use std.common.simd_scan.{simd_bytes_equal}
 
 val DB_ACCEL_DEFAULT_BATCH_SIZE: i64 = 64
 val DB_ACCEL_HASH_MODULUS: i64 = 65_521
@@ -133,14 +134,9 @@ struct RowBitmap:
             row_bitmap_word_count(self.row_count),
             row_bitmap_word_count(rhs.row_count)
         )
-        var words: [u32] = [0u32; limit]
-        var idx = 0
-        while idx < limit:
-            words[idx as i32] = self.words[idx as i32] & rhs.words[idx as i32]
-            idx = idx + 1
         RowBitmap(
             row_count: row_bitmap_min(self.row_count, rhs.row_count),
-            words: words
+            words: row_bitmap_and_words(self.words, rhs.words, limit)
         )
 
     fn or_with(rhs: RowBitmap) -> RowBitmap:
@@ -148,27 +144,95 @@ struct RowBitmap:
             row_bitmap_word_count(self.row_count),
             row_bitmap_word_count(rhs.row_count)
         )
-        var words: [u32] = [0u32; limit]
-        var idx = 0
-        while idx < limit:
-            val lhs_word = if idx < row_bitmap_word_count(self.row_count): self.words[idx as i32] else: 0u32
-            val rhs_word = if idx < row_bitmap_word_count(rhs.row_count): rhs.words[idx as i32] else: 0u32
-            words[idx as i32] = lhs_word | rhs_word
-            idx = idx + 1
         RowBitmap(
             row_count: row_bitmap_max(self.row_count, rhs.row_count),
-            words: words
+            words: row_bitmap_or_words(
+                self.words, rhs.words, limit,
+                row_bitmap_word_count(self.row_count),
+                row_bitmap_word_count(rhs.row_count))
         )
 
     fn and_not(rhs: RowBitmap) -> RowBitmap:
         val limit = row_bitmap_word_count(self.row_count)
-        var words: [u32] = [0u32; limit]
-        var idx = 0
-        while idx < limit:
-            val rhs_word = if idx < row_bitmap_word_count(rhs.row_count): rhs.words[idx as i32] else: 0u32
-            words[idx as i32] = self.words[idx as i32] & (0xFFFFFFFFu32 ^ rhs_word)
-            idx = idx + 1
-        RowBitmap(row_count: self.row_count, words: words)
+        RowBitmap(
+            row_count: self.row_count,
+            words: row_bitmap_andnot_words(
+                self.words, rhs.words, limit,
+                row_bitmap_word_count(rhs.row_count))
+        )
+
+# ============================================================================
+# Row-bitmap word kernels
+#
+# `and_with` / `or_with` / `and_not` are the innermost work of every filtered
+# scan, posting-list intersect and union, and in the interpreter each word was
+# an interpreted loop step. Each now issues one native call that runs the whole
+# word loop, dispatched to an AVX-512 / AVX2 / scalar variant of the SAME source
+# loop — so the tier changes speed and never results.
+#
+# Every kernel keeps its scalar twin and falls back to it whenever the native
+# result is not exactly `limit` words. An unbacked extern returns nil, so the
+# length check IS the backing check: a short or nil result must never be used
+# as a bitmap, because dropping a word silently drops up to 32 matching rows.
+# ============================================================================
+
+@unsafe(reason: "row-bitmap word AND; span is validated inside the kernel", capabilities: [ffi])
+extern fn rt_db_bitmap_and_u32(lhs: [u32], rhs: [u32], limit: i64) -> [u32]
+@unsafe(reason: "row-bitmap word OR; span is validated inside the kernel", capabilities: [ffi])
+extern fn rt_db_bitmap_or_u32(lhs: [u32], rhs: [u32], limit: i64, lhs_words: i64, rhs_words: i64) -> [u32]
+@unsafe(reason: "row-bitmap word AND-NOT; span is validated inside the kernel", capabilities: [ffi])
+extern fn rt_db_bitmap_andnot_u32(lhs: [u32], rhs: [u32], limit: i64, rhs_words: i64) -> [u32]
+
+fn row_bitmap_and_words(lhs: [u32], rhs: [u32], limit: i64) -> [u32]:
+    if limit <= 0:
+        return [0u32; 0]
+    val out = rt_db_bitmap_and_u32(lhs, rhs, limit)
+    if out.len() == limit:
+        return out
+    _scalar_row_bitmap_and_words(lhs, rhs, limit)
+
+fn _scalar_row_bitmap_and_words(lhs: [u32], rhs: [u32], limit: i64) -> [u32]:
+    var words: [u32] = [0u32; limit]
+    var idx = 0
+    while idx < limit:
+        words[idx as i32] = lhs[idx as i32] & rhs[idx as i32]
+        idx = idx + 1
+    words
+
+fn row_bitmap_or_words(lhs: [u32], rhs: [u32], limit: i64, lhs_words: i64, rhs_words: i64) -> [u32]:
+    if limit <= 0:
+        return [0u32; 0]
+    val out = rt_db_bitmap_or_u32(lhs, rhs, limit, lhs_words, rhs_words)
+    if out.len() == limit:
+        return out
+    _scalar_row_bitmap_or_words(lhs, rhs, limit, lhs_words, rhs_words)
+
+fn _scalar_row_bitmap_or_words(lhs: [u32], rhs: [u32], limit: i64, lhs_words: i64, rhs_words: i64) -> [u32]:
+    var words: [u32] = [0u32; limit]
+    var idx = 0
+    while idx < limit:
+        val lhs_word = if idx < lhs_words: lhs[idx as i32] else: 0u32
+        val rhs_word = if idx < rhs_words: rhs[idx as i32] else: 0u32
+        words[idx as i32] = lhs_word | rhs_word
+        idx = idx + 1
+    words
+
+fn row_bitmap_andnot_words(lhs: [u32], rhs: [u32], limit: i64, rhs_words: i64) -> [u32]:
+    if limit <= 0:
+        return [0u32; 0]
+    val out = rt_db_bitmap_andnot_u32(lhs, rhs, limit, rhs_words)
+    if out.len() == limit:
+        return out
+    _scalar_row_bitmap_andnot_words(lhs, rhs, limit, rhs_words)
+
+fn _scalar_row_bitmap_andnot_words(lhs: [u32], rhs: [u32], limit: i64, rhs_words: i64) -> [u32]:
+    var words: [u32] = [0u32; limit]
+    var idx = 0
+    while idx < limit:
+        val rhs_word = if idx < rhs_words: rhs[idx as i32] else: 0u32
+        words[idx as i32] = lhs[idx as i32] & (0xFFFFFFFFu32 ^ rhs_word)
+        idx = idx + 1
+    words
 
 struct PostingList:
     term: text
@@ -327,12 +391,7 @@ fn text_to_byte_span(value: text) -> ByteSpan:
 fn byte_span_equals(lhs: ByteSpan, rhs: ByteSpan) -> bool:
     if lhs.len != rhs.len:
         return false
-    var idx = 0
-    while idx < lhs.len:
-        if lhs.bytes[lhs.start + idx] != rhs.bytes[rhs.start + idx]:
-            return false
-        idx = idx + 1
-    true
+    simd_bytes_equal(lhs.bytes, lhs.start, rhs.bytes, rhs.start, lhs.len)
 
 fn byte_span_prefix_len(lhs: ByteSpan, rhs: ByteSpan) -> i64:
     val limit = row_bitmap_min(lhs.len, rhs.len)

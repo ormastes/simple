@@ -1,7 +1,20 @@
 # Native Function Value Array Literal Blocker
 
+## Closed 2026-09-13 — already closed in-entry; behaviour re-checked on the current seed
+
+- **inferred** The entry `Status: closed` is backed by an in-file record of what changed
+  (narrowed compilability fallback / preserved native lowering), not a bare status flip.
+- **measured** On the Rust seed v1.0.0-rc.1 (Windows) the shapes this blocker covers now
+  execute correctly: a function-value array literal `[add1, add2]` walked by `for f in fns`
+  and called per element prints `total=23`; helper returns and `me fn` methods mutating an
+  array field accumulate correctly (`mefn=2`).
+- **inferred** Standalone-native re-confirmation is not possible here: `bin/simple
+  native-build` aborts with `SCV-E-SNAPSHOT: snapshot-cache-root-not-owned` and
+  `unknown extern function: rt_env_vars` before codegen, for reasons unrelated to this bug.
+
+
 Date: 2026-06-11
-Status: closed
+Status: closed 2026-09-13 (was: Status: closed)
 Owner: multicore-green lane
 
 ## Summary

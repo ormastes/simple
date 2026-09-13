@@ -2552,13 +2552,47 @@ fn decl_entry_count(decls: text) -> i32:
 
 # Flat table, stride 2: [name0, value0, name1, value1, ...] in source order.
 # Names are trimmed+lowered, values trimmed — exactly as `decl_get` does.
+#
+# MEMO (2026-09-13): the table is a pure function of `decls`, but the style
+# cascade rebuilds it PER NODE over a rule set that never changes within a
+# document — 2190 builds for 908 nodes on css-layout, each materialising the
+# whole table with a `substring().trim().lower()` per entry
+# (doc/10_metrics/ui/web_document_pipeline_profile_macos_2026-09-12.md, defect 3).
+# Every caller treats the returned array as READ-ONLY (verified: the four call
+# sites only pass it to `decl_tbl_*` readers), so one shared instance per
+# distinct block is byte-identical to a fresh build. Bounded so a pathological
+# document cannot grow it without limit; `decl_table_memo_reset()` clears it.
+val DECL_TABLE_MEMO_LIMIT: i64 = 4096
+var _decl_table_memo: Dict<text, [text]> = {}
+var _decl_table_memo_hits: i64 = 0
+var _decl_table_memo_misses: i64 = 0
+
+pub fn decl_table_memo_hits() -> i64:
+    _decl_table_memo_hits
+
+pub fn decl_table_memo_misses() -> i64:
+    _decl_table_memo_misses
+
+pub fn decl_table_memo_reset():
+    _decl_table_memo = {}
+    _decl_table_memo_hits = 0
+    _decl_table_memo_misses = 0
+
 fn decl_table_build(decls: text) -> [text]:
-    if _wsc_armed():
+    if _decl_table_memo.has(decls):
+        _decl_table_memo_hits = _decl_table_memo_hits + 1
+        return _decl_table_memo[decls]
+    _decl_table_memo_misses = _decl_table_memo_misses + 1
+    val table = if _wsc_armed():
         val t0 = _wsc_now_us()
         val built = _decl_table_build_inner(decls)
         _wsc_add_table(_wsc_now_us() - t0, (built.len() as i64) / 2)
-        return built
-    _decl_table_build_inner(decls)
+        built
+    else:
+        _decl_table_build_inner(decls)
+    if _decl_table_memo.len() < DECL_TABLE_MEMO_LIMIT:
+        _decl_table_memo[decls] = table
+    table
 
 fn _decl_table_build_inner(decls: text) -> [text]:
     val n = decl_entry_count(decls)

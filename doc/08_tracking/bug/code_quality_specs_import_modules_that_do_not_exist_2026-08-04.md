@@ -122,6 +122,12 @@ is still present and still imports them. The specs remain unloadable.
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/system/code_quality/allow_suppressions_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
 
+## Triage 2026-09-13
+Reconfirmed: `bin/simple test test/system/code_quality/deprecated_removed_spec.spl`
+still fails identically (`Module "std.common" does not export 'set_utils'`,
+`Results: 1 total, 0 passed, 1 failed`). Needs an owner decision on whether
+to implement the missing modules/types or delete the stale specs. Left
+OPEN, no code change attempted.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Still unwritten library surface (`Set` type, `std.common.iterable`) per every

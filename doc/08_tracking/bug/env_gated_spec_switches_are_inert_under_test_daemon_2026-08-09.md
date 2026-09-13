@@ -211,3 +211,8 @@ an audit stream should land blind.
   once they really run. This box has CUDA + Vulkan, no Metal, Linux — the Metal
   and Qualcomm specs would need their own host-awareness audit. Out of scope
   here, and deliberately not enabled.
+
+## Triage 2026-09-13
+Reconfirmed: env-gated spec switches remain inert under the test daemon per
+this record's own analysis (fail-open). Fix needs test-daemon environment
+propagation work. Left OPEN (P2), no code change attempted.

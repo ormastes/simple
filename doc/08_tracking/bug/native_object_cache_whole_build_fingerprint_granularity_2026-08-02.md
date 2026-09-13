@@ -191,6 +191,12 @@ above. No further timing measurement was attempted under this load, per
 guidance to stop chasing clean timings on a contended host.
 
 
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Already "DEFERRED BY POLICY, NOW FENCED" as of 2026-08-08 with an extensive
+independent re-verification already on record. Primary file
+(`src/compiler_rust/driver/src/cli/native_build.rs`) is Rust seed. No
+action available in this lane; left OPEN/DEFERRED, unchanged.
 ## Triage 2026-09-13 (BUGFIX-6 lane)
 
 Skipped from this row-order pass: primary file/fix surface is the Rust seed

@@ -195,6 +195,15 @@ fn dispatch_command(entry: &CommandEntry, ctx: &CommandContext) -> i32 {
         }
     }
 
+    // Help must not pay for the command's implementation closure. This sits
+    // above the `test` runner-selection branches below so a help request never
+    // reaches the single-runner or light-daemon client either.
+    if let Some(help_app) = tool_help_entry_for(entry.name, &ctx.args[1..]) {
+        if let Some(code) = dispatch_to_simple_app(help_app, ctx.args, ctx.gc_log, ctx.gc_off) {
+            return code;
+        }
+    }
+
     if entry.name == "test" {
         if test_should_use_single_runner(ctx.args) {
             if let Some(code) = dispatch_to_simple_app(
@@ -282,6 +291,53 @@ fn native_build_rust_override(value: Option<&str>) -> bool {
 
 fn temporary_rust_test_runner_override(value: Option<&str>) -> bool {
     value == Some("1")
+}
+
+/// The thin pure-Simple entry that prints `lint|fmt|fix|test` help.
+///
+/// A tool command's real entry resolves its whole implementation closure before
+/// `main()` can reach its help branch, so `simple lint --help` cost 533 `.spl`
+/// opens and `simple test --help` cost 10,151 opens and then printed
+/// `Error: unknown option: --help` instead of any help. `use lazy` is loaded
+/// eagerly by this interpreter and a function-local `use` drops the module out
+/// of the JIT, so the fix is to dispatch a DIFFERENT, closure-free entry for a
+/// help request. `src/app/cli/dispatch.spl` routes identically, from the same
+/// predicate owner (`src/app/cli/tool_help.spl`).
+/// See doc/08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md
+const TOOL_HELP_ENTRY: &str = "src/app/cli/tool_help_entry.spl";
+
+/// `lint|fmt|fix` help rule, identical to `lint_entry.spl`'s own
+/// `args_request_help`: help iff there is no argument after the command, or
+/// exactly one and it is `--help`/`-h`. Deliberately NOT "any argument is
+/// `--help`" -- `simple lint foo.spl --help` lints `foo.spl` today.
+fn lint_family_help_request(rest: &[String]) -> bool {
+    match rest.len() {
+        0 => true,
+        1 => rest[0] == "--help" || rest[0] == "-h",
+        _ => false,
+    }
+}
+
+/// `test` help rule: `--help`/`-h` in any position. Every position errors
+/// today, so there is no behaviour to preserve, and this matches the predicate
+/// `handle_test_rust` already uses. A bare `simple test` runs the suite and is
+/// not a help request.
+fn test_help_request(rest: &[String]) -> bool {
+    rest.iter().any(|a| a == "--help" || a == "-h")
+}
+
+/// App path to dispatch for a tool help request, or None when this is not one.
+fn tool_help_entry_for(command: &str, rest: &[String]) -> Option<&'static str> {
+    let requested = match command {
+        "lint" | "fmt" | "fix" => lint_family_help_request(rest),
+        "test" => test_help_request(rest),
+        _ => return None,
+    };
+    if requested {
+        Some(TOOL_HELP_ENTRY)
+    } else {
+        None
+    }
 }
 
 fn command_is_pure_simple_tool(name: &str) -> bool {
@@ -1362,6 +1418,7 @@ fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool
     if app_relative_path != "src/app/ui/cli_entry.spl"
         && app_relative_path != "src/app/cli/theme_sync.spl"
         && app_relative_path != "src/app/cli/lint_entry.spl"
+        && app_relative_path != TOOL_HELP_ENTRY
         && app_relative_path != "src/app/ui.tauri/tauri_entry.spl"
         && app_relative_path != "src/app/office/mod.spl"
         && app_relative_path != "src/app/cli/bootstrap_main.spl"

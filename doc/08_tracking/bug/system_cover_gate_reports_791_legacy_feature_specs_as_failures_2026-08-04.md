@@ -103,6 +103,10 @@ scope assessment both still hold:
 
 No code changed for this doc; only this confirmation note.
 
+## Triage 2026-09-13
+Reconfirmed: architectural, root cause unchanged per the 2026-08-10
+re-verification. Test-runner/legacy-feature-suite annotation gap. Left
+as-is, no code change attempted.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Still a large-scale annotation backlog (791 files) plus a runner-reporting

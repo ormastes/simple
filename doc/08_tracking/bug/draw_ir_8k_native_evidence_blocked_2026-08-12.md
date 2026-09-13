@@ -54,3 +54,9 @@ is broken ahead of any performance question — a native-renderer or DrawIR
 artifact build cannot succeed while that holds, and re-attempting these
 benchmarks before it is fixed would only re-derive the same blocker. Detail:
 `doc/08_tracking/bug/aot_llvm_void_type_struct_probe_2026-08-10.md`.
+
+## Triage 2026-09-13
+Reconfirmed: same family as gui_8k_native_renderer_artifact_build_timeout_2026-08-13
+(native-build artifact cannot be produced within the evidence bound on this
+host). Needs a working self-hosted native-build path or GPU/board evidence
+run, outside a single-bug budget. Left OPEN, no code change attempted.

@@ -78,3 +78,12 @@ cargo feature, so LLVM lowering is untested. The spec is correct and stays RED
 on the native lane by design: per `.claude/rules/testing.md` a correct spec that
 fails is a legitimate artifact and must not be weakened. **Not fixed here** —
 F65 owns the seed.
+
+## SUPERSEDED 2026-09-13
+
+The "of -> to_span span materialisation / width-sized byte writes" reading above is
+WRONG. Root cause: same-named INSTANCE methods on the six sibling structs in
+`ints.spl` collapse to a single native implementation (`U32be`s). Bit ops are
+correct at every width; `U32le.of(0xDEADBEEF).to_span()` round-trips fine
+natively when no sibling type is in the closure. See
+`native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md`.

@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: RESOLVED. The narrowed interpreter proof draws a real buffer-backed frame. (The line-1 heading in the body still carries the old symptom text; the Status line below it is the resolution.)
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Status/Bug: Editor TUI render code complete; full runtime behavior still degraded
 
 Status: - RESOLVED. The narrowed interpreter proof draws a real buffer-backed frame. The full `rust-hosted` 

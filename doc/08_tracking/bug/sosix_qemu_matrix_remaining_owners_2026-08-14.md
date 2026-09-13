@@ -1,5 +1,11 @@
 # SOSIX QEMU matrix remaining owners
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: hardware/QEMU-matrix ownership tracker
+across RV64/x86_32/ARM32/Windows/FreeBSD/macOS guests, each blocker requiring
+a real or QEMU-emulated target host and an admitted Stage-4 CLI build. Not
+reproducible or actionable from a pure-Simple bugfix worktree. Left OPEN.
+
 Status: OPEN
 
 Canonical plan:

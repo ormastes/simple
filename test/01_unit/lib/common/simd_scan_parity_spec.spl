@@ -1,0 +1,98 @@
+# Purpose: pin simd_scan's public kernels against the scalar oracle at every
+# buffer length and needle position, including inside a complete SIMD chunk.
+# The FixedVec chunk path shipped returning "not found" for every needle inside
+# a complete 16-byte chunk, on the HTTP request-parsing path, because the
+# existing specs only exercised short buffers and the scalar tail.
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.common.simd_scan.{
+    simd_find_byte, scalar_find_byte, _fixedvec_find_byte,
+    simd_bytes_equal, scalar_bytes_equal, _fixedvec_bytes_equal
+}
+
+val NEEDLE: u8 = 13u8
+val FILLER: u8 = 65u8
+
+fn buf_with_needle(n: i64, at: i64) -> [u8]:
+    var b: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        if i == at:
+            b.push(NEEDLE)
+        else:
+            b.push(FILLER)
+        i = i + 1
+    b
+
+fn find_mismatches_over_lengths(max_n: i64) -> i64:
+    var bad: i64 = 0
+    var n: i64 = 1
+    while n <= max_n:
+        var at: i64 = 0
+        while at < n:
+            val b = buf_with_needle(n, at)
+            if simd_find_byte(b, 0, NEEDLE) != scalar_find_byte(b, 0, NEEDLE):
+                bad = bad + 1
+            at = at + 1
+        n = n + 1
+    bad
+
+describe "simd_scan public kernels match the scalar oracle":
+    it "finds a needle at every position of every length up to 40":
+        step("this sweep crosses the 16-byte chunk boundary twice")
+        assert_equal(find_mismatches_over_lengths(40), 0)
+
+    it "finds a needle that lies inside the FIRST complete chunk":
+        step("the exact case the shipped FixedVec path always missed")
+        val b = buf_with_needle(64, 5)
+        assert_equal(simd_find_byte(b, 0, NEEDLE), 5)
+        assert_equal(simd_find_byte(b, 0, NEEDLE), scalar_find_byte(b, 0, NEEDLE))
+
+    it "finds a needle in a later complete chunk and in the ragged tail":
+        step("chunk 2 interior, and a position past the last whole chunk")
+        val mid = buf_with_needle(70, 37)
+        assert_equal(simd_find_byte(mid, 0, NEEDLE), 37)
+        val tail = buf_with_needle(70, 67)
+        assert_equal(simd_find_byte(tail, 0, NEEDLE), 67)
+
+    it "honours a non-zero start and reports -1 for an absent needle":
+        step("start must skip earlier hits, absence must be -1 not 0")
+        val b = buf_with_needle(64, 5)
+        assert_equal(simd_find_byte(b, 6, NEEDLE), -1)
+        val none = buf_with_needle(64, -1)
+        assert_equal(simd_find_byte(none, 0, NEEDLE), -1)
+
+    it "agrees with the oracle on span equality, equal and unequal":
+        step("including a difference inside a complete chunk")
+        val a = buf_with_needle(64, -1)
+        val same = buf_with_needle(64, -1)
+        assert_equal(simd_bytes_equal(a, 0, same, 0, 64), true)
+        assert_equal(simd_bytes_equal(a, 0, same, 0, 64), scalar_bytes_equal(a, 0, same, 0, 64))
+        val diff = buf_with_needle(64, 5)
+        assert_equal(simd_bytes_equal(a, 0, diff, 0, 64), false)
+        val diff_tail = buf_with_needle(64, 61)
+        assert_equal(simd_bytes_equal(a, 0, diff_tail, 0, 64), false)
+
+    it "rejects out-of-range spans instead of reading past the buffer":
+        step("span validation is the trust boundary for both kernels")
+        val a = buf_with_needle(32, -1)
+        assert_equal(simd_bytes_equal(a, 0, a, 0, 64), false)
+        assert_equal(simd_bytes_equal(a, 30, a, 0, 8), false)
+        assert_equal(simd_find_byte(a, 99, NEEDLE), -1)
+
+describe "FixedVec kernels are NOT lane-consistent — do not dispatch to them":
+    it "pins _fixedvec_bytes_equal, which never splats and is correct in both lanes":
+        step("both operands come from fixedvec_from_array, which compares correctly")
+        val a = buf_with_needle(64, -1)
+        val same = buf_with_needle(64, -1)
+        assert_equal(_fixedvec_bytes_equal(a, 0, same, 0, 64), true)
+        val diff = buf_with_needle(64, 5)
+        assert_equal(_fixedvec_bytes_equal(a, 0, diff, 0, 64), false)
+
+    it "does not assert _fixedvec_find_byte, whose result depends on the lane":
+        step("it returns 5 under the spec runner and -1 under a plain `run` main; see doc/08_tracking/bug/fixedvec_splat_boxing_mismatch_breaks_simd_scan_2026-09-13.md")
+        step("asserting either value here would encode a lane artifact, so only the scalar oracle is pinned")
+        val b = buf_with_needle(64, 5)
+        assert_equal(scalar_find_byte(b, 0, NEEDLE), 5)

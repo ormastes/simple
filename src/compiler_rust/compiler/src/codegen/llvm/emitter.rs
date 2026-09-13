@@ -629,8 +629,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         if matches!(method, "is_ok" | "is_err") && args.len() == 1 {
             let recv = self.get(args[0])?;
             let variant = if method == "is_ok" { "Ok" } else { "Err" };
+            let enum_id = self.i64_const(0);
             let disc = self.i64_const(Self::enum_variant_discriminant(variant));
-            let result = self.call_runtime("rt_enum_check_discriminant", &[recv, disc])?;
+            let result = self.call_runtime("rt_enum_check_variant", &[recv, enum_id, disc])?;
             if let Some(d) = dest {
                 self.set(*d, result);
             }

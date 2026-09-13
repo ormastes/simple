@@ -1,5 +1,57 @@
 # `.?` evaluates to the payload, not a bool — 158 compiler-suite examples red
 
+## Closed 2026-09-13 — INVALID premise, and the red it was filed for is gone
+
+**Status: CLOSED (invalid premise; consequences independently remediated).**
+
+### The premise contradicts the ratified contract
+
+`.?` returning the payload is **the specified behaviour**, not a defect.
+`doc/07_guide/quick_reference/syntax_quick_reference.md:539-550`:
+
+> The `.?` operator checks if a value is **present** (not nil AND not empty).
+> ```
+> num.?     # i64?:  Some(num) — primitives always present
+> flag.?    # bool?: Some(flag) — primitives always present
+> ```
+
+The declared result type is `T?`, never `bool`. So the transcript in this entry
+— `exists=42`, `dictexists=value`, `nilexists=nil` — is the compiler doing
+exactly what the contract says. Re-measured today on the Rust seed
+`build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`): identical output on
+the default JIT lane and on `SIMPLE_EXECUTION_MODE=interpret`, matching this
+entry's own transcript byte for byte. Nothing changed; nothing was wrong.
+
+This is the same call that was already made on the sibling report
+`exists_check_on_optional_i64_returns_payload_2026-08-01.md`, closed
+2026-08-08 under "Re-triage — INVALID, premise contradicts the ratified
+contract". This entry is that same claim filed three days later against a
+different spec family and should have been closed with it.
+
+### The 158 red examples: measured today, effectively gone
+
+Sampled 8 of the 36 `test/01_unit/compiler_core/branch_coverage_*_spec.spl`
+files:
+
+```
+branch_coverage_10_spec.spl: 81 total, 80 passed, 1 failed
+branch_coverage_11_spec.spl: 79 total, 79 passed, 0 failed
+branch_coverage_12_spec.spl: 79 total, 79 passed, 0 failed
+branch_coverage_13_spec.spl: 78 total, 78 passed, 0 failed
+branch_coverage_14_spec.spl: 78 total, 78 passed, 0 failed
+branch_coverage_15_spec.spl: 79 total, 79 passed, 0 failed
+branch_coverage_16_spec.spl: 78 total, 78 passed, 0 failed
+branch_coverage_17_spec.spl: 78 total, 78 passed, 0 failed
+```
+
+630 examples, **1 failure**. The specs were corrected to the real contract in
+the interim, which is the right remediation for an invalid premise.
+
+MEASURED. **Not measured:** the remaining 28 `branch_coverage_*` files in that
+directory and the legacy `test/unit/compiler/coverage/` duplicates, and the
+cause of `branch_coverage_10`'s single surviving failure — that one was not
+investigated and is not asserted to be unrelated.
+
 - **ID:** `exists_operator_returns_payload_not_bool_2026-08-04`
 - **Status:** OPEN
 - **Found:** 2026-08-04
@@ -168,6 +220,3 @@ attribution shared by this report.
 **Status: CLOSED — not a defect.** Do not "fix" `.?` to return a bool.
 Cross-references from sibling reports citing this file as the root cause should
 be repointed at the parameter-binding report above.
-
-## Triage 2026-09-12
-Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

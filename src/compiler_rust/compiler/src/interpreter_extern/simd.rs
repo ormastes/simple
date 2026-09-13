@@ -2416,3 +2416,287 @@ pub fn rt_xgetbv(args: &[Value]) -> Result<Value, CompileError> {
 
     Ok(Value::Int(value))
 }
+
+// ---------------------------------------------------------------------------
+// Percent-opacity constant-colour span blend (web renderer row kernel).
+//
+// `rt_engine2d_simd_blend_const_span_u32` blends with STRAIGHT-ALPHA src-over
+// (/255, +128 rounding, alpha taken from the colour). The web renderer's
+// `blend_opacity` instead blends by an integer PERCENT (/100, +50 rounding),
+// so the two are not interchangeable — substituting one for the other shifts
+// every rendered pixel. This kernel exists because the renderer's row loop
+// needs the percent semantics, bit for bit.
+//
+// The body is deliberately a plain indexed loop over a `&mut [u32]`: that is
+// the shape LLVM auto-vectorizes, and the `blend_const_span_pct_avx512`
+// wrapper below re-emits it under `avx512bw` so a capable host gets ZMM-width
+// codegen without any hand-written intrinsics to get wrong. Correctness is
+// therefore identical across all three paths by construction — they are the
+// same source loop compiled three ways.
+// ---------------------------------------------------------------------------
+
+/// One pixel of the percent blend. MUST stay bit-identical to
+/// `blend_opacity` in
+/// `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl`.
+#[inline(always)]
+fn blend_opacity_pct_u32(src: u32, dst: u32, opacity_pct: i32) -> u32 {
+    if opacity_pct >= 100 {
+        return src;
+    }
+    if opacity_pct <= 0 {
+        return dst;
+    }
+    let sr = ((src >> 16) & 255) as i32;
+    let sg = ((src >> 8) & 255) as i32;
+    let sb = (src & 255) as i32;
+    let dr = ((dst >> 16) & 255) as i32;
+    let dg = ((dst >> 8) & 255) as i32;
+    let db = (dst & 255) as i32;
+    let inv = 100 - opacity_pct;
+    let r = (sr * opacity_pct + dr * inv + 50) / 100;
+    let g = (sg * opacity_pct + dg * inv + 50) / 100;
+    let b = (sb * opacity_pct + db * inv + 50) / 100;
+    // Mirrors the Simple `argb` helper EXACTLY
+    // (renderer_foundation.spl:1223), which does not clamp:
+    //     0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+    // Clamping here would be a no-op for every reachable input (channels are
+    // 0..255 and opacity_pct is 0..100 after the early returns above), but
+    // writing it out this way makes the two bit-identical by construction
+    // rather than by argument.
+    0xFF00_0000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
+#[inline(always)]
+fn blend_const_span_pct_scalar(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    for d in dst.iter_mut() {
+        *d = blend_opacity_pct_u32(src, *d, opacity_pct);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+unsafe fn blend_const_span_pct_avx512(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    blend_const_span_pct_scalar(dst, src, opacity_pct);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blend_const_span_pct_avx2(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    blend_const_span_pct_scalar(dst, src, opacity_pct);
+}
+
+/// Dispatch on the widest admitted host tier. Every path runs the same source
+/// loop, so this can change speed but never results.
+fn blend_const_span_pct_dispatch(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512f") {
+            // SAFETY: guarded by the runtime feature probe immediately above.
+            unsafe { blend_const_span_pct_avx512(dst, src, opacity_pct) };
+            return;
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the runtime feature probe immediately above.
+            unsafe { blend_const_span_pct_avx2(dst, src, opacity_pct) };
+            return;
+        }
+    }
+    blend_const_span_pct_scalar(dst, src, opacity_pct);
+}
+
+/// Interpreter bridge: blend one constant colour over `dst[offset..offset+count)`
+/// at an integer percent opacity. Interpreter arrays are immutable Arc values,
+/// so the updated destination array is returned.
+pub fn rt_engine2d_blend_const_span_pct_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_blend_const_span_pct_u32 expects 5 arguments (dst, offset, count, color, opacity_pct)"
+                .to_string(),
+        ));
+    }
+    let mut dst = unpack_u32_array("rt_engine2d_blend_const_span_pct_u32(dst)", &args[0])?;
+    let offset_raw = require_u64_value("rt_engine2d_blend_const_span_pct_u32(offset)", &args[1])? as i64;
+    let count_raw = require_u64_value("rt_engine2d_blend_const_span_pct_u32(count)", &args[2])? as i64;
+    let color = require_u32_value("rt_engine2d_blend_const_span_pct_u32(color)", &args[3])?;
+    let opacity_pct = require_u64_value("rt_engine2d_blend_const_span_pct_u32(opacity_pct)", &args[4])? as i64;
+
+    if offset_raw < 0 || count_raw <= 0 {
+        return Ok(pack_u32_array(dst));
+    }
+    let offset = offset_raw as usize;
+    if offset >= dst.len() {
+        return Ok(pack_u32_array(dst));
+    }
+    let count = (count_raw as usize).min(dst.len() - offset);
+    let pct = opacity_pct.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    blend_const_span_pct_dispatch(&mut dst[offset..offset + count], color, pct);
+    Ok(pack_u32_array(dst))
+}
+
+// ---------------------------------------------------------------------------
+// DB row-bitmap word kernels (query execution hot path).
+//
+// `RowBitmap::and_with` / `or_with` / `and_not` / `count` in
+// src/lib/nogc_sync_mut/db/accel.spl are word-wise u32 loops over the row
+// bitmap — the innermost work of every filtered scan, posting-list intersect
+// and union. In the interpreter each iteration is an interpreted step; these
+// kernels replace the whole loop with one call.
+//
+// `or_with` and `and_not` take explicit word counts because the Simple loops
+// treat an index past the end of either operand as a zero word rather than
+// clamping the span. The kernels reproduce that exactly instead of shortening
+// the result, which would silently drop set rows.
+//
+// As with the renderer kernel, each tier is the SAME source loop re-emitted
+// under `#[target_feature]`, so a wider tier changes speed and never results.
+// ---------------------------------------------------------------------------
+
+macro_rules! db_bitmap_tiers {
+    ($scalar:ident, $avx512:ident, $avx2:ident, $dispatch:ident, $($arg:ident: $ty:ty),*) => {
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512bw")]
+        unsafe fn $avx512(out: &mut [u32], $($arg: $ty),*) { $scalar(out, $($arg),*) }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2")]
+        unsafe fn $avx2(out: &mut [u32], $($arg: $ty),*) { $scalar(out, $($arg),*) }
+
+        fn $dispatch(out: &mut [u32], $($arg: $ty),*) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::is_x86_feature_detected!("avx512bw")
+                    && std::is_x86_feature_detected!("avx512f")
+                {
+                    // SAFETY: guarded by the runtime feature probe above.
+                    unsafe { $avx512(out, $($arg),*) };
+                    return;
+                }
+                if std::is_x86_feature_detected!("avx2") {
+                    // SAFETY: guarded by the runtime feature probe above.
+                    unsafe { $avx2(out, $($arg),*) };
+                    return;
+                }
+            }
+            $scalar(out, $($arg),*)
+        }
+    };
+}
+
+#[inline(always)]
+fn db_bitmap_and_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32]) {
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = lhs[i] & rhs[i];
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_and_scalar,
+    db_bitmap_and_avx512,
+    db_bitmap_and_avx2,
+    db_bitmap_and_dispatch,
+    lhs: &[u32],
+    rhs: &[u32]
+);
+
+#[inline(always)]
+fn db_bitmap_or_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32], lhs_words: usize, rhs_words: usize) {
+    for (i, o) in out.iter_mut().enumerate() {
+        let l = if i < lhs_words { lhs[i] } else { 0 };
+        let r = if i < rhs_words { rhs[i] } else { 0 };
+        *o = l | r;
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_or_scalar,
+    db_bitmap_or_avx512,
+    db_bitmap_or_avx2,
+    db_bitmap_or_dispatch,
+    lhs: &[u32],
+    rhs: &[u32],
+    lhs_words: usize,
+    rhs_words: usize
+);
+
+#[inline(always)]
+fn db_bitmap_andnot_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32], rhs_words: usize) {
+    for (i, o) in out.iter_mut().enumerate() {
+        let r = if i < rhs_words { rhs[i] } else { 0 };
+        *o = lhs[i] & (0xFFFF_FFFFu32 ^ r);
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_andnot_scalar,
+    db_bitmap_andnot_avx512,
+    db_bitmap_andnot_avx2,
+    db_bitmap_andnot_dispatch,
+    lhs: &[u32],
+    rhs: &[u32],
+    rhs_words: usize
+);
+
+/// Shared prologue: unpack both operands and the word limit, or return Nil so
+/// the Simple caller falls back to its scalar twin rather than producing a
+/// short bitmap (which would silently drop set rows).
+fn db_bitmap_operands(
+    name: &str,
+    args: &[Value],
+    expected: usize,
+) -> Result<Option<(Vec<u32>, Vec<u32>, usize)>, CompileError> {
+    if args.len() != expected {
+        return Err(CompileError::runtime(format!(
+            "{name} expects {expected} arguments"
+        )));
+    }
+    let lhs = unpack_u32_array(name, &args[0])?;
+    let rhs = unpack_u32_array(name, &args[1])?;
+    let limit_raw = require_u64_value(name, &args[2])? as i64;
+    if limit_raw < 0 {
+        return Ok(None);
+    }
+    Ok(Some((lhs, rhs, limit_raw as usize)))
+}
+
+pub fn rt_db_bitmap_and_u32(args: &[Value]) -> Result<Value, CompileError> {
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_and_u32", args, 3)? else {
+        return Ok(Value::Nil);
+    };
+    if limit > lhs.len() || limit > rhs.len() {
+        return Ok(Value::Nil);
+    }
+    let mut out = vec![0u32; limit];
+    db_bitmap_and_dispatch(&mut out, &lhs, &rhs);
+    Ok(pack_u32_array(out))
+}
+
+pub fn rt_db_bitmap_or_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_db_bitmap_or_u32 expects 5 arguments (lhs, rhs, limit, lhs_words, rhs_words)".to_string(),
+        ));
+    }
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_or_u32", args, 5)? else {
+        return Ok(Value::Nil);
+    };
+    let lhs_words = (require_u64_value("rt_db_bitmap_or_u32(lhs_words)", &args[3])? as usize).min(lhs.len());
+    let rhs_words = (require_u64_value("rt_db_bitmap_or_u32(rhs_words)", &args[4])? as usize).min(rhs.len());
+    let mut out = vec![0u32; limit];
+    db_bitmap_or_dispatch(&mut out, &lhs, &rhs, lhs_words, rhs_words);
+    Ok(pack_u32_array(out))
+}
+
+pub fn rt_db_bitmap_andnot_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_db_bitmap_andnot_u32 expects 4 arguments (lhs, rhs, limit, rhs_words)".to_string(),
+        ));
+    }
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_andnot_u32", args, 4)? else {
+        return Ok(Value::Nil);
+    };
+    if limit > lhs.len() {
+        return Ok(Value::Nil);
+    }
+    let rhs_words = (require_u64_value("rt_db_bitmap_andnot_u32(rhs_words)", &args[3])? as usize).min(rhs.len());
+    let mut out = vec![0u32; limit];
+    db_bitmap_andnot_dispatch(&mut out, &lhs, &rhs, rhs_words);
+    Ok(pack_u32_array(out))
+}

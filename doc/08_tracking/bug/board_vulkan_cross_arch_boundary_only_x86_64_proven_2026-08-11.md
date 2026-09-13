@@ -285,3 +285,8 @@ Only once at least one real capture exists per architecture does
 `arch_coverage_count` for a given boundary legitimately reach more than 1 —
 until then, any report of multi-architecture board-Vulkan coverage is false
 and this record documents why.
+
+## Triage 2026-09-13
+Reconfirmed: needs additional physical/QEMU board architectures to prove
+cross-arch boundary capture beyond x86_64. Hardware/board-evidence gap,
+not reproducible in this environment. Left OPEN (P3), no code change.

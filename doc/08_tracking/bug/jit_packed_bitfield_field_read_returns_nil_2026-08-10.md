@@ -1,5 +1,11 @@
 ## Re-verified 2026-08-17 — STILL OPEN, symptom unchanged
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: doc's own 2026-08-17 re-verification
+already confirms this still reproduces and needs a seed/JIT change plus
+rebuild, explicitly out of a pure-Simple lane's resource rules. Left OPEN.
+
+
 `bin/simple run` on the exact repro from this doc still prints:
 ```
 ready=nil ro=nil rsv=0

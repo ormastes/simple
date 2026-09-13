@@ -79,6 +79,10 @@ jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
 
+## Triage 2026-09-13
+Reconfirmed: Cranelift JIT method dispatch during engine2d backend
+auto-resolution, Rust-seed codegen defect. Out of scope for a pure-Simple
+lane. Left OPEN, no code change attempted.
 ## Re-check 2026-09-13 (BUGFIX-12 shard 22)
 
 Confirmed by content: both `src/lib/nogc_sync_mut/env/platform.spl` and

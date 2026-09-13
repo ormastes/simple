@@ -1,5 +1,5 @@
 # Bootstrap progress watcher reports only wrapper RSS
-**Status:** OPEN (unverified 2026-09-12)
+**Status:** RESOLVED — "Fixed for future canonical runs" per this record's own Status section; restored 2026-09-13 after a 2026-09-12 generic triage stamp overwrote it.
 
 ## Status
 
@@ -46,6 +46,11 @@ this fix deliberately does not change it.
 ## Triage 2026-09-12
 Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.
 
+## Triage 2026-09-13
+Restored status per this record's own "## Status" section ("Fixed for
+future canonical runs"). Not independently re-run (needs a live bootstrap
+process to observe the RSS watcher in action, out of this lane's
+no-bootstrap constraint). No code change attempted.
 ## Re-check 2026-09-13 (BUGFIX-12 shard 22)
 
 Confirmed by content: `tree_rss_kb` is present in

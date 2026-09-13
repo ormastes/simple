@@ -1,6 +1,6 @@
 # CudaVmExecutor.run_source / ResidentSession.run_program discard arena DATA-region state every call
 
-Status: OPEN (P2)
+Status: CLOSED (2026-09-13) -- fix confirmed present in source, no GPU hardware here to re-run live spec
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 Date: 2026-08-08
@@ -95,6 +95,24 @@ Verified: `test/02_integration/app/tools/notebook/cuda_exec_spec.spl` —
 `SIMPLE_MODULE_LIMIT=4000` workaround for the unrelated pre-existing
 module-count-limit infra issue), lint clean.
 
+## Re-check 2026-09-13 (BUGFIX-10 fanout)
+
+Status line was stale ("OPEN (P2)") despite the 2026-08-08 follow-up already
+documenting a landed, GPU-verified root-cause fix. Re-read
+`src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl:140-154` on base
+`f26970e9d93`: `build_svmg_arena_persisting_data` is present, unchanged from
+the documented fix — absolute-offset copy (`copy_start = max(data_off,
+prior_data_off)`), comment explicitly citing the live-device proof that
+SVM-G addressing is absolute, not `data_off`-relative. This sandbox has no
+GPU hardware, so `test/02_integration/app/tools/notebook/cuda_exec_spec.spl`
+could not be re-run live this pass; closing on source-content confirmation
+of the already-landed and previously live-verified fix, consistent with how
+`jit_module_drop_primitive_api_ty_field_2026-08-08` was handled earlier in
+this same lane before its own live re-verification became possible.
+
+- Status: CLOSED (2026-09-13) — fix already landed and previously verified
+  4/4 on live dual-GPU hardware (see 2026-08-08 entry above); re-confirmed
+  present in source on `f26970e9d93`.
 ## Triage 2026-09-13
 
 Requires real CUDA hardware execution (CudaVmExecutor/ResidentSession

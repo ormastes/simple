@@ -18,7 +18,7 @@
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
     MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId,
     SymbolId}
-use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirLocal, LocalKind}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirLocal, LocalKind, MirConstValue}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind,
     VhdlHardwareMetadata, vhdl_hardware_metadata_default}
@@ -45,8 +45,21 @@ fn make_local(id: i64) -> LocalId:
 fn make_block_id(id: i64) -> BlockId:
     BlockId.new(id)
 
-fn make_const_op(val_text: text) -> MirOperand:
-    MirOperand(kind: MirOperandKind.Const("i64", val_text))
+# MirOperandKind.Const is Const(value: MirConstValue, type_: MirType).
+# This fixture used to build `Const("i64", val_text)` — arguments in the wrong
+# ORDER and of the wrong TYPES, left over from an older signature. The result
+# was that `operand_is_integer_one` saw the text "i64" where it expected
+# MirConstValue.Int, so the unit-step check never fired and every positive
+# detect_bounds_from_block example failed. The production code was correct.
+fn make_int_const_op(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Int(v),
+        MirType(kind: MirTypeKind.I64)))
+
+fn make_str_const_op(val_text: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(val_text),
+        MirType(kind: MirTypeKind.Opaque("str"))))
 
 fn make_copy_op(local_id: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Copy(make_local(local_id)))
@@ -67,13 +80,13 @@ fn make_add_const_inst(dest_id: i64, src_id: i64) -> MirInst:
     # Represents  %dest = %src + 1  (induction variable increment)
     MirInst(kind: MirInstKind.BinOp(
         make_local(dest_id), MirBinOp.Add,
-        make_copy_op(src_id), make_const_op("1")
+        make_copy_op(src_id), make_int_const_op(1)
     ))
 
 fn make_call_inst(dest_id: i64) -> MirInst:
     MirInst(kind: MirInstKind.Call(
         Some(make_local(dest_id)),
-        make_const_op("extern_fn"),
+        make_str_const_op("extern_fn"),
         []
     ))
 
@@ -612,7 +625,7 @@ describe "AutoVectorize W-scev — detect_bounds_from_block negative":
         expect(result.?).to_equal(false)
 
     it "Const cond operand (not a local) returns nil":
-        val result = detect_bounds_from_block(make_bounds_block_for_n(), make_const_op("1"), make_block_id(99))
+        val result = detect_bounds_from_block(make_bounds_block_for_n(), make_int_const_op(1), make_block_id(99))
         expect(result.?).to_equal(false)
 
 # ============================================================================
@@ -1072,3 +1085,58 @@ describe "AutoVectorize N1-codegen — create_vector_loop_block":
             case If(cond, then_, else_): true
             case _: false
         expect(is_if).to_equal(true)
+
+# ============================================================================
+# Width ladder: a wider planning level must never vectorize FEWER loops
+# ============================================================================
+
+fn make_recipe_with_width(trip: i64, width: i64) -> VectorRecipe:
+    VectorRecipe(
+        kind:             VectorRecipeKind.Elementwise,
+        header_block:     make_block_id(1),
+        induction_var:    make_local(4),
+        trip_count:       trip,
+        element_type:     "f32",
+        vector_width:     width,
+        op_name:          "add_elementwise",
+        note:             "width-ladder",
+        input_bases:      [make_local(10), make_local(11)],
+        output_base:      Some(make_local(12)),
+        accumulator:      nil,
+        chunk_width:      width,
+        index_locals:     [make_local(4)],
+        store_value:      nil,
+        induction_update: make_local(4)
+    )
+
+describe "AutoVectorize width ladder — AVX-512 must not refuse what AVX2 accepts":
+    it "trip-count 12 still rewrites when the plan is 16 lanes (narrows to 8)":
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val at_16 = rewrite_elementwise_add(make_recipe_with_width(12, 16), func)
+        val at_8  = rewrite_elementwise_add(make_recipe_with_width(12, 8), func)
+        expect(at_8.blocks.len() > func.blocks.len()).to_equal(true)
+        expect(at_16.blocks.len() > func.blocks.len()).to_equal(true)
+
+    it "every trip count an 8-lane plan accepts, a 16-lane plan also accepts":
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        var regressions = 0
+        var trip = 4
+        while trip <= 40:
+            val wide   = rewrite_elementwise_add(make_recipe_with_width(trip, 16), func)
+            val narrow = rewrite_elementwise_add(make_recipe_with_width(trip, 8), func)
+            val wide_ok   = wide.blocks.len() > func.blocks.len()
+            val narrow_ok = narrow.blocks.len() > func.blocks.len()
+            if narrow_ok and not wide_ok:
+                regressions = regressions + 1
+            trip = trip + 1
+        expect(regressions).to_equal(0)
+
+    it "still declines a trip count below the narrowest 4-lane width":
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val tiny = rewrite_elementwise_add(make_recipe_with_width(3, 16), func)
+        expect(tiny.blocks.len() == func.blocks.len()).to_equal(true)
+
+    it "leaves a dynamic trip count alone rather than narrowing on no evidence":
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val dynamic = rewrite_elementwise_add(make_recipe_with_width(-1, 16), func)
+        expect(dynamic.blocks.len() == func.blocks.len()).to_equal(true)

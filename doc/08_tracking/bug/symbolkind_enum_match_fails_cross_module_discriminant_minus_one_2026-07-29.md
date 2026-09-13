@@ -530,3 +530,45 @@ orchestrator review.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Re-check 2026-09-13
+
+- Status: CLOSED (2026-09-13) — not reproducible on `3d120a6f9ab5` (`bin/release/aarch64-unknown-linux-gnu/simple`, `Simple Language v1.0.0-rc.1`, Rust bootstrap seed)
+
+The "DISC1 update" minimal live repro block (`describe "real SymbolKind.Module
+value, matched against SymbolKind.Module"` above) was reproduced verbatim as a
+scratch spec (one syntax fix needed: `case Err(_): assert_true(false);
+ModuleSurfacesByName(...)` on one line no longer parses — split onto two
+lines, unrelated to this bug). Result for the `main` symbol, the same symbol
+the original report used to show the defect crossed no module boundary:
+
+```
+name=main defining_module=Option::Some(consumer_rskp) disc=2452922934 fn_matched=true
+```
+
+The original report's actual output for the same symbol was
+`disc=-1 fn_matched=false`. `disc` is no longer `-1` (it is now a hashed
+enum-id, consistent with the unrelated, separately-tracked
+`rt_enum_discriminant_is_enum_id_blind_name_hash_2026-08-08.md`), and
+`case SymbolKind.Function:` now matches correctly (`fn_matched=true`). This
+directly contradicts the bug's core claim and matches the "Rename table is
+now 11/11 complete" fix already landed in-tree (`struct ParserField`/
+`struct ParserTypeAlias` in `src/compiler/10.frontend/parser_types.spl:348,580`
+confirmed present at this sha) — the `SymbolKind.Field`/`SymbolKind.TypeAlias`
+bare-name collision with the parser's own `Field`/`TypeAlias` structs no
+longer exists anywhere in scope.
+
+The scratch spec's `expect(lowering.errors.len()).to_equal(0)` assertion
+itself failed (`expected 2 to equal 0`) — an artifact of a simplified
+single-module `modules` dict in the repro harness (the `consumer_rskp` module
+was never inserted into `modules`), not a symptom of this bug; it does not
+affect the discriminant/match evidence above, which is the only claim this
+record makes.
+
+Corroborating: `test/01_unit/compiler/hir/symbol_table_id_zero_spec.spl`
+(named in the original battery) is green today, `3 examples, 0 failures`.
+`enum_payload_capture_spec.spl` and `qualified_import_call_spec.spl` (also
+named in that battery) currently show unrelated failures
+(`semantic: array index out of bounds`, a payload-capture defect, not a
+discriminant/match defect) — filed separately if not already tracked; they do
+not bear on this record's specific claim.

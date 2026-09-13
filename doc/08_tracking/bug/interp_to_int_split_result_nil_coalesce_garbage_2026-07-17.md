@@ -1,7 +1,56 @@
 # Bug: `.to_int()` on `.split()`-derived text + `??` fallback both return garbage (Rust seed interpreter)
 
+## Closed 2026-09-13 — fixed on the lane this entry names (measured); a JIT-lane residual split out
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+This entry is filed against the Rust seed tree-walk interpreter, so that is
+the lane that decides it. Ran the minimal repro verbatim:
+
+```spl
+fn main():
+    val parts = "hello:42:world".split(":")
+    print "parts[1]={parts[1]}"
+
+    val n = parts[1].to_int() ?? 0
+    print "n={n}"
+
+    val n2 = parts[1].to_int()
+    match n2:
+        case nil:
+            print "n2 is nil"
+        case Some(v):
+            print "n2 = {v}"
+```
+
+Tree-walk lane (`SIMPLE_EXECUTION_MODE=interpreter run`):
+
+```
+parts[1]=42
+n=42
+n2 = 42
+```
+
+All three reported symptoms are gone: `.to_int()` on a `.split()`-derived
+string returns `Some(42)` rather than `nil` (the `case Some(v)` arm is
+taken, not `case nil`), and `?? 0` yields `42` rather than a large
+non-deterministic integer (measured).
+
+Recorded rather than lost: on the **seed JIT** lane the first two lines are
+correct (`parts[1]=42`, `n=42`) but the `case Some(v)` arm prints a garbage
+value rendered as a float with ~300 fractional digits ending in `2`. That is
+the `Some(x)` payload-extraction defect, not the `.to_int()`/`??` defect this
+entry tracks, and it is filed as
+
+`doc/08_tracking/bug/jit_some_pattern_payload_shifted_left_3_2026-09-13.md`
+
 - **Date:** 2026-07-17
-- **Status:** open (found incidentally while hardening `simple doc-coverage --missing`; worked around in pure Simple, not fixed here)
+- **Status:** open (found incidentally while hardening `simple doc-coverage --missing`; worked around in pure Simple, not fixed here) — CLOSED 2026-09-13 (see top section)
 - **Area:** `src/compiler_rust` interpreter fallback (tree-walking, `bin/simple run` / `src/compiler_rust/target/release/simple run`)
 
 ## Symptom

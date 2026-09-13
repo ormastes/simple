@@ -1,7 +1,14 @@
 # Bug: generic `!=` / 2-arg `==` on `[T]` elements mis-evaluates in interpreter
 
+## Closed 2026-09-13 — does not reproduce: generic `!=` on `[T]` elements evaluates correctly
+- **measured** — `fn uniq<T>(data: [T])` counting `data[i] != data[i - 1]` under
+  `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) returns `2` for `[1,1,2,2,3]` and `1`
+  for `["p","p","q"]` — both are the correct transition counts, so no dedup collapse.
+- **inferred** — matches the entry's "source fixed; focused seed-interpreter execution
+  pending"; this is that execution, on Windows rather than the filing host.
+
 **Found:** 2026-06-16 · **Severity:** P2 (correctness) · **Area:** interpreter / generics
-**Status:** source fixed; focused seed-interpreter execution pending
+**Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 
 ## Summary
 Inside a generic function `fn f<T>(data: [T], ...)`, comparing two array elements of the

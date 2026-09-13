@@ -293,3 +293,35 @@ a sabotage triple. Read the bug records before touching the same code:
 Current metrics: `doc/10_metrics/ui/chrome_vs_simple_catalog_diff_macos_2026-09-12.md`
 § Round 3. Largest remaining defect: block auto-height inside `<li>` (an inline
 run before a nested `<p>` takes 2-3 line-heights where Chrome takes 1).
+
+## Round 6B (2026-09-13) — bottom-margin collapse-through
+
+`LayoutResult.trailing_margin_b` carries the margin that CSS 2.2 §8.3.1 lets
+escape a block whose last in-flow child's bottom margin has nothing to collapse
+against (`block_bottom_margin_collapses_through`,
+`simple_web_html_layout_renderer_layout.spl`). The block's height loses it; the
+parent puts it back between the block and the next sibling. Chrome's `<li>` in
+the round-4 probe goes 80 -> 64 px, `<ul>` to Chrome's 104.
+
+Three exclusions were NOT obvious and each cost a probe:
+- **flex and grid ITEMS** are independent formatting contexts — check the
+  PARENT's `display`, not the item's own, via `nodes[i].parent`. Letting the
+  margin escape also shrinks the containing flex row by the same 16 px, and no
+  catalog page catches it.
+- a **self-collapsing** child must still forward its own trailing margin; the
+  self-collapsing branch folded only the child's declared margins.
+- **table cells need no guard** — `display: table-cell` already fails the
+  display test. A cell branch was written, proved dead by sabotage, and
+  deleted. Sabotage every guard you add; two of six were dead or wrong.
+
+**Symmetric TOP-margin case is still open** and is the next real lever:
+`doc/08_tracking/bug/web_first_child_top_margin_never_collapses_through_2026-09-13.md`.
+It cannot use this shape — the parent is placed before the first child is
+measured — so it needs `offset_layout_subtree` re-placement or a pre-pass.
+
+**5th measurement gotcha:** the geometry differ's nth-paths desync on `html`
+after `path:0/0/4/3` because Simple attributes `<li>` boxes to the `<section>`
+rather than the `<ul>`; the 247/79/492 mismatch counts are one structural
+divergence cascading, not hundreds of defects. Rank pages with the PIXEL
+differ and trust the geometry report only above the first desync.
+`doc/08_tracking/bug/web_geometry_differ_li_reparented_desyncs_nth_paths_2026-09-13.md`

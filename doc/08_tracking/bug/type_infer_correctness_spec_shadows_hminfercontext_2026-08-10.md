@@ -1,6 +1,6 @@
 # type_infer_correctness_spec.spl shadows HmInferContext with a 1-field stand-in
 
-**Status:** OPEN (unverified 2026-09-12)
+**Status:** RESOLVED (spec rewrite, 2026-08-10) — restored 2026-09-13 after a 2026-09-12 generic triage stamp had overwritten this verdict. The 2 remaining RED examples are real product defects, already filed separately (see below); this record's own scope (the spec shadowing HmInferContext) is closed.
 
 **STATUS: RESOLVED 2026-08-10 (spec) — but the rewrite is RED on two newly
 exposed product defects, deliberately left failing.**
@@ -92,3 +92,22 @@ equivalent) and the dimension solver, not just field presence.
 ## Triage 2026-09-12
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Re-check 2026-09-13
+
+Re-ran `test/01_unit/compiler/type_infer/type_infer_correctness_spec.spl` on
+`bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
+(symlinked from the shared main worktree), sha256 `3d120a6f9ab5`:
+
+```
+20 examples, 0 failures
+Results: 20 total, 20 passed, 0 failed
+```
+
+All 20 pass now (previously 18/20, with the 2 RED examples tracking the
+separately-filed `dim_solver_mismatch_path_calls_span_merge_2026-08-10.md`
+and `dim_solver_try_eval_ignores_substitution_2026-08-10.md`). Those two
+product defects appear to have been fixed since — not independently
+re-verified here since they are separate bug ids with their own records;
+flagging for whoever owns those two ids next. This record's own scope (the
+spec shadowing) remains RESOLVED.

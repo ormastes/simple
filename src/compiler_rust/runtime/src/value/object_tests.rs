@@ -8,6 +8,7 @@ use super::{
     rt_closure_set_capture,
     rt_enum_discriminant,
     rt_enum_id,
+    rt_enum_check_variant,
     // Enum functions
     rt_enum_new,
     rt_enum_payload,
@@ -246,6 +247,20 @@ fn test_enum_invalid_value() {
     assert_eq!(rt_enum_id(not_an_enum), -1);
     assert_eq!(rt_enum_discriminant(not_an_enum), -1);
     assert!(rt_enum_payload(not_an_enum).is_nil());
+}
+
+#[test]
+fn test_enum_check_variant_rejects_cross_enum_collision_and_preserves_legacy_zero() {
+    let shared_discriminant = 0x183f_6f19;
+    let scalar_kind = rt_enum_new(0x3e9d_690b, shared_discriminant, RuntimeValue::NIL);
+    let vec16i_kind = rt_enum_new(0x13c7_1209, shared_discriminant, RuntimeValue::NIL);
+    let legacy = rt_enum_new(0, shared_discriminant, RuntimeValue::NIL);
+
+    assert!(rt_enum_check_variant(scalar_kind, 0x3e9d_690b, shared_discriminant as i64));
+    assert!(!rt_enum_check_variant(vec16i_kind, 0x3e9d_690b, shared_discriminant as i64));
+    assert!(!rt_enum_check_variant(scalar_kind, 0x3e9d_690b, (shared_discriminant + 1) as i64));
+    assert!(rt_enum_check_variant(legacy, 0x3e9d_690b, shared_discriminant as i64));
+    assert!(rt_enum_check_variant(scalar_kind, 0, shared_discriminant as i64));
 }
 
 #[test]

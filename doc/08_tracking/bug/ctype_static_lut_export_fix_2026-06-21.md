@@ -1,5 +1,13 @@
 # ctype Static LUT Benchmark Export Fix
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — confirmed fixed: the exports exist and the benchmark runs
+- **measured** — `test/05_perf/ctype/ctype_lut_tables.spl:28` reads
+  `export CTYPE_FLAG_TABLE, CTYPE_BYTE_SMOKE_TABLE` — the missing exports this entry
+  records adding.
+- **measured** — `bin/simple run test/05_perf/ctype/bench_ctype_static_lut.spl`
+  (Rust seed v1.0.0-rc.1, Windows) completes all four benchmarks, e.g.
+  `lang=simple_static_lut bench=is_alpha ops=128000000 ops_per_ms=80369 checksum=52000000`,
+  ending `combined_checksum=142000000`.
 
 Date: 2026-06-21
 
@@ -23,6 +31,3 @@ from `ctype_lut_tables`, but the table module did not export those symbols.
 - `bin/simple check test/05_perf/ctype/bench_ctype_static_lut.spl`: PASS
 - `bin/simple run test/05_perf/ctype/global_static_array_smoke.spl`: prints
   `[ctype-static-array] ok`
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

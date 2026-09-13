@@ -2233,6 +2233,58 @@ SplArray* rt_engine2d_simd_blend_const_span_u32(SplArray* dst, int64_t offset,
     return dst;
 }
 
+/* ---------------------------------------------------------------------------
+ * Percent-opacity constant-colour span blend (web renderer row kernel).
+ *
+ * Native twin of the interpreter bridge
+ * `rt_engine2d_blend_const_span_pct_u32` in
+ * src/compiler_rust/compiler/src/interpreter_extern/simd.rs. Both must stay
+ * bit-identical to `blend_opacity` in
+ * src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl.
+ *
+ * This is NOT rt_engine2d_simd_blend_const_span_u32. That one is straight-alpha
+ * src-over (/255, +128, alpha from the colour); this one blends by an integer
+ * PERCENT (/100, +50). Substituting one for the other shifts every rendered
+ * pixel, which is why a separate kernel exists rather than a reused one.
+ *
+ * The loop is written plainly so the compiler can auto-vectorize it; on x86-64
+ * the Rust twin additionally re-emits it under `avx512bw` and LLVM issues ZMM
+ * code for it (33 zmm instructions, verified with llvm-objdump).
+ * ------------------------------------------------------------------------- */
+SplArray* rt_engine2d_blend_const_span_pct_u32(SplArray* dst, int64_t offset,
+                                               int64_t count, int64_t color,
+                                               int64_t opacity_pct) {
+    int64_t off = 0, n = 0;
+    if (!engine2d_span_bounds(dst, offset, count, &off, &n)) return dst;
+    int64_t* dst_data = (int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    if (!dst_data) return dst;
+
+    uint32_t s = (uint32_t)(uint64_t)color;
+    if (opacity_pct >= 100) {
+        engine2d_fill_into(dst_data + off, n, engine2d_box_pixel(s));
+        return dst;
+    }
+    if (opacity_pct <= 0) return dst;
+
+    int32_t pct = (int32_t)opacity_pct;
+    int32_t inv = 100 - pct;
+    int32_t sr = (int32_t)((s >> 16) & 255u);
+    int32_t sg = (int32_t)((s >> 8) & 255u);
+    int32_t sb = (int32_t)(s & 255u);
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t d = engine2d_unbox_pixel(dst_data[off + i]);
+        int32_t dr = (int32_t)((d >> 16) & 255u);
+        int32_t dg = (int32_t)((d >> 8) & 255u);
+        int32_t db = (int32_t)(d & 255u);
+        int32_t r = (sr * pct + dr * inv + 50) / 100;
+        int32_t g = (sg * pct + dg * inv + 50) / 100;
+        int32_t b = (sb * pct + db * inv + 50) / 100;
+        dst_data[off + i] = engine2d_box_pixel(
+            0xff000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b);
+    }
+    return dst;
+}
+
 /* Scalar fallback stubs — no-op placeholders until pure Simple or
    hardware-accelerated implementations are wired in. */
 
