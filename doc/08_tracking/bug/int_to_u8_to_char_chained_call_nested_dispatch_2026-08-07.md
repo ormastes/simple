@@ -1,5 +1,5 @@
 # `(i64).to_u8().to_char()` chained call fails in nested-call dispatch context
-
+Status: RESOLVED (2026-09-13) -- call-site fix confirmed present + regression-locked; underlying seed nested-call dispatcher gap stays OPEN-architectural
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-07, U4.2 coverage-closure unit (WM/GUI/web system-test
@@ -148,3 +148,30 @@ rather than a blanket assumption. The call-site workaround already landed in
 `host_gui_event_router.spl` remains the correct interim mitigation. Status
 unchanged: **OPEN — ARCHITECTURAL (Rust seed nested-call dispatcher, verified
 2026-08-10, evidence: `method_dispatch.rs:855`)**.
+
+## Re-check 2026-09-13 (BUGFIX-10 fanout)
+
+Confirmed the interim call-site fix in `host_glfw_key_name`
+(`src/os/compositor/host_gui_event_router.spl:21-27`) is present, using the
+documented intermediate-`val` workaround for both branches. Ran the
+regression spec: `test/01_unit/os/compositor/host_gui_event_router_coverage_closure_spec.spl`
+— `outcome=OK declared>=11 executed=11 passed=11 failed=0`, covering
+`host_glfw_key_name` (12 non-printable codes, uppercase-range +
+printable-range lowering, empty-fallback both directions).
+
+Noted, not fixed (separate, already-tracked bug, out of this row's scope):
+`test/01_unit/os/compositor/host_gui_event_router_spec.spl` has 2
+pre-existing failures, both `method 'get_prop' not found on value of type
+enum in nested call context` — the same seed nested-call-dispatcher family,
+already tracked at `doc/08_tracking/bug/interp_enum_method_nested_call_dispatch_2026-06-29.md`.
+Not touched here.
+
+The underlying seed nested-call dispatcher gap for primitive receivers
+(`method_dispatch.rs:855`) remains architecturally out of scope for a
+pure-Simple lane, as this record already correctly concludes. This row's
+specific product-code bug (the crash-on-every-keystroke symptom) is fixed
+and locked; closing this row on that basis.
+
+- Status: RESOLVED (2026-09-13) — call-site fix re-confirmed present,
+  regression spec re-verified 11/11 PASS. Underlying seed dispatcher gap
+  stays OPEN-architectural (unchanged, out of scope here).
