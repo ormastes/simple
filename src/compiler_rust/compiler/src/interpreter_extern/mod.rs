@@ -2126,6 +2126,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_engine2d_blend_const_span_pct_u32",
         simd::rt_engine2d_blend_const_span_pct_u32
     );
+    insert_simple!("rt_engine2d_blend_mask_span_u32", simd::rt_engine2d_blend_mask_span_u32);
     insert_simple!("rt_simd_find_byte_span", simd::rt_simd_find_byte_span);
     insert_simple!("rt_simd_bytes_equal_span", simd::rt_simd_bytes_equal_span);
     insert_simple!("rt_db_bitmap_and_u32", simd::rt_db_bitmap_and_u32);

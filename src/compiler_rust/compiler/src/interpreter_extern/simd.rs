@@ -2904,3 +2904,104 @@ pub fn rt_simd_bytes_equal_span(args: &[Value]) -> Result<Value, CompileError> {
     }
     Ok(Value::Bool(lhs[ls..ls + n] == rhs[rs..rs + n]))
 }
+
+// ---------------------------------------------------------------------------
+// Glyph mask-blend span kernel (text rendering).
+//
+// `blit_glyph` (src/lib/nogc_sync_mut/text_layout/font_rasterizer.spl:791)
+// blends a rasterized glyph's u8 coverage mask into an ARGB buffer, one pixel
+// at a time with five branches and ~15 integer ops each. Text is the other
+// high-volume path in the web renderer after solid fills.
+//
+// Semantics MUST mirror blit_glyph exactly, and it is NOT the same blend as
+// either of the two kernels already here:
+//   * it is straight-alpha src-over with FLOOR /255 (not the percent blend's
+//     /100 + 50),
+//   * and it always writes opaque alpha, ignoring the destination's alpha
+//     entirely -- so it must take the opaque-dst branch unconditionally rather
+//     than reusing a general Porter-Duff path.
+//
+// Span-returning, like the percent kernel: returning the whole destination
+// would make the cost O(rows x buffer) instead of O(rows x span).
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn blend_mask_span_scalar(dst: &mut [u32], mask: &[u8], color: u32) {
+    let fg_r = ((color >> 16) & 0xFF) as u32;
+    let fg_g = ((color >> 8) & 0xFF) as u32;
+    let fg_b = (color & 0xFF) as u32;
+    for (i, d) in dst.iter_mut().enumerate() {
+        let a = mask[i] as u32;
+        // Branchless in the vector body: `a == 0` and `a == 255` both fall out
+        // of the general formula (inv=255 -> dst, inv=0 -> fg), so no early
+        // exit is needed and the loop stays widenable.
+        let inv = 255 - a;
+        let cur = *d;
+        let r = (fg_r * a + ((cur >> 16) & 0xFF) * inv) / 255;
+        let g = (fg_g * a + ((cur >> 8) & 0xFF) * inv) / 255;
+        let b = (fg_b * a + (cur & 0xFF) * inv) / 255;
+        *d = 0xFF00_0000u32 | (r << 16) | (g << 8) | b;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+unsafe fn blend_mask_span_avx512(dst: &mut [u32], mask: &[u8], color: u32) {
+    blend_mask_span_scalar(dst, mask, color)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blend_mask_span_avx2(dst: &mut [u32], mask: &[u8], color: u32) {
+    blend_mask_span_scalar(dst, mask, color)
+}
+
+fn blend_mask_span_dispatch(dst: &mut [u32], mask: &[u8], color: u32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512f") {
+            // SAFETY: guarded by the runtime feature probe above.
+            unsafe { blend_mask_span_avx512(dst, mask, color) };
+            return;
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the runtime feature probe above.
+            unsafe { blend_mask_span_avx2(dst, mask, color) };
+            return;
+        }
+    }
+    blend_mask_span_scalar(dst, mask, color)
+}
+
+/// Blend `count` mask pixels into `dst[offset..]`, returning ONLY that span.
+/// An out-of-range span returns an empty array, which the caller treats as
+/// "not backed" and falls back rather than writing a short row.
+pub fn rt_engine2d_blend_mask_span_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 6 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_blend_mask_span_u32 expects 6 arguments (dst, offset, mask, mask_offset, count, color)"
+                .to_string(),
+        ));
+    }
+    let dst_off = require_u64_value("rt_engine2d_blend_mask_span_u32(offset)", &args[1])? as i64;
+    let mask_off = require_u64_value("rt_engine2d_blend_mask_span_u32(mask_offset)", &args[3])? as i64;
+    let count_raw = require_u64_value("rt_engine2d_blend_mask_span_u32(count)", &args[4])? as i64;
+    let color = require_u32_value("rt_engine2d_blend_mask_span_u32(color)", &args[5])?;
+    if dst_off < 0 || mask_off < 0 || count_raw <= 0 {
+        return Ok(pack_u32_array(Vec::new()));
+    }
+    let count = count_raw as usize;
+    let mut span = unpack_u32_window(
+        "rt_engine2d_blend_mask_span_u32(dst)",
+        &args[0],
+        dst_off as usize,
+        count,
+    )?;
+    let mask_all = unpack_u8_array("rt_engine2d_blend_mask_span_u32(mask)", &args[2])?;
+    let m0 = mask_off as usize;
+    if span.len() != count || m0 + count > mask_all.len() {
+        return Ok(pack_u32_array(Vec::new()));
+    }
+    blend_mask_span_dispatch(&mut span, &mask_all[m0..m0 + count], color);
+    Ok(pack_u32_array(span))
+}
