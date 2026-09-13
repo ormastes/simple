@@ -218,3 +218,13 @@ alias-aware path still runs under the same `/usr/bin/timeout -k 2s 30s` bound
 that produced the original exit-124, and no post-fix run showing a retained
 Git-state receipt exists in the tree. The mechanism is verified present; the
 defect is not verified resolved. Status unchanged.
+
+## Triage 2026-09-13
+
+Not exercisable on this host (linux/aarch64, seed sha256 prefix
+3d120a6f9ab5704b, base a6450c9d6f5). This defect is specific to a
+Windows checkout materializing git symlinks and the Stage 3 Windows
+Git-state receipt; there is no Windows path here to reproduce
+`bootstrap_stage3_git_state` against. Leaving OPEN — BUGFIX-6 lane
+cannot progress this without a Windows host. No code change.
+
