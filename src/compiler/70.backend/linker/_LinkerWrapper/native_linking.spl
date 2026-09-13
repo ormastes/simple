@@ -643,7 +643,28 @@ fn _cc_fallback_runtime_lib_args(config: NativeLinkConfig) -> [text]:
     if runtime_dir == "" or runtime_dir == "none":
         return []
     val archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
-    native_runtime_archive_link_args(runtime_dir, config.runtime_bundle, archives, true, true, true)
+    # PE/COFF (MSVC link.exe AND mingw ld/lld) has no `-rpath` concept -- it is
+    # an ELF/Mach-O runtime-search-path mechanism. Emitting it unconditionally
+    # here made this cc-fallback path a Windows-native-build landmine: any
+    # code path that reaches link_native_cc on a Windows host (e.g. via a
+    # wrong upstream OS detection routing a real Windows host into the
+    # "Unix-like" link_native_unix -> link_native_cc branch, see
+    # doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md)
+    # turned "-rpath <dir>" into an extra positional cc argument, which
+    # link.exe/lld-link then treated as an input file: "<dir>.obj" not found
+    # (LNK1181). Gate on the same effective host-OS string every other
+    # Windows-vs-Unix branch in this file uses (host_os(), which the fixed
+    # detector now agrees with std.nogc_sync_mut.env.platform.detect_os()
+    # everywhere), so the emitted flag matches the linker this argv will
+    # actually be handed to.
+    val emit_rpath = not native_linking_os_is_windows(host_os())
+    native_runtime_archive_link_args(runtime_dir, config.runtime_bundle, archives, true, true, emit_rpath)
+
+fn native_linking_os_is_windows(os: text) -> bool:
+    """True for every Windows linker flavor this file recognizes (MSVC and
+    mingw), matching the `os` strings native_effective_link_os()/host_os()
+    produce -- "windows", "windows-msvc", "windows-mingw"."""
+    os == "windows" or os == "windows-msvc" or os == "windows-mingw"
 
 fn native_runtime_archive_link_args(runtime_dir: text, runtime_bundle: text,
         archives: [text], cc_fallback: bool, rescan_core_pair: bool,
