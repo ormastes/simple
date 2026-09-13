@@ -13,7 +13,10 @@ use os.smf.provider_loader.{
 }
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_QUERY_V1_SIZE, SIMPLE_CLI_COMMAND_V1_INTERFACE,
-    SIMPLE_CLI_RUN, SimpleProviderQueryV1
+    SIMPLE_CLI_RUN, SimpleProviderQueryV1, SimpleAbiDigest256V1
+}
+use std.nogc_sync_mut.composition.abi_digest.{
+    simple_abi_digest_parse_hex_v1, simple_abi_digest_equals_v1, simple_abi_digest_is_zero_v1
 }
 
 val SIMPLE_CORE_PROVIDER_DISPATCH_OK: i32 = 0
@@ -107,8 +110,32 @@ fn simple_core_dispatch_provider_v1(
         invoked.call.result.output, invoked.call.result.diagnostic_text, true, true,
     )
 
+fn simple_core_provider_abi_digest_verdict_v1(
+    locked_hex: text,
+    provided: SimpleAbiDigest256V1,
+) -> text:
+    """Host-side exact 256-bit ABI admission verdict.
+
+    Returns "" when `provided` matches the SCI-locked digest exactly.
+    Otherwise returns a non-empty diagnostic naming why admission is refused:
+    a malformed locked digest, an undeclared (all-zero) provider digest, or an
+    exact 256-bit mismatch. Bug: sci_provider_query_abi_digest_width_mismatch_2026-08-16
+    — SCI locks one canonical 64-hex digest while the provider query ABI
+    carries fixed-width words; this is the one place that compares them, and
+    it must never truncate to fewer than all 256 bits.
+    """
+    val locked = simple_abi_digest_parse_hex_v1(locked_hex)
+    if not locked.ok:
+        return "provider-abi-digest-locked-invalid:" + locked.diagnostic
+    if simple_abi_digest_is_zero_v1(provided):
+        return "provider-abi-digest-not-declared"
+    if simple_abi_digest_equals_v1(locked.value, provided):
+        return ""
+    "provider-abi-digest-mismatch"
+
 export SIMPLE_CORE_PROVIDER_DISPATCH_OK, SIMPLE_CORE_PROVIDER_DISPATCH_INVALID
 export SIMPLE_CORE_PROVIDER_DISPATCH_ADMISSION_FAILED, SIMPLE_CORE_PROVIDER_DISPATCH_QUERY_FAILED
 export SIMPLE_CORE_PROVIDER_DISPATCH_CALL_FAILED, SIMPLE_CORE_PROVIDER_DISPATCH_RELEASE_FAILED
 export SIMPLE_CORE_PROVIDER_DISPATCH_CLOSE_FAILED
 export SimpleCoreProviderDispatchV1, simple_core_dispatch_provider_v1
+export simple_core_provider_abi_digest_verdict_v1
