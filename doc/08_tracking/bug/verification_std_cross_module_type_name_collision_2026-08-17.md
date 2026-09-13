@@ -137,3 +137,25 @@ re-confirmed by execution.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane) — re-verified, CLOSED
+
+The 2026-09-12 "unverified" flag was procedural (no repro was actually run
+that day), not a real regression. Ran the repro now at `a6450c9d6f5`:
+
+```
+$ bin/simple test test/00_formal_verification/compiler/unified_attrs_spec.spl --no-session-daemon --sequential
+6 examples, 0 failures
+SPEC FILE VERDICT: ... outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0
+Results: 6 total, 6 passed, 0 failed
+```
+
+(6 examples now vs. 5 at the original 2026-08-17 verification — an example was
+added since, unrelated to this defect — all pass.) Binary:
+`bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, sha256 prefix
+`3d120a6f`). Neither of the two originally-documented errors appears.
+
+- Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`. The latent
+  interpreter mechanism (global type-name table instead of alias-scoped
+  lookup) remains a separate, still-open hazard per the "Unblock condition"
+  section and the sibling collision-family records referenced above.
