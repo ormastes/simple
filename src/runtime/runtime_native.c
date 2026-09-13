@@ -6659,6 +6659,64 @@ double rt_math_log2(double x) {
     return log2(x);
 }
 
+/* Stage2 bootstrap link (core-C-only lane): `rt_math_sqrt` is the twelfth
+ * member of the libm passthrough family above and had NO C definition at all,
+ * so the CoreCBootstrap lane could not link any program that reaches
+ * `math.sqrt` -- observed as the `link` class of the native-vs-interpreter
+ * differential census (doc/10_metrics/infra/
+ * native_interp_differential_2026-09-13.md). Byte-for-byte twin of the Rust
+ * side (runtime/src/value/sffi/math.rs: `x.sqrt()`), which is `f64::sqrt` ->
+ * the IEEE-754 correctly-rounded square root; C99 `sqrt` is the same
+ * correctly-rounded operation, so the two agree on every input including
+ * -0.0 (-> -0.0), negative (-> NaN) and infinities. */
+double rt_math_sqrt(double x) {
+    return sqrt(x);
+}
+
+/* Same lane, same census, same shape as the eleven above and as rt_math_sqrt:
+ * eight more libm passthroughs that existed only in the Rust crate
+ * (runtime/src/value/sffi/math.rs), each a one-line method call. They surfaced
+ * as the NEXT unresolved set once the six symbols of this change stopped
+ * blocking `test/01_unit/compiler/backend/llvm_ir_builder_spec.spl`, so closing
+ * them here is what actually moves that row off the `link` class rather than
+ * trading one unresolved name for another.
+ *
+ * min/max mirror Rust's `f64::min`/`f64::max`, which are the IEEE-754
+ * minNum/maxNum operations -- they return the non-NaN operand when exactly one
+ * side is NaN. C99 `fmin`/`fmax` are specified as the same operations, so a
+ * naive `a < b ? a : b` would NOT be a twin and is deliberately not used. */
+double rt_math_exp(double x) {
+    return exp(x);
+}
+
+double rt_math_cbrt(double x) {
+    return cbrt(x);
+}
+
+double rt_math_sin(double x) {
+    return sin(x);
+}
+
+double rt_math_cos(double x) {
+    return cos(x);
+}
+
+double rt_math_tan(double x) {
+    return tan(x);
+}
+
+double rt_math_hypot(double x, double y) {
+    return hypot(x, y);
+}
+
+double rt_math_min(double a, double b) {
+    return fmin(a, b);
+}
+
+double rt_math_max(double a, double b) {
+    return fmax(a, b);
+}
+
 /* Fault limits are process policy for the pure-Simple runner and its child
  * compiler/test processes. Keep this provider independent from the legacy
  * Rust CLI CGU (which also owns seed-delegating rt_cli_run_tests). The names
@@ -9067,6 +9125,272 @@ int64_t rt_array_pop(SplArray* a) {
     int64_t value = data[idx];
     data[idx] = 3;
     return value;
+}
+
+/* ===========================================================================
+ * Core-C-only lane twins: rt_utf8_* / rt_numeric_dot_f64 / rt_array_remove
+ *
+ * These five were Rust-runtime-only. The CoreCBootstrap lane -- the lane the
+ * self-hosted Stage 2/3 binaries link against -- never links that crate, so
+ * any program reaching them failed to LINK. That is the `link` class of the
+ * native-vs-interpreter differential census
+ * (doc/10_metrics/infra/native_interp_differential_2026-09-13.md, 9 rows) and
+ * doc/08_tracking/bug/
+ * core_c_bootstrap_runtime_lane_missing_rt_utf8_math_array_symbols_2026-09-13.md.
+ * They are live call targets, never bypassed.
+ *
+ * They are written HERE, beside rt_array_pop, for the reason stated in the
+ * comment immediately below it: RtCoreArray, rt_core_as_array and the
+ * rt_core_is_int/as_int/is_float/as_float tag helpers are all file-local to
+ * this translation unit, and re-declaring RtCoreArray elsewhere is exactly the
+ * layout drift that links cleanly and corrupts silently.
+ *
+ * Every body below mirrors its Rust twin's SEMANTICS, not its code shape; the
+ * one deliberate, stated exception is the packed-SIMD reassociation noted on
+ * rt_numeric_dot_f64.
+ * ======================================================================== */
+
+/* Twin of Rust's `runtime_value_array_to_bytes`
+ * (runtime/src/value/utf8_kernels.rs): every element must be an integer in
+ * 0..=255, or the whole decode refuses (Rust's `None`).
+ *
+ * Rust reaches elements through `rt_array_get`, which RE-TAGS the packed
+ * layouts before returning them. This lane's `rt_array_get` hands back a RAW
+ * byte for FLAG_BYTES instead, so routing through it would make a byte-backed
+ * array decode differently from a generic one. The layouts are therefore read
+ * directly here. Returns the byte count, or -1 for refusal; on success *out
+ * owns a malloc'd buffer (NULL when the length is 0).
+ *
+ * A zero-length array is Some(empty) in Rust even when its data pointer is
+ * null, so the length check precedes the data check. */
+static int64_t splc_utf8_array_to_bytes(int64_t value, uint8_t** out) {
+    RtCoreArray* array = rt_core_as_array(value);
+    *out = NULL;
+    if (!array) return -1;
+    int64_t len = array->len;
+    if (len < 0) return -1;
+    if (len == 0) return 0;
+    if (!array->data) return -1;
+    uint8_t* buf = (uint8_t*)malloc((size_t)len);
+    if (!buf) return -1;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t elem;
+        if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+            elem = (int64_t)((uint8_t*)array->data)[i];
+        } else if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+            elem = (int64_t)((uint64_t*)array->data)[i];
+        } else {
+            int64_t tagged = ((int64_t*)array->data)[i];
+            if (!rt_core_is_int(tagged)) { free(buf); return -1; }
+            elem = rt_core_as_int(tagged);
+        }
+        if (elem < 0 || elem > 255) { free(buf); return -1; }
+        buf[i] = (uint8_t)elem;
+    }
+    *out = buf;
+    return len;
+}
+
+/* Twin of what `std::str::from_utf8` runs (core's run_utf8_validation), which
+ * is what Rust's `scalar_validate` / `scalar_find_invalid` call. Returns the
+ * number of leading bytes that form valid UTF-8: `len` when the whole input is
+ * valid, otherwise Rust's `Utf8Error::valid_up_to()`, which is the offset of
+ * the FIRST BYTE of the offending sequence (not of the offending byte).
+ *
+ * RFC 3629 strictness, encoded in the lead/second-byte ranges below: C0/C1
+ * overlong leads, 3-byte overlongs (E0 80..9F), UTF-16 surrogates
+ * (ED A0..BF => U+D800..U+DFFF), 4-byte overlongs (F0 80..8F), anything above
+ * U+10FFFF (F4 90.. and F5..FF), bare continuation bytes, and truncated
+ * sequences are all invalid. Truncation reports the sequence start too.
+ *
+ * All of Rust's SIMD tiers (avx2/avx512/neon) are documented in
+ * utf8_kernels.rs as byte-for-byte identical to the scalar result for every
+ * input including malformed UTF-8 -- they only skip a pure-ASCII prefix -- so
+ * one scalar twin covers every tier. */
+static int64_t splc_utf8_valid_up_to(const uint8_t* b, int64_t len) {
+    int64_t i = 0;
+    while (i < len) {
+        uint8_t first = b[i];
+        if (first < 0x80) { i++; continue; }
+        int width;
+        if (first < 0xC2) return i;       /* continuation byte, or overlong C0/C1 lead */
+        else if (first < 0xE0) width = 2;
+        else if (first < 0xF0) width = 3;
+        else if (first < 0xF5) width = 4;
+        else return i;                    /* F5..FF: beyond U+10FFFF */
+        if (i + width > len) return i;    /* truncated: reported at the start */
+        uint8_t second = b[i + 1];
+        if (width == 2) {
+            if (second < 0x80 || second > 0xBF) return i;
+        } else if (width == 3) {
+            int ok = (first == 0xE0 && second >= 0xA0 && second <= 0xBF)
+                  || (first >= 0xE1 && first <= 0xEC && second >= 0x80 && second <= 0xBF)
+                  || (first == 0xED && second >= 0x80 && second <= 0x9F)
+                  || (first >= 0xEE && second >= 0x80 && second <= 0xBF);
+            if (!ok) return i;
+            if (b[i + 2] < 0x80 || b[i + 2] > 0xBF) return i;
+        } else {
+            int ok = (first == 0xF0 && second >= 0x90 && second <= 0xBF)
+                  || (first >= 0xF1 && first <= 0xF3 && second >= 0x80 && second <= 0xBF)
+                  || (first == 0xF4 && second >= 0x80 && second <= 0x8F);
+            if (!ok) return i;
+            if (b[i + 2] < 0x80 || b[i + 2] > 0xBF) return i;
+            if (b[i + 3] < 0x80 || b[i + 3] > 0xBF) return i;
+        }
+        i += width;
+    }
+    return len;
+}
+
+/* Twin of rt_utf8_count_codepoints. NOT validation-based, deliberately: Rust
+ * walks lead bytes with `sequence_len(..).unwrap_or(1)` and counts one
+ * codepoint per step, so malformed input still yields a number rather than an
+ * error, and a stray continuation byte counts as one. The width table is
+ * `sequence_len`'s exactly (<0x80 => 1, <0xC0 => None, <0xE0 => 2, <0xF0 => 3,
+ * <0xF8 => 4, else None), with None spelled as the unwrap_or(1) step. A final
+ * truncated sequence may step past the end, which simply ends the loop -- same
+ * as Rust. A refused decode returns 0, matching the Rust `else` arm. */
+int64_t rt_utf8_count_codepoints(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int64_t count = 0;
+    int64_t i = 0;
+    while (i < len) {
+        uint8_t byte = buf[i];
+        int step;
+        if (byte < 0x80) step = 1;
+        else if (byte < 0xC0) step = 1;   /* sequence_len None -> unwrap_or(1) */
+        else if (byte < 0xE0) step = 2;
+        else if (byte < 0xF0) step = 3;
+        else if (byte < 0xF8) step = 4;
+        else step = 1;                    /* sequence_len None -> unwrap_or(1) */
+        i += step;
+        count++;
+    }
+    free(buf);
+    return count;
+}
+
+/* Twin of rt_utf8_validate. Rust returns `bool`, whose extern "C" ABI is a
+ * single byte holding 0 or 1 -- int8_t here, the spelling this file already
+ * uses for every other boolean-returning rt_* export. A refused decode is
+ * `false`, matching the Rust `else` arm. */
+int8_t rt_utf8_validate(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int8_t ok = (splc_utf8_valid_up_to(buf, len) == len) ? 1 : 0;
+    free(buf);
+    return ok;
+}
+
+/* Twin of rt_utf8_find_invalid: -1 when the input is entirely valid, otherwise
+ * the byte offset of the first invalid sequence. A refused decode returns 0,
+ * matching the Rust `else` arm -- note that this collides with "invalid at
+ * offset 0"; the convention is mirrored rather than improved, because the two
+ * lanes must answer identically. */
+int64_t rt_utf8_find_invalid(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int64_t at = splc_utf8_valid_up_to(buf, len);
+    free(buf);
+    return (at == len) ? -1 : at;
+}
+
+/* Twin of Rust's `runtime_numeric_to_f64`: floats pass through, integers widen,
+ * everything else refuses. Order matters only in that both lanes accept the
+ * same set. */
+static int splc_numeric_to_f64(int64_t value, double* out) {
+    if (rt_core_is_float(value)) { *out = rt_core_as_float(value); return 1; }
+    if (rt_core_is_int(value)) { *out = (double)rt_core_as_int(value); return 1; }
+    return 0;
+}
+
+/* Element read that re-tags the packed layouts, i.e. what Rust's rt_array_get
+ * does and what this lane's rt_array_get does NOT (see
+ * splc_utf8_array_to_bytes). Returns 0 for an out-of-range index. */
+static int splc_array_numeric_at(RtCoreArray* array, int64_t index, double* out) {
+    if (!array->data || index < 0 || index >= array->len) return 0;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        *out = (double)(int64_t)((uint8_t*)array->data)[index];
+        return 1;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        *out = (double)(int64_t)((uint64_t*)array->data)[index];
+        return 1;
+    }
+    return splc_numeric_to_f64(((int64_t*)array->data)[index], out);
+}
+
+/* Twin of rt_numeric_dot_f64 -> packed_dot_f64 -> scalar_dot_runtime_f64:
+ * lengths must match, every element must be numeric, and the accumulation is
+ * `acc = a.mul_add(b, acc)` -- a fused multiply-add, one rounding per term.
+ * C99 `fma` is the same operation, so the scalar lane agrees bit-for-bit.
+ * A non-array receiver, a length mismatch or a non-numeric element yields NIL
+ * (the tagged special `3`), never 0.0 -- a 0.0 would read as a legitimate dot
+ * product of orthogonal vectors.
+ *
+ * STATED LIMIT, not an oversight: when BOTH operands are all-float arrays of
+ * length >= 24 (PACK_THRESHOLD_F64), Rust hands the pair to the active SIMD
+ * provider, whose lane-wise reassociation can differ in the last ulp from the
+ * sequential fma above. That variance already exists WITHIN the Rust lane
+ * across SIMD tiers, so it is not a C-vs-Rust property; reproducing one
+ * particular tier's blocking here would pin the C lane to whichever host built
+ * it. The sequential fma is the semantics every tier is a reassociation of. */
+int64_t rt_numeric_dot_f64(int64_t lhs_value, int64_t rhs_value) {
+    RtCoreArray* lhs = rt_core_as_array(lhs_value);
+    RtCoreArray* rhs = rt_core_as_array(rhs_value);
+    if (!lhs || !rhs) return rt_core_nil();
+    if (lhs->len < 0 || lhs->len != rhs->len) return rt_core_nil();
+    double acc = 0.0;
+    for (int64_t i = 0; i < lhs->len; i++) {
+        double a, b;
+        if (!splc_array_numeric_at(lhs, i, &a)) return rt_core_nil();
+        if (!splc_array_numeric_at(rhs, i, &b)) return rt_core_nil();
+        acc = fma(a, b, acc);
+    }
+    return rt_value_float(acc);
+}
+
+/* Twin of rt_array_remove: remove the element at `index`, shift the tail down
+ * one slot, shrink the length, and RETURN THE REMOVED ELEMENT. A non-array
+ * receiver, a null data pointer, a negative index or an index >= len is NIL --
+ * note that, unlike this lane's rt_array_get, a negative index does NOT count
+ * from the end; Rust refuses it, so this refuses it.
+ *
+ * All three storage layouts are handled exactly as Rust does. Byte- and
+ * u64-packed arrays store raw scalars, so their element is read through the
+ * correctly-sized pointer and RE-TAGGED on the way out; handing back the raw
+ * scalar would be misdecoded by the caller. memmove is required, not memcpy:
+ * source and destination overlap by design. */
+int64_t rt_array_remove(int64_t array_value, int64_t index) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    if (!array) return rt_core_nil();
+    int64_t len = array->len;
+    if (!array->data || index < 0 || index >= len) return rt_core_nil();
+    int64_t tail = len - 1 - index;
+
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        uint8_t* base = (uint8_t*)array->data;
+        int64_t removed = (int64_t)base[index];
+        memmove(base + index, base + index + 1, (size_t)tail);
+        array->len -= 1;
+        return (int64_t)((uint64_t)removed << 3) | RT_VALUE_TAG_INT;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        uint64_t* base = (uint64_t*)array->data;
+        int64_t removed = (int64_t)base[index];
+        memmove(base + index, base + index + 1, (size_t)tail * sizeof(uint64_t));
+        array->len -= 1;
+        return (int64_t)((uint64_t)removed << 3) | RT_VALUE_TAG_INT;
+    }
+    int64_t* base = (int64_t*)array->data;
+    int64_t removed = base[index];
+    memmove(base + index, base + index + 1, (size_t)tail * sizeof(int64_t));
+    array->len -= 1;
+    return removed;
 }
 
 /* pop / clear: receiver-dispatched spellings of rt_array_pop/rt_array_clear.
