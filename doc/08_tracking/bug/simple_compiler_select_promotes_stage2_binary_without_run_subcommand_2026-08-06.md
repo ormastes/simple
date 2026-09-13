@@ -131,3 +131,27 @@ Option 2 alone is honesty, not a fix. Option 1 is the actual repair.
 
 **Not attempted here** because verifying either requires a stage2/stage3
 rebuild, and two Stage 3 builds were already live on this host.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Root cause is pinned to `src/app/cli/bootstrap_main.spl:449-484` (the staged
+bootstrap CLI's dispatch never included `run`), with the fix requiring a
+stage2/stage3 rebuild to verify — explicitly out of scope for this lane
+(no bootstrap runs here) and the record's own two prior attempts both
+stopped for the same reason. Confirmed the dispatch table still has no
+`run` case:
+149:        elif arg == "native-build":
+168:    worker_marker == "1" and args.len() >= 3 and args[1] == "run" and
+193:    if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
+256:        if arg == "native-build":
+353:    if removed_bundle == "--help" or removed_bundle == "-h":
+610:    if first == "run" and native_worker_marker == "1" and argc >= 3:
+616:    if first == "native-build":
+618:    if first.len() == 9 and first.starts_with("--version"):
+621:    if first.len() == 6 and first.starts_with("--help"):
+633:    if first.len() == 7 and first.starts_with("compile"):
+
+No `run` case present, confirming the defect is still live. Left OPEN;
+direction unchanged (option 1: add `run` to bootstrap_main.spl's dispatch,
+then rebuild stage2/stage3 to verify — a bootstrap redeploy, not a lane
+edit).
