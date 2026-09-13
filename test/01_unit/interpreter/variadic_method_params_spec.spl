@@ -1,0 +1,103 @@
+# A variadic parameter must work on a class/impl METHOD, not only on a free `fn`.
+#
+# Bug: doc/08_tracking/bug/interpreter_variadic_param_unsupported_on_class_methods_2026-09-13.md
+# `bind_args_with_values_named` (the pre-evaluated method-dispatch binder) had
+# no variadic case at all, though `Parameter` carries a `variadic` flag and the
+# expression binder `bind_args` has honoured it since forever. Every call with
+# more arguments than declared parameters was rejected up front:
+#   `function expects 1 argument(s), but 3 were provided`
+# so `addall(1, 2, 3)` returned 6 as a free function and failed as a method.
+#
+# The second oracle here guards the fix's own hazard: the owned-receiver
+# write-back zips parameters against argument expressions and writes any
+# container-valued parameter back into the caller variable the argument named.
+# A variadic parameter is bound to a Tuple of the trailing arguments, so an
+# unguarded write-back would clobber the FIRST caller variable with that tuple.
+
+use std.spec
+
+class Summer:
+    total: i64
+    fn addall(self, nums: i64...) -> i64:
+        var s = 0
+        for n in nums:
+            s = s + n
+        return s
+    fn offset_all(self, base: i64, nums: i64...) -> i64:
+        var s = base
+        for n in nums:
+            s = s + n
+        return s
+
+class Accum:
+    total: i64
+    me fn absorb(nums: i64...) -> i64:
+        var s = 0
+        for n in nums:
+            s = s + n
+        self.total = self.total + s
+        return self.total
+
+struct ImplBox:
+    n: i64
+
+impl ImplBox:
+    fn sum_with(nums: i64...) -> i64:
+        var s = self.n
+        for n in nums:
+            s = s + n
+        return s
+
+fn addall_free(nums: i64...) -> i64:
+    var s = 0
+    for n in nums:
+        s = s + n
+    return s
+
+describe "variadic parameters on methods":
+    it "matches the free-function control":
+        expect(addall_free(1, 2, 3)).to_equal(6)
+
+    it "collects three positional arguments on a class method":
+        var c = Summer(total: 0)
+        expect(c.addall(1, 2, 3)).to_equal(6)
+
+    it "accepts zero variadic arguments":
+        var c = Summer(total: 0)
+        expect(c.addall()).to_equal(0)
+
+    it "accepts exactly one variadic argument":
+        var c = Summer(total: 0)
+        expect(c.addall(7)).to_equal(7)
+
+    it "binds fixed parameters before the variadic tail":
+        var c = Summer(total: 0)
+        expect(c.offset_all(100, 1, 2, 3)).to_equal(106)
+
+    it "works on a me-method that mutates self":
+        var a = Accum(total: 0)
+        expect(a.absorb(1, 2)).to_equal(3)
+        expect(a.absorb(10)).to_equal(13)
+        expect(a.total).to_equal(13)
+
+    it "works on an impl-block method":
+        val b = ImplBox(n: 5)
+        expect(b.sum_with(1, 2, 3)).to_equal(11)
+
+    it "does not clobber the caller variables the arguments named":
+        var c = Summer(total: 0)
+        var x = 4
+        var y = 5
+        expect(c.addall(x, y)).to_equal(9)
+        expect(x).to_equal(4)
+        expect(y).to_equal(5)
+
+    it "does not clobber a caller array passed alongside a variadic tail":
+        var c = Summer(total: 0)
+        var head = 100
+        var t1 = 1
+        var t2 = 2
+        expect(c.offset_all(head, t1, t2)).to_equal(103)
+        expect(head).to_equal(100)
+        expect(t1).to_equal(1)
+        expect(t2).to_equal(2)

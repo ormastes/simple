@@ -584,3 +584,35 @@ Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
 - Trap: the macOS seed aborts rc 138 (SIGBUS) on a cross-module call, which is why the
   counter is one module and why `check-renderdoc-web-diff.shs --selftest` is ERROR
   here — `doc/08_tracking/bug/renderdoc_seed_sigbus_cross_module_call_2026-09-13.md`.
+
+## 2026-09-13 (later) — that "3 submits" was WRONG; counting rules
+
+- **Retracted:** the `css-layout` 3-submit/3-readback row above. Re-measured live on
+  the Vulkan device at `origin/main`: `overview` and `css-layout` both read
+  **1 submit / 1 readback / 0 host pixel loops per frame at 900x760 AND 3840x2160**.
+  The bad row was hand-copied from 2026-09-12 lane docs that quote WHOLE-RUN totals
+  across different configuration states, and predates `65634ae996a` (device
+  blur/glass batching) by five hours.
+- **Counting rule:** a submits/readbacks figure is meaningless without the frame
+  count it covers. Split an order trace on `[audit-frame N]`; never sum a run.
+  Quote per-frame numbers from the audit's own `classify`, never by hand.
+- **One parser, two tools:** `check-renderdoc-chrome-vs-simple.shs --trace-derived`
+  delegates every count to `check-web-vulkan-gpu-boundary-audit.shs --classify-only`.
+  Do not grow a second counter in it — that is exactly how the two disagreed.
+  Fixtures `test/fixtures/renderdoc/trace/*.trace.txt` (3 frames x 1 each must report
+  1 and PASS; a genuinely triple final frame must FAIL). Note `.log` is gitignored,
+  hence `.trace.txt`.
+- **Coverage:** `check-web-vulkan-gpu-boundary-audit.shs --matrix` = both pages x both
+  sizes. Only `overview` at 900x760 was ever gated before, which is why nothing
+  contradicted the bad row.
+- **Submit counter was 1-of-7 wired.** `VK_T_SFFI_SUBMIT` was folded at only
+  `backend_vulkan_helpers._flush_pending_compute_impl`; font-atlas, packed-font,
+  resident-2d and immediate-dispatch submitted uncounted. All now go through
+  `vulkan_counted_submit_and_wait_fence` (`backend_vulkan.spl`).
+  `VulkanSession.submit_and_wait` stays raw (module cycle) and has zero callers.
+- **The gate is not vacuous** — proven by live sabotage, not fixture: a second real
+  queue submit in the flush path yields
+  `FAIL — 2 frame(s) audited, violated: submits_per_frame=2 (>1)`.
+- The pooled census `submits=`/`fences=` still read 0 against real submits. That is
+  documented at `gpu_boundary_audit.spl:154-156` as unusable; the gate reads the
+  `sffi_submit_and_wait` timing bucket. Do not re-report this as a new finding.

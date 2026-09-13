@@ -13,37 +13,112 @@ RenderDoc has no macOS build, so the Mac itself can never capture.
 
 ## 1. Simple web renderer — TRACE-DERIVED, not RenderDoc-derived
 
-Source: the GPU boundary audit and catalog lanes already in this repo
-(`doc/10_metrics/ui/web_4k_showcase_gpu_boundary_audit_macos_2026-09-12.md`,
-`web_catalog_vulkan_native_lane_macos_2026-09-12.md`). These come from the
-renderer's own instrumentation, not from a graphics debugger.
+**Corrected 2026-09-13 by live re-measurement. The earlier version of this table
+reported `css-layout` at 3 submits / 3 readbacks and called it "a real open
+finding, not a measurement gap". That was wrong**, and it was wrong in a
+specific, avoidable way: the rows were hand-copied out of two 2026-09-12 lane
+documents that span DIFFERENT configuration states and use WHOLE-RUN totals,
+then read as if they were per-frame counts under the final configuration. The
+`3` came from `web_catalog_vulkan_native_lane_macos_2026-09-12.md`, whose
+`readback_pixels=2052000` is 3 x 684,000 — a PRE blur+glass cold measurement
+that was never re-taken after the fix that took `overview` from 2 readbacks to
+1. `css-layout` was fixed by the same change and simply never re-measured. The
+ordering is on record, not inferred: the css-layout native-lane measurement
+landed in `3fc7fb51292` (2026-09-12 13:42) and the device blur/glass batching
+that collapsed the extra submits in `65634ae996a` (2026-09-12 18:35), five
+hours later.
 
-| page | resolution | submits | readbacks | dispatches | backend draw ops | upload bytes | host pixel loops |
-|---|---|---|---|---|---|---|---|
-| overview | 900x760 (baseline) | 17 | 2 (5,472,000 B) | 107 | not measured (94 uploads/frame) | no counter | 16 |
-| overview | 3840x2160 | 17 | 2 (66,355,200 B) | 107 | not measured (94 uploads/frame) | no counter | 16 |
-| overview | 900x760, after device blur+glass | 1 | 1 (2,736,000 B) | 107 | 23 uploads/frame | no counter | 16 |
-| overview | 900x760, `SIMPLE_VK_FONT_UPLOAD=u32` | **1** | **1** | 107 | 23 uploads/frame | ~60 MB/frame memcpy in the bytes lane | **0** |
-| css-layout | 900x760, u32 font lane | **3** | not measured | not measured | not measured | `upload_ms` 184 -> 58 | 47 -> **0** |
-| css-layout | 900x760, native readback (cold) | not measured | 3 (2,052,000 px) | not measured | 550 ops (rect_opaque 288, rect_alpha_blend 262, image 2) | not measured | not measured |
-| css-layout | 300x253 | not measured | 1 | not measured | 187 ops | not measured | not measured |
-| html, css-paint, animation, forms-media, tab-bar, evidence | — | not measured | not measured | not measured | not measured | not measured | not measured |
+Measured live on this Mac, 2026-09-13, on the real Vulkan device, by the
+official gate `scripts/check/check-web-vulkan-gpu-boundary-audit.shs` (which
+arms `SIMPLE_VK_TIMING=1` and `SIMPLE_VK_ORDER_TRACE=1` itself and reads
+per-frame counters drained at each frame boundary — the LAST, steady frame
+decides the verdict). Interpreter binary
+`/Users/ormastes/simple/build/cargo-r2/release/simple` (39,528,776 bytes,
+2026-09-12 16:57), `SIMPLE_EXECUTION_MODE=interpreter`, 2 frames per run
+(1 cold + 1 steady).
 
-Also measured: `fence_waits` 17 -> 1, `cpu_fallback_count=0`,
-`full_surface_composites=0`, `atlas_full_repacks` 5 -> 4 -> 0. The pooled census
-reports `submits=0 fences=0` against 17 real submits and must not be used.
+| page | resolution | verdict | submits/frame | readbacks/frame | dispatches/frame | host pixel loops |
+|---|---|---|---|---|---|---|
+| overview | 900x760 | PASS | 1 | 1 | 107 | 0 |
+| css-layout | 900x760 | PASS | 1 | 1 | 287 | 0 |
+| overview | 3840x2160 | PASS | 1 | 1 | 107 | 0 |
+| css-layout | 3840x2160 | PASS | 1 | 1 | 297 | 0 |
+| html, css-paint, animation, forms-media, tab-bar, evidence | — | not measured | not measured | not measured | not measured | not measured |
 
-Commands that produced these:
+Independently cross-checked against the raw `SIMPLE_VK_ORDER_TRACE=1` event
+stream, split on the `[audit-frame N]` markers rather than summed over the run.
+Every one of the 8 frames (4 runs x cold + steady) carries exactly
+`present=1`, `readback-entry=1`. Those trace events come from a different
+emitter than the timing buckets, so they are a genuine second opinion and not a
+restatement of the same counter. Per-frame `flush` counts are 5-6, which is NOT
+a submit count: a flush with `pending_n=0` submits nothing and is deliberately
+excluded (`gpu_boundary_audit.spl`, `audit_host_fallback_report`).
+
+Commands that produced these (one per row):
 
 ```sh
-SIMPLE_2D_BACKEND=vulkan SIMPLE_VK_READBACK=native SIMPLE_VK_IMAGE_UPLOAD=u32 \
-SIMPLE_VK_RECT_UPLOAD=u32 SIMPLE_VK_FONT_UPLOAD=u32 \
-  sh scripts/check/check-web-vulkan-gpu-boundary-audit.shs
+SIMPLE_BIN=/Users/ormastes/simple/build/cargo-r2/release/simple \
+SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+  sh scripts/check/check-web-vulkan-gpu-boundary-audit.shs \
+    --page examples/06_io/ui/web_catalog/css-layout.html --width 900 --height 760
 ```
 
-Read against the invariants: `overview` in the final configuration satisfies
-1 submit / 1 readback / 0 host pixel loops. **`css-layout` does not — 3 submits
-against a limit of 1**, and that is a real open finding, not a measurement gap.
+Read against the invariants: **both pages satisfy 1 submit / 1 readback / 0 host
+pixel loops at both sizes.** There is no open multi-submit finding on
+`css-layout`.
+
+Counting rule, so this class of error cannot recur: a "submits" or "readbacks"
+figure in any document under `doc/10_metrics/ui/` is meaningless without the
+frame count it covers. Quote per-frame numbers from the audit's own `classify`
+output, never a run total divided or copied by hand. The
+`--trace-derived` mode of `scripts/check/check-renderdoc-chrome-vs-simple.shs`
+now delegates to exactly that parser, so the two tools cannot disagree again.
+
+The pooled census fields `submits=` / `fences=` still read 0 against real
+submits and must not be used; the gate reads the `sffi_submit_and_wait` timing
+bucket instead, which measured `1 74 74` and `1 61 61` ms on the two
+`css-layout` frames.
+
+### The submit counter was under-wired, and now is not
+
+Verifying the above surfaced a separate, real defect: `VK_T_SFFI_SUBMIT` — the
+only submit counter this gate reads — was folded at exactly ONE of the seven
+`vkQueueSubmit` call sites in `src/lib/gc_async_mut/gpu/engine2d`
+(`backend_vulkan_helpers._flush_pending_compute_impl`). The font-atlas, packed-font,
+resident-2d and immediate-dispatch paths all submitted uncounted, so a frame could
+have reported `submits_per_frame=1` while performing several. Every submit now goes
+through `vulkan_counted_submit_and_wait_fence`
+(`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`), which counts by
+construction. One raw submit is deliberately left unrouted and documented at the
+facade: `VulkanSession.submit_and_wait` (`vulkan_session.spl`), because
+`backend_vulkan` already imports `vulkan_session` and the reverse import would
+close a module cycle. It has zero call sites repo-wide, so it contributes no
+uncounted submit; if one is ever added, the counted door moves to a leaf module
+both sides can import rather than the cycle being opened.
+
+Proven live, not by fixture: with a second REAL queue submit spliced into the flush
+path on this device, the gate answered
+`FAIL — 2 frame(s) audited, violated: submits_per_frame=2 (>1)` (exit 1) and the
+bucket read `sffi_submit_and_wait 2`. The sabotage was then reverted and the gate
+returned to PASS with the bucket back at `1`. So the `<=1` verdicts above are
+measured, not vacuous. Re-running `css-layout` at 900x760 **after** the counter fix
+still reads 1 submit per frame — the previously-uncounted paths are not exercised by
+these pages, so the fix is hardening and the verdicts stand unchanged.
+
+Rendering is byte-unchanged by the refactor. Frame digests are identical before and
+after the counter fix at every page and size: `743c2081` (css-layout 900x760),
+`a15c50cd` (overview 900x760), `3c79ec0c` (css-layout 3840x2160), `5420e92d`
+(overview 3840x2160) — and identical between the cold and steady frame within each
+run.
+
+Coverage is now enforced rather than remembered:
+`check-web-vulkan-gpu-boundary-audit.shs --matrix` renders both pages at both sizes
+and fails if any cell violates an invariant, so a per-page regression cannot sit
+unobserved the way this one did. Measured on this host:
+`PASS — 4 matrix cell(s) audited (overview + css-layout at 900x760 and 3840x2160), 0 violations`,
+and the same four logs read back through the shared parser give
+`RENDERDOC CHROME-VS-SIMPLE: PASS — 4 trace log(s) counted per frame, 0 invariant failures`
+with `submits_per_frame=1` and `readbacks_per_frame=1` on every one.
 
 ## 2. Chrome — NOT MEASURED
 

@@ -273,11 +273,54 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # modules (one `main`), not every file in the --source dirs. Over-approximates
     # safely: an unresolved `use` is skipped; a genuinely missing import still
     # errors in the compile phase.
+    # SCV freeze is an optional consistency/caching layer (a frozen,
+    # content-addressed snapshot of the source tree). `_nb_scv_freeze_v1`
+    # fails closed whenever there is no admitted source inventory to freeze
+    # against (`compile_source_inventory_read_current_v1`), which is the case
+    # in EVERY worktree on this host: the inventory is maintained purely by
+    # explicit event submission from a git/filesystem watcher adapter
+    # (src/lib/scv/compile_source_inventory.spl: "this module never
+    # discovers files"), and nothing here ever ran one.
+    #
+    # Before this fix, a failed freeze made this function return `[]`
+    # outright with only the terse, non-actionable `SCV-E-SNAPSHOT:
+    # <reason>` line already printed inside `_nb_scv_freeze_v1` -- so every
+    # native-build, even a 2-line hello-world entry with no imports, silently
+    # compiled an empty closure and died later, deep inside the pipeline,
+    # with an opaque, locationless
+    # `error: semantic: method \`len\` not found on type \`i64\``. See
+    # doc/08_tracking/bug/native_build_entry_closure_scv_freeze_collapses_to_empty_2026-09-13.md.
+    #
+    # Fail-closed policy is kept (still returns `[]` by default -- a design
+    # change to bypass it silently was rejected in review): on freeze failure
+    # this now prints a LOUD, actionable diagnostic naming the cause and the
+    # remedy instead of the bare reason code. An unfrozen direct filesystem
+    # scan (read straight from the working tree, exactly as if no SCV
+    # snapshot were ever consulted -- weaker consistency: a concurrent edit
+    # is not guaranteed to be seen atomically) is available ONLY as an
+    # explicit opt-in via `SIMPLE_SCV_FREEZE_FALLBACK=1`, which prints its own
+    # one-line notice when it takes effect.
     val frozen = _nb_scv_freeze_v1(entry, source_dirs)
-    if not frozen.0:
+    val freeze_fallback_enabled = (env_get("SIMPLE_SCV_FREEZE_FALLBACK") ?? "") == "1"
+    if not frozen.0 and not freeze_fallback_enabled:
+        _cli_eprint(
+            "error: native-build: SCV freeze has no admitted source " +
+            "inventory to freeze the entry closure against (see the " +
+            "SCV-E-* reason above). Refusing to compute an entry closure " +
+            "under the default fail-closed policy. Remedy: set " +
+            "SIMPLE_SCV_FREEZE_FALLBACK=1 to opt into an unfrozen direct " +
+            "filesystem scan instead (weaker consistency guarantee), or " +
+            "populate an admitted source inventory first (see " +
+            "src/lib/scv/compile_source_inventory.spl).")
         return []
-    val frozen_entry = frozen.1
-    val frozen_source_dirs = frozen.2
+    if not frozen.0:
+        _cli_eprint(
+            "SCV-W-FREEZE-FALLBACK: SIMPLE_SCV_FREEZE_FALLBACK=1 is set; " +
+            "scanning the working tree directly instead of a frozen SCV " +
+            "snapshot (weaker consistency guarantee: a concurrent edit is " +
+            "not guaranteed to be seen atomically)")
+    val frozen_entry = if frozen.0: frozen.1 else: entry
+    val frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     # Level-gated, default-off per-file timing probe. The 25-file checkpoint
     # above only shows aggregate progress; this prints a per-file elapsed-us

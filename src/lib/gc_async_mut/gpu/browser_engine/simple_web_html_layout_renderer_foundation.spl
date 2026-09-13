@@ -262,6 +262,8 @@ pub fn web_style_counters_arm():
     _wsc_sec_h = 0
     _wsc_sec_i = 0
 
+
+
 fn _wsc_armed() -> bool:
     _wsc_on
 
@@ -815,6 +817,68 @@ fn attr_present(inner: text, name: text) -> bool:
                     return true
         i = i + 1
     false
+
+# Single-pass prefilter for presentational_attr_decls.
+#
+# presentational_attr_decls used to run six independent `attr_value*` /
+# `attr_present` scans over every element's raw attribute text, and each of
+# those materialises `inner.bytes()` again. Almost no element in a real page
+# carries any of the five legacy presentational attributes, so the six scans
+# almost always find nothing. This walks the byte array ONCE, quote-aware,
+# using exactly the token-start + case-insensitive name rule the individual
+# scans use, and answers whether any of the five names can possibly be found.
+#
+# Conservative by construction: a `false` answer means no scan for
+# hidden/bgcolor/width/height/align can match a token start, so all six
+# lookups would have returned nothing. It never suppresses a real match.
+pub fn html_has_presentational_attr(inner: text) -> bool:
+    val inner_len = inner.len()
+    if inner_len == 0:
+        return false
+    val ib = inner.bytes()
+    var quote = 0
+    var i = 0
+    while i < inner_len:  # cpu-lane-loop-ok: one quote-aware pass over ONE element's raw attribute text; bound is that element's attribute-text length
+        val current = ib[i]
+        if quote != 0:
+            if current == quote:
+                quote = 0
+            i = i + 1
+            continue
+        if current == 34 or current == 39:
+            quote = current
+            i = i + 1
+            continue
+        var token_start = i == 0
+        if not token_start:
+            val previous = ib[i - 1]
+            token_start = (
+                previous == 32 or previous == 9 or
+                previous == 10 or previous == 13
+            )
+        if token_start:
+            if (
+                _html_attr_name_at(ib, inner_len, i, "hidden") or
+                _html_attr_name_at(ib, inner_len, i, "bgcolor") or
+                _html_attr_name_at(ib, inner_len, i, "width") or
+                _html_attr_name_at(ib, inner_len, i, "height") or
+                _html_attr_name_at(ib, inner_len, i, "align")
+            ):
+                return true
+        i = i + 1
+    false
+
+fn _html_attr_name_at(ib: [u8], inner_len: i64, at: i64, name: text) -> bool:
+    val nb = name.bytes()
+    val name_len = name.len()
+    if at + name_len > inner_len:
+        return false
+    var j = 0
+    while j < name_len:  # cpu-lane-loop-ok: compares ONE fixed short attribute name at one offset; bound is that name's length
+        if not html_attr_name_byte_equal(ib[at + j], nb[j]):
+            return false
+        j = j + 1
+    true
 
 fn is_void(tag: text) -> bool:
     tag == "meta" or tag == "br" or tag == "img" or tag == "input" or tag == "link" or tag == "hr" or tag == "area" or tag == "base" or tag == "col" or tag == "embed" or tag == "source" or tag == "track" or tag == "wbr"

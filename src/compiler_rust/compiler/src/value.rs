@@ -512,6 +512,25 @@ pub struct CowEnv {
     tombstones: FrameSet<String>,
     /// Names declared by the current lexical function frame.
     local_bindings: FrameSet<String>,
+    /// SUPERSET of `{ k in overlay : !is_local(k) }` — the only overlay keys a
+    /// call-entry global publish can ever act on.
+    ///
+    /// `publish_live_bound_globals` runs on EVERY call out of a frame and used
+    /// to walk the whole overlay, paying two string hashes per entry in
+    /// `is_local` to discard almost all of them: measured at 23 entries
+    /// scanned per call for a caller with 20 locals versus 3 for the same
+    /// call in a narrow caller, with **1** entry surviving the filter and
+    /// **0** published across a 2,000,000-call run. That O(caller width) scan
+    /// is the mechanism behind the per-call cost growing with the caller
+    /// frame's width (PERF-7's +650 ns per 20 caller locals).
+    ///
+    /// Deliberately a SUPERSET, not an exact set: `entry()` hands out a raw
+    /// `Entry` that may or may not insert, and a stale extra name costs only
+    /// one failed `overlay.get`, whereas a MISSING name would silently drop a
+    /// global write. Every consumer re-checks membership in `overlay`,
+    /// `is_local` and `is_refreshed_global`, so over-approximation is
+    /// unobservable.
+    nonlocal_overlay: Option<FrameSet<String>>,
     /// Names shadowed by currently executing nested blocks.
     block_local_bindings: FrameMap<String, usize>,
     /// Owner-global values copied from a callee for reads, not caller writes.
@@ -587,6 +606,7 @@ impl CowEnv {
             overlay: FrameMap::default(),
             tombstones: FrameSet::default(),
             local_bindings: FrameSet::default(),
+            nonlocal_overlay: None,
             block_local_bindings: FrameMap::default(),
             refreshed_globals: FrameSet::default(),
             forwarded_globals: FrameMap::default(),
@@ -635,7 +655,42 @@ impl CowEnv {
         if !self.uninit_names.is_empty() {
             self.uninit_names.remove(&key);
         }
+        self.note_overlay_key(&key);
         self.overlay.insert(key, value)
+    }
+
+    /// Record `key` as a publishable overlay name unless this frame already
+    /// declares it local. The ONE place the `nonlocal_overlay` superset grows;
+    /// every overlay key insertion must pass through here or through a
+    /// constructor that seeds the set (see the field's doc comment).
+    #[inline]
+    fn note_overlay_key(&mut self, key: &str) {
+        if self.is_local(key) {
+            return;
+        }
+        // Lazily allocated: an ordinary frame declares every name it binds, so
+        // the set is never created and the field costs 0 to construct, clone
+        // and drop. Constructing one `ahash::RandomState` per frame for a set
+        // that stays empty was measurable at ~2,000,000 calls/run.
+        match &mut self.nonlocal_overlay {
+            Some(set) => {
+                if !set.contains(key) {
+                    set.insert(key.to_string());
+                }
+            }
+            None => {
+                let mut set = FrameSet::default();
+                set.insert(key.to_string());
+                self.nonlocal_overlay = Some(set);
+            }
+        }
+    }
+
+    #[inline]
+    fn unnote_overlay_key(&mut self, key: &str) {
+        if let Some(set) = &mut self.nonlocal_overlay {
+            set.remove(key);
+        }
     }
 
     /// Strict mode only (plan M5 §2): mark `name` as bound-but-uninitialized
@@ -673,6 +728,8 @@ impl CowEnv {
         if self.global_bindings.contains_key(&name) {
             Arc::make_mut(&mut self.global_bindings).remove(&name);
         }
+        // Now local: it can never be published, so drop it from the superset.
+        self.unnote_overlay_key(&name);
         self.local_bindings.insert(name);
     }
 
@@ -681,6 +738,7 @@ impl CowEnv {
         if !self.field_prebinds.is_empty() {
             self.field_prebinds.remove(&name);
         }
+        self.unnote_overlay_key(&name);
         *self.block_local_bindings.entry(name).or_default() += 1;
     }
 
@@ -691,11 +749,21 @@ impl CowEnv {
         *depth -= 1;
         if *depth == 0 {
             self.block_local_bindings.remove(name);
+            // The name is publishable again unless the frame declares it.
+            if self.overlay.contains_key(name) && !self.local_bindings.contains(name) {
+                self.note_overlay_key(name);
+            }
         }
     }
 
     pub fn is_local(&self, name: &str) -> bool {
-        self.local_bindings.contains(name) || self.block_local_bindings.contains_key(name)
+        // Hashing the name twice against two empty tables is pure loss, and
+        // this runs on every overlay insertion and every publish candidate.
+        if self.local_bindings.is_empty() {
+            return !self.block_local_bindings.is_empty() && self.block_local_bindings.contains_key(name);
+        }
+        self.local_bindings.contains(name)
+            || (!self.block_local_bindings.is_empty() && self.block_local_bindings.contains_key(name))
     }
 
     /// Attach (or replace) the module scope this frame resolves globals through.
@@ -720,15 +788,23 @@ impl CowEnv {
         let Some(scope) = self.scope.as_ref() else {
             return;
         };
+        // Superset-driven (see CowEnv::nonlocal_overlay). `publish_and_repoint`
+        // reaches this on every call out of the frame, so walking the whole
+        // overlay here cost the caller's width a second time.
         let names: Vec<String> = self
-            .overlay
-            .keys()
+            .nonlocal_overlay
+            .iter()
+            .flatten()
+            .filter(|name| self.overlay.contains_key(name.as_str()))
             .filter(|name| !self.is_local(name) && !self.tombstones.contains(name.as_str()))
             .filter(|name| scope.binding(name).is_some())
             .cloned()
             .collect();
         for name in names {
             self.overlay.remove(&name);
+            if let Some(set) = &mut self.nonlocal_overlay {
+                set.remove(&name);
+            }
             self.dirty_names.remove(&name);
             self.refreshed_globals.remove(&name);
         }
@@ -805,6 +881,7 @@ impl CowEnv {
         let promoted = self.get(key).cloned();
         if let Some(v) = promoted {
             self.steal_for_mutation(key, &v);
+            self.note_overlay_key(key);
             self.overlay.insert(key.to_string(), v);
             self.refreshed_globals.remove(key);
             self.dirty_names.insert(key.to_string());
@@ -823,6 +900,7 @@ impl CowEnv {
     /// Remove a key. Returns the removed value if any.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         self.refreshed_globals.remove(key);
+        self.unnote_overlay_key(key);
         if let Some(v) = self.overlay.remove(key) {
             // If the key also exists in a shared layer, add a tombstone so we don't see it
             if self.shared_contains(key) {
@@ -854,12 +932,14 @@ impl CowEnv {
         if self.tombstones.contains(key) || self.shared_contains(key) {
             return None;
         }
+        self.unnote_overlay_key(key);
         self.overlay.remove(key)
     }
 
     /// Put back a value obtained from `take_frame_owned` without recording a
     /// frame write: the exact state that existed before the take.
     pub fn restore_frame_owned(&mut self, key: String, value: Value) {
+        self.note_overlay_key(&key);
         self.overlay.insert(key, value);
     }
 
@@ -958,6 +1038,48 @@ impl CowEnv {
         self.overlay.iter()
     }
 
+    /// The overlay entries a call-entry global publish or refresh can act on:
+    /// the `nonlocal_overlay` superset filtered back through `overlay` and
+    /// `is_local`. Callers that also exclude refreshed globals apply
+    /// `is_refreshed_global` themselves, exactly as the overlay walk did.
+    ///
+    /// Same set as walking the whole overlay with those three predicates —
+    /// that is what the superset invariant buys — but O(superset), which is
+    /// empty for an ordinary frame, instead of O(caller frame width). Only
+    /// the ITERATION ORDER differs, and both are `ahash` HashMap orders
+    /// already, so nothing observable depended on it.
+    pub fn nonlocal_overlay_entries(&self) -> impl Iterator<Item = (&String, &Value)> + '_ {
+        self.nonlocal_overlay
+            .iter()
+            .flatten()
+            .filter(move |name| !self.is_local(name))
+            .filter_map(move |name| self.overlay.get_key_value(name.as_str()))
+    }
+
+    /// Entries in the superset, for counters. Not the publishable count.
+    pub fn nonlocal_overlay_len(&self) -> usize {
+        self.nonlocal_overlay.as_ref().map_or(0, |set| set.len())
+    }
+
+    /// Overlay keys the superset FAILS to cover. Always empty by construction;
+    /// a non-empty result means a global write would be silently dropped by
+    /// `publishable_overlay_entries`. Used by the `SIMPLE_ENV_AUDIT=1` gate in
+    /// `publish_live_bound_globals` and by this module's own unit tests, so the
+    /// invariant is checked against real workloads rather than argued.
+    pub fn nonlocal_overlay_audit_misses(&self) -> Vec<String> {
+        self.overlay
+            .keys()
+            .filter(|k| {
+                !self.is_local(k)
+                    && !self
+                        .nonlocal_overlay
+                        .as_ref()
+                        .is_some_and(|set| set.contains(k.as_str()))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Extend the overlay with entries from an iterator.
     pub fn extend<I: IntoIterator<Item = (String, Value)>>(&mut self, iter: I) {
         for (k, v) in iter {
@@ -969,6 +1091,7 @@ impl CowEnv {
     pub fn refresh_globals<I: IntoIterator<Item = (String, Value)>>(&mut self, iter: I) {
         for (key, value) in iter {
             self.tombstones.remove(&key);
+            self.note_overlay_key(&key);
             self.overlay.insert(key.clone(), value);
             self.refreshed_globals.insert(key);
         }
@@ -1109,6 +1232,15 @@ impl CowEnv {
                 env.refreshed_globals.insert(name.clone());
             }
         }
+        // Built field-by-field above, so seed the superset from the finished
+        // overlay/local sets rather than from any single insertion point.
+        let projected: FrameSet<String> = env
+            .overlay
+            .keys()
+            .filter(|k| !env.local_bindings.contains(k.as_str()))
+            .cloned()
+            .collect();
+        env.nonlocal_overlay = if projected.is_empty() { None } else { Some(projected) };
         env
     }
 
@@ -1138,12 +1270,20 @@ impl CowEnv {
 
     /// Create a CowEnv from an existing HashMap (map becomes the overlay).
     pub fn from_map(map: HashMap<String, Value>) -> Self {
+        // Nothing here is marked local, so every key is publishable and the
+        // superset must name all of them (see `nonlocal_overlay`).
+        let nonlocal_overlay: Option<FrameSet<String>> = if map.is_empty() {
+            None
+        } else {
+            Some(map.keys().cloned().collect())
+        };
         CowEnv {
             base: None,
             scope: None,
             overlay: map.into_iter().collect(),
             tombstones: FrameSet::default(),
             local_bindings: FrameSet::default(),
+            nonlocal_overlay,
             block_local_bindings: FrameMap::default(),
             refreshed_globals: FrameSet::default(),
             forwarded_globals: FrameMap::default(),
@@ -1162,6 +1302,7 @@ impl CowEnv {
             overlay: FrameMap::default(),
             tombstones: FrameSet::default(),
             local_bindings: FrameSet::default(),
+            nonlocal_overlay: None,
             block_local_bindings: FrameMap::default(),
             refreshed_globals: FrameSet::default(),
             forwarded_globals: FrameMap::default(),
@@ -1188,6 +1329,7 @@ impl CowEnv {
     /// Clear all entries.
     pub fn clear(&mut self) {
         self.overlay.clear();
+        self.nonlocal_overlay = None;
         self.tombstones.clear();
         self.base = None;
         self.scope = None;
@@ -1212,6 +1354,9 @@ impl CowEnv {
             }
         }
         self.tombstones.remove(&key);
+        // The raw `Entry` may insert without coming back through `insert`, so
+        // record the key unconditionally — over-approximating is safe.
+        self.note_overlay_key(&key);
         self.overlay.entry(key)
     }
 }
@@ -1230,6 +1375,7 @@ impl Clone for CowEnv {
             overlay: self.overlay.clone(),       // small
             tombstones: self.tombstones.clone(), // small
             local_bindings: self.local_bindings.clone(),
+            nonlocal_overlay: self.nonlocal_overlay.clone(),
             block_local_bindings: self.block_local_bindings.clone(),
             refreshed_globals: self.refreshed_globals.clone(),
             forwarded_globals: self.forwarded_globals.clone(),

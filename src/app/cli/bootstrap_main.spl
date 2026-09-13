@@ -13,7 +13,8 @@ extern fn rt_native_build(args: [text]) -> i64
 # Importing driver.spl directly lets discovery pull the driver and its
 # transitive imports statically. (2026-07-13 redeploy)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
-use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1}
+use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1,
+    selected_k1_backend_policy_v1}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
 use app.cli.bootstrap_identity.{bootstrap_version}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
@@ -430,7 +431,18 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     # This direct driver route bypasses the composition wrapper that normally
     # installs K1. Backend-session construction must see the selected table.
     if not install_selected_k1_backend_table_v1():
-        print "PLUG-E-K1-POLICY: bootstrap backend composition admission failed"
+        # Name WHICH module answered, instead of discarding it. There are two
+        # definitions of install_selected_k1_backend_table_v1 shadowed under the
+        # module path compiler.driver.bootstrap_k1_selected: the fail-closed
+        # stub (src/compiler/80.driver/bootstrap_k1_selected.spl, policy
+        # "unselected", install always false) and the real composition
+        # (src/compositions/kernel_llvm_cranelift/..., policy "llvm-cranelift").
+        # Both return false with identical output today, so site 16
+        # (stage2_sanity_positional_route_k1_composition_admission_failed_2026-09-13.md)
+        # could not tell "the stub bound into the capsule" from "the real
+        # installer ran and its table validation failed". The policy string
+        # separates them in one line, at zero cost on the success path.
+        print "PLUG-E-K1-POLICY: bootstrap backend composition admission failed (selected policy '{selected_k1_backend_policy_v1()}'; 'unselected' means the fail-closed stub bound instead of a committed K1 composition)"
         return 1
     var options = driver_core_compile_options_default()
     options.input_files = [entry_path]

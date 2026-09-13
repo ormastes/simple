@@ -55,14 +55,65 @@ pub fn parse_env_timeout_secs(raw: text) -> i64:
         return 0
     value
 
+# `0` is the documented way to say "no limit" (`SIMPLE_TIMEOUT_SECONDS=0`, and
+# `--timeout 0`). Until 2026-09-13 it parsed to 0, was indistinguishable from a
+# malformed value, and silently became the 900s default — so the incantation
+# used across the repo requested exactly the budget it was trying to escape.
+# Bug: doc/08_tracking/bug/web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13.md
+#
+# "Unlimited" is represented as a very large FINITE budget rather than a
+# sentinel: every downstream consumer (light_request_timeout_ms_from_seconds,
+# the outer bounded wait, the `--timeout` argument handed to the child) does
+# arithmetic on this number and treats <= 0 as "absent", so a negative or zero
+# sentinel would be silently re-defaulted at each hop. 365 days is unreachable
+# in practice while keeping every fail-closed bound intact, and it is far above
+# LIGHT_REQUEST_MAX_TIMEOUT_MS so the daemon lane is bypassed and the spec runs
+# directly with no cap.
+val TIMEOUT_UNLIMITED_SECS = 31536000
+
+pub fn timeout_value_is_well_formed(raw: text) -> bool:
+    """True when `raw` is a non-empty run of decimal digits — i.e. a value the
+    caller actually supplied, as distinct from an absent or malformed one.
+    `"0"` is well formed and means unlimited; `"abc"`, `"-5"`, `"800s"` and
+    `""` are not."""
+    if raw == "":
+        return false
+    var i = 0
+    while i < raw.len():
+        val c = raw.char_code_at(i)
+        if c < 48 or c > 57:
+            return false
+        i = i + 1
+    true
+
+pub fn timeout_secs_from_value(raw: text) -> i64:
+    """The budget a well-formed value asks for, with `0` meaning unlimited.
+    Callers must have checked `timeout_value_is_well_formed` first."""
+    val secs = parse_env_timeout_secs(raw)
+    if secs <= 0:
+        return TIMEOUT_UNLIMITED_SECS
+    secs
+
+pub fn resolve_timeout_secs(flag_raw: text, env_raw: text) -> i64:
+    """The documented ladder, most-specific-wins: an explicit `--timeout N`
+    flag, then SIMPLE_TIMEOUT_SECONDS, then the built-in default. `0` at
+    either level means unlimited. A malformed value at either level is ignored
+    and the next rung is consulted, never turned into a 0-second budget."""
+    if timeout_value_is_well_formed(flag_raw):
+        return timeout_secs_from_value(flag_raw)
+    if timeout_value_is_well_formed(env_raw):
+        return timeout_secs_from_value(env_raw)
+    CLIENT_DEFAULT_TIMEOUT_SECS
+
 pub fn client_default_timeout_secs() -> i64:
     """The budget to use when no explicit `--timeout` was given: the
     environment override when it is usable, otherwise the built-in default."""
-    val env_secs = parse_env_timeout_secs(env_get("SIMPLE_TIMEOUT_SECONDS") ?? "")
-    if env_secs > 0:
-        return env_secs
-    CLIENT_DEFAULT_TIMEOUT_SECS
+    resolve_timeout_secs("", env_get("SIMPLE_TIMEOUT_SECONDS") ?? "")
 
 export CLIENT_DEFAULT_TIMEOUT_SECS
+export TIMEOUT_UNLIMITED_SECS
 export parse_env_timeout_secs
+export timeout_value_is_well_formed
+export timeout_secs_from_value
+export resolve_timeout_secs
 export client_default_timeout_secs

@@ -249,3 +249,30 @@ fn light_request_deadline(expiry_micros: i64, now_micros: i64) -> (bool, i64):
         return (false, LIGHT_REQUEST_MAX_TIMEOUT_MS)
     val remaining_micros = expiry_micros - now_micros
     (false, (remaining_micros + 999) / 1000)
+
+# ---------------------------------------------------------------------------
+# Request claiming (bug: web_showcase_slow_specs_relaunch_loop_at_900s_cap_2026-09-13)
+# ---------------------------------------------------------------------------
+# A request must be CLAIMED — moved out of the pollable name space — before its
+# spec is executed, not after the response is written. Until 2026-09-13 the
+# `<id>.req` file stayed in place for the whole run, so a worker (or the daemon
+# itself) killed at the budget left the request re-servable: the next poll, or a
+# successor daemon spawned by another client, started the SAME spec again, and
+# again, indefinitely. An over-budget spec then looked "still running" instead
+# of failing once. These two helpers are the whole protocol: a claimed name is
+# derived from the request name and is deliberately NOT pollable, so no amount
+# of re-listing can resurrect a run that was already attempted.
+fn light_request_inflight_path(req_path: text) -> text:
+    """The claimed name for a request. Derived, never guessed, so the daemon
+    and anyone auditing the request directory agree on which files are runs
+    already attempted."""
+    "{req_path}.inflight"
+
+fn light_request_is_pollable(name: text) -> bool:
+    """True when a request-directory entry is a request the daemon may serve.
+    A claimed (`.req.inflight`) entry is NOT pollable — that is what bounds the
+    retry count of a killed run to exactly one attempt. Neither are the
+    `.req.tmp` files of an in-flight atomic write."""
+    if not name.ends_with(".req"):
+        return false
+    true

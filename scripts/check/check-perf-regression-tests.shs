@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=294
+ROW_FLOOR=317
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -835,6 +835,83 @@ must_contain     "BLOCKSHADOW parity spec is non-vacuous on the counter row" \
     "$BLOCKPARITY" "expect(r.names > 0).to_equal(true)"
 must_contain     "BLOCKSHADOW parity spec keeps the module-global oracle" \
     "$BLOCKPARITY" "assert_semantics(binary, \"sem_global_shadow.spl\", \"sem_global_shadow\", 4, \"30:9\")"
+# --- PUBLISHGLOBALS: the call-entry global publish must not scan the caller frame
+# `publish_and_repoint` runs on EVERY call out of a frame and two of its three
+# steps used to walk the caller's whole overlay asking `is_local` -- two string
+# hashes per entry -- to discard almost all of them. Counted on the base seed at
+# n = 2,000,000: 3 entries scanned per call for a narrow caller, 23 for the same
+# call with 20 extra caller locals, with ONE entry surviving the filter and NONE
+# published across either whole run. That is PERF-7's unattributed
+# caller-frame-width term. These rows pin the `nonlocal_overlay` superset that
+# replaced the walk, its lazy `Option` (an ordinary frame must never construct
+# the set), every consumer that must keep using it instead of `overlay_entries`,
+# the audit oracle and its `SIMPLE_ENV_AUDIT` gate, the counters, and the spec's
+# count-based pin and anti-vacuity assertion. See
+# doc/08_tracking/bug/interpreter_call_entry_publish_scans_the_whole_caller_frame_2026-09-13.md.
+PUBVALUE="$ROOT/src/compiler_rust/compiler/src/value.rs"
+PUBFEXEC="$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs"
+PUBSPEC="$ROOT/test/05_perf/interp/call_entry_publish_scan_spec.spl"
+PUBTESTS="$ROOT/src/compiler_rust/compiler/src/value_tests_nonlocal_overlay.rs"
+must_contain     "PUBLISHGLOBALS the publishable-name superset exists" \
+    "$PUBVALUE" "nonlocal_overlay: Option<FrameSet<String>>,"
+must_contain     "PUBLISHGLOBALS the superset is lazily allocated" \
+    "$PUBVALUE" "self.nonlocal_overlay = Some(set);"
+must_contain     "PUBLISHGLOBALS every overlay-key insertion goes through one recorder" \
+    "$PUBVALUE" "fn note_overlay_key(&mut self, key: &str) {"
+must_contain     "PUBLISHGLOBALS the superset drives the publishable iterator" \
+    "$PUBVALUE" "pub fn nonlocal_overlay_entries(&self) -> impl Iterator<Item = (&String, &Value)> + '_ {"
+must_contain     "PUBLISHGLOBALS the invariant has its own oracle" \
+    "$PUBVALUE" "pub fn nonlocal_overlay_audit_misses(&self) -> Vec<String> {"
+must_contain     "PUBLISHGLOBALS drop_published_globals starts from the superset" \
+    "$PUBVALUE" "            .filter(|name| self.overlay.contains_key(name.as_str()))"
+# No must_not_contain on drop_published_globals' old walk: every line of it
+# that is genuinely gone is a fragment other functions still use, and these
+# matchers are line-oriented `grep -qF` (a multi-line needle is ORed line by
+# line, so it would fire on an unrelated `.keys()`). The positive row above
+# plus the spec's count pin carry that guarantee.
+must_contain     "PUBLISHGLOBALS the superset is dropped wholesale on clear" \
+    "$PUBVALUE" "        self.nonlocal_overlay = None;"
+must_contain     "PUBLISHGLOBALS the call-entry publish uses the superset" \
+    "$PUBFEXEC" "        .nonlocal_overlay_entries()"
+must_not_contain "PUBLISHGLOBALS the call-entry publish no longer walks the overlay" \
+    "$PUBFEXEC" "        .filter(|(name, _)| !env.is_local(name) && !env.is_refreshed_global(name))"
+must_contain     "PUBLISHGLOBALS the audit is gated and fail-closed" \
+    "$PUBFEXEC" "fn env_audit_enabled() -> bool {"
+must_contain     "PUBLISHGLOBALS the audit aborts on a missing name" \
+    "$PUBFEXEC" "CowEnv nonlocal_overlay superset is missing publishable overlay name(s): {missed:?}"
+must_contain     "PUBLISHGLOBALS the scan is counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "PUBLISH_GLOBALS_SCANNED"
+must_contain     "PUBLISHGLOBALS the publishes are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "PUBLISH_GLOBALS_PUBLISHED"
+must_contain     "PUBLISHGLOBALS the spec pins width-independence by COUNT" \
+    "$PUBSPEC" "expect(extra < CALL_N / 100).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec pins the narrow caller too" \
+    "$PUBSPEC" "expect(narrow.scanned < CALL_N / 100).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec is non-vacuous on the counter row" \
+    "$PUBSPEC" "expect(r.calls >= expect_iters).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec forbids an empty superset" \
+    "$PUBSPEC" "expect(r.published >= SEM_N).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec keeps the caller-global oracle" \
+    "$PUBSPEC" 'expect(r.acc).to_equal("200:200")'
+must_contain     "PUBLISHGLOBALS the invariant is unit-tested across mutation orderings" \
+    "$PUBTESTS" "fn nonlocal_overlay_superset_covers_every_mutation_ordering() {"
+must_contain     "PUBLISHGLOBALS the superset is proven equal to the walk it replaced" \
+    "$PUBTESTS" "fn nonlocal_overlay_entries_match_the_overlay_walk_it_replaced() {"
+# --- PERFSELFBIN: the perf-spec binary override must divert off the daemon ---
+# 2026-09-13 (PERF-7, fixed PERF-9). `SIMPLE_PERF_SELF_BIN` selects the
+# interpreter a perf spec measures, but it was absent from the test runner's
+# binary-override list, so a daemon-served run answered from the daemon's
+# FROZEN environment. A lane asked for the BASE seed, was served the CANDIDATE,
+# and recorded 10/10 green for a spec that is RED on base. The variable belongs
+# in exactly the list whose whole purpose is "any request naming one of these
+# takes the direct lane, where the child really does inherit it".
+# See doc/08_tracking/bug/perf_self_bin_override_served_from_frozen_daemon_env_2026-09-13.md.
+must_contain     "PERFSELFBIN the perf binary override is a daemon-bypass selector" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" '"SIMPLE_PERF_SELF_BIN"]'
+must_contain     "PERFSELFBIN the bypass list is still what the override check reads" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" "    for name in _binary_override_vars():"
+must_contain     "PERFSELFBIN a named override still diverts off the daemon" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" "    val binary_override_bypass = _has_binary_override()"
 # --- TOOLHELP: `lint|fmt|fix|test --help` must not load the implementation ---
 # 2026-09-13. A tool command's real entry resolved its whole implementation
 # closure before main() could reach its help branch: 533 `.spl` opens / 9.4 s

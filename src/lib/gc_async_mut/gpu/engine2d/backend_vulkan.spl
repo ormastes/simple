@@ -53,7 +53,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_rect_blend, emu_draw_image_blend,
     emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
-    emu_draw_blur_rect,
+    emu_draw_blur_rect, emu_draw_shadow_rect,
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
@@ -65,6 +65,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_image_upload_u32_requested, vulkan_image_upload_note,
     vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
     vulkan_sffi_accepted_compute_submit_count,
+    vulkan_sffi_submit_and_wait_fence,
     vulkan_sffi_copy_from_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
     vulkan_sffi_readback_u32_into,
@@ -2916,15 +2917,22 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown: return
         if w <= 0 or h <= 0:
             return
-        val sx = x + offset_x
-        val sy = y + offset_y
-        val sw = w + 2 * blur_r
-        val sh = h + 2 * blur_r
-        self.draw_rect_filled(
-            sx - blur_r, sy - blur_r, sw, sh, color)
-        if blur_r > 0:
-            self.draw_blur_rect(
-                sx - blur_r, sy - blur_r, sw, sh, blur_r)
+        # TWIN PARITY: every other backend (software/cpu, metal's mirror,
+        # opengl, webgpu, intel, baremetal) renders a box-shadow through
+        # `emu_draw_shadow_rect`, which builds a separable coverage profile
+        # over a region padded by 2*blur_r and blends each pixel at its own
+        # falloff. Vulkan used to paint a FLAT alpha rect padded by only
+        # blur_r and then blur it, which is a different formula: it darkened
+        # the whole shadow band uniformly and gave the CPU<->Vulkan web
+        # showcase twins a 29.33% pixel divergence at 160x90 (worst channel
+        # delta 37) on every catalog page that has a shadowed card. Painting
+        # the shared formula costs one host readback per shadow, exactly as
+        # `draw_blur_rect` above already does; a device kernel for the
+        # coverage profile would have to reproduce `_emu_shadow_profile`
+        # exactly before it could replace this.
+        if not self._flush_for_host_fallback("shadow-rect-host-readback"):
+            return
+        emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         if self.completion_unknown: return
@@ -3227,6 +3235,37 @@ pub fn vulkan_timing_add(bucket: i64, started_us: i64):
     if elapsed > _vk_t_max[bucket]:
         _vk_t_max[bucket] = elapsed
 
+# --- counted queue submits ---------------------------------------------------
+#
+# `VK_T_SFFI_SUBMIT` is the ONLY submit counter the GPU-boundary audit gate reads
+# (`src/app/ui/chrome_showcase/gpu_boundary_audit.spl` — the pooled census fields
+# `submits=` / `fences=` are dead and documented as unusable). Until 2026-09-13 it
+# was folded at exactly ONE of the seven real `vkQueueSubmit` call sites in this
+# package (`backend_vulkan_helpers._flush_pending_compute_impl`), so a frame that
+# submitted through the font, resident-2d, session or immediate-dispatch paths
+# could report `submits_per_frame=1` while performing several — a fail-open the
+# gate's `<=1` invariant could not see.
+#
+# These two facades are the single counted door to the queue. Every submit inside
+# `gc_async_mut/gpu/engine2d` goes through one of them, so a future call site is
+# counted by construction rather than by remembering to add a `vulkan_timing_add`
+# next to it. The raw `vulkan_sffi_submit_*` facades stay in `nogc_sync_mut`,
+# which cannot see this timing table — that is why the counted door lives here and
+# not one layer down.
+pub fn vulkan_counted_submit_and_wait_fence(cmd: i64) -> i64:
+    """Fenced queue submit, folded into `VK_T_SFFI_SUBMIT`. No-op unless armed."""
+    val started = vulkan_timing_now_us()
+    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    vulkan_timing_add(VK_T_SFFI_SUBMIT, started)
+    fence
+
+# The one remaining raw submit in this package is `VulkanSession.submit_and_wait`
+# (`vulkan_session.spl`), which is NOT routed here on purpose: `backend_vulkan`
+# already imports `vulkan_session` for `VulkanSession`, so the reverse import
+# would close a module cycle. It contributes no uncounted submit today — a
+# repo-wide search for `.submit_and_wait(` on a `VulkanSession` finds zero call
+# sites — and if one is ever added, the counted door must be moved to a leaf
+# module both sides can import rather than the cycle being opened.
 pub fn vulkan_timing_note(bucket: i64, elapsed_us: i64):
     """Fold a pre-measured duration into `bucket`, for a caller that already
     holds a start/finish pair (e.g. the font composite's own evidence clock)."""

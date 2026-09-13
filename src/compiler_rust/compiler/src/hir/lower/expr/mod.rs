@@ -732,7 +732,26 @@ impl Lowerer {
                     .cloned();
                 if let Some(target) = resolved {
                     let args_hir = self.lower_call_args(args, ctx)?;
-                    let ret_ty = self.named_callable_return_type(method).unwrap_or(TypeId::ANY);
+                    // Look the return type up under the QUALIFIED name first.
+                    // `method_return_types` is keyed `Owner.method` for every
+                    // imported `impl` method (import_loader's `Node::Impl`
+                    // arm), so a bare `method` lookup misses it and answers
+                    // ANY. That ANY is the whole defect chain behind the
+                    // sibling-type method collapse: `U16le.of(0xBEEF)` typed
+                    // ANY, so the `.store(...)` it feeds could not be
+                    // qualified by MIR and lowered to a BARE `store`, which
+                    // every name-keyed resolver downstream binds to an
+                    // arbitrary same-named method in the link closure. All six
+                    // `ints.spl` types then ran ONE `store`/`to_span` body.
+                    // The bare lookup stays as the fallback -- a plain
+                    // qualified FREE function (`mod.func()`) has no
+                    // `mod.func` row and must keep resolving as before.
+                    // doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
+                    let ret_ty = self
+                        .named_callable_return_type(&qualified)
+                        .filter(|ty| *ty != TypeId::ANY)
+                        .or_else(|| self.named_callable_return_type(method))
+                        .unwrap_or(TypeId::ANY);
                     return Ok(HirExpr {
                         kind: HirExprKind::Call {
                             func: Box::new(HirExpr {
