@@ -107,3 +107,8 @@ owner records in one table:
 - `src/lib/common/ui/ui_web_packed_producer.spl:260-272`
 - Design authority: `doc/05_design/ui/unified_packed_ui_scene.md` sections 2.4, 4.1
 - Feature wiki: `doc/00_llm_process/feature_expert/unified_packed_ui_scene/skill.md`
+
+## Triage 2026-09-13
+Reconfirmed: filed and explicitly not fixed pending a real multi-producer
+scene wiring that does not exist yet (latent P2, becomes P1 once wired).
+Left OPEN as filed, no code change attempted.
