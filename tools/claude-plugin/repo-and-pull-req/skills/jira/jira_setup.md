@@ -2,6 +2,20 @@
 
 Interactive setup for our custom Jira CLI (`tools/jira-cli`) — a gh-like interface for Atlassian Cloud.
 
+> **Note:** `tools/jira-cli` is not present in this tree, so the `bin/jira` steps below may not
+> run. The maintained Jira client is `bin/itf jira` (`src/app/devhub/`). It supports Jira
+> **Data Center** (Bearer PAT, REST v2) and **Cloud** (email + API token, REST v3). When a
+> token is configured it calls REST directly, with no acli login:
+>
+> ```bash
+> bin/itf auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT
+> bin/itf auth login --jira --url https://<site>.atlassian.net --user you@co.com --token API_TOKEN
+> bin/itf jira view PROJ-123
+> ```
+>
+> Config keys (`jira.url`, `jira.deployment`, `jira.auth`, `jira.email`, `[token_env]`) are
+> documented in `doc/07_guide/app/devhub.md` § Setup.
+
 ## Prerequisites Check
 
 1. Check if jira-cli available: `bin/jira version`

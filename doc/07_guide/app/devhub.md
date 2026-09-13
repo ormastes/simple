@@ -47,11 +47,46 @@ original `itf` config format:
 
 ```bash
 devhub auth login --confluence --url https://company.atlassian.net/wiki --user you@co.com --token TOKEN
-devhub auth login --jira                                              # delegates to `acli jira auth login --web`
-devhub auth login --jira --url URL --user EMAIL --token TOKEN         # also wires the REST curl fallback acli lacks
+# Jira Data Center: Bearer personal access token, no --user needed
+devhub auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT
+# Jira Cloud: basic auth, email + API token
+devhub auth login --jira --url https://company.atlassian.net --user you@co.com --token API_TOKEN
+devhub auth login --jira                                              # acli --web login; skipped when a jira token is already configured
 devhub auth status
 devhub auth logout --confluence
 ```
+
+**Jira token auth (no acli login).** When `jira.url` and a Jira token are
+configured, every `jira` verb (`view`, `search`, `create`, `update`, `comment`,
+`transition`) and `tasks --backend jira` searches call the Jira REST API
+directly. acli is used only when no token is configured
+(`check_jira_auth` in `auth.spl`). A token resolves from `[token_env]`, then
+`[token_cmd]`, then `auth.sdn`. `jira.email` is required only for basic auth.
+
+```sdn
+# ~/.config/itf/config.sdn — Jira Data Center (REST v2, Bearer PAT)
+jira:
+    url: https://jira.corp:8443/jira      # any base URL; port and context path allowed
+    deployment: datacenter                # datacenter -> /rest/api/2 | cloud (default) -> /rest/api/3
+    auth: bearer                          # bearer (DC PAT) | basic (default)
+token_env:
+    jira: JIRA_TOKEN                      # or put `jira: token: ...` in auth.sdn
+```
+
+```sdn
+# ~/.config/itf/config.sdn — Jira Cloud (REST v3, basic email + API token)
+jira:
+    url: https://company.atlassian.net
+    deployment: cloud
+    auth: basic
+    email: you@company.com
+token_env:
+    jira: JIRA_API_TOKEN
+```
+
+On Data Center, `create`/`update`/`comment` send description and comment
+bodies as plain strings (v2 rejects ADF); Cloud gets ADF. Attachment download
+on Data Center follows the attachment metadata's `content` URL.
 
 Other backends have no `devhub auth` verb — their credentials go straight
 into `auth.sdn`/`email.sdn`, or an external tool's own login:
@@ -104,8 +139,8 @@ devhub tasks create --backend jira --project PROJ --title "New bug"
 devhub tasks close 42 --backend github
 ```
 
-Requires: `gh` CLI (github backend) or `acli`/Jira curl credentials (jira
-backend).
+Requires: `gh` CLI (github backend), or for the jira backend `jira.url` + a
+Jira token (REST, see Setup), with `acli` used only when no token is configured.
 
 ## Facade: `git` — `gh`/`git` (routing) + `github`, `bb`/`b` (explicit)
 
@@ -476,7 +511,7 @@ directly (no `--backend` selection — each talks to exactly one system):
 
 | Command | Talks to | Notable verbs |
 |---|---|---|
-| `jira` (alias `j`) | Jira only | `view`, `search` (JQL), `create`, `update`, `comment`, `transition` — `update`/`comment`/`transition` try `acli` first, then fall back to REST v3 curl if `jira.url`+`jira.email`+a token are configured |
+| `jira` (alias `j`) | Jira only | `view`, `search` (JQL), `create`, `update`, `comment`, `transition` — all REST (DC `/rest/api/2`, Cloud `/rest/api/3`) when `jira.url` + a token are configured (plus `jira.email` for basic auth); `acli` only when no token is configured |
 | `minio` (alias `mio`) | MinIO/S3 only | `ls`, `get`, `put`, `stat`, `mb`, `rb`, `rm`, `presign`, `presign-put`, `health` |
 | `outlook` (alias `ol`) | Microsoft Graph only | `folders`, `messages <FID>`, `get <MID>`, `move <MID> --to F`, `mark <MID>` |
 | `api` | Raw REST | `api <GET\|POST\|PUT\|DELETE> <URL/path>` against Confluence (default) or Jira (`--jira`) — like `gh api` |
