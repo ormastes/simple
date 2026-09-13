@@ -400,3 +400,47 @@ is the legacy string-named-intrinsic lane and is not on this path at all: the
 native x86_64 selector consumes `MirSimdLoad`/`MirSimdBinop`/`MirSimdStore`
 directly (`isel_x86_64.spl:368-375`, `x86_64_avx512_isel.spl:91-135`). The real
 blocker was D8, and it is fixed.
+
+## What Active does and does not mean for the DB and web servers
+
+Recorded because "AutoVectorize is Active" invites a reading it does not
+support. The pass rewrites a loop only when ALL of these hold
+(`rewrite.spl:307-374`):
+
+  * the recipe kind is Elementwise and the op name contains "add" — sub, mul,
+    div and everything else are matched and logged, not rewritten;
+  * the trip count is a COMPILE-TIME CONSTANT. `is_simple_loop` sets
+    `end_value` only for constant-bounded loops; a dynamic bound leaves
+    `trip_count = -1` and R4 declines;
+  * that constant is a whole number of lanes (R4b, see D7);
+  * there are at least two input bases and an output base; and
+  * the alias oracle clears the bases, or the emitted runtime range guard does.
+
+Server code loops over runtime-length buffers — request bodies, row sets,
+framebuffers sized at runtime. Those have no constant trip count, so **R4
+declines them and the pass does nothing**. The honest answer to "are the DB
+server and the web server automatically AVX-512 optimized by this pass" is
+**no**, and no amount of the pass being Active changes that. What would change
+it is a SCEV/runtime-trip-count path, which R4's comment already names as the
+unblock condition.
+
+### Where their AVX-512 actually comes from
+
+Hand-written native kernels, dispatched by CPUID at runtime — not this pass:
+
+  * DB: `rt_db_bitmap_and_u32` / `_or_` / `_andnot_u32`
+    (`src/lib/nogc_sync_mut/db/accel.spl:180-223`);
+  * scanning: `rt_simd_find_byte_span`, `rt_simd_bytes_equal_span`
+    (`src/lib/common/simd_scan.spl:121-153`);
+  * web/2D: `rt_engine2d_blend_const_span_pct_u32`,
+    `rt_engine2d_blend_mask_span_u32`
+    (`simple_web_html_layout_renderer_paint_primitives.spl`,
+    `text_layout/font_rasterizer.spl`).
+
+That those really are AVX-512 — rather than a `#[target_feature]` attribute LLVM
+declined to act on — is checked by reading the binary, not by trusting the
+attribute: `scripts/check/check-simd-kernels-vectorized.shs`, measured
+`PASS — 9 kernel(s) checked, all vectorized`. That gate exists because three of
+five kernels once carried the AVX-512 attribute and contained zero zmm
+instructions, which no parity test can detect since a scalar kernel returns
+identical answers.
