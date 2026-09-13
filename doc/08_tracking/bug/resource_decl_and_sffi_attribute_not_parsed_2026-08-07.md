@@ -199,6 +199,11 @@ is in fact implemented. The remaining structural cause (if the pilot is still
 RED) is downstream of parsing and has not been isolated here — see the
 Unproven section.
 
+## Triage 2026-09-13
+Reconfirmed: expected gap per this record (WP-A of a tracked feature not
+yet landed) — `resource` decl + `@sffi(...)` attribute parsing genuinely
+unimplemented in the real frontend. Feature work, not a quick fix. Left
+OPEN, no code change attempted.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Confirmed the 2026-08-17 re-triage's finding still holds: WP-A is landed

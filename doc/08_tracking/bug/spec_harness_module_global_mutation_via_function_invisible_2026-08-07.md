@@ -101,6 +101,21 @@ conflate, but the mechanisms and fixes are unrelated.
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
 
+## Re-check 2026-09-13
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/simple` = Rust seed
+  `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared
+  main worktree), sha256 `3d120a6f9ab5`, `Simple Language v1.0.0-rc.1`.
+
+Ran the exact repro from the "Repro" section above as a `bin/simple test`
+spec file: both examples pass (`2 examples, 0 failures`) — the plain `i64`
+global and the `Dict` bracket-write both read back the correct mutated value
+after being written by a called `fn`, inside the spec harness.
+
+Added a permanent regression lock,
+`test/01_unit/app/test_runner_new/spec_harness_module_global_mutation_visible_spec.spl`
+(2 examples, 0 failures), so a future regression of this class is caught
+directly rather than relying on incidental discovery again.
 ## Triage 2026-09-13
 
 Doc already states "OPEN, not root-caused (found incidentally, out of

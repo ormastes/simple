@@ -119,6 +119,10 @@ cases added by this task, all passing).
 current file(s) containing the MIR dispatch string for
 `rt_engine2d_simd_fill_span_u32` / `rt_engine2d_simd_copy_span_u32`.
 
+## Triage 2026-09-13
+Reconfirmed: this is a multi-item catalog of host 2D Vulkan/SIMD spec reds
+found during primitive-rendering verification, mixed severity, not a
+single fixable defect. Left as-is, no code change attempted.
 ## Re-check 2026-09-13 (BUGFIX-12 shard 22)
 
 Per-item at `f26970e9d93`:

@@ -119,6 +119,14 @@ perf-sensitive. Weighed against the bug's own severity — a user could invoke
 `simple os` and get nothing back — the wiring was judged the right trade, but
 someone should measure it.
 
+## Triage 2026-09-13
+Attempted to re-verify `test/01_unit/app/cli/cli_os_spec.spl` (the one
+remaining 6/7 row from 2026-09-12): timed out at 120s with no verdict line
+on this shared, loaded host (`rc=124`). Not conclusive evidence of a
+regression — the 2026-09-12 run completed and this pass's host is under
+concurrent multi-session load. Rows 1, 2 and 4 not re-run this pass (no
+reason to expect them to have moved). Status left as PARTIALLY-RESOLVED
+per 2026-09-12; no code change attempted.
 ## Re-check 2026-09-13 (BUGFIX-12 shard 22)
 
 Confirmed by content: `handle_os_build_inline` (line 407) and

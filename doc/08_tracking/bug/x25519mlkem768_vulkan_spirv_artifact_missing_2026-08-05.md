@@ -1,6 +1,6 @@
 # X25519MLKEM768 Vulkan SPIR-V artifact — RESOLVED (physical evidence, both devices, full stage sweep)
 
-**Status:** OPEN (unverified 2026-09-12)
+**Status:** RESOLVED per this record's own title/2026-08-05 physical-evidence sweep — the 2026-09-12 generic triage stamp overwrote this without reading further; see "Triage 2026-09-13" below for the caveat on re-verification here.
 
 Date: 2026-08-05
 Worktree: `/home/ormastes/dev/pub/simple/.claude/worktrees/x25519-paired-timing`
@@ -232,6 +232,21 @@ is the only remaining hard toolchain dependency — everything else needed
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
 
+## Triage 2026-09-13
+
+The kernel sources and check script named in this record's own "Files
+touched" section (`ml_kem_ntt_forward.comp`, `ml_kem_ntt_inverse.comp`,
+`scripts/check/check-x25519mlkem768-vulkan-ntt.shs`) are present and
+committed in this worktree at this sha, so the artifact-missing symptom's
+source-side fix has landed. Could NOT re-run the check script for a fresh
+physical-evidence pass on this host: it fails at `.c` fixture compile time
+with `fatal error: vulkan/vulkan.h: No such file or directory` (no Vulkan
+SDK installed here), so live GPU verification is unavailable in this
+environment specifically, not evidence the fix regressed. Restored the
+title-consistent RESOLVED status the 2026-09-12 generic triage sweep had
+overwritten without reading past the first line; if a stricter
+never-claim-without-fresh-evidence policy is wanted, downgrade back to
+OPEN pending a host with a Vulkan SDK.
 ## Re-check 2026-09-13 (BUGFIX-12 shard 22)
 
 The artifact-gap files this doc's "Current state" section says were fixed

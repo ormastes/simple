@@ -102,3 +102,9 @@ comparison against Mesa `powervr`'s real
 `vulkan.submit.command_stream@1` capture, which this lane cannot produce
 (no verified kernel-UAPI layout, no board/firmware). `submit_implemented`
 is not flipped. `soc_profile.spl` was not edited by this lane.
+
+## Triage 2026-09-13
+Reconfirmed: host UAPI already fixed per this record; hardware validation
+(PowerVR/Imagination kernel driver) is genuinely blocked on unavailable
+vendor header text and physical hardware, not reproducible in this
+environment. Left OPEN (P3) as documented, no code change attempted.

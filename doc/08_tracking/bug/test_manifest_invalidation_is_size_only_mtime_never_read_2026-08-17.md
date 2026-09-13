@@ -174,3 +174,57 @@ sandbox artefact; the shared manifest is carrying 111 dispatchable phantoms
 today. (The roots line is also polluted: it contains `800`, `.tmp_probe`, an
 absolute `/mnt/data/tmp/...` scratch path and `build/failopen_probe` — a
 separate arg-plumbing defect, not filed here.)
+
+## Re-check 2026-09-13 — guard's `scanner-mtime` check is now a FALSE GREEN
+
+- Status: OPEN (P1) — still not fixed; new finding: the guard script's own
+  "scanner-mtime" sub-check no longer detects the defect at all.
+
+Ran `sh scripts/check/check-doctest-manifest-staleness.shs` on
+`bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
+(symlinked from the shared main worktree), sha256 `3d120a6f9ab5`:
+
+```
+ok    scanner-mtime: .../test_manifest_scanner.spl sources mtime from something other than rt_file_stat()
+SKIP  manifest-columns / manifest-existence: no manifest at this fresh worktree
+PASS — 1 invariant(s) checked, 0 violations (2 skipped for missing inputs)
+```
+
+The `ok` is misleading. `test_manifest_scanner.spl` no longer calls
+`rt_file_stat(` **directly** — it now calls a `file_stat(f)` wrapper imported
+from `src/lib/nogc_sync_mut/io/file_ops.spl:222`:
+
+```
+fn file_stat(path: text) -> i64:
+    # Get file modification time in seconds since epoch (direct SFFI).
+    # Returns 0 if file doesn't exist or on error.
+    unsafe(capabilities: [ffi]):
+        rt_file_stat(host_path_native(path))
+```
+
+`file_stat`'s own doc comment claims it returns "modification time in
+seconds since epoch", but its body still calls `rt_file_stat`, which per
+`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs:290-298` is
+unchanged from the original report — `/// Get file stat info (simplified -
+returns size or -1)`, body is `fs::metadata(path).len()` (the byte size, not
+an mtime). `rt_file_stat_mtime` (`file_io.rs:3180`) still exists but takes a
+STAT HANDLE (an int index into a `STAT_HANDLES` registry populated by a
+separate open-call), not a path — it is not a drop-in replacement and is
+still unused by this path.
+
+So the underlying defect — the "mtime" column is a second copy of the size —
+is **unchanged**. What changed is only a naming/wrapper refactor
+(`test_manifest_scanner.spl` used to call `rt_file_stat` inline; it now calls
+`io/file_ops.file_stat`, which calls `rt_file_stat`), and the guard script's
+`scanner-mtime` check does a literal text-match for `rt_file_stat(` in
+`test_manifest_scanner.spl` specifically, so the indirection defeats it. This
+guard needs to either grep transitively through `file_stat`'s own body, or
+check `manifest-columns` against a live manifest (which is not a false
+green — see 2026-08-17's 20126/20126 evidence above, unchanged in mechanism).
+
+Not fixed here: the real fix (a genuine per-path mtime source plus a
+`MANIFEST_VERSION` bump to invalidate every existing on-disk manifest) is
+explicitly scoped in the "Fix sketch" above as "not small, needs its own
+red-first change" spanning the scanner, the manifest version, and the guard
+itself — out of a single-bug budget. Filing this indirection finding so the
+guard is not mistaken for evidence of a fix.

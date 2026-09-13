@@ -270,6 +270,10 @@ comm -12 <(cd test/unit && find . -name '*_spec.spl'|sort) \
          <(cd test/01_unit && find . -name '*_spec.spl'|sort) | wc -l                    # 5005
 ```
 
+## Triage 2026-09-13
+Reconfirmed: measurement/characterization record, not a single localized
+code defect, per its own 2026-08-09 re-confirmation. Left as-is, no code
+change attempted.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Still a characterization record, not a point code defect; remedy (rewriting
