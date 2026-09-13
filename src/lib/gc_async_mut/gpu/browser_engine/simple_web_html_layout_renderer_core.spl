@@ -810,19 +810,54 @@ fn _html_without_inert_template_sources(source: text) -> text:
     # 125/152/251 ms on html/css-layout/css-paint, 571 ms of the 892 ms
     # eight-page total) because it visits EVERY tag of the document and scans
     # each tag name a character at a time in interpreted Simple -- to elide
-    # `<template>` bodies that most documents do not have. A document with no
-    # `<template` substring anywhere has nothing to elide: the loop below never
-    # takes the `name == "template"` branch, so `parts` ends as the single
-    # element `source.substring(0, source.len())` and the join returns `source`
-    # unchanged. The probe is a native `find_from` over the already-lowered
-    # copy, and it is deliberately made on the WHOLE source rather than on the
-    # walk's script/style-skipping view: a `<template` that only appears inside
-    # a `<script>` body makes the probe fall through to the full walk, which
-    # then classifies it exactly as before. The fast path can therefore only
-    # trigger where the walk provably returns the input.
-    if find_from(lower, "<template", 0) < 0:
+    # `<template>` bodies that most documents do not have. A document in which
+    # the `name == "template"` branch can never fire has nothing to elide: the
+    # loop leaves `parts` as the single element `source.substring(0,
+    # source.len())` and the join returns `source` unchanged.
+    #
+    # The probe is deliberately made on the WHOLE lowered source rather than on
+    # the walk's script/style-skipping view: a template tag appearing only
+    # inside a `<script>` body makes the probe fall through to the full walk,
+    # which classifies it exactly as before. The fast path can therefore only
+    # fire where the walk returns its input.
+    #
+    # **The first cut probed `"<template"` and was WRONG** -- the walk derives
+    # its tag name from `lower.substring(lt + 1, gt).trim()`, so `< template>`
+    # (and `</ template>`) reach `name == "template"` while containing no
+    # contiguous `<template`. That divergence was found by adding the shape to
+    # the equivalence fixture; see `_html_template_tag_present` for the probe
+    # that actually mirrors the walk's own name derivation.
+    if not _html_template_tag_present(lower):
         return source
     _html_without_inert_template_sources_scan(source)
+
+fn _is_html_space(c: text) -> bool:
+    c == " " or c == "\t" or c == "\n" or c == "\r"
+
+# True when `lower` (an already-lowercased document) can produce a tag whose
+# name is `template` under the walk's own derivation: `<`, optional whitespace,
+# optionally `/` and more whitespace, then the name. A bare `template` in prose
+# or in a `grid-template` property therefore does not cost the fast path --
+# which matters, because all eight catalog pages contain the bare word.
+#
+# Bounded by the number of `template` occurrences, not by the document length,
+# and each occurrence is examined by walking backwards over whitespace only.
+fn _html_template_tag_present(lower: text) -> bool:
+    var at = find_from(lower, "template", 0)
+    while at >= 0:  # cpu-lane-loop-ok: one iteration per literal `template` occurrence in the document (2-3 on every catalog page), not per character
+        var p = at - 1
+        # cpu-lane-loop-ok: walks back over the whitespace immediately before ONE occurrence
+        while p >= 0 and _is_html_space(lower[p:p + 1]):
+            p = p - 1
+        if p >= 0 and lower[p:p + 1] == "/":
+            p = p - 1
+            # cpu-lane-loop-ok: whitespace between `<` and `/` of ONE closing tag
+            while p >= 0 and _is_html_space(lower[p:p + 1]):
+                p = p - 1
+        if p >= 0 and lower[p:p + 1] == "<":
+            return true
+        at = find_from(lower, "template", at + 1)
+    false
 
 # The full tag walk, unchanged. Kept as its own function so the equivalence
 # oracle below can drive it directly and compare it with the fast path.

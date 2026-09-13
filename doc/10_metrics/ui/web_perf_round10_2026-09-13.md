@@ -80,13 +80,50 @@ node — each a Dict lookup keyed on the whole multi-kilobyte merged declaration
 string plus an array return — and six backwards linear scans over a table of
 hundreds of entries.
 
-## Target B: the `<template`-absent fast path
+## Correction (same day, PR #911): the first probe was WRONG
 
-`_html_without_inert_template_sources` now probes `find_from(lower, "<template",
-0)` once — a native substring scan — and returns `source` unchanged when the
-substring is absent. That is exactly what the walk returns in that case: the
-`name == "template"` branch is never taken, so `parts` ends as the single
-element `source.substring(0, source.len())`.
+**PR #910 shipped a probe for the contiguous substring `<template`, and that is
+not equivalent to the walk.** The walk derives its tag name from
+`lower.substring(lt + 1, gt).trim()`, so `< template>` and `</ template>` reach
+`name == "template"` while containing no contiguous `<template` — the fast path
+returned a document whose template body the walk elides. The #910 fixture set
+had no whitespace-after-`<` shape, which is exactly why its spec passed.
+
+Fixed in #911, round-9 order: the shapes were added to the adversarial fixture
+FIRST and the spec confirmed **failing** on them
+(`[12] MISMATCH fast_len=68 slow_len=34`, `[13] MISMATCH fast_len=70
+slow_len=34`), then the probe was replaced by `_html_template_tag_present`,
+which mirrors the walk's own derivation: for each literal `template` occurrence,
+walk back over whitespace, optionally one `/` and more whitespace, and test for
+`<`. Bounded by the occurrence count (2-3 per catalog page), not the document
+length.
+
+A bare-word probe (`find_from(lower, "template", 0)`) would have been trivially
+correct and is **not** usable: `grep -ic template` finds the word on all eight
+catalog pages (prose and `grid-template-*`), so it would have deleted the entire
+win. That fixture row is in the spec so the shortcut cannot be taken later.
+
+Re-measured on the corrected probe, 2 alternating pairs on a much busier host
+(`sel_match` 911-947 vs the 608-681 of the sweep below):
+
+| pair | pp_css before | after | cas_tail b/a | sel_match b/a |
+|---|---|---|---|---|
+| 1 | 1223 | **554** | 889 / 877 | 947 / 916 |
+| 2 | 1165 | **551** | 861 / 855 | 944 / 911 |
+
+Same **-55%**, controls flat within each pair, 8/8 digests identical on all four
+runs. (Those digests differ from the set recorded further down for `html` —
+`2ecbe24a29e7ef3c` vs `85a685ca46fc3527` — because unrelated commits landed on
+`main` between the two sweeps; both SIDES of every pair agree, which is what the
+gate asserts.)
+
+## Target B: the template-elide fast path
+
+`_html_without_inert_template_sources` now answers "can the walk's
+`name == "template"` branch fire at all?" via `_html_template_tag_present` and
+returns `source` unchanged when it cannot. That is exactly what the walk returns
+in that case: the branch is never taken, so `parts` ends as the single element
+`source.substring(0, source.len())`.
 
 The probe is deliberately made on the WHOLE lowered source rather than on the
 walk's script/style-skipping view. A `<template` that appears only inside a
@@ -104,16 +141,19 @@ walk provably returns its input. The walk itself is untouched, split out as
 wrapper and the walk and compares the results byte-for-byte.
 
 Two tiers, the shape round 9 established: the eight catalog pages (all of which
-take the fast path — none contains `<template` at all) plus twelve adversarial
-documents — a real `<template>` body, a template with attributes, nested
-templates, an unclosed template, a stray `</template>` with no opener,
-`<template` inside a `<script>` body, `<template` inside a `<style>` body,
-`<templatex>` (a prefix that is not the tag), uppercase `<TEMPLATE>`, a document
-with no tags, and the empty document.
+take the fast path) plus sixteen adversarial documents — a real `<template>`
+body, a template with attributes, nested templates, an unclosed template, a
+stray `</template>` with no opener, a template tag inside a `<script>` body and
+inside a `<style>` body, `<templatex>` (a prefix that is not the tag), uppercase
+`<TEMPLATE>`, a document with no tags, the empty document, `< template>`,
+`<\n\ttemplate>` / `</ template>`, `</  template>`, and a document carrying the
+bare word `template` in prose and in `grid-template-columns`.
 
-**2/2 examples pass, 0 mismatches.** Unlike round 9 this one found no
-divergence — which is the expected outcome for a guard whose skipped branch is
-provably a no-op, and is reported as such rather than dressed up.
+**2/2 examples pass, 0 mismatches** — but only after the correction above. The
+first twelve fixtures passed against a probe that was genuinely wrong; the four
+added in #911 are the ones that did the work. The lesson is round 9's, restated:
+a fixture set that does not attack the fast path's own assumption proves
+nothing.
 
 ### A/B evidence
 
@@ -183,10 +223,12 @@ sub-timers and these two comments survive, in
 `_final_overflow_axis_in_decls`.
 
 **What the next round should try instead**, now that the split is known:
-`tail_inline` (~247 ms) is three unmemoized
-`apply_decls_without_display_on_writing_mode` calls on `inline_normal` /
-`combined_important_decls` / `inline_important`; extending the existing cascade
-memo boundary to cover them (key = current `memo_key` + the three strings,
+`tail_inline` (~247 ms) is the single unmemoized
+`apply_decls_without_display_on_writing_mode` call on `inline_normal` — the
+sibling calls on `combined_important_decls` and `inline_important` both sit at
+the ~44 ms timer floor, i.e. they cost nothing on this catalog. Extending the
+existing cascade memo boundary to cover it (key = current `memo_key` + that
+string,
 leaving `final_display` and `empty_cells_hide` outside, which read inputs not in
 the key) is a memo-key change, not an array-passing change, and so does not hit
 the copy cost that killed design 1. `tail_overflow` (~271 ms) needs the six
@@ -209,7 +251,7 @@ across 4/4 pairs. Against the round-2 baseline, the cumulative effect of rounds
 | gate | verdict |
 |---|---|
 | Draw IR sha256, 8/8 pages | byte-identical across all 8 A/B runs (and every exploratory run): `5cdf8386bad82f0c 85a685ca46fc3527 76c359e483e11e84 2efd1c8c294b705e a16ea7c83d459a5a 616ad24659d7779e 4cf797f8c3a8f3a4 56097a5a1ce50dda` |
-| `web_template_elide_fastpath_equivalence_spec` (new) | **2/2 pass**, 8 catalog pages + 12 adversarial documents, 0 mismatches |
+| `web_template_elide_fastpath_equivalence_spec` (new) | **2/2 pass**, 8 catalog pages + 16 adversarial documents, 0 mismatches (1 real divergence caught and fixed first — see the correction at the top) |
 | GPU boundary audit | `PASS — 2 frame(s) audited, host_pixel_iterations=0, readbacks_per_frame<=1, submits_per_frame<=1` |
 | 53 `*selector*` / `*style*` / `*cascade*` / `*inherit*` specs + `web_cold_pipeline_memo_spec` | verdict lines **byte-identical before vs after** (35 OK, 18 pre-existing ERROR) |
 
