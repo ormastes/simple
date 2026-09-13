@@ -108,6 +108,32 @@ impl DapServer:
         transport.write_response(request_seq, true, command, nil)?
 
         Ok(nil)
+    fn handle_attach(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling attach request")
+
+        # Attach to an already-running program (no spawning): parse the
+        # same shaped config as launch, but rely on adapter.attach() to
+        # connect to an existing target instead of starting a new process.
+        match arguments:
+            Some(args):
+                self.launch_config = LaunchConfig.from_json(args)
+                transport.log_debug("Attaching to program: {self.launch_config.program}")
+
+                # Initialize debug context with source path
+                self.debug_context.source_path = self.launch_config.program
+            nil:
+                transport.log_debug("No attach arguments provided")
+
+        # Attach adapter to the already-running program
+        self.adapter.attach(self.launch_config.program, self.launch_config.args)?
+
+        # Update state
+        self.state = DebuggerState.Launched
+
+        # Send response
+        transport.write_response(request_seq, true, command, nil)?
+
+        Ok(nil)
     fn handle_configuration_done(request_seq: Int, command: String) -> Result<Nil, String>:
         transport.log_debug("Handling configurationDone request")
 
@@ -453,6 +479,8 @@ impl DapServer:
                 self.handle_initialize(request.id, request.command, request.arguments)
             case "launch":
                 self.handle_launch(request.id, request.command, request.arguments)
+            case "attach":
+                self.handle_attach(request.id, request.command, request.arguments)
             case "configurationDone":
                 self.handle_configuration_done(request.id, request.command)
             case "setBreakpoints":
