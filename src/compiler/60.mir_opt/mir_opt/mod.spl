@@ -358,22 +358,32 @@ fn pass_status(kind: PassKind) -> PassStatus:
         case BodyOutlining:
             PassStatus.Skeleton
         case AutoVectorize:
-            # ACTIVE as of 2026-09-13, gated by the alias oracle
-            # (auto_vectorize_alias.spl). The pass discovers candidates, applies
-            # the oracle per recipe, and rewrites only what the oracle admits:
-            # provably-disjoint bases, or an exact alias where every access sits
-            # at the induction index. Anything undecidable is REFUSED rather
-            # than guessed, because guessing there is a silent miscompilation.
+            # REVERTED to AnalysisOnly on 2026-09-13, hours after being flipped
+            # to Active, because an adversarial review found four defects that
+            # make the rewrite unsafe on real MIR. The alias oracle and the
+            # runtime guard are correct and stay; what is not yet correct is
+            # everything around them:
             #
-            # Consequence to be honest about: MIR locals carry no allocation
-            # identity yet, so every base reports an unproven origin and the
-            # oracle answers NeedsRuntimeGuard for any two DIFFERENT bases.
-            # Until the runtime range check is emitted, that means this pass is
-            # active and sound but rewrites almost nothing. That is the correct
-            # trade — inert beats wrong — and it is what makes the remaining
-            # work (emit the guard, or thread allocation identity) take effect
-            # the moment it lands, instead of sitting behind another flip.
-            PassStatus.Active
+            #  * the guard's span is computed from `recipe.element_type`, which
+            #    `get_instruction_type` hard-codes to "f32" for every BinOp. So
+            #    span_bytes is always trip_count*4, half the truth for an f64
+            #    or i64 loop, and a partial overlap at exactly that distance
+            #    PASSES the guard — the one case it exists to reject.
+            #  * when a guard is required but cannot be bounded, the rewriter
+            #    falls through to the UNGUARDED rewrite instead of declining.
+            #  * block ids are assigned as header+1/+2/+3 while every original
+            #    block with a higher id is kept verbatim, so a real CFG gets
+            #    DUPLICATE ids and the vector path exits to a block that does
+            #    not exist. The single-block unit fixture cannot observe this.
+            #  * the guard's temporaries are never added to func.locals, so they
+            #    have no type entry and can collide with real locals.
+            #
+            # Each of those is a wrong-answer-at-runtime risk, not a missed
+            # optimization. Active is the correct destination and the work to
+            # get back there is scoped in the tracking record; shipping it
+            # before these are fixed would be exactly the silent miscompilation
+            # the oracle was built to prevent.
+            PassStatus.AnalysisOnly
         case TargetNarrowForm:
             PassStatus.Skeleton
         case PatternIdiom:
@@ -443,29 +453,13 @@ fn mir_pass_backend_outcome_name(outcome: MirPassBackendOutcome) -> text:
         case NotApplicable: "not-applicable"
 
 fn pass_witness_contract(kind: PassKind) -> PassWitnessContract?:
+    # AutoVectorize's witness pair was removed together with its Active status
+    # on 2026-09-13. The registry check is explicit that an INACTIVE pass must
+    # not advertise executable witnesses ("inactive pass must not advertise
+    # executable witnesses"), so leaving the contract behind while reverting
+    # the status is itself an integrity error. The identities that belong here
+    # when it goes Active again are recorded in the tracking record.
     match kind:
-        case AutoVectorize:
-            # An Active transform must name an input it DOES rewrite and one it
-            # does NOT, so "active" cannot quietly mean "runs and never fires".
-            # Both of these are real and verified, not placeholders:
-            #
-            #  positive — every base is the SAME local. The alias oracle calls
-            #    that ExactAliasOnly: with every access at the induction index,
-            #    both sides touch the same element in the same iteration, so
-            #    vector order equals scalar order and the rewrite is sound.
-            #
-            #  negative — the bases are DIFFERENT locals with unproven origins.
-            #    The oracle answers NeedsRuntimeGuard, and until that guard is
-            #    emitted the pass refuses rather than guesses.
-            #
-            # Pinned by the "AutoVectorize Active witnesses" block in
-            # test/01_unit/compiler/mir_opt/auto_vectorize_spec.spl, which runs
-            # both witnesses through run_auto_vectorize rather than asserting
-            # their identity strings.
-            Some(PassWitnessContract(
-                kind: PassKind.AutoVectorize,
-                positive_id: "auto_vectorize/exact-alias-elementwise-add",
-                negative_id: "auto_vectorize/undecidable-distinct-bases"))
         case _: nil
 
 fn pass_witness_registry_integrity_errors_for(

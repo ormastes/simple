@@ -266,6 +266,53 @@ impl TargetCpu {
         }
     }
 
+    /// Host-aware default CPU for a target that will actually be BUILT.
+    ///
+    /// `builtin_default_for_arch` returns `X86_64V3` (AVX2) and is a `const fn`,
+    /// so it cannot consult the host. Every native-build path seeded `self.cpu`
+    /// from it, which made the v4 widening in
+    /// `backend_core.rs:default_x86_64_cpu_name` DEAD CODE: `llvm_cpu_name`
+    /// answered `Some("x86-64-v3")` and the `unwrap_or(..)` arm never ran. So
+    /// LLVM's loop and SLP vectorizers -- both enabled -- were still capped at
+    /// 256 bits for every DB, HTTP and renderer binary.
+    ///
+    /// Widening requires the target to be the SAME EXECUTION DOMAIN as the
+    /// builder, which is stricter than the triple-prefix test it replaces:
+    ///
+    ///   * same arch AND same OS as the host. An x86_64-linux binary built on
+    ///     x86_64-windows is a cross build; the builder's CPUID says nothing
+    ///     about the machine that runs it.
+    ///   * never freestanding. A SimpleOS or bare-metal kernel does not set
+    ///     XCR0 (no `xsetbv` outside the userland probes), so a ZMM instruction
+    ///     there faults with #UD rather than running slowly.
+    ///   * AVX-512 F, VL and BW all present on the host.
+    ///
+    /// Anything short of that returns the builtin default, so this can only
+    /// widen, never narrow.
+    pub fn host_aware_default_for(target: Target) -> Self {
+        let builtin = Self::builtin_default_for_arch(target.arch);
+        if target.arch != TargetArch::X86_64 {
+            return builtin;
+        }
+        if matches!(target.os, TargetOS::SimpleOS | TargetOS::None | TargetOS::Any) {
+            return builtin;
+        }
+        let host = Target::host();
+        if target.arch != host.arch || target.os != host.os {
+            return builtin;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512vl")
+                && std::is_x86_feature_detected!("avx512bw")
+            {
+                return Self::X86_64V4;
+            }
+        }
+        builtin
+    }
+
     pub const fn is_x86_64_level(&self) -> bool {
         matches!(
             self,
@@ -1098,5 +1145,89 @@ mod tests {
     fn test_simpleos_display() {
         let target = Target::new(TargetArch::X86_64, TargetOS::SimpleOS);
         assert_eq!(format!("{}", target), "x86_64-simpleos");
+    }
+}
+
+#[cfg(test)]
+mod host_aware_default_tests {
+    use super::*;
+
+    fn t(arch: TargetArch, os: TargetOS) -> Target {
+        let mut x = Target::host();
+        x.arch = arch;
+        x.os = os;
+        x
+    }
+
+    #[test]
+    fn freestanding_x86_64_is_never_widened() {
+        // A SimpleOS or bare-metal kernel does not set XCR0, so a ZMM
+        // instruction there is #UD, not merely slow.
+        for os in [TargetOS::SimpleOS, TargetOS::None, TargetOS::Any] {
+            assert_eq!(
+                TargetCpu::host_aware_default_for(t(TargetArch::X86_64, os)),
+                TargetCpu::X86_64V3,
+                "freestanding os {os:?} was widened"
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_os_on_the_same_arch_is_a_cross_build() {
+        // x86_64-linux built on x86_64-windows: the triple still starts with
+        // x86_64, but the builder's CPUID says nothing about the target host.
+        let host = Target::host();
+        let other = if host.os == TargetOS::Linux { TargetOS::Windows } else { TargetOS::Linux };
+        assert_eq!(
+            TargetCpu::host_aware_default_for(t(TargetArch::X86_64, other)),
+            TargetCpu::X86_64V3
+        );
+    }
+
+    #[test]
+    fn non_x86_targets_keep_their_builtin_default() {
+        for arch in [TargetArch::Aarch64, TargetArch::Riscv64, TargetArch::Wasm32] {
+            assert_eq!(
+                TargetCpu::host_aware_default_for(t(arch, TargetOS::Linux)),
+                TargetCpu::builtin_default_for_arch(arch)
+            );
+        }
+    }
+
+    #[test]
+    fn never_narrows_below_the_builtin_default() {
+        let host = Target::host();
+        let got = TargetCpu::host_aware_default_for(host);
+        assert!(
+            got == TargetCpu::X86_64V3 || got == TargetCpu::X86_64V4 || got == TargetCpu::Default,
+            "host default resolved to {got:?}, below the builtin baseline"
+        );
+    }
+
+    #[test]
+    fn the_host_target_widens_exactly_when_the_host_admits_avx512() {
+        // The whole point: this must track the real probe, and it must be
+        // REACHABLE -- the previous widening sat behind llvm_cpu_name() and
+        // was dead code.
+        let host = Target::host();
+        if host.arch != TargetArch::X86_64 {
+            return;
+        }
+        let expected_wide = cfg!(target_arch = "x86_64")
+            && std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512vl")
+            && std::is_x86_feature_detected!("avx512bw");
+        let got = TargetCpu::host_aware_default_for(host);
+        assert_eq!(got == TargetCpu::X86_64V4, expected_wide, "got {got:?}");
+    }
+
+    #[test]
+    fn a_widened_default_still_maps_to_a_real_llvm_cpu_name() {
+        // Regression on the actual failure: llvm_cpu_name must RESOLVE the
+        // widened value, not fall through to the unwrap_or default.
+        assert_eq!(
+            TargetCpu::X86_64V4.llvm_cpu_name(TargetArch::X86_64),
+            Some("x86-64-v4")
+        );
     }
 }
