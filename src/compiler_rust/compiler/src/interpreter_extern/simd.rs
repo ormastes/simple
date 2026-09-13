@@ -2636,7 +2636,20 @@ db_bitmap_tiers!(
 
 #[inline(always)]
 fn db_bitmap_or_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32], lhs_words: usize, rhs_words: usize) {
-    for (i, o) in out.iter_mut().enumerate() {
+    // The per-element `if i < words` bounds test is hoisted out of the loop.
+    //
+    // It is not cosmetic: with the test inside, llvm-objdump showed ZERO zmm
+    // instructions in the avx512 variant of this kernel -- a data-dependent
+    // branch per lane blocks vectorization outright, so the function was
+    // AVX-512 in name only. Splitting the span into a both-operands region and
+    // a single-operand tail leaves three straight-line loops LLVM can widen.
+    let both = lhs_words.min(rhs_words).min(out.len());
+    let (head, tail) = out.split_at_mut(both);
+    for (i, o) in head.iter_mut().enumerate() {
+        *o = lhs[i] | rhs[i];
+    }
+    for (k, o) in tail.iter_mut().enumerate() {
+        let i = both + k;
         let l = if i < lhs_words { lhs[i] } else { 0 };
         let r = if i < rhs_words { rhs[i] } else { 0 };
         *o = l | r;
@@ -2655,9 +2668,17 @@ db_bitmap_tiers!(
 
 #[inline(always)]
 fn db_bitmap_andnot_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32], rhs_words: usize) {
-    for (i, o) in out.iter_mut().enumerate() {
-        let r = if i < rhs_words { rhs[i] } else { 0 };
-        *o = lhs[i] & (0xFFFF_FFFFu32 ^ r);
+    // Same hoist as db_bitmap_or_scalar, for the same measured reason: the
+    // per-element bounds test left the avx512 variant with zero zmm
+    // instructions. Past rhs_words the right operand reads as zero, so
+    // `x & !0` is just a copy of the left operand.
+    let both = rhs_words.min(out.len());
+    let (head, tail) = out.split_at_mut(both);
+    for (i, o) in head.iter_mut().enumerate() {
+        *o = lhs[i] & !rhs[i];
+    }
+    for (k, o) in tail.iter_mut().enumerate() {
+        *o = lhs[both + k];
     }
 }
 db_bitmap_tiers!(
@@ -2761,10 +2782,39 @@ pub fn rt_db_bitmap_andnot_u32(args: &[Value]) -> Result<Value, CompileError> {
 
 #[inline(always)]
 fn find_byte_scalar(hay: &[u8], needle: u8) -> i64 {
-    match hay.iter().position(|&b| b == needle) {
-        Some(i) => i as i64,
-        None => -1,
+    // Chunked rather than `iter().position()`.
+    //
+    // `position` is an EARLY-EXIT loop: every iteration may leave the loop, so
+    // LLVM cannot widen it, and llvm-objdump confirmed the avx512 variant of
+    // this kernel contained ZERO zmm instructions -- AVX-512 in name only,
+    // while the three sibling kernels here genuinely vectorized.
+    //
+    // The fix is the standard memchr shape: fold a whole chunk into one
+    // "any match" flag with NO branch inside the fold, so the fold vectorizes,
+    // and only pay a scalar scan for the single chunk that actually hits.
+    const CHUNK: usize = 64;
+    let mut base = 0usize;
+    while base + CHUNK <= hay.len() {
+        let block = &hay[base..base + CHUNK];
+        let mut hit = 0u8;
+        for &b in block {
+            hit |= (b == needle) as u8;
+        }
+        if hit != 0 {
+            for (k, &b) in block.iter().enumerate() {
+                if b == needle {
+                    return (base + k) as i64;
+                }
+            }
+        }
+        base += CHUNK;
     }
+    for (k, &b) in hay[base..].iter().enumerate() {
+        if b == needle {
+            return (base + k) as i64;
+        }
+    }
+    -1
 }
 
 #[cfg(target_arch = "x86_64")]

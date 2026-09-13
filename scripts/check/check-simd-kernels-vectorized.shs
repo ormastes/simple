@@ -1,0 +1,83 @@
+#!/bin/sh
+# Fail when a kernel that advertises a SIMD tier did not actually get one.
+#
+# Every `*_avx512` / `*_avx2` kernel in interpreter_extern/simd.rs is the same
+# source loop re-emitted under `#[target_feature]`. That is only true if LLVM
+# actually widens it -- and it silently does not when the loop shape resists
+# vectorization. Measured 2026-09-13, THREE of five kernels contained zero zmm
+# instructions while claiming AVX-512:
+#
+#   db_bitmap_or / db_bitmap_andnot  -- a per-element `if i < words` bounds
+#       test inside the loop is a data-dependent branch per lane and blocks
+#       vectorization outright. Fixed by hoisting the test and splitting the
+#       span into straight-line regions.
+#   find_byte -- `iter().position()` is an EARLY-EXIT loop; every iteration may
+#       leave, so it cannot be widened. Fixed with the memchr shape: fold a
+#       chunk into one branchless "any match" flag, scan scalar only on a hit.
+#
+# None of that is visible in a passing parity test: a scalar kernel gives
+# identical ANSWERS. Only the disassembly shows it, which is why this gate
+# reads the binary rather than trusting the attribute.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> kernel(s) checked, all vectorized
+#   FAIL — ... naming each kernel that is scalar despite its tier
+#   ERROR — nothing was checked  (missing binary/tools, unreadable symbols)
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+bin=${SIMD_KERNEL_BINARY:-$root/src/compiler_rust/target/release/simple.exe}
+[ -f "$bin" ] || bin=$root/src/compiler_rust/target/release/simple
+
+nm=$(command -v llvm-nm || true)
+objdump=$(command -v llvm-objdump || true)
+
+if [ ! -f "$bin" ]; then
+    echo "ERROR — nothing was checked (no built binary at $bin)"
+    exit 2
+fi
+if [ -z "$nm" ] || [ -z "$objdump" ]; then
+    # Absence of a disassembler is absence of evidence, never a pass.
+    echo "ERROR — nothing was checked (llvm-nm/llvm-objdump not on PATH)"
+    exit 2
+fi
+
+# kernel:register-class the tier is REQUIRED to use.
+kernels="blend_const_span_pct_avx512:zmm
+db_bitmap_and_avx512:zmm
+db_bitmap_or_avx512:zmm
+db_bitmap_andnot_avx512:zmm
+find_byte_avx512:zmm
+blend_const_span_pct_avx2:ymm
+find_byte_avx2:ymm"
+
+checked=0
+offenders=""
+
+for row in $kernels; do
+    sym=${row%%:*}
+    want=${row##*:}
+    addr=$("$nm" "$bin" 2>/dev/null | grep -i "$sym" | head -1 | awk '{print $3}')
+    if [ -z "$addr" ]; then
+        offenders="$offenders $sym(symbol-missing)"
+        continue
+    fi
+    count=$("$objdump" -d --disassemble-symbols="$addr" "$bin" 2>/dev/null | grep -c "$want" || true)
+    checked=$((checked + 1))
+    if [ "${count:-0}" -lt 1 ]; then
+        offenders="$offenders $sym(no-$want)"
+    fi
+done
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no kernel symbols resolved in $bin)"
+    exit 2
+fi
+
+if [ -n "$offenders" ]; then
+    echo "FAIL — $checked kernel(s) checked, not vectorized:$offenders"
+    exit 1
+fi
+
+echo "PASS — $checked kernel(s) checked, all vectorized"
+exit 0
