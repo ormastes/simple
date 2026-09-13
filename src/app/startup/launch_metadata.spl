@@ -66,6 +66,13 @@ pub struct LaunchMetadata:
     required_native_dynlibs: [text]
     required_smf_dynlibs: [text]
 
+pub struct StartupComponentStep:
+    id: text
+    version: text
+    mode: text
+    activation: text
+    dynload_setting: text
+
 pub struct StartupLaunchPlan:
     entry_path: text
     entry_kind: text
@@ -85,6 +92,14 @@ pub struct StartupLaunchPlan:
     cache_strategy: text
     supported: bool
     error: text
+    # Reconciliation fields. StartupLaunchPlan is the canonical in-memory
+    # policy value; frozen StartupPlanV1 and the legacy component planner
+    # project into these fields rather than defining another execution plan.
+    route_kind: text
+    command_id: text
+    target_id: text
+    source_plan_digest: text
+    component_steps: [StartupComponentStep]
 
 pub fn startup_detect_launch_kind(path: text) -> text:
     val lower = path.lower()
@@ -182,6 +197,7 @@ fn _cache_strategy(metadata: LaunchMetadata, host_mmap_supported: bool, simpleos
 
 pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: LaunchMetadata, host_mmap_supported: bool, simpleos_cache_supported: bool) -> StartupLaunchPlan:
     val effective_policy = launch_metadata_effective_load_policy(metadata)
+    val no_steps: [StartupComponentStep] = []
     # Fail closed: an unknown declared policy never launches.
     if not load_policy_is_valid(effective_policy):
         return StartupLaunchPlan(
@@ -200,7 +216,12 @@ pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: Laun
             load_policy: LOAD_POLICY_INVALID,
             cache_strategy: "normal_read",
             supported: false,
-            error: "unknown load_policy value"
+            error: "unknown load_policy value",
+            route_kind: metadata.entry_kind,
+            command_id: "",
+            target_id: "",
+            source_plan_digest: "",
+            component_steps: no_steps
         )
     val strategy = _cache_strategy(metadata, host_mmap_supported, simpleos_cache_supported)
     val use_cache = strategy != "normal_read"
@@ -221,7 +242,12 @@ pub fn startup_plan_from_metadata(entry_path: text, args: [text], metadata: Laun
         load_policy: effective_policy,
         cache_strategy: strategy,
         supported: true,
-        error: ""
+        error: "",
+        route_kind: metadata.entry_kind,
+        command_id: "",
+        target_id: "",
+        source_plan_digest: "",
+        component_steps: no_steps
     )
 
 pub fn startup_feature_summary(plan: StartupLaunchPlan) -> text:

@@ -1,0 +1,110 @@
+# Pure reconciliation adapters for the three historical startup plan shapes.
+#
+# StartupLaunchPlan is the canonical in-memory policy value. StartupPlanV1
+# remains a frozen wire receipt and StartupLoadPlan remains a compatibility
+# producer while its callers migrate. Neither is executed directly here.
+# This module performs no host I/O and accepts no caller-supplied capability
+# booleans. Mechanism admission remains pending until a provider receipt is
+# available, so adapters never fabricate mmap/cache support.
+
+use app.startup.launch_metadata.{
+    LOAD_POLICY_NORMAL,
+    StartupComponentStep,
+    StartupLaunchPlan,
+    load_policy_is_valid,
+    startup_detect_launch_kind,
+    startup_normalize_program_args
+}
+use app.startup.contract.startup_plan_v1.{
+    StartupPlanV1,
+    startup_plan_cache_sets_valid,
+    startup_plan_decode,
+    startup_plan_encode
+}
+use app.startup.startup_planner.{StartupLoadPlan}
+
+fn _empty_launch_plan() -> StartupLaunchPlan:
+    val no_text: [text] = []
+    val no_text2: [text] = []
+    val no_text3: [text] = []
+    val no_steps: [StartupComponentStep] = []
+    StartupLaunchPlan(
+        entry_path: "", entry_kind: "", target_os: "", target_arch: "",
+        target_abi: "", program_args: no_text, include_arg_parser: false,
+        include_mmap_cache: false, include_dynlib_loader: false,
+        load_native_dynlibs: no_text2, load_smf_dynlibs: no_text3,
+        executable_source: "filesystem", load_policy: LOAD_POLICY_NORMAL,
+        cache_strategy: "normal_read", supported: false, error: "unplanned",
+        route_kind: "", command_id: "", target_id: "",
+        source_plan_digest: "", component_steps: no_steps)
+
+fn _frozen_plan_valid(plan: StartupPlanV1) -> bool:
+    val route_valid = plan.route_kind == "root" or
+        plan.route_kind == "command" or
+        plan.route_kind == "script" or
+        plan.route_kind == "artifact"
+    if not route_valid or not load_policy_is_valid(plan.load_policy):
+        return false
+    if not startup_plan_cache_sets_valid(plan):
+        return false
+    # The decoder owns every frozen structural invariant. Round-encoding this
+    # in-memory value proves it crosses that fail-closed boundary intact.
+    startup_plan_decode(startup_plan_encode(plan)).ok
+
+# Project the frozen routing receipt into executable policy. Provider-specific
+# cache mechanisms remain disabled: the V1 receipt proves intent, not that a
+# host operation is available.
+pub fn startup_launch_plan_from_v1(
+    plan: StartupPlanV1,
+    program_args: [text]
+) -> StartupLaunchPlan:
+    var out = _empty_launch_plan()
+    if not _frozen_plan_valid(plan):
+        out.error = "invalid_startup_plan_v1"
+        return out
+    out.route_kind = plan.route_kind
+    out.command_id = plan.command_id
+    out.target_id = plan.target_id
+    out.entry_path = plan.entry_path
+    if out.entry_path == "":
+        out.entry_path = plan.direct_exec_path
+    out.entry_kind = plan.route_kind
+    if plan.route_kind == "artifact" and out.entry_path != "":
+        out.entry_kind = startup_detect_launch_kind(out.entry_path)
+    if out.entry_path != "":
+        out.program_args = startup_normalize_program_args(out.entry_path, program_args)
+    else:
+        out.program_args = program_args
+    out.include_arg_parser = out.entry_kind == "script" or out.entry_kind == "smf"
+    out.load_policy = plan.load_policy
+    out.source_plan_digest = plan.plan_digest
+    out.supported = true
+    out.error = ""
+    out
+
+# Project component selection into the same canonical plan. This is a
+# compatibility seam; callers can migrate field-by-field without changing the
+# planner's deterministic dependency order or fail-closed result.
+pub fn startup_launch_plan_from_load_plan(plan: StartupLoadPlan) -> StartupLaunchPlan:
+    var out = _empty_launch_plan()
+    out.route_kind = "command"
+    out.entry_kind = "command"
+    out.command_id = plan.command
+    if not plan.ok:
+        out.error = plan.reason
+        return out
+    var steps: [StartupComponentStep] = []
+    for step in plan.steps:
+        steps.push(StartupComponentStep(
+            id: step.id,
+            version: step.version,
+            mode: step.mode,
+            activation: step.activation,
+            dynload_setting: step.dynload_setting))
+    out.component_steps = steps
+    for step in steps:
+        if step.mode == "dynamic":
+            out.include_dynlib_loader = true
+    out.supported = true
+    out.error = ""
+    out
