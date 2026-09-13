@@ -325,3 +325,44 @@ rather than the `<ul>`; the 247/79/492 mismatch counts are one structural
 divergence cascading, not hundreds of defects. Rank pages with the PIXEL
 differ and trust the geometry report only above the first desync.
 `doc/08_tracking/bug/web_geometry_differ_li_reparented_desyncs_nth_paths_2026-09-13.md`
+
+## Round 7 (2026-09-13) — the TOP half landed; the shape that made it possible
+
+The symmetric top-margin case above is now CLOSED, and it did **not** need the
+pre-pass the round-6 note predicted. `LayoutResult` gained `leading_margin_t`
+(the exact mirror of `trailing_margin_b`) and the block child loop does a
+**two-phase correction** with the `offset_layout_subtree` that was already in
+the file: place the child from its DECLARED margin-top, then re-offset the whole
+child subtree by the difference against its EFFECTIVE one,
+`collapse(declared, child.leading_margin_t)`. The effective value is only
+knowable after the child is laid out, which is exactly the objection — the
+answer is to move the box afterwards, not to measure it beforehand.
+
+Three things that cost a probe each, all now pinned as AC in
+`test/01_unit/browser_engine/first_child_top_margin_collapse_spec.spl`:
+- **`<li>` is the case the catalog actually exercises** (the feature-inventory
+  pages carry ~100 each) and it has a `::marker` as its FIRST node. Check that
+  the marker does not consume `child_count == 0` before the escape test, or the
+  fix silently does nothing on every list. AC-9.
+- **Out-of-flow first children** must not donate a margin to the block. AC-10.
+- **Nesting must yield ONE margin, not one per level** — the recursion is in
+  returning the escaped margin upward, not in adding it at each level. AC-8.
+
+The exclusion set was deliberately copied from
+`block_bottom_margin_collapses_through` INCLUDING the height clamps, even though
+CSS does let a top margin escape a fixed-height block. Widening it would move
+boxes the trailing half still holds; the remaining case is recorded, not guessed.
+
+**`::marker` bites the key scheme too, in a second place.** The 2026-09-12 fix
+corrected the geometry differ's `_layout_tag`; the renderer's own
+`_simple_web_layout_element` still counted markers, so every hit-test and
+animation target key inside an `<li>` was off by one ordinal. All three copies
+of the scheme (Chrome walker, differ, renderer) now exclude `::`-prefixed tags.
+If you touch one, grep for the other two.
+
+**6th measurement gotcha (macOS):** the PIXEL differ is impractically slow here
+— one `html` page did not finish rendering the Simple side in 20 minutes, and
+Chrome itself hits the 90 s screenshot alarm on every page. Budget the geometry
+differ instead, and never A/B across two trees: check the two
+`browser_engine/*.spl` files out at `HEAD~1` in the SAME worktree for the before
+side (`.claude/rules/testing.md` § Measurement traps).
