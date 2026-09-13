@@ -66,3 +66,11 @@ sabotage-verified example per closure unit.
   `wc -l` per file (e.g. `_layout.spl`: 2613 raw vs 1634 measured) — always
   quote the measured denominator from the `coverage:` banner / artifact, not
   `wc -l`.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+This is a coverage-closure tracking unit, not a discrete defect: the record
+itself states closing the ~40-50 point gap per file is "out of scope for a
+single session" and describes an ongoing multi-unit authoring effort
+(U4.4/U4.5 of the wm_gui_web plan). No single fix applies here within a
+45-minute bugfix-lane budget. Left OPEN, unchanged.
