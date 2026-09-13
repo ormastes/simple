@@ -792,10 +792,16 @@ fn make_elementwise_add_recipe_dynamic_n() -> VectorRecipe:
     )
 
 fn make_elementwise_mul_recipe() -> VectorRecipe:
-    """Recipe for: for i in 0..16: out[i] = a[i] * b[i]"""
+    """Recipe for: for i in 0..16: out[i] = a[i] * b[i]
+
+    header_block is 2 because `make_elementwise_block_mul` IS block 2. It used
+    to say 1, naming a block that does not exist in that function — the rewrite
+    only appeared to work because the old code invented an exit at header + 3
+    instead of resolving the real one.
+    """
     VectorRecipe(
         kind:             VectorRecipeKind.Elementwise,
-        header_block:     make_block_id(1),
+        header_block:     make_block_id(2),
         induction_var:    make_local(4),
         trip_count:       16,
         element_type:     "f32",
@@ -1339,3 +1345,84 @@ describe "AutoVectorize end-to-end — the Active pass genuinely fires":
     it "still refuses a genuinely dynamic upper bound":
         step("a local upper bound is not resolvable here and must stay refused")
         expect(blocks_after_pass(gep_loop_block_dynamic(1, 2, 3))).to_equal(1)
+
+# ============================================================================
+# The four defects that sent AutoVectorize back to AnalysisOnly
+# ============================================================================
+
+describe "D1 — the guard span uses the REAL element width, not a guess":
+    it "resolves f64 from the function locals instead of assuming f32":
+        step("get_instruction_type answered Some(\"f32\") for every BinOp")
+        step("that made span_bytes HALF the truth for an f64 loop, so an overlap")
+        step("at exactly that distance PASSED the check meant to reject it")
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.F64))).to_equal(Some("f64"))
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.I64))).to_equal(Some("i64"))
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.F32))).to_equal(Some("f32"))
+
+    it "returns nil for a type it cannot map, so the caller declines":
+        step("nil must mean decline — never fall back to a default width")
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.Unit))).to_be_nil()
+        expect(mir_type_element_name(MirType(kind: MirTypeKind.Bool))).to_be_nil()
+
+    it "no longer answers f32 for an untyped BinOp":
+        step("the old guess is gone; without a function there is no type to read")
+        expect(get_instruction_type(make_binop_inst(12, MirBinOp.Add, 10, 11))).to_be_nil()
+
+    it "element widths map to the byte sizes the guard spans with":
+        step("4 for 32-bit lanes, 8 for 64-bit — the distinction the guess erased")
+        expect(element_size_bytes("f32")).to_equal(4)
+        expect(element_size_bytes("i32")).to_equal(4)
+        expect(element_size_bytes("f64")).to_equal(8)
+        expect(element_size_bytes("i64")).to_equal(8)
+        expect(element_size_bytes("mystery")).to_equal(0)
+
+describe "D2 — an unbounded guard declines instead of rewriting unguarded":
+    it "refuses when a guard is required but the element width is unknown":
+        step("it used to splice the blocks with NO guard for a recipe the")
+        step("alias oracle had explicitly refused to clear")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val r = make_elementwise_add_recipe_for_rewrite()
+        val unbounded = VectorRecipe(
+            kind: r.kind, header_block: r.header_block, induction_var: r.induction_var,
+            trip_count: r.trip_count, element_type: "mystery", vector_width: r.vector_width,
+            op_name: r.op_name, note: r.note, input_bases: r.input_bases,
+            output_base: r.output_base, accumulator: r.accumulator,
+            chunk_width: r.chunk_width, index_locals: r.index_locals,
+            store_value: r.store_value, induction_update: r.induction_update)
+        val guarded = rewrite_elementwise_add_guarded(unbounded, func)
+        expect(guarded.blocks.len()).to_equal(func.blocks.len())
+
+describe "D3 — the exit block is resolved, not assumed to be header + 3":
+    it "declines a recipe whose header names no block in the function":
+        step("the old code invented an exit at header+3 for a header that does")
+        step("not exist, which is how the mul fixture appeared to work")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val r = make_elementwise_add_recipe_for_rewrite()
+        val orphan = VectorRecipe(
+            kind: r.kind, header_block: make_block_id(77), induction_var: r.induction_var,
+            trip_count: r.trip_count, element_type: r.element_type, vector_width: r.vector_width,
+            op_name: r.op_name, note: r.note, input_bases: r.input_bases,
+            output_base: r.output_base, accumulator: r.accumulator,
+            chunk_width: r.chunk_width, index_locals: r.index_locals,
+            store_value: r.store_value, induction_update: r.induction_update)
+        expect(rewrite_elementwise_add(orphan, func).blocks.len()).to_equal(func.blocks.len())
+
+describe "D4 — guard temporaries are declared locals":
+    it "appends a local for every temporary the guard block writes":
+        step("they had no type entry, so codegen could not classify them,")
+        step("and their ids could collide with real locals")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        expect(guarded.locals.len() > func.locals.len()).to_equal(true)
+
+    it "numbers them above every existing local so they cannot collide":
+        step("the previous base was an arbitrary constant unrelated to the function")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        var seen: [i64] = []
+        var dupes = 0
+        for lc in guarded.locals:
+            if seen.contains(lc.id.id):
+                dupes = dupes + 1
+            seen.push(lc.id.id)
+        expect(dupes).to_equal(0)
