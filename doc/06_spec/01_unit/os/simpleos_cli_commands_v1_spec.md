@@ -2,14 +2,17 @@
 
 Requirement: `REQ-016`
 
-## Image composition remains fail-closed at the native CLI adapter
+## Image composition requires explicit verified inputs
 
-The verified composition owner now defines the complete retained-root,
-persisted-readback, exact-output, and manifest flow. However, its safe hosted
-read/write ABI is currently implemented only by the interpreter provider. The
-production native runtime has no corresponding hooks. `simple os image`
-therefore returns non-zero and names that exact provider gap instead of using
-the interpreter, legacy descriptor builder, or an unsafe path-based fallback.
+`simple os image` projects explicit artifact paths, a new output path, sector
+count, profile, and identities into the verified composition owner. Missing
+inputs return nonzero. Help exposes the native retained-root requirement and
+canonical `SimpleOsImageManifestV1` stdout encoding. Native Linux mechanisms
+now exist; unsupported hosts and filesystem mechanisms fail closed.
+
+The dedicated [image CLI scenarios](image_cli_v1_spec.md) cover bounded parsing
+and inert inspection. These are source/spec contracts, not evidence that a
+deployed self-hosted runtime has executed the composer successfully.
 
 ## Shell inspection reuses the QEMU plan owner
 
@@ -21,9 +24,9 @@ than adding another QEMU policy owner.
 
 ## Help is capability-honest
 
-The OS help marks both actual interactive shell launch and image composition
-unavailable while exposing their safe inspection/diagnostic surfaces. No
-source-only projection is advertised as a working producer.
+The OS help describes image composition as a verified NVFS carrier and points
+to its explicit input options. It continues to mark interactive shell launch
+unavailable. Composition does not claim firmware boot or release qualification.
 
 ## Bootstrap inspection is receipt-oriented
 

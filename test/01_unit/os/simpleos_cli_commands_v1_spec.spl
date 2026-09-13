@@ -5,7 +5,6 @@
 use std.spec.{describe, it, expect, step}
 use os.cli.{
     handle_os,
-    simpleos_image_cli_unavailable_reason_v1,
     simpleos_shell_cli_unavailable_reason_v1,
     simpleos_shell_cli_inspection_requested_v1,
     simpleos_bootstrap_cli_unavailable_reason_v1,
@@ -16,6 +15,7 @@ use os.cli.{
 use std.common.contracts.execution.process_launch_spec_v1.{
     process_launch_spec_validate_v1
 }
+use os.image_cli_v1.{simpleos_image_cli_plan_v1, simpleos_image_cli_usage_lines_v1}
 use app.io.env_ops.{env_get, env_set}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -24,17 +24,17 @@ fn cli_source_v1() -> text:
     rt_file_read_text("src/os/cli.spl") ?? ""
 
 describe "REQ-016: SimpleOS image and shell CLI projections [importance=high; importance_weight=2]":
-    it "keeps the production CLI closed until the native retained-root provider exists":
-        step("Read the operator-facing native-provider reason")
-        val reason = simpleos_image_cli_unavailable_reason_v1()
-
-        step("Require no-follow native inputs and the shared manifest authority")
-        expect(reason).to_contain("native retained-root no-follow")
-        expect(reason).to_contain("interpreter-only hooks are not accepted")
-        expect(reason).to_contain("SimpleOsImageManifestV1")
-
-        step("Invoke the command and require non-zero rejection")
+    it "requires explicit image inputs before admitting the native provider":
+        step("Reject image composition without caller-selected artifacts and identities")
+        expect(simpleos_image_cli_plan_v1([]).is_err()).to_equal(true)
         expect(handle_os(["image"])).to_equal(1)
+
+        step("Expose the native requirement and canonical output contract in help")
+        val help = simpleos_image_cli_usage_lines_v1().join("\n")
+        expect(help).to_contain("native retained-root provider")
+        expect(help).to_contain("unsupported hosts fail closed")
+        expect(help).to_contain("canonical SimpleOsImageManifestV1")
+        expect(handle_os(["image", "--help"])).to_equal(0)
 
     it "limits shell to sealed inspection until an interactive provider exists":
         step("Read the interactive-launch unavailable reason")
@@ -59,12 +59,13 @@ describe "REQ-016: SimpleOS image and shell CLI projections [importance=high; im
         expect(source).to_contain("return handle_os_run(args)")
         expect(source).to_contain("\"shell\":\n            handle_os_shell(rest)")
 
-    it "labels native image wiring unavailable while advertising the interactive shell":
+    it "advertises the bounded image composer and the interactive shell status":
         step("Inspect the help source")
         val source = cli_source_v1()
 
         step("Require honest image status and the shell command")
-        expect(source).to_contain("Compose a verified OS image (native provider unavailable)")
+        expect(source).to_contain("Compose a verified NVFS carrier (see image --help)")
+        expect(source).to_contain("handle_os_image_v1(args)")
         expect(source).to_contain("Inspect interactive QEMU launch (launch unavailable)")
 
     it "models bootstrap qualification as bounded guest process requests":

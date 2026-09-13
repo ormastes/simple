@@ -95,6 +95,28 @@ fn _verified_image_distinct_paths_v1(request: SimpleOsVerifiedImageRequestV1) ->
         i = i + 1
     true
 
+pub fn simpleos_verified_image_request_validate_v1(
+    request: SimpleOsVerifiedImageRequestV1
+) -> Result<(), text>:
+    """Validate image inputs without opening the host root or writing bytes."""
+    if (not request.trusted_absolute_root.starts_with("/") or
+        request.trusted_absolute_root.contains("\0") or
+        request.trusted_absolute_root.len() > 4095):
+        return Err("hosted-safe-io-invalid-root")
+    if (request.size_sectors < 8u64 or
+        request.size_sectors > SIMPLEOS_VERIFIED_IMAGE_MAX_SECTORS_V1):
+        return Err("verified image size must be between 8 and 32768 sectors")
+    if not _verified_image_distinct_paths_v1(request):
+        return Err("verified image paths must be distinct safe relative paths")
+    if request.compiler_relative_path != "" and request.profile_id != "dev":
+        return Err("verified image compiler payload is permitted only in dev profile")
+    if (not simpleos_image_profile_id_valid_v1(request.profile_id) or
+        not simpleos_image_identity_valid_v1(request.build_id) or
+        not simpleos_image_identity_valid_v1(request.source_id) or
+        not simpleos_image_identity_valid_v1(request.sosix_version)):
+        return Err("verified image profile or manifest identity is invalid")
+    Ok(())
+
 fn _verified_image_read_artifact_v1(
     authority: HostedSafeArtifactRootAuthorityV1, path: text, role: text
 ) -> Result<[u8], text>:
@@ -164,19 +186,6 @@ fn _verified_image_build_with_authority_v1(
 ) -> Result<SimpleOsVerifiedImageReceiptV1, text>:
     if manifest_output.len() != 0:
         return Err("verified image manifest output buffer must be empty")
-    if (request.size_sectors < 8u64 or
-        request.size_sectors > SIMPLEOS_VERIFIED_IMAGE_MAX_SECTORS_V1):
-        return Err("verified image size must be between 8 and 32768 sectors")
-    if not _verified_image_distinct_paths_v1(request):
-        return Err("verified image paths must be distinct safe relative paths")
-    if request.compiler_relative_path != "" and request.profile_id != "dev":
-        return Err("verified image compiler payload is permitted only in dev profile")
-    if (not simpleos_image_profile_id_valid_v1(request.profile_id) or
-        not simpleos_image_identity_valid_v1(request.build_id) or
-        not simpleos_image_identity_valid_v1(request.source_id) or
-        not simpleos_image_identity_valid_v1(request.sosix_version)):
-        return Err("verified image profile or manifest identity is invalid")
-
     val kernel = _verified_image_read_artifact_v1(
         authority, request.kernel_relative_path, "kernel")?
     val init = _verified_image_read_artifact_v1(
@@ -319,6 +328,7 @@ pub fn simpleos_verified_image_compose_v1(
     """Build one new verified image beneath an explicitly retained host root."""
     if manifest_output.len() != 0:
         return Err("verified image manifest output buffer must be empty")
+    simpleos_verified_image_request_validate_v1(request)?
     val authority = hosted_safe_artifact_root_acquire_v1(
         request.trusted_absolute_root)?
     var staged_manifests: [SimpleOsImageManifestV1] = []
@@ -334,4 +344,5 @@ pub fn simpleos_verified_image_compose_v1(
 
 export SimpleOsVerifiedImageRequestV1, SimpleOsVerifiedImageReceiptV1
 export simpleos_verified_image_compose_v1
+export simpleos_verified_image_request_validate_v1
 export SIMPLEOS_VERIFIED_IMAGE_MAX_SECTORS_V1
