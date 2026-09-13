@@ -1,0 +1,116 @@
+#!/bin/sh
+# Pin the Stage-3 planner-receipt auto-production wiring.
+#
+# Site 20 (doc/08_tracking/bug/
+# stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md) was
+# NOT a missing producer -- every receipt the Stage 3 gate reads has one. It was
+# that the LAST producer,
+# scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs, was never
+# invoked, so a seed-rooted lane admitted a Stage 2 and then had no reachable
+# entry point to Stage 3.
+#
+# The wiring must keep four properties, and this guard fails closed on each:
+#   1. the producer is invoked from bootstrap-from-scratch.sh, inside the
+#      Stage-2 trust-root branch, AFTER publish-stage2-parent-receipts.shs (the
+#      producer reads the two receipts that publisher writes);
+#   2. the typed reason is taken from the operator's flag, never a literal --
+#      inventing a reason would defeat the typed-reason policy entirely;
+#   3. the flag is REFUSED outside the trust-root Stage-2 lane rather than
+#      silently ignored;
+#   4. a producer failure fails the run and leaves no receipt behind.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> check(s) run, 0 failed          exit 0
+#   FAIL — <n> check(s) run, <k> failed        exit 1
+#   ERROR — nothing was checked                exit 2
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+script="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+
+checks=0
+failed=0
+
+note_fail() {
+    failed=$((failed + 1))
+    echo "  FAIL: $1" >&2
+}
+
+check_grep() {
+    # check_grep <description> <pattern>
+    checks=$((checks + 1))
+    if grep -q -- "$2" "$script"; then
+        return 0
+    fi
+    note_fail "$1"
+}
+
+[ -f "$script" ] || { echo "ERROR — nothing was checked (missing $script)"; exit 2; }
+
+# --- 1. producer invoked, after the parent-receipt publisher -----------------
+pub_line=$(grep -n 'publish-stage2-parent-receipts\.shs' "$script" | head -1 | cut -d: -f1)
+prod_line=$(grep -n 'sh "\${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2\.shs"' "$script" | head -1 | cut -d: -f1)
+checks=$((checks + 1))
+if [ -z "$pub_line" ] || [ -z "$prod_line" ]; then
+    note_fail "publisher and/or planner-admission producer are not invoked from bootstrap-from-scratch.sh"
+elif [ "$prod_line" -le "$pub_line" ]; then
+    note_fail "planner-admission producer (line $prod_line) runs before the parent-receipt publisher (line $pub_line)"
+fi
+
+# The invocation must sit inside the trust-root branch that publishes the
+# parent receipts. Both are guarded by the same condition; assert the producer
+# appears between that condition and the end of the Stage-2 admission block.
+trust_line=$(grep -n 'bootstrap_stage2_trust_root}" -eq 1' "$script" | tail -1 | cut -d: -f1)
+checks=$((checks + 1))
+if [ -z "$trust_line" ] || [ -z "$prod_line" ] || [ "$prod_line" -le "$trust_line" ]; then
+    note_fail "planner-admission producer is not inside the Stage-2 trust-root branch"
+fi
+
+# --- 2. the typed reason is the operator's, never a literal -----------------
+check_grep "producer is not passed the operator-supplied reason variable" \
+    '\-\-reason=\${produce_stage3_receipt_reason}'
+checks=$((checks + 1))
+if grep -n -- '--reason=' "$script" | grep -qv 'produce_stage3_receipt_reason'; then
+    note_fail "a literal --reason= is passed to the planner-admission producer"
+fi
+check_grep "--produce-stage3-receipt=<reason> flag is not parsed" \
+    '\-\-produce-stage3-receipt=\*)'
+checks=$((checks + 1))
+if grep -q "produce_stage3_receipt_reason=['\"]\?[a-z]" "$script"; then
+    note_fail "produce_stage3_receipt_reason carries a default reason; it must start empty"
+fi
+
+# --- 3. refused outside the trust-root Stage-2 lane -------------------------
+check_grep "the flag is not refused outside the Stage-2 trust-root lane" \
+    'produce-stage3-receipt-requires-stage2-trust-root-lane'
+
+# --- 4. fail-closed on producer failure -------------------------------------
+check_grep "producer failure does not fail the run" \
+    'could not produce the Stage 3 planner admission receipt'
+check_grep "a producer that writes nothing is not refused" \
+    'Stage 3 planner admission producer wrote no receipt'
+check_grep "the receipt is not removed when the producer fails" \
+    'rm -f "\${stage3_planner_receipt}"'
+
+# --- 5. behavioural: the refusal actually fires ------------------------------
+# Cheapest real execution that proves property 3: the flag without the
+# trust-root lane must exit 64 with the typed diagnostic and start no stage.
+checks=$((checks + 1))
+behaviour_out=$(cd "$root" && sh "$script" \
+    --produce-stage3-receipt=verify-landed-compiler-fix \
+    --validate-bootstrap-receipt 2>&1)
+behaviour_rc=$?
+case "$behaviour_rc:$behaviour_out" in
+    64:*produce-stage3-receipt-requires-stage2-trust-root-lane*) ;;
+    *)
+        note_fail "flag outside the trust-root lane did not exit 64 with the typed refusal (rc=$behaviour_rc): $(printf '%s' "$behaviour_out" | tail -1)"
+        ;;
+esac
+
+[ "$checks" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $checks check(s) run, $failed failed"
+    exit 1
+fi
+echo "PASS — $checks check(s) run, 0 failed"
+exit 0

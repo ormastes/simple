@@ -326,3 +326,27 @@ does not set it. Ensure the wrapper sets both when invoking native-build in
 hosted mode (e.g., `SIMPLE_RUNTIME_PATH="$seed_target" bin/simple native-build`).
 
 See `.claude/memory/ref_architecture.md` for detailed architecture.
+
+## Reaching Stage 3 from a seed-rooted Stage 2 (site 20, closed 2026-09-13)
+
+A trust-root Stage-2 lane (`--full-bootstrap --stop-after-stage2`, no receipt)
+publishes the Stage-2 admission receipt and the sanity/provenance parent pair,
+but until 2026-09-13 nothing invoked the LAST producer, so Stage 3 was
+unreachable (`bootstrap-policy-error: reason-receipt-required`). Add the typed
+reason to the same command and the planner receipt is produced for you:
+
+```bash
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap \
+  --stop-after-stage2 --mode=dynload --jobs=half \
+  --produce-stage3-receipt=verify-landed-compiler-fix
+# -> bootstrap-policy: stage3-planner-receipt=<output>/stage3-planner-admission.receipt
+# -> bootstrap-policy: resume with: ... --resume-stage3-from-admitted=<output> --bootstrap-receipt=<receipt>
+```
+
+The reason is yours to type — it is never defaulted and never invented; the
+producer validates it against its own allow-list
+(`bootstrap_planner_v2_reason_allowed`) and re-verifies the whole parent
+authority before emitting anything. The flag is REFUSED (exit 64) outside the
+trust-root Stage-2 lane rather than silently ignored, and a producer failure
+fails the run leaving no receipt. Pinned by
+`scripts/check/check-bootstrap-stage3-receipt-autowire.shs`.
