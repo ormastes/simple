@@ -1,7 +1,7 @@
 # unify_types: the occurs check is dead code, UNIFY_FAIL_OCCURS is unreachable
 
 - **Date:** 2026-08-02
-- **Status:** OPEN
+- **Status:** CLOSED (2026-09-13) -- fixed by occurs_check_never_recurses_2026-08-17.md's structural-recursion fix, spec green
 - **Severity:** HIGH — the type checker has no working guard against infinite
   types. The guard exists in source and can never fire.
 - **Found by:** de-vacuifying `type_inference_v2_spec.spl`, whose 70 examples
@@ -118,3 +118,29 @@ recreate the vacuity. The gap is tracked here instead.
 
 - `doc/08_tracking/bug/vacuous_spec_corpus_census_and_inert_assertion_forms_2026-08-02.md`
 - `doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md`
+
+## Re-check 2026-09-13 (BUGFIX-10 fanout) — fixed by a later, related bug's landing
+
+`src/compiler/10.frontend/core/type_inference.spl:76-161` (base
+`f26970e9d93`) now has `occurs_check`/`occurs_check_depth`/`occurs_check_any`/
+`occurs_check_fn` that recurse structurally into every composite type tag
+(array/option/isolated/exclusive/reference/pointer/atomic/weak wrappers,
+dict, result, tuple, union, and named struct/class/enum field types), with a
+`OCCURS_MAX_DEPTH` cycle bound. The in-source comment names this exact fix:
+`doc/08_tracking/bug/occurs_check_never_recurses_2026-08-17.md`, landed
+2026-08-17. This closes both halves of the original "Fix required" list:
+(1) the check is genuinely reachable now, since it recurses into `t2`'s
+structure looking for `t1` rather than only testing direct equality, which
+`unify_types`'s own `t1 == t2` case already handled; and (2) it recurses
+into composite types, so `T = List<T>`-shaped infinite types are caught.
+
+Verified with the existing regression spec:
+
+```
+$ bin/simple test test/01_unit/compiler/type_checker/occurs_check_structural_spec.spl
+SPEC FILE VERDICT: ... declared>=24 executed=24 passed=24 failed=0 skipped=0 dropped=0
+Results: 24 total, 24 passed, 0 failed
+```
+
+- Status: CLOSED (2026-09-13) — fixed by `occurs_check_never_recurses_2026-08-17`;
+  `occurs_check_structural_spec.spl` 24/24 PASS.
