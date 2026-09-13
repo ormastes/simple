@@ -3301,7 +3301,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     # doc/08_tracking/bug/stage2_compatibility_manifest_unwritable_by_rust_seed_2026-09-13.md
     stage2_compat_producer_kind=$(
       bootstrap_phase2_compat_producer_kind \
-        "${bootstrap_stage2_parent_override}" "${pure_simple}"
+        "${bootstrap_stage2_parent_override}"
     ) || {
       echo "error: could not determine the Stage 2 producer kind" >&2
       exit 1

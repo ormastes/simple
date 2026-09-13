@@ -62,22 +62,30 @@
 # (src/compiler/00.common/cache/phase_compatibility_manifest.spl:166).
 BOOTSTRAP_PHASE2_COMPAT_SCHEMA_HEADER='simple-phase2-phase3-compatibility-v1'
 
-# bootstrap_phase2_compat_producer_kind <parent_override> <pure_simple_flag>
+# bootstrap_phase2_compat_producer_kind <parent_override>
 #
-# Prints `pure-simple` or `rust-seed` on stdout; exit 2 on malformed input.
-# Positive in both directions: a non-empty override is an admitted pure-Simple
-# release (see bootstrap-from-scratch.sh:488-495), and an empty override under
-# the manual lane means Stage 2's parent is by construction the admitted RUST
-# authority at `${stage2_runtime_authority}/simple`.
+# Prints `pure-simple` or `rust-seed` on stdout; exit 2 if the argument is
+# missing (an absent argument is never silently read as "rust-seed").
+#
+# `bootstrap_stage2_parent_override` is the ONLY thing that changes which
+# binary compiles Stage 2 (bootstrap-from-scratch.sh:2772-2776): non-empty, it
+# is an admitted pure-Simple release that `admit-stage2-parent.shs` verified
+# against the immutable runtime provenance record; empty, Stage 2's parent is
+# by construction the admitted RUST authority at
+# `${stage2_runtime_authority}/simple`, because `can_full_bootstrap=0` pins the
+# manual seed lane on every platform.
+#
+# `--pure-simple` is deliberately NOT consulted: it only forbids REBUILDING the
+# Rust seed (and conflicts with `--full-bootstrap` at :707); it leaves
+# `stage2_seed_absolute` pointing at that same Rust authority. Treating it as a
+# pure-Simple producer would demand a manifest no producer on that lane can
+# publish.
 bootstrap_phase2_compat_producer_kind() {
-  bpcpk_override=$1
-  bpcpk_pure=$2
-  case "${bpcpk_pure}" in
-    0|1) ;;
-    *) echo "error: pure-simple flag must be 0 or 1 (got '${bpcpk_pure}')" >&2
-       return 2 ;;
-  esac
-  if [ -n "${bpcpk_override}" ] || [ "${bpcpk_pure}" -eq 1 ]; then
+  if [ "$#" -lt 1 ]; then
+    echo "error: bootstrap_phase2_compat_producer_kind requires the Stage 2 parent override (possibly empty) as \$1" >&2
+    return 2
+  fi
+  if [ -n "$1" ]; then
     echo pure-simple
   else
     echo rust-seed
@@ -132,14 +140,19 @@ bootstrap_phase2_compat_manifest_gate() {
     return 1
   fi
 
-  # rust-seed, absent: skip WITH evidence.
-  if [ -n "${bpcmg_evidence}" ]; then
-    bpcmg_dir=$(dirname -- "${bpcmg_evidence}")
-    [ -d "${bpcmg_dir}" ] || {
-      echo "ERROR — nothing was checked (evidence directory ${bpcmg_dir} is absent)"
-      return 2
-    }
-    {
+  # rust-seed, absent: skip WITH evidence. The evidence is MANDATORY -- a skip
+  # that leaves no record on disk is indistinguishable from the gate not having
+  # run at all, which is the failure mode this whole file exists to avoid.
+  if [ -z "${bpcmg_evidence}" ]; then
+    echo "ERROR — nothing was checked (a rust-seed skip requires an evidence path)"
+    return 2
+  fi
+  bpcmg_dir=$(dirname -- "${bpcmg_evidence}")
+  [ -d "${bpcmg_dir}" ] || {
+    echo "ERROR — nothing was checked (evidence directory ${bpcmg_dir} is absent)"
+    return 2
+  }
+  {
       echo "schema: simple-stage2-compat-manifest-skip-v1"
       echo "producer_kind: rust-seed"
       echo "producer_path: ${bpcmg_producer}"
@@ -148,12 +161,11 @@ bootstrap_phase2_compat_manifest_gate() {
       echo "reason: reverse-reference authority exist only in the pure-Simple"
       echo "reason: driver; a seed-built Phase 2 cache carries no M2 receipt,"
       echo "reason: so the manifest cannot be published by this producer."
-      echo "consequence: Stage 3 admits ZERO Phase-2 reuse (fail-closed)."
-    } > "${bpcmg_evidence}" || {
-      echo "ERROR — nothing was checked (could not write ${bpcmg_evidence})"
-      return 2
-    }
-  fi
+    echo "consequence: Stage 3 admits ZERO Phase-2 reuse (fail-closed)."
+  } > "${bpcmg_evidence}" || {
+    echo "ERROR — nothing was checked (could not write ${bpcmg_evidence})"
+    return 2
+  }
   echo "PASS — 2 invariant(s) checked (producer identified, skip recorded)," \
        "producer=rust-seed cannot publish the manifest; Stage 3 reuse disabled;" \
        "evidence=${bpcmg_evidence}"
@@ -224,17 +236,20 @@ bootstrap_phase2_compat_selftest() {
   bpcs_case bad-evidence-dir 2 'ERROR' \
     bootstrap_phase2_compat_manifest_gate rust-seed \
     "${bpcs_tmp}/missing.manifest" "${bpcs_tmp}/nope/ev8" /fake/x
+  # 9. rust-seed skip with NO evidence path -> ERROR: an unrecorded skip is
+  #    indistinguishable from the gate never running.
+  bpcs_case skip-without-evidence 2 'ERROR' \
+    bootstrap_phase2_compat_manifest_gate rust-seed \
+    "${bpcs_tmp}/missing.manifest" "" /fake/x
 
-  # 9-11. producer-kind derivation.
-  bpcs_k=$(bootstrap_phase2_compat_producer_kind "" 0) || bpcs_fail=1
+  # 10-11. producer-kind derivation: the override is the only producer input.
+  bpcs_k=$(bootstrap_phase2_compat_producer_kind "") || bpcs_fail=1
   [ "${bpcs_k}" = rust-seed ] || { echo "selftest FAIL kind-seed: ${bpcs_k}" >&2; bpcs_fail=1; }
-  bpcs_k=$(bootstrap_phase2_compat_producer_kind /some/admitted/simple 0) || bpcs_fail=1
+  bpcs_k=$(bootstrap_phase2_compat_producer_kind /some/admitted/simple) || bpcs_fail=1
   [ "${bpcs_k}" = pure-simple ] || { echo "selftest FAIL kind-override: ${bpcs_k}" >&2; bpcs_fail=1; }
-  bpcs_k=$(bootstrap_phase2_compat_producer_kind "" 1) || bpcs_fail=1
-  [ "${bpcs_k}" = pure-simple ] || { echo "selftest FAIL kind-pure: ${bpcs_k}" >&2; bpcs_fail=1; }
-  # 12. malformed flag -> exit 2
-  bootstrap_phase2_compat_producer_kind "" x >/dev/null 2>&1
-  [ $? -eq 2 ] || { echo "selftest FAIL kind-malformed: expected exit 2" >&2; bpcs_fail=1; }
+  # 12. missing argument -> exit 2, never a silent "rust-seed".
+  bootstrap_phase2_compat_producer_kind >/dev/null 2>&1
+  [ $? -eq 2 ] || { echo "selftest FAIL kind-missing-arg: expected exit 2" >&2; bpcs_fail=1; }
 
   rm -rf "${bpcs_tmp}"
   return "${bpcs_fail}"
