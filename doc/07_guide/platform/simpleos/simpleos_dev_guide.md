@@ -427,7 +427,28 @@ bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=x86_32
 bin/simple run examples/09_embedded/simple_os/build.spl -- --arch=i686
 ```
 
-The x86_32 lane uses `qemu-system-i386`, an ELF32 linker mode, and freestanding C/ASM boot support under `examples/09_embedded/simple_os/arch/x86_32/boot/`. The QEMU runner chooses LLVM for this lane by default because the current Cranelift object backend cannot initialize an i686 freestanding target. The selected `simple` binary must be built with the Rust `llvm` feature and a discoverable LLVM 18 installation, for example by setting `LLVM_SYS_180_PREFIX` before running `cargo build --features llvm`.
+The x86_32 catalog retains the `qemu-system-i386` guest identity, ELF32 linker
+mode, and freestanding C/ASM boot support under
+`examples/09_embedded/simple_os/arch/x86_32/boot/`. The host adapter launches
+that `pc`/`qemu32` machine through the compatible `qemu-system-x86_64`
+frontend because the i386 frontend rejects this Multiboot-style kernel's PVH
+shape. The executable alias is host policy and does not change target identity.
+
+Inspect the sealed launch policy without starting QEMU:
+
+```bash
+simple os run --arch=x86_32 --show-plan
+simple os run --arch=x86_32 --print-command
+simple os run --scenario=x86_64-q35-pure-nvme-perf --show-plan
+```
+
+POSIX hosts receive single-quoted inert command text. Windows receives a
+labelled `Windows argv (display only)` vector, not POSIX or PowerShell
+syntax. Named inspection admits only catalog scenarios whose established boot
+shape is represented exactly. ARM loader-device scenarios and the forwarded-
+network RV64 hosted scenario fail closed until their typed vocabulary exists.
+Normal launch remains on the established runner until complete parity is
+qualified.
 
 ### 4.8 Native Build Config
 

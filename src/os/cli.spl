@@ -1,5 +1,8 @@
 use app.io.env_ops.{env_get, env_set}
-use os.qemu_cli_plan_v1.{qemu_cli_inspect_plan_v1}
+use os.qemu_cli_plan_v1.{
+    qemu_cli_inspect_plan_v1, qemu_cli_inspect_named_lane_v1,
+    qemu_cli_named_lane_supported_v1
+}
 use os.qemu_runner.{
     OsTarget,
     arch_display_name,
@@ -11,6 +14,9 @@ use os.qemu_runner.{
     get_scenario,
     scenario_exists,
     scenario_by_name_direct,
+    _catalog_platform_name_for_scenario,
+    _catalog_has_lane_for_scenario,
+    scenario_target,
     run_os,
     run_os_debug_gui,
     run_scenario,
@@ -108,7 +114,7 @@ fn print_os_help():
     print "  --scenario=<name>  Named QEMU scenario (for run/test/build)"
     print "  --debug-gui        Keep GUI targets windowed while exposing serial logs"
     print "  --show-plan        Validate the typed default-lane QEMU launch plan"
-    print "  --print-command    Print sealed POSIX argv (not Windows or x86_32 yet)"
+    print "  --print-command    Print sealed POSIX command or Windows argv display"
     print "  --log=<on|off>     Compile normal OS logging in or out (default: on)"
     print ""
     print "Architectures:"
@@ -225,9 +231,30 @@ fn handle_os_run(args: [text]) -> i64:
         return 1
     if scenario_name != "":
         if show_plan or print_command:
+            if not scenario_exists(scenario_name):
+                _restore_os_log_mode(old_log_mode)
+                print "Error: unknown scenario '{scenario_name}'"
+                return 1
+            val scenario = scenario_by_name_direct(scenario_name)
+            if not _catalog_has_lane_for_scenario(scenario):
+                _restore_os_log_mode(old_log_mode)
+                print "Error: named scenario '{scenario_name}' is not a catalog-owned QEMU lane"
+                return 1
+            val platform_name = _catalog_platform_name_for_scenario(scenario)
+            if not qemu_cli_named_lane_supported_v1(platform_name, scenario.name):
+                _restore_os_log_mode(old_log_mode)
+                print "Error: named scenario '{scenario_name}' uses a QEMU boot shape not represented by the sealed plan"
+                return 1
+            val target = scenario_target(scenario)
+            val outcome = qemu_cli_inspect_named_lane_v1(
+                platform_name, scenario.name, target.output, target.qemu_memory,
+                target.qemu_bios, target.qemu_extra, print_command)
             _restore_os_log_mode(old_log_mode)
-            print "Error: typed QEMU inspection is not yet available for named scenarios"
-            return 1
+            if not outcome.ok():
+                print "Error: {outcome.error()}"
+                return 1
+            for line in outcome.lines_copy(): print line
+            return 0
         if not scenario_exists(scenario_name):
             _restore_os_log_mode(old_log_mode)
             print "Error: unknown scenario '{scenario_name}'"

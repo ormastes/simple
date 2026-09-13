@@ -17,6 +17,19 @@ pub enum QemuLaneBlockDeviceV1:
     None
     VirtioBlockDevice
 
+pub struct QemuLaneNvmeDriveV1:
+    path: text
+    id: text
+
+pub struct QemuLaneNvmeControllerV1:
+    id: text
+    serial: text
+
+pub struct QemuLaneNvmeNamespaceV1:
+    drive_id: text
+    controller_id: text
+    namespace_id: u16
+
 pub class QemuLaneWiringV1:
     _valid: bool
     _lane_name: text
@@ -30,6 +43,13 @@ pub class QemuLaneWiringV1:
     _raw_drive_id: text
     _block_device: QemuLaneBlockDeviceV1
     _semihosting_native: bool
+    _nvme_drives: [QemuLaneNvmeDriveV1]
+    _nvme_controllers: [QemuLaneNvmeControllerV1]
+    _nvme_namespaces: [QemuLaneNvmeNamespaceV1]
+    _catalog_argv: [text]
+    _machine_repeat: bool
+    _network_user: bool
+    _network_device: bool
 
 impl QemuLaneWiringV1:
     pub fn valid() -> bool: self._valid
@@ -41,6 +61,31 @@ impl QemuLaneWiringV1:
     pub fn initrd_path() -> text: self._initrd_path
     pub fn raw_drive_path() -> text: self._raw_drive_path
     pub fn raw_drive_id() -> text: self._raw_drive_id
+    pub fn nvme_drive_count() -> i64: self._nvme_drives.len()
+    pub fn nvme_controller_count() -> i64: self._nvme_controllers.len()
+    pub fn nvme_namespace_count() -> i64: self._nvme_namespaces.len()
+    pub fn nvme_drive_id(index: i64) -> text:
+        if index < 0 or index >= self._nvme_drives.len(): return ""
+        self._nvme_drives[index].id
+    pub fn nvme_drive_path(index: i64) -> text:
+        if index < 0 or index >= self._nvme_drives.len(): return ""
+        self._nvme_drives[index].path
+    pub fn nvme_controller_id(index: i64) -> text:
+        if index < 0 or index >= self._nvme_controllers.len(): return ""
+        self._nvme_controllers[index].id
+    pub fn nvme_namespace_id(index: i64) -> u16:
+        if index < 0 or index >= self._nvme_namespaces.len(): return 0u16
+        self._nvme_namespaces[index].namespace_id
+    pub fn nvme_namespace_drive_id(index: i64) -> text:
+        if index < 0 or index >= self._nvme_namespaces.len(): return ""
+        self._nvme_namespaces[index].drive_id
+    pub fn nvme_namespace_controller_id(index: i64) -> text:
+        if index < 0 or index >= self._nvme_namespaces.len(): return ""
+        self._nvme_namespaces[index].controller_id
+    pub fn catalog_argv_copy() -> [text]:
+        var result: [text] = []
+        for value in self._catalog_argv: result.push(value)
+        result
 
 fn _qemu_empty_lane_wiring_v1() -> QemuLaneWiringV1:
     QemuLaneWiringV1(
@@ -48,7 +93,10 @@ fn _qemu_empty_lane_wiring_v1() -> QemuLaneWiringV1:
         _repeat_firmware_arg: false, _debug_exit: false,
         _display_arg: QemuLaneDisplayArgV1.Omit, _initrd_path: "",
         _virtio_mmio_modern: false, _raw_drive_path: "", _raw_drive_id: "",
-        _block_device: QemuLaneBlockDeviceV1.None, _semihosting_native: false)
+        _block_device: QemuLaneBlockDeviceV1.None, _semihosting_native: false,
+        _nvme_drives: [], _nvme_controllers: [], _nvme_namespaces: [],
+        _catalog_argv: [], _machine_repeat: false,
+        _network_user: false, _network_device: false)
 
 fn _qemu_invalid_lane_wiring_v1(lane_name: text) -> QemuLaneWiringV1:
     var result = _qemu_empty_lane_wiring_v1()
@@ -69,6 +117,61 @@ fn _qemu_expected_drive_v1(target: SimpleOsMachineTargetProjection) -> (text, te
         case "riscv64gc-simpleos" | "riscv32imac-simpleos": (target.disk_image_output, "rvdisk")
         case _: ("", "")
 
+fn _qemu_lane_id_valid_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 64: return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        if not alpha and not digit and code != 45 and code != 46 and code != 95: return false
+        i = i + 1
+    true
+
+fn _qemu_nvme_drive_v1(value: text) -> QemuLaneNvmeDriveV1?:
+    val fields = value.split(",")
+    if (fields.len() != 4 or not fields[0].starts_with("file=") or
+        fields[1] != "if=none" or not fields[2].starts_with("id=") or
+        fields[3] != "format=raw"): return nil
+    val path = fields[0][5:]
+    val id = fields[2][3:]
+    if path.len() == 0 or path.len() > 4096 or path.contains(",") or not _qemu_lane_id_valid_v1(id): return nil
+    QemuLaneNvmeDriveV1(path: path, id: id)
+
+fn _qemu_nvme_controller_v1(value: text) -> QemuLaneNvmeControllerV1?:
+    val fields = value.split(",")
+    if (fields.len() != 3 or fields[0] != "nvme" or
+        not fields[1].starts_with("id=") or
+        not fields[2].starts_with("serial=")): return nil
+    val id = fields[1][3:]
+    val serial = fields[2][7:]
+    if not _qemu_lane_id_valid_v1(id) or not _qemu_lane_id_valid_v1(serial): return nil
+    QemuLaneNvmeControllerV1(id: id, serial: serial)
+
+fn _qemu_nvme_namespace_v1(value: text) -> QemuLaneNvmeNamespaceV1?:
+    val fields = value.split(",")
+    if (fields.len() != 4 or fields[0] != "nvme-ns" or
+        not fields[1].starts_with("drive=") or
+        not fields[2].starts_with("bus=") or
+        not fields[3].starts_with("nsid=")): return nil
+    val drive_id = fields[1][6:]
+    val controller_id = fields[2][4:]
+    val namespace_id = int(fields[3][5:])
+    if (not _qemu_lane_id_valid_v1(drive_id) or not _qemu_lane_id_valid_v1(controller_id) or
+        namespace_id < 1 or namespace_id > 65535): return nil
+    QemuLaneNvmeNamespaceV1(
+        drive_id: drive_id, controller_id: controller_id, namespace_id: namespace_id as u16)
+
+fn _qemu_nvme_drive_exists_v1(values: [QemuLaneNvmeDriveV1], id: text) -> bool:
+    for value in values:
+        if value.id == id: return true
+    false
+
+fn _qemu_nvme_controller_exists_v1(values: [QemuLaneNvmeControllerV1], id: text) -> bool:
+    for value in values:
+        if value.id == id: return true
+    false
+
 pub fn qemu_lane_wiring_from_catalog_v1(
     target: SimpleOsMachineTargetProjection,
     lane: SimpleOsLaneContract
@@ -88,6 +191,7 @@ pub fn qemu_lane_wiring_from_catalog_v1(
     var result = _qemu_empty_lane_wiring_v1()
     result._lane_name = lane.name
     result._firmware_arg = firmware_arg.unwrap()
+    for value in lane.qemu_extra: result._catalog_argv.push(value)
     var index = 0
     while index < lane.qemu_extra.len():
         val option = lane.qemu_extra[index]
@@ -119,10 +223,19 @@ pub fn qemu_lane_wiring_from_catalog_v1(
         elif option == "-drive":
             val (expected_path, expected_id) = _qemu_expected_drive_v1(target)
             val expected = "file={expected_path},if=none,id={expected_id},format=raw"
-            if (expected_path == "" or result._raw_drive_path != "" or value != expected):
-                return _qemu_invalid_lane_wiring_v1(lane.name)
-            result._raw_drive_path = expected_path
-            result._raw_drive_id = expected_id
+            if expected_path != "" and value == expected:
+                if result._raw_drive_path != "":
+                    return _qemu_invalid_lane_wiring_v1(lane.name)
+                result._raw_drive_path = expected_path
+                result._raw_drive_id = expected_id
+            else:
+                val drive = _qemu_nvme_drive_v1(value)
+                if drive == nil or result._nvme_drives.len() >= 8:
+                    return _qemu_invalid_lane_wiring_v1(lane.name)
+                val resolved = drive.unwrap()
+                if _qemu_nvme_drive_exists_v1(result._nvme_drives, resolved.id):
+                    return _qemu_invalid_lane_wiring_v1(lane.name)
+                result._nvme_drives.push(resolved)
         elif option == "-device" and value.starts_with("virtio-blk-device,drive="):
             if (result._raw_drive_id == "" or
                 value != "virtio-blk-device,drive={result._raw_drive_id}" or
@@ -133,13 +246,59 @@ pub fn qemu_lane_wiring_from_catalog_v1(
             if result._semihosting_native:
                 return _qemu_invalid_lane_wiring_v1(lane.name)
             result._semihosting_native = true
+        elif option == "-machine" and value == target.qemu_machine:
+            if result._machine_repeat:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._machine_repeat = true
+        elif option == "-device" and value.starts_with("nvme,id="):
+            val controller = _qemu_nvme_controller_v1(value)
+            if controller == nil or result._nvme_controllers.len() >= 4:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            val resolved = controller.unwrap()
+            if _qemu_nvme_controller_exists_v1(result._nvme_controllers, resolved.id):
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._nvme_controllers.push(resolved)
+        elif option == "-device" and value.starts_with("nvme-ns,"):
+            val namespace = _qemu_nvme_namespace_v1(value)
+            if namespace == nil or result._nvme_namespaces.len() >= 8:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._nvme_namespaces.push(namespace.unwrap())
+        elif option == "-netdev" and value == "user,id=net0":
+            if result._network_user:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._network_user = true
+        elif option == "-device" and value == "virtio-net-pci,netdev=net0":
+            if result._network_device:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._network_device = true
         else:
             return _qemu_invalid_lane_wiring_v1(lane.name)
         index = index + 2
     if ((result._raw_drive_path == "") !=
         (result._block_device == QemuLaneBlockDeviceV1.None)):
         return _qemu_invalid_lane_wiring_v1(lane.name)
+    for namespace in result._nvme_namespaces:
+        if (not _qemu_nvme_drive_exists_v1(result._nvme_drives, namespace.drive_id) or
+            not _qemu_nvme_controller_exists_v1(result._nvme_controllers, namespace.controller_id)):
+            return _qemu_invalid_lane_wiring_v1(lane.name)
+    var namespace_index = 0
+    while namespace_index < result._nvme_namespaces.len():
+        var other_index = namespace_index + 1
+        while other_index < result._nvme_namespaces.len():
+            val current = result._nvme_namespaces[namespace_index]
+            val other = result._nvme_namespaces[other_index]
+            if (current.drive_id == other.drive_id or
+                (current.controller_id == other.controller_id and
+                 current.namespace_id == other.namespace_id)):
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            other_index = other_index + 1
+        namespace_index = namespace_index + 1
+    if ((result._nvme_drives.len() == 0) != (result._nvme_namespaces.len() == 0)):
+        return _qemu_invalid_lane_wiring_v1(lane.name)
+    if result._network_user != result._network_device:
+        return _qemu_invalid_lane_wiring_v1(lane.name)
     result
 
 export QemuLaneFirmwareArgV1, QemuLaneDisplayArgV1, QemuLaneBlockDeviceV1
+export QemuLaneNvmeDriveV1, QemuLaneNvmeControllerV1, QemuLaneNvmeNamespaceV1
 export QemuLaneWiringV1, qemu_lane_wiring_from_catalog_v1, _qemu_empty_lane_wiring_v1

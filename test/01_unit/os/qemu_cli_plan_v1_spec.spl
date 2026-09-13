@@ -4,7 +4,9 @@
 
 use std.spec.{describe, it, expect, step}
 use os.qemu_cli_plan_v1.{
-    qemu_cli_executable_policy_matches_v1, qemu_cli_shell_display_v1
+    qemu_cli_command_display_v1, qemu_cli_executable_policy_matches_v1,
+    qemu_cli_named_lane_supported_v1,
+    qemu_cli_shell_display_v1
 }
 
 describe "REQ-SIMPLEOS-QEMU-CLI-PLAN-001: command inspection is shell-safe and inert [importance=high; importance_weight=2]":
@@ -24,6 +26,16 @@ describe "REQ-SIMPLEOS-QEMU-CLI-PLAN-001: command inspection is shell-safe and i
         expect(qemu_cli_shell_display_v1("qemu-system-aarch64", ["-bios", "", "-S"])).to_equal(
             "'qemu-system-aarch64' '-bios' '' '-S'")
 
+    it "renders Windows as an inert typed argv vector rather than POSIX shell text":
+        step("Render backslashes, spaces, quotes, and a PowerShell metacharacter")
+        val rendered = qemu_cli_command_display_v1(
+            "windows", "C:\\Program Files\\qemu\\qemu-system-x86_64.exe",
+            ["-kernel", "build\\guest \"one\".elf", "$(must-not-run)"])
+        expect(rendered).to_equal(
+            "Windows argv (display only): [" +
+            "\"C:\\\\Program Files\\\\qemu\\\\qemu-system-x86_64.exe\", " +
+            "\"-kernel\", \"build\\\\guest \\\"one\\\".elf\", \"$(must-not-run)\"]")
+
     it "rejects settings that resolve a different executable than the normal runner":
         step("Compare normalized executable identities without probing or launching")
         expect(qemu_cli_executable_policy_matches_v1(
@@ -32,3 +44,18 @@ describe "REQ-SIMPLEOS-QEMU-CLI-PLAN-001: command inspection is shell-safe and i
             "C:\\QEMU\\qemu-system-aarch64.exe", "C:/QEMU/qemu-system-aarch64.exe")).to_equal(true)
         expect(qemu_cli_executable_policy_matches_v1(
             "/usr/bin/qemu-system-aarch64", "/opt/custom/qemu-system-aarch64")).to_equal(false)
+
+    it "admits only named scenarios whose boot shape is represented":
+        step("Admit catalog kernel lanes and reject ARM loader-device boot lanes")
+        expect(qemu_cli_named_lane_supported_v1(
+            "x86_64", "x86_64-q35-pure-nvme-perf")).to_equal(true)
+        expect(qemu_cli_named_lane_supported_v1(
+            "x86_32", "x86_32-initrd-fat32-smf")).to_equal(true)
+        expect(qemu_cli_named_lane_supported_v1(
+            "riscv64", "riscv64-virtio-fat32-smf")).to_equal(true)
+        expect(qemu_cli_named_lane_supported_v1(
+            "arm64", "arm64-virtio-fat32-smf")).to_equal(false)
+        expect(qemu_cli_named_lane_supported_v1(
+            "riscv64", "riscv64-hosted")).to_equal(false)
+        expect(qemu_cli_named_lane_supported_v1(
+            "x86_64", "not-a-lane")).to_equal(false)

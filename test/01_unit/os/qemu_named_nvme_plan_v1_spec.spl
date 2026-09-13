@@ -1,0 +1,131 @@
+"""Typed projection coverage for catalog-owned named NVMe lanes."""
+# codex-system-test
+# @req: REQ-SIMPLEOS-QEMU-NAMED-NVME-PLAN-001
+
+use std.spec.{describe, it, expect, step}
+use os.port.simpleos_multiplatform_build.{simpleos_machine_target_projection}
+use os.qemu_runner.{build_scenario_command, scenario_by_name_direct}
+use os.port.qemu_machine_plan_v1.{
+    QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuAcceleratorRequestV1,
+    QemuHostResolutionV1, QemuMachinePlanErrorV1,
+    qemu_lane_wiring_from_catalog_v1, qemu_machine_spec_from_lane_v1,
+    qemu_machine_spec_from_named_lane_v1,
+    qemu_machine_spec_digest_v1, qemu_launch_plan_bind_lane_parity_v1
+}
+
+val HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn tcg_host() -> QemuHostResolutionV1:
+    QemuHostResolutionV1(
+        host_adapter_id: "linux",
+        executable_path: "qemu-system-x86_64",
+        firmware_path: "",
+        available_accelerators: [QemuAcceleratorV1.Tcg])
+
+fn tcg_request() -> QemuAcceleratorRequestV1:
+    QemuAcceleratorRequestV1(
+        kind: QemuAcceleratorRequestKindV1.Auto,
+        accelerator: QemuAcceleratorV1.Tcg)
+
+fn expect_named_parity(platform_name: text, scenario_name: text):
+    val target = simpleos_machine_target_projection(platform_name)
+    val lane = target.qemu_lane_or_smoke(scenario_name)
+    val memory = int(lane.qemu_memory[:lane.qemu_memory.len() - 1]) as u64
+    val legacy = build_scenario_command(scenario_by_name_direct(scenario_name), lane.output)
+    val plan = qemu_launch_plan_bind_lane_parity_v1(
+        qemu_machine_spec_from_named_lane_v1(target, lane, HASH_A, memory, tcg_request()),
+        QemuHostResolutionV1(
+            host_adapter_id: "parity",
+            executable_path: legacy[0],
+            firmware_path: "",
+            available_accelerators: [QemuAcceleratorV1.Tcg]))
+    expect(plan.admitted()).to_equal(true)
+    expect(plan.argv_copy()).to_equal(legacy[1:])
+    expect(plan.sealed_valid()).to_equal(true)
+
+describe "REQ-SIMPLEOS-QEMU-NAMED-NVME-PLAN-001: named NVMe lanes are structured and sealed [importance=high; importance_weight=2]":
+    it "projects controller drive and namespace identities with exact runner argv parity":
+        step("Resolve the catalog-owned q35 pure-NVMe scenario lane")
+        val target = simpleos_machine_target_projection("x86_64")
+        val lane = target.qemu_lane_or_smoke("x86_64-q35-pure-nvme-perf")
+        val wiring = qemu_lane_wiring_from_catalog_v1(target, lane)
+        expect(wiring.valid()).to_equal(true)
+        expect(wiring.nvme_controller_count()).to_equal(1)
+        expect(wiring.nvme_controller_id(0)).to_equal("pureperf")
+        expect(wiring.nvme_drive_count()).to_equal(2)
+        expect(wiring.nvme_drive_id(0)).to_equal("pureperfns1")
+        expect(wiring.nvme_drive_id(1)).to_equal("pureperfns2")
+        expect(wiring.nvme_drive_path(1)).to_equal(
+            "build/test-artifacts/simpleos-q35-smoke/q35_user_namespace.img")
+        expect(wiring.nvme_namespace_count()).to_equal(2)
+        expect(wiring.nvme_namespace_id(0)).to_equal(1u16)
+        expect(wiring.nvme_namespace_id(1)).to_equal(2u16)
+        expect(wiring.nvme_namespace_drive_id(1)).to_equal("pureperfns2")
+        expect(wiring.nvme_namespace_controller_id(1)).to_equal("pureperf")
+
+        step("Seal the same ordered arguments used by the established scenario runner")
+        val spec = qemu_machine_spec_from_named_lane_v1(
+            target, lane, HASH_A, 512u64, tcg_request())
+        val plan = qemu_launch_plan_bind_lane_parity_v1(spec, tcg_host())
+        expect(plan.admitted()).to_equal(true)
+        expect(plan.error()).to_equal(QemuMachinePlanErrorV1.None)
+        val legacy = build_scenario_command(
+            scenario_by_name_direct("x86_64-q35-pure-nvme-perf"), lane.output)
+        expect(plan.executable_path()).to_equal(legacy[0])
+        expect(plan.argv_copy()).to_equal(legacy[1:])
+        expect(plan.sealed_valid()).to_equal(true)
+
+    it "supports the one-namespace acceptance lane at exact boundaries":
+        step("Resolve the q35 FAT32 SMF lane with namespace id one")
+        val target = simpleos_machine_target_projection("x86_64")
+        val lane = target.qemu_lane_or_smoke("x86_64-q35-nvme-fat32-smf")
+        val wiring = qemu_lane_wiring_from_catalog_v1(target, lane)
+        expect(wiring.valid()).to_equal(true)
+        expect(wiring.nvme_controller_count()).to_equal(1)
+        expect(wiring.nvme_drive_count()).to_equal(1)
+        expect(wiring.nvme_namespace_count()).to_equal(1)
+        expect(wiring.nvme_namespace_id(0)).to_equal(1u16)
+
+    it "matches every currently admitted named scenario shape":
+        step("Compare x86 NVMe, x86_32 initrd, and both RISC-V filesystem lanes")
+        expect_named_parity("x86_64", "x86_64-q35-pure-nvme-perf")
+        expect_named_parity("x86_32", "x86_32-initrd-fat32-smf")
+        expect_named_parity("riscv64", "riscv64-virtio-fat32-smf")
+        expect_named_parity("riscv32", "riscv32-virtio-fat32-smf")
+
+    it "binds named shape identity and rejects unsupported direct construction":
+        step("Require distinct target-launch and named-scenario digests for RISC-V")
+        val rv = simpleos_machine_target_projection("riscv64")
+        val rv_lane = rv.qemu_lane_or_smoke("riscv64-virtio-fat32-smf")
+        val target_spec = qemu_machine_spec_from_lane_v1(
+            rv, rv_lane, HASH_A, 512u64, tcg_request())
+        val named_spec = qemu_machine_spec_from_named_lane_v1(
+            rv, rv_lane, HASH_A, 512u64, tcg_request())
+        expect(qemu_machine_spec_digest_v1(named_spec) ==
+            qemu_machine_spec_digest_v1(target_spec)).to_equal(false)
+
+        step("Reject ARM loader-device shape even through the public constructor")
+        val arm = simpleos_machine_target_projection("arm64")
+        val arm_lane = arm.qemu_lane_or_smoke("arm64-virtio-fat32-smf")
+        val rejected = qemu_launch_plan_bind_lane_parity_v1(
+            qemu_machine_spec_from_named_lane_v1(
+                arm, arm_lane, HASH_A, 384u64, tcg_request()),
+            QemuHostResolutionV1(
+                host_adapter_id: "parity",
+                executable_path: "qemu-system-aarch64",
+                firmware_path: "",
+                available_accelerators: [QemuAcceleratorV1.Tcg]))
+        expect(rejected.admitted()).to_equal(false)
+        expect(rejected.error()).to_equal(QemuMachinePlanErrorV1.InvalidLaneProjection)
+        expect(rejected.argv_len()).to_equal(0)
+
+    it "rejects catalog lane mutation before it can become executable argv":
+        step("Attempt namespace-id and controller-id injection on copied lane values")
+        val target = simpleos_machine_target_projection("x86_64")
+        var namespace_mutation = target.qemu_lane_or_smoke("x86_64-q35-nvme-fat32-smf")
+        namespace_mutation.qemu_extra[9] = "nvme-ns,drive=fsexecns1,bus=fsexec,nsid=2"
+        expect(qemu_lane_wiring_from_catalog_v1(target, namespace_mutation).valid()).to_equal(false)
+
+        var controller_injection = target.qemu_lane_or_smoke("x86_64-q35-pure-nvme-perf")
+        controller_injection.qemu_extra[3] = "nvme,id=pureperf,serial=ok,drive=host-secret"
+        expect(qemu_lane_wiring_from_catalog_v1(target, controller_injection).valid()).to_equal(false)

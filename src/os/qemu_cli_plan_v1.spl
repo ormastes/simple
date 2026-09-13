@@ -11,12 +11,15 @@ use os.port.simpleos_multiplatform_build.{
 }
 use os.port.qemu_host_adapters_v1.{
     QemuHostProbeInputsV1, QemuHostAdapterErrorV1,
-    LinuxQemuHostV1, WindowsQemuHostV1, MacQemuHostV1, FreeBsdQemuHostV1
+    LinuxQemuHostV1, WindowsQemuHostV1, MacQemuHostV1, FreeBsdQemuHostV1,
+    qemu_host_executable_name_v1
 }
 use os.port.qemu_machine_plan_v1.{
     QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuAcceleratorRequestV1,
     QemuMachinePlanErrorV1, QemuLaunchPlanV1,
-    qemu_machine_spec_from_lane_v1, qemu_launch_plan_bind_lane_parity_v1
+    qemu_lane_wiring_from_catalog_v1,
+    qemu_machine_spec_from_lane_v1, qemu_machine_spec_from_named_lane_v1,
+    qemu_launch_plan_bind_lane_parity_v1, qemu_named_lane_shape_supported_v1
 }
 
 pub class QemuCliInspectOutcomeV1:
@@ -125,6 +128,27 @@ pub fn qemu_cli_shell_display_v1(executable: text, argv: [text]) -> text:
         parts.push(_qemu_shell_quote_v1(value))
     parts.join(" ")
 
+fn _qemu_windows_argv_atom_v1(value: text) -> text:
+    val escaped_slashes = value.replace("\\", "\\\\")
+    val escaped_quotes = escaped_slashes.replace("\"", "\\\"")
+    "\"" + escaped_quotes + "\""
+
+pub fn qemu_cli_command_display_v1(host: text, executable: text, argv: [text]) -> text:
+    """Render inert inspection text; Windows is an explicit argv vector, not shell syntax."""
+    if host != "windows":
+        return qemu_cli_shell_display_v1(executable, argv)
+    var atoms: [text] = [_qemu_windows_argv_atom_v1(executable)]
+    for value in argv:
+        atoms.push(_qemu_windows_argv_atom_v1(value))
+    "Windows argv (display only): [" + atoms.join(", ") + "]"
+
+pub fn qemu_cli_named_lane_supported_v1(requested_target: text, requested_lane: text) -> bool:
+    """Report only named shapes whose established command is the parity-lane shape."""
+    if not simpleos_machine_target_known(requested_target): return false
+    val target = simpleos_machine_target_projection(requested_target)
+    if not target.has_qemu_lane(requested_lane): return false
+    qemu_named_lane_shape_supported_v1(target.canonical_name, requested_lane)
+
 fn _qemu_host_error_text_v1(error: QemuHostAdapterErrorV1) -> text:
     match error:
         case QemuHostAdapterErrorV1.None: "none"
@@ -174,7 +198,7 @@ fn _qemu_cli_render_plan_v1(
 ) -> [text]:
     val argv = plan.argv_copy()
     if print_command:
-        return [qemu_cli_shell_display_v1(plan.executable_path(), argv)]
+        return [qemu_cli_command_display_v1(host, plan.executable_path(), argv)]
     [
         "Host:        {host}",
         "Guest:       SimpleOS {target_id}",
@@ -192,25 +216,40 @@ fn _qemu_cli_render_plan_v1(
         "Sealed:      true"
     ]
 
-pub fn qemu_cli_inspect_plan_v1(
+fn _qemu_cli_inspect_lane_shape_v1(
     requested_target: text,
+    requested_lane: text,
     image_path: text,
     qemu_memory: text,
     qemu_bios: text,
     legacy_lane_argv: [text],
-    print_command: bool
+    print_command: bool,
+    named_scenario_shape: bool
 ) -> QemuCliInspectOutcomeV1:
     if not simpleos_machine_target_known(requested_target):
         return _qemu_cli_reject_v1("unknown SimpleOS target '{requested_target}'")
     val target = simpleos_machine_target_projection(requested_target)
-    val lane = target.default_qemu_lane()
+    if not target.has_qemu_lane(requested_lane):
+        return _qemu_cli_reject_v1(
+            "QEMU lane '{requested_lane}' is not catalog-owned by {target.canonical_name}")
+    val lane = target.qemu_lane_or_smoke(requested_lane)
     if (image_path != lane.output or qemu_memory != lane.qemu_memory or
         qemu_bios != lane.qemu_bios or legacy_lane_argv != lane.qemu_extra):
         return _qemu_cli_reject_v1(
             "typed QEMU inspection rejected non-catalog lane inputs")
-    if target.canonical_name == "i686-simpleos":
-        return _qemu_cli_reject_v1(
-            "typed QEMU inspection is unavailable for x86_32 until the x86_64 launch alias is host-resolved")
+    val wiring = qemu_lane_wiring_from_catalog_v1(target, lane)
+    if not wiring.valid():
+        return _qemu_cli_reject_v1("typed QEMU inspection rejected invalid catalog wiring")
+    if wiring.initrd_path() != "" and not file_exists(wiring.initrd_path()):
+        return _qemu_cli_reject_v1("QEMU initrd not found: {wiring.initrd_path()}")
+    if wiring.raw_drive_path() != "" and not file_exists(wiring.raw_drive_path()):
+        return _qemu_cli_reject_v1("QEMU drive not found: {wiring.raw_drive_path()}")
+    var drive_index = 0
+    while drive_index < wiring.nvme_drive_count():
+        val drive_path = wiring.nvme_drive_path(drive_index)
+        if not file_exists(drive_path):
+            return _qemu_cli_reject_v1("QEMU NVMe drive not found: {drive_path}")
+        drive_index = drive_index + 1
     if not file_exists(image_path):
         return _qemu_cli_reject_v1("SimpleOS image not found: {image_path}")
     val image_digest = file_hash_sha256(image_path)
@@ -230,9 +269,6 @@ pub fn qemu_cli_inspect_plan_v1(
     if (settings.host != "linux" and settings.host != "windows" and
         settings.host != "macos" and settings.host != "freebsd"):
         return _qemu_cli_reject_v1("unsupported QEMU host: {settings.host}")
-    if print_command and settings.host == "windows":
-        return _qemu_cli_reject_v1(
-            "--print-command is unavailable on Windows until a shell dialect is selected")
     val selected_accelerator = _qemu_accelerator_v1(settings.accelerator)
     if selected_accelerator == nil:
         return _qemu_cli_reject_v1("unsupported QEMU accelerator: {settings.accelerator}")
@@ -242,10 +278,11 @@ pub fn qemu_cli_inspect_plan_v1(
     val configured_path = _qemu_resolve_executable_v1(settings.host, configured_binary)
     if configured_path == "" or not file_exists(configured_path):
         return _qemu_cli_reject_v1("QEMU executable not found: {configured_binary}")
-    val executable_path = _qemu_resolve_executable_v1(settings.host, target.qemu_system)
+    val executable_name = qemu_host_executable_name_v1(target, "")
+    val executable_path = _qemu_resolve_executable_v1(settings.host, executable_name)
     if executable_path == "" or not file_exists(executable_path):
         return _qemu_cli_reject_v1(
-            "normal runner QEMU executable not found on PATH: {target.qemu_system}")
+            "normal runner QEMU executable not found on PATH: {executable_name}")
     if not qemu_cli_executable_policy_matches_v1(executable_path, configured_path):
         return _qemu_cli_reject_v1(
             "QEMU executable policy mismatch: normal runner resolves {executable_path}, " +
@@ -255,7 +292,8 @@ pub fn qemu_cli_inspect_plan_v1(
     val accelerator = selected_accelerator.unwrap()
     val probe = QemuHostProbeInputsV1(
         target_id: target.canonical_name,
-        executable_name: target.qemu_system + (if settings.host == "windows": ".exe" else: ""),
+        executable_name: qemu_host_executable_name_v1(
+            target, if settings.host == "windows": ".exe" else: ""),
         qemu_bin_dir: _qemu_path_directory_v1(executable_path),
         executable_available: true,
         firmware_required: firmware_required,
@@ -282,11 +320,15 @@ pub fn qemu_cli_inspect_plan_v1(
             "adapter selected {host_outcome.resolution().executable_path}")
 
     val memory_mib = _qemu_memory_mib_v1(qemu_memory)
-    val spec = qemu_machine_spec_from_lane_v1(
-        target, lane, image_digest, memory_mib,
-        QemuAcceleratorRequestV1(
-            kind: QemuAcceleratorRequestKindV1.Auto,
-            accelerator: accelerator))
+    val request = QemuAcceleratorRequestV1(
+        kind: QemuAcceleratorRequestKindV1.Auto,
+        accelerator: accelerator)
+    val spec = if named_scenario_shape:
+        qemu_machine_spec_from_named_lane_v1(
+            target, lane, image_digest, memory_mib, request)
+    else:
+        qemu_machine_spec_from_lane_v1(
+            target, lane, image_digest, memory_mib, request)
     val plan = qemu_launch_plan_bind_lane_parity_v1(spec, host_outcome.resolution())
     if not plan.admitted() or not plan.sealed_valid():
         return _qemu_cli_reject_v1("QEMU launch plan rejected: {_qemu_plan_error_text_v1(plan.error())}")
@@ -298,5 +340,53 @@ pub fn qemu_cli_inspect_plan_v1(
             target.qemu_machine, target.qemu_cpu, memory_mib, qemu_bios,
             image_path, image_digest, plan, print_command))
 
+pub fn qemu_cli_inspect_lane_v1(
+    requested_target: text,
+    requested_lane: text,
+    image_path: text,
+    qemu_memory: text,
+    qemu_bios: text,
+    legacy_lane_argv: [text],
+    print_command: bool
+) -> QemuCliInspectOutcomeV1:
+    _qemu_cli_inspect_lane_shape_v1(
+        requested_target, requested_lane, image_path, qemu_memory, qemu_bios,
+        legacy_lane_argv, print_command, false)
+
+pub fn qemu_cli_inspect_named_lane_v1(
+    requested_target: text,
+    requested_lane: text,
+    image_path: text,
+    qemu_memory: text,
+    qemu_bios: text,
+    legacy_lane_argv: [text],
+    print_command: bool
+) -> QemuCliInspectOutcomeV1:
+    if not qemu_cli_named_lane_supported_v1(requested_target, requested_lane):
+        return _qemu_cli_reject_v1(
+            "named QEMU lane '{requested_lane}' has an unsupported boot shape")
+    _qemu_cli_inspect_lane_shape_v1(
+        requested_target, requested_lane, image_path, qemu_memory, qemu_bios,
+        legacy_lane_argv, print_command, true)
+
+pub fn qemu_cli_inspect_plan_v1(
+    requested_target: text,
+    image_path: text,
+    qemu_memory: text,
+    qemu_bios: text,
+    legacy_lane_argv: [text],
+    print_command: bool
+) -> QemuCliInspectOutcomeV1:
+    if not simpleos_machine_target_known(requested_target):
+        return _qemu_cli_reject_v1("unknown SimpleOS target '{requested_target}'")
+    val target = simpleos_machine_target_projection(requested_target)
+    val lane = target.default_qemu_lane()
+    qemu_cli_inspect_lane_v1(
+        requested_target, lane.name, image_path,
+        qemu_memory, qemu_bios, legacy_lane_argv, print_command)
+
 export QemuCliInspectOutcomeV1, qemu_cli_shell_display_v1
-export qemu_cli_executable_policy_matches_v1, qemu_cli_inspect_plan_v1
+export qemu_cli_command_display_v1, qemu_cli_executable_policy_matches_v1
+export qemu_cli_named_lane_supported_v1
+export qemu_cli_inspect_lane_v1, qemu_cli_inspect_named_lane_v1
+export qemu_cli_inspect_plan_v1
