@@ -125,6 +125,92 @@ fn _sffi_value_as_int(value: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_value_as_int(value)
 
+pub fn llvm_assert_unique_ssa_defs(ir: text) -> text:
+    """Fail-closed SSA check over the finished module text.
+
+    LLVM value names are FUNCTION-scoped and single-assignment: defining `%l22`
+    twice inside one `define` is rejected outright by llc with `multiple
+    definition of local value named 'l22'`. The emitter names an LLVM value
+    `%l<mir_local_id>` after the MIR local it holds, and MIR locals are NOT SSA
+    -- a `var` can be written more than once (loop-carried counters, plain
+    re-assignment). `ssa_alloca_transform_blocks` is the mechanism that repairs
+    that (one entry-block alloca per multi-def/cross-block local, def -> store,
+    use -> load), but it can REFUSE a whole function (`unsupported instruction`,
+    `invalid terminator operands`), and on that path `llvm_bootstrap_ssa_function`
+    hands the un-rewritten function straight to the emitter. The duplicate then
+    travels all the way to llc, which is a link-stage error pointing at a line
+    number in a staging file that has usually already been deleted -- twice, on
+    the macOS Stage 2 lane, it cost a whole bootstrap run to diagnose (runs 22
+    and 23, doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md).
+
+    This converts that into a compiler-side abort naming the FUNCTION and the
+    value, at the moment the IR is produced. It is exactly llc's own rule, so it
+    cannot reject IR that llc would have accepted: the seen-set resets at every
+    `define`, because `%l3` in two different functions is legal and common.
+    Checking the text rather than the emitter's `defined_locals` receipt is
+    deliberate -- `translate_copy`'s ordinary scalar/ptr/float tail never records
+    that receipt, so a receipt-based check would be blind to the very site that
+    emitted both reported duplicates."""
+    val offender = llvm_first_duplicate_ssa_def(ir)
+    if offender != "":
+        panic("llvm-emitter-ssa-violation:{offender} -- a value is defined twice in one function; the MIR local behind it is multi-def and was not slotted by ssa_alloca_transform_blocks")
+    ir
+
+pub fn llvm_first_duplicate_ssa_def(ir: text) -> text:
+    """`<function>:<value>` for the first value defined twice inside one
+    `define`, or "" when the module is well-formed. Split out of
+    llvm_assert_unique_ssa_defs so the rule is testable as a value rather than
+    only as an abort. The seen-set resets at every `define`: LLVM value names
+    are function-scoped, so `%l3` in two different functions is legal."""
+    var seen: Dict<text, bool> = {}
+    var current_fn = "<module>"
+    # Index-based `while`, not `for ... in`: this runs inside the bootstrap
+    # compiler itself, and a mutation performed per iteration of a `for` body is
+    # the shape of
+    # doc/08_tracking/bug/class_instances_copy_on_bind_and_for_loop_drops_mutation_2026-08-04.md.
+    # A guard that silently stops recording is worse than no guard.
+    val lines = ir.split("\n")
+    var li = 0
+    while li < lines.len():
+        val trimmed = lines[li].trim()
+        li = li + 1
+        if trimmed.starts_with("define "):
+            seen = {}
+            # Same reason as the value-name extraction below: take the `@name(`
+            # token by splitting, not by slicing. On run 24 the native lane's
+            # slice produced an EMPTY function name, which is exactly the piece
+            # of the diagnostic that matters.
+            current_fn = trimmed
+            val toks = trimmed.split(" ")
+            var ti = 0
+            while ti < toks.len():
+                val tok = toks[ti]
+                ti = ti + 1
+                if tok.starts_with("@"):
+                    current_fn = tok.split("(")[0]
+            continue
+        if not trimmed.starts_with("%"):
+            continue
+        val eq = trimmed.index_of(" = ")
+        if eq < 0:
+            continue
+        # `split(" ")[0]`, NOT `substring(0, eq)`: on the run-24 Stage 2 candidate
+        # this slice returned the WHOLE line, so the seen-key degenerated to the
+        # full instruction text -- which still catches two byte-identical
+        # definitions (it did) but would MISS a duplicate whose two definitions
+        # differ on the right-hand side. The single fault that explains BOTH that
+        # and the empty function name above is `index_of` returning a
+        # not-found sentinel that is >= 0 (see
+        # .claude/memory/bug_index_of_brace_needle.md); `substring` itself is
+        # unconfirmed. `split` is a different primitive; it is assumed, not
+        # measured, to be sound in the native lane -- if it also diverges the
+        # key is no worse than the whole-line key it replaces.
+        val name = trimmed.split(" ")[0]
+        if seen.has(name):
+            return "{current_fn}:{name}"
+        seen[name] = true
+    ""
+
 fn llvm_bootstrap_ssa_function(
     fn_: MirFunction,
     bootstrap_mode: bool
@@ -161,6 +247,14 @@ fn llvm_bootstrap_ssa_function(
     val alloca_rewritten = ssa_alloca_transform_blocks(fn_.blocks, fn_.locals, fn_.entry_block)
     if alloca_rewritten.applied:
         return MirFunction.with_blocks(fn_, alloca_rewritten.blocks)
+    # A reject for any reason OTHER than "nothing needed slotting" means a
+    # function that MAY contain multi-def locals is handed to the emitter
+    # un-rewritten -- the path that produced the llc "multiple definition of
+    # local value" failures on the macOS Stage 2 lane. The text guard
+    # (llvm_assert_unique_ssa_defs) names the offending function and value; this
+    # names the REASON, which is what the repair needs, in the same log.
+    if alloca_rewritten.reason != "no slotted locals" and alloca_rewritten.reason != "empty function":
+        print "[llvm-ssa] fn={fn_.name} alloca-transform rejected: {alloca_rewritten.reason}"
     if bootstrap_mode:
         return fn_
     val rewritten = ssa_var_transform_blocks(fn_.blocks)
@@ -418,7 +512,7 @@ impl MirTextCodegen for MirToLlvm:
 
         if not bootstrap_debug:
             self.builder.emit_tbaa_hierarchy()
-        return llvm_ir_builder_build(self.builder)
+        return llvm_assert_unique_ssa_defs(llvm_ir_builder_build(self.builder))
 
     me register_bootstrap_signatures():
         var index = 0
