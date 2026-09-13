@@ -83,6 +83,11 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
         # the tag used to be parsed and then dropped on the floor).
         var func_vectorized = false
         var func_lane_bits = 0
+        # A reduction / matrix kernel that was RECOGNISED but is log-only in N1
+        # is not the same failure as a loop nothing matched. Saying
+        # "loop-not-vectorized" for it sends the reader hunting for a pattern
+        # bug that is not there.
+        var func_recognised_only = false
         # @simd(disable) is a refusal, not a hint: skip pattern matching and
         # rewriting entirely for this function.
         val blocks_to_scan = if cur_func.simd_disabled: [] else: cur_func.blocks
@@ -134,11 +139,13 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
             if red.?:
                 val r = red.unwrap()
                 _log_recipe(cur_func.name, r)
+                func_recognised_only = true
 
             val matrix = mir_pattern_match_matrix_kernel(block, cur_func.has_fast_math)
             if matrix.?:
                 val r = matrix.unwrap()
                 _log_recipe(cur_func.name, r)
+                func_recognised_only = true
 
         # Enforce the SIMD optimization requirement now that we know what the
         # pass actually achieved for this function.
@@ -148,10 +155,17 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
             SimdReqEvidence(
                 vectorized:      func_vectorized,
                 lane_width_bits: func_lane_bits,
-                avx512_admitted: auto_vectorize_target_level() == "x86_64-v4"))
+                avx512_admitted: auto_vectorize_target_level() == "x86_64-v4",
+                recognised_only: func_recognised_only))
+        # Reported, not panicked. `pipeline_optimize` returns a bare MirModule
+        # with no Result channel, so a panic here would abort the whole compiler
+        # process (natively: rt_panic) with no span and no error code. Until the
+        # optimizer pipeline can carry a diagnostic, an unmissable stderr line is
+        # the honest maximum — see the "not yet fatal" note in
+        # doc/08_tracking/bug/auto_vectorize_pass_is_analysis_only_2026-09-13.md.
         match outcome.verdict:
             case Error:
-                panic("auto_vectorize: {cur_func.name}: {outcome.reason}")
+                print("error[SIMD-REQ-001] {cur_func.name}: {outcome.reason}")
             case Warn:
                 print("warning[SIMD-REQ-001] {cur_func.name}: {outcome.reason}")
             case _:

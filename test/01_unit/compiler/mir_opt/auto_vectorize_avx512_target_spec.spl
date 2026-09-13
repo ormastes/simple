@@ -6,7 +6,7 @@
 use std.spec.step
 use std.spec.{describe, it, assert_equal}
 use compiler.types.simd_capabilities.{SimdFeatureSet, _simd_features_none}
-use compiler.mir_opt.mir_opt.auto_vectorize_target.{auto_vectorize_x86_level, auto_vectorize_avx512_admitted}
+use compiler.mir_opt.mir_opt.auto_vectorize_target.{auto_vectorize_x86_level, auto_vectorize_avx512_admitted, AUTO_VECTORIZE_BASELINE_LEVEL}
 use compiler.mir_opt.mir_opt.auto_vectorize_receipt.{
     SimdReqEvidence, SimdReqVerdict, check_simd_requirement, simd_req_outcome_is_fatal
 }
@@ -54,12 +54,24 @@ describe "auto-vectorize AVX-512 planning level":
         assert_equal(auto_vectorize_x86_level(avx512_host(), false), "x86_64-v3")
         assert_equal(auto_vectorize_avx512_admitted(avx512_host(), false), false)
 
-    it "degrades to v3 / v2 / v1 rather than failing":
-        step("no AVX-512 receipt keeps the previous AVX2 behaviour exactly")
+    it "falls back to the v3 BASELINE and never below it — widen-only":
+        step("this ladder is x86-only, so an aarch64/riscv host sees all-false")
+        step("degrading there would drop 8 f32 lanes to 4 on a host that never had an x86 receipt — a regression, not a fallback")
         assert_equal(auto_vectorize_x86_level(avx2_host(), true), "x86_64-v3")
         val sse_only = SimdFeatureSet(.._simd_features_none(), has_sse42: true)
-        assert_equal(auto_vectorize_x86_level(sse_only, true), "x86_64-v2")
-        assert_equal(auto_vectorize_x86_level(_simd_features_none(), true), "x86_64-v1")
+        assert_equal(auto_vectorize_x86_level(sse_only, true), "x86_64-v3")
+        assert_equal(auto_vectorize_x86_level(_simd_features_none(), true), "x86_64-v3")
+        assert_equal(auto_vectorize_x86_level(_simd_features_none(), true), AUTO_VECTORIZE_BASELINE_LEVEL)
+
+    it "never plans narrower than the width the pass used before this change":
+        step("the concrete regression guard: every non-v4 answer must still give 8 f32 lanes")
+        val non_v4 = [_simd_features_none(), avx2_host(), SimdFeatureSet(..avx512_host(), xcr0_opmask_zmm: false)]
+        var narrowed = 0
+        for f in non_v4:
+            val caps = x86_caps_from_target(auto_vectorize_x86_level(f, true))
+            if preferred_lane_count_x86(caps, 32) < 8:
+                narrowed = narrowed + 1
+        assert_equal(narrowed, 0)
 
     it "turns the resolved level into 512-bit lane counts":
         step("this is the regression the hardcoded x86_64-v3 caused")
@@ -117,3 +129,12 @@ describe "@must(simd) / @prefer(avx512) enforcement":
         val ev = SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: false)
         assert_equal(check_simd_requirement("must", "cuda", ev).verdict == SimdReqVerdict.NotRequested, true)
         assert_equal(check_simd_requirement("must", "gpu", ev).verdict == SimdReqVerdict.NotRequested, true)
+
+    it "names a recognised-but-unrewritten pattern instead of blaming the matcher":
+        step("a reduction is matched but this wave emits no rewrite for it")
+        val ev = SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: true, recognised_only: true)
+        val out = check_simd_requirement("must", "simd", ev)
+        assert_equal(out.verdict == SimdReqVerdict.Error, true)
+        assert_equal(out.reason.contains("pattern-recognised"), true)
+        val nothing = SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: true, recognised_only: false)
+        assert_equal(check_simd_requirement("must", "simd", nothing).reason.contains("loop-not-vectorized"), true)

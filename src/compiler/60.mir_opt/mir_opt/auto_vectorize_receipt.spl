@@ -39,13 +39,20 @@ struct SimdReqEvidence:
     lane_width_bits:  the vector width the rewrite used (0 when none).
     avx512_admitted:  the resolved planning level admitted AVX-512
                       (auto_vectorize_target.spl:auto_vectorize_avx512_admitted).
+    recognised_only:  a vectorizable pattern WAS recognised (reduction, matrix
+                      kernel) but this wave's rewriter does not emit it yet.
+                      Distinguishing this from "nothing matched" matters: the
+                      two have completely different fixes, and reporting the
+                      wrong one sends the reader hunting a pattern-matcher bug
+                      that does not exist.
     """
     vectorized:      bool
     lane_width_bits: i64
     avx512_admitted: bool
+    recognised_only: bool = false
 
 fn simd_req_evidence_none() -> SimdReqEvidence:
-    SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: false)
+    SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: false, recognised_only: false)
 
 # ============================================================================
 # Decision
@@ -97,7 +104,9 @@ fn check_simd_requirement(level: text, backend: text, ev: SimdReqEvidence) -> Si
             reason: "{backend}-satisfied-at-{ev.lane_width_bits}-bit-lanes")
 
     var why = "loop-not-vectorized"
-    if ev.vectorized and backend == "avx512" and not ev.avx512_admitted:
+    if not ev.vectorized and ev.recognised_only:
+        why = "pattern-recognised-but-this-wave-emits-no-rewrite-for-it"
+    elif ev.vectorized and backend == "avx512" and not ev.avx512_admitted:
         why = "avx512-not-admitted-by-target-receipt"
     elif ev.vectorized:
         why = "vectorized-at-{ev.lane_width_bits}-bit-lanes-below-{backend}-width"
