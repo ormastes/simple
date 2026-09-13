@@ -442,9 +442,15 @@ impl<'a> MirLowerer<'a> {
                                     )),
                                     ty: TypeId::I64,
                                 };
-                                let builtin_args = [receiver.clone(), expected];
+                                let expected_enum_id = HirExpr {
+                                    kind: HirExprKind::Integer(i64::from(
+                                        crate::codegen::shared::enum_runtime_type_id(enum_name),
+                                    )),
+                                    ty: TypeId::I64,
+                                };
+                                let builtin_args = [receiver.clone(), expected_enum_id, expected];
                                 return self.lower_builtin_call_expr(
-                                    "rt_enum_check_discriminant",
+                                    "rt_enum_check_variant",
                                     &builtin_args,
                                     TypeId::BOOL,
                                 );

@@ -1023,7 +1023,7 @@ fn test_trait_typed_method_result_enables_result_builtin() {
         .unwrap();
     let body = format!("{:?}", failed.body);
     assert!(
-        body.contains("rt_enum_check_discriminant") && !body.contains("method: \"is_err\""),
+        body.contains("rt_enum_check_variant") && !body.contains("method: \"is_err\""),
         "trait Result return must lower is_err as a builtin: {body}"
     );
 }

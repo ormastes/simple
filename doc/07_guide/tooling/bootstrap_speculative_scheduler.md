@@ -91,6 +91,60 @@ and `current.env` both report failure, leaving no reusable qualified state.
 No provisional child may update `bin/simple`, protected checks, release state,
 or trusted shared publication records.
 
+## Explicit local promotion
+
+When a `--deploy` or `--release` run finishes with a verified quarantine result,
+it writes `promotion-required.env`. That receipt is only a hand-off to the
+explicit promotion command; it is not deployment authority by itself. Promote
+only after Stage 4 has produced the matching admitted toolset receipt whose
+`completed_gate=stage5-native-mcp-smoke` and whose hashes bind the CLI, MCP,
+and LSP MCP artifacts.
+
+The two inputs must be absolute, canonical regular files from the same scheduler
+generation. Replace the example roots with the absolute paths recorded by the
+receipts:
+
+```sh
+sh scripts/bootstrap/promote-stage4-local.shs \
+  --promotion-receipt /absolute/path/to/scheduler/<generation>/promotion-required.env \
+  --toolset-admission /absolute/path/to/stage4/<candidate>/simple.toolset-admission.env
+```
+
+The command rejects a missing or non-admitted Stage 4 toolset, a missing Stage 5
+native MCP smoke, changed hashes, a stale lease, or receipts mixed from different
+generations. It copies the admitted `simple`, `simple_mcp_server`, and
+`simple_lsp_mcp_server` executables plus their provenance and admission records
+into one immutable generation directory under `bin/release/<platform>/generations/`.
+It then atomically replaces the single `bin/release/current.env` pointer. There
+is no supported state in which only the CLI, only an MCP server, or artifacts
+from two generations are active. A partial generation or an invalid existing
+pointer causes promotion to fail closed.
+
+All shipped wrappers resolve through that pointer and execute the cached
+generation artifacts. They must not compile, interpret source, or select a
+platform release directory by guessing. To inspect the exact binaries selected
+by the active pointer:
+
+```sh
+sh scripts/bootstrap/promote-stage4-local.shs --resolve cli
+sh scripts/bootstrap/promote-stage4-local.shs --resolve mcp
+sh scripts/bootstrap/promote-stage4-local.shs --resolve lsp-mcp
+```
+
+On Windows the equivalent is `bin/stage4_local_resolve.cmd cli|mcp|lsp-mcp`.
+There is no deployment command that bypasses Stage 4 toolset admission; repair
+the failed generation and produce a new admitted receipt instead.
+
+To return to the immediately previous admitted generation, run:
+
+```sh
+sh scripts/bootstrap/promote-stage4-local.shs --rollback
+```
+
+Rollback validates the retained pointer and all three binaries before atomically
+publishing a new `current.env`. It fails if no valid previous admitted generation
+is retained; do not edit generation receipts or pointers by hand.
+
 ## Failure and recovery
 
 A correctness/qualification failure, engine failure, source or policy drift,

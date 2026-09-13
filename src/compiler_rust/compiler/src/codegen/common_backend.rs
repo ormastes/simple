@@ -697,6 +697,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_is_some"
             | "rt_is_present"
             | "rt_is_none"
+            | "rt_enum_check_variant"
             | "rt_value_as_u64"
             | "rt_string_eq"
             // P0 fix (2026-07-22): rt_text_cmp_any backs the codegen/instr/core.rs
@@ -3119,6 +3120,7 @@ mod tests {
         assert!(runtime_symbol_is_codegen_root("rt_is_present"));
         assert!(runtime_symbol_is_codegen_root("rt_is_none"));
         assert!(runtime_symbol_is_codegen_root("rt_contains"));
+        assert!(runtime_symbol_is_codegen_root("rt_enum_check_variant"));
         // NOT rooted, on purpose: a genuine `Result` receiver emits
         // `rt_enum_check_discriminant` as a real MIR Call, so it is already in
         // `referenced_call_names`. Asserted so that adding it later is a

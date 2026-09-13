@@ -110,6 +110,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_index_set"
         | "rt_enum_check_discriminant"
         | "lib__common__string_core__str_repeat" => Some(2),
+        "rt_enum_check_variant" => Some(3),
         _ if matches!(method, "slice" | "substring") => Some(2),
         _ => None,
     }
@@ -2322,7 +2323,7 @@ impl LlvmBackend {
                 "unwrap_err" => Some("rt_enum_payload"),
                 "is_none" => Some("rt_is_none"),
                 "is_some" => Some("rt_is_some"),
-                "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
+                "is_ok" | "is_err" => Some("rt_enum_check_variant"),
                 _ => None,
             };
 
@@ -2398,6 +2399,7 @@ impl LlvmBackend {
                                 | "rt_is_some"
                                 | "rt_is_present"
                                 | "rt_enum_check_discriminant"
+                                | "rt_enum_check_variant"
                         );
                         let fn_type = if returns_bool {
                             self.context_ref().bool_type().fn_type(&param_types, false)
@@ -2462,12 +2464,12 @@ impl LlvmBackend {
             }
 
             if matches!(method_name, "is_ok" | "is_err") && args.len() == 1 {
-                let rt_func = module.get_function("rt_enum_check_discriminant").unwrap_or_else(|| {
+                let rt_func = module.get_function("rt_enum_check_variant").unwrap_or_else(|| {
                     let fn_type = self
                         .context_ref()
                         .bool_type()
-                        .fn_type(&[i64_type.into(), i64_type.into()], false);
-                    module.add_function("rt_enum_check_discriminant", fn_type, None)
+                        .fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
+                    module.add_function("rt_enum_check_variant", fn_type, None)
                 });
                 let recv = self.get_vreg(&args[0], vreg_map)?;
                 let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
@@ -2475,10 +2477,11 @@ impl LlvmBackend {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 use std::hash::{Hash, Hasher};
                 variant.hash(&mut hasher);
+                let enum_id = i64_type.const_zero();
                 let disc = i64_type.const_int(hasher.finish() & 0xFFFF_FFFF, false);
                 let call_site = builder
-                    .build_call(rt_func, &[recv.into(), disc.into()], "direct_enum_disc")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("direct enum discriminant call", &e))?;
+                    .build_call(rt_func, &[recv.into(), enum_id.into(), disc.into()], "direct_enum_variant")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("direct enum variant call", &e))?;
                 if let Some(d) = dest {
                     if let Some(ret_val) = call_site.try_as_basic_value().left() {
                         let ret_val = self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?;

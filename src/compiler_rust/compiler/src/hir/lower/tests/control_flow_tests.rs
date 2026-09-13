@@ -429,16 +429,16 @@ fn test_positional_class_pattern_match_lowering() {
     );
 }
 
-/// Enum variant positional patterns must still use rt_enum_check_discriminant
+/// Enum variant positional patterns must validate runtime enum identity
 /// (regression guard: class-pattern fix must not affect enum matching).
 #[test]
-fn test_enum_variant_pattern_condition_still_uses_discriminant() {
+fn test_enum_variant_pattern_condition_uses_identity_and_discriminant() {
     let source = "enum Color:\n    Red\n    Green\n    Blue\n\nfn is_red(c: Color) -> i64:\n    match c:\n        case Color.Red:\n            return 1\n        case _:\n            return 0\n";
     let module = parse_and_lower(source).unwrap();
 
     let func = &module.functions[0];
 
-    // Find the first HirStmt::If whose condition uses rt_enum_check_discriminant.
+    // Find the first HirStmt::If whose condition uses rt_enum_check_variant.
     let match_if = func
         .body
         .iter()
@@ -451,8 +451,8 @@ fn test_enum_variant_pattern_condition_still_uses_discriminant() {
 
     let repr = format!("{:?}", condition.kind);
     assert!(
-        repr.contains("rt_enum_check_discriminant") || repr.contains("rt_is_none") || repr.contains("rt_is_some"),
-        "enum variant pattern condition should use rt_enum_check_discriminant; got: {repr}"
+        repr.contains("rt_enum_check_variant") || repr.contains("rt_is_none") || repr.contains("rt_is_some"),
+        "enum variant pattern condition should use rt_enum_check_variant; got: {repr}"
     );
 }
 
@@ -500,7 +500,7 @@ fn test_subject_enum_const_variant_beats_unrelated_const_struct() {
         Some(HirType::Struct { .. })
     ));
     assert!(
-        repr.contains("rt_enum_check_discriminant"),
+        repr.contains("rt_enum_check_variant"),
         "subject-owned Const variant must remain refutable despite unrelated Const struct: {repr}"
     );
     assert!(
@@ -562,7 +562,7 @@ fn test_standalone_match_subject_enum_const_variant_beats_unrelated_const_struct
         Some(HirType::Struct { .. })
     ));
     assert!(
-        repr.contains("rt_enum_check_discriminant"),
+        repr.contains("rt_enum_check_variant"),
         "standalone match must discriminate its subject-owned Const variant: {repr}"
     );
     assert!(
@@ -615,7 +615,7 @@ fn test_expression_match_bare_enum_variants_check_discriminants() {
     let function = module.functions.iter().find(|f| f.name.ends_with("render")).unwrap();
     let hir_repr = format!("{:?}", function.body);
 
-    assert_eq!(hir_repr.matches("rt_enum_check_discriminant").count(), 2, "{hir_repr}");
+    assert_eq!(hir_repr.matches("rt_enum_check_variant").count(), 2, "{hir_repr}");
     assert!(!hir_repr.contains("Global(\"Shared\")"), "{hir_repr}");
     assert!(!hir_repr.contains("Global(\"Mutable\")"), "{hir_repr}");
     assert!(!function
@@ -627,6 +627,24 @@ fn test_expression_match_bare_enum_variants_check_discriminants() {
     let mir_repr = format!("{mir:?}");
     assert!(!mir_repr.contains("global_name: \"Shared\""), "{mir_repr}");
     assert!(!mir_repr.contains("global_name: \"Mutable\""), "{mir_repr}");
+}
+
+#[test]
+fn test_scalar_and_vec16i_same_tag_route_by_enum_identity() {
+    let source = "enum HirTypeKind:\n    Vec16i\n\nenum MirTypeKind:\n    Vec16i\n\nfn hir_route(kind: HirTypeKind) -> i64:\n    match kind:\n        case HirTypeKind.Vec16i:\n            return 1\n        case _:\n            return 0\n\nfn mir_route(kind: MirTypeKind) -> i64:\n    match kind:\n        case MirTypeKind.Vec16i:\n            return 2\n        case _:\n            return 0\n";
+    let module = parse_and_lower(source).unwrap();
+    let repr = format!("{:?}", module.functions);
+    let hir_id = crate::codegen::shared::enum_runtime_type_id("HirTypeKind");
+    let mir_id = crate::codegen::shared::enum_runtime_type_id("MirTypeKind");
+
+    assert_ne!(hir_id, mir_id);
+    assert_eq!(repr.matches("rt_enum_check_variant").count(), 2, "{repr}");
+    assert!(repr.contains(&format!("Integer({hir_id})")), "{repr}");
+    assert!(repr.contains(&format!("Integer({mir_id})")), "{repr}");
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert_eq!(mir_repr.matches("rt_enum_check_variant").count(), 2, "{mir_repr}");
 }
 
 #[test]
@@ -669,7 +687,7 @@ fn test_imported_same_named_unit_variants_follow_typed_subject() {
     let module = lowerer.lower_module(&parsed).expect("HIR lowering should succeed");
     let function = module.functions.iter().find(|f| f.name.ends_with("render")).unwrap();
     let hir_repr = format!("{:?}", function.body);
-    assert_eq!(hir_repr.matches("rt_enum_check_discriminant").count(), 2, "{hir_repr}");
+    assert_eq!(hir_repr.matches("rt_enum_check_variant").count(), 2, "{hir_repr}");
     assert!(!hir_repr.contains("Global(\"Shared\")"), "{hir_repr}");
     assert!(
         !function.locals.iter().any(|local| local.name == "Shared"),

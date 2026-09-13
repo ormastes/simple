@@ -16,7 +16,7 @@
 //! These tests exercise the parser crate directly and therefore give a verdict
 //! now, on current source.
 
-use simple_parser::Parser;
+use simple_parser::{lexer::Lexer, token::TokenKind, Parser};
 
 fn parse_ok(src: &str) {
     let mut parser = Parser::new(src);
@@ -92,6 +92,26 @@ fn the_statement_forms_of_those_soft_keywords_still_parse() {
     parse_ok("fn f():\n    skip");
     parse_ok("var w = 1\nlet s = spawn w");
     parse_ok("let c = spawn \\x: x + 1");
+}
+
+/// The Phase-1 tool matrix exposed an authority leak by reporting this exact
+/// current source as invalid through an older deployed `bin/simple`.  Pin both
+/// halves of the diagnosis: the lexer deliberately emits the hard `Auto`
+/// token, while the current parser accepts that token contextually as a named
+/// argument label and as its value expression.
+#[test]
+fn auto_token_parses_contextually_in_the_exact_frontend_offload_source() {
+    let mut lexer = Lexer::new("P(auto: auto)");
+    assert!(matches!(lexer.next_token().kind, TokenKind::Identifier { .. }));
+    assert_eq!(lexer.next_token().kind, TokenKind::LParen);
+    assert_eq!(lexer.next_token().kind, TokenKind::Auto);
+    assert_eq!(lexer.next_token().kind, TokenKind::Colon);
+    assert_eq!(lexer.next_token().kind, TokenKind::Auto);
+    assert_eq!(lexer.next_token().kind, TokenKind::RParen);
+
+    parse_ok(include_str!(
+        "../../../compiler/00.common/structural_contracts/frontend_offload_switch.spl"
+    ));
 }
 
 /// SIMILAR-PROBLEM DETECTION TEST for the defect CLASS: a soft keyword that is
