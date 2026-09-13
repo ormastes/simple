@@ -22,7 +22,9 @@ root using `openat2` with `RESOLVE_BENEATH`, `RESOLVE_NO_XDEV`,
 Read admits regular files only, caps allocation and transfer at the requested
 bound (maximum 16 MiB), compares descriptor identity/size/mode and nanosecond
 mtime/ctime before and after transfer, closes the descriptor, then returns an
-owned packed byte array. Failure is nil; a valid empty file is an empty array.
+owned packed byte array. Failure is canonical native nil (`rt_value_nil()`, raw
+3); raw zero is a present value and cannot represent failure. A valid empty file
+is an empty array.
 `O_NONBLOCK` prevents a FIFO substitution from blocking before the type check.
 
 Publish copies a validated runtime byte array and creates an unnamed `O_TMPFILE`
@@ -57,6 +59,26 @@ failure, prepublication cleanup failure, postpublication durability failure,
 concurrent publishers, registry capacity, root pathname replacement, stale
 handles, and close failure consumption. Failure injection is compiled only into
 the test build. Final directory removal proves no named staging artifacts remain.
+
+### Review correction, 2026-09-14
+
+Astra found a P1 ABI error in the first implementation: failure returned raw zero
+and the first selfcheck incorrectly expected zero. Native `rt_is_none(0)` is
+false, so a caller could admit the failed read as a present empty value. Every
+read failure, allocation/conversion failure, and unsupported-platform read now
+returns `rt_value_nil()` (raw 3). The direct ABI probe and all negative read
+assertions now check both exact nil encoding and the actual `rt_is_none` /
+`rt_is_some` predicates. Valid empty and nonempty reads assert present values.
+Allocation/conversion failure injection covers the previously implicit exits.
+
+Corrected evidence: PASS for the full native selfcheck and forced-unsupported
+selfcheck, each linked against `runtime_native.c` so the optional predicates are
+the production implementations; PASS for strict standalone provider compilation.
+
+The earlier native PASS did not establish optional-value ABI correctness and is
+superseded by the corrected selfchecks. Native Simple execution remains
+**MissingEvidence**; this correction does not replace the pending admitted
+self-hosted compiler/facade execution gate.
 
 ## Limits and remaining work
 

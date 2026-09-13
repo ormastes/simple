@@ -193,8 +193,8 @@ int64_t rt_hosted_safe_artifact_read_v1(int64_t token, const uint8_t* path_bytes
                                       uint64_t length, int64_t max_bytes) {
     char path[RT_HSA_PATH_BYTES];
     if (max_bytes < 0 || max_bytes > RT_HSA_MAX_BYTES ||
-        !rt_hsa_path(path_bytes, length, 0, path)) return 0;
-    if (pthread_mutex_lock(&rt_hsa_mutex) != 0) return 0;
+        !rt_hsa_path(path_bytes, length, 0, path)) return rt_value_nil();
+    if (pthread_mutex_lock(&rt_hsa_mutex) != 0) return rt_value_nil();
     RtHsaRootV1* root = rt_hsa_root(token);
     /* O_NONBLOCK prevents a FIFO replacement from hanging before fstat can
      * reject it. Regular files ignore this flag. */
@@ -207,7 +207,8 @@ int64_t rt_hosted_safe_artifact_read_v1(int64_t token, const uint8_t* path_bytes
                  before.st_size >= 0 && before.st_size <= max_bytes;
     if (ok) {
         wanted = (size_t)before.st_size;
-        bytes = (uint8_t*)calloc(wanted ? wanted : 1, 1);
+        bytes = rt_hsa_fault("read-allocation", fd) ? NULL :
+            (uint8_t*)calloc(wanted ? wanted : 1, 1);
         ok = bytes != NULL;
     }
     size_t used = 0;
@@ -220,14 +221,15 @@ int64_t rt_hosted_safe_artifact_read_v1(int64_t token, const uint8_t* path_bytes
     }
     if (ok) ok = rt_hsa_stat(fd, &after) == 0 && rt_hsa_same_stat(&before, &after);
     if (fd >= 0 && rt_hsa_close(fd) != 0) ok = 0;
-    int64_t result = 0;
+    int64_t result = rt_value_nil();
     if (ok) {
-        SplArray* array = rt_byte_array_new_len(wanted);
+        SplArray* array = rt_hsa_fault("array-allocation", -1) ? NULL : rt_byte_array_new_len(wanted);
         if (array) {
             result = (int64_t)(uintptr_t)array;
-            if (rt_array_bytes_store_checked(result, bytes, (int64_t)wanted) != (int64_t)wanted) {
+            if (rt_hsa_fault("array-store", -1) ||
+                rt_array_bytes_store_checked(result, bytes, (int64_t)wanted) != (int64_t)wanted) {
                 rt_array_free(array);
-                result = 0;
+                result = rt_value_nil();
             }
         }
     }
@@ -317,7 +319,7 @@ bool rt_hosted_safe_artifact_root_close_v1(int64_t handle) {
 int64_t rt_hosted_safe_artifact_read_v1(int64_t handle, const uint8_t* path,
                                       uint64_t length, int64_t max_bytes) {
     (void)handle; (void)path; (void)length; (void)max_bytes;
-    return 0;
+    return rt_value_nil();
 }
 int64_t rt_hosted_safe_artifact_publish_v1(int64_t handle, const uint8_t* path,
                                          uint64_t length, int64_t payload,

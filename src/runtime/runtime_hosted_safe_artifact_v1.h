@@ -6,7 +6,8 @@
 
 /* Retained-root handles are provider-owned tokens, never caller-owned fds.
  * Text arguments use the native (pointer, byte-length) ABI. Arrays are runtime
- * values. Read returns nil (0) on failure and an owned array, including for an
+ * values. Read returns canonical native nil (rt_value_nil(), raw 3) on failure
+ * and an owned array, including for an
  * empty file, on success. No operation follows a symlink or crosses a mount
  * below the retained root. Linux requires openat2 and O_TMPFILE support.
  * Other platforms fail closed until they provide those guarantees.

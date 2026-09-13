@@ -60,10 +60,15 @@ static int64_t bytes_value(const uint8_t* bytes, size_t size) {
 static void expect_bytes(int64_t value, const uint8_t* expected, size_t size) {
     uint8_t copied[32] = {0};
     assert(size <= sizeof(copied) && value != 0);
+    assert(!rt_is_none(value) && rt_is_some(value));
     assert(rt_array_bytes_validate(value) == (int64_t)size);
     assert(rt_array_bytes_copy_checked(value, copied, sizeof(copied)) == (int64_t)size);
     assert(memcmp(copied, expected, size) == 0);
     rt_array_free((SplArray*)(uintptr_t)value);
+}
+static void expect_none(int64_t value) {
+    assert(value == rt_value_nil() && value == 3);
+    assert(rt_is_none(value) && !rt_is_some(value));
 }
 static void create_file(int root, const char* path, const uint8_t* bytes, size_t size) {
     int fd = openat(root, path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -85,6 +90,12 @@ static void* concurrent_publish(void* raw) {
 
 int main(void) {
     const uint8_t payload[] = {0x00, 0x7f, 0x80, 0xff, 0x2a};
+    /* Probe the exact extern ABI and the actual runtime optional predicates.
+     * Raw zero is a present value; it cannot represent a failed byte read. */
+    int64_t (*read_abi)(int64_t, const uint8_t*, uint64_t, int64_t) =
+        rt_hosted_safe_artifact_read_v1;
+    assert(rt_value_nil() == 3 && !rt_is_none(0));
+    expect_none(read_abi(-1, (const uint8_t*)"missing", 7, 32));
     char directory[] = "/tmp/simple-safe-artifact-v1-XXXXXX";
     char moved[256], symlink_root[256], path[256];
     assert(mkdtemp(directory));
@@ -115,32 +126,40 @@ int main(void) {
     assert(!rt_hosted_safe_artifact_root_close_v1(INT64_MAX));
     expect_bytes(read_artifact(root, "source", sizeof(payload)), payload, sizeof(payload));
     expect_bytes(read_artifact(root, "empty", 0), payload, 0);
-    assert(read_artifact(root, "source", sizeof(payload) - 1) == 0);
-    assert(read_artifact(root, "source", -1) == 0);
-    assert(read_artifact(root, "source", 16777217) == 0);
-    assert(read_artifact(root, "missing", 32) == 0);
-    assert(read_artifact(root, "fifo", 32) == 0);
-    assert(read_artifact(root, "nested", 32) == 0);
+    expect_none(read_artifact(root, "source", sizeof(payload) - 1));
+    expect_none(read_artifact(root, "source", -1));
+    expect_none(read_artifact(root, "source", 16777217));
+    expect_none(read_artifact(root, "missing", 32));
+    expect_none(read_artifact(root, "fifo", 32));
+    expect_none(read_artifact(root, "nested", 32));
     const char* invalid[] = {"link", "dirlink/nope", "../source", "/source", "./source", "nested//x", "nested/", "\\source", ""};
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
-        assert(read_artifact(root, invalid[i], 32) == 0);
-    assert(rt_hosted_safe_artifact_read_v1(root, (const uint8_t*)"source\0x", 8, 32) == 0);
+        expect_none(read_artifact(root, invalid[i], 32));
+    expect_none(rt_hosted_safe_artifact_read_v1(root, (const uint8_t*)"source\0x", 8, 32));
 
     fault("openat2", EINTR, 0, 1);
     expect_bytes(read_artifact(root, "source", 32), payload, sizeof(payload));
     assert(faults[0].observed == 2);
     fault("read", EINTR, 0, 32);
-    assert(read_artifact(root, "source", 32) == 0 && faults[0].observed == 32);
+    expect_none(read_artifact(root, "source", 32));
+    assert(faults[0].observed == 32);
     fault("read", EIO, 0, 1);
-    assert(read_artifact(root, "source", 32) == 0);
+    expect_none(read_artifact(root, "source", 32));
     fault("fstat", EIO, 1, 1);
-    assert(read_artifact(root, "source", 32) == 0);
+    expect_none(read_artifact(root, "source", 32));
     fault("close", EINTR, 0, 1);
-    assert(read_artifact(root, "source", 32) == 0 && faults[0].observed == 1);
+    expect_none(read_artifact(root, "source", 32));
+    assert(faults[0].observed == 1);
+    const char* allocation_ops[] = {"read-allocation", "array-allocation", "array-store"};
+    for (size_t i = 0; i < sizeof(allocation_ops) / sizeof(allocation_ops[0]); ++i) {
+        fault(allocation_ops[i], ENOMEM, 0, 1);
+        expect_none(read_artifact(root, "source", 32));
+        assert(faults[0].observed == 1);
+    }
     clear_faults();
     mutate_fd = openat(test_root, "source", O_WRONLY | O_CLOEXEC);
     assert(mutate_fd >= 0);
-    assert(read_artifact(root, "source", 32) == 0);
+    expect_none(read_artifact(root, "source", 32));
     assert(close(mutate_fd) == 0);
     mutate_fd = -1;
     assert(unlinkat(test_root, "source", 0) == 0);
@@ -206,13 +225,13 @@ int main(void) {
     expect_bytes(read_artifact(root, "source", 32), payload, sizeof(payload));
     int64_t replacement = acquire(directory);
     assert(replacement > 0 && replacement != root);
-    assert(read_artifact(replacement, "source", 32) == 0);
+    expect_none(read_artifact(replacement, "source", 32));
     fault("close", EINTR, 0, 1);
     assert(!rt_hosted_safe_artifact_root_close_v1(root));
     assert(faults[0].observed == 1);
     clear_faults();
     assert(!rt_hosted_safe_artifact_root_close_v1(root));
-    assert(read_artifact(root, "source", 32) == 0);
+    expect_none(read_artifact(root, "source", 32));
     assert(publish(root, "stale", bytes, 32) == -1);
     assert(rt_hosted_safe_artifact_root_close_v1(replacement));
     assert(rmdir(directory) == 0);
