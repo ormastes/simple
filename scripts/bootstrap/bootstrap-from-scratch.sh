@@ -544,6 +544,28 @@ if [ "${bootstrap_stage2_trust_root}" -eq 0 ]; then
   elif [ -n "${resume_stage3_output}" ] || [ "${stop_after_stage3}" -eq 1 ]; then
     bootstrap_receipt_target='//bootstrap:stage3'
   fi
+  # Reader-side twin of the producer binding at the Stage-2 trust-root lane
+  # (PR #929, SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${...:-${output_dir}}).
+  # bootstrap_planner_v2_verify refuses a receipt whose output root is outside
+  # <repo>/build unless that variable names it -- and this call site never set
+  # it. A Stage 3 resume names its own output root right there on the command
+  # line, so a lane using a private storage root (.simple/storage/build/...)
+  # produced a receipt that its own next step refused as
+  # planner-admission-v2-unbound. Bind the verify to THIS run's own resume
+  # output root and nothing wider; an operator-supplied value always wins.
+  if [ -n "${resume_stage3_output}" ] &&
+     [ -z "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ]; then
+    bootstrap_resume_output_root=$(
+      CDPATH= cd -- "${resume_stage3_output}" 2>/dev/null && pwd -P
+    ) || bootstrap_resume_output_root=
+    [ -n "${bootstrap_resume_output_root}" ] &&
+      [ "${bootstrap_resume_output_root}" != / ] || {
+      echo "bootstrap-policy-error: resume-output-root-unresolvable" >&2
+      exit 64
+    }
+    SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${bootstrap_resume_output_root}
+    export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
+  fi
   bootstrap_planner_v2_verify "${bootstrap_receipt_path}" "${bootstrap_early_repo_root}" || {
     echo "bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2" >&2
     exit 64
