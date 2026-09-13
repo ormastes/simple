@@ -33,6 +33,7 @@ use compiler.mir_opt.mir_opt.auto_vectorize.{
 use compiler.mir_opt.auto_vectorize_analysis.{LoopBounds, detect_bounds_from_block}
 use compiler.mir_opt.mir_opt.auto_vectorize_codegen.{VectorizeContext, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
 use compiler.mir_opt.mir_opt.auto_vectorize.{rewrite_elementwise_add}
+use compiler.mir_opt.mir_opt.auto_vectorize.{rewrite_elementwise_add_guarded}
 use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo}
 
 # ============================================================================
@@ -1194,3 +1195,147 @@ describe "AutoVectorize Active witnesses — the alias oracle decides both":
         val pos = blocks_after_pass(witness_block(1, 1, 1))
         expect(neg).to_equal(1)
         expect(pos >= neg).to_equal(true)
+
+describe "runtime alias guard — loop versioning for undecidable bases":
+    it "emits a guard block and a scalar version, not just the vector path":
+        step("the unguarded rewrite adds align + vec + peel = 3 blocks")
+        step("the guarded one adds an alias_check entry and a full scalar clone on top")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val recipe = make_elementwise_add_recipe_for_rewrite()
+        val plain = rewrite_elementwise_add(recipe, func)
+        val guarded = rewrite_elementwise_add_guarded(recipe, func)
+        expect(guarded.blocks.len() > plain.blocks.len()).to_equal(true)
+
+    it "labels the two versioning blocks so the CFG is readable":
+        step("alias_check is the entry; scalar_version is the fallback")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        var saw_guard = false
+        var saw_scalar = false
+        for b in guarded.blocks:
+            if b.label.?:
+                if b.label.unwrap() == "alias_check":
+                    saw_guard = true
+                if b.label.unwrap() == "scalar_version":
+                    saw_scalar = true
+        expect(saw_guard).to_equal(true)
+        expect(saw_scalar).to_equal(true)
+
+    it "the scalar version keeps the original body verbatim":
+        step("a loop that may alias must run ENTIRELY scalar, not partly")
+        step("this is why the peel block cannot serve as the fallback")
+        val orig = make_elementwise_block_add()
+        val func = make_test_mir_function([orig], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        var scalar_len = -1
+        for b in guarded.blocks:
+            if b.label.? and b.label.unwrap() == "scalar_version":
+                scalar_len = b.instructions.len()
+        expect(scalar_len).to_equal(orig.instructions.len())
+
+    it "computes six comparison instructions per input base":
+        step("diff, ==0, >=span, <=-span, and two ORs per base")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
+        var guard_insts = -1
+        for b in guarded.blocks:
+            if b.label.? and b.label.unwrap() == "alias_check":
+                guard_insts = b.instructions.len()
+        # two input bases: 6 + 6 + one BitAnd combining them
+        expect(guard_insts).to_equal(13)
+
+    it "refuses to emit a guard it cannot bound":
+        step("an unknown element width gives span 0, and a guard that admits everything")
+        step("is worse than not vectorizing at all")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val r = make_elementwise_add_recipe_for_rewrite()
+        val bad = VectorRecipe(
+            kind: r.kind, header_block: r.header_block, induction_var: r.induction_var,
+            trip_count: r.trip_count, element_type: "mystery", vector_width: r.vector_width,
+            op_name: r.op_name, note: r.note, input_bases: r.input_bases,
+            output_base: r.output_base, accumulator: r.accumulator,
+            chunk_width: r.chunk_width, index_locals: r.index_locals,
+            store_value: r.store_value, induction_update: r.induction_update)
+        val guarded = rewrite_elementwise_add_guarded(bad, func)
+        var saw_guard = false
+        for b in guarded.blocks:
+            if b.label.? and b.label.unwrap() == "alias_check":
+                saw_guard = true
+        expect(saw_guard).to_equal(false)
+
+# ============================================================================
+# End-to-end: the pass driver must actually transform something
+# ============================================================================
+
+fn gep(dest: i64, base: i64, index: i64) -> MirInst:
+    MirInst(kind: MirInstKind.GetElementPtr(
+        make_local(dest), make_copy_op(base), [make_copy_op(index)]))
+
+fn make_cmp_lt_const(dest_id: i64, left_id: i64, bound: i64) -> MirInst:
+    MirInst(kind: MirInstKind.BinOp(
+        make_local(dest_id), MirBinOp.Lt,
+        make_copy_op(left_id), make_int_const_op(bound)))
+
+fn _gep_body(pa: i64, pb: i64, pout: i64) -> [MirInst]:
+    [
+        gep(30, pa, 4),
+        make_load_inst(10, 30),
+        gep(31, pb, 4),
+        make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, pout, 4),
+        make_store_inst(32, 12),
+        make_add_const_inst(5, 4)
+    ]
+
+fn gep_loop_block(pa: i64, pb: i64, pout: i64, bound: i64) -> MirBlock:
+    """`for i in 0..bound: out[i] = a[i] + b[i]` addressed through GEPs."""
+    var insts = [make_cmp_lt_const(20, 4, bound)]
+    for x in _gep_body(pa, pb, pout):
+        insts.push(x)
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 99))
+
+fn gep_loop_block_dynamic(pa: i64, pb: i64, pout: i64) -> MirBlock:
+    """Same body, but the upper bound is a LOCAL — genuinely dynamic."""
+    var insts = [make_cmp_lt_inst(20, 4, 30)]
+    for x in _gep_body(pa, pb, pout):
+        insts.push(x)
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 99))
+
+fn pass_block_labels(block: MirBlock) -> [text]:
+    val func = make_test_mir_function([block], false)
+    var fns: Dict<SymbolId, MirFunction> = {}
+    fns[func.symbol] = func
+    val out = run_auto_vectorize(MirModule(
+        name: "e2e", functions: fns, statics: {}, constants: {}, types: {}))
+    var labels: [text] = []
+    for sym in out.functions.keys():
+        for b in out.functions[sym].blocks:
+            if b.label.?:
+                labels.push(b.label.unwrap())
+    labels
+
+describe "AutoVectorize end-to-end — the Active pass genuinely fires":
+    it "transforms a constant-bounded GEP-indexed elementwise loop through the driver":
+        step("a real loop body addresses its arrays through GetElementPtr")
+        step("detect_array_accesses needs those GEPs to recover the base arrays at all")
+        step("this is the case that proves Active is not nominal")
+        expect(blocks_after_pass(gep_loop_block(1, 2, 3, 64)) > 1).to_equal(true)
+
+    it "emits the runtime alias guard and a scalar version for distinct bases":
+        step("three distinct locals with unproven origins are statically undecidable")
+        step("so the decision is deferred to a range check over the real addresses")
+        val labels = pass_block_labels(gep_loop_block(1, 2, 3, 64))
+        expect(labels.contains("alias_check")).to_equal(true)
+        expect(labels.contains("scalar_version")).to_equal(true)
+
+    it "does NOT emit a guard when every base is the same local":
+        step("an exact alias is proven safe statically, so a runtime check would be dead weight")
+        val labels = pass_block_labels(gep_loop_block(1, 1, 1, 64))
+        expect(labels.contains("alias_check")).to_equal(false)
+
+    it "still refuses a genuinely dynamic upper bound":
+        step("a local upper bound is not resolvable here and must stay refused")
+        expect(blocks_after_pass(gep_loop_block_dynamic(1, 2, 3))).to_equal(1)

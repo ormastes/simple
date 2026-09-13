@@ -171,6 +171,132 @@ fn create_alignment_check_block(ctx: VectorizeContext, loop_info: VectorLoopInfo
         terminator:   terminator
     )
 
+
+# ============================================================================
+# Runtime alias guard (loop versioning)
+# ============================================================================
+
+fn element_size_bytes(element_type: text) -> i64:
+    """Byte width of one lane element; 0 for an unrecognised type."""
+    if element_type == "f32" or element_type == "i32" or element_type == "u32":
+        return 4
+    if element_type == "f64" or element_type == "i64" or element_type == "u64":
+        return 8
+    if element_type == "i16" or element_type == "u16":
+        return 2
+    if element_type == "i8" or element_type == "u8":
+        return 1
+    0
+
+fn create_alias_guard_block(
+    block_id: i64,
+    out_base: LocalId,
+    input_bases: [LocalId],
+    span_bytes: i64,
+    safe_target: i64,
+    scalar_target: i64,
+    first_temp: i64
+) -> MirBlock:
+    """
+    Emit the runtime range check the alias oracle asks for, as the loop
+    versioning entry block.
+
+    For each input base this computes
+
+        diff_k  = out_base - in_base_k
+        safe_k  = (diff_k == 0) | (diff_k >= span) | (diff_k <= -span)
+
+    and branches to `safe_target` (the vector path) only when every safe_k
+    holds, otherwise to `scalar_target` (an unmodified clone of the original
+    loop). That is exactly `alias_guard_safe_at_runtime` in
+    auto_vectorize_alias.spl, which is unit-tested against this predicate --
+    the pure function exists so this block can be checked against something
+    other than itself.
+
+    The `diff == 0` disjunct is what admits an exact alias: with every access
+    at the induction index, identical bases touch the same element in the same
+    iteration, so vector order equals scalar order.
+    """
+    var insts: [MirInst] = []
+    var temp = first_temp
+    var acc_local = LocalId(id: -1)
+
+    for in_base in input_bases:
+        val diff = LocalId(id: temp)
+        val is_eq = LocalId(id: temp + 1)
+        val is_hi = LocalId(id: temp + 2)
+        val is_lo = LocalId(id: temp + 3)
+        val or1   = LocalId(id: temp + 4)
+        val safe_k = LocalId(id: temp + 5)
+
+        insts.push(MirInst(kind: MirInstKind.BinOp(diff, MirBinOp.Sub,
+            MirOperand(kind: MirOperandKind.Copy(out_base)),
+            MirOperand(kind: MirOperandKind.Copy(in_base))), span: nil))
+        insts.push(MirInst(kind: MirInstKind.BinOp(is_eq, MirBinOp.Eq,
+            MirOperand(kind: MirOperandKind.Copy(diff)), _i64_const(0)), span: nil))
+        insts.push(MirInst(kind: MirInstKind.BinOp(is_hi, MirBinOp.Ge,
+            MirOperand(kind: MirOperandKind.Copy(diff)), _i64_const(span_bytes)), span: nil))
+        insts.push(MirInst(kind: MirInstKind.BinOp(is_lo, MirBinOp.Le,
+            MirOperand(kind: MirOperandKind.Copy(diff)), _i64_const(0 - span_bytes)), span: nil))
+        insts.push(MirInst(kind: MirInstKind.BinOp(or1, MirBinOp.BitOr,
+            MirOperand(kind: MirOperandKind.Copy(is_eq)),
+            MirOperand(kind: MirOperandKind.Copy(is_hi))), span: nil))
+        insts.push(MirInst(kind: MirInstKind.BinOp(safe_k, MirBinOp.BitOr,
+            MirOperand(kind: MirOperandKind.Copy(or1)),
+            MirOperand(kind: MirOperandKind.Copy(is_lo))), span: nil))
+
+        if acc_local.id < 0:
+            acc_local = safe_k
+        else:
+            val combined = LocalId(id: temp + 6)
+            insts.push(MirInst(kind: MirInstKind.BinOp(combined, MirBinOp.BitAnd,
+                MirOperand(kind: MirOperandKind.Copy(acc_local)),
+                MirOperand(kind: MirOperandKind.Copy(safe_k))), span: nil))
+            acc_local = combined
+        temp = temp + 8
+
+    MirBlock(
+        id:           BlockId.new(block_id),
+        label:        Some("alias_check"),
+        instructions: insts,
+        terminator:   MirTerminator.If(
+            cond:  MirOperand(kind: MirOperandKind.Copy(acc_local)),
+            then_: BlockId.new(safe_target),
+            else_: BlockId.new(scalar_target)))
+
+fn create_scalar_version_block(original: MirBlock, new_id: i64) -> MirBlock:
+    """
+    The unmodified loop, kept as the versioning fallback.
+
+    `create_peeling_block` covers only the REMAINDER after the vector loop, so
+    it cannot serve as the alias fallback -- a loop that may alias must run
+    entirely scalar, not partly. This is the original body verbatim with its
+    self-loop retargeted to its new id; every other branch target, including
+    the loop exit, is preserved.
+    """
+    val retargeted = _retarget_self_loop(original.terminator, original.id.id, new_id)
+    MirBlock(
+        id:           BlockId.new(new_id),
+        label:        Some("scalar_version"),
+        instructions: original.instructions,
+        terminator:   retargeted)
+
+fn _retarget_self_loop(t: MirTerminator, old_id: i64, new_id: i64) -> MirTerminator:
+    """Point a back-edge at the clone instead of the block it was copied from."""
+    match t:
+        case Goto(target):
+            if target.id == old_id:
+                MirTerminator.Goto(target: BlockId.new(new_id))
+            else:
+                t
+        case If(cond, then_, else_):
+            MirTerminator.If(
+                cond: cond,
+                then_: if then_.id == old_id: BlockId.new(new_id) else: then_,
+                else_: if else_.id == old_id: BlockId.new(new_id) else: else_)
+        case _:
+            t
+
 fn create_peeling_block(ctx: VectorizeContext, loop_info: VectorLoopInfo, body_blocks: [MirBlock]) -> MirBlock:
     """
     Create scalar-fixup peeling block that runs the loop body for the misaligned

@@ -46,7 +46,7 @@ use compiler.mir_opt.mir_opt.auto_vectorize_types (VectorLoopInfo, ArrayAccess)
 use compiler.mir_opt.mir_opt.auto_vectorize_analysis (DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only)
 use compiler.mir_opt.mir_opt.auto_vectorize_validate (VectorizabilityResult, check_vectorizability, get_vectorizable_type)
 use compiler.mir_opt.mir_opt.auto_vectorize_cost (CostEstimate, estimate_vectorization_cost, should_vectorize_loop)
-use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block)
+use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, element_size_bytes)
 
 # ============================================================================
 # Main Auto-Vectorization Pass
@@ -125,7 +125,10 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
                             induction_update: r.induction_update
                         )
                 _log_recipe(cur_func.name, r)
-                val rewritten = rewrite_elementwise_add(r, cur_func)
+                # Deferred until the alias verdict is known, because an
+                # undecidable pair must go through the GUARDED rewrite rather
+                # than the bare one.
+                var rewritten = cur_func
                 # If block count changed, rewrite was applied
                 # ALIAS ORACLE — pass-level policy, applied per recipe.
                 #
@@ -144,15 +147,28 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
                 # A recipe with no output base is refused by the rewriter's own
                 # R5 and has nothing to alias against, so do not unwrap it here.
                 var alias_ok = false
+                var needs_guard = false
                 if r.output_base.?:
                     var alias_ins: [AliasBase] = []
                     for ib in r.input_bases:
                         alias_ins.push(alias_base(ib.id, -1, true))
                     val alias_decision = decide_recipe_aliasing(
                         alias_base(r.output_base.unwrap().id, -1, true), alias_ins)
-                    alias_ok = alias_decision_permits_vectorization(alias_decision) and not alias_decision_requires_guard(alias_decision)
+                    alias_ok = alias_decision_permits_vectorization(alias_decision)
+                    needs_guard = alias_decision_requires_guard(alias_decision)
                     if not alias_ok:
                         _log_alias_refusal(cur_func.name, alias_decision.reason)
+
+                if alias_ok:
+                    if needs_guard:
+                        # Statically undecidable: emit the runtime range check
+                        # and version the loop against an unmodified scalar
+                        # clone. The oracle has NOT proven safety here; it has
+                        # deferred the decision to something that can see the
+                        # real addresses.
+                        rewritten = rewrite_elementwise_add_guarded(r, cur_func)
+                    else:
+                        rewritten = rewrite_elementwise_add(r, cur_func)
 
                 if alias_ok and rewritten.blocks.len() != cur_func.blocks.len():
                     cur_func = rewritten
@@ -258,6 +274,20 @@ fn _binop_name(op: MirBinOp) -> text:
         case _:    "other"
 
 fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
+    """Rewrite without a runtime alias guard. Callers that have not PROVEN the
+    bases disjoint must use rewrite_elementwise_add_guarded instead."""
+    _rewrite_elementwise_add_impl(recipe, func, false)
+
+fn rewrite_elementwise_add_guarded(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
+    """Rewrite behind a runtime alias guard (loop versioning).
+
+    Used when the alias oracle answers NeedsRuntimeGuard: the bases cannot be
+    separated statically, so the decision is deferred to a range check that
+    branches to an unmodified scalar clone when the spans partially overlap.
+    """
+    _rewrite_elementwise_add_impl(recipe, func, true)
+
+fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_guard: bool) -> MirFunction:
     """
     N1 Wave — MIR rewriter for the elementwise-add pattern.
 
@@ -384,15 +414,42 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
     val orig_header_id = recipe.header_block.id
     val new_header_id  = align_block.id.id
 
+    # Loop versioning. When the alias oracle could not separate the bases
+    # statically, the entry point becomes a runtime range check that branches
+    # to an unmodified clone of the original loop whenever the spans partially
+    # overlap. New ids are taken ABOVE the highest existing block id rather
+    # than at header_id + N, because the latter scheme silently assumes those
+    # slots are free and there is nothing in the IR that guarantees it.
+    var max_block_id = orig_header_id
+    for block in func.blocks:
+        if block.id.id > max_block_id:
+            max_block_id = block.id.id
+    val guard_id  = max_block_id + 1
+    val scalar_id = max_block_id + 2
+
+    val elt = element_size_bytes(recipe.element_type)
+    val span_bytes = if recipe.trip_count > 0 and elt > 0: recipe.trip_count * elt else: 0
+    # A span of 0 means the element width is unknown, so the guard cannot be
+    # given a real bound. Emitting it anyway would produce a check that admits
+    # everything, which is worse than not vectorizing.
+    val guard_usable = emit_guard and span_bytes > 0 and body_blocks_for_peel.len() == 1
+
+    val entry_id = if guard_usable: guard_id else: new_header_id
+
     var new_blocks: [MirBlock] = []
 
     for block in func.blocks:
         if block.id.id < orig_header_id:
-            # Patch terminators that target the old header to point to align_check.
-            val patched = _patch_terminator_target(block, orig_header_id, new_header_id)
+            # Patch terminators that targeted the old header to the new entry.
+            val patched = _patch_terminator_target(block, orig_header_id, entry_id)
             new_blocks.push(patched)
 
-    # Insert alignment-check at the header's position, then vec and peel
+    if guard_usable:
+        new_blocks.push(create_alias_guard_block(
+            guard_id, out_base, recipe.input_bases, span_bytes,
+            new_header_id, scalar_id, max_block_id * 4 + 1000))
+
+    # Insert alignment-check at the header position, then vec and peel
     new_blocks.push(align_block)
     new_blocks.push(vec_block)
     new_blocks.push(peel_block)
@@ -401,6 +458,9 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
     for block in func.blocks:
         if block.id.id > orig_header_id:
             new_blocks.push(block)
+
+    if guard_usable:
+        new_blocks.push(create_scalar_version_block(body_blocks_for_peel[0], scalar_id))
 
     MirFunction.with_blocks(func, new_blocks)
 

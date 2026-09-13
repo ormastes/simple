@@ -1,6 +1,8 @@
 # Auto-vectorization is Active but rewrites almost nothing: the alias guard is not emitted
 
-- **Status:** open — the remaining work after the 2026-09-13 `Active` flip
+- **Status:** RESOLVED 2026-09-13 — the guard is emitted and the pass fires
+  end to end. The analysis below is retained because the chain of blockers it
+  describes is instructive.
 - **Where:** `src/compiler/60.mir_opt/mir_opt/auto_vectorize_alias.spl`,
   `_AutoVectorize/rewrite.spl` (`run_auto_vectorize`)
 
@@ -68,3 +70,45 @@ hardest class of bug to attribute. The refusal is the feature.
 - `auto_vectorize_spec.spl` — 71/71, including the two Active-pass witnesses
   executed through `run_auto_vectorize`: distinct bases leave the function
   untouched, one shared base is admitted.
+
+## Resolved — and the real last blocker was not the guard
+
+The runtime range check is now emitted (`create_alias_guard_block`), backed by a
+full-range scalar clone (`create_scalar_version_block`), and
+`NeedsRuntimeGuard` takes that path instead of refusing.
+
+But emitting it was not sufficient, and the reason is worth recording. Two
+further defects sat underneath, each of which independently made the pass
+incapable of transforming anything:
+
+**1. `detect_loop_bounds` hardcoded `end_value = -1`.** Even when the upper
+operand was a literal constant, the comment said the value could not be
+determined "without deeper inspection" — while the value was sitting in the
+operand. Because the rewriter's R4 refuses a dynamic trip count, that single
+`-1` refused EVERY loop, regardless of what the pattern matcher or the alias
+oracle decided. Fixed by reading the constant.
+
+**2. The unit fixtures were not realistic loops.** `detect_array_accesses`
+recovers base arrays from `GetElementPtr` instructions; the fixtures used bare
+`Load(dest, ptr)` with no GEP, so `input_bases` came back empty and
+`output_base` nil, and R5/R6 refused. Real loop bodies address arrays through
+GEPs. A GEP-indexed fixture was added, and with it the pass transforms.
+
+The order matters for anyone retracing this: the alias oracle was never what
+stopped the pass. It was the last gate reached, so it looked like the blocker,
+but two earlier gates were refusing everything before the oracle was consulted.
+
+## Now verified end to end
+
+`auto_vectorize_spec.spl` — 80/80, including:
+
+- a constant-bounded GEP-indexed `out[i] = a[i] + b[i]` that the pass actually
+  transforms through `run_auto_vectorize`;
+- `alias_check` and `scalar_version` blocks present for distinct bases;
+- **no** guard emitted when every base is the same local, since an exact alias
+  is proven safe statically and a runtime check there would be dead weight;
+- a genuinely dynamic upper bound still refused;
+- the guard block carrying exactly 6 comparison instructions per input base
+  plus the combining AND, and refusing to emit at all when the element width is
+  unknown (an unbounded guard admits everything, which is worse than not
+  vectorizing).
