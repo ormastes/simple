@@ -53,7 +53,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_rect_blend, emu_draw_image_blend,
     emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
-    emu_draw_blur_rect,
+    emu_draw_blur_rect, emu_draw_shadow_rect,
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
@@ -2917,15 +2917,22 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown: return
         if w <= 0 or h <= 0:
             return
-        val sx = x + offset_x
-        val sy = y + offset_y
-        val sw = w + 2 * blur_r
-        val sh = h + 2 * blur_r
-        self.draw_rect_filled(
-            sx - blur_r, sy - blur_r, sw, sh, color)
-        if blur_r > 0:
-            self.draw_blur_rect(
-                sx - blur_r, sy - blur_r, sw, sh, blur_r)
+        # TWIN PARITY: every other backend (software/cpu, metal's mirror,
+        # opengl, webgpu, intel, baremetal) renders a box-shadow through
+        # `emu_draw_shadow_rect`, which builds a separable coverage profile
+        # over a region padded by 2*blur_r and blends each pixel at its own
+        # falloff. Vulkan used to paint a FLAT alpha rect padded by only
+        # blur_r and then blur it, which is a different formula: it darkened
+        # the whole shadow band uniformly and gave the CPU<->Vulkan web
+        # showcase twins a 29.33% pixel divergence at 160x90 (worst channel
+        # delta 37) on every catalog page that has a shadowed card. Painting
+        # the shared formula costs one host readback per shadow, exactly as
+        # `draw_blur_rect` above already does; a device kernel for the
+        # coverage profile would have to reproduce `_emu_shadow_profile`
+        # exactly before it could replace this.
+        if not self._flush_for_host_fallback("shadow-rect-host-readback"):
+            return
+        emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         if self.completion_unknown: return
