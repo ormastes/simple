@@ -361,3 +361,15 @@ separate, much larger remediation decision (tracked above under
 "Remediation"), not a silent side effect of a perf/scoping fix. Left
 unchanged, per instructions not to weaken *or* strengthen detection semantics
 as a side effect of a reliability fix.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Re-ran `sh scripts/check/check-vacuous-specs.shs --selftest`: still
+`PASS — selftest only, 8 fixtures checked, 0 flagged in corpus` (8/8 fixtures
+correct). Detector remains healthy and wired into the pre-push guard. The
+remaining remediation items (#1-4 in "Remediation" above — rewriting the
+`hir_*`/`treesitter_*_real` spec families with real assertions, working the
+~900 high-risk `V2` candidates, wiring a hard gate) are each independently
+large, cross-cutting efforts well beyond a single 45-minute bugfix-lane
+change and touch specs other lanes may be actively editing. No remediation
+attempted this pass; leaving OPEN as filed.
