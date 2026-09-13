@@ -43,3 +43,7 @@ same file), so counting hits over the spec corpus is vacuous. A run of
 `test/01_unit/compiler` showed 0 hits — vacuously. Quantifying requires either
 implementing the static check and sweeping, or a per-module `run`-path lowering
 sweep. Until that number exists, do not flip this to a hard error.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: fix surface is the Rust seed (src/compiler_rust/compiler/src/hir/lower/expr/access.rs) and the record explicitly defers the hard-error policy decision to the user; not a bounded fix. No change made.
