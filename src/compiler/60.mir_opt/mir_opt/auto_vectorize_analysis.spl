@@ -618,9 +618,26 @@ fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exi
         case Move(local): "_l{local.id}"
         case Const(_, _): "const"
 
-    # If upper is a constant we can't determine its value without deeper
-    # inspection — we still return Some with "const" so the rewriter can
-    # proceed; it will gate on trip_count separately.
+    # Extract a CONSTANT upper bound when there is one.
+    #
+    # This used to be left as "we can't determine its value without deeper
+    # inspection", and end_value below was hardcoded to -1. That single -1 is
+    # why the auto-vectorizer never transformed anything through the pass
+    # driver: R4 in the rewriter refuses a dynamic trip count, so with the
+    # bound never resolved, EVERY loop was refused regardless of what the
+    # pattern matcher and the alias oracle decided. No deeper inspection is
+    # needed for the constant case — the value is sitting in the operand.
+    var const_upper: i64 = -1
+    match upper_op.kind:
+        case Const(value, _):
+            match value:
+                case Int(n):
+                    if n > 0:
+                        const_upper = n
+                case _:
+                    pass_do_nothing
+        case _:
+            pass_do_nothing
 
     # Step 6: Find the induction variable as a LocalId for VectorLoopInfo
     val induction_local = LocalId(id: induction_local_id)
@@ -643,7 +660,9 @@ fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exi
         exit_block:   exit,
         induction_var: induction_local,
         start_value:  0,
-        end_value:    -1,    # -1 = dynamic upper bound
+        # A resolved constant bound, or -1 when the upper operand is a local
+        # whose value genuinely is not known here.
+        end_value:    const_upper,
         step:         1
     ))
 
