@@ -806,6 +806,28 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
 
 fn _html_without_inert_template_sources(source: text) -> text:
     val lower = source.lower()
+    # Round 10: this walk is the single largest leaf of `pp_css_us` (measured
+    # 125/152/251 ms on html/css-layout/css-paint, 571 ms of the 892 ms
+    # eight-page total) because it visits EVERY tag of the document and scans
+    # each tag name a character at a time in interpreted Simple -- to elide
+    # `<template>` bodies that most documents do not have. A document with no
+    # `<template` substring anywhere has nothing to elide: the loop below never
+    # takes the `name == "template"` branch, so `parts` ends as the single
+    # element `source.substring(0, source.len())` and the join returns `source`
+    # unchanged. The probe is a native `find_from` over the already-lowered
+    # copy, and it is deliberately made on the WHOLE source rather than on the
+    # walk's script/style-skipping view: a `<template` that only appears inside
+    # a `<script>` body makes the probe fall through to the full walk, which
+    # then classifies it exactly as before. The fast path can therefore only
+    # trigger where the walk provably returns the input.
+    if find_from(lower, "<template", 0) < 0:
+        return source
+    _html_without_inert_template_sources_scan(source)
+
+# The full tag walk, unchanged. Kept as its own function so the equivalence
+# oracle below can drive it directly and compare it with the fast path.
+fn _html_without_inert_template_sources_scan(source: text) -> text:
+    val lower = source.lower()
     var parts: [text] = []
     var visible_start = 0
     var pos = 0
@@ -878,7 +900,23 @@ fn _extract_css_vw_with_rule_limit(
             group_parts: [], group_specificities: [], decls: [],
             important_decls: []
         )
+    # CSS-parse sub-timers (round 10). `pp_css_us` has been a single opaque
+    # number since round 6; these six split it into its leaves so the largest
+    # one can be named instead of guessed. Same idiom as the phase trace: the
+    # clock is read only when the trace is on, so an untraced parse pays
+    # nothing.
+    val _ppc_on = _web_phase_trace_enabled()
+    var _ppc_tmpl: i64 = 0
+    var _ppc_props: i64 = 0
+    var _ppc_var: i64 = 0
+    var _ppc_scan: i64 = 0
+    var _ppc_rules: i64 = 0
+    var _ppc_append: i64 = 0
+    val _ppc_t0 = if _ppc_on: rt_time_now_micros() else: 0
     val html = _html_without_inert_template_sources(source_html)
+    if _ppc_on:
+        _ppc_tmpl = rt_time_now_micros() - _ppc_t0
+    val _ppc_t1 = if _ppc_on: rt_time_now_micros() else: 0
     # First pass: collect CSS custom properties from all :root blocks
     var html_tag = find_from(html, "<html", 0)
     var html_tag_guard = 0
@@ -940,6 +978,8 @@ fn _extract_css_vw_with_rule_limit(
     # the host's exact value. The defect is downstream, in the re-parse.
     if custom_props.len() == 0:
         print "[web-style-producer] css-props-stage2 parts={custom_prop_count} custom_props_len=0"
+    if _ppc_on:
+        _ppc_props = rt_time_now_micros() - _ppc_t1
     var group_parts: [[[text]]] = []
     var group_specificities: [[i32]] = []
     var decls: [text] = []
@@ -959,6 +999,7 @@ fn _extract_css_vw_with_rule_limit(
         if close < 0:
             break
         val css_raw = html.substring(open + 1, close)
+        val _ppc_tv = if _ppc_on: rt_time_now_micros() else: 0
         val css_var_state = CssVarResolutionState.new(custom_props)
         val css_resolution = _css_resolve_vars(
             css_raw, css_var_state, 0, 0, false
@@ -984,10 +1025,15 @@ fn _extract_css_vw_with_rule_limit(
         # cost seconds-to-minutes on a realistic theme sheet). See
         # `_css_scan_rules_simple`. Selector-group splitting, @media condition
         # evaluation, and CSS-variable substitution stay in Simple below.
+        if _ppc_on:
+            _ppc_var = _ppc_var + (rt_time_now_micros() - _ppc_tv)
         val remaining_rules = rule_limit - group_parts.len()
+        val _ppc_ts = if _ppc_on: rt_time_now_micros() else: 0
         val bounds: CssRuleScan = _css_scan_rules_simple(
             css, CSS_SCAN_CANDIDATE_CAP
         )
+        if _ppc_on:
+            _ppc_scan = _ppc_scan + (rt_time_now_micros() - _ppc_ts)
         val b_sel_text: [text] = bounds.selectors
         val b_decl_text: [text] = bounds.declarations
         val candidate_count = b_sel_text.len()
@@ -1008,6 +1054,7 @@ fn _extract_css_vw_with_rule_limit(
         var block_important_decls: [text] = [""; block_cap]
         var out_i = 0
         var bi = 0
+        val _ppc_tr = if _ppc_on: rt_time_now_micros() else: 0
         while bi < candidate_count and out_i < remaining_rules:  # cpu-lane-loop-ok: walks the candidate rules _css_scan_rules_simple produced for ONE <style> block; bound is that block's rule count, capped by remaining_rules; once per style invalidation
             var include = true
             val wrapper_start = bounds.wrapper_starts[bi]
@@ -1064,6 +1111,9 @@ fn _extract_css_vw_with_rule_limit(
         # INLINED on purpose (was group_parts_list_prefix): same aggregate
         # cross-function-return hazard as above — append each element
         # directly instead of returning a [[[text]]] prefix slice.
+        if _ppc_on:
+            _ppc_rules = _ppc_rules + (rt_time_now_micros() - _ppc_tr)
+        val _ppc_ta = if _ppc_on: rt_time_now_micros() else: 0
         var gi = 0
         while gi < out_i:
             group_parts = group_parts + [block_group_parts[gi]]
@@ -1073,7 +1123,13 @@ fn _extract_css_vw_with_rule_limit(
         important_decls = important_decls + text_list_prefix(
             block_important_decls, out_i
         )
+        if _ppc_on:
+            _ppc_append = _ppc_append + (rt_time_now_micros() - _ppc_ta)
         pos = close + 1
+    if _ppc_on:
+        print "[web-phase] css_sub ppc_tmpl_us={_ppc_tmpl} ppc_props_us={_ppc_props}" +
+            " ppc_var_us={_ppc_var} ppc_scan_us={_ppc_scan}" +
+            " ppc_rules_us={_ppc_rules} ppc_append_us={_ppc_append}"
     val result = Rules(
         group_parts: group_parts,
         group_specificities: group_specificities,
@@ -1089,6 +1145,18 @@ fn _extract_css_vw_with_rule_limit(
     if total_candidates > 0 and group_parts.len() == 0:
         print "[css-extract] degenerate candidates={total_candidates} groups=0"
     result
+
+# Equivalence oracle for the round-10 `<template`-absent fast path in
+# `_html_without_inert_template_sources`. Returns "OK" when the fast-path
+# wrapper and the full tag walk agree on `html`, and a describing line when
+# they do not. Exported so a spec can drive it over the shared catalog pages
+# and over an adversarial fixture.
+pub fn simple_web_layout_debug_template_elide_equivalence(html: text) -> text:
+    val fast = _html_without_inert_template_sources(html)
+    val slow = _html_without_inert_template_sources_scan(html)
+    if fast == slow:
+        return "OK"
+    "MISMATCH fast_len={fast.len()} slow_len={slow.len()}"
 
 pub fn simple_web_layout_debug_capped_css_rule_count(
     html: text, requested_rule_limit: i32
@@ -3343,6 +3411,31 @@ pub fn simple_web_enforce_details_visibility(
         i = i + 1
     resolved
 
+# Round 10: this lookup and `_scrollbar_width_in_decls` run on every cascade
+# origin of every node -- six per node -- and each used to pay
+# `decl_table_build` (a Dict probe keyed on the whole multi-kilobyte merged
+# declaration string, plus an array return) followed by backwards linear scans
+# over a table of hundreds of entries, only to answer "absent" almost every
+# time. Round 10 sub-timed that -- `tail_overflow` is ~271 ms of the catalog's
+# `cas_tail`, see doc/10_metrics/ui/web_perf_round10_2026-09-13.md -- and tried
+# TWO fixes. BOTH were measured WORSE and are deliberately NOT in this file;
+# they are recorded here so the next round does not re-derive them:
+#
+#  1. Build each cascade origin's table ONCE in
+#     `_normalize_final_overflow_axes` and pass `[text]` to table-taking twins.
+#     `cas_tail` 540 -> 868 ms across the eight-page catalog with every control
+#     flat: passing and rebinding an array COPIES it in this interpreter, and
+#     three copies cost more than the three memo probes saved.
+#  2. Guard each lookup with `text_index_of(decls, "overflow")` /
+#     `text_index_of(decls, "scrollbar-width")` and skip the table probe when
+#     the property cannot be present. Sound (both property names contain the
+#     probed substring, and `decl_table_build` lowercases every key) but 697 ms
+#     against a same-session fully-reverted control of 614 ms: the catalog's
+#     merged strings mostly DO contain `overflow`, so the scan is added and the
+#     original work still runs.
+#
+# What is left to try is folding the six lookups into ONE table probe INLINE in
+# `_normalize_final_overflow_axes`, with no array crossing a function boundary.
 fn _final_overflow_axis_in_decls(decls: text, axis: text) -> text:
     if decls == "":
         return ""
@@ -3829,6 +3922,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 if _wsc_armed():
                     _wsc_add_sub(6, _wsc_now_us() - _sb_t6)
         val _sb_t7 = if _wsc_armed(): _wsc_now_us() else: 0
+        var _sb_t8 = if _wsc_tail_sub_armed(): _wsc_now_us() else: 0
         if inline_normal != "":
             val inline_empty_cells_decl = decl_get(
                 inline_normal, "empty-cells"
@@ -3842,6 +3936,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             )
             if _font_style_trace_on:
                 print "[font-inline-trace] index={i} post_inline_apply_font_family={st.font_family} post_inline_apply_font_size={st.font_size}"
+        if _wsc_tail_sub_armed():
+            _wsc_add_sub2(8, _wsc_now_us() - _sb_t8)
+            _sb_t8 = _wsc_now_us()
         if combined_important_decls != "":
             val important_empty_cells_decl = decl_get(
                 combined_important_decls, "empty-cells"
@@ -3853,6 +3950,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             st = apply_decls_without_display_on_writing_mode(
                 st, combined_important_decls, em_base, logical_writing_mode
             )
+        if _wsc_tail_sub_armed():
+            _wsc_add_sub2(9, _wsc_now_us() - _sb_t8)
+            _sb_t8 = _wsc_now_us()
         if inline_important != "":
             val inline_important_empty_cells_decl = decl_get(
                 inline_important, "empty-cells"
@@ -3864,15 +3964,24 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             st = apply_decls_without_display_on_writing_mode(
                 st, inline_important, em_base, logical_writing_mode
             )
+        if _wsc_tail_sub_armed():
+            _wsc_add_sub2(10, _wsc_now_us() - _sb_t8)
+            _sb_t8 = _wsc_now_us()
         if final_display != "":
             if final_display == "contents":
                 st = apply_decls(st, "display:" + final_display, em_base)
             else:
                 st.display = final_display
+        if _wsc_tail_sub_armed():
+            _wsc_add_sub2(11, _wsc_now_us() - _sb_t8)
+            _sb_t8 = _wsc_now_us()
         st = _normalize_final_overflow_axes(
             st, combined_decls, inline_normal, combined_important_decls,
             inline_important
         )
+        if _wsc_tail_sub_armed():
+            _wsc_add_sub2(12, _wsc_now_us() - _sb_t8)
+            _sb_t8 = _wsc_now_us()
         # Disclosure state is structural and author CSS cannot reveal closed
         # content. Apply it after the author cascade and before layout/paint.
         if details_hidden[i]:
@@ -3882,6 +3991,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # tries to display it; invalid-context uses retain generic semantics.
         if nd.tag == "selectedcontent" and is_valid_selectedcontent_context(nodes, child_index, i):
             st = apply_decls(st, "display:none", em_base)
+        if _wsc_tail_sub_armed():
+            _wsc_add_sub2(13, _wsc_now_us() - _sb_t8)
         if _wsc_armed():
             _wsc_add_sub(7, _wsc_now_us() - _sb_t7)
         # The shared WM supplies the package's named solid material for the
