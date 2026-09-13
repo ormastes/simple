@@ -1492,6 +1492,78 @@ pub extern "C" fn rt_xgetbv(index: i32) -> i64 {
     }
 }
 
+/// Raw CPUID leaf/subleaf registers. `#[repr(C)]` and the field ORDER match the
+/// C twin's `RtCpuidResult` in `src/runtime/runtime_native.c` exactly, because
+/// the same Simple declaration
+/// (`src/compiler/30.types/simd_capabilities.spl`, `-> (i32, i32, i32, i32)`)
+/// is linked against whichever lane the build selected.
+#[repr(C)]
+pub struct RtCpuidResult {
+    pub a: i32,
+    pub b: i32,
+    pub c: i32,
+    pub d: i32,
+}
+
+/// Raw CPUID. A non-x86 host reports all-zero — the C twin's behaviour — so a
+/// caller's feature bits read as "absent" instead of as uninitialised memory.
+#[no_mangle]
+pub extern "C" fn rt_cpuid(leaf: i32, subleaf: i32) -> RtCpuidResult {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: __cpuid_count is unconditionally available on x86_64, and an
+        // unsupported leaf returns zeros rather than faulting.
+        let r = unsafe { std::arch::x86_64::__cpuid_count(leaf as u32, subleaf as u32) };
+        RtCpuidResult {
+            a: r.eax as i32,
+            b: r.ebx as i32,
+            c: r.ecx as i32,
+            d: r.edx as i32,
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (leaf, subleaf);
+        RtCpuidResult {
+            a: 0,
+            b: 0,
+            c: 0,
+            d: 0,
+        }
+    }
+}
+
+/// 1 when this runtime was built for x86_64, else 0 (C twin: `rt_cpu_is_x86_64`).
+#[no_mangle]
+pub extern "C" fn rt_cpu_is_x86_64() -> i32 {
+    if cfg!(target_arch = "x86_64") {
+        1
+    } else {
+        0
+    }
+}
+
+/// 1 when this runtime was built for aarch64, else 0 (C twin: `rt_cpu_is_aarch64`).
+#[no_mangle]
+pub extern "C" fn rt_cpu_is_aarch64() -> i32 {
+    if cfg!(target_arch = "aarch64") {
+        1
+    } else {
+        0
+    }
+}
+
+/// 1 when this runtime was built for 64-bit RISC-V, else 0
+/// (C twin: `rt_cpu_is_riscv64`).
+#[no_mangle]
+pub extern "C" fn rt_cpu_is_riscv64() -> i32 {
+    if cfg!(target_arch = "riscv64") {
+        1
+    } else {
+        0
+    }
+}
+
 /// Read a Linux auxiliary-vector entry; unsupported hosts report zero.
 #[no_mangle]
 pub extern "C" fn rt_getauxval(key: i64) -> i64 {
@@ -2178,6 +2250,48 @@ mod tests {
         }
         #[cfg(not(target_arch = "x86_64"))]
         assert_eq!(rt_xgetbv(0), 0);
+    }
+
+    /// The three CPU predicates are a PARTITION of the architectures the
+    /// runtime is built for: exactly one answers 1 on any supported host, and
+    /// the answer must agree with the `cfg!` the rest of the runtime uses.
+    /// A stub that returned 0 everywhere (which is what an all-zero fallback
+    /// would look like) fails the sum assertion, so this discriminates.
+    #[test]
+    fn test_cpu_arch_gates_partition_the_host() {
+        let x86 = rt_cpu_is_x86_64();
+        let arm = rt_cpu_is_aarch64();
+        let riscv = rt_cpu_is_riscv64();
+        for value in [x86, arm, riscv] {
+            assert!(value == 0 || value == 1, "gate must be 0 or 1, got {value}");
+        }
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
+        assert_eq!(x86 + arm + riscv, 1, "exactly one architecture gate may be 1");
+
+        assert_eq!(x86, i32::from(cfg!(target_arch = "x86_64")));
+        assert_eq!(arm, i32::from(cfg!(target_arch = "aarch64")));
+        assert_eq!(riscv, i32::from(cfg!(target_arch = "riscv64")));
+    }
+
+    /// CPUID leaf 0 returns the vendor string in ebx/edx/ecx on every x86 part
+    /// ever made, so a non-zero ebx is a real oracle rather than "it returned
+    /// something". Off x86 the C twin returns all-zero and so must this.
+    #[test]
+    fn test_rt_cpuid_matches_the_c_twin_contract() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let vendor = rt_cpuid(0, 0);
+            assert_ne!(vendor.b, 0, "CPUID.0 must report a vendor string in ebx");
+            // "GenuineIntel" / "AuthenticAMD" both put ASCII letters in ebx.
+            assert!(vendor.a >= 0, "max leaf is a small non-negative number");
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let zero = rt_cpuid(0, 0);
+            assert_eq!((zero.a, zero.b, zero.c, zero.d), (0, 0, 0, 0));
+            let also_zero = rt_cpuid(7, 1);
+            assert_eq!((also_zero.a, also_zero.b, also_zero.c, also_zero.d), (0, 0, 0, 0));
+        }
     }
 
     #[test]
