@@ -32,6 +32,7 @@ use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.semantics.gpu_checker.{parse_gpu_kernel_target}
 use compiler.common.attributes.{FunctionAttr}
+use compiler.common.attributes.{OptimizationReqLevel, OptimizationBackend}
 use compiler.common.assurance.policy_names.{normalize_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, normalize_gpu_target_metadata_name}
@@ -838,6 +839,13 @@ impl MirLowering:
             result.align = fa.align
         if fa.is_global:
             result.is_global = true
+        # SIMD optimization requirement transport. Without this the
+        # @must(simd)/@prefer(avx512) tags reached HIR and stopped there, so
+        # the auto-vectorizer had nothing to enforce.
+        result.simd_req_level = _simd_req_level_text(fa.optimization_req.level)
+        result.simd_req_backend = _simd_req_backend_text(fa.optimization_req.backend)
+        if fa.simd_disable:
+            result.simd_disabled = true
         result
 
     me lower_const(const_: HirConst):
@@ -1736,3 +1744,28 @@ impl MirLowering:
 # ============================================================================
 # Target-Qualified Assembly
 # ============================================================================
+
+fn _simd_req_level_text(level: OptimizationReqLevel) -> text:
+    """Stable wire text for the requirement level; "" means no requirement."""
+    match level:
+        case None_:     ""
+        case Must:      "must"
+        case Prefer:    "prefer"
+        case ErrorNot:  "error_not"
+        case WarnNot:   "warn_not"
+
+fn _simd_req_backend_text(backend: OptimizationBackend) -> text:
+    """Stable wire text for the requested backend; "" means none/unknown."""
+    match backend:
+        case Unknown:  ""
+        case Simd:     "simd"
+        case Avx2:     "avx2"
+        case Avx512:   "avx512"
+        case Sse:      "sse"
+        case Neon:     "neon"
+        case RiscvV:   "riscv_v"
+        case Cuda:     "cuda"
+        case Metal:    "metal"
+        case OpenCL:   "opencl"
+        case Gpu:      "gpu"
+

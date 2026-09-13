@@ -1,0 +1,65 @@
+# Auto-Vectorization Target Level Resolution
+#
+# `get_simd_width` used to hardcode the `x86_64-v3` planning profile, which
+# pins every auto-vectorized loop to AVX2 (8 x f32) even on a host that admits
+# AVX-512. The comment there said the real target triple was "not plumbed yet";
+# this module plumbs it.
+#
+# Admission discipline mirrors `backend_helpers.spl:target_opt_context_from`:
+# a CPU name is a *request*, never proof about the execution domain. AVX-512
+# widening is admitted only from a capability receipt that carries both the
+# CPUID feature bits and the OS XCR0 opmask/ZMM state, and only when the output
+# actually targets the host. Anything short of that resolves to the previous
+# v3 default, so this is a widening, never a regression.
+
+use compiler.types.simd_capabilities.{SimdFeatureSet, detect_capabilities}
+
+# ============================================================================
+# Pure resolution — testable without touching CPUID
+# ============================================================================
+
+fn auto_vectorize_x86_level(features: SimdFeatureSet, output_target_is_host: bool) -> text:
+    """
+    Resolve the x86_64 micro-arch planning level for auto-vectorization.
+
+    Returns "x86_64-v4" only when every condition holds:
+      - the output targets the host (a cross-target request proves nothing),
+      - AVX-512F, VL and BW are all present (VL is required because the
+        rewriter still emits 128/256-bit forms for short trip counts, and BW
+        because byte/word lanes are otherwise unencodable),
+      - the OS has enabled opmask + ZMM state in XCR0.
+
+    Otherwise it degrades: v3 (AVX2) -> v2 (SSE4.2) -> v1.
+    """
+    if output_target_is_host and features.has_avx512f and features.has_avx512vl and features.has_avx512bw and features.xcr0_opmask_zmm:
+        return "x86_64-v4"
+    if features.has_avx2 and features.xcr0_xmm_ymm:
+        return "x86_64-v3"
+    if features.has_sse42:
+        return "x86_64-v2"
+    "x86_64-v1"
+
+fn auto_vectorize_avx512_admitted(features: SimdFeatureSet, output_target_is_host: bool) -> bool:
+    """True when the resolved level is the AVX-512 one. Used by the provider
+    metadata and by the `@must(simd)` receipt so both agree with the width."""
+    auto_vectorize_x86_level(features, output_target_is_host) == "x86_64-v4"
+
+# ============================================================================
+# Host-resolving wrapper
+# ============================================================================
+
+fn auto_vectorize_target_level() -> text:
+    """Resolve the planning level for the current compilation host.
+
+    Auto-vectorization runs on MIR before backend target selection, so the
+    host receipt is the only evidence available here. Cross-compiled output
+    must not be widened from it; `auto_vectorize_x86_level` is called with
+    output_target_is_host = true only because MIR auto-vectorization is
+    currently host-lane only. When a cross-target receipt is plumbed, pass
+    that decision in rather than widening this.
+    """
+    auto_vectorize_x86_level(detect_capabilities(), true)
+
+export auto_vectorize_x86_level
+export auto_vectorize_avx512_admitted
+export auto_vectorize_target_level

@@ -1,0 +1,119 @@
+# Purpose: the auto-vectorizer must resolve an AVX-512 planning level from a
+# real capability receipt instead of the hardcoded x86_64-v3 (AVX2) profile,
+# and the @must(simd)/@prefer(avx512) tags must actually be enforced.
+# @req REQ-SIMD-002 REQ-SIMD-004
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use compiler.types.simd_capabilities.{SimdFeatureSet, _simd_features_none}
+use compiler.mir_opt.mir_opt.auto_vectorize_target.{auto_vectorize_x86_level, auto_vectorize_avx512_admitted}
+use compiler.mir_opt.mir_opt.auto_vectorize_receipt.{
+    SimdReqEvidence, SimdReqVerdict, check_simd_requirement, simd_req_outcome_is_fatal
+}
+use compiler.backend.feature_caps.{x86_caps_from_target, preferred_lane_count_x86}
+
+fn avx512_host() -> SimdFeatureSet:
+    SimdFeatureSet(
+        .._simd_features_none(),
+        has_sse42: true,
+        has_avx: true,
+        has_avx2: true,
+        has_avx512f: true,
+        has_avx512bw: true,
+        has_avx512vl: true,
+        has_osxsave: true,
+        xcr0_xmm_ymm: true,
+        xcr0_opmask_zmm: true)
+
+fn avx2_host() -> SimdFeatureSet:
+    SimdFeatureSet(
+        .._simd_features_none(),
+        has_sse42: true,
+        has_avx: true,
+        has_avx2: true,
+        has_osxsave: true,
+        xcr0_xmm_ymm: true)
+
+describe "auto-vectorize AVX-512 planning level":
+    it "resolves x86_64-v4 on a host whose receipt admits AVX-512 F+VL+BW and ZMM state":
+        step("full AVX-512 receipt widens the planning level")
+        assert_equal(auto_vectorize_x86_level(avx512_host(), true), "x86_64-v4")
+        assert_equal(auto_vectorize_avx512_admitted(avx512_host(), true), true)
+
+    it "refuses to widen without OS ZMM state, without VL, or without BW":
+        step("each missing admission condition degrades to AVX2")
+        val no_os = SimdFeatureSet(..avx512_host(), xcr0_opmask_zmm: false)
+        assert_equal(auto_vectorize_x86_level(no_os, true), "x86_64-v3")
+        val no_vl = SimdFeatureSet(..avx512_host(), has_avx512vl: false)
+        assert_equal(auto_vectorize_x86_level(no_vl, true), "x86_64-v3")
+        val no_bw = SimdFeatureSet(..avx512_host(), has_avx512bw: false)
+        assert_equal(auto_vectorize_x86_level(no_bw, true), "x86_64-v3")
+
+    it "never widens a cross-target output from a host receipt":
+        step("a CPU name is a request, not proof about the execution domain")
+        assert_equal(auto_vectorize_x86_level(avx512_host(), false), "x86_64-v3")
+        assert_equal(auto_vectorize_avx512_admitted(avx512_host(), false), false)
+
+    it "degrades to v3 / v2 / v1 rather than failing":
+        step("no AVX-512 receipt keeps the previous AVX2 behaviour exactly")
+        assert_equal(auto_vectorize_x86_level(avx2_host(), true), "x86_64-v3")
+        val sse_only = SimdFeatureSet(.._simd_features_none(), has_sse42: true)
+        assert_equal(auto_vectorize_x86_level(sse_only, true), "x86_64-v2")
+        assert_equal(auto_vectorize_x86_level(_simd_features_none(), true), "x86_64-v1")
+
+    it "turns the resolved level into 512-bit lane counts":
+        step("this is the regression the hardcoded x86_64-v3 caused")
+        val v4 = x86_caps_from_target("x86_64-v4")
+        assert_equal(preferred_lane_count_x86(v4, 32), 16)
+        assert_equal(preferred_lane_count_x86(v4, 64), 8)
+        val v3 = x86_caps_from_target("x86_64-v3")
+        assert_equal(preferred_lane_count_x86(v3, 32), 8)
+        assert_equal(preferred_lane_count_x86(v3, 64), 4)
+
+    it "admits avx512bw in the v4 preset so byte/word ZMM lanes are reachable":
+        step("the native adapter pinned this false, making BW unreachable")
+        assert_equal(x86_caps_from_target("x86_64-v4").has_avx512bw, true)
+        assert_equal(x86_caps_from_target("x86_64-v3").has_avx512bw, false)
+
+describe "@must(simd) / @prefer(avx512) enforcement":
+    it "reports NotRequested when the function carries no tag":
+        step("untagged functions are unaffected")
+        val ev = SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: false)
+        assert_equal(check_simd_requirement("", "", ev).verdict == SimdReqVerdict.NotRequested, true)
+
+    it "fails compilation for @must(simd) when no loop was vectorized":
+        step("this is the case that used to compile clean and silent")
+        val ev = SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: true)
+        val out = check_simd_requirement("must", "simd", ev)
+        assert_equal(out.verdict == SimdReqVerdict.Error, true)
+        assert_equal(simd_req_outcome_is_fatal(out), true)
+
+    it "satisfies @must(simd) when a loop was actually rewritten":
+        step("pattern-matched-and-logged is not enough; rewritten is")
+        val ev = SimdReqEvidence(vectorized: true, lane_width_bits: 256, avx512_admitted: false)
+        assert_equal(check_simd_requirement("must", "simd", ev).verdict == SimdReqVerdict.Satisfied, true)
+
+    it "refuses @must(avx512) when the rewrite used narrower lanes":
+        step("an AVX-512 host that still emitted 256-bit lanes has not satisfied the tag")
+        val narrow = SimdReqEvidence(vectorized: true, lane_width_bits: 256, avx512_admitted: true)
+        assert_equal(check_simd_requirement("must", "avx512", narrow).verdict == SimdReqVerdict.Error, true)
+        val wide = SimdReqEvidence(vectorized: true, lane_width_bits: 512, avx512_admitted: true)
+        assert_equal(check_simd_requirement("must", "avx512", wide).verdict == SimdReqVerdict.Satisfied, true)
+
+    it "refuses @must(avx512) when the target receipt did not admit AVX-512":
+        step("width alone is not admission")
+        val ev = SimdReqEvidence(vectorized: true, lane_width_bits: 512, avx512_admitted: false)
+        assert_equal(check_simd_requirement("must", "avx512", ev).verdict == SimdReqVerdict.Error, true)
+
+    it "warns rather than fails for @prefer and @warn_not":
+        step("a preference is advisory")
+        val ev = SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: false)
+        assert_equal(check_simd_requirement("prefer", "avx512", ev).verdict == SimdReqVerdict.Warn, true)
+        assert_equal(check_simd_requirement("warn_not", "simd", ev).verdict == SimdReqVerdict.Warn, true)
+        assert_equal(check_simd_requirement("error_not", "simd", ev).verdict == SimdReqVerdict.Error, true)
+
+    it "does not adjudicate GPU backend requests":
+        step("@must(cuda) is not this pass's authority and must not false-error")
+        val ev = SimdReqEvidence(vectorized: false, lane_width_bits: 0, avx512_admitted: false)
+        assert_equal(check_simd_requirement("must", "cuda", ev).verdict == SimdReqVerdict.NotRequested, true)
+        assert_equal(check_simd_requirement("must", "gpu", ev).verdict == SimdReqVerdict.NotRequested, true)
