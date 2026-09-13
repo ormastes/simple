@@ -734,6 +734,7 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 PORTABLE_LOCK_ATOMIC_HELPER_PATH=\
 "${repo_root}/scripts/check/lib/portable-hardlink-lock.pl"
 export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "${repo_root}/scripts/check/lib/bootstrap-stage3/phase2-compat-manifest.shs"
 . "${repo_root}/scripts/check/lib/portable-process-lock.shs"
 . "${repo_root}/scripts/bootstrap/bootstrap-authority-wiring.shs"
 . "${repo_root}/scripts/bootstrap/bootstrap-deploy-transaction.shs"
@@ -3288,12 +3289,32 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   fi
 
   if [ "${stage2_status}" -eq 0 ]; then
-    [ -f "${stage2_compatibility_manifest_absolute}" ] || {
-      echo "error: Stage 2 did not publish its compatibility manifest" >&2
+    # Producer-scoped compatibility-manifest gate. The manifest and the M2
+    # reverse-reference authority it binds exist ONLY in the pure-Simple driver
+    # (driver_aot_native_output.spl:398 / reverse_reference_receipt.spl:243);
+    # `grep -rn PHASE2_COMPATIBILITY_MANIFEST src/compiler_rust/` is empty and
+    # so is the seed's reverse-reference grep, so a seed-produced Phase-2 cache
+    # can never carry one. The gate is NOT dropped: it is scoped on a POSITIVE
+    # producer fact computed before Stage 2 ran, a skip leaves evidence on
+    # disk, and Stage 3 still gets MANIFEST_READ and therefore admits ZERO
+    # Phase-2 reuse without a manifest. Selftest is fatal inside the checker.
+    # doc/08_tracking/bug/stage2_compatibility_manifest_unwritable_by_rust_seed_2026-09-13.md
+    stage2_compat_producer_kind=$(
+      bootstrap_phase2_compat_producer_kind \
+        "${bootstrap_stage2_parent_override}"
+    ) || {
+      echo "error: could not determine the Stage 2 producer kind" >&2
       exit 1
     }
+    sh "${repo_root}/scripts/check/check-stage2-compat-manifest-gate.shs" \
+      "--producer-kind=${stage2_compat_producer_kind}" \
+      "--manifest=${stage2_compatibility_manifest_absolute}" \
+      "--evidence=${stage2_compatibility_manifest_absolute}.not-published" \
+      "--producer-path=${stage2_seed_absolute}" || exit 1
     chmod -R a-w "${stage2_cache_absolute}"
-    chmod 400 "${stage2_compatibility_manifest_absolute}"
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      chmod 400 "${stage2_compatibility_manifest_absolute}"
+    fi
   fi
 
   if [ "${stop_after_stage2}" -eq 1 ]; then
@@ -3338,8 +3359,15 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "${stage3_provenance_dir}/runtime-before-stage3.txt" || exit 1
     bootstrap_stage3_directory_snapshot \
       "${phase2_cache_before_stage3}" "${stage2_cache_absolute}" || exit 1
-    phase2_manifest_sha_before_stage3=$(bootstrap_stage3_hash_file \
-      "${stage2_compatibility_manifest_absolute}") || exit 1
+    # Absent-by-design on a rust-seed producer (see the producer-scoped gate
+    # above). The sentinel is compared verbatim after Stage 3, so a manifest
+    # that APPEARS mid-Stage-3 is still caught as a mutation.
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      phase2_manifest_sha_before_stage3=$(bootstrap_stage3_hash_file \
+        "${stage2_compatibility_manifest_absolute}") || exit 1
+    else
+      phase2_manifest_sha_before_stage3=absent
+    fi
   fi
   # Stage 3 uses the exact SIMPLE_BOOTSTRAP_STAGE3 focused capsule. That route
   # accepts only bootstrap_main, dynload mode, and the transcribed source roots,
@@ -3426,8 +3454,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: Stage 3 mutated the read-only Phase 2 cache" >&2
       exit 1
     }
-    phase2_manifest_sha_after_stage3=$(bootstrap_stage3_hash_file \
-      "${stage2_compatibility_manifest_absolute}") || exit 1
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      phase2_manifest_sha_after_stage3=$(bootstrap_stage3_hash_file \
+        "${stage2_compatibility_manifest_absolute}") || exit 1
+    else
+      phase2_manifest_sha_after_stage3=absent
+    fi
     [ "${phase2_manifest_sha_before_stage3}" = \
       "${phase2_manifest_sha_after_stage3}" ] || {
       echo "error: Stage 3 mutated the Phase 2 compatibility manifest" >&2

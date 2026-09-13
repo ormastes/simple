@@ -1653,3 +1653,56 @@ clearing site 16 should unlock Stage 3, and Stage 4 follows through
 `bootstrap-strategy.sh`, which mints the lineage admission locally — no remote
 scheduler — with `SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE=1` forcing `deploy=0` so
 `bin/release` is never touched.
+
+### Run 30 (2026-09-13) — site 16 repaired; a NEW, earlier Stage-2 link blocker
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+evidence root, worktree `agent-a48e6e7adea865a52`, tip `6c801a7f309` (carries
+PR #843), carrying the site-16 fix below. Cold Rust seed.
+
+**Site 16 is fixed, and the fix is in the tree — but this run did not exercise
+it.** Stage 2 never linked, so `stage2_status=1` and the manifest gate at
+`bootstrap-from-scratch.sh:3291` (inside `if [ "${stage2_status}" -eq 0 ]`) was
+not reached. What run 30 does prove about the fix is narrow and worth stating
+exactly: the new library sources cleanly into the script under `set -eu` (the
+run reached its own Stage-2 failure path and exited normally), and the gate's
+own fixtures pass. The call site itself remains unexercised in a real lane.
+
+Verdict, verbatim:
+
+```
+  diagnosis: 2 diagnostic line(s) found. First 5:
+    | Build failed: link failed: ld: warning: -ld_classic is deprecated and will be removed in a future release
+    | clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+PASS — 1 check(s), stage stage2 failed (exit 1) and said why
+  warning: stage2 native-build failed (exit 1); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Six undefined symbols at
+`logs/aarch64-apple-darwin/stage2-native-build.log:2734-2748` —
+`__sffi_enum_discriminant`, `module_surfaces_promote_reason`, `rt_cpu_is_aarch64`,
+`rt_cpu_is_riscv64`, `rt_cpu_is_x86_64`, `rt_cpuid` — in three distinct classes
+(runtime-bundle composition, a re-exported surface symbol, and a per-module SFFI
+helper mangling gap). Run 29 linked cleanly at an earlier tip, so this is a
+REGRESSION in the range between them, not a standing condition. Filed as site 17:
+`doc/08_tracking/bug/stage2_link_undefined_cpu_probe_and_surface_symbols_2026-09-13.md`.
+
+**Site 16's resolution** (design finding, since the bug record called for an
+owner decision): both repairs the record proposed are dead on measurement. The
+manifest's writer returns `m2-receipt-<reason>` at
+`driver_aot_native_output.spl:415-418` unless the Phase-2 cache carries M2
+reverse-reference receipts, which only `reverse_reference_receipt.spl` writes —
+`grep -rl 'reverse_reference|current-admitted' src/compiler_rust/` is EMPTY. So
+teaching the seed to emit the manifest means porting the whole M2
+reuse-admission authority into Rust, and running the pure-Simple writer inside
+the Stage-2 candidate against a seed-written cache fails at the same line. It is
+also not a macOS problem: `can_full_bootstrap=0` ("Force manual bootstrap") pins
+the admitted Rust seed as the Stage-2 producer on EVERY platform unless
+`--stage2-parent` supplies an admitted pure-Simple release, so the gate was only
+ever satisfiable on that producer. The gate is kept and scoped on a positive
+producer fact, with schema checking the old `[ -f ]` never had, and a
+`<manifest>.not-published` evidence record on the skip path. Stage 3 still
+receives `MANIFEST_READ` and still admits ZERO Phase-2 reuse without a manifest
+(verified by reading `phase_compatibility_read_manifest_io_v1`, which returns
+`valid=false` on an absent file rather than aborting). Nothing was deployed.
