@@ -121,3 +121,7 @@ symbol defect.) Its `Environment` is now structurally identical to the live
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Confirmed the primary file (`src/compiler_rust/compiler/src/hir/lower/expr/access.rs`) is Rust-seed source. A fix here requires a `cargo build`/seed redeploy cycle plus native-build oracle verification, which is out of scope for this pure-Simple TDD bugfix pass (no seed rebuild performed this pass, per lane guide). Leaving OPEN; no code change made.
