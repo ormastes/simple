@@ -55,7 +55,11 @@ host.
 
 No production default changes until selected requirements exist and the
 canonical parser reaches declared parity. The legacy CPU frontend remains an
-independent correctness path.
+independent correctness path. The first source-landed provider seam routes the
+existing compiler frontend facade through `ParserProviderV1`, with
+`LegacyReference` as its sole executable member. Canonical scalar, SIMD, and
+GPU members are typed candidates that fail closed before parser state is
+mutated; they are not execution claims or promotion evidence.
 
 ## Canonical contracts
 
@@ -187,6 +191,14 @@ placeholder transformation, diagnostics, and source spans. Simple, SDN, and
 sosh retain distinct dialects under one grammar authority. GPU-valid regions
 may advance to flat Parsed HIR/local work; global binding and recovery remain
 explicit CPU stages until independently designed and qualified.
+
+The current core-facade `ParserProviderV1` compiler adapter is intentionally narrower than
+the future independently loaded `FrontendFacetV1`: it selects the existing
+facade implementation and emits an execution receipt without exporting AST/HIR
+layouts. It is the call-path seam used to preserve legacy behavior while later
+facets qualify; it does not introduce a second frontend ABI.
+Native `_FlatAstBridge/module_assembly.spl` remains an explicitly separate
+frontend route and is not claimed as migrated by this slice.
 
 ## Generated-code architecture
 

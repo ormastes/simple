@@ -108,6 +108,16 @@ independent-region work with safe tails/guard pages. Unsupported regions emit
 typed CPU work tags. GPU execution stages private output and emits actual device
 completion evidence before commit.
 
+The source-landed compiler adapter exposes `ParserProviderV1` and
+`ParserProviderReceiptV1` in `compiler.frontend.core.frontend`. The default
+facade selects `LegacyReference`; the explicit execution entrypoint rejects
+canonical scalar, SIMD, and GPU candidates with
+`parser_provider_unqualified` before invoking the parser. The receipt names
+only the provider actually executed. Focused differential coverage compares
+the retained direct legacy entrypoint with the default facade. Runtime
+qualification remains pending until an admitted self-hosted runner executes
+that coverage.
+
 ### JIT/AOT/native artifacts
 
 Generated-code requests take `TargetCodegenProfile`, never the host parser

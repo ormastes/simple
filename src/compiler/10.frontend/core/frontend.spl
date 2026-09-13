@@ -8,7 +8,31 @@ use compiler.core.ast.{expr_count}
 use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations}
 use compiler.frontend.desugar.placeholder_lambda.{transform_interpolated_placeholder_args}
 
-fn core_frontend_parse(
+enum ParserProviderV1:
+    LegacyReference
+    CanonicalScalarCandidate
+    SimdCandidate
+    GpuCandidate
+
+struct ParserProviderReceiptV1:
+    provider: ParserProviderV1
+    provider_id: text
+    executed: bool
+    parse_ok: bool
+    fallback_reason: text
+
+fn parser_provider_v1_name(provider: ParserProviderV1) -> text:
+    match provider:
+        case ParserProviderV1.LegacyReference: "parser.simple.legacy-reference"
+        case ParserProviderV1.CanonicalScalarCandidate: "parser.simple.canonical-scalar"
+        case ParserProviderV1.SimdCandidate: "parser.simple.simd"
+        case ParserProviderV1.GpuCandidate: "parser.simple.gpu"
+
+fn parser_provider_v1_default() -> ParserProviderV1:
+    """Return the only frontend provider currently qualified for execution."""
+    ParserProviderV1.LegacyReference
+
+fn core_frontend_parse_legacy_reference(
     source: text,
     path: text,
     append_mode: bool,
@@ -35,6 +59,38 @@ fn core_frontend_parse(
 
     parse_ok
 
+fn parser_provider_v1_execute(
+    provider: ParserProviderV1,
+    source: text,
+    path: text,
+    append_mode: bool,
+    preserve_error_state: bool
+) -> Result<ParserProviderReceiptV1, text>:
+    """Execute an admitted full-frontend provider without implicit fallback."""
+    if provider != ParserProviderV1.LegacyReference:
+        return Err("parser_provider_unqualified: " + parser_provider_v1_name(provider))
+
+    val parse_ok = core_frontend_parse_legacy_reference(
+        source, path, append_mode, preserve_error_state)
+    Ok(ParserProviderReceiptV1(
+        provider: provider,
+        provider_id: parser_provider_v1_name(provider),
+        executed: true,
+        parse_ok: parse_ok,
+        fallback_reason: ""
+    ))
+
+fn core_frontend_parse(
+    source: text,
+    path: text,
+    append_mode: bool,
+    preserve_error_state: bool
+) -> bool:
+    match parser_provider_v1_execute(
+        parser_provider_v1_default(), source, path, append_mode, preserve_error_state):
+        case Ok(receipt): receipt.parse_ok
+        case Err(_): false
+
 fn core_frontend_parse_reset(source: text, path: text) -> bool:
     """Parse a standalone module, resetting parser/AST state."""
     core_frontend_parse(source, path, false, false)
@@ -46,3 +102,7 @@ fn core_frontend_parse_append(source: text, path: text) -> bool:
 fn core_frontend_parse_isolated(source: text, path: text) -> bool:
     """Parse in isolated mode and restore prior parser error flag."""
     core_frontend_parse(source, path, false, true)
+
+export ParserProviderV1, ParserProviderReceiptV1
+export parser_provider_v1_name, parser_provider_v1_default, parser_provider_v1_execute
+export core_frontend_parse_legacy_reference

@@ -1,0 +1,125 @@
+"""Focused contract coverage for the compiler frontend parser-provider seam."""
+
+use std.spec.{describe, it, expect}
+use compiler.core.frontend.{
+    ParserProviderV1,
+    parser_provider_v1_default,
+    parser_provider_v1_execute,
+    core_frontend_parse_legacy_reference,
+    core_frontend_parse_reset,
+    core_frontend_parse_append,
+    core_frontend_parse_isolated
+}
+use compiler.core.ast.{expr_count}
+use compiler.core.parser.{parser_error_count, parser_has_errors, parser_set_had_error}
+
+val PROVIDER_SEAM_SOURCE = "fn provider_seam_probe():\n    42\n"
+val PROVIDER_SEAM_APPEND_SOURCE = "fn provider_seam_append():\n    7 + 8\n"
+val PROVIDER_SEAM_REJECT_SOURCE = (
+    "fn rejected_one():\n    1 + 2\n\n"
+    + "fn rejected_two():\n    3 + 4\n")
+val PROVIDER_SEAM_INVALID_SOURCE = "fn provider_seam_broken(:\n"
+
+fn expect_rejected_without_state_change(provider: ParserProviderV1, expected_reason: text):
+    val expressions_before = expr_count()
+    val diagnostics_before = parser_error_count()
+    val had_error_before = parser_has_errors()
+    val reason = match parser_provider_v1_execute(
+        provider, PROVIDER_SEAM_REJECT_SOURCE, "provider_seam_reject.spl", false, false):
+        case Ok(_): "unexpected execution"
+        case Err(reason): reason
+    expect(reason).to_equal(expected_reason)
+    expect(expr_count()).to_equal(expressions_before)
+    expect(parser_error_count()).to_equal(diagnostics_before)
+    expect(parser_has_errors()).to_equal(had_error_before)
+
+describe "ParserProviderV1 compiler frontend seam":
+    it "keeps the independent legacy parser as the production default":
+        # @req REQ-008
+        expect(parser_provider_v1_default()).to_equal(ParserProviderV1.LegacyReference)
+
+    it "preserves the legacy frontend result through the default facade":
+        # @req REQ-008
+        val reference_ok = core_frontend_parse_legacy_reference(
+            PROVIDER_SEAM_SOURCE, "provider_seam_reference.spl", false, false)
+        val reference_exprs = expr_count()
+        val reference_errors = parser_error_count()
+        val facade_ok = core_frontend_parse_reset(
+            PROVIDER_SEAM_SOURCE, "provider_seam_reference.spl")
+        expect(reference_ok).to_equal(true)
+        expect(facade_ok).to_equal(reference_ok)
+        expect(expr_count()).to_equal(reference_exprs)
+        expect(parser_error_count()).to_equal(reference_errors)
+
+    it "preserves invalid-source diagnostics through the default facade":
+        # @req REQ-008
+        val reference_ok = core_frontend_parse_legacy_reference(
+            PROVIDER_SEAM_INVALID_SOURCE, "provider_seam_invalid.spl", false, false)
+        val reference_exprs = expr_count()
+        val reference_errors = parser_error_count()
+        val reference_had_error = parser_has_errors()
+        val facade_ok = core_frontend_parse_reset(
+            PROVIDER_SEAM_INVALID_SOURCE, "provider_seam_invalid.spl")
+        expect(reference_ok).to_equal(false)
+        expect(facade_ok).to_equal(reference_ok)
+        expect(expr_count()).to_equal(reference_exprs)
+        expect(parser_error_count()).to_equal(reference_errors)
+        expect(parser_has_errors()).to_equal(reference_had_error)
+
+    it "preserves append and isolated-error-state behavior":
+        # @req REQ-008
+        core_frontend_parse_legacy_reference(
+            PROVIDER_SEAM_SOURCE, "provider_seam_append_base.spl", false, false)
+        val legacy_append_ok = core_frontend_parse_legacy_reference(
+            PROVIDER_SEAM_APPEND_SOURCE, "provider_seam_append.spl", true, false)
+        val legacy_append_exprs = expr_count()
+        val legacy_append_errors = parser_error_count()
+
+        core_frontend_parse_reset(
+            PROVIDER_SEAM_SOURCE, "provider_seam_append_base.spl")
+        val facade_append_ok = core_frontend_parse_append(
+            PROVIDER_SEAM_APPEND_SOURCE, "provider_seam_append.spl")
+        expect(facade_append_ok).to_equal(legacy_append_ok)
+        expect(expr_count()).to_equal(legacy_append_exprs)
+        expect(parser_error_count()).to_equal(legacy_append_errors)
+
+        parser_set_had_error(true)
+        val legacy_isolated_ok = core_frontend_parse_legacy_reference(
+            PROVIDER_SEAM_SOURCE, "provider_seam_isolated.spl", false, true)
+        val legacy_preserved_error = parser_has_errors()
+        parser_set_had_error(true)
+        val facade_isolated_ok = core_frontend_parse_isolated(
+            PROVIDER_SEAM_SOURCE, "provider_seam_isolated.spl")
+        expect(facade_isolated_ok).to_equal(legacy_isolated_ok)
+        expect(parser_has_errors()).to_equal(legacy_preserved_error)
+
+    it "records the actually executed legacy provider":
+        # @req REQ-008
+        match parser_provider_v1_execute(
+            ParserProviderV1.LegacyReference,
+            PROVIDER_SEAM_SOURCE,
+            "provider_seam_receipt.spl",
+            false,
+            false
+        ):
+            case Ok(receipt):
+                expect(receipt.executed).to_equal(true)
+                expect(receipt.parse_ok).to_equal(true)
+                expect(receipt.provider_id).to_equal("parser.simple.legacy-reference")
+                expect(receipt.fallback_reason).to_equal("")
+            case Err(reason): fail(reason)
+
+    it "rejects unqualified canonical and accelerated candidates without fallback":
+        # @req REQ-009
+        core_frontend_parse_legacy_reference(
+            PROVIDER_SEAM_SOURCE, "provider_seam_seed.spl", false, false)
+        parser_set_had_error(true)
+        expect_rejected_without_state_change(
+            ParserProviderV1.CanonicalScalarCandidate,
+            "parser_provider_unqualified: parser.simple.canonical-scalar")
+        expect_rejected_without_state_change(
+            ParserProviderV1.SimdCandidate,
+            "parser_provider_unqualified: parser.simple.simd")
+        expect_rejected_without_state_change(
+            ParserProviderV1.GpuCandidate,
+            "parser_provider_unqualified: parser.simple.gpu")
