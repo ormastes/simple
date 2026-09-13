@@ -203,3 +203,10 @@ Note for whoever takes it: silent coercion is arguably worse than the old
 pass-through for diagnosis, because `got=true` looks correct. A spec that
 pins "`take_bool(42)` is rejected" is the right guard and would sit RED today,
 so none is added here.
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.
