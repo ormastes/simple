@@ -94,3 +94,10 @@ Verified: `test/02_integration/app/tools/notebook/cuda_exec_spec.spl` —
 4/4 PASS on live dual-GPU hardware (RTX A6000 + TITAN RTX,
 `SIMPLE_MODULE_LIMIT=4000` workaround for the unrelated pre-existing
 module-count-limit infra issue), lint clean.
+
+## Triage 2026-09-13
+
+Requires real CUDA hardware execution (CudaVmExecutor/ResidentSession
+arena state across launches) -- no GPU available in this environment.
+Leaving OPEN.
+
