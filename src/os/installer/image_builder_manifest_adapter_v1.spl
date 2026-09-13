@@ -1,0 +1,145 @@
+# Fail-closed projection from image-builder output evidence to the shared
+# SimpleOsImageManifestV1 value contract.
+#
+# The current x86_64 image builder does not yet produce sufficient evidence for
+# this adapter to succeed: its alternate `nvfs` selection is a boot marker over
+# a FAT32 carrier/root payload, and its fallback output is a descriptor rather
+# than a materialized image.  Callers must therefore provide independently
+# verified carrier and root-volume identities.  This module never hashes files,
+# infers a digest, converts a marker into a filesystem fact, or grants release
+# admission.
+
+use std.common.contracts.execution.simpleos_image_manifest_v1.{
+    SimpleOsImageCarrierKindV1,
+    SimpleOsImageFilesystemV1,
+    SimpleOsImageManifestErrorV1,
+    SimpleOsImageManifestV1,
+    simpleos_image_manifest_validate_v1
+}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+
+pub enum SimpleOsImageBuilderManifestAdapterErrorV1:
+    None
+    InvalidOutputPath
+    DescriptorFallback
+    CarrierNotMaterialized
+    RootNotMaterialized
+    RootMarkerOnly
+    InvalidVerifiedIdentity
+    ManifestInvalid
+    CarrierMismatch
+    RootMismatch
+
+pub struct SimpleOsImageBuilderOutputEvidenceV1:
+    """Verified facts about one completed builder output, not requested config."""
+    output_path: text
+    descriptor_fallback: bool
+    carrier_materialized: bool
+    carrier_kind: SimpleOsImageCarrierKindV1
+    carrier_format_id: text
+    carrier_digest: text
+    carrier_byte_length: u64
+    root_materialized: bool
+    root_marker_only: bool
+    root_volume_id: text
+    root_filesystem: SimpleOsImageFilesystemV1
+    root_digest: text
+    root_byte_length: u64
+
+pub struct SimpleOsImageBuilderManifestProjectionV1:
+    """A caller-populated manifest plus independently verified builder facts."""
+    manifest: SimpleOsImageManifestV1
+    output: SimpleOsImageBuilderOutputEvidenceV1
+
+pub struct SimpleOsImageBuilderManifestProjectionReceiptV1:
+    """Small receipt; the caller retains the already-populated manifest value."""
+    accepted: bool
+    error: SimpleOsImageBuilderManifestAdapterErrorV1
+
+fn _builder_output_path_valid_v1(path: text) -> bool:
+    if path.len() == 0 or path.len() > 4096:
+        return false
+    var i = 0
+    while i < path.len():
+        if path.char_code_at(i) < 32:
+            return false
+        i = i + 1
+    true
+
+fn _builder_projection_reject_v1(
+    error: SimpleOsImageBuilderManifestAdapterErrorV1
+) -> SimpleOsImageBuilderManifestProjectionReceiptV1:
+    SimpleOsImageBuilderManifestProjectionReceiptV1(
+        accepted: false, error: error)
+
+fn _builder_verified_identity_valid_v1(
+    output: SimpleOsImageBuilderOutputEvidenceV1
+) -> bool:
+    output.carrier_format_id.len() > 0 and
+        output.carrier_format_id.len() <= 128 and
+        hash256_hex_valid(output.carrier_digest) and
+        output.carrier_byte_length > 0u64 and
+        output.root_volume_id.len() > 0 and
+        output.root_volume_id.len() <= 128 and
+        hash256_hex_valid(output.root_digest) and
+        output.root_byte_length > 0u64
+
+fn _builder_root_matches_manifest_v1(
+    manifest: SimpleOsImageManifestV1,
+    output: SimpleOsImageBuilderOutputEvidenceV1
+) -> bool:
+    if manifest.root.volume_id != output.root_volume_id or
+        manifest.root.filesystem != output.root_filesystem:
+        return false
+    for volume in manifest.volumes:
+        if volume.volume_id == output.root_volume_id:
+            return volume.filesystem == output.root_filesystem and
+                volume.digest == output.root_digest and
+                volume.byte_length == output.root_byte_length
+    false
+
+pub fn simpleos_image_builder_manifest_project_v1(
+    input: SimpleOsImageBuilderManifestProjectionV1
+) -> SimpleOsImageBuilderManifestProjectionReceiptV1:
+    """Assess projection facts without copying a large manifest through Result."""
+    val output = input.output
+    if not _builder_output_path_valid_v1(output.output_path):
+        return _builder_projection_reject_v1(
+            SimpleOsImageBuilderManifestAdapterErrorV1.InvalidOutputPath)
+    if output.descriptor_fallback:
+        return _builder_projection_reject_v1(
+            SimpleOsImageBuilderManifestAdapterErrorV1.DescriptorFallback)
+    if not output.carrier_materialized:
+        return _builder_projection_reject_v1(
+            SimpleOsImageBuilderManifestAdapterErrorV1.CarrierNotMaterialized)
+    if output.root_marker_only:
+        return _builder_projection_reject_v1(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootMarkerOnly)
+    if not output.root_materialized:
+        return _builder_projection_reject_v1(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootNotMaterialized)
+    if not _builder_verified_identity_valid_v1(output):
+        return _builder_projection_reject_v1(
+            SimpleOsImageBuilderManifestAdapterErrorV1.InvalidVerifiedIdentity)
+    match simpleos_image_manifest_validate_v1(input.manifest):
+        case Err(_):
+            return _builder_projection_reject_v1(
+                SimpleOsImageBuilderManifestAdapterErrorV1.ManifestInvalid)
+        case Ok(_): ()
+    if input.manifest.carrier.kind != output.carrier_kind or
+        input.manifest.carrier.format_id != output.carrier_format_id or
+        input.manifest.carrier.digest != output.carrier_digest or
+        input.manifest.carrier.byte_length != output.carrier_byte_length:
+        return _builder_projection_reject_v1(
+            SimpleOsImageBuilderManifestAdapterErrorV1.CarrierMismatch)
+    if not _builder_root_matches_manifest_v1(input.manifest, output):
+        return _builder_projection_reject_v1(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootMismatch)
+    SimpleOsImageBuilderManifestProjectionReceiptV1(
+        accepted: true, error: SimpleOsImageBuilderManifestAdapterErrorV1.None)
+
+export SimpleOsImageBuilderManifestAdapterErrorV1
+export SimpleOsImageBuilderOutputEvidenceV1
+export SimpleOsImageBuilderManifestProjectionV1
+export SimpleOsImageBuilderManifestProjectionReceiptV1
+export simpleos_image_builder_manifest_project_v1

@@ -1,0 +1,193 @@
+# Executable contract for fail-closed image-builder manifest projection.
+# @codex-impl
+# @req REQ-SIMPLEOS-IMAGE-BUILDER-MANIFEST-ADAPTER-V1
+
+use std.spec.*
+use std.spec.step
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_X86_64_FIRMWARE
+}
+use std.common.contracts.execution.simpleos_image_manifest_v1.*
+use os.installer.image_builder_manifest_adapter_v1.*
+
+fn digest(marker: text) -> text:
+    "000000000000000000000000000000000000000000000000000000000000000" + marker
+
+fn artifact(
+    id: text, role: SimpleOsImageArtifactRoleV1, path: text,
+    marker: text, required: bool, baseline: bool
+) -> SimpleOsImageArtifactV1:
+    SimpleOsImageArtifactV1(
+        artifact_id: id, role: role, image_path: path, digest: digest(marker),
+        required: required, baseline: baseline)
+
+fn manifest() -> SimpleOsImageManifestV1:
+    SimpleOsImageManifestV1(
+        schema_version: SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA,
+        target_id: SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+        profile_id: "runtime", build_id: "build-adapter-v1",
+        source_id: "source-adapter-v1",
+        kernel: artifact("kernel.simpleos", SimpleOsImageArtifactRoleV1.Kernel,
+            "/boot/kernel.elf", "1", true, true),
+        services: [artifact("service.init", SimpleOsImageArtifactRoleV1.Service,
+            "/system/init.smf", "2", true, true)],
+        runtime: [
+            artifact("runtime.loader", SimpleOsImageArtifactRoleV1.Runtime,
+                "/system/loader.smf", "3", true, true),
+            artifact("runtime.selector", SimpleOsImageArtifactRoleV1.Runtime,
+                "/system/selector.smf", "4", true, true)
+        ],
+        compiler: [], providers: [], symbols: [],
+        carrier: SimpleOsImageCarrierV1(
+            kind: SimpleOsImageCarrierKindV1.RawDiskImage,
+            format_id: "raw-v1", digest: digest("a"), byte_length: 8192u64),
+        root: SimpleOsImageRootV1(
+            volume_id: "volume.system", filesystem: SimpleOsImageFilesystemV1.Nvfs,
+            mount_point: "/", snapshot_id: "", overlay_id: ""),
+        volumes: [SimpleOsImageVolumeV1(
+            volume_id: "volume.system", role: SimpleOsImageVolumeRoleV1.System,
+            filesystem: SimpleOsImageFilesystemV1.Nvfs,
+            digest: digest("b"), byte_length: 4096u64, writable: false)],
+        snapshot: SimpleOsImageSnapshotV1(
+            present: false, snapshot_id: "", volume_id: "", digest: ""),
+        overlay: SimpleOsImageOverlayV1(
+            present: false, overlay_id: "", base_snapshot_id: "",
+            upper_volume_id: "", digest: ""),
+        firmware_profile: SIMPLEOS_TARGET_V1_X86_64_FIRMWARE,
+        sosix_version: "sosix-v1",
+        entry: SimpleOsImageEntryV1(
+            artifact_id: "service.init", symbol: "simpleos-init"),
+        baseline: SimpleOsImageBaselineV1(
+            kernel_artifact_id: "kernel.simpleos",
+            init_artifact_id: "service.init",
+            loader_artifact_id: "runtime.loader",
+            selector_artifact_id: "runtime.selector"))
+
+fn evidence() -> SimpleOsImageBuilderOutputEvidenceV1:
+    SimpleOsImageBuilderOutputEvidenceV1(
+        output_path: "build/simpleos-x86_64.img",
+        descriptor_fallback: false,
+        carrier_materialized: true,
+        carrier_kind: SimpleOsImageCarrierKindV1.RawDiskImage,
+        carrier_format_id: "raw-v1", carrier_digest: digest("a"),
+        carrier_byte_length: 8192u64,
+        root_materialized: true, root_marker_only: false,
+        root_volume_id: "volume.system",
+        root_filesystem: SimpleOsImageFilesystemV1.Nvfs,
+        root_digest: digest("b"), root_byte_length: 4096u64)
+
+fn projection_error(
+    candidate: SimpleOsImageManifestV1,
+    output: SimpleOsImageBuilderOutputEvidenceV1
+) -> SimpleOsImageBuilderManifestAdapterErrorV1:
+    simpleos_image_builder_manifest_project_v1(
+        SimpleOsImageBuilderManifestProjectionV1(
+            manifest: candidate, output: output)).error
+
+fn projection_receipt(
+    candidate: SimpleOsImageManifestV1,
+    output: SimpleOsImageBuilderOutputEvidenceV1
+) -> SimpleOsImageBuilderManifestProjectionReceiptV1:
+    simpleos_image_builder_manifest_project_v1(
+        SimpleOsImageBuilderManifestProjectionV1(
+            manifest: candidate, output: output))
+
+describe "SimpleOS image-builder manifest adapter v1":
+    it "projects only exact independently verified carrier and NVFS root facts":
+        step("Project a fully materialized output whose identities match the manifest")
+        val receipt = projection_receipt(manifest(), evidence())
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.error).to_equal(SimpleOsImageBuilderManifestAdapterErrorV1.None)
+
+    it "rejects the descriptor fallback instead of treating it as an image":
+        step("Mark the builder output as its descriptor fallback")
+        var output = evidence()
+        output.descriptor_fallback = true
+        val receipt = projection_receipt(manifest(), output)
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.error).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.DescriptorFallback)
+
+    it "rejects the current marker-only NVFS request as filesystem evidence":
+        step("Describe the current FAT32 payload carrying an NVFS boot marker")
+        var output = evidence()
+        output.root_materialized = false
+        output.root_marker_only = true
+        val receipt = projection_receipt(manifest(), output)
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.error).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootMarkerOnly)
+
+    it "rejects every missing or malformed verification precondition":
+        step("Reject an invalid output path")
+        var path = evidence()
+        path.output_path = ""
+        expect(projection_error(manifest(), path)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.InvalidOutputPath)
+
+        step("Reject a carrier that was not materially produced")
+        var carrier = evidence()
+        carrier.carrier_materialized = false
+        expect(projection_error(manifest(), carrier)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.CarrierNotMaterialized)
+
+        step("Reject a root that was not materially produced")
+        var root = evidence()
+        root.root_materialized = false
+        expect(projection_error(manifest(), root)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootNotMaterialized)
+
+        step("Reject an identity that is not a verified SHA-256 value")
+        var identity = evidence()
+        identity.root_digest = "unverified"
+        expect(projection_error(manifest(), identity)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.InvalidVerifiedIdentity)
+
+        step("Reject a candidate manifest that fails its owning validator")
+        var invalid_manifest = manifest()
+        invalid_manifest.profile_id = "release"
+        expect(projection_error(invalid_manifest, evidence())).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.ManifestInvalid)
+
+    it "rejects carrier and root identities that do not match the manifest":
+        step("Change verified carrier identity without changing the manifest")
+        var carrier = evidence()
+        carrier.carrier_digest = digest("c")
+        expect(projection_error(manifest(), carrier)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.CarrierMismatch)
+
+        step("Change verified root identity without changing the manifest")
+        var root = evidence()
+        root.root_digest = digest("d")
+        expect(projection_error(manifest(), root)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootMismatch)
+
+    it "binds every carrier and root identity field independently":
+        step("Reject carrier kind format and length mismatches")
+        var carrier_kind = evidence()
+        carrier_kind.carrier_kind = SimpleOsImageCarrierKindV1.PartitionImage
+        expect(projection_error(manifest(), carrier_kind)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.CarrierMismatch)
+        var carrier_format = evidence()
+        carrier_format.carrier_format_id = "raw-v2"
+        expect(projection_error(manifest(), carrier_format)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.CarrierMismatch)
+        var carrier_length = evidence()
+        carrier_length.carrier_byte_length = 8193u64
+        expect(projection_error(manifest(), carrier_length)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.CarrierMismatch)
+
+        step("Reject root ID filesystem and length mismatches")
+        var root_id = evidence()
+        root_id.root_volume_id = "volume.other"
+        expect(projection_error(manifest(), root_id)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootMismatch)
+        var root_filesystem = evidence()
+        root_filesystem.root_filesystem = SimpleOsImageFilesystemV1.Fat32
+        expect(projection_error(manifest(), root_filesystem)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootMismatch)
+        var root_length = evidence()
+        root_length.root_byte_length = 4097u64
+        expect(projection_error(manifest(), root_length)).to_equal(
+            SimpleOsImageBuilderManifestAdapterErrorV1.RootMismatch)
