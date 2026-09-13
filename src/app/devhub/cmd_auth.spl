@@ -42,7 +42,7 @@ fn _auth_login(args: [text]) -> i64:
     """Login to a provider.
 
     Usage:
-      itf auth login --confluence --url URL --user EMAIL --token TOKEN
+      itf auth login --confluence --url URL [--user EMAIL] --token TOKEN [--deployment D] [--auth A]
       itf auth login --jira
     """
     val is_confluence = _has_flag(args, "--confluence")
@@ -64,16 +64,18 @@ fn _login_confluence(args: [text]) -> i64:
     val url = _extract_flag(args, "--url", "")
     val user = _extract_flag(args, "--user", "")
     val token = _extract_flag(args, "--token", "")
+    val deployment = _extract_flag(args, "--deployment", "")
+    val auth = _extract_flag(args, "--auth", "")
 
-    if url == "":
-        print_error("--url required (e.g., https://company.atlassian.net/wiki)")
-        return 1
-    if user == "":
-        print_error("--user required (your email)")
-        return 1
-    if token == "":
-        print_error("--token required (Atlassian API token)")
-        print "Generate a token at: https://id.atlassian.com/manage-profile/security/api-tokens"
+    if url == "" and user == "" and token == "":
+        if check_confluence_auth(load_config()):
+            print_success("Confluence token already configured; using REST directly (no login needed).")
+            return 0
+    val err = _token_login_error(url, user, token, auth)
+    if err != "":
+        print_error(err)
+        if token == "":
+            print "Generate a token at: https://id.atlassian.com/manage-profile/security/api-tokens"
         return 1
 
     # Ensure config dir exists
@@ -81,9 +83,12 @@ fn _login_confluence(args: [text]) -> i64:
 
     # Save config
     var config = load_config()
+    val new_deployment = if deployment != "": deployment else: config.confluence_deployment
+    val new_auth = if auth != "": auth else: config.confluence_auth
+    val new_user = if user != "": user else: config.confluence_user
     config = ItfConfig(
         confluence_url: url,
-        confluence_user: user,
+        confluence_user: new_user,
         confluence_default_space: config.confluence_default_space,
         jira_url: config.jira_url,
         jira_acli_path: config.jira_acli_path,
@@ -101,7 +106,7 @@ fn _login_confluence(args: [text]) -> i64:
         bb_repo: config.bb_repo,
         token_envs: config.token_envs,
         jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
-        confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+        confluence_deployment: new_deployment, confluence_auth: new_auth,
         bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
         bb_auth: config.bb_auth, bb_user: config.bb_user
     )
@@ -110,10 +115,24 @@ fn _login_confluence(args: [text]) -> i64:
     # Save token
     save_auth_token("confluence", token)
 
-    print_success("Confluence authentication configured.")
+    print_success("Confluence REST token authentication configured.")
     print_info("URL", url)
-    print_info("User", user)
+    print_info("Deployment", if new_deployment != "": new_deployment else: "cloud")
+    print_info("Auth", atlassian_normalize_auth(new_auth, ATLASSIAN_AUTH_BASIC))
+    if user != "":
+        print_info("User", user)
     0
+
+
+fn _token_login_error(url: text, user: text, token: text, auth: text) -> text:
+    """Validation for `auth login --confluence|--jira` token flags: url and
+    token are required; a user/email is required unless auth is bearer (a
+    Data Center PAT). Returns "" when valid, else the error message."""
+    if url == "" or token == "":
+        return "--url and --token are required for token (REST) auth"
+    if user == "" and atlassian_normalize_auth(auth, ATLASSIAN_AUTH_BASIC) != ATLASSIAN_AUTH_BEARER:
+        return "--user EMAIL is required with basic auth (use --auth bearer for a Data Center PAT)"
+    ""
 
 
 fn _login_jira(args: [text]) -> i64:
@@ -133,11 +152,9 @@ fn _login_jira(args: [text]) -> i64:
     val auth = _extract_flag(args, "--auth", "")
 
     if url != "" or user != "" or token != "":
-        if url == "" or token == "":
-            print_error("--url and --token are required for token (REST) auth")
-            return 1
-        if user == "" and atlassian_normalize_auth(auth, ATLASSIAN_AUTH_BASIC) != ATLASSIAN_AUTH_BEARER:
-            print_error("--user EMAIL is required with basic auth (use --auth bearer for a Data Center PAT)")
+        val err = _token_login_error(url, user, token, auth)
+        if err != "":
+            print_error(err)
             return 1
         _ensure_config_dir()
         var config = load_config()
@@ -288,6 +305,7 @@ fn _print_auth_help():
     print ""
     print "Login examples:"
     print "  itf auth login --confluence --url https://company.atlassian.net/wiki --user email --token TOKEN"
+    print "  itf auth login --confluence --url https://wiki.corp:8090/confluence --deployment datacenter --auth bearer --token PAT"
     print "  itf auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT"
     print "  itf auth login --jira --url https://company.atlassian.net --user email --token API_TOKEN"
     print "  itf auth login --jira            # acli --web login, only when no jira token is configured"
