@@ -785,3 +785,42 @@ attempted; nothing deployed. Candidate preserved, not deployed:
 `630ad64b7194eec6873fdcd6382c83ecad4b23f760d303a57eac5b26f214e0ed` (mode 400 —
 copy out and `chmod +x` before a witness run). The ~40-second witness loop is
 therefore available on macOS for site 8.
+
+## Run 21 (2026-09-13) — site 8 confirmed fixed on macOS; site 9 localized
+
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --output=.simple/storage/build/bootstrap-run21
+--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, stock PATH,
+`cargo` present, no tracked file edited during the run. The tree carried an
+independent fix for site 8 authored in this lane (`.values()`-based capsule
+identity walk, no key lookup); the Linux lane landed its own fix for the same
+root cause in parallel (`native_capsule_sorted_symbol_ids_v1` sorting an index
+permutation), and that is the version now on `main`. **The two lanes agree on the
+cause and each one's run independently shows the SEGV gone**, which is stronger
+evidence than either alone.
+
+Verdict, verbatim:
+
+```
+    | error: stage2 failed the positional pure-Simple Stage-3 route (status 124)
+PASS — 1 check(s), stage stage2 failed (exit 3) and said why
+  warning: stage2 native-build failed (exit 3); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+**Status 139 → 124**, matching the Linux BOOT-8 result. `serialize_mir_function`
+appears nowhere. `native_compile` is entered at `elapsed_ms=3950`
+(run 20 crashed inside it at `elapsed_ms=94426`),
+`current=compiler.common.module_path_naming`.
+
+Site 9 is now LOCALIZED from this lane: every `sample` is self time in
+`BuildGraph.topological_order`, with no callees, and macOS RSS is flat/falling
+(12.3 → 9.8 → 9.4 GB) rather than growing as on Linux. Evidence and both
+candidate causes are appended to
+`doc/08_tracking/bug/stage2_stage3_route_native_compile_timeout_2026-09-13.md`.
+
+Stages reached: Stage 1 admitted; Stage 2 built and rejected; Stage 3 not
+attempted; **Stage 2 is NOT admitted and nothing was deployed**. Candidate
+preserved: `.simple/storage/build/bootstrap-run21/stage2-rejected/aarch64-apple-darwin/simple`,
+139,328,040 bytes, sha256
+`e1ab37e7ba2caa3e587390c9d0d581b14ca4c93023e4cafe14abe28e5ee0c17f` (mode 400 —
+copy out and `chmod +x` before a witness run).
