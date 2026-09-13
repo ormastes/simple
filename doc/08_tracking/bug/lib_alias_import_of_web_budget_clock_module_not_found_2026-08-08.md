@@ -86,3 +86,19 @@ at :266, :299, :332. Every `use` in that file (lines 3-13) is the `std.` form;
 no `use lib.` alias remains. So the *workaround* is what is in the tree — the
 `lib.`-alias resolution defect itself is unfixed and lives in the compiler's
 module resolver, not in this stdlib file. Not actionable from `src/lib/**`.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Attempted to re-run the minimal repro on the deployed seed
+(`bin/release/aarch64-unknown-linux-gnu/simple`, `f26970e9d93`); it did not
+complete in 600s under current host load (heavy shared-clone contention,
+consistent with the repo's noted multi-minute session-setup cost for this
+lane), so the fast `variable _web_budget_clock not found` failure from the
+original report could not be reconfirmed by execution this pass. The
+2026-08-17 source-inspection triage already independently confirmed the
+underlying defect shape (no `use lib.` alias remains anywhere in the
+foundation module — the workaround is what's in the tree, the resolver defect
+itself is unfixed) without needing execution, and that source state is
+unchanged at this sha. This is a compiler/interpreter module-resolver defect
+(`std.X` vs `lib.X` treated as distinct module instances), not something
+fixable from `src/lib/**`. No change made. Leaving OPEN.
