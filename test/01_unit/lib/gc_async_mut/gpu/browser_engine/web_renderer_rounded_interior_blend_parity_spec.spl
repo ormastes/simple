@@ -1,0 +1,105 @@
+# Purpose: a translucent rounded rect's FULLY-COVERED interior must paint
+# identically to a translucent square rect of the same colour and opacity.
+#
+# It did not. The interior went through `_blend_alpha256`, which computes
+# `(s*a + d*(256-a)) / 256` — floor — while `fb_rect_opacity_clip` uses
+# `blend_opacity`, `(s*pct + d*(100-pct) + 50) / 100` — round. Those disagree
+# on odd sums, so the same colour at the same opacity painted DIFFERENTLY
+# depending on whether the box had rounded corners, and the interior disagreed
+# with its own anti-aliased corner ramp at the seam.
+#
+# Nothing tested this, because each path was self-consistent. The bug only
+# appears when the two are compared.
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    fb_rect_opacity_clip, fb_rounded_rect_corners_opacity_clip, ClipRect
+}
+
+fn ramp(n: i64) -> [u32]:
+    var b: [u32] = []
+    var i: i64 = 0
+    while i < n:
+        b.push((0xFF000000u32 | ((i * 11 + 5) as u32)))
+        i = i + 1
+    b
+
+fn wide_clip() -> ClipRect:
+    ClipRect(x0: 0, y0: 0, x1: 4096, y1: 4096)
+
+# The interior of a rounded rect, sampled well inside every corner arc so only
+# fully-covered pixels are compared. A radius-4 corner cannot reach further
+# than 4 px from each edge.
+fn interior_matches(fbw: i64, fbh: i64, radius: i64, pct: i64, color: u32) -> bool:
+    val total = fbw * fbh
+    val square = fb_rect_opacity_clip(
+        ramp(total), fbw.to_i32(), fbh.to_i32(), 0, 0, fbw.to_i32(), fbh.to_i32(),
+        color, pct.to_i32(), wide_clip())
+    val rounded = fb_rounded_rect_corners_opacity_clip(
+        ramp(total), fbw.to_i32(), fbh.to_i32(), 0, 0, fbw.to_i32(), fbh.to_i32(),
+        radius.to_i32(), radius.to_i32(), radius.to_i32(), radius.to_i32(),
+        color, pct.to_i32(), wide_clip())
+    val margin = radius + 1
+    var row = margin
+    while row < fbh - margin:
+        var col = margin
+        while col < fbw - margin:
+            val idx = (row * fbw + col).to_i32()
+            if square[idx] != rounded[idx]:
+                return false
+            col = col + 1
+        row = row + 1
+    true
+
+describe "rounded-rect interior blends identically to a square rect":
+    it "matches across the whole opacity range":
+        step("floor vs round disagree on odd sums, so this needs every pct")
+        var bad = 0
+        var pct: i64 = 0
+        while pct <= 100:
+            if not interior_matches(24, 16, 4, pct, 0xFF3366CCu32):
+                bad = bad + 1
+            pct = pct + 1
+        assert_equal(bad, 0)
+
+    it "matches for several colours, not just one":
+        step("the disagreement is per-channel, so a single colour can hide it")
+        var bad = 0
+        for c in [0xFF000000u32, 0xFFFFFFFFu32, 0xFF010203u32, 0xFF7F8081u32, 0xFFFE0102u32]:
+            var pct: i64 = 1
+            while pct < 100:
+                if not interior_matches(20, 14, 3, pct, c):
+                    bad = bad + 1
+                pct = pct + 7
+        assert_equal(bad, 0)
+
+    it "matches at the saturating ends":
+        step("0 must leave the destination, 100 must write the source")
+        assert_equal(interior_matches(20, 14, 3, 0, 0xFF3366CCu32), true)
+        assert_equal(interior_matches(20, 14, 3, 100, 0xFF3366CCu32), true)
+
+    it "matches for several corner radii":
+        step("the interior must not depend on how much of the box is arc")
+        var bad = 0
+        for r in [1, 2, 3, 5]:
+            if not interior_matches(28, 20, r, 37, 0xFF10A0F0u32):
+                bad = bad + 1
+        assert_equal(bad, 0)
+
+    it "still anti-aliases the corners rather than painting them solid":
+        step("unifying the interior must NOT flatten the arc to a hard edge")
+        step("a corner pixel should differ from both the square fill and the untouched ramp")
+        val fbw: i64 = 24
+        val fbh: i64 = 16
+        val total = fbw * fbh
+        val before = ramp(total)
+        val rounded = fb_rounded_rect_corners_opacity_clip(
+            ramp(total), fbw.to_i32(), fbh.to_i32(), 0, 0, fbw.to_i32(), fbh.to_i32(),
+            5, 5, 5, 5, 0xFFFFFFFFu32, 100, wide_clip())
+        # The extreme corner pixel is outside the arc entirely, so it keeps the
+        # original framebuffer content.
+        assert_equal(rounded[0], before[0])
+        # A pixel deep inside is fully covered and takes the fill.
+        assert_equal(rounded[((fbh / 2) * fbw + (fbw / 2)).to_i32()], 0xFFFFFFFFu32)
