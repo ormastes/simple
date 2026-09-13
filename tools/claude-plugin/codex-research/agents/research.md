@@ -1,3 +1,8 @@
+---
+name: codex-research
+description: Codex research agent for forked parallel research
+---
+
 # Codex Research Agent
 
 ## Role

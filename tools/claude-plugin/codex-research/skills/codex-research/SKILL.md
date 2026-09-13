@@ -1,3 +1,8 @@
+---
+name: codex-research
+description: Run research Step 2 using OpenAI Codex CLI as the LLM. Reads Claude Step 1 output, forks parallel research agents, generates requirement options.
+---
+
 # Codex Research Skill -- Step 2: Forked Agent Research + Requirement Selection
 
 ## Cooperative Phase
