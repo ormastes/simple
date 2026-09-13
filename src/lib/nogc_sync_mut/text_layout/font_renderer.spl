@@ -98,6 +98,71 @@ fn _gid_warm(identity: text, blob: [u8]) -> i32:
     _gid_vals[slot] = ids
     slot
 
+# Batched ASCII advance warm (2026-09-13, round 13), keyed by (loaded-face
+# identity, font_size) -- the SAME key granularity the per-glyph path already
+# uses, because an advance is `round(unscaled * size / unitsPerEm)` and is
+# therefore size-dependent. Round 12 §3a measured `sfnt_glyph_advance_into` at
+# 1.09 ms x 228 calls = 248 ms, essentially all of it the `parse_offset_table`
+# + three `find_table` setup re-run per glyph. `sfnt_blob_glyph_advances_into`
+# does that setup once for the whole ASCII range; its per-glyph arithmetic is
+# the same expression, so the values are identical by construction.
+#
+# A slot answers only with a POSITIVE advance; 0 (the batch could not answer,
+# exactly where the per-glyph call would also have failed) falls through to the
+# untouched per-glyph path, so no behaviour outside the hit is changed.
+val _ADVW_SLOTS: i32 = 8
+var _advw_identity: [text] = [""; 8]
+var _advw_size: [i32] = [0; 8]
+var _advw_vals: [[i64]] = [[0; 95]; 8]
+# The rounded pixel lane, kept alongside the milli lane because the two are
+# rounded INDEPENDENTLY from the unrounded scale (`meta[2]` and `meta[18]`) --
+# `milli / 1000` is not the same number and substituting it would move glyphs.
+var _advw_px: [[i64]] = [[0; 95]; 8]
+var _advw_cursor: i32 = 0
+
+fn _advw_slot(identity: text, size: i32) -> i32:
+    var i: i32 = 0
+    while i < _ADVW_SLOTS:  # cpu-lane-loop-ok: scans the 8 fixed advance buckets
+        if _advw_size[i] == size and _advw_identity[i] == identity:
+            return i
+        i = i + 1
+    -1
+
+# Warm one (face, size) pair's ASCII advances from a single blob parse. The
+# glyph ids come from the already-warmed `_gid_vals` slot, so no cmap work is
+# repeated here either. Returns the slot.
+fn _advw_warm(identity: text, size: i32, gid_slot: i32, blob: [u8]) -> i32:
+    if identity == "" or blob.len() == 0 or gid_slot < 0:
+        return -1
+    val existing = _advw_slot(identity, size)
+    if existing >= 0:
+        return existing
+    var advances: [i64] = [0; 95]
+    var advances_px: [i64] = [0; 95]
+    sfnt_blob_glyph_advances_into(blob, _gid_vals[gid_slot], size.to_i64(), advances, advances_px)
+    val slot = _advw_cursor
+    _advw_cursor = (_advw_cursor + 1) % _ADVW_SLOTS
+    _advw_identity[slot] = identity
+    _advw_size[slot] = size
+    _advw_vals[slot] = advances
+    _advw_px[slot] = advances_px
+    slot
+
+# Milli-pixel advance for an ASCII codepoint on a warmed (face, size) slot.
+# 0 means "this table cannot answer" -- the caller falls through to the
+# per-glyph path.
+fn _advw_lookup(slot: i32, codepoint: i32) -> i64:
+    if slot < 0 or codepoint < _ADV_ASCII_LO or codepoint > _ADV_ASCII_HI:
+        return 0
+    _advw_vals[slot][codepoint - _ADV_ASCII_LO]
+
+# The rounded pixel advance for the same entry (`meta[2]`), used only for the
+# `meta[18] <= 0` fallback the per-glyph lane applies.
+fn _advw_lookup_px(slot: i32, codepoint: i32) -> i64:
+    if slot < 0 or codepoint < _ADV_ASCII_LO or codepoint > _ADV_ASCII_HI:
+        return 0
+    _advw_px[slot][codepoint - _ADV_ASCII_LO]
+
 # Glyph id for an ASCII codepoint on a warmed face. Returns -1 when this table
 # cannot answer (non-ASCII, or the face was never warmed), which is NOT the
 # same as 0 -- 0 is the definitive "this face has no glyph for it".
@@ -276,7 +341,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
@@ -2002,6 +2067,28 @@ class FontRenderer:
                 # Metrics-only, by glyph INDEX: skips the cmap entirely, and
                 # skips the `glyf` outline decode that `sfnt_measure_glyph_into`
                 # performs for ink extents this caller never reads.
+                # Batched (face, size) advance warm first: one blob parse for
+                # the whole ASCII range instead of one per glyph. A positive
+                # value is the same number the per-glyph call below produces
+                # (same `_hmtx` index arithmetic, same scale, same rounding);
+                # 0 means the batch could not answer and the per-glyph path
+                # runs unchanged.
+                val _aw_t0 = _fr_probe_now()
+                val _aw_slot = _advw_warm(_adv_identity, font_size, _gid_s, _blob)
+                val _aw_milli = _advw_lookup(_aw_slot, codepoint)
+                val _aw_px = _advw_lookup_px(_aw_slot, codepoint)
+                _fr_probe_add_gadv_batch(_fr_probe_now() - _aw_t0, _aw_px > 0)
+                # The per-glyph lane's own two-field rule, reproduced exactly:
+                # the milli field when the face offered one, otherwise the
+                # rounded pixel result widened. Its admission test is on the
+                # PIXEL field (`meta[2] > 0`), not the milli one.
+                if _aw_px > 0:
+                    val _adv_batched = if _aw_milli > 0:
+                        _aw_milli as i32
+                    else:
+                        (_aw_px as i32) * 1000
+                    _adv_cache_store(_adv_identity, font_size, codepoint, _adv_batched)
+                    return _adv_batched
                 var index_meta: [i64] = [0; 20]
                 val _sa_t0 = _fr_probe_now()
                 sfnt_glyph_advance_into(_blob, SFNT_GLYPH_SELECTOR_INDEX, _gid, font_size.to_i64(), index_meta)
@@ -3224,6 +3311,17 @@ fn _fr_probe_add_gadv_warm(us: i64):
         _fr_gadv_warm_calls = _fr_gadv_warm_calls + 1
         _fr_gadv_warm_us = _fr_gadv_warm_us + us
 
+var _fr_gadv_batch_us: i64 = 0
+var _fr_gadv_batch_calls: i64 = 0
+var _fr_gadv_batch_hits: i64 = 0
+
+fn _fr_probe_add_gadv_batch(us: i64, hit: bool):
+    if _fr_probe_armed():
+        _fr_gadv_batch_calls = _fr_gadv_batch_calls + 1
+        if hit:
+            _fr_gadv_batch_hits = _fr_gadv_batch_hits + 1
+        _fr_gadv_batch_us = _fr_gadv_batch_us + us
+
 fn _fr_probe_add_gadv_sfnt(us: i64):
     if _fr_probe_armed():
         _fr_gadv_sfnt_calls = _fr_gadv_sfnt_calls + 1
@@ -3330,7 +3428,9 @@ pub fn font_measure_probe_report() -> text:
         " gadv_inst_calls={_fr_gadv_inst_calls} gadv_inst_ms={_fr_gadv_inst_us / 1000}" +
         " gadv_blob_calls={_fr_gadv_blob_calls} gadv_blob_ms={_fr_gadv_blob_us / 1000}" +
         " gadv_warm_calls={_fr_gadv_warm_calls} gadv_warm_ms={_fr_gadv_warm_us / 1000}" +
-        " gadv_sfnt_calls={_fr_gadv_sfnt_calls} gadv_sfnt_ms={_fr_gadv_sfnt_us / 1000}"
+        " gadv_sfnt_calls={_fr_gadv_sfnt_calls} gadv_sfnt_ms={_fr_gadv_sfnt_us / 1000}" +
+        " gadv_batch_calls={_fr_gadv_batch_calls} gadv_batch_hits={_fr_gadv_batch_hits}" +
+        " gadv_batch_ms={_fr_gadv_batch_us / 1000}"
 
 # Round 5: raised 512 -> 4096. Measured on the eight-page web catalog, the memo
 # SATURATED on page 4 of 8 (`front_entries` pinned at 512 from there on) and
