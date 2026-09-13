@@ -421,6 +421,33 @@ OWNER/NAME` (GitHub — the repo whose `.wiki.git` to use), `--json`/`--jq`,
 `--web`, `--limit N` (default 25, Confluence only), `--push` (GitHub backend
 only — pushes local wiki-git commits back to GitHub; never implied).
 
+**Confluence Cloud and Data Center.** The Confluence backend
+(`adapter_confluence.spl`) calls the v1 content API `{confluence.url}/rest/api/content`
+through `curl` on both deployments. On Cloud, `url` includes `/wiki`; on Data
+Center it is the server base with any port and context path. Spaces are
+addressed by key. A configured token is used directly (`[token_env]` >
+`[token_cmd]` > `auth.sdn`), and no login is started. Auth is Basic
+`confluence.user:token` by default, or `Bearer <PAT>` with `confluence.auth: bearer`.
+
+```sdn
+# Confluence Data Center (Bearer PAT)
+confluence:
+    url: https://wiki.corp:8090/confluence
+    deployment: datacenter
+    auth: bearer
+token_env:
+    confluence: CONFLUENCE_PAT
+```
+
+```sdn
+# Confluence Cloud (Basic email + API token)
+confluence:
+    url: https://company.atlassian.net/wiki
+    user: you@company.com
+token_env:
+    confluence: CONFLUENCE_API_TOKEN
+```
+
 ```bash
 devhub wiki list --space ENG
 devhub wiki view 12345 --json id,title
@@ -567,6 +594,14 @@ Honest, currently-open gaps — do not expect these to work:
 - **`rm --recursive`/`rb --force`/`mirror --remove`** are all capped at 1000
   objects per side (no batch `DeleteObjects` call in the adapter); over the
   cap, they refuse and point you at the real `mc` CLI.
+- **`auth login --confluence` has no `--deployment`/`--auth` flags** and still
+  requires `--user`. Those flags exist for `--jira` only. For a Confluence
+  Data Center PAT, write `confluence.deployment`/`confluence.auth: bearer`
+  into `config.sdn` by hand (see the `wiki` facade).
+- **`std.nogc_sync_mut.http_client` `add_header` recurses forever.** Its
+  `request_add_header` alias resolves back onto itself, and the shim has no
+  transport. devhub's Confluence and Bitbucket adapters avoid it by using `curl`.
+  The stdlib bug itself is not fixed.
 - **`bb`**: no free-text search verb; list endpoints cap at 10 pages
   (`_capped:true` in `--json` past the cap).
 - **`gh` facade covers `pr` and `repo` only** on non-GitHub backends. `issue`

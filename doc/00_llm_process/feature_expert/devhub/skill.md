@@ -98,6 +98,11 @@ mechanical causes, all now closed:
   `text`/`anchor`, `strategyId` with `?version=`, and `isLastPage`/`nextPageStart`
   paging. `bitbucket_server_base` keeps port and context path, and
   `bitbucket_resolve_deployment` treats non-bitbucket.org URLs as DC.
+- **`itf wiki` stack overflow came from the stdlib, not the wiki code.**
+  `std.nogc_sync_mut.http_client`'s `add_header` alias recurses onto itself and
+  never sends anything. `adapter_confluence` now uses `curl` against the v1
+  `{url}/rest/api/content`, which works on both Cloud (url has `/wiki`) and DC.
+  The v2 `/pages` paths 404 on DC. Pinned by `wiki_confluence_no_recursion_spec.spl`.
 - **`gh pr create --body` had nothing to map onto.** `bb_build_create_pr_body`
   took no description at all, so a PR body would have been silently discarded.
   Added additively (`*_full` / `*_with_body`) so no existing caller or spec
