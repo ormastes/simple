@@ -52,7 +52,53 @@ So neither operand alone is enough; it is the combination.
 - The probes are runtime-call-free integer loops, so the hand-link shim used to
   produce a runnable binary cannot account for it.
 
-## Reproduction
+
+## Self-contained reproduction
+
+An earlier revision of this record pointed at `build/p2run/**`. That path is
+covered by `.gitignore`, so those files reach nobody else and the instructions
+were unfollowable even though the measurements behind them were real. The probe
+source is inlined here instead, and the harness is described rather than
+referenced.
+
+Save the probe below, then, with the MSVC toolchain sourced
+(`. ./scripts/setup/windows-msvc-bootstrap-env.shs`):
+
+1. `<phase2-simple.exe> compile --format=smf <probe>.spl` — phase 2 cannot
+   finish a `native-build` while the capsule-receipt defect stands, so stop at
+   the object.
+2. Link the emitted `.o` with the runtime archives
+   (`simple_runtime.lib` from the stage2 runtime authority and the
+   `core_c_runtime` one) plus the usual Win32 system libraries, using
+   `link.exe -SUBSYSTEM:CONSOLE -FORCE:MULTIPLE`.
+3. Run it, and run the same source through the Rust seed
+   (`<seed> run <probe>.spl`) as the phase 1 control.
+
+```simple
+# probe: loop-carried accumulator, proved WITHOUT printing the number
+fn main() -> i64:
+    var s = 0
+    var i = 1
+    while i <= 10:
+        s = s + i
+        i = i + 1
+    if s == 55:
+        print "SUM_IS_55"
+    else:
+        print "SUM_NOT_55"
+    if s == 0:
+        print "SUM_IS_ZERO"
+    if i == 11:
+        print "COUNTER_OK"
+    0
+```
+
+Branching rather than printing matters: `str()` is separately broken in this
+lane (see `phase2_str_returns_raw_pointer_2026-09-13.md`), so a printed number
+would not have settled anything. phase 1 answers `SUM_IS_55 | COUNTER_OK`;
+phase 2 answers `SUM_NOT_55 | SUM_IS_ZERO | COUNTER_OK`.
+
+## Reproduction (original harness, local only)
 
 Phase 2 cannot finish a `native-build` (see the capsule-receipt defect,
 `phase2_file_size_garbage_breaks_capsule_receipt_2026-09-13.md`), so the object
