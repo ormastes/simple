@@ -1,0 +1,206 @@
+#!/bin/sh
+# Focused authority test. Fixture programs are never bootstrap admission evidence.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-rust-sysroot.XXXXXX")
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/tools" "$fixture/repo/src/compiler_rust" "$fixture/toolchain/bin"
+printf '[toolchain]\nchannel = "stable"\n' >"$fixture/repo/src/compiler_rust/rust-toolchain.toml"
+cat >"$fixture/tools/rustc" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = --print ] && [ "$2" = sysroot ] || exit 9
+[ "${RUSTUP_TOOLCHAIN:-}" = stable ] || exit 10
+[ -z "${RUSTFLAGS:-}" ] || exit 11
+cat "${0%/*}/sysroot.txt"
+EOF
+cat >"$fixture/tools/cygpath" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = -u ] || exit 12
+case "$2" in 'Z:\installed\rust stable'|'Z:/installed/rust stable') ;;
+    *) exit 13 ;;
+esac
+cat "${0%/*}/expected.txt"
+EOF
+cat >"$fixture/tools/uname" <<'EOF'
+#!/bin/sh
+printf 'MINGW64_NT-fixture\n'
+EOF
+for binary in rustc.exe cargo.exe; do
+    printf '#!/bin/sh\nexit 0\n' >"$fixture/toolchain/bin/$binary"
+    chmod +x "$fixture/toolchain/bin/$binary"
+done
+chmod +x "$fixture/tools/rustc" "$fixture/tools/cygpath" "$fixture/tools/uname"
+printf '%s\n' "$fixture/toolchain" >"$fixture/tools/expected.txt"
+# Build a strict absolute PATH from the actual shell utility directory. Do not
+# reuse ambient Windows PATH aliases or relative entries in authority tests.
+utility_dir=$(CDPATH= cd -- "$(dirname -- "$(command -v sh)")" && pwd -P)
+test_path="$fixture/tools:$utility_dir:/usr/bin:/bin"
+printf '%s\n' "$fixture/toolchain" >"$fixture/tools/sysroot.txt"
+RUSTUP_TOOLCHAIN=nightly RUSTFLAGS=must-not-leak \
+    bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$test_path" >"$fixture/posix.env"
+grep -Fx "rust-sysroot=$fixture/toolchain" "$fixture/posix.env" >/dev/null
+grep -Fx "rustc-path=$fixture/toolchain/bin/rustc.exe" "$fixture/posix.env" >/dev/null
+grep -Fx "cargo-path=$fixture/toolchain/bin/cargo.exe" "$fixture/posix.env" >/dev/null
+printf '%s\r\n' 'Z:\installed\rust stable' >"$fixture/tools/sysroot.txt"
+bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$test_path" >"$fixture/windows.env"
+cmp -s "$fixture/posix.env" "$fixture/windows.env"
+printf '%s\n' 'Z:/installed/rust stable' >"$fixture/tools/sysroot.txt"
+bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$test_path" >"$fixture/slashes.env"
+cmp -s "$fixture/posix.env" "$fixture/slashes.env"
+
+# A standard rustup layout is resolved from its canonical metadata and policy,
+# without launching the PATH proxy. A failing proxy must not prevent selection
+# of the installed policy-matching compiler; the fixture does not claim to
+# reproduce an unobserved native Windows process failure.
+rustup_root="$fixture/rustup"
+installed_name=stable-x86_64-pc-windows-gnu
+installed_toolchain="$rustup_root/.rustup/toolchains/$installed_name"
+mkdir -p "$rustup_root/.cargo/bin" "$installed_toolchain/bin"
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_host_tuple = "x86_64-pc-windows-gnu"
+default_toolchain = "stable-x86_64-pc-windows-gnu"
+profile = "default"
+EOF
+cat >"$rustup_root/.cargo/bin/rustc" <<'EOF'
+#!/bin/sh
+: >"${0%/*}/proxy-called"
+exit 99
+EOF
+cat >"$installed_toolchain/bin/rustc.exe" <<'EOF'
+#!/bin/sh
+[ -z "${RUSTFLAGS:-}" ] && [ -z "${RUSTUP_TOOLCHAIN:-}" ] || exit 23
+[ "$PATH" = "$(cat "${0%/*}/expected-path")" ] || exit 24
+case "$1" in --print) query=sysroot ;; -vV) query=version ;; *) exit 21 ;; esac
+if [ -f "${0%/*}/$query.fault" ]; then
+    mode=$(cat "${0%/*}/$query.fault")
+    printf x >>"${0%/*}/$query.calls"
+    attempt=$(wc -c <"${0%/*}/$query.calls")
+    if [ "$mode" = permanent ] || [ "$attempt" -eq 1 ]; then
+        printf 'invalid partial metadata\n'
+        printf 'rustc %s injected fault on attempt %s\n' "$query" "$attempt" >&2
+        exit "$((50 + attempt))"
+    fi
+fi
+case "$1" in
+    --print)
+        [ "$#" -eq 2 ] && [ "$2" = sysroot ] || exit 20
+        printf '%s\n' "${0%/bin/rustc.exe}"
+        ;;
+    -vV)
+        printf '%s\n' 'rustc 1.90.0 (fixture)' \
+            'release: 1.90.0' 'host: x86_64-pc-windows-gnu'
+        ;;
+    *) exit 21 ;;
+esac
+EOF
+cat >"$installed_toolchain/bin/cargo.exe" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = -V ] || exit 22
+printf '%s\n' 'cargo 1.90.0 (fixture)'
+EOF
+chmod +x "$rustup_root/.cargo/bin/rustc" \
+    "$installed_toolchain/bin/rustc.exe" \
+    "$installed_toolchain/bin/cargo.exe"
+installed_path="$rustup_root/.cargo/bin:$fixture/tools:$utility_dir:/usr/bin:/bin"
+printf '%s' "$installed_path" >"$installed_toolchain/bin/expected-path"
+bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$installed_path" \
+    >"$fixture/installed.env"
+[ ! -e "$rustup_root/.cargo/bin/proxy-called" ]
+grep -Fx "rustup-home-path=$rustup_root/.rustup" \
+    "$fixture/installed.env" >/dev/null
+grep -Fx "rust-toolchain-name=$installed_name" \
+    "$fixture/installed.env" >/dev/null
+grep -Fx "rust-host=x86_64-pc-windows-gnu" \
+    "$fixture/installed.env" >/dev/null
+grep -Fx "rust-sysroot=$installed_toolchain" \
+    "$fixture/installed.env" >/dev/null
+grep -Fx "rustc-path=$installed_toolchain/bin/rustc.exe" \
+    "$fixture/installed.env" >/dev/null
+grep -Fx "cargo-path=$installed_toolchain/bin/cargo.exe" \
+    "$fixture/installed.env" >/dev/null
+
+# Exercise failure diagnostics through nested command substitution, matching
+# the fingerprint consumer. No invalid authority may leak partial stdout.
+expect_installed_rejection() {
+    expected_marker=$1
+    if observed=$(BOOTSTRAP_STAGE3_FINGERPRINT_TRACE=1 \
+        bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$installed_path" \
+        2>"$fixture/fault.log"); then
+        echo "FAIL: fault admitted: $expected_marker" >&2
+        exit 1
+    fi
+    [ -z "$observed" ]
+    grep -Fx "rust-toolchain-check=$expected_marker" "$fixture/fault.log" >/dev/null
+    [ ! -e "$rustup_root/.cargo/bin/proxy-called" ]
+}
+
+# Both installed rustc metadata queries must use the bounded exact-executable
+# helper. Exercise transient recovery and permanent failure through the real
+# resolver, so a callsite that silently bypasses the helper cannot pass.
+for query in sysroot version; do
+    printf 'transient\n' >"$installed_toolchain/bin/$query.fault"
+    RUSTUP_TOOLCHAIN=nightly RUSTFLAGS=must-not-leak \
+        bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$installed_path" \
+        >"$fixture/$query-recovered.env" 2>"$fixture/$query-recovered.log"
+    cmp -s "$fixture/installed.env" "$fixture/$query-recovered.env"
+    [ "$(wc -c <"$installed_toolchain/bin/$query.calls")" -eq 2 ]
+    grep -Fx "bootstrap-native-metadata-probe=rustc-$query attempt=1 shell-status=51" \
+        "$fixture/$query-recovered.log" >/dev/null
+    grep -Fx "bootstrap-native-metadata-probe=rustc-$query attempt=2 shell-status=0" \
+        "$fixture/$query-recovered.log" >/dev/null
+    grep -Fx "rustc $query injected fault on attempt 1" \
+        "$fixture/$query-recovered.log" >/dev/null
+    : >"$installed_toolchain/bin/$query.calls"
+    printf 'permanent\n' >"$installed_toolchain/bin/$query.fault"
+    expect_installed_rejection "rustc-$query-command=fail"
+    [ "$(wc -c <"$installed_toolchain/bin/$query.calls")" -eq 2 ]
+    for attempt in 1 2; do
+        grep -Fx "bootstrap-native-metadata-probe=rustc-$query attempt=$attempt shell-status=$((50 + attempt))" \
+            "$fixture/fault.log" >/dev/null
+        grep -Fx "rustc $query injected fault on attempt $attempt" \
+            "$fixture/fault.log" >/dev/null
+    done
+    rm -f "$installed_toolchain/bin/$query.fault" "$installed_toolchain/bin/$query.calls"
+done
+
+cp "$fixture/repo/src/compiler_rust/rust-toolchain.toml" "$fixture/policy.saved"
+printf 'channel = "nightly"\n' >>"$fixture/repo/src/compiler_rust/rust-toolchain.toml"
+expect_installed_rejection resolver-channel=parse-fail
+cp "$fixture/policy.saved" "$fixture/repo/src/compiler_rust/rust-toolchain.toml"
+cp "$rustup_root/.rustup/settings.toml" "$fixture/settings.saved"
+printf 'default_host_tuple = "x86_64-pc-windows-gnu"\n' >>"$rustup_root/.rustup/settings.toml"
+expect_installed_rejection settings-host=parse-fail
+cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
+cp "$installed_toolchain/bin/rustc.exe" "$fixture/rustc.saved"
+printf '#!/bin/sh\nexit 47\n' >"$installed_toolchain/bin/rustc.exe"
+expect_installed_rejection rustc-sysroot-command=fail
+cp "$fixture/rustc.saved" "$installed_toolchain/bin/rustc.exe"
+cp "$installed_toolchain/bin/cargo.exe" "$fixture/cargo.saved"
+printf '#!/bin/sh\nexit 48\n' >"$installed_toolchain/bin/cargo.exe"
+expect_installed_rejection cargo-version-command=fail
+cp "$fixture/cargo.saved" "$installed_toolchain/bin/cargo.exe"
+
+reject_sysroot() {
+    if bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$test_path" \
+        >"$fixture/rejected.env" 2>"$fixture/rejected.log"; then
+        echo 'FAIL: invalid sysroot admitted' >&2
+        exit 1
+    fi
+    [ ! -s "$fixture/rejected.env" ]
+}
+printf '../toolchain\n' >"$fixture/tools/sysroot.txt"
+reject_sysroot
+printf '%s\nnoise\n' "$fixture/toolchain" >"$fixture/tools/sysroot.txt"
+reject_sysroot
+printf '%s\n' "$fixture/toolchain" >"$fixture/tools/sysroot.txt"
+mv "$fixture/toolchain/bin/cargo.exe" "$fixture/toolchain/bin/cargo.absent"
+reject_sysroot
+mv "$fixture/toolchain/bin/cargo.absent" "$fixture/toolchain/bin/cargo.exe"
+if bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$test_path:relative" \
+    >"$fixture/rejected.env" 2>"$fixture/rejected.log"; then
+    echo 'FAIL: relative PATH admitted' >&2; exit 1
+fi
+printf 'PASS: Rust authority resolves installed/proxy POSIX/native/CRLF sysroots, pins .exe identity and policy, bounds both rustc query retries, rejects malformed/missing authorities\n'

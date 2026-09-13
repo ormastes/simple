@@ -1,0 +1,45 @@
+#!/bin/sh
+# Exercise the real driver function bodies with recording process boundaries.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=$(mktemp -d "$root/build/native_probe/bootstrap-jobs-propagation.XXXXXX")
+fail() { echo "FAIL: $1; evidence=$work" >&2; exit 1; }
+driver=$root/scripts/bootstrap/bootstrap-from-scratch.sh
+awk '/^run_rust_authority_cargo\(\) \{/ { copy=1 } copy { print } copy && /^\}$/ { copy=0 }' "$driver" >"$work/cargo-functions.shs"
+awk '/^bootstrap_native_build_main\(\) \{/ { copy=1 } copy { print } copy && /^\}$/ { copy=0 }' "$driver" >"$work/native-functions.shs"
+. "$root/scripts/bootstrap/bootstrap-jobs.shs"
+. "$work/cargo-functions.shs"
+. "$work/native-functions.shs"
+bootstrap_detect_host_cpus() { printf '8\n'; }
+absolute_path() { printf '%s\n' "$1"; }
+prepare_rust_authority_workspace() { :; }
+run_logged() { printf '%s\n' "$@" >"$work/cargo-$rust_llvm_status-$rust_authority_lto-$jobs.argv"; }
+env() { printf '%s\n' "$@" >"$work/native-$jobs.argv"; }
+progress_log= os=windows PLATFORM=x86_64-pc-windows-gnu
+rust_authority_home=$work/home rust_authority_cargo_home=$work/cargo
+rust_authority_target=$work/target rust_authority_tmp=$work/tmp
+rustc_abs=/tool/rustc cc_abs=/tool/cc cargo_abs=/tool/cargo
+mingw_linker=/tool/ld mingw_cc=/tool/cc mingw_ar=/tool/ar
+windows_include= windows_lib= windows_libpath= windows_system_root= windows_system_drive= windows_program_data= windows_temp=
+rust_llvm_major=18 rust_llvm_prefix=/llvm rust_llvm_homebrew_prefix= rust_llvm_library_path= rust_llvm_sdkroot=
+backend=cranelift NATIVE_FILE_TIMEOUT_SECONDS=180 NATIVE_LOW_MEMORY=0
+native_cache_dir=$work/cache bootstrap_runtime_authority_path=$work/runtime build_progress_events=$work/events
+unset SIMPLE_NATIVE_BUILD_THREADS
+for requested in '' 3; do
+    bootstrap_select_jobs "$requested" "$work/missing.sdn"
+    for rust_llvm_status in enabled disabled; do
+        for lto in default off; do
+            run_rust_authority_cargo fixture "$lto" build --locked
+            argv=$work/cargo-$rust_llvm_status-$lto-$jobs.argv
+            [ "$(grep -c '^CARGO_BUILD_JOBS=' "$argv")" = 1 ] || fail 'Cargo job environment missing or duplicated'
+            grep -qx "CARGO_BUILD_JOBS=$jobs" "$argv" || fail 'Cargo job selection differs'
+        done
+    done
+    bootstrap_native_build_main /tool/simple "$work/output"
+    argv=$work/native-$jobs.argv
+    grep -qx "SIMPLE_NATIVE_BUILD_THREADS=$jobs" "$argv" || fail 'native environment jobs differ'
+    [ "$(awk '/^--threads$/ { getline; print }' "$argv")" = "$jobs" ] || fail 'native threads argument differs'
+    if grep -qx -- --low-memory "$argv"; then fail 'default native build forces serial low-memory mode'; fi
+done
+grep -q '^NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-0}' "$driver" || fail 'driver silently defaults to serial low-memory mode'
+printf 'PASS: selected full/default and override jobs reach all Cargo branches and native argv/env; evidence=%s\n' "$work"

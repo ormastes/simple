@@ -2808,7 +2808,7 @@ impl LlvmBackend {
                     "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
                     "is_none" => Some("rt_is_none"),
                     "is_some" => Some("rt_is_some"),
-                    "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
+                    "is_ok" | "is_err" => Some("rt_enum_check_variant"),
                     _ => None,
                 };
 

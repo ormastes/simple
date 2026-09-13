@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use super::byte_kernels::{
-    avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
-    scalar_byte_rfind, scalar_byte_split_ranges,
+    avx2_byte_find, avx2_byte_rfind, avx512_byte_find, avx512_byte_rfind, byte_split_ranges_for_tier, neon_byte_find,
+    neon_byte_rfind, scalar_byte_find, scalar_byte_rfind, scalar_byte_split_ranges,
 };
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
@@ -179,12 +179,28 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
             byte_split: scalar_byte_split_ranges,
             simd_tier: SimdTier::X86_64Sse2,
         },
-        SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => CollectionProviders {
+        SimdTier::X86_64Avx2 => CollectionProviders {
             array_sort: scalar_array_sort,
             byte_find: avx2_byte_find,
             byte_rfind: avx2_byte_rfind,
             byte_split: avx2_byte_split_ranges,
             simd_tier: SimdTier::X86_64Avx2,
+        },
+        // byte_find/byte_rfind/byte_split are all straight linear scans
+        // (find-first / find-last / delimiter-split built on find), so
+        // widening them to 64-byte AVX-512 lanes is a clear, contained win —
+        // see `byte_kernels.rs` for the actual kernels and their
+        // scalar-equivalence tests. `array_sort` stays on `scalar_array_sort`
+        // for every tier here: this generic comparator sorts heterogeneous
+        // tagged `RuntimeValue`s (see `compare_runtime_values`), not a
+        // homogeneous primitive buffer, so it was never SIMD-accelerated to
+        // begin with — nothing to widen.
+        SimdTier::X86_64Avx512 => CollectionProviders {
+            array_sort: scalar_array_sort,
+            byte_find: avx512_byte_find,
+            byte_rfind: avx512_byte_rfind,
+            byte_split: avx512_byte_split_ranges,
+            simd_tier: SimdTier::X86_64Avx512,
         },
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => CollectionProviders {
             array_sort: scalar_array_sort,
@@ -297,6 +313,10 @@ fn scalar_array_sort(values: &mut [RuntimeValue]) {
 
 fn avx2_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
     byte_split_ranges_for_tier(SimdTier::X86_64Avx2, haystack, delimiter)
+}
+
+fn avx512_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
+    byte_split_ranges_for_tier(SimdTier::X86_64Avx512, haystack, delimiter)
 }
 
 fn neon_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
@@ -5897,6 +5917,124 @@ pub extern "C" fn __simple_intrinsic_bounds_check(index: i64, len: i64) -> i64 {
         std::process::exit(1);
     }
     0
+}
+
+// AVX-512 provider dispatch tests. Kept as a dedicated module in this file
+// (rather than in `collection_tests.rs`) so the AVX-512 `byte_find`/
+// `byte_rfind`/`byte_split` provider wiring added to `providers_for_tier`
+// above has direct, close-by coverage. Modelled on the AVX-512 tests in
+// `byte_kernels.rs`: compare the AVX-512 provider's answer against the
+// SCALAR provider's answer (never a hardcoded expected value) across sizes
+// straddling the 64-byte lane boundary, and stay correct on a host without
+// AVX-512 because every kernel here falls back through AVX2 to scalar.
+#[cfg(test)]
+mod avx512_provider_dispatch_tests {
+    use super::{
+        avx512_byte_split_ranges, byte_split_ranges_for_tier, providers_for_tier, scalar_byte_find,
+        scalar_byte_rfind, scalar_byte_split_ranges,
+    };
+    use simple_simd::SimdTier;
+
+    #[cfg(target_arch = "x86_64")]
+    fn avx512_available() -> bool {
+        std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512bw")
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn avx512_available() -> bool {
+        false
+    }
+
+    #[test]
+    fn avx512_provider_reports_its_own_tier() {
+        let providers = providers_for_tier(SimdTier::X86_64Avx512);
+        assert_eq!(providers.simd_tier, SimdTier::X86_64Avx512);
+    }
+
+    #[test]
+    fn avx512_provider_find_and_rfind_match_scalar_across_lane_boundaries() {
+        if !avx512_available() {
+            return;
+        }
+        let providers = providers_for_tier(SimdTier::X86_64Avx512);
+
+        for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
+            let mut haystack = vec![b'a'; filler];
+            haystack.extend_from_slice(b"needle");
+            haystack.extend_from_slice(&vec![b'b'; 17]);
+            haystack.extend_from_slice(b"needle");
+            haystack.extend_from_slice(&vec![b'c'; 5]);
+            let needle = b"needle";
+
+            for start in [0usize, 1, filler] {
+                assert_eq!(
+                    (providers.byte_find)(&haystack, needle, start),
+                    scalar_byte_find(&haystack, needle, start),
+                    "find mismatch: filler={filler} start={start}"
+                );
+            }
+            assert_eq!(
+                (providers.byte_rfind)(&haystack, needle),
+                scalar_byte_rfind(&haystack, needle),
+                "rfind mismatch: filler={filler}"
+            );
+        }
+
+        // Degenerate inputs: empty haystack, needle absent, needle longer
+        // than haystack, empty needle.
+        let empty: Vec<u8> = Vec::new();
+        assert_eq!(
+            (providers.byte_find)(&empty, b"x", 0),
+            scalar_byte_find(&empty, b"x", 0)
+        );
+        let haystack = vec![b'z'; 300];
+        assert_eq!(
+            (providers.byte_find)(&haystack, b"absent", 0),
+            scalar_byte_find(&haystack, b"absent", 0)
+        );
+        assert_eq!(
+            (providers.byte_find)(b"ab", b"abcdef", 0),
+            scalar_byte_find(b"ab", b"abcdef", 0)
+        );
+        assert_eq!(
+            (providers.byte_find)(&haystack, b"", 5),
+            scalar_byte_find(&haystack, b"", 5)
+        );
+    }
+
+    #[test]
+    fn avx512_provider_split_matches_scalar_across_lane_boundaries() {
+        if !avx512_available() {
+            return;
+        }
+        let providers = providers_for_tier(SimdTier::X86_64Avx512);
+
+        for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
+            let mut haystack = "a".repeat(filler);
+            haystack.push_str("--seg--");
+            haystack.push_str(&"b".repeat(23));
+            haystack.push_str("--");
+
+            let expected = scalar_byte_split_ranges(&haystack, "--");
+            assert_eq!((providers.byte_split)(&haystack, "--"), expected, "filler={filler}");
+            assert_eq!(
+                avx512_byte_split_ranges(&haystack, "--"),
+                expected,
+                "helper mismatch filler={filler}"
+            );
+            assert_eq!(
+                byte_split_ranges_for_tier(SimdTier::X86_64Avx512, &haystack, "--"),
+                expected,
+                "tier-fn mismatch filler={filler}"
+            );
+        }
+
+        // Degenerate: no delimiter present, and an empty haystack.
+        let expected = scalar_byte_split_ranges("no-delimiter-here", "::");
+        assert_eq!((providers.byte_split)("no-delimiter-here", "::"), expected);
+        let expected = scalar_byte_split_ranges("", "--");
+        assert_eq!((providers.byte_split)("", "--"), expected);
+    }
 }
 
 #[cfg(test)]

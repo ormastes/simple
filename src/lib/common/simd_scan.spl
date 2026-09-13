@@ -1,0 +1,86 @@
+# Platform-neutral byte scan kernels shared by database and protocol code.
+#
+# FixedVec is the public SIMD facade. In interpreter/scalar builds it executes
+# the same lane semantics as the scalar oracle; admitted native backends may
+# lower the complete 16-byte chunks. Tails always use the oracle loop.
+
+use std.simd.fixed.{fixedvec_from_array, fixedvec_splat}
+
+val SIMD_SCAN_LANES: i64 = 16
+
+fn scalar_bytes_equal(lhs: [u8], lhs_start: i64,
+                      rhs: [u8], rhs_start: i64, len: i64) -> bool:
+    if not simd_scan_span_valid(lhs.len(), lhs_start, len):
+        return false
+    if not simd_scan_span_valid(rhs.len(), rhs_start, len):
+        return false
+    var i = 0
+    while i < len:
+        if lhs[lhs_start + i] != rhs[rhs_start + i]:
+            return false
+        i = i + 1
+    true
+
+fn simd_bytes_equal(lhs: [u8], lhs_start: i64,
+                    rhs: [u8], rhs_start: i64, len: i64) -> bool:
+    if not simd_scan_span_valid(lhs.len(), lhs_start, len):
+        return false
+    if not simd_scan_span_valid(rhs.len(), rhs_start, len):
+        return false
+    var i = 0
+    while i + SIMD_SCAN_LANES <= len:
+        var left_lanes: [u8] = []
+        var right_lanes: [u8] = []
+        var lane = 0
+        while lane < SIMD_SCAN_LANES:
+            left_lanes.push(lhs[lhs_start + i + lane])
+            right_lanes.push(rhs[rhs_start + i + lane])
+            lane = lane + 1
+        val left_vec = fixedvec_from_array(left_lanes)
+        val right_vec = fixedvec_from_array(right_lanes)
+        if not left_vec.cmp_eq(right_vec).all():
+            return false
+        i = i + SIMD_SCAN_LANES
+    while i < len:
+        if lhs[lhs_start + i] != rhs[rhs_start + i]:
+            return false
+        i = i + 1
+    true
+
+fn scalar_find_byte(bytes: [u8], start: i64, needle: u8) -> i64:
+    if not simd_scan_span_valid(bytes.len(), start, 0):
+        return -1
+    var i = start
+    while i < bytes.len():
+        if bytes[i] == needle:
+            return i
+        i = i + 1
+    -1
+
+fn simd_find_byte(bytes: [u8], start: i64, needle: u8) -> i64:
+    if not simd_scan_span_valid(bytes.len(), start, 0):
+        return -1
+    val needle_vec = fixedvec_splat(needle, SIMD_SCAN_LANES as i32)
+    var i = start
+    while i + SIMD_SCAN_LANES <= bytes.len():
+        var lanes: [u8] = []
+        var lane = 0
+        while lane < SIMD_SCAN_LANES:
+            lanes.push(bytes[i + lane])
+            lane = lane + 1
+        val mask = fixedvec_from_array(lanes).cmp_eq(needle_vec)
+        if mask.any():
+            var match_lane = 0
+            while match_lane < SIMD_SCAN_LANES:
+                if mask.lane_active(match_lane as i32):
+                    return i + match_lane
+                match_lane = match_lane + 1
+        i = i + SIMD_SCAN_LANES
+    while i < bytes.len():
+        if bytes[i] == needle:
+            return i
+        i = i + 1
+    -1
+
+fn simd_scan_span_valid(size: i64, start: i64, len: i64) -> bool:
+    start >= 0 and len >= 0 and start <= size and len <= size - start

@@ -39,6 +39,14 @@ void rt_set_macro_trace(bool enabled);
 bool rt_is_macro_trace_enabled(void);
 void rt_set_debug_mode(bool enabled);
 
+/* Fail-closed host capability probes used by compiler SIMD dispatch. */
+int64_t rt_getauxval(int64_t key);
+bool rt_is_darwin_arm64(void);
+int32_t rt_sysctlbyname_i32(int64_t name);
+int32_t rt_riscv_read_vlenb(void);
+bool rt_riscv_has_v_ext(void);
+int32_t rt_cuda_sm_version(int32_t device);
+
 /* ===== Recoverable language exception frames =====
  *
  * Frames are fixed-capacity, per-thread runtime storage.  The compiler owns
@@ -690,6 +698,7 @@ int64_t  rt_closure_set_capture(int64_t closure, int64_t index, int64_t value);
 int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
+int8_t   rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant);
 int64_t  rt_hash_text(int64_t value);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);

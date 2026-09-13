@@ -1,0 +1,102 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase1-authority.XXXXXX")
+trap 'chmod -R u+w "$tmp" 2>/dev/null || :; rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "bootstrap_phase_stage1_native_build_authority_test: $*" >&2; exit 1; }
+
+mkdir -p "$tmp/source/scripts/bootstrap" "$tmp/good" "$tmp/silent/outputs"
+cp "$root/scripts/bootstrap/run-process-group-timeout.shs" \
+  "$tmp/source/scripts/bootstrap/run-process-group-timeout.shs"
+
+cat >"$tmp/fake-seed" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = --version ]; then
+  echo fake-phase1-seed
+  exit 0
+fi
+if [ "${1:-}" = native-build ]; then
+  printf 'rust=%s|binary=%s|bootstrap=%s|argv=%s\n' \
+    "${SIMPLE_NATIVE_BUILD_RUST:-}" "${SIMPLE_BINARY:-}" \
+    "${SIMPLE_BOOTSTRAP:-}" "$*" >>"$PHASE1_INVOCATIONS"
+  output=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --output ]; then shift; output=$1; fi
+    shift
+  done
+  [ -n "$output" ] || exit 2
+  [ "${PHASE1_SILENT_SUCCESS:-0}" != 1 ] || exit 0
+  mkdir -p "$(dirname "$output")"
+  cat >"$output" <<'TOOL'
+#!/bin/sh
+printf '%s\n' "$(basename "$0") $*" >>"$PHASE1_EXECUTIONS"
+exit 0
+TOOL
+  chmod +x "$output"
+fi
+exit 0
+EOF
+chmod +x "$tmp/fake-seed"
+seed_sha=$(sha256sum "$tmp/fake-seed" | awk '{print $1}')
+. "$root/test/01_unit/scripts/fixtures/phase1_authority_fixture.shs"
+phase1_authority_fixture "$root" "$tmp/source" "$tmp/fake-seed"
+
+: >"$tmp/good.invocations"
+: >"$tmp/good.executions"
+status=0
+PHASE1_INVOCATIONS="$tmp/good.invocations" \
+PHASE1_EXECUTIONS="$tmp/good.executions" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage1 --compiler="$tmp/fake-seed" \
+    --compiler-sha256="$seed_sha" --strategy=full --hash-policy=canonical \
+    --source-root="$tmp/source" --work-root="$tmp/good" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "Stage 1 unsupported rows unexpectedly admitted the whole matrix"
+[ "$(wc -l <"$tmp/good.invocations" | tr -d ' ')" = 2 ] ||
+  fail "expected both Stage 1 server builds"
+snapshot="$tmp/good/compiler.snapshot"
+if grep -Fv "rust=1|binary=$snapshot|bootstrap=1|" "$tmp/good.invocations" >/dev/null; then
+  fail "Stage 1 native-build escaped the admitted snapshot/Rust bootstrap authority"
+fi
+grep -Fq -- '--entry src/app/mcp/main.spl' "$tmp/good.invocations" ||
+  fail "MCP entry was not built"
+grep -Fq -- '--entry src/app/simple_lsp_mcp/main.spl' "$tmp/good.invocations" ||
+  fail "LSP MCP entry was not built"
+grep -Eq 'task=mcp_build\|result=PASS\|status=0.*artifact_status=present' \
+  "$tmp/good/summary.env" || fail "materialized MCP build was not recorded"
+grep -Eq 'task=lsp_build\|result=PASS\|status=0.*artifact_status=present' \
+  "$tmp/good/summary.env" || fail "materialized LSP build was not recorded"
+grep -Fq 'simple_mcp_server --help' "$tmp/good.executions" || fail "MCP help did not launch"
+grep -Fq 'simple_lsp_mcp_server --help' "$tmp/good.executions" || fail "LSP help did not launch"
+
+# A stale executable plus an exit-zero producer used to become a false PASS.
+# The recorder must delete the residue, require a fresh exact artifact, and
+# preserve both full-matrix rows as explicit failures.
+printf '#!/bin/sh\nexit 0\n' >"$tmp/silent/outputs/simple_mcp_server"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/silent/outputs/simple_lsp_mcp_server"
+chmod +x "$tmp/silent/outputs/simple_mcp_server" "$tmp/silent/outputs/simple_lsp_mcp_server"
+: >"$tmp/silent.invocations"
+: >"$tmp/silent.executions"
+status=0
+PHASE1_SILENT_SUCCESS=1 PHASE1_INVOCATIONS="$tmp/silent.invocations" \
+PHASE1_EXECUTIONS="$tmp/silent.executions" \
+  sh "$root/scripts/bootstrap/bootstrap-phase-verification.shs" \
+    --phase=stage1 --compiler="$tmp/fake-seed" \
+    --compiler-sha256="$seed_sha" --strategy=full --hash-policy=canonical \
+    --source-root="$tmp/source" --work-root="$tmp/silent" \
+    --timeout-seconds=30 || status=$?
+[ "$status" -ne 0 ] || fail "exit-zero missing artifacts passed"
+grep -Eq 'task=mcp_build\|result=FAIL\|status=87.*artifact_status=missing' \
+  "$tmp/silent/summary.env" || fail "missing MCP executable was not failed closed"
+grep -Eq 'task=lsp_build\|result=FAIL\|status=87.*artifact_status=missing' \
+  "$tmp/silent/summary.env" || fail "missing LSP executable was not failed closed"
+grep -Fq 'task=simple_mcp_server_help|result=BLOCKED|status=not-built' \
+  "$tmp/silent/summary.env" || fail "missing MCP executable reached launch"
+grep -Fq 'task=simple_lsp_mcp_server_help|result=BLOCKED|status=not-built' \
+  "$tmp/silent/summary.env" || fail "missing LSP executable reached launch"
+[ ! -s "$tmp/silent.executions" ] || fail "stale server residue executed"
+[ ! -e "$tmp/silent/outputs/simple_mcp_server" ] || fail "stale MCP artifact survived"
+[ ! -e "$tmp/silent/outputs/simple_lsp_mcp_server" ] || fail "stale LSP artifact survived"
+
+echo 'bootstrap_phase_stage1_native_build_authority_test: PASS'

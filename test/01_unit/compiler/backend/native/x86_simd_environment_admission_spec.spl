@@ -1,0 +1,101 @@
+# codex-system-test
+# @tag: unit, simd, avx512, capability, environment-neutral
+# @req REQ-AVX512-006 REQ-SIMD-002 NFR-SIMD-008
+
+"""
+The unit lane is deliberately host independent.  It tests the pure admission
+record with synthetic CPUID/XCR0 values, then checks the target gate for every
+supported x86 host OS.  No AVX instruction is executed by this file.
+"""
+
+use std.spec.{describe, it, expect, assert_equal}
+use std.spec.step
+use compiler.types.simd_capabilities.{
+    X86SimdEligibilityV1,
+    x86_simd_eligibility_from_raw,
+    x86_avx_eligible,
+    x86_avx2_eligible,
+    x86_avx512f_eligible,
+    x86_avx512bw_eligible
+}
+use compiler.backend.native.x86_64_simd.{
+    x86_simd_gate_from_triple,
+    x86_simd_gate_allows_sse2,
+    x86_simd_gate_allows_avx2,
+    x86_simd_gate_allows_avx512,
+    x86_select_simd_width_bits
+}
+use compiler.backend.native.native_avx512_capability.{
+    native_avx512_capability_v1,
+    native_avx512_denied_v1,
+    native_avx512_receipt_key
+}
+
+fn full_eligibility() -> X86SimdEligibilityV1:
+    # CPUID.1 ECX: OSXSAVE + AVX; CPUID.7.0 EBX: AVX2/F/DQ/BW/VL.
+    x86_simd_eligibility_from_raw(
+        (1 << 27) + (1 << 28),
+        (1 << 5) + (1 << 16) + (1 << 17) + (1 << 30) + (1 << 31),
+        0xE6)
+
+describe "x86 SIMD environment admission" :
+    it "should require every CPU and OS state bit before admitting AVX-512F":
+        step("Build a synthetic CPUID and XCR0 record with all required bits")
+        val full = full_eligibility()
+        expect(x86_avx_eligible(full)).to_be(true)
+        expect(x86_avx2_eligible(full)).to_be(true)
+        expect(x86_avx512f_eligible(full)).to_be(true)
+        expect(x86_avx512bw_eligible(full)).to_be(true)
+
+        step("Remove each CPU or OS prerequisite one at a time")
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw(1 << 28, (1 << 5) + (1 << 16), 0xE6))).to_be(false)
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw(1 << 27, (1 << 5) + (1 << 16), 0xE6))).to_be(false)
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 27) + (1 << 28), (1 << 5) + (1 << 16), 0x6))).to_be(false)
+        expect(x86_avx512f_eligible(x86_simd_eligibility_from_raw((1 << 27) + (1 << 28), (1 << 5), 0xE6))).to_be(false)
+
+    it "should preserve the x86 target gate across Linux Windows BSD and macOS":
+        step("Derive target policy independently from the runtime capability record")
+        val full = full_eligibility()
+        for triple in [
+            "x86_64-avx512-linux-gnu",
+            "x86_64-avx512-windows-msvc",
+            "x86_64-avx512-freebsd",
+            "x86_64-avx512-darwin"
+        ]:
+            val gate = x86_simd_gate_from_triple(triple)
+            expect(x86_simd_gate_allows_sse2(gate)).to_be(true)
+            expect(x86_simd_gate_allows_avx2(gate)).to_be(true)
+            expect(x86_simd_gate_allows_avx512(gate)).to_be(true)
+            expect(x86_select_simd_width_bits(gate, full, 512)).to_equal(512)
+
+        step("Reject non-x86 targets even if a synthetic x86 CPU record is supplied")
+        val arm_gate = x86_simd_gate_from_triple("aarch64-unknown-linux-gnu")
+        expect(x86_simd_gate_allows_sse2(arm_gate)).to_be(false)
+        expect(x86_simd_gate_allows_avx512(arm_gate)).to_be(false)
+        expect(x86_select_simd_width_bits(arm_gate, full, 512)).to_equal(0)
+
+    it "should fail closed when a capability receipt lacks identity or OS admission":
+        step("Create the explicit denied receipt used by native selection")
+        val denied = native_avx512_denied_v1()
+        expect(denied.avx512f_admitted).to_be(false)
+        expect(denied.avx512bw_admitted).to_be(false)
+        expect(denied.os_state_ready).to_be(false)
+        expect(denied.reason).to_equal("avx512f-not-admitted")
+        expect(native_avx512_receipt_key(denied)).to_contain("avx512f=false")
+
+        step("Refuse a CPU-positive record when its provenance fields are empty")
+        val no_source = native_avx512_capability_v1("x86_64-avx512-linux", "", "hash", true, true, true)
+        expect(no_source.avx512f_admitted).to_be(false)
+        expect(no_source.reason).to_equal("missing-capability-source")
+        val no_hash = native_avx512_capability_v1("x86_64-avx512-linux", "cpuid+xgetbv", "", true, true, true)
+        expect(no_hash.avx512f_admitted).to_be(false)
+        expect(no_hash.reason).to_equal("missing-capability-hash")
+
+    it "should admit FMA with AVX-512F while keeping BW as an operation-specific subset":
+        step("Use the common floating-point admission record")
+        val f_only = x86_simd_eligibility_from_raw(
+            (1 << 27) + (1 << 28), (1 << 16) + (1 << 17), 0xE6)
+        expect(x86_avx512f_eligible(f_only)).to_be(true)
+        expect(x86_avx512bw_eligible(f_only)).to_be(false)
+        # FMA uses AVX-512F; byte/word operations must require BW separately.
+        expect(x86_select_simd_width_bits(x86_simd_gate_from_triple("x86_64-avx512-linux"), f_only, 512)).to_equal(512)

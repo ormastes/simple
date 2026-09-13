@@ -1,0 +1,489 @@
+# Pure-Simple scalar semantics for portable MIR SIMD instructions.
+#
+# The MIR interpreter is a semantic oracle, not an ISA simulator. Vector
+# values are represented by opaque handles backed by lane arrays. Fixed-width
+# values use their exact lane count; scalable values use the architectural
+# minimum lane count, as required by the interpreter representation contract.
+
+use compiler.mir.mir_data.*
+use std.common.binary_io.{f64_to_bits}
+use std.common.math.math.{math_sqrt}
+use std.common.math.ieee754_bits.{
+    math_f32_widen_bits, math_f64_decode_bits, math_f64_round_to_f32_bits,
+    math_f32_fma_bits, math_f64_fma_bits
+}
+
+class MirSimdShape:
+    lanes: i64
+    lane_kind: text
+    scalable: bool
+
+class MirSimdState:
+    vectors: {i64: [i64]}
+    shapes: {i64: MirSimdShape}
+    next_handle: i64
+    active_scalable_lanes: i64
+    last_error: text?
+
+fn _invalid_shape() -> MirSimdShape:
+    MirSimdShape(lanes: 0, lane_kind: "invalid", scalable: false)
+
+fn _scalar_lane_kind(type_: MirType) -> text:
+    match type_.kind:
+        case I32: "i32"
+        case F32: "f32"
+        case F64: "f64"
+        case _: "invalid"
+
+fn mir_simd_shape(type_: MirType, active_scalable_lanes: i64) -> MirSimdShape:
+    match type_.kind:
+        case Vec4f: MirSimdShape(lanes: 4, lane_kind: "f32", scalable: false)
+        case Vec8f: MirSimdShape(lanes: 8, lane_kind: "f32", scalable: false)
+        case Vec16f: MirSimdShape(lanes: 16, lane_kind: "f32", scalable: false)
+        case Vec4d: MirSimdShape(lanes: 4, lane_kind: "f64", scalable: false)
+        case Vec8d: MirSimdShape(lanes: 8, lane_kind: "f64", scalable: false)
+        case Vec4i: MirSimdShape(lanes: 4, lane_kind: "i32", scalable: false)
+        case Vec8i: MirSimdShape(lanes: 8, lane_kind: "i32", scalable: false)
+        case Vec16i: MirSimdShape(lanes: 16, lane_kind: "i32", scalable: false)
+        case ScalableVec(element, min_lanes):
+            var lanes = min_lanes
+            if active_scalable_lanes >= 0 and active_scalable_lanes < lanes:
+                lanes = active_scalable_lanes
+            MirSimdShape(lanes: lanes, lane_kind: _scalar_lane_kind(element), scalable: true)
+        case _: _invalid_shape()
+
+fn mir_simd_min_lanes_for_element(type_: MirType) -> i64:
+    match type_.kind:
+        case I8 | U8: 16
+        case I16 | U16: 8
+        case I32 | U32 | F32: 4
+        case I64 | U64 | F64: 2
+        case _: 0
+
+fn _same_shape(a: MirSimdShape, b: MirSimdShape) -> bool:
+    a.lanes == b.lanes and a.lane_kind == b.lane_kind and a.scalable == b.scalable
+
+fn _wrap_i32(value: i64) -> i64:
+    val low = value & 0xFFFFFFFF
+    if low >= 2147483648: low - 4294967296 else: low
+
+fn _mask_shape(shape: MirSimdShape) -> MirSimdShape:
+    MirSimdShape(lanes: shape.lanes, lane_kind: "mask", scalable: shape.scalable)
+
+fn _nan32(bits: i64) -> bool: (bits & 0x7FFFFFFF) > 0x7F800000
+fn _nan64(bits: i64) -> bool: (bits & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000
+
+fn _f32_binop(a_bits: i64, b_bits: i64, op: text) -> i64:
+    if op == "Min" or op == "Max":
+        # Unordered/tied lanes select rhs bits, preserving payload and zero.
+        # Exact-mode reductions apply this rule left-to-right.
+        if _nan32(a_bits) or _nan32(b_bits): return b_bits
+        val a = math_f64_decode_bits(math_f32_widen_bits(a_bits))
+        val b = math_f64_decode_bits(math_f32_widen_bits(b_bits))
+        if op == "Min": return if a < b: a_bits else: b_bits
+        return if a > b: a_bits else: b_bits
+    if _nan32(a_bits): return a_bits | 0x400000
+    if _nan32(b_bits): return b_bits | 0x400000
+    if op == "Add": return math_f32_fma_bits(a_bits, 0x3F800000, b_bits)
+    if op == "Sub": return math_f32_fma_bits(a_bits, 0x3F800000, b_bits xor 0x80000000)
+    if op == "Mul": return math_f32_fma_bits(a_bits, b_bits, (a_bits xor b_bits) & 0x80000000)
+    val bits64 = _f64_binop(math_f32_widen_bits(a_bits), math_f32_widen_bits(b_bits), "Div")
+    if _nan64(bits64): return 0x7FC00000
+    math_f64_round_to_f32_bits(math_f64_decode_bits(bits64))
+
+fn _f64_binop(a_bits: i64, b_bits: i64, op: text) -> i64:
+    if op == "Min" or op == "Max":
+        if _nan64(a_bits) or _nan64(b_bits): return b_bits
+        val a = math_f64_decode_bits(a_bits)
+        val b = math_f64_decode_bits(b_bits)
+        if op == "Min": return if a < b: a_bits else: b_bits
+        return if a > b: a_bits else: b_bits
+    if _nan64(a_bits): return a_bits | 0x8000000000000
+    if _nan64(b_bits): return b_bits | 0x8000000000000
+    val sign_mask = ~0x7FFFFFFFFFFFFFFF
+    if op == "Add": return math_f64_fma_bits(a_bits, 0x3FF0000000000000, b_bits)
+    if op == "Sub": return math_f64_fma_bits(a_bits, 0x3FF0000000000000, b_bits xor sign_mask)
+    if op == "Mul": return math_f64_fma_bits(a_bits, b_bits, (a_bits xor b_bits) & sign_mask)
+    val aa = a_bits & 0x7FFFFFFFFFFFFFFF
+    val bb = b_bits & 0x7FFFFFFFFFFFFFFF
+    val sign = (a_bits xor b_bits) & sign_mask
+    val infinity = 0x7FF0000000000000
+    if (aa == 0 and bb == 0) or (aa == infinity and bb == infinity): return 0x7FF8000000000000
+    if bb == 0 or aa == infinity: return sign | infinity
+    if aa == 0 or bb == infinity: return sign
+    f64_to_bits(math_f64_decode_bits(a_bits) / math_f64_decode_bits(b_bits)) as i64
+
+fn _sqrt_bits(word: i64, lane_kind: text) -> i64:
+    if lane_kind == "f32":
+        if _nan32(word): return word | 0x400000
+        if (word & 0x7FFFFFFF) == 0: return word
+        if (word & 0x80000000) != 0: return 0x7FC00000
+        if word == 0x7F800000: return word
+        val result = math_sqrt(math_f64_decode_bits(math_f32_widen_bits(word)))
+        return math_f64_round_to_f32_bits(result)
+    if _nan64(word): return word | 0x8000000000000
+    if (word & 0x7FFFFFFFFFFFFFFF) == 0: return word
+    if word < 0: return 0x7FF8000000000000
+    if word == 0x7FF0000000000000: return word
+    f64_to_bits(math_sqrt(math_f64_decode_bits(word))) as i64
+
+fn _i32_binop(a: i64, b: i64, op: text) -> i64:
+    val lhs = _wrap_i32(a)
+    val rhs = _wrap_i32(b)
+    match op:
+        case "Add": _wrap_i32(lhs + rhs)
+        case "Sub": _wrap_i32(lhs - rhs)
+        case "Mul": _wrap_i32(lhs * rhs)
+        case "And": _wrap_i32(lhs & rhs)
+        case "Or": _wrap_i32(lhs | rhs)
+        case "Xor": _wrap_i32(lhs xor rhs)
+        case "Andnot": _wrap_i32((~lhs) & rhs)
+        case "Shl": _wrap_i32(lhs << rhs)
+        case "ShrLogical": _wrap_i32((lhs & 0xFFFFFFFF) >> rhs)
+        case "ShrArith": _wrap_i32(lhs >> rhs)
+        case "Min": if lhs < rhs: lhs else: rhs
+        case "Max": if lhs > rhs: lhs else: rhs
+        case _: 0
+
+fn _cmp_i64(a: i64, b: i64, op: text) -> i64:
+    match op:
+        case "Eq": if a == b: 1 else: 0
+        case "Ne": if a != b: 1 else: 0
+        case "Lt": if a < b: 1 else: 0
+        case "Le": if a <= b: 1 else: 0
+        case "Gt": if a > b: 1 else: 0
+        case "Ge": if a >= b: 1 else: 0
+        case _: 0
+
+fn _cmp_f32(a_bits: i64, b_bits: i64, op: text) -> i64:
+    if _nan32(a_bits) or _nan32(b_bits): return if op == "Ne": 1 else: 0
+    val a = math_f64_decode_bits(math_f32_widen_bits(a_bits))
+    val b = math_f64_decode_bits(math_f32_widen_bits(b_bits))
+    match op:
+        case "Eq": if a == b: 1 else: 0
+        case "Ne": if a != b: 1 else: 0
+        case "Lt": if a < b: 1 else: 0
+        case "Le": if a <= b: 1 else: 0
+        case "Gt": if a > b: 1 else: 0
+        case "Ge": if a >= b: 1 else: 0
+        case _: 0
+
+fn _cmp_f64(a_bits: i64, b_bits: i64, op: text) -> i64:
+    if _nan64(a_bits) or _nan64(b_bits): return if op == "Ne": 1 else: 0
+    val a = math_f64_decode_bits(a_bits)
+    val b = math_f64_decode_bits(b_bits)
+    match op:
+        case "Eq": if a == b: 1 else: 0
+        case "Ne": if a != b: 1 else: 0
+        case "Lt": if a < b: 1 else: 0
+        case "Le": if a <= b: 1 else: 0
+        case "Gt": if a > b: 1 else: 0
+        case "Ge": if a >= b: 1 else: 0
+        case _: 0
+
+impl MirSimdState:
+    static fn create() -> MirSimdState:
+        MirSimdState(vectors: {}, shapes: {}, next_handle: 1000000000,
+            active_scalable_lanes: -1, last_error: nil)
+
+    me _fail(message: text) -> i64:
+        self.last_error = Some(message)
+        -1
+
+    me take_error() -> text?:
+        val error = self.last_error
+        self.last_error = nil
+        error
+
+    me set_scalable_vl(requested: i64, elem_type: MirType) -> i64:
+        val minimum = mir_simd_min_lanes_for_element(elem_type)
+        if minimum == 0 or _scalar_lane_kind(elem_type) == "invalid":
+            return self._fail("invalid scalable SIMD element type")
+        var lanes = requested
+        if lanes < 0: lanes = 0
+        if lanes > minimum: lanes = minimum
+        self.active_scalable_lanes = lanes
+        lanes
+
+    fn shape_for_type(type_: MirType) -> MirSimdShape:
+        mir_simd_shape(type_, self.active_scalable_lanes)
+
+    me put(lanes: [i64], shape: MirSimdShape) -> i64:
+        if shape.lanes <= 0 or (shape.lane_kind != "i32" and shape.lane_kind != "f32" and shape.lane_kind != "f64" and shape.lane_kind != "mask"):
+            return self._fail("invalid or unavailable SIMD vector shape")
+        if lanes.len() != shape.lanes:
+            return self._fail("SIMD lane count mismatch: expected {shape.lanes}, got {lanes.len()}")
+        var normalized: [i64] = []
+        for lane in lanes:
+            if shape.lane_kind == "i32":
+                if lane < -2147483648 or lane > 0xFFFFFFFF: return self._fail("SIMD i32 lane bits exceed 32 bits")
+                normalized.push(_wrap_i32(lane))
+            else if shape.lane_kind == "f32":
+                if lane < 0 or lane > 0xFFFFFFFF: return self._fail("SIMD f32 lane bits exceed 32 bits")
+                normalized.push(lane)
+            else if shape.lane_kind == "mask": normalized.push(if lane == 0: 0 else: 1)
+            else: normalized.push(lane)
+        val handle = self.next_handle
+        self.next_handle = self.next_handle + 1
+        self.vectors[handle] = normalized
+        self.shapes[handle] = shape
+        handle
+
+    fn get(handle: i64) -> [i64]?:
+        if self.vectors.contains(handle): Some(self.vectors[handle]) else: nil
+
+    fn shape(handle: i64) -> MirSimdShape?:
+        if self.shapes.contains(handle): Some(self.shapes[handle]) else: nil
+
+    me splat(value: i64, type_: MirType) -> i64:
+        val shape = self.shape_for_type(type_)
+        var lanes: [i64] = []
+        var i = 0
+        while i < shape.lanes:
+            lanes.push(value)
+            i = i + 1
+        self.put(lanes, shape)
+
+    me binop(lhs_handle: i64, rhs_handle: i64, op: text) -> i64:
+        val lhs_opt = self.get(lhs_handle)
+        val rhs_opt = self.get(rhs_handle)
+        val lhs_shape_opt = self.shape(lhs_handle)
+        val rhs_shape_opt = self.shape(rhs_handle)
+        if not lhs_opt.? or not rhs_opt.? or not lhs_shape_opt.? or not rhs_shape_opt.?:
+            return self._fail("SIMD binary operand is not a vector")
+        val lhs = lhs_opt.unwrap()
+        val rhs = rhs_opt.unwrap()
+        val shape = lhs_shape_opt.unwrap()
+        if not _same_shape(shape, rhs_shape_opt.unwrap()):
+            return self._fail("SIMD binary operand shapes differ")
+        val numeric = op == "Add" or op == "Sub" or op == "Mul" or op == "Div" or op == "Min" or op == "Max"
+        if shape.lane_kind == "mask": return self._fail("SIMD numeric operation requires data lanes")
+        val integer = op == "Add" or op == "Sub" or op == "Mul" or op == "And" or op == "Or" or op == "Xor" or op == "Andnot" or op == "Shl" or op == "ShrLogical" or op == "ShrArith" or op == "Min" or op == "Max"
+        if (shape.lane_kind == "i32" and not integer) or (shape.lane_kind != "i32" and not numeric):
+            return self._fail("SIMD operation '{op}' is invalid for {shape.lane_kind}")
+        if op == "Shl" or op == "ShrLogical" or op == "ShrArith":
+            for count in rhs:
+                if count < 0 or count >= 32: return self._fail("SIMD i32 shift count must be in 0..31")
+        var out: [i64] = []
+        var i = 0
+        while i < shape.lanes:
+            if shape.lane_kind == "f32": out.push(_f32_binop(lhs[i], rhs[i], op))
+            else if shape.lane_kind == "f64": out.push(_f64_binop(lhs[i], rhs[i], op))
+            else: out.push(_i32_binop(lhs[i], rhs[i], op))
+            i = i + 1
+        self.put(out, shape)
+
+    me ternop(a_handle: i64, b_handle: i64, c_handle: i64, op: text) -> i64:
+        val a_opt = self.get(a_handle)
+        val b_opt = self.get(b_handle)
+        val c_opt = self.get(c_handle)
+        val shape_opt = self.shape(a_handle)
+        val b_shape_opt = self.shape(b_handle)
+        val c_shape_opt = self.shape(c_handle)
+        if not a_opt.? or not b_opt.? or not c_opt.? or not shape_opt.? or not b_shape_opt.? or not c_shape_opt.?:
+            return self._fail("SIMD ternary operand is not a vector")
+        val shape = shape_opt.unwrap()
+        if not _same_shape(shape, b_shape_opt.unwrap()) or not _same_shape(shape, c_shape_opt.unwrap()):
+            return self._fail("SIMD ternary operand shapes differ")
+        if (shape.lane_kind != "f32" and shape.lane_kind != "f64") or (op != "Fma" and op != "Fnmadd"):
+            return self._fail("unsupported SIMD ternary operation '{op}'")
+        val a = a_opt.unwrap()
+        val b = b_opt.unwrap()
+        val c = c_opt.unwrap()
+        var out: [i64] = []
+        var i = 0
+        while i < shape.lanes:
+            if shape.lane_kind == "f32":
+                val a_bits = if op == "Fnmadd": a[i] xor 0x80000000 else: a[i]
+                out.push(math_f32_fma_bits(a_bits, b[i], c[i]))
+            else:
+                val a_bits = if op == "Fnmadd": a[i] xor (~0x7FFFFFFFFFFFFFFF) else: a[i]
+                out.push(math_f64_fma_bits(a_bits, b[i], c[i]))
+            i = i + 1
+        self.put(out, shape)
+
+    me unop(handle: i64, op: text) -> i64:
+        val lanes_opt = self.get(handle)
+        val shape_opt = self.shape(handle)
+        if not lanes_opt.? or not shape_opt.?: return self._fail("SIMD unary operand is not a vector")
+        val lanes = lanes_opt.unwrap()
+        val shape = shape_opt.unwrap()
+        if shape.lane_kind == "i32":
+            if op != "Not" and op != "Neg": return self._fail("SIMD integer unary operation must be Not or Neg")
+            var words: [i64] = []
+            for word in lanes:
+                words.push(if op == "Not": _wrap_i32(~word) else: _wrap_i32(-word))
+            return self.put(words, shape)
+        if shape.lane_kind == "mask": return self._fail("SIMD unary operation requires data lanes")
+        val valid = op == "Abs" or op == "Neg" or op == "Recip" or op == "Sqrt" or op == "RecipSqrt"
+        if not valid: return self._fail("unsupported SIMD unary operation '{op}'")
+        var out: [i64] = []
+        for word in lanes:
+            if shape.lane_kind == "f32":
+                if op == "Abs": out.push(word & 0x7FFFFFFF)
+                else if op == "Neg": out.push(word xor 0x80000000)
+                else:
+                    if op == "Recip": out.push(_f32_binop(0x3F800000, word, "Div"))
+                    else:
+                        val root_bits = _sqrt_bits(word, "f32")
+                        out.push(if op == "Sqrt": root_bits else: _f32_binop(0x3F800000, root_bits, "Div"))
+            else:
+                if op == "Abs": out.push(word & 0x7FFFFFFFFFFFFFFF)
+                else if op == "Neg": out.push(word xor -9223372036854775808)
+                else:
+                    if op == "Recip": out.push(_f64_binop(0x3FF0000000000000, word, "Div"))
+                    else:
+                        val root_bits = _sqrt_bits(word, "f64")
+                        out.push(if op == "Sqrt": root_bits else: _f64_binop(0x3FF0000000000000, root_bits, "Div"))
+        self.put(out, shape)
+
+    me reduce(handle: i64, op: text) -> i64:
+        val lanes_opt = self.get(handle)
+        val shape_opt = self.shape(handle)
+        if not lanes_opt.? or not shape_opt.?: return self._fail("SIMD reduction operand is not a vector")
+        val lanes = lanes_opt.unwrap()
+        val shape = shape_opt.unwrap()
+        if lanes.len() == 0: return self._fail("SIMD reduction requires at least one active lane")
+        val valid_numeric = op == "Sum" or op == "Min" or op == "Max"
+        if shape.lane_kind == "mask": return self._fail("SIMD reduction requires data lanes")
+        val valid_integer = valid_numeric or op == "And" or op == "Or" or op == "Xor"
+        if (shape.lane_kind == "i32" and not valid_integer) or (shape.lane_kind != "i32" and not valid_numeric):
+            return self._fail("unsupported SIMD reduction '{op}' for {shape.lane_kind}")
+        var value = lanes[0]
+        var i = 1
+        while i < lanes.len():
+            if op == "Sum":
+                if shape.lane_kind == "f32": value = _f32_binop(value, lanes[i], "Add")
+                else if shape.lane_kind == "f64": value = _f64_binop(value, lanes[i], "Add")
+                else: value = _i32_binop(value, lanes[i], "Add")
+            else if op == "Min" or op == "Max":
+                if shape.lane_kind == "f32": value = _f32_binop(value, lanes[i], op)
+                else if shape.lane_kind == "f64": value = _f64_binop(value, lanes[i], op)
+                else: value = _i32_binop(value, lanes[i], op)
+            else: value = _i32_binop(value, lanes[i], op)
+            i = i + 1
+        value
+
+    me permute(source_handle: i64, control_handle: i64) -> i64:
+        val source_opt = self.get(source_handle)
+        val control_opt = self.get(control_handle)
+        val shape_opt = self.shape(source_handle)
+        val control_shape_opt = self.shape(control_handle)
+        if not source_opt.? or not control_opt.? or not shape_opt.? or not control_shape_opt.?: return self._fail("SIMD permute operand is not a vector")
+        val source = source_opt.unwrap()
+        val control = control_opt.unwrap()
+        val shape = shape_opt.unwrap()
+        val control_shape = control_shape_opt.unwrap()
+        if control.len() != shape.lanes or control_shape.lane_kind != "i32" or control_shape.scalable != shape.scalable:
+            return self._fail("SIMD permute control must be matching i32 lane indices")
+        var out: [i64] = []
+        for index in control:
+            if index < 0 or index >= shape.lanes: return self._fail("SIMD permute lane out of bounds")
+            out.push(source[index])
+        self.put(out, shape)
+
+    me shuffle(lhs_handle: i64, rhs_handle: i64, kind: text) -> i64:
+        if kind == "Permute": return self.permute(lhs_handle, rhs_handle)
+        if kind == "BroadcastLane":
+            val source_opt = self.get(lhs_handle)
+            val shape_opt = self.shape(lhs_handle)
+            if not source_opt.? or not shape_opt.?: return self._fail("SIMD broadcast source is not a vector")
+            val shape = shape_opt.unwrap()
+            if rhs_handle < 0 or rhs_handle >= shape.lanes: return self._fail("SIMD broadcast lane out of bounds")
+            val source = source_opt.unwrap()
+            var repeated: [i64] = []
+            for i in 0..shape.lanes: repeated.push(source[rhs_handle])
+            return self.put(repeated, shape)
+        val lhs_opt = self.get(lhs_handle)
+        val rhs_opt = self.get(rhs_handle)
+        val shape_opt = self.shape(lhs_handle)
+        val rhs_shape_opt = self.shape(rhs_handle)
+        if not lhs_opt.? or not rhs_opt.? or not shape_opt.? or not rhs_shape_opt.?: return self._fail("SIMD shuffle operand is not a vector")
+        val shape = shape_opt.unwrap()
+        if not _same_shape(shape, rhs_shape_opt.unwrap()) or (kind != "InterleaveLo" and kind != "InterleaveHi"):
+            return self._fail("unsupported SIMD shuffle '{kind}' or mismatched shape")
+        val lhs = lhs_opt.unwrap()
+        val rhs = rhs_opt.unwrap()
+        val half = shape.lanes / 2
+        if (shape.lanes & 1) != 0: return self._fail("SIMD interleave requires an even lane count")
+        val start = if kind == "InterleaveLo": 0 else: half
+        var out: [i64] = []
+        var i = 0
+        while i < half:
+            out.push(lhs[start + i])
+            out.push(rhs[start + i])
+            i = i + 1
+        self.put(out, shape)
+
+    me compare(lhs_handle: i64, rhs_handle: i64, op: text) -> i64:
+        val lhs_opt = self.get(lhs_handle)
+        val rhs_opt = self.get(rhs_handle)
+        val lhs_shape_opt = self.shape(lhs_handle)
+        val rhs_shape_opt = self.shape(rhs_handle)
+        if not lhs_opt.? or not rhs_opt.? or not lhs_shape_opt.? or not rhs_shape_opt.?:
+            return self._fail("SIMD comparison operand is not a vector")
+        val lhs = lhs_opt.unwrap()
+        val rhs = rhs_opt.unwrap()
+        val shape = lhs_shape_opt.unwrap()
+        if not _same_shape(shape, rhs_shape_opt.unwrap()):
+            return self._fail("SIMD comparison operand shapes differ")
+        val valid = op == "Eq" or op == "Ne" or op == "Lt" or op == "Le" or op == "Gt" or op == "Ge"
+        if shape.lane_kind == "mask": return self._fail("SIMD comparison requires data lanes")
+        if not valid: return self._fail("unsupported SIMD comparison '{op}'")
+        var out: [i64] = []
+        var i = 0
+        while i < shape.lanes:
+            if shape.lane_kind == "f32": out.push(_cmp_f32(lhs[i], rhs[i], op))
+            else if shape.lane_kind == "f64": out.push(_cmp_f64(lhs[i], rhs[i], op))
+            else: out.push(_cmp_i64(_wrap_i32(lhs[i]), _wrap_i32(rhs[i]), op))
+            i = i + 1
+        self.put(out, _mask_shape(shape))
+
+    me mask_op(lhs_handle: i64, rhs_handle: i64, op: text) -> i64:
+        val lhs_opt = self.get(lhs_handle)
+        val rhs_opt = self.get(rhs_handle)
+        val lhs_shape_opt = self.shape(lhs_handle)
+        val rhs_shape_opt = self.shape(rhs_handle)
+        if not lhs_opt.? or not lhs_shape_opt.?:
+            return self._fail("SIMD mask operand is not a vector")
+        if op != "Not" and (not rhs_opt.? or not rhs_shape_opt.?):
+            return self._fail("SIMD mask rhs is not a vector")
+        val lhs = lhs_opt.unwrap()
+        val shape = lhs_shape_opt.unwrap()
+        if shape.lane_kind != "mask": return self._fail("SIMD mask operation requires mask lanes")
+        var rhs: [i64] = []
+        if rhs_opt.?: rhs = rhs_opt.unwrap()
+        if op != "Not" and not _same_shape(shape, rhs_shape_opt.unwrap()):
+            return self._fail("SIMD mask operand shapes differ")
+        if op != "And" and op != "Or" and op != "Xor" and op != "Andnot" and op != "Not":
+            return self._fail("unsupported SIMD mask operation '{op}'")
+        var out: [i64] = []
+        for i in 0..shape.lanes:
+            if op == "Not": out.push(if lhs[i] == 0: 1 else: 0)
+            else if op == "And": out.push(lhs[i] & rhs[i])
+            else if op == "Or": out.push(lhs[i] | rhs[i])
+            else if op == "Xor": out.push(lhs[i] xor rhs[i])
+            else: out.push((1 xor lhs[i]) & rhs[i])
+        self.put(out, shape)
+
+    me select(mask_handle: i64, true_handle: i64, false_handle: i64) -> i64:
+        val mask_opt = self.get(mask_handle)
+        val true_opt = self.get(true_handle)
+        val false_opt = self.get(false_handle)
+        val true_shape_opt = self.shape(true_handle)
+        val false_shape_opt = self.shape(false_handle)
+        val mask_shape_opt = self.shape(mask_handle)
+        if not mask_opt.? or not true_opt.? or not false_opt.? or not true_shape_opt.? or not false_shape_opt.? or not mask_shape_opt.?:
+            return self._fail("SIMD select operand is not a vector")
+        val mask = mask_opt.unwrap()
+        val yes = true_opt.unwrap()
+        val no = false_opt.unwrap()
+        val shape = true_shape_opt.unwrap()
+        val mask_shape = mask_shape_opt.unwrap()
+        if mask_shape.lane_kind != "mask" or mask_shape.scalable != shape.scalable or mask.len() != shape.lanes or not _same_shape(shape, false_shape_opt.unwrap()):
+            return self._fail("SIMD select operand shapes differ")
+        var out: [i64] = []
+        for i in 0..shape.lanes: out.push(if mask[i] == 0: no[i] else: yes[i])
+        self.put(out, shape)
+
+export MirSimdShape, MirSimdState, mir_simd_shape, mir_simd_min_lanes_for_element

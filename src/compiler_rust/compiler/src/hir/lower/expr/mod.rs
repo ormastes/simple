@@ -1311,9 +1311,13 @@ impl Lowerer {
                 {
                     return Ok(Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
-                            name: "rt_enum_check_discriminant".to_string(),
+                            name: "rt_enum_check_variant".to_string(),
                             args: vec![
                                 receiver.clone(),
+                                HirExpr {
+                                    kind: HirExprKind::Integer(self.enum_runtime_id_for_type(receiver.ty)),
+                                    ty: TypeId::I64,
+                                },
                                 HirExpr {
                                     kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method("Ok")),
                                     ty: TypeId::I64,
@@ -1329,9 +1333,13 @@ impl Lowerer {
                 {
                     return Ok(Some(HirExpr {
                         kind: HirExprKind::BuiltinCall {
-                            name: "rt_enum_check_discriminant".to_string(),
+                            name: "rt_enum_check_variant".to_string(),
                             args: vec![
                                 receiver.clone(),
+                                HirExpr {
+                                    kind: HirExprKind::Integer(self.enum_runtime_id_for_type(receiver.ty)),
+                                    ty: TypeId::I64,
+                                },
                                 HirExpr {
                                     kind: HirExprKind::Integer(
                                         self.enum_variant_discriminant_for_builtin_method("Err"),

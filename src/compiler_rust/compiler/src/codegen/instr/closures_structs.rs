@@ -2096,12 +2096,13 @@ fn try_compile_builtin_method_call<M: Module>(
                 check_variant.hash(&mut hasher);
                 (hasher.finish() & 0xFFFFFFFF) as i64
             };
-            let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_discriminant") else {
+            let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_variant") else {
                 return Ok(None);
             };
             let check_ref = ctx.module.declare_func_in_func(check_id, builder.func);
+            let enum_id_val = builder.ins().iconst(types::I64, 0);
             let disc_val = builder.ins().iconst(types::I64, disc);
-            let call = adapted_call(builder, check_ref, &[receiver_val, disc_val]);
+            let call = adapted_call(builder, check_ref, &[receiver_val, enum_id_val, disc_val]);
             let bool_result = builder.inst_results(call)[0];
             let result = builder.ins().sextend(types::I64, bool_result);
             return Ok(Some(result));

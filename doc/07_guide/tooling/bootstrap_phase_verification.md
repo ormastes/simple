@@ -14,6 +14,30 @@ sh scripts/check/check-bootstrap-all-phases.shs --selftest-only
 The umbrella's registry is the machine-readable twin of the table below. If you
 add, rename, or delete a phase gate, change both.
 
+Actual tool/provider execution has an additional gate:
+`python scripts/check/check-bootstrap-phase-live.py --manifest
+<absolute-phase-manifest.json> --output <new-absolute-receipt-directory>
+--timeout 30`. Run it for each admitted phase's own artifacts; its rows cover
+MCP, LSP MCP, the pinned SPipe plugin, Caret, DevHub, and separate GitHub/Jira/
+Confluence fixture reads. The source/static umbrella cannot replace these live
+checks or complete compiler/interpreter/component suites. A controller fixture
+PASS is not a live artifact/access PASS. Missing admission, plugin, credentials,
+fixture IDs, or read permission remains blocked/unsupported with an exact resume
+command. `devhub auth status` alone does not prove provider access.
+
+The precise manifest, row, suite, and resume contract is in
+`doc/03_plan/compiler/bootstrap/full_pure_simple_simd_bootstrap_trusted_deployment_matrix.md`.
+
+Phase 1 and Phase 2 major-feature coverage also uses
+`scripts/check/check-bootstrap-phase-feature-matrix.py`. It requires paired
+interpreter/native rows for compiler, language/runtime, Simple MCP, Simple LSP
+MCP, T32 MCP, SPipe/SSpec, Caret, Slang, and SIMD database/web behavior, plus
+actual protocol/plugin/binary launches. See
+`doc/07_guide/tooling/bootstrap_phase_feature_matrix.md`. Every supported row
+pins the absolute executable, SHA-256, generation, provenance, admission, test
+inventory, selected bootstrap jobs, and detected CPU count. Missing or stale
+rows fail before launch; Phase 1/2 results are never release evidence.
+
 ## Why an umbrella exists
 
 Before this, the gates were scattered across three regimes: some invoked from

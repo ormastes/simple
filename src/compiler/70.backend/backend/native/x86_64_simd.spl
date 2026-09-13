@@ -20,6 +20,7 @@ use compiler.backend.native.mach_inst.{X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3, X
 use compiler.backend.native.mach_inst.{X86_XMM8, X86_XMM9, X86_XMM10, X86_XMM11, X86_XMM12, X86_XMM13, X86_XMM14, X86_XMM15}
 use compiler.backend.native.mach_inst.{X86_YMM0, X86_YMM1, X86_YMM2, X86_YMM3, X86_YMM4, X86_YMM5, X86_YMM6, X86_YMM7}
 use compiler.backend.native.mach_inst.{X86_YMM8, X86_YMM9, X86_YMM10, X86_YMM11, X86_YMM12, X86_YMM13, X86_YMM14, X86_YMM15}
+use compiler.types.simd_capabilities.{X86SimdEligibilityV1, x86_avx2_eligible, x86_avx512f_eligible}
 
 # ============================================================================
 # VEX Prefix Encoding
@@ -427,10 +428,16 @@ with an "avx2" token (e.g. "x86_64-avx2-linux"). Non-x86 triples gate all off.
 struct X86SimdGate:
     allow_sse2: bool
     allow_avx2: bool
+    allow_avx512: bool
 
 fn x86_simd_gate_from_triple(triple: text) -> X86SimdGate:
     val is_x86 = triple.starts_with("x86_64") or triple.starts_with("i686")
-    X86SimdGate(allow_sse2: is_x86, allow_avx2: is_x86 and triple.contains("avx2"))
+    val avx512 = is_x86 and (triple.contains("avx512") or triple.contains("avx-512"))
+    X86SimdGate(
+        allow_sse2: is_x86,
+        allow_avx2: is_x86 and (triple.contains("avx2") or avx512),
+        allow_avx512: avx512
+    )
 
 fn x86_simd_gate_allows_sse2(gate: X86SimdGate) -> bool:
     gate.allow_sse2
@@ -438,5 +445,19 @@ fn x86_simd_gate_allows_sse2(gate: X86SimdGate) -> bool:
 fn x86_simd_gate_allows_avx2(gate: X86SimdGate) -> bool:
     gate.allow_avx2
 
+fn x86_simd_gate_allows_avx512(gate: X86SimdGate) -> bool:
+    gate.allow_avx512
+
+fn x86_select_simd_width_bits(gate: X86SimdGate, eligibility: X86SimdEligibilityV1, requested_bits: i64) -> i64:
+    # Selection completes before mutation. Missing CPU or OS state moves to the
+    # next admitted implementation and eventually returns scalar width zero.
+    if requested_bits >= 512 and gate.allow_avx512 and x86_avx512f_eligible(eligibility):
+        return 512
+    if requested_bits >= 256 and gate.allow_avx2 and x86_avx2_eligible(eligibility):
+        return 256
+    if requested_bits >= 128 and gate.allow_sse2:
+        return 128
+    0
+
 fn x86_simd_gate_any_enabled(gate: X86SimdGate) -> bool:
-    gate.allow_sse2 or gate.allow_avx2
+    gate.allow_sse2 or gate.allow_avx2 or gate.allow_avx512

@@ -1,0 +1,149 @@
+# AVX-512 frame-value planner. Shape metadata never depends on a physical
+# register. SIMD values live in their own frame slots between instructions.
+use compiler.mir.mir_data.{MirFunction, MirOperand, MirOperandKind, MirTypeKind}
+use compiler.backend.native.x86_64_avx512_ops.{avx512_binop_code, avx512_unop_code, avx512_cmp_code, avx512_reduce_code}
+
+struct X86Avx512FunctionPlanV1:
+    ok: bool
+    shapes: Dict<i64, text>
+    reason: text
+
+fn x86_avx512_operand_local(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Copy(local): local.id
+        case Move(local): local.id
+        case _: -1
+
+fn x86_avx512_load_shape(kind: MirTypeKind) -> text:
+    match kind:
+        case Vec16f: "f32x16"
+        case Vec8d: "f64x8"
+        case Vec16i: "i32x16"
+        case Vec8i: "i32x8"
+        case _: ""
+
+fn x86_avx512_shape(shapes: Dict<i64, text>, local: i64) -> text:
+    if shapes.contains_key(local): shapes[local] else: ""
+
+fn x86_avx512_source_shape(shapes: Dict<i64, text>, operand: MirOperand) -> text:
+    x86_avx512_shape(shapes, x86_avx512_operand_local(operand))
+
+fn x86_avx512_mask_shape(shape: text) -> text:
+    if shape == "f64x8": "mask8"
+    elif shape == "f32x16" or shape == "i32x16": "mask16"
+    else: ""
+
+fn x86_avx512_shape_supports_op(shape: text, op: text) -> bool:
+    val code = avx512_binop_code(op)
+    if shape == "f32x16" or shape == "f64x8": return code >= 1 and code <= 6
+    if shape == "i32x16": return code > 0 and code != 4
+    false
+
+fn x86_function_has_avx512_fixed(func: MirFunction) -> bool:
+    for local in func.locals:
+        match local.type_.kind:
+            case Vec16f | Vec8d | Vec16i: return true
+            case _: ()
+    false
+
+fn x86_avx512_reject(reason: text) -> X86Avx512FunctionPlanV1:
+    X86Avx512FunctionPlanV1(ok: false, shapes: {}, reason: "avx512-{reason}")
+
+fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
+    var shapes: Dict<i64, text> = {}
+    for local in func.locals:
+        val shape = x86_avx512_load_shape(local.type_.kind)
+        if shape != "":
+            shapes[local.id.id] = shape
+            match local.kind:
+                case Arg(_): return x86_avx512_reject("vector-argument-ABI-unavailable-use-pointer-kernel")
+                case _: ()
+    if x86_avx512_load_shape(func.signature.return_type.kind) != "":
+        return x86_avx512_reject("vector-return-ABI-unavailable-use-pointer-kernel")
+    # MIR has no first-class mask type. Recover mask lane count from its
+    # defining comparison, then propagate it through copies and mask operations.
+    for round in 0..(func.locals.len() + 1):
+        var changed = false
+        for block in func.blocks:
+            for inst in block.instructions:
+                var dest = -1
+                var inferred = ""
+                match inst.kind:
+                    case MirSimdCmp(id, lhs, _, _):
+                        dest = id.id
+                        inferred = x86_avx512_mask_shape(x86_avx512_source_shape(shapes, lhs))
+                    case MirSimdMaskOp(id, lhs, _, _):
+                        dest = id.id
+                        val source = x86_avx512_source_shape(shapes, lhs)
+                        if source == "mask8" or source == "mask16": inferred = source
+                    case Copy(id, source), Move(id, source):
+                        dest = id.id
+                        inferred = x86_avx512_shape(shapes, source.id)
+                    case _: ()
+                if dest >= 0 and inferred != "" and x86_avx512_shape(shapes, dest) != inferred:
+                    shapes[dest] = inferred
+                    changed = true
+        if not changed: break
+    for block in func.blocks:
+        for inst in block.instructions:
+            var reason = ""
+            match inst.kind:
+                case MirSimdLoad(dest, _, _, type_), MirSimdSplat(dest, _, type_), MirSimdGather(dest, _, _, type_):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    if shape == "" or shape != x86_avx512_load_shape(type_.kind): reason = "load-splat-gather-shape-mismatch"
+                case MirSimdBinop(dest, lhs, rhs, op):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    if not x86_avx512_shape_supports_op(shape, op): reason = "unsupported-binary-{shape}-{op}"
+                    elif x86_avx512_source_shape(shapes, lhs) != shape or x86_avx512_source_shape(shapes, rhs) != shape: reason = "binary-shape-mismatch"
+                case MirSimdTernop(dest, lhs, rhs, addend, op):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    if shape != "f32x16" and shape != "f64x8": reason = "fma-requires-floating-lanes"
+                    elif op != "Fma" and op != "Fnmadd": reason = "unsupported-ternary-{op}"
+                    elif x86_avx512_source_shape(shapes, lhs) != shape or x86_avx512_source_shape(shapes, rhs) != shape or x86_avx512_source_shape(shapes, addend) != shape: reason = "ternary-shape-mismatch"
+                case MirSimdUnop(dest, source, op):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    val code = avx512_unop_code(op)
+                    if x86_avx512_source_shape(shapes, source) != shape or shape == "": reason = "unary-shape-mismatch"
+                    elif shape == "i32x16" and code != 1 and code != 3: reason = "integer-unary-{op}"
+                    elif shape != "i32x16" and ((shape != "f32x16" and shape != "f64x8") or code <= 0 or code == 3): reason = "floating-unary-{op}"
+                case MirSimdCmp(_, lhs, rhs, op):
+                    val shape = x86_avx512_source_shape(shapes, lhs)
+                    if avx512_cmp_code(op) < 0 or x86_avx512_mask_shape(shape) == "" or x86_avx512_source_shape(shapes, rhs) != shape: reason = "comparison-shape-or-predicate"
+                case MirSimdSelect(dest, mask, lhs, rhs):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    if x86_avx512_mask_shape(shape) == "" or x86_avx512_source_shape(shapes, mask) != x86_avx512_mask_shape(shape) or x86_avx512_source_shape(shapes, lhs) != shape or x86_avx512_source_shape(shapes, rhs) != shape: reason = "select-mask-or-data-shape"
+                case MirSimdMaskOp(dest, lhs, rhs, op):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    if (shape != "mask8" and shape != "mask16") or x86_avx512_source_shape(shapes, lhs) != shape: reason = "mask-kind-mismatch"
+                    elif op != "Not" and x86_avx512_source_shape(shapes, rhs) != shape: reason = "mask-width-mismatch"
+                    elif op != "Not" and op != "And" and op != "Or" and op != "Xor" and op != "Andnot": reason = "unsupported-mask-{op}"
+                case MirSimdReduce(_, source, op):
+                    val shape = x86_avx512_source_shape(shapes, source)
+                    val code = avx512_reduce_code(op)
+                    if shape == "i32x16":
+                        if code != 1 and code != 5 and code != 6 and code != 7 and code != 8 and code != 9: reason = "integer-reduce-{op}"
+                    elif (shape != "f32x16" and shape != "f64x8") or (code != 1 and code != 5 and code != 6): reason = "floating-reduce-{op}"
+                case MirSimdPermute(dest, source, indices):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    if x86_avx512_mask_shape(shape) == "" or x86_avx512_source_shape(shapes, source) != shape: reason = "permute-data-shape"
+                    elif x86_avx512_source_shape(shapes, indices) != (if shape == "f64x8": "i32x8" else: "i32x16"): reason = "permute-index-shape"
+                case MirSimdShuffle(dest, lhs, rhs, op):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    if x86_avx512_mask_shape(shape) == "" or x86_avx512_source_shape(shapes, lhs) != shape: reason = "shuffle-data-shape"
+                    elif op != "Reverse" and op != "BroadcastLane" and op != "InterleaveLo" and op != "InterleaveHi": reason = "unsupported-shuffle-{op}"
+                    elif (op == "InterleaveLo" or op == "InterleaveHi") and x86_avx512_source_shape(shapes, rhs) != shape: reason = "shuffle-right-shape"
+                case MirSimdStore(value, _, _):
+                    val shape = x86_avx512_source_shape(shapes, value)
+                    if shape == "" or shape == "mask8" or shape == "mask16": reason = "store-requires-data-vector"
+                case MirSimdScatter(value, _, indices):
+                    val shape = x86_avx512_source_shape(shapes, value)
+                    if x86_avx512_mask_shape(shape) == "" or x86_avx512_source_shape(shapes, indices) != (if shape == "f64x8": "i32x8" else: "i32x16"): reason = "scatter-shape-mismatch"
+                case _: ()
+            if reason != "": return x86_avx512_reject(reason)
+            match inst.kind:
+                case MirSimdGather(dest, _, indices, _):
+                    val shape = x86_avx512_shape(shapes, dest.id)
+                    if x86_avx512_source_shape(shapes, indices) != (if shape == "f64x8": "i32x8" else: "i32x16"):
+                        return x86_avx512_reject("gather-indices-require-matching-i32-lanes")
+                case _: ()
+    X86Avx512FunctionPlanV1(ok: true, shapes: shapes, reason: "avx512-frame-values-planned")

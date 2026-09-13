@@ -363,6 +363,16 @@ fn function_has_calls(func: MachFunction) -> bool:
                 return true
     false
 
+fn function_has_x86_avx512(func: MachFunction) -> bool:
+    for block in func.blocks:
+        for inst in block.insts:
+            if inst.opcode >= 400 and inst.opcode <= 450:
+                return true
+    false
+
+fn x86_avx512_spill_admitted(has_avx512: bool, spill_count: i64) -> bool:
+    not has_avx512 or spill_count == 0
+
 # ============================================================================
 # Apply Register Allocation
 # ============================================================================
@@ -378,6 +388,9 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
 
     # Run linear scan
     val result = linear_scan_x86_64(intervals, alloc_regs)
+    val has_avx512 = function_has_x86_avx512(func)
+    if not x86_avx512_spill_admitted(has_avx512, result.spills.len()):
+        panic("x86-avx512 native GPR pressure requires {result.spills.len()} spills, but generic x86 spill rewriting is unsafe for AVX-512 functions")
 
     # Calculate frame layout including callee-saved register storage
     val callee_save_count = result.used_callee_saved.len()
@@ -393,7 +406,10 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
     for block in func.blocks:
         var new_block = new_mach_block(block.label, block.block_id)
         for inst in block.insts:
-            val rewritten = rewrite_inst(inst, result)
+            val rewritten = if has_avx512:
+                [rewrite_inst_no_spill(inst, result, "x86-avx512")]
+            else:
+                rewrite_inst(inst, result)
             for ri in rewritten:
                 new_block = mach_block_add_inst(new_block, ri)
         new_blocks.push(new_block)

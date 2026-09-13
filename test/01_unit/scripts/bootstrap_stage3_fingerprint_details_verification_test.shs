@@ -1,0 +1,73 @@
+#!/bin/sh
+# Behavioral contract for the authenticated Stage 3 fingerprint-details sidecar.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage3-details.XXXXXX")
+trap 'chmod -R u+w "$fixture" 2>/dev/null || true; rm -rf -- "$fixture"' EXIT HUP INT TERM
+
+seed="$fixture/seed"
+native_all="$fixture/native-all"
+stamp="$fixture/seed.inputs.sha256"
+details="$stamp.details.env"
+records="$fixture/records"
+cp /bin/sh "$seed"
+printf 'native companion fixture\n' >"$native_all"
+[ -x "$seed" ]
+[ -s "$native_all" ]
+
+printf '%s\n' \
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  src/compiler_rust/a.rs' \
+    'profile=bootstrap backend=cranelift features=none target=x86_64-pc-windows-gnu' \
+    'rust-sysroot=/fixture/rust' >"$records"
+bootstrap_stage3_write_seed_fingerprint_details "$details" "$records" "$fixture"
+inputs=$(sed -n 's/^aggregate_sha256=//p' "$details")
+bootstrap_stage3_valid_fingerprint "$inputs"
+[ "$(bootstrap_stage3_manifest_value schema "$details")" = \
+    simple-bootstrap-fingerprint-details-v1 ]
+bootstrap_stage3_write_seed_stamp "$stamp" "$inputs" "$seed" "$native_all" "$fixture/missing-backfill"
+
+# A complete, hash-bound sidecar is admitted.
+bootstrap_stage3_verify_seed_stamp "$stamp" "$inputs" "$seed" "$native_all" \
+    "$fixture/missing-backfill"
+
+# A well-formed but incorrect sidecar digest is rejected before its contents
+# can become authority.
+tampered_stamp="$fixture/tampered-hash.stamp"
+sed 's/^fingerprint_details_sha256=.*/fingerprint_details_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
+    "$stamp" >"$tampered_stamp"
+if bootstrap_stage3_verify_seed_stamp "$tampered_stamp" "$inputs" "$seed" "$native_all" \
+    "$fixture/missing-backfill"; then
+    echo 'FAIL: tampered sidecar hash was admitted' >&2
+    exit 1
+fi
+
+# Updating the outer hash cannot authorize a sidecar with the wrong schema.
+tampered_schema="$fixture/tampered-schema.details.env"
+sed 's/^schema=.*/schema=unexpected-details-schema-v9/' "$details" >"$tampered_schema"
+tampered_schema_sha=$(bootstrap_stage3_hash_file "$tampered_schema")
+sed "s#^fingerprint_details_file=.*#fingerprint_details_file=$(basename "$tampered_schema")#; s#^fingerprint_details_sha256=.*#fingerprint_details_sha256=$tampered_schema_sha#" \
+    "$stamp" >"$fixture/tampered-schema.stamp"
+if bootstrap_stage3_verify_seed_stamp "$fixture/tampered-schema.stamp" "$inputs" "$seed" "$native_all" \
+    "$fixture/missing-backfill"; then
+    echo 'FAIL: tampered sidecar schema was admitted' >&2
+    exit 1
+fi
+
+# Updating the outer hash cannot authorize a sidecar whose aggregate no longer
+# matches the input fingerprint recorded by the stamp.
+tampered_aggregate="$fixture/tampered-aggregate.details.env"
+sed 's/^aggregate_sha256=.*/aggregate_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/' \
+    "$details" >"$tampered_aggregate"
+tampered_aggregate_sha=$(bootstrap_stage3_hash_file "$tampered_aggregate")
+sed "s#^fingerprint_details_file=.*#fingerprint_details_file=$(basename "$tampered_aggregate")#; s#^fingerprint_details_sha256=.*#fingerprint_details_sha256=$tampered_aggregate_sha#" \
+    "$stamp" >"$fixture/tampered-aggregate.stamp"
+if bootstrap_stage3_verify_seed_stamp "$fixture/tampered-aggregate.stamp" "$inputs" "$seed" "$native_all" \
+    "$fixture/missing-backfill"; then
+    echo 'FAIL: tampered sidecar aggregate was admitted' >&2
+    exit 1
+fi
+
+echo 'bootstrap Stage 3 fingerprint-details verification: PASS'

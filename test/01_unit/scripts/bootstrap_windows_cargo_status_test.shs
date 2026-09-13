@@ -1,0 +1,45 @@
+#!/bin/sh
+# Actual native child status through the same clean-environment Cargo adapter.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+case "$(uname -s)" in MSYS*|MINGW*|CYGWIN*) ;; *) echo 'ERROR: actual Windows execution required' >&2; exit 2 ;; esac
+. "$root/scripts/bootstrap/bootstrap-logged-process.shs"
+work=$(mktemp -d "$root/build/native_probe/cargo-status.XXXXXX")
+python_bin=$(command -v python3 || command -v python)
+fail() { echo "FAIL: $1; evidence=$work" >&2; exit 1; }
+mkdir "$work/home with space"
+cat >"$work/native child.py" <<'PY'
+import os
+from pathlib import Path
+import sys
+assert "BOOTSTRAP_TEST_LEAK" not in os.environ
+assert Path(os.environ["HOME"]).name == "home with space", os.environ["HOME"]
+assert sys.argv[2] == 'literal $(no-shell-expansion) argument'
+with open(os.environ["LAUNCH_MARKER"], "a", encoding="ascii") as marker:
+    marker.write("launch\n")
+print("Finished `bootstrap` profile [optimized] target(s) in 0.01s", flush=True)
+sys.exit(int(sys.argv[1]))
+PY
+BOOTSTRAP_TEST_LEAK=must-not-be-inherited
+export BOOTSTRAP_TEST_LEAK
+status_cases=${BOOTSTRAP_WINDOWS_CARGO_STATUS_CASE:-"0 101 125 137"}
+for expected in $status_cases; do
+    log="$work/status-$expected.log"
+    : >"$log"
+    actual=0
+    bootstrap_logged_windows_cargo "$root" "$log" env -i \
+        "HOME=$work/home with space" "LAUNCH_MARKER=$work/launches" \
+        "SystemRoot=${SystemRoot:-${SYSTEMROOT:-C:\WINDOWS}}" \
+        "$python_bin" "$work/native child.py" "$expected" \
+        'literal $(no-shell-expansion) argument' || actual=$?
+    [ "$actual" = "$expected" ] || fail "expected status $expected, got $actual"
+    receipt=$(sed -n 's/^process_receipt=//p' "$log")
+    [ -f "$receipt" ] || fail 'missing native receipt'
+    grep -qx "native_exit_status=$expected" "$receipt" || fail 'native status changed'
+    grep -qx "raw_status=$expected" "$receipt" || fail 'shell status changed'
+    grep -qx 'reason=child-exit' "$receipt" || fail 'ordinary exit misclassified'
+    grep -qx 'command_environment=clean-prefix' "$receipt" || fail 'clean env envelope missing'
+    grep -q '^Finished .*bootstrap.* profile' "$log" || fail 'build output missing'
+done
+[ "$(wc -l <"$work/launches" | tr -d ' ')" = "$(printf '%s\n' $status_cases | wc -l | tr -d ' ')" ] || fail 'child repeated or skipped'
+printf 'PASS: native Cargo status %s, exact clean env and literal argv; evidence=%s\n' "$status_cases" "$work"

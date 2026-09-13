@@ -46,36 +46,28 @@ fi
 # platform-detect emits the 3-part Rust triple (e.g. aarch64-apple-darwin), but
 # release binaries live under the 4-part Simple-native triple (…-macho on macOS).
 # Resolve PLATFORM_TRIPLE to whichever release dir actually exists.
-if [ ! -x "${repo_root}/bin/release/${PLATFORM_TRIPLE}/simple" ]; then
-  for cand in "${PLATFORM_TRIPLE}-macho" "${PLATFORM_ARCH}-apple-darwin-macho"; do
-    if [ -x "${repo_root}/bin/release/${cand}/simple" ]; then
-      PLATFORM_TRIPLE="${cand}"
-      break
-    fi
-  done
-fi
-
-release_dir="${repo_root}/bin/release/${PLATFORM_TRIPLE}"
-
-if [ ! -x "${release_dir}/simple" ]; then
-  echo "setup: ${release_dir}/simple not found — run bootstrap first" >&2
+if ! sh "${repo_root}/scripts/bootstrap/promote-stage4-local.shs" --resolve cli >/dev/null 2>&1; then
+  echo "setup: no admitted local Stage 4 generation; run bootstrap and explicit promotion first" >&2
   exit 0
 fi
 
 cd "${repo_root}/bin"
 
-ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
+rm -f simple
+cat > simple <<'EOF'
+#!/bin/sh
+set -eu
+script_dir=$(CDPATH= cd -- "${0%/*}" && pwd -P)
+repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd -P)
+native=$(sh "${repo_root}/scripts/bootstrap/promote-stage4-local.shs" --resolve cli)
+exec "${native}" "$@"
+EOF
+chmod +x simple
 
-if [ -x "release/${PLATFORM_TRIPLE}/simple_seed" ]; then
-  ln -sf "release/${PLATFORM_TRIPLE}/simple_seed" simple_seed
-else
-  rm -f simple_seed
-fi
+rm -f simple_seed
 
 for b in simple_ui_backend; do
-  if [ -x "release/${PLATFORM_TRIPLE}/${b}" ]; then
-    ln -sf "release/${PLATFORM_TRIPLE}/${b}" "${b}"
-  fi
+  rm -f "${b}"
 done
 
 rm -f simple_mcp_server
@@ -241,32 +233,10 @@ mcp_probe_native() {
 }
 
 cd "${repo_root}"
-native=""
-if [ -n "${SIMPLE_MCP_NATIVE:-}" ]; then
-  if [ -x "${SIMPLE_MCP_NATIVE}" ] && native_hash_is_valid "${SIMPLE_MCP_NATIVE}" && mcp_probe_native "${SIMPLE_MCP_NATIVE}"; then
-    native="${SIMPLE_MCP_NATIVE}"
-  else
-    printf '%s\n' "error: SIMPLE_MCP_NATIVE is missing or failed its MCP probe: ${SIMPLE_MCP_NATIVE}" >&2
-    exit 127
-  fi
-else
-  for candidate in \
-    "${script_dir}/release/aarch64-apple-darwin/simple_mcp_server" \
-    "${script_dir}/release/aarch64-apple-darwin-macho/simple_mcp_server" \
-    "${script_dir}/release/x86_64-apple-darwin/simple_mcp_server" \
-    "${script_dir}/release/x86_64-apple-darwin-macho/simple_mcp_server" \
-    "${script_dir}/release/x86_64-unknown-linux-gnu/simple_mcp_server" \
-    "${script_dir}/release/aarch64-unknown-linux-gnu/simple_mcp_server" \
-    "${script_dir}/release/linux-x86_64/simple_mcp_server" \
-    "${script_dir}/release/x86_64-pc-windows-msvc/simple_mcp_server.exe" \
-    "${script_dir}/release/x86_64-pc-windows-gnu/simple_mcp_server.exe" \
-    "${script_dir}/release/aarch64-pc-windows-msvc/simple_mcp_server.exe"
-  do
-    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}" && mcp_probe_native "${candidate}"; then
-      native="${candidate}"
-      break
-    fi
-  done
+native=$(sh "${repo_root}/scripts/bootstrap/promote-stage4-local.shs" --resolve mcp) || exit 127
+if [ ! -x "${native}" ] || ! mcp_probe_native "${native}"; then
+  printf '%s\n' "error: admitted native simple_mcp_server failed its MCP probe: ${native}" >&2
+  exit 127
 fi
 
 if [ -z "${native}" ]; then
@@ -426,27 +396,10 @@ mcp_probe_lsp_native() {
 }
 
 cd "${repo_root}"
-native=""
-if [ -n "${SIMPLE_LSP_MCP_NATIVE:-}" ]; then
-  if [ -x "${SIMPLE_LSP_MCP_NATIVE}" ] && native_hash_is_valid "${SIMPLE_LSP_MCP_NATIVE}" && mcp_probe_lsp_native "${SIMPLE_LSP_MCP_NATIVE}"; then
-    native="${SIMPLE_LSP_MCP_NATIVE}"
-  else
-    printf '%s\n' "error: SIMPLE_LSP_MCP_NATIVE is missing or failed its LSP MCP probe: ${SIMPLE_LSP_MCP_NATIVE}" >&2
-    exit 127
-  fi
-else
-  for candidate in \
-    "${script_dir}/release/aarch64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/x86_64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server" \
-    "${script_dir}/release/aarch64-unknown-linux-gnu/simple_lsp_mcp_server" \
-    "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server"
-  do
-    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}" && mcp_probe_lsp_native "${candidate}"; then
-      native="${candidate}"
-      break
-    fi
-  done
+native=$(sh "${repo_root}/scripts/bootstrap/promote-stage4-local.shs" --resolve lsp-mcp) || exit 127
+if [ ! -x "${native}" ] || ! mcp_probe_lsp_native "${native}"; then
+  printf '%s\n' "error: admitted native simple_lsp_mcp_server failed its LSP MCP probe: ${native}" >&2
+  exit 127
 fi
 
 if [ ! -x "${native}" ]; then
@@ -645,7 +598,7 @@ exec "${native}" "$@" 2>>"${log_dir}/t32_lsp_mcp_stderr.log"
 EOF
 chmod +x t32_lsp_mcp_server
 
-echo "setup: bin/simple -> release/${PLATFORM_TRIPLE}/simple"
+echo "setup: CLI, MCP, and LSP MCP wrappers -> admitted Stage 4 local generation"
 
 # Install and verify mandatory hooks through the worktree-aware helper. It owns
 # pre-push migration and fails setup when installation or wiring is unsafe.

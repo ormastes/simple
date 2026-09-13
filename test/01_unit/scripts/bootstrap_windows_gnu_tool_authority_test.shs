@@ -1,0 +1,54 @@
+#!/bin/sh
+# Behavioral fault injection for target compiler selection; no build admission.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-gnu-tool-authority.XXXXXX")
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+case "$fixture" in /*/simple-gnu-tool-authority.*) ;; *) exit 1 ;; esac
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+fixture_shell=$(command -v sh)
+utility_dir=$(CDPATH= cd -- "${fixture_shell%/*}" && pwd -P)
+mkdir "$fixture/tools"
+for tool in cargo rustc gcc gcc-selected clang ld ar ranlib; do
+    printf '#!/bin/sh\nprintf "fixture %s version 1\\n"\n' "$tool" >"$fixture/tools/$tool"
+    chmod +x "$fixture/tools/$tool"
+done
+test_path="$fixture/tools:$utility_dir"
+
+# Delegate ordinary command lookup to a real shell, while making the cc alias
+# absent even on a test host that normally installs one. Actual executable
+# canonicalization, invocation, hashing and snapshot serialization stay live.
+command() {
+    case "$#:${1:-}:${2:-}" in
+        2:-v:cc) return 1 ;;
+        *) "$fixture_shell" -c 'command "$@"' lookup "$@" ;;
+    esac
+}
+bootstrap_stage3_host_platform() { printf '%s\n' x86_64-pc-windows-gnu; }
+bootstrap_stage3_resolve_rust_toolchain() {
+    printf 'rustc-path=%s\ncargo-path=%s\n' "$fixture/tools/rustc" "$fixture/tools/cargo"
+}
+
+if ! CC_x86_64_pc_windows_gnu=gcc bootstrap_stage3_tool_authority_snapshot \
+    "$fixture/default.snapshot" "$test_path" "$root"; then
+    echo 'FAIL: Windows GNU snapshot rejected gcc when cc was absent' >&2
+    exit 1
+fi
+grep -F "tool=gcc|requested=$fixture/tools/gcc|" "$fixture/default.snapshot" >/dev/null
+if grep -F 'tool=cc|' "$fixture/default.snapshot" >/dev/null; then
+    echo 'FAIL: Windows GNU snapshot bound the absent cc alias' >&2
+    exit 1
+fi
+
+CC_x86_64_pc_windows_gnu=gcc-selected bootstrap_stage3_tool_authority_snapshot \
+    "$fixture/selected.snapshot" "$test_path" "$root"
+grep -F "tool=gcc-selected|requested=$fixture/tools/gcc-selected|" \
+    "$fixture/selected.snapshot" >/dev/null
+if CC_x86_64_pc_windows_gnu=missing-selected bootstrap_stage3_tool_authority_snapshot \
+    "$fixture/missing.snapshot" "$test_path" "$root"; then
+    echo 'FAIL: missing selected compiler silently fell back to gcc' >&2
+    exit 1
+fi
+[ ! -e "$fixture/missing.snapshot" ]
+printf 'PASS: Windows GNU tool authority binds target gcc and explicit override without cc, rejects a missing selected compiler\n'

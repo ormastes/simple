@@ -837,9 +837,13 @@ impl Lowerer {
             kind: HirExprKind::If {
                 condition: Box::new(HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
+                        name: "rt_enum_check_variant".to_string(),
                         args: vec![
                             subject_for_check,
+                            HirExpr {
+                                kind: HirExprKind::Integer(0),
+                                ty: TypeId::I64,
+                            },
                             HirExpr {
                                 kind: HirExprKind::Integer(expected_disc),
                                 ty: TypeId::I64,

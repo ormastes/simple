@@ -674,8 +674,7 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
-                // All enums use hashed variant name discriminants consistently
+                // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -691,8 +690,15 @@ impl Lowerer {
 
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
-                        args: vec![subject_ref.clone(), expected_val],
+                        name: "rt_enum_check_variant".to_string(),
+                        args: vec![
+                            subject_ref.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                ty: TypeId::I64,
+                            },
+                            expected_val,
+                        ],
                     },
                     ty: TypeId::BOOL,
                 };
@@ -1007,7 +1013,7 @@ impl Lowerer {
                 }
                 acc
             }
-            Pattern::Enum { variant, payload, .. } => {
+            Pattern::Enum { name, variant, payload, .. } => {
                 // A struct/class spelling (`Point(x, y)`) also arrives as
                 // Pattern::Enum. Emitting a discriminant check for it would
                 // read an object pointer's enum header and never match — see
@@ -1029,9 +1035,13 @@ impl Lowerer {
                 };
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
+                        name: "rt_enum_check_variant".to_string(),
                         args: vec![
                             slot.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_pattern(name, variant)),
+                                ty: TypeId::I64,
+                            },
                             HirExpr {
                                 kind: HirExprKind::Integer(expected_disc),
                                 ty: TypeId::I64,
@@ -1499,6 +1509,36 @@ impl Lowerer {
                     .iter()
                     .any(|(variant, payload)| variant == name && payload.is_none())
             })
+    }
+
+    /// Stable runtime identity for a statically known enum. Zero keeps the
+    /// legacy discriminant-only lane for erased or unresolved user values.
+    pub(crate) fn enum_runtime_id_for_type(&self, subject_ty: TypeId) -> i64 {
+        match self.module.types.get(subject_ty) {
+            Some(HirType::Enum { name, .. }) => i64::from(crate::codegen::shared::enum_runtime_type_id(name)),
+            _ => 0,
+        }
+    }
+
+    fn enum_runtime_id_for_pattern(&self, enum_name: &str, variant_name: &str) -> i64 {
+        if !enum_name.is_empty() && enum_name != "_" {
+            return i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name));
+        }
+
+        let mut owner: Option<&str> = None;
+        for (_, ty) in self.module.types.iter() {
+            let HirType::Enum { name, variants, .. } = ty else {
+                continue;
+            };
+            if !variants.iter().any(|(variant, _)| variant == variant_name) {
+                continue;
+            }
+            if owner.is_some_and(|prior| prior != name) {
+                return 0;
+            }
+            owner = Some(name);
+        }
+        owner.map_or(0, |name| i64::from(crate::codegen::shared::enum_runtime_type_id(name)))
     }
 
     /// Is a bare `case <name>:` arm provably NOT an intended binding?
@@ -2492,9 +2532,13 @@ impl Lowerer {
                 (hasher.finish() & 0xFFFF_FFFF) as i64
             };
             builtin_check(
-                "rt_enum_check_discriminant",
+                "rt_enum_check_variant",
                 vec![
                     subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(RESULT_ENUM_ID),
+                        ty: TypeId::I64,
+                    },
                     HirExpr {
                         kind: HirExprKind::Integer(err_disc),
                         ty: TypeId::I64,
@@ -2725,9 +2769,13 @@ impl Lowerer {
 
         let is_err = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_enum_check_discriminant".to_string(),
+                name: "rt_enum_check_variant".to_string(),
                 args: vec![
                     subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                        ty: TypeId::I64,
+                    },
                     HirExpr {
                         kind: HirExprKind::Integer(err_disc),
                         ty: TypeId::I64,

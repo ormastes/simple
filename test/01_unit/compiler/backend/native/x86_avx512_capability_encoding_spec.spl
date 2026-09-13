@@ -1,0 +1,42 @@
+# Purpose: AVX-512 CPU/OS admission and EVEX encoding unit evidence.
+# @req REQ-SIMD-002 REQ-SIMD-004 NFR-SIMD-008
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use compiler.types.simd_capabilities.{x86_simd_eligibility_from_raw, x86_avx_eligible, x86_avx2_eligible, x86_avx512f_eligible, x86_avx512bw_eligible}
+use compiler.backend.native.x86_64_simd.{x86_simd_gate_from_triple, x86_select_simd_width_bits}
+use compiler.backend.native.x86_64_avx512.{X86_ZMM0, X86_ZMM1, X86_ZMM2, X86_ZMM8, X86_ZMM9, X86_ZMM10, X86_ZMM16, X86_ZMM17, X86_ZMM18, X86_K0, encode_avx512_add_f32x16, encode_avx512_add_f64x8, encode_avx512_add_i32x16}
+
+fn full_x86_eligibility():
+    x86_simd_eligibility_from_raw(
+        (1 << 27) + (1 << 28),
+        (1 << 5) + (1 << 16) + (1 << 17) + (1 << 30),
+        0xE6)
+
+describe "x86 AVX-512 capability and encoding":
+    it "admits AVX-512 only when CPU, OSXSAVE, and complete XCR0 state agree":
+        step("admit AVX-512 from CPU and OS-owned save state")
+        val full = full_x86_eligibility()
+        assert_equal(x86_avx_eligible(full), true)
+        assert_equal(x86_avx2_eligible(full), true)
+        assert_equal(x86_avx512f_eligible(full), true)
+        assert_equal(x86_avx512bw_eligible(full), true)
+
+        val no_osxsave = x86_simd_eligibility_from_raw(1 << 28, (1 << 5) + (1 << 16), 0xE6)
+        assert_equal(x86_avx512f_eligible(no_osxsave), false)
+        val no_zmm_state = x86_simd_eligibility_from_raw((1 << 27) + (1 << 28), (1 << 5) + (1 << 16), 0x6)
+        assert_equal(x86_avx512f_eligible(no_zmm_state), false)
+
+    it "falls back deterministically from AVX-512 to AVX2, SSE2, then scalar":
+        step("select the widest target-and-runtime-admitted implementation")
+        val full = full_x86_eligibility()
+        assert_equal(x86_select_simd_width_bits(x86_simd_gate_from_triple("x86_64-avx512-linux"), full, 512), 512)
+        assert_equal(x86_select_simd_width_bits(x86_simd_gate_from_triple("x86_64-avx2-linux"), full, 512), 256)
+        assert_equal(x86_select_simd_width_bits(x86_simd_gate_from_triple("x86_64-linux"), full, 512), 128)
+        assert_equal(x86_select_simd_width_bits(x86_simd_gate_from_triple("aarch64-linux"), full, 512), 0)
+
+    it "encodes f32 f64 and i32 operations with EVEX 512-bit prefixes":
+        step("validate exact EVEX bytes for each admitted lane family")
+        assert_equal(encode_avx512_add_f32x16(X86_ZMM0, X86_ZMM1, X86_ZMM2, X86_K0, false), [0x62, 0xF1, 0x74, 0x48, 0x58, 0xC2])
+        assert_equal(encode_avx512_add_f64x8(X86_ZMM8, X86_ZMM9, X86_ZMM10), [0x62, 0x51, 0xB5, 0x48, 0x58, 0xC2])
+        assert_equal(encode_avx512_add_i32x16(X86_ZMM16, X86_ZMM17, X86_ZMM18), [0x62, 0xA1, 0x75, 0x40, 0xFE, 0xC2])

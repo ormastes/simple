@@ -2478,7 +2478,7 @@ impl Lowerer {
             }
             Pattern::Identifier(name) => {
                 if self.subject_enum_has_variant(subject_ty, name) {
-                    // Treat as enum variant pattern using rt_enum_check_discriminant
+                    // Treat as an identity-aware enum variant pattern.
                     let expected_disc: i64 = {
                         use std::collections::hash_map::DefaultHasher;
                         use std::hash::{Hash, Hasher};
@@ -2494,8 +2494,15 @@ impl Lowerer {
 
                     Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
-                            name: "rt_enum_check_discriminant".to_string(),
-                            args: vec![subject_ref, expected_val],
+                            name: "rt_enum_check_variant".to_string(),
+                            args: vec![
+                                subject_ref,
+                                HirExpr {
+                                    kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                    ty: TypeId::I64,
+                                },
+                                expected_val,
+                            ],
                         },
                         ty: TypeId::BOOL,
                     })
@@ -2798,8 +2805,7 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
-                // All enums use hashed variant name discriminants consistently
+                // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -2815,8 +2821,15 @@ impl Lowerer {
 
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
-                        args: vec![subject_ref.clone(), expected_val],
+                        name: "rt_enum_check_variant".to_string(),
+                        args: vec![
+                            subject_ref.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                ty: TypeId::I64,
+                            },
+                            expected_val,
+                        ],
                     },
                     ty: TypeId::BOOL,
                 };

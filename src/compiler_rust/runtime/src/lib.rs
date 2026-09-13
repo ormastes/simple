@@ -949,6 +949,7 @@ pub use value::{
     rt_dict_set_i64_raw,
     // Enum operations
     rt_enum_check_discriminant,
+    rt_enum_check_variant,
     rt_enum_discriminant,
     rt_enum_id,
     rt_enum_new,

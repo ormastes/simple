@@ -1610,6 +1610,13 @@ int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     return enum_value && enum_value->discriminant == (int32_t)expected;
 }
 
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant) {
+    SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
+    if (!enum_value || enum_value->discriminant != (int32_t)expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane (including Result). */
+    return expected_enum_id == 0 || enum_value->enum_id == 0 || enum_value->enum_id == (int32_t)expected_enum_id;
+}
+
 void rt_bdd_describe_start_rv(int64_t name_rv) {
     (void)name_rv;
 }

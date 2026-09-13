@@ -138,6 +138,13 @@ lsp_build_ready=0
 
 # Copy only an already-admitted compiler. The before/copy/after hashes make a
 # concurrent publish or accidental mutation a terminal admission failure.
+if [ "$phase" = stage1 ]; then
+  [ "$hash_policy" = canonical ] || die "Phase1 requires canonical current-generation authority"
+  phase1_tool_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+  . "$phase1_tool_root/scripts/bootstrap/bootstrap-phase1-authority.shs"
+  bootstrap_phase1_authority_init "$phase1_tool_root" "$source_root" \
+    "$compiler" "$expected_sha" "$work_root" || die "Phase1 compiler is not the current admitted artifact"
+fi
 source_before=$(hash_file "$compiler") || die "cannot hash compiler"
 cp "$compiler" "$work_root/compiler.snapshot" || die "cannot snapshot compiler"
 chmod +x "$work_root/compiler.snapshot"
@@ -151,6 +158,9 @@ if [ "$source_before" != "$source_after" ] || [ "$snapshot_sha" != "$expected_sh
   hash_status=WARN
 fi
 compiler_snapshot="$work_root/compiler.snapshot"
+if [ "$phase" = stage1 ]; then
+  bootstrap_phase1_register_tool "$compiler_snapshot" "$snapshot_sha" || die "cannot bind Phase1 compiler snapshot"
+fi
 
 if [ -z "$runtime_path" ]; then
   compiler_dir=$(dirname "$compiler")
@@ -184,6 +194,12 @@ fi
   echo "compiler_hash_status=$hash_status"
   echo "runtime_path=${runtime_path:--}"
   echo "native_internal_timeout_seconds=$native_internal_timeout"
+  if [ "$phase" = stage1 ]; then
+    echo "phase1_generation=$p1a_generation"
+    echo "phase1_admission_path=$p1a_marker"
+    echo "phase1_admission_sha256=$p1a_marker_sha"
+    echo "phase1_admitted_compiler_path=$p1a_seed"
+  fi
 } >>"$summary"
 
 run_with_timeout() {
@@ -194,15 +210,47 @@ run_with_timeout() {
 run_task() {
   task=$1
   shift
+  expected_executable=""
+  case "${1:-}" in
+    --verification-expect-executable=*)
+      expected_executable=${1#*=}
+      shift
+      ;;
+  esac
   log="$logs/$task.log"
   started=$(date +%s)
   status=0
-  (
-    cd "$source_root" || exit 125
-    HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
-      SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
-      run_with_timeout "$@"
-  ) >"$log" 2>&1 || status=$?
+  if [ -n "$expected_executable" ] && ! rm -f "$expected_executable"; then
+    printf 'bootstrap-phase-verification: cannot remove prior expected artifact: %s\n' \
+      "$expected_executable" >"$log"
+    status=88
+  else
+    (
+      cd "$source_root" || exit 125
+      if [ "$phase" = stage1 ]; then
+        bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-before.env" || exit 89
+      fi
+      if [ "$phase" = stage1 ] && [ "${1:-}" = "$compiler_snapshot" ] && \
+         [ "${2:-}" = native-build ]; then
+        # A Phase-1 seed normally dispatches native-build to the deployed
+        # pure-Simple CLI.  That ambient CLI can predate the admitted seed and
+        # current source (observed as `auto:` being rejected in a valid named
+        # argument).  Phase verification must exercise the exact snapshotted
+        # seed's bootstrap-only Rust builder and must never consult bin/simple.
+        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+          SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
+          SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+          SIMPLE_BINARY="$compiler_snapshot" run_with_timeout "$@"
+      else
+        HOME="$home" TMPDIR="$tmp" SIMPLE_NO_STUB_FALLBACK=1 \
+          SIMPLE_NATIVE_BUILD_CACHE_DIR="$cache/$task" \
+          run_with_timeout "$@"
+      fi
+    ) >"$log" 2>&1 || status=$?
+    if [ "$phase" = stage1 ] && [ "$status" -eq 0 ]; then
+      bootstrap_phase1_validate_invocation "${1:-}" "$task" "$log.phase1-after.env" >>"$log" 2>&1 || status=89
+    fi
+  fi
   # Tool help is an executable ABI sanity probe, not merely an exit-code
   # check. Native runtimes deliberately fail closed on invalid handles but may
   # return control to the program so diagnostics remain inspectable. Do not
@@ -214,7 +262,35 @@ run_task() {
       fi
       ;;
   esac
+  artifact_status=not-applicable
+  artifact_sha256=-
+  if [ -n "$expected_executable" ]; then
+    if [ "$status" -ne 0 ]; then
+      artifact_status=producer-failed
+    elif [ ! -e "$expected_executable" ]; then
+      printf 'bootstrap-phase-verification: command exited 0 but expected executable is missing: %s\n' \
+        "$expected_executable" >>"$log"
+      status=87
+      artifact_status=missing
+    elif [ -L "$expected_executable" ] || [ ! -f "$expected_executable" ] || \
+         [ ! -x "$expected_executable" ]; then
+      printf 'bootstrap-phase-verification: expected artifact is not a regular executable: %s\n' \
+        "$expected_executable" >>"$log"
+      status=87
+      artifact_status=invalid
+    else
+      artifact_status=present
+      artifact_sha256=$(hash_file "$expected_executable") || {
+        status=89
+        artifact_status=hash-failed
+        artifact_sha256=-
+      }
+    fi
+  fi
   ended=$(date +%s)
+  if [ "$phase" = stage1 ] && [ "$status" -eq 0 ] && [ "$artifact_status" = present ]; then
+    bootstrap_phase1_register_tool "$expected_executable" "$artifact_sha256" || status=89
+  fi
   result=PASS
   case "$status" in
     0) result=PASS ;;
@@ -222,8 +298,14 @@ run_task() {
     134|136|139) result=CRASH ;;
     *) result=FAIL ;;
   esac
-  printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s\n' \
-    "$task" "$result" "$status" "$((ended - started))" "$log" >>"$summary"
+  if [ -n "$expected_executable" ]; then
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s|artifact=%s|artifact_status=%s|artifact_sha256=%s\n' \
+      "$task" "$result" "$status" "$((ended - started))" "$log" \
+      "$expected_executable" "$artifact_status" "$artifact_sha256" >>"$summary"
+  else
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|log=%s\n' \
+      "$task" "$result" "$status" "$((ended - started))" "$log" >>"$summary"
+  fi
   [ "$status" -eq 0 ]
 }
 
@@ -338,13 +420,15 @@ else
     mkdir -p "$tool_cache/full-cli" "$tool_cache/test-runner"
     mkdir -p "$tool_outputs"
     rm -f "$compiler_cli" "$test_runner"
-    run_matrix_task compiler_cli_build "$compiler_snapshot" native-build \
+    run_matrix_task compiler_cli_build --verification-expect-executable="$compiler_cli" \
+      "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/cli/_CliMain/main_and_help.spl --threads "$build_threads" \
       --cache-dir "$tool_cache/full-cli" --output "$compiler_cli"
     compiler_cli_ready=$matrix_task_passed
-    run_matrix_task test_runner_build "$compiler_snapshot" native-build \
+    run_matrix_task test_runner_build --verification-expect-executable="$test_runner" \
+      "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
       --entry src/app/test_runner_new/main.spl --threads "$build_threads" \
@@ -385,26 +469,32 @@ else
 fi
 
 if [ "$phase" = stage1 ]; then
-  run_matrix_task mcp_build "$compiler_snapshot" native-build \
+  run_matrix_task mcp_build --verification-expect-executable="$outputs/simple_mcp_server" \
+    "$compiler_snapshot" native-build \
     --source src/compiler --source src/app --source src/lib --entry-closure \
     --entry src/app/mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
     --output "$outputs/simple_mcp_server"
-  run_matrix_task lsp_build "$compiler_snapshot" native-build \
+  mcp_build_ready=$matrix_task_passed
+  run_matrix_task lsp_build --verification-expect-executable="$outputs/simple_lsp_mcp_server" \
+    "$compiler_snapshot" native-build \
     --source src/compiler --source src/app --source src/lib --entry-closure \
     --entry src/app/simple_lsp_mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
     --output "$outputs/simple_lsp_mcp_server"
+  lsp_build_ready=$matrix_task_passed
 elif [ "$hosted_runtime_ready" -eq 1 ]; then
   tool_build_cache="$cache/tool_builds/$snapshot_sha/$runtime_cache_identity"
   server_outputs="$outputs/tool-builds/$snapshot_sha/$runtime_cache_identity"
   mkdir -p "$server_outputs"
   rm -f "$server_outputs/simple_mcp_server" "$server_outputs/simple_lsp_mcp_server"
-  run_matrix_task mcp_build "$compiler_snapshot" native-build \
+  run_matrix_task mcp_build --verification-expect-executable="$server_outputs/simple_mcp_server" \
+    "$compiler_snapshot" native-build \
     --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
     --source src/compiler --source src/app --source src/lib --entry-closure \
     --entry src/app/mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
     --output "$server_outputs/simple_mcp_server"
   mcp_build_ready=$matrix_task_passed
-  run_matrix_task lsp_build "$compiler_snapshot" native-build \
+  run_matrix_task lsp_build --verification-expect-executable="$server_outputs/simple_lsp_mcp_server" \
+    "$compiler_snapshot" native-build \
     --timeout "$native_internal_timeout" --runtime-bundle host-gpu --runtime-path "$runtime_path" \
     --source src/compiler --source src/app --source src/lib --entry-closure \
     --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
@@ -423,14 +513,14 @@ fi
 
 for tool in simple_mcp_server simple_lsp_mcp_server; do
   tool_path="$outputs/$tool"
-  tool_ready=1
+  tool_ready=0
   if [ "$phase" != stage1 ]; then
     tool_path="$server_outputs/$tool"
-    case "$tool" in
-      simple_mcp_server) tool_ready=${mcp_build_ready:-0} ;;
-      simple_lsp_mcp_server) tool_ready=${lsp_build_ready:-0} ;;
-    esac
   fi
+  case "$tool" in
+    simple_mcp_server) tool_ready=${mcp_build_ready:-0} ;;
+    simple_lsp_mcp_server) tool_ready=${lsp_build_ready:-0} ;;
+  esac
   if [ "$tool_ready" -eq 1 ] && [ -x "$tool_path" ]; then
     run_matrix_task "${tool}_help" "$tool_path" --help
   else

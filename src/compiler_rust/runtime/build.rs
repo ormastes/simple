@@ -9,6 +9,7 @@ mod runtime_export_scan;
 mod runtime_signature_scan;
 
 fn main() {
+    emit_cdylib_soname();
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
     println!("cargo:rerun-if-changed=src/runtime_export_scan.rs");
     println!("cargo:rerun-if-changed=src/runtime_signature_scan.rs");
@@ -138,6 +139,45 @@ fn main() {
     generated.push_str("];\n");
 
     fs::write(out_dir.join("runtime_symbol_entries.rs"), generated).expect("write runtime symbol entries");
+}
+
+/// Give the `cdylib` a real shared-library identity instead of leaving it a
+/// build by-product.
+///
+/// Without a SONAME an ELF consumer records the *path it was linked against*
+/// in `DT_NEEDED`, so the library cannot be installed, versioned, or resolved
+/// by `ld.so` from a system directory. `rustc-cdylib-link-arg` is the right
+/// lever because it applies ONLY to the cdylib link step: the `rlib` and
+/// `staticlib` outputs of this same crate are unaffected, which is what keeps
+/// the freestanding/static lane (`libsimple_runtime.a`, and the
+/// `simple-native-all` archive that Stage 4 actually links) byte-for-byte
+/// unchanged. Putting `-soname` in `.cargo/config.toml` rustflags would
+/// instead stamp it onto every crate in the workspace, including binaries.
+///
+/// The version is taken from `CARGO_PKG_VERSION_MAJOR` so the SONAME tracks a
+/// deliberate ABI break rather than every patch release.
+fn emit_cdylib_soname() {
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_else(|_| "0".to_string());
+    match target_os.as_str() {
+        // ELF platforms: DT_SONAME.
+        "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "dragonfly" => {
+            println!(
+                "cargo:rustc-cdylib-link-arg=-Wl,-soname,libsimple_runtime.so.{major}"
+            );
+        }
+        // Mach-O: the install name is the SONAME equivalent. `@rpath` keeps the
+        // dylib relocatable so a consumer picks it up via its own LC_RPATH.
+        "macos" | "ios" => {
+            println!(
+                "cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libsimple_runtime.{major}.dylib"
+            );
+        }
+        // PE/COFF has no SONAME concept: the DLL name is embedded in the import
+        // library that rustc emits alongside the DLL. Nothing to do.
+        _ => {}
+    }
 }
 
 /// Emit the canonical callable ABI for symbols that are also declared by the
@@ -350,16 +390,35 @@ fn compile_c_runtime_sources() {
     // See the runtime_process.c comment above: the Rust runtime crate already
     // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
     build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
-    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    if target_env == "msvc" {
+    let target_os_for_heap_counters = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os_for_heap_counters == "windows" {
         // runtime_memtrack.c's rt_heap_live_bytes/rt_heap_peak_bytes fallbacks
         // are __attribute__((weak)) so the Rust accounting wins whenever both
         // are linked. MSVC has no weak attribute, so on this lane the C
         // fallbacks are STRONG and collide with the Rust definitions in
         // value::heap -- LNK2005, measured on x86_64-pc-windows-msvc. The Rust
         // runtime always provides them here (mem_snapshot.rs imports both), so
-        // suppress the C fallbacks rather than duplicate them. Gated to msvc:
-        // the GNU/Darwin lanes keep the weak fallbacks byte-unchanged.
+        // suppress the C fallbacks rather than duplicate them.
+        //
+        // Keyed on target_os, NOT target_env == "msvc" (2026-09-07). The
+        // earlier msvc-only gate reasoned that "the GNU/Darwin lanes keep the
+        // weak fallbacks byte-unchanged", but that holds only for the *Unix*
+        // GNU lanes. runtime_memtrack.c selects its weak branch with
+        // `#elif (__GNUC__ || __clang__) && !defined(_WIN32)`, so
+        // x86_64-pc-windows-gnu skips that branch and lands on the same STRONG
+        // definitions MSVC gets -- deliberately, because a GNU-style weak
+        // symbol on MinGW becomes a `.weak.NAME.ref` COFF alias that ld drops
+        // under --gc-sections (documented at that file's `#else`). With the
+        // suppression gated to msvc, MinGW therefore got the strong C
+        // definitions AND the Rust ones, failing the seed link with:
+        //   multiple definition of `rt_heap_peak_bytes';
+        //   simple_runtime...rcgu.o: first defined here
+        // measured on x86_64-pc-windows-gnu / GCC 16.2 running
+        // `cargo build --profile bootstrap -p simple-driver`.
+        //
+        // Both Windows ABIs need the same suppression for the same reason, so
+        // the condition is the OS. Unix GNU and Darwin still take the weak
+        // branch and are unaffected.
         build.define("SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS", None);
     }
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {

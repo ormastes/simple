@@ -174,6 +174,8 @@ Options:
   --jobs=<n|full|half|min|auto>
                      Native build workers (default: half CPUs locally, 2 on GitHub Actions)
   --no-mcp           Skip MCP server builds (Stage 5)
+  --promotion-receipt=<absolute-path>
+                     Required with --deploy/--release; qualified scheduler receipt
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
   --progress[=<path>]
@@ -189,6 +191,7 @@ EOF
 backend="llvm"
 output_dir="build/bootstrap"
 deploy=0
+promotion_receipt_path="${SIMPLE_BOOTSTRAP_PROMOTION_RECEIPT:-}"
 build_mcp=1
 target=""
 verbose=0
@@ -251,6 +254,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --deploy)
       deploy=1
+      ;;
+    --promotion-receipt=*)
+      promotion_receipt_path=${1#*=}
       ;;
     --release)
       release_tests=1
@@ -680,6 +686,8 @@ portable_lock_canonical_output "${output_dir}" || {
   exit 1
 }
 output_dir=${PORTABLE_LOCK_CANONICAL_OUTPUT}
+. "${repo_root}/scripts/bootstrap/bootstrap-logged-process.shs"
+bootstrap_windows_output_root_preflight "${output_dir}" || exit 1
 
 # Disk-space precondition. A full bootstrap needs ~10-15 GB (Rust authority
 # cargo target tree + generation publish + stage2/3 native artifacts); below
@@ -1093,66 +1101,17 @@ export PATH
 log_dir="${output_dir}/logs/${PLATFORM}"
 mkdir -p "${log_dir}"
 
-host_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 2)
-case "${host_cpus}" in
-  ''|*[!0-9]*) host_cpus=2 ;;
-esac
-case "${jobs}" in
-  ""|auto)
-    jobs=""
-    ;;
-  full)
-    jobs="${host_cpus}"
-    ;;
-  half)
-    jobs=$((host_cpus / 2))
-    if [ "${jobs}" -lt 1 ]; then
-      jobs=1
-    fi
-    ;;
-  min|minimal|minimum)
-    jobs=1
-    ;;
-esac
-if [ -z "${jobs}" ]; then
-  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    jobs=2
-  elif [ "${execution_profile}" = "clean-release" ]; then
-    # A release proof is intentionally full-resource: it must not inherit the
-    # conservative incremental scheduler used for developer iteration.
-    jobs="${host_cpus}"
-  elif [ "${execution_profile}" = "incremental-unlimited" ]; then
-    jobs="${host_cpus}"
-  else
-    jobs=$((host_cpus / 2))
-    if [ "${jobs}" -lt 1 ]; then
-      jobs=1
-    fi
-  fi
-fi
-case "${jobs}" in
-  ''|*[!0-9]*|0)
-    echo "error: --jobs must be a positive integer" >&2
-    exit 1
-    ;;
-esac
-echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
-selfhost_jobs="${jobs}"
-if [ "${execution_profile}" = "incremental" ] && [ "${selfhost_jobs}" -gt 2 ]; then
-  selfhost_jobs=2
-fi
-# Opt-in override of the self-host thread count (stage 2/3/4 recompiles);
-# unset keeps the profile-derived value above.  `full` = host CPUs.
-case "${SIMPLE_NATIVE_BUILD_THREADS:-}" in
-  '') ;;
-  full) selfhost_jobs="${host_cpus}" ;;
-  *[!0-9]*|0)
-    echo "error: SIMPLE_NATIVE_BUILD_THREADS must be a positive integer or 'full'" >&2
-    exit 1
-    ;;
-  *) selfhost_jobs="${SIMPLE_NATIVE_BUILD_THREADS}" ;;
-esac
+. "${bootstrap_entry_dir}/bootstrap-jobs.shs"
+bootstrap_select_jobs "${jobs}" "${bootstrap_early_repo_root}/config/bootstrap.sdn" || exit 1
+echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}, source: ${job_source})"
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
+{
+  echo schema=simple-bootstrap-selected-jobs-v1
+  echo host_cpus="${host_cpus}"
+  echo jobs="${jobs}"
+  echo selfhost_jobs="${selfhost_jobs}"
+  echo source="${job_source}"
+} >"${output_dir}/selected-build-jobs.env"
 
 native_cache_dir="${output_dir}/native_cache"
 native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
@@ -1367,7 +1326,12 @@ run_logged() {
   } >"${log_file}"
 
   set +e
-  "$@" >>"${log_file}" 2>&1
+  case "${os:-}:${label}" in
+    windows:rust-seed-build|windows:rust-native-all-build|windows:rust-runtime-nolto-build|windows:rust-compiler-backfill-build)
+      bootstrap_logged_windows_cargo "${repo_root}" "${log_file}" "$@" >>"${log_file}" 2>&1
+      ;;
+    *) "$@" >>"${log_file}" 2>&1 ;;
+  esac
   status=$?
   set -e
 
@@ -1388,7 +1352,7 @@ COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 NATIVE_FILE_TIMEOUT_SECONDS=${SIMPLE_NATIVE_FILE_TIMEOUT:-300}   # per-file native-build cap; 0 = wait for completion
-NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-1}   # 1 = --low-memory (single worker); 0 = full parallel
+NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-0}   # Explicit opt-in; default uses selected parallel workers.
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
@@ -1548,20 +1512,14 @@ bootstrap_stage_sanity() (
   unsupported_status=$?
   set -e
   frontend_status=0
-  frontend_owner_pid=$(perl -e 'print getppid') || return 1
-  exec 6<"${frontend_bootstrap0_log%/*}" \
-    7<"${sanity_repo_root}/scripts/bootstrap/run-process-group-bounded-log.pl" \
-    8<"$(command -v perl)" || return 1
-  BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$frontend_owner_pid/fd/8
-  BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$frontend_owner_pid/fd/7
-  frontend_log_authority=/proc/$frontend_owner_pid/fd/6/${frontend_log##*/}
-  export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+  candidate_frontend_capture_setup "${frontend_bootstrap0_log%/*}" || return 1
+  frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
   frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
   CANDIDATE_FRONTEND_BACKEND="${backend}" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
-    CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap0_log##*/}" \
+    CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_log##*/}" \
     CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap0_log}" \
-    CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap0_status_path##*/}" \
+    CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap0_status_path##*/}" \
     candidate_frontend_smoke "${candidate}" >"${frontend_log_authority}" 2>&1 ||
     frontend_status=$?
   # Second pass under SIMPLE_BOOTSTRAP=1 -- the EXACT configuration Stage 3
@@ -1576,9 +1534,9 @@ bootstrap_stage_sanity() (
     frontend_bootstrap_ran=true
     CANDIDATE_FRONTEND_BACKEND="${backend}" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
-      CANDIDATE_FRONTEND_LOG_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap1_log##*/}" \
+      CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_log##*/}" \
       CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="${frontend_bootstrap1_log}" \
-      CANDIDATE_FRONTEND_STATUS_PATH="/proc/$frontend_owner_pid/fd/6/${frontend_bootstrap1_status_path##*/}" \
+      CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_bootstrap1_status_path##*/}" \
       candidate_frontend_smoke "${candidate}" >>"${frontend_log_authority}" 2>&1 ||
       frontend_bootstrap_status=$?
     frontend_status=${frontend_bootstrap_status}
@@ -1802,6 +1760,9 @@ fi
 # churn. Any doubt (missing stamp, hash failure → empty mismatch) rebuilds: a
 # stale seed would silently miscompile, which is worse than a slow build.
 seed_stamp="${seed_bin}.inputs.sha256"
+seed_fingerprint_details="${seed_stamp}.details.env"
+seed_fingerprint_observation_details=\
+"${output_dir}/rust-authority-fingerprint-current.details.env"
 seed_fingerprint_tmp="${output_dir}/rust-authority-fingerprint-tmp"
 seed_fingerprint_error_manifest=\
 "${output_dir}/rust-authority-fingerprint-error.manifest"
@@ -1809,6 +1770,10 @@ seed_fingerprint_error=\
 "${output_dir}/rust-authority-fingerprint-error.log"
 seed_inputs_hash() {
   seed_fingerprint_phase=$1
+  # Never overwrite the sidecar bound to the published stamp while deciding
+  # whether that stamp is stale.  Current observations remain separate until
+  # a rebuilt tuple is committed as a new immutable generation.
+  BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_PATH="${seed_fingerprint_observation_details}" \
   bootstrap_authority_seed_inputs_fingerprint \
     "${seed_fingerprint_phase}" "${seed_fingerprint_tmp}" \
     "${seed_fingerprint_error_manifest}" "${seed_fingerprint_error}" \
@@ -2045,7 +2010,7 @@ run_rust_authority_cargo() {
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-        RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+        RUSTC="${rustc_abs}" CC="${cc_abs}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2063,7 +2028,7 @@ run_rust_authority_cargo() {
         CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-        RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+        RUSTC="${rustc_abs}" CC="${cc_abs}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
         CC_x86_64_pc_windows_gnu="${mingw_cc}" \
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2082,7 +2047,7 @@ run_rust_authority_cargo() {
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-      RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+      RUSTC="${rustc_abs}" CC="${cc_abs}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2096,7 +2061,7 @@ run_rust_authority_cargo() {
       CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
-      RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+      RUSTC="${rustc_abs}" CC="${cc_abs}" CARGO_BUILD_JOBS="${jobs}" LC_ALL=C LANG=C \
       CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
       CC_x86_64_pc_windows_gnu="${mingw_cc}" \
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
@@ -2182,6 +2147,8 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     exit 1
   fi
   seed_inputs_fingerprint="${seed_inputs_fingerprint_after}"
+  BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE="${seed_fingerprint_observation_details}"
+  export BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE
   rust_generation_nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   case "${rust_generation_nonce}" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
@@ -2225,6 +2192,9 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
   native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
   compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}"
   seed_stamp="${seed_bin}.inputs.sha256"
+  seed_fingerprint_details="${seed_stamp}.details.env"
+  seed_fingerprint_observation_details=\
+"${output_dir}/rust-authority-fingerprint-current.details.env"
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
@@ -3521,6 +3491,8 @@ echo "Full CLI binary: ${full_bin}"
 # ===========================================================================
 
 mcp_build_ok=1
+stage4_toolset_admission="${full_bin}.toolset-admission.env"
+rm -f "${stage4_toolset_admission}"
 if [ "${build_mcp}" -eq 1 ]; then
   echo "Stage 5: compiling MCP servers..."
   bootstrap_progress_mark stage5 "$(absolute_path "${log_dir}/stage51-mcp-native-build.log")"
@@ -3578,7 +3550,7 @@ if [ "${build_mcp}" -eq 1 ]; then
   fi
 
   echo "Stage 5 smoke: fresh MCP initialize/list/call gate"
-  if ! env \
+  if ! run_logged stage5-mcp-native-smoke env \
     SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
     MCP_SERVER="$(absolute_path "${full_dir}/simple_mcp_server${exe_suffix}")" \
     LSP_MCP_SERVER="$(absolute_path "${full_dir}/simple_lsp_mcp_server${exe_suffix}")" \
@@ -3587,6 +3559,28 @@ if [ "${build_mcp}" -eq 1 ]; then
     echo "error: fresh Stage 5 MCP server smoke failed" >&2
     exit 1
   fi
+  stage4_toolset_tmp="${stage4_toolset_admission}.tmp.$$"
+  {
+    echo "schema=simple-bootstrap-stage4-toolset-admission-v1"
+    echo "status=admitted"
+    echo "platform=${PLATFORM}"
+    echo "cli_path=$(absolute_path "${full_bin}")"
+    echo "cli_sha256=$(hash_file "${full_bin}")"
+    echo "mcp_path=$(absolute_path "${full_dir}/simple_mcp_server${exe_suffix}")"
+    echo "mcp_sha256=$(hash_file "${full_dir}/simple_mcp_server${exe_suffix}")"
+    echo "lsp_mcp_path=$(absolute_path "${full_dir}/simple_lsp_mcp_server${exe_suffix}")"
+    echo "lsp_mcp_sha256=$(hash_file "${full_dir}/simple_lsp_mcp_server${exe_suffix}")"
+    echo "stage4_provenance_path=$(absolute_path "${stage4_provenance}")"
+    echo "stage4_provenance_sha256=$(hash_file "${stage4_provenance}")"
+    echo "stage3_acceptance_path=$(absolute_path "${stage3_acceptance_receipt}")"
+    echo "stage3_acceptance_sha256=$(hash_file "${stage3_acceptance_receipt}")"
+    echo "stage5_smoke_log_path=$(absolute_path "${log_dir}/stage5-mcp-native-smoke.log")"
+    echo "stage5_smoke_log_sha256=$(hash_file "${log_dir}/stage5-mcp-native-smoke.log")"
+    echo "completed_gate=stage5-native-mcp-smoke"
+  } >"${stage4_toolset_tmp}" || exit 1
+  chmod 400 "${stage4_toolset_tmp}" || exit 1
+  mv "${stage4_toolset_tmp}" "${stage4_toolset_admission}" || exit 1
+  echo "  Stage 4 toolset admission: ${stage4_toolset_admission}"
 else
   echo "Skipping MCP server builds (--no-mcp)"
 fi
@@ -3597,183 +3591,30 @@ fi
 
 resume_stage4_verify_immutable || exit 1
 if [ "${deploy}" -eq 1 ]; then
-  bootstrap_progress_mark deploy ""
-  deploy_dir="bin/release/${PLATFORM}"
-  if [ -L "bin" ] || [ -L "bin/release" ]; then
-    echo "ERROR: deploy refused - symlinked deployment parent" >&2
+  if [ "${build_mcp}" -ne 1 ] || [ "${mcp_build_ok}" -ne 1 ] || \
+     [ ! -f "${stage4_toolset_admission}" ]; then
+    echo "ERROR: atomic local deployment requires the admitted CLI + MCP + LSP MCP toolset" >&2
+    exit 78
+  fi
+  if [ -z "${promotion_receipt_path}" ]; then
+    echo "ERROR: --deploy requires --promotion-receipt=<absolute qualified scheduler receipt>" >&2
+    exit 78
+  fi
+  if ! sh scripts/bootstrap/promote-stage4-local.shs \
+      --promotion-receipt "${promotion_receipt_path}" \
+      --toolset-admission "$(absolute_path "${stage4_toolset_admission}")"; then
+    echo "ERROR: atomic local Stage 4 toolset promotion failed" >&2
     exit 1
   fi
-  mkdir -p "${deploy_dir}"
-  if [ -L "${deploy_dir}" ]; then
-    echo "ERROR: deploy refused - symlinked deployment directory: ${deploy_dir}" >&2
-    exit 1
-  fi
-  deploy_lock_root="${deploy_dir}/.bootstrap-deploy-locks"
-  if ! portable_lock_acquire "${deploy_lock_root}" deployment \
-    "${SIMPLE_BOOTSTRAP_LOCK_WAIT_SECONDS:-30}"; then
-    echo "ERROR: deploy refused - deployment is locked: ${deploy_dir}" >&2
-    exit 1
-  fi
-  deploy_lock_handle=${PORTABLE_LOCK_HANDLE}
-
-  # Deploy gate: never swap bin/simple to the self-hosted stage4 binary unless
-  # a working seed driver exists at the delegate path. Without it the stage4
-  # self-exec guard blocks `bin/simple test` host-wide (see
-  # doc/08_tracking/bug/stage4_deploy_no_seed_test_runner_blocked_2026-06-11.md).
-  seed_probe() {
-    [ -x "$1" ] || return 1
-    out="$(run_timeout 30 "$1" -c 'print(1+1)' 2>/dev/null)" || return 1
-    [ "${out}" = "2" ]
-  }
-  if [ -z "${resume_stage4_output}" ]; then
-    seed_delegate="${deploy_dir}/simple_seed${exe_suffix}"
-    seed_src="${full_dir}/simple_seed${exe_suffix}"
-    if ! seed_probe "${seed_src}"; then
-      echo "ERROR: deploy refused — current seed driver failed smoke test: ${seed_src}." >&2
-      exit 1
-    fi
-    install -m755 "${seed_src}" "${seed_delegate}"
-    echo "Installed current seed delegate: ${seed_src} -> ${seed_delegate}"
-  fi
-
-  # Identity gate: bin/simple MUST be the pure-Simple self-hosted compiler and
-  # never the Rust seed/driver (default tooling rule, .claude/rules/bootstrap.md).
-  # Behavioural probes cannot tell them apart: the seed passes -c 'print(1+1)',
-  # passes `test` 2-pass/1-fail, emits a .smf, and produces a running LLVM ELF.
-  # Size and banner have BOTH failed as identity signals — a 154,185,152-byte
-  # binary was the Rust driver while a 22,300,688-byte one was self-hosted.
-  # The discriminator is a diagnostic string that only the pure-Simple compiler
-  # sources carry into the emitted binary; it is absent from every Rust-driver
-  # build (see src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
-  # and doc/08_tracking/bug/
-  # bin_simple_bootstrap_main_stage_deployed_no_subcommands_2026-08-01.md).
-  selfhost_identity_marker='enum construction: unregistered enum'
-  selfhost_identity_ok() {
-    [ -f "$1" ] || return 1
-    if command -v strings >/dev/null 2>&1; then
-      strings -a "$1" 2>/dev/null | grep -q "${selfhost_identity_marker}"
-    else
-      grep -a -q "${selfhost_identity_marker}" "$1" 2>/dev/null
-    fi
-  }
-  if ! selfhost_identity_ok "${full_bin}"; then
-    echo "ERROR: deploy refused — Stage 4 output is not the pure-Simple self-hosted compiler." >&2
-    echo "  candidate: ${full_bin}" >&2
-    echo "  identity probe found no self-hosted compiler marker (absent = Rust driver)." >&2
-    echo "  Refusing to install a Rust seed/driver as ${deploy_dir}/simple${exe_suffix}." >&2
-    exit 1
-  fi
-  echo "Identity gate: Stage 4 output verified pure-Simple self-hosted"
-
-  deployed_bin="${deploy_dir}/simple${exe_suffix}"
-  prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
-  deploy_receipt="${deploy_dir}/bootstrap-deploy-receipt.env"
-  deploy_tmp="${deploy_dir}/.simple${exe_suffix}.deploy.$$"
-  receipt_tmp="${deploy_dir}/.bootstrap-deploy-receipt.$$"
-  rm -f "${deploy_receipt}"
-  backup_created=0
-  if [ -e "${deployed_bin}" ]; then
-    if [ ! -f "${deployed_bin}" ] || [ -L "${deployed_bin}" ] || \
-       ! selfhost_identity_ok "${deployed_bin}" || \
-       [ "$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)" != "2" ]; then
-      echo "ERROR: deploy refused - current compiler is not a safe known-good backup." >&2
-      exit 1
-    fi
-    prev_tmp="${deploy_dir}/.simple${exe_suffix}.pre_deploy.$$"
-    install -m755 "${deployed_bin}" "${prev_tmp}"
-    mv "${prev_tmp}" "${prev_bin}"
-    backup_created=1
-  else
-    rm -f "${prev_bin}"
-  fi
-  install -m755 "${full_bin}" "${deploy_tmp}"
-  mv "${deploy_tmp}" "${deployed_bin}"
-  echo "Deployed full CLI binary to ${deployed_bin}"
-
-  # Post-swap smoke: the deployed binary must evaluate code; restore on failure.
-  if smoke_out="$(run_timeout 30 "${deployed_bin}" -c 'print(1+1)' 2>/dev/null)"; then
-    :
-  else
-    smoke_out=""
-  fi
-  if [ "${smoke_out}" != "2" ]; then
-    echo "ERROR: deployed binary failed smoke test (-c 'print(1+1)' -> '${smoke_out}')." >&2
-    if [ "${backup_created}" -eq 1 ] && [ -x "${prev_bin}" ]; then
-      restore_tmp="${deploy_dir}/.simple${exe_suffix}.restore.$$"
-      install -m755 "${prev_bin}" "${restore_tmp}"
-      mv "${restore_tmp}" "${deployed_bin}"
-      echo "Restored previous binary to ${deployed_bin}" >&2
-    else
-      rm -f "${deployed_bin}"
-    fi
-    exit 1
-  fi
-  install -m755 "${ui_backend_bin}" "${deploy_dir}/simple_ui_backend${exe_suffix}"
-  echo "Deployed cached UI backend to ${deploy_dir}/simple_ui_backend${exe_suffix}"
-
-  # Deploy MCP servers if they were built successfully
-  if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
-    for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
-      if [ -x "${full_dir}/${mcp_bin_name}${exe_suffix}" ] && [ -s "${full_dir}/${mcp_bin_name}${exe_suffix}" ]; then
-        mcp_deploy_tmp="${deploy_dir}/.${mcp_bin_name}${exe_suffix}.deploy.$$"
-        mcp_hash_tmp="${deploy_dir}/.${mcp_bin_name}${exe_suffix}.sha256.deploy.$$"
-        install -m755 "${full_dir}/${mcp_bin_name}${exe_suffix}" "${mcp_deploy_tmp}"
-        install -m644 "${full_dir}/${mcp_bin_name}${exe_suffix}.sha256" "${mcp_hash_tmp}"
-        mv "${mcp_deploy_tmp}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}"
-        mv "${mcp_hash_tmp}" "${deploy_dir}/${mcp_bin_name}${exe_suffix}.sha256"
-        echo "Deployed ${mcp_bin_name} to ${deploy_dir}/${mcp_bin_name}${exe_suffix}"
-      fi
-    done
-  fi
-
-  # Recreate wrapper/launcher entrypoints (bin/simple plus release links)
-  if [ "${os}" != "windows" ]; then
-    if ! "${repo_root}/scripts/setup/setup.shs"; then
-      echo "ERROR: deployment setup failed; restoring previous compiler" >&2
-      if [ "${backup_created}" -eq 1 ] && [ -x "${prev_bin}" ]; then
-        restore_tmp="${deploy_dir}/.simple${exe_suffix}.setup-restore.$$"
-        install -m755 "${prev_bin}" "${restore_tmp}"
-        mv "${restore_tmp}" "${deployed_bin}"
-      else
-        rm -f "${deployed_bin}"
-      fi
-      exit 1
-    fi
-  fi
-
-  full_hash="$(hash_file "${full_bin}")"
-  current_hash="$(hash_file "${deployed_bin}")"
-  if [ "${current_hash}" != "${full_hash}" ]; then
-    echo "ERROR: deployed compiler hash differs from admitted Stage 4 candidate" >&2
-    echo "  candidate: ${full_hash}" >&2
-    echo "  deployed:  ${current_hash}" >&2
-    exit 1
-  fi
-  backup_hash="none"
-  [ "${backup_created}" -eq 1 ] && [ -f "${prev_bin}" ] && [ ! -L "${prev_bin}" ] && backup_hash="$(hash_file "${prev_bin}")"
-  {
-    echo "schema=bootstrap-deploy-receipt-v1"
-    echo "platform=${PLATFORM}"
-    echo "current_path=${deployed_bin}"
-    echo "current_sha256=${current_hash}"
-    echo "stage4_candidate_sha256=${full_hash}"
-    echo "backup_path=${prev_bin}"
-    echo "backup_sha256=${backup_hash}"
-    echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "deployment_status=pass"
-    echo "stage3_current_acceptance_status=${stage3_current_acceptance_status}"
-    echo "stage3_current_acceptance_receipt=${stage3_acceptance_receipt}"
-    echo "platform_acceptance_claimed=false"
-  } > "${receipt_tmp}"
-  chmod 644 "${receipt_tmp}"
-  mv "${receipt_tmp}" "${deploy_receipt}"
-  echo "Deployment receipt: ${deploy_receipt}"
-
+  deployed_bin=$(sh scripts/bootstrap/promote-stage4-local.shs --resolve cli) || exit 1
   if [ "${release_tests}" -eq 1 ]; then
     echo "Stage 6: running release whole-test gate..."
     bootstrap_progress_mark stage6 ""
     run_logged stage6-whole-tests "${deployed_bin}" test test --whole --mode=interpreter
   fi
+  # The legacy per-file deploy body below is retained temporarily for diff
+  # traceability, but is unreachable after the atomic generation transaction.
+  deploy=0
 fi
 
 resume_stage4_finalize || exit 1
