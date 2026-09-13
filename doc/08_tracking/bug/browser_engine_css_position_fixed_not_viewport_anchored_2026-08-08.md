@@ -55,3 +55,41 @@ up to the nearest positioned ancestor.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/03_system/gui/web_css/web_css_positioning_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22) — refined diagnosis, fix deferred
+
+Re-ran the spec (`bin/simple test
+test/03_system/gui/web_css/web_css_positioning_spec.spl`): still RED, same
+`expected 22 to equal 2` on `it "position: fixed anchors to the viewport"`
+(6 examples, 3 failures — the other 2 failures, `clear`/`float`, are the
+pre-existing unrelated RED-by-design cases documented in that spec's own
+header, unaffected here).
+
+Confirmed the root cause with `simple_web_layout_debug_layout_by_id` on the
+exact fixture: the LAYOUT box for `#fx` is `(bx=21, by=22)` — exactly
+`(#wrap.bx=20, #wrap.by=20) + (left_px=1, top_px=2)`, matching this doc's
+root-cause arithmetic precisely. **New finding not in the original diagnosis:**
+the DrawIR command the spec actually asserts on does NOT read `bx`/`by`
+directly for `x` — `fx.x` from `_draw_ir_command_by_id` is `1` (already
+viewport-correct) while `fx.y` is `22` (still ancestor-anchored), even though
+the underlying layout box has `bx=21`. So there is an X-axis-only paint-time
+transform somewhere between layout and DrawIR-command emission that already
+corrects for the ancestor offset on X but not on Y — grepped
+`simple_web_html_layout_renderer_core.spl`,
+`simple_web_html_layout_renderer_paint_layout.spl`,
+`simple_web_html_layout_renderer_paint_primitives.spl`, and
+`web_paint_chunk_frame.spl` for the actual `DrawIrCommand{...}`/command-x
+construction site and could not locate it within this shard's budget (no
+literal `DrawIrCommand(` constructor call in any of those files — it is built
+through an indirection not yet identified).
+
+This matters because the fix sketch in this doc (add a `position_fixed`
+branch to `absolute_child_x`/`absolute_child_y` anchoring to the viewport)
+would change `bx` from 21 to 1 — which, if the unidentified X-axis paint
+transform ALSO still fires and subtracts the ancestor offset again, would
+turn the now-correct `fx.x` DrawIR value into a wrong negative number
+(regression on a currently-passing assertion). Implementing the layout-level
+fix blind, without first locating and understanding that transform, risks
+exactly the kind of regression `.claude/rules/testing.md` warns against.
+Deferring the code fix; leaving OPEN with this refined root-cause note so the
+next owner does not have to re-discover the X/Y asymmetry from scratch.
