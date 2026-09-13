@@ -191,3 +191,7 @@ forward and inverse.
 ## Triage 2026-09-12
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Triage 2026-09-13
+
+GPU/Vulkan compute-shader crypto kernel defect (NTT negative-modulo handling in `.comp` shaders) needing a Vulkan-capable device and shader recompilation to re-verify -- outside this pass's pure-Simple TDD scope. Leaving OPEN, no code change made.

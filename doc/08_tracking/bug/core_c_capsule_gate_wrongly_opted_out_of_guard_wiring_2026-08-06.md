@@ -52,3 +52,11 @@ an FPGA or a physical dev board`. Deliberately NOT edited: removing the entry ma
 `check-guard-wiring.shs` FAIL (the guard is genuinely unwired), so the correct fix is to wire
 the capsule gate into a caller first and then drop the line — an ordering this lane could not
 complete without touching guard-wiring files owned by the wiring backlog.
+
+## Triage 2026-09-13
+
+Confirmed still present: `scripts/check/guard_wiring_optout.txt` still carries the false `build-core-c-bootstrap-runtime-capsule.shs` exemption. The doc's own fix requires wiring the gate into a caller lane FIRST (otherwise `check-guard-wiring.shs` fails on a genuinely-unwired guard) — that ordering constraint means this can't be fixed as an isolated unit-spec change; it needs coordination with the CI guard-wiring lane owner. Leaving OPEN, no code change made.
+
+## Re-check 2026-09-13 (correction to the triage note above)
+
+Correction: `grep -n "build-core-c-bootstrap-runtime-capsule.shs" scripts/check/guard_wiring_optout.txt` returns NOTHING — the false exemption entry is gone from the file (removed by another lane between the 2026-08-17 verification and now; `guard_wiring_optout.txt` is 521 lines today). Whether the gate is now actually wired into a caller (the doc's required ordering: wire first, then remove) was not confirmed — `sh scripts/check/check-guard-wiring.shs` did not complete within a 60s budget in this pass, and only a comment (not a real invocation) references the script from `check-no-unresolved-runtime-symbols.shs`. This needs a follow-up run of `check-guard-wiring.shs` to completion to confirm whether removing the exemption without confirmed wiring left the gate genuinely unwired-and-unexempted (which would newly FAIL that check) or whether wiring already landed too.

@@ -485,3 +485,7 @@ The underlying language/runtime defect is unchanged and still OPEN. Lint rule
 documented here, which is the more dangerous one because the payload outlives
 the expression. Extending `OPTME001` to optional-typed fields whose payload has
 `me` methods is the natural next step.
+
+## Triage 2026-09-13
+
+The underlying language/runtime defect is a compiler-semantics change (silent discard of `me`-method mutation through an Option-typed binding) beyond this pass's budget. The suggested lint-only follow-up (extend `OPTME001` in `src/compiler/35.semantics/lint/option_me_call.spl` to also flag the optional-typed-FIELD shape, not just local bindings) was considered but not attempted this pass: `OPTME001` is a broadly-run lint rule and widening its pattern risks false positives across the whole tree without careful fixture coverage, which needs its own dedicated pass. Leaving OPEN, no code change made.

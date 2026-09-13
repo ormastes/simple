@@ -97,3 +97,7 @@ Two smaller follow-ups worth doing independently of the feature:
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/03_system/compiler/import_c_match_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Confirmed still unimplemented: `ls src/lib/common/c_parser/` -> No such file or directory. The doc's own "Decide the shape question first" note flags this as an architecture decision (repoint specs to `src/compiler/10.frontend/c_import/` vs. build a new parallel library) that must be made before any implementation work, not a mechanical fix. Leaving OPEN, no code change made.

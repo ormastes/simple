@@ -80,3 +80,7 @@ STILL-OPEN. `grep -c "trust_anchor\|manifest_verify_signature" src/os/kernel/loa
 returns **0**. There is still no trust anchor, no key distribution, and no
 verification entry point — the `signature` field is carried and never checked.
 Not repaired here: `src/os/crypto/**` is explicitly out of scope for this lane.
+
+## Triage 2026-09-13
+
+Confirmed still absent: `grep -c "trust_anchor\|manifest_verify_signature" src/os/kernel/loader/artifact_manifest.spl` returns 0. Implementing a trust-anchor/key-registry design plus a signature wire format is multi-step security-architecture work (the doc's own "Land, in order" list has 4 steps before wiring `ed25519_verify`), explicitly out of scope for `src/os/crypto/**` per the prior lane. Leaving OPEN, no code change made.
