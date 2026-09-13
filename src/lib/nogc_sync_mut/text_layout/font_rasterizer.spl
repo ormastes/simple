@@ -788,10 +788,43 @@ fn rasterize_bitmap_accelerated(codepoint: i32, font_size: i32) -> CachedGlyph:
 # Glyph Blitting (alpha-blend into ARGB buffer)
 # ============================================================================
 
+@unsafe(reason: "glyph mask-blend span; the span is validated inside the kernel", capabilities: [ffi])
+extern fn rt_engine2d_blend_mask_span_u32(dst: [u32], offset: i64, mask: [u8], mask_offset: i64, count: i64, color: u32) -> [u32]
+
 fn blit_glyph(buffer: [u32], buf_w: i32, buf_h: i32,
               x: i32, y: i32, glyph: CachedGlyph, color: u32) -> [u32]:
-    """Alpha-blend a rasterized glyph into an ARGB pixel buffer."""
+    """Alpha-blend a rasterized glyph into an ARGB pixel buffer.
+
+    Each fully-in-bounds row goes through the native mask-blend kernel, which
+    is dispatched avx512bw -> avx2 -> scalar. The per-pixel path ran five
+    branches and ~15 integer ops per pixel; text is the highest-volume
+    renderer path after solid fills.
+
+    Rows that are clipped, or whose glyph data is short, fall back to the
+    per-pixel loop below — clamping the span inside the kernel would silently
+    paint the wrong pixels rather than fewer of them.
+    """
     var out = buffer
+    val bw = buf_w.to_i64()
+    if glyph.width > 0 and y >= 0 and (y + glyph.height) <= buf_h and x >= 0 and (x + glyph.width) <= buf_w:
+        val gw = glyph.width.to_i64()
+        var grow = 0
+        var all_rows_done = true
+        while grow < glyph.height:
+            val mask_off = (grow.to_i64()) * gw
+            val dst_off = (y + grow).to_i64() * bw + x.to_i64()
+            if (mask_off + gw) <= glyph.pixels.len() and (dst_off + gw) <= out.len():
+                val span = rt_engine2d_blend_mask_span_u32(out, dst_off, glyph.pixels, mask_off, gw, color)
+                if span.len() == gw:
+                    out.write_span(span, dst_off, 0, gw)
+                else:
+                    all_rows_done = false
+            else:
+                all_rows_done = false
+            grow = grow + 1
+        if all_rows_done:
+            return out
+        out = buffer
     val fg_r = (color >> 16) & 0xFF
     val fg_g = (color >> 8) & 0xFF
     val fg_b = color & 0xFF

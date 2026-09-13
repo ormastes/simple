@@ -2402,6 +2402,52 @@ int64_t rt_simd_bytes_equal_span(SplArray* lhs, int64_t lhs_start,
     return 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * Glyph mask-blend span — native twin of rt_engine2d_blend_mask_span_u32.
+ *
+ * Mirrors blit_glyph (font_rasterizer.spl): straight-alpha src-over with
+ * FLOOR /255, always writing opaque alpha and ignoring the destination's.
+ * That is neither the percent blend (/100 +50) nor the general Porter-Duff
+ * path; confusing them shifts every glyph pixel.
+ *
+ * Returns ONLY the blended span, matching the Rust bridge's ABI — returning
+ * the whole destination would make the cost O(rows x buffer).
+ * ------------------------------------------------------------------------- */
+SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
+                                          SplArray* mask, int64_t mask_offset,
+                                          int64_t count, int64_t color) {
+    if (!dst || !mask || offset < 0 || mask_offset < 0 || count <= 0) return NULL;
+    if (offset + count > rt_array_len(dst)) return NULL;
+    if (mask_offset + count > rt_array_len(mask)) return NULL;
+
+    const int64_t* dst_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(dst);
+    const int64_t* mask_data = (const int64_t*)(uintptr_t)rt_array_data_ptr(mask);
+    if (!dst_data || !mask_data) return NULL;
+
+    SplArray* out = rt_array_new_uninit(count);
+    if (!out) return NULL;
+    int64_t* o = (int64_t*)(uintptr_t)rt_array_data_ptr(out);
+    if (!o) return NULL;
+
+    uint32_t s = (uint32_t)(uint64_t)color;
+    uint32_t fg_r = (s >> 16) & 255u;
+    uint32_t fg_g = (s >> 8) & 255u;
+    uint32_t fg_b = s & 255u;
+
+    for (int64_t i = 0; i < count; i++) {
+        /* SplArray stores one tagged int64_t slot per element, so a [u8] must
+           be read slot-wise and unboxed rather than as packed bytes. */
+        uint32_t a = engine2d_unbox_pixel(mask_data[mask_offset + i]) & 255u;
+        uint32_t inv = 255u - a;
+        uint32_t d = engine2d_unbox_pixel(dst_data[offset + i]);
+        uint32_t r = (fg_r * a + ((d >> 16) & 255u) * inv) / 255u;
+        uint32_t g = (fg_g * a + ((d >> 8) & 255u) * inv) / 255u;
+        uint32_t b = (fg_b * a + (d & 255u) * inv) / 255u;
+        o[i] = engine2d_box_pixel(0xff000000u | (r << 16) | (g << 8) | b);
+    }
+    return out;
+}
+
 /* Scalar fallback stubs — no-op placeholders until pure Simple or
    hardware-accelerated implementations are wired in. */
 
