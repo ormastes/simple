@@ -125,6 +125,66 @@ fn _sffi_value_as_int(value: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_value_as_int(value)
 
+pub fn llvm_assert_unique_ssa_defs(ir: text) -> text:
+    """Fail-closed SSA check over the finished module text.
+
+    LLVM value names are FUNCTION-scoped and single-assignment: defining `%l22`
+    twice inside one `define` is rejected outright by llc with `multiple
+    definition of local value named 'l22'`. The emitter names an LLVM value
+    `%l<mir_local_id>` after the MIR local it holds, and MIR locals are NOT SSA
+    -- a `var` can be written more than once (loop-carried counters, plain
+    re-assignment). `ssa_alloca_transform_blocks` is the mechanism that repairs
+    that (one entry-block alloca per multi-def/cross-block local, def -> store,
+    use -> load), but it can REFUSE a whole function (`unsupported instruction`,
+    `invalid terminator operands`), and on that path `llvm_bootstrap_ssa_function`
+    hands the un-rewritten function straight to the emitter. The duplicate then
+    travels all the way to llc, which is a link-stage error pointing at a line
+    number in a staging file that has usually already been deleted -- twice, on
+    the macOS Stage 2 lane, it cost a whole bootstrap run to diagnose (runs 22
+    and 23, doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md).
+
+    This converts that into a compiler-side abort naming the FUNCTION and the
+    value, at the moment the IR is produced. It is exactly llc's own rule, so it
+    cannot reject IR that llc would have accepted: the seen-set resets at every
+    `define`, because `%l3` in two different functions is legal and common.
+    Checking the text rather than the emitter's `defined_locals` receipt is
+    deliberate -- `translate_copy`'s ordinary scalar/ptr/float tail never records
+    that receipt, so a receipt-based check would be blind to the very site that
+    emitted both reported duplicates."""
+    val offender = llvm_first_duplicate_ssa_def(ir)
+    if offender != "":
+        panic("llvm-emitter-ssa-violation:{offender} -- a value is defined twice in one function; the MIR local behind it is multi-def and was not slotted by ssa_alloca_transform_blocks")
+    ir
+
+pub fn llvm_first_duplicate_ssa_def(ir: text) -> text:
+    """`<function>:<value>` for the first value defined twice inside one
+    `define`, or "" when the module is well-formed. Split out of
+    llvm_assert_unique_ssa_defs so the rule is testable as a value rather than
+    only as an abort. The seen-set resets at every `define`: LLVM value names
+    are function-scoped, so `%l3` in two different functions is legal."""
+    var seen: Dict<text, bool> = {}
+    var current_fn = "<module>"
+    for line in ir.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("define "):
+            seen = {}
+            val at = trimmed.index_of("@")
+            if at >= 0:
+                val rest = trimmed.substring(at + 1, trimmed.len())
+                val paren = rest.index_of("(")
+                current_fn = if paren >= 0: rest.substring(0, paren) else: rest
+            continue
+        if not trimmed.starts_with("%"):
+            continue
+        val eq = trimmed.index_of(" = ")
+        if eq < 0:
+            continue
+        val name = trimmed.substring(0, eq)
+        if seen.has(name):
+            return "{current_fn}:{name}"
+        seen[name] = true
+    ""
+
 fn llvm_bootstrap_ssa_function(
     fn_: MirFunction,
     bootstrap_mode: bool
@@ -418,7 +478,7 @@ impl MirTextCodegen for MirToLlvm:
 
         if not bootstrap_debug:
             self.builder.emit_tbaa_hierarchy()
-        return llvm_ir_builder_build(self.builder)
+        return llvm_assert_unique_ssa_defs(llvm_ir_builder_build(self.builder))
 
     me register_bootstrap_signatures():
         var index = 0

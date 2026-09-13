@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.mir_to_llvm.{llvm_first_duplicate_ssa_def}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+# macOS Stage 2 site 10 (doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md,
+# runs 22-23): `llc` rejected the emitted module with
+#   module.ll:114:3: multiple definition of local value named 'l22'
+# because MIR locals are not SSA -- a `var` can be written more than once -- and
+# the emitter names LLVM values `%l<mir_local_id>`. The repair mechanism is
+# ssa_alloca_transform_blocks; this spec pins the fail-closed check that stops a
+# function it did not slot from reaching llc silently.
+
+fn lower_source(src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "ssa.spl", "ssa.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("ssa.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn emit(label: text, src: text) -> text:
+    MirToLlvm.create("test.ssa.{label}", CodegenTarget.X86_64, nil).translate_module(lower_source(src))
+
+val var_in_loop = "fn total(n: i64) -> i64:\n    var acc = 0\n    var i = 0\n    while i < n:\n        acc = acc + i\n        i = i + 1\n    acc\n"
+val copy_of_copy = "fn go() -> i64:\n    var a = 1\n    val b = a\n    val c = b\n    a = c + 1\n    a\n"
+val struct_receiver_loop = "struct Box:\n    n: i64\n\nimpl Box:\n    me bump(k: i64) -> i64:\n        var i = 0\n        var acc = self.n\n        while i < k:\n            acc = acc + self.n\n            i = i + 1\n        acc\n\nfn go() -> i64:\n    val b = Box(n: 2)\n    b.bump(3)\n"
+
+# Hand-written IR: the exact shape run 23 reported, reduced. Two definitions of
+# %l22 inside ONE define -- what llc refuses.
+val ir_with_duplicate = "define i64 @mod.f(i64 %l1) nounwind {\nentry:\n  %l35 = add i64 %l1, 0  ; copy\n  %l22 = add i64 %l35, 0  ; copy\n  %l22 = add i64 %l35, 1  ; copy\n  ret i64 %l22\n}\n"
+# Same NAME in two different functions is legal LLVM: value names are
+# function-scoped. A guard that missed this would reject every real module.
+val ir_same_name_two_functions = "define i64 @mod.f() nounwind {\nentry:\n  %l3 = add i64 3, 0  ; const int\n  ret i64 %l3\n}\n\ndefine i64 @mod.g() nounwind {\nentry:\n  %l3 = add i64 0, 0  ; const int\n  ret i64 %l3\n}\n"
+
+describe "LLVM emitter refuses a second definition of one value", tag: ["only-compiled"]:
+    it "names the function and the value for a duplicate definition":
+        # @req REQ-SSPEC-UNIT
+        step("names the function and the value for a duplicate definition")
+        expect(llvm_first_duplicate_ssa_def(ir_with_duplicate)).to_equal("mod.f:%l22")
+
+    it "accepts the same value name in two different functions":
+        # @req REQ-SSPEC-UNIT
+        step("accepts the same value name in two different functions")
+        expect(llvm_first_duplicate_ssa_def(ir_same_name_two_functions)).to_equal("")
+
+    it "reports nothing for an empty module":
+        # @req REQ-SSPEC-UNIT
+        step("reports nothing for an empty module")
+        expect(llvm_first_duplicate_ssa_def("")).to_equal("")
+
+describe "emitted IR defines every value at most once per function", tag: ["only-compiled"]:
+    it "a var re-assigned in a loop":
+        # @req REQ-SSPEC-UNIT
+        step("a var re-assigned in a loop")
+        expect(llvm_first_duplicate_ssa_def(emit("loop", var_in_loop))).to_equal("")
+
+    it "a copy of a copy, then a write back to the source":
+        # @req REQ-SSPEC-UNIT
+        step("a copy of a copy, then a write back to the source")
+        expect(llvm_first_duplicate_ssa_def(emit("copy", copy_of_copy))).to_equal("")
+
+    it "a struct-receiver method with a loop-carried accumulator":
+        # @req REQ-SSPEC-UNIT
+        step("a struct-receiver method with a loop-carried accumulator")
+        expect(llvm_first_duplicate_ssa_def(emit("recv", struct_receiver_loop))).to_equal("")
