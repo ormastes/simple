@@ -226,3 +226,104 @@ scalar and compare outputs.
 `simd_lowering.spl` still knows only three f32x4 names, but that no longer
 blocks the interpreter path; it matters for the native backend, and is tracked
 separately.
+
+## Step 6 DONE — and it found two more defects
+
+The execution-level differential test now exists, runs, and passes. Writing it
+was not the hard part; making the emitted function *execute* was, and the first
+run did exactly what this record predicted no structural test could.
+
+**D6 — the vector loop never advanced its induction variable.** The first
+execution returned `InterpError::RuntimeError(Infinite loop detected)`.
+`create_vector_loop_block` computed
+
+    %vi1 = %vi + chunk_width          # a SEPARATE local
+    %cond = %vi1 < trip_count
+    If(%cond, vec_loop, exit)
+
+and never wrote `%vi`. Every iteration re-entered with the same index, so the
+back-edge was taken forever. `%vi` was also never initialised — no block seeded
+it. Fixed: the increment writes back into `%vi` itself, the guard reads `%vi`,
+and `align_check` (the only block dominating both the vector entry and the peel
+fall-through) seeds `%vi = 0`. `%vi1` is deleted.
+
+This is the defect that justifies the whole exercise. Four rounds of structural
+tests, five D-numbered fixes, and a correct alias oracle all sat on top of a
+loop that could not terminate — and nothing before this test could see it,
+because block shape was perfect.
+
+**D7 — a remainder trip count silently wrote one element.** With D6 fixed the
+8-element case passed, so the sweep was widened to trip counts 4..17. Trip 9
+failed with `undefined field 'instructions' ... on value of type 'nil'`. The
+peel path is doubly wrong:
+
+  * `create_peeling_block` emits exactly ONE cloned scalar iteration no matter
+    how many remain, then leaves the loop — for trip 9 that writes `out[0]` and
+    leaves elements 1..8 at their previous contents; and
+  * it terminates at a hard-coded `header + 3`, a block that does not exist on
+    any CFG with a real continuation. This is D3's assumption, removed from the
+    vector path in the earlier round but left in the peel path.
+
+The note in `rewrite.spl` claiming "Misaligned static trip counts are now
+handled by create_peeling_block ... Defect C is resolved" was false.
+
+Fixed by REFUSING it (`R4b`): `trip_count % chunk_width != 0` returns the
+function unchanged. Refusing costs remainder loops an optimization; not
+refusing miscompiles them. Lifting it requires a real peel that runs
+`trip % chunk` iterations and exits to the resolved exit block, plus an
+extension of the differential sweep to prove it.
+
+R4b then made the width ladder refuse trip 12 under a 16-lane plan (it narrowed
+to 8, and 12 % 8 != 0) — the exact "AVX-512 refuses what AVX2 accepts"
+regression the ladder exists to prevent, arriving by a new route. The ladder
+now narrows until the width both fits AND divides the trip count, so trip 12
+lands on 4 lanes and is accepted.
+
+### The tests
+
+`auto_vectorize_spec.spl` is 98/98. The step-6 section holds five examples:
+
+  * a scalar CONTROL that must run and produce the expected sums — without it
+    a vector failure proves nothing;
+  * byte-identical memory for the divisible case;
+  * a sweep over trip counts 4..17 asserting scalar and vector agree;
+  * a positive pin that trip counts 4/8/12/16 really are rewritten (block count
+    grows), so the sweep cannot pass vacuously by declining everything; and
+  * a negative pin that 5/6/7/9/10/11 are declined.
+
+One existing spec asserted the OPPOSITE of D7 — "accepts misaligned trip count
+(6 % 4 != 0) with peel body (Wave L3b)". What it pinned was the miscompile, so
+it is inverted, with the execution evidence named in place.
+
+## ACTIVE — 2026-09-13
+
+`PassKind.AutoVectorize` is `PassStatus.Active` and the witness pair
+(`auto_vectorize/exact-alias-elementwise-add` /
+`auto_vectorize/undecidable-distinct-bases`) is re-added alongside it, since the
+registry rejects an active pass with no witnesses just as it rejects an inactive
+one that claims them.
+
+**Admitted scope is deliberately narrow:** elementwise loops, static trip count
+that is a whole number of lanes, cleared by the alias oracle or by the emitted
+runtime range guard. Everything else declines. Widening means extending the
+differential sweep first.
+
+Measured consequence on the pass-registry specs, A/B on one tree with one
+binary: baseline (AnalysisOnly) 11 failures across three specs, Active 13 — the
+two new ones were the specs pinning the old status, now inverted.
+
+The flip also fixed two PRE-EXISTING reds in `pass_status_spec.spl`, for a
+reason worth recording: **AutoVectorize is the only Active pass in the entire
+registry.** "invalidates shared facts conservatively after any admitted
+transform" named `WriteCoalesce` as its transforming example, which is
+analysis-only, so the assertion had no force and was red; "binds every retained
+active transform to positive and negative witnesses" named `PatternIdiom`,
+which is Disabled and therefore correctly advertises nothing, so it threw on
+`unwrap`. Both rules needed an actually-active pass to point at and there was
+none. `pass_status_spec.spl` is 12/12, including
+`mir_pass_registry_integrity_errors()` and
+`pass_witness_registry_integrity_errors()` both empty.
+
+`simd_lowering.spl` still knows only three f32x4 names. That does not block the
+interpreter path this record is about, but it means the NATIVE backend cannot
+yet consume what the pass emits; tracked separately.
