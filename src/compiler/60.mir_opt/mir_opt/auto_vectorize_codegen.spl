@@ -597,30 +597,99 @@ fn vectorize_store(ctx: VectorizeContext, ptr: MirOperand, value: MirOperand, sp
 # Vector Load/Store Helpers
 # ============================================================================
 
-fn create_vector_load(ctx: VectorizeContext, base: LocalId, offset: LocalId) -> MirInst:
-    """Create a vector load instruction."""
-    val load_name = "simd_load_{ctx.element_type}x{ctx.vector_width}"
-    val base_op = MirOperand.copy(base)
-    val offset_op = MirOperand.copy(offset)
+# ============================================================================
+# Vector memory and arithmetic — REAL MIR SIMD instructions
+#
+# These used to emit `MirInstKind.Intrinsic` addressed by STRING NAME
+# ("simd_load_f32x16", "simd_add_i32x4", ...). Nothing in the tree implements
+# those names: `simd_lowering.spl` knows exactly three (simd_add/mul/sub_f32x4
+# — no load, no store, no other width), and the MIR interpreter has no case
+# for them at all. So the vector loop this file produced could never run or be
+# lowered, which is why four rounds of structural tests passed over a loop body
+# no backend could consume.
+#
+# `MirSimdLoad` / `MirSimdBinop` / `MirSimdStore` are real instruction kinds
+# the MIR interpreter already executes (mir_interpreter.spl:702-727, backed by
+# the Vec16f/Vec8d/Vec16i lane model in mir_simd_interpreter.spl). Emitting
+# those makes the output executable, which is the precondition for any
+# differential test of the rewrite.
+# ============================================================================
+
+fn vector_mir_type(element_type: text, lanes: i64) -> MirType?:
+    """Map (element, lane count) to the vector MirType the interpreter models.
+
+    Returns nil for a combination it does not model — the caller must decline
+    rather than emit a vector type nothing can shape.
+    """
+    if element_type == "f32":
+        if lanes == 4: return Some(MirType(kind: MirTypeKind.Vec4f))
+        if lanes == 8: return Some(MirType(kind: MirTypeKind.Vec8f))
+        if lanes == 16: return Some(MirType(kind: MirTypeKind.Vec16f))
+        return nil
+    if element_type == "f64":
+        if lanes == 4: return Some(MirType(kind: MirTypeKind.Vec4d))
+        if lanes == 8: return Some(MirType(kind: MirTypeKind.Vec8d))
+        return nil
+    if element_type == "i32":
+        if lanes == 4: return Some(MirType(kind: MirTypeKind.Vec4i))
+        if lanes == 8: return Some(MirType(kind: MirTypeKind.Vec8i))
+        if lanes == 16: return Some(MirType(kind: MirTypeKind.Vec16i))
+        return nil
+    nil
+
+fn simd_binop_name(op_name: text) -> text?:
+    """Map the recipe op name to the interpreter's SimdBinop spelling."""
+    if op_name.contains("add"): Some("Add")
+    elif op_name.contains("sub"): Some("Sub")
+    elif op_name.contains("mul"): Some("Mul")
+    elif op_name.contains("xor"): Some("Xor")
+    else: nil
+
+fn create_vector_addr(dest: LocalId, base: LocalId, offset: LocalId) -> MirInst:
+    """Address of the vector slice: base + offset, as a real GEP."""
     MirInst(
-        kind: MirInstKind.Intrinsic(Some(LocalId(id: ctx.next_local)), load_name, [base_op, offset_op]),
+        kind: MirInstKind.GetElementPtr(dest, MirOperand.copy(base), [MirOperand.copy(offset)]),
         span: nil
     )
 
-fn create_vector_store(ctx: VectorizeContext, base: LocalId, offset: LocalId, value: LocalId) -> MirInst:
-    """Create a vector store instruction."""
-    val store_name = "simd_store_{ctx.element_type}x{ctx.vector_width}"
-    val base_op = MirOperand.copy(base)
-    val offset_op = MirOperand.copy(offset)
-    val value_op = MirOperand.copy(value)
+fn create_vector_load_typed(dest: LocalId, addr: LocalId, vec_type: MirType) -> MirInst:
     MirInst(
-        kind: MirInstKind.Intrinsic(nil, store_name, [base_op, offset_op, value_op]),
+        kind: MirInstKind.MirSimdLoad(dest, MirOperand.copy(addr), false, vec_type),
+        span: nil
+    )
+
+fn create_vector_store_typed(value: LocalId, addr: LocalId) -> MirInst:
+    MirInst(
+        kind: MirInstKind.MirSimdStore(MirOperand.copy(value), MirOperand.copy(addr), false),
+        span: nil
+    )
+
+fn create_vector_binop(dest: LocalId, lhs: LocalId, rhs: LocalId, op: text) -> MirInst:
+    MirInst(
+        kind: MirInstKind.MirSimdBinop(dest, MirOperand.copy(lhs), MirOperand.copy(rhs), op),
         span: nil
     )
 
 # ============================================================================
 # N1 Wave — Vector Loop Block (elementwise-add)
 # ============================================================================
+
+
+fn _vec_block_instructions(body: [MirInst], inc_inst: MirInst, guard_inst: MirInst) -> [MirInst]:
+    """Vector body followed by the index bump and exit guard.
+
+    `body` is EMPTY when the element/lane combination has no vector MirType or
+    the op has no SimdBinop spelling. That is deliberate: emitting a loop with
+    no vector work, rather than one full of instructions nothing implements,
+    keeps the failure visible to the caller instead of deferring it to a
+    backend that will reject the whole function.
+    """
+    var out: [MirInst] = []
+    for i in body:
+        out.push(i)
+    out.push(inc_inst)
+    out.push(guard_inst)
+    out
 
 fn create_vector_loop_block(
     ctx: VectorizeContext,
@@ -664,51 +733,27 @@ fn create_vector_loop_block(
     val a_base = if input_bases.len() > 0: input_bases[0] else: LocalId(id: 0)
     val b_base = if input_bases.len() > 1: input_bases[1] else: LocalId(id: 1)
 
-    val load_name  = "simd_load_{ctx.element_type}x{ctx.vector_width}"
-    val store_name = "simd_store_{ctx.element_type}x{ctx.vector_width}"
-    val vec_op_name = "simd_{_elementwise_op_stem(op_name)}_{ctx.element_type}x{ctx.vector_width}"
+    # Real SIMD MIR, not string-named intrinsics. See the note above
+    # vector_mir_type: the old `simd_load_f32x16`-style names had no
+    # implementation anywhere, so this loop could never run or be lowered.
+    val vt_opt = vector_mir_type(ctx.element_type, ctx.vector_width)
+    val op_opt = simd_binop_name(op_name)
+    # Address locals for the three slices.
+    val addr_a = LocalId(id: base_block_id + 210)
+    val addr_b = LocalId(id: base_block_id + 211)
+    val addr_o = LocalId(id: base_block_id + 212)
 
-    # %va = simd_load(a_base, vi)
-    val load_a = MirInst(
-        kind: MirInstKind.Intrinsic(
-            Some(va_local),
-            load_name,
-            [MirOperand(kind: MirOperandKind.Copy(a_base)),
-             MirOperand(kind: MirOperandKind.Copy(vi_local))]
-        ),
-        span: nil
-    )
-    # %vb = simd_load(b_base, vi)
-    val load_b = MirInst(
-        kind: MirInstKind.Intrinsic(
-            Some(vb_local),
-            load_name,
-            [MirOperand(kind: MirOperandKind.Copy(b_base)),
-             MirOperand(kind: MirOperandKind.Copy(vi_local))]
-        ),
-        span: nil
-    )
-    # %vres = simd_<op>(va, vb) — use Intrinsic to stay type-agnostic; backend lowers it
-    val op_inst = MirInst(
-        kind: MirInstKind.Intrinsic(
-            Some(vres_local),
-            vec_op_name,
-            [MirOperand(kind: MirOperandKind.Copy(va_local)),
-             MirOperand(kind: MirOperandKind.Copy(vb_local))]
-        ),
-        span: nil
-    )
-    # simd_store(out_base, vi, vres)
-    val store_inst = MirInst(
-        kind: MirInstKind.Intrinsic(
-            nil,
-            store_name,
-            [MirOperand(kind: MirOperandKind.Copy(output_base)),
-             MirOperand(kind: MirOperandKind.Copy(vi_local)),
-             MirOperand(kind: MirOperandKind.Copy(vres_local))]
-        ),
-        span: nil
-    )
+    var body: [MirInst] = []
+    if vt_opt.? and op_opt.?:
+        val vt = vt_opt.unwrap()
+        body.push(create_vector_addr(addr_a, a_base, vi_local))
+        body.push(create_vector_load_typed(va_local, addr_a, vt))
+        body.push(create_vector_addr(addr_b, b_base, vi_local))
+        body.push(create_vector_load_typed(vb_local, addr_b, vt))
+        body.push(create_vector_binop(vres_local, va_local, vb_local, op_opt.unwrap()))
+        body.push(create_vector_addr(addr_o, output_base, vi_local))
+        body.push(create_vector_store_typed(vres_local, addr_o))
+
     # %vi1 = vi + chunk_width
     val vf_op = _i64_const(ctx.vector_width)
     val inc_inst = MirInst(
@@ -746,7 +791,7 @@ fn create_vector_loop_block(
     MirBlock(
         id:           block_id,
         label:        Some("vec_loop"),
-        instructions: [load_a, load_b, op_inst, store_inst, inc_inst, guard_inst],
+        instructions: _vec_block_instructions(body, inc_inst, guard_inst),
         terminator:   terminator
     )
 

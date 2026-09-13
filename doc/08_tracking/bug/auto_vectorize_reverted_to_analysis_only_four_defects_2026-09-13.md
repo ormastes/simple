@@ -183,3 +183,46 @@ intrinsics, not merely writing the test:
    string-named intrinsics;
 2. extend `simd_lowering.spl` past the three f32x4 names it knows;
 3. then, and only then, run vectorized against scalar and compare outputs.
+
+## D5 FIXED — the vector loop now emits executable SIMD MIR
+
+Option (1) from the list above, taken: the rewriter no longer emits
+string-named intrinsics at all. `create_vector_loop_block` now builds
+
+    GetElementPtr   -> slice address
+    MirSimdLoad(dest, addr, aligned, vec_type)
+    MirSimdBinop(dest, lhs, rhs, "Add"|"Sub"|"Mul"|"Xor")
+    MirSimdStore(value, addr, aligned)
+
+which the MIR interpreter already executes (`mir_interpreter.spl:702-727`)
+against the Vec4f/Vec8f/Vec16f, Vec4d/Vec8d, Vec4i/Vec8i/Vec16i lane model in
+`mir_simd_interpreter.spl`.
+
+`vector_mir_type(element, lanes)` maps to those types and returns nil for a
+combination the interpreter does not model; `simd_binop_name(op)` maps the
+recipe op to the interpreter's spelling and returns nil for anything else.
+When either is nil the vector body is emitted EMPTY rather than filled with
+instructions nothing implements — the failure stays visible to the caller
+instead of being deferred to a backend that would reject the whole function.
+
+Pinned by five examples: MirSimdLoad/Store/Binop are emitted and the
+string-named Intrinsic count is **zero**; every supported width maps to a real
+vector type; unsupported widths and elements decline; the op mapping covers
+Add/Sub/Mul and declines div; and a 16-lane f32 recipe — the width the whole
+AVX-512 planning effort produces, and the one that previously had no
+implementation anywhere — emits a real vector body.
+
+`auto_vectorize_spec.spl`: 93/93.
+
+### Step 6 is now unblocked
+
+The execution-level differential test no longer depends on implementing
+anything: the emitted loop is executable by the MIR interpreter. What remains
+is to build a fixture that is itself runnable — the current single-block
+fixtures branch to a block that does not exist, so both the rewritten AND the
+original fail and the control proves nothing — then run vectorized against
+scalar and compare outputs.
+
+`simd_lowering.spl` still knows only three f32x4 names, but that no longer
+blocks the interpreter path; it matters for the native backend, and is tracked
+separately.
