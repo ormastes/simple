@@ -376,6 +376,11 @@ const READ_NF_TOO_LARGE: i64 = 7;
 const READ_NF_REPARSE: i64 = 8;
 const READ_NF_READ: i64 = 9;
 const READ_NF_BAD_UTF8_CONTENT: i64 = 10;
+/// Created, but the value did not decode as a heap string on the way out.
+/// This separates "the string was born bad" from "it went bad after crossing
+/// into Simple" -- the caller sees a present-but-undecodable text? and cannot
+/// tell those apart, and they have completely different owners.
+const READ_NF_BORN_UNDECODABLE: i64 = 101;
 
 fn read_no_follow_fail(code: i64) -> RuntimeValue {
     READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(code));
@@ -448,8 +453,15 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     if std::str::from_utf8(&raw).is_err() {
         return read_no_follow_fail(READ_NF_BAD_UTF8_CONTENT);
     }
-    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(READ_NF_OK));
-    rt_string_new(raw.as_ptr(), raw.len() as u64)
+    let value = rt_string_new(raw.as_ptr(), raw.len() as u64);
+    let born_len = crate::value::collections::rt_string_len(value);
+    let code = if born_len == raw.len() as i64 {
+        READ_NF_OK
+    } else {
+        READ_NF_BORN_UNDECODABLE
+    };
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(code));
+    value
 }
 
 /// Read entire file as text (RuntimeValue wrapper)

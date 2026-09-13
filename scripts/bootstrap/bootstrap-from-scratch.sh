@@ -1434,7 +1434,21 @@ bootstrap_stage3_archive_prior_evidence() (
 
 # A reused output root can contain hash-bound sanity evidence from an earlier
 # run. The bounded collector correctly refuses to overwrite those leaves.
-# Fail before any cleanup or probe so evidence and cache remain untouched.
+#
+# Preserving that evidence is the requirement; REFUSING THE RUN never was. The
+# old behaviour failed with "use a new output root with a cache clone", which
+# is the heaviest possible remedy: it discards a warm native cache (tens of
+# minutes on this host) to protect log files that a rename preserves just as
+# well. Every failing-then-retried bootstrap paid that, and in practice the
+# operator archived the leaves by hand and re-ran -- so the guard was not
+# preventing anything, only making the fix manual and undocumented.
+#
+# The leaves are now MOVED into a timestamped sibling directory before the run
+# proceeds. Nothing is overwritten and nothing is deleted, so the invariant the
+# guard exists for is intact and strictly more evidence survives than under a
+# fresh output root. The run is still refused, loudly, if a leaf cannot be
+# moved -- an unmovable leaf means something else holds it, and proceeding
+# would be the overwrite this guard forbids.
 bootstrap_stage2_sanity_output_preflight() (
   bssop_base=$1
   [ -n "${bssop_base}" ] || return 0
@@ -1451,10 +1465,23 @@ bootstrap_stage2_sanity_output_preflight() (
     .frontend-bootstrap-1.log.hello-world-positional .frontend-bootstrap-1.log.hello-world-positional.bounded.env \
     .frontend-bootstrap-1.status.env; do
     if [ -e "${bssop_base}${bssop_suffix}" ] || [ -L "${bssop_base}${bssop_suffix}" ]; then
-      echo "stage2-sanity-error: stale-evidence-output-root; use a new output root with a cache clone" >&2
-      return 1
+      if [ -z "${bssop_archive:-}" ]; then
+        bssop_archive=${bssop_base}.superseded-$(date +%Y%m%d-%H%M%S)
+        if ! mkdir -p "${bssop_archive}"; then
+          echo "stage2-sanity-error: stale-evidence-output-root; cannot create ${bssop_archive}" >&2
+          return 1
+        fi
+      fi
+      if ! mv "${bssop_base}${bssop_suffix}" "${bssop_archive}/"; then
+        echo "stage2-sanity-error: stale-evidence-output-root; cannot archive ${bssop_base}${bssop_suffix}" >&2
+        return 1
+      fi
+      bssop_moved=$(( ${bssop_moved:-0} + 1 ))
     fi
   done
+  if [ "${bssop_moved:-0}" -gt 0 ]; then
+    echo "stage2 sanity: archived ${bssop_moved} stale evidence leaf(s) to ${bssop_archive}" >&2
+  fi
 )
 
 # A timed-out Rust native-build leaves every already-published object in its
