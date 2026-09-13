@@ -613,3 +613,11 @@ still not been localised; attach-based profiling remains blocked on this host
 (`ptrace_scope=1`, `perf_event_paranoid=4`). Cross-reference:
 `doc/08_tracking/bug/lint_timeout_hwir_zca_rows_2026-08-17.md`.
 Not proven here: any specific hot function or algorithmic cause.
+
+## Triage 2026-09-13
+
+Same superlinear lint/check cost family already documented in
+.claude/rules/commands.md (partly fixed by the 2026-08-18 seed
+redeploy per that doc's own note, but root cause still not fully
+located). Not a bounded fix for this lane. Leaving OPEN.
+

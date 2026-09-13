@@ -54,3 +54,13 @@ Run the materially changed cache-preserving Stage 3 build once. It must pass
 the symbolized `remember_local_hir_type` frontier and produce an admitted
 candidate; then run Stage 4 and the essential-tools gates. Do not use the Rust
 seed as acceptance authority.
+
+## Triage 2026-09-13
+
+Unblock condition requires running a materially-changed Stage 3
+bootstrap build once, past the symbolized remember_local_hir_type
+frontier, then Stage 4 and essential-tools gates. This is a full
+native bootstrap cycle (native compile + link + multi-stage
+self-compilation), far outside this lane's per-item budget and risky
+to attempt on a shared, already-loaded host. Leaving OPEN, no attempt.
+

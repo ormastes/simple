@@ -199,3 +199,10 @@ ownership. Filed as the real follow-up below.
 API that returns through a pointer is unsafe by construction, GPU or not. The
 detection spec fences the GPU dispatchers; the underlying gap in
 `src/lib/nogc_sync_mut/sffi/dynamic.spl` remains open and needs an owner.
+
+## Triage 2026-09-13
+
+Requires real NVIDIA GPU hardware + libcuda.so to reproduce/verify
+(filed against a host with two working GPUs). No GPU hardware
+available in this environment. Leaving OPEN.
+

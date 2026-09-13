@@ -98,3 +98,9 @@ be re-triaged as such (not an environment issue).
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/02_integration/gpu_lane/cuda_lane_session_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Requires real CUDA/GPU execution to verify B2 lane resolution across
+module boundaries. No GPU available in this environment. Leaving OPEN.
+

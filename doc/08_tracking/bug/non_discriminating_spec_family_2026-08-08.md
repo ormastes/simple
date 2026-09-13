@@ -361,3 +361,13 @@ separate, much larger remediation decision (tracked above under
 "Remediation"), not a silent side effect of a perf/scoping fix. Left
 unchanged, per instructions not to weaken *or* strengthen detection semantics
 as a side effect of a reliability fix.
+
+## Triage 2026-09-13
+
+Large audit/remediation effort: a 19,499-spec corpus sweep with a
+landed detector but outstanding remediation across many individual
+vacuous specs (the headline example alone is an 86-example spec file
+needing its commented-out module import and assertions restored, which
+requires the target module to actually be import-ready). Not a single
+localized bug; out of this lane's per-item budget. Leaving OPEN.
+

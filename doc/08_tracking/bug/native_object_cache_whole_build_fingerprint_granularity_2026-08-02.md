@@ -190,3 +190,10 @@ contention) are treated as reliable evidence for the granularity verdict
 above. No further timing measurement was attempted under this load, per
 guidance to stop chasing clean timings on a contended host.
 
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.

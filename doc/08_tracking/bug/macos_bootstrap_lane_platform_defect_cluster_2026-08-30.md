@@ -143,3 +143,13 @@ fresh evidence for being worth doing: the 2026-09-06 lane hit `stat -Lc` and an
 unconditional `/proc/self/stat` read — the same GNU/Linux-only class as four of
 the eight here — in a tree that had already been swept once. A one-off sweep does
 not hold; only a gate does.
+
+## Triage 2026-09-13
+
+Not exercisable on this host (linux/aarch64). Every one of the eight
+listed defects is macOS-specific (aarch64-apple-darwin bootstrap,
+Metal, Apple libc/ABI quirks, BSD `find`/`sed` syntax). No macOS host
+available to this lane. Leaving OPEN per the record's own status line
+("fixes landed for all eight; lane not yet green through Stage 2") —
+verification requires a macOS bootstrap run this lane cannot perform.
+

@@ -148,3 +148,15 @@ rather than a blanket assumption. The call-site workaround already landed in
 `host_gui_event_router.spl` remains the correct interim mitigation. Status
 unchanged: **OPEN — ARCHITECTURAL (Rust seed nested-call dispatcher, verified
 2026-08-10, evidence: `method_dispatch.rs:855`)**.
+
+## Triage 2026-09-13
+
+Call-site workaround already landed (host_glfw_key_name uses
+intermediate typed vals per .claude/rules/language.md's documented
+workaround for chained methods on erased receivers). Root cause is the
+Rust seed's nested/chained-call dispatcher
+(method_dispatch.rs:855) needing a primitive-receiver arm mirroring
+the 2026-06-29 enum-receiver fix; confirmed the pure-Simple
+95.interp/ tree has no such dispatcher to edit instead. Out of
+pure-Simple fix scope. Leaving OPEN.
+

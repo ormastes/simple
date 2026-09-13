@@ -156,3 +156,51 @@ position and in argument position respectively. Fixing that one site retires
 both docs; patching the 29 call sites individually does not.
 
 NOT FIXED by this lane (interpreter path owned by a concurrent P1 lane).
+
+## Fix 2026-09-13 (BUGFIX-6 lane) — `has_subcommand()` (3 mirrored sites)
+
+Since this doc was last updated, several of the 24 unfixed sites were already
+fixed by other lanes without this doc being updated (re-checked by content:
+`symbol.spl`, `lazy_seq.spl`, `lazy_seq_fixed.spl`, `auth.spl`, `infer.spl`,
+`checker.spl`, `verification_checker.spl`, `binding_specializer.spl`,
+`conf.spl`, `mailbox.spl` no longer use tail-position `.?` in a `-> bool`
+function). Of the remaining live sites, two
+(`src/compiler/25.traits/trait_def.spl`, `src/compiler/99.loader/jit_instantiator.spl`)
+are fenced for this fan-out and were not touched.
+
+Fixed here, per the doc's own caution against a blind bulk sweep — one
+caller-audited site (present as 3 near-identical mirrors across the
+`nogc_sync_mut`/`gc_async_mut`/`nogc_async_mut` GC-variant families, all part
+of the same `ParsedResult.has_subcommand()` API):
+
+- `src/lib/nogc_sync_mut/cli/simple_parser_api.spl:63`
+- `src/lib/gc_async_mut/cli/simple_parser_api.spl:60`
+- `src/lib/nogc_async_mut/cli/simple_parser_api.spl:60`
+
+`has_subcommand() -> bool` returned `self.subcommand.?` where
+`subcommand: text?`. Caller audit: `grep -rn '\.has_subcommand(' src/ test/`
+found only test callers, all using strict `to_equal` assertions
+(`test/03_system/feature/usage/cli_args_default_spec.spl`,
+`cli_args_subcommand_spec.spl`) — no truthy-position caller depends on the
+old payload/nil leak, so converging to a real bool is safe.
+
+RED (base `a6450c9d6f5`): `bin/simple test
+test/03_system/feature/usage/cli_args_default_spec.spl` ->
+`Results: 4 total, 1 passed, 3 failed` — 2 examples hit `semantic: nil is
+forbidden by the non-optional return contract of 'has_subcommand'` (the
+no-subcommand case, where `.?` returns nil) and 1 hit `expected build to
+equal true` (the subcommand-present case, where `.?` returns the payload
+text `"build"`).
+
+Fix: `self.subcommand != nil` in all three mirrors.
+
+GREEN: `cli_args_default_spec.spl` `Results: 4 total, 4 passed, 0 failed`.
+Regression check: `cli_args_subcommand_spec.spl` (which also exercises
+`has_subcommand()`) `Results: 10 total, 10 passed, 0 failed`.
+
+Remaining unfixed, non-fenced sites (10) still need their own caller audits
+per this doc's standing caution and are left for a future pass:
+`dict.spl:94`, `lock.spl:47`, `associated_types.spl:42`, `llvm_backend.spl:344`
+(cross-stream, owned by F2 per this doc), `macho_inspect.spl:204`,
+`pe_parser.spl:299`, `lean/runner.spl:102`, `durability.spl:483`,
+`vfs.spl:147`.

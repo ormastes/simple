@@ -121,3 +121,10 @@ workers in this pass, so no fix was attempted here.
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Per-engine match-on-enum native lowering status row, seed-side
+(src/compiler_rust/compiler/src/pipeline/execution.rs). Out of
+pure-Simple fix scope. Leaving OPEN.
+

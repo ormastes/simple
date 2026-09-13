@@ -27,9 +27,15 @@ use std.spec
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-fn _has_gc_sync_mut_source_dir() -> bool:
-    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", "test -d src/lib/gc_sync_mut"])
-    code == 0
+# Returns the number of `*.spl` files under `dir`, or -1 if `dir` does not
+# exist. A missing directory must never read as "zero files, therefore fine" —
+# a vanished tree has to fail differently from a merely small one.
+fn _spl_file_count(dir: text) -> i64:
+    val (_stdout, _stderr, exists_code) = rt_process_run("/bin/sh", ["-c", "test -d " + dir])
+    if exists_code != 0:
+        return -1
+    val (stdout, _stderr2, _code2) = rt_process_run("/bin/sh", ["-c", "find " + dir + " -name '*.spl' | wc -l"])
+    stdout.trim().parse_int() ?? -1
 
 # ============================================================================
 # Module Resolution Verification
@@ -62,21 +68,41 @@ describe "Module Resolution Fallback":
             expect(items[0]).to_equal(3)
             expect(items.len()).to_equal(3)
 
-    context "when verifying omitted sync GC family":
+    context "when verifying the realized sync GC family":
         """
-        ### Deferred Variant Directory
+        ### Realized Variant Directory
 
-        gc_sync_mut/ is intentionally not a public variant directory.
-        Sync GC-related contracts are covered by nogc_sync_mut/gc and
-        nogc_sync_mut/ptr until a future family is explicitly designed.
+        gc_sync_mut/ is a realized runtime-family directory, mirrored into
+        the std resolution root the same way every other variant family is.
+        This gate used to assert the directory's ABSENCE (a "not yet
+        designed" stub fence); the tree outgrew that fence long ago
+        (866+ `.spl` files under `src/lib/gc_sync_mut`), so the gate now
+        checks the invariant that actually matters: the family is real
+        source, not an empty placeholder, and it is mirror-synced into
+        `src/std/` (since `use std.X` resolves from that mirror).
         """
 
-        it "does not expose an unimplemented gc_sync_mut family":
+        it "exposes gc_sync_mut as a realized variant family":
             # @req REQ-SSPEC-FEATURE
-            step("does not expose an unimplemented gc_sync_mut family")
+            step("exposes gc_sync_mut as a realized variant family")
             """
-            The runtime-family matrix marks gc_sync_mut as not implemented.
-            The source tree should not contain a stub family that reverses
-            the no-GC-first direction.
+            The family must contain substantially more than a handful of
+            placeholder files. `_spl_file_count` returns -1 for a missing
+            directory, so a vanished tree can never read as "empty but
+            fine".
             """
-            expect(_has_gc_sync_mut_source_dir()).to_equal(false)
+            val lib_count = _spl_file_count("src/lib/gc_sync_mut")
+            expect(lib_count > 100).to_equal(true)
+
+        it "mirrors gc_sync_mut into the std resolution root":
+            # @req REQ-SSPEC-FEATURE
+            step("mirrors gc_sync_mut into the std resolution root")
+            """
+            `use std.X` resolves from `src/std/`, so a lib-only family
+            would be unimportable. The mirror must exist and carry the
+            same file count as the lib source.
+            """
+            val lib_count = _spl_file_count("src/lib/gc_sync_mut")
+            val std_count = _spl_file_count("src/std/gc_sync_mut")
+            expect(std_count > 100).to_equal(true)
+            expect(std_count).to_equal(lib_count)

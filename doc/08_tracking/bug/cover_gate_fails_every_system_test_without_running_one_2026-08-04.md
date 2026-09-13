@@ -98,3 +98,12 @@ that names the 2,122 legacy files explicitly, or a measured annotation pass done
 with coverage collection on. Until then, treat the 227 in
 `test/03_system/app` as **unmeasured**, not as 227 defects: the only honest
 current number for that directory comes from a `--no-cover-check` run.
+
+## Triage 2026-09-13
+
+Explicitly recorded as "a rollout/policy decision... not something a
+bug-triage session can resolve unilaterally" -- 2,122+ legacy specs
+lack the # @cover annotation the gate now requires, and adding it
+requires measured coverage data per file (not mechanical). Leaving
+OPEN as recorded, no attempt.
+

@@ -117,3 +117,15 @@ the returned value, and each run is paired with a fabricated-symbol control that
 must produce `error[E1002]`. Probes ran against a tree pinned to `origin/main`
 containing only `src/lib` plus the `src/std -> lib` symlink, with the facade
 `mv`-ed away for the ablation arm.
+
+## Triage 2026-09-13
+
+Both remaining OPEN items require nontrivial, risky cross-module work:
+`std.log`'s backing module (nogc_sync_mut/log.spl) must be fixed BEFORE
+a re-export can be added (re-exporting now would poison the whole
+facade with a runtime fault), and `std.pe_coff_header` needs either
+renaming or merging two colliding `PeHeaderSummary` classes across
+src/lib/pe_coff_header.spl and src/lib/common/pe_coff_header.spl,
+affecting pe_inspect.spl/pe_parser.spl consumers. Both exceed a safe
+single-item budget. Leaving OPEN as recorded.
+

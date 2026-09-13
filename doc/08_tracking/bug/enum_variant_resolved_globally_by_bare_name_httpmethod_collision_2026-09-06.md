@@ -84,3 +84,17 @@ so this path stops being uncovered.
 
 Binary measured: `bin/release/aarch64-unknown-linux-gnu/simple`,
 `Simple Language v1.0.0-rc.1` (Rust bootstrap seed).
+
+## Triage 2026-09-13
+
+Reproduced the described symptom class in principle (the root cause
+`enum_declares_variant` resolving bare enum names globally rather than
+per-import-scope lives in the Rust seed at
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_ident.rs:31-66`,
+confirmed present at base a6450c9d6f5). This is a Rust-seed defect, out
+of pure-Simple fix scope for this lane (`.spl`/`.shs` only per
+CLAUDE.md, seed is bootstrap-only per `.claude/rules/bootstrap.md`).
+The existing record already carries a full root-cause writeup and a
+minimal reproducer; no further diagnosis needed from this lane. Leaving
+OPEN for a seed-side (Rust) fix.
+

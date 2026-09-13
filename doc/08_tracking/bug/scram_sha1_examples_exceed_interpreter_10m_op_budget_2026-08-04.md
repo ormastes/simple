@@ -91,3 +91,10 @@ Three candidate fixes, none safe to pick from a measurement lane:
 The third is the one that matters: until the JIT list-return corruption is
 fixed, deliberately-expensive KDFs can only be exercised on the slow engine,
 where they do not fit the budget.
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.

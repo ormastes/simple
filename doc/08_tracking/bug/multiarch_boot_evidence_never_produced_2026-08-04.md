@@ -140,3 +140,11 @@ specs assert on. That needs a QEMU lane run, which was not attempted.
 So the specs are honestly RED rather than vacuously green (a missing file makes
 `expect(file_exists(...)).to_equal(true)` fail), but they gate on a production
 path that was never built.
+
+## Triage 2026-09-13
+
+Requires real multi-arch QEMU boot artifacts
+(build/multiarch/<triple>/{smoke,bootstrap}_result.json) that no lane in
+this environment can produce -- needs actual QEMU boots across
+multiple architectures. Out of scope. Leaving OPEN.
+
