@@ -1,6 +1,7 @@
 # Site 11: the Stage-2 route now REACHES llc and emits invalid IR (duplicate local name)
 
-- **Status:** OPEN (2026-09-13)
+- **Status:** FIXED (2026-09-13, BOOT-10, commit `be454c32040`) — verified by a full
+  canonical `--stop-after-stage2` bootstrap, see "Closed by measurement" below.
 - **Lane:** BOOT-9, found on `build/bootstrap-boot9b` (09:43:56 -> 09:52:48,
   head `c541c610d86`, `--full-bootstrap --backend=llvm --mode=dynload --jobs=10
   --stop-after-stage2`)
@@ -138,3 +139,26 @@ emitting the module to a caller-chosen path) is step one; without the IR, line
 
 Do NOT raise `STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS`: it is no longer even
 involved — the route fails fast now.
+
+## Closed by measurement — `build/bootstrap-boot10a`, head `be454c32040`
+
+Full canonical run, fresh output root, `--full-bootstrap --backend=llvm --mode=dynload --jobs=10
+--stop-after-stage2`, 10:41:03 -> 11:19:03 (38m00s), rc=1. Stage-2 candidate
+sha256 `ba3c25f30d76c9a82a9353432be57c03…`, 152 203 632 B.
+
+In the new candidate's own route log
+(`bootstrap-boot10a/stage3/aarch64-unknown-linux-gnu/stage2-receiver.log`):
+
+```
+grep -c 'multiple definition of local value'  ->  0
+```
+
+BOOT-9's log for the same step and the same fixture carried
+`module.ll:102:3: error: multiple definition of local value named 'l13'`. The llc rejection is gone.
+
+Stage 2 sanity is still `status=pass` (`checks_run=5`, `sha_stable_status=0`,
+`frontend_smoke_bootstrap_mode_status=0`); the struct-receiver step is still `status=fail`
+(`probe_exit=1`, `reason=stage2-struct-receiver-failed`) and the route still exits `status 1` — but
+now for a DIFFERENT and independent reason, `native-capsule-source-mutated`, filed as site 12
+(`stage2_capsule_source_identity_is_sha256_of_empty_2026-09-13.md`), which was already present
+underneath this one in BOOT-9's run. Stage 3/4 were correctly refused: no admitted Stage-2 parent.

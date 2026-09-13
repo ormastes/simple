@@ -99,3 +99,25 @@ grep -A1 native-capsule-source-mutated scratchpad/boot10/fxrun/f1/build.log
 
 Raw evidence: `scratchpad/boot10/fxrun/*/build.log`, `scratchpad/boot10/route11c.log`,
 and BOOT-9's `stage2-receiver.log` quoted above.
+
+## Confirmed as the SOLE remaining blocker (2026-09-13, BOOT-10)
+
+With site 11 fixed (`be454c32040`), the canonical `--stop-after-stage2` run
+`build/bootstrap-boot10a` (head `be454c32040`, Stage-2 candidate
+`ba3c25f30d76c9a82a9353432be57c03…`) shows **zero** llc errors in the route log and both units
+failing here instead:
+
+```
+| error: stage2 failed the positional pure-Simple Stage-3 route (status 1)
+| error: native capsule collection failed -- module, tag and detail follow
+cache-source=src/compiler/common/module_path_naming.spl
+  capsule-identity=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  disk-identity=c84a1cf364dcf48b5ec6bec5e8ecf7ecb07411c9089b4620b8b92d5f76a09c95
+cache-source=scripts/check/cert/redeploy_gate/fixtures/stage2_module_path_naming.spl
+  capsule-identity=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  disk-identity=404569fc2e1d74f7b292c14b75766e041dfc84c45cc409899c8255796651bc45
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Same sha256("") identity for two different sources on a freshly built compiler, so this is
+reproducible across candidates and is what blocks Stage-2 admission now.
