@@ -174,3 +174,63 @@ This also sharpens the suspect: a defect in small-fixed-array indexing or enum e
 under MIR lowering is consistent with `34b96e29837` being the only commit in the
 BOOT-13 -> here span that rewrites `function_lowering.spl` and `mir_instruction_graph.spl`
 — still a suspect, still not proven.
+
+---
+
+## ROOT CAUSE FOUND AND FIXED — 2026-09-13 (BOOT-16)
+
+- Status: FIXED in the Rust seed (`7bcf337209f`), pinned by
+  `df1ec89c4cf`. Stage-2 effect recorded separately below.
+
+BOOT-15 narrowed this to "a natively compiled `match` on an enum runs no arm:
+`rt_enum_new` is baked with one id, `rt_enum_check_variant` with another
+(= `rid("Kind")`, the BARE name), discriminants agree", and established that the
+pure-Simple sites in `src/compiler/50.mir/_MirLowering/module_lowering.spl` never
+execute for Stage-2 output. The two derivations are in the Rust seed, and they are:
+
+| side | site | name it hashes | id for `enum Kind` in module `aa.zz` |
+|---|---|---|---|
+| construction | `pipeline/native_project/mangle.rs:43` `qualify_enum_runtime_names` rewrites `MirInst::EnumUnit`/`EnumWith.enum_name` to the declaring-module runtime name (module name from `compiler.rs:764` `enum_runtime_module_name_from_path`), which codegen then hashes at `codegen/llvm/functions.rs:1695` / `codegen/instr/calls.rs:2404` | `aa.zz.Kind` (module-qualified, hence path-dependent) | 1815201125 |
+| match | `hir/lower/expr/control.rs:1538` `enum_runtime_id_for_type` and `:1545` `enum_runtime_id_for_pattern` bake the id as an HIR `Integer` literal into the `rt_enum_check_variant` builtin call (also `mir/lower/lowering_expr_call.rs:447` for `is_ok`/`is_err`) | `Kind` (bare declared name) | 2107071139 = `0x7d975aa3` |
+
+`2107071139` is exactly the `w1` BOOT-15 disassembled out of the real Stage-2
+binary, so the unit-level reproduction and the machine code agree.
+
+The match side was never reachable by `qualify_enum_runtime_names`: by the time
+MIR exists the name is already an integer, so the pass saw nothing to qualify.
+`rt_enum_check_variant` answers 0 on an id mismatch, so **no match arm ran in any
+natively compiled Simple program** — which is why `BackendKind.to_text()` returned
+garbage in the capsule, why `_table_is_sorted_v1` was false, and why
+`validate_k1_static_backend_table_v1` refused the table. The 13-line pure function
+this record narrowed to was correct all along; every `match` inside it was dead.
+
+**Fix** (`7bcf337209f`): `qualify_enum_runtime_names` now also remaps the baked
+constant, through the same `qualify` closure the constructors take, so both sides
+derive from the one canonical runtime name `imports.rs:519` registers. A fresh
+`ConstInt` is inserted before the call rather than the existing one mutated (a
+constant vreg can feed other operands); ids 0/1 are never rewritten (reserved
+Result/Option lane, and 0 also marks the erased discriminant-only lane); a
+bare-name hash collision whose qualified answers disagree drops the entry instead
+of guessing.
+
+**Evidence** — private seed `d6f1a424edbc` (before) vs `60adb234b470` (after),
+`native-build --backend cranelift`, BOOT-15's `shapes4.spl`, 3 s per iteration:
+
+| shape | interpreted (control) | native before | native after |
+|---|---|---|---|
+| `match k` -> i64, 3 arms | 11 / 22 / 33 | 0 / 0 / 0 | **11 / 22 / 33** |
+| `match k` -> text | cranelift / interpreter / llvm | '0' / '0' / '0' | **cranelift / interpreter / llvm** |
+| `match` with `case _` | 11 / 99 | 99 / 99 | **11 / 99** |
+| statement-form `match` on a var | cranelift / interpreter | none / none | **cranelift / interpreter** |
+| statement-form `match` -> i64 | 11 / 22 | 0 / 0 | **11 / 22** |
+
+Identical and correct for the same fixture at `aa/zz.spl` and `bbbb/zz.spl`, so
+the path-dependence BOOT-15 measured is gone as a DIVERGENCE. The shared id is
+still module-qualified by design — that is what the registrar writes and what the
+collision checks in `mangle.rs`/`imports.rs` depend on — so it legitimately
+differs between two module names; what must never differ, and no longer does, is
+construction vs match within one build.
+
+`cargo test -p simple-compiler --lib`: 4070 passed / 20 failed before (18
+pre-existing + the 2 new RED), 4072 passed / 18 failed after. Failure-set diff is
+empty in both directions apart from the two tests going green.
