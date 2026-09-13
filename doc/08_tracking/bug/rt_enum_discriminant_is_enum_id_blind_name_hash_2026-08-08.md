@@ -119,3 +119,13 @@ change across the Rust runtime, the Cranelift/LLVM backends, and the `.spl` back
 - **Pure-Simple self-hosted binary:** UNMEASURED. `bin/simple` currently resolves to the
   Rust bootstrap **seed** (it prints the seed warning on every run). Redeploying the
   self-hosted binary was out of scope for this lane.
+
+## Triage 2026-09-13
+
+Re-confirmed the record's own conclusion: this is a documented latent
+risk class with "No code fix is warranted" -- a site audit already
+found zero cross-family discriminant comparisons in the current tree,
+so there is no live defect to fix, only a documented trap for future
+code. Nothing to do here. Leaving OPEN as an intentional latent-risk
+record, matching its own stated status.
+

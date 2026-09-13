@@ -109,3 +109,35 @@ The `simple test` half is the dangerous one: it manufactures false GREENs.
 ## Triage 2026-09-12
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Re-check 2026-09-13 (BUGFIX-6 lane) — Half 2 NOT REPRODUCIBLE; Half 1 unchanged
+
+Base `a6450c9d6f5`, seed sha256 prefix `3d120a6f9ab5704b`.
+
+**Half 2** (`simple test <ABSOLUTE path>` silently running nothing and
+exiting 0): tried both an absolute single-file spec path and an absolute
+directory path.
+
+- Absolute single file (`bin/simple test "$PWD/test/01_unit/lib/common/text_advanced_levenshtein_spec.spl"`,
+  both with and without `--no-session-daemon --sequential`):
+  `Results: 7 total, 7 passed, 0 failed`, exit 0 — correct, matches the
+  relative-path form exactly.
+- Absolute directory (`bin/simple test "$PWD/test/01_unit/lib/js"`, default
+  daemon mode): `Results: 60 total, 47 passed, 13 failed, 13 skipped`, exit 1
+  — correct, matches the relative-path sweep run earlier in this session
+  exactly (same 13 failures, same counts).
+- Absolute directory with `--no-session-daemon --sequential` (single-file
+  lane): `error: expected .spl test file: <path>` — a LOUD, correctly
+  non-zero-exit refusal (that flag combination is documented elsewhere as
+  single-file-only), not the silent-zero failure mode described.
+
+None of these reproduce "runs nothing and exits 0". Half 2 appears fixed on
+this binary; not closing outright since the fix commit was not located and
+this is one binary/host, but recording as not reproducible here.
+
+**Half 1** (`native-build --entry` rejecting an absolute path): not
+re-attempted — the record's own 2026-08-16 evidence already needs a fresh
+pure-Simple compiler + admitted Stage 2/4 verification to confirm, which
+this lane cannot run (no self-hosted binary, native-build risk on a shared
+host per other rows' native-build memory-allocation failures this session).
+Leaving OPEN for Half 1; Half 2 downgraded to not-reproducible-here.
