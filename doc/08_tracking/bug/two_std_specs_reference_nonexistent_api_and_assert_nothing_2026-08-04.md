@@ -113,3 +113,8 @@ Both need an owner decision that a test-repair lane cannot make:
   what is not acceptable is leaving a zero-assertion file counted as a test.
 
 Neither may be resolved by `@skip`/`@ignore` or by deleting the assertions.
+
+## Triage 2026-09-13
+Reconfirmed: `bin/simple test test/01_unit/std/mock_simple_spec.spl` still
+fails identically (`semantic: variable Mock not found`). Architectural,
+blocked on an owner decision per this record. Left as-is, no code change.
