@@ -1,5 +1,11 @@
 # Vulkan 8K strict-JIT retained host-buffer sample crash
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: needs a real (or pinned lavapipe) Vulkan
+compute device plus SIMPLE_JIT_STRICT=1 8K retained-buffer harness to
+reproduce -- GPU-hardware-gated, not a stdlib fix. Left OPEN.
+
+
 **Status:** OPEN (unverified 2026-09-12)
 
 Date: 2026-08-12
