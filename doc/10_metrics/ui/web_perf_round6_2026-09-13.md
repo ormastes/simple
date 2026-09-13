@@ -1,19 +1,25 @@
 # Web-rendering perf round 6 (2026-09-13)
 
-Continuation of `doc/10_metrics/ui/web_perf_round5_2026-09-13.md`, which
-committed sub-timers for the `parse` phase and the `sec_select`/`sec_cascade`
-style buckets (`14fa8034e90`) and left "split `sec_select`/`sec_cascade` into
-sub-timers" as the first item for this round. That split was already committed
-in `14fa8034e90` (the `sel_match`/`sel_sort`/`cas_*` counters exposed via
-`SIMPLE_WEB_STYLE_COUNTERS=1` + `SIMPLE_WEB_PHASE_TRACE=1`, printed as
-`[web-phase] style_counters ...` / `[web-phase] phase=parse ...`).
+Continuation of `doc/10_metrics/ui/web_perf_round5_2026-09-13.md`, whose
+own PR (#881) landed only the round-5 write-up doc — the sub-timer
+instrumentation itself (`14fa8034e90`, "sub-time the parse phase and the
+sec_select/sec_cascade style buckets") was committed locally by the round-5
+agent but **never pushed to `origin/main`**. This PR is therefore the one
+that actually lands that instrumentation: the `sel_match`/`sel_sort`/`cas_*`
+counters and the `parse` phase sub-timers (`pp_html_us`/`pp_css_us`/
+`pp_childidx_us`), exposed via `SIMPLE_WEB_STYLE_COUNTERS=1` +
+`SIMPLE_WEB_PHASE_TRACE=1` and printed as `[web-phase] style_counters ...` /
+`[web-phase] phase=parse ...`. Both are level-gated and default-off — an
+untraced render pays nothing for them, per the existing phase-trace
+convention in that file.
 
-**Outcome this round: no fix landed.** Two candidate optimizations were
-measured with paired A/B evidence and both failed to move the needle (one
-made things slightly worse). Per the task contract ("implement AT MOST ONE
-fix, with A/B evidence"), a disproven candidate is not landed. This is an
-honest negative result, recorded here so round 7 does not re-try either path
-without first fixing the reason it failed.
+**Outcome this round: the instrumentation lands; no optimization fix lands.**
+Two candidate optimizations were measured with paired A/B evidence using that
+instrumentation and both failed to move the needle (one made things slightly
+worse). Per the task contract ("implement AT MOST ONE fix, with A/B
+evidence"), a disproven candidate is not landed. This is an honest negative
+result, recorded here so round 7 does not re-try either path without first
+fixing the reason it failed.
 
 ## Sub-bucket tables (8-page catalog, this host, `before_*` runs 1-4)
 
@@ -38,11 +44,12 @@ Style-stage sub-buckets (`sec_select`'s `sel_match`, and `sec_cascade`'s
 | before_3 | 1112 | 182 | 149 | 352 | 191 | 286 | 589 |
 | before_4 | 1108 | 179 | 149 | 350 | 193 | 284 | 590 |
 
-`sel_match` (selector-group matching against a node's tag/class/id) is the
-single largest leaf measured this round — ahead of `pp_html_us`'s per-call
-cost breakdown, `pp_css_us`, and every `cas_*` sub-bucket. `cas_tail` (the
-un-split remainder of the cascade after the other six `cas_*` buckets) is the
-second largest single bucket inside `sec_cascade`.
+`pp_html_us` (`parse_html`) is the single largest bucket measured this round
+(1427-1544 ms across the 8-page catalog). Inside the style stage, `sel_match`
+(selector-group matching against a node's tag/class/id) is the largest single
+leaf (1036-1112 ms) — ahead of `pp_css_us` and every `cas_*` sub-bucket.
+`cas_tail` (the un-split remainder of the cascade after the other six `cas_*`
+buckets) is the second largest style-stage sub-bucket.
 
 ## Candidate 1 (inherited from the dead round-5 agent): byte-compare tokenizer
 scan + template-elide early return + base-selector shape memo — REVERTED
@@ -145,18 +152,34 @@ Reverted via `git checkout --`.
 
 ## Gates
 
-Both candidates were checked for correctness before being measured and
-reverted:
+Both optimization candidates were checked for correctness before being
+measured and reverted; the sub-timer instrumentation that this PR actually
+lands was checked separately, on HEAD:
 
-- **Draw IR digests: 8 of 8 byte-identical** on every run of both candidates,
-  matching the round-4/5/6 pinned values:
+- **Draw IR digests: 8 of 8 byte-identical** on every run of both candidates
+  (dozens of runs across this round), matching the round-4/5 pinned values:
   `5cdf8386bad82f0c`, `85a685ca46fc3527`, `76c359e483e11e84`,
   `d9a0d2a7e71a2960`, `a16ea7c83d459a5a`, `616ad24659d7779e`,
   `4cf797f8c3a8f3a4`, `56097a5a1ce50dda`.
-- GPU boundary audit and the 19+1 specs were **not** re-run this round: since
-  neither candidate was kept, there is no code change on the branch tip for
-  those gates to certify, and the tree at HEAD is bit-identical to round 5's
-  landed `14fa8034e90`.
+- **GPU boundary audit PASS on HEAD** —
+  `SIMPLE_BIN=<interpreter> sh scripts/check/check-web-vulkan-gpu-boundary-audit.shs`,
+  exit 0: `PASS — 2 frame(s) audited, host_pixel_iterations=0,
+  readbacks_per_frame<=1, submits_per_frame<=1`.
+- **The 19 `*style*`/`*cascade*`/`*inherit*` specs: identical before/after.**
+  Run twice — once against HEAD (sub-timers present), once with the three
+  changed lib files (`simple_web_html_layout_renderer.spl`,
+  `..._core.spl`, `..._foundation.spl`) reverted to their `origin/main`
+  content (sub-timers absent) — with everything else on the tree held fixed.
+  Exit codes were byte-identical on both sides: the same **3 pre-existing
+  RED** specs (`be_dom_event_path_and_style_serialize_spec`,
+  `style_animation_spec`, `simple_web_css_cascade_spec` — matching round 5's
+  record, unrelated to this change) and the same 16 GREEN. Since the counters
+  are level-gated and default-off, and neither run set
+  `SIMPLE_WEB_STYLE_COUNTERS`/`SIMPLE_WEB_PHASE_TRACE`, this isolates
+  whether the new (dead-by-default) code paths disturb anything — they do
+  not.
+- **`web_cold_pipeline_memo_spec` GREEN on HEAD — 4 examples, 0 failures**,
+  matching round 5's recorded state.
 
 ## Left for round 7
 
