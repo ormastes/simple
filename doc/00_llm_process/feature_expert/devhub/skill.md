@@ -84,6 +84,13 @@ mechanical causes, all now closed:
   routing facts and the *NAME* of a credential's env var
   (`bitbucket_token_env: BB_TOKEN`), never a secret. `resolve_auth_token`
   resolves `[token_env]` > `[token_cmd]` > `auth.sdn`.
+- **A configured Jira token means REST, never acli.** acli is Cloud-only and
+  ignores itf's URL/token, so routing `view`/`search`/`create` through it forced
+  `acli jira auth login` even with a token set, and could never work on Data
+  Center. `check_jira_auth` (`auth.spl`, via `atlassian_token_ready`) is now the
+  single "url + token (+ user unless bearer)" rule; `cmd_jira` goes REST-first
+  on it and `cmd_tasks` searches through `jira_search_any`. DC v2 rich-text
+  fields are plain strings (`_jira_rich_text`), not ADF.
 - **`gh pr create --body` had nothing to map onto.** `bb_build_create_pr_body`
   took no description at all, so a PR body would have been silently discarded.
   Added additively (`*_full` / `*_with_body`) so no existing caller or spec
