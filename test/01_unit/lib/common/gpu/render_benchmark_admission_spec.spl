@@ -1,0 +1,123 @@
+"""Comparable renderer evidence must share workload and measurement policy."""
+# @cover src/lib/common/gpu/render_benchmark_admission.spl 95%
+
+use std.spec.*
+use std.common.gpu.render_benchmark_admission.*
+
+fn evidence(runner: text) -> GpuRenderBenchmarkEvidence:
+    GpuRenderBenchmarkEvidence(runner: runner, fixture_hash: "sha256:fixture",
+        event_script_hash: "sha256:events", width: 3840, height: 2160,
+        pixel_format: "rgba8-unorm", timing_boundary: "event-to-device-fence",
+        warmup_count: 5, sample_count: 30, backend: "vulkan",
+        device_identity: "pci:1002:73bf", source_revision: "git:abc",
+        binary_hash: "sha256:binary", p50_ns: 6000000, p95_ns: 9000000,
+        max_rss_bytes: 134217728, upload_bytes: 4096,
+        timed_buffer_allocation_count: 0, retained_buffer_bytes: 67108864,
+        teardown_released_bytes: 67108864, timed_full_frame_upload_count: 0,
+        timed_readback_bytes: 0, capture_count: 1,
+        capture_readback_bytes: 33177600, fence_completion_count: 30,
+        completion_poll_count: 30, cpu_completion_wait_count: 0,
+        frame_ring_capacity: 3, max_frames_in_flight: 3,
+        unconditional_submit_wait: false, event_generation_count: 30,
+        damage_area_pixels: 124416000,
+        fallback_used: false, device_execution_proven: true)
+
+describe "GPU render benchmark evidence admission":
+    it "admits C Vulkan and Simple Vulkan with identical measurement metadata":
+        # @req REQ-GPUUI-007
+        # @req NFR-GPUUI-002
+        val c = evidence("c-vulkan")
+        val simple = evidence("simple-vulkan")
+        expect(gpu_render_benchmark_pair_admitted(c, simple)).to_be(true)
+
+    it "admits Chrome and Simple Web only with a common GPU identity":
+        # @req REQ-GPUUI-007
+        # @req NFR-GPUUI-003
+        val chrome = evidence("chrome-web")
+        val simple = evidence("simple-web")
+        expect(gpu_render_benchmark_pair_admission_reason(chrome, simple)).to_equal("admitted")
+
+    it "rejects a fixture mismatch":
+        var right = evidence("simple-vulkan")
+        right.fixture_hash = "sha256:different"
+        expect(gpu_render_benchmark_pair_admission_reason(
+            evidence("c-vulkan"), right)).to_equal("fixture-mismatch")
+
+    it "rejects different event scripts":
+        var right = evidence("simple-web")
+        right.event_script_hash = "sha256:different-events"
+        expect(gpu_render_benchmark_pair_admission_reason(
+            evidence("chrome-web"), right)).to_equal("event-script-mismatch")
+
+    it "rejects different timing boundaries":
+        var right = evidence("simple-vulkan")
+        right.timing_boundary = "cpu-submit-return"
+        expect(gpu_render_benchmark_pair_admission_reason(
+            evidence("c-vulkan"), right)).to_equal("timing-boundary-mismatch")
+
+    it "rejects different devices":
+        var right = evidence("simple-web")
+        right.device_identity = "pci:10de:2684"
+        expect(gpu_render_benchmark_pair_admission_reason(
+            evidence("chrome-web"), right)).to_equal("device-identity-mismatch")
+
+    it "rejects timed framebuffer readback":
+        var left = evidence("c-vulkan")
+        left.timed_readback_bytes = 33177600
+        expect(gpu_render_benchmark_pair_admission_reason(
+            left, evidence("simple-vulkan"))).to_equal("left-evidence-not-admitted")
+
+    it "rejects fallback or unproven device execution":
+        var right = evidence("simple-web")
+        right.fallback_used = true
+        expect(gpu_render_benchmark_pair_admission_reason(
+            evidence("chrome-web"), right)).to_equal("right-evidence-not-admitted")
+        right.fallback_used = false
+        right.device_execution_proven = false
+        expect(gpu_render_benchmark_evidence_admitted(right)).to_be(false)
+
+    it "rejects unequal sampling policy":
+        var right = evidence("simple-vulkan")
+        right.sample_count = 20
+        right.fence_completion_count = 20
+        expect(gpu_render_benchmark_pair_admission_reason(
+            evidence("c-vulkan"), right)).to_equal("sample-count-mismatch")
+
+    it "rejects synchronous submit-and-wait disguised by fence counts":
+        # @req REQ-GPUUI-004
+        # @req NFR-GPUUI-005
+        var simple = evidence("simple-vulkan")
+        simple.frame_ring_capacity = 1
+        simple.max_frames_in_flight = 1
+        simple.unconditional_submit_wait = true
+        expect(gpu_render_benchmark_pair_admission_reason(
+            evidence("c-vulkan"), simple)).to_equal("right-evidence-not-admitted")
+
+    it "rejects timed allocation full-frame upload and missing retained buffers":
+        # @req REQ-GPUUI-003
+        # @req REQ-GPUUI-006
+        # @req NFR-GPUUI-006
+        var candidate = evidence("simple-web")
+        candidate.timed_buffer_allocation_count = 1
+        expect(gpu_render_benchmark_evidence_admitted(candidate)).to_be(false)
+        candidate.timed_buffer_allocation_count = 0
+        candidate.timed_full_frame_upload_count = 1
+        expect(gpu_render_benchmark_evidence_admitted(candidate)).to_be(false)
+        candidate.timed_full_frame_upload_count = 0
+        candidate.retained_buffer_bytes = 0
+        expect(gpu_render_benchmark_evidence_admitted(candidate)).to_be(false)
+
+    it "rejects blocking completion and invalid damage accounting":
+        # @req REQ-GPUUI-004
+        # @req REQ-GPUUI-005
+        # @req NFR-GPUUI-005
+        # @req NFR-GPUUI-007
+        var candidate = evidence("simple-web")
+        candidate.cpu_completion_wait_count = 1
+        expect(gpu_render_benchmark_evidence_admitted(candidate)).to_be(false)
+        candidate.cpu_completion_wait_count = 0
+        candidate.completion_poll_count = 29
+        expect(gpu_render_benchmark_evidence_admitted(candidate)).to_be(false)
+        candidate.completion_poll_count = 30
+        candidate.damage_area_pixels = 3840 * 2160 * 31
+        expect(gpu_render_benchmark_evidence_admitted(candidate)).to_be(false)

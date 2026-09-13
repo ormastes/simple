@@ -18,9 +18,19 @@ class PaneRecord:
     pane: MuxPane
     buf: ScrollbackBuffer
     focus: bool
+    # child_pid — pid of the piped child process backing this pane, or -1 when
+    # the pane has no process attached. Panes are NEVER auto-spawned: creating a
+    # session or splitting a pane must not fork a shell (that would leak one
+    # process per pane in every test), so smux_pane_spawn attaches one
+    # explicitly and smux_send_text fails typed on a pane with no child.
+    child_pid: i64
+    # pty_fd — master fd of the PTY backing this pane, or -1 when the pane is
+    # backed by plain pipes. A pane with pty_fd > 0 has a CONTROLLING TERMINAL:
+    # its child sees isatty(0) true and `stty size` reports the pane geometry.
+    pty_fd: i64
 
     me feed(line: text) -> PaneRecord:
-        return PaneRecord(pane: me.pane, buf: me.buf.append(line), focus: me.focus)
+        return PaneRecord(pane: me.pane, buf: me.buf.append(line), focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd)
 
     me resize(c: int, r: int) -> PaneRecord:
         val p = me.pane
@@ -33,13 +43,22 @@ class PaneRecord:
             cols: c,
             rows: r
         )
-        return PaneRecord(pane: np, buf: me.buf, focus: me.focus)
+        return PaneRecord(pane: np, buf: me.buf, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd)
+
+    me with_focus(f: bool) -> PaneRecord:
+        return PaneRecord(pane: me.pane, buf: me.buf, focus: f, child_pid: me.child_pid, pty_fd: me.pty_fd)
+
+    me with_child(pid: i64) -> PaneRecord:
+        return PaneRecord(pane: me.pane, buf: me.buf, focus: me.focus, child_pid: pid, pty_fd: me.pty_fd)
+
+    me with_pty(pid: i64, fd: i64) -> PaneRecord:
+        return PaneRecord(pane: me.pane, buf: me.buf, focus: me.focus, child_pid: pid, pty_fd: fd)
 
     me capture(max_lines: int) -> MuxCapture:
         return MuxCapture.create(me.pane.id, me.buf.capture(max_lines), me.buf.line_count())
 
     static fn create(p: MuxPane) -> PaneRecord:
-        return PaneRecord(pane: p, buf: ScrollbackBuffer.create(), focus: false)
+        return PaneRecord(pane: p, buf: ScrollbackBuffer.create(), focus: false, child_pid: -1, pty_fd: -1)
 
 
 # =========================================================================
@@ -229,6 +248,25 @@ class ServiceState:
             st = ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: w, window_count: n + 1, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
         return st
 
+    me replace_window(idx: int, w: MuxWindow) -> ServiceState:
+        if idx == 0:
+            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: w, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        if idx == 1:
+            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: w, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        if idx == 2:
+            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: w, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        if idx == 3:
+            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: w, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        if idx == 4:
+            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: w, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        if idx == 5:
+            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: w, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        if idx == 6:
+            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: w, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        if idx == 7:
+            return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: w, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: me.pane_count, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)
+        return me
+
     # --- pane helpers ---
 
     me find_pane_idx(pid: text) -> int:
@@ -323,6 +361,24 @@ class ServiceState:
             val stp7: ServiceState = me.replace_pane(7, pr)
             return stp7.with_pane_count(n + 1)
         return me
+
+    # remove_pane — compact on removal.
+    #
+    # find_pane_idx / get_pane only scan the first pane_count slots, so blanking
+    # a slot in place and decrementing the count (the old smux_close_pane) left
+    # every LATER pane above the new count and therefore undiscoverable and
+    # unwritable. Shift survivors down, blank the vacated tail, then decrement.
+    me remove_pane(idx: int) -> ServiceState:
+        if idx < 0 or idx >= me.pane_count:
+            return me
+        val blank = PaneRecord.create(MuxPane.create("", "", ""))
+        var st = me
+        var i = idx
+        while i < me.pane_count - 1:
+            st = st.replace_pane(i, st.get_pane(i + 1))
+            i = i + 1
+        st = st.replace_pane(me.pane_count - 1, blank)
+        return st.with_pane_count(me.pane_count - 1)
 
     me with_pane_count(n: int) -> ServiceState:
         return ServiceState(s0: me.s0, s1: me.s1, s2: me.s2, s3: me.s3, s4: me.s4, s5: me.s5, s6: me.s6, s7: me.s7, session_count: me.session_count, w0: me.w0, w1: me.w1, w2: me.w2, w3: me.w3, w4: me.w4, w5: me.w5, w6: me.w6, w7: me.w7, window_count: me.window_count, p0: me.p0, p1: me.p1, p2: me.p2, p3: me.p3, p4: me.p4, p5: me.p5, p6: me.p6, p7: me.p7, pane_count: n, c0: me.c0, c1: me.c1, c2: me.c2, c3: me.c3, client_count: me.client_count, next_id: me.next_id, metrics: me.metrics)

@@ -1,0 +1,180 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @manual_section: workbench-production
+# Lifecycle: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ;
+# doc/04_architecture/ui/simple_gui_stack.md ;
+# doc/05_design/sspec_capture_extension.md
+# research: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ; plan: .spipe/caret_workbench/state.md
+
+"""
+Caret workbench production wiring (lane A9): pane == agent.
+
+Closes the two gaps `.spipe/caret_workbench/state.md` left open after A8:
+
+  1. **Nothing in `src/` ever launched a `MultiCaretManager`**, so the live
+     registry was never fed and `caret_gui_html()` served an empty roster in
+     production. `src/app/llm_caret/main.spl --workbench` is now that owner; it
+     calls the same `workbench/pane_team.spl` entry points this oracle calls.
+  2. **A pane's child was not a managed agent.** The manager used to spawn with
+     `process_spawn_async` (no piped stdout) while panes spawned separately.
+     `launch_pane_team` now spawns each agent through `smux_pane_spawn`, so the
+     pane's child and the `ManagedAgent` are ONE process.
+
+The identity claim is proven destructively rather than by inspection: closing
+ONE agent's PANE must kill exactly that agent's pid and leave its sibling
+running. Two separate processes cannot pass that.
+
+The active region shows the agent's own stdout, and the nonce arrives
+TRANSFORMED (`AGENT:<nonce>`) — an echo of the bytes the workbench wrote
+cannot satisfy it.
+
+**Captures:** build/test-artifacts/caret_workbench/prod_live_team.txt,
+build/test-artifacts/caret_workbench/prod_live_team.html
+"""
+# @evidence-display: embed_tui
+
+use std.spec.*
+use std.sffi.io.{file_write_text}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+
+# Bare kill(pid,0) probe. NOT process_is_running: measured 2026-09-05, that one
+# only consults the runtime's async-spawn registry, so a live PIPED child (which
+# a pane's child is) reports false there and the assertion would be vacuous.
+use app.io.process_ops.{process_pid_exists}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.workbench.pane_team.{launch_pane_team, poll_pane_team,
+    stop_pane_team, send_to_agent, publish_pane_team, pid_for_agent,
+    pane_id_for_agent}
+use app.llm_caret.workbench.session_contract.{ProcessLifecycle, AgentTurn}
+use app.llm_caret.workbench.session_source.{live_sessions, live_selected,
+    clear_live_sessions, clear_pane_output}
+use app.llm_caret.workbench.tui_entry.{render_live_workbench}
+use app.llm_caret.workbench.tui_layout.{CompactView}
+use app.llm_caret.gui.{caret_gui_html}
+use os.apps.smux.api.{smux_reset_for_test, smux_close_pane}
+
+# A line-oriented stand-in agent CLI: ignores the launch plan's argv and answers
+# each stdin line PREFIXED, so the workbench cannot pass by echoing its own send.
+val AGENT_STUB: text = "test/fixtures/caret_workbench/agent_pane_stub.shs"
+val NONCE: text = "nonceA9prod"
+val ALPHA: text = "agents/alpha.md"
+val BETA: text = "agents/beta.md"
+
+fn _request(agent_md: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: "claude", agent_md_path: agent_md,
+        skill_path: "", task_desc: "workbench prod", model: "",
+        session_id: "", extra_args: [])
+
+fn _join_lines(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+describe "Caret workbench production wiring launches real agents into real panes":
+
+    it "makes the pane's child the managed agent and shows its transformed output":
+        # @req: REQ-CARET-WORKBENCH-PROD-001
+        # @capture(action_trace): pane pids before/after close -> caret_workbench_prod_spec.evidence.sdn
+        step("Gap 1: the production owner launches a real team and feeds the registry")
+        clear_live_sessions()
+        clear_pane_output()
+        smux_reset_for_test()
+        var team = launch_pane_team("caret-workbench-prod",
+            [_request(ALPHA), _request(BETA)], 8, AGENT_STUB, "", "", "", "")
+        expect(team.ok).to_equal(true)
+        expect(team.manager.status).to_equal("running")
+        expect(team.agents.len()).to_equal(2)  # oracle: two --agent requests were submitted
+
+        val alpha_pid = pid_for_agent(team, ALPHA)
+        val beta_pid = pid_for_agent(team, BETA)
+        # Real OS processes, and each has its OWN pane.
+        expect(alpha_pid > 0).to_equal(true)
+        expect(beta_pid > 0).to_equal(true)
+        expect(alpha_pid == beta_pid).to_equal(false)
+        expect(process_pid_exists(alpha_pid)).to_equal(true)
+        expect(process_pid_exists(beta_pid)).to_equal(true)
+        expect(pane_id_for_agent(team, ALPHA) == pane_id_for_agent(team, BETA))
+            .to_equal(false)
+
+        step("The roster the surfaces read is non-empty and names the real agents")
+        team = poll_pane_team(team)
+        expect(team.manager.status).to_equal("running")
+        expect(publish_pane_team(team)).to_equal(true)
+        val views = live_sessions()
+        expect(views.len()).to_equal(2)  # oracle: one SessionView published per launched agent
+        expect(views[0].label).to_equal(ALPHA)
+        expect(views[1].label).to_equal(BETA)
+        expect(views[0].lifecycle).to_equal(ProcessLifecycle.Running)
+        # A raw child exposes no semantic turn state; guessing one would
+        # collapse two independent contract axes.
+        expect(views[0].turn).to_equal(AgentTurn.Unknown)
+        expect(live_selected().value).to_equal(ALPHA)
+
+        step("Gap 2: input reaches the SELECTED AGENT's own stdin and returns transformed")
+        expect(send_to_agent(team, ALPHA, NONCE)).to_equal(true)
+        var frames = 0
+        var grid = ""
+        while frames < 60 and not grid.contains("AGENT:" + NONCE):
+            thread_sleep_ms(50)
+            team = poll_pane_team(team)
+            val _published = publish_pane_team(team)
+            grid = _join_lines(render_live_workbench(120, 40, CompactView.Session))
+            frames = frames + 1
+        expect(file_write_text(
+            "build/test-artifacts/caret_workbench/prod_live_team.txt", grid)).to_equal(true)
+        # The stub PREFIXES, so an echo of the sent bytes cannot satisfy this.
+        expect(grid).to_contain("AGENT:" + NONCE)
+        expect(grid).to_contain(ALPHA)
+        expect(grid).to_contain(BETA)
+        expect(grid).to_contain("Pane " + pane_id_for_agent(team, ALPHA))
+
+        step("The GUI serves the same live roster — not the empty page it used to")
+        val html = caret_gui_html()
+        expect(file_write_text(
+            "build/test-artifacts/caret_workbench/prod_live_team.html", html)).to_equal(true)
+        expect(html).to_contain(ALPHA)
+        expect(html).to_contain(BETA)
+        expect(html).to_contain("AGENT:" + NONCE)
+        # This is gap 1 stated as an assertion: an unfed registry rendered this.
+        expect(html.contains("No agents yet")).to_equal(false)
+
+        step("Identity proof: closing ONE agent's pane kills exactly that agent")
+        val alpha_pane = pane_id_for_agent(team, ALPHA)
+        expect(smux_close_pane(team.session_id, team.window_id, alpha_pane))
+            .to_equal(true)
+        thread_sleep_ms(300)
+        # Two distinct processes could not produce this pair of answers.
+        expect(process_pid_exists(alpha_pid)).to_equal(false)
+        expect(process_pid_exists(beta_pid)).to_equal(true)
+        # And the manager sees the survivor rather than declaring the team dead.
+        team = poll_pane_team(team)
+        expect(team.manager.status).to_equal("degraded")
+
+        step("Teardown asserted against the OS, not the manager's self-report")
+        val settled = stop_pane_team(team)
+        thread_sleep_ms(300)
+        expect(process_pid_exists(beta_pid)).to_equal(false)
+        expect(settled.manager.status).to_equal("stopped")
+        smux_reset_for_test()
+        clear_live_sessions()
+        clear_pane_output()
+        expect(live_sessions().len()).to_equal(0)  # oracle: registry empty before publish / after teardown
+
+    it "refuses a launch it cannot seat, leaving no child behind":
+        # @req: REQ-CARET-WORKBENCH-PROD-002
+        # @capture(action_trace): refused-launch child inventory -> caret_workbench_prod_spec.evidence.sdn
+        step("A nonexistent agent binary must fail closed, not half-launch")
+        clear_live_sessions()
+        clear_pane_output()
+        smux_reset_for_test()
+        val team = launch_pane_team("caret-workbench-refuse",
+            [_request(ALPHA), _request(BETA)], 8,
+            "test/fixtures/caret_workbench/does_not_exist.shs", "", "", "", "")
+        expect(team.ok).to_equal(false)
+        expect(team.error).to_contain("launch_rolled_back")
+        expect(team.manager.status).to_equal("not_started")
+        # The registry is never fed by a refused launch, so the surfaces keep
+        # rendering the honest empty page.
+        expect(live_sessions().len()).to_equal(0)  # oracle: registry empty before publish / after teardown
+        expect(caret_gui_html()).to_contain("No agents yet")
+        smux_reset_for_test()

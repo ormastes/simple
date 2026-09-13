@@ -1,0 +1,175 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# research: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ; plan: .spipe/caret_workbench/state.md
+
+"""
+Caret workbench end-to-end wiring (lane A8).
+
+Closes the three seams the workbench lanes left open:
+
+  1. `multi_caret_manager` -> `SessionView` (workbench/session_source.spl), so
+     the roster is the parent-owned process table, not a fixture list.
+  2. The smux terminal service -> the big active-session region
+     (workbench/pane_source.spl), so that region shows bytes a REAL child
+     produced.
+  3. Both surfaces consume both: the TUI through
+     `workbench/tui_entry.render_live_workbench`, the GUI through
+     `caret_gui_html()`.
+
+The oracle launches a real two-child team THROUGH the manager (two live pids),
+spawns a real transforming child on an smux pane, sends it a nonce, and asserts
+that both surfaces show both children's identities AND the nonce as the child
+TRANSFORMED it. An echo of the sent bytes cannot pass: the child prefixes.
+
+**Captures:** build/test-artifacts/caret_workbench/e2e_live_team.txt,
+build/test-artifacts/caret_workbench/e2e_live_team.html
+"""
+# @evidence-display: embed_tui
+
+use std.spec.*
+use std.sffi.io.{file_write_text}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+
+use app.io.mod.{process_is_running}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.multi_caret_manager.{MultiCaretManager,
+    launch_multi_caret_manager, poll_multi_caret_manager,
+    stop_multi_caret_manager, list_multi_caret_agents}
+use app.llm_caret.workbench.session_contract.{ProcessLifecycle, AgentTurn}
+use app.llm_caret.workbench.session_source.{publish_manager_sessions,
+    live_sessions, live_selected, clear_live_sessions, clear_pane_output,
+    lifecycle_for_agent}
+use app.llm_caret.workbench.tui_layout.{CompactView}
+use app.llm_caret.workbench.tui_entry.{render_live_workbench}
+use app.llm_caret.workbench.pane_source.{refresh_active_pane}
+use app.llm_caret.gui.{caret_gui_html}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session,
+    smux_list_windows, smux_list_panes, smux_pane_spawn, smux_send_text,
+    smux_capture, smux_close_pane}
+
+# A stand-in agent CLI: the launch plan's argv (`-p <prompt> --output-format
+# json`) is rejected by every stock binary, so the team needs an executable
+# that ignores it and stays alive. Tracked, not generated into a gitignored
+# scratch dir, so this spec has no untracked dependency.
+val AGENT_STUB: text = "test/fixtures/caret_workbench/agent_stub.shs"
+val NONCE: text = "nonce8a41c"
+
+fn _request(agent_md: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: "claude", agent_md_path: agent_md,
+        skill_path: "", task_desc: "workbench e2e", model: "",
+        session_id: "", extra_args: [])
+
+fn _join_lines(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+# Polls the pane until its capture holds `needle`. The service is deliberately
+# non-blocking, so the wait loop lives here.
+fn _await_pane(sid: text, wid: text, pid: text, needle: text) -> text:
+    var i = 0
+    var seen = ""
+    while i < 60 and not seen.contains(needle):
+        thread_sleep_ms(50)
+        val cap = smux_capture(sid, wid, pid, 20)
+        if cap.is_ok():
+            seen = cap.unwrap().content
+        i = i + 1
+    seen
+
+describe "Caret workbench renders a live team and a live terminal pane":
+
+    it "shows both real managed children and real child output in the TUI and the GUI":
+        # @req: REQ-CARET-WORKBENCH-E2E-001
+        step("Seam 1: launch a REAL two-child team through the manager")
+        clear_live_sessions()
+        clear_pane_output()
+        smux_reset_for_test()
+        val manager = launch_multi_caret_manager("caret-e2e",
+            [_request("agents/alpha.md"), _request("agents/beta.md")], 4,
+            AGENT_STUB, "", "", "", "")
+        expect(manager.status).to_equal("running")
+        val agents = list_multi_caret_agents(manager)
+        expect(agents.len()).to_equal(2)
+        # Both children are real OS processes, not table rows.
+        expect(agents[0].pid > 0).to_equal(true)
+        expect(agents[1].pid > 0).to_equal(true)
+
+        step("The manager's process truth reaches the shared SessionView contract")
+        val polled = poll_multi_caret_manager(manager)
+        publish_manager_sessions(polled)
+        val views = live_sessions()
+        expect(views.len()).to_equal(2)
+        expect(views[0].label).to_equal("agents/alpha.md")
+        expect(views[1].label).to_equal("agents/beta.md")
+        # A live child is Running, and its turn stays Unknown: a raw child
+        # exposes no semantic turn state and inventing one would collapse two
+        # independent axes.
+        expect(lifecycle_for_agent(list_multi_caret_agents(polled)[0]))
+            .to_equal(ProcessLifecycle.Running)
+        expect(views[0].turn).to_equal(AgentTurn.Unknown)
+        expect(live_selected().value).to_equal("agents/alpha.md")
+
+        step("Seam 2: a real child on an smux pane transforms a nonce")
+        val s = smux_create_session("caret-e2e")
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        val spawned = smux_pane_spawn(s.id, w.id, p.id, "/bin/sh",
+            ["-c", "while read l; do echo \"GOT:$l\"; done"])
+        expect(spawned.is_ok()).to_equal(true)
+        expect(smux_send_text(s.id, w.id, p.id, NONCE + "\n").is_ok()).to_equal(true)
+        val seen = _await_pane(s.id, w.id, p.id, "GOT:")
+        # The child PREFIXES, so an echo of the sent bytes cannot satisfy this.
+        expect(seen).to_equal("GOT:" + NONCE)
+        val published = refresh_active_pane(s.id, w.id, p.id, 20)
+        expect(published.ok).to_equal(true)
+
+        step("Seam 3a: the TUI workbench renders both live agents and the real output")
+        val lines = render_live_workbench(120, 40, CompactView.Session)
+        expect(lines.len()).to_equal(40)
+        val grid = _join_lines(lines)
+        expect(file_write_text(
+            "build/test-artifacts/caret_workbench/e2e_live_team.txt", grid)).to_equal(true)
+        expect(grid).to_contain("agents/alpha.md")
+        expect(grid).to_contain("agents/beta.md")
+        expect(grid).to_contain("GOT:" + NONCE)
+        expect(grid).to_contain("Pane " + p.id)
+
+        step("Seam 3b: the GUI page renders the same live state")
+        val html = caret_gui_html()
+        expect(file_write_text(
+            "build/test-artifacts/caret_workbench/e2e_live_team.html", html)).to_equal(true)
+        expect(html).to_contain("agents/alpha.md")
+        expect(html).to_contain("agents/beta.md")
+        expect(html).to_contain("GOT:" + NONCE)
+        expect(html).to_contain("class='pane-output'")
+        # An empty roster would have rendered this placeholder instead.
+        expect(html.contains("No agents yet")).to_equal(false)
+
+        step("Tear the team and the pane down; no child is left running")
+        val stopped = stop_multi_caret_manager(manager)
+        expect(stopped.status).to_equal("stopped")
+        # "stopped" only means process_kill returned true. Ask the OS whether
+        # the children are actually gone, so a lying teardown cannot pass.
+        expect(process_is_running(agents[0].pid)).to_equal(false)
+        expect(process_is_running(agents[1].pid)).to_equal(false)
+        val _closed = smux_close_pane(s.id, w.id, p.id)
+        smux_reset_for_test()
+        clear_live_sessions()
+        clear_pane_output()
+        expect(live_sessions().len()).to_equal(0)
+
+    it "renders an empty roster honestly when nothing has been published":
+        # @req: REQ-CARET-WORKBENCH-E2E-002
+        step("Verify: no published manager means no rows, not fabricated ones")
+        clear_live_sessions()
+        clear_pane_output()
+        val html = caret_gui_html()
+        expect(html).to_contain("No agents yet")
+        # No session means no active pane region at all -- the page says so
+        # rather than showing a stale capture from a previous roster.
+        expect(html).to_contain("Launch or select an agent to attach a session.")
+        expect(html.contains("GOT:")).to_equal(false)
+        expect(html.contains("Connected")).to_equal(false)
+        val lines = render_live_workbench(120, 40, CompactView.Session)
+        expect(_join_lines(lines)).to_contain("No session selected")

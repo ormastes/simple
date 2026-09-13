@@ -55,12 +55,26 @@ no borrowed output pointer. Non-OK native codes become the frozen text classes
 from architecture and bounded, redacted detail. The converter rejects unknown
 status/layer/primitive rather than preserving opaque native payload.
 
+`ChromiumOraclePrimitiveFixture` also owns the exact Electron version, Chrome
+version, broker SHA-256, and npm lockfile SHA-256. Normalization rejects an
+unpinned version, malformed digest, or all-zero digest before interpreting any
+trace event. This mirrors the broker's pre-window manifest gate and prevents a
+serializer from dropping identity fields that happen to exist in a standalone
+JSON fixture.
+
 The unit-test loader seam calls only
 `chromium_oracle_validate_library_probe(request, probe)` with a constructed
 `ChromiumOracleLibraryProbe`. It validates exact ABI/symbol/hash classes but
 never invokes native code or returns a fixture trace. Integration and system
 tests use `chromium_oracle_load` and a real explicit plugin path; fake loader,
 fixture, response, or synthetic Chrome mode is prohibited.
+
+The frozen records, library-probe validation, GPU-receipt validation, and the
+runtime load/run/release path are implemented in the single SFFI owner. The
+runtime path performs two-sided artifact hashing around load, caches the five
+resolved addresses, uses bounded caller-owned buffers, and closes even when
+destroy reports failure. It remains unadmitted until the bridge dylib is
+buildable and the native integration test proves that path end to end.
 
 ## Non-overlap
 

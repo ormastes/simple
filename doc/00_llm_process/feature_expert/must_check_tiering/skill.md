@@ -117,3 +117,37 @@ runner; do not describe it as runner-proven. Also note the workflow emits FOUR
 modes (`docs` was added alongside `sanity`/`escalate`/`full`) while its own
 header comment still says three. Operator guide, with the full verdict-string
 troubleshooting table: `doc/07_guide/infra/local_ci_receipt/operator_guide.md`.
+## 2026-09-06 push dispatcher and guard-wiring landmines
+
+- **The push consumer must take its dispatcher from the pushed ref, not the
+  live checkout — the same invariant as the evidence hash above.** Until
+  `3dfc6eb9202`, `check-push-must-pass.shs` read the gate manifest from the
+  commit being pushed but matched rows against the dispatch arms of the
+  WORKING-TREE copy of itself. On any manifest/dispatcher drift the fail-closed
+  `*)` arm returned 2 while printing nothing, so the push died with "one or more
+  manifest-declared push gates failed" although no blocking gate had failed.
+  Now `*)` names the refused row and `load_committed_dispatcher()`
+  (`check-push-must-pass.shs:393`, called at `:519`) redefines the dispatcher
+  from the pushed commit's own copy. If a push fails with no gate named, suspect
+  a stale dispatcher before suspecting a gate.
+- **`sed -i` without a suffix never runs on macOS.** BSD sed consumes the script
+  as the backup suffix and then parses the file path as a script.
+  `check-runtime-source-list-parity.shs` had never executed on macOS for that
+  reason; with its selftest green the real scan was red on every OS and the
+  baseline was updated with traced provenance (`9838339c6cc`). Portable form,
+  used at `:295`/`:315`: `sed ... "$f" > "$f.tmp" && mv "$f.tmp" "$f"`. Never
+  `sed -i ''` — that breaks GNU sed.
+- **Guard-wiring reachability counts mentions in COMMENTS.** Wiring guard A can
+  make guard B, named only in A's header comment, newly "reachable" and turn
+  B's row in `scripts/check/guard_wiring_unwired_baseline.txt` stale. Expect
+  the cascade and fix B's row in the same change.
+- **Binary-dependent guards belong in `rust-bootstrap-multiplatform.yml`**, the
+  only workflow that builds the seed; `repo-hygiene.yml` has no binary and runs
+  only `--selftest` (e.g. `check-ui-slim-closure.shs` at `repo-hygiene.yml:101`
+  vs the real `--seed src/compiler_rust/target/bootstrap/simple` run at
+  `rust-bootstrap-multiplatform.yml:201`; `check-ui-layout-branch-coverage.shs`
+  at `:232`).
+- **Stale-snapshot merge `e274cd33719`** ("merge all share-history worktree
+  branches into main") deleted live, still-referenced code across many lanes.
+  Before debugging any inexplicable "symbol not found", run
+  `git show e274cd33719^:<file>` and diff.
