@@ -1,0 +1,33 @@
+use std.spec
+use std.nogc_sync_mut.io_runtime.{read_file_text}
+use std.nogc_async_mut.io.file.{FileThreadPool}
+
+# Regression spec for
+# doc/08_tracking/bug/threadpool_duplicate_export_collapses_type_2026-08-02.md
+#
+# Two classes both named `ThreadPool` (thread_pool.spl and io/file.spl) used
+# to be reachable from std.nogc_async_mut at once, silently collapsing into a
+# degenerate type with neither class's members: constructing succeeded but
+# every member access failed with "method ... not found on type `ThreadPool`"
+# / "undefined field 'size': cannot access field on value of type
+# 'thread_pool'". io/file.spl's class was renamed to FileThreadPool to
+# remove the bare-name collision. (The real thread_pool.spl ThreadPool spawns
+# actual OS worker threads via native FFI and is exercised elsewhere, e.g.
+# test/01_unit/lib/nogc_async_mut/thread_pool_spec.spl and
+# thread_pool_authority_spec.spl; it is not re-instantiated here to avoid a
+# real native-thread-spawn dependency in a duplicate-export regression spec.)
+describe "io/file.spl FileThreadPool no longer collides with thread_pool.spl ThreadPool":
+    it "constructs and exposes its own field, not a degenerate merge":
+        val p = FileThreadPool.new(7)
+        expect(p.size).to_equal(7)
+
+    it "default() also constructs a usable instance":
+        val p = FileThreadPool.default()
+        expect(p.size).to_equal(4)
+
+    it "the two class declarations remain distinct and non-colliding by name":
+        val file_src = read_file_text("src/lib/nogc_async_mut/io/file.spl") ?? ""
+        val pool_src = read_file_text("src/lib/nogc_async_mut/thread_pool.spl") ?? ""
+        expect(file_src.contains("class FileThreadPool:")).to_equal(true)
+        expect(file_src.contains("class ThreadPool:")).to_equal(false)
+        expect(pool_src.contains("class ThreadPool:")).to_equal(true)

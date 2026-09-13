@@ -48,3 +48,13 @@ Logs: rust-seed-build logs under
 
 ## Triage 2026-09-12
 Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.
+
+## Triage 2026-09-13
+
+This is a process/environment concern about full bootstrap in a shared
+working tree (~30min build, guard correctly refuses a stale seed when
+concurrent sessions mutate src/compiler_rust during the run). Not
+reproducible as a unit spec and far outside this lane's per-item
+budget (a real bootstrap run would also contend with other lanes on
+this shared, already-loaded host). Leaving OPEN, no attempt made.
+

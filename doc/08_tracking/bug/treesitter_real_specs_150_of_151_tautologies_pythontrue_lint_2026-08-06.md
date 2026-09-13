@@ -202,3 +202,15 @@ SPEC FILE VERDICT: <path> declared>=N executed=N passed=N failed=N dropped=N
 `declared` vs `executed` vs `dropped` directly detects the dead-entry-point and dropped-block
 shapes. Grep it with `/usr/bin/grep -a` (ugrep is the default `grep` here, and log output contains
 control bytes).
+
+## Triage 2026-09-13
+
+Restoring the 150 commented-out real assertions across 4 treesitter
+spec files requires first probing whether the treesitter module's
+TokenKind.True/False variants are reachable post-lint-recovery (an
+open question per the doc's own "Not established" section), then
+verifying each restored assertion individually against the live
+module -- a multi-hour project, not a single bounded fix, and the
+doc's own "Disposition proposed" section explicitly says this "needs
+approval" before proceeding. Leaving OPEN, no attempt.
+

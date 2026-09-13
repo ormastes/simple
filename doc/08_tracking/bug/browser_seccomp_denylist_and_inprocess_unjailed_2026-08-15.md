@@ -57,3 +57,45 @@ SPEC FILE VERDICT: test/01_unit/lib/js/js_native_confinement_spec.spl outcome=ER
 `src/runtime/runtime_process.c` is **fenced** by this fan-out (it appears in
 `egl_offlimits_v2.txt`), and it is C runtime rather than pure Simple, so no edit
 was attempted.
+
+## Fix 2026-09-13 (BUGFIX-6 lane) — js_native_confinement_spec.spl unblocked (adjacent, not the C jail itself)
+
+The 4/6 red examples in `test/01_unit/lib/js/js_native_confinement_spec.spl`
+were NOT the seccomp/namespace/in-process-jail defects this row tracks (those
+remain OPEN — `src/runtime/runtime_process.c` is fenced and C runtime, not
+touched). The actual failure was an unrelated construction defect: the spec
+builds `Logger(name: "confinement-spec", level: LogLevel.Error)` as a struct
+literal, but `class Logger` in `src/lib/common/js/engine/js_error.spl` (and
+its `src/lib/nogc_sync_mut/js/engine/js_error.spl` twin) had no `level` field
+— `static fn new(name, level)` accepted the argument and threw it away, the
+same defect pattern already fixed once for a sibling Logger in
+`doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md`
+(OPEN 4). `semantic: class 'Logger' has no field named 'level'` failed the
+spec at construction, before any confinement assertion ran.
+
+RED (base `a6450c9d6f5`, seed sha256 prefix `3d120a6f9ab5704b`):
+`Results: 6 total, 2 passed, 4 failed` (`class 'Logger' has no field named
+'level'` on all four).
+
+Fix: added a real `level: LogLevel` field to both `Logger` classes,
+`should_log` now rank-compares against it (previously always `true`,
+identical "inert filter" defect as the already-fixed sibling), and updated
+the three other bare `Logger(name: ...)` construction sites
+(`src/lib/{common,nogc_sync_mut}/js/engine/runtime.spl`'s
+`js_runtime_with_default_logger`, and
+`test/01_unit/lib/common/js_async_fetch_spec.spl`) to pass an explicit
+`level: LogLevel.Info`.
+
+GREEN: `js_native_confinement_spec.spl` 6/6; `js_async_fetch_spec.spl` 1/1.
+Suite check `bin/simple test test/01_unit/lib/js` (60 total, 47 passed, 13
+failed, 13 skipped) — the 13 failures
+(`function_scope_chain_and_global_constructors_spec.spl`,
+`statement_dispatch_class_spec.spl`, `statement_dispatch_regression_spec.spl`)
+are pre-existing JS-engine gaps (classic `for` statement, global
+String/Number/Boolean conversions, class statement dispatch) with no mention
+of `Logger`/`LogLevel` in their failures — confirmed unrelated to this change,
+no regression introduced.
+
+This row (`browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15`) stays
+OPEN — the actual seccomp deny-list/namespace/in-process-jail defects are
+untouched, C runtime, fenced.

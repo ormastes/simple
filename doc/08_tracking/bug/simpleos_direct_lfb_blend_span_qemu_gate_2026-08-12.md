@@ -52,3 +52,11 @@ has been observed. Spec-test note: this defect lives in a `.shs` host gate that
 shells out to clang/llvm-objdump on cross-target objects, so it is not
 expressible as an SSpec `.spl` example; the gate script itself is the
 regression test and it is now genuinely red-to-green.
+
+## Triage 2026-09-13
+
+Implementation landed per the record; remaining blocker is QEMU boot
+evidence requiring a freshly built SimpleOS kernel ELF and a real
+serial/QMP screenshot capture. No kernel build or QEMU environment
+available/attempted in this lane. Leaving OPEN.
+

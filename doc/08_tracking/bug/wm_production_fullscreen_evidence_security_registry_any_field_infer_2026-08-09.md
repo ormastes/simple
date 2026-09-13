@@ -157,3 +157,10 @@ that should be chosen deliberately.
 - Fix commits already on `main` that resolved the *main*-pass instance of
   this symptom but not the security-registry instance: `2c62f5cb028`,
   `b061a8929c2`
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.

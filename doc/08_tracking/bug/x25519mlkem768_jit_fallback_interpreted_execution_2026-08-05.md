@@ -74,3 +74,11 @@ read as native/JIT performance.
 ## Triage 2026-09-12
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Triage 2026-09-13
+
+Perf-attribution issue (JIT lost on X25519MLKEM768 hot path, falls
+back to interpreter) -- correctness is not affected, this is a
+benchmark/JIT-dispatch investigation requiring deep codegen work.
+Out of this lane's per-item budget. Leaving OPEN.
+

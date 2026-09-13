@@ -832,3 +832,12 @@ Duration: 3848ms
   in-repo status is UNVERIFIED-BY-`test`, VERIFIED-RED-BY-`run` (its three
   `it` blocks assert exactly the `PASS ...` lines the probe transcripts above
   show absent).
+
+## Triage 2026-09-13
+
+Root-caused but explicitly "not fixed" -- Defect A is a seed JIT
+dispatch gap, Defect B had a measured fix recipe that was "lost to a"
+(record cuts off) and needs re-derivation; both require Rust-seed
+changes or deep interpreter/JIT dispatch work. Out of pure-Simple
+scope. Leaving OPEN.
+

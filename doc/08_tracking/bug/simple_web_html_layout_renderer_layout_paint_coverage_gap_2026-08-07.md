@@ -66,3 +66,10 @@ sabotage-verified example per closure unit.
   `wc -l` per file (e.g. `_layout.spl`: 2613 raw vs 1634 measured) — always
   quote the measured denominator from the `coverage:` banner / artifact, not
   `wc -l`.
+
+## Triage 2026-09-13
+
+Explicitly recorded as "planning/tracking, not a product defect" --
+a coverage-target tracking row (layout/paint-primitive line coverage
+gap), not a bug to fix. Leaving OPEN as a tracking item.
+

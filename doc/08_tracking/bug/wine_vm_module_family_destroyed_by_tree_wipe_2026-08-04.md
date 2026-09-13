@@ -261,3 +261,12 @@ not match them; every spec reads as "no verdict" unless the escapes are stripped
 first. This is a second instance of the same class of harness error as the
 `^Results:` mistake recorded above, and it produced an identical false
 "nothing ran" for all 62 specs before it was caught.
+
+## Triage 2026-09-13
+
+"Partially repaired" module family after a tree-wipe incident -- the
+"what is left" scope was not read in full given time budget, but the
+record's own framing (large family reconstruction after data loss)
+indicates this is well beyond a single bounded fix. Leaving OPEN, no
+attempt.
+

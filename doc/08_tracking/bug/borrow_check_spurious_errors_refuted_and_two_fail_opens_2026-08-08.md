@@ -271,3 +271,17 @@ fail-open #2 (borrow check skipped for Stage 2/3 under `SIMPLE_BOOTSTRAP=1`
 without `STAGE4=1`). Both are driver-side design changes in
 `src/compiler/80.driver/`, deliberately not drive-by patched for the reason this
 record already gives.
+
+## Triage 2026-09-13
+
+Extensively investigated (273 lines); the original "spurious errors"
+premise is already refuted with a sabotage-verified spec (borrow
+checker itself is clean). The three fail-opens found instead are each
+explicitly "deliberately NOT fixed here" in the record itself --
+diagnostic-mislabeling and stage-dependent skip-gating are compiler
+pipeline architecture decisions requiring careful cross-pipeline
+coordination (3 call sites: AOT/JIT/VHDL), and fail-open #3 needs
+further isolation work the original investigator couldn't complete
+even with a 40-minute interpreted budget. Not a quick fix. Leaving
+OPEN as recorded.
+

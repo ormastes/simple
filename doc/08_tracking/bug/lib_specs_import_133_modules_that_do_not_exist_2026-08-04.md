@@ -158,3 +158,12 @@ not a defect with a code fix).
   and `doc/08_tracking/bug/c_parser_library_specced_but_never_implemented_2026-08-04.md`
   — the same failure mode under `test/01_unit/app/`, found independently the
   same day. The pattern is tree-wide, not a `lib/` quirk.
+
+## Triage 2026-09-13
+
+199 lib specs fail on 133 std.* modules that were never implemented --
+a feature-completeness gap (tests for code that doesn't exist yet),
+not a bug fixable by editing tests or a small module. Implementing
+133 missing modules is far beyond this lane's per-item budget. Leaving
+OPEN.
+

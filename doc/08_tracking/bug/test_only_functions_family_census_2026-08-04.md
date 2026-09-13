@@ -492,3 +492,10 @@ test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 3598 filtered ou
 `left: 0` against `right: 2` and `right: 3` are the collected-warning counts the
 rewritten tests assert — the rewrite still observes real collector behaviour and is
 not vacuous. Sabotage reverted; suite back to `6 passed; 0 failed`.
+
+## Triage 2026-09-13
+
+Census-only record ("individual class-(ii) items to be filed/fixed
+per lane") -- an enumeration of a vacuity family, not a single
+localized bug. Leaving OPEN, out of this lane's per-item scope.
+

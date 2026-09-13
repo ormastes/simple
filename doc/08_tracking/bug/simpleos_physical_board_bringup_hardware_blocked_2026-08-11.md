@@ -64,3 +64,10 @@ Full runbook and gap analysis: `doc/07_guide/os/simpleos_board_bringup.md`.
   `-kernel` onto the aarch64 real-firmware chain — flagged as open in
   `.claude/rules/board-runnable.md` already; unrelated to the x86_64 USB work
   above and left as-is.
+
+## Triage 2026-09-13
+
+Explicitly hardware-blocked per the record's own title and
+.claude/rules/board-runnable.md — no physical SimpleOS board available
+in this environment either. Leaving OPEN.
+
