@@ -117,7 +117,9 @@ typedef struct RtOwnedCapturedByte {
 #define RT_OWNED_HOST_FREE free
 #endif
 #ifndef RT_OWNED_TOKEN_FILL
+#if defined(__linux__) && defined(SYS_getrandom)
 #define RT_OWNED_TOKEN_FILL(dst, len) syscall(SYS_getrandom, (dst), (len), 0)
+#endif
 #endif
 #ifndef RT_OWNED_SIGNAL_GROUP
 #define RT_OWNED_SIGNAL_GROUP(pid, pgid, pidfd, sig) owned_signal_group((pid), (pgid), (pidfd), (sig))
@@ -2467,6 +2469,7 @@ static int pov4_directory_digest(int fd, uint8_t digest[POV4_DIGEST_BYTES]) {
 }
 
 static int pov4_mint_positive(uint64_t* value) {
+#if defined(__linux__) && defined(SYS_getrandom)
     for (int attempt = 0; attempt < 32; attempt++) {
         uint64_t candidate = 0;
         ssize_t got = RT_OWNED_TOKEN_FILL(&candidate, sizeof(candidate));
@@ -2478,6 +2481,11 @@ static int pov4_mint_positive(uint64_t* value) {
     }
     errno = EAGAIN;
     return 0;
+#else
+    (void)value;
+    errno = ENOTSUP;
+    return 0;
+#endif
 }
 
 int64_t rt_process_observation_v4_pin_cwd_value(const char* path_data,
