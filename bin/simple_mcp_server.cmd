@@ -3,7 +3,8 @@ setlocal
 rem Simple MCP server launcher (Windows). Mirrors bin/simple_mcp_server:
 rem   1. an admitted native exe, hash-checked against its .sha256 sidecar
 rem   2. otherwise the pure-Simple source entry on the deployed runtime.
-rem Every instance inherits stderr. Until 2026-09-12 the source path hopped
+rem The native path inherits stderr; the source path logs it to a per-process
+rem dir under <temp>\simple\mcp (see below). Until 2026-09-12 the source path hopped
 rem through bin\release\<triple>\simple_mcp_server.cmd, which redirected stderr
 rem to ONE process-global %TEMP%\simple_mcp_server.err; the second client
 rem (Codex + Claude Code) then died with "The process cannot access the file
