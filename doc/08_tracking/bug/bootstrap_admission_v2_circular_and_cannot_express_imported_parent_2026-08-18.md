@@ -66,3 +66,16 @@ the gate look unsatisfiable when it is not.
 - Extend the v2 receipt schema with `parent_origin_root`,
   `parent_origin_git_head`, and `parent_is_imported`, and have consumers treat
   an imported parent as a weaker authority rather than an indistinguishable one.
+
+## Still OPEN, and now reproduced from a SUCCESSFUL Stage 2 (macOS run 35, 2026-09-13)
+
+This record states the cycle for a tree with no `build/bootstrap/stage2/`. macOS
+run 35 (tip `60c78b96789`) reached an **admitted, byte-stable Stage 2**
+(sha256 `aed71b28…`, `stage2-sanity.env status=pass checks_run=5`) and the gate
+still has no entry point: what is missing is the admission/provenance receipt
+pair that, as section 2 above says, nothing in the repo ever writes — not the
+compiler. Three routes refused with the identical
+`bootstrap-policy-error: reason-receipt-required` (rc=64), including
+`bootstrap-strategy.sh`, which is a supervisor and `exec`s the engine unchanged
+when given no `--bootstrap-receipt=`. Evidence and the route table:
+`stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md`.
