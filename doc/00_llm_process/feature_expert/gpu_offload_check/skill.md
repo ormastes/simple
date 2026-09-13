@@ -481,7 +481,8 @@ none is default): `SIMPLE_VK_READBACK=native`, `SIMPLE_VK_IMAGE_UPLOAD=u32`,
 Pinned GLSL->SPIR-V kernels, one gate each (fail-closed; no
 `glslangValidator` = ERROR, `.spv` never committed): `rect_batch`
 (`check-rect-batch-spirv-pinned.shs`), `blit` (`check-blit-spirv-pinned.shs`),
-`blur_rect` (`check-blur-rect-spirv-pinned.shs`), `glass_material`
+`blur_rect` (`check-blur-rect-spirv-pinned.shs`), `shadow_rect`
+(`check-shadow-rect-spirv-pinned.shs`), `glass_material`
 (`check-glass-material-spirv-pinned.shs`). After editing a `.comp` shader,
 regen via `scripts/tool/gen-rect-batch-spirv.shs` (or the kernel's equivalent)
 before re-running its pin gate.
