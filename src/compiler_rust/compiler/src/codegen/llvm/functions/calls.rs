@@ -95,6 +95,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_dict_values"
         | "rt_is_none"
         | "rt_is_some"
+        | "rt_is_present"
         | "rt_enum_payload" => Some(1),
         "rt_string_starts_with"
         | "rt_string_ends_with"
@@ -2395,6 +2396,7 @@ impl LlvmBackend {
                                 | "rt_contains"
                                 | "rt_is_none"
                                 | "rt_is_some"
+                                | "rt_is_present"
                                 | "rt_enum_check_discriminant"
                         );
                         let fn_type = if returns_bool {
