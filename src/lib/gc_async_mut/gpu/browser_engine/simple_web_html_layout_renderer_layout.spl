@@ -163,6 +163,13 @@ class LayoutResult:
     wrap_ends: [[i32]]
     intrinsic_widths: [i32]
     height: i32
+    # CSS 2.2 8.3.1: the bottom margin of a block's LAST in-flow child
+    # collapses THROUGH the block when the block has no bottom padding,
+    # no bottom border, and no height that would establish a bottom edge.
+    # The margin is then the block's own trailing margin for the parent's
+    # sibling collapsing -- it must not be added to the block's height.
+    # Without this an <li> wrapping a <p> was 16 px taller than Chrome.
+    trailing_margin_b: i32 = 0
 
 class LayoutSelectedResult:
     layout: LayoutResult
@@ -292,6 +299,35 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
             out_by = shifted.by
         baseline_i = baseline_i + 1
     InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height)
+
+fn block_bottom_margin_collapses_through(node: HNode, st: Style) -> bool:
+    # CSS 2.2 8.3.1: a block's bottom margin collapses with the bottom margin
+    # of its last in-flow child when nothing establishes a bottom edge between
+    # them -- no bottom padding, no bottom border, and no height/clamp/overflow
+    # that would close the box. Chrome measures an <li><p>text</p></li> at the
+    # <p>'s height; Simple measured it 16 px taller because the <p>'s bottom
+    # margin was added to the <li>'s content height instead of collapsing out.
+    # <body>/<html> are excluded: the document box owns page height here and
+    # shrinking it moves nothing but the surface extent.
+    if node.tag == "body" or node.tag == "html":
+        return false
+    if st.display != "block" and st.display != "list-item":
+        return false
+    if st.position_absolute or st.position_fixed:
+        return false
+    if st.float_mode != 0:
+        return false
+    if st.overflow_hidden or st.overflow_auto_y or st.overflow_scroll_y:
+        return false
+    if st.pad_b != 0 or st.border_b != 0:
+        return false
+    if st.height_px != 0 or st.min_height_px != 0 or st.max_height_px != 0:
+        return false
+    if st.min_height_vh or st.flex_fill:
+        return false
+    if node.has_widget_panel_class:
+        return false
+    true
 
 fn relative_layout_result(child_index: HtmlChildIndex, node_index: i32, st: Style, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], height: i32) -> LayoutResult:
     if st.position_relative and (st.left_px != 0 or st.top_px != 0):
@@ -2915,6 +2951,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     var cy = y + st.border_t + st.pad_t
     var child_count = 0
     var prev_margin_b = 0
+    var trailing_margin_b = 0
     var in_inline_run = false
     val inline_start_x = if (
         node.is_details_summary and st.display == "list-item"
@@ -3260,7 +3297,12 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     prev_margin_b_before_child,
                     collapse_margins_signed(resolved_cst_margin_t, resolved_cst_margin_b))
             else:
-                prev_margin_b = resolved_cst_margin_b
+                # The child's own trailing margin (one that collapsed through
+                # it, CSS 2.2 8.3.1) collapses with the child's declared
+                # bottom margin and becomes what separates it from the next
+                # sibling.
+                prev_margin_b = collapse_margins_signed(
+                    resolved_cst_margin_b, child.trailing_margin_b)
             child_count = child_count + 1
         c = child_index.next_sibling[c]
     if child_count > 0:
@@ -3274,7 +3316,10 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_bx = aligned.bx
             out_by = aligned.by
             cy = cy + aligned.height
-        cy = cy + prev_margin_b
+        if block_bottom_margin_collapses_through(nodes[i], st):
+            trailing_margin_b = prev_margin_b
+        else:
+            cy = cy + prev_margin_b
     var h = (cy - y) + st.pad_b + st.border_b
     val explicit_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
     if st.height_px > 0:
@@ -3296,5 +3341,10 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             h = fill_bottom_blk - y
     if h < 1:
         h = 1
+    if h != (cy - y) + st.pad_b + st.border_b:
+        # An explicit/clamped height establishes a bottom edge, so nothing
+        # collapses through after all.
+        trailing_margin_b = 0
     out_bh[i] = h
-    relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
+    val placed = relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
+    LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b)
