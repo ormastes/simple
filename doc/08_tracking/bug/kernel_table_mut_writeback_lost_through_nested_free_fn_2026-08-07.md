@@ -114,3 +114,9 @@ lane's call.
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+Reconfirmed via source inspection: the workaround comments/structure at
+`backend_software.spl:75-76,1310-1318,1404` are still present; the
+underlying Rust interpreter argument-write-back defect is untouched and
+out of scope for a src/lib/** lane. Left OPEN, no code change attempted.
