@@ -78,3 +78,8 @@ correct against a REAL OS-level resource" (not proven) is the same
 distinction the WP-3.5 lint-redeploy finding drew for lint checks: source
 correctness and reachable/verified correctness are not the same claim, and
 this repo has been burned before by conflating them.
+
+## Triage 2026-09-13
+Reconfirmed: test-coverage gap (double-close on a genuinely-acquired
+handle untested), P3, needs a live handle fixture. Left OPEN, no code
+change attempted.
