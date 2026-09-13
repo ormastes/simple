@@ -3,7 +3,7 @@
 Status: CLOSED (2026-09-13) -- named symptom (compile-time "unknown static method rgb on class Color") not reproducible via this doc's own reproducer
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
-**Filed:** 2026-08-06 (WS-D6) · **Status:** OPEN · **Pre-existing:** yes, reproduced at HEAD
+**Filed:** 2026-08-06 (WS-D6) · **Status:** CLOSED (2026-09-13, see top-line status) · **Pre-existing:** yes, reproduced at HEAD
 **Binary:** `bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple`,
 md5 `ed53cc5f255e269ca27c4cd83b17aef9` (Rust seed build).
 

@@ -1,7 +1,7 @@
 # `src/lib/<name>.spl` facades shadow tier modules via `src/std -> lib` (family)
 
 - **Date:** 2026-08-08
-- **Status:** 3 fixed, 1 open (theoretical, no live consumer impact) (this file) — see "Re-check 2026-09-13", 12 audited innocent
+- **Status:** RESOLVED (2026-09-13) — OPEN 1 spec-locked; OPEN 2 remains, inert (theoretical, no live consumer impact) — see "Re-check 2026-09-13", 12 audited innocent
 - **Area:** module resolution / stdlib surface
 
 ## Mechanism (confirmed in source and empirically)
