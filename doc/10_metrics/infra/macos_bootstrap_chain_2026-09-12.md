@@ -1838,3 +1838,65 @@ out of this lane's scope; filed as
 Rejected candidate preserved at `stage2-rejected/aarch64-apple-darwin/simple`,
 139,504,696 B, sha256 `70f1a6517183d74c1a855f4761235dd2c62d52a63bfa3c36f7c5fb53b83f2703`.
 Stage 3, the full CLI and Stage 4 were not reached; **nothing was deployed**.
+
+### Run 35 — on landed main (`60c78b96789`, carries PR #903): site 19 CLEARED, Stage 2 ADMITTED, site 20 exposed
+
+Command identical to run 34's, from worktree `agent-a73a6f3780a2bd75b`:
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`.
+Native build jobs 5 (host CPUs 10), LLVM 18 at `/opt/homebrew/opt/llvm@18`.
+Wall clock ~25 min end to end including a full Rust seed rebuild.
+
+**This is the first macOS run to reach an admitted Stage 2.** Verdict, verbatim:
+
+```
+  Stage 2: running bootstrap compiler sanity
+  Stage 2: proving struct receiver/runtime capability
+PASS — 2 invariant(s) checked (producer identified, skip recorded), producer=rust-seed cannot publish the manifest; Stage 3 reuse disabled; evidence=.../stage3/aarch64-apple-darwin/phase2-compatibility.manifest.not-published
+Stage 2 admitted; stopping before Stage 3 as requested.
+```
+
+`BOOTSTRAP_RC=0`. Admitted candidate
+`<storage>/build/bootstrap/stage2/aarch64-apple-darwin/simple` (byte-identical to
+`stage3/aarch64-apple-darwin/stage2-admitted/simple`), 139,504,568 B, sha256
+`aed71b284fd897f6dff37ee2cda23056a32b4967c54d99468fea6aa8fc07124a`.
+`stage2-sanity.env`: `status=pass ... checks_run=5`. Note this env does NOT carry
+run 34's `hello_world_positional_raw_status` / `probe=complete` keys; the
+positional Stage-3-route probe is recorded separately in `stage2-receiver.env`,
+which reads **`status=pass probe_exit=0`** — that is the probe that failed on run
+34 with `field composite_names of surface[0]`, and its fixture log
+`stage2-sanity.env.frontend-bootstrap-0.log.stage2-module-path-naming` is present.
+
+Site 19 root cause: NOT a new promotion instance and NOT a seed miscompile — a
+regression of `460aa9781cc` reintroduced by `db127a8e8c4` (PR #873). The
+repeat-promote post-condition ("a second `rt_transient_heap_promote` answers true
+only for a value still owned by the dying scope") holds for a transient heap
+STRING only, whose `RT_CORE_STRING_FLAG_TRANSIENT` promote clears
+(`runtime_native.c:2474`). Every field in the 24-field loop is an ARRAY: promote
+merely zeroes `transient_scope_id` (`:2493`) and `rt_core_transient_classify`
+(`:2362`) never reads it, so the repeat promote answers true forever and the guard
+was red on the first field of the first surface. Fixed in PR #903 by deleting the
+per-field verdict and restoring the guard-free
+`module_surface_promote_freeze_names`. `460aa9781cc`'s regression spec had been
+RED at 2 of 3 examples on `origin/main` from `db127a8e8c4` until #903; it is now
+4 of 4 and additionally pins the array-field loop.
+
+**Stage 3 was NOT reached — new blocker, site 20.** Both routes fail rc=64 with
+`bootstrap-policy-error: reason-receipt-required`: the prescribed
+`--resume-stage3-from-admitted=<output>`, and a plain continuous
+`--full-bootstrap --mode=dynload --jobs=half` run that reuses the admitted Stage 2
+and hits the gate within seconds. The planner-admission producer needs a Stage-2
+admission + provenance receipt pair that only a non-seed producer may publish —
+which is what the Stage 2 verdict above states outright. No receipt was
+manufactured. Filed as
+`doc/08_tracking/bug/stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md`.
+Stage 4 is downstream of Stage 3 and was therefore not attempted. **Nothing was
+deployed.**
+
+Run-34 repro note for future lanes: run 34's rejected candidate
+(`70f1a651…`) was already gone — worktree `agent-a0e562ca3e5681c38` and its
+`.simple/storage` had been cleaned — so no cheap native repro of site 19 was
+possible. The diagnosis rests on the C runtime source, `460aa9781cc`'s gdb
+measurement, and the regression spec. Interpreter-vs-native is not a usable
+discriminator for this class at all: the seed's interpreter stubs the
+transient-scope externs, so the guard cannot fire there and an interpreter pass
+is vacuous.
