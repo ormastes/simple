@@ -160,3 +160,7 @@ blocks, each carrying a real assertion, none of them trivially true:
 Recommend closing. (Not runtime-confirmed from this lane — see the parent
 reports Unproven list — but the two specific defects the doc names are
 verifiably absent from current content.)
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Needs a decision (rewrite against the current MCP API vs delete) for 7 stale, assertion-free test files -- not a mechanical fix, and deleting/skipping a test needs approval per repo rules. No change made.
