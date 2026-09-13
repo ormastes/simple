@@ -465,3 +465,84 @@ mismatches under a live per-call probe, and still moved all eight catalog
 digests — because it was right about the field nobody reads. **If you touch an
 advance path, check BOTH fields; a one-lane oracle for a two-lane function is
 not an oracle.** Only the Draw IR digest gate caught it.
+
+## Round 13 (2026-09-14): the differ was fail-open, and kerning was never read
+
+Two independent findings. Read both before trusting ANY compared/mismatched
+number recorded in rounds 11-13.
+
+### 1. The measurement lane could report a page it never laid out
+
+The runner binary (`build/cargo-r2/release/simple`, built Sep 12) predated
+commit `08770cc5025` (Sep 14), which added the extern
+`rt_engine2d_blend_cov_span_u32` — declaration in
+`simple_web_html_layout_renderer_paint_primitives.spl` AND registration in
+`interpreter_extern/simd.rs`, same commit. An unregistered extern answers
+**silent nil**, so the layout module emitted 432 boxes on `html` of which
+**432 were (0,0,0,0)** — every KEY still present, `missing_in_simple` 0, and
+the differ reporting 430 "mismatches" whose delta is **Chrome's own (x,y,w,h)
+verbatim**, because it is subtracting from zero.
+
+On the tree before that commit the same differ over the same Chrome harvest
+gives **html 329** with ordinary small deltas. **There was never a layout
+regression to bisect**; round 12's "host/Chrome variance" (html 338 vs 430,
+same commit) is the same artifact. Env vars were ruled OUT, not in — the
+all-zero count is identical with and without
+`SIMPLE_EXECUTION_MODE=interpreter` / `SIMPLE_TIMEOUT_SECONDS=0`.
+
+Fixed where it can be: the differ refuses to diff an all-zero Simple side
+(`all_boxes_degenerate`, fifth fatal selftest fixture, `--selftest` now
+`PASS — 5 fixture(s) checked`), and caught this live on first contact.
+Record: `doc/08_tracking/bug/web_html_page_zero_geometry_boxes_2026-09-13.md`.
+
+**Two lessons to carry.** (a) A differ that compares two element lists cannot
+tell "everything is wrong" from "one side never ran" — give any such tool a
+non-vacuity check on the side it does not own. (b) **Always check the runner
+binary's mtime against the tree you are measuring** before believing a parity
+number; `src/lib` is read as source every run, but the EXTERNS it declares are
+baked into the binary.
+
+### 2. `path:(body)` is benign — it is NOT a key desync
+
+Every page reports `missing in Chrome (Simple-only boxes): 1 — path:(body)`.
+Simple emits a box for `<body>` (key `path:`); Chrome's `--dump-dom` harvest
+carries no `|body|` row. Keys are matched by STRING, not by position, so one
+extra box cannot shift any nth-path. `overview` proves it: 18 compared, 5
+mismatched, every neighbour exact. Do not spend a round on it.
+
+### 3. Kerning: `kern` is now read on the unmanaged lane
+
+`FontRasterizer.load_unmanaged` builds the rasterizer with `kern_fp: 0`, so
+`horizontal_kern` answered **0 for every pair on every macOS system face**,
+while Chrome kerns by default. `sfnt_ttc_extract_face` copies every table when
+it repacks a collection face, so the data was in `selected_blob` the whole time
+and nothing read it.
+
+New: `src/lib/common/encoding/sfnt_kern.spl` — legacy `kern`, both header
+shapes (Apple 0x00010000 32-bit and MS 0x0000 16-bit), horizontal
+non-cross-stream **format 0** only, binary search on the `(left<<16)|right`
+key, values in MILLI-pixels so they fold into round 12's cumulative pen instead
+of being rounded per pair. Measured on this host:
+
+| face | table | `AV` | `To` |
+|---|---|---|---|
+| Helvetica.ttc#0 | `kern` 656 B, no GPOS | -151 units = **-1180** milli-px @16 | -227 = **-1773** |
+| Menlo.ttc#0 | no `kern`, no GPOS | 0 | 0 |
+
+**GPOS `PairPos` is deliberately NOT implemented** — neither face ships GPOS, so
+it would be dead code. A face that kerns only through GPOS answers 0 from here,
+exactly as before.
+
+Two traps for the next round:
+- **Do not assert "the pair at 2x size is 2x the value".** -151/2048 em is
+  -1179.6875 milli-px at 16 and -2359.375 at 32; rounding each exact product
+  gives -1180 and **-2359**, not -2360. Doubling a rounded number reintroduces
+  the sum-of-rounded-parts error round 12 removed.
+- **Kerning is ASCII-only** on this lane: the glyph-id table `_gid_lookup`
+  covers 32..126, so a non-ASCII pair gets no kern. Stated, not hidden.
+
+`render_text` still kerns at whole-pixel through `horizontal_kern`;
+`measure_text_advances` is the milli-px path and is what layout and
+`paint_layout_advance_parity` (2/2, green) consume.
+
+Measurements: `doc/10_metrics/ui/web_chrome_parity_round13_2026-09-14.md`.
