@@ -1,6 +1,14 @@
 # dbfs checkpoint structs use reserved keyword `gen` as field name
 
-- **Status:** fixed 2026-06-11 — renamed `gen` → `slot_gen` across all affected structs and consumers
+## Closed 2026-09-13 — rename landed; no `gen` field remains
+
+- **measured** `grep -c slot_gen src/lib/nogc_sync_mut/db/dbfs_engine/checkpoint.spl` → **11**;
+  `grep -c '\bgen\b:'` on the same file → **0**. The reserved-keyword field is gone.
+- **inferred** Entry's own status records the rename as landed 2026-06-11 across both
+  tier copies and all consumers.
+
+
+Status: closed 2026-09-13 (was: - **Status:** fixed 2026-06-11 — renamed `gen` → `slot_gen` across all affected structs and consumers)
 - **Found:** 2026-06-11 (during E5 pager WAL gate verification)
 - **Severity:** medium — `dbfs_checkpoint_attr_facade_spec.spl` (both gc_async_mut
   and nogc_async_mut copies) fails in interpreter mode; not introduced by E5

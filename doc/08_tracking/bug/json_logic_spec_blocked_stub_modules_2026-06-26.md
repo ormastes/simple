@@ -1,7 +1,13 @@
 # Bug: json_logic_spec blocked by stub-only json sub-modules
 
+## Closed 2026-09-13 — FIXED: stub modules are gone; spec's stale `lib.json.*` prefix corrected
+- **measured**: all six named symbols exist as real source — `json_minify`/`json_beautify` in `src/lib/common/json/serializer.spl`, `json_diff`/`json_patch`/`json_unflatten_object` in `utilities.spl`, `json_deep_equals` in `validation.spl`; `find src/lib -name '*.smf'` returns nothing.
+- **measured**: the residual failure was a stale import prefix, not a stub — `use lib.json.serializer` errors `E1034 module path segment 'json' not found` (there is no `src/lib/json/`), while the same eight imports under `std.common.json.*` all resolve and run (`all-imports-ok`, and `json_minify`/`json_deep_equals` execute).
+- **FIX APPLIED**: `test/01_unit/lib/common/json_logic_spec.spl` lines 4-11 rewritten `lib.json.` -> `std.common.json.`, matching line 12 which already used that prefix.
+- **inferred**: the spec was not re-run end to end; `bin/simple test` is broken on this Windows host (a trivial spec reports a false `outer-bound-timeout`).
+
 **Date:** 2026-06-26
-**Status:** Open
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 **Classification:** missing-source (both-fail)
 
 ## Summary

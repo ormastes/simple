@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: FIXED — `expect_byte_array` in simd.rs already handles `Value::UInt { width: 8 }` which covers u8 el
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Bug — `rt_aes{128,256}_encrypt_block_pure expects an array of integers` under interpreter mode
 
 Status: FIXED — `expect_byte_array` in simd.rs already handles `Value::UInt { width: 8 }` which covers u8 el

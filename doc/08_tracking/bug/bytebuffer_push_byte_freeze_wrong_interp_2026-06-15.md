@@ -1,9 +1,14 @@
 # Bug: ByteBuffer.push_byte(v) + freeze() yields wrong byte values in interpreter
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — Does not reproduce: pushed bytes survive `freeze()` exactly
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's minimal repro — `ByteBuffer.new()`, `push_byte` of `0xde 0xad 0xbe 0xef`, then `freeze()` — gives `len=4` and reads back `222 173 190 239`, i.e. exactly `0xde 0xad 0xbe 0xef`. No garbage values.
+- **inferred**: the original driver was `SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed`, a Linux artifact not present here, so this is "does not reproduce on the current Windows seed" rather than a located fix.
+- Note found in the same run and filed against its own entry, not this one: `for b in span:` over the frozen `ByteSpan` still iterates zero times — see `for_in_custom_struct_no_iterator_protocol_2026-06-15.md`, which remains OPEN. The byte VALUES are correct; only iteration is missing.
 
 **ID:** bytebuffer_push_byte_freeze_wrong_interp_2026-06-15
 **Filed:** 2026-06-15
-**Severity:** P1 — silent data corruption; produces wrong bytes with no error
+**Status:** CLOSED 2026-09-13 (does not reproduce). **Severity:** P1 — silent data corruption; produces wrong bytes with no error
 **Component:** interpreter / src/lib/common/bytes/span.spl `ByteBuffer.push_byte`
 **Driver:** `SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed`
 
@@ -82,6 +87,3 @@ val span = ByteSpan.new(arr)
 
 This is the pattern used in `ctypes.spl`'s `_hex_to_bytes` helper (see comment in
 that file). Confirmed working.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

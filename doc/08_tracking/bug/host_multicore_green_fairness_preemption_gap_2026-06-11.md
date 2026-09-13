@@ -1,7 +1,16 @@
 # Host Multicore Green Fairness and Preemption Gap
 
+## Closed 2026-09-13 — already closed with compiler/runtime safepoint evidence
+
+- **inferred** Entry status: `closed; ordinary loop-body fairness now has compiler/runtime
+  safepoint evidence` — the acceptance bar it set was met in-entry.
+- **inferred** Not re-runnable here: the hosted multicore-green fairness lane needs a
+  working native-build, which fails on this Windows host for unrelated reasons
+  (`SCV-E-SNAPSHOT: snapshot-cache-root-not-owned`, `unknown extern function: rt_env_vars`).
+
+
 Date: 2026-06-11
-Status: closed; ordinary loop-body fairness now has compiler/runtime safepoint evidence
+Status: closed 2026-09-13 (was: Status: closed; ordinary loop-body fairness now has compiler/runtime safepoint evidence)
 Owner: multicore-green lane
 
 ## Summary

@@ -1,6 +1,13 @@
 # IDE feature check native probe fallbacks
 
-Status: Resolved for IDE feature-check completion; runtime/content follow-up remains optional.
+## Closed 2026-09-13 — Resolved: the direct feature-check entrypoint reports every probe from real renderer output
+
+- **measured** `bin/simple-interp src/app/ide/main.spl --feature-check --tui` -> `EXIT=0` with real probe values, e.g. `db-admin: owners=5 targets=4 ... page-size=4096`, `agent-dashboard: ... tools=19 lsp=true wiki=true modes=3`, `tui-panels: preview=6 outline=1 md=true table=true slide-outline=true styled=true`.
+- **inferred** The entry's own Status already recorded this resolved for feature-check completion with only optional runtime/content follow-ups; the run above confirms that criterion still holds.
+- **inferred** The optional f64-evaluator and GUI HTML content-preservation follow-ups are separate concerns; re-file them on their own if still wanted.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Status
 Resolved for IDE feature-check completion; runtime/content follow-up remains optional.

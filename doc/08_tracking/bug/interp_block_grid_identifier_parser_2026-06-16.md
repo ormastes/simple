@@ -1,7 +1,14 @@
 # Bug: `block` / `grid` as identifier names trip the parser near named-field construction
 
+## Closed 2026-09-13 — does not reproduce: `block` / `grid` parse as ordinary identifiers
+- **measured** — `fn probe(block: i64, grid: i64)` whose body constructs `Dim(x: block, y: grid)`
+  parses and runs under `bin/simple run` (Rust seed v1.0.0-rc.1, Windows), printing `7` —
+  no `E0002: unexpected token, expected: Colon, found: Comma`.
+- **inferred** — matches the entry's own "source fixed for `grid` in Rust parser 2026-07-15";
+  this run is the focused execution it said was pending, and it also covers `block`.
+
 **Found:** 2026-06-16 · **Severity:** P3 (parser ergonomics) · **Area:** parser / frontend
-**Status:** source fixed for `grid` in Rust parser 2026-07-15; focused execution
+**Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 pending (`block` was not reserved)
 
 ## Summary

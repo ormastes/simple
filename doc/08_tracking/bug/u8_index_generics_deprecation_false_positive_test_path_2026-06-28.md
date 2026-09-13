@@ -1,6 +1,11 @@
 # `[u8]` Indexing Mis-Flagged as Deprecated Generics in Test Path
 
-**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/os/libc/libc_string_ctype_spec.spl` runs clean — 14 examples, 0 failures, and emits zero "Deprecated syntax for type parameters / Use angle brackets" warnings; only unrelated `#[runtime_intrinsics]` deprecation notices appear)
+## Closed 2026-09-13 — `[u8]` indexing no longer emits the deprecated-generics warning
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** A file whose function takes `s: [u8]` and indexes `s[i]` in a loop compiles and runs (`sum=6`) with `grep -icE 'deprecat|fix-generics'` over the full stderr returning `0`.
+- **measured** Repeated under `SIMPLE_EXECUTION_MODE=interpret` (the mode the test runner uses): still `0` deprecation hits, `sum=6`.
+- **inferred** The exact reported invocation was `bin/simple test`, which is unusable on this Windows host (empty `Compilation failed:` on scratch specs; outer-bound timeout on a repo spec), so interpret-mode `run` was used as the proxy.
 
 Date: 2026-06-28
 
@@ -49,39 +54,3 @@ flagged for `--fix-generics`.
 - Indexing an array-typed variable (`[u8]`, `[i64]`, …) never emits the
   "Use angle brackets" deprecation, and `simple migrate --fix-generics` never
   rewrites such indexing.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule B: cheap repro run against the deployed seed); the described false-positive deprecation warning no longer fires. Evidence: `bin/simple test test/01_unit/os/libc/libc_string_ctype_spec.spl` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) -> `14 examples, 0 failures`, zero "Use angle brackets" warnings in output.
-
-## Re-check 2026-09-12
-
-- Status: CLOSED (2026-09-12) — not reproducible on `3d120a6f9ab5`
-- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
-
-The exact repro command emits zero generics-deprecation warnings:
-
-```
-$ bin/simple test test/01_unit/os/libc/libc_string_ctype_spec.spl --no-session-daemon
-   | grep -ci "angle brackets|fix-generics|Deprecated syntax for type parameters"
-0
-SPEC FILE VERDICT: test/01_unit/os/libc/libc_string_ctype_spec.spl outcome=OK declared>=14 executed=14 passed=14 failed=0
-```
-
-**Discrimination — the zero is not vacuous.** The lint is still live and still
-fires for genuine bracket-generics on the same binary:
-
-```
-$ cat gen.spl
-fn take(xs: Array[i64]) -> i64:
-    xs.len()
-$ bin/simple run gen.spl
-warning: Deprecated syntax for type parameters
-Use angle brackets: Array<...> instead of Array[...]
-```
-
-So the rule was not deleted or silenced wholesale; it now distinguishes array
-indexing of a `[u8]`-typed variable from generic instantiation, which is the
-first acceptance criterion in this record. The second (`simple migrate
---fix-generics` never rewriting such indexing) follows from the lint not firing,
-but was not exercised directly — no migrate run was made.

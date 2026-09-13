@@ -1,6 +1,15 @@
 # Thread Spawn Native Zero-Join Blocker
 
-Status: Closed
+## Closed 2026-09-13 — already Closed in-entry
+
+- **inferred** Entry status: Closed, with its own resolution record; no later entry in the
+  June-September window reopens native thread-spawn/join returning zero.
+- **inferred** Re-running the native lane is impossible on this host — `bin/simple
+  native-build` aborts with `SCV-E-SNAPSHOT: snapshot-cache-root-not-owned` before codegen —
+  so this closure rests on the entry evidence, not a fresh native run.
+
+
+Status: closed 2026-09-13 (was: Status: Closed)
 
 ## Summary
 

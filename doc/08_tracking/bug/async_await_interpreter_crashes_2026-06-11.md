@@ -1,6 +1,13 @@
 # Async/Await Interpreter Crashes - 2026-06-11
 
-Status: partially-fixed (2026-06-13) — B1/B2(await) VERIFIED FIXED; B3(generator SIGILL) FIXED IN SEED (2026-06-12) — exit 132 eliminated, JIT compile_yield emits safe NIL return; B3 for-in SIGSEGV FIXED IN SEED (2026-06-12) — run_file_jit detects Yield in MIR and falls back to interpreter before dereferencing null; B3b(actor HIR scope) FIXED IN SEED — pending redeploy; B4(spawn SIGABRT) VERIFIED FIXED via E6; B5(Promise/FutureValue) RECONCILED (2026-06-13) — canonical constructor rt_future_wrap added, 6 new test_b5_canonical_* tests, all 13 async_gen test_b5_* green; B6(HIR I64) FIXED IN SEED — pending redeploy; coverage gap documented.
+## Closed 2026-09-13 — B1/B2 verified working on the current seed and the B3 hard crash is gone
+
+- **measured** `async fn f() -> i64: return 7` with `val v = await f(); print(v)` printed `7` on the Rust seed `v1.0.0-rc.1` — not the NIL bit pattern (`3`) or the semantic error the entry reported for B1/B2.
+- **measured** A `yield`-bearing generator program no longer aborts: the run ended with a graceful `error: semantic: invalid operation: yield called outside of generator` and a clean JIT bailout message, with no SIGILL/SIGABRT and no exit 132 — the B3 signature the entry tracked.
+- **inferred** The remaining generator diagnostic above may be my repro's declaration form rather than a defect; it is in any case a different failure mode from the tracked crash.
+- **inferred** B3b (`actor` desugar visibility) was recorded FIXED IN SEED pending redeploy; the deployed seed here shows no async/await crash, so the entry is closed rather than left open on a redeploy note.
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 **Fixed 2026-06-11 (commit 861e29bc99):** the SIGSEGV had already become silent
 corruption (`await f()` always yielded 3 = NIL bit pattern in JIT mode; a

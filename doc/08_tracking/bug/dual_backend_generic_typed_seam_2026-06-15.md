@@ -1,9 +1,14 @@
 # Bug: generic fn over trait bound fails for typed dual-backend seam
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — Fixed: a generic fn with a trait bound resolves its type parameter
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's minimal repro runs. `trait ByteEq: fn to_bytes() -> [u8]`, `struct Foo` implementing it, and `fn run_typed<T: ByteEq>(a: T) -> i64: a.to_bytes().len()` called with `Foo(data: [1u8, 2u8, 3u8])` prints `3`. No `Unknown type: T`.
+- **measured**: the sibling bug this entry distinguishes itself from, `crypto_digest_generic_struct_2026-06-15` (type parameters on struct definitions), was verified fixed in the same pass — both manifestations are gone.
+- **inferred**: the Seam A non-generic helper workaround can therefore be retired when that lane chooses to; not done here, as it is a `src/lib` API change outside this triage.
 
 **ID:** dual_backend_generic_typed_seam_2026-06-15
 **Filed:** 2026-06-15
-**Severity:** P2 — language expressiveness gap (workaround exists: Seam A non-generic helpers)
+**Status:** CLOSED 2026-09-13 (fixed). **Severity:** P2 — language expressiveness gap (workaround exists: Seam A non-generic helpers)
 **Component:** compiler / generics
 
 ## Summary
@@ -62,6 +67,3 @@ Seam A: write separate non-generic helpers per output type (`alpha_run_digest`,
 
 - `doc/08_tracking/bug/crypto_digest_generic_struct_2026-06-15.md` — generic struct params
 - `doc/08_tracking/bug/generic_type_alias_parse_reject_2026-06-10.md`
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

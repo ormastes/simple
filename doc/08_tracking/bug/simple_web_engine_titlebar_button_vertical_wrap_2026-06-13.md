@@ -1,6 +1,12 @@
 # Bug: pure-Simple browser engine wraps titlebar widget button label vertically
 
-Status: Fixed in focused pure-Simple layout regression
+## Closed 2026-09-13 — Fixed; the nowrap regression spec passes
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple run test/02_integration/rendering/simple_web_titlebar_nowrap_spec.spl` → `declared>=1 executed=1 passed=1 failed=0`, outcome=OK. The intrinsic-width / `white-space:nowrap` case the button regressed on is covered and green.
+- **inferred**: the entry's own Fix Evidence already recorded the fix; its command line pins `/home/ormastes/dev/pub/simple/bin/simple`, a Linux path that does not exist here, and the cross-engine comparison needs Chromium and WKWebView — neither is available on this host, so only the pure-Simple half was re-run.
+- **measured**: all six repo paths this entry cites, including `scripts/check/check-titlebar-cross-engine-parity.shs` and the software layout renderer, still exist — a real closed fix, not removed code.
+
+Status: CLOSED 2026-09-13 (fixed; regression spec green)
 
 **Date:** 2026-06-13
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl` (software HTML layout)

@@ -1,6 +1,12 @@
 # Bug: struct constructor Type(field: var) fails "unknown argument" in cross-module spec context
 
-**Status:** RESOLVED (2026-09-12, re-verified: minimal repro spec now passes — `1 total, 1 passed, 0 failed`, no "unknown argument" error)
+## Closed 2026-09-13 — does not reproduce: `Type(field: var)` resolves cross-module
+- **measured** — module `modA.spl` defines `struct Pt` and `fn mk(v: i64) -> Pt` returning
+  `Pt(a: v, b: v * 2)`; the importer calls `mk(5)` then builds `Pt(a: p.a, b: 9)`. Under
+  `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) it prints `10` then `9` — no
+  "unknown argument" semantic error.
+- **inferred** — the filed driver was the Linux seed (`simple_seed`); same Rust seed lane,
+  different host.
 
 **ID:** struct_ctor_field_var_cross_module_2026-06-15
 **Filed:** 2026-06-15
@@ -90,7 +96,3 @@ struct used from a spec or cross-module fn.
 
 - `doc/08_tracking/bug/cross_module_struct_method_poisons_itblock_byte_ops_2026-06-15.md`
   — related cross-module interpreter issue with byte ops
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule B: cheap repro run against the deployed seed); the record's "Minimal repro" spec block saved verbatim to a temp file and run with `bin/simple test` passes. Evidence: `bin/simple test /tmp/repro_struct_ctor.spl` on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) -> `1 total, 1 passed, 0 failed`.

@@ -1,6 +1,13 @@
 # Bug: pure_simple web render O(n²) — two distinct causes (one fixed)
 
-Status: likely-fixed (triaged 2026-06-11, Path A and Path B both fixed per title/body)
+## Closed 2026-09-13 — Both tracked paths (A and B) recorded fixed; the entry is a 1400-line worklog, not a live defect
+
+- **inferred** The Status line records Path A and Path B both fixed; the 2026-06-11 triage sweep classified it `likely-fixed`.
+- **measured** Path-survival scan over its 77 backticked paths shows the misses are overwhelmingly command fragments and historical artifact names rather than deleted product modules — the entry accumulated a session log rather than pointing at one broken file.
+- **inferred** The web-render spec lane cannot be executed on this host (`bin/simple test` is killed at its outer bound for every spec, verified on a 6-line spec), so closure rests on the recorded fixes; re-file a narrow entry if a specific render bound is still hit.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 **Date:** 2026-06-06  **Area:** `src/lib/gc_async_mut/gpu/browser_engine` (web render lane)
 **Symptom:** the `pure_simple` web-render backend appears to "hang" at larger

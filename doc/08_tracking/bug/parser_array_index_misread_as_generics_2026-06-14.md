@@ -1,10 +1,16 @@
 # Bug: array indexing `name[expr]` misread as `[...]` generics in some contexts
 
+## Closed 2026-09-13 — Fixed: `name[expr]` is no longer misread as a generic application
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the exact shape from the report — `while j >= 0 and matched[j].w > 2:` with `matched[j]` read inside the loop — parses and runs, printing `5` then `3`. No `Use angle brackets: matched<...>` error.
+- **measured**: the load-time consequence is gone. `use std.common.ui.style.*` in a fresh file loads and runs (`style-ok`), so `common.ui.style` and its transitive dependents (`common.ui.widget`, `app.office.slides.render`) are importable again.
+- **inferred**: `src/lib/common/ui/style.spl` around the cited lines has also been rewritten to build the match list with `push` rather than indexed assignment, so the original call site no longer depends on the parser behaviour either way.
+
 - **ID:** parser_array_index_misread_as_generics_2026-06-14
 - **Severity:** P2 (blocks loading `common.ui.style`, hence the slides/word GUI
   widget render chain, from new dependents)
 - **Discovered:** 2026-06-14, wiring slides render to the office style resolver
-- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+- **Status:** CLOSED 2026-09-13 (fixed; verified by execution)
 
 ## Summary
 
@@ -71,6 +77,3 @@ Note this instance narrows the trigger usefully: `rows` here is a **function
 parameter** declared `rows: [i64]`, not a local `var`. So the disambiguation
 fails for parameter bindings too, not just locals — worth covering in whatever
 fix lands. Sibling report: `u8_index_generics_deprecation_false_positive_test_path_2026-06-28.md`.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

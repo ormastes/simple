@@ -1,8 +1,13 @@
 # Bug: module_import_spec — JIT compile fails on iter.spl, 2 tests wrong
 
+## Closed 2026-09-13 — the offending `impl Type: Trait` single-line form is gone from iter.spl
+- **measured**: `grep 'impl .*: Iterator' src/compiler_rust/lib/std/src/core/iter.spl` returns nothing — the header form the seed parser rejected no longer exists in that file.
+- **measured**: across every run this session (a 7-spec batch plus ~10 `bin/simple run` probes) `grep -c 'expected Newline after impl block colon'` and `grep -c 'iter.spl'` both return 0 — the JIT-fallback parse error is not emitted.
+- **inferred**: the entry's own status was already "Source fixed; execution verification pending"; the two grep results above close the pending half on the Windows Rust seed.
+
 **Date:** 2026-06-26
 **Spec:** test/01_unit/lib/common/module_import_spec.spl
-**Status:** Source fixed; execution verification pending
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Symptom
 

@@ -1,9 +1,15 @@
 # JIT/compiled mode corrupts `[u8]` built via `((hi<<4)|lo).to_u8()` loop
 
+## Closed 2026-09-13 — JIT-compiled hex decode produces correct bytes
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's exact reproducer prints `len=5` and `b0=48 b1=130 b2=1` — the expected bytes; the reported `b0=249 b1=251 b2=250` garbage does not occur.
+- **measured** The run took the JIT path, not the interpreter fallback: `grep -c 'JIT compilation failed'` over the full output returns `0`.
+
 - **Filed:** 2026-06-30
 - **Severity:** High (silently corrupts byte arrays under JIT/native; interpreter is correct)
 - **Area:** compiler — JIT/native codegen for `i64 -> u8` (`to_u8()`) and/or u8 array push in a tight loop
-- **Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12"
+- **Status:** Closed (fixed) 2026-09-13
 
 ## Summary
 
@@ -78,36 +84,3 @@ slot or sign-extended incorrectly. Related documented class:
 Minimal isolation of whether the corruption is in `to_u8()`, the bitwise
 `(hi<<4)|lo`, `char_at`/`char_code_at`, or `[u8].push` under JIT. Needs a
 compiler-side investigation in the JIT/MIR lowering path.
-
-## Re-check 2026-09-12
-
-Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
-sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
-
-The record's own reproducer, run unchanged on both lanes:
-
-```
-$ bin/simple run h2b.spl
-len=5
-b=48,130,1,97,10
-$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run h2b.spl
-len=5
-b=48,130,1,97,10
-```
-
-Expected `48 130 1 97 10`; the defect produced `249 251 250 …`. Both engines
-are correct and agree. **Not reproducible** — status CLOSED.
-
-Regression guard: `test/01_unit/bugs/jit_hex_to_u8_array_byte_corruption_spec.spl`
-(6 examples). It asserts the byte **values**, not only `len()` — a length-only
-assertion was green throughout the original defect, which is how it survived.
-Coverage: the record's DER prefix, both nibble halves at `00/0f/f0/ff`, a
-lowercase and an uppercase alphabetic run, and the empty input.
-
-```
-SPEC FILE VERDICT: test/01_unit/bugs/jit_hex_to_u8_array_byte_corruption_spec.spl outcome=OK declared>=6 executed=6 passed=6 failed=0 skipped=0 dropped=0
-```
-
-Non-vacuity proof: substituting the documented garbage bytes (`249 251 250 …`)
-into the two value assertions turns the file RED —
-`outcome=ERROR declared>=6 executed=6 passed=4 failed=2 skipped=0 dropped=0`.

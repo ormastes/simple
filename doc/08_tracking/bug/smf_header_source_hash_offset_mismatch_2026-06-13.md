@@ -1,5 +1,10 @@
 # BUG: SMF header `source_hash` write/read offset mismatch (68 vs 84)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — Fixed: writer and validator now agree on offset 68
+
+- **measured** (grep of current source): `src/compiler/70.backend/linker/smf_header.spl:514` reads `source_hash: bytes_to_u64_le_header(bytes, offset + 68)`, matching the `to_bytes()` write order at `:411`.
+- **measured**: `src/compiler/80.driver/cache/cache_validator.spl:293` now reads `self.u64_at(start + 68)` in `fn source_hash()`. The 84 offset the bug reported is gone from that reader; the only remaining `84` in `smf_header.spl` is `reserved_hints` at `:520`, a different field.
+- **inferred**: with both sides on 68 the 16-byte discrepancy cannot produce a false cache hit or miss. Not runtime-exercised here — no self-hosted binary is deployed and the seed does not take the pure-Simple SMF validator path.
 
 - **ID:** `smf_header_source_hash_offset_mismatch`
 - **Severity:** P2 (latent — user-script SMF cache validator may read the wrong bytes)
@@ -27,8 +32,5 @@ Pick one canonical offset for `source_hash`; make `to_bytes()` writer and `cache
 reader agree; add a round-trip spec (`write header → read field → equal`).
 
 ## Status
-OPEN — recorded. Out of AC-7 scope (sidecar lane unaffected). Validate before relying on the
+CLOSED 2026-09-13 (fixed; both sides read offset 68). Originally: OPEN — recorded. Out of AC-7 scope (sidecar lane unaffected). Validate before relying on the
 user-script SMF source-hash field.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

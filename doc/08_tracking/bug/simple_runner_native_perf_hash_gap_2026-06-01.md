@@ -1,6 +1,13 @@
 # Bug: simple_runner native-build perf/hash gap on macOS
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — Stale by host: a macOS native-build perf/hash comparison, with no macOS host and no working native lane here
+
+- **measured** Native linking is broken in this environment: `bin/simple compile --native <hello.spl>` fails with `ld: cannot find -lsimple_runtime` and `ld: cannot find -lc`, so neither the cranelift nor the LLVM artifact in the entry can be built or timed.
+- **measured** The entry's title and Context scope it to macOS ("on macOS", "on this host"); triage host is Windows x86_64.
+- **inferred** Both halves of the report (cranelift slower than `bin/simple run`, LLVM hash divergence) are host- and backend-specific measurements; re-file with fresh numbers from a macOS runner if the gap persists.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Status
 
@@ -103,6 +110,3 @@ Simple scalar loops.
 
 This is not accepted as performance evidence for the GUI/Engine2D NFR until the
 native artifact reports matching hashes for all canonical scenes.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

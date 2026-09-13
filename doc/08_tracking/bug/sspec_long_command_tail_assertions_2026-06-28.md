@@ -1,7 +1,14 @@
 # SSpec Long Command Tail Assertions May Be Skipped
 
+## Closed 2026-09-13 — root cause (matcher clearing a prior failure) is fixed; tail assertions are now observed
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The minimized repro of the shared root cause (`sspec_matcher_success_clears_prior_failure_2026-06-28`) — a failing `expect` followed by a passing one in the same `it` — now reports `1 example, 1 failure` / `outcome=ERROR`, i.e. the later assertion no longer erases the earlier failure.
+- **measured** A single example containing a passing assertion followed by a genuinely failing one prints `1 example, 1 failure`, so a trailing assertion is still evaluated and counted.
+- **inferred** The original GUI RenderDoc autodiscovery symptom was attributed in the sibling entry to that same matcher-clear defect, not to command length.
+
 Date: 2026-06-28
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Status: closed (fixed) 2026-09-13
 Owner: test-runner
 
 ## Summary
@@ -33,7 +40,3 @@ For long-command GUI evidence scenarios, put critical evidence checks into the
 shell command itself with `grep -qx ... && ...`, then assert the command exit
 code. Prefer splitting long setup commands into shorter helper scripts or
 scenario helpers before relying on post-command assertions.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

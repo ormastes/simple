@@ -1,9 +1,14 @@
 # Bug: unit-return function pointer `fn() -> ()` hard-crashes (SIGILL)
 
+## Closed 2026-09-13 — Fixed: a `fn() -> ()` function pointer calls cleanly
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's repro shape — `fn run_warm(iters: i64, body: fn() -> ()) -> i64` calling `body()` once plus twice in a loop, passed a unit-returning `tick` — runs to completion printing `t t t` then `0`, exit 0. No SIGILL, no rc=132.
+- **inferred**: the entry says the crash hit both the interpreter and compiled SMF. Only the default `bin/simple run` lane was exercised here; the SMF lane was not, so the compiled half rests on the shared call-lowering fix rather than a direct measurement.
+
 - **ID:** unit_return_fn_pointer_sigill
 - **Severity:** P2 (hard crash, but a narrow type; easy workaround)
 - **Area:** compiler / function-pointer call lowering (interpreter AND smf/compiled)
-- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+- **Status:** CLOSED 2026-09-13 (fixed; verified by execution)
 - **Date:** 2026-06-14
 
 ## Symptom
@@ -60,7 +65,3 @@ named workload functions directly instead of passing a `fn() -> ()` closure.
 `smf-extern-segfault` — that label was investigated separately and does not reproduce (externs,
 including tuple/text-returning, run correctly in `--mode smf`; the text-return segfault was
 Resolved 2026-05-29). This SIGILL is a distinct, mode-independent function-pointer bug.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

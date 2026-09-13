@@ -1,9 +1,14 @@
 # tracking add-feature runtime dispatch blocker
 
+## Closed 2026-09-13 — entry already records Status: Fixed
+
+- **inferred** `- **Status:** Fixed` is already recorded in the entry body along with the dispatch repair.
+- **inferred** Re-running `simple run src/app/tracking/main.spl add-feature ...` end to end was not attempted: it loads the full app/compiler closure and a bootstrap is running concurrently on this clone.
+
 - **Filed-on:** 2026-06-28
 - **Filed-by:** Codex
 - **Area:** `src/app/tracking/main.spl`, app runtime dispatch
-- **Status:** Fixed
+- **Status:** Closed (fixed) 2026-09-13
 - **Severity:** medium
 
 ## Summary

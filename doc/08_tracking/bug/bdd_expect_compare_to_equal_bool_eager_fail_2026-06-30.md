@@ -1,5 +1,10 @@
 # Bug: `expect(a == b).to_equal(false)` false-fails when a != b
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — `expect(a == b).to_equal(false)` passes, with no failure-masking
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Spec with both idioms (`expect("aaa" == "bbb").to_equal(false)` and `expect("aaa" == "aaa").to_equal(true)`) runs green: `2 examples, 0 failures`.
+- **measured** The FALSE-GREEN risk the entry warned about did not materialise: an example containing that idiom followed by a genuinely failing `expect(1).to_equal(2)` still reports `1 example, 1 failure` / `outcome=ERROR`.
 
 **Date:** 2026-06-30
 **Severity:** Medium — false-RED on specs that assert inequality via the
@@ -48,6 +53,3 @@ Use the idiomatic matchers: `expect(a).to_not_equal(b)` (asserts inequality) or
 `expect(a).to_equal(b)` — both already correct. Same family as
 `harness_word_infix_expect_not_preprocessed_2026-06-29` (BDD eager-marking vs
 trailing matcher).
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
