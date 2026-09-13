@@ -126,3 +126,60 @@ place today is structural — it verifies the emitted blocks have the right
 shape, not that running them produces the right numbers. That is the
 substitution no amount of structural testing can make, and it is why the four
 fixes here do not by themselves justify flipping the status.
+
+## D5 — the emitted vector loop is UNLOWERABLE and UNEXECUTABLE
+
+Found while building the execution-level differential test that step 6 asks
+for. The test could not be built, and the reason is the most fundamental defect
+in this record.
+
+`create_vector_loop_block` emits its work as `MirInstKind.Intrinsic` addressed
+by STRING NAME:
+
+    simd_load_{element}x{width}
+    simd_{op}_{element}x{width}
+    simd_store_{element}x{width}
+
+Nothing in the tree implements those names.
+
+- `simd_lowering.spl` handles exactly **three**: `simd_add_f32x4`,
+  `simd_mul_f32x4`, `simd_sub_f32x4`. No load. No store. No width other than
+  f32x4.
+- The MIR interpreter has no case for them either. Its unknown-intrinsic path
+  is at least honest — `E-INTERP-INTRINSIC-Unknown` with a recorded
+  `UnsupportedOperation`, not a silent 0 (Lane C8 fixed that) — so a vectorized
+  function fails loudly rather than producing wrong numbers.
+
+So for the 4-lane recipe the loop emits `simd_load_i32x4` and
+`simd_store_i32x4`, which have no handler; and the AVX-512 planning level this
+whole effort added emits `simd_load_f32x16` / `simd_add_f32x16` /
+`simd_store_f32x16`, **none of which exist anywhere**.
+
+The consequence is blunt: even with D1-D4 fixed and the alias oracle correct,
+the code the rewriter produces cannot run. Flipping the pass Active would not
+produce slow code or subtly wrong code — it would produce code that fails at
+the first vector instruction.
+
+This also explains why every defect in this record survived so long. The pass
+has never been Active, the emitted intrinsics have never been executed, and the
+unit fixtures only ever inspected block SHAPE. Four rounds of structural tests
+all passed over a loop body that no backend can consume.
+
+Pinned by three examples in `auto_vectorize_spec.spl`: `simd_load_*` and
+`simd_store_*` are emitted; every emitted name for a 16-lane recipe lies
+outside the three lowerable names; and load/store are emitted even for the
+4-lane recipe.
+
+### What step 6 now requires
+
+The execution-level differential test is blocked behind implementing the
+intrinsics, not merely writing the test:
+
+1. implement `simd_load_*` / `simd_store_*` / `simd_<op>_*` in the MIR
+   interpreter (the scalar oracle in `mir_simd_interpreter.spl` already models
+   Vec16f/Vec8d/Vec16i lane semantics and is the obvious backing), **or**
+   change the rewriter to emit `MirSimdLoad`/`MirSimdBinop`/`MirSimdStore`
+   instructions that the interpreter already understands rather than
+   string-named intrinsics;
+2. extend `simd_lowering.spl` past the three f32x4 names it knows;
+3. then, and only then, run vectorized against scalar and compare outputs.

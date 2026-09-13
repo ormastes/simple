@@ -15,6 +15,7 @@
 #   block reachability.  The assertions inside it-blocks are not executed.
 #   All assertions use built-in matchers only: to_equal, to_be_nil, to_be.
 
+use compiler.interp.mir_interpreter.{MirInterpreter}
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
     MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId,
     SymbolId}
@@ -1426,3 +1427,74 @@ describe "D4 — guard temporaries are declared locals":
                 dupes = dupes + 1
             seen.push(lc.id.id)
         expect(dupes).to_equal(0)
+
+# ============================================================================
+# D5 — execution level: what the vector loop emits, and whether anything runs it
+#
+# Every check above is STRUCTURAL: it verifies the emitted blocks have the
+# right shape. This one asks the question structure cannot answer — can the
+# emitted code actually execute?
+# ============================================================================
+
+fn emitted_intrinsic_names(f: MirFunction) -> [text]:
+    var names: [text] = []
+    for b in f.blocks:
+        for ins in b.instructions:
+            match ins.kind:
+                case Intrinsic(_, nm, _):
+                    names.push(nm)
+                case _:
+                    pass_do_nothing
+    names
+
+describe "D5 — the vector loop emits intrinsics nothing can execute":
+    it "emits simd_load / simd_<op> / simd_store by name":
+        step("these are Intrinsic instructions addressed by string name")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val rewritten = rewrite_elementwise_add(make_elementwise_add_recipe_for_rewrite(), func)
+        val names = emitted_intrinsic_names(rewritten)
+        expect(names.len() > 0).to_equal(true)
+        var has_load = false
+        var has_store = false
+        for n in names:
+            if n.starts_with("simd_load_"):
+                has_load = true
+            if n.starts_with("simd_store_"):
+                has_store = true
+        expect(has_load).to_equal(true)
+        expect(has_store).to_equal(true)
+
+    it "emits names with a LANE WIDTH that nothing in the tree lowers":
+        step("simd_lowering.spl handles exactly simd_add/mul/sub_f32x4 — three names,")
+        step("no load, no store, and no width other than f32x4. A 16-lane AVX-512")
+        step("recipe emits simd_load_f32x16 / simd_add_f32x16 / simd_store_f32x16,")
+        step("none of which exist anywhere, so the vector loop is unlowerable.")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val r = make_elementwise_add_recipe_for_rewrite()
+        val wide = VectorRecipe(
+            kind: r.kind, header_block: r.header_block, induction_var: r.induction_var,
+            trip_count: 64, element_type: "f32", vector_width: 16,
+            op_name: r.op_name, note: r.note, input_bases: r.input_bases,
+            output_base: r.output_base, accumulator: r.accumulator,
+            chunk_width: 16, index_locals: r.index_locals,
+            store_value: r.store_value, induction_update: r.induction_update)
+        val names = emitted_intrinsic_names(rewrite_elementwise_add(wide, func))
+        var lowerable = 0
+        for n in names:
+            if n == "simd_add_f32x4" or n == "simd_mul_f32x4" or n == "simd_sub_f32x4":
+                lowerable = lowerable + 1
+        # Every emitted intrinsic is OUTSIDE the lowerable set.
+        expect(names.len() > 0).to_equal(true)
+        expect(lowerable).to_equal(0)
+
+    it "even the 4-lane recipe emits load/store that nothing lowers":
+        step("the three lowerable names are arithmetic only — there is no")
+        step("simd_load_* or simd_store_* handler anywhere in the tree")
+        val func = make_test_mir_function([make_elementwise_block_add()], false)
+        val names = emitted_intrinsic_names(
+            rewrite_elementwise_add(make_elementwise_add_recipe_for_rewrite(), func))
+        var unlowerable = 0
+        for n in names:
+            if n.starts_with("simd_load_") or n.starts_with("simd_store_"):
+                unlowerable = unlowerable + 1
+        expect(unlowerable > 0).to_equal(true)
