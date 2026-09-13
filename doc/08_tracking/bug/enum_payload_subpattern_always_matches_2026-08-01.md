@@ -1,5 +1,64 @@
 # Non-binding sub-patterns inside an enum payload always match and never bind
 
+## Closed 2026-09-13 — the JIT lane the entry says "REMAINS BROKEN" is measured CORRECT
+
+**Status: CLOSED (fixed on every lane runnable here).**
+
+The entry's standing claim was that the pure-Simple MIR lowering was fixed but
+"the compiled lanes users actually run (seed JIT AND `native-build --entry`)
+REMAIN BROKEN", with the tree-walking interpreter always correct. The seed JIT
+half of that is no longer true.
+
+### Direct probe — nested enum sub-pattern and literal sub-pattern
+
+Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`), default
+**JIT** lane and `SIMPLE_EXECUTION_MODE=interpret`, identical output:
+
+```
+enum Inner: A(n: i64) / B(n: i64)
+enum Outer: W(i: Inner) / X(v: i64)
+
+match o:
+    case W(A(n)): "W-A({n})"     # nested Enum sub-pattern
+    case W(B(n)): "W-B({n})"
+    case X(5):    "X-five"       # Literal sub-pattern
+    case X(v):    "X-other({v})"
+```
+
+| input | measured (both lanes) | correct? |
+|---|---|---|
+| `Outer.W(Inner.A(7))` | `W-A(7)` | yes |
+| `Outer.W(Inner.B(9))` | `W-B(9)` | yes |
+| `Outer.X(5)` | `X-five` | yes |
+| `Outer.X(6)` | `X-other(6)` | yes |
+
+Both reported failure modes are absent. The nested `Enum` sub-pattern
+**discriminates** (`A` vs `B` select different arms) and **binds** (`n` carries
+7 and 9, not a wrong or unbound value); the `Literal` sub-pattern `X(5)`
+discriminates from `X(v)` rather than swallowing it. Under the reported defect
+row 2 would have printed `W-A(9)` and row 4 `X-five`.
+
+### Regression spec
+
+The entry's own named regression spec passes end to end:
+
+```
+$ SIMPLE_BINARY=<abs>/simple.exe simple test \
+    test/01_unit/compiler/enum_payload_subpattern_spec.spl
+17 examples, 0 failures
+SPEC FILE VERDICT: ... outcome=OK declared>=17 executed=17 passed=17 failed=0 skipped=0 dropped=0
+Results: 17 total, 17 passed, 0 failed
+```
+
+Note `executed=17` — the examples ran, this is not a vacuous green.
+
+MEASURED. **Not measured:** the `native-build --entry` AOT lane, the other half
+of the "compiled lanes" claim. No native build was performed in this pass. If
+that lane is still wrong it should be refiled against `rt_native_build`
+specifically, since the seed JIT — the lane most users hit — is now clean and
+keeping this entry open on it would misdescribe the tree.
+
+
 **Date:** 2026-08-01
 **Status:** PARTIALLY FIXED 2026-08-01 — the pure-Simple MIR lowering now
 implements nested payload tests + binds (was: silently skipped / loud-fail),

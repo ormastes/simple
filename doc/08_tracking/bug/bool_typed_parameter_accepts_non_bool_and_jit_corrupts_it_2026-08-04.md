@@ -1,6 +1,73 @@
 # BUG: a `bool`-declared parameter accepts a non-bool silently — and the JIT corrupts it
 
-- Status: PARTIALLY-RESOLVED (2026-09-12) — the JIT corruption and the 28 red specs are gone; a `bool` parameter is still not type-CHECKED, see Triage 2026-09-12
+## Re-measured 2026-09-13 — still OPEN. Both halves live; the corruption now renders as `error`, and the lanes disagree three ways
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`),
+Windows.
+
+### Half 1 — the missing check: UNCHANGED, still unenforced on BOTH lanes
+
+`fn takes_bool(b: bool)` accepts an `i64`, a `text`, a bare `nil` and an
+`i64?` without any diagnostic on either lane. Nothing rejects. `coerce_param`
+still has no bool arm, as the sibling entry pins.
+
+### Half 2 — what the parameter actually holds, `print "{b}"` inside the callee
+
+| argument | JIT (default) | interpret |
+|---|---|---|
+| `true` | `true` | `true` |
+| `1` | `true` | `true` |
+| `0` | `false` | **`true`** |
+| `nil` | **`error`** | `false` |
+| `opt_nil()` (`i64?` = nil) | **`error`** | `false` |
+| `"x"` | `true` | `true` |
+
+and the branch each one selects in `if b:`:
+
+| argument | JIT | interpret |
+|---|---|---|
+| `0` | ELSE | **THEN** |
+| `nil` | **THEN** | ELSE |
+| `opt_nil()` | **THEN** | ELSE |
+
+Three things this pins down that the original report could not:
+
+1. **The JIT re-tagging half is still live.** The reported garbage tag
+   `<special:N>` is gone as a *rendering*, but the value is still corrupt: a
+   `bool` parameter handed `nil` stringifies as the literal text `error` and is
+   simultaneously **truthy**. That is strictly worse than a visible
+   `<special:N>` — it looks like a legitimate error string.
+2. **The two lanes now disagree in both directions**, so neither can serve as
+   the oracle for the other. `0` is falsy on the JIT and truthy in the
+   interpreter; `nil` is truthy on the JIT and falsy in the interpreter. A spec
+   asserting either behaviour is green on one runner and red on the other,
+   which is the cross-runner hazard this cluster was filed about.
+3. **The JIT `nil`-is-truthy row is the same defect** as the reopened
+   `not_over_nil_returns_false_in_run_engine_2026-08-04.md` (literal `not nil`
+   is `false` on the JIT, `true` in the interpreter). Fixing nil truthiness on
+   the JIT should move both.
+
+Note the interpreter's `0` -> `true` row is not in the original report and may
+be new: passing integer `0` to a `bool` parameter yields a truthy `true` there.
+
+Entry stays OPEN. Not fixed here — `src/compiler_rust/**` was off-limits during
+this pass (concurrent bootstrap).
+
+**The "fix once, close all of these" list is now three, not four.**
+`exists_operator_returns_payload_not_bool_2026-08-04.md` was closed 2026-09-13
+as an **invalid premise**: `.?` evaluating to `T?` rather than `bool` is the
+ratified contract
+(`doc/07_guide/quick_reference/syntax_quick_reference.md:539-550`, `num.?  #
+i64?: Some(num)`), the same call already made on its sibling
+`exists_check_on_optional_i64_returns_payload_2026-08-01.md` on 2026-08-08.
+Its 158 red examples were remediated spec-side (sampled 8 of the 36
+`branch_coverage_*` files: 630 examples, 1 failure). So that report was never
+evidence for a compiler defect, and the real defect behind this cluster is the
+missing bool coercion measured above — `coerce_param` having no bool arm —
+together with the JIT's nil-truthiness.
+
+
+**Status:** OPEN
 **Found:** 2026-08-04
 **Related — SAME root cause, found independently by parallel lanes the same day.
 Fix once, close all of these. This file is the UNIT-tier record; its unique
@@ -166,55 +233,3 @@ have had `check(opt.?)` rewritten to `check(opt != nil)`, which is why those
 two files are green while the other 28 identical files are red. That workaround
 hid the defect rather than removing it, and it should be reverted once the real
 fix lands.
-
-## Triage 2026-09-12
-
-Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
-Re-ran this record's own minimal repro verbatim, both engines:
-
-| line | 2026-08-04 interpreter | 2026-08-04 jit | now, interpreter | now, jit |
-|---|---|---|---|---|
-| A `opt.?` | `42` | `42` | `42` | `42` |
-| B `if opt.?:` | truthy | truthy | truthy | truthy |
-| C `take_bool(opt.?)` | `got=42` | `got=<special:82>` | **`got=true`** | **`got=true`** |
-| D `take_bool(42)` | `got=42` | `got=<special:44>` | **`got=true`** | **`got=true`** |
-
-Two of the three halves are **closed**:
-
-- The **JIT re-tagging** half — the `<special:N>` garbage value that gives this
-  record its title — no longer reproduces in either mode.
-- The **suite** half: `auto_comprehensive_10_spec.spl`, named here as the
-  canonical failure (`✗ option coverage 1 / expected 42 to equal true`), is
-  `outcome=OK executed=30 passed=30 failed=0`. Spot-checked siblings 1, 2 and 4
-  are 30/30 as well, so the "28 specs in `test/01_unit/std/` are red because of
-  it" severity driver is gone.
-
-**Still open, and narrower than filed:** row D. `take_bool(42)` — an integer
-literal to a `bool` parameter — is still accepted with no diagnostic. What
-changed is the *outcome*, not the *check*: the argument is now coerced to
-`true` instead of being passed through raw or re-tagged. That is the
-"`bool` type annotation on a parameter is unenforced" claim, and it stands;
-the record's stated expectation for row D is a compile error. Fixing it means
-adding a bool arm to `coerce_param` (seed `arg_binding.rs:84`, per the sibling
-record `optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`),
-which is Rust-seed work and out of scope for this triage slot.
-
-Note for whoever takes it: silent coercion is arguably worse than the old
-pass-through for diagnosis, because `got=true` looks correct. A spec that
-pins "`take_bool(42)` is rejected" is the right guard and would sit RED today,
-so none is added here.
-
-## Triage 2026-09-13 (BUGFIX-10 fanout)
-
-No new evidence to add. The remaining gap (no compile-time type-check
-rejecting a non-bool value at a `bool`-typed parameter) is a
-language-semantics decision with repo-wide blast radius, already
-re-investigated once (2026-08-10) and confirmed to have no minimal
-`.spl`-side fix available — every option needs a policy call this lane
-cannot make unilaterally. Status left as PARTIALLY-RESOLVED, unchanged.
-## Triage 2026-09-13 (BUGFIX-6 lane)
-
-Skipped from this row-order pass: primary file/fix surface is the Rust seed
-(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
-pure-Simple, non-Codex lane within the triage budget. Not reproduced or
-re-diagnosed this pass; left OPEN as-is.

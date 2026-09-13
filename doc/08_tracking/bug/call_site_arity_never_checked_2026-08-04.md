@@ -1,5 +1,57 @@
 # Call-site argument count is never checked before codegen (2026-08-04)
 
+## Re-measured 2026-09-13 — detection IS now armed, but only on one lane, and only at RUNTIME
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`),
+Windows. The entry's own probe: `fn f3(a, b, c) -> c*1000 + a*10 + b`, correct
+call yields **9078**, a parameter read as the nil sentinel `3` yields **3078**.
+
+| call (executed) | JIT (default) | `SIMPLE_EXECUTION_MODE=interpret` |
+|---|---|---|
+| `f3(7, 8, 9)` — correct | `9078` ✓ | `9078` ✓ |
+| `f3(7, 8)` — one too few | **`3078`** — silent, exit 0 | `error: semantic: function expects argument for parameter 'c', but none was provided` |
+| `f3(7, 8, 9, 11)` — one too many | **`9078`** — extra arg silently dropped | `error: semantic: function expects 3 argument(s), but more were provided` |
+
+So the standing status line — "detection not armed" — is now half wrong. The
+interpreter lane rejects **both** arity errors with messages naming the
+parameter and the expected count.
+
+### But it is a runtime check, not a static one — MEASURED
+
+The same wrong-arity call placed inside a function that is **never invoked**
+runs clean on **both** lanes:
+
+```
+fn never_called():
+    print "{f3(7, 8)}"        # never reached
+fn main():
+    print "main ran"
+main()
+```
+-> `main ran`, exit 0, no diagnostic, on JIT and on `interpret` alike.
+
+This matters for how the entry's census work can proceed. The interpreter's
+check fires only when the bad call is actually executed, so it **cannot** be
+used to sweep the 154 cross-module sites §8 found by simply loading their
+modules — including the `wine_vm_commit/4` (96) and `dyn_torch_tensor_*` (9)
+clusters, whose whole difficulty is that they are hard to reach by value. Those
+still need either a static checker or a reaching execution. §5's detection gap
+is therefore genuinely still open; what changed is only that *executed* wrong
+calls now fail loudly on one lane.
+
+What is still broken on the default **JIT** lane is the reported silent
+corruption: `3078` is the nil-sentinel signature this entry defined, proving the
+missing third parameter is read as `RT_NIL == 3` and folded into the arithmetic
+with no diagnostic and exit 0. The too-many case is silent there too.
+
+Narrowed remaining compiler work: port the interpreter's existing runtime arity
+check to the JIT/MIR call-lowering path, and separately add the static check §5
+asks for — they are two jobs, not one.
+
+Entry stays OPEN.
+
+Not fixed here — both sites are `src/compiler_rust/**`, off-limits during this
+pass (concurrent bootstrap).
 **Status:** OPEN (detection not armed; real call sites remain). §3's same-file
 census found 7 real sites, all repaired (`af0fdf192d8`, `7788bdf1d56`, §7). §8
 then measured the **cross-module** population §3 had declared unmeasured and
@@ -702,7 +754,3 @@ and the blocker is named: the lean bridge must capture `has_default` faithfully 
 **That is the real fix target, not `resolve.spl`.** No patch applied: arming the check
 without the bridge fix would false-fire on every valid omitted-default call, which is a
 worse regression than the bug. Prerequisite filed as the actual dependency.
-
-## Triage 2026-09-13
-
-Confirmed the doc's own finding still holds: the arity checker is written-and-deliberately-suppressed pending the lean bridge capturing `has_default` faithfully -- arming it now would false-fire on every valid omitted-default call, a worse regression than the bug. The real fix target is the lean bridge, not `resolve.spl`, and that prerequisite is out of this pass's budget. Leaving OPEN, no code change made.

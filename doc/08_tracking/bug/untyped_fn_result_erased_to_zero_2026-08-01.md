@@ -1,5 +1,34 @@
 # An untyped function's result is erased to `0` (or to `value << 3`)
 
+## Re-measured 2026-09-13 — HALF FIXED, entry stays OPEN on the remaining half
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (Windows), the entry's own
+repro run verbatim as a whole program with `main()` appended.
+
+| lane | `no_ret_type` (a) | `with_ret_type` (b) | `untyped_params_ret_i64` (c) |
+|---|---|---|---|
+| default (JIT) | **0 — still WRONG** | 8 | **8 — now CORRECT** |
+| `SIMPLE_NO_JIT=1` | **0 — still WRONG** | 8 | 8 |
+| `SIMPLE_EXECUTION_MODE=interpret` | **8 — CORRECT** | 8 | 8 |
+
+Two things this pins down that the original report could not:
+
+1. **The `value << 3` half is FIXED.** Case (c) — declared return type, untyped
+   parameters — returned the raw tag-boxed word `64` when filed; it now returns
+   `8` on every lane. That sub-defect can be treated as closed.
+2. **The remaining half is a JIT/MIR-only divergence, not a language-wide
+   erasure.** The Rust AST interpreter gets case (a) right. Only the JIT and the
+   `SIMPLE_NO_JIT=1` (MIR) path erase a *missing return type annotation* to `0`.
+   That narrows the search to the return-type-inference/erasure decision on the
+   MIR lowering path, and gives a free differential oracle: any candidate fix can
+   be checked against `SIMPLE_EXECUTION_MODE=interpret` on the same file.
+
+Still **silent wrong data, no error** — severity unchanged.
+
+**Not fixed here:** lives in `src/compiler_rust/**`, off-limits during this pass
+(concurrent bootstrap; editing Rust sources aborts it).
+
+
 **Date:** 2026-08-01
 **Status:** Open
 **Severity:** High — silent wrong data, no error
