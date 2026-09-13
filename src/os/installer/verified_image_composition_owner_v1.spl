@@ -1,0 +1,337 @@
+# Production owner for one verified x86_64 SimpleOS NVFS image.
+#
+# The owner retains the hosted root descriptor, reads each artifact through the
+# no-follow bounded provider, derives every digest from those bytes, reopens the
+# resulting NVFS namespace for persisted readback, atomically publishes a new
+# output leaf, reads that leaf back through the retained root, and only then
+# issues its receipt and manifest projection. It never accepts proof booleans,
+# descriptors, placeholder payloads, signing claims, or publication admission.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+    SIMPLEOS_TARGET_V1_X86_64_FIRMWARE
+}
+use std.common.contracts.execution.simpleos_image_manifest_v1.*
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{elf_admit_executable}
+use os.installer.image_package_payload_policy.{
+    image_native_smf_executable_payload_admitted_v1
+}
+use os.port.nvfs_image.{
+    NvfsImageConfig, NvfsImageSeed, NvfsImageArtifactSeedV1,
+    NvfsImageMaterializationReceiptV1,
+    _nvfs_image_mem_device, _nvfs_image_byte_identity_v1,
+    _nvfs_image_artifact_evidence_v1,
+    NVFS_IMAGE_PROVIDER, NVFS_IMAGE_CARRIER_FORMAT_V1
+}
+use os.installer.hosted_safe_artifact_io_v1.{
+    HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1,
+    HostedSafeArtifactRootAuthorityV1,
+    hosted_safe_artifact_relative_path_valid_v1,
+    hosted_safe_artifact_root_acquire_v1,
+    hosted_safe_artifact_root_close_v1,
+    hosted_safe_artifact_read_once_v1,
+    hosted_safe_artifact_publish_prepare_v1,
+    hosted_safe_artifact_publish_redeem_v1
+}
+use os.installer.nvfs_artifact_manifest_projection_v1.{
+    simpleos_nvfs_artifacts_project_persisted_v1
+}
+use os.installer.simpleos_image_manifest_composer_v1.{
+    SimpleOsVerifiedArtifactInputV1,
+    SimpleOsX8664ImageCompositionV1,
+    SIMPLEOS_IMAGE_COMPOSER_V1_X86_64_KERNEL_TARGET,
+    simpleos_x86_64_image_manifest_compose_v1
+}
+
+pub const SIMPLEOS_VERIFIED_IMAGE_MAX_SECTORS_V1: u64 = 32768u64
+
+pub struct SimpleOsVerifiedImageRequestV1:
+    trusted_absolute_root: text
+    output_relative_path: text
+    size_sectors: u64
+    profile_id: text
+    build_id: text
+    source_id: text
+    sosix_version: text
+    kernel_relative_path: text
+    init_relative_path: text
+    loader_relative_path: text
+    selector_relative_path: text
+    compiler_relative_path: text
+
+pub struct SimpleOsVerifiedImageReceiptV1:
+    output_relative_path: text
+    carrier_digest: text
+    carrier_byte_length: u64
+    manifest_digest: text
+    artifact_count: i64
+
+fn _verified_image_artifact_v1(
+    artifact_id: text, role: SimpleOsImageArtifactRoleV1,
+    image_path: text, bytes: [u8], required: bool, baseline: bool
+) -> SimpleOsImageArtifactV1:
+    SimpleOsImageArtifactV1(
+        artifact_id: artifact_id, role: role, image_path: image_path,
+        digest: sha256_u8_hex(bytes), required: required, baseline: baseline)
+
+fn _verified_image_distinct_paths_v1(request: SimpleOsVerifiedImageRequestV1) -> bool:
+    var paths = [
+        request.kernel_relative_path, request.init_relative_path,
+        request.loader_relative_path, request.selector_relative_path
+    ]
+    if request.compiler_relative_path != "":
+        paths.push(request.compiler_relative_path)
+    paths.push(request.output_relative_path)
+    var i = 0
+    while i < paths.len():
+        if not hosted_safe_artifact_relative_path_valid_v1(paths[i]):
+            return false
+        var prior = 0
+        while prior < i:
+            if paths[prior] == paths[i]: return false
+            prior = prior + 1
+        i = i + 1
+    true
+
+fn _verified_image_read_artifact_v1(
+    authority: HostedSafeArtifactRootAuthorityV1, path: text, role: text
+) -> Result<[u8], text>:
+    val read = hosted_safe_artifact_read_once_v1(
+        authority, path, HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1)
+    if read.is_err(): return Err(role + ": " + read.unwrap_err())
+    val bytes = read.unwrap()
+    if bytes.len() == 0: return Err(role + " is empty")
+    Ok(bytes)
+
+fn _verified_image_x86_64_smf_v1(bytes: [u8]) -> bool:
+    image_native_smf_executable_payload_admitted_v1(
+        bytes, Architecture.X86_64)
+
+fn _verified_image_candidate_v1(
+    request: SimpleOsVerifiedImageRequestV1,
+    inputs: [SimpleOsVerifiedArtifactInputV1],
+    materialization: NvfsImageMaterializationReceiptV1,
+    mut output: [SimpleOsImageManifestV1]
+) -> Result<(), text>:
+    if output.len() != 0:
+        return Err("verified image candidate output buffer must be empty")
+    var compiler: [SimpleOsImageArtifactV1] = []
+    if inputs.len() == 5: compiler.push(inputs[4].artifact)
+    output.push(SimpleOsImageManifestV1(
+        schema_version: SIMPLEOS_IMAGE_MANIFEST_V1_SCHEMA,
+        target_id: SIMPLEOS_TARGET_V1_X86_64_TRIPLE,
+        profile_id: request.profile_id,
+        build_id: request.build_id, source_id: request.source_id,
+        kernel: inputs[0].artifact,
+        services: [inputs[1].artifact],
+        runtime: [inputs[2].artifact, inputs[3].artifact],
+        compiler: compiler, providers: [], symbols: [],
+        carrier: SimpleOsImageCarrierV1(
+            kind: SimpleOsImageCarrierKindV1.RawDiskImage,
+            format_id: materialization.carrier_format_id,
+            digest: materialization.carrier_digest,
+            byte_length: materialization.carrier_byte_length),
+        root: SimpleOsImageRootV1(
+            volume_id: "volume.system", filesystem: SimpleOsImageFilesystemV1.Nvfs,
+            mount_point: "/", snapshot_id: "", overlay_id: ""),
+        volumes: [SimpleOsImageVolumeV1(
+            volume_id: "volume.system", role: SimpleOsImageVolumeRoleV1.System,
+            filesystem: SimpleOsImageFilesystemV1.Nvfs,
+            digest: materialization.root_digest,
+            byte_length: materialization.root_byte_length, writable: false)],
+        snapshot: SimpleOsImageSnapshotV1(
+            present: false, snapshot_id: "", volume_id: "", digest: ""),
+        overlay: SimpleOsImageOverlayV1(
+            present: false, overlay_id: "", base_snapshot_id: "",
+            upper_volume_id: "", digest: ""),
+        firmware_profile: SIMPLEOS_TARGET_V1_X86_64_FIRMWARE,
+        sosix_version: request.sosix_version,
+        entry: SimpleOsImageEntryV1(
+            artifact_id: inputs[1].artifact.artifact_id, symbol: "simpleos-init"),
+        baseline: SimpleOsImageBaselineV1(
+            kernel_artifact_id: inputs[0].artifact.artifact_id,
+            init_artifact_id: inputs[1].artifact.artifact_id,
+            loader_artifact_id: inputs[2].artifact.artifact_id,
+            selector_artifact_id: inputs[3].artifact.artifact_id)))
+    Ok(())
+
+fn _verified_image_build_with_authority_v1(
+    request: SimpleOsVerifiedImageRequestV1,
+    authority: HostedSafeArtifactRootAuthorityV1,
+    mut manifest_output: [SimpleOsImageManifestV1]
+) -> Result<SimpleOsVerifiedImageReceiptV1, text>:
+    if manifest_output.len() != 0:
+        return Err("verified image manifest output buffer must be empty")
+    if (request.size_sectors < 8u64 or
+        request.size_sectors > SIMPLEOS_VERIFIED_IMAGE_MAX_SECTORS_V1):
+        return Err("verified image size must be between 8 and 32768 sectors")
+    if not _verified_image_distinct_paths_v1(request):
+        return Err("verified image paths must be distinct safe relative paths")
+    if request.compiler_relative_path != "" and request.profile_id != "dev":
+        return Err("verified image compiler payload is permitted only in dev profile")
+    if (not simpleos_image_profile_id_valid_v1(request.profile_id) or
+        not simpleos_image_identity_valid_v1(request.build_id) or
+        not simpleos_image_identity_valid_v1(request.source_id) or
+        not simpleos_image_identity_valid_v1(request.sosix_version)):
+        return Err("verified image profile or manifest identity is invalid")
+
+    val kernel = _verified_image_read_artifact_v1(
+        authority, request.kernel_relative_path, "kernel")?
+    val init = _verified_image_read_artifact_v1(
+        authority, request.init_relative_path, "init")?
+    val loader = _verified_image_read_artifact_v1(
+        authority, request.loader_relative_path, "loader")?
+    val selector = _verified_image_read_artifact_v1(
+        authority, request.selector_relative_path, "selector")?
+    if elf_admit_executable(kernel, Architecture.X86_64).is_err():
+        return Err("kernel is not a loadable x86_64 ELF executable")
+    if (not _verified_image_x86_64_smf_v1(init) or
+        not _verified_image_x86_64_smf_v1(loader) or
+        not _verified_image_x86_64_smf_v1(selector)):
+        return Err("init, loader, and selector must be canonical x86_64 SimpleOS SMF executables")
+    var source_paths = [
+        request.kernel_relative_path, request.init_relative_path,
+        request.loader_relative_path, request.selector_relative_path
+    ]
+    var image_paths = [
+        "/boot/kernel.elf", "/system/init.smf",
+        "/system/loader.smf", "/system/selector.smf"
+    ]
+    var payloads = [kernel, init, loader, selector]
+    var artifacts = [
+        _verified_image_artifact_v1("kernel.simpleos",
+            SimpleOsImageArtifactRoleV1.Kernel, image_paths[0], kernel, true, true),
+        _verified_image_artifact_v1("service.init",
+            SimpleOsImageArtifactRoleV1.Service, image_paths[1], init, true, true),
+        _verified_image_artifact_v1("runtime.loader",
+            SimpleOsImageArtifactRoleV1.Runtime, image_paths[2], loader, true, true),
+        _verified_image_artifact_v1("runtime.selector",
+            SimpleOsImageArtifactRoleV1.Runtime, image_paths[3], selector, true, true)
+    ]
+    if request.compiler_relative_path != "":
+        val compiler = _verified_image_read_artifact_v1(
+            authority, request.compiler_relative_path, "compiler")?
+        if not _verified_image_x86_64_smf_v1(compiler):
+            return Err("compiler must be a canonical x86_64 SimpleOS SMF executable")
+        source_paths.push(request.compiler_relative_path)
+        image_paths.push("/system/compiler/simple.smf")
+        payloads.push(compiler)
+        artifacts.push(_verified_image_artifact_v1("compiler.simple",
+            SimpleOsImageArtifactRoleV1.Compiler,
+            "/system/compiler/simple.smf", compiler, false, false))
+
+    var seeds: [NvfsImageArtifactSeedV1] = []
+    var plain_seeds: [NvfsImageSeed] = []
+    var index = 0
+    while index < payloads.len():
+        seeds.push(NvfsImageArtifactSeedV1(
+            source_path: source_paths[index], image_path: image_paths[index],
+            data: payloads[index]))
+        plain_seeds.push(NvfsImageSeed(
+            name: image_paths[index], data: payloads[index]))
+        index = index + 1
+
+    val dev = _nvfs_image_mem_device(NvfsImageConfig(
+        size_sectors: request.size_sectors, seeds: plain_seeds))?
+    val evidence = _nvfs_image_artifact_evidence_v1(dev, seeds)?
+    val identity = _nvfs_image_byte_identity_v1(dev)?
+    val raw = dev.bytes()
+    if (raw.len() != identity.byte_length as i64 or
+        sha256_u8_hex(raw) != identity.digest):
+        return Err("verified image raw bytes changed before publication")
+
+    # Validate the complete candidate before the first external write. This
+    # provisional materialization never escapes and deliberately carries no
+    # completion claims; only its byte identities are used by the projection.
+    val provisional = NvfsImageMaterializationReceiptV1(
+        output_path: request.output_relative_path,
+        provider_id: NVFS_IMAGE_PROVIDER,
+        carrier_format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+        carrier_digest: identity.digest,
+        carrier_byte_length: identity.byte_length,
+        root_digest: identity.digest, root_byte_length: identity.byte_length,
+        bytes_verified_before_write: false, write_completed: false)
+    var verified_inputs: [SimpleOsVerifiedArtifactInputV1] = []
+    simpleos_nvfs_artifacts_project_persisted_v1(
+        seeds, artifacts, evidence, provisional, verified_inputs)?
+    var candidates: [SimpleOsImageManifestV1] = []
+    _verified_image_candidate_v1(
+        request, verified_inputs, provisional, candidates)?
+    val candidate = candidates[0]
+    if simpleos_image_manifest_validate_v1(candidate).is_err():
+        return Err("verified image candidate manifest is invalid")
+
+    val publish_grant = hosted_safe_artifact_publish_prepare_v1(
+        authority, request.output_relative_path, raw,
+        HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1)?
+    val publish_receipt = hosted_safe_artifact_publish_redeem_v1(publish_grant)?
+    if (not publish_receipt.durable or
+        publish_receipt.byte_count != raw.len()):
+        return Err("verified image publication was not durable and exact")
+    val materialized_bytes = hosted_safe_artifact_read_once_v1(
+        authority, request.output_relative_path,
+        HOSTED_SAFE_ARTIFACT_MAX_BYTES_V1)?
+    if (materialized_bytes.len() != raw.len() or
+        sha256_u8_hex(materialized_bytes) != identity.digest):
+        return Err("verified image materialized output identity mismatch")
+
+    val materialization = NvfsImageMaterializationReceiptV1(
+        output_path: request.output_relative_path,
+        provider_id: NVFS_IMAGE_PROVIDER,
+        carrier_format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+        carrier_digest: identity.digest,
+        carrier_byte_length: identity.byte_length,
+        root_digest: identity.digest, root_byte_length: identity.byte_length,
+        bytes_verified_before_write: true, write_completed: true)
+    var compiler_inputs: [SimpleOsVerifiedArtifactInputV1] = []
+    if verified_inputs.len() == 5: compiler_inputs.push(verified_inputs[4])
+    val composition = simpleos_x86_64_image_manifest_compose_v1(
+        SimpleOsX8664ImageCompositionV1(
+            candidate: candidate, profile_id: request.profile_id,
+            build_id: request.build_id, source_id: request.source_id,
+            sosix_version: request.sosix_version,
+            kernel_target_triple:
+                SIMPLEOS_IMAGE_COMPOSER_V1_X86_64_KERNEL_TARGET,
+            kernel: verified_inputs[0], init: verified_inputs[1],
+            loader: verified_inputs[2], selector: verified_inputs[3],
+            compiler: compiler_inputs, providers: [],
+            materialization: materialization, root_volume_id: "volume.system"))
+    if not composition.accepted:
+        return Err("verified image manifest composition rejected")
+    val digest_result = simpleos_image_manifest_digest_v1(candidate)
+    if digest_result.is_err():
+        return Err("verified image canonical manifest digest failed")
+    val manifest_digest = digest_result.unwrap()
+    manifest_output.push(candidate)
+    Ok(SimpleOsVerifiedImageReceiptV1(
+        output_relative_path: request.output_relative_path,
+        carrier_digest: identity.digest,
+        carrier_byte_length: identity.byte_length,
+        manifest_digest: manifest_digest,
+        artifact_count: artifacts.len()))
+
+pub fn simpleos_verified_image_compose_v1(
+    request: SimpleOsVerifiedImageRequestV1,
+    mut manifest_output: [SimpleOsImageManifestV1]
+) -> Result<SimpleOsVerifiedImageReceiptV1, text>:
+    """Build one new verified image beneath an explicitly retained host root."""
+    if manifest_output.len() != 0:
+        return Err("verified image manifest output buffer must be empty")
+    val authority = hosted_safe_artifact_root_acquire_v1(
+        request.trusted_absolute_root)?
+    var staged_manifests: [SimpleOsImageManifestV1] = []
+    val built = _verified_image_build_with_authority_v1(
+        request, authority, staged_manifests)
+    val closed = hosted_safe_artifact_root_close_v1(authority)
+    if closed.is_err(): return Err(closed.unwrap_err())
+    if built.is_err(): return built
+    if staged_manifests.len() != 1:
+        return Err("verified image owner produced no admitted manifest")
+    manifest_output.push(staged_manifests[0])
+    built
+
+export SimpleOsVerifiedImageRequestV1, SimpleOsVerifiedImageReceiptV1
+export simpleos_verified_image_compose_v1
+export SIMPLEOS_VERIFIED_IMAGE_MAX_SECTORS_V1

@@ -32,6 +32,40 @@ fn _simpleos_nvfs_artifact_matches_v1(
         evidence.materialized_root_digest == materialization.root_digest and
         evidence.materialized_root_byte_length == materialization.root_byte_length
 
+pub(package) fn simpleos_nvfs_artifacts_project_persisted_v1(
+    sources: [NvfsImageArtifactSeedV1],
+    artifacts: [SimpleOsImageArtifactV1],
+    evidence: [NvfsImageArtifactEvidenceV1],
+    materialization: NvfsImageMaterializationReceiptV1,
+    mut output: [SimpleOsVerifiedArtifactInputV1]
+) -> Result<(), text>:
+    """Project only byte-derived persisted evidence owned by this package."""
+    if output.len() != 0:
+        return Err("SimpleOS NVFS verified artifact output buffer must be empty")
+    if sources.len() == 0 or sources.len() != artifacts.len() or
+        sources.len() != evidence.len():
+        return Err("SimpleOS NVFS artifact projection inputs must align")
+    var index = 0
+    while index < sources.len():
+        if not _simpleos_nvfs_artifact_matches_v1(
+            artifacts[index], sources[index], evidence[index], materialization):
+            return Err("SimpleOS NVFS artifact projection mismatch at index " +
+                index.to_text())
+        index = index + 1
+    index = 0
+    while index < sources.len():
+        val item = evidence[index]
+        output.push(SimpleOsVerifiedArtifactInputV1(
+            artifact: artifacts[index],
+            source_path: item.source_path,
+            source_digest: item.source_digest,
+            source_byte_length: item.source_byte_length,
+            identity_verified: true,
+            included_in_materialized_root: true,
+            materialized_root_digest: item.materialized_root_digest))
+        index = index + 1
+    Ok(())
+
 pub fn simpleos_nvfs_artifacts_build_and_project_v1(
     size_sectors: u64,
     sources: [NvfsImageArtifactSeedV1],
@@ -65,25 +99,10 @@ pub fn simpleos_nvfs_artifacts_build_and_project_v1(
     if built.is_err():
         return Err(built.unwrap_err())
     val materialization = built.unwrap()
-    var index = 0
-    while index < sources.len():
-        if not _simpleos_nvfs_artifact_matches_v1(
-            artifacts[index], sources[index], evidence[index], materialization):
-            return Err("SimpleOS NVFS artifact projection mismatch at index " +
-                index.to_text())
-        index = index + 1
-    index = 0
-    while index < sources.len():
-        val item = evidence[index]
-        output.push(SimpleOsVerifiedArtifactInputV1(
-            artifact: artifacts[index],
-            source_path: item.source_path,
-            source_digest: item.source_digest,
-            source_byte_length: item.source_byte_length,
-            identity_verified: true,
-            included_in_materialized_root: true,
-            materialized_root_digest: item.materialized_root_digest))
-        index = index + 1
+    val projected = simpleos_nvfs_artifacts_project_persisted_v1(
+        sources, artifacts, evidence, materialization, output)
+    if projected.is_err():
+        return Err(projected.unwrap_err())
     Ok(materialization)
 
 export simpleos_nvfs_artifacts_build_and_project_v1

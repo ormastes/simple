@@ -155,6 +155,41 @@ pub fn _nvfs_image_artifact_readback_v1(
         persisted_digests.push(persisted_digest)
     Ok(persisted_digests)
 
+pub fn _nvfs_image_artifact_evidence_v1(
+    dev: MemBlockDevice, seeds: [NvfsImageArtifactSeedV1]
+) -> Result<[NvfsImageArtifactEvidenceV1], text>:
+    """Derive persisted-file and exact-root identities without host output.
+
+    The caller cannot supply any proof flag. Every returned field is computed
+    from source bytes, a fresh persisted-only NVFS reopen, and the exact raw
+    device bytes that a materializer must subsequently publish.
+    """
+    if not _nvfs_image_artifact_seeds_valid_v1(seeds):
+        return Err("nvfs artifact seeds are invalid or duplicated")
+    val persisted_result = _nvfs_image_artifact_readback_v1(dev, seeds)
+    if persisted_result.is_err():
+        return Err(persisted_result.unwrap_err())
+    val identity_result = _nvfs_image_byte_identity_v1(dev)
+    if identity_result.is_err():
+        return Err(identity_result.unwrap_err())
+    val persisted = persisted_result.unwrap()
+    val identity = identity_result.unwrap()
+    var evidence: [NvfsImageArtifactEvidenceV1] = []
+    var index = 0
+    while index < seeds.len():
+        val seed = seeds[index]
+        evidence.push(NvfsImageArtifactEvidenceV1(
+            source_path: seed.source_path,
+            image_path: seed.image_path,
+            source_digest: sha256_u8_hex(seed.data),
+            source_byte_length: seed.data.len() as u64,
+            persisted_digest: persisted[index],
+            persisted_byte_length: seed.data.len() as u64,
+            materialized_root_digest: identity.digest,
+            materialized_root_byte_length: identity.byte_length))
+        index = index + 1
+    Ok(evidence)
+
 fn _nvfs_image_seed_driver(
     driver: NvfsPosixDriver, seeds: [NvfsImageSeed]
 ) -> Result<(), text>:
@@ -286,10 +321,10 @@ pub fn build_nvfs_rootfs_artifact_image_v1(
     if dev_result.is_err():
         return Err(dev_result.unwrap_err())
     val dev = dev_result.unwrap()
-    val readback_result = _nvfs_image_artifact_readback_v1(dev, seeds)
-    if readback_result.is_err():
-        return Err(readback_result.unwrap_err())
-    val persisted_digests = readback_result.unwrap()
+    val evidence_result = _nvfs_image_artifact_evidence_v1(dev, seeds)
+    if evidence_result.is_err():
+        return Err(evidence_result.unwrap_err())
+    val built_evidence = evidence_result.unwrap()
     val identity_result = _nvfs_image_byte_identity_v1(dev)
     if identity_result.is_err():
         return Err(identity_result.unwrap_err())
@@ -300,17 +335,8 @@ pub fn build_nvfs_rootfs_artifact_image_v1(
     if not wrote.unwrap():
         return Err("nvfs image write did not complete")
     var index = 0
-    while index < seeds.len():
-        val seed = seeds[index]
-        evidence.push(NvfsImageArtifactEvidenceV1(
-            source_path: seed.source_path,
-            image_path: seed.image_path,
-            source_digest: sha256_u8_hex(seed.data),
-            source_byte_length: seed.data.len() as u64,
-            persisted_digest: persisted_digests[index],
-            persisted_byte_length: seed.data.len() as u64,
-            materialized_root_digest: identity.digest,
-            materialized_root_byte_length: identity.byte_length))
+    while index < built_evidence.len():
+        evidence.push(built_evidence[index])
         index = index + 1
     Ok(NvfsImageMaterializationReceiptV1(
         output_path: output_path,

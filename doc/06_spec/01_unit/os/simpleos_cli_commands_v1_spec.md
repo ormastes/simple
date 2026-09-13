@@ -2,13 +2,14 @@
 
 Requirement: `REQ-016`
 
-## Image composition fails closed
+## Image composition remains fail-closed at the native CLI adapter
 
-Given the verified NVFS artifact producer and `SimpleOsImageManifestV1`
-composer are not yet joined by a production CLI owner, `simple os image`
-returns a non-zero status and explains which evidence boundary is missing. It
-does not call the legacy installer builder, create a descriptor or placeholder
-image, sign, publish, or write physical media.
+The verified composition owner now defines the complete retained-root,
+persisted-readback, exact-output, and manifest flow. However, its safe hosted
+read/write ABI is currently implemented only by the interpreter provider. The
+production native runtime has no corresponding hooks. `simple os image`
+therefore returns non-zero and names that exact provider gap instead of using
+the interpreter, legacy descriptor builder, or an unsafe path-based fallback.
 
 ## Shell inspection reuses the QEMU plan owner
 
