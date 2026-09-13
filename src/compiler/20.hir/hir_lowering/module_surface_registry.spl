@@ -341,64 +341,70 @@ pub fn module_surface_promote(surface: ModuleSurface) -> bool:
     roots.push(surface)
     module_surface_promote_roots(roots)
 
-fn module_surface_promote_field(
-        failure: text, label: text, value: Any) -> text:
-    """Promote one retained surface field, keeping the FIRST failing field's name.
-
-    Two contracts are merged here and both must hold.
+fn module_surface_promote_fields(surface: ModuleSurface):
+    """Promote every retained surface field. No per-field verdict is decidable.
 
     From `6a49e75efe0`: the 24-way `promote(a) or promote(b) or ...` chain this
     replaces could only answer a bare `false`, so the driver raised `Module
     surface registry graph promotion failed after phase 2` naming neither the
     surface nor the field. That opacity cost two full bootstrap cycles on the
-    macOS lane. Each call records `label` instead, and threading the accumulated
-    `failure` through also drops a 24-operand boolean chain, a form the
-    Rust-seed aarch64 backend has independently mis-lowered in this file's
-    neighbours.
+    macOS lane, and a 24-operand boolean chain is also a form the Rust-seed
+    aarch64 backend has mis-lowered in this file's neighbours. A flat sequence
+    of statements keeps both improvements.
 
     From `db127a8e8c4`: a field that is ALREADY persistent returns false from
-    the FIRST promote, and that is NOT an error — exactly as
-    `module_surface_promote_freeze_names` documents below. Treating that first
-    false as failure aborted the whole registry on any one of 24 fields x 813
-    modules. The post-condition is what fails closed: a SECOND promote reports
-    true only for a value that is STILL owned by the dying scope, which is the
-    thing that would actually dangle.
-    """
-    if failure != "":
-        return failure
-    val _first = rt_transient_heap_promote(value)
-    if rt_transient_heap_promote(value):
-        return label
-    ""
+    the FIRST promote, and that is NOT an error. True, and the fix that commit
+    shipped for it was not: it required a SECOND promote to answer false, on
+    the premise that a repeat promote reports true only for a value still owned
+    by the dying scope. `460aa9781cc` had already MEASURED that premise false
+    with gdb nine hours earlier and deleted the same post-condition from
+    `module_surface_promote_freeze_names`; `db127a8e8c4` reinstated it there and
+    newly applied it to all 24 fields here, self-described as "NOT YET VERIFIED
+    end to end", and left `460aa9781cc`'s regression spec unrun (it has been RED
+    at 2 of 3 examples since).
 
-fn module_surface_promote_fields(surface: ModuleSurface) -> text:
-    """Return "" when every retained field promoted, else the first field name."""
-    var failure = ""
-    failure = module_surface_promote_field(failure, "composite_names", surface.composite_names)
-    failure = module_surface_promote_field(failure, "enum_names", surface.enum_names)
-    failure = module_surface_promote_field(failure, "trait_names", surface.trait_names)
-    failure = module_surface_promote_field(failure, "callable_names", surface.callable_names)
-    failure = module_surface_promote_field(failure, "type_alias_names", surface.type_alias_names)
-    failure = module_surface_promote_field(failure, "constant_names", surface.constant_names)
-    failure = module_surface_promote_field(failure, "composite_values", surface.composite_values)
-    failure = module_surface_promote_field(failure, "enum_values", surface.enum_values)
-    failure = module_surface_promote_field(failure, "trait_values", surface.trait_values)
-    failure = module_surface_promote_field(failure, "callable_values", surface.callable_values)
-    failure = module_surface_promote_field(failure, "type_alias_values", surface.type_alias_values)
-    failure = module_surface_promote_field(failure, "constant_values", surface.constant_values)
-    failure = module_surface_promote_field(failure, "import_target_indices", surface.import_target_indices)
-    failure = module_surface_promote_field(failure, "import_target_names", surface.import_target_names)
-    failure = module_surface_promote_field(failure, "import_resolution_traces", surface.import_resolution_traces)
-    failure = module_surface_promote_field(failure, "import_item_offsets", surface.import_item_offsets)
-    failure = module_surface_promote_field(failure, "import_item_names", surface.import_item_names)
-    failure = module_surface_promote_field(failure, "import_item_aliases", surface.import_item_aliases)
-    failure = module_surface_promote_field(failure, "import_item_has_alias", surface.import_item_has_alias)
-    failure = module_surface_promote_field(failure, "export_route_sources", surface.export_route_sources)
-    failure = module_surface_promote_field(failure, "export_route_locals", surface.export_route_locals)
-    failure = module_surface_promote_field(failure, "export_route_target_indices", surface.export_route_target_indices)
-    failure = module_surface_promote_field(failure, "export_route_target_names", surface.export_route_target_names)
-    failure = module_surface_promote_field(failure, "export_route_is_glob", surface.export_route_is_glob)
-    failure
+    The premise holds for a transient heap STRING only, whose
+    `RT_CORE_STRING_FLAG_TRANSIENT` the C runtime clears on promote
+    (runtime_native.c:2474) so that `rt_core_transient_classify`
+    (runtime_native.c:2362) then answers "untracked" and the repeat promote
+    answers false. Every field here is an ARRAY: promote only zeroes its
+    `transient_scope_id` (runtime_native.c:2493), classify consults neither that
+    nor the raw-lookup owned bit, and so a repeat promote of a registered array
+    answers TRUE forever. The post-condition was therefore red by construction
+    on the very first field of the very first surface — measured on macOS run
+    34 as `field composite_names of surface[0]`.
+
+    So the promotes are the work and stay; no per-field failure signal exists to
+    report. Fail-closed coverage is not lost: the registry root carrier below is
+    a freshly built `[Any]` whose promote verdict IS meaningful, and the driver
+    runs `module_surfaces_retained_alignment_error` AFTER
+    `_sffi_transient_array_scope_end()`, which reads the names back out of the
+    dead scope — the real post-condition, at the only moment it means anything.
+    """
+    val _composite_names = rt_transient_heap_promote(surface.composite_names)
+    val _enum_names = rt_transient_heap_promote(surface.enum_names)
+    val _trait_names = rt_transient_heap_promote(surface.trait_names)
+    val _callable_names = rt_transient_heap_promote(surface.callable_names)
+    val _type_alias_names = rt_transient_heap_promote(surface.type_alias_names)
+    val _constant_names = rt_transient_heap_promote(surface.constant_names)
+    val _composite_values = rt_transient_heap_promote(surface.composite_values)
+    val _enum_values = rt_transient_heap_promote(surface.enum_values)
+    val _trait_values = rt_transient_heap_promote(surface.trait_values)
+    val _callable_values = rt_transient_heap_promote(surface.callable_values)
+    val _type_alias_values = rt_transient_heap_promote(surface.type_alias_values)
+    val _constant_values = rt_transient_heap_promote(surface.constant_values)
+    val _import_target_indices = rt_transient_heap_promote(surface.import_target_indices)
+    val _import_target_names = rt_transient_heap_promote(surface.import_target_names)
+    val _import_resolution_traces = rt_transient_heap_promote(surface.import_resolution_traces)
+    val _import_item_offsets = rt_transient_heap_promote(surface.import_item_offsets)
+    val _import_item_names = rt_transient_heap_promote(surface.import_item_names)
+    val _import_item_aliases = rt_transient_heap_promote(surface.import_item_aliases)
+    val _import_item_has_alias = rt_transient_heap_promote(surface.import_item_has_alias)
+    val _export_route_sources = rt_transient_heap_promote(surface.export_route_sources)
+    val _export_route_locals = rt_transient_heap_promote(surface.export_route_locals)
+    val _export_route_target_indices = rt_transient_heap_promote(surface.export_route_target_indices)
+    val _export_route_target_names = rt_transient_heap_promote(surface.export_route_target_names)
+    val _export_route_is_glob = rt_transient_heap_promote(surface.export_route_is_glob)
 
 fn module_surface_promote_scope_sentinel() -> bool:
     """Promote a freshly built carrier to tell a scope/linkage fault from a field fault.
@@ -435,11 +441,8 @@ pub fn module_surfaces_promote_reason(registry: ModuleSurfacesByName) -> text:
     var surface_index = 0
     while surface_index < registry.surfaces.len():
         val surface = registry.surfaces[surface_index]
-        val field_failure = module_surface_promote_fields(surface)
-        if field_failure != "":
-            return "field {field_failure} of surface[{surface_index}] logical={surface.logical_name} canonical={surface.canonical_name} package={surface.package_name} (scope sentinel promote={sentinel}, surfaces={registry.surfaces.len()})"
-        if not module_surface_promote_freeze_names(surface):
-            return "freeze names of surface[{surface_index}] logical={surface.logical_name} canonical={surface.canonical_name} package={surface.package_name} (scope sentinel promote={sentinel}, surfaces={registry.surfaces.len()})"
+        module_surface_promote_fields(surface)
+        module_surface_promote_freeze_names(surface)
         surface_index = surface_index + 1
     roots.push(registry)
     if not module_surface_promote_roots(roots):
@@ -450,7 +453,7 @@ pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
     """Bool-shaped compatibility wrapper over `module_surfaces_promote_reason`."""
     module_surfaces_promote_reason(registry) == ""
 
-fn module_surface_promote_freeze_names(surface: ModuleSurface) -> bool:
+fn module_surface_promote_freeze_names(surface: ModuleSurface):
     """Promote the four scalar texts `module_surfaces_freeze` re-assigns.
 
     `module_surfaces_freeze` (module_surface_registry_index.spl) overwrites
@@ -467,20 +470,33 @@ fn module_surface_promote_freeze_names(surface: ModuleSurface) -> bool:
 
     A field that is ALREADY persistent returns false from the first promote and
     that is not an error: `canonical_name` aliases `logical_name`, and an empty
-    `preferred_registry_name` is a shared literal. The post-condition below is
-    what fails closed, because a second promote reports true only for a value
-    that is STILL owned by the dying scope.
+    `preferred_registry_name` is a shared literal.
+
+    This used to end in a post-condition asserting that a SECOND promote of each
+    name answers false, on the premise that a repeat promote reports true only
+    for a value still owned by the dying scope. `460aa9781cc` measured that
+    premise false with gdb on the Stage-2 candidate and removed it;
+    `db127a8e8c4` reinstated it unverified and the macOS lane went red again.
+    It holds only for a plain transient heap STRING, whose
+    `RT_CORE_STRING_FLAG_TRANSIENT` the C runtime clears on promote
+    (runtime_native.c:2474); a raw allocation keeps its lookup-table entry and
+    only loses `RT_CORE_TRANSIENT_RAW_OWNED_BIT` (runtime_native.c:2488), an
+    array/dict/enum/closure only has its `transient_scope_id` zeroed
+    (runtime_native.c:2493), and `rt_core_transient_classify`
+    (runtime_native.c:2362) consults neither — so the repeat promote keeps
+    answering true. Under `SIMPLE_NATIVE_ARENA_DECLS=1` these four names are not
+    plain transient heap strings, so the guard fired on every run.
+
+    The four promotes are the work and stay. The real post-condition runs
+    elsewhere and at the only moment it means anything: the driver calls
+    `module_surfaces_retained_alignment_error` AFTER
+    `_sffi_transient_array_scope_end()`, and that check reads these names back
+    from the dead scope (module_surface_registry_index.spl:321).
     """
     val _logical = rt_transient_heap_promote(surface.logical_name)
     val _canonical = rt_transient_heap_promote(surface.canonical_name)
     val _package = rt_transient_heap_promote(surface.package_name)
     val _preferred = rt_transient_heap_promote(surface.preferred_registry_name)
-    if rt_transient_heap_promote(surface.logical_name) or
-       rt_transient_heap_promote(surface.canonical_name) or
-       rt_transient_heap_promote(surface.package_name) or
-       rt_transient_heap_promote(surface.preferred_registry_name):
-        return false
-    true
 
 pub fn module_surfaces_retained_alignment(registry: ModuleSurfacesByName) -> bool:
     module_surfaces_frozen_alignment(registry)

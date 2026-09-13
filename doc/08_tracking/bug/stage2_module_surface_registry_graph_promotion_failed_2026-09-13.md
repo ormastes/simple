@@ -89,3 +89,13 @@ Two things, stated because "a fail-closed check was deleted" deserves them:
    But it tests `== ""`, so it catches an emptied name, not a dangling pointer into freed
    memory reading as garbage, which is the shape the 2026-09-06 SEGV had. Coverage of the
    four freeze-assigned names after scope end is therefore PARTIAL, not restored.
+
+## Regressed and re-fixed (2026-09-13)
+
+`db127a8e8c4` (PR #873) reinstated the repeat-promote post-condition this record
+had removed, and extended it to the 24 retained array fields. The macOS lane went
+red again on `field composite_names of surface[0]` (run 34). Re-fixed the same
+day by deleting the per-field verdict and restoring the guard-free
+`module_surface_promote_freeze_names`; the regression spec this record landed is
+green again and now also pins the array-field loop. See
+`stage2_positional_stage3_route_surface_promotion_composite_names_2026-09-13.md`.
