@@ -87,22 +87,28 @@ and the evidence is the transcript above.)
   be triaged to a faulting pc before it is called codegen: pc `0x0` is a
   runtime-lane gap, not bad generated code.
 
-## Results — 39 specs compared (10 no-oracle, excluded), **30 divergent rows**
+## Results — 48 specs compared (12 no-oracle, excluded), **36 divergent rows**
 
 Curated set: 60 stride-sampled pure-logic specs from `test/01_unit/lib/common` and
-`test/01_unit/compiler`; the run was cut at spec ~45 by the session budget, so this
-is 39 compared, not 60. The manifest is complete for what ran.
+`test/01_unit/compiler`, all 60 run. 12 produced no interpreter examples and are
+excluded as `no-oracle` rather than counted as agreement.
 
 | class | rows | specs | smallest reproducer |
 |---|---|---|---|
-| `other` | 13 | `ui/render_opt/occlusion_spec.spl` (8), `crypto/hmac_sha1_spec.spl` (5) | `crypto/hmac_sha1_spec.spl` — all RFC-2202 test vectors pass interpreted, fail natively |
-| `link` | 7 | `encoding/{utf32_byte_guard,protobuf_wire_bounds_guard,codec_decode_byte_guard}`, `search/explain_contract`, `engine/math3d_trig_precision_repro`, `web/{browser_renderer_frame_reuse_protocol,browser_session_html_text_level_tags}` | `encoding/utf32_byte_guard_spec.spl` — unresolved `rt_utf8_validate` / `rt_utf8_find_invalid` / `rt_utf8_count_codepoints` |
+| `other` | 14 | `ui/render_opt/occlusion_spec.spl` (8), `crypto/hmac_sha1_spec.spl` (5) | `crypto/hmac_sha1_spec.spl` — all RFC-2202 test vectors pass interpreted, fail natively |
+| `link` | 9 | `encoding/{utf32_byte_guard,protobuf_wire_bounds_guard,codec_decode_byte_guard}`, `search/explain_contract`, `engine/math3d_trig_precision_repro`, `web/{browser_renderer_frame_reuse_protocol,browser_session_html_text_level_tags}`, `compiler/{backend/llvm_ir_builder,ast_arena_generation}` | `encoding/utf32_byte_guard_spec.spl` — unresolved `rt_utf8_validate` / `rt_utf8_find_invalid` / `rt_utf8_count_codepoints` |
 | `int-width-bitops` | 5 | `bytes/ints_spec.spl` | `U32le.of(0xDEADBEEF).to_span()` then `U32le.load(sp,0).value()` — `ints_spec.spl:38-42` |
-| `crash` | 3 | `text_advanced_return_types_spec.spl`, `wine_process_session_{import_resolution,first_import_module}_spec.spl` | `text_advanced_return_types_spec.spl` — SEGV at `StringBuilder_dot_to_text+16`, `ldr x28,[x8]`, x8 null |
+| `crash` | 5 | `text_advanced_return_types_spec.spl`, `wine_process_session_{import_resolution,first_import_module,loader_state}_spec.spl`, `compiler/50.mir/hwir_aspect_lock_spec.spl` | `text_advanced_return_types_spec.spl` — SEGV at `StringBuilder_dot_to_text+16`, `ldr x28,[x8]`, x8 null |
 | `truncated-run` | 1 | `token_budget_spec.spl` | native run prints one example name then exits rc=65 with no summary line |
-| `build-failed` | 1 | `imaging/find_diff_regions_spec.spl` | — |
+| `build-failed` | 2 | `imaging/find_diff_regions_spec.spl` (+1) | — |
 
-Every `crash` row was triaged to a faulting pc before being called codegen: all
+Only 1 of 48 compared specs came from `test/01_unit/compiler` with a divergence in
+`other`; the compiler tree's contribution is concentrated in `link` and `crash`.
+
+The three `wine_process_session_*` crashes share a module and are almost certainly
+one defect seen three times, not three.
+
+The first `crash` row was triaged to a faulting pc before being called codegen: all
 three fault **inside generated code**, not at pc `0x0`, so none is an artifact of
 the allowlisted unresolved-runtime bypass.
 
