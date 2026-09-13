@@ -343,6 +343,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
@@ -1721,6 +1722,51 @@ class FontRenderer:
             return kern_value as i32
         0
 
+    # MILLI-pixel kerning (2026-09-14, round 13).
+    #
+    # Round 12 made the run pen a milli-pixel cumulative but left kerning a
+    # whole-pixel quantity entering it x1000, and named that as an open lane.
+    # This closes it, and closes a larger hole beside it: on the UNMANAGED
+    # (selected-blob) lane `horizontal_kern` answers 0 for every pair, because
+    # the only kerning source it knows is the foreign `rt_fonts_horizontal_kern`
+    # address that only the SFFI-dylib lane owns. Chrome kerns by default, so
+    # every Helvetica run carrying a kern pair measured WIDER here than in
+    # Chrome. `sfnt_ttc_extract_face` already repacks `kern` verbatim, so the
+    # data was present the whole time and simply never read.
+    #
+    # Order of sources, and why:
+    #   1. the foreign rasterizer, when it answers non-zero -- the managed lane
+    #      keeps EXACTLY the number it produced before, widened x1000, so this
+    #      change cannot move a face that was already kerning;
+    #   2. the face's own `kern` table, read in milli-pixels.
+    # (2) also runs when (1) answers 0, which is where a whole-pixel foreign
+    # kern rounded a real sub-pixel pair away -- the same under-measure round 12
+    # removed from advances, removed here from kerning.
+    me horizontal_kern_milli(left_codepoint: i32, right_codepoint: i32, font_size: i32) -> i32:
+        val foreign = self.horizontal_kern(left_codepoint, right_codepoint, font_size)
+        if foreign != 0:
+            return foreign * 1000
+        if font_size <= 0 or font_size > 512:
+            return 0
+        val blob = self.selected_outline_blob
+        if blob.len() == 0:
+            return 0
+        # Same face-identity source the advance lane uses (`_adv_identity` in
+        # `get_glyph_advance_milli`): the glyph-id table is keyed on it, so a
+        # face swap cannot serve a stale glyph id to the kern lookup.
+        val kern_rast = self.ttf_rasterizer
+        val identity: text = if kern_rast != nil: kern_rast.?.cache_identity() else: ""
+        if identity == "":
+            return 0
+        val gid_slot = _gid_warm(identity, blob)
+        if gid_slot < 0:
+            return 0
+        val left_gid = _gid_lookup(gid_slot, left_codepoint)
+        val right_gid = _gid_lookup(gid_slot, right_codepoint)
+        if left_gid <= 0 or right_gid <= 0:
+            return 0
+        sfnt_blob_kern_pair_milli_px(blob, left_gid, right_gid, font_size.to_i64()) as i32
+
     me horizontal_line_metric(font_size: i32, field: i32) -> i32:
         val rast = self.ttf_rasterizer
         if rast != nil:
@@ -2232,19 +2278,23 @@ class FontRenderer:
         var slot = if _run_identity != "": _adv_ascii_slot(_run_identity, font_size) else: -1
         while ci < content_len:
             val cp = content_cps[ci] as i32
-            # Kerning is still a whole-pixel quantity (`horizontal_kern` is
-            # unchanged); it enters the cumulative x1000 and, as before, is
-            # attributed to the PRECEDING glyph -- it lands in the run before
-            # `boundaries[ci]` is taken, so it widens advances[ci - 1].
+            # Kerning is a MILLI-pixel quantity as of round 13
+            # (`horizontal_kern_milli`), so it enters the cumulative directly
+            # rather than x1000. It is attributed to the PRECEDING glyph
+            # exactly as before -- it lands in the run before `boundaries[ci]`
+            # is taken, so it widens (or, being usually negative, narrows)
+            # advances[ci - 1]. The kern square below therefore stores
+            # MILLI-pixels too; both of its readers are these four lines, and
+            # they changed together, so there is no mixed-unit path.
             if prev_cp >= 0:
                 val kern_memo = _kern_cache_lookup_slot(slot, prev_cp, cp)
                 if kern_memo != _KERN_EMPTY:
                     _fr_probe_add_kern(0, true)
-                    cumulative = cumulative + (kern_memo as i64) * 1000
+                    cumulative = cumulative + (kern_memo as i64)
                 else:
-                    val kern_live = self.horizontal_kern(prev_cp, cp, font_size)
+                    val kern_live = self.horizontal_kern_milli(prev_cp, cp, font_size)
                     _kern_cache_store_slot(slot, prev_cp, cp, kern_live)
-                    cumulative = cumulative + (kern_live as i64) * 1000
+                    cumulative = cumulative + (kern_live as i64)
             boundaries[ci] = cumulative
             # The slot cache stores MILLI-pixels (see `get_glyph_advance_milli`),
             # so this is still exactly one lookup per character.

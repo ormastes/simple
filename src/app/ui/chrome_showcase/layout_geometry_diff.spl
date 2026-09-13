@@ -135,6 +135,29 @@ struct GeomDiffResult:
     rows: [GeomDiffRow]
     extra_keys: [text]
 
+# A Simple side on which EVERY box is (0,0,0,0) is not a page that mismatches
+# everywhere -- it is a page that was never laid out, and the only honest
+# verdict for it is "nothing was checked".
+#
+# Round 13 (2026-09-14) found this shape sitting in three rounds of recorded
+# metrics. The runner binary predated a `rt_engine2d_blend_cov_span_u32` extern
+# that the layout module had begun declaring; an unregistered extern answers
+# silent nil, the renderer emitted 432 boxes of which 432 were (0,0,0,0),
+# `missing_in_simple` was 0 because every KEY was still present, and the differ
+# reported 430 mismatches whose delta was exactly Chrome's own geometry. That
+# table was then read as a layout defect and filed as one. Nothing upstream can
+# be relied on to notice this, which is why the check lives here.
+#
+# One box is not enough to judge on -- a single-element page could legitimately
+# be a zero-sized box -- so the rule needs at least two.
+pub fn all_boxes_degenerate(boxes: [GeomBox]) -> bool:
+    if boxes.len() < 2:
+        return false
+    for b in boxes:
+        if b.x != 0 or b.y != 0 or b.w != 0 or b.h != 0:
+            return false
+    true
+
 fn _has(haystack: text, needle: text) -> bool:
     haystack.contains(needle)
 
@@ -413,10 +436,24 @@ pub fn selftest_report() -> text:
     else:
         log = log + "selftest inherited-delta: PASS (2 mismatched, 1 root, 1 inherited)\n"
 
-    if failures == 0:
-        log + "SELFTEST PASS — 4 fixture(s) checked"
+    # An all-zero Simple side is a page that was never laid out, and must be
+    # recognised as such rather than reported as "everything mismatches".
+    # Both halves are checked: the degenerate side must be caught, and a real
+    # side that merely CONTAINS a zero box must not be.
+    val degenerate = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 0, h: 0, features: ""),
+        GeomBox(key: "path:0", tag: "div", x: 0, y: 0, w: 0, h: 0, features: "")
+    ]
+    if not all_boxes_degenerate(degenerate) or all_boxes_degenerate(nested_simple):
+        failures = failures + 1
+        log = log + "selftest all-zero-side: FAIL\n"
     else:
-        log + "SELFTEST FAIL — " + failures.to_string() + " of 4 fixture(s) failed"
+        log = log + "selftest all-zero-side: PASS (degenerate caught, real side kept)\n"
+
+    if failures == 0:
+        log + "SELFTEST PASS — 5 fixture(s) checked"
+    else:
+        log + "SELFTEST FAIL — " + failures.to_string() + " of 5 fixture(s) failed"
 
 fn main():
     val args = get_cli_args()
@@ -457,6 +494,13 @@ fn main():
     val dump = file_read_text(geom_path)
     val chrome = parse_chrome_geom(dump)
     val simple = simple_geom_boxes(html, width, height)
+    if all_boxes_degenerate(simple):
+        print("chrome_boxes=" + chrome.len().to_string())
+        print("simple_boxes=" + simple.len().to_string())
+        print("ERROR — nothing was checked (every Simple box is 0x0 at 0,0 for " +
+              html_path + "; the page was not laid out. Run with " +
+              "SIMPLE_EXECUTION_MODE=interpreter and SIMPLE_TIMEOUT_SECONDS=0)")
+        return
     val result = geometry_diff(chrome, simple, 1)
     file_write(out_prefix + ".sdn", diff_sdn(html_path, result))
     file_write(out_prefix + ".md", diff_md(html_path, result))
