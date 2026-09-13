@@ -1,0 +1,178 @@
+# Pure host-side QEMU discovery policy v1.
+#
+# Environment, filesystem, and process probes are deliberately outside this
+# module.  Host owners translate those observations into bounded probe facts;
+# these adapters only validate and project them into QemuHostResolutionV1.
+
+use os.port._SimpleosMultiplatformBuild.build_target_contracts.{SimpleOsMachineTargetProjection}
+use os.port.qemu_machine_plan_v1.{
+    QemuAcceleratorV1, QemuHostResolutionV1, QemuMachinePlanErrorV1,
+    qemu_host_resolution_validate_v1
+}
+
+pub enum QemuHostAdapterErrorV1:
+    None
+    InvalidProbe
+    MissingExecutable
+    MissingFirmware
+    AcceleratorUnavailable
+
+pub struct QemuHostProbeInputsV1:
+    # Availability facts are observations for this exact target/executable pair.
+    target_id: text
+    executable_name: text
+    qemu_bin_dir: text
+    executable_available: bool
+    firmware_required: bool
+    firmware_override_path: text
+    firmware_override_available: bool
+    discovered_firmware_path: text
+    discovered_firmware_available: bool
+    native_accelerator_available: bool
+    tcg_available: bool
+
+pub class QemuHostAdapterOutcomeV1:
+    _admitted: bool
+    _error: QemuHostAdapterErrorV1
+    _resolution: QemuHostResolutionV1
+
+impl QemuHostAdapterOutcomeV1:
+    pub fn admitted() -> bool: self._admitted
+    pub fn error() -> QemuHostAdapterErrorV1: self._error
+    pub fn resolution() -> QemuHostResolutionV1: self._resolution
+
+pub class LinuxQemuHostV1:
+    probe: QemuHostProbeInputsV1
+
+impl LinuxQemuHostV1:
+    pub fn resolve(target: SimpleOsMachineTargetProjection) -> QemuHostAdapterOutcomeV1:
+        _qemu_host_resolve_v1("linux", "", QemuAcceleratorV1.Kvm, target, self.probe)
+
+pub class WindowsQemuHostV1:
+    probe: QemuHostProbeInputsV1
+
+impl WindowsQemuHostV1:
+    pub fn resolve(target: SimpleOsMachineTargetProjection) -> QemuHostAdapterOutcomeV1:
+        _qemu_host_resolve_v1("windows", ".exe", QemuAcceleratorV1.Whpx, target, self.probe)
+
+pub class MacQemuHostV1:
+    probe: QemuHostProbeInputsV1
+
+impl MacQemuHostV1:
+    pub fn resolve(target: SimpleOsMachineTargetProjection) -> QemuHostAdapterOutcomeV1:
+        _qemu_host_resolve_v1("macos", "", QemuAcceleratorV1.Hvf, target, self.probe)
+
+pub class FreeBsdQemuHostV1:
+    probe: QemuHostProbeInputsV1
+
+impl FreeBsdQemuHostV1:
+    pub fn resolve(target: SimpleOsMachineTargetProjection) -> QemuHostAdapterOutcomeV1:
+        _qemu_host_resolve_v1("freebsd", "", QemuAcceleratorV1.Nvmm, target, self.probe)
+
+fn _qemu_probe_path_valid_v1(value: text, allow_empty: bool) -> bool:
+    if value.len() == 0:
+        return allow_empty
+    if value.len() > 4096 or value.contains(","):
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 32 or code > 126:
+            return false
+        i = i + 1
+    true
+
+fn _qemu_executable_name_valid_v1(value: text) -> bool:
+    if not value.starts_with("qemu-system-") or value.len() > 128:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        if not alpha and not digit and code != 45 and code != 95 and code != 46:
+            return false
+        i = i + 1
+    true
+
+fn _qemu_join_host_path_v1(directory: text, name: text) -> text:
+    if directory.len() == 0:
+        return name
+    if directory.ends_with("/") or directory.ends_with("\\"):
+        return directory + name
+    directory + "/" + name
+
+fn _qemu_rejected_host_v1(error: QemuHostAdapterErrorV1) -> QemuHostAdapterOutcomeV1:
+    QemuHostAdapterOutcomeV1(
+        _admitted: false,
+        _error: error,
+        _resolution: QemuHostResolutionV1(
+            host_adapter_id: "",
+            executable_path: "",
+            firmware_path: "",
+            available_accelerators: []))
+
+fn _qemu_firmware_path_v1(probe: QemuHostProbeInputsV1) -> text:
+    if not probe.firmware_required:
+        return ""
+    if probe.firmware_override_path.len() > 0:
+        if probe.firmware_override_available:
+            return probe.firmware_override_path
+        return ""
+    if probe.discovered_firmware_available:
+        return probe.discovered_firmware_path
+    ""
+
+fn _qemu_host_resolve_v1(
+    adapter_id: text,
+    executable_suffix: text,
+    native_accelerator: QemuAcceleratorV1,
+    target: SimpleOsMachineTargetProjection,
+    probe: QemuHostProbeInputsV1
+) -> QemuHostAdapterOutcomeV1:
+    val expected_executable_name = target.qemu_system + executable_suffix
+    if (probe.target_id != target.canonical_name or
+        probe.executable_name != expected_executable_name or
+        not _qemu_executable_name_valid_v1(expected_executable_name) or
+        not _qemu_probe_path_valid_v1(probe.qemu_bin_dir, true) or
+        not _qemu_probe_path_valid_v1(probe.firmware_override_path, true) or
+        not _qemu_probe_path_valid_v1(probe.discovered_firmware_path, true)):
+        return _qemu_rejected_host_v1(QemuHostAdapterErrorV1.InvalidProbe)
+    if probe.firmware_override_available and probe.firmware_override_path.len() == 0:
+        return _qemu_rejected_host_v1(QemuHostAdapterErrorV1.InvalidProbe)
+    if probe.discovered_firmware_available and probe.discovered_firmware_path.len() == 0:
+        return _qemu_rejected_host_v1(QemuHostAdapterErrorV1.InvalidProbe)
+
+    val executable_path = _qemu_join_host_path_v1(
+        probe.qemu_bin_dir, expected_executable_name)
+    if executable_path.len() > 4096:
+        return _qemu_rejected_host_v1(QemuHostAdapterErrorV1.InvalidProbe)
+    if not probe.executable_available:
+        return _qemu_rejected_host_v1(QemuHostAdapterErrorV1.MissingExecutable)
+
+    val firmware_path = _qemu_firmware_path_v1(probe)
+    if probe.firmware_required and firmware_path.len() == 0:
+        return _qemu_rejected_host_v1(QemuHostAdapterErrorV1.MissingFirmware)
+
+    var accelerators: [QemuAcceleratorV1] = []
+    if probe.native_accelerator_available:
+        accelerators.push(native_accelerator)
+    if probe.tcg_available:
+        accelerators.push(QemuAcceleratorV1.Tcg)
+    if accelerators.len() == 0:
+        return _qemu_rejected_host_v1(QemuHostAdapterErrorV1.AcceleratorUnavailable)
+
+    val resolution = QemuHostResolutionV1(
+        host_adapter_id: adapter_id,
+        executable_path: executable_path,
+        firmware_path: firmware_path,
+        available_accelerators: accelerators)
+    if qemu_host_resolution_validate_v1(resolution, probe.firmware_required) != QemuMachinePlanErrorV1.None:
+        return _qemu_rejected_host_v1(QemuHostAdapterErrorV1.InvalidProbe)
+    QemuHostAdapterOutcomeV1(
+        _admitted: true,
+        _error: QemuHostAdapterErrorV1.None,
+        _resolution: resolution)
+
+export QemuHostAdapterErrorV1, QemuHostProbeInputsV1, QemuHostAdapterOutcomeV1
+export LinuxQemuHostV1, WindowsQemuHostV1, MacQemuHostV1, FreeBsdQemuHostV1

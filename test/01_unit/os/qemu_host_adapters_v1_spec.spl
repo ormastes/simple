@@ -1,0 +1,209 @@
+"""Matrix coverage for pure host-side QEMU resolution policy."""
+# codex-system-test
+# @req: REQ-SIMPLEOS-QEMU-HOST-ADAPTER-001
+
+use std.spec.{describe, it, expect, step}
+use os.port.simpleos_multiplatform_build.{simpleos_machine_target_projection}
+use os.port.qemu_machine_plan_v1.{
+    QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuAcceleratorRequestV1,
+    QemuMachineImageKindV1, QemuFirmwareKindV1, QemuStorageKindV1,
+    QemuDisplayKindV1, QemuNetworkKindV1, QemuConsoleKindV1,
+    qemu_machine_spec_from_projection_v1, qemu_launch_plan_bind_v1
+}
+use os.port.qemu_host_adapters_v1.{
+    QemuHostAdapterErrorV1, QemuHostProbeInputsV1, QemuHostAdapterOutcomeV1,
+    LinuxQemuHostV1, WindowsQemuHostV1, MacQemuHostV1, FreeBsdQemuHostV1
+}
+
+val HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn probe(
+    target_id: text = "x86_64-simpleos",
+    executable_name: text = "qemu-system-x86_64",
+    native_available: bool = true,
+    tcg_available: bool = true,
+    executable_available: bool = true,
+    firmware_required: bool = false,
+    firmware_override_path: text = "",
+    firmware_override_available: bool = false,
+    discovered_firmware_path: text = "",
+    discovered_firmware_available: bool = false,
+    qemu_bin_dir: text = "/opt/qemu/bin"
+) -> QemuHostProbeInputsV1:
+    QemuHostProbeInputsV1(
+        target_id: target_id,
+        executable_name: executable_name,
+        qemu_bin_dir: qemu_bin_dir,
+        executable_available: executable_available,
+        firmware_required: firmware_required,
+        firmware_override_path: firmware_override_path,
+        firmware_override_available: firmware_override_available,
+        discovered_firmware_path: discovered_firmware_path,
+        discovered_firmware_available: discovered_firmware_available,
+        native_accelerator_available: native_available,
+        tcg_available: tcg_available)
+
+fn expect_resolution(
+    host_id: text,
+    executable_suffix: text,
+    expected_native: QemuAcceleratorV1,
+    outcome: QemuHostAdapterOutcomeV1
+):
+    expect(outcome.admitted()).to_equal(true)
+    expect(outcome.error()).to_equal(QemuHostAdapterErrorV1.None)
+    val resolution = outcome.resolution()
+    expect(resolution.host_adapter_id).to_equal(host_id)
+    expect(resolution.executable_path).to_equal("/opt/qemu/bin/qemu-system-x86_64{executable_suffix}")
+    expect(resolution.available_accelerators).to_equal([expected_native, QemuAcceleratorV1.Tcg])
+
+fn kernel_spec(target, firmware_kind: QemuFirmwareKindV1, firmware_id: text):
+    qemu_machine_spec_from_projection_v1(
+        target, "build/simpleos/kernel.elf", HASH_A,
+        QemuMachineImageKindV1.Kernel, firmware_kind, firmware_id,
+        2048u64, 4u16, QemuStorageKindV1.None,
+        QemuDisplayKindV1.None, QemuNetworkKindV1.None,
+        QemuConsoleKindV1.SerialStdio,
+        QemuAcceleratorRequestV1(
+            kind: QemuAcceleratorRequestKindV1.Auto,
+            accelerator: QemuAcceleratorV1.Tcg))
+
+fn overlong_directory() -> text:
+    var value = "/"
+    var i = 0
+    # The directory is valid alone; joining the executable crosses 4096 bytes.
+    while i < 4080:
+        value = value + "a"
+        i = i + 1
+    value
+
+describe "REQ-SIMPLEOS-QEMU-HOST-ADAPTER-001: host discovery is pure and fail closed [importance=high; importance_weight=2]":
+    it "projects the four host families through one decision matrix":
+        step("Resolve identical probe facts without repeating guest machine policy")
+        val target = simpleos_machine_target_projection("x86_64")
+        expect_resolution("linux", "", QemuAcceleratorV1.Kvm, LinuxQemuHostV1(probe: probe()).resolve(target))
+        expect_resolution("windows", ".exe", QemuAcceleratorV1.Whpx, WindowsQemuHostV1(
+            probe: probe(executable_name: "qemu-system-x86_64.exe")).resolve(target))
+        expect_resolution("macos", "", QemuAcceleratorV1.Hvf, MacQemuHostV1(probe: probe()).resolve(target))
+        expect_resolution("freebsd", "", QemuAcceleratorV1.Nvmm, FreeBsdQemuHostV1(probe: probe()).resolve(target))
+
+    it "uses explicit firmware before discovered firmware and reports missing facts":
+        step("Prefer the verified explicit firmware input")
+        val target = simpleos_machine_target_projection("aarch64")
+        val selected = LinuxQemuHostV1(probe: probe(
+            target_id: "aarch64-simpleos",
+            executable_name: "qemu-system-aarch64",
+            firmware_required: true,
+            firmware_override_path: "/explicit/QEMU_EFI.fd",
+            firmware_override_available: true,
+            discovered_firmware_path: "/discovered/QEMU_EFI.fd",
+            discovered_firmware_available: true)).resolve(target)
+        expect(selected.admitted()).to_equal(true)
+        expect(selected.resolution().firmware_path).to_equal("/explicit/QEMU_EFI.fd")
+
+        step("Reject a required explicit path that the probe did not verify")
+        val missing = LinuxQemuHostV1(probe: probe(
+            target_id: "aarch64-simpleos",
+            executable_name: "qemu-system-aarch64",
+            firmware_required: true,
+            firmware_override_path: "/missing/QEMU_EFI.fd",
+            firmware_override_available: false,
+            discovered_firmware_path: "/discovered/QEMU_EFI.fd",
+            discovered_firmware_available: true)).resolve(target)
+        expect(missing.admitted()).to_equal(false)
+        expect(missing.error()).to_equal(QemuHostAdapterErrorV1.MissingFirmware)
+
+    it "orders native acceleration before TCG and admits explicit fallback":
+        step("Resolve the portable fallback when the native facility is unavailable")
+        val target = simpleos_machine_target_projection("riscv64")
+        val fallback = FreeBsdQemuHostV1(probe: probe(
+            target_id: "riscv64gc-simpleos", executable_name: "qemu-system-riscv64",
+            native_available: false)).resolve(target)
+        expect(fallback.admitted()).to_equal(true)
+        expect(fallback.resolution().available_accelerators).to_equal([QemuAcceleratorV1.Tcg])
+
+        step("Fail closed when neither native nor portable execution was observed")
+        val blocked = MacQemuHostV1(probe: probe(
+            target_id: "riscv64gc-simpleos", executable_name: "qemu-system-riscv64",
+            native_available: false, tcg_available: false)).resolve(target)
+        expect(blocked.admitted()).to_equal(false)
+        expect(blocked.error()).to_equal(QemuHostAdapterErrorV1.AcceleratorUnavailable)
+        expect(blocked.resolution().available_accelerators.len()).to_equal(0)
+
+    it "retains executable suffix policy and rejects unavailable binaries":
+        step("Use the Windows executable suffix even when PATH lookup is requested")
+        val target = simpleos_machine_target_projection("arm32")
+        val windows = WindowsQemuHostV1(probe: probe(
+            target_id: "armv7-simpleos", executable_name: "qemu-system-arm.exe",
+            qemu_bin_dir: "")).resolve(target)
+        expect(windows.resolution().executable_path).to_equal("qemu-system-arm.exe")
+
+        step("Return no executable-bearing resolution for a failed probe")
+        val missing = LinuxQemuHostV1(probe: probe(
+            target_id: "armv7-simpleos", executable_name: "qemu-system-arm",
+            executable_available: false)).resolve(target)
+        expect(missing.admitted()).to_equal(false)
+        expect(missing.error()).to_equal(QemuHostAdapterErrorV1.MissingExecutable)
+        expect(missing.resolution().executable_path).to_equal("")
+
+        step("Accept a Windows separator and reject malformed or overlong paths")
+        val win_dir = WindowsQemuHostV1(probe: probe(
+            target_id: "armv7-simpleos", executable_name: "qemu-system-arm.exe",
+            qemu_bin_dir: "C:\\QEMU\\")).resolve(target)
+        expect(win_dir.resolution().executable_path).to_equal("C:\\QEMU\\qemu-system-arm.exe")
+        val malformed = LinuxQemuHostV1(probe: probe(qemu_bin_dir: "/bad,path")).resolve(
+            simpleos_machine_target_projection("x86_64"))
+        expect(malformed.error()).to_equal(QemuHostAdapterErrorV1.InvalidProbe)
+        val overlong = LinuxQemuHostV1(probe: probe(qemu_bin_dir: overlong_directory())).resolve(
+            simpleos_machine_target_projection("x86_64"))
+        expect(overlong.error()).to_equal(QemuHostAdapterErrorV1.InvalidProbe)
+
+    it "binds probe facts to one target and follows the catalog for x86_32":
+        step("Reject acceleration and executable facts collected for another target")
+        val riscv = simpleos_machine_target_projection("riscv64")
+        val mismatched = LinuxQemuHostV1(probe: probe()).resolve(riscv)
+        expect(mismatched.admitted()).to_equal(false)
+        expect(mismatched.error()).to_equal(QemuHostAdapterErrorV1.InvalidProbe)
+
+        step("Use the canonical x86_32 catalog executable instead of the legacy shell alias")
+        val x86_32 = simpleos_machine_target_projection("x86_32")
+        val resolved = LinuxQemuHostV1(probe: probe(
+            target_id: "i686-simpleos", executable_name: "qemu-system-i386")).resolve(x86_32)
+        expect(resolved.admitted()).to_equal(true)
+        expect(resolved.resolution().executable_path).to_equal("/opt/qemu/bin/qemu-system-i386")
+
+    it "feeds validated host facts into the sealed launch-plan binder":
+        step("Bind a firmware-free Linux resolution and retain native-first ordering")
+        val x86 = simpleos_machine_target_projection("x86_64")
+        val linux = LinuxQemuHostV1(probe: probe(
+            discovered_firmware_path: "/firmware/unused.fd",
+            discovered_firmware_available: true)).resolve(x86)
+        val linux_plan = qemu_launch_plan_bind_v1(
+            kernel_spec(x86, QemuFirmwareKindV1.None, ""), linux.resolution())
+        expect(linux_plan.admitted()).to_equal(true)
+        expect(linux_plan.accelerator()).to_equal(QemuAcceleratorV1.Kvm)
+        expect(linux_plan.firmware_path()).to_equal("")
+
+        step("Bind TCG when the target-bound native probe reports unavailable")
+        val tcg_host = LinuxQemuHostV1(probe: probe(native_available: false)).resolve(x86)
+        val tcg_plan = qemu_launch_plan_bind_v1(
+            kernel_spec(x86, QemuFirmwareKindV1.None, ""), tcg_host.resolution())
+        expect(tcg_plan.admitted()).to_equal(true)
+        expect(tcg_plan.accelerator()).to_equal(QemuAcceleratorV1.Tcg)
+
+        step("Bind a verified discovered firmware path for an Arm guest")
+        val arm = simpleos_machine_target_projection("aarch64")
+        val arm_host = MacQemuHostV1(probe: probe(
+            target_id: "aarch64-simpleos", executable_name: "qemu-system-aarch64",
+            firmware_required: true,
+            discovered_firmware_path: "/firmware/QEMU_EFI.fd",
+            discovered_firmware_available: true)).resolve(arm)
+        val arm_plan = qemu_launch_plan_bind_v1(
+            kernel_spec(arm, QemuFirmwareKindV1.Uefi, "qemu-efi"), arm_host.resolution())
+        expect(arm_plan.admitted()).to_equal(true)
+        expect(arm_plan.firmware_path()).to_equal("/firmware/QEMU_EFI.fd")
+
+        step("Keep rejected adapter output unusable by the binder")
+        val rejected = LinuxQemuHostV1(probe: probe(executable_available: false)).resolve(x86)
+        val rejected_plan = qemu_launch_plan_bind_v1(
+            kernel_spec(x86, QemuFirmwareKindV1.None, ""), rejected.resolution())
+        expect(rejected_plan.admitted()).to_equal(false)
