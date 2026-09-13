@@ -1,3 +1,8 @@
+---
+name: gemini-ui-design
+description: Generate TUI/GUI mockup designs using Google Gemini CLI. Step 3 of cooperative pipeline — reads requirements, produces visual mockups.
+---
+
 # UI Design Skill — Gemini-Powered TUI/GUI Mockup Generation
 
 **Step 3 of Cooperative Pipeline.** This skill generates TUI and GUI mockup designs using Google Gemini CLI. It reads requirements produced in Steps 1-2 and produces visual mockups for implementation in Steps 4-5.
