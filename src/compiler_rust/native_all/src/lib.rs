@@ -16,9 +16,19 @@ pub use simple_runtime;
 pub use simple_driver;
 
 mod mem_snapshot_provider;
-pub use mem_snapshot_provider::{
-    rt_mem_snapshot_close, rt_mem_snapshot_open, rt_mem_snapshot_record, rt_phase_profile_record,
-};
+pub use mem_snapshot_provider::rt_phase_profile_record;
+
+// `rt_mem_snapshot_open` / `_record` / `_close` are owned by `simple-runtime`
+// (runtime/src/mem_snapshot.rs) and reach this staticlib through the bundled
+// `simple_runtime` objects. This module used to carry a SECOND `#[no_mangle]`
+// definition of each -- a later, duplicating addition whose `-> bool` return
+// also disagreed with the ABI the compiler declares for them
+// (`RuntimeFuncSpec::new("rt_mem_snapshot_close", &[I64], &[I8])`,
+// compiler/src/codegen/runtime_sffi.rs:2087-2095) and with the generated
+// runtime symbol table, which extern-declares them as `-> i8` and takes their
+// addresses. Two definitions of one `#[no_mangle]` symbol in one link is
+// LNK2005; the runtime's copy is the authoritative one.
+pub use simple_runtime::mem_snapshot::{rt_mem_snapshot_close, rt_mem_snapshot_open, rt_mem_snapshot_record};
 
 // Row 3 hosted-compositor SFFI bindings. This `extern crate` is the
 // load-bearing reference that forces rustc to link the staticlib's

@@ -120,6 +120,28 @@ fn token(ptr: *const u8, len: i64, capacity: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// `run_id` field of the `simple.compiler.mem_snapshot.v1` record, percent-encoded
+/// with the same rules as `token`. Unset or unencodable reads as `none`,
+/// matching `runtime.c:2282-2283` (`if (!run_id || !*run_id) run_id = "none";`)
+/// and the interpreter extern at `compiler/src/interpreter_extern/file_io.rs:697`.
+///
+/// This field is REQUIRED by the schema. `runtime.c`'s `rt_mem_snapshot_record`
+/// emits `run_id=%s`, and the Stage-3 evidence validator
+/// (`scripts/check/lib/bootstrap-stage3-rss-evidence.c:77-83`) rejects any line
+/// that does not carry all 25 named fields, additionally matching `run_id`
+/// against the expected run. This Rust copy previously emitted only 24 fields,
+/// so its records could never satisfy that validator.
+fn run_id_token() -> String {
+    let raw = std::env::var("SIMPLE_EVIDENCE_RUN_ID").unwrap_or_default();
+    if raw.is_empty() {
+        return "none".to_string();
+    }
+    match token(raw.as_ptr(), raw.len() as i64, 256) {
+        Some(encoded) => String::from_utf8_lossy(&encoded).into_owned(),
+        None => "none".to_string(),
+    }
+}
+
 fn status_kib(key: &str) -> i64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -201,7 +223,8 @@ pub unsafe extern "C" fn rt_mem_snapshot_record(
         let event = String::from_utf8_lossy(&event);
         let phase = String::from_utf8_lossy(&phase);
         let path = String::from_utf8_lossy(&path);
-        let line = format!("schema=simple.compiler.mem_snapshot.v1 seq={seq} pid={} monotonic_ms={} event={event} phase={phase} source_index={source_index} source_path_kind={} source_path={} retained_modules={retained} validation_keys={keys} validation_values={values} shared_traits={traits} hir_names={names} hir_symbols={symbols} hir_functions={functions} hir_constants={constants} hir_enums={enums} hir_structs={structs} hir_classes={classes} heap_live_bytes={} heap_peak_bytes={} rss_kib={} hwm_kib={}\n",
+        let run_id = run_id_token();
+        let line = format!("schema=simple.compiler.mem_snapshot.v1 run_id={run_id} seq={seq} pid={} monotonic_ms={} event={event} phase={phase} source_index={source_index} source_path_kind={} source_path={} retained_modules={retained} validation_keys={keys} validation_values={values} shared_traits={traits} hir_names={names} hir_symbols={symbols} hir_functions={functions} hir_constants={constants} hir_enums={enums} hir_structs={structs} hir_classes={classes} heap_live_bytes={} heap_peak_bytes={} rss_kib={} hwm_kib={}\n",
             libc::getpid(), monotonic_ms(), if path_len > 0 { "recorded" } else { "none" }, if path_len > 0 { path.as_ref() } else { "-" },
             rt_heap_live_bytes(), rt_heap_peak_bytes(), status_kib("VmRSS:"), status_kib("VmHWM:"));
         if line.len() >= 6144 {
@@ -282,7 +305,39 @@ mod tests {
         assert_eq!(rt_mem_snapshot_close(fd), 1);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("event=stage%203 phase=lower%3Dcheck"));
+        // 25-field schema: `run_id` sits between `schema` and `seq`, matching
+        // runtime.c and what the Stage-3 evidence validator parses.
+        let last = text.lines().last().unwrap();
+        assert!(last.starts_with("schema=simple.compiler.mem_snapshot.v1 run_id="));
+        assert_eq!(last.split(' ').count(), 25);
         assert!(text.ends_with('\n'));
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// Moved here from `simple-native-all`'s duplicate provider
+    /// (native_all/src/mem_snapshot_provider.rs), which defined a second
+    /// `rt_mem_snapshot_open`/`_record`/`_close` triple. This crate's copy is
+    /// the authoritative one, so its hardening coverage must live here too.
+    #[cfg(unix)]
+    #[test]
+    fn secure_open_is_exclusive_and_rejects_symlinked_parent() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("evidence.log");
+        let bytes = target.as_os_str().as_bytes();
+        let fd = unsafe { rt_mem_snapshot_open(bytes.as_ptr(), bytes.len() as i64) };
+        assert!(fd >= 0);
+        assert_eq!(rt_mem_snapshot_close(fd), 1);
+        assert_eq!(unsafe { rt_mem_snapshot_open(bytes.as_ptr(), bytes.len() as i64) }, -1);
+
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        let linked_target = link.join("other.log");
+        let linked = linked_target.as_os_str().as_bytes();
+        assert_eq!(
+            unsafe { rt_mem_snapshot_open(linked.as_ptr(), linked.len() as i64) },
+            -1
+        );
     }
 }
