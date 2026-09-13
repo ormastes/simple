@@ -261,3 +261,14 @@ not match them; every spec reads as "no verdict" unless the escapes are stripped
 first. This is a second instance of the same class of harness error as the
 `^Results:` mistake recorded above, and it produced an identical false
 "nothing ran" for all 62 specs before it was caught.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+This is a large, multi-pass archaeological restoration effort (already at
+232 examples / 26 failures / 206 passing / 26 failing specs after two
+repair passes), where each remaining failure needs individual
+history-authority investigation per the record's own "What is left"
+section. Far beyond a single 45-minute bugfix-lane row. No primary file is
+named for this row in the shard (`-`), consistent with it being a
+cross-file family issue rather than a single fixable location. Left OPEN,
+unchanged; no new restoration attempted this pass.
