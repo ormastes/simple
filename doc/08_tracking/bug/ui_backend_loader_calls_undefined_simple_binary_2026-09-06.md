@@ -2,6 +2,7 @@
 
 - **Filed:** 2026-09-06
 - **Status:** FIXED (primary defect); the downstream residual is also FIXED 2026-09-06 (see § Residual and § Fix — residual)
+- **Status:** FIXED (primary defect); a second, distinct defect found downstream is still OPEN (see § Residual)
 - **Component:** `src/app/ui/backend_loader.spl`
 - **Severity:** high — the whole product `ui` command never reaches any backend
 
@@ -88,6 +89,7 @@ Run with `src/compiler_rust/target/bootstrap/simple run <spec>`.
   `simple run src/app/ui/cli_entry.spl ui tui …` transcript.
 
 ## Residual (FIXED 2026-09-06 — separate defect, see § Fix — residual)
+## Residual (OPEN, separate defect — not this bug)
 
 `check-ui-slim-startup.shs --binary src/compiler_rust/target/bootstrap/simple
 --lane T1 --samples 3 --warmup 1` still fails, but now for a **different**

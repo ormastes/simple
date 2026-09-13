@@ -1,0 +1,170 @@
+# Caret GUI workbench — pure layout and interaction-state logic (lane A7).
+#
+# Deliberately has NO HTML in it. Every function here is a plain data
+# transform so it can be probed headlessly (no browser, no DOM) per the
+# lane brief. `gui_page.spl` is the only module that turns this state into
+# markup.
+#
+# Fixes encoded here (see doc/08_tracking/bug/ records filed by this lane):
+#   GUI-H001 — connection status must come from a real Transport reading,
+#   never a hardcoded "Connected" string.
+#   GUI-H002 — sending a message must not clear the draft until delivery is
+#   actually acknowledged; scrolling away from the bottom suspends "follow
+#   output"; switching the selected agent must restore THAT agent's own
+#   independent draft/scroll state, never the previously selected agent's.
+
+use app.llm_caret.workbench.session_contract.{
+    SessionId, SessionView, ComposerDraft, Delivery, InputMode, Transport,
+    same_session, new_draft}
+
+# ============================================================================
+# Responsive breakpoints (doc §4.2)
+# ============================================================================
+
+enum WorkbenchMode:
+    # Full composition: left control column + large session + preview strip.
+    Full
+    # Optional metadata (selected-agent details, preview strip) collapses
+    # before the active session shrinks.
+    Collapsed
+    # Roster/details/composer move into a drawer; session goes full width.
+    Compact
+
+val WORKBENCH_FULL_BREAKPOINT_PX: i64 = 1100
+val WORKBENCH_COMPACT_BREAKPOINT_PX: i64 = 760
+
+pub fn workbench_mode_for_width(width_px: i64) -> WorkbenchMode:
+    if width_px >= WORKBENCH_FULL_BREAKPOINT_PX:
+        WorkbenchMode.Full
+    else if width_px >= WORKBENCH_COMPACT_BREAKPOINT_PX:
+        WorkbenchMode.Collapsed
+    else:
+        WorkbenchMode.Compact
+
+pub fn workbench_mode_name(mode: WorkbenchMode) -> text:
+    match mode:
+        case WorkbenchMode.Full: "full"
+        case WorkbenchMode.Collapsed: "collapsed"
+        case WorkbenchMode.Compact: "compact"
+
+# ============================================================================
+# Connection status (GUI-H001)
+# ============================================================================
+
+struct ConnectionStatus:
+    label: text
+    icon: text
+    css_class: text
+
+# There is deliberately no "default" branch that reads "Connected" — every
+# Transport value maps to its own distinct label/icon/class.
+pub fn connection_status_for_transport(transport: Transport) -> ConnectionStatus:
+    match transport:
+        case Transport.Connecting: ConnectionStatus(label: "Connecting", icon: "…", css_class: "status-connecting")
+        case Transport.Ready: ConnectionStatus(label: "Ready", icon: "●", css_class: "status-ready")
+        case Transport.Stale: ConnectionStatus(label: "Stale", icon: "◐", css_class: "status-stale")
+        case Transport.Disconnected: ConnectionStatus(label: "Disconnected", icon: "○", css_class: "status-disconnected")
+        case Transport.Reconnecting: ConnectionStatus(label: "Reconnecting", icon: "…", css_class: "status-reconnecting")
+        case Transport.Closed: ConnectionStatus(label: "Failed", icon: "■", css_class: "status-failed")
+
+# Before any session has handshaken there is no Transport reading at all --
+# that state is "Connecting", not "Connected". Callers pass has_session=false
+# only when no session exists yet (e.g. empty roster).
+pub fn connection_status_for_selection(has_session: bool, transport: Transport) -> ConnectionStatus:
+    if has_session:
+        connection_status_for_transport(transport)
+    else:
+        ConnectionStatus(label: "Connecting", icon: "…", css_class: "status-connecting")
+
+# ============================================================================
+# Per-agent composer + scroll state (GUI-H002)
+# ============================================================================
+
+struct SessionUiState:
+    session: SessionId
+    draft: ComposerDraft
+    scroll_offset: i64
+    # true while the view should auto-scroll to newly arrived output.
+    follow: bool
+
+pub fn new_session_ui_state(session: SessionId, mode: InputMode) -> SessionUiState:
+    SessionUiState(session: session, draft: new_draft(session, mode), scroll_offset: 0, follow: true)
+
+# Lookup result for `find_session_ui_state`. A dedicated struct instead of
+# the builtin `Option<T>` -- see doc/08_tracking/bug/ record filed by this
+# lane: `Option<T>` becomes unresolvable ("class `Option` not found in this
+# scope") once this module is compiled together with the large `provider.spl`
+# import graph (codex/opencode/openai/torch/slang backends). Reproduced with
+# a minimal fixture; root cause is in the compiler's generic-type resolution
+# under a large co-compiled program, not in this lane's code. Avoiding the
+# builtin generic here sidesteps it without touching the seed compiler.
+struct SessionUiLookup:
+    found: bool
+    state: SessionUiState
+
+pub fn find_session_ui_state(states: [SessionUiState], id: SessionId) -> SessionUiLookup:
+    for s in states:
+        if same_session(s.session, id):
+            return SessionUiLookup(found: true, state: s)
+    SessionUiLookup(found: false, state: new_session_ui_state(id, InputMode.Message))
+
+pub fn upsert_session_ui_state(states: [SessionUiState], updated: SessionUiState) -> [SessionUiState]:
+    var out: [SessionUiState] = []
+    var replaced = false
+    for s in states:
+        if same_session(s.session, updated.session):
+            out.push(updated)
+            replaced = true
+        else:
+            out.push(s)
+    if not replaced:
+        out.push(updated)
+    out
+
+# Selecting another agent must return THAT agent's own draft/scroll state --
+# never the previously selected agent's, and never a redirected copy of it.
+pub fn select_session(states: [SessionUiState], next: SessionId, default_mode: InputMode) -> SessionUiState:
+    val lookup = find_session_ui_state(states, next)
+    if lookup.found:
+        lookup.state
+    else:
+        new_session_ui_state(next, default_mode)
+
+# A failed or uncertain delivery RETAINS the draft body so the operator can
+# recover it. Only an Acknowledged delivery clears the composer.
+pub fn apply_delivery_result(state: SessionUiState, delivery: Delivery) -> SessionUiState:
+    match delivery:
+        case Delivery.Acknowledged:
+            val cleared = ComposerDraft(target: state.draft.target, mode: state.draft.mode, body: "", delivery: Delivery.Draft)
+            SessionUiState(session: state.session, draft: cleared, scroll_offset: state.scroll_offset, follow: state.follow)
+        case _:
+            val kept = ComposerDraft(target: state.draft.target, mode: state.draft.mode, body: state.draft.body, delivery: delivery)
+            SessionUiState(session: state.session, draft: kept, scroll_offset: state.scroll_offset, follow: state.follow)
+
+# A submit never clears the draft body itself -- only marks it Queued/Sent.
+# The body is cleared later, only via apply_delivery_result(Acknowledged).
+pub fn begin_submit(state: SessionUiState) -> SessionUiState:
+    val queued = ComposerDraft(target: state.draft.target, mode: state.draft.mode, body: state.draft.body, delivery: Delivery.Queued)
+    SessionUiState(session: state.session, draft: queued, scroll_offset: state.scroll_offset, follow: state.follow)
+
+pub fn edit_draft_body(state: SessionUiState, body: text) -> SessionUiState:
+    val edited = ComposerDraft(target: state.draft.target, mode: state.draft.mode, body: body, delivery: Delivery.Draft)
+    SessionUiState(session: state.session, draft: edited, scroll_offset: state.scroll_offset, follow: state.follow)
+
+# Scrolling upward (away from the bottom) suspends follow mode. Reaching the
+# bottom again resumes it. `at_bottom` is supplied by the caller (DOM
+# scrollTop/scrollHeight comparison); this function only encodes the rule.
+pub fn apply_scroll(state: SessionUiState, offset: i64, at_bottom: bool) -> SessionUiState:
+    SessionUiState(session: state.session, draft: state.draft, scroll_offset: offset, follow: at_bottom)
+
+# ============================================================================
+# Preview-strip sizing (doc §4.2 — normally 2-4 visible cards)
+# ============================================================================
+
+pub fn preview_card_count(inactive_count: i64) -> i64:
+    if inactive_count < 0:
+        0
+    else if inactive_count > 4:
+        4
+    else:
+        inactive_count

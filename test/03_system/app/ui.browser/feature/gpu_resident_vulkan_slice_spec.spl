@@ -4,20 +4,25 @@
 ## Purpose and audience
 This is the device half of the fixed-arena Vulkan resident-2D slice. The reader
 is an engineer asking: *on a machine that really has a Vulkan device, does the
-resident slice run N frames through one never-grown arena without a semantic
-rebuild or a readback, and does it produce device evidence honest enough to
-flip device_execution_proven?* Feature IDs: gpu_scheduler_hardening.
+resident slice retain one uploaded scene allocation for N frames without a
+semantic rebuild or framebuffer readback, while proving descriptor-backed
+shader consumption with one explicit checksum attestation?* Feature IDs:
+gpu_scheduler_hardening.
 Category: App / GPU / system.
 ## Operator workflow
 SIMPLE_GPU_TEST=1 SIMPLE_LIB=src bin/simple test test/03_system/app/ui.browser/feature/gpu_resident_vulkan_slice_spec.spl
-Without SIMPLE_GPU_TEST=1, or on a host with no Vulkan device, the device
-scenario skips cleanly and the gate-reason scenario still runs.
+Without SIMPLE_GPU_TEST=1, or on a host with no initialisable Vulkan device,
+the device scenario records an explicit skip and the gate-reason scenario still
+runs. With both prerequisites present, the body runs unchanged.
 ## Compatibility and limitations
 The slice reports device_timestamp_available=false because this tree exposes no
-Vulkan query-pool timestamp extern; qualification therefore rests on binary
-identity, device and driver identity, monotonic host timestamps bracketing a
-real submit-and-wait, and a negative control. When SIMPLE_BINARY_IDENTITY is
-unset the evidence honestly does not qualify.
+Vulkan query-pool timestamp extern. The retained scene buffer is bound to a
+two-binding SPIR-V consumer that writes an FNV checksum to a proof buffer; one
+explicit proof-buffer readback is collision-limited evidence that at least one
+accepted dispatch consumed the packed rows. It is not an exact identity proof.
+Steady frames currently use the provider's blocking fenced submit; the report
+must expose that cost and must not increment the nonblocking counter. Device
+evidence still does not qualify until query-pool timestamps exist.
 ## Verification guidance and troubleshooting
 A skip is a correct result on a device-less host. A RED with a device present
 means the slice regressed: read init_error first, then the report summary,
@@ -39,9 +44,6 @@ use std.gc_async_mut.gpu.engine2d.vulkan_resident_2d.{
 }
 
 fn resident_device_absent() -> bool:
-    # A Vulkan loader is not a Vulkan device: measured on this macOS host
-    # 2026-09-05, vulkan_available() is true while VulkanSession.init() fails
-    # with "runtime-init". The gate therefore ends on a live session probe.
     if env_get("SIMPLE_GPU_TEST") != "1" or not vulkan_available():
         return true
     not engine2d_vulkan_resident_device_ready()
@@ -55,7 +57,7 @@ describe "GPU-resident Vulkan 2D slice on a real device":
         expect(ENGINE2D_VULKAN_RESIDENT_GATE_REASON).to_contain("Vulkan")
 
     skip_if(fn(): resident_device_absent(), ENGINE2D_VULKAN_RESIDENT_GATE_REASON)(
-        "runs sixteen resident frames on the device with no rebuild, no readback, and honest evidence",
+        "uploads one resident allocation, consumes it through a descriptor, and reports blocking fences honestly",
         fn():
             # Covers REQ-GPU-SCHED-RESIDENT-001 on a device; the id is declared
             # on the ungated scenario above so it stays bound when this skips.
@@ -68,14 +70,32 @@ describe "GPU-resident Vulkan 2D slice on a real device":
             step("Every frame went through the one never-grown arena")
             expect(report.frames_submitted).to_equal(16)  # oracle: frames_requested passed to the slice
             expect(report.semantic_rebuilds).to_equal(0)  # oracle: one unchanging scene, no rebuild
-            expect(report.readbacks).to_equal(0)  # oracle: the resident path copies nothing back
-            step("Every queue round-trip actually succeeded")
+            expect(report.readbacks).to_equal(0)  # oracle: no framebuffer readback; proof readback is counted separately
+            expect(report.device_scene_uploads).to_equal(1)  # oracle: one retained device allocation/upload for one scene
+            expect(report.device_scene_upload_bytes).to_equal(32)  # oracle: four u64 rows
+            expect(report.device_scene_reuses).to_equal(15)  # oracle: fifteen frames reuse the resident payload
+            expect(report.device_scene_upload_failures).to_equal(0)
+            expect(report.device_scene_allocations).to_equal(1)
+            expect(report.device_scene_releases).to_equal(1)
+            expect(report.device_scene_release_failures).to_equal(0)
+            expect(report.device_scene_blocking_upload_calls).to_equal(2)  # oracle: scene upload + one proof sentinel upload
+            expect(report.device_scene_shader_consumed).to_be(true)
+            expect(report.device_scene_proof_readbacks).to_equal(1)
+            expect(report.device_scene_proof_initializations).to_equal(1)
+            expect(report.device_scene_proof_init_bytes).to_equal(4)
+            expect(report.device_scene_descriptor_binds).to_equal(1)
+            expect(report.device_scene_dispatches).to_equal(16)
+            step("Every descriptor-backed dispatch was accepted and the blocking provider cost stayed explicit")
             expect(report.submit_failures).to_equal(0)  # oracle: a failed submit voids the run's evidence
+            expect(report.blocking_queue_submit_calls).to_equal(16)
+            expect(report.device_scene_nonblocking_submits).to_equal(0)
+            expect(report.device_scene_fence_waits).to_equal(16)
             step("The negative control refused a generation the arena never issued")
             expect(report.negative_control_passed).to_be(true)
             step("Device execution is claimed only when the evidence qualifies")
             expect(report.host_complete_ns >= report.host_submit_ns).to_be(true)
             expect(report.last_phase).to_equal(ENGINE2D_GPU_PHASE_GPU_FINISHED)
-            expect(report.device_execution_proven).to_equal(report.evidence_qualifies)
+            expect(report.evidence_qualifies).to_be(false)
+            expect(report.device_execution_proven).to_be(false)
             print(report.summary)
     )

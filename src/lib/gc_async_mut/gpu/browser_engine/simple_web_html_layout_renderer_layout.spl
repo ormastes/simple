@@ -170,6 +170,14 @@ class LayoutResult:
     # sibling collapsing -- it must not be added to the block's height.
     # Without this an <li> wrapping a <p> was 16 px taller than Chrome.
     trailing_margin_b: i32 = 0
+    # CSS 2.2 8.3.1, the symmetric half: the top margin of a block's FIRST
+    # in-flow child collapses THROUGH the block when the block has no top
+    # padding, no top border, and nothing else that would establish a top
+    # edge. The margin is then the block's own LEADING margin and must be
+    # collapsed with the block's declared margin-top by the block's parent
+    # instead of being added to the block's height. Without this
+    # `<div><p>t</p></div>` measured 40 px where Chrome measures 24.
+    leading_margin_t: i32 = 0
 
 class LayoutSelectedResult:
     layout: LayoutResult
@@ -339,6 +347,45 @@ fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32
         if pdisp == "flex" or pdisp == "inline-flex" or pdisp == "grid" or pdisp == "inline-grid":
             return false
     true
+
+fn block_top_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
+    # Mirror of block_bottom_margin_collapses_through for the TOP edge: a
+    # block's top margin collapses with its first in-flow child's top margin
+    # when nothing separates them. The exclusion set is deliberately the same
+    # one the bottom half uses (documents, non-block display, out-of-flow,
+    # floats, BFC roots, widget panels, flex/grid items) so the two halves
+    # cannot disagree about which boxes are formatting-context roots. The
+    # height clamps are kept in the exclusion set too: CSS lets a top margin
+    # escape a fixed-height block, but admitting that here would move boxes
+    # the bottom half still holds in place, so it stays conservative and the
+    # remaining case is recorded rather than guessed at.
+    if node_tag_is_document(nodes[i]):
+        return false
+    if st.display != "block" and st.display != "list-item":
+        return false
+    if st.position_absolute or st.position_fixed:
+        return false
+    if st.float_mode != 0:
+        return false
+    if st.overflow_hidden or st.overflow_auto_y or st.overflow_scroll_y:
+        return false
+    if st.pad_t != 0 or st.border_t != 0:
+        return false
+    if st.height_px != 0 or st.min_height_px != 0 or st.max_height_px != 0:
+        return false
+    if st.min_height_vh or st.flex_fill:
+        return false
+    if nodes[i].has_widget_panel_class:
+        return false
+    val parent = nodes[i].parent
+    if parent >= 0:
+        val pdisp = styles[parent].display
+        if pdisp == "flex" or pdisp == "inline-flex" or pdisp == "grid" or pdisp == "inline-grid":
+            return false
+    true
+
+fn node_tag_is_document(node: HNode) -> bool:
+    node.tag == "body" or node.tag == "html" or node.tag == "#root"
 
 fn relative_layout_result(child_index: HtmlChildIndex, node_index: i32, st: Style, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], height: i32) -> LayoutResult:
     if st.position_relative and (st.left_px != 0 or st.top_px != 0):
@@ -2963,6 +3010,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     var child_count = 0
     var prev_margin_b = 0
     var trailing_margin_b = 0
+    var leading_margin_t = 0
     var in_inline_run = false
     val inline_start_x = if (
         node.is_details_summary and st.display == "list-item"
@@ -3282,6 +3330,43 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_starts = child.wrap_starts
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
+            # CSS 2.2 8.3.1 leading half. The child's EFFECTIVE top margin is
+            # its declared margin-top collapsed with whatever margin escaped
+            # through its own top edge (child.leading_margin_t), and that is
+            # only known after the child is laid out -- the advance above was
+            # computed from the declared value alone. Correct the difference by
+            # translating the child subtree, which is the same two-phase
+            # mechanics offset_layout_subtree already serves elsewhere.
+            val effective_cst_margin_t = collapse_margins_signed(
+                resolved_cst_margin_t, child.leading_margin_t)
+            var corrected_top_advance = child_top_advance
+            if child.leading_margin_t != 0:
+                if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
+                    val body_margin_t = resolve_vertical_margin_px(st.margin_t, viewport_h)
+                    corrected_top_advance = collapse_margins_signed(
+                        body_margin_t, effective_cst_margin_t) - body_margin_t
+                else:
+                    corrected_top_advance = collapse_margins_signed(
+                        prev_margin_b_before_child, effective_cst_margin_t)
+            # When THIS block also lets a top margin through, the whole
+            # effective leading margin leaves the box: the first in-flow child
+            # sits on the content top edge and the margin becomes this block's
+            # own leading margin for its parent to collapse.
+            val escapes_top = (
+                child_count == 0 and
+                block_top_margin_collapses_through(nodes, styles, i, st)
+            )
+            if escapes_top:
+                leading_margin_t = effective_cst_margin_t
+                corrected_top_advance = 0
+            if corrected_top_advance != child_top_advance:
+                val retopped = offset_layout_subtree(
+                    child_index, c, 0, corrected_top_advance - child_top_advance,
+                    out_bx, out_by)
+                out_bx = retopped.bx
+                out_by = retopped.by
+                cy = cy + (corrected_top_advance - child_top_advance)
+                child_top_advance = corrected_top_advance
             cy = cy + child.height
             val resolved_cst_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
             # CSS 2.2 §8.3.1 self-collapsing block: an in-flow block with no
@@ -3357,4 +3442,4 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         h = 1
     out_bh[i] = h
     val placed = relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
-    LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b)
+    LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b, leading_margin_t: leading_margin_t)

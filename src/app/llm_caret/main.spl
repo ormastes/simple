@@ -27,6 +27,13 @@
 #   --electron               launch the GUI in the canonical Electron shell
 #   --metal-gui              use the GPU companion entry (not core Caret)
 #   --prompt <text>          send one prompt, print the response, and exit
+#   --workbench              launch an agent team into smux panes (one pane per
+#                             agent, the pane's child IS the agent) and render
+#                             the live workbench
+#   --agent <agent.md>       workbench agent, repeatable
+#   --agent-cmd <path>       binary launched per agent (default: claude)
+#   --send <text>            one line written to the selected agent's stdin
+#   --workbench-frames <n>   refresh iterations before the final frame (20)
 #   --server                 run the HTTP proxy (server.spl) instead of chat
 #   --port <n>                proxy port (default 8317, or $LLM_CARET_PORT)
 #   -h / --help              show this help
@@ -84,6 +91,15 @@ use app.llm_caret.server.{handle_route, build_error_response,
 use app.llm_caret.session.{Session, save_session, load_session, list_session_ids, gen_session_id}
 use app.llm_caret.gui.{caret_gui_html, caret_gui_prompt,
     caret_gui_json_content, caret_gui_json_error}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.workbench.pane_team.{launch_pane_team, poll_pane_team,
+    stop_pane_team, send_to_agent, publish_pane_team}
+use app.llm_caret.workbench.session_source.{live_sessions}
+use app.llm_caret.workbench.tui_entry.{render_live_workbench}
+use app.llm_caret.workbench.tui_layout.{CompactView}
+use app.io.process_ops.{process_pid_exists}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.sffi.io.{file_write_text}
 use app.llm_caret.messaging.cli.{run_messaging_cli}
 use app.llm_caret.workspace_cli.{run_workspace_cli}
 
@@ -105,6 +121,15 @@ struct MainArgs:
     port: i64
     help: bool
     unknown: text        # first unrecognized --flag (empty if none)
+    # --workbench (lane A9): launch a real agent team into smux panes and
+    # render the live workbench. `agents` is repeatable --agent, `agent_cmd`
+    # overrides the provider binary, `send_text` is written to the selected
+    # agent's own stdin, `frames` bounds the refresh loop.
+    workbench: bool
+    agents: [text]
+    agent_cmd: text
+    send_text: text
+    frames: i64
 
 fn parse_main_args(args: [text]) -> MainArgs:
     var provider = ""
@@ -120,6 +145,11 @@ fn parse_main_args(args: [text]) -> MainArgs:
     var port: i64 = 0
     var help = false
     var unknown = ""
+    var workbench = false
+    var agents: [text] = []
+    var agent_cmd = ""
+    var send_text = ""
+    var frames: i64 = 0
     var i = 0
     while i < args.len():
         val arg = args[i]
@@ -179,6 +209,28 @@ fn parse_main_args(args: [text]) -> MainArgs:
             i = i + 1
         elif arg.starts_with("--port="):
             port = int(arg.substring(7)) ?? 0
+        elif arg == "--workbench":
+            workbench = true
+        elif arg == "--agent" and i + 1 < args.len():
+            agents.push(args[i + 1])
+            i = i + 1
+        elif arg.starts_with("--agent="):
+            agents.push(arg.substring(8))
+        elif arg == "--agent-cmd" and i + 1 < args.len():
+            agent_cmd = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--agent-cmd="):
+            agent_cmd = arg.substring(12)
+        elif arg == "--send" and i + 1 < args.len():
+            send_text = args[i + 1]
+            i = i + 1
+        elif arg.starts_with("--send="):
+            send_text = arg.substring(7)
+        elif arg == "--workbench-frames" and i + 1 < args.len():
+            frames = int(args[i + 1]) ?? 0
+            i = i + 1
+        elif arg.starts_with("--workbench-frames="):
+            frames = int(arg.substring(19)) ?? 0
         elif arg.starts_with("--") and unknown == "":
             unknown = arg
         i = i + 1
@@ -187,7 +239,9 @@ fn parse_main_args(args: [text]) -> MainArgs:
         system_prompt: system_prompt, resume_id: resume_id,
         workspace_root: workspace_root, prompt: prompt, allow_all: allow_all,
         ui_mode: ui_mode, server_mode: server_mode, port: port,
-        help: help, unknown: unknown
+        help: help, unknown: unknown,
+        workbench: workbench, agents: agents, agent_cmd: agent_cmd,
+        send_text: send_text, frames: frames
     )
 
 # ============================================================================
@@ -220,6 +274,12 @@ fn print_help():
     print "  --electron               launch the GUI in Electron"
     print "  --metal-gui              launch pure Simple Web/Draw IR/Metal GUI"
     print "  --prompt <text>          send one prompt, print the response, and exit"
+    print "  --workbench              launch an agent team into smux panes and render"
+    print "                           the live workbench (roster + active pane)"
+    print "  --agent <agent.md>       workbench agent (repeatable)"
+    print "  --agent-cmd <path>       binary to launch per agent (default: claude)"
+    print "  --send <text>            write one line to the selected agent's stdin"
+    print "  --workbench-frames <n>   refresh iterations before the final frame (20)"
     print "  --server                 run the HTTP proxy instead of interactive chat"
     print "  --port <n>               proxy port (default 8317, or $LLM_CARET_PORT)"
     print ""
@@ -907,6 +967,94 @@ fn run_gui(port: i64, shell: text) -> i64:
 # Session integration
 # ============================================================================
 
+# ============================================================================
+# --workbench: the production owner of a MultiCaretManager (lane A9)
+# ============================================================================
+#
+# Gap 1 of .spipe/caret_workbench/state.md: nothing in src/ ever launched a
+# manager, so `caret_gui_html()` and the TUI always served an EMPTY roster.
+# This is that owner. It launches the team through
+# `workbench.pane_team.launch_pane_team`, so the pane's child and the managed
+# agent are ONE process (gap 2), publishes each frame into
+# `workbench.session_source`'s live registry, and renders the workbench grid
+# the TUI and the GUI both read.
+#
+# ponytail: bounded refresh loop that prints the FINAL frame, rather than a
+# key-driven full-screen event loop -- input handling belongs to the IDE TUI
+# shell (AC-1, src/app/ide/main.spl) and forking a second one here would be
+# the two-owner error again. upgrade: drive render_live_workbench from that
+# shell's poll loop and route keystrokes through `send_to_agent`.
+fn _workbench_requests(paths: [text]) -> [AgentLaunchRequest]:
+    var reqs: [AgentLaunchRequest] = []
+    for p in paths:
+        reqs.push(AgentLaunchRequest(provider: "claude", agent_md_path: p,
+            skill_path: "", task_desc: "caret workbench session", model: "",
+            session_id: "", extra_args: []))
+    reqs
+
+fn run_workbench(args: MainArgs) -> i64:
+    if args.agents.len() == 0:
+        print "Error: --workbench needs at least one --agent <agent.md>"
+        return 2
+    # --agent-cmd overrides the provider binary; otherwise the configured
+    # claude path (or a bare `claude` on PATH) is launched for real.
+    var agent_cmd = args.agent_cmd
+    if agent_cmd == "":
+        agent_cmd = config_claude_cli_path()
+    var team = launch_pane_team("caret-workbench",
+        _workbench_requests(args.agents), 8, agent_cmd, "", "", "", "")
+    if not team.ok:
+        print "Error: workbench launch failed: {team.error}"
+        return 1
+
+    if args.send_text != "":
+        # Goes to the SELECTED agent's own stdin, because the pane's child is
+        # that agent.
+        val sent = send_to_agent(team, team.agents[0].agent_id, args.send_text)
+        if not sent:
+            print "Error: could not send to {team.agents[0].agent_id}"
+
+    var budget = args.frames
+    if budget <= 0:
+        budget = 20
+    var n: i64 = 0
+    while n < budget:
+        thread_sleep_ms(100)
+        team = poll_pane_team(team)
+        val _published = publish_pane_team(team)
+        if team.manager.status != "running" and team.manager.status != "degraded":
+            n = budget
+        n = n + 1
+
+    val lines = render_live_workbench(120, 40, CompactView.Session)
+    var grid = ""
+    for line in lines:
+        grid = grid + line + "\n"
+    val _wrote = file_write_text(
+        "build/test-artifacts/caret_workbench/live_workbench.txt", grid)
+    val _wrote_html = file_write_text(
+        "build/test-artifacts/caret_workbench/live_workbench.html",
+        caret_gui_html())
+    print "{grid}"
+    print "AGENT  PID  PANE  STATUS"
+    for a in team.agents:
+        print "  {a.agent_id}  {a.pid}  {a.pane_id}  {a.status}"
+    print "manager={team.manager.status} roster={live_sessions().len()}"
+    print "captures: build/test-artifacts/caret_workbench/live_workbench.{txt,html}"
+
+    val stopped = stop_pane_team(team)
+    var leaked = 0
+    for a in team.agents:
+        # OS truth, not the manager's self-report: a piped child's pid is
+        # invisible to process_is_running (different runtime registry), so
+        # process_exists -- a bare kill(pid,0) -- is the honest probe.
+        if a.pid > 0 and process_pid_exists(a.pid):
+            leaked = leaked + 1
+    print "teardown={stopped.manager.status} still_running={leaked}"
+    if leaked > 0:
+        return 1
+    0
+
 fn _resolve_workspace(args: MainArgs) -> text:
     if args.workspace_root != "":
         return args.workspace_root
@@ -1069,6 +1217,12 @@ fn run_main_args(raw_args: [text]) -> i64:
         if err != "":
             print "Error: {err}"
             return 2
+
+    # Before provider validation on purpose: --workbench launches AGENT
+    # providers ("claude", "codex"), whose names are a different vocabulary
+    # from the chat providers ("claude_cli", ...) `is_valid_provider` checks.
+    if args.workbench:
+        return run_workbench(args)
 
     var provider = _effective_provider(args)
     if not is_valid_provider(provider):
