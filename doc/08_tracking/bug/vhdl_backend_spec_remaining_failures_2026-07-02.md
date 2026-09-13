@@ -1,5 +1,7 @@
 # vhdl_backend_spec.spl — Failure Triage (2026-07-02)
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Recreated tracking doc (the original, produced by a prior agent session that took
 this suite from 0/48 → 31/48, was lost to jj rebase/conflict churn from parallel
 sessions before it could be committed). This doc covers the follow-on pass that
@@ -875,3 +877,7 @@ bitfield-construct arg aliasing — both distinct follow-ups.
 - `type_checker/type_inference_executable_spec.spl` — 1/1
 - `backend/vhdl_backend_spec.spl` — 40/48 (all 8 failures now width-correct;
   remaining blockers are (A) + (B) above)
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

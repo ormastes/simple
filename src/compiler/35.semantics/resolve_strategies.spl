@@ -13,6 +13,15 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.traits.traits.*
 use compiler.semantics.resolve.{MethodResolver, ResolveError}
 use compiler.hir.{MethodResolution}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_unresolved_method_v1
+}
+
+pub fn resolve_strategies_publish_unresolved_method_v1(subject: text,
+        consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("unresolved-method-candidate")
+    reverse_reference_register_unresolved_method_v1(subject, consumer, evidence)
 
 impl MethodResolver:
     me resolve_method(receiver: HirExpr, method: text, args: [HirCallArg]) -> MethodResolution:
@@ -24,11 +33,8 @@ impl MethodResolver:
         3. Free function where receiver becomes first argument
         """
         if receiver.type_ == nil:
-            if self.quiet:
-                # Quiet mode (SIMPLE_RESOLVE_METHODS=1): an unknown receiver
-                # type is not an error — leave the call for the MIR
-                # receiver-kind fallbacks, exactly as an un-run pass would.
-                return MethodResolution.Unresolved
+            resolve_strategies_publish_unresolved_method_v1(
+                method, "unknown-receiver", "receiver-type-unknown")
             self.add_error(
                 ("cannot resolve method '{method}': receiver type is unknown. " +
                 "Ensure the receiver expression has a valid type."),
@@ -37,6 +43,8 @@ impl MethodResolver:
             return MethodResolution.Unresolved
         val ty = receiver.type_ ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
         val type_name = self.format_type(ty)
+        resolve_strategies_publish_unresolved_method_v1(
+            method, type_name, "method-candidate:{method}:{type_name}:{args.len()}")
 
         # Priority 1: Instance method on receiver's type
         val instance_result = self.try_instance_method(ty, method)
@@ -54,11 +62,6 @@ impl MethodResolver:
             return result
 
         # No resolution found - provide helpful error message
-        if self.quiet:
-            # Quiet mode: builtin container/text receivers (Dict/Array/text)
-            # carry no type symbol, so all three strategies legitimately miss
-            # — that is the MIR builtin fallback's job, not an error.
-            return MethodResolution.Unresolved
         val arg_count = args.len()
         val suggestions = self.get_method_suggestions(ty, method)
 
@@ -391,11 +394,6 @@ impl MethodResolver:
 
     me add_error(message: text, span: Span):
         """Add a resolution error."""
-        if self.quiet:
-            # Quiet mode records NO errors, ever — the monotonicity guarantee
-            # of the SIMPLE_RESOLVE_METHODS=1 experiment rests on this. A
-            # failed resolution must degrade to exactly today's Unresolved.
-            return
         self.errors = self.errors.push(ResolveError(
             message: message,
             span: span

@@ -1,5 +1,7 @@
 # Interpreter text-memory counters are unobservable
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open observability blocker.
@@ -24,3 +26,7 @@ the exercised text representation. Add parity tests against native runtime
 counters and a negative test proving that a deliberate allocation changes at
 least one counter. Until then, receipts must use
 `counter_status=unavailable` and retain isolated RSS/HWM evidence separately.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

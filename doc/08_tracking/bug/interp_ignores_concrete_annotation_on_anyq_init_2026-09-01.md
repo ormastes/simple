@@ -1,5 +1,7 @@
 # Interpreter ignores concrete annotation on an `any?` initializer (divergence)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-01. **Status:** OPEN. **Found while fixing:** MIR-side
 `any?` receiver-type erasure (fixed in `src/compiler/50.mir/mir_lowering_stmts.spl`,
 early-Let path; regression spec `test/01_unit/bugs/anyq_receiver_erasure_spec.spl`).
@@ -30,3 +32,7 @@ interpreter side needs the matching unwrap-on-concrete-annotation, or the
 frontend should reject the bare form so both modes agree loudly.
 
 Workaround accepted by both modes today: `... = get_obj(...) ?? {}`.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

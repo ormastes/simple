@@ -1,4 +1,5 @@
 # Entry-closure freestanding cranelift codegen defects found chasing first desktop frame (2026-07-16/17)
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/hir/alias_static_call_resolution_spec.spl -> 0 passed, 2 failed, still reproduces)
 
 All found on `native-build --entry-closure --target x86_64-unknown-none --backend cranelift --opt-level=aggressive`
 building `gui_entry_desktop.spl`. Each verified by objdump disassembly of `build/os/_wk/desktop.elf`.
@@ -1576,3 +1577,6 @@ remain pending while bootstrap continues. Do not promote this checkpoint to a
 full verification PASS.
 
 UNPROVEN by this lane. Every reproduction path for this row is a cross-target/freestanding `native-build` (riscv*-unknown-none / x86_64-unknown-none, LLVM or Cranelift, plus QEMU boot), and the fix sites fall in lanes claimed by concurrent sessions (`src/compiler/20.hir/hir_lowering/**`, `src/compiler/50.mir/**`, `src/compiler/70.backend/**`, `pipeline/native_project/**`). No content-level fix marker was found for it in current source, and no cheap hosted-engine proxy exists — the hosted engines do not exercise the failing path at all. Status left OPEN, unmodified; do not read this note as either a confirmation or a close.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/hir/alias_static_call_resolution_spec.spl` on the deployed seed; 2 of 2 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

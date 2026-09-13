@@ -312,14 +312,12 @@ fn pack_vec16u8_flat(lanes: [u8; 16]) -> RuntimeValue {
     RuntimeValue::from_raw(ptr as u64)
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_aes_round_u8x16(state: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
     let s = unpack_vec16u8_flat(state);
     let k = unpack_vec16u8_flat(key);
     pack_vec16u8_flat(aes_round_u8x16(s, k))
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_aes_round_last_u8x16(state: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
     let s = unpack_vec16u8_flat(state);
     let k = unpack_vec16u8_flat(key);

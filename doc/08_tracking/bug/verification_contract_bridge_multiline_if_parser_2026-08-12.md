@@ -1,5 +1,7 @@
 # Pure-Simple parser rejects multiline if-expressions in FV2 contract bridge
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-12
 
 ## Reproduction
@@ -36,3 +38,7 @@ mailbox/transfer verification pass.
 the bridge after the normalization. A mailbox spec currently reaches the
 adjacent pre-existing blocker in `verification_region_effects.spl` first:
 `Unexpected token: expected pattern, found Else`.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

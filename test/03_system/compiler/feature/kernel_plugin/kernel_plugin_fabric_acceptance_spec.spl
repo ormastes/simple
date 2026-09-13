@@ -1,0 +1,60 @@
+# codex-system-test
+# @req REQ-KPF-001 REQ-KPF-004 REQ-KPF-005 REQ-KPF-007 REQ-KPF-009
+# @tag:in-development
+# Tracks: kernel_plugin_fabric migration Waves 1-4
+"""# Kernel Plugin Fabric Runtime Acceptance
+
+Exercises production descriptor admission, bounded dispatch, generation
+safety, coverage verdicts, and static placement parity. The production module
+is intentionally unresolved until the KPF runtime lands; no test-local model
+may satisfy these scenarios.
+"""
+use std.spec.*
+use std.nogc_async_mut.kernel_plugin.acceptance.{
+    acceptance_fixture, malformed_descriptor_fixture,
+    zero_completed_lint_fixture, static_parity_fixture
+}
+
+describe "KPF fail-closed runtime contract":
+    it "should reject a malformed descriptor before provider publication":
+        step("Submit a truncated descriptor with a valid ABI prefix")
+        val result = malformed_descriptor_fixture()
+        expect(result.error_code).to_equal("KPF-E-MALFORMED-DESCRIPTOR")
+        expect(result.published_generation).to_equal(0)
+
+    it "should never classify zero completed required checks as clean":
+        step("Request required lint work and complete none of it")
+        val result = zero_completed_lint_fixture()
+        expect(result.requested_checks).to_be_greater_than(0)
+        expect(result.completed_checks).to_equal(0)
+        expect(result.verdict).to_equal("INCOMPLETE")
+
+    it "should return bounded backpressure when the submission ring is full":
+        step("Fill an admitted two-slot ring without polling completions")
+        val fixture = acceptance_fixture(2)
+        expect(fixture.submit(101).code).to_equal("Accepted")
+        expect(fixture.submit(102).code).to_equal("Accepted")
+        val full = fixture.submit(103)
+        expect(full.code).to_equal("WouldBlock")
+        expect(full.capacity).to_equal(2)
+        expect(fixture.submission_high_water()).to_equal(2)
+
+    it "should reject a stale handle after its slot is reused":
+        step("Retire a generation and reuse its dense slot")
+        val fixture = acceptance_fixture(1)
+        val stale = fixture.open_session()
+        expect(fixture.retire_and_publish_next()).to_equal(2)
+        val current = fixture.open_session()
+        expect(current.slot).to_equal(stale.slot)
+        expect(current.generation).to_equal(2)
+        expect(fixture.poll(stale).error_code).to_equal("KPF-E-STALE-HANDLE")
+        expect(fixture.poll(current).error_code).to_equal("")
+
+    it "should preserve known semantics across static-direct and static-table placement":
+        step("Execute independent static-direct and table adapters over a known batch")
+        val result = static_parity_fixture([3, 5, 8])
+        expect(result.direct_provider_calls).to_equal(1)
+        expect(result.table_provider_calls).to_equal(1)
+        expect(result.direct_values).to_equal([6, 10, 16])
+        expect(result.table_values).to_equal([6, 10, 16])
+        expect(result.table_values).to_equal(result.direct_values)

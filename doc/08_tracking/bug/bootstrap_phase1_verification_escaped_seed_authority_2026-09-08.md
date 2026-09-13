@@ -1,7 +1,7 @@
 # Phase 1 verification escaped seed authority and false-passed missing tools
 
-**Date:** 2026-09-08  
-**Status:** FIXED IN WORKING TREE  
+**Date:** 2026-09-08
+**Status:** FIXED IN WORKING TREE
 **Component:** `scripts/bootstrap/bootstrap-phase-verification.shs`
 
 ## Symptom

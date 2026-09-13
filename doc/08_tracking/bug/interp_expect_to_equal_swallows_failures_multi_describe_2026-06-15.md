@@ -1,8 +1,16 @@
 # Bug: expect().to_equal() swallows failures in multi-describe-block specs
 
+## Closed 2026-09-13 — does not reproduce: failures in later describe blocks are reported
+- **measured** — probe spec with 3 `describe` blocks (1 passing, 2 deliberately wrong
+  `to_equal`) run via the Rust seed `bin/simple` v1.0.0-rc.1 on Windows:
+  `spec failure: 2 of 3 example(s) failed (exit 1)`, `declared>=3 executed=3 passed=1 failed=2`
+  — both wrong assertions surfaced (`expected 5 to equal 9`, `expected abc to equal xyz`).
+- **inferred** — filed against the Linux seed interpreter; the Windows seed is the same
+  Rust seed lane, so this is strong but not self-hosted-binary evidence.
+
 **ID:** interp_expect_to_equal_swallows_failures_multi_describe_2026-06-15
 **Severity:** P1
-**Status:** Open
+**Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 **Discovered:** 2026-06-15
 
 ## Symptom

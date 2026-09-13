@@ -1,0 +1,210 @@
+"""Event damage is coalesced before submission and immutable after freeze."""
+# @cover src/lib/gc_async_mut/gpu/session/render_surface_event_damage.spl 90%
+
+use std.spec.*
+use std.common.ui.gpu_web_ports.{
+    GpuInputEvent, GPU_EVENT_KIND_POINTER_MOVE, GPU_EVENT_KIND_TIMER,
+    GPU_EVENT_KIND_HOST_EFFECT_COMPLETION
+}
+use std.common.ui.gpu_web_event_model.{GpuNormalizedEventBatch, GpuEventReject}
+use std.gc_async_mut.gpu.session.render_surface_state.*
+use std.gc_async_mut.gpu.session.render_surface_event_damage.*
+
+fn event(scene: u64, sequence: u64, kind: u16) -> GpuInputEvent:
+    GpuInputEvent(sequence: sequence, scene_generation: scene,
+        timestamp_ns: sequence, kind: kind, device_id: 1u16, flags: 0u32,
+        x_fixed: 0, y_fixed: 0, delta_x_fixed: 0, delta_y_fixed: 0,
+        key_code: 0u32, text_offset: 0u32, text_length: 0u32)
+
+fn batch(scene: u64, sequence: u64, kind: u16) -> GpuNormalizedEventBatch:
+    var events: [GpuInputEvent] = [event(scene, sequence, kind)]
+    var rejects: [GpuEventReject] = []
+    GpuNormalizedEventBatch(schema_id: 1u32, scene_generation: scene,
+        input_count: 1, coalesced_count: 0,
+        events: events, rejects: rejects)
+
+describe "render-surface event damage freeze":
+    it "clips and coalesces pending damage into one upload":
+        # @req REQ-GPUUI-005
+        val surface = gpu_render_surface_create(8, 100, 100, 2, 1024, 256)
+        val pending = gpu_pending_event_damage_for_surface(surface.surface, 4u64)
+        val (one, r1) = gpu_event_damage_accumulate(
+            pending, batch(4u64, 1u64, GPU_EVENT_KIND_POINTER_MOVE),
+            1, [-5, 10, 20, 10], 100, 100)
+        expect(r1).to_equal("accumulated")
+        val (two, r2) = gpu_event_damage_accumulate(
+            one, batch(4u64, 2u64, GPU_EVENT_KIND_POINTER_MOVE),
+            2, [80, 80, 30, 30], 100, 100)
+        expect(r2).to_equal("accumulated")
+        expect(two.accepted_event_count).to_equal(2)
+        expect(two.event_generation).to_equal(2)
+        expect(two.left).to_equal(0)
+        expect(two.top).to_equal(10)
+        expect(two.right).to_equal(100)
+        expect(two.bottom).to_equal(100)
+
+    it "freezes damage into a slot and starts a distinct pending generation":
+        # @req REQ-GPUUI-004
+        # @req REQ-GPUUI-005
+        val surface = gpu_render_surface_create(8, 100, 100, 2, 1024, 256)
+        val (pending, _) = gpu_event_damage_accumulate(
+            gpu_pending_event_damage_for_surface(surface.surface, 4u64),
+            batch(4u64, 7u64, GPU_EVENT_KIND_POINTER_MOVE), 7,
+            [10, 20, 30, 40], 100, 100)
+        val (recording, next, slot, reason) =
+            gpu_event_damage_freeze(surface, pending, 4)
+        expect(reason).to_equal("damage-frozen")
+        expect(recording.slots[slot].event_generation).to_equal(7)
+        expect(recording.slots[slot].damage_pixels).to_equal(1200)
+        expect(recording.slots[slot].upload_bytes).to_equal(4800)
+        expect(next.event_generation).to_equal(0)
+        expect(next.has_damage).to_be(false)
+
+    it "rejects stale scene and event generations without mutation":
+        # @req REQ-GPUUI-005
+        val surface = gpu_render_surface_create(8, 10, 10, 2, 1024, 256)
+        val pending = gpu_pending_event_damage_for_surface(surface.surface, 4u64)
+        val (same_scene, stale_scene) = gpu_event_damage_accumulate(
+            pending, batch(3u64, 1u64, GPU_EVENT_KIND_POINTER_MOVE),
+            1, [0, 0, 1, 1], 10, 10)
+        expect(stale_scene).to_equal("stale-scene-generation")
+        expect(same_scene.has_damage).to_be(false)
+        val (one, _) = gpu_event_damage_accumulate(
+            pending, batch(4u64, 2u64, GPU_EVENT_KIND_POINTER_MOVE),
+            2, [0, 0, 1, 1], 10, 10)
+        val (same_event, stale_event) = gpu_event_damage_accumulate(
+            one, batch(4u64, 2u64, GPU_EVENT_KIND_POINTER_MOVE),
+            2, [1, 1, 1, 1], 10, 10)
+        expect(stale_event).to_equal("stale-event-generation")
+        expect(same_event.right).to_equal(1)
+
+    it "does not submit an idle frame when clipping removes all damage":
+        # @req REQ-GPUUI-005
+        val surface = gpu_render_surface_create(8, 100, 100, 2, 1024, 256)
+        val (pending, accumulated) = gpu_event_damage_accumulate(
+            gpu_pending_event_damage_for_surface(surface.surface, 4u64),
+            batch(4u64, 7u64, GPU_EVENT_KIND_POINTER_MOVE), 7,
+            [140, 140, 20, 20], 100, 100)
+        expect(accumulated).to_equal("accumulated")
+        val (idle, unchanged, slot, reason) = gpu_event_damage_freeze(
+            surface, pending, 4)
+        expect(reason).to_equal("no-damage")
+        expect(slot).to_equal(-1)
+        expect(idle.slots[0].state).to_equal(GPU_FRAME_FREE)
+        expect(idle.slots[1].state).to_equal(GPU_FRAME_FREE)
+        expect(idle.next_frame_generation).to_equal(1)
+        expect(idle.last_event_generation).to_equal(0)
+        expect(idle.allocation_count).to_equal(surface.allocation_count)
+        expect(unchanged.event_generation).to_equal(7)
+        expect(unchanged.accepted_event_count).to_equal(1)
+        expect(unchanged.has_damage).to_be(false)
+        val (replay, replay_reason) = gpu_event_damage_accumulate(
+            unchanged, batch(4u64, 7u64, GPU_EVENT_KIND_POINTER_MOVE),
+            7, [0, 0, 1, 1], 100, 100)
+        expect(replay_reason).to_equal("stale-event-generation")
+        expect(replay.event_generation).to_equal(7)
+
+    it "coalesces later resource and animation wakeups after an idle event":
+        # @req REQ-GPUUI-005
+        val surface = gpu_render_surface_create(8, 100, 100, 2, 1024, 256)
+        val (idle_pending, _) = gpu_event_damage_accumulate(
+            gpu_pending_event_damage_for_surface(surface.surface, 4u64),
+            batch(4u64, 7u64, GPU_EVENT_KIND_POINTER_MOVE), 7,
+            [140, 140, 20, 20], 100, 100)
+        val (_, pending, idle_slot, idle_reason) = gpu_event_damage_freeze(
+            surface, idle_pending, 4)
+        expect(idle_slot).to_equal(-1)
+        expect(idle_reason).to_equal("no-damage")
+        val (resource, resource_reason) = gpu_event_damage_accumulate(
+            pending,
+            batch(4u64, 8u64, GPU_EVENT_KIND_HOST_EFFECT_COMPLETION),
+            8, [10, 20, 30, 40], 100, 100)
+        expect(resource_reason).to_equal("accumulated")
+        val (animated, animation_reason) = gpu_event_damage_accumulate(
+            resource, batch(4u64, 9u64, GPU_EVENT_KIND_TIMER),
+            9, [70, 5, 20, 10], 100, 100)
+        expect(animation_reason).to_equal("accumulated")
+        expect(animated.event_generation).to_equal(9)
+        expect(animated.accepted_event_count).to_equal(3)
+        expect(animated.left).to_equal(10)
+        expect(animated.top).to_equal(5)
+        expect(animated.right).to_equal(90)
+        expect(animated.bottom).to_equal(60)
+        val (recording, _, wake_slot, freeze_reason) = gpu_event_damage_freeze(
+            surface, animated, 4)
+        expect(freeze_reason).to_equal("damage-frozen")
+        expect(wake_slot).to_be_greater_than(-1)
+        expect(recording.last_event_generation).to_equal(9)
+        expect(recording.slots[wake_slot].event_generation).to_equal(9)
+
+    it "rejects cross-surface pending work and returns a target-bound empty accumulator":
+        # @req REQ-GPUUI-005
+        val owner = gpu_render_surface_create(8, 100, 100, 2, 1024, 256)
+        val other = gpu_render_surface_create(9, 100, 100, 2, 1024, 256)
+        val (pending, _) = gpu_event_damage_accumulate(
+            gpu_pending_event_damage_for_surface(owner.surface, 4u64),
+            batch(4u64, 7u64, GPU_EVENT_KIND_POINTER_MOVE), 7,
+            [10, 20, 30, 40], 100, 100)
+        val (unchanged, coalesce_reason) = gpu_event_damage_accumulate_for_surface(
+            pending, other.surface,
+            batch(4u64, 8u64, GPU_EVENT_KIND_HOST_EFFECT_COMPLETION), 8,
+            [0, 0, 1, 1], 100, 100)
+        expect(coalesce_reason).to_equal("stale-surface-identity")
+        expect(unchanged.surface_id).to_equal(owner.surface.surface_id)
+        val (committed, reset, slot, freeze_reason) = gpu_event_damage_freeze(
+            other, pending, 4)
+        expect(freeze_reason).to_equal("stale-surface-identity")
+        expect(slot).to_equal(-1)
+        expect(committed.slots[0].state).to_equal(GPU_FRAME_FREE)
+        expect(reset.surface_id).to_equal(other.surface.surface_id)
+        expect(reset.device_generation).to_equal(other.surface.device_generation)
+        expect(reset.has_damage).to_be(false)
+
+    it "invalidates pending work across resize and permits later wakeups on the new generation":
+        # @req REQ-GPUUI-005
+        var state = gpu_render_surface_create(8, 100, 100, 2, 1024, 256)
+        val (pending, _) = gpu_event_damage_accumulate(
+            gpu_pending_event_damage_for_surface(state.surface, 4u64),
+            batch(4u64, 7u64, GPU_EVENT_KIND_POINTER_MOVE), 7,
+            [10, 20, 30, 40], 100, 100)
+        val (resized, resize_reason) = gpu_render_surface_resize(
+            state, 120, 120, 2048, 512)
+        expect(resize_reason).to_equal("resized")
+        val (not_coalesced, coalesce_reason) =
+            gpu_event_damage_accumulate_for_surface(
+                pending, resized.surface,
+                batch(4u64, 8u64, GPU_EVENT_KIND_HOST_EFFECT_COMPLETION), 8,
+                [10, 20, 30, 40], 120, 120)
+        expect(coalesce_reason).to_equal("stale-device-generation")
+        expect(not_coalesced.event_generation).to_equal(7)
+        expect(not_coalesced.device_generation).to_equal(1)
+        val (unchanged, reset, stale_slot, stale_reason) = gpu_event_damage_freeze(
+            resized, pending, 4)
+        expect(stale_reason).to_equal("stale-device-generation")
+        expect(stale_slot).to_equal(-1)
+        expect(unchanged.surface.device_generation).to_equal(2)
+        expect(reset.device_generation).to_equal(2)
+        val (resource, resource_reason) = gpu_event_damage_accumulate_for_surface(
+            reset, resized.surface,
+            batch(4u64, 8u64, GPU_EVENT_KIND_HOST_EFFECT_COMPLETION), 8,
+            [10, 20, 30, 40], 120, 120)
+        expect(resource_reason).to_equal("accumulated")
+        val (animated, animation_reason) = gpu_event_damage_accumulate_for_surface(
+            resource, resized.surface,
+            batch(4u64, 9u64, GPU_EVENT_KIND_TIMER), 9,
+            [70, 5, 20, 10], 120, 120)
+        expect(animation_reason).to_equal("accumulated")
+        val (recording, _, wake_slot, wake_reason) = gpu_event_damage_freeze(
+            resized, animated, 4)
+        expect(wake_reason).to_equal("damage-frozen")
+        expect(wake_slot).to_be_greater_than(-1)
+        expect(recording.slots[wake_slot].event_generation).to_equal(9)
+
+    it "fails closed for the legacy unbound constructor":
+        # @req REQ-GPUUI-005
+        val legacy = gpu_pending_event_damage(4u64)
+        val (pending, reason) = gpu_event_damage_accumulate(
+            legacy, batch(4u64, 1u64, GPU_EVENT_KIND_POINTER_MOVE), 1,
+            [0, 0, 1, 1], 10, 10)
+        expect(reason).to_equal("surface-identity-required")
+        expect(pending.surface_id).to_equal(0)

@@ -4,8 +4,7 @@
 # memory and file-backed mappings for the loader. Replaces the old stub that
 # returned 0/false for everything.
 
-@unsafe(reason: "raw file-size status ABI", capabilities: [ffi])
-extern fn rt_file_size(path: text) -> i64
+use std.nogc_sync_mut.io_runtime.{file_size_signed}
 
 # Low-level syscall SFFI (raw address-based wrappers in C runtime)
 @unsafe(reason: "raw nullable mmap address ABI", capabilities: [ffi, raw_ptr])
@@ -51,8 +50,7 @@ extern fn rt_bytes_from_raw(addr: i64, length: i64) -> [u8]
 
 @always_inline
 fn _sffi_file_size(path: text) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_file_size(path)
+    file_size_signed(path)
 
 @always_inline
 fn _sffi_open_fd(path: text, flags: i64, mode: i64) -> i64:
@@ -182,6 +180,11 @@ fn native_munlock(address: i64, size: i64) -> bool:
 # Native Executable Memory
 # ============================================================================
 
+# Production-owner accounting for executable mappings. SegmentMapper imports
+# this sibling module, so leak evidence must observe the same allocation owner
+# rather than the historical nested compatibility implementation.
+var EXEC_MEMORY_ALLOCS: Dict<i64, i64> = {}
+
 fn native_alloc_exec_memory(size: i64) -> i64:
     # Allocate RW and require the existing explicit RW->RX transition before
     # execution; never create a transient RWX mapping.
@@ -190,6 +193,7 @@ fn native_alloc_exec_memory(size: i64) -> i64:
     val addr = _sffi_mmap_raw(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
     if addr == MAP_FAILED:
         return 0
+    EXEC_MEMORY_ALLOCS[addr] = size
     addr
 
 fn native_alloc_rw_memory(size: i64) -> i64:
@@ -199,7 +203,19 @@ fn native_alloc_rw_memory(size: i64) -> i64:
 fn native_free_exec_memory(address: i64, size: i64) -> bool:
     if address == 0 or size <= 0:
         return false
-    _sffi_munmap_raw(address, size) == 0
+    val released = _sffi_munmap_raw(address, size) == 0
+    if released:
+        EXEC_MEMORY_ALLOCS = EXEC_MEMORY_ALLOCS.remove(address)
+    released
+
+fn native_exec_memory_count() -> i64:
+    EXEC_MEMORY_ALLOCS.len() as i64
+
+fn native_exec_memory_total() -> i64:
+    var total = 0i64
+    for address in EXEC_MEMORY_ALLOCS.keys():
+        total = total + EXEC_MEMORY_ALLOCS[address]
+    total
 
 @unsafe(reason: "caller owns executable mapping and write extent", capabilities: [raw_ptr])
 fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:

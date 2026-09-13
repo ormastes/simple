@@ -10,9 +10,11 @@ use std.spec.step
 
 use std.spec.*
 use std.skia.entity.geometry.{SkRect, sk_rect_make_xywh}
-use std.skia.entity.paint.{SkPaint, sk_paint_fill}
+use std.skia.entity.paint.{SkPaint, sk_paint_fill, sk_paint_stroke}
 use std.skia.entity.color.{sk_color_argb}
-use std.skia.entity.picture.{SkPicture, sk_picture_recorder_new, sk_picture_op_draw_rect}
+use std.skia.entity.enums.{SkPaintStyle}
+use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind, sk_picture_recorder_new, sk_picture_op_draw_rect, sk_picture_op_draw_rrect, sk_picture_op_draw_paint, sk_picture_op_draw_path}
+use std.skia.entity.path.{sk_path_new}
 use std.skia.bridge.engine2d_bridge.{skia_render_picture_on_engine2d, skia_render_picture_on_engine2d_reported}
 
 
@@ -32,6 +34,46 @@ fn _record_two_rects(w: i32, h: i32, bg: i64, fg: i64) -> SkPicture:
     # Foreground 8x6 rect at (4,3) — interior pixel (8,5) is inside.
     val fg_rect = sk_rect_make_xywh(4.0, 3.0, 8.0, 6.0)
     rec.record(sk_picture_op_draw_rect(fg_rect, sk_paint_fill(fg)))
+    rec.finish_recording()
+
+# Background fill via DrawPaint (whole-canvas) followed by a stroked rect
+# outline. Both were previously counted as skipped.
+fn _record_paint_and_stroked_rect(w: i32, h: i32, bg: i64, line: i64) -> SkPicture:
+    val full = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+    val rec = sk_picture_recorder_new().begin_recording(full)
+    rec.record(sk_picture_op_draw_paint(sk_paint_fill(bg)))
+    # 10x8 outline at (4,3): edge pixel (4,3) is on the border, (8,6) is interior.
+    rec.record(sk_picture_op_draw_rect(sk_rect_make_xywh(4.0, 3.0, 10.0, 8.0), sk_paint_stroke(line, 1.0)))
+    rec.finish_recording()
+
+# Background fill, then a filled rounded rect.
+fn _record_rrect(w: i32, h: i32, bg: i64, fg: i64) -> SkPicture:
+    val full = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+    val rec = sk_picture_recorder_new().begin_recording(full)
+    rec.record(sk_picture_op_draw_rect(full, sk_paint_fill(bg)))
+    rec.record(sk_picture_op_draw_rrect(sk_rect_make_xywh(4.0, 3.0, 12.0, 10.0), 3.0, 3.0, sk_paint_fill(fg)))
+    rec.finish_recording()
+
+# Background fill, then a filled oval. DrawOval is what SkCanvas.draw_oval and
+# SkCanvas.draw_circle record.
+fn _record_oval(w: i32, h: i32, bg: i64, fg: i64) -> SkPicture:
+    val full = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+    val rec = sk_picture_recorder_new().begin_recording(full)
+    rec.record(sk_picture_op_draw_rect(full, sk_paint_fill(bg)))
+    val oval = sk_rect_make_xywh(4.0, 2.0, 12.0, 10.0)
+    rec.record(SkPictureOp(
+        kind: SkPictureOpKind.DrawOval, rect: oval, rx: 0.0, ry: 0.0,
+        path: None, image: None, paint: sk_paint_fill(fg), x: 0.0, y: 0.0
+    ))
+    rec.finish_recording()
+
+# A DrawPath op, which still has no Engine2D primitive: it must stay COUNTED,
+# never silently dropped.
+fn _record_path(w: i32, h: i32, bg: i64) -> SkPicture:
+    val full = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+    val rec = sk_picture_recorder_new().begin_recording(full)
+    rec.record(sk_picture_op_draw_rect(full, sk_paint_fill(bg)))
+    rec.record(sk_picture_op_draw_path(sk_path_new().move_to(1.0, 1.0).line_to(5.0, 5.0), sk_paint_fill(bg)))
     rec.finish_recording()
 
 describe "SkiaEngine2DBridge":
@@ -84,3 +126,63 @@ describe "SkiaEngine2DBridge":
 
         expect(result.report.mapped_rects).to_equal(2)
         expect(result.report.skipped).to_equal(0)
+
+    it "maps DrawPaint to a whole-canvas fill and a stroked rect to an outline":
+        # @req REQ-SSPEC-LIB
+        step("maps DrawPaint to a whole-canvas fill and a stroked rect to an outline")
+        val w = 24
+        val h = 16
+        val bg = sk_color_argb(255, 0x11, 0x22, 0x33)
+        val line = sk_color_argb(255, 0x00, 0xFF, 0x00)
+        val result = skia_render_picture_on_engine2d_reported(_record_paint_and_stroked_rect(w, h, bg, line), w, h, "cpu_simd")
+
+        expect(result.pixels.len()).to_equal(w * h)
+        # DrawPaint painted the whole canvas, including a corner far from the rect.
+        expect(result.pixels[23 + 15 * w]).to_equal(0xFF112233u32)
+        # The stroke drew the outline, not a filled block: the top-left corner of
+        # the rect is the line colour, the interior is still the background.
+        expect(result.pixels[4 + 3 * w]).to_equal(0xFF00FF00u32)
+        expect(result.pixels[8 + 6 * w]).to_equal(0xFF112233u32)
+        expect(result.report.skipped).to_equal(0)
+        expect(result.report.mapped_rects).to_equal(2)
+
+    it "maps DrawRRect onto the rounded-rect primitive":
+        # @req REQ-SSPEC-LIB
+        step("maps DrawRRect onto the rounded-rect primitive")
+        val w = 24
+        val h = 16
+        val bg = sk_color_argb(255, 0x11, 0x22, 0x33)
+        val fg = sk_color_argb(255, 0xAB, 0xCD, 0xEF)
+        val result = skia_render_picture_on_engine2d_reported(_record_rrect(w, h, bg, fg), w, h, "cpu_simd")
+
+        # Centre of the rounded rect is filled; the clipped corner is not.
+        expect(result.pixels[10 + 8 * w]).to_equal(0xFFABCDEFu32)
+        expect(result.pixels[4 + 3 * w]).to_equal(0xFF112233u32)
+        expect(result.report.skipped).to_equal(0)
+        expect(result.report.mapped_rects).to_equal(2)
+
+    it "maps DrawOval onto the filled-ellipse primitive":
+        # @req REQ-SSPEC-LIB
+        step("maps DrawOval onto the filled-ellipse primitive")
+        val w = 24
+        val h = 16
+        val bg = sk_color_argb(255, 0x11, 0x22, 0x33)
+        val fg = sk_color_argb(255, 0xFF, 0x00, 0xFF)
+        val result = skia_render_picture_on_engine2d_reported(_record_oval(w, h, bg, fg), w, h, "cpu_simd")
+
+        # Centre of the oval is filled; the bounding-box corner is outside it.
+        expect(result.pixels[10 + 7 * w]).to_equal(0xFFFF00FFu32)
+        expect(result.pixels[4 + 2 * w]).to_equal(0xFF112233u32)
+        expect(result.report.skipped).to_equal(0)
+        expect(result.report.mapped_ovals).to_equal(1)
+
+    it "still counts a DrawPath op as skipped rather than dropping it":
+        # @req REQ-SSPEC-LIB
+        step("still counts a DrawPath op as skipped rather than dropping it")
+        val w = 24
+        val h = 16
+        val bg = sk_color_argb(255, 0x11, 0x22, 0x33)
+        val result = skia_render_picture_on_engine2d_reported(_record_path(w, h, bg), w, h, "cpu_simd")
+
+        expect(result.report.mapped_rects).to_equal(1)
+        expect(result.report.skipped).to_equal(1)

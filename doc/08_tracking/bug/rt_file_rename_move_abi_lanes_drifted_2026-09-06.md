@@ -1,4 +1,5 @@
 # `rt_file_rename` / `rt_file_move` ABI has drifted across four lanes
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/bootstrap/file_rename_move_abi_contract_spec.spl -> 0 passed, 3 failed, still reproduces)
 
 **Date:** 2026-09-06
 **Found by:** sspec score-80 wave 16B (modernizing
@@ -43,3 +44,6 @@ This record was filed twice. The first copy was created by wave 16B and then
 disappeared from the working tree before it was committed — untracked files in
 this shared checkout are periodically swept by peer sessions. Filed again and
 committed in the same change as the spec it documents.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/bootstrap/file_rename_move_abi_contract_spec.spl` on the deployed seed; 3 of 3 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,0 +1,121 @@
+# codex-impl
+# Compiler-owned bridge from canonical composite publication to lifecycle facts.
+
+use compiler.driver.environment_variant_composite_publication_v1.{EnvironmentCompositePublicationV1, environment_composite_publication_sidecars_valid_v1}
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.environment_variant_policy_digest256_v1
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.*
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.*
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.*
+
+pub enum EnvironmentCompositeReceiptErrorV1:
+    InvalidPlanSidecar
+    InvalidArtifactEvidence
+    MissingRootArtifact
+    ReceiptIdentityMismatch
+    ReceiptTransitionFailed
+    MappingPlanMismatch
+
+fn _same(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+fn _declared(v: EnvironmentDigest256V1) -> bool:
+    v.w0 != 0u64 or v.w1 != 0u64 or v.w2 != 0u64 or v.w3 != 0u64
+
+fn _artifact_valid(row: PublicationArtifactEvidenceV1) -> bool:
+    row.provider_generation > 0u64 and
+    _same(row.artifact_digest, row.observed_artifact_digest) and
+    artifact_trust_receipt_valid_v1(row.trust_receipt) and
+    row.trust_receipt.authentication_status == ENV_ARTIFACT_TRUST_AUTHENTICATED_V1 and
+    _same(row.trust_receipt.artifact_digest, row.artifact_digest) and
+    _same(row.trust_receipt.trust_policy_digest, row.required_trust_policy_digest) and
+    _same(row.trust_receipt.verifier_identity, row.required_verifier_identity) and
+    row.trust_receipt.verifier_generation >= row.minimum_verifier_generation
+
+fn _publication_valid(
+    publication: EnvironmentCompositePublicationV1,
+    identity: EnvironmentVariantReceiptIdentityV1
+) -> Result<(), EnvironmentCompositeReceiptErrorV1>:
+    val plan = publication.admission.plan
+    val policy_digest = match environment_variant_policy_digest256_v1(
+        publication.policy_explanation_digest):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentCompositeReceiptErrorV1.InvalidPlanSidecar)
+    if not environment_composite_publication_sidecars_valid_v1(publication) or
+       not _same(policy_digest, plan.policy_digest) or
+       publication.admission.schema_version != ENV_PUBLICATION_ADMISSION_SCHEMA_V1 or
+       not _declared(publication.admission.dependency_closure_digest) or
+       binding_plan_validate_v1(plan, publication.facet_bindings,
+        publication.selected_variant_identities.len() as u32,
+        publication.rejections) != Ok(()) or
+       plan.facet_bindings.offset != 0u32 or
+       plan.facet_bindings.count != publication.facet_bindings.len() as u32 or
+       plan.selected_variant_identities.offset != 0u32 or
+       plan.selected_variant_identities.count != publication.selected_variant_identities.len() as u32 or
+       plan.rejections.offset != 0u32 or
+       plan.rejections.count != publication.rejections.len() as u32 or
+       publication.facet_bindings.len() != publication.selected_variant_identities.len():
+        return Err(EnvironmentCompositeReceiptErrorV1.InvalidPlanSidecar)
+    var i = 0
+    while i < publication.facet_bindings.len():
+        if not _same(publication.facet_bindings[i].variant_identity,
+                     publication.selected_variant_identities[i]):
+            return Err(EnvironmentCompositeReceiptErrorV1.InvalidPlanSidecar)
+        i = i + 1
+    if not _same(plan.environment_identity, identity.environment_identity) or
+       plan.environment_generation != identity.environment_generation or
+       not _same(publication.admission.root_provider_identity, identity.provider_identity) or
+       not _same(publication.admission.root_variant_identity, identity.variant_identity):
+        return Err(EnvironmentCompositeReceiptErrorV1.ReceiptIdentityMismatch)
+    var root_found = false
+    i = 0
+    while i < publication.admission.admitted_artifacts.len():
+        val row = publication.admission.admitted_artifacts[i]
+        if not _artifact_valid(row):
+            return Err(EnvironmentCompositeReceiptErrorV1.InvalidArtifactEvidence)
+        var j = 0
+        while j < i:
+            val prior = publication.admission.admitted_artifacts[j]
+            if _same(row.provider_identity, prior.provider_identity) and
+               _same(row.variant_identity, prior.variant_identity):
+                return Err(EnvironmentCompositeReceiptErrorV1.InvalidArtifactEvidence)
+            j = j + 1
+        if _same(row.provider_identity, identity.provider_identity) and
+           _same(row.variant_identity, identity.variant_identity) and
+           _same(row.artifact_digest, identity.artifact_digest) and
+           row.provider_generation == identity.provider_generation:
+            root_found = true
+        i = i + 1
+    if not root_found: return Err(EnvironmentCompositeReceiptErrorV1.MissingRootArtifact)
+    Ok(())
+
+pub fn environment_composite_receipt_mark_eligible_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    publication: EnvironmentCompositePublicationV1
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentCompositeReceiptErrorV1>:
+    if not environment_variant_receipt_identity_matches_v1(receipt, identity):
+        return Err(EnvironmentCompositeReceiptErrorV1.ReceiptIdentityMismatch)
+    match _publication_valid(publication, identity):
+        case Err(reason): return Err(reason)
+        case Ok(_): pass
+    match environment_variant_receipt_mark_eligible_v1(receipt, identity,
+        publication.admission.plan.plan_digest):
+        case Ok(value): Ok(value)
+        case Err(_): Err(EnvironmentCompositeReceiptErrorV1.ReceiptTransitionFailed)
+
+pub fn environment_composite_receipt_mark_mapped_v1(
+    receipt: EnvironmentVariantReceiptV1,
+    identity: EnvironmentVariantReceiptIdentityV1,
+    publication: EnvironmentCompositePublicationV1,
+    mapping_handle: u64
+) -> Result<EnvironmentVariantReceiptV1, EnvironmentCompositeReceiptErrorV1>:
+    if not environment_variant_receipt_identity_matches_v1(receipt, identity):
+        return Err(EnvironmentCompositeReceiptErrorV1.ReceiptIdentityMismatch)
+    match _publication_valid(publication, identity):
+        case Err(reason): return Err(reason)
+        case Ok(_): pass
+    if not _same(receipt.eligibility_digest, publication.admission.plan.plan_digest):
+        return Err(EnvironmentCompositeReceiptErrorV1.MappingPlanMismatch)
+    match environment_variant_receipt_mark_mapped_v1(receipt, identity, mapping_handle):
+        case Ok(value): Ok(value)
+        case Err(_): Err(EnvironmentCompositeReceiptErrorV1.ReceiptTransitionFailed)

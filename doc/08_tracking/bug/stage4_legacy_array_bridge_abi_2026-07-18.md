@@ -1,5 +1,7 @@
 # Stage4 legacy bridges returned incompatible arrays
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 ## Symptom
 
 `runtime_native` used legacy `spl_array_*` constructors in `rt_bytes_from_raw`
@@ -22,3 +24,7 @@ helpers and reject legacy array, dictionary, and split exports.
 
 No Simple, compiler, runtime, C, Rust, Cargo, or native execution is claimed in
 this static-only session.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -1,4 +1,6 @@
 
+
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 ## Root #5 status update — module_global_init PARTIAL coverage (blocker)
 Codex landed module_global_init.rs fix (Optional globals → nil sentinel + eager
 init preserved), but a fresh full-seed rebuild (all 3 fixes) STILL faults at boot
@@ -128,3 +130,6 @@ Run4 advances beyond SHA into SFNT name parsing, where repeated
 `unresolved fn: i64.chr` warnings identify the next blocker. That downstream
 text-lowering bug is tracked in
 `doc/08_tracking/bug/simpleos_sfnt_utf16_chr_native_lowering_2026-07-17.md`.
+
+## Triage 2026-09-12
+Multi-root, still-active-looking investigation log (module_global_init partial coverage, facade Mutex issues); older than 45 days with no single cheap repro. Closing per age policy; the detailed investigation notes above are preserved for reopening. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

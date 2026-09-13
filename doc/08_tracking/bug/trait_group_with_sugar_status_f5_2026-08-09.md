@@ -1,5 +1,7 @@
 # Trait-group `with` sugar — measured status (stream F5, 2026-08-09)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Supersedes the "parser rejects `trait X with A, B:`" claim in
 `src/lib/common/debug/debug_profiler.spl` (lines 15-20) and in
 `trait_group_with_sugar_unwired_and_from_aot_if_val_2026-08-09.md`.
@@ -98,3 +100,7 @@ between the deployed binary and `5b31f9e687c`; not determined.
 A deploy of a P0-carrying binary is **warranted but NOT performed** here
 (per the hard constraint). Recommend it be done through the normal
 bootstrap lane, not by copying this cargo artifact.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

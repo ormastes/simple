@@ -1,4 +1,5 @@
 # SimpleOS riscv64 in-guest hello world: native GREEN, interpreter blocked on Stage2 admission
+**Status:** OPEN (unverified 2026-09-12)
 
 Date: 2026-08-31
 Base: `goal/simpleos-b1-merge-clobber-restore-20260831` @ `91b6b9f28dd`
@@ -135,3 +136,6 @@ Separately, autodiscovery compiles `*.inc.c` files as standalone translation
 units, which fails for four of them under `arch/riscv64/boot/`. It is non-fatal
 today (they are `#include`d by the real TU) but it makes every riscv64 build log
 carry spurious "failed to compile" lines that mask real errors.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

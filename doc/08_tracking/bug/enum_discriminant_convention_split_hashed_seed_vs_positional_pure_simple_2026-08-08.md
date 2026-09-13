@@ -198,3 +198,7 @@ non-negotiable guardrail, in priority order:
   primitive defect owned by another lane (agent `a8b04238e9b9afc61`). `Result`
   variants carry payloads, so this finding does not depend on that primitive
   being sound.
+
+## Triage 2026-09-13
+
+Confirmed unchanged: the doc's own "Recommended fix (converge, or fence)" section documents this as an architectural convention split between the Rust seed's hashed enum discriminants (`codegen/instr/result.rs`) and pure-Simple's positional convention, not yet converged. A real fix requires either a Rust-seed codegen change (cargo build/redeploy cycle) or a cross-runtime fencing decision — both out of scope for this pure-Simple TDD pass. No live cross-over was found (per "Reachability" section), so severity remains low today. Leaving OPEN, no code change made.

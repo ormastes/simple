@@ -1,5 +1,7 @@
 # `text.index_of` on a substring receiver reported as returning a bool
 
+**Status:** CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`; pinned by a regression spec
+
 ## Status
 
 **Reported, NOT REPRODUCED on the binary available at the time of writing.**
@@ -149,3 +151,46 @@ Note the two remaining arguments *against* `index_of`, unchanged:
 Re-run the reproducer on a self-hosted pure-Simple binary produced by
 `bin/simple build bootstrap`, and either promote this to Open with that
 transcript or retract it.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Re-check 2026-09-12 (BUGFIX-5)
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, sha256 `3d120a6f`), worktree `/home/yoon/dev/simple-bugfix-5`
+at base `89c5e3f865d`.
+
+The reporter's own reproducer, run verbatim:
+
+```
+$ bin/simple run idx.spl
+1 named            = 14
+2 sub-temp         = 11
+3 trim-temp        = 11
+5 named-line       = 11
+```
+
+Line 2 — the failing case — is the correct i64 `11`, not `true`. Not
+reproducible.
+
+Because the failure mode is a *silent* one (a bool coerces to 1 and passes a
+`> 0` guard), this is closed with a regression pin rather than on the probe
+alone: `test/01_unit/lib/common/text_index_of_temp_receiver_spec.spl` (and its
+`test/unit/...` mirror) asserts the offset on a named receiver, a `substring()`
+temporary, a `trim()` temporary, and the full CSS-declaration split the bug
+report said produced garbage. Each assertion checks both the numeric value and
+its rendered text, so a bool result fails on `"true" != "11"` even where the
+numeric compare might coerce.
+
+```
+GREEN test/01_unit/lib/common/text_index_of_temp_receiver_spec.spl outcome=OK declared>=4 executed=4 passed=4 failed=0
+GREEN test/unit/lib/common/text_index_of_temp_receiver_spec.spl    outcome=OK declared>=4 executed=4 passed=4 failed=0
+```
+
+Discrimination check (the spec is not vacuous): flipping the expected
+`sub_offset` from 11 to 12 in a scratch copy fails exactly one example —
+`outcome=ERROR declared>=4 executed=4 passed=3 failed=1`.
+
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 3d120a6f, 44f08f49d0a, spec test/01_unit/lib/common/text_index_of_temp_receiver_spec.spl (+ test/unit mirror)

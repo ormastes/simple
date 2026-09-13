@@ -28,7 +28,13 @@ function assertRegularInventory(stat) {
 
 function openNoFollow(path) {
   if (typeof constants.O_NOFOLLOW !== "number") {
-    throw new Error("secure no-follow inventory opening is unavailable on this host");
+    // Node does not expose CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT) or an
+    // equivalent atomic Windows no-follow primitive.  An lstat -> open ->
+    // fstat sequence is not a substitute: a pathname can be replaced with a
+    // symlink to the same inode between those calls, and the followed handle
+    // then looks identical to the original regular file.  Refuse the
+    // capability rather than claiming a security property we cannot enforce.
+    throw new Error("secure no-follow inventory opening unavailable on this host");
   }
   try { return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
   catch (error) {

@@ -636,10 +636,7 @@ run (which is still not counted as coverage evidence).";
 /// degrade via `SIMPLE_COVERAGE_FALLBACK=interpreter`. Any other value — and
 /// the unset case — fails closed.
 pub fn coverage_interpreter_fallback_opted_in() -> bool {
-    matches!(
-        std::env::var("SIMPLE_COVERAGE_FALLBACK").as_deref(),
-        Ok("interpreter")
-    )
+    matches!(std::env::var("SIMPLE_COVERAGE_FALLBACK").as_deref(), Ok("interpreter"))
 }
 
 /// Decide whether an interpreter-mode run may proceed under `--coverage`.
@@ -1021,11 +1018,8 @@ fn execute_test_files(
                     }
                 }
             }
-            TestExecutionMode::Interpreter if coverage_interpreter_gate(
-                options.coverage,
-                coverage_interpreter_fallback_opted_in(),
-            )
-            .is_err() =>
+            TestExecutionMode::Interpreter
+                if coverage_interpreter_gate(options.coverage, coverage_interpreter_fallback_opted_in()).is_err() =>
             {
                 // FAIL CLOSED: `--coverage` asked for instrumented execution.
                 // Interpreter mode never builds the instrumented artifact
@@ -1036,7 +1030,11 @@ fn execute_test_files(
                 // .claude/rules/vcs.md on the `ERROR — nothing was checked`
                 // convention.
                 if !quiet {
-                    eprintln!("[coverage-abort] {}: {}", path.display(), COVERAGE_NOT_INSTRUMENTED_ERROR);
+                    eprintln!(
+                        "[coverage-abort] {}: {}",
+                        path.display(),
+                        COVERAGE_NOT_INSTRUMENTED_ERROR
+                    );
                 }
                 TestFileResult {
                     path: path.to_path_buf(),

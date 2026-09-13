@@ -1,5 +1,7 @@
 # A `u64` literal above `i64::MAX` fails to parse
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-08-05
 **Area:** compiler / frontend / lexer-parser, lint
 **Severity:** low (workaround exists) — but silent-ish: the diagnostic names
@@ -50,3 +52,7 @@ with a comment pointing here.
 
 Either the literal parses, or the diagnostic names the offending token and
 its position instead of failing the entire file with a file-level PARSE001.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

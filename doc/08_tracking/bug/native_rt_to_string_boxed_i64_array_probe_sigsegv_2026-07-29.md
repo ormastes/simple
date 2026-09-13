@@ -1,5 +1,7 @@
 # Native `rt_to_string` boxed-integer array probe SIGSEGV
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Resolved and verified with a rebuilt phase-2 pure-Simple docgen. The dependent
@@ -63,3 +65,7 @@ DONE Generated 1 docs (1 complete, 0 stubs)
 Build and generation logs are retained under
 `/tmp/simple-docgen-rt-to-string-fix/`. No full bootstrap or Rust-seed fallback
 was used.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

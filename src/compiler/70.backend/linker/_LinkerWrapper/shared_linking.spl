@@ -25,7 +25,7 @@ use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
-use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
 use compiler.backend.linker.object_emitter.{assemble_code_units}
@@ -93,9 +93,11 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     for lib in config.libraries:
         args = args.push("-l{lib}")
 
-    # Dead code elimination and strip (size reduction)
+    # Dead code elimination is always safe; symbol stripping follows the
+    # public native-build --strip contract instead of happening implicitly.
     args = args.push("-Wl,--gc-sections")
-    args = args.push("-Wl,-s")
+    if config.strip_output:
+        args = args.push("-Wl,-s")
 
     # Same duplicate-definition tolerance the Linux/FreeBSD cc path gets from
     # unresolved_symbol_flags_for_cc: runtime.o and runtime_native.o
@@ -202,12 +204,12 @@ fn _link_shared_unix(object_files: [text], output: text, config: NativeLinkConfi
             support_inputs.push(arg)
 
     # Standard libraries
-    if os == "linux":
-        sb.push(" -lc -lpthread -ldl -lm")
-    elif os == "macos" or os == "darwin":
-        sb.push(" -lc -lpthread -lm -lSystem")
-    elif os == "freebsd":
-        sb.push(" -lc -lpthread -lm")
+    # Target-keyed: macOS has no libc/libm/libpthread to link against — libSystem
+    # is all three. See native_all_support.spl and
+    # doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md.
+    for lib in native_link_shared_std_libs(os):
+        sb.push(" ")
+        sb.push(lib)
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
     for flag in native_all_gnu_support_args(support_inputs, os, brew_prefix):
         sb.push(" ")

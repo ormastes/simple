@@ -1,5 +1,7 @@
 # `simple lint` runs the entire pure-Simple linter in the tree-walking interpreter (two stacked de-JIT causes)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-18
 - Status: **OPEN — root cause located and reproduced; fix not landed**
 - Supersedes the "superlinearity not located" section of
@@ -255,3 +257,6 @@ arm because the feed only populates the duplicate-struct map.
 Module-qualified struct resolution across all three engines. Until then the
 sanctioned remedy for a specific collision remains renaming one struct
 (fix option 1), which buys the measured **1.23x** on lint and nothing more.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

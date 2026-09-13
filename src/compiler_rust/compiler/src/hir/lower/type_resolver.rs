@@ -99,10 +99,9 @@ impl Lowerer {
                 // TypeId::ANY branch of `get_field_info`). Count breaks ties
                 // between candidates that agree on the index, which produce
                 // an identical byte offset either way.
-                if best_global
-                    .as_ref()
-                    .is_some_and(|(best_idx, _, best_count, _)| idx > *best_idx || (idx == *best_idx && count <= *best_count))
-                {
+                if best_global.as_ref().is_some_and(|(best_idx, _, best_count, _)| {
+                    idx > *best_idx || (idx == *best_idx && count <= *best_count)
+                }) {
                     continue;
                 }
                 best_global = Some((idx, field_type.clone(), count, struct_name.clone()));
@@ -834,17 +833,34 @@ impl Lowerer {
                         }
                         return Ok((idx, owner_field_ty));
                     }
-                    if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
-                        if crate::hir::lower::trace_field_get_enabled() {
-                            let fpath = self
-                                .current_file
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown");
-                            eprintln!("[FT2] S-GLOBALINFO/{field} struct={name} idx={idx} in {fpath}");
+                    // Receiver-BLIND last resort: `resolve_global_field_info`
+                    // ignores `name` entirely and returns "the struct with the
+                    // most fields that happens to declare this field name".
+                    // Every attempt above is receiver-scoped; this one is not,
+                    // so it must obey the same ambiguity veto the ANY branches
+                    // at the top of this function already apply. Without the
+                    // veto it silently emits a wrong byte offset AND a wrong
+                    // field type — see
+                    // `driver_native_capsule_result_invalid_reason_v1`, where
+                    // `fp.size`/`fp.content_hash` on a `FileFingerprint`
+                    // (size@3:i64, content_hash@1:text) compiled to
+                    // `ldr [ptr,#56]`/`ldr [ptr,#88]` past the end of a
+                    // 32-byte allocation, printed as raw u64/i64, and wrote a
+                    // capsule receipt reading `size=16 content_hash=129` for a
+                    // 1032-byte object.
+                    if !self.is_ambiguous_global_field(field) {
+                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
+                            if crate::hir::lower::trace_field_get_enabled() {
+                                let fpath = self
+                                    .current_file
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown");
+                                eprintln!("[FT2] S-GLOBALINFO/{field} struct={name} idx={idx} in {fpath}");
+                            }
+                            return Ok((idx, field_ty));
                         }
-                        return Ok((idx, field_ty));
                     }
                     let mut best: Option<(usize, TypeId, usize)> = None;
                     for (_, search_ty) in self.module.types.iter() {
@@ -939,8 +955,16 @@ impl Lowerer {
                     if let Some((idx, owner_field_ty)) = self.try_resolve_current_owner_field(field) {
                         return Ok((idx, owner_field_ty));
                     }
-                    if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
-                        return Ok((idx, field_ty));
+                    // Same receiver-blind veto as the ANY and named-struct
+                    // branches above: this arm is reached for VOID/Pointer
+                    // receivers, i.e. exactly when a cross-module dependency
+                    // failed to load, so guessing "the largest struct that
+                    // declares this name" is guessing with no receiver
+                    // information at all.
+                    if !self.is_ambiguous_global_field(field) {
+                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
+                            return Ok((idx, field_ty));
+                        }
                     }
                     // For VOID, Pointer, or other non-struct types (often caused by
                     // cross-module imports where field types resolve to VOID because
@@ -956,11 +980,11 @@ impl Lowerer {
                                         if fname == field {
                                             let count = fields.len();
                                             // Smallest index wins -- memory-safe, see
-                                    // the proof on the TypeId::ANY branch.
-                                    if best
-                                        .as_ref()
-                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                    {
+                                            // the proof on the TypeId::ANY branch.
+                                            if best
+                                                .as_ref()
+                                                .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                            {
                                                 best = Some((idx, *fty, count));
                                             }
                                         }
@@ -971,11 +995,11 @@ impl Lowerer {
                                         if f.name == field {
                                             let count = fields.len();
                                             // Smallest index wins -- memory-safe, see
-                                    // the proof on the TypeId::ANY branch.
-                                    if best
-                                        .as_ref()
-                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                    {
+                                            // the proof on the TypeId::ANY branch.
+                                            if best
+                                                .as_ref()
+                                                .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
+                                            {
                                                 best = Some((idx, f.ty, count));
                                             }
                                         }

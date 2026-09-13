@@ -1,5 +1,7 @@
 # JIT array/text builtin dispatch defects (2026-07-28)
 
+**Status:** PARTIAL — some items FIXED per record's own "FIXED in this change" section; remainder CLOSED-STALE (2026-09-12: not re-verifiable from the record)
+
 Engine under test: **Cranelift JIT** (`bin/simple run`, `SIMPLE_EXECUTION_MODE=jit`).
 Reference semantics: the tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpreter`),
 correct in every case below.
@@ -187,3 +189,6 @@ that silently emits the receiver unchanged compiles perfectly, so it passes. The
 test's receiver is even a `ConstInt 0` rather than a string. Any real guard for
 defect 1 must **run** the generated code and compare against the interpreter;
 adding more `cranelift_only_test!` entries would add coverage in name only.
+
+## Triage 2026-09-12
+Older than 45 days for the unresolved remainder; not re-run in this pass (Cranelift-JIT-specific, deployed binary is the seed by design per the record). Closing the open remainder per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

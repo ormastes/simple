@@ -110,6 +110,11 @@ describe "Vulkan font performance evidence counters":
         val warm_pool_reuse_gate = source.contains("val use_warm_pool = self.frame_batching_enabled and not self.font_oracle_mode") and
             source.contains("self.font_params_pool[pool_index]") and
             source.contains("self.font_descriptor_pool[pool_index]")
+        val scalar_validation_gate = source.contains("fn _vulkan_font_atlas_composite_params_valid(") and
+            source.contains("if not _vulkan_font_atlas_composite_params_valid(\n                batch.atlas_width") and
+            source.contains("val packed = vulkan_font_atlas_composite_params(batch.atlas_width")
+        val discarded_validation_pack_absent = not source.contains(
+            "val packed = vulkan_font_atlas_composite_params(batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),\n                q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count, dst_x.?, dst_y.?, q.color)\n            if packed.len() != VULKAN_FONT_PARAMS_BYTES")
         val pool_grows_only_on_first_use = source.contains("self.font_params_pool.push(params)") and
             source.contains("self.font_descriptor_pool.push(descriptor)")
         val dispatch_is_packed_and_batch_capped = source.contains("queued-packed-font-batch") and
@@ -130,6 +135,8 @@ describe "Vulkan font performance evidence counters":
         expect(frame_gate_guards_pending_compute).to_equal(true)  # oracle: the pending compute command is gated on frame batching
         expect(glyph_work_is_queued_not_executed).to_equal(true)  # oracle: the hot path pushes work into frame queues instead of dispatching
         expect(warm_pool_reuse_gate).to_equal(true)  # oracle: warm-pool reuse requires frame batching and non-oracle mode
+        expect(scalar_validation_gate).to_equal(true)  # oracle: validation is side-effect-free while the actual non-packed upload retains its ABI encoder
+        expect(discarded_validation_pack_absent).to_equal(true)  # oracle: pre-flight never rebuilds and discards a 52-byte record per glyph
         expect(pool_grows_only_on_first_use).to_equal(true)  # oracle: pools grow only when the warm slot is missing
         expect(dispatch_is_packed_and_batch_capped).to_equal(true)  # oracle: dispatch consumes the packed batch and enforces the glyph cap
         expect(empty_frame_short_circuits).to_equal(true)  # oracle: an empty frame must not reach the dispatch path

@@ -16,7 +16,7 @@ use simple_parser::Parser;
 use std::path::{Path, PathBuf};
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::stdlib_variant::stdlib_root_candidates;
+use crate::stdlib_variant::stdlib_root_candidates_present;
 
 const STDLIB_FAMILY_DIRS: &[&str] = &[
     "nogc_async_mut",
@@ -745,7 +745,7 @@ impl ModuleResolver {
                     for root in stdlib_roots {
                         if p_is_dir(&root) {
                             if stdlib_segments.is_empty() {
-                                for candidate in stdlib_root_candidates(&root) {
+                                for candidate in stdlib_root_candidates_present(&root) {
                                     if let Ok(resolved) = resolve_stdlib_namespace_from_root(&candidate, path) {
                                         return Ok(resolved);
                                     }
@@ -761,7 +761,7 @@ impl ModuleResolver {
                                         }
                                     }
                                 }
-                                for candidate in stdlib_root_candidates(&root) {
+                                for candidate in stdlib_root_candidates_present(&root) {
                                     if let Ok(resolved) =
                                         resolve_stdlib_from_root(self, &candidate, stdlib_segments, path)
                                     {
@@ -990,7 +990,7 @@ impl ModuleResolver {
         let manifest = if let Some(manifest) = &resolved.manifest {
             Some(manifest.clone())
         } else if resolved.is_directory && resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
-            let mut source = std::fs::read_to_string(&resolved.path)
+            let mut source = crate::read_trace::rts(file!(), line!(), &resolved.path)
                 .map_err(|e| crate::error::factory::failed_to_read_file(&resolved.path, &e))?;
             if source.contains('\r') {
                 source = source.replace('\r', "");

@@ -1,5 +1,7 @@
 # Binding a class-typed FIELD to a local snapshots it — interpreter only
 
+**Status:** OPEN (unverified 2026-09-12)
+
 > **Root cause lives elsewhere — see
 > `interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md`**,
 > the canonical record for the class-value-identity family (list index / field
@@ -310,3 +312,6 @@ got worse; it says the closure was never checked against the artifact it blocks.
 
 Not done here, deliberately: the spec was **not edited**, no source was changed
 to make anything pass, and the disposition line above was **not flipped**.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

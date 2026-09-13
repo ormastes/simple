@@ -10,7 +10,7 @@ import { WorktreeOverlayStore } from "../../src/storage/overlay_store.js";
 import { ImmutableSnapshotStore, createSnapshotMetadata, computeSnapshotId } from "../../src/storage/snapshot_store.js";
 import { createProjectRelation } from "../../src/workspace/linked_project.js";
 import { normalizeRelativePath } from "../../src/workspace/paths.js";
-import { WorkspaceRegistry } from "../../src/workspace/registry.js";
+import { WorkspaceRegistry, isWorkspaceRegistryV1 } from "../../src/workspace/registry.js";
 import { createWorktreeRecord, deriveWorktreeUid } from "../../src/workspace/worktree.js";
 
 const PROJECT_ONE = "P-000000000000000000000000000000A1";
@@ -37,6 +37,15 @@ function snapshotInput(overrides = {}) {
     ...overrides
   };
 }
+
+test("workspace registry exports one live brand predicate", () => {
+  const root = tempRoot();
+  try {
+    const registry = new WorkspaceRegistry({ root });
+    assert.equal(isWorkspaceRegistryV1(registry), true);
+    assert.equal(isWorkspaceRegistryV1(Object.create(WorkspaceRegistry.prototype)), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("project relations keep semantic dependency separate from physical linkage", () => {
   const relation = createProjectRelation({

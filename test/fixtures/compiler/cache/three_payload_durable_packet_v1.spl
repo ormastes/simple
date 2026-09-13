@@ -1,0 +1,81 @@
+# Shared immutable packet fixture: logical validation only; no host authority.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_cache_encode_envelope_v1,
+    canonical_cache_kind_compile_snapshot_v1,
+    canonical_cache_kind_public_summary_v1
+}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_digest_v1,
+    generation_manifest_encode_v1
+}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_digest_v1
+}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedCasTypedIdentityV1, VerifiedGenerationRootV1,
+    VerifiedGenerationPinV1, VerifiedCasReadObjectV1,
+    VerifiedGenerationDurableBindingV1, verified_generation_pin_snapshot_v1
+}
+use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.*
+
+fn durable_d(label: text) -> text: sha256_text(label)
+
+pub fn durable_packet_v1(generation: i64, label: text,
+        journal_prefix: text = "", action_override: text? = nil
+) -> ThreePayloadDurablePublicationPacketV1:
+    val compile_bytes = canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_compile_snapshot_v1(), 1,
+        text_to_bytes("compile-" + label))
+    val summary_bytes = canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_public_summary_v1(), 1,
+        text_to_bytes("summary-" + label))
+    val compile_digest = verified_cas_kind_digest_v1("compile_snapshot", compile_bytes)
+    val summary_digest = verified_cas_kind_digest_v1("public_summary", summary_bytes)
+    val manifest = GenerationManifestV1(schema: 1,
+        snapshot_digest: compile_digest,
+        catalog_digest: durable_d("catalog-" + label),
+        summary_refs: [summary_digest], scope_refs: [], rr_shard_refs: [],
+        forward_manifest_refs: [], portable_refs: [], target_refs: [],
+        diagnostic_refs: [])
+    val manifest_digest = generation_manifest_digest_v1(manifest)
+    val prepared = PreparedThreePayloadGenerationV1(manifest: manifest,
+        manifest_digest: manifest_digest,
+        immutable_objects: [ThreePayloadImmutableObjectV1(
+            digest: summary_digest, kind: "public_summary", bytes: summary_bytes)])
+    val root = VerifiedGenerationRootV1(generation: generation,
+        manifest_digest: manifest_digest)
+    val epoch = generation * 2 + 100
+    val pins = verified_generation_pin_snapshot_v1(epoch,
+        [VerifiedGenerationPinV1(pin_id: "pin-" + label, root: root)], []).unwrap()
+    val objects = [
+        VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "generation_manifest", digest: manifest_digest),
+            canonical_bytes: generation_manifest_encode_v1(manifest)),
+        VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "compile_snapshot", digest: compile_digest),
+            canonical_bytes: compile_bytes),
+        VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "public_summary", digest: summary_digest),
+            canonical_bytes: summary_bytes)
+    ]
+    val journal = ActionRootJournalV1.recovered(journal_prefix, generation).unwrap()
+    val action_digest = action_override ?? durable_d("action-" + label)
+    val append = journal.prepare(action_digest, "public_summary", summary_digest,
+        manifest_digest).unwrap()
+    journal.accept_durable(append).unwrap()
+    val journal_digest = sha256_text(journal.bytes)
+    val durable = VerifiedGenerationDurableBindingV1(generation: generation,
+        sequence: append.record.sequence, writer_epoch: epoch,
+        operation_digest: append.operation_digest,
+        host_receipt_digest: durable_d("host-" + label),
+        journal_digest: journal_digest,
+        accepted_journal_bytes: journal.bytes.len(),
+        accepted_journal_prefix_digest: journal_digest,
+        projection_applied: true, projection_digest: manifest.catalog_digest)
+    ThreePayloadDurablePublicationPacketV1(prepared: prepared,
+        action_digest: action_digest, root: root, pins: pins, objects: objects,
+        journal: journal, durable: durable)

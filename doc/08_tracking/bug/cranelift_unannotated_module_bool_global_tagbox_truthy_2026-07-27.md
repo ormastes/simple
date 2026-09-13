@@ -1,7 +1,7 @@
 # Un-annotated module-level `val x = false` is stored tag-boxed (19) and reads TRUTHY
 
 - **ID:** cranelift_unannotated_module_bool_global_tagbox_truthy_2026-07-27
-- **Status:** OPEN — root-caused, reproduced at object level, not fixed
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high (silent wrong-branch; no diagnostic, no crash)
 - **Backend:** Cranelift. LLVM backend not tested (see Unverified).
 - **Trigger config:** `--entry-closure --mode dynload --emit-archive --target x86_64-unknown-none --opt-level=none`
@@ -216,3 +216,6 @@ objdump -s -j .rodata.subsection mod_0.o     # _B slot reads 13 (=19), not 00
 - `doc/08_tracking/bug/llvm_backend_missing_module_init_heap_globals_2026-06-15.md`
   — the LLVM-side analogue of the heap/text module-init mechanism.
 - Memory topic `project_module_global_mir_lowering_2026-07-25`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

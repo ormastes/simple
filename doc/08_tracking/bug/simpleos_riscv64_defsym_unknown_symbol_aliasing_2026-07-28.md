@@ -1,6 +1,6 @@
 # SimpleOS rv64 link aliases lost call targets (`unknown_N`) to real functions via `--defsym`
 
-- **Status:** OPEN — currently inert, but armed
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** HIGH (latent memory-safety / wrong-signature calls)
 - **Area:** `src/compiler/70.backend/backend/llvm_native_link.spl`, SimpleOS riscv64 link
 - **Filed:** 2026-07-28
@@ -94,3 +94,6 @@ this text on `main` but not necessarily where the code was originally authored.
 - `doc/08_tracking/bug/simpleos_fabricated_rt_guard_weak_real_false_positive_2026-07-28.md`
   — the fabricated-`rt_*` link guard intended to cover the adjacent fail-open
   class on x86_64.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,11 @@
 # Bug: `expect(n).to_equal(0)` mis-reports the integer `0` as falsy
 
+## Closed 2026-09-13 — `to_equal(0)` on a falsy value passes
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's spec fence runs green: `1 example, 0 failures`, `outcome=OK declared>=1 executed=1 passed=1 failed=0`.
+- **measured** Companion negative check: a spec asserting `expect(1).to_equal(2)` still reports `1 example, 1 failure`, so the pass is not a swallowed assertion.
+
 **Date:** 2026-06-29
 **Area:** test runner / sspec matchers (`std.spec`)
 **Severity:** low (correct logic fails the assertion; misleading message)

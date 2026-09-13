@@ -1,4 +1,5 @@
 # sha256_bytes / base58check engine divergence — root cause (2026-07-29)
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/lib/common/encoding/base58_spec.spl -> 16 passed, 0 failed)
 
 Assignment (Fix-Security-Inline, top priority): root-cause the pass-7
 finding that `sha256_bytes` / `_b58_double_sha256_first4` produced
@@ -187,3 +188,6 @@ tag-box bug (pass 3), which stays with the engine investigation lanes —
 now with three named triggers for the same `<<3` family on record
 (empty-list-rebind, loop-carried push-realloc spill, `list`-typed
 parameter) for whoever picks up the compiler-side (cranelift) fix.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/common/encoding/base58_spec.spl` on the deployed seed; the spec now passes in full (16/16), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

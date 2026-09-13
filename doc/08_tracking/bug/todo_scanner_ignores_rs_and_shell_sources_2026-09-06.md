@@ -1,5 +1,7 @@
 # The TODO scanner accepts only `.spl` and `.md`, so `todo_db.sdn` structurally under-reports
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-06 · **Status:** RECORDED (needs a scoping decision, not a reflex fix) ·
 **Measured at:** `a12a19eb775` (worktree checkout of `origin/main`). No build was run.
 
@@ -94,3 +96,7 @@ So the change is at least two coupled edits, and the scope of the second is a de
   carry meaningful TODOs — as opposed to few or none — is unknown. It is possible the
   under-reporting is structural but empirically small. That would change the priority, not
   the correctness of the finding.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

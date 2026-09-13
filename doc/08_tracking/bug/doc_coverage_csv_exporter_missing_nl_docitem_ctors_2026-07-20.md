@@ -1,4 +1,5 @@
 # doc_coverage csv_exporter: undefined `NL` import + DocItem missing create_class/create_enum
+- Status: RESOLVED (2026-09-12) — see Triage 2026-09-12; csv 28/28 and json 26/26 green in both the live and legacy test trees
 
 ## Symptom
 
@@ -107,3 +108,58 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 25 \
   still failing on root causes 2 and 3 above)
 - `test/01_unit/app/doc_coverage/json_export_spec.spl` (same import-path symptom,
   not in shard, untouched)
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/app/doc_coverage/json_export_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-12
+
+Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
+
+RED at the start of this session — both exporters' specs, live and legacy:
+
+```
+test/01_unit/app/doc_coverage/json_export_spec.spl  declared>=26 executed=0  (Cannot resolve module: doc_coverage.reporting.json_exporter)
+test/01_unit/app/doc_coverage/csv_export_spec.spl   declared>=28 executed=28 passed=0 failed=28 (variable `NL` not found)
+```
+
+`create_class` / `create_enum` (root cause 3 in this record) already exist, so
+that half was fixed upstream. Five defects remained, every one of them in
+**product** source rather than in a spec — the two exporters had drifted away
+from the types they read and nothing exercised them:
+
+1. `reporting/{csv,json,terminal}_exporter|renderer.spl` imported `NL` from
+   `std.string`, which does not export it. Now `std.common.text`
+   (`src/lib/common/text.spl:3`, the only definition, and it is exported).
+2. `csv_exporter.spl:26` read `item.file`; the field is `file_path`.
+3. `json_exporter.spl:59` read `file_cov.file_path`; the field is `path`.
+   (The two exporters had the same mistake in opposite directions.)
+4. `CoverageReport.overall_percent()` / `.sdoctest_percent()` and
+   `FileCoverage.coverage_percent()` / `.sdoctest_percent()` were called by
+   `json_exporter.spl` and declared nowhere. Added, with zero items defined as
+   100% — a report with nothing in it has nothing missing — rather than a
+   division by zero.
+5. `DocItem.sdoctest_tags` was read by `csv_exporter.spl:34` and declared
+   nowhere. Added as `[text] = []` so the four `create_*` constructors are
+   untouched.
+
+The spec-side import prefix (root cause 1) was still wrong in the json and csv
+specs in both trees (`doc_coverage.*` -> `app.doc_coverage.*`, the convention
+the record already identified).
+
+GREEN:
+
+```
+test/01_unit/app/doc_coverage/csv_export_spec.spl   outcome=OK executed=28 passed=28
+test/01_unit/app/doc_coverage/json_export_spec.spl  outcome=OK executed=26 passed=26
+test/unit/app/doc_coverage/csv_export_spec.spl      outcome=OK executed=28 passed=28
+test/unit/app/doc_coverage/json_export_spec.spl     outcome=OK executed=26 passed=26
+```
+
+Whole directory re-run before/after: no verdict line moved backwards.
+`markdown_report_spec` 29/29, `threshold_system_spec` 17/17,
+`compiler_integration_spec` 8/8, `group_comment_detection_spec` 30/30 all still
+green. The directory's other reds (`tag_generator`, `tag_validator`,
+`threshold_calculator`, `threshold_parser`, `init_parser` — all `executed=0`,
+plus `sdoctest_coverage` 0/6 and `analysis_exports_defined` 2/3) are untouched
+pre-existing failures in unrelated modules.

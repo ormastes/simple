@@ -498,6 +498,14 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_transient_array_scope_pause" => value::rt_transient_array_scope_pause as *const () as usize,
         "rt_transient_heap_promote" => value::rt_transient_heap_promote as *const () as usize,
         "rt_transient_array_scope_end" => value::rt_transient_array_scope_end as *const () as usize,
+        // Diagnostic heap counters. Registered here as well as in
+        // codegen::runtime_sffi so a JIT-hosted call resolves to the real
+        // counter instead of silently returning nil (which is
+        // indistinguishable from a true 0 and has hidden defects before).
+        "rt_heap_live_bytes" => value::heap::rt_heap_live_bytes as *const () as usize,
+        "rt_heap_peak_bytes" => value::heap::rt_heap_peak_bytes as *const () as usize,
+        "rt_heap_alloc_count" => value::heap::rt_heap_alloc_count as *const () as usize,
+        "rt_heap_free_count" => value::heap::rt_heap_free_count as *const () as usize,
         // Receiver-polymorphic map (array or Option). See rt_map.
         "rt_map" => simple_runtime::rt_map as *const () as usize,
         "rt_array_all" => simple_runtime::rt_array_all as *const () as usize,
@@ -570,6 +578,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "spl_wffi_call_f64_checked" => value::spl_wffi_call_f64_checked as *const () as usize,
         "spl_wffi_call_i64_checked" => value::spl_wffi_call_i64_checked as *const () as usize,
         "spl_wffi_try_call_i64_out" => value::spl_wffi_try_call_i64_out as *const () as usize,
+        "spl_wffi_call_i64_into_bytes" => value::spl_wffi_call_i64_into_bytes as *const () as usize,
         "spl_wffi_call_i64_with_bytes" => value::spl_wffi_call_i64_with_bytes as *const () as usize,
         "spl_wffi_call_i64_with_bytes_checked" => value::spl_wffi_call_i64_with_bytes_checked as *const () as usize,
         "spl_fonts_call_init_blob" => value::spl_fonts_call_init_blob as *const () as usize,
@@ -975,6 +984,7 @@ mod tests {
             "spl_fonts_call_init_blob",
             "spl_fonts_call_init_path",
             "spl_fonts_call_layout_text",
+            "spl_wffi_call_i64_into_bytes",
             "spl_wffi_call_i64_with_bytes",
             "spl_wffi_call_i64_with_bytes_checked",
             "spl_wffi_call_i64_checked",

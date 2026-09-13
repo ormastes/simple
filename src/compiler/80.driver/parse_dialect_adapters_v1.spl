@@ -1,0 +1,259 @@
+# SDN dialect adapter for the parse-result provider seam (EGL package 4
+# follow-up).
+#
+# The design document says only that "Simple, SDN, and sosh need dialect-
+# specific normalization adapters once immutable full result APIs exist"
+# (doc/05_design/compiler/environment_optimized_dynamic_libraries.md, "Scalar
+# parser promotion receipt"). It does not specify what each dialect's normalized
+# record must carry, so the projection here carries the MINIMAL STABLE FIELDS
+# the seam already compares -- an ordered token walk, a span walk, a node digest
+# and a diagnostic digest -- and nothing invented on top. SDN has no separate
+# node API, so its node digest is the canonical encoding `sdn_encode_canonical`
+# already produces (bytewise-sorted keys), rather than a second tree walker
+# written here.
+#
+# NO TOKEN-KIND ENUM IS NAMED HERE, deliberately. `TokenKind`
+# (std.common.sdn.lexer) collides with the compiler frontend's own `TokenKind`
+# (10.frontend/core/lexer_types.spl), and under co-compilation the frontend's
+# wins -- measured. An aliased import cannot help: for the sosh case the same
+# collision fires inside `shell_script.spl` itself, before any importer runs.
+# The observables used instead are read off the real lexer and the real parser:
+# SDN punctuation tokens carry their character as their `text`, so the
+# token-text stream is lossless, and the parser's own acceptance and canonical
+# encoding observe the kind mapping indirectly.
+#
+# The sosh dialect adapter is NOT here. It cannot exist yet: the same collision
+# hits `StmtKind` (os.apps.shell.shell_script vs 10.frontend/parser_types_expr)
+# INSIDE `shell_script.spl` itself, so merely importing the seam and
+# `ScriptEngine` into one spec breaks `ScriptEngine.parse`. Six-line
+# reproduction and the exact fix:
+# doc/08_tracking/bug/shell_stmtkind_collides_with_frontend_stmtkind_2026-09-12.md
+#
+# This provider reaches the same `parse_result_seam_request_v1` as the Simple
+# scalar provider, carries its own computed dialect identity, and is refused by
+# it for a request naming another dialect.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.string_core.{text_to_utf8_bytes}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+use std.common.sdn.lexer.{tokenize}
+use std.common.sdn.parser.{parse_with_spans, parse_with_issues}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+use compiler.driver.parser_scalar_parity_v1.{ParserScalarNormalizedOutputV1}
+use compiler.driver.parse_dialect_identity_v1.{
+    DialectTablesV1,
+    parse_dialect_identity_of_v1,
+    parse_digest_push_u64_v1,
+    parse_digest_push_text_v1,
+    parse_digest_of_v1
+}
+use compiler.driver.parse_result_provider_seam_v1.{
+    PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+    ParseRequestV1,
+    ParseNormalizedResultV1,
+    ParseResultProviderV1,
+    ParseResultRefusalV1,
+    parse_result_source_identity_v1,
+    parse_result_unstamped_dialect_digest_v1
+}
+
+# Seam-local dialect ids, continuing the seam's numbering (1 = Simple).
+pub const PARSE_DIALECT_SDN_V1: u32 = 2u32
+
+const _SDN_PROVIDER_ID: text = "std.common.sdn.parser.scalar.v1"
+
+# ---------------------------------------------------------------- digest material
+
+# The material helpers come from `parse_dialect_identity_v1.spl`; nothing is
+# re-implemented here.
+
+fn _label_digest(label: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, label)
+    parse_digest_of_v1(material)
+
+# `classify` and `action_bits` must answer with an integer, so an observation
+# string is folded. Collisions only weaken discrimination; the observation
+# itself is what carries the meaning, and it is digested directly in the
+# projections.
+fn _fold_text(value: text) -> i64:
+    var code = 17
+    for b in text_to_utf8_bytes(value):
+        code = ((code * 131) + (b as i64)) % 2147483647
+    code
+
+# ---------------------------------------------------------------- SDN dialect
+
+# Probe alphabet: every printable ASCII character plus newline and tab, one unit
+# each. This is the lexer's whole input alphabet, so it is a property of the
+# alphabet rather than a delimiter list copied out of the lexer. A dialect with
+# no kind table has no separate kind domain, so the alphabet IS the domain.
+fn _sdn_probe_units() -> [text]:
+    var units: [text] = []
+    for code in 32..127:
+        units.append(code.to_char())
+    units.append("\n")
+    units.append("\t")
+    units
+
+fn _sdn_kind_name(index: i64) -> text:
+    val units = _sdn_probe_units()
+    if index >= 0 and index < units.len():
+        return units[index]
+    "Unknown({index})"
+
+# Grammar observable: what the real lexer does with the unit in word context.
+# A delimiter splits the probe and appears as its own token text; a word
+# character does not. Nothing about the character map is restated here.
+fn _sdn_lexical_probe(unit: text) -> text:
+    var stream = ""
+    for token in tokenize("a" + unit + "b"):
+        stream = stream + "|" + token.text
+    stream
+
+# Action observable: what the real PARSER builds from the same probe -- its
+# acceptance, its canonical encoding, and its issue count. This is where the
+# token-kind mapping shows through, since the parser branches on it.
+fn _sdn_structural_probe(unit: text) -> text:
+    match parse_with_issues("a" + unit + "b"):
+        case Ok(parsed): "ok:{parsed.1.len()}:" + sdn_encode_canonical(parsed.0)
+        case Err(e): "err:" + e
+
+fn _sdn_classify(unit: text) -> i64:
+    _fold_text(_sdn_lexical_probe(unit))
+
+fn _sdn_action_bits(index: i64) -> i64:
+    _fold_text(_sdn_structural_probe(_sdn_kind_name(index)))
+
+# SDN punctuation tokens carry their character as their text, and a Word token
+# never is one, so the token-text stream is a lossless ordered token walk.
+fn _sdn_token_digest(source: text, path: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, "sdn/parse-tokens/v1")
+    parse_digest_push_text_v1(material, path)
+    val tokens = tokenize(source)
+    parse_digest_push_u64_v1(material, tokens.len() as u64)
+    for token in tokens:
+        parse_digest_push_text_v1(material, token.text)
+    parse_digest_of_v1(material)
+
+# Spans come from the parser's own dotted-path span table. Keys are sorted, so
+# the digest does not depend on hash iteration order.
+fn _sdn_span_digest(source: text, path: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, "sdn/parse-spans/v1")
+    parse_digest_push_text_v1(material, path)
+    match parse_with_spans(source):
+        case Ok(pair):
+            val spans = pair.1
+            val keys = spans.keys().sort()
+            parse_digest_push_u64_v1(material, keys.len() as u64)
+            for key in keys:
+                val span = spans[key]
+                parse_digest_push_text_v1(material, key)
+                parse_digest_push_u64_v1(material, span.line as u64)
+                parse_digest_push_u64_v1(material, span.column as u64)
+                parse_digest_push_u64_v1(material, span.start as u64)
+                parse_digest_push_u64_v1(material, span.end as u64)
+        case Err(e):
+            parse_digest_push_text_v1(material, "unparsed")
+            parse_digest_push_text_v1(material, e)
+    parse_digest_of_v1(material)
+
+# The node digest is the canonical encoding SDN already defines (bytewise-sorted
+# dict keys, inline rendering), not a second tree walk written here.
+fn _sdn_node_digest(source: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, "sdn/parse-nodes/v1")
+    match parse_with_issues(source):
+        case Ok(parsed):
+            parse_digest_push_text_v1(material, "parsed")
+            parse_digest_push_text_v1(material, sdn_encode_canonical(parsed.0))
+        case Err(e):
+            parse_digest_push_text_v1(material, "unparsed")
+            parse_digest_push_text_v1(material, e)
+    parse_digest_of_v1(material)
+
+fn _sdn_diagnostic_digest(source: text) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, "sdn/parse-diagnostics/v1")
+    match parse_with_issues(source):
+        case Ok(parsed):
+            val issues = parsed.1
+            parse_digest_push_u64_v1(material, issues.len() as u64)
+            for issue in issues:
+                parse_digest_push_text_v1(material, issue.kind)
+                parse_digest_push_text_v1(material, issue.path)
+                parse_digest_push_text_v1(material, issue.message)
+                parse_digest_push_u64_v1(material, issue.line as u64)
+                parse_digest_push_u64_v1(material, issue.col as u64)
+        case Err(e):
+            # A fatal SDN parse error has no issue list; it is one diagnostic.
+            parse_digest_push_u64_v1(material, 1u64)
+            parse_digest_push_text_v1(material, "fatal")
+            parse_digest_push_text_v1(material, e)
+    parse_digest_of_v1(material)
+
+pub fn parse_dialect_normalize_sdn_v1(
+    source: text, path: text
+) -> ParserScalarNormalizedOutputV1:
+    ParserScalarNormalizedOutputV1(
+        token_digest: _sdn_token_digest(source, path),
+        span_digest: _sdn_span_digest(source, path),
+        node_digest: _sdn_node_digest(source),
+        diagnostic_digest: _sdn_diagnostic_digest(source))
+
+const _SDN_PROBE_PATH: text = "dialect-probe.sdn"
+const _SDN_PROBE_SOURCE: text = "name: probe\ncount: 2\nitems: [a, b]\nnested: {k: v}\n"
+
+pub fn parse_dialect_tables_sdn_v1() -> DialectTablesV1:
+    val units = _sdn_probe_units()
+    DialectTablesV1(dialect_id: PARSE_DIALECT_SDN_V1,
+        kind_limit: units.len(),
+        kind_name: _sdn_kind_name,
+        classify: _sdn_classify,
+        action_bits: _sdn_action_bits,
+        probe_units: units,
+        probe_output: parse_dialect_normalize_sdn_v1(
+            _SDN_PROBE_SOURCE, _SDN_PROBE_PATH))
+
+fn _sdn_declaration_count(source: text) -> u64:
+    match parse_with_spans(source):
+        case Ok(pair): pair.1.keys().len() as u64
+        case Err(e): 0u64
+
+fn _sdn_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
+    var diagnostics = 0u64
+    match parse_with_issues(request.source_text):
+        case Ok(parsed): diagnostics = parsed.1.len() as u64
+        case Err(e): diagnostics = 1u64
+    Ok(ParseNormalizedResultV1(
+        schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+        provider_id: _SDN_PROVIDER_ID,
+        implementation_identity: _label_digest(_SDN_PROVIDER_ID),
+        generation: 1u64,
+        source_identity: parse_result_source_identity_v1(request.source_text),
+        source_length: request.source_text.len() as u64,
+        dialect_id: request.dialect_id,
+        grammar_digest: parse_result_unstamped_dialect_digest_v1(),
+        actions_digest: parse_result_unstamped_dialect_digest_v1(),
+        schema_digest: parse_result_unstamped_dialect_digest_v1(),
+        semantic_profile_digest: parse_result_unstamped_dialect_digest_v1(),
+        token_count: tokenize(request.source_text).len() as u64,
+        declaration_count: _sdn_declaration_count(request.source_text),
+        diagnostic_count: diagnostics,
+        output: parse_dialect_normalize_sdn_v1(
+            request.source_text, request.source_path)))
+
+pub fn parse_result_provider_sdn_v1() -> ParseResultProviderV1:
+    val tables = parse_dialect_tables_sdn_v1()
+    ParseResultProviderV1(schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
+        provider_id: _SDN_PROVIDER_ID,
+        implementation_identity: _label_digest(_SDN_PROVIDER_ID),
+        generation: 1u64, available: true, unavailable_reason: "",
+        tables: tables,
+        dialect_identity: parse_dialect_identity_of_v1(tables),
+        parse: _sdn_parse)
+

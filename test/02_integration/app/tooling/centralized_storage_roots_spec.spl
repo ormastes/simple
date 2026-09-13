@@ -1,0 +1,38 @@
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.tooling_paths.*
+use app.toolingd.storage.*
+use app.svim.storage.*
+use app.mcp.dap_bridge.*
+use app.mcp.cli_passthrough.*
+use app.mcp.main_editor_tools.*
+use app.mcp.main_lazy_caret_tools.*
+
+fn roots() -> StorageRoots:
+    StorageRoots(
+        user_root: CanonicalPath(value: "/users/alice/simple-storage"),
+        worktree_root: CanonicalPath(value: "/repo/simple/.simple/storage"),
+        user_source: RootSource.Explicit,
+        worktree_source: RootSource.Explicit,
+        policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        worktree_identity: Digest256(w0: 1u64, w1: 2u64, w2: 3u64, w3: 4u64),
+    )
+
+describe "IDE and tooling centralized storage roots":
+    it "keeps reusable identity-safe indexes under the user root":
+        val path = tooling_shared_cache_path_in(roots(), "toolingd-index", "symbols-v1", "workspace-abc").unwrap()
+        expect(path.value).to_start_with("/users/alice/simple-storage/cache/toolingd-index/symbols-v1/")
+        expect(path.value.contains("/.simple/storage/tmp/")).to_equal(false)
+
+    it "keeps sessions diagnostics sockets and temporary payloads under the worktree root":
+        val session = tooling_workspace_path_in(roots(), "toolingd", "session-7", "state.sdn").unwrap()
+        val diagnostics = tooling_workspace_path_in(roots(), "toolingd", "session-7", "diagnostics.sdn").unwrap()
+        val socket = tooling_workspace_path_in(roots(), "toolingd", "session-7", "server.sock").unwrap()
+        val editor = tooling_workspace_path_in(roots(), "svim", "session-8", "buffer-state.sdn").unwrap()
+        expect(session.value).to_start_with("/repo/simple/.simple/storage/tmp/toolingd/session-7/")
+        expect(diagnostics.value).to_start_with("/repo/simple/.simple/storage/tmp/toolingd/session-7/")
+        expect(socket.value).to_start_with("/repo/simple/.simple/storage/tmp/toolingd/session-7/")
+        expect(editor.value).to_start_with("/repo/simple/.simple/storage/tmp/svim/session-8/")
+
+    it "rejects traversal and invalid shared-cache identities":
+        expect(tooling_workspace_path_in(roots(), "toolingd", "../escape", "state").unwrap_err()).to_equal(StoragePathError.InvalidSegment)
+        expect(tooling_shared_cache_path_in(roots(), "toolingd-index", "symbols-v1", "../escape").unwrap_err()).to_equal(StoragePathError.InvalidSegment)

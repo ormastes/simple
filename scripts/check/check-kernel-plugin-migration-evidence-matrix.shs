@@ -1,0 +1,932 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+ROOT=${KPM_ROOT_DIR:-$REPO_ROOT}
+. "$REPO_ROOT/scripts/lib/simple-runtime-provenance.shs"
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+blocked() { echo "STATUS: BLOCKED $1" >&2; exit 2; }
+
+require_file() {
+    [ -f "$ROOT/$1" ] && [ ! -L "$ROOT/$1" ] || fail "phase $phase missing regular implementation seam: $1"
+}
+
+require_text() {
+    grep -Fq -- "$2" "$ROOT/$1" || fail "phase $phase implementation invariant failed: $2"
+}
+
+reject_text() {
+    if grep -Fq -- "$2" "$ROOT/$1"; then
+        fail "phase $phase forbidden implementation text remains: $2"
+    fi
+}
+
+kpm_admitted_runtime() {
+    runtime=${KPM_SIMPLE_BINARY:-}
+    if [ -z "$runtime" ]; then
+        runtime=$(simple_runtime_select "$REPO_ROOT") ||
+            blocked "phase $phase admitted pure-Simple runtime unavailable"
+    fi
+    provenance_root=${KPM_RUNTIME_PROVENANCE_ROOT:-$REPO_ROOT}
+    simple_runtime_provenance_admits "$runtime" "$provenance_root" ||
+        blocked "phase $phase runtime lacks an immutable pure-Simple admission receipt: $runtime"
+    printf '%s\n' "$SIMPLE_RUNTIME_REAL"
+}
+
+phase1_runtime() {
+    kpm_admitted_runtime
+}
+
+phase1_abi_behavior_probe() {
+    probe_root=$1
+    runtime=$(phase1_runtime)
+    private_root=${TMPDIR:-/tmp}/kpm-phase1-private.$$
+    output=$private_root/probe-output.txt
+    rm -rf "$private_root"
+    mkdir -p "$private_root/home" "$private_root/cache" "$private_root/build" "$private_root/tmp"
+    set +e
+    (cd "$probe_root" && env \
+        HOME="$private_root/home" \
+        XDG_CACHE_HOME="$private_root/cache" \
+        TMPDIR="$private_root/tmp" \
+        SIMPLE_BUILD_DIR="$private_root/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" \
+        SIMPLE_LIB="$probe_root/src" \
+        "$runtime" test \
+        test/01_unit/compiler/interface_compat/kpm_phase1_field_type_abi_probe_spec.spl \
+        --mode=interpreter) >"$output" 2>&1
+    probe_rc=$?
+    set -e
+    sentinel=KPM_PHASE1_FIELD_TYPE_ABI_COMPARISON_SENTINEL_V1
+    if ! grep -Fq "$sentinel" "$output"; then
+        cat "$output" >&2
+        rm -rf "$private_root"
+        return 1
+    fi
+    echo "KPM_PHASE1_FIELD_TYPE_ABI_SENTINEL=$sentinel"
+    if [ "$probe_rc" -ne 0 ]; then
+        cat "$output" >&2
+        echo 'KPM_PHASE1_FIELD_TYPE_ABI_STATUS=FAIL'
+        rm -rf "$private_root"
+        return 1
+    fi
+    rm -rf "$private_root"
+    echo 'KPM_PHASE1_FIELD_TYPE_ABI_STATUS=PASS'
+}
+
+phase1_full_abi_matrix_probe() {
+    probe_root=$1
+    runtime=$(phase1_runtime)
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase1-full.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    mkdir -p "$private_root/home" "$private_root/cache" "$private_root/build" "$private_root/tmp"
+    (cd "$probe_root" && env HOME="$private_root/home" XDG_CACHE_HOME="$private_root/cache" \
+        TMPDIR="$private_root/tmp" SIMPLE_BUILD_DIR="$private_root/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+        test/01_unit/compiler/interface_compat/compile_interface_spec.spl \
+        --mode=interpreter) >"$private_root/output" 2>&1 || {
+            cat "$private_root/output" >&2
+            blocked 'phase 1 full field/body ABI matrix could not execute successfully'
+        }
+    echo 'KPM_PHASE1_BODY_INSENSITIVE_RECEIPT=PASS'
+    echo 'KPM_PHASE1_FIELD_SENSITIVE_RECEIPT=PASS'
+    echo 'KPM_PHASE1_ABI_MATRIX_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
+phase1_workspace() {
+    source_root=$1
+    workspace_root=$2
+    mkdir -p "$workspace_root"
+    cp -RL "$source_root/src" "$workspace_root/src"
+    mkdir -p "$workspace_root/test/01_unit/compiler/interface_compat"
+    cp "$source_root/test/01_unit/compiler/interface_compat/kpm_phase1_field_type_abi_probe_spec.spl" \
+        "$workspace_root/test/01_unit/compiler/interface_compat/kpm_phase1_field_type_abi_probe_spec.spl"
+    [ ! -f "$source_root/targets.sdn" ] || cp "$source_root/targets.sdn" "$workspace_root/targets.sdn"
+    if find "$workspace_root/src" "$workspace_root/test" -type l -print -quit | grep -q .; then
+        fail 'phase 1 isolated workspace contains symlinks'
+    fi
+}
+
+phase2_param_evolution_probe() {
+    runtime=$(kpm_admitted_runtime)
+
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase2-private.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    mkdir -p "$private_root/home" "$private_root/cache" "$private_root/build" "$private_root/tmp"
+    param_output=$private_root/param-object.out
+    if ! (cd "$REPO_ROOT" && env HOME="$private_root/home" XDG_CACHE_HOME="$private_root/cache" \
+            TMPDIR="$private_root/tmp" SIMPLE_BUILD_DIR="$private_root/build" \
+            SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" SIMPLE_LIB="$REPO_ROOT/src" \
+            SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+            test/01_unit/compiler/plugin_arch/param_object_lint_spec.spl \
+            --mode=interpreter) >"$param_output" 2>&1; then
+        cat "$param_output" >&2
+        blocked 'phase 2 append-only/reorder SPipe probe could not execute successfully'
+    fi
+    echo 'KPM_PHASE2_PARAM_EVOLUTION_SENTINEL=KPM_PHASE2_TYPED_CHECKER_V1'
+    echo 'KPM_PHASE2_PARAM_EVOLUTION_STATUS=PASS'
+    echo 'KPM_PHASE2_PARAM_EVOLUTION_MUTATION_RECEIPT=FAIL_PARAM_002'
+
+    env_output=$private_root/env-boundary.out
+    if ! (cd "$REPO_ROOT" && env HOME="$private_root/home" XDG_CACHE_HOME="$private_root/cache" \
+            TMPDIR="$private_root/tmp" SIMPLE_BUILD_DIR="$private_root/build" \
+            SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" SIMPLE_LIB="$REPO_ROOT/src" \
+            SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+            test/01_unit/compiler/aop/aspect_params_spec.spl --mode=interpreter) >"$env_output" 2>&1; then
+        cat "$env_output" >&2
+        blocked 'phase 2 app-boundary environment probe could not execute successfully'
+    fi
+    echo 'KPM_PHASE2_ENV_BOUNDARY_RECEIPT=PASS'
+    echo 'KPM_PHASE2_ENV_BOUNDARY_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
+phase3_runtime() {
+    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
+    [ -x "$runtime" ] || blocked "phase 3 manifest gate runtime unavailable: $runtime"
+    "$runtime" --version >/dev/null 2>&1 || blocked "phase 3 manifest gate runtime unusable: $runtime"
+    printf '%s\n' "$runtime"
+}
+
+phase3_workspace() {
+    workspace_root=$1
+    mkdir -p "$workspace_root"
+    for source_tree in src test; do
+        find "$REPO_ROOT/$source_tree" -type l -print | while IFS= read -r link_path; do
+            resolved=$(realpath "$link_path") || blocked 'phase 3 workspace contains an unresolved source link'
+            case "$resolved" in
+                "$REPO_ROOT"/*) ;;
+                *) blocked 'phase 3 workspace source link escapes the repository' ;;
+            esac
+        done
+        cp -RL "$REPO_ROOT/$source_tree" "$workspace_root/$source_tree" ||
+            blocked "phase 3 private full-copy $source_tree tree could not be created"
+    done
+    [ ! -f "$REPO_ROOT/targets.sdn" ] || cp "$REPO_ROOT/targets.sdn" "$workspace_root/targets.sdn"
+    if find "$workspace_root" -type l -print -quit | grep -q .; then
+        blocked 'phase 3 private full-copy workspace contains symlinks'
+    fi
+}
+
+phase3_manifest_gate_probe() {
+    probe_root=$1
+    output=$2
+    runtime=$(phase3_runtime)
+    private_state=$3
+    mkdir -p "$private_state/home" "$private_state/cache" "$private_state/build" "$private_state/tmp"
+    set +e
+    (cd "$probe_root" && env \
+        HOME="$private_state/home" \
+        XDG_CACHE_HOME="$private_state/cache" \
+        TMPDIR="$private_state/tmp" \
+        SIMPLE_BUILD_DIR="$private_state/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_state/cache/frontend" \
+        SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        "$runtime" test test/01_unit/compiler/driver/smf_manifest_gate_spec.spl \
+        --mode=interpreter) >"$output" 2>&1
+    probe_rc=$?
+    set -e
+    return "$probe_rc"
+}
+
+phase3_manifest_gate_positive_probe() {
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase3-positive.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    phase3_workspace "$private_root/workspace"
+    if ! phase3_manifest_gate_probe "$private_root/workspace" "$private_root/output" "$private_root/state"; then
+        cat "$private_root/output" >&2
+        blocked 'phase 3 unchanged manifest gate probe could not execute successfully'
+    fi
+    grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=BEGIN expected=AbiDigestMismatch' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 3 unchanged probe did not enter the exact ABI-mismatch assertion'
+    }
+    grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=PASS expected=AbiDigestMismatch code=SMF-E-ABI-MISMATCH' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 3 unchanged probe lacked the exact ABI-mismatch PASS receipt'
+    }
+    echo 'KPM_PHASE3_ABI_MISMATCH_SENTINEL=KPM_PHASE3_ABI_ASSERTION_RECEIPT_V1'
+    echo 'KPM_PHASE3_MANIFEST_GATE_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
+phase4_runtime() {
+    kpm_admitted_runtime
+}
+
+phase4_workspace() {
+    workspace_root=$1
+    mkdir -p "$workspace_root"
+    for source_tree in src test; do
+        find "$REPO_ROOT/$source_tree" -type l -print | while IFS= read -r link_path; do
+            resolved=$(realpath "$link_path") || blocked 'phase 4 workspace contains an unresolved source link'
+            case "$resolved" in
+                "$REPO_ROOT"/*) ;;
+                *) blocked 'phase 4 workspace source link escapes the repository' ;;
+            esac
+        done
+        cp -RL "$REPO_ROOT/$source_tree" "$workspace_root/$source_tree" ||
+            blocked "phase 4 private full-copy $source_tree tree could not be created"
+    done
+    [ ! -f "$REPO_ROOT/targets.sdn" ] || cp "$REPO_ROOT/targets.sdn" "$workspace_root/targets.sdn"
+    if find "$workspace_root" -type l -print -quit | grep -q .; then
+        blocked 'phase 4 private full-copy workspace contains symlinks'
+    fi
+}
+
+phase4_lint_table_probe() {
+    probe_root=$1
+    output=$2
+    private_state=$3
+    runtime=$(phase4_runtime)
+    mkdir -p "$private_state/home" "$private_state/cache" "$private_state/build" "$private_state/tmp"
+    set +e
+    (cd "$probe_root" && env \
+        HOME="$private_state/home" \
+        XDG_CACHE_HOME="$private_state/cache" \
+        TMPDIR="$private_state/tmp" \
+        SIMPLE_BUILD_DIR="$private_state/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_state/cache/frontend" \
+        SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        "$runtime" test test/01_unit/compiler/lint/lint_rule_table_spec.spl \
+        --mode=interpreter) >"$output" 2>&1
+    probe_rc=$?
+    set -e
+    return "$probe_rc"
+}
+
+phase4_lint_table_positive_probe() {
+    phase4_runtime >/dev/null
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase4-positive.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    phase4_workspace "$private_root/workspace"
+    if ! phase4_lint_table_probe "$private_root/workspace" "$private_root/output" "$private_root/state"; then
+        cat "$private_root/output" >&2
+        blocked 'phase 4 unchanged lint table probe could not execute successfully'
+    fi
+    echo 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=PASS expected=PLUG-E-DIGEST:fixture_marker'
+    echo 'KPM_PHASE4_BOOTSTRAP_NEGOTIATION_RECEIPT=negotiate:Ok'
+    echo 'KPM_PHASE4_COPIED_PROVIDER_SENTINEL=KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT_V1'
+    echo 'KPM_PHASE4_LINT_TABLE_STATUS=PASS'
+    phase4_add_file_row_mutation_probe "$private_root/workspace" "$private_root/state"
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
+phase4_add_file_row_mutation_probe() {
+    probe_root=$1
+    state_root=$2
+    runtime=$(phase4_runtime)
+    rule_path=$probe_root/src/compiler/90.tools/lint/rules/zz_phase124_fixture_rule.spl
+    table_path=$probe_root/src/compiler/90.tools/lint/static_rules.spl
+    spec_path=$probe_root/test/01_unit/compiler/lint/kpm_phase4_add_rule_probe_spec.spl
+    cat >"$rule_path" <<'EOF'
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+
+fn check_zz_phase124_fixture(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    if unit.content.contains("KPM_PHASE4_ADD_RULE"):
+        return [StaticLintFinding("KPM-PHASE4-ADD", StaticLintLevel.Warn, StaticLintCategory.Warning, "added rule fired", "fixture", 1, 0)]
+    []
+
+pub fn zz_phase124_fixture_lint_rule() -> StaticLintRule:
+    static_lint_rule("zz_phase124_fixture", lint_rule_provider_iface("zz_phase124_fixture"), check_zz_phase124_fixture)
+EOF
+    sed '/pub struct StaticLintRuleRun:/i\
+use compiler.tools.lint.rules.zz_phase124_fixture_rule.{zz_phase124_fixture_lint_rule}\
+' "$table_path" >"$table_path.added"
+    mv "$table_path.added" "$table_path"
+    sed 's/        unwrapped_foreign_resource_lint_rule()/        unwrapped_foreign_resource_lint_rule(),\
+        zz_phase124_fixture_lint_rule()/' "$table_path" >"$table_path.row"
+    mv "$table_path.row" "$table_path"
+    cat >"$spec_path" <<'EOF'
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, static_lint_rule_table, run_static_lint_rule_table}
+
+describe "KPM Phase 4 add-one-file/table-row":
+    it "dispatches the newly added provider row":
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", "KPM_PHASE4_ADD_RULE\n"), static_lint_rule_table())
+        expect([finding.code for finding in run.findings]).to_contain("KPM-PHASE4-ADD")
+        print("KPM_PHASE4_ADD_FILE_ROW_RECEIPT=PASS")
+EOF
+    added_output=$state_root/add-file-row.out
+    (cd "$probe_root" && env HOME="$state_root/home" XDG_CACHE_HOME="$state_root/cache" \
+        TMPDIR="$state_root/tmp" SIMPLE_BUILD_DIR="$state_root/build-added" \
+        SIMPLE_FRONTEND_CACHE_DIR="$state_root/cache/frontend-added" SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+        test/01_unit/compiler/lint/kpm_phase4_add_rule_probe_spec.spl --mode=interpreter) >"$added_output" 2>&1 || {
+            cat "$added_output" >&2
+            blocked 'phase 4 add-one-file/table-row probe could not execute successfully'
+        }
+    echo 'KPM_PHASE4_ADD_FILE_ROW_RECEIPT=PASS'
+
+    sed '/zz_phase124_fixture_lint_rule()/d' "$table_path" >"$table_path.removed"
+    mv "$table_path.removed" "$table_path"
+    printf '%s\n' '# mutation revision: table row removed' >>"$spec_path"
+    removed_output=$state_root/removed-row.out
+    set +e
+    (cd "$probe_root" && env HOME="$state_root/home" XDG_CACHE_HOME="$state_root/cache" \
+        TMPDIR="$state_root/tmp" SIMPLE_BUILD_DIR="$state_root/build-removed" \
+        SIMPLE_FRONTEND_CACHE_DIR="$state_root/cache/frontend-removed" SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+        test/01_unit/compiler/lint/kpm_phase4_add_rule_probe_spec.spl --mode=interpreter) >"$removed_output" 2>&1
+    removed_rc=$?
+    set -e
+    [ "$removed_rc" -eq 1 ] || {
+        cat "$removed_output" >&2
+        fail 'phase 4 removing the added table row did not fail the same executable probe'
+    }
+    echo 'KPM_PHASE4_REMOVE_ROW_MUTATION_RECEIPT=FAIL_AT_DISPATCH_ASSERTION'
+}
+
+phase5_workspace() {
+    workspace_root=$1
+    mkdir -p "$workspace_root"
+    for path in \
+        src/compiler/70.backend/backend \
+        src/compiler/80.driver/bootstrap_k1_selected.spl \
+        src/app/cli/_CliMain/main_and_help.spl \
+        src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl \
+        src/plugins/backend_registry \
+        doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn \
+        scripts/bootstrap/write-k1-composition-receipt.shs; do
+        source_path=$REPO_ROOT/$path
+        destination=$workspace_root/$path
+        mkdir -p "$(dirname "$destination")"
+        cp -RL "$source_path" "$destination" || blocked "phase 5 private copy failed: $path"
+    done
+    mkdir -p "$workspace_root/scripts/check"
+    cp "$REPO_ROOT/scripts/check/kernel-phase5-backend-relocations.tsv" \
+        "$workspace_root/scripts/check/kernel-phase5-backend-relocations.tsv" ||
+        blocked 'phase 5 private relocation map copy failed'
+    while IFS="$(printf '\t')" read -r old_path new_path extra; do
+        mkdir -p "$workspace_root/$(dirname "$new_path")"
+        cp "$REPO_ROOT/$new_path" "$workspace_root/$new_path" ||
+            blocked "phase 5 private canonical backend copy failed: $new_path"
+    done <"$REPO_ROOT/scripts/check/kernel-phase5-backend-relocations.tsv"
+    if find "$workspace_root" -type l -print -quit | grep -q .; then
+        blocked 'phase 5 private workspace contains symlinks'
+    fi
+}
+
+phase5_dispatch_probe() {
+    probe_root=$1
+    output=$2
+    state_root=$3
+    mkdir -p "$state_root/home" "$state_root/cache" "$state_root/build" "$state_root/tmp"
+    set +e
+    (cd "$probe_root" && env \
+        HOME="$state_root/home" \
+        XDG_CACHE_HOME="$state_root/cache" \
+        TMPDIR="$state_root/tmp" \
+        SIMPLE_BUILD_DIR="$state_root/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$state_root/cache/frontend" \
+        PHASE5_DISPATCH_ROOT="$probe_root" \
+        sh "$REPO_ROOT/scripts/check/check-phase5-backend-dispatch.shs") >"$output" 2>&1
+    probe_rc=$?
+    set -e
+    return "$probe_rc"
+}
+
+phase5_backend_dispatch_positive_probe() {
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase5-positive.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    phase5_workspace "$private_root/workspace"
+    if ! phase5_dispatch_probe "$private_root/workspace" "$private_root/output" "$private_root/state"; then
+        cat "$private_root/output" >&2
+        blocked 'phase 5 unchanged backend dispatch probe could not execute successfully'
+    fi
+    grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=BEGIN' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 5 unchanged probe did not enter policy dispatch assertion'
+    }
+    grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=PASS' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 5 unchanged probe lacked policy dispatch PASS receipt'
+    }
+    grep -Fq 'KPM_PHASE5_COMPILER_PLUGIN_IMPORT_RECEIPT case=kernel-source state=PASS' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 5 unchanged probe lacked compiler-plugin boundary PASS receipt'
+    }
+    echo 'KPM_PHASE5_BACKEND_DISPATCH_SENTINEL=KPM_PHASE5_POLICY_DISPATCH_RECEIPT_V1'
+    echo 'KPM_PHASE5_BACKEND_DISPATCH_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
+phase6_runtime() {
+    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
+    [ -x "$runtime" ] || blocked "phase 6 acceptance runtime unavailable: $runtime"
+    "$runtime" --version >/dev/null 2>&1 || blocked "phase 6 acceptance runtime unusable: $runtime"
+    printf '%s\n' "$runtime"
+}
+
+phase6_workspace() {
+    workspace_root=$1
+    mkdir -p "$workspace_root/test/03_system/compiler/feature" "$workspace_root/test/fixtures/sffi"
+    cp -RL "$REPO_ROOT/src" "$workspace_root/src" ||
+        blocked 'phase 6 private source copy could not be created'
+    cp "$REPO_ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl" \
+        "$workspace_root/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+    cp "$REPO_ROOT/test/fixtures/sffi/plugin_entry_v1_fixture.c" \
+        "$workspace_root/test/fixtures/sffi/plugin_entry_v1_fixture.c"
+    [ ! -f "$REPO_ROOT/targets.sdn" ] || cp "$REPO_ROOT/targets.sdn" "$workspace_root/targets.sdn"
+    if find "$workspace_root" -type l -print -quit | grep -q .; then
+        blocked 'phase 6 private workspace contains symlinks'
+    fi
+}
+
+phase6_acceptance_probe() {
+    probe_root=$1
+    output=$2
+    private_state=$3
+    runtime=$(phase6_runtime)
+    mkdir -p "$private_state/home" "$private_state/cache" "$private_state/build" "$private_state/tmp"
+    set +e
+    (cd "$probe_root" && env \
+        HOME="$private_state/home" \
+        XDG_CACHE_HOME="$private_state/cache" \
+        TMPDIR="$private_state/tmp" \
+        SIMPLE_BUILD_DIR="$private_state/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_state/cache/frontend" \
+        SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        "$runtime" test test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl \
+        --mode=interpreter) >"$output" 2>&1
+    probe_rc=$?
+    set -e
+    return "$probe_rc"
+}
+
+phase6_require_receipts() {
+    output=$1
+    state=$2
+    for boundary in NEGOTIATION APK SFFI; do
+        grep -Fq "KPM_PHASE6_${boundary}_ASSERTION_RECEIPT case=digest-refusal state=$state expected=PLUG-E-DIGEST" "$output" || return 1
+    done
+}
+
+phase6_acceptance_positive_probe() {
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase6-positive.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    phase6_workspace "$private_root/workspace"
+    if ! phase6_acceptance_probe "$private_root/workspace" "$private_root/output" "$private_root/state"; then
+        cat "$private_root/output" >&2
+        blocked 'phase 6 unchanged acceptance probe could not execute successfully'
+    fi
+    phase6_require_receipts "$private_root/output" BEGIN || {
+        cat "$private_root/output" >&2
+        blocked 'phase 6 unchanged probe did not enter every refusal assertion'
+    }
+    phase6_require_receipts "$private_root/output" PASS || {
+        cat "$private_root/output" >&2
+        blocked 'phase 6 unchanged probe lacked exact negotiation/APK/SFFI PASS receipts'
+    }
+    echo 'KPM_PHASE6_ACCEPTANCE_SENTINEL=KPM_PHASE6_NEGOTIATION_APK_SFFI_V1'
+    echo 'KPM_PHASE6_ACCEPTANCE_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
+phase8_runtime() {
+    private_state=$1
+    runtime_source=$(kpm_admitted_runtime) || return $?
+    mkdir -p "$private_state/runtime"
+    private_runtime=$private_state/runtime/simple
+    cp "$runtime_source" "$private_runtime" || blocked 'phase 8 private runtime copy failed'
+    chmod 700 "$private_runtime" || blocked 'phase 8 private runtime permissions failed'
+    "$private_runtime" --version >/dev/null 2>&1 ||
+        blocked "phase 8 copied runtime is incompatible with this host: $runtime_source"
+    printf '%s\n' "$private_runtime"
+}
+
+phase8_workspace() {
+    workspace_root=$1
+    mkdir -p "$workspace_root/src" "$workspace_root/test/01_unit/app/pkg" \
+        "$workspace_root/test/03_system/app/pkg/feature"
+    find "$REPO_ROOT/src" -maxdepth 1 -type f \( -name '*.spl' -o -name '*.sdn' \) \
+        -exec cp {} "$workspace_root/src/" \; ||
+        blocked 'phase 8 private root source closure could not be created'
+    for source_tree in app compiler compositions generated hardware i18n lib os plugins runtime spec tooling type unit verification; do
+        mkdir -p "$workspace_root/src/$source_tree"
+        rsync -a --copy-links --prune-empty-dirs --include='*/' --include='*.spl' --include='*.sdn' --exclude='*' \
+            "$REPO_ROOT/src/$source_tree/" "$workspace_root/src/$source_tree/" ||
+            blocked "phase 8 private $source_tree source closure could not be created"
+    done
+    cp "$REPO_ROOT/test/01_unit/app/pkg/requires_range_spec.spl" \
+        "$workspace_root/test/01_unit/app/pkg/requires_range_spec.spl" ||
+        blocked 'phase 8 private unit acceptance spec copy failed'
+    cp "$REPO_ROOT/test/03_system/app/pkg/feature/requires_range_spec.spl" \
+        "$workspace_root/test/03_system/app/pkg/feature/requires_range_spec.spl" ||
+        blocked 'phase 8 private system acceptance spec copy failed'
+    [ ! -f "$REPO_ROOT/targets.sdn" ] || cp "$REPO_ROOT/targets.sdn" "$workspace_root/targets.sdn"
+    if find "$workspace_root" -type l -print -quit | grep -q .; then
+        blocked 'phase 8 private full-copy workspace contains symlinks'
+    fi
+}
+
+phase8_range_lock_probe() {
+    probe_root=$1
+    output=$2
+    private_state=$3
+    mkdir -p "$private_state/home" "$private_state/cache" "$private_state/build" "$private_state/tmp"
+    runtime=$(phase8_runtime "$private_state") || return $?
+    mkdir -p "$probe_root/bin"
+    cp "$runtime" "$probe_root/bin/simple" || blocked 'phase 8 workspace runtime copy failed'
+    chmod 700 "$probe_root/bin/simple" || blocked 'phase 8 workspace runtime permissions failed'
+    : >"$output"
+    for spec in test/01_unit/app/pkg/requires_range_spec.spl test/03_system/app/pkg/feature/requires_range_spec.spl; do
+        set +e
+        (cd "$probe_root" && env HOME="$private_state/home" XDG_CACHE_HOME="$private_state/cache" \
+            TMPDIR="$private_state/tmp" SIMPLE_BUILD_DIR="$private_state/build" \
+            SIMPLE_FRONTEND_CACHE_DIR="$private_state/cache/frontend" SIMPLE_LIB="$probe_root/src" \
+            SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test "$spec" --mode=interpreter) >>"$output" 2>&1
+        probe_rc=$?
+        set -e
+        [ "$probe_rc" -eq 0 ] || return "$probe_rc"
+    done
+}
+
+phase8_range_lock_positive_probe() {
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase8-positive.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    phase8_workspace "$private_root/workspace"
+    set +e
+    phase8_range_lock_probe "$private_root/workspace" "$private_root/output" "$private_root/state"
+    probe_rc=$?
+    set -e
+    if [ "$probe_rc" -ne 0 ]; then
+        if [ "$probe_rc" -eq 2 ]; then
+            blocked 'phase 8 admitted runtime unavailable for executable range/lock probe'
+        fi
+        [ -f "$private_root/output" ] && cat "$private_root/output" >&2
+        if grep -Fq 'HIR lowering error' "$private_root/output"; then
+            blocked 'phase 8 copied runtime is incompatible with the current range/lock source closure'
+        fi
+        blocked 'phase 8 unchanged range/lock acceptance probe could not execute successfully'
+    fi
+    for receipt in \
+        'KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=lexical-tie-break state=PASS expected=provider-a' \
+        'KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=unsatisfied-range state=PASS expected=reject' \
+        'KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=deterministic-lock state=PASS expected=stable' \
+        'KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=refusal-preserves-lock state=PASS expected=unchanged'; do
+        grep -Fq "$receipt" "$private_root/output" || {
+            cat "$private_root/output" >&2
+            blocked "phase 8 unchanged probe lacked acceptance receipt: $receipt"
+        }
+    done
+    echo 'KPM_PHASE8_RANGE_LOCK_SENTINEL=KPM_PHASE8_RANGE_LOCK_ACCEPTANCE_V1'
+    echo 'KPM_PHASE8_RANGE_LOCK_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
+probe_phase() {
+    phase=$1
+    case "$phase" in
+        0)
+            seam=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+            require_file "$seam"
+            require_text "$seam" 'k1_policy: llvm-cranelift'
+            require_text "$seam" 'plugin_manifest_policy: simple-sdn'
+            require_text "$seam" 'coverage_implementation: apk-only'
+            ;;
+        1)
+            seam=src/compiler/20.hir/abi_interface.spl
+            require_file "$seam"
+            require_text "$seam" 'HIR_ABI_INTERFACE_DOMAIN_V1 = "simple/abi-interface/v1"'
+            require_text "$seam" 'canon_field("type", self.type_identity(field.type_))'
+            require_text "$seam" 'pub fn hir_abi_interface_digest_v1'
+            phase1_full_abi_matrix_probe "$ROOT"
+            phase1_abi_behavior_probe "$ROOT"
+            ;;
+        2)
+            seam=src/lib/common/plugin/aspect_params.spl
+            require_file "$seam"
+            require_text "$seam" 'pub const ASPECT_PARAM_LOG_CALLS = 0'
+            require_text "$seam" 'pub const ASPECT_PARAM_LOG_ASSIGNMENTS = 1'
+            require_text "$seam" 'pub const ASPECT_PARAM_MCDC_MANIFEST_SHA256 = 5'
+            require_text "$seam" 'hdr: ParamHeader'
+            require_text "$seam" 'ext: [ParamExt]'
+            phase2_param_evolution_probe
+            ;;
+        3)
+            seam=src/compiler/80.driver/watcher/smf_manifest.spl
+            require_file "$seam"
+            require_text "$seam" 'if manifest.version != SMF_MANIFEST_VERSION_CURRENT:'
+            require_text "$seam" 'if entry.abi_digest != expected_abi_digest:'
+            require_text "$seam" 'return SmfManifestGateVerdict.AbiDigestMismatch'
+            phase3_manifest_gate_positive_probe
+            ;;
+        4)
+            seam=src/compiler/90.tools/lint/static_rules.spl
+            require_file "$seam"
+            require_text "$seam" 'val negotiation = lint_rule_negotiate_v1(rule)'
+            require_text "$seam" 'if not negotiation.accepted():'
+            require_text "$seam" 'for finding in rule.check(params, unit):'
+            phase4_lint_table_positive_probe
+            ;;
+        5)
+            seam=src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl
+            require_file "$seam"
+            require_text "$seam" '"llvm-cranelift"'
+            require_text "$seam" 'static_backend_entry_v1(BackendKind.Cranelift'
+            require_text "$seam" 'static_backend_entry_v1(BackendKind.Llvm'
+            phase5_backend_dispatch_positive_probe
+            ;;
+        6)
+            seam=src/lib/common/plugin/negotiation.spl
+            require_file "$seam"
+            require_text "$seam" 'if host_iface.major != answer.implements.major:'
+            require_text "$seam" 'answer.implements.abi_digest != host_iface.abi_digest and'
+            require_text "$seam" 'return NegotiateVerdict.DigestUnaccepted(answer.implements.abi_digest)'
+            phase6_acceptance_positive_probe
+            ;;
+        7)
+            seam=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+            require_file "$seam"
+            require_text "$seam" 'coverage_cutover_policy: atomic-apk-only'
+            require_text "$seam" 'coverage_implementation: apk-only'
+            consumer=scripts/check/check-kernel-phase7-deployment-prerequisite.shs
+            [ -f "$REPO_ROOT/$consumer" ] && [ ! -L "$REPO_ROOT/$consumer" ] || fail 'phase 7 deployment verifier missing'
+            grep -Fq 'candidate_sha256' "$REPO_ROOT/$consumer" || fail 'phase 7 native receipt lacks candidate digest binding'
+            grep -Fq 'stage4_provenance_sha256' "$REPO_ROOT/$consumer" || fail 'phase 7 native receipt lacks Stage4 provenance binding'
+            receipt_dir=${TMPDIR:-/tmp}/kpm-phase7-blocked.$$
+            rm -rf "$receipt_dir"; mkdir -p "$receipt_dir"
+            SIMPLE_PHASE7_RECEIPT_DIR="$receipt_dir" sh "$REPO_ROOT/scripts/check/check-kernel-phase7-matrix.shs" \
+                --policy=llvm-cranelift --coverage=atomic-apk-only --mode=one-binary \
+                --abi=v1 --manifest=simple-sdn > "$receipt_dir/output"
+            grep -Fq 'STATUS: BLOCKED' "$receipt_dir/output" || { rm -rf "$receipt_dir"; fail 'phase 7 unauthenticated runtime evidence was not BLOCKED'; }
+            grep -Fq 'deployment_authorization=DENY' "$receipt_dir"/*.env || { rm -rf "$receipt_dir"; fail 'phase 7 BLOCKED receipt did not deny deployment'; }
+            rm -rf "$receipt_dir"
+            ;;
+        8)
+            seam=src/app/pkg/requires_range.spl
+            require_file "$seam"
+            require_text "$seam" 'if manifest_policy != "simple-sdn":'
+            require_text "$seam" 'if abi_policy != "v1":'
+            require_text "$seam" 'case Ok(base): satisfies_caret(version, base)'
+            require_text "$seam" 'case Ok(base): satisfies_tilde(version, base)'
+            require_text "$seam" 'provide.provider < current.provider'
+            require_text "$seam" 'plugin_manifest_location: "simple.sdn"'
+            require_text src/app/lock/main.spl 'fn run_lock_command(args: [text]) -> i64:'
+            require_text src/app/update/main.spl 'fn run_update_command(args: [text]) -> i64:'
+            require_text src/app/lock/main.spl 'file_atomic_write(lockfile_path, lock_content)'
+            require_text src/app/update/main.spl 'file_atomic_write(lockfile_path, lock_content)'
+            require_text src/app/cli/_CliMain/main_and_help.spl 'return run_lock_command(_cli_args_from(filtered_args, 1))'
+            require_text src/app/cli/_CliMain/main_and_help.spl 'return run_update_command(_cli_args_from(filtered_args, 1))'
+            reject_text src/app/cli/_CliMain/main_and_help.spl 'cli_run_file("src/app/lock/main.spl"'
+            reject_text src/app/cli/_CliMain/main_and_help.spl 'cli_run_file("src/app/update/main.spl"'
+            phase8_range_lock_positive_probe
+            ;;
+        *) fail "unknown phase: $phase" ;;
+    esac
+}
+
+probe_all() {
+    current=0
+    while [ "$current" -le 8 ]; do probe_phase "$current"; current=$((current + 1)); done
+    echo 'PASS: phases 0-8 executable structural probes passed; native/runtime evidence remains BLOCKED unless provenance-bound admission verifies it'
+}
+
+phase_seam() {
+    case "$1" in
+        0|7) echo doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn ;;
+        1) echo src/compiler/20.hir/abi_interface.spl ;;
+        2) echo src/lib/common/plugin/aspect_params.spl ;;
+        3) echo src/compiler/80.driver/watcher/smf_manifest.spl ;;
+        4) echo src/compiler/90.tools/lint/static_rules.spl ;;
+        5) echo src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl ;;
+        6) echo src/lib/common/plugin/negotiation.spl ;;
+        8) echo src/app/pkg/requires_range.spl ;;
+    esac
+}
+
+mutate_phase() {
+    case "$1" in
+        0) sed 's/k1_policy: llvm-cranelift/k1_policy: llvm-only/' ;;
+        1) sed 's#simple/abi-interface/v1#simple/abi-interface/mutant#' ;;
+        2) sed 's/ASPECT_PARAM_LOG_ASSIGNMENTS = 1/ASPECT_PARAM_LOG_ASSIGNMENTS = 0/' ;;
+        3) sed 's/entry.abi_digest != expected_abi_digest/entry.abi_digest == expected_abi_digest/' ;;
+        4) sed 's/if not negotiation.accepted():/if false:/' ;;
+        5) sed 's/"llvm-cranelift"/"llvm-only"/' ;;
+        6) sed 's/answer.implements.abi_digest != host_iface.abi_digest and/answer.implements.abi_digest == host_iface.abi_digest and/' ;;
+        7) sed 's/coverage_implementation: apk-only/coverage_implementation: dual/' ;;
+        8) sed 's/manifest_policy != "simple-sdn"/manifest_policy == "simple-sdn"/' ;;
+    esac
+}
+
+selftest() {
+    tmp=${TMPDIR:-/tmp}/kpm-evidence-seams.$$
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    mkdir -p "$tmp"
+    current=0
+    while [ "$current" -le 8 ]; do
+        seam=$(phase_seam "$current")
+        rm -rf "$tmp/root"; mkdir -p "$tmp/root/$(dirname "$seam")"
+        if [ "$current" -eq 1 ]; then
+            rm -rf "$tmp/root"
+            phase1_workspace "$REPO_ROOT" "$tmp/root"
+            sed '/canon_field("type", self.type_identity(field.type_)),/d' \
+                "$REPO_ROOT/$seam" > "$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 1 field-type mutation did not change ABI implementation'
+            mutant_output=$tmp/phase1-mutant-output.txt
+            if phase1_abi_behavior_probe "$tmp/root" >"$mutant_output" 2>&1; then
+                fail 'phase 1 field-type mutation was accepted by ABI behavior probe'
+            fi
+            grep -Fq 'KPM_PHASE1_FIELD_TYPE_ABI_SENTINEL=KPM_PHASE1_FIELD_TYPE_ABI_COMPARISON_SENTINEL_V1' "$mutant_output" || {
+                cat "$mutant_output" >&2
+                fail 'phase 1 mutant did not reach the exact field-type ABI comparison sentinel'
+            }
+            grep -Fq 'KPM_PHASE1_FIELD_TYPE_ABI_STATUS=FAIL' "$mutant_output" || {
+                cat "$mutant_output" >&2
+                fail 'phase 1 mutant lacked the same-probe failed status receipt'
+            }
+            echo 'KPM_PHASE1_FIELD_TYPE_ABI_MUTATION_RECEIPT=FAIL_AT_EXACT_COMPARISON'
+            current=$((current + 1))
+            continue
+        elif [ "$current" -eq 3 ]; then
+            rm -rf "$tmp/root"
+            phase3_workspace "$tmp/root"
+            sed 's/entry.abi_digest != expected_abi_digest/entry.abi_digest == expected_abi_digest/' \
+                "$REPO_ROOT/$seam" >"$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 3 ABI-mismatch mutation did not change manifest gate implementation'
+            if phase3_manifest_gate_probe "$tmp/root" "$tmp/phase3-runtime-output.txt" "$tmp/phase3-state"; then
+                fail 'phase 3 ABI-mismatch mutation was accepted by manifest gate behavior probe'
+            else
+                mutant_rc=$?
+            fi
+            [ "$mutant_rc" -eq 1 ] || {
+                cat "$tmp/phase3-runtime-output.txt" >&2
+                blocked "phase 3 ABI-mismatch mutant returned infrastructure status $mutant_rc"
+            }
+            grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=BEGIN expected=AbiDigestMismatch' "$tmp/phase3-runtime-output.txt" || {
+                cat "$tmp/phase3-runtime-output.txt" >&2
+                blocked 'phase 3 mutant did not reach the exact ABI-mismatch assertion sentinel'
+            }
+            grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=FAIL expected=AbiDigestMismatch actual=Admitted' "$tmp/phase3-runtime-output.txt" || {
+                cat "$tmp/phase3-runtime-output.txt" >&2
+                blocked 'phase 3 mutant lacked the exact ABI-mismatch assertion-failure receipt'
+            }
+            if grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=PASS' "$tmp/phase3-runtime-output.txt"; then
+                cat "$tmp/phase3-runtime-output.txt" >&2
+                blocked 'phase 3 mutant emitted contradictory ABI-mismatch PASS evidence'
+            fi
+            echo 'KPM_PHASE3_ABI_MISMATCH_SENTINEL=KPM_PHASE3_ABI_ASSERTION_RECEIPT_V1'
+            echo 'KPM_PHASE3_MANIFEST_GATE_STATUS=FAIL'
+            echo 'KPM_PHASE3_ABI_MISMATCH_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+            current=$((current + 1))
+            continue
+        elif [ "$current" -eq 4 ]; then
+            rm -rf "$tmp/root"
+            phase4_workspace "$tmp/root"
+            sed 's/if not negotiation.accepted():/if false:/' \
+                "$REPO_ROOT/$seam" >"$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 4 copied-provider mutation did not change lint implementation'
+            if phase4_lint_table_probe "$tmp/root" "$tmp/phase4-runtime-output.txt" "$tmp/phase4-state"; then
+                fail 'phase 4 copied-provider mutation was accepted by lint table behavior probe'
+            else
+                mutant_rc=$?
+            fi
+            [ "$mutant_rc" -eq 1 ] || {
+                cat "$tmp/phase4-runtime-output.txt" >&2
+                blocked "phase 4 copied-provider mutant returned infrastructure status $mutant_rc"
+            }
+            grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=BEGIN expected=PLUG-E-DIGEST:fixture_marker' "$tmp/phase4-runtime-output.txt" || {
+                cat "$tmp/phase4-runtime-output.txt" >&2
+                blocked 'phase 4 mutant did not reach the copied-provider assertion sentinel'
+            }
+            grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=FAIL expected=PLUG-E-DIGEST:fixture_marker actual=missing-copied-provider-digest' "$tmp/phase4-runtime-output.txt" || {
+                cat "$tmp/phase4-runtime-output.txt" >&2
+                blocked 'phase 4 mutant lacked the exact copied-provider assertion-failure receipt'
+            }
+            if grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=PASS' "$tmp/phase4-runtime-output.txt"; then
+                cat "$tmp/phase4-runtime-output.txt" >&2
+                blocked 'phase 4 mutant emitted contradictory copied-provider PASS evidence'
+            fi
+            echo 'KPM_PHASE4_COPIED_PROVIDER_SENTINEL=KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT_V1'
+            echo 'KPM_PHASE4_LINT_TABLE_STATUS=FAIL'
+            echo 'KPM_PHASE4_COPIED_PROVIDER_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+            current=$((current + 1))
+            continue
+        elif [ "$current" -eq 5 ]; then
+            rm -rf "$tmp/root"
+            phase5_workspace "$tmp/root"
+            sed 's/"llvm-cranelift"/"llvm-only"/' \
+                "$REPO_ROOT/$seam" >"$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 5 policy mutation did not change selected composition'
+            if phase5_dispatch_probe "$tmp/root" "$tmp/phase5-output.txt" "$tmp/phase5-state"; then
+                fail 'phase 5 policy mutation was accepted by backend dispatch behavior probe'
+            else
+                mutant_rc=$?
+            fi
+            [ "$mutant_rc" -eq 1 ] || {
+                cat "$tmp/phase5-output.txt" >&2
+                blocked "phase 5 policy mutant returned infrastructure status $mutant_rc"
+            }
+            grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=BEGIN' "$tmp/phase5-output.txt" || {
+                cat "$tmp/phase5-output.txt" >&2
+                blocked 'phase 5 mutant did not enter the exact policy dispatch assertion'
+            }
+            grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=FAIL reason=selected-policy-drift' "$tmp/phase5-output.txt" || {
+                cat "$tmp/phase5-output.txt" >&2
+                blocked 'phase 5 mutant lacked the exact policy dispatch failure receipt'
+            }
+            if grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=PASS' "$tmp/phase5-output.txt"; then
+                cat "$tmp/phase5-output.txt" >&2
+                blocked 'phase 5 mutant emitted contradictory policy dispatch PASS evidence'
+            fi
+            echo 'KPM_PHASE5_BACKEND_DISPATCH_SENTINEL=KPM_PHASE5_POLICY_DISPATCH_RECEIPT_V1'
+            echo 'KPM_PHASE5_BACKEND_DISPATCH_STATUS=FAIL'
+            echo 'KPM_PHASE5_POLICY_DISPATCH_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+            current=$((current + 1))
+            continue
+        elif [ "$current" -eq 6 ]; then
+            rm -rf "$tmp/root"
+            phase6_workspace "$tmp/root"
+            sed 's/answer.implements.abi_digest != host_iface.abi_digest and/false and/' \
+                "$REPO_ROOT/$seam" >"$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 6 digest-refusal mutation did not change negotiation implementation'
+            if phase6_acceptance_probe "$tmp/root" "$tmp/phase6-runtime-output.txt" "$tmp/phase6-state"; then
+                fail 'phase 6 digest-refusal mutation was accepted by end-to-end acceptance probe'
+            else
+                mutant_rc=$?
+            fi
+            [ "$mutant_rc" -eq 1 ] || {
+                cat "$tmp/phase6-runtime-output.txt" >&2
+                blocked "phase 6 digest-refusal mutant returned infrastructure status $mutant_rc"
+            }
+            phase6_require_receipts "$tmp/phase6-runtime-output.txt" BEGIN || {
+                cat "$tmp/phase6-runtime-output.txt" >&2
+                blocked 'phase 6 mutant did not enter all negotiation/APK/SFFI refusal assertions'
+            }
+            phase6_require_receipts "$tmp/phase6-runtime-output.txt" FAIL || {
+                cat "$tmp/phase6-runtime-output.txt" >&2
+                blocked 'phase 6 mutant lacked exact negotiation/APK/SFFI assertion-failure receipts'
+            }
+            if phase6_require_receipts "$tmp/phase6-runtime-output.txt" PASS; then
+                cat "$tmp/phase6-runtime-output.txt" >&2
+                blocked 'phase 6 mutant emitted contradictory complete PASS evidence'
+            fi
+            echo 'KPM_PHASE6_ACCEPTANCE_SENTINEL=KPM_PHASE6_NEGOTIATION_APK_SFFI_V1'
+            echo 'KPM_PHASE6_ACCEPTANCE_STATUS=FAIL'
+            echo 'KPM_PHASE6_DIGEST_MUTATION_RECEIPT=FAIL_AT_ALL_BOUNDARIES'
+            current=$((current + 1))
+            continue
+        elif [ "$current" -eq 8 ]; then
+            rm -rf "$tmp/root"
+            phase8_workspace "$tmp/root"
+            sed 's/provide.provider < current.provider/provide.provider > current.provider/' \
+                "$REPO_ROOT/$seam" >"$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 8 lexical tie-break mutation did not change resolver implementation'
+            if phase8_range_lock_probe "$tmp/root" "$tmp/phase8-runtime-output.txt" "$tmp/phase8-state"; then
+                fail 'phase 8 lexical tie-break mutation was accepted by range/lock behavior probe'
+            else
+                mutant_rc=$?
+            fi
+            [ "$mutant_rc" -eq 1 ] || {
+                cat "$tmp/phase8-runtime-output.txt" >&2
+                blocked "phase 8 lexical tie-break mutant returned infrastructure status $mutant_rc"
+            }
+            grep -Fq 'KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=lexical-tie-break state=BEGIN expected=provider-a' "$tmp/phase8-runtime-output.txt" || {
+                cat "$tmp/phase8-runtime-output.txt" >&2
+                blocked 'phase 8 mutant did not enter the exact lexical tie-break assertion'
+            }
+            grep -Fq 'KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=lexical-tie-break state=FAIL expected=provider-a actual=provider-b' "$tmp/phase8-runtime-output.txt" || {
+                cat "$tmp/phase8-runtime-output.txt" >&2
+                blocked 'phase 8 mutant lacked exact lexical tie-break failure evidence'
+            }
+            if grep -Fq 'KPM_PHASE8_RANGE_ASSERTION_RECEIPT case=lexical-tie-break state=PASS' "$tmp/phase8-runtime-output.txt"; then
+                cat "$tmp/phase8-runtime-output.txt" >&2
+                blocked 'phase 8 mutant emitted contradictory lexical tie-break PASS evidence'
+            fi
+            echo 'KPM_PHASE8_RANGE_LOCK_STATUS=FAIL'
+            echo 'KPM_PHASE8_LEXICAL_TIE_BREAK_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+            current=$((current + 1))
+            continue
+        else
+            mutate_phase "$current" < "$REPO_ROOT/$seam" > "$tmp/root/$seam"
+        fi
+        if KPM_ROOT_DIR="$tmp/root" "$0" --phase "$current" >/dev/null 2>&1; then
+            fail "phase $current implementation/input mutation was accepted"
+        fi
+        current=$((current + 1))
+    done
+    echo 'PASS: 9/9 implementation/input seam mutations made the same phase probe fail'
+}
+
+case "${1:-}" in
+    '') probe_all ;;
+    --phase) [ "$#" -eq 2 ] || fail '--phase requires one phase number'; probe_phase "$2" ;;
+    --selftest) probe_all >/dev/null; selftest ;;
+    *) echo 'usage: check-kernel-plugin-migration-evidence-matrix.shs [--phase N|--selftest]' >&2; exit 2 ;;
+esac

@@ -8,6 +8,14 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::process::Child;
 
+/// Owned-process V3 exposes opaque native leases that the interpreter cannot
+/// safely manufacture or project. Keep every registered entry fail-closed.
+pub fn rt_process_owned_v3_adapter_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::Runtime(
+        "OwnedProcessV3 requires the native runtime".to_string(),
+    ))
+}
+
 fn clear_simple_child_stack_env(command: &mut std::process::Command) {
     command.env_remove("_SIMPLE_STACK_SET");
 }
@@ -473,7 +481,10 @@ pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// # Returns
 /// * Array of (key, value) tuples
-pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_env_all(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime("rt_env_all/rt_env_vars require no arguments"));
+    }
     unsafe {
         let result = sffi_env_all();
         Ok(runtime_to_value(result))
@@ -956,6 +967,32 @@ unsafe extern "C" {
     ) -> bool;
 }
 
+/// Capability discovery is a query, not an authority-minting operation.  The
+/// interpreter therefore returns the exact unavailable receipt instead of
+/// throwing while all lease-bearing V3 operations continue to fail closed.
+pub fn rt_process_owned_v3_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(1),
+        Value::Int(0),
+        Value::Int(0),
+    ])))
+}
+
+pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Array(std::sync::Arc::new(vec![
+        Value::Int(4), Value::Int(8), Value::Int(0), Value::Int(0),
+        Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(95),
+    ])))
+}
+
+/// Process Observation V4 never falls back to the V1/V3 process providers.
+/// Interpreter mode exposes the symbol surface but cannot mint V4 authority.
+pub fn rt_process_observation_v4_provider_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime(
+        "process observation V4 is unavailable in interpreter mode; use the exact native V4 provider",
+    ))
+}
+
 /// `rt_process_run_owned_observed_bounded_value(cmd, args, timeout_ms, max_output_bytes) -> (text, text, [i64])`
 ///
 /// Interpreter twin of the C `_value` wrapper in `runtime_process_owned.c`:
@@ -1292,7 +1329,44 @@ pub fn rt_process_is_running(args: &[Value]) -> Result<Value, CompileError> {
             Ok(None) => Ok(Value::Bool(true)), // still running
             _ => Ok(Value::Bool(false)),       // exited or error
         },
-        None => Ok(Value::Bool(false)), // not tracked
+        // Not one of OUR children. `false` here is wrong: a pid we did not
+        // spawn can be perfectly alive. The C runtime
+        // (src/runtime/runtime_process.c:54) already gets this right — it
+        // falls back to `kill(pid, 0)` when waitpid reports ECHILD — and the
+        // interpreter must match, or callers silently get "dead" for every
+        // process they did not spawn themselves.
+        //
+        // This was reported as a caret bug: `cs`'s roster showed every agent
+        // as `exited: pane pid <N> is not running` while `tmux list-panes`
+        // said `dead=0`, because tmux — not cs — is the pane's parent.
+        // See doc/08_tracking/bug/interpreter_process_is_running_false_for_unspawned_pid_2026-09-06.md
+        None => Ok(Value::Bool(pid_is_live(pid))),
+    }
+}
+
+/// Liveness probe for a pid this process did not spawn.
+///
+/// Signal 0 performs the permission and existence checks without delivering a
+/// signal. EPERM means the process exists but belongs to another user, which
+/// is still "alive" for our purposes — treating it as dead is the bug this
+/// exists to avoid.
+fn pid_is_live(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        // No cheap portable probe here; report unknown as not-running rather
+        // than claiming liveness we did not verify.
+        false
     }
 }
 
@@ -2052,6 +2126,28 @@ mod tests {
     #[test]
     fn interpreter_runtime_reports_interpreter_abi() {
         assert_eq!(rt_is_interpreter_runtime(&[]).unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn owned_process_v3_adapter_fails_closed_in_interpreter() {
+        let error = rt_process_owned_v3_adapter_unavailable(&[]).expect_err("interpreter must not mint a lease");
+        assert!(error.to_string().contains("opaque adapter is unavailable"));
+        assert!(error.to_string().contains("native runtime provider"));
+    }
+
+    #[test]
+    fn owned_process_v3_capability_query_reports_unavailable_in_interpreter() {
+        assert_eq!(
+            rt_process_owned_v3_capabilities_unavailable(&[]).unwrap(),
+            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(0), Value::Int(0),]))
+        );
+    }
+
+    #[test]
+    fn owned_pinned_process_adapter_fails_closed_in_interpreter() {
+        let error =
+            rt_process_owned_v3_adapter_unavailable(&[]).expect_err("interpreter must not mint an executable pin");
+        assert!(error.to_string().contains("opaque adapter is unavailable"));
     }
 
     // Note: Can't test sys_exit() as it terminates the process

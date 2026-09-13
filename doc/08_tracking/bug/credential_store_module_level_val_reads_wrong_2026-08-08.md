@@ -109,3 +109,9 @@ actually received. **Read that number first.**
 
 - `doc/09_report/lib/crypto/credential_store_aes_cbc_adversarial_review_2026-08-08.md` (finding F6)
 - `doc/08_tracking/bug/credential_kdf_multi_derivation_spec_aborts_runner_2026-08-08.md`
+
+## Re-check 2026-09-13
+
+Ran `bin/simple test test/01_unit/lib/terminal/credential_key_file_format_spec.spl --no-session-daemon` on the deployed seed: `12 total, 12 passed, 0 failed`. The case in question, `expect(credential_kdf_cost()).to_equal(10)` (line 128), passes — `credential_kdf_cost()` correctly returns `10` with `SIMPLE_CREDENTIAL_KDF_COST` unset. Not reproducible; the underlying `rt_env_get`/module-constant-read defect this doc suspected does not reproduce on the current binary.
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)

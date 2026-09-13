@@ -2,7 +2,7 @@
 
 - **ID:** BUG-2026-08-16-selfhost-test-segv-blocks-bootstrap
 - **Date:** 2026-08-16
-- **Status:** open
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/browser_engine/layout_text_node_spec.spl` now PASSes)
 - **Severity:** high — no pure-Simple self-hosted test evidence is obtainable
   in-tree, and the documented recovery path (re-bootstrap) is itself blocked
 - **Component:** `release/x86_64-unknown-linux-gnu/simple` (git-tracked),
@@ -124,3 +124,6 @@ init is the first place to look — compare
 Separately, consider whether Stage 1's bounded test ABI probe should be able to
 run against the *seed* when the deployed runtime is known-bad, so that a broken
 deployment can always be bootstrapped out of rather than being self-sealing.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/browser_engine/layout_text_node_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,3 +1,7 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 /*
  * Piped-process support for the editor LSP transport.
  *
@@ -16,6 +20,10 @@
  * Build: cc -c -fPIC -O2 -std=gnu11 -I src/runtime src/runtime/runtime_process.c
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #ifdef _WIN32
 #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
 #undef _WIN32_WINNT
@@ -32,6 +40,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#endif
 
 #if defined(SIMPLE_CORE_C_STANDALONE)
 #ifdef _WIN32
@@ -66,6 +77,56 @@ bool rt_process_is_running(int64_t pid) {
     if (waited == (pid_t)pid) return false;
     if (errno == ECHILD) return kill((pid_t)pid, 0) == 0 || errno == EPERM;
     return false;
+#endif
+}
+
+int64_t rt_process_start_identity(int64_t pid) {
+    if (pid <= 0) return 0;
+#ifdef _WIN32
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!process) return 0;
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+        CloseHandle(process);
+        return 0;
+    }
+    CloseHandle(process);
+    ULARGE_INTEGER value;
+    value.LowPart = created.dwLowDateTime;
+    value.HighPart = created.dwHighDateTime;
+    return value.QuadPart > INT64_MAX ? 0 : (int64_t)value.QuadPart;
+#elif defined(__linux__)
+    char path[64], line[2048];
+    snprintf(path, sizeof(path), "/proc/%lld/stat", (long long)pid);
+    FILE* file = fopen(path, "r");
+    if (!file) return 0;
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    char* cursor = strrchr(line, ')');
+    if (!cursor || cursor[1] != ' ') return 0;
+    cursor += 2;
+    for (int field = 3; field < 22; field++) {
+        cursor = strchr(cursor, ' ');
+        if (!cursor) return 0;
+        cursor++;
+    }
+    errno = 0;
+    char* end = NULL;
+    unsigned long long value = strtoull(cursor, &end, 10);
+    return errno == 0 && end != cursor && value <= INT64_MAX ? (int64_t)value : 0;
+#elif defined(__APPLE__)
+    struct proc_bsdinfo info;
+    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+    if (bytes != sizeof(info)) return 0;
+    uint64_t seconds = (uint64_t)info.pbi_start_tvsec;
+    uint64_t micros = (uint64_t)info.pbi_start_tvusec;
+    if (seconds > (uint64_t)INT64_MAX / 1000000ULL) return 0;
+    return (int64_t)(seconds * 1000000ULL + micros);
+#else
+    return 0;
 #endif
 }
 
@@ -948,6 +1009,31 @@ int64_t rt_process_pin_executable(const char* canonical_path) {
     return -1;
 }
 
+int64_t rt_process_pin_executable_owned(const char* canonical_path) {
+    (void)canonical_path;
+    return -1;
+}
+int64_t rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path_len) {
+    (void)path; (void)path_len;
+    return -1;
+}
+bool rt_process_close_pinned_executable_owned(int64_t handle) {
+    (void)handle;
+    return false;
+}
+int rt_process_close_pinned_executable_owned_value(int64_t handle) {
+    (void)handle;
+    return 0;
+}
+int64_t rt_process_acquire_pinned_executable(int64_t handle) {
+    (void)handle;
+    return -1;
+}
+SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
+    (void)handle;
+    return NULL;
+}
+
 bool rt_process_close_pinned_executable(int64_t handle) {
     (void)handle;
     return false;
@@ -961,6 +1047,10 @@ int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args)
 
 #else /* POSIX */
 
+static int64_t rt_process_spawn_piped_argv(
+    const char* cmd, char** argv, bool sandboxed_renderer,
+    int pinned_executable_fd);
+
 #include "runtime_fork.h"
 
 #include <unistd.h>
@@ -970,6 +1060,10 @@ int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args)
 #include <fcntl.h>
 #include <errno.h>
 #include <limits.h>
+
+static int64_t rt_process_spawn_piped_argv(
+        const char* cmd, char** argv, bool sandboxed_renderer,
+        int pinned_executable_fd);
 #include <pthread.h>
 #include <poll.h>
 #ifdef __APPLE__
@@ -994,6 +1088,7 @@ int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args)
 #define RT_PROC_MAX 16
 #define RT_RENDERER_PROC_MAX 4
 #define RT_PROC_READ_BUF 8192
+#define RT_PINNED_EXEC_MAX 16
 
 struct RtProcSlot {
     pid_t pid;       /* 0 = empty, -1 = reserved during spawn */
@@ -1005,6 +1100,13 @@ struct RtProcSlot {
 static struct RtProcSlot s_procs[RT_PROC_MAX];
 static pthread_mutex_t s_proc_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int s_renderer_slots_active;
+
+struct RtPinnedExecutable {
+    uint64_t handle;
+    int fd;
+};
+static struct RtPinnedExecutable s_pinned_executables[RT_PINNED_EXEC_MAX];
+static pthread_mutex_t s_pinned_executables_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Static read buffer — returned pointer is valid until the next call */
 static char s_read_buf[RT_PROC_READ_BUF];
@@ -1238,6 +1340,7 @@ done:
     if (actions_initialized) (void)posix_spawn_file_actions_destroy(&actions);
     return pid;
 }
+#endif /* __APPLE__ */
 
 /* Reject all runtime-loaded ELF images. Static PIE is intentionally excluded:
  * admitting its loader/dependency closure requires a separate pinned manifest. */
@@ -1267,6 +1370,132 @@ static bool rt_hal_static_elf_fd(int fd, off_t size) {
 #undef RT_HAL_CHECK_ELF
     return false;
 }
+
+static int64_t pinned_handle_install(int fd) {
+    if (pthread_mutex_lock(&s_pinned_executables_lock) != 0) return -1;
+    int free_slot = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == 0 && free_slot < 0) free_slot = i;
+    }
+    if (free_slot < 0) { pthread_mutex_unlock(&s_pinned_executables_lock); errno = EAGAIN; return -1; }
+    uint64_t candidate = 0;
+    for (int attempt = 0; attempt < 16 && candidate == 0; attempt++) {
+        uint64_t random = 0;
+        ssize_t count = syscall(SYS_getrandom, &random, sizeof(random), 0);
+        if (count == (ssize_t)sizeof(random))
+            candidate = random & UINT64_C(0x0fffffffffffffff);
+        else if (count < 0 && errno == EINTR) attempt--;
+        else break;
+        for (int i = 0; i < RT_PINNED_EXEC_MAX && candidate; i++)
+            if (s_pinned_executables[i].handle == candidate) candidate = 0;
+    }
+    if (!candidate) { pthread_mutex_unlock(&s_pinned_executables_lock); errno = EAGAIN; return -1; }
+    s_pinned_executables[free_slot].handle = candidate;
+    s_pinned_executables[free_slot].fd = fd;
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    return (int64_t)candidate;
+}
+
+int64_t rt_process_acquire_pinned_executable(int64_t handle) {
+    if (handle <= 0) return -1;
+    if (pthread_mutex_lock(&s_pinned_executables_lock) != 0) return -1;
+    int duplicate = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == (uint64_t)handle) {
+            duplicate = fcntl(s_pinned_executables[i].fd, F_DUPFD_CLOEXEC, 3);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    if (duplicate < 0) return -1;
+    struct stat st;
+    int seals = fcntl(duplicate, F_GET_SEALS);
+    if (fstat(duplicate, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size > (off_t)(64 * 1024 * 1024) || seals < 0 ||
+        (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
+        (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) ||
+        !rt_hal_static_elf_fd(duplicate, st.st_size)) {
+        close(duplicate); errno = ESTALE; return -1;
+    }
+    return duplicate;
+}
+
+static uint32_t pin_sha_r(uint32_t x, unsigned n) { return (x >> n) | (x << (32 - n)); }
+static void pin_sha_block(uint32_t s[8], const uint8_t b[64]) {
+    static const uint32_t k[64] = {0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+    uint32_t w[64], a,b0,c,d,e,f,g,h;
+    for (int i=0;i<16;i++) w[i]=((uint32_t)b[4*i]<<24)|((uint32_t)b[4*i+1]<<16)|((uint32_t)b[4*i+2]<<8)|b[4*i+3];
+    for (int i=16;i<64;i++) w[i]=w[i-16]+(pin_sha_r(w[i-15],7)^pin_sha_r(w[i-15],18)^(w[i-15]>>3))+w[i-7]+(pin_sha_r(w[i-2],17)^pin_sha_r(w[i-2],19)^(w[i-2]>>10));
+    a=s[0];b0=s[1];c=s[2];d=s[3];e=s[4];f=s[5];g=s[6];h=s[7];
+    for (int i=0;i<64;i++) { uint32_t t1=h+(pin_sha_r(e,6)^pin_sha_r(e,11)^pin_sha_r(e,25))+((e&f)^((~e)&g))+k[i]+w[i], t2=(pin_sha_r(a,2)^pin_sha_r(a,13)^pin_sha_r(a,22))+((a&b0)^(a&c)^(b0&c)); h=g;g=f;f=e;e=d+t1;d=c;c=b0;b0=a;a=t1+t2; }
+    s[0]+=a;s[1]+=b0;s[2]+=c;s[3]+=d;s[4]+=e;s[5]+=f;s[6]+=g;s[7]+=h;
+}
+
+SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
+    int fd = (int)rt_process_acquire_pinned_executable(handle);
+    if (fd < 0) return NULL;
+    struct stat image;
+    if (fstat(fd, &image) != 0 || image.st_size <= 0 || image.st_size > (off_t)(64 * 1024 * 1024)) {
+        close(fd); return NULL;
+    }
+    uint32_t state[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    uint8_t block[64], buffer[4096]; uint64_t total = 0; off_t offset = 0; size_t used = 0; int failed = 0;
+    while (offset < image.st_size) {
+        size_t want = (size_t)(image.st_size - offset);
+        if (want > sizeof(buffer)) want = sizeof(buffer);
+        ssize_t n = pread(fd, buffer, want, offset);
+        if (n < 0) { if (errno == EINTR) continue; failed = 1; break; }
+        if (n == 0) { failed = 1; break; }
+        if (UINT64_MAX - total < (uint64_t)n) { failed = 1; break; }
+        total += (uint64_t)n; offset += n;
+        for (ssize_t i=0;i<n;i++) { block[used++] = buffer[i]; if (used == 64) { pin_sha_block(state, block); used = 0; } }
+    }
+    if (!failed && total == (uint64_t)image.st_size && total <= UINT64_MAX / 8) {
+        block[used++] = 0x80;
+        if (used > 56) { while (used < 64) block[used++] = 0; pin_sha_block(state, block); used = 0; }
+        while (used < 56) block[used++] = 0;
+        uint64_t bits = total * 8;
+        for (int i=7;i>=0;i--) block[used++] = (uint8_t)(bits >> (8*i));
+        pin_sha_block(state, block);
+    } else failed = 1;
+    close(fd);
+    if (failed) return NULL;
+    SplArray* result = rt_array_new(32);
+    if (!result) return NULL;
+    for (int i=0;i<8;i++) for (int j=3;j>=0;j--)
+        if (!rt_array_push(result, rt_value_int((state[i] >> (8*j)) & 255))) { rt_array_free(result); return NULL; }
+    return result;
+}
+
+bool rt_process_close_pinned_executable_owned(int64_t handle) {
+    if (handle <= 0 || pthread_mutex_lock(&s_pinned_executables_lock) != 0)
+        return false;
+    int fd = -1;
+    for (int i = 0; i < RT_PINNED_EXEC_MAX; i++) {
+        if (s_pinned_executables[i].handle == (uint64_t)handle) {
+            fd = s_pinned_executables[i].fd;
+            memset(&s_pinned_executables[i], 0, sizeof(s_pinned_executables[i]));
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s_pinned_executables_lock);
+    return fd >= 0 && close(fd) == 0;
+}
+#endif
+
+#ifndef __linux__
+int64_t rt_process_acquire_pinned_executable(int64_t handle) {
+    (void)handle;
+    return -1;
+}
+bool rt_process_close_pinned_executable_owned(int64_t handle) {
+    (void)handle;
+    return false;
+}
+SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
+    (void)handle;
+    return NULL;
+}
 #endif
 
 /* Linux-only race-free executable pinning for the RT/HAL comparator host.
@@ -1279,7 +1508,7 @@ int64_t rt_process_pin_executable(const char* canonical_path) {
     return -1;
 #else
     if (!canonical_path || canonical_path[0] != '/') return -1;
-    int source = open(canonical_path, O_RDONLY | O_NOFOLLOW);
+    int source = open(canonical_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (source < 0) return -1;
     struct stat st;
     if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) ||
@@ -1295,15 +1524,19 @@ int64_t rt_process_pin_executable(const char* canonical_path) {
     close(source);
     return -1;
 #else
-    int pinned = (int)syscall(SYS_memfd_create, "simple-rthal", 0x0002U);
+    int pinned = (int)syscall(SYS_memfd_create, "simple-rthal", 0x0003U);
     if (pinned < 0) { close(source); return -1; }
     uint8_t buffer[65536];
+    off_t copied = 0;
     for (;;) {
         ssize_t count = read(source, buffer, sizeof(buffer));
         if (count == 0) break;
         if (count < 0) {
             if (errno == EINTR) continue;
             close(source); close(pinned); return -1;
+        }
+        if (copied > st.st_size - count) {
+            close(source); close(pinned); errno = EFBIG; return -1;
         }
         ssize_t offset = 0;
         while (offset < count) {
@@ -1315,18 +1548,54 @@ int64_t rt_process_pin_executable(const char* canonical_path) {
             }
             offset += written;
         }
+        copied += count;
     }
     close(source);
-    if (lseek(pinned, 0, SEEK_SET) < 0 || fchmod(pinned, 0500) != 0 ||
+    struct stat pinned_stat;
+    if (copied != st.st_size || lseek(pinned, 0, SEEK_SET) < 0 || fchmod(pinned, 0500) != 0 ||
         fcntl(pinned, F_ADD_SEALS,
               F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0 ||
-        fcntl(pinned, F_SETFD, FD_CLOEXEC) != 0) {
+        fstat(pinned, &pinned_stat) != 0 || pinned_stat.st_size != copied ||
+        !rt_hal_static_elf_fd(pinned, pinned_stat.st_size) ||
+        (fcntl(pinned, F_GET_SEALS) & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
+            (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) {
         close(pinned);
         return -1;
     }
     return (int64_t)pinned;
 #endif
 #endif
+}
+
+int64_t rt_process_pin_executable_owned(const char* canonical_path) {
+#ifndef __linux__
+    (void)canonical_path;
+    return -1;
+#else
+    int raw_fd = (int)rt_process_pin_executable(canonical_path);
+    if (raw_fd < 0) return -1;
+    int owner_fd = fcntl(raw_fd, F_DUPFD_CLOEXEC, 3);
+    if (owner_fd < 0) { close(raw_fd); return -1; }
+    int64_t handle = pinned_handle_install(owner_fd);
+    if (handle < 0) close(owner_fd);
+    close(raw_fd);
+    return handle;
+#endif
+}
+
+int64_t rt_process_pin_executable_owned_value(const uint8_t* path, uint64_t path_len) {
+    if (!path || path_len == 0 || path_len > 4096 || path_len > SIZE_MAX - 1 ||
+        path[0] != '/' || memchr(path, '\0', (size_t)path_len)) return -1;
+    char* copied = (char*)malloc((size_t)path_len + 1);
+    if (!copied) return -1;
+    memcpy(copied, path, (size_t)path_len); copied[path_len] = '\0';
+    int64_t handle = rt_process_pin_executable_owned(copied);
+    free(copied);
+    return handle;
+}
+
+int rt_process_close_pinned_executable_owned_value(int64_t handle) {
+    return rt_process_close_pinned_executable_owned(handle) ? 1 : 0;
 }
 
 bool rt_process_close_pinned_executable(int64_t handle) {
@@ -1365,7 +1634,7 @@ int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args)
     return pid;
 #endif
 }
-#else
+#if !defined(__APPLE__)
 static void proc_close_inherited_fds_except(int keep_fd) {
     if (keep_fd >= 3) {
 #if defined(__linux__) && defined(SYS_close_range)

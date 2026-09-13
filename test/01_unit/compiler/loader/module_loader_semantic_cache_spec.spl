@@ -1,12 +1,17 @@
 use std.spec
 use compiler.loader.{
-    ModuleLoader,
+    ModuleLoader, LoadedModule,
     moduleloader_record_semantic_fingerprint,
     moduleloader_record_dependency_semantic_fingerprint,
+    moduleloader_record_semantic_export,
+    moduleloader_record_semantic_dependency,
     moduleloader_semantic_cache_is_fresh,
     moduleloader_semantic_dependents_of,
+    moduleloader_semantic_dependents,
     moduleloader_invalidate_semantic_change
 }
+
+extern fn rt_file_read_text(path: text) -> text
 
 describe "Module loader semantic cache invalidation":
     it "fails closed when dependency semantic fingerprints change":
@@ -21,6 +26,15 @@ describe "Module loader semantic cache invalidation":
         var deps_v2: Dict<text, text> = {}
         deps_v2["B.smf"] = "B:field-wrapper:v2"
         expect(moduleloader_semantic_cache_is_fresh(loader, "A.smf", "A:abi:v1", deps_v2)).to_be(false)
+
+        var deps_extra: Dict<text, text> = {}
+        deps_extra["B.smf"] = "B:field-wrapper:v1"
+        deps_extra["C.smf"] = "C:abi:v1"
+        expect(moduleloader_semantic_cache_is_fresh(loader, "A.smf", "A:abi:v1", deps_extra)).to_be(false)
+        expect(moduleloader_semantic_cache_is_fresh(loader, "A.smf", "A:abi:v1", {})).to_be(false)
+
+        moduleloader_record_semantic_fingerprint(loader, "Leaf.smf", "Leaf:abi:v1")
+        expect(moduleloader_semantic_cache_is_fresh(loader, "Leaf.smf", "Leaf:abi:v1", {})).to_be(true)
 
     it "finds transitive dependents through dependency cycles":
         val loader = ModuleLoader.with_defaults()
@@ -37,6 +51,54 @@ describe "Module loader semantic cache invalidation":
         expect(invalidated.contains("A.smf")).to_be(true)
         expect(invalidated.contains("B.smf")).to_be(true)
         expect(moduleloader_semantic_cache_is_fresh(loader, "A.smf", "A:abi:v1", {})).to_be(false)
+
+    it "delegates compatibility fingerprint traversal to the canonical index":
+        val source = rt_file_read_text(
+            "src/compiler/99.loader/module_loader_compat.spl")
+        expect(source).to_contain("_semantic_fingerprint_dependents_from_paths")
+        expect(source).to_contain(
+            "self.dependency_semantic_fingerprints.keys()")
+        expect(source.contains("var reverse_heads: Dict<text, i64> = {}")).to_equal(false)
+        expect(source.contains("for candidate in changed_paths:")).to_equal(false)
+        expect(source.contains("for key in exports + deps:")).to_equal(false)
+
+    it "checks exact dependency cardinality before one value traversal":
+        val compat = rt_file_read_text(
+            "src/compiler/99.loader/module_loader_compat.spl")
+        val canonical = rt_file_read_text(
+            "src/compiler/99.loader/loader/module_loader_semantic.spl")
+        expect(canonical).to_contain("return current_dependencies.is_empty()")
+        expect(canonical).to_contain(
+            "stored_deps.len() != current_dependencies.len()")
+        expect(canonical.contains("for dep_path in stored_deps.keys():")).to_equal(false)
+        expect(compat).to_contain("_semantic_cache_is_fresh_from_maps")
+        expect(compat.contains("val stored_deps =")).to_equal(false)
+
+    it "propagates indexed semantic keys through exports and module paths":
+        var loader = ModuleLoader.with_defaults()
+        loader.modules["A.smf"] = LoadedModule(
+            path: "A.smf", reader: "", symbols: {}, load_time: 0, version: 1)
+        loader.modules["B.smf"] = LoadedModule(
+            path: "B.smf", reader: "", symbols: {}, load_time: 0, version: 1)
+        loader.modules["C.smf"] = LoadedModule(
+            path: "C.smf", reader: "", symbols: {}, load_time: 0, version: 1)
+        moduleloader_record_semantic_dependency(loader, "A.smf", "root.key")
+        moduleloader_record_semantic_export(loader, "A.smf", "A.api")
+        moduleloader_record_semantic_dependency(loader, "B.smf", "A.api")
+        moduleloader_record_semantic_dependency(loader, "C.smf", "B.smf")
+        val affected = moduleloader_semantic_dependents(loader, "root.key")
+        expect(affected.len()).to_equal(3)
+        expect(affected.contains("A.smf")).to_be(true)
+        expect(affected.contains("B.smf")).to_be(true)
+        expect(affected.contains("C.smf")).to_be(true)
+
+    it "delegates compatibility semantic-key closure to the canonical owner":
+        val source = rt_file_read_text(
+            "src/compiler/99.loader/module_loader_compat.spl")
+        expect(source).to_contain(
+            "use compiler.loader.loader.module_loader_semantic.")
+        expect(source).to_contain("_semantic_dependents_from_paths")
+        expect(source).to_contain("self.modules.keys(), self.semantic_exports")
 
     it "invalidates JIT symbols compiled against a field-wrapper semantic key":
         val loader = ModuleLoader.with_defaults()

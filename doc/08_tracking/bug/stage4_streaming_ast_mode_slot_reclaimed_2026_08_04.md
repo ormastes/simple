@@ -1,5 +1,7 @@
 # Stage 4 streaming AST mode slot reclaimed between files
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Claimed from a native debugger trace on 2026-08-04.
@@ -38,3 +40,7 @@ runtime alias, or revive the rejected lexer-lifetime experiment.
   cases for the rebuilt self-hosted test runner.
 - One bounded incremental Stage 2/3 refresh and Phase 4 retry crosses release
   sequence 1 before any broader completion claim.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

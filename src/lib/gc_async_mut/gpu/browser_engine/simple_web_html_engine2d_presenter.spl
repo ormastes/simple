@@ -37,6 +37,47 @@ pub fn web_gpu_paint_mode() -> text:
         return "measured"
     "gpu-first"
 
+# ---------------------------------------------------------------------------
+# Route-stage counters (CPU<->GPU boundary attribution)
+# ---------------------------------------------------------------------------
+# The GPU-boundary audit gate classifies `readbacks` from the backend census
+# and host pixel work from the vk-timing buckets, but NEITHER of them can say
+# WHICH presenter route produced a readback, and neither sees the host paint
+# this presenter performs before an upload — that work never touches a Vulkan
+# op, so no backend counter is written for it. These counters close exactly
+# that gap: every presenter readback site and every host-painted pixel handed
+# to the device is counted here and emitted as one `[web-route-stage]` line per
+# drain, which the aggregator reads. They are always counted — a counter that
+# is only armed under an env var reads 0 exactly when it matters — and the
+# caller decides whether to emit the drained line.
+var _web_route_readbacks_gpu_paint: i64 = 0
+var _web_route_readbacks_upload: i64 = 0
+var _web_route_host_paint_pixels: i64 = 0
+
+pub fn web_route_stage_note_host_paint(pixels: i64):
+    if pixels > 0:
+        _web_route_host_paint_pixels = _web_route_host_paint_pixels + pixels
+
+pub fn web_route_stage_host_paint_pixels() -> i64:
+    _web_route_host_paint_pixels
+
+pub fn web_route_stage_readbacks() -> i64:
+    _web_route_readbacks_gpu_paint + _web_route_readbacks_upload
+
+# One line per frame, drained by the caller that ends a frame. Draining is what
+# makes the numbers per-frame rather than cumulative, exactly like the backend
+# census drain the audit gate already relies on.
+pub fn web_route_stage_drain() -> text:
+    val line = (
+        "[web-route-stage] readbacks_gpu_paint={_web_route_readbacks_gpu_paint}" +
+        " readbacks_upload={_web_route_readbacks_upload}" +
+        " host_paint_pixels={_web_route_host_paint_pixels}"
+    )
+    _web_route_readbacks_gpu_paint = 0
+    _web_route_readbacks_upload = 0
+    _web_route_host_paint_pixels = 0
+    line
+
 fn _backend_is_cpu(normalized_backend: text) -> bool:
     (normalized_backend == "software" or normalized_backend == "cpu"
         or normalized_backend == "cpu_simd" or normalized_backend == "simd_cpu"
@@ -309,18 +350,30 @@ pub fn web_gpu_paint_timing_evidence(
     pixels_match: bool,
     upload_device_proven: bool,
     gpu_device_proven: bool,
-    commands_complete: bool = true
+    commands_complete: bool = true,
+    readback_absence: text = ""
 ) -> WebGpuPaintTimingEvidence:
     val timings_valid = (
         sample_count >= 3 and upload_bound_p50_us > 0 and upload_bound_p95_us >= upload_bound_p50_us and
         gpu_paint_p50_us > 0 and gpu_paint_p95_us >= gpu_paint_p50_us
     )
+    # An absent readback is absence of EVIDENCE, not evidence of a mismatch, so
+    # it can never make the route available -- but it must not be REPORTED as a
+    # pixel mismatch either. A zero-length buffer compared against a full one
+    # fails on length before a single pixel is examined, and calling that
+    # `pixel-mismatch` sent two investigations after blend rounding and alpha
+    # handling when the real fault was a wedged Vulkan command buffer. See
+    # doc/08_tracking/bug/
+    # vulkan_post_readback_dispatch_fails_latches_cpu_fallback_2026-09-11.md.
+    val readback_present = readback_absence == ""
     val available = (
-        timings_valid and pixels_match and upload_device_proven and
+        timings_valid and readback_present and pixels_match and upload_device_proven and
         gpu_device_proven and commands_complete)
     val should = available and gpu_paint_p95_us + WEB_GPU_PAINT_MIN_MARGIN_US < upload_bound_p95_us
     val reason = if not timings_valid:
         "timing-unavailable"
+    elif not readback_present:
+        readback_absence
     elif not pixels_match:
         "pixel-mismatch"
     elif not commands_complete:
@@ -421,6 +474,7 @@ fn present_gpu_paint_readback(frame: WebGpuPaintFrame, backend_name: text, base:
                         engine.draw_image(dirty.x, dirty.y, dirty.w, dirty.h, sub)
                         blit_count = 1
                         blit_pixels = dirty.w * dirty.h
+            _web_route_readbacks_gpu_paint = _web_route_readbacks_gpu_paint + 1
             val out = engine.read_pixels_with_source()
             # `gpu_backend_used` reports whether the DEVICE produced these
             # pixels, so it must be bound to the same readback evidence the
@@ -582,7 +636,22 @@ fn present_layout_pixels_with_engine2d_readback(pixels: [u32], width: i32, heigh
         Ok(engine):
             engine.clear(base)
             if pixels.len() == width * height:
+                # A gpu-paint-candidate backend reaching THIS path is the
+                # upload-bound fallback, not the GPU route: the surface was
+                # painted on the host and the device is only compositing and
+                # handing it straight back. That is a legitimate fallback (the
+                # measured lane's parity leg, a scroll render, an explicitly
+                # gpu_paint=false caller) but it must never be silent, so it
+                # records a reason in the same shape the gpu-first lane uses
+                # for its declines.
+                if not _backend_is_cpu(normalized_backend):
+                    print "[web-gpu-paint-decision] backend={normalized_backend} upload-bound:host-painted:offloaded=none:cpu=full-frame:reason=upload-bound-present:pixels={pixels.len()}"
+                # Every pixel uploaded here was painted on the HOST. Count it:
+                # this is the pass-through term the boundary audit could not
+                # see, because a host raster writes no Vulkan counter.
+                web_route_stage_note_host_paint(pixels.len().to_i64())
                 engine.draw_image(0, 0, width, height, pixels)
+            _web_route_readbacks_upload = _web_route_readbacks_upload + 1
             val gpu_pixels = engine.read_pixels_with_source()
             gpu_pixels
         Err(_):

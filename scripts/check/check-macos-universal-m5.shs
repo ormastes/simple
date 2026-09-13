@@ -1,0 +1,649 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+if [ -f "$root/scripts/lib/storage-roots.shs" ]; then
+    STORAGE_ROOTS_REPO_ROOT=$root
+    export STORAGE_ROOTS_REPO_ROOT
+    . "$root/scripts/lib/storage-roots.shs"
+    storage_roots_init
+fi
+work_parent="$SIMPLE_WORKTREE_STORAGE_ROOT/tmp/macos-m5-selftest"
+mkdir -p "$work_parent"
+work=$(mktemp -d "$work_parent/run.XXXXXXXX")
+trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/bin" "$work/inputs" "$work/out"
+policy_manifest="$work/inputs/kernel_closure.sdn"
+cat >"$policy_manifest" <<'EOF'
+schema: simple-kernel-closure-v1
+authority:
+  k1_policy: llvm-cranelift
+  simple_abi_policy: v1
+  plugin_manifest_policy: simple-sdn
+  coverage_cutover_policy: atomic-apk-only
+  coverage_implementation: apk-only
+  performance_threshold_mode: baseline-relative-10-percent
+  performance_threshold_status: selected
+  performance_baseline_scope: admitted-per-architecture-receipt
+  performance_steady_rss_percent: 110
+  performance_growth_percent: 10
+  performance_warm_request_count: 20
+EOF
+nfr_authority="$work/inputs/macos-bootstrap-nfr.md"
+cat >"$nfr_authority" <<'EOF'
+MBH-NFR-003
+Decision source: user-final-performance-authority-2026-09-02
+maximum steady RSS shall be at most 110% of baseline RSS
+nonnegative RSS growth shall be at most 10% of baseline RSS
+EOF
+
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else sha256sum "$1" | awk '{print $1}'; fi
+}
+cat >"$work/bin/lipo" <<'EOF'
+#!/bin/sh
+if [ "$1" = -archs ]; then sed -n 's/^ARCHS=//p' "$2"; exit 0; fi
+if [ "$1" = -create ]; then
+    first=$2; second=$3; [ "$4" = -output ] || exit 2
+    {
+        printf 'ARCHS=arm64 x86_64\n'
+        sed '1d' "$first"
+        sed '1d' "$second"
+    } >"$5"
+    exit 0
+fi
+exit 2
+EOF
+cat >"$work/bin/file" <<'EOF'
+#!/bin/sh
+archs=$(sed -n 's/^ARCHS=//p' "$1")
+case "$archs" in
+  'arm64 x86_64'|'x86_64 arm64') echo "$1: Mach-O universal binary with 2 architectures" ;;
+  arm64|x86_64) echo "$1: Mach-O 64-bit executable $archs" ;;
+  *) echo "$1: data" ;;
+esac
+EOF
+cat >"$work/bin/codesign" <<'EOF'
+#!/bin/sh
+case "$1" in
+  --force) printf '\nM5-SIGNATURE\n' >>"${7}/Contents/MacOS/simple"; echo signed ;;
+  --verify) grep -q M5-SIGNATURE "${4}/Contents/MacOS/simple" && echo valid-signature ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"$work/bin/xcrun" <<'EOF'
+#!/bin/sh
+if [ "$1:$2" = notarytool:submit ]; then echo 'status: Accepted'; exit 0; fi
+if [ "$1:$2" = stapler:staple ]; then printf 'M5-TICKET\n' >>"$3/Contents/MacOS/simple"; echo stapled; exit 0; fi
+if [ "$1:$2" = stapler:validate ]; then grep -q M5-TICKET "$3/Contents/MacOS/simple" && echo valid-ticket; exit $?; fi
+exit 2
+EOF
+cat >"$work/bin/ditto" <<'EOF'
+#!/bin/sh
+for value in "$@"; do previous=${current:-}; current=$value; done
+source=$previous; destination=$current
+cat "$source/Contents/Info.plist" "$source/Contents/MacOS/simple" >"$destination"
+EOF
+cat >"$work/bin/spctl" <<'EOF'
+#!/bin/sh
+[ "${M5_FAKE_SPCTL_FAIL:-0}" != 1 ] || exit 1
+for value in "$@"; do target=$value; done
+grep -q M5-SIGNATURE "$target/Contents/MacOS/simple" &&
+    grep -q M5-TICKET "$target/Contents/MacOS/simple" && echo accepted
+EOF
+chmod +x "$work/bin/lipo" "$work/bin/file" "$work/bin/codesign" "$work/bin/xcrun" "$work/bin/ditto" "$work/bin/spctl"
+
+m5() {
+    env M5_PORTABLE_SELFTEST=1 \
+      M5_LIPO="$work/bin/lipo" M5_FILE="$work/bin/file" \
+      M5_CODESIGN="$work/bin/codesign" M5_XCRUN="$work/bin/xcrun" \
+      M5_DITTO="$work/bin/ditto" M5_SPCTL="$work/bin/spctl" \
+      M5_KERNEL_POLICY_MANIFEST="$policy_manifest" \
+      M5_NFR_AUTHORITY_DOCUMENT="$nfr_authority" \
+      M5_FAKE_SPCTL_FAIL="${M5_FAKE_SPCTL_FAIL:-0}" \
+      sh "$root/scripts/release/macos-universal-m5.shs" "$@"
+}
+
+write_admission() {
+    arch=$1 target=$2 candidate=$3 receipt=$4 provider=$5
+    cat >"$receipt" <<EOF
+schema=macos-phase3-admission-v1
+status=PASS
+phase=3
+architecture=$arch
+target_triple=$target
+candidate_sha256=$(sha256_file "$candidate")
+source_revision=0123456789abcdef0123456789abcdef01234567
+simple_version=1.0.0
+compiler_schema=35
+kernel_plugin_abi=1
+kernel_policy_manifest_sha256=$(sha256_file "$policy_manifest")
+kernel_k1_policy=llvm-cranelift
+plugin_manifest_policy=simple-sdn
+coverage_cutover_policy=atomic-apk-only
+coverage_implementation=apk-only
+performance_threshold_mode=baseline-relative-10-percent
+performance_threshold_status=selected
+performance_baseline_scope=admitted-per-architecture-receipt
+performance_steady_rss_percent=110
+performance_growth_percent=10
+performance_warm_request_count=20
+runtime_bundle_identity=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+provider_identity=$provider
+deployment_policy=macos-13
+target_identity_digest=$(if [ "$arch" = arm64 ]; then printf '%064d' 1; else printf '%064d' 2; fi)
+deployment_target=13.0.0
+sdk_identity=3333333333333333333333333333333333333333333333333333333333333333
+EOF
+}
+write_m4() {
+    arch=$1 candidate=$2 admission=$3 receipt=$4 provider=$5 run_id=$6 evidence_dir=$7
+    rm -rf "$evidence_dir"
+    candidate_sha=$(sha256_file "$candidate")
+    mkdir -p "$evidence_dir/tools/$candidate_sha" "$evidence_dir/long-lived-residency" "$evidence_dir/provider-artifacts" "$evidence_dir/authority"
+    printf 'case\tstatus\tdetail\nportable\tPASS\tstructural-only\n' >"$evidence_dir/results.tsv"
+    printf 'schema=macos-m4-tool-build-set-v1\nproducer=portable-structural\n' >"$evidence_dir/tool-builds.env"
+    for tool in simple_cli simple_test_runner simple_mcp_server simple_lsp_mcp_server; do
+        printf 'portable structural %s\n' "$tool" >"$evidence_dir/tools/$candidate_sha/$tool"
+    done
+    cp "$admission" "$evidence_dir/authority/phase3-admission.env"
+    cp "$policy_manifest" "$evidence_dir/authority/kernel-closure.sdn"
+    cat >"$evidence_dir/authority/phase3-producer-authority.env" <<EOF
+schema=macos-phase3-producer-authority-v1
+status=AUTHENTICATED
+repository=simple-lang/simple
+workflow_ref=simple-lang/simple/.github/workflows/phase3.yml@0123456789abcdef0123456789abcdef01234567
+workflow_sha=4444444444444444444444444444444444444444444444444444444444444444
+head_sha=0123456789abcdef0123456789abcdef01234567
+run_id=100
+run_attempt=1
+artifact_name=portable-phase3-$arch
+artifact_id=$(if [ "$arch" = arm64 ]; then echo 1001; else echo 1002; fi)
+artifact_digest=sha256:$(if [ "$arch" = arm64 ]; then printf '%064d' 6; else printf '%064d' 7; fi)
+candidate_sha256=$candidate_sha
+admission_receipt_sha256=$(sha256_file "$admission")
+authority_repository=simple-lang/simple
+authority_workflow_ref=simple-lang/simple/.github/workflows/macos-reverse-reference-m4.yml@refs/heads/main
+authority_workflow_sha=5555555555555555555555555555555555555555555555555555555555555555
+authority_head_sha=0123456789abcdef0123456789abcdef01234567
+authority_run_id=$run_id
+authority_run_attempt=1
+EOF
+    mcp_sha=$(sha256_file "$evidence_dir/tools/$candidate_sha/simple_mcp_server")
+    authority_document_sha=$(sha256_file "$nfr_authority")
+    cat >"$evidence_dir/authority/residency-baseline.env" <<EOF
+schema=macos-m4-residency-baseline-v1
+status=ADMITTED
+requirement_id=MBH-NFR-003
+selection_policy=baseline-relative-10-percent
+decision_source=user-final-performance-authority-2026-09-02
+architecture=$arch
+request_count=20
+baseline_rss_kib=1000
+baseline_evidence_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+producer_sha256=$candidate_sha
+server_sha256=$mcp_sha
+authority_document=doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md
+authority_document_sha256=$authority_document_sha
+EOF
+    cat >"$evidence_dir/long-lived-residency/receipt.env" <<EOF
+schema=macos-bootstrap-long-lived-residency-gate-v3
+status=PASS
+architecture=$arch
+request_count=20
+pid=4242
+process_start_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+server_sha256=$mcp_sha
+producer_sha256=$(sha256_file "$candidate")
+responses_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+samples_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+baseline_rss_kib=1000
+baseline_evidence_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+baseline_receipt_sha256=$(sha256_file "$evidence_dir/authority/residency-baseline.env")
+authority_document_sha256=$authority_document_sha
+decision_source=user-final-performance-authority-2026-09-02
+threshold_mode=baseline-relative-10-percent
+steady_rss_limit_percent=110
+growth_limit_percent=10
+steady_rss_ceiling_kib=1100
+growth_ceiling_kib=100
+observed_max_steady_rss_kib=1000
+observed_nonnegative_growth_kib=0
+EOF
+    printf 'portable live-built baseline provider archive\n' >"$evidence_dir/provider-artifacts/baseline.a"
+    cp "$evidence_dir/provider-artifacts/baseline.a" "$evidence_dir/provider-artifacts/baseline-same-bytes.a"
+    if [ "${M5_FAKE_PROVIDER_MUTATION_SAME_BYTES:-0}" = 1 ]; then
+        cp "$evidence_dir/provider-artifacts/baseline.a" "$evidence_dir/provider-artifacts/mutated.a"
+    else
+        printf 'portable live-built mutated provider archive\n' >"$evidence_dir/provider-artifacts/mutated.a"
+    fi
+    baseline_archive_sha=$(sha256_file "$evidence_dir/provider-artifacts/baseline.a")
+    same_byte_archive_sha=$(sha256_file "$evidence_dir/provider-artifacts/baseline-same-bytes.a")
+    mutated_archive_sha=$(sha256_file "$evidence_dir/provider-artifacts/mutated.a")
+    baseline_member_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    mutated_member_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    baseline_manifest_identity=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    mutated_manifest_identity=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+    if [ "${M5_FAKE_PROVIDER_MUTATION_SAME_BYTES:-0}" = 1 ]; then
+        mutated_member_digest=$baseline_member_digest
+        mutated_manifest_identity=$baseline_manifest_identity
+    fi
+    printf 'member=0:0|size=32|digest=%s|name=10:provider.o\n' "$baseline_member_digest" >"$evidence_dir/baseline.provider-members.tsv"
+    cp "$evidence_dir/baseline.provider-members.tsv" "$evidence_dir/provider-same-byte.provider-members.tsv"
+    printf 'member=0:0|size=32|digest=%s|name=10:provider.o\n' "$mutated_member_digest" >"$evidence_dir/provider.provider-members.tsv"
+    sed 's/|name=[0-9][0-9]*:.*$//' "$evidence_dir/baseline.provider-members.tsv" >"$evidence_dir/baseline.provider-member-payloads.tsv"
+    cp "$evidence_dir/baseline.provider-member-payloads.tsv" "$evidence_dir/provider-same-byte.provider-member-payloads.tsv"
+    sed 's/|name=[0-9][0-9]*:.*$//' "$evidence_dir/provider.provider-members.tsv" >"$evidence_dir/provider.provider-member-payloads.tsv"
+    for variant in baseline provider-same-byte provider; do
+        case "$variant" in
+            baseline) archive_sha=$baseline_archive_sha; manifest_identity=$baseline_manifest_identity; members_file="$evidence_dir/baseline.provider-members.tsv" ;;
+            provider-same-byte) archive_sha=$same_byte_archive_sha; manifest_identity=$baseline_manifest_identity; members_file="$evidence_dir/provider-same-byte.provider-members.tsv" ;;
+            provider) archive_sha=$mutated_archive_sha; manifest_identity=$mutated_manifest_identity; members_file="$evidence_dir/provider.provider-members.tsv" ;;
+        esac
+        case "$variant" in
+            baseline) payloads_file="$evidence_dir/baseline.provider-member-payloads.tsv" ;;
+            provider-same-byte) payloads_file="$evidence_dir/provider-same-byte.provider-member-payloads.tsv" ;;
+            provider) payloads_file="$evidence_dir/provider.provider-member-payloads.tsv" ;;
+        esac
+        path="/portable/$variant.a"
+        cat >"$evidence_dir/$variant.runtime-provider-manifest.receipt" <<EOF
+simple-darwin-runtime-provider-manifest-v1
+architecture=$arch
+artifact=0|path=${#path}:$path|digest=$archive_sha
+$(sed 's/|name=[0-9][0-9]*:.*$//' "$members_file")
+content-identity=$manifest_identity
+EOF
+        cat >"$evidence_dir/$variant.backend-provider.receipt" <<EOF
+simple-native-provider-identity-v1
+backend=llvm
+provider=$provider
+EOF
+        cat >"$evidence_dir/$variant.provider-oracle.env" <<EOF
+schema=macos-m4-provider-archive-oracle-v1
+case=$variant
+compiler_sha256=$(sha256_file "$candidate")
+backend_provider_digest=$provider
+archive_sha256=$archive_sha
+manifest_sha256=$(sha256_file "$evidence_dir/$variant.runtime-provider-manifest.receipt")
+backend_receipt_sha256=$(sha256_file "$evidence_dir/$variant.backend-provider.receipt")
+manifest_content_identity=$manifest_identity
+member_count=1
+members_sha256=$(sha256_file "$members_file")
+member_payloads_sha256=$(sha256_file "$payloads_file")
+EOF
+    done
+    for variant in baseline mutated; do
+        printf 'portable structural %s provider build\n' "$variant" >"$evidence_dir/build-provider-$variant.log"
+        cat >"$evidence_dir/provider-$variant.tool-build.env" <<EOF
+schema=macos-m4-provider-tool-build-v1
+status=PASS
+variant=$variant
+architecture=$arch
+target_triple=$(if [ "$arch" = arm64 ]; then echo aarch64-apple-darwin; else echo x86_64-apple-darwin; fi)
+producer_sha256=$(sha256_file "$candidate")
+source_sha256=$(sha256_file "$evidence_dir/build-provider-$variant.log")
+archive_sha256=$(sha256_file "$evidence_dir/provider-artifacts/$variant.a")
+build_log_sha256=$(sha256_file "$evidence_dir/build-provider-$variant.log")
+EOF
+    done
+    cat >"$evidence_dir/provider-builds.env" <<EOF
+schema=macos-m4-provider-build-set-v1
+producer_sha256=$(sha256_file "$candidate")
+baseline_receipt_sha256=$(sha256_file "$evidence_dir/provider-baseline.tool-build.env")
+mutated_receipt_sha256=$(sha256_file "$evidence_dir/provider-mutated.tool-build.env")
+baseline_archive_sha256=$baseline_archive_sha
+same_byte_archive_sha256=$same_byte_archive_sha
+mutated_archive_sha256=$mutated_archive_sha
+same_byte_source=checker-owned-copy-of-live-baseline
+EOF
+    printf 'Xcode 16.0\nBuild version 16A000\n' >"$evidence_dir/xcode-version.log"
+    printf 'Apple clang version 16.0.0\n' >"$evidence_dir/clang-version.log"
+    (cd "$evidence_dir" && find . -type f ! -name status.env ! -name evidence-files.sha256 -print | LC_ALL=C sort | while IFS= read -r evidence_file; do
+        printf '%s\t%s\n' "$evidence_file" "$(sha256_file "$evidence_file")"
+    done) >"$evidence_dir/evidence-files.sha256"
+    cat >"$receipt" <<EOF
+schema=macos-m4-qualification-v1
+status=PASS
+architecture=$arch
+host_architecture=$arch
+target_triple=$(if [ "$arch" = arm64 ]; then echo aarch64-apple-darwin; else echo x86_64-apple-darwin; fi)
+target_identity_digest=$(awk -F= '$1 == "target_identity_digest" { print $2 }' "$admission")
+deployment_target=$(awk -F= '$1 == "deployment_target" { print $2 }' "$admission")
+sdk_identity=$(awk -F= '$1 == "sdk_identity" { print $2 }' "$admission")
+candidate_sha256=$(sha256_file "$candidate")
+admission_receipt_sha256=$(sha256_file "$admission")
+source_run_id=100
+source_run_attempt=1
+source_repository=simple-lang/simple
+source_workflow_ref=simple-lang/simple/.github/workflows/phase3.yml@0123456789abcdef0123456789abcdef01234567
+source_workflow_sha=4444444444444444444444444444444444444444444444444444444444444444
+source_head_sha=0123456789abcdef0123456789abcdef01234567
+source_artifact=portable-phase3-$arch
+source_artifact_id=$(if [ "$arch" = arm64 ]; then echo 1001; else echo 1002; fi)
+source_artifact_digest=sha256:$(if [ "$arch" = arm64 ]; then printf '%064d' 6; else printf '%064d' 7; fi)
+qualification_run_id=$run_id
+qualification_run_attempt=1
+qualification_repository=simple-lang/simple
+qualification_workflow_ref=simple-lang/simple/.github/workflows/macos-reverse-reference-m4.yml@refs/heads/main
+qualification_workflow_sha=5555555555555555555555555555555555555555555555555555555555555555
+qualification_head_sha=0123456789abcdef0123456789abcdef01234567
+qualification_artifact=macos-phase3-m4-$arch-run-$run_id-attempt-1
+evidence_artifact=macos-m4-evidence-$arch-run-$run_id-attempt-1
+residency_authority_run_id=99
+residency_authority_artifact=portable-baseline-authority
+phase3_authority_receipt_sha256=$(sha256_file "$evidence_dir/authority/phase3-producer-authority.env")
+residency_baseline_receipt_sha256=$(sha256_file "$evidence_dir/authority/residency-baseline.env")
+cli_sha256=$(sha256_file "$evidence_dir/tools/$candidate_sha/simple_cli")
+test_runner_sha256=$(sha256_file "$evidence_dir/tools/$candidate_sha/simple_test_runner")
+mcp_sha256=$(sha256_file "$evidence_dir/tools/$candidate_sha/simple_mcp_server")
+lsp_mcp_sha256=$(sha256_file "$evidence_dir/tools/$candidate_sha/simple_lsp_mcp_server")
+tool_builds_sha256=$(sha256_file "$evidence_dir/tool-builds.env")
+xcode_version_sha256=$(sha256_file "$evidence_dir/xcode-version.log")
+clang_version_sha256=$(sha256_file "$evidence_dir/clang-version.log")
+source_revision=0123456789abcdef0123456789abcdef01234567
+simple_version=1.0.0
+compiler_schema=35
+kernel_plugin_abi=1
+kernel_policy_manifest_sha256=$(sha256_file "$policy_manifest")
+kernel_k1_policy=llvm-cranelift
+plugin_manifest_policy=simple-sdn
+coverage_cutover_policy=atomic-apk-only
+coverage_implementation=apk-only
+performance_threshold_mode=baseline-relative-10-percent
+performance_threshold_status=selected
+performance_baseline_scope=admitted-per-architecture-receipt
+performance_steady_rss_percent=110
+performance_growth_percent=10
+performance_warm_request_count=20
+runtime_bundle_identity=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+provider_identity=$provider
+provider_builds_sha256=$(sha256_file "$evidence_dir/provider-builds.env")
+provider_baseline_oracle_sha256=$(sha256_file "$evidence_dir/baseline.provider-oracle.env")
+provider_same_byte_oracle_sha256=$(sha256_file "$evidence_dir/provider-same-byte.provider-oracle.env")
+provider_mutated_oracle_sha256=$(sha256_file "$evidence_dir/provider.provider-oracle.env")
+provider_baseline_archive_sha256=$baseline_archive_sha
+provider_same_byte_archive_sha256=$same_byte_archive_sha
+provider_mutated_archive_sha256=$mutated_archive_sha
+provider_baseline_members_sha256=$(sha256_file "$evidence_dir/baseline.provider-members.tsv")
+provider_same_byte_members_sha256=$(sha256_file "$evidence_dir/provider-same-byte.provider-members.tsv")
+provider_mutated_members_sha256=$(sha256_file "$evidence_dir/provider.provider-members.tsv")
+provider_baseline_payloads_sha256=$(sha256_file "$evidence_dir/baseline.provider-member-payloads.tsv")
+provider_same_byte_payloads_sha256=$(sha256_file "$evidence_dir/provider-same-byte.provider-member-payloads.tsv")
+provider_mutated_payloads_sha256=$(sha256_file "$evidence_dir/provider.provider-member-payloads.tsv")
+provider_baseline_manifest_identity=$baseline_manifest_identity
+provider_same_byte_manifest_identity=$baseline_manifest_identity
+provider_mutated_manifest_identity=$mutated_manifest_identity
+deployment_policy=macos-13
+results_sha256=$(sha256_file "$evidence_dir/results.tsv")
+evidence_manifest_sha256=$(sha256_file "$evidence_dir/evidence-files.sha256")
+long_lived_residency_sha256=$(sha256_file "$evidence_dir/long-lived-residency/receipt.env")
+EOF
+    cp "$receipt" "$evidence_dir/status.env"
+}
+compose_with_runs() {
+    arm_run=$1 x86_run=$2 output_root=$3
+    m5 --compose \
+      --arm64-candidate="$work/inputs/arm64" --arm64-admission="$work/inputs/arm64-admission.env" --arm64-m4="$work/inputs/arm64-m4.env" \
+      --arm64-m4-evidence-dir="$work/inputs/arm64-m4-evidence" --arm64-m4-run-id="$arm_run" \
+      --arm64-m4-run-attempt=1 --arm64-m4-artifact="macos-phase3-m4-arm64-run-$arm_run-attempt-1" \
+      --arm64-m4-evidence-artifact="macos-m4-evidence-arm64-run-$arm_run-attempt-1" \
+      --arm64-m4-repository=simple-lang/simple --arm64-m4-workflow-ref=simple-lang/simple/.github/workflows/macos-reverse-reference-m4.yml@refs/heads/main \
+      --arm64-m4-workflow-sha=5555555555555555555555555555555555555555555555555555555555555555 --arm64-m4-head-sha=0123456789abcdef0123456789abcdef01234567 \
+      --arm64-m4-artifact-id=20011 --arm64-m4-artifact-digest=sha256:6666666666666666666666666666666666666666666666666666666666666666 \
+      --arm64-m4-evidence-artifact-id=20012 --arm64-m4-evidence-artifact-digest=sha256:7777777777777777777777777777777777777777777777777777777777777777 \
+      --x86_64-candidate="$work/inputs/x86_64" --x86_64-admission="$work/inputs/x86-admission.env" --x86_64-m4="$work/inputs/x86-m4.env" \
+      --x86_64-m4-evidence-dir="$work/inputs/x86_64-m4-evidence" --x86_64-m4-run-id="$x86_run" \
+      --x86_64-m4-run-attempt=1 --x86_64-m4-artifact="macos-phase3-m4-x86_64-run-$x86_run-attempt-1" \
+      --x86_64-m4-evidence-artifact="macos-m4-evidence-x86_64-run-$x86_run-attempt-1" \
+      --x86_64-m4-repository=simple-lang/simple --x86_64-m4-workflow-ref=simple-lang/simple/.github/workflows/macos-reverse-reference-m4.yml@refs/heads/main \
+      --x86_64-m4-workflow-sha=5555555555555555555555555555555555555555555555555555555555555555 --x86_64-m4-head-sha=0123456789abcdef0123456789abcdef01234567 \
+      --x86_64-m4-artifact-id=20021 --x86_64-m4-artifact-digest=sha256:8888888888888888888888888888888888888888888888888888888888888888 \
+      --x86_64-m4-evidence-artifact-id=20022 --x86_64-m4-evidence-artifact-digest=sha256:9999999999999999999999999999999999999999999999999999999999999999 \
+      --expected-source-revision=0123456789abcdef0123456789abcdef01234567 \
+      --output-root="$output_root"
+}
+compose() {
+    compose_with_runs 2001 2002 "$1"
+}
+expect_reject() {
+    label=$1; shift
+    if "$@" >"$work/$label.log" 2>&1; then echo "M5 self-test FAIL: accepted $label" >&2; exit 1; fi
+}
+rebind_toolchain_evidence() {
+    receipt=$1 evidence_dir=$2 key=$3 evidence_path=$4
+    digest=$(sha256_file "$evidence_dir/$evidence_path")
+    awk -F '\t' -v path="./$evidence_path" -v digest="$digest" 'BEGIN { OFS = "\t" } $1 == path { $2 = digest } { print }' \
+        "$evidence_dir/evidence-files.sha256" >"$evidence_dir/evidence-files.next"
+    mv "$evidence_dir/evidence-files.next" "$evidence_dir/evidence-files.sha256"
+    manifest_digest=$(sha256_file "$evidence_dir/evidence-files.sha256")
+    sed -e "s/^${key}=.*/${key}=$digest/" \
+        -e "s/^evidence_manifest_sha256=.*/evidence_manifest_sha256=$manifest_digest/" \
+        "$receipt" >"$receipt.next"
+    mv "$receipt.next" "$receipt"
+    cp "$receipt" "$evidence_dir/status.env"
+}
+
+printf 'ARCHS=arm64\narm payload\n' >"$work/inputs/arm64"
+printf 'ARCHS=x86_64\nx86 payload\n' >"$work/inputs/x86_64"
+chmod +x "$work/inputs/arm64" "$work/inputs/x86_64"
+arm_provider=1111111111111111111111111111111111111111111111111111111111111111
+x86_provider=2222222222222222222222222222222222222222222222222222222222222222
+write_admission arm64 aarch64-apple-darwin "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$arm_provider"
+write_admission x86_64 x86_64-apple-darwin "$work/inputs/x86_64" "$work/inputs/x86-admission.env" "$x86_provider"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+write_m4 x86_64 "$work/inputs/x86_64" "$work/inputs/x86-admission.env" "$work/inputs/x86-m4.env" "$x86_provider" 2002 "$work/inputs/x86_64-m4-evidence"
+
+sed 's/^decision_source=.*/decision_source=stale-decision/' \
+    "$work/inputs/arm64-m4-evidence/long-lived-residency/receipt.env" >"$work/inputs/arm64-m4-evidence/long-lived-residency/receipt.next"
+mv "$work/inputs/arm64-m4-evidence/long-lived-residency/receipt.next" "$work/inputs/arm64-m4-evidence/long-lived-residency/receipt.env"
+rebind_toolchain_evidence "$work/inputs/arm64-m4.env" "$work/inputs/arm64-m4-evidence" long_lived_residency_sha256 long-lived-residency/receipt.env
+expect_reject residency-decision-drift compose "$work/residency-decision-drift"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+printf 'developer tools without an Xcode version\n' >"$work/inputs/arm64-m4-evidence/xcode-version.log"
+rebind_toolchain_evidence "$work/inputs/arm64-m4.env" "$work/inputs/arm64-m4-evidence" xcode_version_sha256 xcode-version.log
+expect_reject malformed-xcode-identity compose "$work/malformed-xcode"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+printf 'compiler without a clang version\n' >"$work/inputs/arm64-m4-evidence/clang-version.log"
+rebind_toolchain_evidence "$work/inputs/arm64-m4.env" "$work/inputs/arm64-m4-evidence" clang_version_sha256 clang-version.log
+expect_reject malformed-clang-identity compose "$work/malformed-clang"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+sed 's/^sdk_identity=.*/sdk_identity=4444444444444444444444444444444444444444444444444444444444444444/' \
+    "$work/inputs/arm64-m4.env" >"$work/inputs/arm64-m4.target-drift"
+mv "$work/inputs/arm64-m4.target-drift" "$work/inputs/arm64-m4.env"
+cp "$work/inputs/arm64-m4.env" "$work/inputs/arm64-m4-evidence/status.env"
+expect_reject sdk-propagation-drift compose "$work/sdk-drift"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+mv "$work/inputs/x86_64" "$work/inputs/x86.missing"
+expect_reject missing-slice compose "$work/missing-slice"
+mv "$work/inputs/x86.missing" "$work/inputs/x86_64"
+
+cp "$work/inputs/x86_64" "$work/inputs/x86.saved"
+printf 'ARCHS=arm64\nwrong slice\n' >"$work/inputs/x86_64"
+write_admission x86_64 x86_64-apple-darwin "$work/inputs/x86_64" "$work/inputs/x86-admission.env" "$x86_provider"
+write_m4 x86_64 "$work/inputs/x86_64" "$work/inputs/x86-admission.env" "$work/inputs/x86-m4.env" "$x86_provider" 2002 "$work/inputs/x86_64-m4-evidence"
+expect_reject wrong-slice compose "$work/wrong-slice"
+mv "$work/inputs/x86.saved" "$work/inputs/x86_64"
+write_admission x86_64 x86_64-apple-darwin "$work/inputs/x86_64" "$work/inputs/x86-admission.env" "$x86_provider"
+write_m4 x86_64 "$work/inputs/x86_64" "$work/inputs/x86-admission.env" "$work/inputs/x86-m4.env" "$x86_provider" 2002 "$work/inputs/x86_64-m4-evidence"
+
+sed 's/^candidate_sha256=.*/candidate_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' "$work/inputs/arm64-m4.env" >"$work/inputs/arm64-m4.stale"
+mv "$work/inputs/arm64-m4.stale" "$work/inputs/arm64-m4.env"
+expect_reject stale-receipt compose "$work/stale"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+sed 's/^qualification_run_attempt=.*/qualification_run_attempt=2/' "$work/inputs/arm64-m4.env" >"$work/inputs/arm64-m4.bad-attempt"
+mv "$work/inputs/arm64-m4.bad-attempt" "$work/inputs/arm64-m4.env"
+cp "$work/inputs/arm64-m4.env" "$work/inputs/arm64-m4-evidence/status.env"
+expect_reject forged-run-attempt compose "$work/forged-run-attempt"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+sed 's/^qualification_artifact=.*/qualification_artifact=wrong-artifact/' "$work/inputs/arm64-m4.env" >"$work/inputs/arm64-m4.bad-artifact"
+mv "$work/inputs/arm64-m4.bad-artifact" "$work/inputs/arm64-m4.env"
+cp "$work/inputs/arm64-m4.env" "$work/inputs/arm64-m4-evidence/status.env"
+expect_reject forged-artifact-name compose "$work/forged-artifact-name"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+cp "$work/inputs/arm64-m4-evidence/results.tsv" "$work/results.saved"
+printf 'mutated\tPASS\tnot-retained\n' >>"$work/inputs/arm64-m4-evidence/results.tsv"
+expect_reject mutable-m4-evidence compose "$work/mutable-evidence"
+mv "$work/results.saved" "$work/inputs/arm64-m4-evidence/results.tsv"
+
+sed 's/^qualification_run_id=.*/qualification_run_id=9999/' "$work/inputs/arm64-m4.env" >"$work/inputs/arm64-m4.forged"
+mv "$work/inputs/arm64-m4.forged" "$work/inputs/arm64-m4.env"
+cp "$work/inputs/arm64-m4.env" "$work/inputs/arm64-m4-evidence/status.env"
+expect_reject synthetic-run-receipt compose "$work/synthetic-run"
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+M5_FAKE_PROVIDER_MUTATION_SAME_BYTES=1 write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+expect_reject same-byte-provider-mutation compose "$work/same-byte-provider"
+unset M5_FAKE_PROVIDER_MUTATION_SAME_BYTES
+write_m4 arm64 "$work/inputs/arm64" "$work/inputs/arm64-admission.env" "$work/inputs/arm64-m4.env" "$arm_provider" 2001 "$work/inputs/arm64-m4-evidence"
+
+expect_reject same-run-duplication compose_with_runs 2001 2001 "$work/same-run"
+expect_reject prebuilt-helper-override env M5_LIPO="$work/bin/lipo" sh "$root/scripts/release/macos-universal-m5.shs" --compose
+
+compose "$work/out"
+candidate_dir=$(find "$work/out/universal" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+[ -n "$candidate_dir" ] || { echo "M5 self-test FAIL: no universal candidate" >&2; exit 1; }
+expect_reject unsigned-promotion m5 --promote --candidate-dir="$candidate_dir" --pointer="$work/current"
+expect_reject portable-as-native-proof m5 --verify-native --candidate-dir="$candidate_dir" --arch=arm64 --out-receipt="$work/not-native.env"
+
+candidate_sha=$(sha256_file "$candidate_dir/simple")
+package_sha=$(sha256_file "$candidate_dir/package.env")
+for arch in arm64 x86_64; do
+    printf 'portable structural %s version\n' "$arch" >"$work/$arch-version.log"
+    printf 'Results: 1 total, 1 passed, 0 failed\n' >"$work/$arch-test.log"
+    cat >"$work/$arch-verify.env" <<EOF
+schema=macos-m5-portable-verification-v1
+status=PASS
+evidence_class=PORTABLE_STRUCTURAL
+architecture=$arch
+host_architecture=$arch
+candidate_sha256=$candidate_sha
+child_executable_path=$(CDPATH= cd -- "$candidate_dir" && pwd -P)/simple
+child_executable_sha256=$candidate_sha
+package_receipt_sha256=$package_sha
+native_execution=false
+version_log_sha256=$(sha256_file "$work/$arch-version.log")
+test_log_sha256=$(sha256_file "$work/$arch-test.log")
+results_total=1
+results_passed=1
+results_failed=0
+EOF
+done
+
+sed 's/^host_architecture=arm64$/host_architecture=x86_64/' "$work/arm64-verify.env" >"$work/arm64-verify.bad"
+expect_reject forged-native-host m5 --finalize --candidate-dir="$candidate_dir" --arm64-verification="$work/arm64-verify.bad" --x86_64-verification="$work/x86_64-verify.env" --out-receipt="$work/forged.env"
+m5 --finalize --candidate-dir="$candidate_dir" --arm64-verification="$work/arm64-verify.env" --x86_64-verification="$work/x86_64-verify.env" --out-receipt="$work/verified.env"
+grep -Fxq status=PORTABLE_STRUCTURAL_VERIFIED "$work/verified.env"
+grep -Fxq signing_authorized=false "$work/verified.env"
+
+m5 --sign-notarize --candidate-dir="$candidate_dir" --verification-receipt="$work/verified.env" --arm64-verification="$work/arm64-verify.env" --x86_64-verification="$work/x86_64-verify.env" --signing-identity=test-identity --notary-profile=test-profile --output-root="$work/out"
+signed_dir=$(find "$work/out/signed" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+[ -n "$signed_dir" ] || { echo "M5 self-test FAIL: no signed candidate" >&2; exit 1; }
+signed_candidate_sha=$(awk -F= '$1 == "candidate_sha256" { print $2 }' "$signed_dir/signed.env")
+signed_receipt_sha=$(sha256_file "$signed_dir/signed.env")
+signed_executable_sha=$(sha256_file "$signed_dir/SimpleCompiler.app/Contents/MacOS/simple")
+for arch in arm64 x86_64; do
+    cat >"$work/$arch-post-sign.env" <<EOF
+schema=macos-m5-portable-post-sign-verification-v1
+status=PASS
+evidence_class=PORTABLE_STRUCTURAL
+architecture=$arch
+host_architecture=$arch
+signed_candidate_sha256=$signed_candidate_sha
+signed_receipt_sha256=$signed_receipt_sha
+child_executable_path=$signed_dir/SimpleCompiler.app/Contents/MacOS/simple
+child_executable_relative_path=SimpleCompiler.app/Contents/MacOS/simple
+child_executable_sha256=$signed_executable_sha
+version_log_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+test_log_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+results_total=1
+results_passed=1
+results_failed=0
+native_execution=false
+EOF
+done
+
+cp "$signed_dir/codesign-verify.log" "$work/codesign.saved"
+chmod u+w "$signed_dir/codesign-verify.log"
+printf 'stale\n' >>"$signed_dir/codesign-verify.log"
+expect_reject stale-signature m5 --promote --candidate-dir="$signed_dir" --pointer="$work/current"
+cp "$work/codesign.saved" "$signed_dir/codesign-verify.log"
+chmod 400 "$signed_dir/codesign-verify.log"
+
+cp "$signed_dir/stapler-validate.log" "$work/ticket.saved"
+chmod u+w "$signed_dir/stapler-validate.log"
+printf 'stale\n' >>"$signed_dir/stapler-validate.log"
+expect_reject stale-ticket m5 --promote --candidate-dir="$signed_dir" --pointer="$work/current"
+cp "$work/ticket.saved" "$signed_dir/stapler-validate.log"
+chmod 400 "$signed_dir/stapler-validate.log"
+
+cp "$signed_dir/unsigned-verification.env" "$work/verification.saved"
+chmod u+w "$signed_dir/unsigned-verification.env"
+printf 'stale\n' >>"$signed_dir/unsigned-verification.env"
+expect_reject stale-verification-handoff m5 --promote --candidate-dir="$signed_dir" --pointer="$work/current"
+cp "$work/verification.saved" "$signed_dir/unsigned-verification.env"
+chmod 400 "$signed_dir/unsigned-verification.env"
+
+cp "$signed_dir/signing-order.log" "$work/signing-order.saved"
+cp "$signed_dir/signed.env" "$work/signing-order-signed.saved"
+chmod u+w "$signed_dir/signing-order.log"
+chmod u+w "$signed_dir/signed.env"
+sed '1,2d' "$work/signing-order.saved" >"$signed_dir/signing-order.log"
+signing_order_sha=$(sha256_file "$signed_dir/signing-order.log")
+sed "s/^signing_order_sha256=.*/signing_order_sha256=$signing_order_sha/" "$work/signing-order-signed.saved" >"$signed_dir/signed.env"
+expect_reject wrong-signing-order m5 --promote --candidate-dir="$signed_dir" --pointer="$work/current"
+cp "$work/signing-order.saved" "$signed_dir/signing-order.log"
+cp "$work/signing-order-signed.saved" "$signed_dir/signed.env"
+chmod 400 "$signed_dir/signing-order.log"
+chmod 400 "$signed_dir/signed.env"
+
+M5_FAKE_SPCTL_FAIL=1 expect_reject gatekeeper-failure m5 --promote --candidate-dir="$signed_dir" --pointer="$work/current"
+M5_FAKE_SPCTL_FAIL=0
+
+signed_binary="$signed_dir/SimpleCompiler.app/Contents/MacOS/simple"
+cp "$signed_binary" "$work/simple.saved"
+chmod u+w "$signed_dir/SimpleCompiler.app" "$signed_dir/SimpleCompiler.app/Contents" "$signed_dir/SimpleCompiler.app/Contents/MacOS"
+chmod u+w "$signed_binary"
+printf 'mutation\n' >>"$signed_binary"
+expect_reject mutation m5 --promote --candidate-dir="$signed_dir" --pointer="$work/current"
+mv "$work/simple.saved" "$signed_binary"
+chmod 500 "$signed_binary"
+chmod 500 "$signed_dir/SimpleCompiler.app/Contents/MacOS" "$signed_dir/SimpleCompiler.app/Contents" "$signed_dir/SimpleCompiler.app"
+
+signed_plist="$signed_dir/SimpleCompiler.app/Contents/Info.plist"
+cp "$signed_plist" "$work/Info.plist.saved"
+chmod u+w "$signed_dir/SimpleCompiler.app" "$signed_dir/SimpleCompiler.app/Contents" "$signed_plist"
+printf '\n<!-- mutated bundle metadata -->\n' >>"$signed_plist"
+expect_reject bundle-mutation m5 --promote --candidate-dir="$signed_dir" --pointer="$work/current"
+mv "$work/Info.plist.saved" "$signed_plist"
+chmod 400 "$signed_plist"
+chmod 500 "$signed_dir/SimpleCompiler.app/Contents" "$signed_dir/SimpleCompiler.app"
+
+cp "$signed_dir/signed.env" "$work/signed.saved"
+chmod u+w "$signed_dir/signed.env"
+sed 's/^composition=.*/composition=rebuild/' "$signed_dir/signed.env" >"$work/signed.bad"
+cp "$work/signed.bad" "$signed_dir/signed.env"
+expect_reject rebuild-attempt m5 --promote --candidate-dir="$signed_dir" --pointer="$work/current"
+cp "$work/signed.saved" "$signed_dir/signed.env"
+chmod 400 "$signed_dir/signed.env"
+
+m5 --promote --candidate-dir="$signed_dir" \
+  --arm64-post-sign-verification="$work/arm64-post-sign.env" \
+  --x86_64-post-sign-verification="$work/x86_64-post-sign.env" \
+  --expected-current=NONE --pointer="$work/current" --out-receipt="$work/promotion.env"
+[ -L "$work/current" ] && [ "$(cd "$(readlink "$work/current")" && pwd -P)" = "$(cd "$signed_dir" && pwd -P)" ] || { echo "M5 self-test FAIL: pointer promotion was not atomic immutable reference" >&2; exit 1; }
+grep -Fxq schema=macos-m5-promotion-v1 "$work/promotion.env"
+grep -Fxq cas_applied=true "$work/promotion.env"
+expect_reject promotion-cas-replay m5 --promote --candidate-dir="$signed_dir" \
+  --arm64-post-sign-verification="$work/arm64-post-sign.env" \
+  --x86_64-post-sign-verification="$work/x86_64-post-sign.env" \
+  --expected-current=NONE --pointer="$work/current" --out-receipt="$work/replay.env"
+echo "M5 portable structural self-test PASS: wrong/missing/same slice, canonical policy recomputation, exact workflow/artifact binding, full content-addressed M4 evidence retention, candidate-bound child identity, live provider/archive and same-byte mutation-red, target/SDK propagation drift, malformed retained Xcode/clang identity, retained M4 evidence mutation, forged workflow run/attempt/artifact receipt, prebuilt helper, stale signature/ticket/verification handoff, wrong signing order, fake native proof, Gatekeeper failure, unsigned promotion, full bundle mutation, rebuild, post-sign receipt gate, CAS pointer-only promotion and replay rejection"
+echo "M5 native status: BLOCKED (requires two distinct retained native M4 workflow artifacts, arm64+x86_64 runners, and real Apple signing/notary services)"

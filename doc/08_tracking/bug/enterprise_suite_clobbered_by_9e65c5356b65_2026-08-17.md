@@ -204,3 +204,6 @@ conflict-tree PASS (4 commits), conflict-markers PASS (95 files), tree-size PASS
 (`--expect-files 115478`), runtime-API PASS (2795 symbols, 0 removed),
 seed-build PASS, C-runtime PASS (106 compiled, 0 errors, 2 external-SDK skips),
 no-revert PASS with `--min-files 89` per its own documented escape.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

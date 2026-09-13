@@ -74,15 +74,15 @@ fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value)
     MODULE_GLOBALS.with(|cell| {
         cell.borrow_mut().insert(name.clone(), value.clone());
     });
-    if let Some(owner) = owner {
-        crate::interpreter::set_owned_global(owner, &name, value.clone(), true);
-        MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
-            cell.borrow_mut()
-                .entry(Arc::clone(owner))
-                .or_default()
-                .insert(name, value);
-        });
-    }
+    // Entry-script functions are tagged with the `<entry>` owner below. Their
+    // unmarked globals must use the same owner; keeping them only in the flat
+    // compatibility map leaves method mutations with no owned-global target,
+    // so a cloned control-flow frame drops the updated aggregate on exit.
+    let owner = owner.cloned().unwrap_or_else(|| Arc::from("<entry>"));
+    crate::interpreter::set_owned_global(&owner, &name, value.clone(), true);
+    MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
+        cell.borrow_mut().entry(owner).or_default().insert(name, value);
+    });
 }
 
 fn record_flattened_import_binding(marker: &str) {

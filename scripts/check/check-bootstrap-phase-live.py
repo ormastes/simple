@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -13,6 +14,17 @@ import time
 
 ROWS = ("mcp", "lsp_mcp", "spipe_plugin", "caret", "devhub", "jira", "confluence", "github")
 LIMIT = 1024 * 1024
+PROVIDER_ROWS = {"jira", "confluence", "github"}
+PROVIDER_UNAVAILABLE_PATTERNS = (
+    r"(?im)^\s*(?:error:\s*)?(?:http\s+)?(?:401|403)(?:\b|:)",
+    r"(?im)^\s*(?:error:\s*)?(?:not authenticated|authentication required)\s*[.!:]?\s*$",
+    r"(?im)^\s*(?:error:\s*)?(?:credentials? (?:missing|unavailable)|provider .+ not configured)\s*[.!:]?\s*$",
+    r"(?im)^\s*(?:error:\s*)?(?:gh cli not found|acli not found)\s*[.!:]?\s*$",
+    r"(?im)^\s*(?:error:\s*)?could not resolve host(?:\s*[:.].*)?$",
+    r"(?im)^\s*(?:error:\s*)?request failed:\s*(?:network|dns|connect(?:ion|ivity)?|timeout|timed out)\b.*$",
+    r"(?im)^\s*to get started with github cli, please run:\s*gh auth login\s*$",
+    r"(?im)^\s*you are not logged into any github hosts\s*[.!]?\s*$",
+)
 
 
 class Verdict(Exception):
@@ -168,12 +180,33 @@ def mcp_probe(child, tool, arguments):
     return {"tool_count": len(tools), "tool_called": tool}
 
 
-def parse_provider(row, output, code, expected):
+def process_crashed(code):
+    return code < 0 or code >= 128
+
+
+def provider_unavailable(row, output):
+    return row in PROVIDER_ROWS and any(
+        re.search(pattern, output) for pattern in PROVIDER_UNAVAILABLE_PATTERNS
+    )
+
+
+def require_provider_process(row, code, output, failure_reason, crash_reason):
+    if process_crashed(code):
+        raise Verdict("FAIL", crash_reason)
     if code:
-        # Never include server bodies or credentials in receipts.
-        if any(text in output.lower() for text in ("http 401", "http 403", "not authenticated", "authentication", "not configured", "login", "token", "could not resolve", "request failed")):
+        if provider_unavailable(row, output):
             raise Verdict("BLOCKED", "provider-auth-or-connectivity-unavailable")
-        raise Verdict("FAIL", "provider-command-failed")
+        raise Verdict("FAIL", failure_reason)
+    if provider_unavailable(row, output):
+        raise Verdict("BLOCKED", "provider-auth-or-connectivity-unavailable")
+
+
+def parse_provider(row, output, code, expected, errors=""):
+    # Never include server bodies or credentials in receipts.
+    require_provider_process(
+        row, code, output + "\n" + errors,
+        "provider-command-failed", "provider-process-crashed",
+    )
     if row == "jira":
         value = json.loads(output)
         valid = value.get("key") == expected and bool(value.get("id")) and isinstance(value.get("fields"), dict)
@@ -211,8 +244,11 @@ def provider_identity(manifest, row, argv, env, timeout, receipt):
     receipt["identity_argv"] = identity_argv
     try:
         code, output = child.finish()
-        if code or output.startswith(("HTTP 401", "HTTP 403")):
-            raise Verdict("BLOCKED", "authenticated-identity-unavailable")
+        errors = bytes(child.errors).decode("utf-8", errors="replace").replace("\r\n", "\n")
+        require_provider_process(
+            row, code, output + "\n" + errors,
+            "identity-command-failed", "identity-process-crashed",
+        )
         if row != "github":
             if not output.startswith("HTTP 200\n"):
                 raise Verdict("FAIL", "identity-http-status-invalid")
@@ -263,7 +299,8 @@ def probe(manifest, row, env, timeout, receipt):
         code, output = child.finish()
         receipt["exit_code"] = code
         if row in ("jira", "confluence", "github"):
-            parse_provider(row, output, code, expected)
+            errors = bytes(child.errors).decode("utf-8", errors="replace").replace("\r\n", "\n")
+            parse_provider(row, output, code, expected, errors)
         elif code:
             raise Verdict("FAIL", "process-nonzero-exit")
         elif row == "devhub" and not all(word in output.lower() for word in ("jira", "wiki", "github", "auth")):

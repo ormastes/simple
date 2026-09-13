@@ -242,6 +242,24 @@ pub fn rt_pool_state_v1_unavailable(_args: &[Value]) -> Result<Value, CompileErr
     ))
 }
 
+/// AVX2 affinity/parser-mask leases are native-only capabilities. Keep their
+/// extern names resolvable in interpreter mode while failing closed on use.
+fn cpu_affinity_avx2_interpreter_error() -> CompileError {
+    CompileError::Runtime("CPU-affinity AVX2 ownership requires the native runtime".to_string())
+}
+
+pub fn rt_cpu_affinity_avx2_unavailable_i64(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(cpu_affinity_avx2_interpreter_error())
+}
+
+pub fn rt_cpu_affinity_avx2_unavailable_bool(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(cpu_affinity_avx2_interpreter_error())
+}
+
+pub fn rt_cpu_affinity_avx2_unavailable_cpu(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(cpu_affinity_avx2_interpreter_error())
+}
+
 /// Defensive interpreter stub for native pool handles.
 pub fn rt_pool_is_done(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(1))

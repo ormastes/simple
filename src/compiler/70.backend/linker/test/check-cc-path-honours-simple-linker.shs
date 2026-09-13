@@ -1,0 +1,157 @@
+#!/bin/sh
+# Guard: the cc fallback link path must honour SIMPLE_LINKER.
+#
+# Why this check exists
+# --------------------
+# `find_linker()` (mold.spl) reads SIMPLE_LINKER and resolves it through
+# `find_requested_linker`, which fails closed on an unsupported value. But the
+# cc fallback (`link_native_cc` in _LinkerWrapper/native_linking.spl) used to
+# invoke `cc`/`clang` and let the compiler driver pick the linker, consulting
+# SIMPLE_LINKER nowhere. On a host where `readlink -f $(command -v ld)` is
+# mold, that silently linked with mold no matter what the user asked for --
+# and mold front-loads a single contiguous 8 GiB reservation that fails under
+# memory contention ("mold: cannot reserve 8589934592 bytes of virtual
+# memory"), which surfaces as an opaque compiler failure.
+#
+# The cheap discriminator is that a deliberately bogus SIMPLE_LINKER value
+# must FAIL rather than be ignored. Before the fix `SIMPLE_LINKER=bogus-linker`
+# produced a successful link; a value the direct path rejects outright must
+# never be silently accepted here.
+#
+# Scope note (measured 2026-09-06, aarch64 Linux): the BOOTSTRAP cli's
+# `native-build` does NOT reach this code. `src/app/cli/bootstrap_main.spl:4`
+# declares `extern fn rt_native_build(args: [text]) -> i64`, so that command
+# links through the Rust seed's
+# `src/compiler_rust/compiler/src/pipeline/native_project/linker.rs`, which
+# reads SIMPLE_LINKER_DEBUG but never SIMPLE_LINKER. That file is a separate
+# defect and a separate owner. This check therefore exercises the Simple
+# resolver directly -- the path used by `driver_aot_native_output.spl` and
+# `llvm_native_link_orchestrator.spl` -- rather than shelling out to a
+# native-build that would not exercise it.
+#
+# Verdict is the last line of stdout:
+#   PASS  -- <n> case(s) checked, ...   exit 0
+#   FAIL  -- ...                        exit 1
+#   ERROR -- nothing was checked        exit 2   (never a pass)
+
+set -u
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../../../../.." && pwd)
+
+SIMPLE_BIN=${SIMPLE_BIN:-"$repo_root/bin/simple"}
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no runnable simple binary at $SIMPLE_BIN; set SIMPLE_BIN)"
+    exit 2
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple_linker_pref_XXXXXX") || {
+    echo "ERROR — nothing was checked (could not create temp dir)"
+    exit 2
+}
+trap 'rm -rf "$work"' EXIT INT TERM
+
+driver="$work/probe.spl"
+cat > "$driver" <<'SPL'
+use compiler.backend.linker._LinkerWrapper.native_linking.{cc_requested_fuse_ld_flag}
+
+fn main():
+    val r = cc_requested_fuse_ld_flag("linux", false)
+    if r.is_err():
+        print "RESULT:ERR:{r.unwrap_err()}"
+    else:
+        print "RESULT:OK:{r.unwrap()}"
+SPL
+
+# Run the resolver with SIMPLE_LINKER set to $1 (empty string = unset) and
+# echo the single RESULT: line. The exit status is read directly into a
+# variable on the line after the invocation, never through a pipe: a
+# pipeline's $? is the last stage's status and has produced false greens here.
+run_probe() {
+    _val=$1
+    _out="$work/out.$$"
+    if [ -z "$_val" ]; then
+        ( cd "$repo_root" && unset SIMPLE_LINKER; "$SIMPLE_BIN" run "$driver" ) > "$_out" 2>&1
+    else
+        ( cd "$repo_root" && SIMPLE_LINKER="$_val" "$SIMPLE_BIN" run "$driver" ) > "$_out" 2>&1
+    fi
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        # The driver itself must run; a compile/interpret failure is not a
+        # verdict about SIMPLE_LINKER handling.
+        echo "PROBE_FAILED rc=$_rc"
+        return
+    fi
+    _line=$(grep '^RESULT:' "$_out" | head -1)
+    if [ -z "$_line" ]; then
+        echo "PROBE_FAILED no-result"
+        return
+    fi
+    echo "${_line#RESULT:}"
+}
+
+checked=0
+failures=""
+
+# The behavioural cases below exercise the RESOLVER. They cannot see whether
+# link_native_cc still calls it: a refactor that dropped the early return on
+# cc_requested_fuse_ld_flag's Err would keep every case green while reopening
+# the defect at the link level. Require a definition plus at least one call
+# site in the module that does the linking.
+native_linking="$repo_root/src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl"
+if [ ! -f "$native_linking" ]; then
+    echo "ERROR — nothing was checked (missing $native_linking)"
+    exit 2
+fi
+mentions=$(grep -c 'cc_requested_fuse_ld_flag' "$native_linking")
+checked=$((checked + 1))
+if [ "$mentions" -ge 2 ]; then
+    echo "  ok   resolver-still-wired: $mentions mention(s) in native_linking.spl (definition + call site)"
+else
+    echo "  FAIL resolver-still-wired: expected >=2 mentions of cc_requested_fuse_ld_flag, got $mentions"
+    failures="$failures resolver-still-wired"
+fi
+
+expect_case() {
+    _label=$1
+    _env=$2
+    _want=$3
+    _got=$(run_probe "$_env")
+    checked=$((checked + 1))
+    if [ "$_got" = "$_want" ]; then
+        echo "  ok   $_label: $_got"
+    else
+        echo "  FAIL $_label: expected '$_want', got '$_got'"
+        failures="$failures $_label"
+    fi
+}
+
+echo "Checking SIMPLE_LINKER handling on the cc link path (binary: $SIMPLE_BIN)"
+
+# 1. THE DISCRIMINATOR. A value the alias table does not know must fail
+#    closed. Silently succeeding here is the whole defect.
+expect_case "bogus-value-rejected" "bogus-linker" \
+    "ERR:Unsupported SIMPLE_LINKER value: bogus-linker"
+
+# 2. A supported value must produce the matching driver flag.
+expect_case "lld-honoured" "lld" "OK:-fuse-ld=lld"
+
+# 3. The GNU aliases map to 'bfd' -- LinkerType.to_string() yields "ld", which
+#    no compiler driver accepts after -fuse-ld=.
+expect_case "gnu-alias-maps-to-bfd" "gnu" "OK:-fuse-ld=bfd"
+
+# 4. Unset must leave the arm's existing behaviour untouched (empty flag).
+expect_case "unset-unchanged" "" "OK:"
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no cases ran)"
+    exit 2
+fi
+
+if [ -n "$failures" ]; then
+    echo "FAIL — $checked case(s) checked,$failures"
+    exit 1
+fi
+
+echo "PASS — $checked case(s) checked, cc link path honours SIMPLE_LINKER and fails closed on an unsupported value"
+exit 0

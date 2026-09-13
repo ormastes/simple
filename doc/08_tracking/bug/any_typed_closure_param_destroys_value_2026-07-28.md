@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** high — silent data loss, no error, no warning
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Found via:** SF4 mutex-guard lane (its `with_lock` signature is built on this)
 
 ## Symptom
@@ -142,3 +142,6 @@ One genuine finding survives regardless of the value bug: the JIT still
 **refuses** `fn(Any) -> Any` closures outright rather than compiling them, so
 every such call site silently drops to the interpreter. That is a performance
 cliff, not a wrong answer, and is not what this record tracks.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

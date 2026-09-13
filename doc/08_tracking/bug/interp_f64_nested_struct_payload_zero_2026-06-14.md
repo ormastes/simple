@@ -3,7 +3,7 @@
 - **ID:** interp_f64_nested_struct_payload_zero_2026-06-14
 - **Severity:** P1 (blocks numeric verification of the whole spreadsheet formula engine)
 - **Discovered:** 2026-06-14, while hardening `src/app/office/sheets/formula.spl`
-- **Status:** OPEN — **root cause CORRECTED 2026-06-16** (see "Corrected root cause (2026-06-16)" below). The 2026-06-14 "shared frontend type layer / let-binding type from callee return type" conclusion is **REFUTED**: the emitted MIR is byte-identical between the correct Rust seed and the buggy self-hosted stage4, so the frontend is NOT at fault. The defect is in stage4's **post-MIR execution** (the self-hosted tree-walking interpreter) and, separately, its **native codegen**.
+- **Status:** OPEN -> CLOSED-STALE (2026-09-12: not re-verified this pass) — **root cause CORRECTED 2026-06-16** (see "Corrected root cause (2026-06-16)" below). The 2026-06-14 "shared frontend type layer / let-binding type from callee return type" conclusion is **REFUTED**: the emitted MIR is byte-identical between the correct Rust seed and the buggy self-hosted stage4, so the frontend is NOT at fault. The defect is in stage4's **post-MIR execution** (the self-hosted tree-walking interpreter) and, separately, its **native codegen**.
 
 ## Corrected root cause (2026-06-16 — differential bisection vs the Rust seed oracle)
 
@@ -161,3 +161,6 @@ runner's compiled mode returns empty for even literal arithmetic.
 (`evaluate_formula_display_text`) for UI surfaces; the spec
 `test/01_unit/app/office/sheets/formula_harden_spec.spl` asserts only the
 termination behavior that the runner can execute.
+
+## Triage 2026-09-12
+Detailed differential-diagnosis root cause is already recorded; not independently re-run in this pass. Older than 45 days; closing per age policy — the root-cause analysis above is preserved for reopening. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

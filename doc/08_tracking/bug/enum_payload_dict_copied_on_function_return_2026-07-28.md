@@ -1,7 +1,7 @@
 # Enum collection payload is copied at the function-return boundary
 
 - **Date:** 2026-07-28
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high — silently wrong results, no diagnostic
 - **Engines:** interpreter (silently wrong) and JIT (rejects with W1006)
 - **Found via:** `SdnValue.insert()` never persisting (`test/01_unit/lib/common/sdn_coverage_spec.spl`, example "get by key from dict")
@@ -70,3 +70,6 @@ Stop deep-copying collection payloads when an enum value crosses a return
 boundary (keep the handle), or make the copy explicit and consistent so that
 in-frame mutation does not appear to work. Either way, the interpreter must
 stop silently discarding a write through an immutable `case` binding.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

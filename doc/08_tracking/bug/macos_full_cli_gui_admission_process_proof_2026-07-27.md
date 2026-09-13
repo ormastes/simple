@@ -1,6 +1,6 @@
 # macOS Full-CLI GUI Admission Process Proof
 
-**Status:** cycle-3 source candidate / builder self-test blocked after fixture chmod repair / Swift link+self-test blocked after `-lbsm` repair / live Endpoint Security evidence unavailable (exit 125)
+**Status:** BLOCKED (re-verified 2026-09-12) — builder `--self-test` now PASSes; `--build-candidate` correctly refuses `policy-not-prepared`; live Endpoint Security evidence remains unavailable pending signing-team/entitlement provisioning. See "Re-verified 2026-09-12" below.
 **Evidence row:** `MAC-WM-GLASS-LOCAL-001`
 
 The cycle-3 source candidate repairs the previously rejected boundary:
@@ -67,3 +67,53 @@ the provisioned identities and artifact, run:
 sh scripts/check/check-macos-vulkan-gui-widget-live-evidence.shs
 sh scripts/check/check-macos-vulkan-web-live-evidence.shs
 ```
+
+## Re-verified 2026-09-12 (BLOCKED — external prerequisite, not fixable in-repo)
+
+Reproduced on this host (macOS arm64, `gh` authenticated):
+
+```
+$ sh scripts/check/build-macos-es-history-collector.shs --self-test
+macOS ES collector snapshot/admission self-test: PASS
+
+$ sh scripts/check/build-macos-es-history-collector.shs --build-candidate
+macOS ES collector: FAIL (policy-not-prepared)
+```
+
+The builder self-test now PASSes cleanly (progress since the prior "reached its
+immutable-manifest restore fixture but was not rerun" note — no fixture repair was
+needed here; script and fixtures are in a self-consistent state). `--build-candidate`
+correctly refuses with `policy-not-prepared`: no `status=prepared` policy has been
+committed with a signing team / Endpoint Security entitlement, and none can be
+fabricated from this session (it requires an Apple Developer signing team assignment
+and an ES entitlement grant, both organizational prerequisites outside repo/CI scope).
+
+**Exact resume command**, unchanged from the "Prepared-host completion" section above —
+recorded verbatim here so a future session does not need to re-derive it:
+
+```sh
+# 1. After a signing team + ES entitlement are provisioned, commit a status=prepared
+#    policy (source/build/entitlement/signing identity/compiler/SDK/target/argv pins).
+# 2. sh scripts/check/build-macos-es-history-collector.shs --build-candidate
+# 3. Review the candidate; commit a status=admitted policy update with its output/manifest hashes.
+# 4. sh scripts/check/build-macos-es-history-collector.shs --verify
+# 5. sh test/01_unit/scripts/macos_gui_execution_history_boundary_contract.shs
+#    sh test/01_unit/scripts/macos_gui_full_cli_provenance_contract.shs
+#    sh test/01_unit/scripts/macos_gpu_trusted_build_admission_contract.shs
+#    sh test/01_unit/scripts/macos_es_history_collector_contract.shs
+# 6. sh scripts/check/check-macos-vulkan-gui-widget-live-evidence.shs
+#    sh scripts/check/check-macos-vulkan-web-live-evidence.shs
+```
+
+The script exposes exactly three modes (`grep -n -- '--build-candidate\|--verify\|--self-test\|--exec-verified' scripts/check/build-macos-es-history-collector.shs`):
+`--build-candidate`, `--verify`, `--exec-verified`, `--self-test`. There is no separate
+Swift-compile/link-only self-test flag — the Swift typecheck+link step named in this
+record's original text is reached only inside `--build-candidate`'s own flow, which now
+refuses at `policy-not-prepared` before it gets there. So the second "distinct unrerun
+gate" from the original text cannot be independently rerun from this session either; it
+is gated behind the same external policy-provisioning prerequisite as the rest of
+`--build-candidate`, not a separate local repair.
+
+Status: BLOCKED on organizational signing-team/entitlement provisioning (not a code or
+CI defect). Do not fake `status=admitted`/`status=prepared` policy — the builder's
+`policy-not-prepared` refusal is the correct fail-closed behavior.

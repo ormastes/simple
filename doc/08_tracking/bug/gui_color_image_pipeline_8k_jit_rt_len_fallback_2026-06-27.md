@@ -1,5 +1,10 @@
 # GUI Color/Image 8K JIT rt_len Fallback
 
+## Closed 2026-09-13 — wrapper pins interpreter mode; the misleading fallback line is gone
+- **measured**: `grep -c SIMPLE_EXECUTION_MODE scripts/check/check-gui-color-image-pipeline-8k-evidence.shs` = 2 — the fix described in this entry is present in the wrapper.
+- **inferred**: the wrapper needs a Linux GPU / 8K evidence lane and could not be executed on this Windows host, so absence of the `rt_len` Cranelift line was not re-observed live.
+- **inferred**: the entry already recorded itself resolved; the grep confirms the change is in the tree rather than lost.
+
 Date: 2026-06-27
 
 ## Summary

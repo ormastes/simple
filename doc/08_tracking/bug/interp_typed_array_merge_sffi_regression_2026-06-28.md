@@ -1,7 +1,12 @@
 # Typed-array `.merge()` mis-dispatches to missing `Array.merge` runtime symbol
 
+## Closed 2026-09-13 — typed-array `.merge()` works in both engine arms
+- **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`): `val a: [i64] = [1,2]` then `a.merge([3,4])` printed `len=4` under BOTH `SIMPLE_EXECUTION_MODE=interpret` and `=jit`.
+- **measured**: no `rt_function_not_found` / missing `Array.merge` symbol error on either arm — the JIT/compiled path is the one this entry identifies as the true root cause.
+- **inferred**: this seed post-dates the landed fix `2edb32ce152`; the run confirms the fix is live in the deployed binary, not only in source.
+
 Date: 2026-06-28
-Status: RESOLVED (fix landed 2edb32ce152, 2026-06-28)
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 Severity: high
 Component: runtime SFFI / interpreter method dispatch
 Regression: yes (works on seed `acfe9654`, broken on current-main builds)

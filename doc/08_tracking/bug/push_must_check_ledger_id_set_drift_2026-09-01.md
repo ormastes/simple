@@ -1,4 +1,5 @@
 # push-must-check blocks every push: must_check ledger id-set drifted from the gate manifest (2026-09-01)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Verdict (before)
 
@@ -118,3 +119,6 @@ worktrees under `.claude/worktrees/` carry a
 `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md`
 names `--rev-list-args-or-tips` and `--push-tip` as known caller/callee option
 mismatches. Landing a competing fix would clobber that work.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

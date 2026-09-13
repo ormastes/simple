@@ -1,6 +1,6 @@
 # RISC-V64 Native Entry Call Compare Codegen
 
-Status: open
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 Native entry-closure builds for `riscv64-unknown-none` lose calls when a
 condition compares a zero-arg extern call directly with an integer literal, for
@@ -20,3 +20,6 @@ Evidence:
 Required fix: preserve and lower the call result before binary comparison in
 the native-entry frontend/HIR/MIR path, then restore the RV64 smoke source to
 the explicit `== 1` checks if desired.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

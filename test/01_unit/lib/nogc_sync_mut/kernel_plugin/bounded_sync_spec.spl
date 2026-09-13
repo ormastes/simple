@@ -1,0 +1,108 @@
+# Purpose: executable evidence for bounded KPF sync storage, generations, pins, and static dispatch.
+# @req REQ-KPF-SYNC-BOUNDED
+# @cover src/lib/nogc_sync_mut/kernel_plugin 90%
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.*
+
+fn id(value: u64) -> KpfId128: KpfId128(hi: value, lo: value + 1)
+fn digest(value: u64) -> KpfDigest256: KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+describe "KPF bounded fixed slot table":
+    it "fails closed at capacity and rejects a stale reused handle":
+        step("reserve exactly the constructed capacity")
+        val table = KpfFixedSlotTable.create(2)
+        assert_equal(table.storage_capacity(), 2u32)
+        val first = table.reserve(11)
+        val second = table.reserve(22)
+        assert_true(first.status.accepted())
+        assert_true(second.status.accepted())
+        assert_equal(table.size(), 2u32)
+        assert_equal(table.reserve(33).status.code(), KpfSyncStatus.CapacityExceeded.code())
+        assert_equal(table.read(first.handle).value, 11u64)
+        assert_true(table.release(first.handle).accepted())
+        val replacement = table.reserve(44)
+        assert_equal(replacement.handle.index, first.handle.index)
+        assert_false(replacement.handle.epoch == first.handle.epoch)
+        assert_equal(table.read(first.handle).status.code(), KpfSyncStatus.StaleHandle.code())
+        assert_equal(table.read(replacement.handle).value, 44u64)
+        assert_true(table.write(replacement.handle, 55).accepted())
+        assert_equal(table.read(replacement.handle).value, 55u64)
+        assert_equal(table.read(KpfSlotHandle(index: 9, epoch: 1)).status.code(), KpfSyncStatus.StaleHandle.code())
+
+describe "KPF immutable generation publication and O(1) pins":
+    it "keeps a retired generation available until its direct-index pin is released":
+        step("publish and pin the first complete generation")
+        val table = KpfGenerationTable.create(2, 1)
+        assert_equal(table.generation_storage_capacity(), 2u32)
+        assert_equal(table.pin_storage_capacity(), 1u32)
+        assert_equal(table.pin_active().status.code(), KpfSyncStatus.GenerationNotActive.code())
+        val first = table.publish(id(1), digest(10), 7)
+        assert_true(first.status.accepted())
+        val pin = table.pin(first.current)
+        assert_true(pin.status.accepted())
+        assert_equal(table.pin_active().status.code(), KpfSyncStatus.CapacityExceeded.code())
+        val second = table.publish(id(2), digest(20), 8)
+        assert_true(second.status.accepted())
+        assert_equal(table.pin(first.current).status.code(), KpfSyncStatus.GenerationNotActive.code())
+        val old = table.view(first.current)
+        assert_true(old.retired)
+        assert_false(old.active)
+        assert_equal(old.pin_count, 1u32)
+        assert_equal(table.collect(first.current).status.code(), KpfSyncStatus.GenerationStillPinned.code())
+        assert_true(table.release_pin(pin.handle).accepted())
+        assert_equal(table.release_pin(pin.handle).code(), KpfSyncStatus.StaleHandle.code())
+        assert_true(table.collect(first.current).accepted())
+        assert_equal(table.view(first.current).status.code(), KpfSyncStatus.StaleHandle.code())
+        assert_equal(table.pin(first.current).status.code(), KpfSyncStatus.StaleHandle.code())
+        val current_pin = table.pin(second.current)
+        assert_true(current_pin.status.accepted())
+        assert_equal(table.view(second.current).pin_count, 1u32)
+        assert_true(table.release_pin(current_pin.handle).accepted())
+        assert_equal(table.collect(second.current).code(), KpfSyncStatus.GenerationNotRetired.code())
+
+    it "does not disturb the active generation when publication capacity is exhausted":
+        step("fill the generation table without collecting the retired entry")
+        val table = KpfGenerationTable.create(2, 2)
+        val first = table.publish(id(1), digest(1), 1)
+        val second = table.publish(id(2), digest(2), 2)
+        val rejected = table.publish(id(3), digest(3), 3)
+        assert_equal(rejected.status.code(), KpfSyncStatus.CapacityExceeded.code())
+        assert_true(table.view(second.current).active)
+        assert_equal(table.view(second.current).provider_id.hi, 2u64)
+        assert_true(table.view(first.current).retired)
+
+    it "rejects a generation without persistent provider identity":
+        step("publish with a zero provider identity")
+        val table = KpfGenerationTable.create(1, 1)
+        val rejected = table.publish(KpfId128(hi: 0, lo: 0), digest(1), 1)
+        assert_equal(rejected.status.code(), KpfSyncStatus.IdentityMissing.code())
+        assert_equal(table.pin_active().status.code(), KpfSyncStatus.GenerationNotActive.code())
+
+describe "KPF sealed static registry":
+    it "rejects duplicates and mutation after seal, then dispatches by dense slot":
+        step("build the registry before sealing")
+        val registry = KpfStaticRegistry.create(2)
+        assert_equal(registry.storage_capacity(), 2u32)
+        val binding = KpfStaticBinding(provider_id: id(10), interface_id: id(20), operation_table_token: 101)
+        assert_true(registry.bind(binding).accepted())
+        assert_equal(registry.bind(KpfStaticBinding(provider_id: id(11), interface_id: id(20), operation_table_token: 202)).code(), KpfSyncStatus.RegistryDuplicate.code())
+        assert_equal(registry.resolve(id(20)).status.code(), KpfSyncStatus.RegistryNotSealed.code())
+        assert_true(registry.seal().accepted())
+        assert_equal(registry.size(), 1u32)
+        assert_equal(registry.bind(KpfStaticBinding(provider_id: id(12), interface_id: id(21), operation_table_token: 303)).code(), KpfSyncStatus.RegistrySealed.code())
+        val resolved = registry.resolve(id(20))
+        assert_true(resolved.status.accepted())
+        assert_equal(resolved.slot, 0u32)
+        assert_equal(registry.binding_at(resolved.slot).binding.operation_table_token, 101u64)
+        assert_equal(registry.resolve(id(99)).status.code(), KpfSyncStatus.RegistryMissing.code())
+        assert_equal(registry.binding_at(9).status.code(), KpfSyncStatus.RegistryMissing.code())
+
+    it "fails closed for missing identities and fixed registration capacity":
+        step("fill a one-entry registry without allowing growth")
+        val registry = KpfStaticRegistry.create(1)
+        assert_equal(registry.bind(KpfStaticBinding(provider_id: KpfId128(hi: 0, lo: 0), interface_id: id(1), operation_table_token: 1)).code(), KpfSyncStatus.IdentityMissing.code())
+        assert_true(registry.bind(KpfStaticBinding(provider_id: id(1), interface_id: id(2), operation_table_token: 1)).accepted())
+        assert_equal(registry.bind(KpfStaticBinding(provider_id: id(2), interface_id: id(3), operation_table_token: 2)).code(), KpfSyncStatus.CapacityExceeded.code())

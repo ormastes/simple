@@ -71,3 +71,32 @@ in this worktree, for every spec tried (`ops_spec.spl`, `todo_builtin_spec.spl`,
 and a three-line hand-written probe). That is a silent vacuous pass on the
 default test command. `SIMPLE_TEST_RUNNER_RUST=1` is the documented escape hatch
 and is what every measurement above used.
+
+## Re-check 2026-09-12 (bug fan-out shard 01) — confirms RESOLVED; bug_db row is stale
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+```simple
+var hits = 0
+fn effect() -> bool:
+    hits = hits + 1
+    return true
+fn probe() -> str:
+    val a = false and effect()
+    val b = true or effect()
+    return "a=" + str(a) + " b=" + str(b) + " effects=" + str(hits)
+print probe()
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=jit         bin/simple run sc.spl   -> a=false b=true effects=0
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run sc.spl   -> a=false b=true effects=0
+```
+
+`effects=0` on both lanes: neither right operand ran. The counter is the point —
+asserting only `a` and `b` would pass even if `effect()` had run, which is the
+whole defect. This row's own status has read **RESOLVED 2026-09-06** since the
+executable proof landed; `doc/08_tracking/bug/bug_db.sdn` still carries it as an
+open P1. The db row, not the defect, is what needs updating (db sync is the
+fan-out lead's step, not edited here).

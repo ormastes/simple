@@ -1,4 +1,5 @@
 # `self.error(...)` used where `self.error_fatal(...)` was intended — family sweep
+**Status:** OPEN (unverified 2026-09-12)
 
 Date: 2026-08-08
 
@@ -404,3 +405,14 @@ after the edit tool reported success). The edits were redone and committed
 immediately afterward with no further gap between edit and commit, per the
 standing shared-WC guidance in `.claude/rules/vcs.md` and this repo's
 memory notes on write-tool/edit clobbering.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Confirmed the remaining "HIGH" candidates from the "Recommended follow-up" list are still present at (shifted) line numbers on this tree: `src/compiler/50.mir/_MirLowering/asm_and_targets.spl:160,233,236` (non-fatal `self.error` for asm non-exhaustive/version/assert), `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:2325` (`enum-to-integer cast could not read runtime discriminant`), and the `mir_lowering_stmts.spl` let/for-binding family. The `expr_dispatch.spl:1912` line-number reference in this doc is stale (content moved to :2325 as the file grew); message text matches exactly, so it is the same site.
+
+Repro/verification for a mechanical `self.error` -> `self.error_fatal` conversion here requires the `native-build` oracle (`env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --entry-closure ...`), which this doc's own prior passes measured at several minutes per run on a loaded host, plus constructing fixtures that reach each specific silent-fallback branch without first tripping an already-fatal sibling check (the same difficulty this doc's "Verification (honest results)" sections describe for the already-landed fixes). That exceeds this pass's per-bug budget. Direction for a follow-up lane: convert the 3 asm sites and the enum-cast site one at a time, each with its own native-build fixture and a rc=0-before/rc=1-after discrimination proof, following the exact pattern already used for the 9 sites this doc fixed in its three prior passes.
+
+Leaving OPEN — no code change made this pass.

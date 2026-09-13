@@ -1,5 +1,7 @@
 # `todo(...)` parses into the same AST node as `pass_todo(...)`; REQC003's dedicated branch is unreachable from real source
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-08-07 · **Severity:** low (coverage gap, not silent-wrong-data — a
 weak `todo(...)` still gets flagged, just as REQC001 instead of REQC003)
 **Found by:** WP-7 of `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`
@@ -98,3 +100,55 @@ applied unilaterally here.
 
 **Verdict: BLOCKED (real fix is in `10.frontend`, out of scope for this worker).**
 No code change made in this pass.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Resolution 2026-09-13
+
+Fixed via option 1 (parser distinguishes the two forms), touching
+`10.frontend` after all — the prior worker's scope lock was specific to
+that worker's own task, not a repo-wide constraint.
+
+Added `expr_pass_todo_call()` in `_AstExpr/accessors.spl`: same node shape
+as `expr_pass_todo` (tag 40), but marks the node's `int` field with `1` so
+`check_required_comment` can tell "this source literally wrote `todo(...)`"
+from "this source used the `pass_todo` keyword" — both still produce the
+same tag, but are now distinguishable. Wired into both real parse sites
+(`parser_stmts.spl` statement position, `_ParserPrimary/primary_expr.spl`
+expression position). `required_comment.spl`'s `is_any_pass` branch now
+checks that marker and, when set, splits the message on `" | "` (the
+existing `parse_optional_rationale_args` join separator) and applies the
+REQC003 two-string check instead of REQC001's single-string check.
+
+Deliberately did NOT use the `extra` field (my first attempt): several
+generic AST walkers (`unused_vars.spl`'s `collect_refs_in_expr`,
+`closure_analysis.spl`, `call_edge_utils.spl`, `alloc_inference.spl`, and
+`required_comment.spl`'s own `_check_expr`) treat `expr_get_extra` as an
+optional child-expression index and recurse into it unconditionally
+whenever it is `>= 0` — repurposing it as a boolean flag would have made
+every one of them walk into whatever unrelated node sits at arena index 1.
+Caught this by reading those walkers before shipping, reverted the
+`extra`-based attempt, and used the node's `int` field instead (no
+generic-recursion contract; precedent: `expr_mark_string_processed`
+already reuses it as a per-tag marker).
+
+Updated the regression-pinning spec
+(`test/01_unit/compiler/lint/required_comment_cli_spec.spl`) from
+asserting the bug ("emits REQC001 (not REQC003)") to asserting the fix
+("emits REQC003 (not REQC001)"), added a well-formed-todo negative case
+and a pass_todo-keyword-still-REQC001 case.
+
+```
+test/01_unit/compiler/lint/required_comment_cli_spec.spl:
+10 total, 8 passed, 2 failed
+```
+
+The 2 remaining failures are pre-existing and unrelated (REQC004 if-val/
+if-var wildcard-binding admission, `Module compiler.frontend.core does not
+export 'if_chain_nodes'`) — confirmed present before this change too via a
+`git checkout` / `git apply` round trip that isolated just this fix's
+files. No regression in `unused_vars_spec.spl` (6/6).
+
+- Status: RESOLVED (2026-09-13) — 37e69573ecc, spec `test/01_unit/compiler/lint/required_comment_cli_spec.spl`

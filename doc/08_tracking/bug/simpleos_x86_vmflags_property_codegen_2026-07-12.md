@@ -1,4 +1,5 @@
 # SimpleOS x86 VmFlags property-style lowering failure
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -32,3 +33,6 @@ fresh Stage 2 compiler were rebuilt; Stage 2 SHA-256 is
 `1f784c159f755efdc125e9339f26b1eab839ff4ff67f4a97771c6be34bb26049`.
 The next x86 build must report zero failed/skipped files before the ELF or QEMU
 evidence is accepted.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,6 +1,13 @@
 # DBFS Device Remount Namespace Persistence Gap
 
-Status: Implemented for the current `DbFsDriver.open_on_device` path.
+## Closed 2026-09-13 — Implemented for the `DbFsDriver.open_on_device` path per the entry's own status
+
+- **inferred** The Status line records the behaviour as implemented for the current `DbFsDriver.open_on_device` path.
+- **measured** All three product paths the entry references still exist (path-survival scan: 3 referenced, 0 missing), so the implementation was not later removed.
+- **inferred** The dbfs spec lane cannot be executed on this host (`bin/simple test` is killed at its outer bound for every spec), so closure rests on the recorded implementation.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 Date: 2026-06-06
 

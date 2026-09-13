@@ -1,4 +1,5 @@
 # Game2D Breakout Rendered 60s Interpreter Session Is Too Slow
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/03_system/game2d/breakout_production_spec.spl` now PASSes)
 
 ## Status
 
@@ -22,3 +23,6 @@ Open. G3.2 has a passing 3600-step logic session in
 
 Make the native/JIT Game2D path reliable, then restore the 3600-frame rendered
 session as an affordable gate.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/game2d/breakout_production_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,0 +1,1127 @@
+#!/bin/sh
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+if [ -f "$root/scripts/lib/storage-roots.shs" ]; then
+    STORAGE_ROOTS_REPO_ROOT=$root
+    export STORAGE_ROOTS_REPO_ROOT
+    . "$root/scripts/lib/storage-roots.shs"
+    storage_roots_init || { echo "M5 FAIL: centralized storage roots unavailable" >&2; exit 2; }
+fi
+
+mode=
+arm64_candidate=
+arm64_admission=
+arm64_m4=
+arm64_m4_evidence_dir=
+arm64_m4_run_id=
+arm64_m4_run_attempt=
+arm64_m4_artifact=
+arm64_m4_evidence_artifact=
+arm64_m4_repository=
+arm64_m4_workflow_ref=
+arm64_m4_workflow_sha=
+arm64_m4_head_sha=
+arm64_m4_artifact_id=
+arm64_m4_artifact_digest=
+arm64_m4_evidence_artifact_id=
+arm64_m4_evidence_artifact_digest=
+x86_candidate=
+x86_admission=
+x86_m4=
+x86_m4_evidence_dir=
+x86_m4_run_id=
+x86_m4_run_attempt=
+x86_m4_artifact=
+x86_m4_evidence_artifact=
+x86_m4_repository=
+x86_m4_workflow_ref=
+x86_m4_workflow_sha=
+x86_m4_head_sha=
+x86_m4_artifact_id=
+x86_m4_artifact_digest=
+x86_m4_evidence_artifact_id=
+x86_m4_evidence_artifact_digest=
+expected_source_revision=
+candidate_dir=
+architecture=
+verification_receipt=
+arm64_verification=
+x86_verification=
+output_root=
+pointer=
+out_receipt=
+signing_identity=
+notary_profile=
+signed_receipt=
+arm64_post_sign_verification=
+x86_post_sign_verification=
+expected_current=
+promotion_receipt=
+portable_selftest=${M5_PORTABLE_SELFTEST:-0}
+default_kernel_policy_manifest=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+default_nfr_authority_document=$root/doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md
+if [ "$portable_selftest" = 1 ]; then
+    kernel_policy_manifest=${M5_KERNEL_POLICY_MANIFEST:?M5_KERNEL_POLICY_MANIFEST is required for portable structural policy checks}
+    nfr_authority_document=${M5_NFR_AUTHORITY_DOCUMENT:?M5_NFR_AUTHORITY_DOCUMENT is required for portable structural policy checks}
+else
+    [ -z "${M5_KERNEL_POLICY_MANIFEST:-}${M5_NFR_AUTHORITY_DOCUMENT:-}" ] || { echo "M5 FAIL: policy authority override is portable-self-test only" >&2; exit 1; }
+    kernel_policy_manifest=$default_kernel_policy_manifest
+    nfr_authority_document=$default_nfr_authority_document
+fi
+
+case "$portable_selftest" in
+    0)
+        [ -z "${M5_LIPO:-}${M5_FILE:-}${M5_CODESIGN:-}${M5_XCRUN:-}${M5_DITTO:-}${M5_SPCTL:-}" ] || {
+            echo "M5 FAIL: tool overrides are allowed only for the explicit portable structural self-test" >&2
+            exit 1
+        }
+        lipo_tool=/usr/bin/lipo
+        file_tool=/usr/bin/file
+        codesign_tool=/usr/bin/codesign
+        xcrun_tool=/usr/bin/xcrun
+        ditto_tool=/usr/bin/ditto
+        spctl_tool=/usr/sbin/spctl
+        evidence_class=NATIVE_M4_RETAINED
+        ;;
+    1)
+        lipo_tool=${M5_LIPO:?M5_LIPO is required for the portable structural self-test}
+        file_tool=${M5_FILE:?M5_FILE is required for the portable structural self-test}
+        codesign_tool=${M5_CODESIGN:?M5_CODESIGN is required for the portable structural self-test}
+        xcrun_tool=${M5_XCRUN:?M5_XCRUN is required for the portable structural self-test}
+        ditto_tool=${M5_DITTO:?M5_DITTO is required for the portable structural self-test}
+        spctl_tool=${M5_SPCTL:?M5_SPCTL is required for the portable structural self-test}
+        evidence_class=PORTABLE_STRUCTURAL
+        ;;
+    *)
+        echo "M5 FAIL: M5_PORTABLE_SELFTEST must be 0 or 1" >&2
+        exit 1
+        ;;
+esac
+
+fail() { echo "M5 FAIL: $*" >&2; exit 1; }
+blocked() {
+    [ -n "$out_receipt" ] || out_receipt="$SIMPLE_WORKTREE_STORAGE_ROOT/evidence/release/m5-blocked-$$.env"
+    mkdir -p "$(dirname "$out_receipt")"
+    printf 'status=BLOCKED\narchitecture=%s\nreason=%s\n' "$architecture" "$1" >"$out_receipt"
+    echo "M5 BLOCKED [$architecture]: $1"
+    exit 3
+}
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    else sha256sum "$1" | awk '{print $1}'; fi
+}
+sha256_stream() {
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+    else sha256sum | awk '{print $1}'; fi
+}
+sha256_tree() {
+    tree_root=$1
+    (cd "$tree_root" && find . -type f -print | LC_ALL=C sort | while IFS= read -r tree_file; do
+        printf '%s\t%s\n' "$tree_file" "$(sha256_file "$tree_file")"
+    done) | sha256_stream
+}
+receipt_value() {
+    receipt=$1 key=$2
+    count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$receipt")
+    [ "$count" -eq 1 ] || return 1
+    awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$receipt"
+}
+safe_value() {
+    value=$1
+    [ -n "$value" ] && ! printf '%s' "$value" | grep -q '[[:cntrl:]]'
+}
+require_sha() { printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{64}$'; }
+require_git_sha() { printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{40}$'; }
+require_receipt_value() {
+    value=$(receipt_value "$1" "$2") || fail "$3 receipt has missing or duplicate $2"
+    safe_value "$value" || fail "$3 receipt has unsafe $2"
+    printf '%s\n' "$value"
+}
+require_file_hash() {
+    actual=$(sha256_file "$1")
+    [ "$actual" = "$2" ] || fail "$3 mutated: expected $2, got $actual"
+}
+policy_value() {
+    awk -v key="$1" '$1 == key ":" { count++; value=$2 } END { if (count != 1 || value == "") exit 1; print value }' "$kernel_policy_manifest"
+}
+validate_canonical_policy_receipt() {
+    policy_label=$1 policy_receipt=$2
+    [ -f "$kernel_policy_manifest" ] && [ ! -L "$kernel_policy_manifest" ] || fail "canonical kernel policy authority missing"
+    policy_sha=$(sha256_file "$kernel_policy_manifest")
+    [ "$(require_receipt_value "$policy_receipt" kernel_policy_manifest_sha256 "$policy_label")" = "$policy_sha" ] || fail "$policy_label kernel policy manifest digest mismatch"
+    [ "$(require_receipt_value "$policy_receipt" kernel_k1_policy "$policy_label")" = "$(policy_value k1_policy)" ] || fail "$policy_label K1 policy drift"
+    [ "$(require_receipt_value "$policy_receipt" kernel_plugin_abi "$policy_label")" = 1 ] && [ "$(policy_value simple_abi_policy)" = v1 ] || fail "$policy_label ABI policy drift"
+    for binding in plugin_manifest_policy:plugin_manifest_policy coverage_cutover_policy:coverage_cutover_policy coverage_implementation:coverage_implementation performance_threshold_mode:performance_threshold_mode performance_threshold_status:performance_threshold_status performance_baseline_scope:performance_baseline_scope performance_steady_rss_percent:performance_steady_rss_percent performance_growth_percent:performance_growth_percent performance_warm_request_count:performance_warm_request_count; do
+        receipt_key=${binding%%:*}; policy_key=${binding#*:}
+        [ "$(require_receipt_value "$policy_receipt" "$receipt_key" "$policy_label")" = "$(policy_value "$policy_key")" ] || fail "$policy_label canonical policy drift: $receipt_key"
+    done
+    [ "$(policy_value k1_policy)" = llvm-cranelift ] && [ "$(policy_value plugin_manifest_policy)" = simple-sdn ] &&
+        [ "$(policy_value coverage_cutover_policy)" = atomic-apk-only ] && [ "$(policy_value coverage_implementation)" = apk-only ] &&
+        [ "$(policy_value performance_threshold_mode)" = baseline-relative-10-percent ] && [ "$(policy_value performance_threshold_status)" = selected ] &&
+        [ "$(policy_value performance_baseline_scope)" = admitted-per-architecture-receipt ] && [ "$(policy_value performance_steady_rss_percent)" = 110 ] &&
+        [ "$(policy_value performance_growth_percent)" = 10 ] && [ "$(policy_value performance_warm_request_count)" = 20 ] || fail "canonical kernel policy authority drifted"
+}
+require_m4_residency() {
+    label=$1 m4=$2 evidence_dir=$3
+    receipt="$evidence_dir/long-lived-residency/receipt.env"
+    [ "$(require_receipt_value "$receipt" schema "$label residency")" = macos-bootstrap-long-lived-residency-gate-v3 ] || fail "$label residency schema unsupported"
+    [ "$(require_receipt_value "$receipt" status "$label residency")" = PASS ] || fail "$label residency is not PASS"
+    [ "$(require_receipt_value "$receipt" architecture "$label residency")" = "$label" ] || fail "$label residency architecture mismatch"
+    [ "$(require_receipt_value "$receipt" request_count "$label residency")" = 20 ] || fail "$label residency request count mismatch"
+    [ "$(require_receipt_value "$receipt" threshold_mode "$label residency")" = baseline-relative-10-percent ] || fail "$label residency policy mismatch"
+    [ "$(require_receipt_value "$receipt" decision_source "$label residency")" = user-final-performance-authority-2026-09-02 ] || fail "$label residency decision source mismatch"
+    [ "$(require_receipt_value "$receipt" steady_rss_limit_percent "$label residency")" = 110 ] || fail "$label steady RSS percentage drift"
+    [ "$(require_receipt_value "$receipt" growth_limit_percent "$label residency")" = 10 ] || fail "$label growth percentage drift"
+    [ "$(require_receipt_value "$receipt" producer_sha256 "$label residency")" = "$(require_receipt_value "$m4" candidate_sha256 "$label M4")" ] || fail "$label residency producer mismatch"
+    [ "$(require_receipt_value "$receipt" server_sha256 "$label residency")" = "$(require_receipt_value "$m4" mcp_sha256 "$label M4")" ] || fail "$label residency server mismatch"
+    for key in baseline_evidence_sha256 baseline_receipt_sha256 producer_sha256 server_sha256 responses_sha256 samples_sha256 authority_document_sha256; do
+        require_sha "$(require_receipt_value "$receipt" "$key" "$label residency")" || fail "$label residency $key malformed"
+    done
+    authority_document="$nfr_authority_document"
+    require_file_hash "$authority_document" "$(require_receipt_value "$receipt" authority_document_sha256 "$label residency")" "$label residency authority document"
+    baseline_receipt="$evidence_dir/authority/residency-baseline.env"
+    [ "$(require_receipt_value "$baseline_receipt" schema "$label baseline")" = macos-m4-residency-baseline-v1 ] || fail "$label baseline schema unsupported"
+    [ "$(require_receipt_value "$baseline_receipt" status "$label baseline")" = ADMITTED ] || fail "$label baseline is not admitted"
+    [ "$(require_receipt_value "$baseline_receipt" selection_policy "$label baseline")" = baseline-relative-10-percent ] || fail "$label baseline policy mismatch"
+    [ "$(require_receipt_value "$baseline_receipt" decision_source "$label baseline")" = user-final-performance-authority-2026-09-02 ] || fail "$label baseline decision source mismatch"
+    [ "$(require_receipt_value "$baseline_receipt" architecture "$label baseline")" = "$label" ] || fail "$label baseline architecture mismatch"
+    [ "$(require_receipt_value "$baseline_receipt" request_count "$label baseline")" = 20 ] || fail "$label baseline request count mismatch"
+    require_file_hash "$baseline_receipt" "$(require_receipt_value "$receipt" baseline_receipt_sha256 "$label residency")" "$label retained residency baseline"
+    [ "$(require_receipt_value "$baseline_receipt" baseline_evidence_sha256 "$label baseline")" = "$(require_receipt_value "$receipt" baseline_evidence_sha256 "$label residency")" ] || fail "$label baseline evidence digest mismatch"
+    [ "$(require_receipt_value "$baseline_receipt" producer_sha256 "$label baseline")" = "$(require_receipt_value "$receipt" producer_sha256 "$label residency")" ] || fail "$label baseline producer mismatch"
+    [ "$(require_receipt_value "$baseline_receipt" server_sha256 "$label baseline")" = "$(require_receipt_value "$receipt" server_sha256 "$label residency")" ] || fail "$label baseline server mismatch"
+    [ "$(require_receipt_value "$baseline_receipt" authority_document_sha256 "$label baseline")" = "$(require_receipt_value "$receipt" authority_document_sha256 "$label residency")" ] || fail "$label baseline document digest mismatch"
+    baseline=$(require_receipt_value "$receipt" baseline_rss_kib "$label residency")
+    [ "$(require_receipt_value "$baseline_receipt" baseline_rss_kib "$label baseline")" = "$baseline" ] || fail "$label baseline RSS mismatch"
+    steady=$(require_receipt_value "$receipt" observed_max_steady_rss_kib "$label residency")
+    growth=$(require_receipt_value "$receipt" observed_nonnegative_growth_kib "$label residency")
+    case "$baseline:$steady:$growth" in *[!0-9:]*) fail "$label residency measurements malformed" ;; esac
+    [ "$baseline" -gt 0 ] && [ "$steady" -gt 0 ] || fail "$label residency measurements are zero"
+    [ $((steady * 100)) -le $((baseline * 110)) ] || fail "$label steady RSS exceeds baseline-relative limit"
+    [ "$growth" -ge 0 ] && [ $((growth * 100)) -le $((baseline * 10)) ] || fail "$label RSS growth exceeds baseline-relative limit"
+}
+require_m4_provider_oracle() {
+    label=$1 m4=$2 evidence_dir=$3
+    baseline_oracle="$evidence_dir/baseline.provider-oracle.env"
+    same_byte_oracle="$evidence_dir/provider-same-byte.provider-oracle.env"
+    mutated_oracle="$evidence_dir/provider.provider-oracle.env"
+    for oracle_binding in \
+        "$baseline_oracle:provider_baseline_oracle_sha256" \
+        "$same_byte_oracle:provider_same_byte_oracle_sha256" \
+        "$mutated_oracle:provider_mutated_oracle_sha256"; do
+        oracle_path=${oracle_binding%%:*}; receipt_key=${oracle_binding#*:}
+        [ -f "$oracle_path" ] && [ ! -L "$oracle_path" ] || fail "$label M4 provider oracle missing or symlinked: $oracle_path"
+        expected_sha=$(require_receipt_value "$m4" "$receipt_key" "$label M4")
+        require_sha "$expected_sha" || fail "$label M4 $receipt_key malformed"
+        require_file_hash "$oracle_path" "$expected_sha" "$label M4 provider oracle"
+        [ "$(require_receipt_value "$oracle_path" schema "$label M4 provider oracle")" = macos-m4-provider-archive-oracle-v1 ] || fail "$label M4 provider oracle schema unsupported"
+        [ "$(require_receipt_value "$oracle_path" compiler_sha256 "$label M4 provider oracle")" = "$(require_receipt_value "$m4" candidate_sha256 "$label M4")" ] || fail "$label M4 provider oracle producer mismatch"
+        oracle_backend=$(require_receipt_value "$oracle_path" backend_provider_digest "$label M4 provider oracle")
+        require_sha "$oracle_backend" || fail "$label M4 provider oracle backend digest malformed"
+        [ "$oracle_backend" = "$(require_receipt_value "$m4" provider_identity "$label M4")" ] || fail "$label M4 provider oracle backend identity mismatch"
+    done
+    baseline_archive=$(require_receipt_value "$m4" provider_baseline_archive_sha256 "$label M4")
+    same_byte_archive=$(require_receipt_value "$m4" provider_same_byte_archive_sha256 "$label M4")
+    mutated_archive=$(require_receipt_value "$m4" provider_mutated_archive_sha256 "$label M4")
+    baseline_members=$(require_receipt_value "$m4" provider_baseline_members_sha256 "$label M4")
+    same_byte_members=$(require_receipt_value "$m4" provider_same_byte_members_sha256 "$label M4")
+    mutated_members=$(require_receipt_value "$m4" provider_mutated_members_sha256 "$label M4")
+    baseline_payloads=$(require_receipt_value "$m4" provider_baseline_payloads_sha256 "$label M4")
+    same_byte_payloads=$(require_receipt_value "$m4" provider_same_byte_payloads_sha256 "$label M4")
+    mutated_payloads=$(require_receipt_value "$m4" provider_mutated_payloads_sha256 "$label M4")
+    baseline_manifest=$(require_receipt_value "$m4" provider_baseline_manifest_identity "$label M4")
+    same_byte_manifest=$(require_receipt_value "$m4" provider_same_byte_manifest_identity "$label M4")
+    mutated_manifest=$(require_receipt_value "$m4" provider_mutated_manifest_identity "$label M4")
+    for digest in "$baseline_archive" "$same_byte_archive" "$mutated_archive" \
+        "$baseline_members" "$same_byte_members" "$mutated_members" \
+        "$baseline_payloads" "$same_byte_payloads" "$mutated_payloads" \
+        "$baseline_manifest" "$same_byte_manifest" "$mutated_manifest"; do
+        require_sha "$digest" || fail "$label M4 provider/archive identity malformed"
+    done
+    [ "$baseline_archive" = "$same_byte_archive" ] || fail "$label M4 same-byte provider copy digest mismatch"
+    [ "$baseline_members" = "$same_byte_members" ] || fail "$label M4 same-byte provider members changed"
+    [ "$baseline_payloads" = "$same_byte_payloads" ] || fail "$label M4 same-byte provider payloads changed"
+    [ "$baseline_manifest" = "$same_byte_manifest" ] || fail "$label M4 same-byte provider changed production identity"
+    [ "$baseline_archive" != "$mutated_archive" ] || fail "$label M4 provider mutation reused baseline archive bytes"
+    [ "$baseline_members" != "$mutated_members" ] || fail "$label M4 provider mutation reused baseline member bytes"
+    [ "$baseline_payloads" != "$mutated_payloads" ] || fail "$label M4 provider mutation preserved member payloads"
+    [ "$baseline_manifest" != "$mutated_manifest" ] || fail "$label M4 provider mutation preserved production identity"
+    for variant in baseline provider-same-byte provider; do
+        oracle="$evidence_dir/$variant.provider-oracle.env"
+        members="$evidence_dir/$variant.provider-members.tsv"
+        payloads="$evidence_dir/$variant.provider-member-payloads.tsv"
+        manifest="$evidence_dir/$variant.runtime-provider-manifest.receipt"
+        backend="$evidence_dir/$variant.backend-provider.receipt"
+        case "$variant" in
+            baseline) archive="$evidence_dir/provider-artifacts/baseline.a"; expected_archive=$baseline_archive; expected_members=$baseline_members; expected_payloads=$baseline_payloads; expected_manifest=$baseline_manifest ;;
+            provider-same-byte) archive="$evidence_dir/provider-artifacts/baseline-same-bytes.a"; expected_archive=$same_byte_archive; expected_members=$same_byte_members; expected_payloads=$same_byte_payloads; expected_manifest=$same_byte_manifest ;;
+            provider) archive="$evidence_dir/provider-artifacts/mutated.a"; expected_archive=$mutated_archive; expected_members=$mutated_members; expected_payloads=$mutated_payloads; expected_manifest=$mutated_manifest ;;
+        esac
+        [ -f "$archive" ] && [ ! -L "$archive" ] || fail "$label M4 retained provider archive missing or symlinked: $variant"
+        require_file_hash "$archive" "$expected_archive" "$label M4 retained provider archive $variant"
+        [ -s "$members" ] && [ ! -L "$members" ] || fail "$label M4 ordered provider members missing or symlinked: $variant"
+        awk -F '[=:|]' '
+            $1 != "member" || $2 !~ /^[0-9]+$/ || $3 != count ||
+                $4 != "size" || $5 !~ /^[0-9]+$/ || $5 + 0 <= 0 ||
+                $6 != "digest" || $7 !~ /^[0-9a-f]{64}$/ ||
+                $8 != "name" || $9 !~ /^[0-9]+$/ || $10 == "" ||
+                length($10) != $9 || $10 ~ /[^A-Za-z0-9_.+\/-]/ { exit 1 }
+            NR == 1 { artifact = $2 }
+            $2 != artifact { exit 1 }
+            { count++ }
+            END { if (count == 0) exit 1 }
+        ' "$members" || fail "$label M4 provider members are malformed or unordered: $variant"
+        require_file_hash "$members" "$expected_members" "$label M4 ordered provider members $variant"
+        [ -s "$payloads" ] && [ ! -L "$payloads" ] || fail "$label M4 provider payload evidence missing or symlinked: $variant"
+        require_file_hash "$payloads" "$expected_payloads" "$label M4 provider payloads $variant"
+        [ "$(wc -l <"$payloads" | tr -d ' ')" = "$(wc -l <"$members" | tr -d ' ')" ] || fail "$label M4 provider payload/member count mismatch: $variant"
+        paste "$payloads" "$members" | awk -F '\t' 'NF != 2 || index($2, $1 "|name=") != 1 { exit 1 }' || fail "$label M4 provider payload/member binding mismatch: $variant"
+        [ "$(require_receipt_value "$oracle" archive_sha256 "$label M4 provider oracle")" = "$expected_archive" ] || fail "$label M4 provider oracle archive mismatch: $variant"
+        [ "$(require_receipt_value "$oracle" members_sha256 "$label M4 provider oracle")" = "$expected_members" ] || fail "$label M4 provider oracle members mismatch: $variant"
+        [ "$(require_receipt_value "$oracle" member_payloads_sha256 "$label M4 provider oracle")" = "$expected_payloads" ] || fail "$label M4 provider oracle payload mismatch: $variant"
+        [ "$(require_receipt_value "$oracle" manifest_content_identity "$label M4 provider oracle")" = "$expected_manifest" ] || fail "$label M4 provider oracle manifest identity mismatch: $variant"
+        [ "$(require_receipt_value "$oracle" member_count "$label M4 provider oracle")" = "$(wc -l <"$members" | tr -d ' ')" ] || fail "$label M4 provider member count mismatch: $variant"
+        [ -f "$manifest" ] && [ ! -L "$manifest" ] || fail "$label M4 retained production provider manifest missing: $variant"
+        require_file_hash "$manifest" "$(require_receipt_value "$oracle" manifest_sha256 "$label M4 provider oracle")" "$label M4 production provider manifest $variant"
+        [ "$(require_receipt_value "$manifest" content-identity "$label M4 production provider manifest")" = "$expected_manifest" ] || fail "$label M4 retained production provider identity mismatch: $variant"
+        grep -Eq "^artifact=[0-9]+\\|path=[0-9]+:.*\\|digest=$expected_archive$" "$manifest" || fail "$label M4 production manifest omits selected archive: $variant"
+        while IFS= read -r member_row; do
+            manifest_member=${member_row%|name=*}
+            [ "$(grep -Fxc "$manifest_member" "$manifest")" -eq 1 ] || fail "$label M4 production manifest omits or duplicates ordered member: $variant"
+        done <"$members"
+        [ -f "$backend" ] && [ ! -L "$backend" ] || fail "$label M4 retained backend-provider receipt missing: $variant"
+        require_file_hash "$backend" "$(require_receipt_value "$oracle" backend_receipt_sha256 "$label M4 provider oracle")" "$label M4 backend-provider receipt $variant"
+        [ "$(require_receipt_value "$backend" provider "$label M4 backend-provider receipt")" = "$(require_receipt_value "$m4" provider_identity "$label M4")" ] || fail "$label M4 live backend-provider digest mismatch: $variant"
+    done
+    provider_builds="$evidence_dir/provider-builds.env"
+    [ "$(require_receipt_value "$provider_builds" schema "$label M4 provider builds")" = macos-m4-provider-build-set-v1 ] || fail "$label M4 provider build set schema unsupported"
+    [ "$(require_receipt_value "$provider_builds" producer_sha256 "$label M4 provider builds")" = "$(require_receipt_value "$m4" candidate_sha256 "$label M4")" ] || fail "$label M4 provider build producer mismatch"
+    for variant in baseline mutated; do
+        build_receipt="$evidence_dir/provider-$variant.tool-build.env"
+        [ -f "$build_receipt" ] && [ ! -L "$build_receipt" ] || fail "$label M4 provider build receipt missing: $variant"
+        expected_build_sha=$(require_receipt_value "$provider_builds" "${variant}_receipt_sha256" "$label M4 provider builds")
+        require_file_hash "$build_receipt" "$expected_build_sha" "$label M4 provider build receipt $variant"
+        [ "$(require_receipt_value "$build_receipt" schema "$label M4 provider build")" = macos-m4-provider-tool-build-v1 ] || fail "$label M4 provider build schema unsupported: $variant"
+        [ "$(require_receipt_value "$build_receipt" status "$label M4 provider build")" = PASS ] || fail "$label M4 provider build is not PASS: $variant"
+        [ "$(require_receipt_value "$build_receipt" variant "$label M4 provider build")" = "$variant" ] || fail "$label M4 provider build variant mismatch: $variant"
+        [ "$(require_receipt_value "$build_receipt" producer_sha256 "$label M4 provider build")" = "$(require_receipt_value "$m4" candidate_sha256 "$label M4")" ] || fail "$label M4 provider build candidate provenance mismatch: $variant"
+        expected_archive=$(require_receipt_value "$provider_builds" "${variant}_archive_sha256" "$label M4 provider builds")
+        [ "$(require_receipt_value "$build_receipt" archive_sha256 "$label M4 provider build")" = "$expected_archive" ] || fail "$label M4 provider build archive mismatch: $variant"
+        require_sha "$(require_receipt_value "$build_receipt" source_sha256 "$label M4 provider build")" || fail "$label M4 provider source digest malformed: $variant"
+        require_sha "$(require_receipt_value "$build_receipt" build_log_sha256 "$label M4 provider build")" || fail "$label M4 provider build-log digest malformed: $variant"
+    done
+}
+require_m4_evidence() {
+    label=$1 m4=$2 evidence_dir=$3 expected_run_id=$4 expected_run_attempt=$5 expected_artifact=$6 expected_evidence_artifact=$7
+    case "$label" in
+        arm64) expected_repository=$arm64_m4_repository; expected_workflow_ref=$arm64_m4_workflow_ref; expected_workflow_sha=$arm64_m4_workflow_sha; expected_head_sha=$arm64_m4_head_sha; expected_artifact_id=$arm64_m4_artifact_id; expected_artifact_digest=$arm64_m4_artifact_digest; expected_evidence_artifact_id=$arm64_m4_evidence_artifact_id; expected_evidence_artifact_digest=$arm64_m4_evidence_artifact_digest ;;
+        x86_64) expected_repository=$x86_m4_repository; expected_workflow_ref=$x86_m4_workflow_ref; expected_workflow_sha=$x86_m4_workflow_sha; expected_head_sha=$x86_m4_head_sha; expected_artifact_id=$x86_m4_artifact_id; expected_artifact_digest=$x86_m4_artifact_digest; expected_evidence_artifact_id=$x86_m4_evidence_artifact_id; expected_evidence_artifact_digest=$x86_m4_evidence_artifact_digest ;;
+        *) fail "unknown M4 evidence architecture $label" ;;
+    esac
+    [ -n "$expected_run_id" ] || fail "$label expected M4 workflow run ID missing"
+    case "$expected_run_id" in *[!0-9]*|'') fail "$label expected M4 workflow run ID malformed" ;; esac
+    [ -n "$expected_run_attempt" ] || fail "$label expected M4 workflow run attempt missing"
+    case "$expected_run_attempt" in *[!0-9]*|'') fail "$label expected M4 workflow run attempt malformed" ;; esac
+    [ -n "$expected_artifact" ] || fail "$label expected M4 qualification artifact missing"
+    [ -n "$expected_evidence_artifact" ] || fail "$label expected M4 evidence artifact missing"
+    [ -d "$evidence_dir" ] || fail "$label M4 evidence directory missing"
+    [ -f "$evidence_dir/status.env" ] || fail "$label retained M4 status receipt missing"
+    [ -f "$evidence_dir/evidence-files.sha256" ] || fail "$label retained M4 evidence manifest missing"
+    cmp -s "$m4" "$evidence_dir/status.env" || fail "$label M4 artifact and retained status receipt differ"
+    manifest_sha=$(require_receipt_value "$m4" evidence_manifest_sha256 "$label M4")
+    require_sha "$manifest_sha" || fail "$label M4 evidence manifest digest malformed"
+    require_file_hash "$evidence_dir/evidence-files.sha256" "$manifest_sha" "$label M4 evidence manifest"
+    [ "$(require_receipt_value "$m4" qualification_run_id "$label M4")" = "$expected_run_id" ] || fail "$label M4 workflow run ID mismatch"
+    [ "$(require_receipt_value "$m4" qualification_run_attempt "$label M4")" = "$expected_run_attempt" ] || fail "$label M4 workflow run attempt mismatch"
+    [ "$(require_receipt_value "$m4" qualification_artifact "$label M4")" = "$expected_artifact" ] || fail "$label M4 qualification artifact mismatch"
+    [ "$(require_receipt_value "$m4" evidence_artifact "$label M4")" = "$expected_evidence_artifact" ] || fail "$label M4 evidence artifact mismatch"
+    [ "$(require_receipt_value "$m4" qualification_repository "$label M4")" = "$expected_repository" ] || fail "$label M4 repository mismatch"
+    [ "$(require_receipt_value "$m4" qualification_workflow_ref "$label M4")" = "$expected_workflow_ref" ] || fail "$label M4 workflow ref mismatch"
+    [ "$(require_receipt_value "$m4" qualification_workflow_sha "$label M4")" = "$expected_workflow_sha" ] || fail "$label M4 workflow SHA mismatch"
+    [ "$(require_receipt_value "$m4" qualification_head_sha "$label M4")" = "$expected_head_sha" ] || fail "$label M4 head SHA mismatch"
+    require_sha "$expected_workflow_sha" || fail "$label M4 workflow SHA malformed"
+    require_git_sha "$expected_head_sha" || fail "$label M4 head SHA malformed"
+    case "$expected_artifact_id:$expected_evidence_artifact_id" in *[!0-9:]*) fail "$label M4 artifact ID malformed" ;; esac
+    printf '%s\n%s\n' "$expected_artifact_digest" "$expected_evidence_artifact_digest" | grep -Eqv '^sha256:[0-9a-f]{64}$' && fail "$label M4 artifact digest malformed"
+    source_run_id=$(require_receipt_value "$m4" source_run_id "$label M4")
+    residency_run_id=$(require_receipt_value "$m4" residency_authority_run_id "$label M4")
+    case "$source_run_id:$residency_run_id" in *[!0-9:]*) fail "$label M4 source/residency run ID is malformed" ;; esac
+    require_receipt_value "$m4" source_artifact "$label M4" >/dev/null
+    require_receipt_value "$m4" residency_authority_artifact "$label M4" >/dev/null
+    [ "$(require_receipt_value "$m4" host_architecture "$label M4")" = "$label" ] || fail "$label M4 receipt is not native on its claimed host"
+    duplicate_paths=$(awk -F '\t' 'NF != 2 || $1 !~ /^\.\// || $1 ~ /(^|\/)\.\.($|\/)/ { bad = 1 } { count[$1]++ } END { for (path in count) if (count[path] != 1) bad = 1; print bad + 0 }' "$evidence_dir/evidence-files.sha256")
+    [ "$duplicate_paths" -eq 0 ] || fail "$label M4 evidence manifest has malformed or duplicate paths"
+    while IFS="$(printf '\t')" read -r evidence_path expected_sha; do
+        require_sha "$expected_sha" || fail "$label M4 evidence digest malformed for $evidence_path"
+        retained_file="$evidence_dir/${evidence_path#./}"
+        [ -f "$retained_file" ] && [ ! -L "$retained_file" ] || fail "$label M4 retained evidence missing or symlinked: $evidence_path"
+        require_file_hash "$retained_file" "$expected_sha" "$label M4 evidence $evidence_path"
+    done <"$evidence_dir/evidence-files.sha256"
+    candidate_sha=$(require_receipt_value "$m4" candidate_sha256 "$label M4")
+    [ "$(require_receipt_value "$m4" child_executable_sha256 "$label M4")" = "$(require_receipt_value "$m4" cli_sha256 "$label M4")" ] || fail "$label M4 child executable is not the producer-bound CLI"
+    case "$(require_receipt_value "$m4" child_executable_path "$label M4")" in */tools/"$candidate_sha"/simple_cli) ;; *) fail "$label M4 child executable path is not candidate-content-addressed" ;; esac
+    require_file_hash "$evidence_dir/authority/phase3-admission.env" "$(require_receipt_value "$m4" admission_receipt_sha256 "$label M4")" "$label retained Phase3 admission"
+    require_file_hash "$evidence_dir/authority/phase3-producer-authority.env" "$(require_receipt_value "$m4" phase3_authority_receipt_sha256 "$label M4")" "$label retained Phase3 producer authority"
+    require_file_hash "$evidence_dir/authority/residency-baseline.env" "$(require_receipt_value "$m4" residency_baseline_receipt_sha256 "$label M4")" "$label retained residency baseline authority"
+    require_file_hash "$evidence_dir/authority/kernel-closure.sdn" "$(require_receipt_value "$m4" kernel_policy_manifest_sha256 "$label M4")" "$label retained kernel policy authority"
+    producer_authority="$evidence_dir/authority/phase3-producer-authority.env"
+    [ "$(require_receipt_value "$producer_authority" schema "$label Phase3 authority")" = macos-phase3-producer-authority-v1 ] && [ "$(require_receipt_value "$producer_authority" status "$label Phase3 authority")" = AUTHENTICATED ] || fail "$label Phase3 authority is not authenticated"
+    for binding in source_repository:repository source_workflow_ref:workflow_ref source_workflow_sha:workflow_sha source_head_sha:head_sha source_run_id:run_id source_run_attempt:run_attempt source_artifact:artifact_name source_artifact_id:artifact_id source_artifact_digest:artifact_digest candidate_sha256:candidate_sha256 admission_receipt_sha256:admission_receipt_sha256; do
+        m4_key=${binding%%:*}; authority_key=${binding#*:}
+        [ "$(require_receipt_value "$m4" "$m4_key" "$label M4")" = "$(require_receipt_value "$producer_authority" "$authority_key" "$label Phase3 authority")" ] || fail "$label Phase3 authority mismatch: $m4_key"
+    done
+    [ "$(require_receipt_value "$producer_authority" authority_repository "$label Phase3 authority")" = "$expected_repository" ] || fail "$label Phase3 authority issuer repository mismatch"
+    [ "$(require_receipt_value "$producer_authority" authority_workflow_ref "$label Phase3 authority")" = "$expected_workflow_ref" ] || fail "$label Phase3 authority issuer workflow mismatch"
+    [ "$(require_receipt_value "$producer_authority" authority_workflow_sha "$label Phase3 authority")" = "$expected_workflow_sha" ] || fail "$label Phase3 authority issuer revision mismatch"
+    [ "$(require_receipt_value "$producer_authority" authority_head_sha "$label Phase3 authority")" = "$expected_head_sha" ] || fail "$label Phase3 authority issuer head mismatch"
+    [ "$(require_receipt_value "$producer_authority" authority_run_id "$label Phase3 authority")" = "$expected_run_id" ] || fail "$label Phase3 authority issuer run mismatch"
+    [ "$(require_receipt_value "$producer_authority" authority_run_attempt "$label Phase3 authority")" = "$expected_run_attempt" ] || fail "$label Phase3 authority issuer attempt mismatch"
+    for binding in "./results.tsv:results_sha256" "./tool-builds.env:tool_builds_sha256" "./xcode-version.log:xcode_version_sha256" "./clang-version.log:clang_version_sha256" "./provider-builds.env:provider_builds_sha256" "./baseline.provider-oracle.env:provider_baseline_oracle_sha256" "./provider-same-byte.provider-oracle.env:provider_same_byte_oracle_sha256" "./provider.provider-oracle.env:provider_mutated_oracle_sha256" "./provider-artifacts/baseline.a:provider_baseline_archive_sha256" "./provider-artifacts/baseline-same-bytes.a:provider_same_byte_archive_sha256" "./provider-artifacts/mutated.a:provider_mutated_archive_sha256" "./baseline.provider-members.tsv:provider_baseline_members_sha256" "./provider-same-byte.provider-members.tsv:provider_same_byte_members_sha256" "./provider.provider-members.tsv:provider_mutated_members_sha256" "./baseline.provider-member-payloads.tsv:provider_baseline_payloads_sha256" "./provider-same-byte.provider-member-payloads.tsv:provider_same_byte_payloads_sha256" "./provider.provider-member-payloads.tsv:provider_mutated_payloads_sha256" "./tools/$candidate_sha/simple_cli:cli_sha256" "./tools/$candidate_sha/simple_test_runner:test_runner_sha256" "./tools/$candidate_sha/simple_mcp_server:mcp_sha256" "./tools/$candidate_sha/simple_lsp_mcp_server:lsp_mcp_sha256" "./long-lived-residency/receipt.env:long_lived_residency_sha256"; do
+        evidence_path=${binding%%:*}; receipt_key=${binding#*:}
+        expected_sha=$(require_receipt_value "$m4" "$receipt_key" "$label M4")
+        require_sha "$expected_sha" || fail "$label M4 $receipt_key malformed"
+        awk -F '\t' -v path="$evidence_path" -v digest="$expected_sha" '$1 == path && $2 == digest { found = 1 } END { exit(found ? 0 : 1) }' "$evidence_dir/evidence-files.sha256" || fail "$label M4 $receipt_key is not bound by retained evidence"
+    done
+    grep -Eq '^Xcode [0-9]' "$evidence_dir/xcode-version.log" || fail "$label retained Xcode identity is malformed"
+    grep -Eq '(^| )([Aa]pple )?[Cc]lang version [0-9]' "$evidence_dir/clang-version.log" || fail "$label retained clang identity is malformed"
+    require_m4_residency "$label" "$m4" "$evidence_dir"
+    require_m4_provider_oracle "$label" "$m4" "$evidence_dir"
+}
+admit_thin() {
+    label=$1 expected_arch=$2 expected_target=$3 binary=$4 admission=$5 m4=$6 evidence_dir=$7 expected_run_id=$8 expected_run_attempt=$9
+    shift 9
+    expected_artifact=$1 expected_evidence_artifact=$2
+    [ -f "$binary" ] || fail "$label candidate missing"
+    [ -f "$admission" ] || fail "$label admission receipt missing"
+    [ -f "$m4" ] || fail "$label M4 receipt missing"
+    [ "$(require_receipt_value "$admission" schema "$label admission")" = macos-phase3-admission-v1 ] || fail "$label admission schema unsupported"
+    [ "$(require_receipt_value "$admission" status "$label admission")" = PASS ] || fail "$label admission is not PASS"
+    [ "$(require_receipt_value "$admission" phase "$label admission")" = 3 ] || fail "$label is not Phase3"
+    [ "$(require_receipt_value "$admission" architecture "$label admission")" = "$expected_arch" ] || fail "$label admission architecture mismatch"
+    [ "$(require_receipt_value "$admission" target_triple "$label admission")" = "$expected_target" ] || fail "$label target mismatch"
+    validate_canonical_policy_receipt "$label admission" "$admission"
+    binary_sha=$(require_receipt_value "$admission" candidate_sha256 "$label admission")
+    require_sha "$binary_sha" || fail "$label candidate digest malformed"
+    require_file_hash "$binary" "$binary_sha" "$label candidate"
+    admission_sha=$(sha256_file "$admission")
+    [ "$(require_receipt_value "$m4" status "$label M4")" = PASS ] || fail "$label M4 status is not PASS"
+    [ "$(require_receipt_value "$m4" schema "$label M4")" = macos-m4-qualification-v1 ] || fail "$label M4 schema unsupported"
+    [ "$(require_receipt_value "$m4" architecture "$label M4")" = "$expected_arch" ] || fail "$label M4 architecture mismatch"
+    [ "$(require_receipt_value "$m4" target_triple "$label M4")" = "$expected_target" ] || fail "$label M4 target mismatch"
+    validate_canonical_policy_receipt "$label M4" "$m4"
+    [ "$(require_receipt_value "$m4" candidate_sha256 "$label M4")" = "$binary_sha" ] || fail "$label M4 receipt is stale for candidate"
+    [ "$(require_receipt_value "$m4" admission_receipt_sha256 "$label M4")" = "$admission_sha" ] || fail "$label M4 receipt is stale for admission"
+    require_m4_evidence "$label" "$m4" "$evidence_dir" "$expected_run_id" "$expected_run_attempt" "$expected_artifact" "$expected_evidence_artifact"
+    for key in source_revision simple_version compiler_schema kernel_plugin_abi runtime_bundle_identity provider_identity deployment_policy target_identity_digest deployment_target sdk_identity kernel_policy_manifest_sha256 kernel_k1_policy plugin_manifest_policy coverage_cutover_policy coverage_implementation performance_threshold_mode performance_threshold_status performance_baseline_scope performance_steady_rss_percent performance_growth_percent performance_warm_request_count; do
+        admission_value=$(require_receipt_value "$admission" "$key" "$label admission")
+        m4_value=$(require_receipt_value "$m4" "$key" "$label M4")
+        [ "$admission_value" = "$m4_value" ] || fail "$label M4 $key mismatch"
+    done
+    archs=$($lipo_tool -archs "$binary" 2>/dev/null) || fail "$label slice inspection failed"
+    [ "$archs" = "$expected_arch" ] || fail "$label must contain exactly $expected_arch, found $archs"
+    $file_tool "$binary" | grep -q 'Mach-O' || fail "$label is not Mach-O"
+}
+common_identity() {
+    key=$1
+    arm_value=$(require_receipt_value "$arm64_admission" "$key" "arm64 admission")
+    x86_value=$(require_receipt_value "$x86_admission" "$key" "x86_64 admission")
+    [ "$arm_value" = "$x86_value" ] || fail "thin candidates disagree on $key"
+    printf '%s\n' "$arm_value"
+}
+compose() {
+    [ -n "$output_root" ] || fail "--output-root is required"
+    [ -n "$expected_source_revision" ] || fail "--expected-source-revision is required"
+    [ "$arm64_m4_run_id" != "$x86_m4_run_id" ] || fail "arm64 and x86_64 must come from distinct M4 workflow runs"
+    admit_thin arm64 arm64 aarch64-apple-darwin "$arm64_candidate" "$arm64_admission" "$arm64_m4" "$arm64_m4_evidence_dir" "$arm64_m4_run_id" "$arm64_m4_run_attempt" "$arm64_m4_artifact" "$arm64_m4_evidence_artifact"
+    admit_thin x86_64 x86_64 x86_64-apple-darwin "$x86_candidate" "$x86_admission" "$x86_m4" "$x86_m4_evidence_dir" "$x86_m4_run_id" "$x86_m4_run_attempt" "$x86_m4_artifact" "$x86_m4_evidence_artifact"
+    source_revision=$(common_identity source_revision)
+    printf '%s\n' "$expected_source_revision" | grep -Eq '^[0-9a-f]{40}$' || fail "--expected-source-revision must be an exact commit SHA"
+    [ "$source_revision" = "$expected_source_revision" ] || fail "M4 source revision does not match checked-out M5 source revision"
+    simple_version=$(common_identity simple_version)
+    compiler_schema=$(common_identity compiler_schema)
+    kernel_plugin_abi=$(common_identity kernel_plugin_abi)
+    runtime_bundle_identity=$(common_identity runtime_bundle_identity)
+    deployment_policy=$(common_identity deployment_policy)
+    [ "$deployment_policy" = macos-13 ] || fail "thin candidates do not select canonical macos-13 deployment policy"
+    mkdir -p "$output_root/.staging"
+    staging="$output_root/.staging/universal-$$"
+    trap 'rm -f "$staging"' EXIT HUP INT TERM
+    $lipo_tool -create "$arm64_candidate" "$x86_candidate" -output "$staging" || fail "lipo composition failed"
+    universal_archs=$($lipo_tool -archs "$staging" 2>/dev/null) || fail "universal slice inspection failed"
+    [ "$universal_archs" = "arm64 x86_64" ] || [ "$universal_archs" = "x86_64 arm64" ] || fail "universal must contain exactly arm64+x86_64"
+    $file_tool "$staging" | grep -q 'Mach-O universal binary' || fail "composed candidate is not universal Mach-O"
+    universal_sha=$(sha256_file "$staging")
+    final_dir="$output_root/universal/$universal_sha"
+    [ ! -e "$final_dir" ] || fail "immutable universal candidate already exists"
+    mkdir -p "$final_dir"
+    mv "$staging" "$final_dir/simple"
+    chmod +x "$final_dir/simple"
+    arm_sha=$(sha256_file "$arm64_candidate")
+    x86_sha=$(sha256_file "$x86_candidate")
+    [ "$arm_sha" != "$x86_sha" ] || fail "thin candidates are not distinct immutable slices"
+    cat >"$final_dir/package.env" <<EOF
+status=PACKAGED
+schema=macos-m5-package-v1
+evidence_class=$evidence_class
+candidate_sha256=$universal_sha
+arm64_sha256=$arm_sha
+x86_64_sha256=$x86_sha
+arm64_admission_receipt_sha256=$(sha256_file "$arm64_admission")
+x86_64_admission_receipt_sha256=$(sha256_file "$x86_admission")
+arm64_m4_receipt_sha256=$(sha256_file "$arm64_m4")
+x86_64_m4_receipt_sha256=$(sha256_file "$x86_m4")
+arm64_m4_evidence_manifest_sha256=$(sha256_file "$arm64_m4_evidence_dir/evidence-files.sha256")
+x86_64_m4_evidence_manifest_sha256=$(sha256_file "$x86_m4_evidence_dir/evidence-files.sha256")
+arm64_m4_evidence_tree_sha256=$(sha256_tree "$arm64_m4_evidence_dir")
+x86_64_m4_evidence_tree_sha256=$(sha256_tree "$x86_m4_evidence_dir")
+arm64_target_identity_digest=$(require_receipt_value "$arm64_m4" target_identity_digest "arm64 M4")
+x86_64_target_identity_digest=$(require_receipt_value "$x86_m4" target_identity_digest "x86_64 M4")
+arm64_sdk_identity=$(require_receipt_value "$arm64_m4" sdk_identity "arm64 M4")
+x86_64_sdk_identity=$(require_receipt_value "$x86_m4" sdk_identity "x86_64 M4")
+arm64_deployment_target=$(require_receipt_value "$arm64_m4" deployment_target "arm64 M4")
+x86_64_deployment_target=$(require_receipt_value "$x86_m4" deployment_target "x86_64 M4")
+arm64_xcode_version_sha256=$(require_receipt_value "$arm64_m4" xcode_version_sha256 "arm64 M4")
+x86_64_xcode_version_sha256=$(require_receipt_value "$x86_m4" xcode_version_sha256 "x86_64 M4")
+arm64_clang_version_sha256=$(require_receipt_value "$arm64_m4" clang_version_sha256 "arm64 M4")
+x86_64_clang_version_sha256=$(require_receipt_value "$x86_m4" clang_version_sha256 "x86_64 M4")
+arm64_m4_run_id=$arm64_m4_run_id
+x86_64_m4_run_id=$x86_m4_run_id
+arm64_m4_run_attempt=$arm64_m4_run_attempt
+x86_64_m4_run_attempt=$x86_m4_run_attempt
+arm64_m4_artifact=$arm64_m4_artifact
+x86_64_m4_artifact=$x86_m4_artifact
+arm64_m4_evidence_artifact=$arm64_m4_evidence_artifact
+x86_64_m4_evidence_artifact=$x86_m4_evidence_artifact
+arm64_m4_repository=$arm64_m4_repository
+x86_64_m4_repository=$x86_m4_repository
+arm64_m4_workflow_ref=$arm64_m4_workflow_ref
+x86_64_m4_workflow_ref=$x86_m4_workflow_ref
+arm64_m4_workflow_sha=$arm64_m4_workflow_sha
+x86_64_m4_workflow_sha=$x86_m4_workflow_sha
+arm64_m4_head_sha=$arm64_m4_head_sha
+x86_64_m4_head_sha=$x86_m4_head_sha
+arm64_m4_artifact_id=$arm64_m4_artifact_id
+x86_64_m4_artifact_id=$x86_m4_artifact_id
+arm64_m4_artifact_digest=$arm64_m4_artifact_digest
+x86_64_m4_artifact_digest=$x86_m4_artifact_digest
+arm64_m4_evidence_artifact_id=$arm64_m4_evidence_artifact_id
+x86_64_m4_evidence_artifact_id=$x86_m4_evidence_artifact_id
+arm64_m4_evidence_artifact_digest=$arm64_m4_evidence_artifact_digest
+x86_64_m4_evidence_artifact_digest=$x86_m4_evidence_artifact_digest
+source_revision=$source_revision
+simple_version=$simple_version
+compiler_schema=$compiler_schema
+kernel_plugin_abi=$kernel_plugin_abi
+kernel_policy_manifest_sha256=$(sha256_file "$kernel_policy_manifest")
+kernel_k1_policy=$(policy_value k1_policy)
+plugin_manifest_policy=$(policy_value plugin_manifest_policy)
+coverage_cutover_policy=$(policy_value coverage_cutover_policy)
+coverage_implementation=$(policy_value coverage_implementation)
+performance_threshold_mode=$(policy_value performance_threshold_mode)
+performance_threshold_status=$(policy_value performance_threshold_status)
+performance_baseline_scope=$(policy_value performance_baseline_scope)
+performance_steady_rss_percent=$(policy_value performance_steady_rss_percent)
+performance_growth_percent=$(policy_value performance_growth_percent)
+performance_warm_request_count=$(policy_value performance_warm_request_count)
+runtime_bundle_identity=$runtime_bundle_identity
+arm64_provider_identity=$(require_receipt_value "$arm64_admission" provider_identity "arm64 admission")
+x86_64_provider_identity=$(require_receipt_value "$x86_admission" provider_identity "x86_64 admission")
+deployment_policy=$deployment_policy
+slices=arm64,x86_64
+composition=lipo-only-no-rebuild
+signing_authorized=false
+notarization_authorized=false
+EOF
+    arm_manifest_sha=$(sha256_file "$arm64_m4_evidence_dir/evidence-files.sha256")
+    x86_manifest_sha=$(sha256_file "$x86_m4_evidence_dir/evidence-files.sha256")
+    mkdir -p "$final_dir/evidence/m4/arm64/$arm_manifest_sha" "$final_dir/evidence/m4/x86_64/$x86_manifest_sha"
+    cp -R "$arm64_m4_evidence_dir/." "$final_dir/evidence/m4/arm64/$arm_manifest_sha/"
+    cp -R "$x86_m4_evidence_dir/." "$final_dir/evidence/m4/x86_64/$x86_manifest_sha/"
+    find "$final_dir/evidence" -type f -exec chmod 400 {} +
+    find "$final_dir/evidence" -type d -exec chmod 500 {} +
+    chmod 400 "$final_dir/package.env"
+    chmod 500 "$final_dir/simple" "$final_dir/evidence" "$final_dir/evidence/m4" "$final_dir/evidence/m4/arm64" "$final_dir/evidence/m4/x86_64" "$final_dir/evidence/m4/arm64/$arm_manifest_sha" "$final_dir/evidence/m4/x86_64/$x86_manifest_sha" "$final_dir"
+    echo "M5 PACKAGED: $final_dir"
+}
+verify_package() {
+    [ -d "$candidate_dir" ] || fail "candidate directory missing"
+    package="$candidate_dir/package.env"
+    binary="$candidate_dir/simple"
+    [ -f "$package" ] && [ -x "$binary" ] || fail "candidate package incomplete"
+    [ "$(require_receipt_value "$package" schema package)" = macos-m5-package-v1 ] || fail "candidate package schema unsupported"
+    [ "$(require_receipt_value "$package" status package)" = PACKAGED ] || fail "candidate is not packaged"
+    [ "$(require_receipt_value "$package" evidence_class package)" = "$evidence_class" ] || fail "candidate package evidence class does not match this execution mode"
+    candidate_sha=$(require_receipt_value "$package" candidate_sha256 package)
+    require_sha "$candidate_sha" || fail "package candidate digest malformed"
+    require_file_hash "$binary" "$candidate_sha" "universal candidate"
+    [ "$(basename "$candidate_dir")" = "$candidate_sha" ] || fail "candidate directory is not content addressed"
+    [ "$(require_receipt_value "$package" slices package)" = arm64,x86_64 ] || fail "package slice declaration invalid"
+    [ "$(require_receipt_value "$package" composition package)" = lipo-only-no-rebuild ] || fail "package admits a rebuild"
+    for label in arm64 x86_64; do
+        manifest_sha=$(require_receipt_value "$package" "${label}_m4_evidence_manifest_sha256" package)
+        retained_root="$candidate_dir/evidence/m4/$label/$manifest_sha"
+        [ -d "$retained_root" ] && [ ! -L "$retained_root" ] || fail "packaged full M4 evidence tree missing: $label"
+        require_file_hash "$retained_root/evidence-files.sha256" "$manifest_sha" "packaged $label M4 evidence manifest"
+        [ "$(sha256_tree "$retained_root")" = "$(require_receipt_value "$package" "${label}_m4_evidence_tree_sha256" package)" ] || fail "packaged $label M4 evidence tree changed"
+        require_file_hash "$retained_root/authority/phase3-admission.env" "$(require_receipt_value "$package" "${label}_admission_receipt_sha256" package)" "packaged $label admission"
+        require_file_hash "$retained_root/status.env" "$(require_receipt_value "$package" "${label}_m4_receipt_sha256" package)" "packaged $label M4 receipt"
+    done
+    validate_canonical_policy_receipt package "$package"
+    for label in arm64 x86_64; do
+        manifest_sha=$(require_receipt_value "$package" "${label}_m4_evidence_manifest_sha256" package)
+        admission="$candidate_dir/evidence/m4/$label/$manifest_sha/authority/phase3-admission.env"
+        m4="$candidate_dir/evidence/m4/$label/$manifest_sha/status.env"
+        for key in target_identity_digest sdk_identity deployment_target; do
+            [ "$(require_receipt_value "$package" "${label}_${key}" package)" = "$(require_receipt_value "$admission" "$key" "$label admission")" ] || fail "packaged $label $key differs from admission"
+            [ "$(require_receipt_value "$package" "${label}_${key}" package)" = "$(require_receipt_value "$m4" "$key" "$label M4")" ] || fail "packaged $label $key differs from M4"
+        done
+        for key in xcode_version_sha256 clang_version_sha256; do
+            [ "$(require_receipt_value "$package" "${label}_${key}" package)" = "$(require_receipt_value "$m4" "$key" "$label M4")" ] || fail "packaged $label $key differs from M4"
+        done
+        for key in repository workflow_ref workflow_sha head_sha; do
+            [ "$(require_receipt_value "$package" "${label}_m4_${key}" package)" = "$(require_receipt_value "$m4" "qualification_${key}" "$label M4")" ] || fail "packaged $label M4 $key binding drifted"
+        done
+        for key in artifact_id evidence_artifact_id; do case "$(require_receipt_value "$package" "${label}_m4_${key}" package)" in *[!0-9]*|'') fail "packaged $label M4 $key malformed" ;; esac; done
+        for key in artifact_digest evidence_artifact_digest; do printf '%s\n' "$(require_receipt_value "$package" "${label}_m4_${key}" package)" | grep -Eq '^sha256:[0-9a-f]{64}$' || fail "packaged $label M4 $key malformed"; done
+    done
+    [ "$(require_receipt_value "$package" arm64_m4_run_id package)" != "$(require_receipt_value "$package" x86_64_m4_run_id package)" ] || fail "packaged M4 workflow runs are not distinct"
+    for key in arm64_m4_run_attempt x86_64_m4_run_attempt; do
+        case "$(require_receipt_value "$package" "$key" package)" in *[!0-9]*|'') fail "packaged $key is malformed" ;; esac
+    done
+    for key in arm64_m4_artifact x86_64_m4_artifact arm64_m4_evidence_artifact x86_64_m4_evidence_artifact; do
+        require_receipt_value "$package" "$key" package >/dev/null
+    done
+    archs=$($lipo_tool -archs "$binary" 2>/dev/null) || fail "universal slice inspection failed"
+    [ "$archs" = "arm64 x86_64" ] || [ "$archs" = "x86_64 arm64" ] || fail "universal has wrong or missing slice"
+}
+verify_native() {
+    [ "$portable_selftest" -eq 0 ] || fail "portable structural evidence cannot be used as native execution proof"
+    [ "$architecture" = arm64 ] || [ "$architecture" = x86_64 ] || fail "--arch must be arm64 or x86_64"
+    [ -n "$out_receipt" ] || fail "--out-receipt is required"
+    verify_package
+    [ "$(uname -s)" = Darwin ] || blocked "native macOS host unavailable ($(uname -s))"
+    host_arch=$(uname -m)
+    [ "$host_arch" = "$architecture" ] || blocked "native $architecture host unavailable (running $host_arch)"
+    evidence_dir=$(dirname "$out_receipt")
+    mkdir -p "$evidence_dir"
+    candidate_binary=$(CDPATH= cd -- "$candidate_dir" && pwd -P)/simple
+    "$candidate_binary" --version >"$evidence_dir/$architecture-version.log" 2>&1 || fail "universal candidate did not start natively"
+    SIMPLE_BINARY="$candidate_binary" "$candidate_binary" test test/03_system/app/compiler/feature/macos_universal_m5_spec.spl --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran >"$evidence_dir/$architecture-test.log" 2>&1 || fail "universal native system test failed"
+    results=$(sed -n 's/.*Results: \([0-9][0-9]*\) total, \([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed.*/\1 \2 \3/p' "$evidence_dir/$architecture-test.log" | tail -n 1)
+    set -- $results
+    [ "$#" -eq 3 ] && [ "$1" -gt 0 ] && [ "$1" -eq "$2" ] && [ "$3" -eq 0 ] || fail "native test emitted no passing non-zero Results line"
+    package_sha=$(sha256_file "$candidate_dir/package.env")
+    cat >"$out_receipt" <<EOF
+schema=macos-m5-native-verification-v1
+status=PASS
+evidence_class=NATIVE_EXECUTION
+architecture=$architecture
+host_architecture=$host_arch
+candidate_sha256=$(sha256_file "$candidate_dir/simple")
+child_executable_path=$candidate_binary
+child_executable_sha256=$(sha256_file "$candidate_binary")
+package_receipt_sha256=$package_sha
+native_execution=true
+version_log_sha256=$(sha256_file "$evidence_dir/$architecture-version.log")
+test_log_sha256=$(sha256_file "$evidence_dir/$architecture-test.log")
+results_total=$1
+results_passed=$2
+results_failed=$3
+EOF
+    echo "M5 NATIVE PASS [$architecture]"
+}
+finalize() {
+    [ -n "$out_receipt" ] || fail "--out-receipt is required"
+    verify_package
+    package_sha=$(sha256_file "$candidate_dir/package.env")
+    for pair in arm64:$arm64_verification x86_64:$x86_verification; do
+        expected_arch=${pair%%:*}; receipt=${pair#*:}
+        [ -f "$receipt" ] || fail "$expected_arch native verification receipt missing"
+        if [ "$portable_selftest" -eq 1 ]; then
+            [ "$(require_receipt_value "$receipt" schema "$expected_arch verification")" = macos-m5-portable-verification-v1 ] || fail "$expected_arch portable verification schema mismatch"
+            [ "$(require_receipt_value "$receipt" evidence_class "$expected_arch verification")" = PORTABLE_STRUCTURAL ] || fail "$expected_arch portable verification class mismatch"
+            [ "$(require_receipt_value "$receipt" native_execution "$expected_arch verification")" = false ] || fail "$expected_arch portable receipt falsely claims native execution"
+        else
+            [ "$(require_receipt_value "$receipt" schema "$expected_arch verification")" = macos-m5-native-verification-v1 ] || fail "$expected_arch native verification schema mismatch"
+            [ "$(require_receipt_value "$receipt" evidence_class "$expected_arch verification")" = NATIVE_EXECUTION ] || fail "$expected_arch native verification class mismatch"
+            [ "$(require_receipt_value "$receipt" native_execution "$expected_arch verification")" = true ] || fail "$expected_arch verification was not native"
+        fi
+        [ "$(require_receipt_value "$receipt" status "$expected_arch verification")" = PASS ] || fail "$expected_arch native verification is not PASS"
+        [ "$(require_receipt_value "$receipt" architecture "$expected_arch verification")" = "$expected_arch" ] || fail "$expected_arch native verification architecture mismatch"
+        [ "$(require_receipt_value "$receipt" candidate_sha256 "$expected_arch verification")" = "$(sha256_file "$candidate_dir/simple")" ] || fail "$expected_arch native verification is stale"
+        candidate_binary=$(CDPATH= cd -- "$candidate_dir" && pwd -P)/simple
+        [ "$(require_receipt_value "$receipt" child_executable_path "$expected_arch verification")" = "$candidate_binary" ] || fail "$expected_arch child executable path mismatch"
+        [ "$(require_receipt_value "$receipt" child_executable_sha256 "$expected_arch verification")" = "$(sha256_file "$candidate_binary")" ] || fail "$expected_arch child executable digest mismatch"
+        [ "$(require_receipt_value "$receipt" package_receipt_sha256 "$expected_arch verification")" = "$package_sha" ] || fail "$expected_arch package verification is stale"
+        [ "$(require_receipt_value "$receipt" host_architecture "$expected_arch verification")" = "$expected_arch" ] || fail "$expected_arch verification host mismatch"
+        receipt_dir=$(dirname "$receipt")
+        version_log="$receipt_dir/$expected_arch-version.log"
+        test_log="$receipt_dir/$expected_arch-test.log"
+        [ -f "$version_log" ] && [ ! -L "$version_log" ] || fail "$expected_arch native version log missing or symlinked"
+        [ -f "$test_log" ] && [ ! -L "$test_log" ] || fail "$expected_arch native test log missing or symlinked"
+        require_file_hash "$version_log" "$(require_receipt_value "$receipt" version_log_sha256 "$expected_arch verification")" "$expected_arch native version log"
+        require_file_hash "$test_log" "$(require_receipt_value "$receipt" test_log_sha256 "$expected_arch verification")" "$expected_arch native test log"
+        total=$(require_receipt_value "$receipt" results_total "$expected_arch verification")
+        passed=$(require_receipt_value "$receipt" results_passed "$expected_arch verification")
+        failed=$(require_receipt_value "$receipt" results_failed "$expected_arch verification")
+        case "$total:$passed:$failed" in *[!0-9:]*|::*|:*) fail "$expected_arch verification Results malformed" ;; esac
+        [ "$total" -gt 0 ] && [ "$total" -eq "$passed" ] && [ "$failed" -eq 0 ] || fail "$expected_arch verification Results are not a non-zero PASS"
+    done
+    [ "$(sha256_file "$arm64_verification")" != "$(sha256_file "$x86_verification")" ] || fail "arm64 and x86_64 native verification receipts are not distinct"
+    if [ "$portable_selftest" -eq 1 ]; then
+        finalized_status=PORTABLE_STRUCTURAL_VERIFIED
+        signing_authorized=false
+        notarization_authorized=false
+    else
+        finalized_status=VERIFIED
+        signing_authorized=true
+        notarization_authorized=true
+    fi
+    cat >"$out_receipt" <<EOF
+schema=macos-m5-verification-v1
+status=$finalized_status
+evidence_class=$evidence_class
+candidate_sha256=$(sha256_file "$candidate_dir/simple")
+package_receipt_sha256=$package_sha
+arm64_verification_sha256=$(sha256_file "$arm64_verification")
+x86_64_verification_sha256=$(sha256_file "$x86_verification")
+signing_authorized=$signing_authorized
+notarization_authorized=$notarization_authorized
+rebuild_authorized=false
+EOF
+    if [ "$portable_selftest" -eq 1 ]; then
+        echo "M5 PORTABLE STRUCTURAL VERIFIED: not native release authority"
+    else
+        echo "M5 VERIFIED: signing and notarization may begin"
+    fi
+}
+require_release_verification() {
+    [ -f "$verification_receipt" ] || fail "verification receipt missing"
+    [ "$(require_receipt_value "$verification_receipt" schema verification)" = macos-m5-verification-v1 ] || fail "verification schema unsupported"
+    if [ "$portable_selftest" -eq 1 ]; then
+        [ "$(require_receipt_value "$verification_receipt" status verification)" = PORTABLE_STRUCTURAL_VERIFIED ] || fail "candidate is not portable-structurally verified"
+        [ "$(require_receipt_value "$verification_receipt" evidence_class verification)" = PORTABLE_STRUCTURAL ] || fail "portable verification class mismatch"
+    else
+        [ "$(require_receipt_value "$verification_receipt" status verification)" = VERIFIED ] || fail "candidate is not verified"
+        [ "$(require_receipt_value "$verification_receipt" evidence_class verification)" = NATIVE_M4_RETAINED ] || fail "verification does not bind retained native M4 evidence"
+        [ "$(require_receipt_value "$verification_receipt" signing_authorized verification)" = true ] || fail "signing is not authorized"
+        [ "$(require_receipt_value "$verification_receipt" notarization_authorized verification)" = true ] || fail "notarization is not authorized"
+    fi
+    [ "$(require_receipt_value "$verification_receipt" candidate_sha256 verification)" = "$(sha256_file "$candidate_dir/simple")" ] || fail "verification receipt is stale"
+    [ "$(require_receipt_value "$verification_receipt" package_receipt_sha256 verification)" = "$(sha256_file "$candidate_dir/package.env")" ] || fail "package mutated after verification"
+    [ "$(require_receipt_value "$verification_receipt" rebuild_authorized verification)" = false ] || fail "verification permits rebuild"
+    [ -f "$arm64_verification" ] && [ -f "$x86_verification" ] || fail "native verification evidence missing"
+    [ "$(sha256_file "$arm64_verification")" = "$(require_receipt_value "$verification_receipt" arm64_verification_sha256 verification)" ] || fail "arm64 native verification evidence is stale"
+    [ "$(sha256_file "$x86_verification")" = "$(require_receipt_value "$verification_receipt" x86_64_verification_sha256 verification)" ] || fail "x86_64 native verification evidence is stale"
+}
+sign_notarize() {
+    [ -n "$output_root" ] || fail "--output-root is required"
+    verify_package
+    require_release_verification
+    if [ "$portable_selftest" -eq 0 ]; then
+        [ "$(uname -s)" = Darwin ] || blocked "codesign/notarization requires macOS"
+    fi
+    [ -x "$codesign_tool" ] || blocked "codesign unavailable"
+    [ -x "$xcrun_tool" ] || blocked "xcrun unavailable"
+    [ -x "$ditto_tool" ] || blocked "ditto unavailable"
+    [ -x "$spctl_tool" ] || blocked "spctl unavailable"
+    [ -n "$signing_identity" ] || blocked "codesign identity unavailable"
+    [ -n "$notary_profile" ] || blocked "notarytool credential profile unavailable"
+    mkdir -p "$output_root/.staging"
+    staging_dir="$output_root/.staging/signed-$$"
+    trap 'rm -rf "$staging_dir"' EXIT HUP INT TERM
+    app="$staging_dir/SimpleCompiler.app"
+    mkdir -p "$app/Contents/MacOS"
+    cp "$candidate_dir/simple" "$app/Contents/MacOS/simple"
+    chmod u+wx "$app/Contents/MacOS/simple"
+    cat >"$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>simple</string>
+<key>CFBundleIdentifier</key><string>org.simple-lang.compiler</string>
+<key>CFBundleName</key><string>Simple Compiler</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+</dict></plist>
+EOF
+    : >"$staging_dir/signing-order.log"
+    "$codesign_tool" --force --options runtime --timestamp --sign "$signing_identity" "$app" >"$staging_dir/codesign.log" 2>&1 || fail "codesign failed"
+    echo '01 codesign hardened-runtime timestamp' >>"$staging_dir/signing-order.log"
+    "$codesign_tool" --verify --strict --verbose=2 "$app" >"$staging_dir/codesign-verify-pre-notary.log" 2>&1 || fail "signed candidate verification failed"
+    echo '02 codesign verify pre-notary' >>"$staging_dir/signing-order.log"
+    "$ditto_tool" -c -k --keepParent "$app" "$staging_dir/notary-submission.zip" || fail "notary archive creation failed"
+    echo '03 create notary submission archive' >>"$staging_dir/signing-order.log"
+    "$xcrun_tool" notarytool submit "$staging_dir/notary-submission.zip" --keychain-profile "$notary_profile" --wait >"$staging_dir/notarytool.log" 2>&1 || fail "notarization submission failed"
+    grep -Eiq 'status:[[:space:]]*accepted|status[=":[:space:]]+accepted|Accepted' "$staging_dir/notarytool.log" || fail "notarization was not accepted"
+    echo '04 notarytool submit accepted' >>"$staging_dir/signing-order.log"
+    "$xcrun_tool" stapler staple "$app" >"$staging_dir/stapler.log" 2>&1 || fail "ticket stapling failed"
+    echo '05 stapler staple' >>"$staging_dir/signing-order.log"
+    "$codesign_tool" --verify --strict --verbose=2 "$app" >"$staging_dir/codesign-verify.log" 2>&1 || fail "post-staple signature verification failed"
+    echo '06 codesign verify post-staple' >>"$staging_dir/signing-order.log"
+    "$xcrun_tool" stapler validate "$app" >"$staging_dir/stapler-validate.log" 2>&1 || fail "stapled ticket validation failed"
+    echo '07 stapler validate' >>"$staging_dir/signing-order.log"
+    "$spctl_tool" --assess --type execute --verbose=4 "$app" >"$staging_dir/spctl-assess.log" 2>&1 || fail "Gatekeeper execution assessment failed"
+    echo '08 spctl assess execute' >>"$staging_dir/signing-order.log"
+    signed_archs=$($lipo_tool -archs "$app/Contents/MacOS/simple" 2>/dev/null) || fail "signed universal slice inspection failed"
+    [ "$signed_archs" = "arm64 x86_64" ] || [ "$signed_archs" = "x86_64 arm64" ] || fail "signed universal has wrong or missing slice"
+    signed_app_contents_sha=$(sha256_tree "$app")
+    "$ditto_tool" -c -k --keepParent "$app" "$staging_dir/SimpleCompiler-notarized.zip" || fail "post-staple archive creation failed"
+    signed_sha=$(sha256_file "$staging_dir/SimpleCompiler-notarized.zip")
+    signed_executable_sha=$(sha256_file "$app/Contents/MacOS/simple")
+    unsigned_sha=$(sha256_file "$candidate_dir/simple")
+    [ "$signed_executable_sha" != "$unsigned_sha" ] || fail "codesign/stapling did not produce a distinct signed executable identity"
+    final_dir="$output_root/signed/$signed_sha"
+    [ ! -e "$final_dir" ] || fail "immutable signed candidate already exists"
+    mkdir -p "$final_dir"
+    mv "$app" "$final_dir/SimpleCompiler.app"
+    mv "$staging_dir/SimpleCompiler-notarized.zip" "$final_dir/"
+    mv "$staging_dir/codesign.log" "$staging_dir/codesign-verify-pre-notary.log" "$staging_dir/codesign-verify.log" "$staging_dir/notarytool.log" "$staging_dir/stapler.log" "$staging_dir/stapler-validate.log" "$staging_dir/spctl-assess.log" "$staging_dir/signing-order.log" "$final_dir/"
+    cp "$candidate_dir/package.env" "$final_dir/unsigned-package.env"
+    cp "$verification_receipt" "$final_dir/unsigned-verification.env"
+    cp "$arm64_verification" "$final_dir/arm64-native-verification.env"
+    cp "$x86_verification" "$final_dir/x86_64-native-verification.env"
+    cp "$(dirname "$arm64_verification")/arm64-version.log" "$final_dir/arm64-version.log"
+    cp "$(dirname "$arm64_verification")/arm64-test.log" "$final_dir/arm64-test.log"
+    cp "$(dirname "$x86_verification")/x86_64-version.log" "$final_dir/x86_64-version.log"
+    cp "$(dirname "$x86_verification")/x86_64-test.log" "$final_dir/x86_64-test.log"
+    cp -R "$candidate_dir/evidence" "$final_dir/thin-evidence"
+    if [ "$portable_selftest" -eq 1 ]; then signed_status=PORTABLE_STRUCTURAL_SIGNED
+    else signed_status=SIGNED_NOTARIZED; fi
+    cat >"$final_dir/signed.env" <<EOF
+schema=macos-m5-signed-v1
+status=$signed_status
+evidence_class=$evidence_class
+candidate_sha256=$signed_sha
+signed_executable_sha256=$signed_executable_sha
+signed_app_contents_sha256=$signed_app_contents_sha
+unsigned_candidate_sha256=$unsigned_sha
+unsigned_package_receipt_sha256=$(sha256_file "$candidate_dir/package.env")
+unsigned_verification_receipt_sha256=$(sha256_file "$verification_receipt")
+signing_identity=$signing_identity
+codesign_verification_sha256=$(sha256_file "$final_dir/codesign-verify.log")
+notarization_submission_sha256=$(sha256_file "$final_dir/notarytool.log")
+stapled_ticket_verification_sha256=$(sha256_file "$final_dir/stapler-validate.log")
+gatekeeper_assessment_sha256=$(sha256_file "$final_dir/spctl-assess.log")
+signing_order_sha256=$(sha256_file "$final_dir/signing-order.log")
+arm64_native_verification_sha256=$(sha256_file "$final_dir/arm64-native-verification.env")
+x86_64_native_verification_sha256=$(sha256_file "$final_dir/x86_64-native-verification.env")
+composition=post-verification-sign-and-staple-no-rebuild
+EOF
+    chmod 500 "$final_dir/SimpleCompiler.app/Contents/MacOS/simple"
+    chmod 400 "$final_dir/signed.env" "$final_dir"/*.env "$final_dir"/*.log "$final_dir"/*.zip
+    find "$final_dir/thin-evidence" -type f -exec chmod 400 {} +
+    find "$final_dir/thin-evidence" -type d -exec chmod 500 {} +
+    chmod 500 "$final_dir/SimpleCompiler.app" "$final_dir/SimpleCompiler.app/Contents" "$final_dir/SimpleCompiler.app/Contents/MacOS"
+    if [ -n "$out_receipt" ]; then cp "$final_dir/signed.env" "$out_receipt"; fi
+    chmod 500 "$final_dir"
+    if [ "$portable_selftest" -eq 1 ]; then
+        echo "M5 PORTABLE STRUCTURAL SIGNED: not native signing/notary proof ($final_dir)"
+    else
+        echo "M5 SIGNED_NOTARIZED: $final_dir"
+    fi
+}
+verify_signed() {
+    signed_app="$candidate_dir/SimpleCompiler.app"
+    signed_binary="$signed_app/Contents/MacOS/simple"
+    signed_archive="$candidate_dir/SimpleCompiler-notarized.zip"
+    [ -d "$candidate_dir" ] && [ -x "$signed_binary" ] && [ -f "$signed_archive" ] || fail "signed candidate missing"
+    [ -n "$signed_receipt" ] || signed_receipt="$candidate_dir/signed.env"
+    [ -f "$signed_receipt" ] || fail "signed/notarized receipt missing"
+    [ "$(require_receipt_value "$signed_receipt" schema signed)" = macos-m5-signed-v1 ] || fail "signed receipt schema unsupported"
+    if [ "$portable_selftest" -eq 1 ]; then
+        [ "$(require_receipt_value "$signed_receipt" status signed)" = PORTABLE_STRUCTURAL_SIGNED ] || fail "candidate is not portable-structurally signed"
+        [ "$(require_receipt_value "$signed_receipt" evidence_class signed)" = PORTABLE_STRUCTURAL ] || fail "portable signed evidence class mismatch"
+    else
+        [ "$(require_receipt_value "$signed_receipt" status signed)" = SIGNED_NOTARIZED ] || fail "candidate is unsigned or unnotarized"
+        [ "$(require_receipt_value "$signed_receipt" evidence_class signed)" = NATIVE_M4_RETAINED ] || fail "signed candidate does not bind retained native M4 evidence"
+    fi
+    signed_sha=$(require_receipt_value "$signed_receipt" candidate_sha256 signed)
+    require_sha "$signed_sha" || fail "signed candidate digest malformed"
+    require_file_hash "$signed_archive" "$signed_sha" "signed/notarized archive"
+    require_file_hash "$signed_binary" "$(require_receipt_value "$signed_receipt" signed_executable_sha256 signed)" "signed executable"
+    [ "$(sha256_tree "$signed_app")" = "$(require_receipt_value "$signed_receipt" signed_app_contents_sha256 signed)" ] || fail "signed application content identity changed"
+    [ "$(basename "$candidate_dir")" = "$signed_sha" ] || fail "signed candidate directory is not content addressed"
+    [ "$(require_receipt_value "$signed_receipt" composition signed)" = post-verification-sign-and-staple-no-rebuild ] || fail "signed candidate admits rebuilding"
+    signed_archs=$($lipo_tool -archs "$signed_binary" 2>/dev/null) || fail "signed universal slice inspection failed"
+    [ "$signed_archs" = "arm64 x86_64" ] || [ "$signed_archs" = "x86_64 arm64" ] || fail "signed universal has wrong or missing slice"
+    require_file_hash "$candidate_dir/codesign-verify.log" "$(require_receipt_value "$signed_receipt" codesign_verification_sha256 signed)" "signature evidence"
+    require_file_hash "$candidate_dir/notarytool.log" "$(require_receipt_value "$signed_receipt" notarization_submission_sha256 signed)" "notarization evidence"
+    require_file_hash "$candidate_dir/stapler-validate.log" "$(require_receipt_value "$signed_receipt" stapled_ticket_verification_sha256 signed)" "ticket evidence"
+    require_file_hash "$candidate_dir/spctl-assess.log" "$(require_receipt_value "$signed_receipt" gatekeeper_assessment_sha256 signed)" "Gatekeeper evidence"
+    require_file_hash "$candidate_dir/signing-order.log" "$(require_receipt_value "$signed_receipt" signing_order_sha256 signed)" "signing operation order evidence"
+    expected_signing_order=$(cat <<'EOF'
+01 codesign hardened-runtime timestamp
+02 codesign verify pre-notary
+03 create notary submission archive
+04 notarytool submit accepted
+05 stapler staple
+06 codesign verify post-staple
+07 stapler validate
+08 spctl assess execute
+EOF
+)
+    [ "$(cat "$candidate_dir/signing-order.log")" = "$expected_signing_order" ] || fail "signing/notary/staple/Gatekeeper operation order is not exact"
+    grep -Eiq 'status:[[:space:]]*accepted|status[="[:space:]]+accepted|Accepted' "$candidate_dir/notarytool.log" || fail "retained notarization evidence is not accepted"
+    unsigned_package="$candidate_dir/unsigned-package.env"
+    unsigned_verification="$candidate_dir/unsigned-verification.env"
+    [ -f "$unsigned_package" ] && [ ! -L "$unsigned_package" ] || fail "unsigned package receipt missing or symlinked"
+    [ -f "$unsigned_verification" ] && [ ! -L "$unsigned_verification" ] || fail "unsigned verification receipt missing or symlinked"
+    require_file_hash "$unsigned_package" "$(require_receipt_value "$signed_receipt" unsigned_package_receipt_sha256 signed)" "unsigned package handoff"
+    require_file_hash "$unsigned_verification" "$(require_receipt_value "$signed_receipt" unsigned_verification_receipt_sha256 signed)" "unsigned verification handoff"
+    [ "$(require_receipt_value "$unsigned_package" schema package)" = macos-m5-package-v1 ] || fail "unsigned package schema unsupported"
+    [ "$(require_receipt_value "$unsigned_package" status package)" = PACKAGED ] || fail "unsigned package handoff is not packaged"
+    [ "$(require_receipt_value "$unsigned_package" evidence_class package)" = "$(require_receipt_value "$signed_receipt" evidence_class signed)" ] || fail "unsigned package evidence class changed during signing"
+    [ "$(require_receipt_value "$unsigned_package" candidate_sha256 package)" = "$(require_receipt_value "$signed_receipt" unsigned_candidate_sha256 signed)" ] || fail "signed candidate does not bind the exact unsigned universal"
+    [ "$(require_receipt_value "$unsigned_package" slices package)" = arm64,x86_64 ] || fail "unsigned package does not contain exactly two declared slices"
+    [ "$(require_receipt_value "$unsigned_package" composition package)" = lipo-only-no-rebuild ] || fail "unsigned package handoff admits rebuilding"
+    [ "$(require_receipt_value "$unsigned_package" arm64_sha256 package)" != "$(require_receipt_value "$unsigned_package" x86_64_sha256 package)" ] || fail "unsigned package handoff does not bind distinct thin slices"
+    [ "$(require_receipt_value "$unsigned_package" arm64_m4_run_id package)" != "$(require_receipt_value "$unsigned_package" x86_64_m4_run_id package)" ] || fail "signed handoff does not retain distinct M4 workflow runs"
+    [ "$(require_receipt_value "$unsigned_verification" schema verification)" = macos-m5-verification-v1 ] || fail "unsigned verification schema unsupported"
+    [ "$(require_receipt_value "$unsigned_verification" candidate_sha256 verification)" = "$(require_receipt_value "$signed_receipt" unsigned_candidate_sha256 signed)" ] || fail "unsigned verification is stale for signed handoff"
+    [ "$(require_receipt_value "$unsigned_verification" package_receipt_sha256 verification)" = "$(sha256_file "$unsigned_package")" ] || fail "unsigned verification is stale for package handoff"
+    [ "$(require_receipt_value "$unsigned_verification" rebuild_authorized verification)" = false ] || fail "unsigned verification permits rebuilding"
+    if [ "$portable_selftest" -eq 1 ]; then
+        [ "$(require_receipt_value "$unsigned_verification" status verification)" = PORTABLE_STRUCTURAL_VERIFIED ] || fail "portable unsigned verification status mismatch"
+        [ "$(require_receipt_value "$unsigned_verification" evidence_class verification)" = PORTABLE_STRUCTURAL ] || fail "portable unsigned verification class mismatch"
+        [ "$(require_receipt_value "$unsigned_verification" signing_authorized verification)" = false ] || fail "portable evidence authorizes signing"
+        [ "$(require_receipt_value "$unsigned_verification" notarization_authorized verification)" = false ] || fail "portable evidence authorizes notarization"
+    else
+        [ "$(require_receipt_value "$unsigned_verification" status verification)" = VERIFIED ] || fail "native unsigned verification status mismatch"
+        [ "$(require_receipt_value "$unsigned_verification" evidence_class verification)" = NATIVE_M4_RETAINED ] || fail "native unsigned verification class mismatch"
+        [ "$(require_receipt_value "$unsigned_verification" signing_authorized verification)" = true ] || fail "native signing authority missing"
+        [ "$(require_receipt_value "$unsigned_verification" notarization_authorized verification)" = true ] || fail "native notarization authority missing"
+    fi
+    require_file_hash "$candidate_dir/arm64-native-verification.env" "$(require_receipt_value "$signed_receipt" arm64_native_verification_sha256 signed)" "arm64 native evidence"
+    require_file_hash "$candidate_dir/x86_64-native-verification.env" "$(require_receipt_value "$signed_receipt" x86_64_native_verification_sha256 signed)" "x86_64 native evidence"
+    [ "$(require_receipt_value "$unsigned_verification" arm64_verification_sha256 verification)" = "$(sha256_file "$candidate_dir/arm64-native-verification.env")" ] || fail "unsigned verification does not bind retained arm64 evidence"
+    [ "$(require_receipt_value "$unsigned_verification" x86_64_verification_sha256 verification)" = "$(sha256_file "$candidate_dir/x86_64-native-verification.env")" ] || fail "unsigned verification does not bind retained x86_64 evidence"
+    [ "$(sha256_file "$candidate_dir/arm64-native-verification.env")" != "$(sha256_file "$candidate_dir/x86_64-native-verification.env")" ] || fail "retained native verification receipts are not distinct"
+    for retained_arch in arm64 x86_64; do
+        retained_verification="$candidate_dir/$retained_arch-native-verification.env"
+        if [ "$portable_selftest" -eq 1 ]; then
+            [ "$(require_receipt_value "$retained_verification" schema "$retained_arch verification")" = macos-m5-portable-verification-v1 ] || fail "$retained_arch portable verification schema mismatch"
+            [ "$(require_receipt_value "$retained_verification" evidence_class "$retained_arch verification")" = PORTABLE_STRUCTURAL ] || fail "$retained_arch portable verification class mismatch"
+            [ "$(require_receipt_value "$retained_verification" native_execution "$retained_arch verification")" = false ] || fail "$retained_arch portable verification claims native execution"
+        else
+            [ "$(require_receipt_value "$retained_verification" schema "$retained_arch verification")" = macos-m5-native-verification-v1 ] || fail "$retained_arch native verification schema mismatch"
+            [ "$(require_receipt_value "$retained_verification" evidence_class "$retained_arch verification")" = NATIVE_EXECUTION ] || fail "$retained_arch native verification class mismatch"
+            [ "$(require_receipt_value "$retained_verification" native_execution "$retained_arch verification")" = true ] || fail "$retained_arch verification was not native"
+        fi
+        [ "$(require_receipt_value "$retained_verification" status "$retained_arch verification")" = PASS ] || fail "$retained_arch retained verification is not PASS"
+        [ "$(require_receipt_value "$retained_verification" architecture "$retained_arch verification")" = "$retained_arch" ] || fail "$retained_arch retained verification architecture mismatch"
+        [ "$(require_receipt_value "$retained_verification" host_architecture "$retained_arch verification")" = "$retained_arch" ] || fail "$retained_arch retained verification host mismatch"
+        [ "$(require_receipt_value "$retained_verification" candidate_sha256 "$retained_arch verification")" = "$(require_receipt_value "$signed_receipt" unsigned_candidate_sha256 signed)" ] || fail "$retained_arch retained verification is stale for unsigned universal"
+        [ "$(require_receipt_value "$retained_verification" child_executable_sha256 "$retained_arch verification")" = "$(require_receipt_value "$signed_receipt" unsigned_candidate_sha256 signed)" ] || fail "$retained_arch retained child executable was not the universal candidate"
+        require_receipt_value "$retained_verification" child_executable_path "$retained_arch verification" >/dev/null
+        [ "$(require_receipt_value "$retained_verification" package_receipt_sha256 "$retained_arch verification")" = "$(sha256_file "$unsigned_package")" ] || fail "$retained_arch retained verification is stale for package"
+        total=$(require_receipt_value "$retained_verification" results_total "$retained_arch verification")
+        passed=$(require_receipt_value "$retained_verification" results_passed "$retained_arch verification")
+        failed=$(require_receipt_value "$retained_verification" results_failed "$retained_arch verification")
+        case "$total:$passed:$failed" in *[!0-9:]*|::*|:*) fail "$retained_arch retained Results malformed" ;; esac
+        [ "$total" -gt 0 ] && [ "$total" -eq "$passed" ] && [ "$failed" -eq 0 ] || fail "$retained_arch retained Results are not a non-zero PASS"
+        require_file_hash "$candidate_dir/$retained_arch-version.log" "$(require_receipt_value "$retained_verification" version_log_sha256 "$retained_arch verification")" "$retained_arch retained native version log"
+        require_file_hash "$candidate_dir/$retained_arch-test.log" "$(require_receipt_value "$retained_verification" test_log_sha256 "$retained_arch verification")" "$retained_arch retained native test log"
+    done
+    for retained_arch in arm64 x86_64; do
+        retained_manifest=$(require_receipt_value "$unsigned_package" "${retained_arch}_m4_evidence_manifest_sha256" package)
+        retained_root="$candidate_dir/thin-evidence/m4/$retained_arch/$retained_manifest"
+        require_file_hash "$retained_root/evidence-files.sha256" "$retained_manifest" "$retained_arch M4 evidence manifest"
+        [ "$(sha256_tree "$retained_root")" = "$(require_receipt_value "$unsigned_package" "${retained_arch}_m4_evidence_tree_sha256" package)" ] || fail "$retained_arch complete M4 evidence tree changed"
+        require_file_hash "$retained_root/authority/phase3-admission.env" "$(require_receipt_value "$unsigned_package" "${retained_arch}_admission_receipt_sha256" package)" "$retained_arch admission evidence"
+        require_file_hash "$retained_root/status.env" "$(require_receipt_value "$unsigned_package" "${retained_arch}_m4_receipt_sha256" package)" "$retained_arch M4 evidence"
+    done
+    [ -x "$codesign_tool" ] || blocked "codesign unavailable for promotion verification"
+    [ -x "$xcrun_tool" ] || blocked "xcrun unavailable for promotion verification"
+    [ -x "$spctl_tool" ] || blocked "spctl unavailable for promotion verification"
+    "$codesign_tool" --verify --strict --verbose=2 "$signed_app" >/dev/null 2>&1 || fail "live signature verification failed"
+    "$xcrun_tool" stapler validate "$signed_app" >/dev/null 2>&1 || fail "live stapled ticket verification failed"
+    "$spctl_tool" --assess --type execute --verbose=4 "$signed_app" >/dev/null 2>&1 || fail "live Gatekeeper execution assessment failed"
+}
+verify_signed_native() {
+    [ "$portable_selftest" -eq 0 ] || fail "portable structural evidence cannot be used as post-sign native proof"
+    [ "$architecture" = arm64 ] || [ "$architecture" = x86_64 ] || fail "--arch must be arm64 or x86_64"
+    [ -n "$out_receipt" ] || fail "--out-receipt is required"
+    verify_signed
+    [ "$(uname -s)" = Darwin ] || blocked "post-sign native macOS host unavailable ($(uname -s))"
+    host_arch=$(uname -m)
+    [ "$host_arch" = "$architecture" ] || blocked "post-sign native $architecture host unavailable (running $host_arch)"
+    evidence_dir=$(dirname "$out_receipt")
+    mkdir -p "$evidence_dir"
+    signed_binary=$(CDPATH= cd -- "$candidate_dir/SimpleCompiler.app/Contents/MacOS" && pwd -P)/simple
+    "$signed_binary" --version >"$evidence_dir/$architecture-post-sign-version.log" 2>&1 || fail "signed candidate did not start natively"
+    SIMPLE_BINARY="$signed_binary" "$signed_binary" test test/03_system/app/compiler/feature/macos_universal_m5_spec.spl --mode=interpreter --no-session-daemon --sequential --no-db --no-cache --assert-ran >"$evidence_dir/$architecture-post-sign-test.log" 2>&1 || fail "signed native system test failed"
+    results=$(sed -n 's/.*Results: \([0-9][0-9]*\) total, \([0-9][0-9]*\) passed, \([0-9][0-9]*\) failed.*/\1 \2 \3/p' "$evidence_dir/$architecture-post-sign-test.log" | tail -n 1)
+    set -- $results
+    [ "$#" -eq 3 ] && [ "$1" -gt 0 ] && [ "$1" -eq "$2" ] && [ "$3" -eq 0 ] || fail "post-sign native test emitted no passing non-zero Results line"
+    cat >"$out_receipt" <<EOF
+schema=macos-m5-post-sign-native-verification-v1
+status=PASS
+evidence_class=NATIVE_POST_SIGN_EXECUTION
+architecture=$architecture
+host_architecture=$host_arch
+signed_candidate_sha256=$(require_receipt_value "$signed_receipt" candidate_sha256 signed)
+signed_receipt_sha256=$(sha256_file "$signed_receipt")
+child_executable_path=$signed_binary
+child_executable_relative_path=SimpleCompiler.app/Contents/MacOS/simple
+child_executable_sha256=$(sha256_file "$signed_binary")
+version_log_sha256=$(sha256_file "$evidence_dir/$architecture-post-sign-version.log")
+test_log_sha256=$(sha256_file "$evidence_dir/$architecture-post-sign-test.log")
+results_total=$1
+results_passed=$2
+results_failed=$3
+native_execution=true
+EOF
+    echo "M5 POST-SIGN NATIVE PASS [$architecture]"
+}
+require_post_sign_receipts() {
+    [ -f "$arm64_post_sign_verification" ] && [ -f "$x86_post_sign_verification" ] || fail "both post-sign native verification receipts are required"
+    for pair in arm64:$arm64_post_sign_verification x86_64:$x86_post_sign_verification; do
+        expected_arch=${pair%%:*}; receipt=${pair#*:}
+        if [ "$portable_selftest" -eq 1 ]; then expected_schema=macos-m5-portable-post-sign-verification-v1; expected_class=PORTABLE_STRUCTURAL; expected_native=false
+        else expected_schema=macos-m5-post-sign-native-verification-v1; expected_class=NATIVE_POST_SIGN_EXECUTION; expected_native=true; fi
+        [ "$(require_receipt_value "$receipt" schema "$expected_arch post-sign")" = "$expected_schema" ] || fail "$expected_arch post-sign schema mismatch"
+        [ "$(require_receipt_value "$receipt" status "$expected_arch post-sign")" = PASS ] || fail "$expected_arch post-sign verification is not PASS"
+        [ "$(require_receipt_value "$receipt" evidence_class "$expected_arch post-sign")" = "$expected_class" ] || fail "$expected_arch post-sign evidence class mismatch"
+        [ "$(require_receipt_value "$receipt" architecture "$expected_arch post-sign")" = "$expected_arch" ] && [ "$(require_receipt_value "$receipt" host_architecture "$expected_arch post-sign")" = "$expected_arch" ] || fail "$expected_arch post-sign host binding mismatch"
+        [ "$(require_receipt_value "$receipt" signed_candidate_sha256 "$expected_arch post-sign")" = "$(require_receipt_value "$signed_receipt" candidate_sha256 signed)" ] || fail "$expected_arch post-sign candidate mismatch"
+        [ "$(require_receipt_value "$receipt" signed_receipt_sha256 "$expected_arch post-sign")" = "$(sha256_file "$signed_receipt")" ] || fail "$expected_arch post-sign receipt is stale"
+        [ "$(require_receipt_value "$receipt" child_executable_relative_path "$expected_arch post-sign")" = SimpleCompiler.app/Contents/MacOS/simple ] || fail "$expected_arch post-sign child path mismatch"
+        [ "$(require_receipt_value "$receipt" child_executable_sha256 "$expected_arch post-sign")" = "$(require_receipt_value "$signed_receipt" signed_executable_sha256 signed)" ] || fail "$expected_arch post-sign child digest mismatch"
+        [ "$(require_receipt_value "$receipt" native_execution "$expected_arch post-sign")" = "$expected_native" ] || fail "$expected_arch post-sign execution class mismatch"
+        total=$(require_receipt_value "$receipt" results_total "$expected_arch post-sign"); passed=$(require_receipt_value "$receipt" results_passed "$expected_arch post-sign"); failed=$(require_receipt_value "$receipt" results_failed "$expected_arch post-sign")
+        [ "$total" -gt 0 ] && [ "$total" -eq "$passed" ] && [ "$failed" -eq 0 ] || fail "$expected_arch post-sign Results are not a non-zero PASS"
+        if [ "$portable_selftest" -eq 0 ]; then
+            receipt_dir=$(dirname "$receipt")
+            require_file_hash "$receipt_dir/$expected_arch-post-sign-version.log" "$(require_receipt_value "$receipt" version_log_sha256 "$expected_arch post-sign")" "$expected_arch post-sign version log"
+            require_file_hash "$receipt_dir/$expected_arch-post-sign-test.log" "$(require_receipt_value "$receipt" test_log_sha256 "$expected_arch post-sign")" "$expected_arch post-sign test log"
+        fi
+    done
+    [ "$(sha256_file "$arm64_post_sign_verification")" != "$(sha256_file "$x86_post_sign_verification")" ] || fail "post-sign architecture receipts are not distinct"
+}
+promote() {
+    verify_signed
+    require_post_sign_receipts
+    [ -n "$pointer" ] || fail "--pointer is required"
+    [ -n "$expected_current" ] || fail "--expected-current is required"
+    [ -n "$out_receipt" ] || fail "--out-receipt is required"
+    [ "$expected_current" = NONE ] || require_sha "$expected_current" || fail "--expected-current must be NONE or a SHA-256"
+    mkdir -p "$(dirname "$pointer")"
+    relative_target=$(cd "$candidate_dir" && pwd -P)
+    promoted_digest=$(require_receipt_value "$signed_receipt" candidate_sha256 signed)
+    current_digest=NONE
+    previous_target=NONE
+    previous_signed_receipt_sha256=NONE
+    if [ -e "$pointer" ] || [ -L "$pointer" ]; then
+        [ -L "$pointer" ] || fail "current promotion pointer is not a symlink"
+        previous_target=$(cd "$(dirname "$pointer")" && cd "$(readlink "$pointer")" && pwd -P) || fail "current promotion pointer is unresolved"
+        current_digest=$(basename "$previous_target")
+        require_sha "$current_digest" || fail "current promotion pointer is not content addressed"
+        [ -f "$previous_target/signed.env" ] || fail "current promotion target lacks signed receipt"
+        previous_signed_receipt_sha256=$(sha256_file "$previous_target/signed.env")
+    fi
+    [ "$current_digest" = "$expected_current" ] || fail "promotion CAS mismatch: expected $expected_current, found $current_digest"
+    [ "$current_digest" != "$promoted_digest" ] || fail "candidate is already current"
+    temp_pointer="$pointer.tmp.$$"
+    previous_pointer="$pointer.previous"
+    temp_previous="$previous_pointer.tmp.$$"
+    receipt_tmp="$out_receipt.tmp.$$"
+    trap 'rm -f "$temp_pointer" "$temp_previous" "$receipt_tmp"' EXIT HUP INT TERM
+    ln -s "$relative_target" "$temp_pointer" || fail "could not create promotion pointer"
+    promoted_app="$temp_pointer/SimpleCompiler.app"
+    [ "$(sha256_tree "$promoted_app")" = "$(require_receipt_value "$signed_receipt" signed_app_contents_sha256 signed)" ] || fail "live promotion pointer application identity mismatch"
+    "$codesign_tool" --verify --strict --verbose=2 "$promoted_app" >/dev/null 2>&1 || fail "live promotion pointer signature verification failed"
+    "$xcrun_tool" stapler validate "$promoted_app" >/dev/null 2>&1 || fail "live promotion pointer ticket verification failed"
+    "$spctl_tool" --assess --type execute --verbose=4 "$promoted_app" >/dev/null 2>&1 || fail "live promotion pointer Gatekeeper assessment failed"
+    if [ "$previous_target" != NONE ]; then
+        ln -s "$previous_target" "$temp_previous" || fail "could not retain previous promotion pointer"
+        mv -f "$temp_previous" "$previous_pointer" || fail "could not publish previous promotion pointer"
+    fi
+    cat >"$receipt_tmp" <<EOF
+schema=macos-m5-promotion-v1
+status=PROMOTED
+expected_current_sha256=$expected_current
+previous_candidate_sha256=$current_digest
+previous_target=$previous_target
+previous_signed_receipt_sha256=$previous_signed_receipt_sha256
+promoted_candidate_sha256=$promoted_digest
+promoted_signed_receipt_sha256=$(sha256_file "$signed_receipt")
+arm64_post_sign_verification_sha256=$(sha256_file "$arm64_post_sign_verification")
+x86_64_post_sign_verification_sha256=$(sha256_file "$x86_post_sign_verification")
+pointer=$pointer
+cas_applied=true
+rollback_authorized=$([ "$current_digest" = NONE ] && echo false || echo true)
+EOF
+    mv -f "$temp_pointer" "$pointer" || fail "atomic pointer promotion failed"
+    [ -L "$pointer" ] && [ "$(cd "$(dirname "$pointer")" && cd "$(readlink "$pointer")" && pwd -P)" = "$(cd "$candidate_dir" && pwd -P)" ] || fail "promoted pointer does not resolve to candidate"
+    promoted_app="$pointer/SimpleCompiler.app"
+    [ "$(sha256_tree "$promoted_app")" = "$(require_receipt_value "$signed_receipt" signed_app_contents_sha256 signed)" ] || fail "live promoted application identity mismatch"
+    mv "$receipt_tmp" "$out_receipt" || fail "could not publish promotion receipt"
+    echo "M5 PROMOTED: $pointer -> $relative_target (pointer-only, no rebuild)"
+}
+rollback() {
+    [ -n "$pointer" ] || fail "--pointer is required"
+    [ -n "$expected_current" ] || fail "--expected-current is required"
+    [ -n "$promotion_receipt" ] && [ -f "$promotion_receipt" ] || fail "--promotion-receipt is required"
+    [ -n "$out_receipt" ] || fail "--out-receipt is required"
+    require_sha "$expected_current" || fail "rollback --expected-current must be a SHA-256"
+    [ "$(require_receipt_value "$promotion_receipt" schema promotion)" = macos-m5-promotion-v1 ] && [ "$(require_receipt_value "$promotion_receipt" status promotion)" = PROMOTED ] || fail "promotion receipt is not rollback authority"
+    [ -L "$pointer" ] || fail "rollback current pointer is unavailable"
+    current_target=$(cd "$(dirname "$pointer")" && cd "$(readlink "$pointer")" && pwd -P) || fail "rollback current pointer is unresolved"
+    current_digest=$(basename "$current_target")
+    [ "$current_digest" = "$expected_current" ] && [ "$current_digest" = "$(require_receipt_value "$promotion_receipt" promoted_candidate_sha256 promotion)" ] || fail "rollback CAS mismatch"
+    rollback_target=$(cd "$candidate_dir" && pwd -P)
+    rollback_digest=$(basename "$rollback_target")
+    [ "$rollback_digest" = "$(require_receipt_value "$promotion_receipt" previous_candidate_sha256 promotion)" ] || fail "rollback target is not the retained previous generation"
+    [ "$(sha256_file "$rollback_target/signed.env")" = "$(require_receipt_value "$promotion_receipt" previous_signed_receipt_sha256 promotion)" ] || fail "rollback signed receipt changed"
+    signed_receipt="$rollback_target/signed.env"
+    verify_signed
+    temp_pointer="$pointer.rollback.tmp.$$"
+    receipt_tmp="$out_receipt.tmp.$$"
+    trap 'rm -f "$temp_pointer" "$receipt_tmp"' EXIT HUP INT TERM
+    ln -s "$rollback_target" "$temp_pointer" || fail "could not create rollback pointer"
+    cat >"$receipt_tmp" <<EOF
+schema=macos-m5-rollback-v1
+status=ROLLED_BACK
+promotion_receipt_sha256=$(sha256_file "$promotion_receipt")
+expected_current_sha256=$expected_current
+replaced_candidate_sha256=$current_digest
+restored_candidate_sha256=$rollback_digest
+restored_signed_receipt_sha256=$(sha256_file "$signed_receipt")
+pointer=$pointer
+cas_applied=true
+EOF
+    mv -f "$temp_pointer" "$pointer" || fail "atomic rollback pointer swap failed"
+    mv "$receipt_tmp" "$out_receipt" || fail "could not publish rollback receipt"
+    echo "M5 ROLLED BACK: $pointer -> $rollback_target"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --compose) mode=compose ;; --verify-native) mode=verify-native ;; --finalize) mode=finalize ;; --sign-notarize) mode=sign-notarize ;; --verify-signed-native) mode=verify-signed-native ;; --promote) mode=promote ;; --rollback) mode=rollback ;;
+        --arm64-candidate=*) arm64_candidate=${1#*=} ;; --arm64-admission=*) arm64_admission=${1#*=} ;; --arm64-m4=*) arm64_m4=${1#*=} ;;
+        --arm64-m4-evidence-dir=*) arm64_m4_evidence_dir=${1#*=} ;; --arm64-m4-run-id=*) arm64_m4_run_id=${1#*=} ;;
+        --arm64-m4-run-attempt=*) arm64_m4_run_attempt=${1#*=} ;; --arm64-m4-artifact=*) arm64_m4_artifact=${1#*=} ;; --arm64-m4-evidence-artifact=*) arm64_m4_evidence_artifact=${1#*=} ;;
+        --arm64-m4-repository=*) arm64_m4_repository=${1#*=} ;; --arm64-m4-workflow-ref=*) arm64_m4_workflow_ref=${1#*=} ;; --arm64-m4-workflow-sha=*) arm64_m4_workflow_sha=${1#*=} ;; --arm64-m4-head-sha=*) arm64_m4_head_sha=${1#*=} ;;
+        --arm64-m4-artifact-id=*) arm64_m4_artifact_id=${1#*=} ;; --arm64-m4-artifact-digest=*) arm64_m4_artifact_digest=${1#*=} ;; --arm64-m4-evidence-artifact-id=*) arm64_m4_evidence_artifact_id=${1#*=} ;; --arm64-m4-evidence-artifact-digest=*) arm64_m4_evidence_artifact_digest=${1#*=} ;;
+        --x86_64-candidate=*) x86_candidate=${1#*=} ;; --x86_64-admission=*) x86_admission=${1#*=} ;; --x86_64-m4=*) x86_m4=${1#*=} ;;
+        --x86_64-m4-evidence-dir=*) x86_m4_evidence_dir=${1#*=} ;; --x86_64-m4-run-id=*) x86_m4_run_id=${1#*=} ;;
+        --x86_64-m4-run-attempt=*) x86_m4_run_attempt=${1#*=} ;; --x86_64-m4-artifact=*) x86_m4_artifact=${1#*=} ;; --x86_64-m4-evidence-artifact=*) x86_m4_evidence_artifact=${1#*=} ;;
+        --x86_64-m4-repository=*) x86_m4_repository=${1#*=} ;; --x86_64-m4-workflow-ref=*) x86_m4_workflow_ref=${1#*=} ;; --x86_64-m4-workflow-sha=*) x86_m4_workflow_sha=${1#*=} ;; --x86_64-m4-head-sha=*) x86_m4_head_sha=${1#*=} ;;
+        --x86_64-m4-artifact-id=*) x86_m4_artifact_id=${1#*=} ;; --x86_64-m4-artifact-digest=*) x86_m4_artifact_digest=${1#*=} ;; --x86_64-m4-evidence-artifact-id=*) x86_m4_evidence_artifact_id=${1#*=} ;; --x86_64-m4-evidence-artifact-digest=*) x86_m4_evidence_artifact_digest=${1#*=} ;;
+        --expected-source-revision=*) expected_source_revision=${1#*=} ;;
+        --candidate-dir=*) candidate_dir=${1#*=} ;; --arch=*) architecture=${1#*=} ;; --out-receipt=*) out_receipt=${1#*=} ;;
+        --arm64-verification=*) arm64_verification=${1#*=} ;; --x86_64-verification=*) x86_verification=${1#*=} ;;
+        --verification-receipt=*) verification_receipt=${1#*=} ;; --output-root=*) output_root=${1#*=} ;; --pointer=*) pointer=${1#*=} ;;
+        --arm64-post-sign-verification=*) arm64_post_sign_verification=${1#*=} ;; --x86_64-post-sign-verification=*) x86_post_sign_verification=${1#*=} ;;
+        --expected-current=*) expected_current=${1#*=} ;; --promotion-receipt=*) promotion_receipt=${1#*=} ;;
+        --signing-identity=*) signing_identity=${1#*=} ;; --notary-profile=*) notary_profile=${1#*=} ;; --signed-receipt=*) signed_receipt=${1#*=} ;;
+        *) fail "unknown option $1" ;;
+    esac
+    shift
+done
+
+case "$mode" in
+    compose) compose ;; verify-native) verify_native ;; finalize) finalize ;; sign-notarize) sign_notarize ;; verify-signed-native) verify_signed_native ;; promote) promote ;; rollback) rollback ;; *) fail "one mode is required" ;;
+esac

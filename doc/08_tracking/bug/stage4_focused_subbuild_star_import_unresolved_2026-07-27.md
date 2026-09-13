@@ -1,6 +1,6 @@
 ---
 id: stage4_focused_subbuild_star_import_unresolved_2026-07-27
-status: open
+status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 severity: high
 discovered: 2026-07-27
 discovered_by: full-bootstrap --deploy run from current origin main (Stage 4, full-CLI focused sub-builds)
@@ -205,3 +205,7 @@ consumer of `bin/simple`) stays seed-attributed until this is fully fixed
    visibility is the intended semantic, or whether call sites relying on it
    should get explicit imports instead — verify against pre-`Dict`-fix
    behavior to rule out the masking-accident explanation.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -1970,3 +1970,23 @@ the loss is dominated by ordinary transient values that no eviction call would
 ever be handed. Whoever picks this up next should cost a reclamation strategy
 for `rt_core_*` allocations on the native lane first, and treat arena/eviction
 work as downstream of it.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/driver/driver_memory_lifecycle_family_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-12 — reproduced, left OPEN
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/compiler/driver/driver_memory_lifecycle_family_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/compiler/driver/driver_memory_lifecycle_family_spec.spl outcome=ERROR declared>=5 executed=5 passed=4 failed=1 skipped=0 dropped=0
+```
+
+1 of 5 examples red: "never constructs the HIR lowerer inside the per-source
+loop" — a source-shape assertion over the driver, whose failure message dumps the
+driver's import block rather than a value comparison, so the assertion is
+matching against source text. Reproduced but not diagnosed further; the primary
+file is a compiler driver path and the remaining 4 examples pass.

@@ -44,6 +44,12 @@ with a separately hash-bound plugin entry and checks meaningful guide output.
 DevHub provider rows use read-only resource lookups. Missing provider credentials
 or resource selectors are BLOCKED; malformed responses and dispatch failures are
 FAIL.
+Only the controller-owned GitHub, Jira, and Confluence rows may classify an
+anchored 401/403, explicit unauthenticated status, missing provider CLI, or
+specific DNS/network failure as BLOCKED. Manifest-provided words such as
+`login`, `token`, or `error` cannot downgrade a nonzero implementation or
+dispatch failure. A negative exit or exit status 128 and above is always a
+FAIL, even when output before the crash contained an exact unauthorized status.
 
 Missing rows are failures. A phase may declare a row `unsupported` or `blocked`
 only with `reason`, `owner`, `reviewer`, and `prerequisite`. Such a row does not launch and

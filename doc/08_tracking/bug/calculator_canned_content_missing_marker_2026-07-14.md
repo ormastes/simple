@@ -1,6 +1,6 @@
 # Calculator canned WM content missing `[canned]` marker
 
-- **Status:** Open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Filed:** 2026-07-14
 - **Area:** gui / wm-compositor / anti-fake-evidence
 - **Severity:** minor (honesty-invariant violation, not a crash)
@@ -39,3 +39,6 @@ Found by the 2026-07-14 gui/web/2d dummy-impl audit. Related still-open fakes
 in adjacent lanes: `web_render_gpu_backend_provenance_fabricated_2026-06-17`
 (web pixel path stamps `engine2d_backend="vulkan"` with a synthetic queue
 handle while CPU-rasterizing) and `browser_demo_frozen_loading_placeholder_2026-07-12`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

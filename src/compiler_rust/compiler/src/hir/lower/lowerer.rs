@@ -39,6 +39,7 @@ pub struct Lowerer {
     /// Set of function names that are marked with #[pure] (CTR-031)
     /// These functions can be called from contract expressions
     pub(super) pure_functions: HashSet<String>,
+    pub(super) proven_nonescaping_functions: HashSet<String>,
     /// Current class/struct type being lowered (for Self resolution)
     pub(super) current_class_type: Option<TypeId>,
     /// Current function/method name being lowered, used to enrich lowering diagnostics.
@@ -219,6 +220,7 @@ impl Lowerer {
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
+            proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
@@ -275,6 +277,7 @@ impl Lowerer {
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
+            proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
@@ -354,6 +357,7 @@ impl Lowerer {
             local_globals: HashSet::new(),
             immutable_globals: HashSet::new(),
             pure_functions: HashSet::new(),
+            proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
@@ -828,7 +832,17 @@ impl Lowerer {
 
     /// Resolve a function alias to its original function name
     pub fn resolve_function_alias(&self, name: &str) -> Option<&str> {
-        self.function_aliases.get(name).map(|s| s.as_str())
+        let mut current = self.function_aliases.get(name)?.as_str();
+        // Re-export facades can introduce multiple alias hops. Follow the
+        // complete chain while bounding malformed cycles fail-closed.
+        for _ in 0..=self.function_aliases.len() {
+            match self.function_aliases.get(current) {
+                Some(next) if next != current => current = next.as_str(),
+                Some(_) => return None,
+                None => return Some(current),
+            }
+        }
+        None
     }
 
     /// Find non-deprecated alternatives for a deprecated type

@@ -505,3 +505,65 @@ fn test_option_map_some_with_identity() {
     let payload = rt_enum_payload(result);
     assert_eq!(payload.as_int(), 42);
 }
+
+
+/// `.?` presence, the ONE definition both native backends call
+/// (`rt_is_present`), pinned against the tree-walk interpreter's
+/// `Expr::ExistsCheck` arm (`compiler/src/interpreter/expr.rs`).
+///
+/// Regression: doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+/// — `rt_is_some` answered TRUE for an empty-but-allocated array, so a natively
+/// compiled `while arr.?:` never terminated while `.len()` read 0 in the same
+/// binary and the interpreter said false.
+#[test]
+fn dotq_presence_matches_interpreter_exists_check_rule() {
+    use crate::value::collections::{rt_array_new, rt_array_pop, rt_array_push, rt_string_new};
+    use crate::value::dict::{rt_dict_new, rt_dict_set};
+
+    // Absent: nil and None.
+    assert!(!super::rt_is_present(RuntimeValue::NIL));
+    assert!(!super::rt_is_present(super::rt_option_none()));
+
+    // Empty collections are ABSENT — this is the whole defect.
+    let empty_array = rt_array_new(4);
+    assert!(super::rt_is_some(empty_array), "precondition: rt_is_some is the WRONG predicate here");
+    assert!(!super::rt_is_present(empty_array), "empty array must be absent for `.?`");
+
+    let empty_dict = rt_dict_new(4);
+    assert!(!super::rt_is_present(empty_dict), "empty dict must be absent for `.?`");
+
+    let empty_str = rt_string_new(b"".as_ptr(), 0);
+    assert!(!super::rt_is_present(empty_str), "empty string must be absent for `.?`");
+
+    // Non-empty collections are present, and drain back to absent.
+    let arr = rt_array_new(4);
+    rt_array_push(arr, RuntimeValue::from_int(7));
+    assert!(super::rt_is_present(arr));
+    rt_array_pop(arr);
+    assert!(!super::rt_is_present(arr), "array drained by pop must be absent for `.?`");
+
+    let dict = rt_dict_new(4);
+    rt_dict_set(dict, rt_string_new(b"k".as_ptr(), 1), RuntimeValue::from_int(1));
+    assert!(super::rt_is_present(dict));
+
+    let text = rt_string_new(b"x".as_ptr(), 1);
+    assert!(super::rt_is_present(text));
+
+    // NOT empty-tested, because the interpreter does not test them either:
+    // a falsy-but-present payload stays present ("0 is falsy" landmine,
+    // doc/08_tracking/bug/seed_interp_option_match_falls_through_at_scale_2026-07-18.md).
+    assert!(super::rt_is_present(RuntimeValue::from_int(0)));
+    assert!(super::rt_is_present(RuntimeValue::from_bool(false)));
+    assert!(super::rt_is_present(super::rt_option_some(RuntimeValue::from_int(0))));
+
+    // The Option layer is unwrapped first: Some(<empty array>) is absent.
+    assert!(!super::rt_is_present(super::rt_option_some(rt_array_new(4))));
+    assert!(super::rt_is_present(super::rt_option_some(arr_with_one())));
+}
+
+fn arr_with_one() -> RuntimeValue {
+    use crate::value::collections::{rt_array_new, rt_array_push};
+    let a = rt_array_new(2);
+    rt_array_push(a, RuntimeValue::from_int(1));
+    a
+}

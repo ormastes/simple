@@ -1,5 +1,7 @@
 # Stage 4 SBOM JSON owner and native method dispatch
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Physical JSON owner fixed and crossed by the full closure. The native
@@ -35,3 +37,7 @@ builders' same-named terminal methods and `generate_sbom_json`. A rebuilt
 compiler could not yet be linked with the narrow bootstrap runtime (optional
 Cranelift/GUI symbols are absent), and the admitted Stage3 lacks the LLVM
 feature, so no runtime PASS is claimed until the next current-head bootstrap.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

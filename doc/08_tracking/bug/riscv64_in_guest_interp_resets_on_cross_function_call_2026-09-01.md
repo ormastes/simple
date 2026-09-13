@@ -1,4 +1,5 @@
 # riscv64 in-guest: the guest RESETS while executing a cross-function call
+**Status:** OPEN (unverified 2026-09-12)
 
 > **RESOLVED 2026-09-02 — this record's own defect is fixed.** The "reset" was
 > never a reset and, once the trap vector landed, was measured as an S-mode
@@ -518,3 +519,6 @@ and its offender count did not move. What changed is entirely inside the row: th
 `scause=0x5` trap frame is gone and the failure is now a clean interpreter-level
 error from inside the callee's body. The row stays RED until the `+` defect above
 is fixed.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

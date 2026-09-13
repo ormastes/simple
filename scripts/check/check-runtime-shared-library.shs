@@ -1,0 +1,240 @@
+#!/bin/sh
+# Assert that the DYNAMIC Simple runtime is a real, shippable shared library.
+#
+# Why this check exists: `libsimple_runtime.so` has long been produced as a
+# by-product of `crate-type = [..., "cdylib"]`, but nothing asserted it was
+# usable. A cdylib with no DT_SONAME cannot be installed or versioned (a
+# consumer records the build path in DT_NEEDED), and a cdylib whose export
+# table is empty or truncated links fine and then fails at runtime. Both
+# failures are invisible to every existing tree/size/symbol-delta guard,
+# because the file exists, is correctly sized, and parses as ELF.
+#
+# Three fail-closed assertions on the artifact itself:
+#   1. the shared library exists and is a non-empty ELF shared object
+#   2. it carries DT_SONAME (so it can be installed and resolved by ld.so)
+#   3. it exports a NON-VACUOUS rt_* surface, at or above a recorded floor
+#
+# Verdict is always the last line of stdout:
+#   PASS  — <n> exported rt_* symbol(s) checked ...      exit 0
+#   FAIL  — ...                                          exit 1
+#   ERROR — nothing was checked (<reason>)               exit 2
+# A run that inspected 0 symbols is an ERROR, never a pass, and a host with no
+# `nm`/`readelf` is an ERROR too: absence of a tool is absence of evidence.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+
+# Measured floor. The shared library exported 1646 rt_* symbols at the
+# 2026-09-06 bootstrap baseline and 1676 in-tree on the same day (the delta is
+# the newer rt_cache_host_* family, not a build difference). The floor is set
+# below both so an ordinary source change does not trip it, while any collapse
+# of the export table -- the failure this guard exists for -- still fails.
+DEFAULT_FLOOR=1500
+
+NM="${NM:-nm}"
+READELF="${READELF:-readelf}"
+
+usage() {
+    cat <<'USAGE'
+usage: check-runtime-shared-library.shs [--lib PATH] [--floor N] [--selftest]
+
+  --lib PATH   shared library to check (default: search the known build dirs)
+  --floor N    minimum exported rt_* symbol count (default 1500)
+  --selftest   run the fixture suite and exit
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# scan: echo the verdict, return the exit code. No side effects, so --selftest
+# can drive the REAL scanner over fixtures rather than a reimplementation.
+# ---------------------------------------------------------------------------
+scan() {
+    scan_lib=$1
+    scan_floor=$2
+
+    if [ -z "$scan_lib" ]; then
+        echo "ERROR — nothing was checked (no shared library given or found)"
+        return 2
+    fi
+    if [ ! -f "$scan_lib" ]; then
+        echo "ERROR — nothing was checked (no such file: $scan_lib)"
+        return 2
+    fi
+    if [ ! -s "$scan_lib" ]; then
+        echo "FAIL — $scan_lib is empty (0 bytes); no rt_* surface at all"
+        return 1
+    fi
+
+    command -v "$NM" >/dev/null 2>&1 || {
+        echo "ERROR — nothing was checked ($NM not available)"
+        return 2
+    }
+    command -v "$READELF" >/dev/null 2>&1 || {
+        echo "ERROR — nothing was checked ($READELF not available)"
+        return 2
+    }
+
+    # Must be an ELF shared object, not an archive or a stray file.
+    # Read the status DIRECTLY into a variable -- a pipeline's $? is the LAST
+    # command's status and has produced false greens in this repo before.
+    elf_header=$("$READELF" -h "$scan_lib" 2>/dev/null) || elf_rc=$?
+    elf_rc=${elf_rc:-0}
+    if [ "$elf_rc" -ne 0 ]; then
+        echo "FAIL — $scan_lib is not readable as ELF"
+        return 1
+    fi
+    case "$elf_header" in
+        *DYN*) : ;;
+        *) echo "FAIL — $scan_lib is not an ELF shared object (DYN)"; return 1 ;;
+    esac
+
+    # 2. DT_SONAME. Without it the library is a build by-product, not a
+    #    shippable artifact: consumers bake the build path into DT_NEEDED.
+    soname=$("$READELF" -d "$scan_lib" 2>/dev/null \
+        | awk -F'[][]' '/SONAME/ { print $2; exit }')
+    if [ -z "$soname" ]; then
+        echo "FAIL — $scan_lib carries no DT_SONAME; it cannot be installed or versioned"
+        return 1
+    fi
+
+    # 3. Non-vacuous exported rt_* surface.
+    count=$("$NM" -D --defined-only "$scan_lib" 2>/dev/null \
+        | awk '$2 == "T" && $3 ~ /^rt_/ { seen[$3] = 1 } END { print length(seen) + 0 }')
+    count=${count:-0}
+
+    if [ "$count" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 exported rt_* symbols in $scan_lib)"
+        return 2
+    fi
+    if [ "$count" -lt "$scan_floor" ]; then
+        echo "FAIL — $count exported rt_* symbol(s) in $scan_lib, below floor $scan_floor"
+        return 1
+    fi
+
+    echo "PASS — $count exported rt_* symbol(s) checked in $scan_lib (soname=$soname, floor=$scan_floor)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# selftest: fatal, runs before every real scan.
+# ---------------------------------------------------------------------------
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" EXIT INT TERM
+
+    failures=0
+    fixtures=0
+
+    expect() {
+        expect_name=$1; expect_want=$2; expect_lib=$3; expect_floor=$4
+        fixtures=$((fixtures + 1))
+        expect_out=$(scan "$expect_lib" "$expect_floor") && expect_rc=0 || expect_rc=$?
+        if [ "$expect_rc" -ne "$expect_want" ]; then
+            echo "selftest FAIL [$expect_name]: expected exit $expect_want, got $expect_rc ($expect_out)" >&2
+            failures=$((failures + 1))
+        fi
+    }
+
+    # 1. missing path -> ERROR
+    expect "missing-path" 2 "$tmp/does_not_exist.so" "$DEFAULT_FLOOR"
+
+    # 2. empty file -> FAIL
+    : > "$tmp/empty.so"
+    expect "empty-file" 1 "$tmp/empty.so" "$DEFAULT_FLOOR"
+
+    # 3. a REAL ELF shared object with a SONAME but zero rt_* symbols.
+    #    This is the discriminating fixture: it defeats a guard that merely
+    #    checks "file exists and is a shared library".
+    real_libc=""
+    for candidate in /lib/aarch64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6 \
+                     /usr/lib/libc.so.6 /lib64/libc.so.6; do
+        [ -f "$candidate" ] && { real_libc="$candidate"; break; }
+    done
+    if [ -n "$real_libc" ]; then
+        expect "real-so-without-rt-symbols" 2 "$real_libc" "$DEFAULT_FLOOR"
+    fi
+
+    # 4/5/6. A purpose-built shared object, so these fixtures are self-contained
+    #    rather than depending on a build having happened. Guarded on a working
+    #    compiler; when none exists the fixtures are reported as skipped, never
+    #    silently dropped.
+    cc_bin="${CC:-cc}"
+    if command -v "$cc_bin" >/dev/null 2>&1; then
+        cat > "$tmp/fixture.c" <<'FIXTURE'
+long rt_fixture_one(void) { return 1; }
+long rt_fixture_two(void) { return 2; }
+long not_an_rt_symbol(void) { return 3; }
+FIXTURE
+        if "$cc_bin" -shared -fPIC -o "$tmp/libfixture.so" \
+             -Wl,-soname,libfixture.so.0 "$tmp/fixture.c" >/dev/null 2>&1; then
+            # a real .so with a SONAME and 2 rt_* exports passes a floor of 2 ...
+            expect "fixture-so-passes-floor" 0 "$tmp/libfixture.so" 2
+            # ... and the SAME file fails an absurd floor, proving the floor
+            # comparison is live rather than dead code.
+            expect "floor-is-live" 1 "$tmp/libfixture.so" 999999
+
+            # a shared object built WITHOUT a soname must FAIL, proving the
+            # DT_SONAME assertion is live -- this is the exact defect the
+            # build.rs change fixes.
+            if "$cc_bin" -shared -fPIC -o "$tmp/libnosoname.so" \
+                 "$tmp/fixture.c" >/dev/null 2>&1; then
+                expect "missing-soname" 1 "$tmp/libnosoname.so" 2
+            fi
+        else
+            echo "selftest: skipped compiled fixtures ($cc_bin cannot build a shared object)" >&2
+        fi
+    else
+        echo "selftest: skipped compiled fixtures (no $cc_bin on PATH)" >&2
+    fi
+
+    if [ "$fixtures" -eq 0 ]; then
+        echo "ERROR — nothing was checked (selftest ran 0 fixtures)"
+        exit 2
+    fi
+    if [ "$failures" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest: $failures of $fixtures fixture(s) failed)"
+        exit 2
+    fi
+    rm -rf "$tmp"
+    trap - EXIT INT TERM
+    echo "selftest: $fixtures fixture(s) passed"
+}
+
+resolve_lib() {
+    explicit=$1
+    if [ -n "$explicit" ]; then
+        echo "$explicit"
+        return 0
+    fi
+    for dir in \
+        "${CARGO_TARGET_DIR:-$ROOT_DIR/target}"/*/bootstrap \
+        "${CARGO_TARGET_DIR:-$ROOT_DIR/target}"/*/release \
+        "$ROOT_DIR"/build/bootstrap/rust-authority-*/target/*/bootstrap
+    do
+        [ -f "$dir/libsimple_runtime.so" ] && { echo "$dir/libsimple_runtime.so"; return 0; }
+    done
+    echo ""
+}
+
+lib=""
+floor="$DEFAULT_FLOOR"
+run_selftest_only=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --lib)      lib="${2:?--lib needs a value}"; shift 2 ;;
+        --floor)    floor="${2:?--floor needs a value}"; shift 2 ;;
+        --selftest) run_selftest_only=1; shift ;;
+        -h|--help)  usage; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+selftest
+if [ "$run_selftest_only" -eq 1 ]; then
+    exit 0
+fi
+
+target_lib=$(resolve_lib "$lib")
+scan "$target_lib" "$floor" && rc=0 || rc=$?
+exit "$rc"

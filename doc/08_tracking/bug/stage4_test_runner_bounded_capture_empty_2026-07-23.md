@@ -1,6 +1,6 @@
 # Stage 4 test runner loses bounded child output and status
 
-- **Status:** OPEN / CANDIDATE REJECTED.
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Candidate:** `00431ce52f940722f52746a802011f7d33f35d4931738facee26c5c7b7917b31`.
 
 ## Reproduction
@@ -27,3 +27,7 @@ markers and exits nonzero. Exercise the no-limits tuple path and the limited
 `ProcessResult` path separately, then repair the first boundary that diverges.
 Keep the existing fail-closed summary behavior; missing evidence must never
 become a synthetic pass.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

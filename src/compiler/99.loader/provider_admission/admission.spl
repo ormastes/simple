@@ -1,0 +1,100 @@
+use std.nogc_sync_mut.concurrent.thread.{thread_yield}
+use compiler.driver.smf.package_image_v1.{package_image_validate_v1}
+use compiler.loader.provider_admission.state.*
+
+fn provider_admission_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn provider_admission_token_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn provider_admission_policy_v1(
+    descriptor: ProviderDescriptorV1
+) -> Result[ProviderEffectPolicyV1, ProviderAdmissionErrorV1]:
+    if descriptor.mode == ProviderModeV1.shadow_compare:
+        if (not provider_admission_token_valid_v1(
+                descriptor.shadow_provider_identity) or
+                descriptor.shadow_provider_identity == descriptor.provider_identity):
+            return Err(ProviderAdmissionErrorV1.invalid_dual_mode_policy)
+        return Ok(ProviderEffectPolicyV1(
+            descriptor.provider_identity, true))
+    if descriptor.shadow_provider_identity != "":
+        return Err(ProviderAdmissionErrorV1.invalid_dual_mode_policy)
+    Ok(ProviderEffectPolicyV1(descriptor.provider_identity, true))
+
+fn provider_admission_validate_metadata_v1(
+    admission: ProviderAdmissionV1
+) -> Result[ProviderEffectPolicyV1, ProviderAdmissionErrorV1]:
+    val descriptor = admission.descriptor
+    val authority = admission.authority
+    if (not provider_admission_token_valid_v1(descriptor.provider_identity) or
+            not provider_admission_token_valid_v1(descriptor.package_identity) or
+            not provider_admission_digest_valid_v1(descriptor.abi_digest)):
+        return Err(ProviderAdmissionErrorV1.invalid_descriptor)
+    for digest in descriptor.dependency_digests:
+        if not provider_admission_digest_valid_v1(digest):
+            return Err(ProviderAdmissionErrorV1.invalid_descriptor)
+    if package_image_validate_v1(authority.image, authority.receipt).is_err():
+        return Err(ProviderAdmissionErrorV1.invalid_package_image)
+    if (not authority.capability.open or authority.capability.descriptor < 0 or
+            authority.capability.archive_digest != authority.image.archive_digest or
+            authority.capability.receipt_digest != authority.image.receipt_digest or
+            authority.capability.identity.content_digest != authority.image.archive_digest):
+        return Err(ProviderAdmissionErrorV1.invalid_archive_capability)
+    if (descriptor.package_identity != authority.image.package_identity or
+            descriptor.package_identity != authority.receipt.package_key):
+        return Err(ProviderAdmissionErrorV1.package_identity_mismatch)
+    if (descriptor.abi_digest != authority.required_abi_digest or
+            not provider_admission_digest_valid_v1(authority.required_abi_digest)):
+        return Err(ProviderAdmissionErrorV1.abi_mismatch)
+    if (descriptor.dependency_digests != authority.required_dependency_digests or
+            descriptor.dependency_digests != authority.image.dependency_interface_digests):
+        return Err(ProviderAdmissionErrorV1.dependency_mismatch)
+    provider_admission_policy_v1(descriptor)
+
+fn provider_admit_metadata_v1(
+    admission: ProviderAdmissionV1
+) -> Result[ProviderAdmissionReceiptV1, ProviderAdmissionErrorV1]:
+    if provider_admission_try_claim_v1(admission):
+        val policy = provider_admission_validate_metadata_v1(admission)
+        if policy.is_err():
+            _ = provider_admission_reject_v1(admission, policy.unwrap_err())
+            return Err(policy.unwrap_err())
+        val receipt = ProviderAdmissionReceiptV1(
+            admission.descriptor.provider_identity,
+            admission.descriptor.package_identity,
+            admission.authority.image.archive_digest,
+            admission.authority.image.receipt_digest,
+            admission.descriptor.abi_digest,
+            admission.descriptor.dependency_digests,
+            admission.descriptor.mode, policy.unwrap(), true, false)
+        if not provider_admission_publish_v1(admission, receipt):
+            return Err(ProviderAdmissionErrorV1.admission_conflict)
+        return Ok(receipt)
+
+    var remaining = PROVIDER_ADMISSION_WAIT_BUDGET_V1
+    while remaining > 0:
+        val state = provider_admission_state_v1(admission)
+        if state == ProviderAdmissionStateV1.admitted:
+            if admission.receipt == nil:
+                return Err(ProviderAdmissionErrorV1.admission_conflict)
+            val admitted = admission.receipt!
+            return Ok(ProviderAdmissionReceiptV1(
+                admitted.provider_identity, admitted.package_identity,
+                admitted.archive_digest, admitted.receipt_digest,
+                admitted.abi_digest, admitted.dependency_digests,
+                admitted.mode, admitted.effect_policy, false, true))
+        if state == ProviderAdmissionStateV1.rejected:
+            return Err(ProviderAdmissionErrorV1.cached_rejection)
+        thread_yield()
+        remaining = remaining - 1
+    Err(ProviderAdmissionErrorV1.wait_exhausted)
+
+export provider_admission_digest_valid_v1
+export provider_admission_policy_v1, provider_admission_validate_metadata_v1
+export provider_admit_metadata_v1

@@ -26,12 +26,13 @@ fixture IDs, or read permission remains blocked/unsupported with an exact resume
 command. `devhub auth status` alone does not prove provider access.
 
 The precise manifest, row, suite, and resume contract is in
-`doc/03_plan/compiler/bootstrap/full_pure_simple_simd_bootstrap_trusted_deployment_matrix.md`.
+`doc/07_guide/tooling/bootstrap_phase_live_services.md`.
 
 Phase 1 and Phase 2 major-feature coverage also uses
 `scripts/check/check-bootstrap-phase-feature-matrix.py`. It requires paired
 interpreter/native rows for compiler, language/runtime, Simple MCP, Simple LSP
-MCP, T32 MCP, SPipe/SSpec, Caret, Slang, and SIMD database/web behavior, plus
+MCP, T32 MCP, SPipe/SSpec, Caret, Slang, SIMD database/web behavior, and
+DevHub, plus
 actual protocol/plugin/binary launches. See
 `doc/07_guide/tooling/bootstrap_phase_feature_matrix.md`. Every supported row
 pins the absolute executable, SHA-256, generation, provenance, admission, test

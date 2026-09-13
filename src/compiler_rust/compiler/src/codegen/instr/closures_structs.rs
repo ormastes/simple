@@ -162,6 +162,35 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // `.is_empty()` fell all the way through to suffix-based symbol
             // resolution instead of the safe tag-dispatching path.
             | ("len" | "length" | "keys" | "values" | "is_empty", 0)
+            // `items` returns an array of (key, value) tuples for a Dict,
+            // same shape as `keys`/`values` above and same runtime call
+            // (`rt_dict_entries`, see the dispatch arm below). Missing here
+            // meant a bare (erased-receiver) `d.items()` — e.g. inside an
+            // untyped fn parameter — fell through to suffix-based symbol
+            // resolution and raised "Function 'items' not found", even
+            // though a STATICALLY-typed `Dict<K,V>` receiver already
+            // resolved correctly via MIR lowering
+            // (mir/lower/lowering_expr_method.rs). See doc/08_tracking/bug/
+            // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+            //
+            // Deliberately `"items"` ONLY, not `"entries"`, even though both
+            // alias the same runtime call and `entries()` has the identical
+            // erased-receiver gap: a census
+            // (`grep -rnE '^\s*(pub\s+)?fn entries\s*\(\s*(self\s*)?\)' src
+            // test`) found NINE user-defined `entries()` methods on other
+            // types (Map, HashMap, BTree-style collections, PersistentMap/
+            // PersistentSortedMap/PersistentTrie, ConcurrentCollections,
+            // FileStateCache, PersistentDict) — the exact THEFT hazard this
+            // whole gate exists to avoid (see `push`/`get`/`starts_with`
+            // above): an erased receiver that is actually one of those types
+            // at runtime would get silently routed to `rt_dict_entries`
+            // (which no-ops to nil on a non-Dict tag) instead of that type's
+            // real `entries()`. `items()` has ZERO competing definitions
+            // anywhere in `src`/`test` (same census, no hits), so it carries
+            // no such risk. `entries()` on an erased receiver keeps its
+            // pre-existing "Function 'entries' not found" behavior — a
+            // known, unchanged gap, not a regression.
+            | ("items", 0)
             // Array mutators. Same hazard class as the collection idioms
             // above (doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md):
             // `push` is enumerated there as a confirmed erased-receiver THEFT
@@ -1101,8 +1130,31 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // First try exact match, then check for "TypeName.method" qualified
         // entries in use_map (prefers imported types over alphabetical import_map)
         let mut resolved_name = ctx.use_map.get(func_name).map(|s| s.as_str());
+        // The Optional/Result helpers must never be suffix-rebound to a user
+        // method of the same name -- same defect as the bare import_map
+        // fallback below already refuses, but reached through the two qualified
+        // scans instead. macOS Stage 2 linker blocker 2026-09-13: a bare
+        // `unwrap` on a `text?` bound to the only `.unwrap` in the import maps
+        // (`Poll.unwrap`), which returns 0 for a text receiver. The LLVM twin
+        // is `pipeline/native_project/mangle.rs`'s `is_enum_helper_method`;
+        // fixing one backend and not the other is how this family recurs.
+        // Keyed on the METHOD SEGMENT, not the whole lookup name: a QUALIFIED
+        // `MirStaticInit.unwrap` / `T.unwrap` skipped this predicate entirely
+        // (it is not literally "unwrap"), so all four scans below still ran and
+        // the bare last-resort one bound it to the only `.unwrap` in the import
+        // maps. That is the second route behind the 208 residual
+        // `bl Poll.unwrap` sites measured on the run-17 Stage 2 candidate
+        // (2026-09-13); the LLVM twin is `mangle.rs`'s
+        // `enum_helper_owner_matches`. The exact `use_map.get(func_name)`
+        // lookup above still runs, so a genuine qualified `Poll.unwrap`
+        // resolves.
+        let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+        let enum_helper = matches!(
+            enum_helper_method,
+            "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
+        );
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
-        if resolved_name.is_none() {
+        if resolved_name.is_none() && !enum_helper {
             let method_suffix = format!(".{}", func_name);
             for (raw, mangled) in ctx.use_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
@@ -1112,7 +1164,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Also check import_map for qualified entries where type is imported
-        if resolved_name.is_none() {
+        if resolved_name.is_none() && !enum_helper {
             let method_suffix = format!(".{}", lookup_name);
             for (raw, mangled) in ctx.import_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
@@ -1125,12 +1177,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
         // Final fallback: import_map bare name (may pick wrong overload)
-        if resolved_name.is_none()
-            && !matches!(
-                lookup_name,
-                "unwrap" | "unwrap_or" | "unwrap_err" | "expect" | "is_some" | "is_none" | "is_ok" | "is_err"
-            )
-        {
+        if resolved_name.is_none() && !enum_helper {
             resolved_name = ctx.import_map.get(lookup_name).map(|s| s.as_str());
         }
 
@@ -1172,8 +1219,10 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         .map(|s| s.as_str());
                 }
 
-                // Last resort: bare method name
-                if resolved_name.is_none() {
+                // Last resort: bare method name. Never for the enum helpers --
+                // discarding the qualifier here is exactly how a qualified
+                // `T.unwrap` reached an unrelated type's `unwrap` (2026-09-13).
+                if resolved_name.is_none() && !enum_helper {
                     resolved_name = ctx
                         .use_map
                         .get(method)
@@ -1320,6 +1369,18 @@ mod tests {
         assert!(is_bare_builtin_collection_method("keys", 0));
         assert!(is_bare_builtin_collection_method("values", 0));
         assert!(!is_bare_builtin_collection_method("keys", 1));
+        // `items()` joins `keys`/`values` (doc/08_tracking/bug/
+        // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md,
+        // defect 2's erased-receiver half) — it has no user-defined
+        // competing method anywhere in the tree, so it carries no theft
+        // risk. `entries()` deliberately stays OUT of this gate: real
+        // user-defined `entries()` methods exist on other types (Map,
+        // HashMap, PersistentMap, etc.), so routing a bare `.entries()` here
+        // would risk silently stealing one of those calls. This assertion
+        // guards against that risk being reintroduced.
+        assert!(is_bare_builtin_collection_method("items", 0));
+        assert!(!is_bare_builtin_collection_method("items", 1));
+        assert!(!is_bare_builtin_collection_method("entries", 0));
     }
 
     /// A bare `text.starts_with(prefix)` must reach `rt_string_starts_with`
@@ -2141,10 +2202,7 @@ fn try_compile_builtin_method_call<M: Module>(
                 let mut sig = Signature::new(platform_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
-                match ctx
-                    .module
-                    .declare_function("rt_char_from_code", Linkage::Import, &sig)
-                {
+                match ctx.module.declare_function("rt_char_from_code", Linkage::Import, &sig) {
                     Ok(id) => {
                         ctx.func_ids.insert("rt_char_from_code".to_string(), id);
                         id
@@ -2310,6 +2368,16 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         "keys" => "rt_dict_keys",
         "values" => "rt_dict_values",
+        // `d.items()` on an erased (bare) receiver: same runtime call the
+        // typed-receiver MIR lowering path already uses
+        // (mir/lower/lowering_expr_method.rs), returning an array of (key,
+        // value) tuples matching the interpreter's `items()`/`entries()`
+        // shape. `"entries"` is deliberately NOT added here — see the
+        // `is_bare_builtin_collection_method` gate above for why (real
+        // user-defined `entries()` methods on other types create a theft
+        // risk that `items()` does not have). See doc/08_tracking/bug/
+        // dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md.
+        "items" => "rt_dict_entries",
         // `has` is the canonical Dict/Set membership idiom in Simple source;
         // rt_contains tag-dispatches on the receiver at runtime (Array/Dict/
         // String; anything else yields 0), so it is safe for untyped receivers.

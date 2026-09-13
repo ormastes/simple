@@ -1,6 +1,14 @@
 # llvm_direct run entrypoint misdirected
 
-Status: open (triaged 2026-06-11)
+## Closed 2026-09-13 — Does not reproduce: `run llvm_direct.spl` reaches the CLI entrypoint and emits the profile-counter sidecar
+
+- **measured** `bin/simple run src/app/compile/llvm_direct.spl test/01_unit/compiler/backend/_codegen_smoke.spl <out> --simple-profile-counters --verbose` produced `<out>.simple-profile-counters` on disk — the sidecar the entry reported as missing.
+- **measured** No "Fixed-Point Solver Tests" output appeared, and `src/compiler/00.common/effects_solver.spl` — the file that was being run instead — no longer exists.
+- **measured** The run still ends `EXIT=1` on an unrelated `export use std.nogc_sync_mut.path.*` wildcard-export diagnostic; that is a different defect, not the reported misdirection.
+- **inferred** With the misrouted target deleted and the sidecar produced, the entrypoint-misdirection defect is closed.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 Date: 2026-06-01
 

@@ -263,45 +263,249 @@ fn _sffi_core_string_value_float(value: f64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_value_float(value)
 
-# ponytail: bootstrap-sized string sets only need a compact linear registry;
-# replace it only if equality profiles show pointer validation is hot.
+# Raw-pointer membership table.  The table is deliberately independent from
+# runtime Dict/tagged-value machinery: strings are registered before their
+# headers are initialized, and membership is itself the guard before a header
+# may be read.  Slots are 0 (empty), -1 (deleted), or a positive aligned raw
+# pointer.  Capacity is always a power of two.
 var string_registry_items: i64 = 0
 var string_registry_len: i64 = 0
 var string_registry_cap: i64 = 0
+var string_registry_occupied: i64 = 0
+
+# Four fixed cursor entries, each `(ptr, byte_len, char_index, byte_offset)`.
+# The 128-byte arena is allocated only after a managed-string lookup completes;
+# raw C strings never enter it.  simple-core owns this state single-threadedly.
+var string_char_cursor_items: i64 = 0
+var string_char_cursor_hand: i64 = 0
+
+@always_inline
+fn string_registry_hash(ptr: i64) -> i64:
+    # Shifted xor avoids overflow while discarding malloc alignment bits.
+    (ptr >> 3) ^ (ptr >> 17) ^ (ptr >> 31)
+
+fn string_char_cursor_find(ptr: i64, len: i64) -> i64:
+    val items = string_char_cursor_items
+    if items < 1:
+        return 0
+    var entry = 0
+    while entry < 4:
+        val slot = items + entry * 32
+        if _sffi_core_string_spl_load_i64(slot, 0) == ptr and _sffi_core_string_spl_load_i64(slot, 8) == len:
+            return slot
+        entry = entry + 1
+    0
+
+fn string_char_cursor_record(ptr: i64, len: i64, char_index: i64, byte_offset: i64):
+    if ptr < 1 or len < 0 or char_index < 0 or byte_offset < 0 or byte_offset > len:
+        return
+    var items = string_char_cursor_items
+    if items < 1:
+        items = _sffi_core_string_calloc(1, 128)
+        if items < 1:
+            return
+        string_char_cursor_items = items
+        string_char_cursor_hand = 0
+
+    var destination = string_char_cursor_find(ptr, len)
+    if destination < 1:
+        var entry = 0
+        while entry < 4 and destination < 1:
+            val slot = items + entry * 32
+            if _sffi_core_string_spl_load_i64(slot, 0) == 0:
+                destination = slot
+            entry = entry + 1
+    if destination < 1:
+        var hand = string_char_cursor_hand
+        if hand < 0 or hand > 3:
+            hand = 0
+        destination = items + hand * 32
+        if hand >= 3:
+            string_char_cursor_hand = 0
+        else:
+            string_char_cursor_hand = hand + 1
+
+    # Clear the key before replacing an entry and publish it last.
+    _sffi_core_string_spl_store_i64(destination, 0, 0)
+    _sffi_core_string_spl_store_i64(destination, 8, len)
+    _sffi_core_string_spl_store_i64(destination, 16, char_index)
+    _sffi_core_string_spl_store_i64(destination, 24, byte_offset)
+    _sffi_core_string_spl_store_i64(destination, 0, ptr)
+
+fn string_char_cursor_forget(ptr: i64):
+    val items = string_char_cursor_items
+    if items < 1:
+        return
+    var entry = 0
+    while entry < 4:
+        val slot = items + entry * 32
+        if _sffi_core_string_spl_load_i64(slot, 0) == ptr:
+            _sffi_core_string_spl_store_i64(slot, 0, 0)
+        entry = entry + 1
+
+fn string_char_cursor_reset():
+    val items = string_char_cursor_items
+    if items > 0:
+        _sffi_core_string_free(items)
+    string_char_cursor_items = 0
+    string_char_cursor_hand = 0
+
+fn string_registry_find_raw(ptr: i64) -> i64:
+    if ptr < 4096 or (ptr & 7) != 0:
+        return 0
+    val cap = string_registry_cap
+    val items = string_registry_items
+    if cap < 1 or items < 1 or (cap & (cap - 1)) != 0:
+        return 0
+    if string_registry_len < 0 or string_registry_occupied < string_registry_len or string_registry_occupied > cap:
+        return 0
+    val mask = cap - 1
+    var index = string_registry_hash(ptr) & mask
+    var probes = 0
+    while probes < cap:
+        val slot = _sffi_core_string_spl_load_i64(items, index * 8)
+        if slot == 0:
+            return 0
+        if slot == ptr:
+            return ptr
+        index = (index + 1) & mask
+        probes = probes + 1
+    0
+
+fn string_registry_insert_into(items: i64, cap: i64, ptr: i64) -> i64:
+    val mask = cap - 1
+    var index = string_registry_hash(ptr) & mask
+    var probes = 0
+    while probes < cap:
+        if _sffi_core_string_spl_load_i64(items, index * 8) == 0:
+            _sffi_core_string_spl_store_i64(items, index * 8, ptr)
+            return 1
+        index = (index + 1) & mask
+        probes = probes + 1
+    0
+
+fn string_registry_rebuild(next_cap: i64) -> i64:
+    # 2^59 is the largest accepted slot count: its byte count still fits i64.
+    if next_cap < 64 or next_cap > 576460752303423488 or (next_cap & (next_cap - 1)) != 0:
+        return 0
+    val next_items = _sffi_core_string_calloc(next_cap, 8)
+    if next_items < 1:
+        return 0
+
+    val old_items = string_registry_items
+    val old_cap = string_registry_cap
+    var copied = 0
+    var index = 0
+    while index < old_cap:
+        val slot = _sffi_core_string_spl_load_i64(old_items, index * 8)
+        if slot > 0:
+            if string_registry_insert_into(next_items, next_cap, slot) < 1:
+                _sffi_core_string_free(next_items)
+                return 0
+            copied = copied + 1
+        index = index + 1
+    if copied != string_registry_len:
+        _sffi_core_string_free(next_items)
+        return 0
+
+    # Publish only after the replacement contains the complete old set.
+    string_registry_items = next_items
+    string_registry_cap = next_cap
+    string_registry_occupied = copied
+    if old_items > 0:
+        _sffi_core_string_free(old_items)
+    1
 
 fn register_string_ptr(ptr: i64) -> i64:
-    if string_registry_len >= string_registry_cap:
-        val next_cap = if string_registry_cap < 1: 64 else: string_registry_cap * 2
-        val next_items = _sffi_core_string_realloc(string_registry_items, next_cap * 8)
-        if next_items < 1:
+    if ptr < 4096 or (ptr & 7) != 0:
+        return 0
+    if string_registry_find_raw(ptr) > 0:
+        return 1
+
+    if string_registry_cap < 1:
+        if string_registry_items != 0 or string_registry_len != 0 or string_registry_occupied != 0:
             return 0
-        string_registry_items = next_items
-        string_registry_cap = next_cap
-    _sffi_core_string_spl_store_i64(string_registry_items, string_registry_len * 8, ptr)
-    string_registry_len = string_registry_len + 1
-    1
+        if string_registry_rebuild(64) < 1:
+            return 0
+    else:
+        if string_registry_items < 1 or (string_registry_cap & (string_registry_cap - 1)) != 0:
+            return 0
+        val deleted = string_registry_occupied - string_registry_len
+        if deleted < 0:
+            return 0
+        if deleted > string_registry_len:
+            if string_registry_rebuild(string_registry_cap) < 1:
+                return 0
+
+    if string_registry_occupied + 1 > string_registry_cap / 2:
+        if string_registry_cap >= 576460752303423488:
+            return 0
+        if string_registry_rebuild(string_registry_cap * 2) < 1:
+            return 0
+
+    val items = string_registry_items
+    val cap = string_registry_cap
+    val mask = cap - 1
+    var index = string_registry_hash(ptr) & mask
+    var first_deleted = -1
+    var probes = 0
+    while probes < cap:
+        val slot = _sffi_core_string_spl_load_i64(items, index * 8)
+        if slot == ptr:
+            return 1
+        if slot == -1 and first_deleted < 0:
+            first_deleted = index
+        if slot == 0:
+            val destination = if first_deleted >= 0: first_deleted else: index
+            _sffi_core_string_spl_store_i64(items, destination * 8, ptr)
+            string_registry_len = string_registry_len + 1
+            if first_deleted < 0:
+                string_registry_occupied = string_registry_occupied + 1
+            return 1
+        index = (index + 1) & mask
+        probes = probes + 1
+    if first_deleted >= 0:
+        _sffi_core_string_spl_store_i64(items, first_deleted * 8, ptr)
+        string_registry_len = string_registry_len + 1
+        return 1
+    0
 
 fn registered_string_ptr(value: i64) -> i64:
     if value < 4096 or (value & 7) != 1:
         return 0
     val candidate = value & -8
-    var i = 0
-    while i < string_registry_len:
-        if _sffi_core_string_spl_load_i64(string_registry_items, i * 8) == candidate:
-            return candidate
-        i = i + 1
-    0
+    string_registry_find_raw(candidate)
 
 fn unregister_string_ptr(ptr: i64):
-    var i = 0
-    while i < string_registry_len:
-        if spl_load_i64(string_registry_items, i * 8) == ptr:
-            val last = string_registry_len - 1
-            if i < last:
-                spl_store_i64(string_registry_items, i * 8, spl_load_i64(string_registry_items, last * 8))
-            string_registry_len = last
+    if ptr < 4096 or (ptr & 7) != 0:
+        return
+    val cap = string_registry_cap
+    val items = string_registry_items
+    if cap < 1 or items < 1 or (cap & (cap - 1)) != 0:
+        return
+    if string_registry_len < 1 or string_registry_occupied < string_registry_len or string_registry_occupied > cap:
+        return
+    val mask = cap - 1
+    var index = string_registry_hash(ptr) & mask
+    var probes = 0
+    while probes < cap:
+        val slot = _sffi_core_string_spl_load_i64(items, index * 8)
+        if slot == 0:
             return
-        i = i + 1
+        if slot == ptr:
+            # Drop every memoized dereference before registry retirement.
+            string_char_cursor_forget(ptr)
+            _sffi_core_string_spl_store_i64(items, index * 8, -1)
+            string_registry_len = string_registry_len - 1
+            if string_registry_len == 0:
+                _sffi_core_string_free(items)
+                string_registry_items = 0
+                string_registry_cap = 0
+                string_registry_occupied = 0
+                string_char_cursor_reset()
+            return
+        index = (index + 1) & mask
+        probes = probes + 1
 
 # Transient-string support (2026-08-31, spec: runtime_native.c
 # RT_CORE_STRING_FLAG_TRANSIENT on RtCoreString.reserved). The pure-lane
@@ -426,11 +630,22 @@ pub fn rt_string_len(value: i64) -> i64:
         return _sffi_core_string_strlen(value)
     return -1
 
+# The raw-pointer fallback MUST mirror rt_string_len's above, with the same
+# `> 65535` guard. The compiler lowers a `text` extern argument to the PAIR
+# (rt_string_data(v), rt_string_len(v)); a `text` LITERAL is a bare pointer into
+# read-only data, not a heap string header, so string_ptr cannot decode it.
+# rt_string_len already fell back to strlen for that case and this did not,
+# returning 0 -- and the pair (0, 13) is rejected by every rt_* path entry
+# point, so a text-ABI extern called with a literal failed. Same defect and same
+# fix as rt_string_data in src/runtime/runtime_native.c; the two lanes are
+# paired by the push-rt-dual-implementation ratchet and must not diverge.
 pub fn rt_string_data(value: i64) -> i64:
     val ptr = string_ptr(value)
-    if ptr < 1:
-        return 0
-    return string_data_ptr_value(ptr)
+    if ptr > 0:
+        return string_data_ptr_value(ptr)
+    if value > 65535:
+        return value
+    return 0
 
 # Raw builder handle layout: len @0, cap @8, byte buffer @16.
 pub fn rt_string_builder_new() -> i64:
@@ -572,17 +787,9 @@ pub fn rt_string_chars(value: i64) -> i64:
 
 # Return the Unicode code point at CHARACTER index `index`.
 #
-# Semantics are unchanged; only the cost is. Inside an ASCII prefix a character
-# index is also a byte index, so scan bytes for the first one >= 0x80 and, when
-# `index` falls strictly inside that prefix, read it directly instead of running
-# the multi-byte decode loop below.
-#
-# NOTE: unlike the hosted C/Rust runtimes, this freestanding lane does NOT cache
-# the all-ASCII result in the string header, so it stays O(index) per call rather
-# than becoming O(1). The header bit the hosted runtimes use is bit 31 of the
-# `reserved` field, which lands on the sign bit of the i64 word at offset 0 and
-# is awkward to set safely from Simple. Filed as follow-up; this change is still
-# a strict improvement (plain byte compare instead of full UTF-8 decode).
+# Managed strings retain one of four bounded scan cursors.  A cursor is reused
+# only for an equal or forward character index; backward access restarts at the
+# beginning.  Raw C-string pointers retain the legacy uncached path.
 pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:
     # Match the hosted C owner's rt_core_as_string guard: an arbitrary raw
     # C-string pointer may happen to have the heap tag bits, so validate it
@@ -600,16 +807,16 @@ pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:
             return 0
         while _sffi_core_string_spl_load_u8(data, len) != 0:
             len = len + 1
-    # ASCII-prefix short-circuit: if every byte up to and including `index` is
-    # ASCII, the character at `index` is simply the byte at `index`.
-    if index < len:
-        var probe = 0
-        while probe <= index and (_sffi_core_string_spl_load_u8(data, probe) & 255) < 128:
-            probe = probe + 1
-        if probe > index:
-            return _sffi_core_string_spl_load_u8(data, index) & 255
     var byte_index = 0
     var char_index = 0
+    if ptr > 0:
+        val cursor = string_char_cursor_find(ptr, len)
+        if cursor > 0:
+            val saved_char_index = _sffi_core_string_spl_load_i64(cursor, 16)
+            val saved_byte_offset = _sffi_core_string_spl_load_i64(cursor, 24)
+            if saved_char_index >= 0 and saved_byte_offset >= 0 and saved_byte_offset <= len and index >= saved_char_index:
+                char_index = saved_char_index
+                byte_index = saved_byte_offset
     while byte_index < len:
         val b0 = _sffi_core_string_spl_load_u8(data, byte_index) & 255
         var width = 1
@@ -624,9 +831,13 @@ pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:
             width = 4
             code = ((b0 & 7) << 18) | ((_sffi_core_string_spl_load_u8(data, byte_index + 1) & 63) << 12) | ((_sffi_core_string_spl_load_u8(data, byte_index + 2) & 63) << 6) | (_sffi_core_string_spl_load_u8(data, byte_index + 3) & 63)
         if char_index == index:
+            if ptr > 0:
+                string_char_cursor_record(ptr, len, char_index, byte_index)
             return code
         byte_index = byte_index + width
         char_index = char_index + 1
+    if ptr > 0:
+        string_char_cursor_record(ptr, len, char_index, byte_index)
     return 0
 
 pub fn __simple_rt_string_char_code_at(value: i64, index: i64) -> i64:
@@ -726,6 +937,15 @@ pub fn rt_str_hash(value: i64) -> i64:
         i = i + 1
     return h
 
+# Canonical algorithm: FNV-1a 64-bit (offset basis -3750763034362895579 ==
+# 0xcbf29ce484222325, prime 1099511628211 == 0x100000001b3) — MUST match the
+# C runtime (src/runtime/runtime_native.c rt_hash_text), the Rust native
+# runtime (src/compiler_rust/runtime/src/value/collections.rs rt_hash_text),
+# and the interpreter extern
+# (src/compiler_rust/compiler/src/interpreter_extern/conversion.rs
+# rt_hash_text). Previously DJB2 (matching the buggy Cranelift inline fast
+# path this function mirrors), which silently diverged from the C oracle —
+# see doc/08_tracking/bug/rt_hash_text_cross_lane_disagreement_2026-09-07.md.
 pub fn rt_hash_text(value: i64) -> i64:
     if (value & 7) < 1 or (value & 7) > 1:
         return 0
@@ -737,17 +957,10 @@ pub fn rt_hash_text(value: i64) -> i64:
         return 0
     val len = _sffi_core_string_spl_load_i64(ptr, 8)
     val data = ptr + 16
-    var h = 5381
+    var h = -3750763034362895579
     var i = 0
-    while i + 3 < len:
-        h = h * 1185921 +
-            ((_sffi_core_string_spl_load_u8(data, i) & 255) * 35937) +
-            ((_sffi_core_string_spl_load_u8(data, i + 1) & 255) * 1089) +
-            ((_sffi_core_string_spl_load_u8(data, i + 2) & 255) * 33) +
-            (_sffi_core_string_spl_load_u8(data, i + 3) & 255)
-        i = i + 4
     while i < len:
-        h = (h << 5) + h + (_sffi_core_string_spl_load_u8(data, i) & 255)
+        h = (h ^ (_sffi_core_string_spl_load_u8(data, i) & 255)) * 1099511628211
         i = i + 1
     return h
 
@@ -778,6 +991,39 @@ pub fn rt_string_concat(left: i64, right: i64) -> i64:
 # they're on.
 pub fn rt_strcat_tagged(left: i64, right: i64) -> i64:
     return rt_string_concat(left, right)
+
+# Presence predicate for the postfix `.?` operator -- the simple-core twin of
+# rt_is_present in src/runtime/runtime_native.c and of the Rust runtime's
+# rt_is_present. `.?` is absent for nil/None AND for an EMPTY array, dict or
+# string; 0, false, tuples, closures and structs stay present, exactly as the
+# tree-walk interpreter's Expr::ExistsCheck arm decides it. It lives here
+# rather than beside rt_is_some in core_values.spl because the array/dict/
+# string kind probes it needs are this file's (see rt_len just below).
+# doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+pub fn rt_is_present(value: i64) -> i8:
+    if value == 3:
+        return 0
+    var payload = value
+    # Unwrap the canonical Option layer (enum id 1, Some=0 / None=1) first.
+    if _sffi_core_string_rt_enum_id(value) == 1:
+        val disc = _sffi_core_string_rt_enum_discriminant(value)
+        if disc == 1:
+            return 0
+        payload = _sffi_core_string_rt_enum_payload(value)
+    if payload == 3:
+        return 0
+    val sptr = string_ptr(payload)
+    if sptr > 0:
+        return if string_len_ptr(sptr) > 0: 1 else: 0
+    if (payload & 7) == 1 and payload > 4095:
+        val kind = _sffi_core_string_spl_load_u8(payload & -8, 0)
+        if kind == 2:
+            return if _sffi_core_string_rt_array_len(payload) > 0: 1 else: 0
+        if kind == 6:
+            return if _sffi_core_string_rt_dict_len(payload) > 0: 1 else: 0
+    # Every other value is present -- re-deciding by truthiness is the
+    # "0 is falsy" landmine.
+    return 1
 
 pub fn rt_len(value: i64) -> i64:
     val ptr = string_ptr(value)

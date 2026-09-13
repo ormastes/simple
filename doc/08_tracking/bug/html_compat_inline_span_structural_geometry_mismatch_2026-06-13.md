@@ -1,6 +1,12 @@
 # HTML Compat Inline Span Structural Geometry Mismatch
 
-- Status: resolved
+## Closed 2026-09-13 — Already resolved by the entry's own fix; nothing left to act on
+
+- **inferred**: the entry already records the resolution and its evidence (`fixture_count=1`, `pass_count=1`, `fail_count=0`, `blur_or_tolerance_used=false`) with `01_inline_text` promoted into the default all-pass Chrome geometry manifest.
+- **inferred**: the repro is stale-by-host — it pins `SIMPLE_BIN=/home/ormastes/dev/pub/simple/src/compiler_rust/target/release/simple`, a Linux path that does not exist on this Windows triage host, and needs a Chrome/Chromium harness that is not available here.
+- **measured**: the one repo path the entry cites (`scripts/check/check-chrome-html-compat-geometry-manifest-evidence.shs`) still exists, so this is a genuine closed fix rather than removed code.
+
+- Status: CLOSED 2026-09-13 (resolved)
 - Severity: P2
 - Area: Simple Web Renderer / Chromium geometry parity
 - Repro:

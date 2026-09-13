@@ -44,3 +44,7 @@ Current evidence:
 Restore positive SFFI signature verification/signing interop for Ed25519 and
 RSA-PSS, then tighten `server_accept_spec.spl` back to require a real
 CertificateVerify and encrypted server flight for the valid fixture path.
+
+## Triage 2026-09-12
+
+Re-verified 2026-09-12: still reproduces, and worse than filed — `bin/simple test test/03_system/os/os_rt_ed25519_sign_spec.spl --clean --json` now reports `total_passed:0, total_failed:8` (record cited `total_passed:5, total_failed:3`) on deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59). Status kept as OPEN.

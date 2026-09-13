@@ -158,7 +158,7 @@ pub use collections::{
     rt_typed_words_u64_push_known_data_at, rt_typed_words_u64_raw_data_at, rt_typed_words_u64_set,
     rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
 };
-pub(crate) use collections::{byte_array_bytes, byte_array_write};
+pub(crate) use collections::{byte_array_bytes, byte_array_write, word_array_le_bytes};
 pub use collections::{
     rt_any_add, rt_array_all, rt_array_any, rt_array_each, rt_array_filter, rt_array_find, rt_array_map,
     rt_array_reduce, rt_map,
@@ -404,7 +404,8 @@ pub use wsffi_native::{
     spl_backend_plugin_run_v1, spl_dlopen_checked, spl_dlsym, spl_dlsym_checked, spl_dlsym_process_checked,
     spl_fonts_call_init_blob, spl_fonts_call_init_path, spl_fonts_call_layout_text, spl_wffi_call_bool0_checked,
     spl_wffi_call_bool1_checked, spl_wffi_call_f64, spl_wffi_call_f64_checked, spl_wffi_call_i64,
-    spl_wffi_call_i64_checked, spl_wffi_call_i64_with_bytes, spl_wffi_call_i64_with_bytes_checked,
+    spl_wffi_call_i64_checked, spl_wffi_call_i64_into_bytes, spl_wffi_call_i64_with_bytes,
+    spl_wffi_call_i64_with_bytes_checked,
     spl_wffi_try_call_i64, spl_wffi_try_call_i64_out,
 };
 
@@ -421,6 +422,7 @@ pub use sffi::{
     rt_file_canonicalize,
     rt_file_read_text,
     rt_file_read_regular_no_follow_bounded,
+    rt_file_read_regular_no_follow_last_failure,
     rt_file_read_text_rv,
     rt_file_write_text,
     rt_file_copy,
@@ -1008,21 +1010,29 @@ pub use numeric_kernels::{
     rt_numeric_mul_f32, rt_numeric_mul_f64, rt_numeric_sum_f32, rt_numeric_sum_f64, rt_numeric_xor_sum_u64,
 };
 
-// Re-export Phase 1 SIMD int bitwise / shift / arithmetic SFFI symbols.
-pub use simd_int_ops::{
-    rt_simd_add_i32x4, rt_simd_add_i32x8, rt_simd_and_i32x4, rt_simd_and_i32x8, rt_simd_mul_i32x4, rt_simd_mul_i32x8,
-    rt_simd_or_i32x4, rt_simd_or_i32x8, rt_simd_shl_i32x4, rt_simd_shl_i32x8, rt_simd_shr_i32x4, rt_simd_shr_i32x8,
-    rt_simd_sub_i32x4, rt_simd_sub_i32x8, rt_simd_xor_i32x4, rt_simd_xor_i32x8,
-};
+// Phase 1 SIMD int bitwise/shift/arithmetic `#[no_mangle]` wrappers
+// (rt_simd_{add,sub,mul,xor,and,or,shl,shr}_i32x{4,8}) were REMOVED
+// 2026-09-07 as dead/wrong-ABI duplicates of the C implementations in
+// runtime_simd_dispatch.c — see
+// doc/08_tracking/bug/simple_runtime_cdylib_rt_simd_duplicate_symbol_2026-09-07.md.
+// The private lane-kernel functions (`add_i32x4` etc.) are still used
+// directly by `compiler/src/interpreter_extern/simd.rs` and are not
+// re-exported here.
 
-// Re-export Phase 2 (seed) SIMD byte SFFI symbol.
-pub use simd_byte_ops::rt_simd_add_u8x16;
+// Phase 2 (seed) SIMD byte SFFI symbol `rt_simd_add_u8x16` was REMOVED for
+// the same reason (see above); `rt_simd_xor_u8x16` was never re-exported
+// here either.
 
-// Re-export Phase 2 SIMD AES round SFFI symbols.
+// Re-export Phase 2 SIMD AES round SFFI symbols. Unlike the removals above,
+// these ARE the correct, RUNTIME_FUNCS-registered, actively-used ABI, so
+// they stay; the C definitions of the same two names in
+// runtime_simd_dispatch.c are weak-linked so these win when both are linked
+// (see that file's SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16 gate).
 pub use simd_aes_ops::{rt_simd_aes_round_last_u8x16, rt_simd_aes_round_u8x16};
 
-// Re-export Phase 3 SIMD u64x2 + PCLMUL SFFI symbols.
-pub use simd_clmul_ops::{rt_simd_clmul_hi_u64, rt_simd_clmul_lo_u64, rt_simd_xor_u64x2};
+// Phase 3 SIMD u64x2 + PCLMUL SFFI symbols (rt_simd_clmul_lo_u64,
+// rt_simd_clmul_hi_u64, rt_simd_xor_u64x2) were REMOVED 2026-09-07 for the
+// same dead/wrong-ABI reason as the Phase 1 symbols above.
 
 // Re-export regex SFFI functions
 pub use sffi::{

@@ -1,6 +1,9 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_aot_output.*
+# compile_to_vhdl is an optional plugin-owned CompilerDriver extension. The
+# call below still needs its owning module in this compilation closure.
+use plugins.backend_vhdl.driver.driver_aot_vhdl_output.*
 use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_bootstrap_flat_warning}
 # NOTE: these two MUST stay at module scope. A function-body-scoped
 # `use <path>.{name}` is a silent no-op for symbol resolution, which made the
@@ -8,11 +11,11 @@ use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_boo
 # 'update_smf_manifest_entry' not found`. See
 # doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
 use compiler.driver.cache.cache_validator.{source_to_cache_path}
+use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
-use compiler.driver.driver_bootstrap.{
+use compiler.driver.bootstrap_k1_selected.{
     bootstrap_compile_to_native_local,
-    bootstrap_compile_context_to_native_local,
-    bootstrap_lower_to_mir_context
+    bootstrap_compile_context_to_native_local
 }
 use compiler.common.driver_core_types.{
     CompileResult,
@@ -26,7 +29,7 @@ use std.io_runtime.{env_get_opt, file_read_result, hash_text}
 fn native_build_cache_dir() -> text:
     val dir = env_get_opt("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
     if dir == "":
-        "build/native_cache"
+        machine_cache_root() + "/native-build/v1"
     else:
         dir
 
@@ -58,13 +61,7 @@ impl CompilerDriver:
         val log = self.ctx.logger
 
         log_phase("aot:lower_to_mir:start")
-        var mir_ok = false
-        if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
-            val (next_ctx, ok) = bootstrap_lower_to_mir_context(self.ctx)
-            self.ctx = next_ctx
-            mir_ok = ok
-        else:
-            mir_ok = self.lower_to_mir()
+        val mir_ok = self.lower_to_mir()
         if not mir_ok:
             for err in self.ctx.errors:
                 log_error("MIR error: {err}")
@@ -153,7 +150,24 @@ impl CompilerDriver:
         log_phase("aot:format:start")
         val format = self.ctx.options.output_format
         log_phase("aot:format:done")
-        if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        # bootstrap_compile_context_to_native_local emits exactly ONE object,
+        # hardcoded as `<output>.app.cli.bootstrap_main.o`, and links only that.
+        # It is the "compile the bootstrap CLI" path, so SIMPLE_BOOTSTRAP=1 is
+        # not on its own enough to route here: the Stage-2 admission probe sets
+        # that variable while building hello_world.spl, and the resulting link
+        # failed with `ld.lld: error: undefined symbol: __simple_main`
+        # (measured 2026-09-13). Require that the bootstrap CLI really is part
+        # of this compile, the same predicate and the same ctx.sources identity
+        # that driver_pipeline_lowering.spl applies to the matching MIR gate.
+        # Deliberately duplicated rather than shared: CompileContext lives in
+        # the fenced driver_types.spl. Both sites must move together.
+        var aot_bootstrap_entry_requested = false
+        var aot_bootstrap_entry_idx = 0
+        while aot_bootstrap_entry_idx < self.ctx.sources.len():
+            if self.ctx.sources[aot_bootstrap_entry_idx].module_name == "app.cli.bootstrap_main":
+                aot_bootstrap_entry_requested = true
+            aot_bootstrap_entry_idx = aot_bootstrap_entry_idx + 1
+        if aot_bootstrap_entry_requested and (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             log_phase("aot:bootstrap_native_context_dispatch")
             return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)
         if driver_output_format_is_smf(format):

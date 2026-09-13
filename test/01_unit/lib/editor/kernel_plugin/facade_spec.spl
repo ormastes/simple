@@ -1,0 +1,94 @@
+use std.spec
+use std.spec.step
+use std.editor.extensions.manifest.*
+use std.editor.kernel_plugin.facade.*
+
+fn local_handler(payload: text) -> Result<text, text>:
+    Ok("local:" + payload)
+
+fn failing_handler(payload: text) -> Result<text, text>:
+    Err("boom:" + payload)
+
+fn event_handler(payload: text):
+    pass_do_nothing
+
+fn capability_status(name: text) -> EditorKpfFacadeStatus:
+    match editor_kpf_capability_bit(name):
+        case Ok(_): EditorKpfFacadeStatus.Accepted
+        case Err(status): status
+
+fn activation_event_status(event: text) -> EditorKpfFacadeStatus:
+    match editor_kpf_activation_event(event):
+        case Ok(_): EditorKpfFacadeStatus.Accepted
+        case Err(status): status
+
+fn facade_manifest(name: text, host: text, process_spawn: bool) -> ExtensionManifest:
+    var manifest = extension_manifest_basic(name, "1.0.0", "",
+        ["onCommand:" + name + ".run"],
+        [ExtensionCommand(id: name + ".run", title: "Run", category: "Test")], [])
+    manifest.host = host
+    var permissions = extension_permissions_none()
+    permissions.process_spawn = process_spawn
+    manifest.permissions = permissions
+    manifest
+
+describe "editor KPF compatibility facade":
+    it "rejects unknown placement and capability instead of coercing them":
+        step("Reject unknown editor extension authority at admission")
+        val facade = EditorKpfFacadeV1.create(7, 4)
+        expect(facade.admit(facade_manifest("bad-place", "surprise", false)).status).to_equal(EditorKpfFacadeStatus.UnknownPlacement)
+        expect(capability_status("ambient_root")).to_equal(EditorKpfFacadeStatus.UnknownCapability)
+        expect(activation_event_status("onSurprise:value")).to_equal(EditorKpfFacadeStatus.UnknownActivationEvent)
+
+    it "maps activation and disposes command and event registrations on deactivate":
+        step("Preserve lazy activation and lifetime cleanup")
+        val facade = EditorKpfFacadeV1.create(8, 4)
+        expect(facade.admit(facade_manifest("local-ext", "in_process", false)).status).to_equal(EditorKpfFacadeStatus.Accepted)
+        facade.register_command("local-ext", "local-ext.run", "Run", local_handler)
+        facade.on_event("local-ext", "document.saved", event_handler)
+        expect(facade.owned_disposable_count("local-ext")).to_equal(2)
+        expect(facade.emit_event("document.saved", "x")).to_equal(1)
+        expect(facade.activate_event("onCommand:local-ext.run", 0)).to_equal(1)
+        expect(facade.is_active("local-ext")).to_equal(true)
+        val dispatch = facade.dispatch_command("local-ext.run", "x", 0)
+        expect(dispatch.status).to_equal(EditorKpfFacadeStatus.Accepted)
+        expect(dispatch.output).to_equal("local:x")
+        expect(facade.deactivate("local-ext")).to_equal(EditorKpfFacadeStatus.Accepted)
+        expect(facade.owned_disposable_count("local-ext")).to_equal(0)
+        expect(facade.command_registered("local-ext.run")).to_equal(false)
+        expect(facade.listener_count()).to_equal(0)
+        expect(facade.session_is_live("local-ext")).to_equal(false)
+
+    it "routes worker commands through KPF transport and never invokes the local handler":
+        step("Use the common worker contract for worker placement")
+        val facade = EditorKpfFacadeV1.create(9, 4)
+        expect(facade.admit(facade_manifest("worker-ext", "worker", true)).status).to_equal(EditorKpfFacadeStatus.Accepted)
+        facade.register_command("worker-ext", "worker-ext.run", "Run", failing_handler)
+        expect(facade.activate("worker-ext", 1)).to_equal(EditorKpfFacadeStatus.Pending)
+        expect(facade.accept_worker_handshake("worker-ext", 2)).to_equal(EditorKpfFacadeStatus.Accepted)
+        val dispatch = facade.dispatch_command("worker-ext.run", "payload", 3)
+        expect(dispatch.status).to_equal(EditorKpfFacadeStatus.Accepted)
+        expect(dispatch.output).to_equal("")
+        expect(dispatch.request.request_slot >= 0).to_equal(true)
+        expect(facade.deactivate("worker-ext")).to_equal(EditorKpfFacadeStatus.Quiescing)
+        expect(facade.session_is_live("worker-ext")).to_equal(true)
+        expect(facade.accept_worker_completion("worker-ext", dispatch.request, 4)).to_equal(EditorKpfFacadeStatus.Accepted)
+        expect(facade.deactivate("worker-ext")).to_equal(EditorKpfFacadeStatus.Accepted)
+        expect(facade.session_is_live("worker-ext")).to_equal(false)
+
+    it "contains a worker crash and disables only that provider after repeated failures":
+        step("Isolate worker crashes by provider generation")
+        val facade = EditorKpfFacadeV1.create(10, 8)
+        facade.admit(facade_manifest("worker-crash", "worker", true))
+        facade.admit(facade_manifest("healthy-ext", "in_process", false))
+        facade.register_command("worker-crash", "worker-crash.run", "Run", local_handler)
+        facade.register_command("healthy-ext", "healthy-ext.run", "Run", local_handler)
+        facade.activate("worker-crash", 1)
+        facade.accept_worker_handshake("worker-crash", 2)
+        facade.activate("healthy-ext", 2)
+        facade.crash_worker("worker-crash")
+        expect(facade.dispatch_command("worker-crash.run", "1", 3).status).to_equal(EditorKpfFacadeStatus.WorkerCrashed)
+        expect(facade.dispatch_command("worker-crash.run", "2", 4).status).to_equal(EditorKpfFacadeStatus.WorkerCrashed)
+        expect(facade.dispatch_command("worker-crash.run", "3", 5).status).to_equal(EditorKpfFacadeStatus.WorkerCrashed)
+        expect(facade.dispatch_command("worker-crash.run", "4", 6).status).to_equal(EditorKpfFacadeStatus.Disabled)
+        expect(facade.dispatch_command("healthy-ext.run", "ok", 6).status).to_equal(EditorKpfFacadeStatus.Accepted)

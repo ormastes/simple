@@ -1,0 +1,1547 @@
+# Pure-Simple Linux x86-64 process-observation V1 provider.
+#
+# This is the adjacent runtime owner for the boxed `_value` ABI consumed by
+# std.nogc_sync_mut.io.process_ops. It owns every descriptor, child identity,
+# executable snapshot and generation until collection completes.
+
+@unsafe(reason: "raw libc heap allocation ABI", capabilities: [ffi, raw_ptr])
+extern fn calloc(count: i64, size: i64) -> i64
+@unsafe(reason: "raw libc heap allocation ABI", capabilities: [ffi, raw_ptr])
+extern fn malloc(size: i64) -> i64
+@unsafe(reason: "raw libc owned heap release ABI", capabilities: [ffi, raw_ptr])
+extern fn free(ptr: i64)
+@unsafe(reason: "raw libc descriptor open ABI", capabilities: [ffi, raw_ptr])
+extern fn open(path: i64, flags: i64) -> i64
+@unsafe(reason: "raw libc descriptor close ABI", capabilities: [ffi])
+extern fn close(fd: i64) -> i64
+@unsafe(reason: "raw libc descriptor read ABI", capabilities: [ffi, raw_ptr])
+extern fn read(fd: i64, buffer: i64, count: i64) -> i64
+@unsafe(reason: "raw libc descriptor write ABI", capabilities: [ffi, raw_ptr])
+extern fn write(fd: i64, buffer: i64, count: i64) -> i64
+@unsafe(reason: "raw libc descriptor seek ABI", capabilities: [ffi])
+extern fn lseek(fd: i64, offset: i64, whence: i64) -> i64
+@unsafe(reason: "raw libc descriptor stat ABI", capabilities: [ffi, raw_ptr])
+extern fn fstat(fd: i64, stat_buffer: i64) -> i64
+@unsafe(reason: "raw libc path stat ABI", capabilities: [ffi, raw_ptr])
+extern fn stat(path: i64, stat_buffer: i64) -> i64
+@unsafe(reason: "raw libc descriptor mode ABI", capabilities: [ffi])
+extern fn fchmod(fd: i64, mode: i64) -> i64
+@unsafe(reason: "raw Linux anonymous-file ABI", capabilities: [ffi, raw_ptr])
+extern fn memfd_create(name: i64, flags: i64) -> i64
+@unsafe(reason: "raw Linux pipe descriptor ABI", capabilities: [ffi, raw_ptr])
+extern fn pipe2(pipe_fds: i64, flags: i64) -> i64
+@unsafe(reason: "raw libc descriptor control ABI", capabilities: [ffi])
+extern fn fcntl(fd: i64, command: i64, arg: i64) -> i64
+@unsafe(reason: "raw libc descriptor duplication ABI", capabilities: [ffi])
+extern fn dup2(old_fd: i64, new_fd: i64) -> i64
+@unsafe(reason: "raw libc process fork ABI", capabilities: [ffi])
+extern fn fork() -> i64
+@unsafe(reason: "raw libc child-only immediate exit ABI", capabilities: [ffi])
+extern fn _exit(code: i64)
+@unsafe(reason: "raw libc descriptor-backed exec ABI", capabilities: [ffi, raw_ptr])
+extern fn fexecve(fd: i64, argv: i64, envp: i64) -> i64
+@unsafe(reason: "raw libc nonblocking child wait/rusage ABI", capabilities: [ffi, raw_ptr])
+extern fn wait4(pid: i64, status: i64, options: i64, rusage: i64) -> i64
+@unsafe(reason: "raw libc process-group signal ABI", capabilities: [ffi])
+extern fn kill(pid: i64, signal_number: i64) -> i64
+@unsafe(reason: "raw libc process-group ownership ABI", capabilities: [ffi])
+extern fn setpgid(pid: i64, pgid: i64) -> i64
+@unsafe(reason: "raw libc monotonic-clock ABI", capabilities: [ffi, raw_ptr])
+extern fn clock_gettime(clock_id: i64, timespec: i64) -> i64
+@unsafe(reason: "raw libc bounded sleep ABI", capabilities: [ffi])
+extern fn usleep(microseconds: i64) -> i64
+@unsafe(reason: "raw Linux host identity ABI", capabilities: [ffi, raw_ptr])
+extern fn uname(buffer: i64) -> i64
+@unsafe(reason: "raw thread-local errno address ABI", capabilities: [ffi, raw_ptr])
+extern fn __errno_location() -> i64
+
+@unsafe(reason: "raw pointer i64 load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer byte load ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+@unsafe(reason: "raw pointer i64 store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw pointer byte store ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+@unsafe(reason: "raw tagged array allocation ABI", capabilities: [ffi])
+extern fn rt_array_new(capacity: i64) -> i64
+@unsafe(reason: "raw tagged array value-transfer ABI", capabilities: [ffi])
+extern fn rt_array_push(array: i64, value: i64) -> i8
+@unsafe(reason: "raw tagged integer allocation ABI", capabilities: [ffi])
+extern fn rt_value_int(value: i64) -> i64
+@unsafe(reason: "raw tagged byte-array allocation ABI", capabilities: [ffi])
+extern fn rt_byte_array_new_len(length: i64) -> i64
+@unsafe(reason: "raw tagged array payload ABI", capabilities: [ffi, raw_ptr])
+extern fn array_items(array: i64) -> i64
+@unsafe(reason: "raw tagged tuple allocation ABI", capabilities: [ffi])
+extern fn rt_tuple_new(length: i64) -> i64
+@unsafe(reason: "raw tagged tuple value-transfer ABI", capabilities: [ffi])
+extern fn rt_tuple_set(tuple: i64, index: i64, value: i64) -> i8
+@unsafe(reason: "raw tagged array length ABI", capabilities: [ffi])
+extern fn rt_array_len(array: i64) -> i64
+@unsafe(reason: "raw tagged text array access ABI", capabilities: [ffi])
+extern fn rt_array_get_text(array: i64, index: i64) -> i64
+@unsafe(reason: "raw tagged string payload ABI", capabilities: [ffi, raw_ptr])
+extern fn rt_string_data(value: i64) -> i64
+@unsafe(reason: "raw tagged string length ABI", capabilities: [ffi])
+extern fn rt_string_len(value: i64) -> i64
+@unsafe(reason: "raw tagged string release ABI", capabilities: [ffi])
+extern fn rt_string_free(value: i64) -> i64
+@unsafe(reason: "pure-Simple SHA-256 path provider ABI", capabilities: [ffi])
+extern fn rt_file_hash_sha256(path_ptr: i64, path_len: i64) -> i64
+
+const OBS_VERSION: i64 = 1
+const OBS_CAPABILITIES: i64 = 63
+const OBS_MAX_SLOTS: i64 = 64
+const OBS_MAX_CAPTURE: i64 = 1048576
+const OBS_MAX_DRAIN_TURN: i64 = 65536
+const OBS_MAX_POLL_MS: i64 = 250
+const OBS_CLEANUP_RESERVE_MS: i64 = 1000
+const OBS_MAX_EXECUTABLE_BYTES: i64 = 536870912
+
+const PIN_STRIDE: i64 = 96
+const PIN_STATE: i64 = 0
+const PIN_GENERATION: i64 = 8
+const PIN_FD: i64 = 16
+const PIN_PATH: i64 = 24
+const PIN_PATH_LEN: i64 = 32
+const PIN_DEV: i64 = 40
+const PIN_INO: i64 = 48
+const PIN_SIZE: i64 = 56
+const PIN_MTIME_SEC: i64 = 64
+const PIN_MTIME_NSEC: i64 = 72
+const PIN_DIGEST: i64 = 80
+
+const PROC_STRIDE: i64 = 336
+const PROC_STATE: i64 = 0
+const PROC_GENERATION: i64 = 8
+const PROC_PID: i64 = 16
+const PROC_PGID: i64 = 24
+const PROC_PIN_INDEX: i64 = 32
+const PROC_PIN_GENERATION: i64 = 40
+const PROC_OUT_FD: i64 = 48
+const PROC_OUT_BUFFER: i64 = 56
+const PROC_OUT_LIMIT: i64 = 64
+const PROC_OUT_SEEN: i64 = 72
+const PROC_OUT_KEPT: i64 = 80
+const PROC_OUT_DELIVERED: i64 = 88
+const PROC_OUT_EOF: i64 = 96
+const PROC_ERR_FD: i64 = 104
+const PROC_ERR_BUFFER: i64 = 112
+const PROC_ERR_LIMIT: i64 = 120
+const PROC_ERR_SEEN: i64 = 128
+const PROC_ERR_KEPT: i64 = 136
+const PROC_ERR_DELIVERED: i64 = 144
+const PROC_ERR_EOF: i64 = 152
+const PROC_DEADLINE: i64 = 160
+const PROC_GRACE: i64 = 168
+const PROC_TERM_AT: i64 = 176
+const PROC_TERM_SENT: i64 = 184
+const PROC_KILL_SENT: i64 = 192
+const PROC_DEADLINE_EXCEEDED: i64 = 200
+const PROC_REAPED: i64 = 208
+const PROC_WAIT_STATUS: i64 = 216
+const PROC_USER_MS: i64 = 224
+const PROC_SYSTEM_MS: i64 = 232
+const PROC_RSS_KIB: i64 = 240
+const PROC_RUSAGE_AVAILABLE: i64 = 248
+const PROC_FAILURE: i64 = 256
+const PROC_OUTPUT_COMPLETE: i64 = 264
+const PROC_TURN: i64 = 272
+const PROC_EINTR_RETRIES: i64 = 280
+const PROC_STATUS_BUFFER: i64 = 288
+const PROC_RUSAGE_BUFFER: i64 = 296
+const PROC_STARTED_AT: i64 = 304
+const PROC_SCRATCH_BUFFER: i64 = 312
+const PROC_CLOCK_BUFFER: i64 = 320
+const PROC_CLEANUP_END: i64 = 328
+
+# Start status words.
+const START_UNSUPPORTED: i64 = 0
+const START_STARTED: i64 = 1
+const START_EXEC_FAILED: i64 = 2
+const START_INVALID: i64 = 3
+const START_EXHAUSTED: i64 = 4
+const START_PROVIDER_FAILED: i64 = 5
+const START_CLEANUP_PENDING: i64 = 6
+
+# Poll/result status words.
+const STATUS_UNSUPPORTED: i64 = 0
+const STATUS_OK: i64 = 1
+const STATUS_REUSE: i64 = 2
+const STATUS_MALFORMED: i64 = 3
+const STATUS_MISSING: i64 = 4
+const STATUS_PROVIDER_FAILED: i64 = 5
+const STATUS_CLEANUP_PENDING: i64 = 6
+
+# Failure reason words.
+const FAIL_NONE: i64 = 0
+const FAIL_INVALID: i64 = 1
+const FAIL_EXHAUSTED: i64 = 2
+const FAIL_CLOCK: i64 = 3
+const FAIL_PIN: i64 = 4
+const FAIL_PIPE: i64 = 5
+const FAIL_FORK: i64 = 6
+const FAIL_EXEC: i64 = 7
+const FAIL_WAIT: i64 = 8
+const FAIL_CLEANUP: i64 = 9
+
+var observation_pin_slots: i64 = 0
+var observation_process_slots: i64 = 0
+var observation_capability_cache: i64 = -1
+
+@always_inline
+fn obs_calloc(count: i64, size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]): calloc(count, size)
+
+@always_inline
+fn obs_malloc(size: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]): malloc(size)
+
+@always_inline
+fn obs_free(ptr: i64):
+    unsafe(capabilities: [ffi, raw_ptr]): free(ptr)
+
+@always_inline
+fn obs_load(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]): spl_load_i64(ptr, offset)
+
+@always_inline
+fn obs_byte(ptr: i64, offset: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]): spl_load_u8(ptr, offset)
+
+@always_inline
+fn obs_store(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]): spl_store_i64(ptr, offset, value)
+
+@always_inline
+fn obs_store_byte(ptr: i64, offset: i64, value: i64):
+    unsafe(capabilities: [ffi, raw_ptr]): spl_store_u8(ptr, offset, value)
+
+@always_inline
+fn obs_close(fd: i64) -> i64:
+    unsafe(capabilities: [ffi]): close(fd)
+
+@always_inline
+fn obs_read(fd: i64, buffer: i64, count: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]): read(fd, buffer, count)
+
+@always_inline
+fn obs_write(fd: i64, buffer: i64, count: i64) -> i64:
+    unsafe(capabilities: [ffi, raw_ptr]): write(fd, buffer, count)
+
+@always_inline
+fn obs_errno() -> i64:
+    val ptr = unsafe(capabilities: [ffi, raw_ptr]): __errno_location()
+    obs_load(ptr, 0) & 4294967295
+
+@always_inline
+fn obs_now_ms() -> i64:
+    val ts = obs_malloc(16)
+    if ts < 1:
+        return 0
+    val result = unsafe(capabilities: [ffi, raw_ptr]): clock_gettime(1, ts)
+    if result != 0:
+        obs_free(ts)
+        return 0
+    val now = obs_load(ts, 0) * 1000 + obs_load(ts, 8) / 1000000
+    obs_free(ts)
+    now
+
+@always_inline
+fn obs_now_ms_with(ts: i64) -> i64:
+    if ts < 1:
+        return 0
+    val result = unsafe(capabilities: [ffi, raw_ptr]): clock_gettime(1, ts)
+    if result != 0:
+        return 0
+    obs_load(ts, 0) * 1000 + obs_load(ts, 8) / 1000000
+
+@always_inline
+fn obs_slot_now_ms(slot: i64) -> i64:
+    obs_now_ms_with(obs_load(slot, PROC_CLOCK_BUFFER))
+
+fn obs_copy_bytes(dst: i64, src: i64, count: i64):
+    var i = 0
+    while i < count:
+        obs_store_byte(dst, i, obs_byte(src, i))
+        i = i + 1
+
+fn obs_copy_cstr(src: i64, length: i64) -> i64:
+    if src < 1 or length < 0:
+        return 0
+    val out = obs_malloc(length + 1)
+    if out < 1:
+        return 0
+    obs_copy_bytes(out, src, length)
+    obs_store_byte(out, length, 0)
+    out
+
+fn obs_word_array(capacity: i64) -> i64:
+    unsafe(capabilities: [ffi]): rt_array_new(capacity)
+
+fn obs_push_word(array: i64, value: i64) -> bool:
+    if array < 4096:
+        return false
+    val boxed = unsafe(capabilities: [ffi]): rt_value_int(value)
+    unsafe(capabilities: [ffi]): rt_array_push(array, boxed) == 1
+
+fn obs_words_valid(array: i64, expected: i64) -> bool:
+    array >= 4096 and unsafe(capabilities: [ffi]): rt_array_len(array) == expected
+
+fn obs_empty_bytes() -> i64:
+    unsafe(capabilities: [ffi]): rt_byte_array_new_len(0)
+
+fn obs_bytes(ptr: i64, length: i64) -> i64:
+    val out = unsafe(capabilities: [ffi]): rt_byte_array_new_len(length)
+    if out < 4096 or unsafe(capabilities: [ffi]): rt_array_len(out) != length:
+        return 0
+    if length > 0:
+        val payload = unsafe(capabilities: [ffi, raw_ptr]): array_items(out)
+        obs_copy_bytes(payload, ptr, length)
+    out
+
+fn obs_tuple3(a: i64, b: i64, c: i64) -> i64:
+    if a < 4096 or b < 4096 or c < 4096:
+        return 0
+    val tuple = unsafe(capabilities: [ffi]): rt_tuple_new(3)
+    if tuple < 4096:
+        return 0
+    val ok0 = unsafe(capabilities: [ffi]): rt_tuple_set(tuple, 0, a)
+    val ok1 = unsafe(capabilities: [ffi]): rt_tuple_set(tuple, 1, b)
+    val ok2 = unsafe(capabilities: [ffi]): rt_tuple_set(tuple, 2, c)
+    if ok0 != 1 or ok1 != 1 or ok2 != 1:
+        return 0
+    tuple
+
+fn obs_tuple4(a: i64, b: i64, c: i64, d: i64) -> i64:
+    if a < 4096 or b < 4096 or c < 4096 or d < 4096:
+        return 0
+    val tuple = unsafe(capabilities: [ffi]): rt_tuple_new(4)
+    if tuple < 4096:
+        return 0
+    val ok0 = unsafe(capabilities: [ffi]): rt_tuple_set(tuple, 0, a)
+    val ok1 = unsafe(capabilities: [ffi]): rt_tuple_set(tuple, 1, b)
+    val ok2 = unsafe(capabilities: [ffi]): rt_tuple_set(tuple, 2, c)
+    val ok3 = unsafe(capabilities: [ffi]): rt_tuple_set(tuple, 3, d)
+    if ok0 != 1 or ok1 != 1 or ok2 != 1 or ok3 != 1:
+        return 0
+    tuple
+
+fn obs_ensure_tables() -> bool:
+    if observation_pin_slots < 1:
+        observation_pin_slots = obs_calloc(OBS_MAX_SLOTS, PIN_STRIDE)
+        if observation_pin_slots < 1:
+            return false
+        var i = 0
+        while i < OBS_MAX_SLOTS:
+            obs_store(observation_pin_slots + i * PIN_STRIDE, PIN_GENERATION, 1)
+            i = i + 1
+    if observation_process_slots < 1:
+        observation_process_slots = obs_calloc(OBS_MAX_SLOTS, PROC_STRIDE)
+        if observation_process_slots < 1:
+            return false
+        var i = 0
+        while i < OBS_MAX_SLOTS:
+            obs_store(observation_process_slots + i * PROC_STRIDE, PROC_GENERATION, 1)
+            i = i + 1
+    true
+
+fn obs_find_free(base: i64, stride: i64) -> i64:
+    var i = 0
+    while i < OBS_MAX_SLOTS:
+        if obs_load(base + i * stride, 0) == 0:
+            return i
+        i = i + 1
+    -1
+
+fn obs_handle(index: i64, generation: i64) -> i64:
+    generation * 128 + index + 1
+
+fn obs_handle_index(handle: i64) -> i64:
+    (handle % 128) - 1
+
+fn obs_handle_generation(handle: i64) -> i64:
+    handle / 128
+
+fn obs_pin_slot(handle: i64, required_state: i64) -> i64:
+    if observation_pin_slots < 1 or handle <= 0:
+        return 0
+    val index = obs_handle_index(handle)
+    if index < 0 or index >= OBS_MAX_SLOTS:
+        return 0
+    val slot = observation_pin_slots + index * PIN_STRIDE
+    if obs_load(slot, PIN_STATE) != required_state or
+            obs_load(slot, PIN_GENERATION) != obs_handle_generation(handle):
+        return 0
+    slot
+
+fn obs_process_slot(handle: i64) -> i64:
+    if observation_process_slots < 1 or handle <= 0:
+        return 0
+    val index = obs_handle_index(handle)
+    if index < 0 or index >= OBS_MAX_SLOTS:
+        return 0
+    val slot = observation_process_slots + index * PROC_STRIDE
+    val state = obs_load(slot, PROC_STATE)
+    if (state != 1 and state != 3) or
+            obs_load(slot, PROC_GENERATION) != obs_handle_generation(handle):
+        return 0
+    slot
+
+fn obs_machine_x86_64() -> bool:
+    val uts = obs_calloc(1, 390)
+    if uts < 1:
+        return false
+    val ok = unsafe(capabilities: [ffi, raw_ptr]): uname(uts)
+    val expected: [i64] = [120, 56, 54, 95, 54, 52]
+    var matches = ok == 0
+    var i = 0
+    while matches and i < expected.len():
+        matches = obs_byte(uts, 260 + i) == expected[i]
+        i = i + 1
+    if matches:
+        matches = obs_byte(uts, 266) == 0
+    obs_free(uts)
+    matches
+
+fn obs_serialized_slot_owner_available() -> bool:
+    # This split runtime owner has no admitted once-initialized atomic or mutex
+    # storage primitive. Lazily publishing a lock handle would itself race.
+    # Remain unavailable instead of pretending module globals serialize calls.
+    false
+
+fn obs_identity_safe_tree_cleanup_available() -> bool:
+    # Exact child ownership prevents PID reuse until wait4, but Linux exposes
+    # no process-group pidfd through the currently admitted pure-Simple ABI.
+    # Descendants may retain capture pipes after the leader exits, so complete
+    # tree cleanup cannot be claimed safely by signalling a reusable PGID.
+    false
+
+fn obs_compiler_abi_registered() -> bool:
+    # The frozen observation-V1 extern names have no RuntimeFuncSpec entries.
+    # Pure-Simple cannot safely add those native lowering signatures, and this
+    # lane forbids the Rust registry edit, so the backend stays unavailable.
+    false
+
+fn obs_deadline_bounded_hash_available() -> bool:
+    # rt_file_hash_sha256 has no deadline/cancellation parameter. Pre/post
+    # clock checks can detect an overrun but cannot bound it, so it is not an
+    # admissible implementation of the single admission deadline.
+    false
+
+fn obs_capabilities_available() -> bool:
+    if observation_capability_cache >= 0:
+        # Internal cleanup ownership is reachable only after admission. A
+        # positive cache also implies the future serialized-owner primitive.
+        if observation_capability_cache == 1:
+            obs_sweep_internal_cleanup()
+        return observation_capability_cache == 1
+    observation_capability_cache = 0
+    if not obs_compiler_abi_registered():
+        return false
+    if not obs_machine_x86_64() or obs_now_ms() <= 0:
+        return false
+    if not obs_serialized_slot_owner_available() or
+            not obs_identity_safe_tree_cleanup_available() or
+            not obs_deadline_bounded_hash_available():
+        return false
+    val fds = obs_calloc(1, 8)
+    if fds < 1:
+        return false
+    val pipe_ok = unsafe(capabilities: [ffi, raw_ptr]): pipe2(fds, 524288)
+    if pipe_ok != 0:
+        obs_free(fds)
+        return false
+    val fd0 = obs_load(fds, 0) & 4294967295
+    val fd1 = (obs_load(fds, 0) >> 32) & 4294967295
+    obs_close(fd0)
+    obs_close(fd1)
+    obs_free(fds)
+    val name = obs_malloc(4)
+    if name < 1:
+        return false
+    obs_store_byte(name, 0, 111)
+    obs_store_byte(name, 1, 98)
+    obs_store_byte(name, 2, 115)
+    obs_store_byte(name, 3, 0)
+    var memfd = unsafe(capabilities: [ffi, raw_ptr]): memfd_create(name, 19)
+    if memfd < 0:
+        memfd = unsafe(capabilities: [ffi, raw_ptr]): memfd_create(name, 3)
+    obs_free(name)
+    if memfd < 0:
+        return false
+    val sealed = unsafe(capabilities: [ffi]): fcntl(memfd, 1033, 15)
+    obs_close(memfd)
+    if sealed != 0:
+        return false
+    # Probe wait4 only with a child created and owned by this discovery call.
+    val status = obs_calloc(1, 8)
+    val usage = obs_calloc(1, 144)
+    if status < 1 or usage < 1:
+        if status > 0: obs_free(status)
+        if usage > 0: obs_free(usage)
+        return false
+    val probe_pid = unsafe(capabilities: [ffi]): fork()
+    if probe_pid == 0:
+        unsafe(capabilities: [ffi]): _exit(0)
+        return false
+    var wait_ok = probe_pid > 0
+    var waited = 0
+    while wait_ok and waited != probe_pid:
+        waited = unsafe(capabilities: [ffi, raw_ptr]):
+            wait4(probe_pid, status, 0, usage)
+        if waited < 0 and obs_errno() != 4:
+            wait_ok = false
+    obs_free(status)
+    obs_free(usage)
+    if not wait_ok:
+        return false
+    observation_capability_cache = 1
+    true
+
+pub fn rt_process_observation_v1_capabilities_value() -> i64:
+    val words = obs_word_array(3)
+    obs_push_word(words, OBS_VERSION)
+    obs_push_word(words, if obs_capabilities_available(): 1 else: 0)
+    obs_push_word(words, if observation_capability_cache == 1: OBS_CAPABILITIES else: 0)
+    if obs_words_valid(words, 3): words else: 0
+
+fn obs_fd_path(fd: i64) -> (i64, i64):
+    val path = obs_malloc(32)
+    if path < 1:
+        return (0, 0)
+    val prefix: [i64] = [47, 112, 114, 111, 99, 47, 115, 101, 108, 102, 47, 102, 100, 47]
+    var i = 0
+    while i < prefix.len():
+        obs_store_byte(path, i, prefix[i])
+        i = i + 1
+    var digits = 1
+    var scale = 10
+    while fd >= scale:
+        digits = digits + 1
+        scale = scale * 10
+    var value = fd
+    i = 0
+    while i < digits:
+        obs_store_byte(path, 14 + digits - 1 - i, 48 + value % 10)
+        value = value / 10
+        i = i + 1
+    obs_store_byte(path, 14 + digits, 0)
+    (path, 14 + digits)
+
+fn obs_hex_nibble(value: i64) -> i64:
+    if value >= 48 and value <= 57:
+        return value - 48
+    if value >= 97 and value <= 102:
+        return value - 87
+    -1
+
+fn obs_digest_memfd(fd: i64) -> i64:
+    val (path, path_len) = obs_fd_path(fd)
+    if path < 1:
+        return 0
+    val hash = unsafe(capabilities: [ffi]): rt_file_hash_sha256(path, path_len)
+    obs_free(path)
+    val hash_len = unsafe(capabilities: [ffi]): rt_string_len(hash)
+    if hash_len != 64:
+        unsafe(capabilities: [ffi]): rt_string_free(hash)
+        return 0
+    val hash_ptr = unsafe(capabilities: [ffi, raw_ptr]): rt_string_data(hash)
+    val digest = obs_malloc(32)
+    if digest < 1:
+        unsafe(capabilities: [ffi]): rt_string_free(hash)
+        return 0
+    var i = 0
+    while i < 32:
+        val high = obs_hex_nibble(obs_byte(hash_ptr, i * 2))
+        val low = obs_hex_nibble(obs_byte(hash_ptr, i * 2 + 1))
+        if high < 0 or low < 0:
+            obs_free(digest)
+            unsafe(capabilities: [ffi]): rt_string_free(hash)
+            return 0
+        obs_store_byte(digest, i, high * 16 + low)
+        i = i + 1
+    unsafe(capabilities: [ffi]): rt_string_free(hash)
+    digest
+
+fn obs_write_all(fd: i64, buffer: i64, length: i64) -> bool:
+    var offset = 0
+    while offset < length:
+        val count = obs_write(fd, buffer + offset, length - offset)
+        if count > 0:
+            offset = offset + count
+        elif count < 0 and obs_errno() == 4:
+            ()
+        else:
+            return false
+    true
+
+fn obs_normalize_fd(fd: i64) -> i64:
+    if fd < 0:
+        return -1
+    if fd >= 3:
+        return fd
+    val normalized = unsafe(capabilities: [ffi]): fcntl(fd, 1030, 3)
+    obs_close(fd)
+    normalized
+
+fn obs_release_pin_slot(slot: i64):
+    val fd = obs_load(slot, PIN_FD)
+    val path = obs_load(slot, PIN_PATH)
+    val digest = obs_load(slot, PIN_DIGEST)
+    if fd >= 0: obs_close(fd)
+    if path > 0: obs_free(path)
+    if digest > 0: obs_free(digest)
+    obs_store(slot, PIN_STATE, 0)
+    obs_store(slot, PIN_FD, -1)
+    obs_store(slot, PIN_PATH, 0)
+    obs_store(slot, PIN_DIGEST, 0)
+    val generation = obs_load(slot, PIN_GENERATION)
+    if generation >= 72057594037927935:
+        # Retire instead of wrapping and reviving a stale handle.
+        obs_store(slot, PIN_STATE, -1)
+    else:
+        obs_store(slot, PIN_GENERATION, generation + 1)
+
+fn obs_pin_path(path_ptr: i64, path_len: i64, absolute_deadline: i64) -> i64:
+    val admission_now = obs_now_ms()
+    if admission_now <= 0 or admission_now >= absolute_deadline or
+            not obs_capabilities_available() or not obs_ensure_tables() or
+            path_ptr < 1 or path_len <= 0 or path_len > 4096:
+        return -1
+    var i = 0
+    while i < path_len:
+        if obs_byte(path_ptr, i) == 0:
+            return -1
+        i = i + 1
+    val index = obs_find_free(observation_pin_slots, PIN_STRIDE)
+    if index < 0:
+        return -2
+    val path = obs_copy_cstr(path_ptr, path_len)
+    if path < 1:
+        return -1
+    val source_raw = unsafe(capabilities: [ffi, raw_ptr]): open(path, 524288)
+    val source = obs_normalize_fd(source_raw)
+    if source < 0:
+        obs_free(path)
+        return -1
+    val metadata = obs_calloc(1, 144)
+    val buffer = obs_malloc(65536)
+    if metadata < 1 or buffer < 1 or
+            unsafe(capabilities: [ffi, raw_ptr]): fstat(source, metadata) != 0:
+        if metadata > 0: obs_free(metadata)
+        if buffer > 0: obs_free(buffer)
+        obs_close(source)
+        obs_free(path)
+        return -1
+    val name = obs_malloc(4)
+    if name < 1:
+        obs_free(metadata)
+        obs_free(buffer)
+        obs_close(source)
+        obs_free(path)
+        return -1
+    obs_store_byte(name, 0, 111)
+    obs_store_byte(name, 1, 98)
+    obs_store_byte(name, 2, 115)
+    obs_store_byte(name, 3, 0)
+    var snapshot = unsafe(capabilities: [ffi, raw_ptr]): memfd_create(name, 19)
+    if snapshot < 0:
+        snapshot = unsafe(capabilities: [ffi, raw_ptr]): memfd_create(name, 3)
+    snapshot = obs_normalize_fd(snapshot)
+    obs_free(name)
+    if snapshot < 0:
+        obs_free(metadata)
+        obs_free(buffer)
+        obs_close(source)
+        obs_free(path)
+        return -1
+    var total = 0
+    var first = true
+    var copy_ok = true
+    while copy_ok:
+        val copy_now = obs_now_ms()
+        if copy_now <= 0 or copy_now >= absolute_deadline:
+            copy_ok = false
+            continue
+        val count = obs_read(source, buffer, 65536)
+        if count > 0:
+            if first:
+                first = false
+                copy_ok = count >= 4 and obs_byte(buffer, 0) == 127 and
+                    obs_byte(buffer, 1) == 69 and obs_byte(buffer, 2) == 76 and
+                    obs_byte(buffer, 3) == 70
+            total = total + count
+            if total > OBS_MAX_EXECUTABLE_BYTES:
+                copy_ok = false
+            elif copy_ok:
+                copy_ok = obs_write_all(snapshot, buffer, count)
+        elif count == 0:
+            break
+        elif obs_errno() != 4:
+            copy_ok = false
+    obs_free(buffer)
+    obs_close(source)
+    if not copy_ok or total <= 0 or
+            unsafe(capabilities: [ffi]): fchmod(snapshot, 448) != 0 or
+            unsafe(capabilities: [ffi]): fcntl(snapshot, 1033, 15) != 0 or
+            unsafe(capabilities: [ffi]): lseek(snapshot, 0, 0) != 0:
+        obs_close(snapshot)
+        obs_free(metadata)
+        obs_free(path)
+        return -1
+    val hash_started = obs_now_ms()
+    if hash_started <= 0 or hash_started >= absolute_deadline:
+        obs_close(snapshot)
+        obs_free(metadata)
+        obs_free(path)
+        return -1
+    val digest = obs_digest_memfd(snapshot)
+    val digest_finished = obs_now_ms()
+    if digest < 1 or digest_finished <= 0 or digest_finished >= absolute_deadline:
+        if digest > 0: obs_free(digest)
+        obs_close(snapshot)
+        obs_free(metadata)
+        obs_free(path)
+        return -1
+    val slot = observation_pin_slots + index * PIN_STRIDE
+    obs_store(slot, PIN_STATE, 1)
+    obs_store(slot, PIN_FD, snapshot)
+    obs_store(slot, PIN_PATH, path)
+    obs_store(slot, PIN_PATH_LEN, path_len)
+    obs_store(slot, PIN_DEV, obs_load(metadata, 0))
+    obs_store(slot, PIN_INO, obs_load(metadata, 8))
+    obs_store(slot, PIN_SIZE, obs_load(metadata, 48))
+    obs_store(slot, PIN_MTIME_SEC, obs_load(metadata, 88))
+    obs_store(slot, PIN_MTIME_NSEC, obs_load(metadata, 96))
+    obs_store(slot, PIN_DIGEST, digest)
+    obs_free(metadata)
+    obs_handle(index, obs_load(slot, PIN_GENERATION))
+
+pub fn rt_process_pin_executable_owned_value(path_ptr: i64, path_len: i64) -> i64:
+    val started = obs_now_ms()
+    if started <= 0:
+        return -1
+    obs_pin_path(path_ptr, path_len, started + OBS_CLEANUP_RESERVE_MS)
+
+pub fn rt_process_close_pinned_executable_owned_value(handle: i64) -> i32:
+    val slot = obs_pin_slot(handle, 1)
+    if slot < 1:
+        return 0
+    obs_release_pin_slot(slot)
+    1
+
+pub fn rt_process_pinned_executable_sha256_value(handle: i64) -> i64:
+    val slot = obs_pin_slot(handle, 1)
+    if slot < 1:
+        return obs_empty_bytes()
+    obs_bytes(obs_load(slot, PIN_DIGEST), 32)
+
+fn obs_start_words(status: i64, spawned: i64, pid: i64, handle: i64,
+                   failure: i64, pin_consumed: i64) -> i64:
+    val words = obs_word_array(7)
+    obs_push_word(words, OBS_VERSION)
+    obs_push_word(words, status)
+    obs_push_word(words, spawned)
+    obs_push_word(words, pid)
+    obs_push_word(words, handle)
+    obs_push_word(words, failure)
+    obs_push_word(words, pin_consumed)
+    if obs_words_valid(words, 7): words else: 0
+
+fn obs_pair_set_fd(pair: i64, index: i64, fd: i64):
+    val base = index * 4
+    obs_store_byte(pair, base, fd & 255)
+    obs_store_byte(pair, base + 1, (fd >> 8) & 255)
+    obs_store_byte(pair, base + 2, (fd >> 16) & 255)
+    obs_store_byte(pair, base + 3, (fd >> 24) & 255)
+
+fn obs_pipe_pair() -> i64:
+    val pair = obs_calloc(1, 8)
+    if pair < 1:
+        return 0
+    if unsafe(capabilities: [ffi, raw_ptr]): pipe2(pair, 524288) != 0:
+        obs_free(pair)
+        return 0
+    val raw_read = obs_pipe_read_fd(pair)
+    val raw_write = obs_pipe_write_fd(pair)
+    val normalized_read = obs_normalize_fd(raw_read)
+    val normalized_write = obs_normalize_fd(raw_write)
+    if normalized_read < 0 or normalized_write < 0:
+        if normalized_read >= 0: obs_close(normalized_read)
+        if normalized_write >= 0: obs_close(normalized_write)
+        obs_free(pair)
+        return 0
+    obs_pair_set_fd(pair, 0, normalized_read)
+    obs_pair_set_fd(pair, 1, normalized_write)
+    pair
+
+fn obs_pipe_read_fd(pair: i64) -> i64:
+    obs_load(pair, 0) & 4294967295
+
+fn obs_pipe_write_fd(pair: i64) -> i64:
+    (obs_load(pair, 0) >> 32) & 4294967295
+
+fn obs_make_nonblocking(fd: i64) -> bool:
+    val flags = unsafe(capabilities: [ffi]): fcntl(fd, 3, 0)
+    flags >= 0 and unsafe(capabilities: [ffi]): fcntl(fd, 4, flags | 2048) == 0
+
+fn obs_free_argv(argv: i64, argc: i64):
+    if argv < 1:
+        return
+    var i = 0
+    while i < argc + 1:
+        val value = obs_load(argv, i * 8)
+        if value > 0: obs_free(value)
+        i = i + 1
+    obs_free(argv)
+
+fn obs_build_argv(pin_slot: i64, args: i64) -> (i64, i64):
+    val argc = unsafe(capabilities: [ffi]): rt_array_len(args)
+    if argc < 0 or argc > 4096:
+        return (0, 0)
+    val argv = obs_calloc(argc + 2, 8)
+    if argv < 1:
+        return (0, 0)
+    val command = obs_copy_cstr(obs_load(pin_slot, PIN_PATH), obs_load(pin_slot, PIN_PATH_LEN))
+    if command < 1:
+        obs_free(argv)
+        return (0, 0)
+    obs_store(argv, 0, command)
+    var i = 0
+    while i < argc:
+        val text_value = unsafe(capabilities: [ffi]): rt_array_get_text(args, i)
+        val length = unsafe(capabilities: [ffi]): rt_string_len(text_value)
+        val source = unsafe(capabilities: [ffi, raw_ptr]): rt_string_data(text_value)
+        var valid = length >= 0 and length <= 1048576
+        var j = 0
+        while valid and j < length:
+            valid = obs_byte(source, j) != 0
+            j = j + 1
+        if not valid:
+            obs_free_argv(argv, i)
+            return (0, 0)
+        val copied = obs_copy_cstr(source, length)
+        if copied < 1:
+            obs_free_argv(argv, i)
+            return (0, 0)
+        obs_store(argv, (i + 1) * 8, copied)
+        i = i + 1
+    (argv, argc)
+
+fn obs_close_pair(pair: i64):
+    if pair > 0:
+        obs_close(obs_pipe_read_fd(pair))
+        obs_close(obs_pipe_write_fd(pair))
+        obs_free(pair)
+
+fn obs_reap_before_publish(slot: i64, pid: i64) -> bool:
+    val status = obs_load(slot, PROC_STATUS_BUFFER)
+    val usage = obs_load(slot, PROC_RUSAGE_BUFFER)
+    val term_at = obs_slot_now_ms(slot)
+    if status < 1 or usage < 1 or term_at <= 0:
+        obs_store(slot, PROC_FAILURE, FAIL_CLOCK)
+        val kill_result = unsafe(capabilities: [ffi]): kill(pid, 9)
+        if kill_result != 0 and obs_errno() != 3:
+            obs_store(slot, PROC_FAILURE, FAIL_CLEANUP)
+        return false
+    val term_result = unsafe(capabilities: [ffi]): kill(pid, 15)
+    if term_result != 0 and obs_errno() != 3:
+        return false
+    var killed = false
+    while true:
+        val waited = unsafe(capabilities: [ffi, raw_ptr]): wait4(pid, status, 1, usage)
+        if waited == pid:
+            obs_store_reaped(slot)
+            return true
+        if waited < 0:
+            val error = obs_errno()
+            if error == 4:
+                obs_store(slot, PROC_EINTR_RETRIES,
+                    obs_load(slot, PROC_EINTR_RETRIES) + 1)
+            elif error != 10:
+                obs_store(slot, PROC_FAILURE, FAIL_WAIT)
+                return false
+        val now = obs_slot_now_ms(slot)
+        if now <= 0:
+            obs_store(slot, PROC_FAILURE, FAIL_CLOCK)
+            val kill_result = unsafe(capabilities: [ffi]): kill(pid, 9)
+            if kill_result != 0 and obs_errno() != 3:
+                obs_store(slot, PROC_FAILURE, FAIL_CLEANUP)
+            return false
+        if not killed and now >= term_at + obs_load(slot, PROC_GRACE):
+            val kill_result = unsafe(capabilities: [ffi]): kill(pid, 9)
+            if kill_result != 0 and obs_errno() != 3:
+                return false
+            killed = true
+        if now >= obs_load(slot, PROC_CLEANUP_END):
+            return false
+        unsafe(capabilities: [ffi]): usleep(1000)
+
+fn obs_initialize_process_slot(slot: i64, pin_index: i64, pin_generation: i64,
+                               pid: i64, out_fd: i64, err_fd: i64,
+                               stdout_limit: i64, stderr_limit: i64,
+                               deadline: i64, grace: i64, started_at: i64) -> bool:
+    val out_buffer = if stdout_limit > 0: obs_malloc(stdout_limit) else: 0
+    val err_buffer = if stderr_limit > 0: obs_malloc(stderr_limit) else: 0
+    val status_buffer = obs_calloc(1, 8)
+    val usage_buffer = obs_calloc(1, 144)
+    val scratch_buffer = obs_malloc(8192)
+    val clock_buffer = obs_calloc(1, 16)
+    if (stdout_limit > 0 and out_buffer < 1) or
+            (stderr_limit > 0 and err_buffer < 1) or status_buffer < 1 or
+            usage_buffer < 1 or scratch_buffer < 1 or clock_buffer < 1:
+        if out_buffer > 0: obs_free(out_buffer)
+        if err_buffer > 0: obs_free(err_buffer)
+        if status_buffer > 0: obs_free(status_buffer)
+        if usage_buffer > 0: obs_free(usage_buffer)
+        if scratch_buffer > 0: obs_free(scratch_buffer)
+        if clock_buffer > 0: obs_free(clock_buffer)
+        return false
+    val generation = obs_load(slot, PROC_GENERATION)
+    var offset = 0
+    while offset < PROC_STRIDE:
+        obs_store(slot, offset, 0)
+        offset = offset + 8
+    obs_store(slot, PROC_GENERATION, generation)
+    obs_store(slot, PROC_STATE, 1)
+    obs_store(slot, PROC_PID, pid)
+    obs_store(slot, PROC_PGID, pid)
+    obs_store(slot, PROC_PIN_INDEX, pin_index)
+    obs_store(slot, PROC_PIN_GENERATION, pin_generation)
+    obs_store(slot, PROC_OUT_FD, out_fd)
+    obs_store(slot, PROC_OUT_BUFFER, out_buffer)
+    obs_store(slot, PROC_OUT_LIMIT, stdout_limit)
+    obs_store(slot, PROC_ERR_FD, err_fd)
+    obs_store(slot, PROC_ERR_BUFFER, err_buffer)
+    obs_store(slot, PROC_ERR_LIMIT, stderr_limit)
+    obs_store(slot, PROC_DEADLINE, deadline)
+    obs_store(slot, PROC_GRACE, grace)
+    obs_store(slot, PROC_STATUS_BUFFER, status_buffer)
+    obs_store(slot, PROC_RUSAGE_BUFFER, usage_buffer)
+    obs_store(slot, PROC_STARTED_AT, started_at)
+    obs_store(slot, PROC_SCRATCH_BUFFER, scratch_buffer)
+    obs_store(slot, PROC_CLOCK_BUFFER, clock_buffer)
+    obs_store(slot, PROC_CLEANUP_END,
+        deadline + grace + OBS_CLEANUP_RESERVE_MS)
+    true
+
+fn obs_store_reaped(slot: i64):
+    val status = obs_load(slot, PROC_STATUS_BUFFER)
+    val usage = obs_load(slot, PROC_RUSAGE_BUFFER)
+    obs_store(slot, PROC_REAPED, 1)
+    obs_store(slot, PROC_WAIT_STATUS, obs_load(status, 0) & 4294967295)
+    val user_ms = obs_load(usage, 0) * 1000 + obs_load(usage, 8) / 1000
+    val system_ms = obs_load(usage, 16) * 1000 + obs_load(usage, 24) / 1000
+    obs_store(slot, PROC_USER_MS, user_ms)
+    obs_store(slot, PROC_SYSTEM_MS, system_ms)
+    obs_store(slot, PROC_RSS_KIB, obs_load(usage, 32))
+    obs_store(slot, PROC_RUSAGE_AVAILABLE, 1)
+
+fn obs_wait_once(slot: i64):
+    if obs_load(slot, PROC_REAPED) != 0:
+        return
+    val waited = unsafe(capabilities: [ffi, raw_ptr]):
+        wait4(obs_load(slot, PROC_PID), obs_load(slot, PROC_STATUS_BUFFER), 1,
+              obs_load(slot, PROC_RUSAGE_BUFFER))
+    if waited == obs_load(slot, PROC_PID):
+        obs_store_reaped(slot)
+    elif waited < 0:
+        val error = obs_errno()
+        if error == 4:
+            obs_store(slot, PROC_EINTR_RETRIES,
+                obs_load(slot, PROC_EINTR_RETRIES) + 1)
+        elif error != 10:
+            obs_store(slot, PROC_FAILURE, FAIL_WAIT)
+
+fn obs_drain_stream(slot: i64, fd_offset: i64, buffer_offset: i64,
+                    limit_offset: i64, seen_offset: i64, kept_offset: i64,
+                    eof_offset: i64, scratch: i64):
+    if obs_load(slot, eof_offset) != 0:
+        return
+    val fd = obs_load(slot, fd_offset)
+    var drained = 0
+    var keep_reading = true
+    while keep_reading and drained < OBS_MAX_DRAIN_TURN:
+        val request = if OBS_MAX_DRAIN_TURN - drained < 8192:
+            OBS_MAX_DRAIN_TURN - drained
+        else:
+            8192
+        val count = obs_read(fd, scratch, request)
+        if count > 0:
+            drained = drained + count
+            val seen = obs_load(slot, seen_offset)
+            if seen <= 9223372036854775807 - count:
+                obs_store(slot, seen_offset, seen + count)
+            else:
+                obs_store(slot, PROC_FAILURE, FAIL_CLEANUP)
+            val kept = obs_load(slot, kept_offset)
+            val limit = obs_load(slot, limit_offset)
+            val available = limit - kept
+            val retain = if count < available: count else: (if available > 0: available else: 0)
+            if retain > 0:
+                obs_copy_bytes(obs_load(slot, buffer_offset) + kept, scratch, retain)
+                obs_store(slot, kept_offset, kept + retain)
+        elif count == 0:
+            obs_store(slot, eof_offset, 1)
+            obs_close(fd)
+            obs_store(slot, fd_offset, -1)
+            keep_reading = false
+        else:
+            val error = obs_errno()
+            if error == 4:
+                obs_store(slot, PROC_EINTR_RETRIES,
+                    obs_load(slot, PROC_EINTR_RETRIES) + 1)
+            elif error != 11:
+                obs_store(slot, PROC_FAILURE, FAIL_CLEANUP)
+            keep_reading = false
+
+fn obs_apply_deadline(slot: i64, now: i64):
+    if obs_load(slot, PROC_REAPED) != 0:
+        return
+    if now <= 0:
+        obs_store(slot, PROC_FAILURE, FAIL_CLOCK)
+        return
+    if obs_load(slot, PROC_TERM_SENT) == 0 and now >= obs_load(slot, PROC_DEADLINE):
+        val sent = unsafe(capabilities: [ffi]): kill(obs_load(slot, PROC_PID), 15)
+        if sent == 0:
+            obs_store(slot, PROC_TERM_SENT, 1)
+            obs_store(slot, PROC_TERM_AT, now)
+            obs_store(slot, PROC_DEADLINE_EXCEEDED, 1)
+        elif obs_errno() != 3:
+            obs_store(slot, PROC_FAILURE, FAIL_CLEANUP)
+    if obs_load(slot, PROC_TERM_SENT) != 0 and obs_load(slot, PROC_KILL_SENT) == 0 and
+            now >= obs_load(slot, PROC_TERM_AT) + obs_load(slot, PROC_GRACE):
+        val sent = unsafe(capabilities: [ffi]): kill(obs_load(slot, PROC_PID), 9)
+        if sent == 0:
+            obs_store(slot, PROC_KILL_SENT, 1)
+        elif obs_errno() != 3:
+            obs_store(slot, PROC_FAILURE, FAIL_CLEANUP)
+
+fn obs_service(slot: i64, wait_ms: i64):
+    var bounded_wait = wait_ms
+    if bounded_wait < 0: bounded_wait = 0
+    if bounded_wait > OBS_MAX_POLL_MS: bounded_wait = OBS_MAX_POLL_MS
+    val started = obs_slot_now_ms(slot)
+    if started <= 0:
+        obs_store(slot, PROC_FAILURE, FAIL_CLOCK)
+        return
+    val requested_finish = started + bounded_wait
+    val finish = if requested_finish < obs_load(slot, PROC_CLEANUP_END):
+        requested_finish
+    else:
+        obs_load(slot, PROC_CLEANUP_END)
+    val scratch = obs_load(slot, PROC_SCRATCH_BUFFER)
+    if scratch < 1:
+        obs_store(slot, PROC_FAILURE, FAIL_CLEANUP)
+        return
+    var first = true
+    var current_time = started
+    while first or (bounded_wait > 0 and current_time < finish):
+        first = false
+        if (obs_load(slot, PROC_TURN) & 1) == 0:
+            obs_drain_stream(slot, PROC_OUT_FD, PROC_OUT_BUFFER, PROC_OUT_LIMIT,
+                PROC_OUT_SEEN, PROC_OUT_KEPT, PROC_OUT_EOF, scratch)
+            obs_drain_stream(slot, PROC_ERR_FD, PROC_ERR_BUFFER, PROC_ERR_LIMIT,
+                PROC_ERR_SEEN, PROC_ERR_KEPT, PROC_ERR_EOF, scratch)
+        else:
+            obs_drain_stream(slot, PROC_ERR_FD, PROC_ERR_BUFFER, PROC_ERR_LIMIT,
+                PROC_ERR_SEEN, PROC_ERR_KEPT, PROC_ERR_EOF, scratch)
+            obs_drain_stream(slot, PROC_OUT_FD, PROC_OUT_BUFFER, PROC_OUT_LIMIT,
+                PROC_OUT_SEEN, PROC_OUT_KEPT, PROC_OUT_EOF, scratch)
+        obs_store(slot, PROC_TURN, obs_load(slot, PROC_TURN) + 1)
+        obs_wait_once(slot)
+        current_time = obs_slot_now_ms(slot)
+        if current_time <= 0:
+            obs_store(slot, PROC_FAILURE, FAIL_CLOCK)
+            break
+        obs_apply_deadline(slot, current_time)
+        if obs_load(slot, PROC_REAPED) != 0 and obs_load(slot, PROC_OUT_EOF) != 0 and
+                obs_load(slot, PROC_ERR_EOF) != 0:
+            obs_store(slot, PROC_OUTPUT_COMPLETE, 1)
+            break
+        if bounded_wait > 0:
+            unsafe(capabilities: [ffi]): usleep(1000)
+
+fn obs_child_close_inherited(target_pin_fd: i64):
+    # Child-side only: close every inherited observation descriptor except the
+    # immutable image that fexecve is about to consume.
+    var i = 0
+    while i < OBS_MAX_SLOTS:
+        val pin_slot = observation_pin_slots + i * PIN_STRIDE
+        if obs_load(pin_slot, PIN_STATE) != 0:
+            val fd = obs_load(pin_slot, PIN_FD)
+            if fd >= 0 and fd != target_pin_fd:
+                obs_close(fd)
+        val process_slot = observation_process_slots + i * PROC_STRIDE
+        if obs_load(process_slot, PROC_STATE) != 0:
+            val out_fd = obs_load(process_slot, PROC_OUT_FD)
+            val err_fd = obs_load(process_slot, PROC_ERR_FD)
+            if out_fd >= 0: obs_close(out_fd)
+            if err_fd >= 0: obs_close(err_fd)
+        i = i + 1
+
+fn obs_child_exec_failure(exec_fd: i64, record: i64, error: i64):
+    obs_store(record, 0, 2)
+    obs_store(record, 8, error)
+    obs_write_all(exec_fd, record, 16)
+    obs_close(exec_fd)
+    unsafe(capabilities: [ffi]): _exit(127)
+
+fn obs_start_pinned(pin_handle: i64, args: i64, started_at: i64,
+                    deadline: i64,
+                    grace_ms: i64, stdout_limit: i64,
+                    stderr_limit: i64, internal_pin: bool) -> i64:
+    val pin_slot = obs_pin_slot(pin_handle, 1)
+    if pin_slot < 1:
+        return obs_start_words(START_INVALID, 0, 0, 0, FAIL_PIN, 0)
+    if deadline <= started_at or deadline - started_at > 86400000 or grace_ms < 0 or
+            grace_ms > 60000 or stdout_limit < 0 or stdout_limit > OBS_MAX_CAPTURE or
+            stderr_limit < 0 or stderr_limit > OBS_MAX_CAPTURE:
+        if internal_pin: obs_release_pin_slot(pin_slot)
+        return obs_start_words(START_INVALID, 0, 0, 0, FAIL_INVALID, 0)
+    val current_time = obs_now_ms()
+    if current_time <= 0 or current_time >= deadline:
+        if internal_pin: obs_release_pin_slot(pin_slot)
+        return obs_start_words(START_PROVIDER_FAILED, 0, 0, 0, FAIL_CLOCK, 0)
+    val process_index = obs_find_free(observation_process_slots, PROC_STRIDE)
+    if process_index < 0:
+        if internal_pin: obs_release_pin_slot(pin_slot)
+        return obs_start_words(START_EXHAUSTED, 0, 0, 0, FAIL_EXHAUSTED, 0)
+    val (argv, argc) = obs_build_argv(pin_slot, args)
+    if argv < 1:
+        if internal_pin: obs_release_pin_slot(pin_slot)
+        return obs_start_words(START_INVALID, 0, 0, 0, FAIL_INVALID, 0)
+    val out_pair = obs_pipe_pair()
+    val err_pair = obs_pipe_pair()
+    val exec_pair = obs_pipe_pair()
+    val null_path = obs_malloc(10)
+    if null_path > 0:
+        val null_bytes: [i64] = [47, 100, 101, 118, 47, 110, 117, 108, 108, 0]
+        var ni = 0
+        while ni < null_bytes.len():
+            obs_store_byte(null_path, ni, null_bytes[ni])
+            ni = ni + 1
+    val null_fd_raw = if null_path > 0:
+        unsafe(capabilities: [ffi, raw_ptr]): open(null_path, 524288)
+    else:
+        -1
+    val null_fd = obs_normalize_fd(null_fd_raw)
+    if null_path > 0: obs_free(null_path)
+    val empty_envp = obs_calloc(1, 8)
+    val exec_record = obs_calloc(4, 8)
+    if out_pair < 1 or err_pair < 1 or exec_pair < 1 or null_fd < 0 or
+            empty_envp < 1 or exec_record < 1 or
+            not obs_make_nonblocking(obs_pipe_read_fd(out_pair)) or
+            not obs_make_nonblocking(obs_pipe_read_fd(err_pair)) or
+            not obs_make_nonblocking(obs_pipe_read_fd(exec_pair)):
+        if null_fd >= 0: obs_close(null_fd)
+        obs_close_pair(out_pair)
+        obs_close_pair(err_pair)
+        obs_close_pair(exec_pair)
+        if empty_envp > 0: obs_free(empty_envp)
+        if exec_record > 0: obs_free(exec_record)
+        obs_free_argv(argv, argc)
+        if internal_pin: obs_release_pin_slot(pin_slot)
+        return obs_start_words(START_PROVIDER_FAILED, 0, 0, 0, FAIL_PIPE, 0)
+    val process_slot = observation_process_slots + process_index * PROC_STRIDE
+    val pin_index = obs_handle_index(pin_handle)
+    val pin_generation = obs_handle_generation(pin_handle)
+    val out_read_fd = obs_pipe_read_fd(out_pair)
+    val out_write_fd = obs_pipe_write_fd(out_pair)
+    val err_read_fd = obs_pipe_read_fd(err_pair)
+    val err_write_fd = obs_pipe_write_fd(err_pair)
+    val exec_read_fd = obs_pipe_read_fd(exec_pair)
+    val exec_write_fd = obs_pipe_write_fd(exec_pair)
+    if not obs_initialize_process_slot(process_slot, pin_index, pin_generation, 0,
+            out_read_fd, err_read_fd, stdout_limit, stderr_limit, deadline, grace_ms,
+            started_at):
+        obs_close(null_fd)
+        obs_close(out_write_fd)
+        obs_close(err_write_fd)
+        obs_close(exec_read_fd)
+        obs_close(exec_write_fd)
+        obs_free(out_pair)
+        obs_free(err_pair)
+        obs_free(exec_pair)
+        obs_free(empty_envp)
+        obs_free(exec_record)
+        obs_free_argv(argv, argc)
+        if internal_pin: obs_release_pin_slot(pin_slot)
+        return obs_start_words(START_EXHAUSTED, 0, 0, 0, FAIL_EXHAUSTED, 0)
+    val pid = unsafe(capabilities: [ffi]): fork()
+    if pid == 0:
+        val target_pin_fd = obs_load(pin_slot, PIN_FD)
+        val group_ok = unsafe(capabilities: [ffi]): setpgid(0, 0)
+        if group_ok != 0:
+            obs_child_exec_failure(exec_write_fd, exec_record, obs_errno())
+        val stdin_ok = unsafe(capabilities: [ffi]): dup2(null_fd, 0)
+        val stdout_ok = unsafe(capabilities: [ffi]): dup2(out_write_fd, 1)
+        val stderr_ok = unsafe(capabilities: [ffi]): dup2(err_write_fd, 2)
+        if stdin_ok != 0 or stdout_ok != 1 or stderr_ok != 2:
+            obs_child_exec_failure(exec_write_fd, exec_record, obs_errno())
+        obs_child_close_inherited(target_pin_fd)
+        obs_close(out_write_fd)
+        obs_close(err_write_fd)
+        obs_close(exec_read_fd)
+        obs_close(null_fd)
+        obs_store(exec_record, 0, 1)
+        obs_store(exec_record, 8, 0)
+        if not obs_write_all(exec_write_fd, exec_record, 16):
+            obs_child_exec_failure(exec_write_fd, exec_record, obs_errno())
+        val exec_result = unsafe(capabilities: [ffi, raw_ptr]):
+            fexecve(target_pin_fd, argv, empty_envp)
+        val exec_error = obs_errno()
+        obs_child_exec_failure(exec_write_fd, exec_record,
+            if exec_result < 0: exec_error else: 5)
+        return 0
+    obs_close(null_fd)
+    obs_close(out_write_fd)
+    obs_close(err_write_fd)
+    obs_close(exec_write_fd)
+    obs_free(out_pair)
+    obs_free(err_pair)
+    obs_free(empty_envp)
+    if pid < 1:
+        obs_close_pair(exec_pair)
+        obs_free(exec_record)
+        obs_free_argv(argv, argc)
+        obs_release_process_slot(process_slot)
+        if internal_pin: obs_release_pin_slot(pin_slot)
+        return obs_start_words(START_PROVIDER_FAILED, 0, 0, 0, FAIL_FORK, 0)
+    obs_store(process_slot, PROC_PID, pid)
+    obs_store(process_slot, PROC_PGID, pid)
+    obs_store(pin_slot, PIN_STATE, 2)
+    var exec_error = 0
+    var exec_ready = false
+    var received = 0
+    var handshake_done = false
+    var child_reaped = false
+    while not handshake_done:
+        val count = obs_read(exec_read_fd, exec_record + received, 32 - received)
+        if count > 0:
+            received = received + count
+            if received >= 16:
+                exec_ready = obs_load(exec_record, 0) == 1 and
+                    obs_load(exec_record, 8) == 0
+                if not exec_ready:
+                    exec_error = 5
+                    handshake_done = true
+            if received >= 32:
+                if obs_load(exec_record, 16) == 2:
+                    exec_error = obs_load(exec_record, 24)
+                else:
+                    exec_error = 5
+                handshake_done = true
+        elif count == 0:
+            if not exec_ready or received != 16:
+                exec_error = 5
+            handshake_done = true
+        elif obs_errno() != 11 and obs_errno() != 4:
+            exec_error = obs_errno()
+            handshake_done = true
+        obs_wait_once(process_slot)
+        child_reaped = obs_load(process_slot, PROC_REAPED) != 0
+        val now = obs_slot_now_ms(process_slot)
+        if not handshake_done and (now == 0 or now >= deadline):
+            exec_error = 110
+            handshake_done = true
+        if not handshake_done:
+            unsafe(capabilities: [ffi]): usleep(1000)
+    obs_close(exec_read_fd)
+    obs_free(exec_pair)
+    obs_free(exec_record)
+    obs_free_argv(argv, argc)
+    if exec_error != 0:
+        val reaped = if child_reaped: true else:
+            obs_reap_before_publish(process_slot, pid)
+        obs_store(process_slot, PROC_REAPED, if reaped: 1 else: 0)
+        if reaped:
+            # No public lease was issued; release the provisional owner now.
+            obs_release_process_slot(process_slot)
+            return obs_start_words(START_EXEC_FAILED, 0, 0, 0, FAIL_EXEC, 1)
+        obs_store(process_slot, PROC_STATE, 4)
+        obs_store(process_slot, PROC_FAILURE, FAIL_CLEANUP)
+        return obs_start_words(START_CLEANUP_PENDING, 0, 0, 0, FAIL_CLEANUP, 1)
+    val handle = obs_handle(process_index, obs_load(process_slot, PROC_GENERATION))
+    val receipt = obs_start_words(START_STARTED, 1, pid, handle, FAIL_NONE, 1)
+    if receipt < 4096:
+        # Publication failed; retain an internal cleanup owner rather than
+        # lose a live child behind a malformed caller-visible receipt.
+        obs_store(process_slot, PROC_STATE, 4)
+        return 0
+    receipt
+
+fn obs_request_bounds_valid(deadline_ms: i64, grace_ms: i64,
+                            stdout_limit: i64, stderr_limit: i64) -> bool:
+    deadline_ms > 0 and deadline_ms <= 86400000 and
+        grace_ms >= 0 and grace_ms <= 60000 and
+        stdout_limit >= 0 and stdout_limit <= OBS_MAX_CAPTURE and
+        stderr_limit >= 0 and stderr_limit <= OBS_MAX_CAPTURE
+
+fn obs_deadline_addition_safe(started_at: i64, deadline_ms: i64,
+                              grace_ms: i64) -> bool:
+    started_at <= 9223372036854775807 - deadline_ms - grace_ms -
+        OBS_CLEANUP_RESERVE_MS
+
+pub fn rt_process_observation_v1_start_pinned_value(
+    pin_handle: i64, args: i64, deadline_ms: i64, grace_ms: i64,
+    stdout_limit: i64, stderr_limit: i64
+) -> i64:
+    val started_at = obs_now_ms()
+    if started_at <= 0:
+        return obs_start_words(START_PROVIDER_FAILED, 0, 0, 0, FAIL_CLOCK, 0)
+    if not obs_request_bounds_valid(deadline_ms, grace_ms,
+            stdout_limit, stderr_limit):
+        return obs_start_words(START_INVALID, 0, 0, 0, FAIL_INVALID, 0)
+    if not obs_deadline_addition_safe(started_at, deadline_ms, grace_ms):
+        return obs_start_words(START_PROVIDER_FAILED, 0, 0, 0, FAIL_CLOCK, 0)
+    val deadline = started_at + deadline_ms
+    if not obs_capabilities_available() or not obs_ensure_tables():
+        return obs_start_words(START_UNSUPPORTED, 0, 0, 0, FAIL_NONE, 0)
+    val after_discovery = obs_now_ms()
+    if after_discovery <= 0 or after_discovery >= deadline:
+        return obs_start_words(START_PROVIDER_FAILED, 0, 0, 0, FAIL_CLOCK, 0)
+    obs_start_pinned(pin_handle, args, started_at, deadline, grace_ms,
+        stdout_limit, stderr_limit, false)
+
+pub fn rt_process_observation_v1_start_value(
+    command_ptr: i64, command_len: i64, args: i64,
+    deadline_ms: i64, grace_ms: i64,
+    stdout_limit: i64, stderr_limit: i64
+) -> i64:
+    val started_at = obs_now_ms()
+    if started_at <= 0:
+        return obs_start_words(START_PROVIDER_FAILED, 0, 0, 0, FAIL_CLOCK, 0)
+    if not obs_request_bounds_valid(deadline_ms, grace_ms,
+            stdout_limit, stderr_limit):
+        return obs_start_words(START_INVALID, 0, 0, 0, FAIL_INVALID, 0)
+    if not obs_deadline_addition_safe(started_at, deadline_ms, grace_ms):
+        return obs_start_words(START_PROVIDER_FAILED, 0, 0, 0, FAIL_CLOCK, 0)
+    val deadline = started_at + deadline_ms
+    if not obs_capabilities_available() or not obs_ensure_tables():
+        return obs_start_words(START_UNSUPPORTED, 0, 0, 0, FAIL_NONE, 0)
+    val pin_handle = obs_pin_path(command_ptr, command_len, deadline)
+    if pin_handle == -2:
+        return obs_start_words(START_EXHAUSTED, 0, 0, 0, FAIL_EXHAUSTED, 0)
+    if pin_handle <= 0:
+        return obs_start_words(START_EXEC_FAILED, 0, 0, 0, FAIL_PIN, 0)
+    obs_start_pinned(pin_handle, args, started_at, deadline, grace_ms,
+        stdout_limit, stderr_limit, true)
+
+fn obs_poll_words(slot: i64, status_value: i64) -> i64:
+    val words = obs_word_array(17)
+    obs_push_word(words, OBS_VERSION)
+    obs_push_word(words, status_value)
+    obs_push_word(words, obs_load(slot, PROC_PID))
+    obs_push_word(words, obs_load(slot, PROC_REAPED))
+    obs_push_word(words, obs_load(slot, PROC_DEADLINE_EXCEEDED))
+    obs_push_word(words, obs_load(slot, PROC_TERM_SENT))
+    obs_push_word(words, obs_load(slot, PROC_KILL_SENT))
+    obs_push_word(words, obs_load(slot, PROC_REAPED))
+    obs_push_word(words, obs_load(slot, PROC_OUTPUT_COMPLETE))
+    obs_push_word(words, obs_load(slot, PROC_EINTR_RETRIES))
+    obs_push_word(words, obs_load(slot, PROC_OUT_SEEN))
+    obs_push_word(words, obs_load(slot, PROC_OUT_KEPT))
+    obs_push_word(words, if obs_load(slot, PROC_OUT_SEEN) > obs_load(slot, PROC_OUT_KEPT): 1 else: 0)
+    obs_push_word(words, obs_load(slot, PROC_ERR_SEEN))
+    obs_push_word(words, obs_load(slot, PROC_ERR_KEPT))
+    obs_push_word(words, if obs_load(slot, PROC_ERR_SEEN) > obs_load(slot, PROC_ERR_KEPT): 1 else: 0)
+    obs_push_word(words, obs_load(slot, PROC_FAILURE))
+    if obs_words_valid(words, 17): words else: 0
+
+fn obs_stream_chunk(slot: i64, buffer_offset: i64, kept_offset: i64,
+                    delivered_offset: i64, capacity: i64) -> i64:
+    var bounded = capacity
+    if bounded < 0: bounded = 0
+    if bounded > OBS_MAX_DRAIN_TURN: bounded = OBS_MAX_DRAIN_TURN
+    val delivered = obs_load(slot, delivered_offset)
+    val available = obs_load(slot, kept_offset) - delivered
+    val count = if available < bounded: available else: bounded
+    obs_bytes(obs_load(slot, buffer_offset) + delivered, count)
+
+pub fn rt_process_observation_v1_poll_value(
+    handle: i64, wait_ms: i64, stdout_capacity: i64, stderr_capacity: i64
+) -> i64:
+    val slot = obs_process_slot(handle)
+    if slot < 1:
+        val words = obs_word_array(17)
+        obs_push_word(words, OBS_VERSION)
+        obs_push_word(words, STATUS_REUSE)
+        var i = 2
+        while i < 17:
+            obs_push_word(words, 0)
+            i = i + 1
+        if not obs_words_valid(words, 17):
+            return 0
+        return obs_tuple3(obs_empty_bytes(), obs_empty_bytes(), words)
+    obs_service(slot, wait_ms)
+    val status_value = if obs_load(slot, PROC_STATE) == 3:
+        STATUS_CLEANUP_PENDING
+    elif obs_load(slot, PROC_FAILURE) != 0:
+        STATUS_PROVIDER_FAILED
+    else:
+        STATUS_OK
+    val stdout = obs_stream_chunk(slot, PROC_OUT_BUFFER, PROC_OUT_KEPT,
+        PROC_OUT_DELIVERED, stdout_capacity)
+    val stderr = obs_stream_chunk(slot, PROC_ERR_BUFFER, PROC_ERR_KEPT,
+        PROC_ERR_DELIVERED, stderr_capacity)
+    val words = obs_poll_words(slot, status_value)
+    val receipt = obs_tuple3(stdout, stderr, words)
+    if receipt < 4096:
+        return 0
+    obs_store(slot, PROC_OUT_DELIVERED,
+        obs_load(slot, PROC_OUT_DELIVERED) +
+        unsafe(capabilities: [ffi]): rt_array_len(stdout))
+    obs_store(slot, PROC_ERR_DELIVERED,
+        obs_load(slot, PROC_ERR_DELIVERED) +
+        unsafe(capabilities: [ffi]): rt_array_len(stderr))
+    receipt
+
+fn obs_pin_replaced(pin_slot: i64) -> i64:
+    val metadata = obs_calloc(1, 144)
+    if metadata < 1:
+        return -1
+    val stat_result = unsafe(capabilities: [ffi, raw_ptr]):
+        stat(obs_load(pin_slot, PIN_PATH), metadata)
+    if stat_result != 0:
+        obs_free(metadata)
+        return -1
+    val changed = obs_load(metadata, 0) != obs_load(pin_slot, PIN_DEV) or
+        obs_load(metadata, 8) != obs_load(pin_slot, PIN_INO) or
+        obs_load(metadata, 48) != obs_load(pin_slot, PIN_SIZE) or
+        obs_load(metadata, 88) != obs_load(pin_slot, PIN_MTIME_SEC) or
+        obs_load(metadata, 96) != obs_load(pin_slot, PIN_MTIME_NSEC)
+    obs_free(metadata)
+    if changed: 1 else: 0
+
+fn obs_result_words(slot: i64, status_value: i64, replaced: i64) -> i64:
+    val raw_status = obs_load(slot, PROC_WAIT_STATUS)
+    val signal_number = raw_status & 127
+    val exit_code = if signal_number == 0: (raw_status >> 8) & 255 else: -1
+    val words = obs_word_array(24)
+    obs_push_word(words, OBS_VERSION)
+    obs_push_word(words, status_value)
+    obs_push_word(words, obs_load(slot, PROC_PID))
+    obs_push_word(words, exit_code)
+    obs_push_word(words, signal_number)
+    obs_push_word(words, obs_load(slot, PROC_DEADLINE_EXCEEDED))
+    obs_push_word(words, obs_load(slot, PROC_TERM_SENT))
+    obs_push_word(words, obs_load(slot, PROC_KILL_SENT))
+    obs_push_word(words, obs_load(slot, PROC_REAPED))
+    obs_push_word(words, obs_load(slot, PROC_OUTPUT_COMPLETE))
+    obs_push_word(words, obs_load(slot, PROC_OUT_SEEN))
+    obs_push_word(words, obs_load(slot, PROC_OUT_KEPT))
+    obs_push_word(words, if obs_load(slot, PROC_OUT_SEEN) > obs_load(slot, PROC_OUT_KEPT): 1 else: 0)
+    obs_push_word(words, obs_load(slot, PROC_ERR_SEEN))
+    obs_push_word(words, obs_load(slot, PROC_ERR_KEPT))
+    obs_push_word(words, if obs_load(slot, PROC_ERR_SEEN) > obs_load(slot, PROC_ERR_KEPT): 1 else: 0)
+    obs_push_word(words, obs_load(slot, PROC_USER_MS))
+    obs_push_word(words, obs_load(slot, PROC_SYSTEM_MS))
+    obs_push_word(words, obs_load(slot, PROC_RSS_KIB))
+    obs_push_word(words, obs_load(slot, PROC_RUSAGE_AVAILABLE))
+    obs_push_word(words, 1)
+    obs_push_word(words, if replaced >= 0: 1 else: 0)
+    obs_push_word(words, if replaced == 1: 1 else: 0)
+    obs_push_word(words, obs_load(slot, PROC_FAILURE))
+    if obs_words_valid(words, 24): words else: 0
+
+fn obs_release_process_slot(slot: i64):
+    if obs_load(slot, PROC_OUT_FD) >= 0: obs_close(obs_load(slot, PROC_OUT_FD))
+    if obs_load(slot, PROC_ERR_FD) >= 0: obs_close(obs_load(slot, PROC_ERR_FD))
+    if obs_load(slot, PROC_OUT_BUFFER) > 0: obs_free(obs_load(slot, PROC_OUT_BUFFER))
+    if obs_load(slot, PROC_ERR_BUFFER) > 0: obs_free(obs_load(slot, PROC_ERR_BUFFER))
+    if obs_load(slot, PROC_STATUS_BUFFER) > 0: obs_free(obs_load(slot, PROC_STATUS_BUFFER))
+    if obs_load(slot, PROC_RUSAGE_BUFFER) > 0: obs_free(obs_load(slot, PROC_RUSAGE_BUFFER))
+    if obs_load(slot, PROC_SCRATCH_BUFFER) > 0: obs_free(obs_load(slot, PROC_SCRATCH_BUFFER))
+    if obs_load(slot, PROC_CLOCK_BUFFER) > 0: obs_free(obs_load(slot, PROC_CLOCK_BUFFER))
+    val pin_index = obs_load(slot, PROC_PIN_INDEX)
+    if pin_index >= 0 and pin_index < OBS_MAX_SLOTS:
+        val pin_slot = observation_pin_slots + pin_index * PIN_STRIDE
+        if obs_load(pin_slot, PIN_STATE) == 2 and
+                obs_load(pin_slot, PIN_GENERATION) == obs_load(slot, PROC_PIN_GENERATION):
+            obs_release_pin_slot(pin_slot)
+    val generation = obs_load(slot, PROC_GENERATION)
+    if generation >= 72057594037927935:
+        obs_store(slot, PROC_STATE, -1)
+    else:
+        obs_store(slot, PROC_STATE, 0)
+        obs_store(slot, PROC_GENERATION, generation + 1)
+
+fn obs_sweep_internal_cleanup():
+    if observation_process_slots < 1:
+        return
+    var i = 0
+    while i < OBS_MAX_SLOTS:
+        val slot = observation_process_slots + i * PROC_STRIDE
+        if obs_load(slot, PROC_STATE) == 4:
+            obs_service(slot, 0)
+            if obs_load(slot, PROC_REAPED) != 0 and
+                    obs_load(slot, PROC_OUTPUT_COMPLETE) != 0:
+                obs_release_process_slot(slot)
+        i = i + 1
+
+fn obs_missing_result(status_value: i64) -> i64:
+    val words = obs_word_array(24)
+    obs_push_word(words, OBS_VERSION)
+    obs_push_word(words, status_value)
+    obs_push_word(words, 0)
+    obs_push_word(words, -1)
+    var i = 4
+    while i < 24:
+        obs_push_word(words, 0)
+        i = i + 1
+    if not obs_words_valid(words, 24):
+        return 0
+    obs_tuple4(obs_empty_bytes(), obs_empty_bytes(), obs_empty_bytes(), words)
+
+pub fn rt_process_observation_v1_collect_value(handle: i64) -> i64:
+    val slot = obs_process_slot(handle)
+    if slot < 1:
+        return obs_missing_result(STATUS_REUSE)
+    val initial_now = obs_slot_now_ms(slot)
+    if initial_now <= 0:
+        obs_store(slot, PROC_FAILURE, FAIL_CLOCK)
+        return obs_missing_result(STATUS_PROVIDER_FAILED)
+    val cleanup_end = obs_load(slot, PROC_CLEANUP_END)
+    var collect_now = initial_now
+    while (obs_load(slot, PROC_REAPED) == 0 or
+            obs_load(slot, PROC_OUTPUT_COMPLETE) == 0) and collect_now < cleanup_end:
+        obs_service(slot, 10)
+        collect_now = obs_slot_now_ms(slot)
+        if collect_now <= 0:
+            obs_store(slot, PROC_FAILURE, FAIL_CLOCK)
+            return obs_missing_result(STATUS_PROVIDER_FAILED)
+    if obs_load(slot, PROC_REAPED) == 0 or obs_load(slot, PROC_OUTPUT_COMPLETE) == 0:
+        obs_store(slot, PROC_STATE, 3)
+        obs_store(slot, PROC_FAILURE, FAIL_CLEANUP)
+        val pin_slot = observation_pin_slots + obs_load(slot, PROC_PIN_INDEX) * PIN_STRIDE
+        val digest = obs_bytes(obs_load(pin_slot, PIN_DIGEST), 32)
+        return obs_tuple4(
+            obs_bytes(obs_load(slot, PROC_OUT_BUFFER), obs_load(slot, PROC_OUT_KEPT)),
+            obs_bytes(obs_load(slot, PROC_ERR_BUFFER), obs_load(slot, PROC_ERR_KEPT)),
+            digest, obs_result_words(slot, STATUS_CLEANUP_PENDING,
+                obs_pin_replaced(pin_slot)))
+    val pin_slot = observation_pin_slots + obs_load(slot, PROC_PIN_INDEX) * PIN_STRIDE
+    val replaced = obs_pin_replaced(pin_slot)
+    val stdout = obs_bytes(obs_load(slot, PROC_OUT_BUFFER), obs_load(slot, PROC_OUT_KEPT))
+    val stderr = obs_bytes(obs_load(slot, PROC_ERR_BUFFER), obs_load(slot, PROC_ERR_KEPT))
+    val digest = obs_bytes(obs_load(pin_slot, PIN_DIGEST), 32)
+    val status_value = if obs_load(slot, PROC_FAILURE) == 0: STATUS_OK else: STATUS_PROVIDER_FAILED
+    val words = obs_result_words(slot, status_value, replaced)
+    val receipt = obs_tuple4(stdout, stderr, digest, words)
+    if receipt < 4096:
+        # Receipt construction failed; the lease and every owned resource stay
+        # live so the caller can retry collection.
+        return 0
+    obs_release_process_slot(slot)
+    receipt
+
+pub fn rt_process_observation_v1_release_value(handle: i64) -> i8:
+    val slot = obs_process_slot(handle)
+    if slot < 1 or obs_load(slot, PROC_REAPED) == 0 or
+            obs_load(slot, PROC_OUTPUT_COMPLETE) == 0:
+        return 0
+    obs_release_process_slot(slot)
+    1

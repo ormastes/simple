@@ -1,4 +1,5 @@
 # Pure-Simple ARM32 `--emit-object` is ignored
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -70,3 +71,6 @@ normally exiting process. That preserves test isolation without `fork` plus
 `_exit` and allows an enabled per-process coverage handler to flush. Coverage
 file naming and cross-process merge policy remain the responsibility of the
 selected coverage runner.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

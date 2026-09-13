@@ -1,4 +1,5 @@
 # `rt_time_now_micros()` deltas print as tagbox garbage — in-language microbenchmarking is unusable
+**Status:** OPEN (unverified 2026-09-12)
 
 - Status: OPEN
 - Found: 2026-08-02, while A/B-measuring a CPU-lane hot-path fix
@@ -65,3 +66,22 @@ larger run.
 - Whether the corruption is in `rt_time_now_micros()`'s return typing, in `i64`
   subtraction, or in string interpolation of the result. The three-way split
   should be resolved by printing each of `a0`, `a1`, and `a1 - a0` separately.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-13
+
+Not reproducible. Ran the doc's exact repro shape (`val a0 = rt_time_now_micros(); ...loop...; val a1 = rt_time_now_micros(); print "delta_us={a1 - a0}"`) 5 times in a row on the deployed seed:
+
+```
+delta_us=182
+delta_us=214
+delta_us=182
+delta_us=213
+delta_us=149
+```
+
+All 5 runs print plausible, stable-format integers -- no `<value:0x..>`, `<special:..>`, `<invalid-heap:..>`, or denormal-float garbage. This matches the resolution pattern of the related `any_slot_holds_untagged_scalar_2026-08-05` family (storage-side fixes already landed for several of these tagbox-leak sites).
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)

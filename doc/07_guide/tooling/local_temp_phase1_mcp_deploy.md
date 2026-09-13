@@ -264,54 +264,6 @@ The root is disposable; `deploy-local-temp-mcp.shs` `rm -rf`s and recreates it o
 every run. Nothing under `bin/release/**` is touched, so there is no deployed
 state to roll back.
 
-## 5. Production Stage 4 deployment
-
-The temp-root procedure above is phase-1 seed validation only. It does not
-qualify or deploy a production compiler and must never be copied into
-`bin/release`. Production deployment requires the explicit Stage 4 toolset
-admission, including the Stage 5 native MCP smoke and hashes for the complete
-CLI, MCP, and LSP MCP set.
-
-After the speculative scheduler has written a verified
-`promotion-required.env`, promote its matching admitted toolset with two
-absolute canonical receipt paths:
-
-```sh
-sh scripts/bootstrap/promote-stage4-local.shs \
-  --promotion-receipt /absolute/path/to/scheduler/<generation>/promotion-required.env \
-  --toolset-admission /absolute/path/to/stage4/<candidate>/simple.toolset-admission.env
-```
-
-The receipts must describe the same generation and bind the same executable
-files. The command rejects partial or mixed generations, stale or changed
-receipts, and any toolset without `completed_gate=stage5-native-mcp-smoke`.
-It stages `simple`, `simple_mcp_server`, and `simple_lsp_mcp_server` together
-with their trust records in an immutable directory under
-`bin/release/<platform>/generations/`, then atomically publishes the one active
-pointer at `bin/release/current.env`. A failed validation leaves the active
-pointer unchanged; there is no partial deployment to repair manually.
-
-The normal wrappers use only the cached artifacts selected by that pointer:
-
-```sh
-sh scripts/bootstrap/promote-stage4-local.shs --resolve cli
-sh scripts/bootstrap/promote-stage4-local.shs --resolve mcp
-sh scripts/bootstrap/promote-stage4-local.shs --resolve lsp-mcp
-```
-
-On Windows, use `bin/stage4_local_resolve.cmd cli|mcp|lsp-mcp`. The wrappers do
-not compile or interpret source at startup and do not choose a release binary
-by platform-name guessing. If the active generation must be reverted, run:
-
-```sh
-sh scripts/bootstrap/promote-stage4-local.shs --rollback
-```
-
-Rollback validates the retained previous generation and atomically switches
-`current.env`; it fails closed when no valid previous admitted pointer exists.
-Never deploy without Stage 4 toolset admission and never edit the pointer or
-generation receipts by hand.
-
 ## See also
 
 - `.claude/rules/bootstrap.md` — why a seed must not masquerade as `bin/simple`

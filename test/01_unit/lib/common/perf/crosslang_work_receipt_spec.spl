@@ -1,0 +1,128 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# plan: doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md (L10, rows 735-769 / 1280 / 1303-1305)
+
+# @cover src/lib/common/perf/crosslang_work_receipt.spl 80%
+# @tag: unit, perf, cross_language, l10, work_receipt
+#
+# L10 recorded rejection cause 2 — EXECUTED-WORK PROOF.
+# Astra rejected the parity candidate in part because "Simple count is
+# constant" and "pure repeated calls remain hoistable": a fixture whose result
+# is never consumed can be optimized away entirely, so a timing sample proves
+# only that a process ran, not that the measured work happened. This spec pins
+# a work receipt — a checksum over the PRODUCED OUTPUT plus an item count —
+# that the collector must verify before it accepts a sample.
+#
+# Synthetic only. No benchmark is run and none may be (no fourth collector
+# cycle).
+
+use std.spec
+use std.spec.step
+use common.perf.crosslang_work_receipt.{
+    WorkReceipt,
+    crosslang_checksum,
+    crosslang_work_receipt,
+    crosslang_verify_receipt,
+    crosslang_accept_sample,
+}
+
+fn produced_output() -> [i64]:
+    """The output a correctly-executing adapter produces for the fixture."""
+    [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9]
+
+describe "crosslang work receipt — a sample is admitted only with proof of executed work":
+    # @manual_section L10 rejection cause 2
+
+    it "accepts a sample whose receipt matches the expected work":
+        """An adapter that really produced the fixture's output presents a
+        matching checksum and item count, and its sample is admitted."""
+        # @req REQ-SSPEC-UNIT
+        step("verify a matching receipt")
+        val expected = crosslang_work_receipt("oracle", produced_output())
+        val actual = crosslang_work_receipt("rust", produced_output())
+        val verdict = crosslang_verify_receipt(expected, actual)
+        assert_true(verdict.accepted)
+        assert_equal(verdict.reason, "")
+        # Fail closed on vacuity: an admitted receipt must describe real items.
+        assert_true(actual.item_count == 15)
+        assert_true(actual.output_checksum != "")
+
+    it "rejects a sample whose output checksum does not match":
+        """A hoisted or elided loop produces different output, so the checksum
+        differs and the sample is refused — the defect the L10 review named."""
+        # @req REQ-SSPEC-UNIT
+        step("verify a receipt whose checksum came from different output")
+        val expected = crosslang_work_receipt("oracle", produced_output())
+        val hoisted = crosslang_work_receipt("go", [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 0])
+        val verdict = crosslang_verify_receipt(expected, hoisted)
+        assert_false(verdict.accepted)
+        assert_contains(verdict.reason, "checksum_mismatch")
+
+    it "rejects a sample whose item count does not match":
+        """Same checksum length is not enough: the number of items the adapter
+        claims to have produced must equal the fixture's."""
+        # @req REQ-SSPEC-UNIT
+        step("verify a receipt over a shorter output")
+        val expected = crosslang_work_receipt("oracle", produced_output())
+        val short = crosslang_work_receipt("bun", [3, 1, 4, 1, 5])
+        val verdict = crosslang_verify_receipt(expected, short)
+        assert_false(verdict.accepted)
+        assert_contains(verdict.reason, "item_count_mismatch")
+
+    it "rejects a missing receipt rather than defaulting to accept":
+        """A receipt is REQUIRED. An adapter that supplies none is refused, not
+        waved through on the strength of its timing numbers."""
+        # @req REQ-SSPEC-UNIT
+        step("verify an absent receipt")
+        val expected = crosslang_work_receipt("oracle", produced_output())
+        val absent = WorkReceipt(adapter_id: "python", output_checksum: "", item_count: 0)
+        val verdict = crosslang_verify_receipt(expected, absent)
+        assert_false(verdict.accepted)
+        assert_contains(verdict.reason, "missing_receipt")
+
+    it "rejects a zero-item receipt as vacuous":
+        """A run that produced nothing is a rejection, not a fast pass."""
+        # @req REQ-SSPEC-UNIT
+        step("verify a receipt over an empty output")
+        val expected = crosslang_work_receipt("oracle", produced_output())
+        val nothing = WorkReceipt(adapter_id: "c", output_checksum: "deadbeef", item_count: 0)
+        val verdict = crosslang_verify_receipt(expected, nothing)
+        assert_false(verdict.accepted)
+        assert_contains(verdict.reason, "zero_item_count")
+
+    it "the checksum actually depends on order and on every element":
+        """A checksum that ignored order or a single element could not detect a
+        partially-elided loop — so it is checked directly."""
+        # @req REQ-SSPEC-UNIT
+        step("checksum three related outputs")
+        val base = crosslang_checksum(produced_output())
+        val reordered = crosslang_checksum([1, 3, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9])
+        val one_changed = crosslang_checksum([3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 8])
+        assert_true(base != "")
+        assert_true(base != reordered)
+        assert_true(base != one_changed)
+        assert_true(reordered != one_changed)
+        assert_equal(crosslang_checksum([]), "")
+
+    it "the collector refuses a sample when the receipt fails, even with timings present":
+        """Sample admission is receipt-first: valid-looking timings do not
+        rescue a sample whose executed work is unproven."""
+        # @req REQ-SSPEC-UNIT
+        step("admit a sample with good timings and a bad receipt")
+        val expected = crosslang_work_receipt("oracle", produced_output())
+        val good_timings: [i64] = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 900]
+        val bad = crosslang_work_receipt("go", [0, 0, 0])
+        val refused = crosslang_accept_sample(expected, bad, good_timings)
+        assert_false(refused.accepted)
+        assert_contains(refused.reason, "item_count_mismatch")
+
+        step("admit a sample with a good receipt and no timings")
+        val good = crosslang_work_receipt("rust", produced_output())
+        val no_timings = crosslang_accept_sample(expected, good, [])
+        assert_false(no_timings.accepted)
+        assert_contains(no_timings.reason, "no_timing_samples")
+
+        step("admit a sample with a good receipt and real timings")
+        val ok = crosslang_accept_sample(expected, good, good_timings)
+        assert_true(ok.accepted)
+        assert_equal(ok.reason, "")

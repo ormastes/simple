@@ -1,5 +1,7 @@
 # Native codegen has no lowering for `Expr::Slice` — functions using `a[i:j]` silently emit nothing
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-21
 - Area: compiler / native codegen (AOT `--native`)
 - Severity: medium-high — it is the sole remaining blocker on the enterprise
@@ -143,3 +145,6 @@ arm, `rt_contains` ships only because it was verified against an oracle, while
 `rt_index_of` on a text receiver was verified WRONG and deliberately kept
 failing loudly. Slice lowering must clear the same bar rather than being wired
 up because it links.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

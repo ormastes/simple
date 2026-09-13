@@ -10,6 +10,8 @@ val BACKEND_PLUGIN_BRIDGE_MAGIC_V1: i64 = 0x31504253
 val BACKEND_PLUGIN_BRIDGE_VERSION_V1: i64 = 1
 val BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1: i64 = 32
 val BACKEND_PLUGIN_REQUEST_SIZE_V1: i64 = 16
+val BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1: i64 = 0x31484253
+val BACKEND_PLUGIN_PROVIDER_HANDLE_SIZE_V1: i64 = 16
 
 @unsafe(
     reason: "runtime-owned boxed [u8] backend plugin bridge; result envelope is validated before use",
@@ -19,6 +21,20 @@ extern fn spl_backend_plugin_run_v1(
     path_bytes: [u8], request_bytes: [u8], mir_bytes: [u8]
 ) -> [u8]
 
+@unsafe(reason: "runtime-owned retained backend batch session", capabilities: [ffi])
+extern fn spl_backend_plugin_batch_open_v1(
+    provider_bytes: [u8], request_bytes: [u8]
+) -> i64
+
+@unsafe(reason: "runtime-owned retained backend batch compile", capabilities: [ffi])
+extern fn spl_backend_plugin_batch_compile_v1(handle: i64, mir_bytes: [u8]) -> [u8]
+
+@unsafe(reason: "runtime-owned retained backend batch finalize", capabilities: [ffi])
+extern fn spl_backend_plugin_batch_finalize_v1(handle: i64) -> [u8]
+
+@unsafe(reason: "runtime-owned retained backend batch close", capabilities: [ffi])
+extern fn spl_backend_plugin_batch_close_v1(handle: i64) -> i64
+
 struct BackendPluginBridgeEnvelopeV1:
     valid: bool
     reason: text
@@ -26,6 +42,34 @@ struct BackendPluginBridgeEnvelopeV1:
     result_kind: i64
     payload: [u8]
     diagnostic: text
+
+class BackendPluginBatchBridgeV1:
+    handle: i64
+    closed: bool
+
+    fn compile(module: MirModule) -> BackendPluginBridgeEnvelopeV1:
+        if self.closed or self.handle <= 0:
+            return backend_plugin_bridge_invalid_v1("batch-session-closed")
+        val mir_bytes = text_to_bytes(serialize_mir_module(module))
+        val response = unsafe(capabilities: [ffi]):
+            spl_backend_plugin_batch_compile_v1(self.handle, mir_bytes)
+        backend_plugin_envelope_decode_v1(response)
+
+    fn finalize() -> BackendPluginBridgeEnvelopeV1:
+        if self.closed or self.handle <= 0:
+            return backend_plugin_bridge_invalid_v1("batch-session-closed")
+        val response = unsafe(capabilities: [ffi]):
+            spl_backend_plugin_batch_finalize_v1(self.handle)
+        backend_plugin_envelope_decode_v1(response)
+
+    me close() -> bool:
+        if self.closed:
+            return true
+        val status = unsafe(capabilities: [ffi]):
+            spl_backend_plugin_batch_close_v1(self.handle)
+        self.handle = 0
+        self.closed = true
+        status == 0
 
 fn backend_plugin_bridge_invalid_v1(reason: text) -> BackendPluginBridgeEnvelopeV1:
     BackendPluginBridgeEnvelopeV1(false, reason, -1, 0, [], "")
@@ -90,6 +134,13 @@ fn backend_plugin_request_encode_v1(request: BackendPluginRequestV1) -> [u8]:
     backend_plugin_push_u64_le_v1(out, capabilities)
     out
 
+fn backend_plugin_provider_handle_encode_v1(handle: i64) -> [u8]:
+    var out: [u8] = []
+    backend_plugin_push_u32_le_v1(out, BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1)
+    backend_plugin_push_u32_le_v1(out, BACKEND_PLUGIN_BRIDGE_VERSION_V1)
+    backend_plugin_push_u64_le_v1(out, handle)
+    out
+
 fn backend_plugin_envelope_encode_v1(
     status: i64, result_kind: i64, payload: [u8], diagnostic: text
 ) -> [u8]:
@@ -148,8 +199,54 @@ fn backend_plugin_run_module_v1(
             text_to_bytes(provider_path), request_bytes, mir_bytes)
     backend_plugin_envelope_decode_v1(response)
 
+fn backend_plugin_run_admitted_module_v1(
+    provider_handle: i64, request: BackendPluginRequestV1, module: MirModule
+) -> BackendPluginBridgeEnvelopeV1:
+    if provider_handle <= 0:
+        return backend_plugin_bridge_invalid_v1("missing-provider-handle")
+    val request_bytes = backend_plugin_request_encode_v1(request)
+    val mir_bytes = text_to_bytes(serialize_mir_module(module))
+    val response = unsafe(capabilities: [ffi]):
+        spl_backend_plugin_run_v1(
+            backend_plugin_provider_handle_encode_v1(provider_handle),
+            request_bytes, mir_bytes)
+    backend_plugin_envelope_decode_v1(response)
+
+fn backend_plugin_open_admitted_batch_v1(
+    provider_handle: i64, request: BackendPluginRequestV1
+) -> Result<BackendPluginBatchBridgeV1, text>:
+    if provider_handle <= 0:
+        return Err("missing-provider-handle")
+    val request_bytes = backend_plugin_request_encode_v1(request)
+    val handle = unsafe(capabilities: [ffi]):
+        spl_backend_plugin_batch_open_v1(
+            backend_plugin_provider_handle_encode_v1(provider_handle), request_bytes)
+    if handle <= 0:
+        return Err("provider batch open status " + (-handle).to_string())
+    Ok(BackendPluginBatchBridgeV1(handle, false))
+
+fn backend_plugin_copy_payload_v1(
+    envelope: BackendPluginBridgeEnvelopeV1, output: [u8]
+) -> Result<i64, text>:
+    if not envelope.valid: return Err(envelope.reason)
+    if envelope.status != 0:
+        return Err("provider status " + envelope.status.to_string())
+    if output.len() < envelope.payload.len():
+        return Err("output capacity " + output.len().to_string()
+            + " is smaller than required " + envelope.payload.len().to_string())
+    var index = 0
+    while index < envelope.payload.len():
+        output[index] = envelope.payload[index]
+        index = index + 1
+    Ok(envelope.payload.len())
+
 export BACKEND_PLUGIN_BRIDGE_MAGIC_V1, BACKEND_PLUGIN_BRIDGE_VERSION_V1
 export BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1, BACKEND_PLUGIN_REQUEST_SIZE_V1
+export BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1, BACKEND_PLUGIN_PROVIDER_HANDLE_SIZE_V1
 export BackendPluginBridgeEnvelopeV1
-export backend_plugin_request_encode_v1, backend_plugin_envelope_encode_v1
-export backend_plugin_envelope_decode_v1, backend_plugin_run_module_v1
+export BackendPluginBatchBridgeV1
+export backend_plugin_request_encode_v1, backend_plugin_provider_handle_encode_v1
+export backend_plugin_envelope_encode_v1, backend_plugin_envelope_decode_v1
+export backend_plugin_run_module_v1, backend_plugin_run_admitted_module_v1
+export backend_plugin_open_admitted_batch_v1
+export backend_plugin_copy_payload_v1

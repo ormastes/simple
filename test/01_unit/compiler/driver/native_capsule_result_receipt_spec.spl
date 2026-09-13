@@ -6,8 +6,11 @@ use compiler.mir.mir_data.{MirModule}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint}
 use compiler.driver.driver_aot_native_output.{
     driver_native_capsule_result_valid_v1,
+    driver_native_capsule_result_reason_v1,
     driver_native_collect_capsule_result_v1,
-    driver_native_capsule_inputs_valid_v1
+    driver_native_capsule_inputs_valid_v1,
+    driver_native_capsule_receipt_size_reason_v1,
+    driver_native_capsule_receipt_size_canary_v1
 }
 
 fn receipt_ctx() -> CompileContext:
@@ -70,3 +73,67 @@ describe "native capsule result receipt":
                     assert_false(driver_native_capsule_result_valid_v1(capsule))
                 _ = file_delete(capsule.object_path + ".capsule-receipt")
                 _ = file_delete(capsule.object_path)
+
+    it "names the first differing receipt line when the byte counts match":
+        # Regression pin for the 2026-09-12 Stage-2 blocker: a wrong `size`
+        # field that happens to render the SAME number of characters made the
+        # verdict read `expected-bytes=N:actual-bytes=N`, which localises
+        # nothing. The reason string must name WHICH line diverged. This only
+        # adds diagnosis -- the comparison itself is still full-text equality,
+        # so a receipt that differs anywhere is still rejected.
+        val batch = receipt_fixture()
+        if batch.ok:
+            val capsule = batch.find("receipt")
+            if capsule.ok:
+                _ = file_write(capsule.object_path, "object-v1")
+                val fingerprint = FileFingerprint.from_file(capsule.object_path)
+                if val fp = fingerprint:
+                    # Same character count as the true size (9 -> 8), so the
+                    # two receipts are byte-for-byte the same LENGTH.
+                    val skewed = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n8\n{fp.content_hash}\n"
+                    _ = file_write(capsule.object_path + ".capsule-receipt", skewed)
+                    val reason = driver_native_capsule_result_reason_v1(capsule)
+                    assert_true(reason.contains("receipt-content-mismatch"))
+                    assert_true(reason.contains("expected-bytes=") and
+                        reason.contains("actual-bytes="))
+                    assert_true(reason.contains("first-diff-line=4"))
+                _ = file_delete(capsule.object_path + ".capsule-receipt")
+                _ = file_delete(capsule.object_path)
+
+describe "native capsule receipt size plausibility":
+    # Two checks, deliberately split. `..._reason_v1` is BLOCKING and gates the
+    # value actually WRITTEN to receipt line 4, which both receipt sites take
+    # from `rt_file_size`. `..._canary_v1` is ADVISORY and compares that value
+    # with the `FileFingerprint.size` struct-field read of the same quantity;
+    # a disagreement is the optional-bound scalar-field miscompile, reported
+    # unconditionally but never failing the build, because the written value
+    # does not pass through the field. Run 9 of the macOS Stage 2 chain
+    # (2026-09-13) measured the canary in blocking form: it fired with
+    # field=34363944961 against runtime=632 and stopped the whole bootstrap
+    # over a defect this file already routes around.
+    it "admits a size the runtime can plausibly have produced":
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(632), "")
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(0), "")
+
+    it "rejects the stat sentinel instead of recording it as a size":
+        # `FileFingerprint.from_file` passes -1 through unchecked.
+        assert_true(driver_native_capsule_receipt_size_reason_v1(-1)
+            .contains("receipt-size-unreadable"))
+
+    it "rejects a written size that is itself a pointer":
+        # 2^40 is the bound: at or above it the value cannot be a byte count.
+        assert_true(driver_native_capsule_receipt_size_reason_v1(1099511627776)
+            .contains("receipt-size-implausible"))
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(1099511627775), "")
+
+    it "names both values when the struct field disagrees with the runtime":
+        # 34363944961 is the verbatim run-9 field value against a 632-byte
+        # object -- a tagged heap pointer, and WELL BELOW the 2^40 bound, which
+        # is why the inequality and not the magnitude test is load-bearing.
+        val canary = driver_native_capsule_receipt_size_canary_v1(34363944961, 632)
+        assert_true(canary.contains("field=34363944961"))
+        assert_true(canary.contains("runtime=632"))
+        assert_equal(driver_native_capsule_receipt_size_reason_v1(34363944961), "")
+
+    it "stays quiet when the struct field and the runtime agree":
+        assert_equal(driver_native_capsule_receipt_size_canary_v1(632, 632), "")

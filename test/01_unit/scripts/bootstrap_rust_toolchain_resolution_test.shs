@@ -91,7 +91,7 @@ case "$1" in
         ;;
     -vV)
         printf '%s\n' 'rustc 1.90.0 (fixture)' \
-            'release: 1.90.0' 'host: x86_64-pc-windows-gnu'
+            'release: 1.90.0' "host: $(cat "${0%/*}/host.txt")"
         ;;
     *) exit 21 ;;
 esac
@@ -106,6 +106,7 @@ chmod +x "$rustup_root/.cargo/bin/rustc" \
     "$installed_toolchain/bin/cargo.exe"
 installed_path="$rustup_root/.cargo/bin:$fixture/tools:$utility_dir:/usr/bin:/bin"
 printf '%s' "$installed_path" >"$installed_toolchain/bin/expected-path"
+printf '%s\n' 'x86_64-pc-windows-gnu' >"$installed_toolchain/bin/host.txt"
 bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$installed_path" \
     >"$fixture/installed.env"
 [ ! -e "$rustup_root/.cargo/bin/proxy-called" ]
@@ -121,6 +122,50 @@ grep -Fx "rustc-path=$installed_toolchain/bin/rustc.exe" \
     "$fixture/installed.env" >/dev/null
 grep -Fx "cargo-path=$installed_toolchain/bin/cargo.exe" \
     "$fixture/installed.env" >/dev/null
+
+# Modern rustup settings omit default_host_tuple. The selected policy channel
+# supplies the prefix needed to derive the host tuple from default_toolchain.
+cp "$rustup_root/.rustup/settings.toml" "$fixture/settings.saved"
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_toolchain = "stable-x86_64-pc-windows-gnu"
+profile = "default"
+EOF
+bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$installed_path" \
+    >"$fixture/modern.env"
+for expected in \
+    "rust-toolchain-name=$installed_name" \
+    "rust-host=x86_64-pc-windows-gnu" \
+    "rust-sysroot=$installed_toolchain" \
+    "rustc-path=$installed_toolchain/bin/rustc.exe" \
+    "cargo-path=$installed_toolchain/bin/cargo.exe"; do
+    grep -Fx "$expected" "$fixture/modern.env" >/dev/null
+done
+cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
+
+# Modern settings also select MSVC and ARM64 host tuples. Use the same exact
+# executable fixture with host-specific toolchain directories and metadata.
+for modern_host in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+    modern_name="stable-$modern_host"
+    modern_toolchain="$rustup_root/.rustup/toolchains/$modern_name"
+    mkdir -p "$modern_toolchain/bin"
+    cp "$installed_toolchain/bin/rustc.exe" "$modern_toolchain/bin/rustc.exe"
+    cp "$installed_toolchain/bin/cargo.exe" "$modern_toolchain/bin/cargo.exe"
+    chmod +x "$modern_toolchain/bin/rustc.exe" "$modern_toolchain/bin/cargo.exe"
+    printf '%s' "$installed_path" >"$modern_toolchain/bin/expected-path"
+    printf '%s\n' "$modern_host" >"$modern_toolchain/bin/host.txt"
+    cat >"$rustup_root/.rustup/settings.toml" <<EOF
+version = "12"
+default_toolchain = "stable-$modern_host"
+profile = "default"
+EOF
+    bootstrap_stage3_resolve_rust_toolchain "$fixture/repo" "$installed_path" \
+        >"$fixture/$modern_host.env"
+    grep -Fx "rust-toolchain-name=$modern_name" \
+        "$fixture/$modern_host.env" >/dev/null
+    grep -Fx "rust-host=$modern_host" "$fixture/$modern_host.env" >/dev/null
+done
+cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
 
 # Exercise failure diagnostics through nested command substitution, matching
 # the fingerprint consumer. No invalid authority may leak partial stdout.
@@ -170,9 +215,60 @@ cp "$fixture/repo/src/compiler_rust/rust-toolchain.toml" "$fixture/policy.saved"
 printf 'channel = "nightly"\n' >>"$fixture/repo/src/compiler_rust/rust-toolchain.toml"
 expect_installed_rejection resolver-channel=parse-fail
 cp "$fixture/policy.saved" "$fixture/repo/src/compiler_rust/rust-toolchain.toml"
-cp "$rustup_root/.rustup/settings.toml" "$fixture/settings.saved"
 printf 'default_host_tuple = "x86_64-pc-windows-gnu"\n' >>"$rustup_root/.rustup/settings.toml"
 expect_installed_rejection settings-host=parse-fail
+cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_host_tuple = "x86_64-pc-windows-gnu"
+default_toolchain = "stable-aarch64-pc-windows-msvc"
+profile = "default"
+EOF
+expect_installed_rejection settings-host=parse-fail
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_toolchain = "stable-x86_64-pc-windows-gnu"
+default_toolchain = "stable-x86_64-pc-windows-gnu"
+profile = "default"
+EOF
+expect_installed_rejection settings-host=parse-fail
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_toolchain = "stable"
+profile = "default"
+EOF
+expect_installed_rejection settings-host=parse-fail
+cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_toolchain = "nightly-x86_64-pc-windows-gnu"
+profile = "default"
+EOF
+expect_installed_rejection settings-host=parse-fail
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_toolchain = "stable-x86_64-pc-windows!msvc"
+profile = "default"
+EOF
+expect_installed_rejection settings-host=invalid
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_host_tuple = "x86_64-pc-windows!msvc"
+profile = "default"
+EOF
+expect_installed_rejection settings-host=invalid
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+profile = "default"
+EOF
+expect_installed_rejection settings-host=parse-fail
+cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
+cat >"$rustup_root/.rustup/settings.toml" <<'EOF'
+version = "12"
+default_host_tuple = ""
+profile = "default"
+EOF
+expect_installed_rejection settings-host=invalid
 cp "$fixture/settings.saved" "$rustup_root/.rustup/settings.toml"
 cp "$installed_toolchain/bin/rustc.exe" "$fixture/rustc.saved"
 printf '#!/bin/sh\nexit 47\n' >"$installed_toolchain/bin/rustc.exe"

@@ -1,7 +1,14 @@
 # Green Thread Direct Runtime Blockers
 
+## Closed 2026-09-13 — Already closed 2026-06-11 (E6 cooperative deferral landed)
+
+- **inferred** The Status line records `closed (E6 cooperative deferral landed 2026-06-11)`.
+- **measured** The referenced runtime sources still exist; the two path-scan misses are throwaway smoke filenames (`global_array_append_smoke.spl`, `global_usize_smoke.spl`), not product code.
+- **inferred** Recorded here so a status-grep does not keep surfacing a closed entry as open.
+
+
 Date: 2026-06-06
-Status: closed (E6 cooperative deferral landed 2026-06-11)
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 

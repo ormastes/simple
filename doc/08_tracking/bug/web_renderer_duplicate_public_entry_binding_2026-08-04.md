@@ -80,3 +80,49 @@ actually serves callers today, so the lower-risk rename is
 describes its actual `_resolved_backend_name` behaviour. Extend the existing
 `compiler_cross_module_private_symbol_collision` diagnostic to fire on duplicate
 public definitions with *identical* signatures, which it currently misses.
+
+## Re-check 2026-09-12 — the spec was dead; it now runs. The duplicate is UNCHANGED.
+
+- Status: OPEN (2026-09-12) — duplicate declaration still present; its spec restored
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+- Spec: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_cpu_simd_paint_spec.spl`
+
+Both declarations are still there, so nothing in this record's analysis changes:
+
+```
+src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl:1264
+src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl:99
+```
+
+What WAS fixed is that the two examples comparing the public lane against the
+software oracle — the only examples that can observe which of the two
+declarations actually ran — had been dead since `e8444b6b1a6`
+("chore(sync): WC sweep") restored the spec file's pre-change blob while the
+source change from `3b86328c925` survived:
+
+```
+RED   ✗ keeps non-text pages byte-exact between the public lane and the software oracle
+        semantic: function `_oracle_budget_ms` not found
+      ✗ keeps the public text lane structurally in agreement with the software oracle
+        semantic: function `_oracle_budget_ms` not found
+      SPEC FILE VERDICT: ... outcome=ERROR declared>=8 executed=8 passed=6 failed=2
+GREEN SPEC FILE VERDICT: ... outcome=OK    declared>=8 executed=8 passed=8 failed=0
+```
+
+The clobber removed BOTH the `simple_web_layout_render_html_software_pixels`
+import and the `_oracle_budget_ms` helper; the call sites survived. Restored
+both. The comparison now passes byte-exact for the non-text pages, which is
+evidence that whichever declaration `use` currently binds agrees with the oracle
+— it does not make the duplicate safe, and this record stays OPEN.
+
+Budget note: `_oracle_budget_ms` is restored as 600000 ms AND the spec now arms
+`SIMPLE_WEB_RENDER_BUDGET_MS=600000` so the public lane's own `_web_budget_begin`
+deadline matches. With either side left at the default a loaded host aborts paint
+early and returns background white, turning a byte-exactness assertion into a
+load-dependent coin flip — see
+`doc/08_tracking/bug/web_paint_wallclock_budget_flake_2026-07-31.md`. Arming only
+one side would have been worse than not arming at all.
+
+## Triage 2026-09-13
+
+Confirmed both declarations are still present (duplicate unchanged). The suggested fix (rename `simple_web_renderer.spl:98`'s definition) is low-risk in isolation, but the symbol name `simple_web_render_html_to_pixels_with_engine2d_backend` is referenced across 35+ files in `src/` and `test/` (browser-engine specs, app renderers, WM-compare tooling) — verifying that a rename does not silently rebind any of those imports to the wrong module needs checking each caller's actual import path, which exceeds this pass's per-bug budget given the size of the remaining shard. Leaving OPEN, no code change made.

@@ -1,4 +1,5 @@
 # Parser rejects line continuation after a trailing binary comparison operator
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/os/compositor/host_gui_event_router_spec.spl -> 3 passed, 2 failed, still reproduces)
 
 - **Date:** 2026-08-04
 - **Area:** compiler/parser (both Rust seed and self-hosted stage binary agree)
@@ -50,3 +51,13 @@ Either support line continuation after a trailing binary operator (the file
 was committed in that style, so some earlier lane accepted or never parsed
 it), or have lint/fmt flag bare trailing-operator continuations at commit
 time so they cannot land unparsed.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/compositor/host_gui_event_router_spec.spl` on the deployed seed; 2 of 5 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.

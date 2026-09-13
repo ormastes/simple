@@ -363,3 +363,15 @@ bugs with a code-level fix available in this pass — repeating the 2026-08-06
 investigation would not change that. **No code changed in this re-verification
 pass.** Status stays OPEN / architectural, pending an owner ruling on findings
 1-2 and completion of the SSHCLI lane's own next increment for finding 3.
+
+## Triage 2026-09-13
+
+365-line findings-only record (nothing edited/deleted per its own
+header). Core issue: sshd's 8 rt_boot_tcp_* externs are baremetal-only
+(defined only in riscv64 freestanding_runtime.c), so the daemon cannot
+bind a host socket at all -- fixing this means adding host-OS C
+runtime bindings (rt_boot_tcp_* -> rt_io_tcp_* equivalents) plus
+routing os/apps/sshd through them, a cross-cutting C+Simple change.
+Six duplication sites also noted but not detailed here given budget.
+Out of this lane's per-item scope. Leaving OPEN.
+

@@ -1,0 +1,190 @@
+# Portable Base profile facade.  Typed semantic facts are implemented by the
+# HIR owner; byte admission and attempt-bound completeness remain unavailable
+# until bounded codec qualification and the C/D authority ports exist.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_canonical_codec_identity_v1,
+    hir_canonical_codec_generated_available_v1, HirDecodeLimits,
+    HirDecodeError, hir_module_decode_bounded}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    semantic_scope_live_port_contract_available_v1,
+    semantic_scope_live_port_contract_blocker_v1}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectStageV1, PortablePortabilityV1, PortableObjectRefV1,
+    portable_object_ref_key_v1
+}
+use compiler.hir.portable_body_profile_types.{PortableEmbeddedBodyKindV1,
+    PortableBodyErrorV1, PortableBodyLimitsV1, PortableBodyBudgetCountersV1,
+    PortableBodyDependencyEdgeV1, PortableBodyEntryFactV1, PortableBodyGraphFactsV1,
+    PortableBodySemanticFactsV1, PortableBodyDescriptorV1,
+    portable_embedded_body_kind_available_v1}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1}
+use compiler.hir.portable_body_semantics.{portable_embedded_body_profile_digest_v1,
+    portable_hir_semantic_facts_from_typed_v1,
+    portable_body_signed_literal_valid_v1}
+use compiler.semantics.portable_body_effects.{portable_body_effect_rules_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.utf8.{text_byte_len}
+
+pub struct PortableHirProfileInputV1:
+    module: HirModule
+    stage: PortableObjectStageV1
+    portability: PortablePortabilityV1
+    required_semantics_digest: text
+    target_contract_digest: text?
+    verifier_digest: text
+
+pub struct PortableHirObjectV1:
+    encoded_hir: text
+    verifier_digest: text
+    reference: PortableObjectRefV1
+
+# This is immutable lookup identity only. It does not validate the referenced
+# bytes, issue semantic completeness, or open the native loader path.
+pub fn portable_hir_object_lookup_key_v1(object: PortableHirObjectV1) -> text:
+    portable_object_ref_key_v1(object.reference)
+
+pub fn portable_hir_semantic_verifier_digest_v1() -> text:
+    # Semantic-verifier identity is intentionally separate from byte-codec
+    # identity. PortableBodyDescriptorV1.codec_identity binds the canonical
+    # header and ordering rules through its own length-framed digest.
+    sha256_text("simple.portable-hir.semantic-verifier.v2" +
+        "\u0000embedded-pure-closed-functions\u0000fixed-signed-int-bool-unit" +
+        "\u0000params-lets-blocks-if-direct-local-calls\u0000semantic-effect-owner" +
+        "\u0000canonical-symbol-scope-indexes\u0000bounded-deduplicated-dag")
+
+pub fn portable_body_limits_default_v1() -> PortableBodyLimitsV1:
+    PortableBodyLimitsV1.standard()
+
+pub fn portable_embedded_body_effect_rules_digest_v1() -> text:
+    portable_body_effect_rules_digest_v1()
+
+fn _profile_input_valid_v1(input: PortableHirProfileInputV1) -> bool:
+    input.stage == PortableObjectStageV1.Base and
+        input.portability == PortablePortabilityV1.Portable and
+        input.target_contract_digest.is_none() and
+        input.required_semantics_digest == portable_embedded_body_profile_digest_v1() and
+        input.verifier_digest == portable_hir_semantic_verifier_digest_v1()
+
+pub fn portable_hir_semantic_verifier_available_v1() -> bool:
+    # P01's copied plan is intentionally insufficient: a verifier cannot turn
+    # a structural semantic-scope request into a live scope.  Keep this
+    # dependency explicit so a future authority port cannot bypass it through
+    # the CAS registry.  The remaining independently qualified decoder,
+    # self-hosted/native, and profile-corpus gates remain closed too.
+    if not semantic_scope_live_port_contract_available_v1(): return false
+    if not hir_canonical_codec_generated_available_v1(): return false
+    false
+
+pub fn portable_hir_semantic_verifier_blocker_v1() -> text:
+    if not semantic_scope_live_port_contract_available_v1():
+        return semantic_scope_live_port_contract_blocker_v1()
+    if not hir_canonical_codec_generated_available_v1():
+        return "canonical_codec_generator_stale"
+    "independent_self_hosted_native_and_profile_corpus_qualification_unavailable"
+
+pub fn portable_body_semantic_completeness_available_v1() -> bool:
+    # Slice B has no live generation/pin/attempt owner port.  Public labels,
+    # digests, counters, and copied descriptors cannot issue a grant.
+    false
+
+pub fn portable_body_semantic_completeness_issue_v1(
+) -> Result<(), PortableBodyErrorV1>:
+    Err(PortableBodyErrorV1.AuthorityUnavailable(
+        "live generation/pin/attempt authority port is not installed"))
+
+pub fn portable_hir_semantic_facts_v1(
+    input: PortableHirProfileInputV1,
+    ledger: PortableBodyLedgerV1,
+) -> Result<PortableBodySemanticFactsV1, PortableBodyErrorV1>:
+    if not _profile_input_valid_v1(input):
+        return Err(PortableBodyErrorV1.InvalidProfileIdentity)
+    portable_hir_semantic_facts_from_typed_v1(input.module,
+        input.required_semantics_digest, ledger)
+
+pub fn portable_hir_semantics_valid_v1(module: HirModule) -> bool:
+    val ledger = match PortableBodyLedgerV1.create(PortableBodyLimitsV1.standard()):
+        case Ok(value): value
+        case Err(_): return false
+    portable_hir_semantic_facts_from_typed_v1(module,
+        portable_embedded_body_profile_digest_v1(), ledger).is_ok()
+
+# Verify one exact canonical HIR object and derive all descriptor facts from
+# its decoded typed representation.  This qualifies only the selected
+# concrete closed-function profile.  Macro expansion, generic substitution,
+# trait selection/defaulting, advice weaving, CTFE, CAS, and attempt authority
+# remain outside this result and cannot be inferred from its copied fields.
+pub fn verify_embedded_portable_hir_v1(
+    encoded_hir: text,
+    required_profile_digest: text,
+    decode_limits: HirDecodeLimits,
+    semantic_limits: PortableBodyLimitsV1,
+) -> Result<PortableBodyDescriptorV1, PortableBodyErrorV1>:
+    if required_profile_digest != portable_embedded_body_profile_digest_v1():
+        return Err(PortableBodyErrorV1.InvalidProfileIdentity)
+    val module = match hir_module_decode_bounded(encoded_hir, decode_limits):
+        case Ok(value): value
+        case Err(HirDecodeError.BoundsExceeded(detail)):
+            return Err(PortableBodyErrorV1.BoundsExceeded(detail))
+        case Err(HirDecodeError.Malformed(detail)):
+            return Err(PortableBodyErrorV1.DecodeRefused(detail))
+        case Err(HirDecodeError.Unavailable(detail)):
+            return Err(PortableBodyErrorV1.AuthorityUnavailable(detail))
+    val ledger = PortableBodyLedgerV1.create(semantic_limits)?
+    val encoded_bytes = text_byte_len(encoded_hir)
+    # The typed semantic owner reserves the one decoded object. Keep this
+    # facade to representation-specific byte retention so a profile verify
+    # and a direct typed verify report the same body-object counter.
+    if (not ledger.charge_encoded_bytes(encoded_bytes) or
+            not ledger.charge_retained_bytes(encoded_bytes)):
+        return Err(ledger.error())
+    val facts = portable_hir_semantic_facts_from_typed_v1(module,
+        required_profile_digest, ledger)?
+    Ok(PortableBodyDescriptorV1(object_kind: "portable_hir_object",
+        object_schema: 2, codec_identity: hir_canonical_codec_identity_v1(),
+        verifier_identity: portable_hir_semantic_verifier_digest_v1(),
+        rules_identity: facts.rules_identity,
+        semantic_profile_digest: facts.semantic_profile_digest,
+        stage: PortableObjectStageV1.Base,
+        portability: PortablePortabilityV1.Portable,
+        target_contract_digest: nil,
+        raw_content_digest: sha256_text(encoded_hir),
+        module_name: facts.module_name, module_path: facts.module_path,
+        exported_entries: facts.exported_entries,
+        transitive_effect_digest: facts.transitive_effect_digest,
+        dependency_edges: facts.graph.dependency_edges,
+        dependency_digest: facts.graph.dependency_digest,
+        call_occurrences: facts.graph.call_occurrences,
+        longest_call_chain: facts.graph.longest_call_chain,
+        budget: facts.budget))
+
+pub fn encode_portable_hir_object_v1(
+    input: PortableHirProfileInputV1,
+) -> Result<PortableHirObjectV1, text>:
+    if not _profile_input_valid_v1(input):
+        return Err("portable_profile_identity_invalid")
+    Err("portable_hir_semantic_verifier_unavailable")
+
+pub fn verify_portable_hir_object_v1(
+    object: PortableHirObjectV1,
+    expected_target_contract: text?,
+) -> bool:
+    # Closed before any legacy unbounded decode or copied-receipt inspection.
+    _ = object
+    _ = expected_target_contract
+    false
+
+pub fn portable_hir_native_loader_admit_v1(
+    object: PortableHirObjectV1,
+) -> Result<(), text>:
+    _ = object
+    Err("portable_hir_verification_failed")
+
+export PortableEmbeddedBodyKindV1, PortableBodyErrorV1, PortableBodyLimitsV1
+export PortableBodyBudgetCountersV1, PortableBodyDependencyEdgeV1
+export PortableBodyEntryFactV1, PortableBodyGraphFactsV1
+export PortableBodySemanticFactsV1, PortableBodyDescriptorV1, PortableBodyLedgerV1
+export portable_embedded_body_kind_available_v1
+export portable_embedded_body_profile_digest_v1
+export portable_body_signed_literal_valid_v1
+export verify_embedded_portable_hir_v1

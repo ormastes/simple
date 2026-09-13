@@ -1,0 +1,68 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR=${DDSM_ROOT_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
+cd "$ROOT_DIR"
+
+system_spec=test/03_system/compiler/perf/demand_driven_smf_compile_pipeline_spec.spl
+perf_spec=test/05_perf/compiler/demand_driven_smf_compile_pipeline_perf_spec.spl
+functional=scripts/check/check-demand-driven-smf-compile-pipeline.shs
+performance=scripts/check/check-demand-driven-smf-compile-performance.shs
+
+for file in "$system_spec" "$perf_spec" "$functional" "$performance" scripts/check/lib/demand-driven-smf-evidence.shs; do
+    [ -f "$file" ] || { echo "FAIL: missing evidence owner: $file" >&2; exit 1; }
+done
+
+check_series() {
+    prefix=$1
+    first=$2
+    last=$3
+    spec=$4
+    checker=$5
+    number=$first
+    while [ "$number" -le "$last" ]; do
+        id=$(printf '%s%03d' "$prefix" "$number")
+        [ "$(grep -Foc "$id" "$spec")" -ge 1 ] || { echo "FAIL: $id absent from $spec" >&2; exit 1; }
+        [ "$(grep -Foc "authority=$id" "$checker")" -eq 1 ] || { echo "FAIL: $id mapping is missing or duplicated" >&2; exit 1; }
+        number=$((number + 1))
+    done
+}
+
+check_series DDSM-REQ- 1 20 "$system_spec" "$functional"
+check_series DDSM-NFR- 1 6 "$perf_spec" "$performance"
+check_series DDSM-STOP- 1 5 "$system_spec" "$functional"
+
+phase=0
+while [ "$phase" -le 9 ]; do
+    id=DDSM-PLAN-P$phase
+    [ "$(grep -Foc "$id" "$system_spec")" -ge 1 ] || { echo "FAIL: $id absent from system spec" >&2; exit 1; }
+    [ "$(grep -Foc "authority=$id" "$functional")" -eq 1 ] || { echo "FAIL: $id mapping is missing or duplicated" >&2; exit 1; }
+    phase=$((phase + 1))
+done
+
+for gate in F S V A Q J R; do
+    id=PERF-GATE-$gate
+    [ "$(grep -Foc "$id" "$perf_spec")" -ge 1 ] || { echo "FAIL: $id absent from performance spec" >&2; exit 1; }
+    [ "$(grep -Foc "authority=$id" "$performance")" -eq 1 ] || { echo "FAIL: $id mapping is missing or duplicated" >&2; exit 1; }
+done
+
+for source in \
+  src/compiler/80.driver/smf/package_image_v1.spl \
+  src/app/compiler_entrypoint/demand_entry_path.spl \
+  src/lib/compiler_artifact_service/service.spl \
+  src/compiler/80.driver/action_graph/coordinator.spl \
+  src/compiler/20.hir/import_materialization/materializer.spl \
+  src/compiler/50.mir/admission/mir_admission_v1.spl \
+  src/compiler/80.driver/backend/demand_backend_plan.spl \
+  src/compiler/40.mono/shape/layout_shape.spl \
+  src/lib/common/io/read_only_file_view.spl \
+  src/compiler/10.frontend/lexer/lexical_scan_simd.spl; do
+    [ -f "$source" ] || { echo "FAIL: static implementation owner missing: $source" >&2; exit 1; }
+done
+
+grep -Fq 'admitted runtime receipt missing or invalid' "$functional" || { echo "FAIL: functional wrapper is not fail closed" >&2; exit 1; }
+grep -Fq 'admitted performance/native receipt missing or invalid' "$performance" || { echo "FAIL: performance wrapper is not fail closed" >&2; exit 1; }
+grep -Fq 'samples=100' "$performance" || { echo "FAIL: 100-sample authority missing" >&2; exit 1; }
+grep -Fq 'semantic_equivalence=true' "$performance" || { echo "FAIL: semantic-equivalence authority missing" >&2; exit 1; }
+
+echo 'PASS: 20 REQs, 6 NFRs, 10 phases, 5 stop gates, and 7 parent gates are uniquely mapped; static implementation owners exist; runtime/performance/native evidence fails closed'

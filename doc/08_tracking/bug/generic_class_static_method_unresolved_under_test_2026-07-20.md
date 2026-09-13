@@ -1,7 +1,7 @@
 # Bug: `GenericClass<T>.static_method()` unresolved under `simple test` (non-generic classes work fine)
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/futures_promises_spec.spl`)
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Area:** interpreter method-call dispatch for generic classes (likely
   `src/compiler_rust/compiler/src/interpreter_method/mod.rs`, same family as
   `doc/08_tracking/bug/enum_impl_static_fn_method_call_path_skips_impl_methods_2026-07-20.md`),
@@ -97,3 +97,6 @@ bin/release/x86_64-unknown-linux-gnu/simple test <non-generic control spec above
 Not checked against the pure-Simple self-hosted compiler or the JIT/native
 path — only the Rust seed interpreter (the path `bin/simple test` exercises on
 this host) was probed.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

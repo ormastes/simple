@@ -1,4 +1,5 @@
 # Phase-2 sweep triage — remaining real failures (2026-08-21)
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/module_resolver/type_domain_resolver_spec.spl -> 3 passed, 1 failed, still reproduces)
 
 Triage of the parallel `test/01_unit` + `test/02_integration` sweep. Scope
 excludes `compiler/mir/**`, `compiler/mir_opt/**` and the
@@ -77,3 +78,6 @@ Filed separately: `doc/08_tracking/bug/map_for_each_missing_on_dict_2026-08-21.m
 `rc` alone was never trusted; every verdict above is the spec run's own
 `Results:` / `SPEC FILE VERDICT` line. Re-runs were capped at 8 concurrent
 `bin/simple` processes.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/module_resolver/type_domain_resolver_spec.spl` on the deployed seed; 1 of 4 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

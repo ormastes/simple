@@ -1,0 +1,153 @@
+# codex-impl
+"""Backend-neutral retained GPU surface, submission, and evidence contracts."""
+
+val GPU_FRAME_FREE: i64 = 0
+val GPU_FRAME_RECORDING: i64 = 1
+val GPU_FRAME_SUBMITTED: i64 = 2
+val GPU_FRAME_DEVICE_COMPLETE: i64 = 3
+val GPU_FRAME_PRESENTED: i64 = 4
+val GPU_FRAME_CAPTURE_PENDING: i64 = 5
+
+struct GpuRenderSurfaceId:
+    surface_id: i64
+    device_generation: i64
+    width: i64
+    height: i64
+
+struct GpuSubmissionToken:
+    surface_id: i64
+    device_generation: i64
+    submission_id: i64
+    fence_value: i64
+    backend: text
+    device_identity: text
+    submitted_ns: i64
+
+struct GpuFrameSlot:
+    slot_index: i64
+    state: i64
+    frame_generation: i64
+    event_generation: i64
+    damage_pixels: i64
+    upload_bytes: i64
+    token: GpuSubmissionToken
+    # Capture-attempt identity is independent of the frame/submission identity
+    # so a delayed receipt cannot acknowledge a later retry of the same frame.
+    capture_generation: i64 = 0
+    capture_requested_ns: i64 = 0
+
+struct GpuPresentReceipt:
+    token: GpuSubmissionToken
+    frame_generation: i64
+    event_generation: i64
+    damage_pixels: i64
+    upload_bytes: i64
+    readback_bytes: i64
+    fallback_used: bool
+    completion_source: text
+
+struct GpuCaptureReceipt:
+    token: GpuSubmissionToken
+    readback_source: text
+    readback_bytes: i64
+    pixel_checksum: i64
+    fallback_used: bool
+    capture_generation: i64 = 0
+    capture_requested_ns: i64 = 0
+    capture_completed_ns: i64 = 0
+    pixel_width: i64 = 0
+    pixel_height: i64 = 0
+    row_stride_bytes: i64 = 0
+    pixel_format: text = ""
+
+# Shared async policy extends the legacy surface/submission contracts without
+# changing their ABI. Backend facades use the same closed access masks,
+# bounded ring capacity, and timeout limits before entering SFFI.
+pub val GPU_ASYNC_ACCESS_READ: i64 = 1
+pub val GPU_ASYNC_ACCESS_WRITE: i64 = 2
+pub val GPU_ASYNC_ACCESS_READ_WRITE: i64 = 3
+
+pub fn gpu_async_frame_ring_capacity_v2_valid(capacity: i64) -> bool:
+    capacity >= 3 and capacity <= 16
+
+pub fn gpu_async_wait_timeout_v2_valid(timeout_ns: i64) -> bool:
+    timeout_ns >= 0 and timeout_ns <= 1000000000
+
+struct GpuSurfaceMemoryReceipt:
+    surface: GpuRenderSurfaceId
+    allocation_count: i64
+    retained_bytes: i64
+    staging_bytes: i64
+    lifecycle_cause: text
+
+fn gpu_surface_id_valid(surface: GpuRenderSurfaceId) -> bool:
+    surface.surface_id > 0 and surface.device_generation > 0 and
+        surface.width > 0 and surface.height > 0
+
+fn gpu_submission_token_device_proven(token: GpuSubmissionToken) -> bool:
+    token.surface_id > 0 and token.device_generation > 0 and
+        token.submission_id > 0 and token.fence_value > 0 and
+        token.backend != "" and token.backend != "software" and
+        token.device_identity != "" and token.submitted_ns > 0
+
+fn gpu_frame_transition_valid(current: i64, next: i64) -> bool:
+    if current == GPU_FRAME_FREE:
+        return next == GPU_FRAME_RECORDING
+    if current == GPU_FRAME_RECORDING:
+        return next == GPU_FRAME_SUBMITTED or next == GPU_FRAME_FREE
+    if current == GPU_FRAME_SUBMITTED:
+        return next == GPU_FRAME_DEVICE_COMPLETE
+    if current == GPU_FRAME_DEVICE_COMPLETE:
+        return next == GPU_FRAME_PRESENTED or next == GPU_FRAME_CAPTURE_PENDING
+    if current == GPU_FRAME_CAPTURE_PENDING:
+        # A provider acknowledgement advances through PRESENTED before the
+        # owner atomically releases the slot.  A provider-retired capture may
+        # instead be abandoned back to the already-complete frame; neither
+        # edge claims that readback bytes exist by itself.
+        return next == GPU_FRAME_PRESENTED or next == GPU_FRAME_DEVICE_COMPLETE
+    if current == GPU_FRAME_PRESENTED:
+        return next == GPU_FRAME_FREE
+    false
+
+fn gpu_frame_slot_reusable(slot: GpuFrameSlot) -> bool:
+    slot.state == GPU_FRAME_FREE
+
+fn gpu_frame_slot_matches_surface(slot: GpuFrameSlot,
+                                  surface: GpuRenderSurfaceId) -> bool:
+    slot.token.surface_id == surface.surface_id and
+        slot.token.device_generation == surface.device_generation
+
+fn gpu_present_receipt_admitted(receipt: GpuPresentReceipt) -> bool:
+    gpu_submission_token_device_proven(receipt.token) and
+        receipt.frame_generation > 0 and receipt.event_generation >= 0 and
+        receipt.damage_pixels >= 0 and receipt.upload_bytes >= 0 and
+        receipt.readback_bytes == 0 and not receipt.fallback_used and
+        receipt.completion_source == "device_fence"
+
+fn gpu_capture_receipt_admitted(receipt: GpuCaptureReceipt) -> bool:
+    if (not gpu_submission_token_device_proven(receipt.token) or
+        receipt.capture_generation <= 0 or
+        receipt.capture_requested_ns < receipt.token.submitted_ns or
+        receipt.capture_completed_ns < receipt.capture_requested_ns or
+        receipt.pixel_width <= 0 or receipt.pixel_height <= 0 or
+        receipt.pixel_format != "argb8888" or
+        receipt.pixel_width > 9223372036854775807 / 4):
+        return false
+    val expected_stride = receipt.pixel_width * 4
+    if (receipt.row_stride_bytes != expected_stride or
+        receipt.pixel_height > 9223372036854775807 / expected_stride):
+        return false
+    receipt.readback_source == "device_readback" and
+        receipt.readback_bytes == expected_stride * receipt.pixel_height and
+        receipt.pixel_checksum > 0 and not receipt.fallback_used
+
+fn gpu_surface_memory_receipt_admitted(receipt: GpuSurfaceMemoryReceipt) -> bool:
+    gpu_surface_id_valid(receipt.surface) and receipt.allocation_count >= 0 and
+        receipt.retained_bytes >= 0 and receipt.staging_bytes >= 0 and
+        (receipt.lifecycle_cause == "create" or
+         receipt.lifecycle_cause == "resize" or
+         receipt.lifecycle_cause == "device-loss" or
+         receipt.lifecycle_cause == "shutdown")
+
+fn gpu_frame_ring_capacity_valid(capacity: i64) -> bool:
+    capacity == 2 or capacity == 3

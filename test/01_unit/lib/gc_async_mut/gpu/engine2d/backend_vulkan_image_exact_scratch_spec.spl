@@ -1,0 +1,212 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing the EXACT-SIZE image staging array,
+the byte-path half of
+`doc/08_tracking/bug/vulkan_image_upload_scratch_double_pack_2026-09-12.md`.
+
+The byte lane packs a `[u32]` image into `self.image_upload_scratch` and uploads
+the initialized prefix. That scratch used to be grown to a HIGH-WATER MARK and
+never shrunk, while `vulkan_sffi_copy_to_buffer_prefix` admits a prefix on the
+interpreter array ABI only when `byte_count == data.len()`. So after one large
+image, every smaller composite was refused the prefix and packed the WHOLE image
+a SECOND time through `_pixels_to_bytes`. Measured at 900x760: 262 of 264
+composites paid that second pack, 181 s of an 830 s frame. Sizing the scratch to
+exactly `byte_count` makes the admission test hold for every size.
+
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ <vulkan-capable simple> run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_image_exact_scratch_spec.spl`
+
+Run it with `SIMPLE_VK_IMAGE_UPLOAD` UNSET. This file is about the DEFAULT byte
+path deliberately: the typed `[u32]` lane returns before `_prepare_image_upload`
+is ever reached, so under `SIMPLE_VK_IMAGE_UPLOAD=u32` the counters this file
+asserts on are all zero and the defect is unobservable. That is precisely why
+the byte path needs its own guard -- it is what every binary that predates
+`rt_vulkan_copy_to_buffer_u32` runs, and what this one runs by default.
+
+## Compatibility and limitations
+REQUIRES a real Vulkan device and says so by FAILING, never skipping: the first
+expectation asserts `backend_name() == "vulkan"`. A CPU fallback paints correct
+pixels through `emu_draw_image_blend` without touching the staging array at all,
+so a skip would make every counter below vacuously zero and the file would pass
+while testing nothing.
+
+The counters are PROCESS-WIDE module globals, not per-engine fields, because the
+oracle is read through the engine facade which does not expose the backend
+struct. Each example therefore calls `vulkan_image_pack_evidence_reset()` first
+and must not be reordered into one shared engine.
+
+## Verification guidance and troubleshooting
+The load-bearing oracle is a COUNTER, not a pixel: the two packs write identical
+bytes, so no pixel can witness the second one. `byte_fallbacks` counts entries to
+the exact-size `_pixels_to_bytes` path -- the second walk -- and must be 0 for
+every size an admitted composite uses. `packs` counts walks of the staging array,
+so "one large then one small image" must read exactly `packs=2`.
+
+The sabotage that proves it discriminates: restore the high-water test in
+`_prepare_image_upload` (`!=` back to `<`). The small-after-large example then
+reads `packs=2 byte_fallbacks=1` and fails on the fallback count, while every
+pixel expectation in this file stays GREEN -- which is the whole point.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_image_upload_scratch_double_pack_2026-09-12.md
+# @manual_section: vulkan_image_exact_scratch
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl 3%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 2%
+# @tag: unit, gpu, engine2d, vulkan, image, perf
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val FB: i32 = 96
+val BIG: i32 = 40
+val SMALL: i32 = 4
+val BIG_AT: i32 = 2
+val SMALL_AT: i32 = 60
+val GROUND: u32 = 0xFF101010u32
+
+fn image_color(k: i64) -> u32:
+    """Oracle colour for source pixel k, computed without the renderer.
+
+    Every pixel differs in all three channels so a channel swap, a big-endian
+    widening and a dropped element stay three distinguishable failures. Alpha is
+    opaque: a translucent source would blend against the ground and stop being
+    an exact oracle.
+    """
+    (4278190080 + (k + 1) * 0x0F0703).to_i32().to_u32()
+
+fn oracle_image(side: i32) -> [u32]:
+    var out: [u32] = [0u32; side.to_i64() * side.to_i64()]
+    var k: i64 = 0
+    while k < out.len().to_i64():
+        out[k] = image_color(k)
+        k = k + 1
+    out
+
+fn oracle_image_distinct(side: i32, salt: i64) -> [u32]:
+    """Same SIZE as `oracle_image(side)`, deliberately different CONTENT.
+
+    A small image is content-keyed: at or below `VK_IMAGE_INLINE_KEY_MAX_PIXELS`
+    (64 words) `_draw_image_composite_native_impl` digests the pixels and, on a
+    hit, reuses the already-resident device source and performs NO upload at all
+    (`image-upload-skipped`). 4x4 is 16 words, so uploading the SAME 4x4 image
+    three times legitimately packs ONCE -- which would make a reuse assertion
+    about the staging array vacuous rather than wrong. Salting each upload keeps
+    the SIZE constant (the thing the scratch is sized by) while forcing three
+    real packs, so `scratch_resizes` still witnesses reuse.
+    """
+    var out: [u32] = [0u32; side.to_i64() * side.to_i64()]
+    var k: i64 = 0
+    while k < out.len().to_i64():
+        out[k] = (4278190080 + ((k + 1) * 0x0F0703) + salt * 0x010101).to_i32().to_u32()
+        k = k + 1
+    out
+
+fn dst_index(k: i64, side: i32, at_x: i32, at_y: i32) -> i64:
+    val sx = k % side.to_i64()
+    val sy = k / side.to_i64()
+    (at_y.to_i64() + sy) * FB.to_i64() + at_x.to_i64() + sx
+
+describe "The byte image lane packs each composite exactly once, whatever preceded it":
+
+    it "runs on a real Vulkan device, and fails rather than skipping when it cannot":
+        # PRECONDITION. Every claim below is about the DEVICE upload path. The
+        # host fallback never allocates a staging array, so on CPU every counter
+        # would read zero and this file would pass without exercising anything.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        val name = e.backend_name()
+        e.shutdown()
+        expect(name).to_equal("vulkan")
+
+    it "packs a single composite exactly once":
+        # BASELINE. Establishes what "once" reads as, so the small-after-large
+        # example below cannot be satisfied by a counter that simply never moves.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.vulkan_image_pack_evidence_reset()
+        e.clear(GROUND)
+        e.draw_image(SMALL_AT, SMALL_AT, SMALL, SMALL, oracle_image(SMALL))
+        e.finalize_compute_frame_no_readback()
+        val evidence = e.vulkan_image_pack_evidence()
+        e.shutdown()
+        expect(evidence).to_equal("packs=1 byte_fallbacks=0 scratch_resizes=1")
+
+    it "packs a SMALLER image after a larger one exactly once, not twice":
+        # REPRODUCING. This is the defect, in its minimal shape: the 40x40
+        # composite grows the staging array, then the 4x4 composite needs a
+        # SHORTER prefix. Under the high-water scratch the prefix facade
+        # declined and `_pixels_to_bytes` walked the image a second time, so
+        # this read `byte_fallbacks=1`. Both numbers are absolute, not a
+        # threshold: two composites, two packs, no fallback.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.vulkan_image_pack_evidence_reset()
+        e.clear(GROUND)
+        e.draw_image(BIG_AT, BIG_AT, BIG, BIG, oracle_image(BIG))
+        e.draw_image(SMALL_AT, SMALL_AT, SMALL, SMALL, oracle_image(SMALL))
+        e.finalize_compute_frame_no_readback()
+        val evidence = e.vulkan_image_pack_evidence()
+        e.shutdown()
+        expect(evidence).to_equal("packs=2 byte_fallbacks=0 scratch_resizes=2")
+
+    it "still paints the smaller image's known pixels after the larger one":
+        # CORRECTNESS. The counter oracle above would also be satisfied by a
+        # change that simply stopped uploading, so the pixels are checked in the
+        # same order the counters were. 16 independent point checks: a
+        # byte-swapped widening, an off-by-one stride and a truncated payload
+        # each fail in a different, readable pattern.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        e.draw_image(BIG_AT, BIG_AT, BIG, BIG, oracle_image(BIG))
+        e.draw_image(SMALL_AT, SMALL_AT, SMALL, SMALL, oracle_image(SMALL))
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        var wrong: i64 = 0
+        var k: i64 = 0
+        while k < SMALL.to_i64() * SMALL.to_i64():
+            if px[dst_index(k, SMALL, SMALL_AT, SMALL_AT)] != image_color(k):
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+
+    it "still paints the LARGER image's known pixels, so the shrink did not truncate it":
+        # BOUNDARY, in the other direction. Re-sizing the scratch DOWN for the
+        # small image must not affect a later large one: the next 40x40 upload
+        # has to grow it back rather than upload a 4x4-sized prefix. Checking
+        # the large image last is what makes that observable.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        e.draw_image(SMALL_AT, SMALL_AT, SMALL, SMALL, oracle_image(SMALL))
+        e.draw_image(BIG_AT, BIG_AT, BIG, BIG, oracle_image(BIG))
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        var wrong: i64 = 0
+        var k: i64 = 0
+        while k < BIG.to_i64() * BIG.to_i64():
+            if px[dst_index(k, BIG, BIG_AT, BIG_AT)] != image_color(k):
+                wrong = wrong + 1
+            k = k + 1
+        expect(wrong).to_equal(0)
+
+    it "repeats the SAME size without re-allocating the staging array":
+        # REUSE SURVIVES. The fix trades a high-water array for an exact-size
+        # one, so the obvious worry is that it now allocates on every composite.
+        # Three same-size uploads must resize exactly ONCE -- the reuse that
+        # mattered is intact, and only a size CHANGE costs an allocation.
+        #
+        # The three images are SALTED (`oracle_image_distinct`) so each carries
+        # distinct content at an identical size. Repeating byte-identical pixels
+        # here hits the inline content key instead and skips uploads 2 and 3
+        # entirely, reading `packs=1 ... scratch_resizes=1` -- a PASS that
+        # proves nothing about the staging array, because the array is never
+        # touched a second time. Salting keeps this example about the scratch.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.vulkan_image_pack_evidence_reset()
+        e.clear(GROUND)
+        e.draw_image(SMALL_AT, SMALL_AT, SMALL, SMALL, oracle_image_distinct(SMALL, 1))
+        e.draw_image(SMALL_AT, 10i32, SMALL, SMALL, oracle_image_distinct(SMALL, 2))
+        e.draw_image(SMALL_AT, 20i32, SMALL, SMALL, oracle_image_distinct(SMALL, 3))
+        e.finalize_compute_frame_no_readback()
+        val evidence = e.vulkan_image_pack_evidence()
+        e.shutdown()
+        expect(evidence).to_equal("packs=3 byte_fallbacks=0 scratch_resizes=1")

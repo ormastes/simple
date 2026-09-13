@@ -1,7 +1,7 @@
 # FontRenderConfig `identity()` / `valid()` methods miscompile under entry-closure receiver-binding
 
 **Date:** 2026-07-18
-**Status:** Worked around (methods converted to typed free functions); the
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 underlying entry-closure **receiver-binding codegen miscompile is OPEN** at the
 seed/codegen level.
 **Severity:** P1 — first-frame fault storm (81 recovered faults per frame down
@@ -60,3 +60,6 @@ fields read correctly.
   receiver binding.
 - `baremetal_option_field_unwrap_faults_class_2026-07-18.md` — sibling
   freestanding codegen class (Option unwrap / `if val`).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,7 +1,7 @@
 # Bug: `text.len()` returns bytes but `text[i]` indexes codepoints
 
 **Date:** 2026-07-02
-**Status:** Open (investigated, no code change yet — semantics decision required)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Severity:** High — any `while i < s.len(): s[i]` loop panics on non-ASCII input
 **Crash precedent:** spec-coverage crashed with `string index out of bounds: index is 732 but length is 732`; fixed at call site by switching to `.chars()` (`fix(cli_util): parse_csv_fields codepoint-safe indexing` — 11 similar commits in history).
 
@@ -64,3 +64,7 @@ Cost: codepoint-indexing users of `s[i]` on non-ASCII break — but such code is
 3. **Switch `[]` to byte-based** in seed interpreter + self-hosted interpreter in one change, gated by full spec run + bootstrap (`bin/simple build bootstrap`), converging on the native runtime's semantics.
 4. **Land Phase-5 `Text`/`TextView`** (`len_bytes`/`len_codepoints`/`len_graphemes`/`cp_at`) and migrate user code to explicit units; eventually deprecate bare `s[i]` on `text`.
 5. Document the chosen semantics in `doc/07_guide/quick_reference/syntax_quick_reference.md` and `doc/glossary.md`.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

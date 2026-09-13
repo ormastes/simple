@@ -90,3 +90,12 @@ produce on real single-buffer hardware.
 - `src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx` (Task B3 -- no device
   conformance spec exists yet; filed separately as a gap below)
 - `src/lib/common/svmg/ref_vm.spl` (Task D2)
+
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+`src/lib/common/svmg/ref_vm.spl` still present and unchanged in shape (still
+keeps a separate `code`/`arena` split per the description above). This needs
+an explicit design decision among the three unblock options (snapshot
+semantics, retire/relabel the vector, or accept permanently) — not a local
+code fix — so it stays out of scope for a shard triage pass. No change made.
+Leaving OPEN as documented ("not blocking").

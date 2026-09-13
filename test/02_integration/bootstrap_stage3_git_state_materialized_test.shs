@@ -1,0 +1,210 @@
+#!/bin/sh
+# Synthetic Windows-only consumer contract. Never operates on the real checkout.
+set -Eeuo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 77 ;; esac
+case_name=setup
+tmp=$(mktemp -d "${TMPDIR:?}/stage3-consumer-test.XXXXXX")
+repo="$tmp/repo"
+cleanup() {
+    case "$tmp" in "$TMPDIR"/stage3-consumer-test.*) ;; *) return 1 ;; esac
+    # Unlink junction leaves before any recursive removal of the owned fixture.
+    FIXTURE_ROOT="$(cygpath -aw "$repo")" powershell -NoProfile -NonInteractive -Command '
+      foreach ($name in @("dir-link","extra-junction")) {
+        $p=[IO.Path]::Combine($env:FIXTURE_ROOT,$name)
+        if ([IO.Directory]::Exists($p)) { [IO.Directory]::Delete($p,$false) }
+      }' >/dev/null 2>&1 || :
+    rm -rf -- "$tmp"
+}
+trap cleanup EXIT
+trap 'rc=$?; printf "FAIL case=%s line=%s exit=%s\n" "$case_name" "$LINENO" "$rc" >&2; tail -c 2500 "$tmp/error" >&2 2>/dev/null || :; exit "$rc"' ERR
+mkdir -p "$repo/scripts/setup" "$repo/target-dir" "$repo/bin"
+cp "$root/scripts/setup/materialize-symlinks-windows.shs" "$root/scripts/setup/windows-materialized-pending-policy.tsv" "$repo/scripts/setup/"
+git -C "$repo" init -q
+git -C "$repo" config core.symlinks false
+git -C "$repo" config core.autocrlf false
+printf 'tracked original\n' >"$repo/source.spl"
+printf 'file payload\n' >"$repo/target.txt"
+printf 'directory payload\n' >"$repo/target-dir/tracked.txt"
+printf target.txt >"$repo/file-link"
+printf target.txt >"$repo/shared-file-link"
+printf target-dir >"$repo/dir-link"
+printf target-dir/tracked.txt >"$repo/nested-target-link"
+printf ../tools/bb-cli/bin/bb >"$repo/bin/bb"
+git -C "$repo" add .
+for link in file-link shared-file-link dir-link nested-target-link bin/bb; do
+    blob=$(git -C "$repo" hash-object -w -- "$repo/$link")
+    git -C "$repo" update-index --cacheinfo "120000,$blob,$link"
+done
+# Seed HEAD only in the disposable repository; no real checkout commit/ref edit.
+tree=$(git -C "$repo" write-tree)
+head=$(printf 'synthetic consumer fixture\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git -C "$repo" commit-tree "$tree")
+git -C "$repo" update-ref HEAD "$head"
+case_name=synthetic-producer
+/usr/bin/sh "$repo/scripts/setup/materialize-symlinks-windows.shs" --strict-missing --receipt "$tmp/good" "$repo" >"$tmp/error" 2>&1
+receipt="$tmp/good"
+
+accept() {
+    case_name=$1
+    bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"
+    test ! -s "$tmp/stdout"
+    grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/$1.state"
+    grep -qx 'alias_collapse_count=1' "$tmp/$1.state"
+    test "$(find "$TMPDIR" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+}
+reject() {
+    case_name=$1
+    if bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then
+        echo "unexpected acceptance: $1" >&2; return 1
+    fi
+    test ! -s "$tmp/stdout"
+    test ! -e "$tmp/$1.state"
+    test "$(find "$TMPDIR" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+}
+fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
+
+accept positive-file-dir-pending
+# Independent canonical oracle: explicitly exclude only the known fixture dir.
+printf '\000\377raw\r\nbytes\000' >"$repo/target-dir/untracked.bin"
+accept untracked-bytes
+(
+    cd "$repo"
+    git diff --binary --full-index --no-ext-diff --no-textconv HEAD -- >"$tmp/diff"
+    printf 'tracked-diff-sha256=%s\n' "$(bootstrap_stage3_hash_file "$tmp/diff")"
+    git -c core.quotePath=false ls-files --others --exclude-standard -- . ':(top,literal,exclude)dir-link' >"$tmp/paths"
+    test "$(wc -l <"$tmp/paths")" -eq 1
+    test "$(cat "$tmp/paths")" = target-dir/untracked.bin
+    flag=0; test ! -x target-dir/untracked.bin || flag=1
+    printf 'untracked-file:24:target-dir/untracked.bin:%s:%s\n' "$flag" "$(bootstrap_stage3_hash_file target-dir/untracked.bin)"
+) >"$tmp/oracle"
+test "$(fingerprint "$tmp/untracked-bytes.state")" = "$(bootstrap_stage3_hash_file "$tmp/oracle")"
+test "$(fingerprint "$tmp/positive-file-dir-pending.state")" != "$(fingerprint "$tmp/untracked-bytes.state")"
+test "$(grep '^alias_collapse_sha256=' "$tmp/positive-file-dir-pending.state")" = "$(grep '^alias_collapse_sha256=' "$tmp/untracked-bytes.state")"
+printf 'dirty tracked bytes\n' >"$repo/source.spl"
+accept dirty-tracked-preserved
+test "$(fingerprint "$tmp/untracked-bytes.state")" != "$(fingerprint "$tmp/dirty-tracked-preserved.state")"
+SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="$receipt" bootstrap_stage3_git_state "$repo" "$tmp/inherited.state" >"$tmp/stdout" 2>"$tmp/error"
+cmp "$tmp/inherited.state" "$tmp/dirty-tracked-preserved.state"
+git -C "$repo" update-index --force-remove file-link bin/bb
+accept file-and-pending-still-untracked
+(
+    cd "$repo"
+    git diff --binary --full-index --no-ext-diff --no-textconv HEAD -- >"$tmp/diff"
+    printf 'tracked-diff-sha256=%s\n' "$(bootstrap_stage3_hash_file "$tmp/diff")"
+    git -c core.quotePath=false ls-files --others --exclude-standard -- . ':(top,literal,exclude)dir-link' | LC_ALL=C /usr/bin/sort >"$tmp/paths"
+    test "$(wc -l <"$tmp/paths")" -eq 3
+    grep -qx file-link "$tmp/paths"
+    grep -qx bin/bb "$tmp/paths"
+    while IFS= read -r path; do
+        flag=0; test ! -x "$path" || flag=1
+        printf 'untracked-file:%s:%s:%s:%s\n' "${#path}" "$path" "$flag" "$(bootstrap_stage3_hash_file "$path")"
+    done <"$tmp/paths"
+) >"$tmp/oracle"
+test "$(fingerprint "$tmp/file-and-pending-still-untracked.state")" = "$(bootstrap_stage3_hash_file "$tmp/oracle")"
+for link in file-link bin/bb; do
+    blob=$(git -C "$repo" rev-parse "HEAD:$link")
+    git -C "$repo" update-index --add --cacheinfo "120000,$blob,$link"
+done
+
+# Every mutation starts from the held-contract positive receipt; row mutations
+# recompute the digest, so rejection cannot be attributed to a stale checksum.
+cat >"$tmp/mutate.ps1" <<'PS'
+$ErrorActionPreference="Stop"
+$utf8=New-Object Text.UTF8Encoding($false,$true)
+$s=[IO.File]::ReadAllText($env:GOOD,$utf8)
+function Hex([string]$v) { ([BitConverter]::ToString($utf8.GetBytes($v))).Replace('-','').ToLowerInvariant() }
+function Drift([string]$key) {
+ $script:s=[regex]::Replace($script:s,"(?m)^$key=([0-9a-f])", { param($m) $key+'='+$(if ($m.Groups[1].Value -eq '0') {'1'} else {'0'}) })
+}
+switch ($env:CASE) {
+ 'schema' { $s=$s.Replace('simple-windows-materialized-links-v2','simple-windows-materialized-links-v1') }
+ 'extra-header' { $s=$s.Replace("records_begin","extra=1`nrecords_begin") }
+ 'duplicate-header' { $s=$s.Replace("records_begin","schema=simple-windows-materialized-links-v2`nrecords_begin") }
+ 'missing-header' { $s=$s -replace '(?m)^result=.*\n','' }
+ 'producer-hash' { Drift 'producer_sha256' }
+ 'policy-hash' { Drift 'policy_sha256' }
+ 'head' { Drift 'head' }
+ 'root' { $s=$s -replace '(?m)^root=.*', 'root=/outside' }
+ 'leading-zero' { $s=$s.Replace('record_count=5','record_count=05') }
+ 'count-overflow' { $s=$s.Replace('record_count=5','record_count=2147483648') }
+ 'count-equation' { $s=$s.Replace('record_count=5','record_count=4') }
+ 'blocked-dirty' { $s=$s.Replace('state=created','state=blocked-dirty-ordinary').Replace('result=complete','result=blocked') }
+ 'flag' { $s=$s.Replace('pending_requires_consumer_revalidation=1','pending_requires_consumer_revalidation=0') }
+ 'kind' { $s=$s.Replace('kind=file','kind=socket') }
+ 'state' { $s=$s.Replace('state=created','state=ready') }
+ 'field-order' { $s=$s.Replace('path_len=','wrong_len=') }
+ 'metadata' { $s=$s -replace 'target_volume=[0-9]+','target_volume=0' }
+ 'file-id' { $s=$s -replace 'target_file_id=[0-9]+:[0-9]+','target_file_id=0:0' }
+ 'final-path' { $s=$s -replace 'target_resolved_hex=5c','target_resolved_hex=5d' }
+ 'sha' { $s=$s -replace 'target_sha256=[0-9a-f]+','target_sha256=0000000000000000000000000000000000000000000000000000000000000000' }
+ 'pending-metadata' { $s=$s.Replace('kind=unknown','kind=file') }
+ 'head-blob' { $s=$s.Replace('target_hex='+(Hex 'target.txt'),'target_hex='+(Hex 'targEt.txt')) }
+ 'external' { $s=$s.Replace('target_len=10|target_hex='+(Hex 'target.txt'),'target_len=12|target_hex='+(Hex '../../escape')) }
+ 'nested' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=10|path_hex='+(Hex 'dir-link/x')) }
+ 'case-collision' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=8|path_hex='+(Hex 'DIR-LINK')) }
+ 'duplicate-alias' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=16|path_hex='+(Hex 'shared-file-link')) }
+ 'alias-cycle' { $s=$s.Replace('target_len=10|target_hex='+(Hex 'target.txt'),'target_len=9|target_hex='+(Hex 'file-link')) }
+ 'target-under-alias' { $s=$s.Replace('target_len=10|target_hex='+(Hex 'target.txt'),'target_len=14|target_hex='+(Hex 'dir-link/child')) }
+ 'control' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=9|path_hex='+(Hex "file`nlink")) }
+ 'special' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=9|path_hex='+(Hex 'file*link')) }
+ 'duplicate-row' { $m=[regex]::Match($s,'(?m)^path_len=.*\n'); $s=$s.Replace('records_end',$m.Value+'records_end') }
+ 'missing-row' { $s=[regex]::Replace($s,'(?m)^path_len=.*\n','',1) }
+ 'row-byte-length' { $s=$s.Replace('path_len=9|','path_len=8|') }
+ 'utf8' { $s=$s.Replace('path_hex=66696c652d6c696e6b','path_hex=ff696c652d6c696e6b') }
+ 'trailing-data' { $s+="trailer=1`n" }
+ 'crlf' { $s=$s.Replace("`n","`r`n") }
+ 'bound-receipt' { $s='x' * (8*1024*1024+1) }
+ 'digest' { }
+ default { throw 'unknown mutation' }
+}
+if ($env:CASE -notin @('crlf','bound-receipt')) {
+ $m=[regex]::Match($s,"(?s)records_begin`n(.*?)records_end")
+ $sha=[Security.Cryptography.SHA256]::Create()
+ $h=([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($m.Groups[1].Value)))).Replace('-','').ToLowerInvariant()
+ $s=[regex]::Replace($s,'(?m)^records_sha256=.*','records_sha256='+$h)
+ if ($env:CASE -eq 'digest') { $s=$s.Replace('records_sha256=','records_sha256=0') }
+}
+[IO.File]::WriteAllText($env:BAD,$s,$utf8)
+PS
+for mutation in schema extra-header duplicate-header missing-header producer-hash policy-hash head root leading-zero count-overflow count-equation blocked-dirty flag kind state field-order metadata file-id final-path sha pending-metadata head-blob external nested case-collision duplicate-alias alias-cycle target-under-alias control special duplicate-row missing-row row-byte-length utf8 trailing-data crlf bound-receipt digest; do
+    case_name=$mutation
+    GOOD="$(cygpath -aw "$tmp/good")" BAD="$(cygpath -aw "$tmp/bad")" CASE="$mutation" powershell -NoProfile -NonInteractive -File "$(cygpath -aw "$tmp/mutate.ps1")" >"$tmp/error" 2>&1
+    receipt="$tmp/bad"; reject "$mutation"
+done
+receipt="$tmp/good"
+BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES=1 reject bound-entries
+BOOTSTRAP_STAGE3_GIT_MAX_BYTES=1 reject bound-bytes
+BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=1 reject bound-time
+BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES=100001 reject bound-increase
+printf tampered >"$repo/bin/bb"
+reject pending-placeholder
+printf ../tools/bb-cli/bin/bb >"$repo/bin/bb"
+mkdir -p "$repo/tools/bb-cli/bin"
+printf appeared >"$repo/tools/bb-cli/bin/bb"
+reject pending-target-appeared
+rm "$repo/tools/bb-cli/bin/bb"
+cp "$repo/scripts/setup/windows-materialized-pending-policy.tsv" "$tmp/policy"
+printf '\n' >>"$repo/scripts/setup/windows-materialized-pending-policy.tsv"
+reject held-policy-bytes
+cp "$tmp/policy" "$repo/scripts/setup/windows-materialized-pending-policy.tsv"
+rm "$repo/file-link"
+cp "$repo/target.txt" "$repo/file-link"
+reject copied-file-not-hardlink
+rm "$repo/file-link"
+ln "$repo/target.txt" "$repo/file-link"
+printf changed >>"$repo/target.txt"
+reject changed-target-sha-size
+printf 'file payload\n' >"$repo/target.txt"
+FIXTURE_ROOT="$(cygpath -aw "$repo")" powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; New-Item -ItemType Junction -Path ([IO.Path]::Combine($env:FIXTURE_ROOT,"extra-junction")) -Target ([IO.Path]::Combine($env:FIXTURE_ROOT,"target-dir")) | Out-Null' >"$tmp/error" 2>&1
+reject unexpected-junction
+FIXTURE_ROOT="$(cygpath -aw "$repo")" powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; [IO.Directory]::Delete([IO.Path]::Combine($env:FIXTURE_ROOT,"extra-junction"),$false)' >"$tmp/error" 2>&1
+mkdir -p "$repo/nested/.git"
+reject nested-repository
+rmdir "$repo/nested/.git" "$repo/nested"
+printf retained >"$tmp/collision.state"
+case_name=atomic-output-collision
+if bootstrap_stage3_git_state "$repo" "$tmp/collision.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then exit 1; fi
+test "$(cat "$tmp/collision.state")" = retained
+test ! -s "$tmp/stdout"
+echo 'bootstrap_stage3_git_state_materialized=true'

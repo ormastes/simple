@@ -1,5 +1,7 @@
 # Native build source closure reports locationless array-to-int conversion
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Resolved on 2026-08-26. The no-stub pure-Simple CLI build reached the
@@ -36,3 +38,7 @@ only forwards integer handles to `rt_array_free`. The existing focused test
 `rt_array_free_leaves_interpreter_managed_arrays_to_arc` passes. A post-fix
 shard advances beyond the former failure through closure item 704/1046 without
 an array-to-int conversion.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

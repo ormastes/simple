@@ -7,7 +7,7 @@
 - **Severity:** medium — lossy/ambiguous rendering; a serialized `1.0` reads
   back as an integer, and float values become indistinguishable from ints in
   logs, `to_string()` output, and any text-format round trip.
-- **Status:** OPEN.
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -52,3 +52,6 @@ than weakened to `contains("1")`, which would bake the defect into the suite.
 `src/lib/common/convert.spl:124` `f64_to_text` delegates straight to `"{n}"`,
 so fixing the interpolation path fixes the stdlib helper too. There is
 currently no correct float formatter anywhere in `src/lib/common/`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

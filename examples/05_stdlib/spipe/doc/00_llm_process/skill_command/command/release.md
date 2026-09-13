@@ -45,7 +45,9 @@ or repair stale `doc/07_guide`, `doc/06_spec`, `.codex/skills`,
 
 ## Scoped self-review status and remediation
 
-1. Read current version from `simple.sdn` (field `project.version`, line 6)
+1. Read the current version from `release/version.sdn` (field `version.semver`).
+   That file is the sole authority; `simple.sdn` is one of its projections, not
+   the source. Note `version.channel` too — a prerelease bump has to move it.
 2. Parse argument:
    - Empty, `patch`, or `third` → increment patch (Z+1)
    - `minor` or `second` → increment minor (Y+1), reset patch to 0
@@ -54,17 +56,35 @@ or repair stale `doc/07_guide`, `doc/06_spec`, `.codex/skills`,
    - Anything else → error, show usage
 3. Print: `Version bump: {old} → {new}`
 
-### Step 2 — Update all version locations
+### Step 2 — Update the authority, then every projection
 
-Update these 4 files with the new version:
+Edit `release/version.sdn` first (`version.semver`, and `version.channel` when
+the channel changes), then project that value into **every** path listed in
+`_required_projection_paths()` — `src/app/release/version_authority.spl:82-95`.
+There are 17 of them, and the list is the authority, not this table:
 
-| File | What to change |
-|------|---------------|
-| `simple.sdn` | `version: X.Y.Z` (line 6) |
-| `VERSION` | Entire file content: `X.Y.Z\n` |
-| `src/app/cli/main.spl` | Hardcoded fallback string `"X.Y.Z"` in `get_version()` |
-| `src/app/cli/bootstrap_main.spl` | Hardcoded string `"X.Y.Z"` in `bootstrap_version()` |
+| Group | Paths |
+|-------|-------|
+| plain | `VERSION` |
+| `.sdn` | `src/app/simple.sdn`, `src/lib/simple.sdn`, `src/compiler/simple.sdn`, `src/compiler/00.common/simple.sdn`, `src/compiler_rust/simple.sdn` |
+| cargo | `src/compiler_rust/Cargo.toml` (`[workspace.package] version`), `src/compiler_rust/Cargo.lock` (all 11 product packages, or the file reads `<ambiguous>`) |
+| `.spl` | `src/app/cli/bootstrap_identity.spl`, `src/app/cli/cli_helpers.spl`, `src/app/cli/_CliMain/args_and_os_commands.spl`, `src/app/simple_core/main.spl` (`SIMPLE_CORE_VERSION_V1`), `src/app/simpleos_tool/main.spl` (`print "Simple v..."`) |
+| registry | `tools/mcp-registry/{package,server}.json`, `tools/lsp-mcp-registry/{package,server}.json` — `server.json` carries the version **twice** and both must match, or the file reads `<ambiguous>` |
 
+Then verify. `check_repository_version(root)` must report `valid: true`; it fails
+the release if any projection is missing, stale, or ambiguous, and it also fails
+on any *undeclared* version consumer it discovers.
+
+> **This step used to name four files, two of which hold no version at all.**
+> Until 2026-09-07 it read "Update these 4 files": `simple.sdn`, `VERSION`,
+> `src/app/cli/main.spl` and `src/app/cli/bootstrap_main.spl`. It never
+> mentioned `release/version.sdn` — the authority — and `grep -c` for the
+> product version in those last two files returns **0** for both; they are not
+> in the projection list and never were. Following it produced a tree that
+> `check_repository_version` rejects. It also left the four registry
+> projections behind: they sat at `0.9.9` against a product at `1.0.0-rc.1`,
+> which is how `1.0.1-beta.1` found the version authority already red on
+> untouched `main`.
 ### Step 3 — Update CHANGELOG
 
 - One isolated release session owns one work branch and one non-main worktree.
@@ -79,7 +99,7 @@ Update these 4 files with the new version:
 - Promotion reuses admitted artifacts without rebuilding and pushes exactly one signed annotated tag.
 - Release admission requires focused failures to reach zero followed by one clean whole-suite confirmation.
 - Withdrawal preserves published tags assets and history and corrections use a new version.
-- Protected PR self review uses a required status check because GitHub forbids an author APPROVED review and never claims provider approval.
+- Protected PR self review uses a required status check because GitHub forbids a PR author from submitting an `APPROVED` review and never claims provider approval.
 - Ordinary code and text are eligible by default absent an operator deny or constrain record with code, text, file, directory_files, and directory_recursive scopes.
 - Push, retarget, base, diff, ruleset, policy, or expiry invalidation requires a fresh exact-head review and a new self-review admission dispatch.
 - Rejection remediation follows the exact reason without broadening protected integration, candidate, release, signing, or publication authority.

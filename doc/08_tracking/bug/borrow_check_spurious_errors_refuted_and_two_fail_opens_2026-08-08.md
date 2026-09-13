@@ -227,3 +227,61 @@ Results: 13 total, 13 passed, 0 failed
 GREEN. The primary spurious-error claim remains refuted, consistent with the doc.
 The two secondary driver fail-opens are **not** covered by this spec (it exercises
 `nll.spl` directly, not the driver seam), so they stay OPEN and UNPROVEN here.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/borrow/borrow_check_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-12
+
+Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
+
+**The oracle this record's whole "checker is clean" argument rests on had gone
+dark.** Row 1 of the evidence table (`test/01_unit/compiler/borrow/borrow_check_spec.spl`,
+recorded 11/11 on 2026-08-08) no longer ran at all:
+
+```
+$ bin/simple test test/01_unit/compiler/borrow/borrow_check_spec.spl
+error: compile failed: parse: ... Unexpected token: expected In, found Identifier { name: "starved" }
+error: test-runner: spec executed nothing (parse-error)
+SPEC FILE VERDICT: ... declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=parse-error
+```
+
+Cause: the file's header docstring had lost its **opening** `"""` (the closing
+one at old line 11 survived), so line 1's prose was parsed as code — `for the
+starved-checker` became a `for` statement. A dropped spec is silent
+non-coverage: the four negative controls that refute "spurious errors on
+trivial code" had not executed since the regression landed.
+
+Repaired by restoring the opening fence. Nothing else in the file changed.
+
+```
+$ bin/simple test test/01_unit/compiler/borrow/borrow_check_spec.spl
+SPEC FILE VERDICT: ... outcome=OK declared>=13 executed=13 passed=13 failed=0 skipped=0 dropped=0
+```
+
+13/13 (the spec has grown from 11 cases to 13 since the table above was
+written). The refutation in this record therefore stands on live evidence again.
+
+Repo-wide sweep for the same defect class (spec file whose first line is prose
+and which contains a `"""` fence) found **no other instance**.
+
+**Still OPEN — unchanged by this commit:** fail-open #1 (prior-phase errors
+relabelled `CompileResult.BorrowError` in `driver_aot_pipeline.spl:97`) and
+fail-open #2 (borrow check skipped for Stage 2/3 under `SIMPLE_BOOTSTRAP=1`
+without `STAGE4=1`). Both are driver-side design changes in
+`src/compiler/80.driver/`, deliberately not drive-by patched for the reason this
+record already gives.
+
+## Triage 2026-09-13
+
+Extensively investigated (273 lines); the original "spurious errors"
+premise is already refuted with a sabotage-verified spec (borrow
+checker itself is clean). The three fail-opens found instead are each
+explicitly "deliberately NOT fixed here" in the record itself --
+diagnostic-mislabeling and stage-dependent skip-gating are compiler
+pipeline architecture decisions requiring careful cross-pipeline
+coordination (3 call sites: AOT/JIT/VHDL), and fail-open #3 needs
+further isolation work the original investigator couldn't complete
+even with a 40-minute interpreted budget. Not a quick fix. Leaving
+OPEN as recorded.
+

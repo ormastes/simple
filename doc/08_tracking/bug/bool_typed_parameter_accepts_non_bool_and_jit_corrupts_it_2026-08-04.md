@@ -1,6 +1,6 @@
 # BUG: a `bool`-declared parameter accepts a non-bool silently — and the JIT corrupts it
 
-**Status:** OPEN
+- Status: PARTIALLY-RESOLVED (2026-09-12) — the JIT corruption and the 28 red specs are gone; a `bool` parameter is still not type-CHECKED, see Triage 2026-09-12
 **Found:** 2026-08-04
 **Related — SAME root cause, found independently by parallel lanes the same day.
 Fix once, close all of these. This file is the UNIT-tier record; its unique
@@ -166,3 +166,47 @@ have had `check(opt.?)` rewritten to `check(opt != nil)`, which is why those
 two files are green while the other 28 identical files are red. That workaround
 hid the defect rather than removing it, and it should be reverted once the real
 fix lands.
+
+## Triage 2026-09-12
+
+Binary: `bin/simple` = shared clone's Rust seed, `sha256 3d120a6f…`, aarch64.
+Re-ran this record's own minimal repro verbatim, both engines:
+
+| line | 2026-08-04 interpreter | 2026-08-04 jit | now, interpreter | now, jit |
+|---|---|---|---|---|
+| A `opt.?` | `42` | `42` | `42` | `42` |
+| B `if opt.?:` | truthy | truthy | truthy | truthy |
+| C `take_bool(opt.?)` | `got=42` | `got=<special:82>` | **`got=true`** | **`got=true`** |
+| D `take_bool(42)` | `got=42` | `got=<special:44>` | **`got=true`** | **`got=true`** |
+
+Two of the three halves are **closed**:
+
+- The **JIT re-tagging** half — the `<special:N>` garbage value that gives this
+  record its title — no longer reproduces in either mode.
+- The **suite** half: `auto_comprehensive_10_spec.spl`, named here as the
+  canonical failure (`✗ option coverage 1 / expected 42 to equal true`), is
+  `outcome=OK executed=30 passed=30 failed=0`. Spot-checked siblings 1, 2 and 4
+  are 30/30 as well, so the "28 specs in `test/01_unit/std/` are red because of
+  it" severity driver is gone.
+
+**Still open, and narrower than filed:** row D. `take_bool(42)` — an integer
+literal to a `bool` parameter — is still accepted with no diagnostic. What
+changed is the *outcome*, not the *check*: the argument is now coerced to
+`true` instead of being passed through raw or re-tagged. That is the
+"`bool` type annotation on a parameter is unenforced" claim, and it stands;
+the record's stated expectation for row D is a compile error. Fixing it means
+adding a bool arm to `coerce_param` (seed `arg_binding.rs:84`, per the sibling
+record `optional_passed_to_bool_param_is_neither_coerced_nor_rejected_2026-08-04.md`),
+which is Rust-seed work and out of scope for this triage slot.
+
+Note for whoever takes it: silent coercion is arguably worse than the old
+pass-through for diagnosis, because `got=true` looks correct. A spec that
+pins "`take_bool(42)` is rejected" is the right guard and would sit RED today,
+so none is added here.
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.

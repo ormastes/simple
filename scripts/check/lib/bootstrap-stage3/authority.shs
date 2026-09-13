@@ -22,6 +22,177 @@ bootstrap_stage3_hash_file() {
     fi
 }
 
+# Resolve a file path through any chain of symlinks to the physical file it
+# names. `readlink -f` is GNU-only (macOS/BSD readlink has no -f), so walk the
+# chain explicitly: read one link at a time, resolve a RELATIVE target against
+# the directory of the LINK (not the caller's cwd), and stop at the first
+# non-symlink. Bounded at 32 hops so a symlink cycle terminates instead of
+# spinning. The final physical path is canonicalised with the existing
+# `bootstrap_stage3_canonical_path` helper (`cd -P` + basename), which is this
+# repo's portable realpath.
+bootstrap_stage3_resolve_symlinks() {
+    bootstrap_stage3_resolve_current=$1
+    case "$bootstrap_stage3_resolve_current" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_resolve_hops=0
+    while [ -L "$bootstrap_stage3_resolve_current" ]; do
+        bootstrap_stage3_resolve_hops=$((bootstrap_stage3_resolve_hops + 1))
+        [ "$bootstrap_stage3_resolve_hops" -le 32 ] || return 1
+        bootstrap_stage3_resolve_target=$(
+            readlink -- "$bootstrap_stage3_resolve_current"
+        ) || return 1
+        [ -n "$bootstrap_stage3_resolve_target" ] || return 1
+        case "$bootstrap_stage3_resolve_target" in
+            /*) bootstrap_stage3_resolve_current=$bootstrap_stage3_resolve_target ;;
+            *)
+                bootstrap_stage3_resolve_dir=$(
+                    dirname -- "$bootstrap_stage3_resolve_current"
+                ) || return 1
+                bootstrap_stage3_resolve_current="$bootstrap_stage3_resolve_dir/$bootstrap_stage3_resolve_target"
+                ;;
+        esac
+    done
+    [ -f "$bootstrap_stage3_resolve_current" ] || return 1
+    bootstrap_stage3_canonical_path "$bootstrap_stage3_resolve_current"
+}
+
+# Bind ONE canonical comparator executable and pin its bytes by hash.
+#
+# The candidate may itself be a symlink -- a package-manager shim such as
+# Homebrew's /opt/homebrew/bin/cmp -> ../Cellar/diffutils/<v>/bin/cmp is
+# ALWAYS a symlink, and the old `candidate = canonical` requirement therefore
+# refused to bind on every stock macOS host with `diffutils` installed, killing
+# the bootstrap before Stage 1 (see
+# doc/08_tracking/bug/bootstrap_stage3_comparator_rejects_homebrew_symlinked_cmp_on_macos_2026-09-12.md).
+# The anti-alias property that check was reaching for is supplied by
+# BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256, which pins the CONTENT of the resolved
+# file: an aliased NAME cannot change which bytes run. So resolve the alias
+# instead of rejecting it, and bind the PHYSICAL target.
+#
+# Still refused, each with a stated reason on stderr (the old bare `return 2`
+# surfaced downstream as the misleading "Rust runtime authority changed during
+# private admission"):
+#   * no comparator on PATH, or the named one is absent/unresolvable;
+#   * a target that is not a regular executable file;
+#   * a script wrapper (`#!` magic) -- the trust model is a byte-hash pin of the
+#     bound file, and a wrapper's own bytes do not determine what actually runs,
+#     so hashing it would pin nothing. Refused, not receipted;
+#   * an ambient `cmp` resolving elsewhere than an explicitly pinned
+#     BOOTSTRAP_STAGE3_COMPARE_TOOL (a shadowed comparator).
+bootstrap_stage3_compare_refuse() {
+    echo "error: Stage 3 comparator refused: $1" >&2
+    return 2
+}
+
+bootstrap_stage3_compare_bind() {
+    bootstrap_stage3_compare_pinned=${BOOTSTRAP_STAGE3_COMPARE_TOOL:-}
+    bootstrap_stage3_compare_candidate=$bootstrap_stage3_compare_pinned
+    if [ -z "$bootstrap_stage3_compare_candidate" ]; then
+        bootstrap_stage3_compare_candidate=$(command -v cmp 2>/dev/null) || true
+    fi
+    [ -n "$bootstrap_stage3_compare_candidate" ] ||
+        bootstrap_stage3_compare_refuse "no cmp on PATH" || return 2
+    bootstrap_stage3_compare_canonical=$(bootstrap_stage3_resolve_symlinks \
+        "$bootstrap_stage3_compare_candidate") ||
+        bootstrap_stage3_compare_refuse \
+            "cannot resolve to a regular file: $bootstrap_stage3_compare_candidate" ||
+        return 2
+    [ -x "$bootstrap_stage3_compare_canonical" ] ||
+        bootstrap_stage3_compare_refuse \
+            "not executable: $bootstrap_stage3_compare_canonical" || return 2
+    bootstrap_stage3_compare_magic=""
+    read -r bootstrap_stage3_compare_magic \
+        <"$bootstrap_stage3_compare_canonical" 2>/dev/null ||
+        bootstrap_stage3_compare_magic=""
+    case "$bootstrap_stage3_compare_magic" in
+        '#!'*)
+            bootstrap_stage3_compare_refuse \
+                "script wrapper (#! magic); its own bytes do not determine what runs: $bootstrap_stage3_compare_canonical"
+            return 2
+            ;;
+    esac
+    # Shadowing is decided ONCE, here. `compare_files` must never re-resolve the
+    # ambient `cmp`: doing so made the documented BOOTSTRAP_STAGE3_COMPARE_TOOL
+    # knob useless, because every comparison re-read PATH and rejected the pin.
+    if [ -n "$bootstrap_stage3_compare_pinned" ]; then
+        bootstrap_stage3_compare_ambient=$(command -v cmp 2>/dev/null) || true
+        if [ -n "${bootstrap_stage3_compare_ambient:-}" ]; then
+            bootstrap_stage3_compare_ambient=$(bootstrap_stage3_resolve_symlinks \
+                "$bootstrap_stage3_compare_ambient") ||
+                bootstrap_stage3_compare_ambient=""
+            if [ -n "$bootstrap_stage3_compare_ambient" ] &&
+                [ "$bootstrap_stage3_compare_ambient" != \
+                    "$bootstrap_stage3_compare_canonical" ]; then
+                bootstrap_stage3_compare_refuse \
+                    "ambient cmp ${bootstrap_stage3_compare_ambient} shadows pinned ${bootstrap_stage3_compare_canonical}" ||
+                    return 2
+            fi
+        fi
+    fi
+    bootstrap_stage3_compare_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_compare_canonical") ||
+        bootstrap_stage3_compare_refuse \
+            "cannot hash: $bootstrap_stage3_compare_canonical" || return 2
+    BOOTSTRAP_STAGE3_COMPARE_TOOL="$bootstrap_stage3_compare_canonical"
+    BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256="$bootstrap_stage3_compare_hash"
+    export BOOTSTRAP_STAGE3_COMPARE_TOOL \
+        BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+}
+
+# Compare two regular files with cmp-compatible status semantics. Equal files
+# return 0, different files return 1, and missing/unreadable inputs or an
+# unavailable/comparator-drifted executable return 2 (or another status >1).
+bootstrap_stage3_compare_files() {
+    [ "$#" -eq 2 ] || return 2
+    [ -f "$1" ] && [ -f "$2" ] || return 2
+    [ -n "${BOOTSTRAP_STAGE3_COMPARE_TOOL:-}" ] ||
+        bootstrap_stage3_compare_bind || return $?
+    # Use the BOUND path. Do not re-resolve the ambient `cmp` here: shadowing is
+    # decided once in `compare_bind`, and re-reading PATH on every comparison is
+    # what made the BOOTSTRAP_STAGE3_COMPARE_TOOL pin unusable on macOS.
+    [ -x "$BOOTSTRAP_STAGE3_COMPARE_TOOL" ] || return 2
+    [ "$(bootstrap_stage3_resolve_symlinks \
+        "$BOOTSTRAP_STAGE3_COMPARE_TOOL")" = \
+        "$BOOTSTRAP_STAGE3_COMPARE_TOOL" ] || return 2
+    [ "$(bootstrap_stage3_hash_file \
+        "$BOOTSTRAP_STAGE3_COMPARE_TOOL")" = \
+        "${BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256:-}" ] || return 2
+    "$BOOTSTRAP_STAGE3_COMPARE_TOOL" -s "$1" "$2"
+}
+
+# Classify a required equality gate without allowing set -e to erase the
+# distinction between content drift and comparator infrastructure failure.
+bootstrap_stage3_require_equal() {
+    bootstrap_stage3_compare_context=$1
+    shift
+    if bootstrap_stage3_compare_files "$@"; then
+        bootstrap_stage3_compare_status=0
+    else
+        bootstrap_stage3_compare_status=$?
+    fi
+    case "$bootstrap_stage3_compare_status" in
+        0) return 0 ;;
+        1)
+            echo "error: ${bootstrap_stage3_compare_context} changed: $1 differs from $2" >&2
+            return 1
+            ;;
+        *)
+            echo "error: ${bootstrap_stage3_compare_context} comparator unavailable or I/O failed: $1 $2 status=${bootstrap_stage3_compare_status}" >&2
+            return "$bootstrap_stage3_compare_status"
+            ;;
+    esac
+}
+
+bootstrap_stage3_hash_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then sha256 -q
+    else return 1
+    fi
+}
+
 bootstrap_stage3_hash_stream() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum | awk '{print $1}'
@@ -122,8 +293,20 @@ bootstrap_stage3_validate_descriptor_map() (
             printf '%s_%s\n' "$bootstrap_stage3_dm_role" "$bootstrap_stage3_dm_field" >>"$bootstrap_stage3_dm_keys"
         done
     done
-    sed 's/=.*//' "$bootstrap_stage3_dm_file" | cmp -s - "$bootstrap_stage3_dm_keys" || return 1
-    rm -f "$bootstrap_stage3_dm_keys"
+    bootstrap_stage3_dm_actual_keys="${TMPDIR:-/tmp}/stage3-dmap-actual.$$.txt"
+    sed 's/=.*//' "$bootstrap_stage3_dm_file" >"$bootstrap_stage3_dm_actual_keys" || {
+        rm -f "$bootstrap_stage3_dm_keys" "$bootstrap_stage3_dm_actual_keys"
+        return 1
+    }
+    if bootstrap_stage3_require_equal "descriptor map keys" \
+        "$bootstrap_stage3_dm_actual_keys" "$bootstrap_stage3_dm_keys"; then
+        :
+    else
+        bootstrap_stage3_dm_compare_status=$?
+        rm -f "$bootstrap_stage3_dm_keys" "$bootstrap_stage3_dm_actual_keys"
+        return "$bootstrap_stage3_dm_compare_status"
+    fi
+    rm -f "$bootstrap_stage3_dm_keys" "$bootstrap_stage3_dm_actual_keys"
     bootstrap_stage3_dm_vector_file="${TMPDIR:-/tmp}/stage3-descriptor-vector.$$.bin"
     (umask 077; set -C; : >"$bootstrap_stage3_dm_vector_file") || return 1
     for bootstrap_stage3_dm_role in $bootstrap_stage3_dm_roles; do
@@ -169,26 +352,114 @@ bootstrap_stage3_validate_descriptor_map() (
 # newline-bearing paths; NUL-delimited xargs keeps every other shell character
 # opaque while batching to the host's argument limit. sha256/openssl retain the
 # portable single-file path because their multi-file output formats differ.
+#
+# Large manifests are split into contiguous blocks hashed concurrently, one
+# worker per block. Order is still exact: within a block xargs runs its batches
+# strictly sequentially in argument order and each hash invocation emits one
+# line per input file in the order given, and the blocks themselves are
+# contiguous and concatenated in index order -- so output line N still
+# corresponds to input line N, which is what the callers that discard the
+# filename field and match positionally require. Concurrency is a pure
+# throughput change with no effect on the bytes produced.
+bootstrap_stage3_hash_path_list_block() {
+    # $1 = newline-delimited path file, $2 = hash tool
+    if [ "$2" = sha256sum ]; then
+        while IFS= read -r bootstrap_stage3_hash_path; do
+            printf '%s\0' "$bootstrap_stage3_hash_path"
+        done <"$1" |
+            xargs -0 sha256sum --
+    else
+        while IFS= read -r bootstrap_stage3_hash_path; do
+            printf '%s\0' "$bootstrap_stage3_hash_path"
+        done <"$1" |
+            xargs -0 shasum -a 256 --
+    fi
+}
+
+# Workers for a manifest of $1 lines: an explicit SIMPLE_NATIVE_BUILD_THREADS
+# wins, else the host CPU count. Forking is not worth it for a short manifest,
+# and a block below the floor buys nothing, so both are clamped -- a small list
+# deterministically resolves to 1 worker and the original sequential path.
+bootstrap_stage3_hash_worker_count() {
+    bootstrap_stage3_hash_wc=${SIMPLE_NATIVE_BUILD_THREADS:-}
+    case "$bootstrap_stage3_hash_wc" in
+        ''|*[!0-9]*)
+            bootstrap_stage3_hash_wc=$(getconf _NPROCESSORS_ONLN 2>/dev/null) ||
+                bootstrap_stage3_hash_wc=1
+            ;;
+    esac
+    case "$bootstrap_stage3_hash_wc" in ''|*[!0-9]*) bootstrap_stage3_hash_wc=1 ;; esac
+    [ "$bootstrap_stage3_hash_wc" -ge 1 ] 2>/dev/null || bootstrap_stage3_hash_wc=1
+    [ "$1" -ge 4096 ] 2>/dev/null || bootstrap_stage3_hash_wc=1
+    while [ "$bootstrap_stage3_hash_wc" -gt 1 ] &&
+        [ $(( $1 / bootstrap_stage3_hash_wc )) -lt 1024 ]; do
+        bootstrap_stage3_hash_wc=$(( bootstrap_stage3_hash_wc - 1 ))
+    done
+    printf '%s\n' "$bootstrap_stage3_hash_wc"
+}
+
 bootstrap_stage3_hash_path_list() {
     [ "$#" -eq 1 ] || return 1
     bootstrap_stage3_hash_paths=$1
     [ -f "$bootstrap_stage3_hash_paths" ] || return 1
     [ -s "$bootstrap_stage3_hash_paths" ] || return 0
+    bootstrap_stage3_hash_tool=
     if command -v xargs >/dev/null 2>&1 &&
         printf '' | xargs -0 true >/dev/null 2>&1; then
         if command -v sha256sum >/dev/null 2>&1; then
-            while IFS= read -r bootstrap_stage3_hash_path; do
-                printf '%s\0' "$bootstrap_stage3_hash_path"
-            done <"$bootstrap_stage3_hash_paths" |
-                xargs -0 sha256sum --
-            return
+            bootstrap_stage3_hash_tool=sha256sum
         elif command -v shasum >/dev/null 2>&1; then
-            while IFS= read -r bootstrap_stage3_hash_path; do
-                printf '%s\0' "$bootstrap_stage3_hash_path"
-            done <"$bootstrap_stage3_hash_paths" |
-                xargs -0 shasum -a 256 --
+            bootstrap_stage3_hash_tool=shasum
+        fi
+    fi
+    if [ -n "$bootstrap_stage3_hash_tool" ]; then
+        bootstrap_stage3_hash_lines=$(wc -l <"$bootstrap_stage3_hash_paths") ||
+            return 1
+        bootstrap_stage3_hash_lines=${bootstrap_stage3_hash_lines# }
+        bootstrap_stage3_hash_workers=$(
+            bootstrap_stage3_hash_worker_count "$bootstrap_stage3_hash_lines"
+        ) || return 1
+        if [ "$bootstrap_stage3_hash_workers" -le 1 ]; then
+            bootstrap_stage3_hash_path_list_block \
+                "$bootstrap_stage3_hash_paths" "$bootstrap_stage3_hash_tool"
             return
         fi
+        bootstrap_stage3_hash_dir=$(mktemp -d) || return 1
+        bootstrap_stage3_hash_per=$((
+            ( bootstrap_stage3_hash_lines + bootstrap_stage3_hash_workers - 1 ) /
+            bootstrap_stage3_hash_workers
+        ))
+        awk -v per="$bootstrap_stage3_hash_per" \
+            -v dir="$bootstrap_stage3_hash_dir" '
+            { print > sprintf("%s/in.%04d", dir, int((NR - 1) / per)) }
+        ' "$bootstrap_stage3_hash_paths" || {
+            rm -rf -- "$bootstrap_stage3_hash_dir"
+            return 1
+        }
+        bootstrap_stage3_hash_pids=
+        for bootstrap_stage3_hash_block in "$bootstrap_stage3_hash_dir"/in.*; do
+            bootstrap_stage3_hash_path_list_block \
+                "$bootstrap_stage3_hash_block" \
+                "$bootstrap_stage3_hash_tool" \
+                >"${bootstrap_stage3_hash_block}.out" &
+            bootstrap_stage3_hash_pids="$bootstrap_stage3_hash_pids $!"
+        done
+        bootstrap_stage3_hash_rc=0
+        for bootstrap_stage3_hash_pid in $bootstrap_stage3_hash_pids; do
+            wait "$bootstrap_stage3_hash_pid" || bootstrap_stage3_hash_rc=1
+        done
+        # Emit what was produced even on a partial failure and report the
+        # status, exactly as the sequential xargs pipeline does -- callers
+        # decide, and swallowing the output here would itself be a behaviour
+        # change.
+        for bootstrap_stage3_hash_block in \
+            "$bootstrap_stage3_hash_dir"/in.*; do
+            case "$bootstrap_stage3_hash_block" in *.out) continue ;; esac
+            cat -- "${bootstrap_stage3_hash_block}.out" ||
+                bootstrap_stage3_hash_rc=1
+        done
+        rm -rf -- "$bootstrap_stage3_hash_dir"
+        return "$bootstrap_stage3_hash_rc"
     fi
     while IFS= read -r bootstrap_stage3_hash_path; do
         bootstrap_stage3_path_hash=$(
@@ -203,6 +474,58 @@ bootstrap_stage3_args_sha256() {
     for bootstrap_stage3_arg in "$@"; do
         printf '%s:%s\n' "${#bootstrap_stage3_arg}" "$bootstrap_stage3_arg"
     done | bootstrap_stage3_hash_stream
+}
+
+bootstrap_stage3_stage2_canonical_env_names() {
+    [ "$#" -eq 1 ] || return 1
+    # PATH is in the allowlist because the backend resolves its LLVM tools by
+    # name at run time -- find_tool_portable runs `where llc` on Windows and
+    # `command -v` elsewhere. Under `env -i` with no PATH that lookup finds
+    # nothing, the LLVM object stage returns 'llc not found', and Stage 2
+    # sanity fails. Same reasoning as CC/CXX and INCLUDE/LIB below: a tool
+    # this stage must execute cannot be reached without it.
+    # SIMPLE_LLVM_BIN / LLVM_SYS_180_PREFIX: the backend's tool finder
+    # (_env_tool_dirs in 95.interp/interpreter/llvm/tools.spl) consults these
+    # BEFORE any PATH lookup, and the Windows MSVC lane already exports the
+    # latter. Absent from this allowlist they never reach the child, so the
+    # finder fell through to a spawned `where llc`, found nothing, and the
+    # LLVM object stage returned 'llc not found' -- which surfaced only as
+    # 'backend object-path status 1'. The mechanism already existed; it just
+    # could not see its own configuration.
+    printf '%s' 'SIMPLE_LLVM_BIN LLVM_SYS_180_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
+    case "$1" in
+        *windows-gnu*)
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR'
+            ;;
+        *windows-msvc*)
+            # INCLUDE/LIB/LIBPATH belong here for the same reason CC/CXX do:
+            # the stage runs under `env -i` with this list as the allowlist, so
+            # anything absent is simply gone. Without them cl.exe cannot find the
+            # MSVC headers and the core-c-bootstrap runtime supplement fails with
+            # "fatal error C1083: cannot open include file 'stdint.h'".
+            printf ' %s' 'SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CC CXX INCLUDE LIB LIBPATH'
+            ;;
+    esac
+    printf ' %s\n' 'SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT SIMPLE_BINARY'
+}
+
+bootstrap_stage3_env_assignment_names() {
+    [ "$#" -gt 0 ] || return 1
+    bootstrap_stage3_env_names=
+    bootstrap_stage3_env_seen=' '
+    for bootstrap_stage3_env_assignment in "$@"; do
+        case "$bootstrap_stage3_env_assignment" in
+            [A-Z_][A-Z0-9_]*=*) ;;
+            *) return 1 ;;
+        esac
+        bootstrap_stage3_env_name=${bootstrap_stage3_env_assignment%%=*}
+        case "$bootstrap_stage3_env_seen" in
+            *" $bootstrap_stage3_env_name "*) return 1 ;;
+        esac
+        bootstrap_stage3_env_seen="${bootstrap_stage3_env_seen}${bootstrap_stage3_env_name} "
+        bootstrap_stage3_env_names="${bootstrap_stage3_env_names}${bootstrap_stage3_env_names:+ }${bootstrap_stage3_env_name}"
+    done
+    printf '%s\n' "$bootstrap_stage3_env_names"
 }
 
 # Emit the Stage 3 diagnostic pass-through environment, one NAME=1 assignment
@@ -251,6 +574,7 @@ bootstrap_stage3_diagnostic_env() {
         SIMPLE_HIR_EXPORT_ORIGIN_TRACE \
         SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE \
         SIMPLE_HIR_SIBLING_TRACE \
+        SIMPLE_MIR_TAG_PROBE \
         SIMPLE_MIRB_TRACE \
         SIMPLE_MIR_DEFAULT_PAD_TRACE \
         SIMPLE_MIR_FIELD_TRACE \
@@ -415,6 +739,16 @@ bootstrap_stage3_host_platform() {
 bootstrap_stage3_target_c_compiler() {
     case "$1" in
         *-pc-windows-msvc)
+            # Honor an explicitly selected MSVC-compatible compiler.  This is
+            # needed on hosts where cl.exe passes the lightweight authority
+            # probe but fails later in cc-rs while clang-cl succeeds under the
+            # same MSVC ABI and hermetic environment.  The runnable compiler
+            # probe remains the admission gate, and its exact path is included
+            # in the tool-authority fingerprint.
+            if [ -n "${CC:-}" ]; then
+                bootstrap_stage3_windows_runnable_compiler "$CC" '/?' &&
+                    return 0
+            fi
             bootstrap_stage3_windows_runnable_compiler cl.exe '/?' ||
                 bootstrap_stage3_windows_runnable_compiler clang-cl.exe '--version'
             ;;
@@ -575,7 +909,6 @@ bootstrap_stage3_native_metadata_probe() (
         /*) ;;
         *) return 1 ;;
     esac
-    shift
     [ -f "$bootstrap_stage3_probe_tool" ] &&
         [ -x "$bootstrap_stage3_probe_tool" ] || return 1
     bootstrap_stage3_probe_sha=$(
@@ -596,103 +929,14 @@ bootstrap_stage3_native_metadata_probe() (
             return 1
         }
         bootstrap_stage3_probe_status=0
-        case "$bootstrap_stage3_probe_tool" in
-            *.exe)
-                # MSYS can report status 125 without starting, or without
-                # reliably observing, an otherwise healthy native process.
-                # Use the same Windows Job Object launcher as Rust authority
-                # builds and require its native exit receipt before accepting
-                # metadata stdout.
-                bootstrap_stage3_probe_helper=\
-scripts/bootstrap/run-process-group-bounded-log-windows.py
-                [ -f "$bootstrap_stage3_probe_helper" ] || return 1
-                bootstrap_stage3_probe_python=$(command -v python3 ||
-                    command -v python) || return 1
-                bootstrap_stage3_probe_helper_sha=$(
-                    bootstrap_stage3_hash_file "$bootstrap_stage3_probe_helper"
-                ) || return 1
-                bootstrap_stage3_probe_attempt_dir=\
-"$bootstrap_stage3_probe_tmp/attempt-$bootstrap_stage3_probe_attempt"
-                mkdir -p "$bootstrap_stage3_probe_attempt_dir" || return 1
-                bootstrap_stage3_probe_native_dir=$bootstrap_stage3_probe_attempt_dir
-                bootstrap_stage3_probe_native_helper=$bootstrap_stage3_probe_helper
-                bootstrap_stage3_probe_native_tool=$bootstrap_stage3_probe_tool
-                if command -v cygpath >/dev/null 2>&1; then
-                    bootstrap_stage3_probe_native_dir=$(cygpath -w \
-                        "$bootstrap_stage3_probe_attempt_dir") || return 1
-                    bootstrap_stage3_probe_native_helper=$(cygpath -w \
-                        "$bootstrap_stage3_probe_helper") || return 1
-                    bootstrap_stage3_probe_native_tool=$(cygpath -w \
-                        "$bootstrap_stage3_probe_tool") || return 1
-                fi
-                "$bootstrap_stage3_probe_python" \
-                    "$bootstrap_stage3_probe_native_helper" \
-                    --command-environment=clean-prefix \
-                    --helper-sha256="$bootstrap_stage3_probe_helper_sha" \
-                    --output-parent="$bootstrap_stage3_probe_native_dir" \
-                    --log-leaf=command.log --receipt-leaf=command.env \
-                    --max-bytes=1048576 --timeout-seconds=30 \
-                    --term-grace-seconds=0 -- \
-                    env -i PATH="$PATH" LC_ALL=C LANG=C \
-                    "$bootstrap_stage3_probe_native_tool" "$@" ||
-                    bootstrap_stage3_probe_status=$?
-                bootstrap_stage3_probe_receipt=\
-"$bootstrap_stage3_probe_attempt_dir/command.env"
-                bootstrap_stage3_probe_log=\
-"$bootstrap_stage3_probe_attempt_dir/command.log"
-                [ -f "$bootstrap_stage3_probe_receipt" ] &&
-                    [ -f "$bootstrap_stage3_probe_log" ] || return 1
-                bootstrap_stage3_probe_native_status=$(sed -n \
-                    's/^native_exit_status=//p' \
-                    "$bootstrap_stage3_probe_receipt") || return 1
-                bootstrap_stage3_probe_reason=$(sed -n 's/^reason=//p' \
-                    "$bootstrap_stage3_probe_receipt") || return 1
-                [ "$(sed -n 's/^schema=//p' \
-                    "$bootstrap_stage3_probe_receipt")" = \
-                    simple-bounded-process-log-v1 ] &&
-                    [ "$(sed -n 's/^status=//p' \
-                        "$bootstrap_stage3_probe_receipt")" = complete ] &&
-                    [ "$(sed -n 's/^raw_status=//p' \
-                        "$bootstrap_stage3_probe_receipt")" = \
-                        "$bootstrap_stage3_probe_status" ] &&
-                    [ "$(sed -n 's/^helper_sha256=//p' \
-                        "$bootstrap_stage3_probe_receipt")" = \
-                        "$bootstrap_stage3_probe_helper_sha" ] &&
-                    [ "$(sed -n 's/^command_environment=//p' \
-                        "$bootstrap_stage3_probe_receipt")" = clean-prefix ] &&
-                    [ "$(sed -n 's/^process_group=//p' \
-                        "$bootstrap_stage3_probe_receipt")" = windows-job ] &&
-                    [ "$(sed -n 's/^log_sha256=//p' \
-                        "$bootstrap_stage3_probe_receipt")" = \
-                        "$(bootstrap_stage3_hash_file \
-                            "$bootstrap_stage3_probe_log")" ] || return 1
-                cp "$bootstrap_stage3_probe_log" \
-                    "$bootstrap_stage3_probe_tmp/stdout" || return 1
-                : >"$bootstrap_stage3_probe_tmp/stderr"
-                ;;
-            *)
-                env -i PATH="$PATH" LC_ALL=C LANG=C \
-                    "$bootstrap_stage3_probe_tool" "$@" \
-                    >"$bootstrap_stage3_probe_tmp/stdout" \
-                    2>"$bootstrap_stage3_probe_tmp/stderr" ||
-                    bootstrap_stage3_probe_status=$?
-                ;;
-        esac
+        env -i PATH="$PATH" LC_ALL=C LANG=C "$@" \
+            >"$bootstrap_stage3_probe_tmp/stdout" \
+            2>"$bootstrap_stage3_probe_tmp/stderr" || bootstrap_stage3_probe_status=$?
         if [ "$bootstrap_stage3_probe_status" -ne 0 ] ||
             [ "$bootstrap_stage3_probe_attempt" -eq 2 ]; then
             printf 'bootstrap-native-metadata-probe=%s attempt=%s shell-status=%s\n' \
                 "$bootstrap_stage3_probe_label" "$bootstrap_stage3_probe_attempt" \
                 "$bootstrap_stage3_probe_status" >&2
-            case "$bootstrap_stage3_probe_tool" in
-                *.exe)
-                    printf 'bootstrap-native-metadata-receipt=%s native-status=%s reason=%s receipt-sha256=%s\n' \
-                        "$bootstrap_stage3_probe_label" \
-                        "$bootstrap_stage3_probe_native_status" \
-                        "$bootstrap_stage3_probe_reason" \
-                        "$(bootstrap_stage3_hash_file \
-                            "$bootstrap_stage3_probe_receipt")" >&2
-                    ;;
-            esac
             head -c 4096 "$bootstrap_stage3_probe_tmp/stderr" >&2
             printf '\n' >&2
         fi
@@ -764,15 +1008,40 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
         return 1
     }
     bootstrap_stage3_installed_host=$(
-        awk -F= '
+        awk -F= -v channel="$bootstrap_stage3_installed_channel" '
             /^[[:space:]]*default_host_tuple[[:space:]]*=/ {
                 value = $2
                 gsub(/^[[:space:]]*"/, "", value)
                 gsub(/"[[:space:]]*$/, "", value)
-                print value
-                count += 1
+                legacy = value
+                legacy_count += 1
             }
-            END { if (count != 1) exit 1 }
+            /^[[:space:]]*default_toolchain[[:space:]]*=/ {
+                value = $2
+                gsub(/^[[:space:]]*"/, "", value)
+                gsub(/"[[:space:]]*$/, "", value)
+                modern = value
+                modern_count += 1
+            }
+            END {
+                if (legacy_count > 1 || modern_count > 1) exit 1
+                if (legacy_count == 1) {
+                    if (modern_count == 1) {
+                        prefix = channel "-"
+                        if (index(modern, prefix) != 1) exit 1
+                        modern_host = substr(modern, length(prefix) + 1)
+                        if (modern_host == "" || modern_host != legacy) exit 1
+                    }
+                    print legacy
+                    exit 0
+                }
+                if (modern_count != 1) exit 1
+                prefix = channel "-"
+                if (index(modern, prefix) != 1) exit 1
+                host = substr(modern, length(prefix) + 1)
+                if (host == "") exit 1
+                print host
+            }
         ' "$bootstrap_stage3_installed_settings"
     ) || {
         bootstrap_stage3_rust_toolchain_trace settings-host=parse-fail
@@ -1412,6 +1681,9 @@ bootstrap_stage3_tool_authority_snapshot() (
     bootstrap_stage3_tool_path=$2
     bootstrap_stage3_tool_root=$3
     bootstrap_stage3_tool_tmp="${bootstrap_stage3_tool_output}.tmp.$$"
+    trap 'rm -f "$bootstrap_stage3_tool_tmp" \
+        "${bootstrap_stage3_tool_tmp}.version" \
+        "${bootstrap_stage3_tool_tmp}.arch"' EXIT
     case "$bootstrap_stage3_tool_path" in
         /*) ;;
         *) return 1 ;;
@@ -1477,7 +1749,7 @@ bootstrap_stage3_tool_authority_snapshot() (
     done
     [ -n "$bootstrap_stage3_hash_tool" ] || return 1
     for bootstrap_stage3_tool_name in \
-        cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file \
+        cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file cmp \
         "$bootstrap_stage3_hash_tool"; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
@@ -1607,12 +1879,20 @@ bootstrap_stage3_tool_authority_snapshot() (
 bootstrap_stage3_directory_snapshot() {
     bootstrap_stage3_directory_snapshot_output=$1
     bootstrap_stage3_directory_snapshot_root=$2
-    IFS=' ' read -r bootstrap_stage3_directory_snapshot_pid \
-        bootstrap_stage3_directory_snapshot_stat_rest </proc/self/stat ||
-        return 1
-    case "$bootstrap_stage3_directory_snapshot_pid" in
-        ''|0|*[!0-9]*) return 1 ;;
-    esac
+    # The pid is used only to pin the trusted /proc/<pid>/fd magic-link arm
+    # below. A host without procfs can never present such a root, so leave the
+    # pid empty there: the arm cannot match and the "/proc/*) return 1" arm
+    # still rejects every other /proc path, keeping this fail-closed.
+    if [ -r /proc/self/stat ]; then
+        IFS=' ' read -r bootstrap_stage3_directory_snapshot_pid \
+            bootstrap_stage3_directory_snapshot_stat_rest </proc/self/stat ||
+            return 1
+        case "$bootstrap_stage3_directory_snapshot_pid" in
+            ''|0|*[!0-9]*) return 1 ;;
+        esac
+    else
+        bootstrap_stage3_directory_snapshot_pid=''
+    fi
     case "$bootstrap_stage3_directory_snapshot_root" in
         "/proc/$bootstrap_stage3_directory_snapshot_pid/fd/"[1-9]*)
             expr "$bootstrap_stage3_directory_snapshot_root" : \
@@ -2091,7 +2371,7 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
         [ ! -L "$bootstrap_stage3_hosted_path" ] || return 1
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_hosted_path")" = \
         "$bootstrap_stage3_hosted_expected" ] || return 1
-    set -- $(stat -Lc '%d %i' "$bootstrap_stage3_hosted_walk_root") || return 1
+    set -- $(stat -Lc '%d %i' "$bootstrap_stage3_hosted_walk_root" 2>/dev/null || stat -Lf '%d %i' "$bootstrap_stage3_hosted_walk_root") || return 1
     bootstrap_stage3_hosted_root_dev=$1
     bootstrap_stage3_hosted_root_ino=$2
     perl -MFile::Find -MFcntl=:mode -e '
@@ -2355,11 +2635,17 @@ bootstrap_stage3_prepare_seed_generation() {
     if [ -n "$bootstrap_stage3_generation_details_source" ]; then
         [ -f "$bootstrap_stage3_generation_details_source" ] &&
             [ ! -L "$bootstrap_stage3_generation_details_source" ] || return 1
+    fi
+    # Tuple projection returns a frozen 0500 root.  Thaw only that staging
+    # root, after all optional inputs have been validated, so generation-owned
+    # metadata can be added before publication.  Descendant directories and
+    # tuple members remain frozen; no marker can admit this staging path.
+    chmod 700 "$bootstrap_stage3_generation_staging" || return 1
+    if [ -n "$bootstrap_stage3_generation_details_source" ]; then
         cp -p -- "$bootstrap_stage3_generation_details_source" \
             "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256.details.env" || return 1
         chmod 400 "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256.details.env" || return 1
     fi
-    chmod 700 "$bootstrap_stage3_generation_staging" || return 1
     bootstrap_stage3_generation_stamp=\
 "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256"
     bootstrap_stage3_write_seed_stamp "$bootstrap_stage3_generation_stamp" \
@@ -2384,7 +2670,12 @@ bootstrap_stage3_prepare_seed_generation() {
 "$bootstrap_stage3_generation_root/$bootstrap_stage3_generation_inputs-$bootstrap_stage3_generation_hash"
     BOOTSTRAP_STAGE3_PREPARED_STAGING=$bootstrap_stage3_generation_staging
     BOOTSTRAP_STAGE3_PREPARED_HASH=$bootstrap_stage3_generation_hash
-    chmod 500 "$bootstrap_stage3_generation_staging" || return 1
+    # Keep only the staging root owner-writable until publication.  Its files
+    # and descendant directories are already frozen by the copy/stamp owners.
+    # macOS can reject rename(2) of a pre-frozen directory in hosted-runner
+    # workspaces; immutability begins after the same-parent atomic rename and
+    # before any marker can admit the generation.
+    chmod 700 "$bootstrap_stage3_generation_staging" || return 1
 }
 
 bootstrap_stage3_publish_seed_generation() {
@@ -2432,6 +2723,7 @@ bootstrap_stage3_publish_seed_generation() {
         "$bootstrap_stage3_publish_inputs" ] || return 1
     bootstrap_stage3_publish_stamp_hash=$(bootstrap_stage3_hash_file \
         "$bootstrap_stage3_publish_stamp") || return 1
+    bootstrap_stage3_publish_mode=new
     if [ -d "$bootstrap_stage3_publish_final" ]; then
         bootstrap_stage3_publish_existing=\
 "$bootstrap_stage3_publish_root/.existing.$$"
@@ -2442,39 +2734,21 @@ bootstrap_stage3_publish_seed_generation() {
         rm -f "$bootstrap_stage3_publish_existing"
         chmod -R u+w "$bootstrap_stage3_publish_staging" 2>/dev/null || true
         rm -rf "$bootstrap_stage3_publish_staging"
-    else
-        mv "$bootstrap_stage3_publish_staging" \
-            "$bootstrap_stage3_publish_final" || return 1
+        bootstrap_stage3_publish_mode=existing
     fi
-    bootstrap_stage3_publish_transaction="$bootstrap_stage3_publish_marker.transaction"
-    bootstrap_stage3_publish_transaction_tmp=\
-"$bootstrap_stage3_publish_transaction.tmp.$$"
-    {
-        echo 'schema=simple-bootstrap-authority-transaction-v1'
-        echo "generation=$bootstrap_stage3_publish_name"
-        echo "inputs_fingerprint=$bootstrap_stage3_publish_inputs"
-        echo "generation_sha256=$bootstrap_stage3_publish_hash"
-        echo "stamp_sha256=$bootstrap_stage3_publish_stamp_hash"
-    } >"$bootstrap_stage3_publish_transaction_tmp" || return 1
-    mv "$bootstrap_stage3_publish_transaction_tmp" \
-        "$bootstrap_stage3_publish_transaction" || return 1
-    bootstrap_stage3_publish_compatibility_pointer \
-        "$bootstrap_stage3_publish_compatibility" \
+    bootstrap_stage3_publish_helper=\
+"${BOOTSTRAP_STAGE3_AUTHORITY_PUBLISH_HELPER:-\
+$(dirname -- "$BOOTSTRAP_STAGE3_FACADE_PATH")/bootstrap-authority-generation-publish.pl}"
+    [ -f "$bootstrap_stage3_publish_helper" ] || return 1
+    perl "$bootstrap_stage3_publish_helper" \
+        "$bootstrap_stage3_publish_mode" \
+        "$bootstrap_stage3_publish_staging" \
         "$bootstrap_stage3_publish_final" \
-        "$bootstrap_stage3_publish_root" || return 1
-    if [ "${BOOTSTRAP_STAGE3_TEST_STOP_AFTER_COMPATIBILITY:-0}" = 1 ]; then
-        return 99
-    fi
-    bootstrap_stage3_publish_tmp="$bootstrap_stage3_publish_marker.tmp.$$"
-    {
-        echo 'schema=simple-bootstrap-authority-current-v1'
-        echo "generation=$bootstrap_stage3_publish_name"
-        echo "inputs_fingerprint=$bootstrap_stage3_publish_inputs"
-        echo "generation_sha256=$bootstrap_stage3_publish_hash"
-        echo "stamp_sha256=$bootstrap_stage3_publish_stamp_hash"
-    } >"$bootstrap_stage3_publish_tmp" || return 1
-    mv "$bootstrap_stage3_publish_tmp" "$bootstrap_stage3_publish_marker" || return 1
-    rm -f "$bootstrap_stage3_publish_transaction"
+        "$bootstrap_stage3_publish_marker" \
+        "$bootstrap_stage3_publish_compatibility" \
+        "$bootstrap_stage3_publish_inputs" \
+        "$bootstrap_stage3_publish_hash" \
+        "$bootstrap_stage3_publish_stamp_hash"
 }
 
 bootstrap_stage3_recover_seed_transaction() {
@@ -2688,7 +2962,616 @@ bootstrap_stage3_compatibility_pointer_valid() {
 # Bind the checked-out commit plus the actual tracked dirty bytes/symlink
 # targets and untracked bytes/symlink targets.  A porcelain path list alone is
 # insufficient because an already-dirty file can change without changing it.
+# Read-only native v2 consumer. Keep this boundary in the Stage3 authority;
+# it never invokes the producer or creates/replaces checkout aliases.
+bootstrap_stage3_materialized_native_source() {
+    cat <<'STAGE3_NATIVE'
+$ErrorActionPreference = "Stop"
+try {
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class Stage3MaterializedConsumer {
+    [StructLayout(LayoutKind.Sequential)] struct Info {
+        public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh,
+            WriteLow, WriteHigh, Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct TagInfo { public uint Attributes, Tag; }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern SafeFileHandle CreateFileW(string p, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern uint GetFileAttributesW(string p);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetFileInformationByHandle(SafeFileHandle h, out Info info);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out TagInfo info, uint size);
+    static Exception Error(string predicate) {
+        return new IOException(predicate + ":win32=" + Marshal.GetLastWin32Error());
+    }
+    static SafeFileHandle Open(string p, bool raw, uint access) {
+        var h = CreateFileW(p, access, 1, IntPtr.Zero, 3,
+            0x02000000u | (raw ? 0x00200000u : 0), IntPtr.Zero);
+        if (h.IsInvalid) { h.Dispose(); throw Error("api.open:" + p); }
+        return h;
+    }
+    static TagInfo Tag(SafeFileHandle h) {
+        TagInfo i;
+        if (!GetFileInformationByHandleEx(h, 9, out i, 8)) throw Error("api.attribute-tag");
+        return i;
+    }
+    static Info Identity(SafeFileHandle h) {
+        Info i;
+        if (!GetFileInformationByHandle(h, out i)) throw Error("api.file-identity");
+        return i;
+    }
+    // Retain handles without write/delete sharing through the protected action.
+    // Starting at the volume/share root prevents ancestor rename/reparse swaps.
+    static void Parents(string path, bool create, List<SafeFileHandle> held) {
+        string full = Path.GetFullPath(path), root = Path.GetPathRoot(full);
+        string parent = Path.GetDirectoryName(full);
+        if (String.IsNullOrEmpty(parent)) parent = root;
+        string current = root;
+        var parts = parent.Substring(root.Length).Split(new char[] {'\\'}, StringSplitOptions.RemoveEmptyEntries);
+        // Read-only prefix walk: stop at the first missing pending ancestor.
+        int n;
+        for (n = -1; n < parts.Length; n++) {
+            string candidate = n >= 0 ? Path.Combine(current, parts[n]) : current;
+            uint attrs = GetFileAttributesW(candidate);
+            if (attrs != 0xFFFFFFFFu && (attrs & 0x400u) != 0)
+                throw new IOException("ancestor.reparse:" + candidate);
+            var h = CreateFileW(candidate, 0, 1, IntPtr.Zero, 3, 0x02200000u, IntPtr.Zero);
+            if (h.IsInvalid) {
+                int error = Marshal.GetLastWin32Error(); h.Dispose();
+                if (n >= 0 && error == 2) {
+                    return;
+                }
+                throw new IOException("api.open-parent:" + candidate + ":win32=" + error);
+            }
+            held.Add(h);
+            var t = Tag(h);
+            if ((t.Attributes & 0x400) != 0) throw new IOException("ancestor.reparse:" + candidate);
+            if ((t.Attributes & 0x10) == 0) throw new IOException("ancestor.not-directory:" + candidate);
+            Identity(h);
+            current = candidate;
+        }
+    }
+    public static void Validate(string link, string target, bool directory) {
+        var held = new List<SafeFileHandle>();
+        try {
+            Parents(link, false, held); Parents(target, false, held);
+            using (var raw = Open(link, true, 0)) {
+                var tag = Tag(raw);
+                if (directory ? tag.Tag != 0xA0000003u : (tag.Attributes & 0x400) != 0)
+                    throw new IOException("tag.expected=" + (directory ? "0xA0000003" : "non-reparse") +
+                        ":actual=0x" + tag.Tag.ToString("X8"));
+                using (var expected = Open(target, true, 0)) {
+                    var et = Tag(expected);
+                    if ((et.Attributes & 0x400) != 0) throw new IOException("target.reparse");
+                    if (((et.Attributes & 0x10) != 0) != directory) throw new IOException("target.kind");
+                    using (var final = Open(link, false, 0)) {
+                        var x = Identity(final); var y = Identity(expected);
+                        if (x.Volume != y.Volume || x.IndexHigh != y.IndexHigh || x.IndexLow != y.IndexLow)
+                            throw new IOException("identity.volume-file-id.mismatch");
+                    }
+                }
+            }
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern uint GetFinalPathNameByHandleW(SafeFileHandle h, StringBuilder path, uint size, uint flags);
+    static string FinalPath(SafeFileHandle h) {
+        var path = new StringBuilder(32768);
+        uint n = GetFinalPathNameByHandleW(h, path, (uint)path.Capacity, 0);
+        if (n == 0 || n >= path.Capacity) throw Error("target.final-path");
+        string p = path.ToString();
+        if (!p.StartsWith(@"\\?\") || p.Length < 7 || p[5] != ':' || p[6] != '\\' ||
+            !((p[4] >= 'A' && p[4] <= 'Z') || (p[4] >= 'a' && p[4] <= 'z')))
+            throw new IOException("target.unsupported-final-namespace");
+        return p.Substring(0, 4) + Char.ToUpperInvariant(p[4]) + p.Substring(5);
+    }
+    // Schema v2 consumer contract: target_resolved_hex is strict UTF-8 of the
+    // normalized Win32 extended DOS final path (\\?\C:\...), no newline.
+    // Only drive volumes are admitted; UNC/device namespaces fail closed.
+    // Consumers must explicitly accept v2, decode as native Windows path, and
+    // compare volume + high:low file ID, unsigned decimal byte size and SHA256.
+    // Directory size is the handle's size, SHA is '-'; no POSIX stat semantics.
+    public static string Metadata(string link, string target) {
+        var held = new List<SafeFileHandle>();
+        try {
+            Parents(target, false, held); Parents(link, false, held);
+            held.Add(Open(link, true, 0));
+            // Read sharing only excludes existing/future writers and deletion,
+            // including writes through hardlinks. The stream owns this handle.
+            using (var h = Open(target, true, 0x80000000)) {
+                var tag = Tag(h);
+                if ((tag.Attributes & 0x400) != 0) throw new IOException("target.reparse");
+                bool directory = (tag.Attributes & 0x10) != 0;
+                var before = Identity(h);
+                Charge(((ulong)before.SizeHigh << 32) | before.SizeLow);
+                string path = FinalPath(h);
+                Validate(link, target, directory);
+                // Bind validation to this exact held target, not a later reopen.
+                using (var actual = Open(link, false, 0)) {
+                    var i = Identity(actual);
+                    if (i.Volume != before.Volume || i.IndexHigh != before.IndexHigh || i.IndexLow != before.IndexLow)
+                        throw new IOException("target.replacement");
+                }
+                string sha = "-";
+                FileStream stream = null;
+                try {
+                    if (!directory) {
+                        stream = new FileStream(h, FileAccess.Read);
+                        using (var hash = System.Security.Cryptography.SHA256.Create())
+                            sha = BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                    }
+                    var after = Identity(h);
+                    if (before.Volume != after.Volume || before.IndexHigh != after.IndexHigh || before.IndexLow != after.IndexLow ||
+                        before.SizeHigh != after.SizeHigh || before.SizeLow != after.SizeLow ||
+                        before.WriteHigh != after.WriteHigh || before.WriteLow != after.WriteLow || path != FinalPath(h))
+                        throw new IOException("target.changed-during-capture");
+                    byte[] bytes = new UTF8Encoding(false, true).GetBytes(path);
+                    return bytes.Length.ToString() + "|" + BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant() + "|" +
+                        before.Volume.ToString() + "|" + before.IndexHigh.ToString() + ":" + before.IndexLow.ToString() + "|" +
+                        (((ulong)before.SizeHigh << 32) | before.SizeLow).ToString() + "|" + sha;
+                } finally { if (stream != null) stream.Dispose(); }
+            }
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
+    static string Decode(string hex) {
+        if (hex.Length == 0 || hex.Length > 262136 || hex.Length % 2 != 0 ||
+            !System.Text.RegularExpressions.Regex.IsMatch(hex, "\\A[0-9a-f]+\\z")) throw new IOException("receipt.hex");
+        byte[] bytes = new byte[hex.Length/2];
+        for (int n=0;n<bytes.Length;n++) bytes[n]=Convert.ToByte(hex.Substring(n*2,2),16);
+        return new UTF8Encoding(false,true).GetString(bytes);
+    }
+    static string Fingerprint(SafeFileHandle h) {
+        var i = Identity(h); var t = Tag(h);
+        return i.Volume + ":" + i.IndexHigh + ":" + i.IndexLow + ":" + t.Attributes + ":" + t.Tag;
+    }
+    public static void ParseMetadata(string path, string kind) {
+        string text = new UTF8Encoding(false, true).GetString(File.ReadAllBytes(path));
+        if (text.EndsWith("\r\n")) text = text.Substring(0, text.Length-2);
+        else if (text.EndsWith("\n")) text = text.Substring(0, text.Length-1);
+        ParseMetadataText(text, kind);
+    }
+    static void ParseMetadataText(string text, string kind) {
+        string[] f = text.Split('|');
+        if (f.Length != 6 || text.IndexOfAny(new char[] {'\r','\n'}) >= 0) throw new IOException("metadata.fields");
+        ulong length = Number(f[0], 131068), volume = Number(f[2], UInt32.MaxValue);
+        Number(f[4], UInt64.MaxValue);
+        string[] id = f[3].Split(':');
+        if (id.Length != 2) throw new IOException("metadata.id");
+        Number(id[0], UInt32.MaxValue); Number(id[1], UInt32.MaxValue);
+        if (length < 7 || (ulong)f[1].Length != length * 2 || !System.Text.RegularExpressions.Regex.IsMatch(f[1], "\\A[0-9a-fA-F]+\\z")) throw new IOException("metadata.hex");
+        byte[] bytes = new byte[(int)length];
+        for (int n=0; n<bytes.Length; n++) bytes[n] = Convert.ToByte(f[1].Substring(n*2,2),16);
+        string resolved = new UTF8Encoding(false,true).GetString(bytes);
+        if (!resolved.StartsWith(@"\\?\") || resolved.Length < 7 || resolved[5] != ':' || resolved[6] != '\\' ||
+            !((resolved[4] >= 'A' && resolved[4] <= 'Z') || (resolved[4] >= 'a' && resolved[4] <= 'z')))
+            throw new IOException("metadata.namespace");
+        foreach (char c in resolved) if (Char.IsControl(c)) throw new IOException("metadata.control");
+        if (kind == "directory" ? f[5] != "-" : kind != "file" || !System.Text.RegularExpressions.Regex.IsMatch(f[5], "\\A[0-9a-fA-F]{64}\\z")) throw new IOException("metadata.sha");
+    }
+    static ulong Number(string value, ulong max) {
+        ulong n;
+        if (!System.Text.RegularExpressions.Regex.IsMatch(value, "\\A(?:0|[1-9][0-9]*)\\z") || !UInt64.TryParse(value, out n) || n > max) throw new IOException("metadata.number");
+        return n;
+    }
+    static string Relative(string hex, string length, bool target) {
+        ulong size = Number(length, 131068);
+        if (size == 0 || (ulong)hex.Length != size * 2) throw new IOException("receipt.byte-length");
+        string value = Decode(hex);
+        bool ordinary = false;
+        foreach (string part in value.Split('/')) {
+            if (target && part == ".." && !ordinary) continue;
+            ordinary = true;
+            if (part.Length == 0 || part == "." || part == ".." || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                part.IndexOf('\\') >= 0 || part.EndsWith(".") || part.EndsWith(" ") ||
+                System.Text.RegularExpressions.Regex.IsMatch(part, "\\A(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\\.|\\z)"))
+                throw new IOException("receipt.relative-path");
+            foreach (char c in part) if (Char.IsControl(c)) throw new IOException("receipt.relative-path");
+        }
+        if (!ordinary) throw new IOException("receipt.relative-path");
+        return value;
+    }
+
+    static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
+    static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+    // Callers may tighten budgets, never increase the admitted ceilings.
+    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 100000);
+    const int MaxOutput = 16 * 1024 * 1024;
+    static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
+    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 28000);
+    static ulong bytes;
+    static int entries;
+    static System.Diagnostics.Process ActiveChild;
+    static ulong Budget(string name, ulong ceiling) {
+        string value = Environment.GetEnvironmentVariable(name);
+        ulong n = String.IsNullOrEmpty(value) ? ceiling : Number(value, ceiling);
+        if (n == 0) throw new IOException("bound.zero"); return n;
+    }
+    static void Tick() { if (Clock.ElapsedMilliseconds >= MaxMillis) throw new IOException("bound.time"); }
+    static void Charge(ulong n) { Tick(); if (n > MaxBytes - bytes) throw new IOException("bound.bytes"); bytes += n; }
+    static string Hash(byte[] b) { using (var h = System.Security.Cryptography.SHA256.Create()) return Hex(h.ComputeHash(b)); }
+    static string Hex(byte[] b) { return BitConverter.ToString(b).Replace("-", "").ToLowerInvariant(); }
+    static string Text(byte[] b) { return Utf8.GetString(b); }
+    static byte[] ReadHeld(string path, List<SafeFileHandle> held, int max) {
+        Parents(path, false, held);
+        var lockHandle = Open(path, true, 0); held.Add(lockHandle);
+        if ((Tag(lockHandle).Attributes & 0x410) != 0) throw new IOException("input.kind");
+        using (var stream = new FileStream(Open(path, true, 0x80000000), FileAccess.Read)) {
+            if (stream.Length > max) throw new IOException("bound.input");
+            Charge((ulong)stream.Length);
+            using (var mem = new MemoryStream()) { stream.CopyTo(mem); return mem.ToArray(); }
+        }
+    }
+    static string Quote(string s) {
+        var b = new StringBuilder("\""); int slash = 0;
+        foreach (char c in s) {
+            if (c == '\\') { slash++; continue; }
+            if (c == '"') { b.Append('\\', slash * 2 + 1); b.Append(c); slash = 0; continue; }
+            b.Append('\\', slash); slash = 0; b.Append(c);
+        }
+        b.Append('\\', slash * 2); return b.Append('"').ToString();
+    }
+    static byte[] ReadBound(Stream stream) {
+        using (var mem = new MemoryStream()) {
+            byte[] buffer = new byte[65536]; int n;
+            while ((n = stream.Read(buffer, 0, buffer.Length)) != 0) {
+                if (mem.Length + n > MaxOutput) throw new IOException("bound.command-output");
+                mem.Write(buffer, 0, n);
+            }
+            return mem.ToArray();
+        }
+    }
+    static byte[] Command(string root, string tool, byte[] input, params string[] args) {
+        Tick(); var start = new System.Diagnostics.ProcessStartInfo(tool);
+        start.WorkingDirectory = root; start.UseShellExecute = false; start.CreateNoWindow = true;
+        start.RedirectStandardOutput = true; start.RedirectStandardError = true; start.RedirectStandardInput = true;
+        start.EnvironmentVariables["GIT_OPTIONAL_LOCKS"] = "0";
+        start.EnvironmentVariables["LC_ALL"] = "C";
+        start.EnvironmentVariables["GIT_CONFIG_NOSYSTEM"] = "1";
+        var argv = new List<string>(); foreach (string arg in args) argv.Add(Quote(arg));
+        start.Arguments = String.Join(" ", argv.ToArray());
+        using (var process = System.Diagnostics.Process.Start(start)) {
+            ActiveChild = process;
+            try {
+                var stdout = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardOutput.BaseStream));
+                var stderr = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardError.BaseStream));
+                var stdin = System.Threading.Tasks.Task.Factory.StartNew(() => { if (input != null) process.StandardInput.BaseStream.Write(input, 0, input.Length); process.StandardInput.Close(); });
+                while (!process.WaitForExit(20)) { Tick(); if (stdout.IsFaulted || stderr.IsFaulted || stdin.IsFaulted) throw new IOException("command.io"); }
+                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+                if (process.ExitCode != 0) throw new IOException("command.failed:" + process.ExitCode);
+                return stdout.Result;
+            } finally { if (!process.HasExited) process.Kill(); ActiveChild = null; }
+        }
+    }
+    static byte[] Git(string root, params string[] args) {
+        var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
+        all.AddRange(args); return Command(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, all.ToArray());
+    }
+    static string[] Nul(byte[] b) {
+        string s = Text(b); if (s.Length == 0) return new string[0];
+        if (!s.EndsWith("\0")) throw new IOException("git.nul-format");
+        return s.Substring(0, s.Length - 1).Split('\0');
+    }
+    static void CheckPath(string path) {
+        byte[] b = Utf8.GetBytes(path); Relative(Hex(b), b.Length.ToString(), false);
+        // The retained Stage3 line protocol cannot encode these names safely.
+        if (path.IndexOfAny(new char[] {'\n','\r','\t','\\',':','*','?','[',']'}) >= 0) throw new IOException("path.unsupported");
+    }
+    static Dictionary<string,string> HeadLinks(string root, string head) {
+        var links = new Dictionary<string,string>(StringComparer.Ordinal);
+        var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var components = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "--full-tree", head))) {
+            if (++entries > MaxEntries) throw new IOException("bound.entries");
+            int tab = row.IndexOf('\t'); if (tab < 0) throw new IOException("git.tree-format");
+            string path = row.Substring(tab + 1); CheckPath(path);
+            if (!cases.Add(path)) throw new IOException("path.case-collision");
+            string prefix = "";
+            foreach (string part in path.Split('/')) {
+                prefix = prefix.Length == 0 ? part : prefix + "/" + part;
+                string previous;
+                if (components.TryGetValue(prefix, out previous) && previous != prefix) throw new IOException("path.component-case-collision");
+                components[prefix] = prefix;
+            }
+            string[] f = row.Substring(0, tab).Split(' ');
+            if (f.Length != 3 || f[1] != "blob" || (f[0] != "100644" && f[0] != "100755" && f[0] != "120000")) throw new IOException("git.tree-kind");
+            if (f[0] == "120000") {
+                byte[] blob = Git(root, "cat-file", "blob", f[2]);
+                links.Add(path, Relative(Hex(blob), blob.Length.ToString(), true));
+                if (links.Count > 4096) throw new IOException("bound.aliases");
+            }
+        }
+        return links;
+    }
+    static void AuditTree(string root, Dictionary<string,string> aliases, List<SafeFileHandle> held) {
+        var todo = new Stack<string>(); todo.Push(root);
+        Parents(Path.Combine(root, "leaf"), false, held);
+        var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (todo.Count != 0) {
+            Tick(); string dir = todo.Pop();
+            // Enumerate one ordinary directory at a time, never recurse through
+            // an alias, even if Git would eventually classify it as ignored.
+            foreach (string item in Directory.EnumerateFileSystemEntries(dir)) {
+                if (++entries > MaxEntries) throw new IOException("bound.entries");
+                string relative = item.Substring(root.Length + 1).Replace('\\','/');
+                if (relative == ".git") continue;
+                CheckPath(relative);
+                if (!cases.Add(relative)) throw new IOException("path.case-collision");
+                if (Path.GetFileName(item).Equals(".git", StringComparison.OrdinalIgnoreCase)) throw new IOException("path.nested-repository");
+                var raw = Open(item, true, 0); held.Add(raw);
+                {
+                    var tag = Tag(raw);
+                    if (aliases.ContainsKey(relative) && aliases[relative] == "directory") continue;
+                    if ((tag.Attributes & 0x400) != 0) throw new IOException("path.unreceipted-reparse");
+                    if ((tag.Attributes & 0x40) != 0) throw new IOException("path.special");
+                    if ((tag.Attributes & 0x10) != 0) todo.Push(item);
+                }
+            }
+        }
+    }
+    static void CheckPending(Dictionary<string,string> links, List<string> targets, string[] policy, List<SafeFileHandle> held) {
+        foreach (var pair in links) {
+            string relative = pair.Key.Substring(Environment.GetEnvironmentVariable("STAGE3_ROOT").TrimEnd('\\').Length + 1).Replace('\\','/');
+            if (Array.IndexOf(policy, relative + "\t" + pair.Value) < 0 || Text(ReadHeld(pair.Key, held, 131068)) != pair.Value) throw new IOException("pending.bytes-policy");
+        }
+        foreach (string target in targets) {
+            Parents(target, false, held);
+            uint attr = GetFileAttributesW(target); int error = Marshal.GetLastWin32Error();
+            if (attr != 0xFFFFFFFFu || (error != 2 && error != 3)) throw new IOException("pending.not-absent-at-use");
+        }
+    }
+    static string Inventory(string root, string head, Dictionary<string,string> aliases) {
+        byte[] diff = Git(root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--");
+        var args = new List<string>(new string[] {"ls-files", "--others", "--exclude-standard", "-z", "--", "."});
+        var collapsed = new List<string>();
+        foreach (var pair in aliases) if (pair.Value == "directory") collapsed.Add(pair.Key);
+        collapsed.Sort((a,b) => CompareBytes(Utf8.GetBytes(a), Utf8.GetBytes(b)));
+        var collapse = new StringBuilder();
+        foreach (string path in collapsed) {
+            args.Add(":(top,literal,exclude)" + path);
+            collapse.Append("alias-collapse-directory:").Append(Utf8.GetByteCount(path)).Append(':').Append(Hex(Utf8.GetBytes(path))).Append('\n');
+        }
+        string[] paths = Nul(Git(root, args.ToArray()));
+        if (paths.Length > MaxEntries) throw new IOException("bound.untracked");
+        Array.Sort(paths, (a,b) => CompareBytes(Utf8.GetBytes(a), Utf8.GetBytes(b)));
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in paths) {
+            CheckPath(path); if (!seen.Add(path)) throw new IOException("untracked.duplicate-case");
+            foreach (string alias in collapsed) if (path.Equals(alias, StringComparison.OrdinalIgnoreCase) || path.StartsWith(alias + "/", StringComparison.OrdinalIgnoreCase)) throw new IOException("git.alias-traversal");
+        }
+        byte[] flags = Command(root, Environment.GetEnvironmentVariable("STAGE3_SH"), Utf8.GetBytes(paths.Length == 0 ? "" : String.Join("\0", paths) + "\0"), "-c", "while IFS= read -r -d '' p; do if test -x \"$p\"; then printf 1; else printf 0; fi; done");
+        if (flags.Length != paths.Length) throw new IOException("untracked.mode-count");
+        var records = new StringBuilder("tracked-diff-sha256=" + Hash(diff) + "\n");
+        var held = new List<SafeFileHandle>();
+        try {
+            for (int n=0; n<paths.Length; n++) {
+                string path = paths[n];
+                byte[] content = ReadHeld(Path.Combine(root, path.Replace('/','\\')), held, (int)MaxBytes);
+                if (flags[n] != '0' && flags[n] != '1') throw new IOException("untracked.mode");
+                records.Append("untracked-file:").Append(Utf8.GetByteCount(path)).Append(':').Append(path).Append(':').Append((char)flags[n]).Append(':').Append(Hash(content)).Append('\n');
+            }
+            // Collapse metadata is separately bound; the tracked diff remains
+            // byte-for-byte Git's ordinary HEAD diff, including dirty aliases.
+            return "head=" + head + "\ndirty_fingerprint=" + Hash(Utf8.GetBytes(records.ToString())) +
+                "\nalias_collapse_count=" + collapsed.Count + "\nalias_collapse_sha256=" + Hash(Utf8.GetBytes(collapse.ToString())) + "\n" + collapse;
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
+    static int CompareBytes(byte[] a, byte[] b) { for (int n=0;n<Math.Min(a.Length,b.Length);n++) if (a[n] != b[n]) return a[n].CompareTo(b[n]); return a.Length.CompareTo(b.Length); }
+    public static void Run() {
+        var held = new List<SafeFileHandle>(); FileStream policyStream = null;
+        // The watchdog also interrupts a stalled filesystem read. The outer
+        // shell owns cleanup; it never publishes the private result on failure.
+        var watchdog = new System.Threading.Timer(delegate {
+            try { var child = ActiveChild; if (child != null && !child.HasExited) child.Kill(); } catch { }
+            Environment.Exit(124);
+        }, null, MaxMillis, System.Threading.Timeout.Infinite);
+        try {
+            string root = Environment.GetEnvironmentVariable("STAGE3_ROOT").TrimEnd('\\');
+            string source = Environment.GetEnvironmentVariable("STAGE3_RECEIPT");
+            string head = Text(Git(root, "rev-parse", "--verify", "HEAD")).TrimEnd('\n');
+            string top = Text(Git(root, "rev-parse", "--show-toplevel")).TrimEnd('\n').Replace('/','\\');
+            string posixRoot = Text(Convert.FromBase64String(Environment.GetEnvironmentVariable("STAGE3_ROOT_B64"))).Replace('/','\\');
+            if (!top.Equals(root, StringComparison.OrdinalIgnoreCase) && !top.Equals(posixRoot, StringComparison.Ordinal)) throw new IOException("root.git-mismatch");
+            string producerHash = Hash(ReadHeld(Path.Combine(root, "scripts", "setup", "materialize-symlinks-windows.shs"), held, 1024 * 1024));
+            var headLinks = HeadLinks(root, head);
+            var pending = new List<string>();
+            byte[] receiptBytes = ReadHeld(source, held, 8 * 1024 * 1024);
+            string receiptText = new UTF8Encoding(false,true).GetString(receiptBytes);
+            if (!receiptText.EndsWith("\n") || receiptText.IndexOf('\r') >= 0) throw new IOException("receipt.line-format");
+            var all = receiptText.Substring(0,receiptText.Length-1).Split('\n');
+            var headers = new Dictionary<string,string>();
+            var rows = new List<string>();
+            bool inRecords = false;
+            int beginCount = 0, endCount = 0;
+            foreach (string line in all) {
+                if (endCount != 0) throw new IOException("receipt.trailing-data");
+                if (line == "records_begin") { if (inRecords || ++beginCount != 1) throw new IOException("receipt.records-markers"); inRecords = true; continue; }
+                if (line == "records_end") { if (!inRecords || ++endCount != 1) throw new IOException("receipt.records-markers"); inRecords = false; continue; }
+                if (inRecords) { rows.Add(line); continue; }
+                int split = line.IndexOf('=');
+                if (split <= 0) throw new IOException("receipt.header-format");
+                string key = line.Substring(0, split);
+                if (headers.ContainsKey(key)) throw new IOException("receipt.header-duplicate");
+                headers.Add(key, line.Substring(split + 1));
+            }
+            if (!inRecords && beginCount == 1 && endCount == 1) { }
+            else throw new IOException("receipt.records-markers");
+            string[] required = new string[] {"schema","root","head","producer_sha256","policy_sha256","tracked_mode120000","created","already_ok","skipped_pending","failed","pending_untracked","record_count","records_sha256","pending_count","pending_requires_consumer_revalidation","result"};
+            if (headers.Count != required.Length) throw new IOException("receipt.header-set");
+            foreach (string key in required) if (!headers.ContainsKey(key)) throw new IOException("receipt.header-missing");
+            foreach (string key in new string[] {"producer_sha256","policy_sha256","records_sha256"})
+                if (!System.Text.RegularExpressions.Regex.IsMatch(headers[key], "\\A[0-9a-f]{64}\\z")) throw new IOException("receipt.header-digest");
+            if (!System.Text.RegularExpressions.Regex.IsMatch(headers["head"], "\\A(?:[0-9a-f]{40}|[0-9a-f]{64})\\z")) throw new IOException("receipt.header-head");
+            string expectedRoot = Encoding.UTF8.GetString(Convert.FromBase64String(Environment.GetEnvironmentVariable("STAGE3_ROOT_B64")));
+            if (headers["schema"] != "simple-windows-materialized-links-v2" || headers["root"] != expectedRoot ||
+                headers["head"] != head ||
+                headers["producer_sha256"] != producerHash ||
+                headers["policy_sha256"] != Hash(ReadHeld(Path.Combine(root, "scripts", "setup", "windows-materialized-pending-policy.tsv"), held, 1024 * 1024)))
+                throw new IOException("receipt.header-mismatch");
+            string policyFile = Path.Combine(root, "scripts", "setup", "windows-materialized-pending-policy.tsv");
+            Parents(policyFile, false, held);
+            var policyHandle = Open(policyFile, true, 0x80000000); held.Add(policyHandle);
+            if ((Tag(policyHandle).Attributes & 0x410) != 0) throw new IOException("receipt.policy-kind");
+            string policyIdentity = Fingerprint(policyHandle);
+            policyStream = new FileStream(policyHandle, FileAccess.Read);
+            byte[] policyBytes;
+            using (var snapshot = new MemoryStream()) { if (policyStream.Length > 1024 * 1024) throw new IOException("bound.policy"); policyStream.CopyTo(snapshot); policyBytes = snapshot.ToArray(); }
+            string[] policyRows = new UTF8Encoding(false,true).GetString(policyBytes).Split('\n');
+            string policyDigest;
+            using (var hash = System.Security.Cryptography.SHA256.Create())
+                policyDigest = BitConverter.ToString(hash.ComputeHash(policyBytes)).Replace("-", "").ToLowerInvariant();
+            if (policyDigest != headers["policy_sha256"]) throw new IOException("receipt.policy-digest-mismatch");
+            var recordText = new StringBuilder();
+            foreach (string row in rows) recordText.Append(row).Append('\n');
+            string digest = BitConverter.ToString(System.Security.Cryptography.SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(recordText.ToString()))).Replace("-", "").ToLowerInvariant();
+            if (headers["records_sha256"] != digest) throw new IOException("receipt.records-digest-mismatch");
+            var counts = new Dictionary<string,ulong>();
+            foreach (string key in new string[] {"tracked_mode120000","created","already_ok","skipped_pending","failed","pending_untracked","record_count","pending_count"}) counts.Add(key, Number(headers[key], Int32.MaxValue));
+            if (headers["result"] != "complete" || headers["failed"] != "0" || headers["pending_requires_consumer_revalidation"] != "1" ||
+                counts["record_count"] != (ulong)rows.Count || counts["tracked_mode120000"] != counts["record_count"] ||
+                counts["created"] + counts["already_ok"] + counts["pending_untracked"] != counts["record_count"] ||
+                counts["skipped_pending"] != 0 || counts["pending_untracked"] != counts["pending_count"])
+                throw new IOException("receipt.count-mismatch");
+            ulong createdRows = 0, existingRows = 0;
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string[] keys = "path_len|path_hex|target_len|target_hex|target_resolved_len|target_resolved_hex|target_volume|target_file_id|target_size|target_sha256|kind|state".Split('|');
+            if (rows.Count > 4096) throw new IOException("bound.aliases");
+            var aliases = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+            var targets = new List<string>();
+            var pendingLinks = new Dictionary<string,string>();
+            foreach (string row in rows) {
+                Tick();
+                var fields = new Dictionary<string,string>();
+                string[] cells = row.Split('|');
+                if (cells.Length != keys.Length) throw new IOException("receipt.row-fields");
+                for (int n=0;n<keys.Length;n++) {
+                    if (!cells[n].StartsWith(keys[n] + "=", StringComparison.Ordinal)) throw new IOException("receipt.row-order");
+                    fields.Add(keys[n],cells[n].Substring(keys[n].Length+1));
+                }
+                string path = Relative(fields["path_hex"], fields["path_len"], false);
+                if (!paths.Add(path)) throw new IOException("receipt.duplicate-path");
+                CheckPath(path);
+                if (!headLinks.ContainsKey(path)) throw new IOException("receipt.unexpected-row");
+                string link = Path.Combine(root, path.Replace('/', '\\'));
+                string relative = Relative(fields["target_hex"], fields["target_len"], true);
+                if (headLinks[path] != relative) throw new IOException("receipt.head-blob");
+                Parents(link, false, held);
+                held.Add(Open(link, true, 0));
+                string target = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(link), relative.Replace('/', '\\')));
+                if (!target.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase) || String.Equals(target,link,StringComparison.OrdinalIgnoreCase)) throw new IOException("receipt.target-escape");
+                Parents(target, false, held);
+                targets.Add(target);
+                // Alias ownership is case-insensitive on Windows.  Keep the
+                // rejection typed here instead of allowing Dictionary.Add to
+                // surface an implementation exception for duplicate or
+                // case-colliding rows.
+                if (aliases.ContainsKey(path)) throw new IOException("alias.duplicate-or-case-collision");
+                aliases.Add(path, fields["kind"]);
+                if (fields["state"] == "pending-untracked") {
+                    if (fields["kind"] != "unknown" || fields["target_resolved_len"] != "0") throw new IOException("receipt.pending-metadata");
+                    foreach (string key in new string[] {"target_resolved_hex","target_volume","target_file_id","target_size","target_sha256"})
+                        if (fields[key] != "-") throw new IOException("receipt.pending-metadata");
+                    string policy = Decode(fields["path_hex"]) + "\t" + relative;
+                    if (Array.IndexOf(policyRows, policy) < 0) throw new IOException("pending.policy");
+                    uint pendingAttributes = GetFileAttributesW(target);
+                    int pendingError = Marshal.GetLastWin32Error();
+                    if (pendingAttributes != 0xFFFFFFFFu || (pendingError != 2 && pendingError != 3)) throw new IOException("pending.not-absent");
+                    pending.Add(target);
+                    pendingLinks.Add(link, relative);
+                    if (new UTF8Encoding(false,true).GetString(ReadHeld(link, held, 131068)) != relative) throw new IOException("pending.placeholder");
+                } else {
+                    if (fields["kind"] != "file" && fields["kind"] != "directory") throw new IOException("receipt.kind");
+                    if (fields["state"] == "created") createdRows++;
+                    else if (fields["state"] == "already") existingRows++;
+                    else throw new IOException("receipt.state");
+                    var h = Open(target, true, 0x80000000); held.Add(h);
+                    Validate(link, target, fields["kind"] == "directory");
+                    string actual = Metadata(link, target);
+                    string expected = fields["target_resolved_len"] + "|" + fields["target_resolved_hex"] + "|" + fields["target_volume"] + "|" + fields["target_file_id"] + "|" + fields["target_size"] + "|" + fields["target_sha256"];
+                    ParseMetadataText(expected, fields["kind"]);
+                    if (actual != expected) throw new IOException("publication.metadata-changed");
+                }
+            }
+            if ((ulong)pending.Count != counts["pending_count"] || createdRows != counts["created"] || existingRows != counts["already_ok"]) throw new IOException("receipt.pending-count-mismatch");
+
+            if (headLinks.Count != rows.Count) throw new IOException("receipt.missing-row");
+            foreach (string a in aliases.Keys) {
+                string full = Path.Combine(root, a.Replace('/', '\\'));
+                foreach (string other in aliases.Keys)
+                    if (other.StartsWith(a + "/", StringComparison.OrdinalIgnoreCase)) throw new IOException("alias.overlap");
+                foreach (string target in targets)
+                    if (target.Equals(full, StringComparison.OrdinalIgnoreCase) || target.StartsWith(full + "\\", StringComparison.OrdinalIgnoreCase)) throw new IOException("alias.target-overlap");
+            }
+            // Canonical targets may be shared or nested (for example, two
+            // aliases can hardlink the same file, or one can target a
+            // directory while another targets a child).  Ownership remains
+            // unambiguous because aliases themselves are unique and no target
+            // may equal or descend from an alias path; do not reject equal or
+            // nested canonical target paths here.
+            AuditTree(root, aliases, held);
+            // Held policy/placeholder bytes are authoritative until Git returns.
+            // Absence itself cannot be locked: check at use and again at finish.
+            CheckPending(pendingLinks, pending, policyRows, held);
+            string result = Inventory(root, head, aliases);
+            CheckPending(pendingLinks, pending, policyRows, held);
+            if (Text(Git(root, "rev-parse", "--verify", "HEAD")).TrimEnd('\n') != head) throw new IOException("head.changed");
+            if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("policy.changed");
+            Tick();
+            File.WriteAllText(Environment.GetEnvironmentVariable("STAGE3_RESULT"), result, new UTF8Encoding(false));
+            File.Move(Environment.GetEnvironmentVariable("STAGE3_RESULT"), Environment.GetEnvironmentVariable("STAGE3_OUTPUT"));
+
+        } finally { watchdog.Dispose(); if (policyStream != null) policyStream.Dispose(); foreach (var h in held) h.Dispose(); }
+    }
+}
+'@
+[Stage3MaterializedConsumer]::Run()
+exit 0
+} catch {
+    [Console]::Error.WriteLine("stage3-materialized-consumer: " + $_.Exception.Message)
+    exit 1
+}
+STAGE3_NATIVE
+}
+
+# Three-argument v2 entry; its caller supplies the wrapper environment default.
+# Private temporary directory, no stdout and no destination change on refusal.
+bootstrap_stage3_materialized_git_state() (
+    [ "$#" -eq 3 ] || exit 1
+    case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 1 ;; esac
+    root=$(CDPATH= cd -- "$1" && pwd -P) || exit 1
+    output=$2 receipt=$3
+    work=$(mktemp -d "${TMPDIR:-/tmp}/stage3-consumer.XXXXXX") || exit 1
+    trap 'rm -f -- "$work/api.ps1" "$work/result"; rmdir -- "$work"' EXIT
+    trap 'exit 1' HUP INT TERM
+    bootstrap_stage3_materialized_native_source >"$work/api.ps1" || exit 1
+    STAGE3_ROOT=$(cygpath -aw "$root") || exit 1
+    STAGE3_ROOT_B64=$(printf %s "$root" | base64 -w0) || exit 1
+    STAGE3_RECEIPT=$(cygpath -aw "$receipt") || exit 1
+    STAGE3_RESULT=$(cygpath -aw "$work/result") || exit 1
+    STAGE3_OUTPUT=$(cygpath -aw "$output") || exit 1
+    STAGE3_GIT=$(cygpath -aw "$(command -v git)") || exit 1
+    STAGE3_SH=$(cygpath -aw /usr/bin/sh.exe) || exit 1
+    export STAGE3_ROOT STAGE3_ROOT_B64 STAGE3_RECEIPT STAGE3_RESULT STAGE3_OUTPUT STAGE3_GIT STAGE3_SH
+    /usr/bin/timeout -k 2s 30s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
+)
+
 bootstrap_stage3_git_state() {
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || return 1
+    # All bootstrap/recovery callers inherit the wrapper receipt. An explicit
+    # third argument must not silently disable an exported receipt.
+    bootstrap_stage3_git_receipt=${3:-${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-}}
+    if [ -n "$bootstrap_stage3_git_receipt" ]; then
+        bootstrap_stage3_materialized_git_state "$1" "$2" "$bootstrap_stage3_git_receipt"
+        return $?
+    fi
     bootstrap_stage3_git_root=$1
     bootstrap_stage3_git_output=$2
     bootstrap_stage3_git_diff="${bootstrap_stage3_git_output}.diff.$$"
@@ -2967,6 +3850,11 @@ bootstrap_stage3_seed_inputs_fingerprint() (
     bootstrap_stage3_seed_features=$3
     bootstrap_stage3_seed_tool_path=$4
     bootstrap_stage3_seed_target=${5:-}
+    bootstrap_stage3_seed_abi_policy=${SIMPLE_ABI_POLICY:-}
+    case "$bootstrap_stage3_seed_abi_policy" in
+        v1) ;;
+        *) return 1 ;;
+    esac
     if [ -z "$bootstrap_stage3_seed_target" ]; then
         bootstrap_stage3_seed_target=$(bootstrap_stage3_host_platform) ||
             return 1
@@ -3136,6 +4024,9 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             "$bootstrap_stage3_seed_backend" \
             "$bootstrap_stage3_seed_features" \
             "$bootstrap_stage3_seed_target" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
+        printf 'simple-abi-policy=%s\n' \
+            "$bootstrap_stage3_seed_abi_policy" \
             >>"$bootstrap_stage3_seed_records" || exit 1
         if [ "$bootstrap_stage3_seed_target" = \
             x86_64-pc-windows-gnu ]; then

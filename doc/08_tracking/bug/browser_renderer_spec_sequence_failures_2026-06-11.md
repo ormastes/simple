@@ -48,3 +48,6 @@ Note: repro currently blocked by the stage4 deploy seed gap — see
 2. Find the cross-test state: render the same fixture twice in one process
    and diff pixels; suspect module-level memoization in the fallback path.
 3. Re-bisect the sequence-dependent group after 1-2 land.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

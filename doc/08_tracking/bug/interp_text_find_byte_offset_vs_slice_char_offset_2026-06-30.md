@@ -1,5 +1,10 @@
 # Bug: `text.find` returns a BYTE offset but `text.slice`/`text.len` use CHAR offsets
 
+## Closed 2026-09-13 — `find` and `slice` agree on units in the reported case
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's reproducer (`"ab—cdMARKERxyz"`, em-dash before the marker) prints `MARKERxyz` — the expected value; the reported `RKERxyz` skew does not occur.
+
 **Date:** 2026-06-30
 **Severity:** Medium — silent data corruption. Mixing `find` with `slice`/`len`
 (the natural "find a marker then slice from it" idiom) corrupts substring

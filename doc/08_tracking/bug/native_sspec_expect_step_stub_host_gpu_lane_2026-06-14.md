@@ -1,8 +1,14 @@
 # Native SSpec host-GPU lane process SFFI crash
 
+## Closed 2026-09-13 — Fixed per the entry; the ABI change is in tracked source
+
+- **measured** (grep of current source): the `rt_process_run` ABI rework described in the Status section is present and tracked in `src/runtime/runtime_native.c` — the comment at `:12895-12897` records that the `SplArray*` body was split into `rt_process_run_array()` with `rt_process_run` as "the thin entry point", and the file uses the tagged `rt_array_*` surface throughout.
+- **inferred**: the `expect`/`step` stub half cannot be re-measured here. `bin/simple test --mode=native` requires native-build, which fails on this Windows host before producing a binary, and the entry's own evidence depends on a regenerated `src/runtime/libsimple_runtime.a` that is generated/untracked by design.
+- Verdict: closed on the tracked-source evidence plus the entry's local verification, with the native lane explicitly not re-run here.
+
 ## Status
 
-Fixed locally. The native SSpec `expect`/`step` unresolved-symbol blocker is
+CLOSED 2026-09-13. Originally: fixed locally. The native SSpec `expect`/`step` unresolved-symbol blocker is
 fixed: native preprocessed specs now link without generating `expect` or
 `step` stubs, and minimal native specs for `step()` plus helper-function
 `expect(...)` pass.

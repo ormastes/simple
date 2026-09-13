@@ -1,0 +1,176 @@
+#!/bin/sh
+# Export a RenderDoc capture's event list to `<capture>.events.json`.
+#
+# The RenderDoc replay API is Python-only, so per CLAUDE.md's "ALL code in .spl/.shs"
+# rule the ONLY Python here is the thin exporter
+# scripts/tool/renderdoc-qrenderdoc-python-smoke.py (extended, not duplicated: that
+# file keeps its original smoke behaviour when RDOC_EXPORT_RDC is unset). Every piece
+# of logic that consumes the output - alignment, classification, verdicts - is pure
+# Simple in src/app/ui/renderdoc_diff/.
+#
+# Schema: `renderdoc-events/v1`. Per event: eventId, name, type
+# (draw/dispatch/copy/clear/present), pipeline (graphics/compute), shader hashes,
+# viewport, scissor, bound render targets (id + dims + format), draw params (vertex /
+# instance counts, or dispatch groups), and outputSha256 - the sha256 of the bound
+# colour target saved as 8-bit RGBA PNG immediately after the event. With --thumbs each
+# event additionally carries a 64x64 downsample as base64 RAW RGBA8 (thumbFormat
+# "rgba8-64x64", 16384 bytes) - raw, not PNG, so the pure-Simple consumer needs no PNG
+# decoder to compare pixels.
+#
+# Fail-closed: no renderdoccmd/qrenderdoc -> exit 2 with
+# `renderdoc_status=blocked:renderdoccmd-missing`; a file whose first four bytes are
+# not `RDOC` -> exit 1. Magic is checked FIRST so a malformed input is rejected even on
+# a host that has no RenderDoc.
+#
+# UNVERIFIED ON THIS HOST (macOS, no RenderDoc): the replay-API half of the Python
+# exporter has never executed here. The magic check, the missing-binary path, and the
+# JSON schema are exercised by scripts/check/check-renderdoc-web-diff.shs --selftest.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+. "$ROOT_DIR/scripts/lib/renderdoc-evidence-common.shs"
+cd "$ROOT_DIR"
+
+CAPTURE=""
+THUMBS=0
+OUT=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --thumbs) THUMBS=1; shift ;;
+        --out) OUT="$2"; shift 2 ;;
+        -h|--help)
+            echo "usage: renderdoc-export-events.shs <capture.rdc> [--thumbs] [--out <events.json>]" >&2
+            exit 2
+            ;;
+        *) CAPTURE="$1"; shift ;;
+    esac
+done
+
+if [ -z "$CAPTURE" ]; then
+    echo "renderdoc_status=blocked:no-capture-argument" >&2
+    echo "usage: renderdoc-export-events.shs <capture.rdc> [--thumbs] [--out <events.json>]" >&2
+    exit 2
+fi
+if [ ! -f "$CAPTURE" ]; then
+    echo "renderdoc_status=blocked:no-such-capture" >&2
+    exit 2
+fi
+
+# --- magic first: a malformed capture is rejected even with no RenderDoc installed ---
+MAGIC="$(dd if="$CAPTURE" bs=1 count=4 2>/dev/null || true)"
+if [ "$MAGIC" != "RDOC" ]; then
+    echo "renderdoc_status=bad-magic" >&2
+    echo "FAIL — $CAPTURE does not start with the RDOC capture magic (saw '$MAGIC')" >&2
+    exit 1
+fi
+
+if [ -z "$OUT" ]; then
+    OUT="${CAPTURE}.events.json"
+fi
+
+# --- locate a RenderDoc replay host --------------------------------------------
+RENDERDOC_HOME="$(rdoc_find_renderdoc_home "$ROOT_DIR" || true)"
+RENDERDOCCMD=""
+if [ "${RDOC_FORCE_NO_RENDERDOCCMD:-0}" != "1" ]; then
+    for candidate in \
+        "${RENDERDOCCMD_BIN:-}" \
+        "$RENDERDOC_HOME/bin/renderdoccmd" \
+        "$RENDERDOC_HOME/renderdoccmd"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            RENDERDOCCMD="$candidate"
+            break
+        fi
+    done
+    if [ -z "$RENDERDOCCMD" ]; then
+        RENDERDOCCMD="$(command -v renderdoccmd 2>/dev/null || true)"
+    fi
+    if [ -z "$RENDERDOCCMD" ]; then
+        RENDERDOCCMD="$(command -v qrenderdoc 2>/dev/null || true)"
+    fi
+fi
+
+if [ -z "$RENDERDOCCMD" ]; then
+    echo "renderdoc_status=blocked:renderdoccmd-missing"
+    echo "ERROR — no renderdoccmd/qrenderdoc on PATH or under RENDERDOC_HOME; build one with scripts/setup/build-renderdoc-linux-vulkan-only.shs" >&2
+    exit 2
+fi
+
+EXPORTER="$ROOT_DIR/scripts/tool/renderdoc-qrenderdoc-python-smoke.py"
+if [ ! -f "$EXPORTER" ]; then
+    echo "renderdoc_status=blocked:exporter-missing"
+    exit 2
+fi
+
+RDOC_EXPORT_THUMBS="$THUMBS"
+export RDOC_EXPORT_RDC="$CAPTURE"
+export RDOC_EXPORT_OUT="$OUT"
+export RDOC_EXPORT_THUMBS
+
+# `renderdoccmd python` DOES NOT EXIST. Verified against RenderDoc v1.44
+# source: renderdoccmd.cpp registers vulkanlayer, version, help, capture,
+# inject, thumb, remoteserver, replay, capaltbit, test, convert, embed and
+# extract -- and nothing else. (The PYTHON_AVAILABLE guards in that file gate
+# `test functional`, not a python command.) So this branch could never have
+# worked, and every non-qrenderdoc export was blocked:export-failed.
+#
+# The supported headless path is the pyrenderdoc swig module, which
+# build-renderdoc-linux-vulkan-only.shs stages into $RDOC_HOME/pymodules:
+# import it from the system python3. Fail closed with a distinct status when
+# the module is absent, rather than invoking a subcommand that does not exist.
+case "$RENDERDOCCMD" in
+    *qrenderdoc*)
+        set -- "$RENDERDOCCMD" --python "$EXPORTER"
+        ;;
+    *)
+        # RENDERDOC_HOME can be empty when renderdoccmd came from PATH, so
+        # derive the sibling prefix from the binary itself as a fallback.
+        pymod_dir=""
+        for cand in \
+            "${RDOC_PYMODULE_DIR:-}" \
+            "${RENDERDOC_HOME:+$RENDERDOC_HOME/pymodules}" \
+            "$(dirname -- "$(dirname -- "$RENDERDOCCMD")")/pymodules"
+        do
+            if [ -n "$cand" ] && [ -d "$cand" ]; then
+                pymod_dir="$cand"
+                break
+            fi
+        done
+        if [ -z "$pymod_dir" ]; then
+            echo "renderdoc_status=blocked:pyrenderdoc-module-missing"
+            echo "ERROR — no pymodules dir beside $RENDERDOCCMD; rebuild with RENDERDOC_ENABLE_PYTHON=1 sh scripts/setup/build-renderdoc-linux-vulkan-only.shs --all" >&2
+            exit 2
+        fi
+        PYTHONPATH="$pymod_dir${PYTHONPATH:+:$PYTHONPATH}"
+        export PYTHONPATH
+        # _renderdoc.so is linked against librenderdoc.so via an rpath of
+        # $ORIGIN/../lib, which holds from $RDOC_HOME/pymodules. Name the
+        # directory explicitly too, so a lib64 prefix or a staged-elsewhere
+        # module still resolves.
+        rdoc_prefix="$(dirname -- "$pymod_dir")"
+        LD_LIBRARY_PATH="$rdoc_prefix/lib:$rdoc_prefix/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        export LD_LIBRARY_PATH
+        set -- python3 "$EXPORTER"
+        ;;
+esac
+
+set +e
+"$@" >"${OUT}.export.log" 2>&1
+EXPORT_RC=$?
+set -e
+
+if [ "$EXPORT_RC" != "0" ]; then
+    echo "renderdoc_status=blocked:export-failed"
+    echo "ERROR — replay export exited $EXPORT_RC; see ${OUT}.export.log" >&2
+    exit 2
+fi
+if [ ! -s "$OUT" ]; then
+    echo "renderdoc_status=blocked:empty-export"
+    echo "ERROR — nothing was checked (exporter wrote no events to $OUT)" >&2
+    exit 2
+fi
+
+echo "renderdoc_status=exported"
+echo "renderdoc_events_json=$OUT"
+exit 0

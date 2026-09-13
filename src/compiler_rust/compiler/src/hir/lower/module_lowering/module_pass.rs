@@ -468,6 +468,12 @@ impl Lowerer {
                 if f.is_pure() {
                     self.pure_functions.insert(f.name.clone());
                 }
+                if ret_ty != TypeId::ANY
+                    && !self.is_reference_type(ret_ty)
+                    && f.body.statements.iter().all(|statement| matches!(statement, Node::Pass(_)))
+                {
+                    self.proven_nonescaping_functions.insert(f.name.clone());
+                }
             }
             Node::Class(c) => {
                 let class_type_id = self.register_class(c)?;
@@ -637,6 +643,10 @@ impl Lowerer {
                 // Register extern function in globals so it can be called
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                // Calls consult the callable return-type table before falling
+                // back to the ABI-sized value type. Preserve the declaration's
+                // semantic return type just as imported externs do.
+                self.method_return_types.insert(e.name.clone(), ret_ty);
                 self.local_globals.insert(e.name.clone());
                 // Track as extern function for codegen (BSS slot initialization)
                 self.extern_fn_names.insert(e.name.clone());

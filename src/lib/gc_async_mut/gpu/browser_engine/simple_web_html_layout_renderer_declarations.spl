@@ -564,7 +564,14 @@ fn _apply_decls_dispatch(
                 st.fg = cv
     if css_prop_mask_has(mask, CSS_PROP_WIDTH):
         css_probe_note()
-        val width = decl_tbl_get(decl_tbl, "width")
+        val width_raw = decl_tbl_get(decl_tbl, "width")
+        val width = css_math_primary(width_raw)
+        val implied_max = css_math_implied_max_px(width_raw)
+        val implied_min = css_math_implied_min_px(width_raw)
+        if implied_max > 0 and st.max_width_px <= 0:
+            st.max_width_px = implied_max
+        if implied_min > 0 and st.min_width_px <= 0:
+            st.min_width_px = implied_min
         if width.len() > 0:
             if width.ends_with("%"):
                 val wp = parse_int(width)
@@ -833,7 +840,107 @@ fn normalized_grid_positive_int(raw: text) -> i32:
         index = index + 1
     parse_int(value)
 
-fn normalized_grid_track_list(raw: text) -> text:
+# Index of the ")" that closes the "(" at `open_at`, or -1 if unbalanced.
+fn grid_matching_paren(raw: text, open_at: i32) -> i32:
+    var depth = 0
+    var i = open_at
+    val n = raw.len() as i32
+    while i < n:  # cpu-lane-loop-ok: one pass over ONE track-list declaration during style resolution, never on a paint path
+        val ch = raw.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+# Index of the FIRST (last_wins=false) or LAST (last_wins=true) comma at paren
+# depth 0 within [start, endv), or -1 when there is none.
+fn grid_top_level_comma(raw: text, start: i32, endv: i32, last_wins: bool) -> i32:
+    var depth = 0
+    var i = start
+    var found = -1
+    while i < endv:  # cpu-lane-loop-ok: one pass over ONE track-list declaration during style resolution, never on a paint path
+        val ch = raw.substring(i, i + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif ch == "," and depth == 0:
+            if found < 0 or last_wins:
+                found = i
+        i = i + 1
+    found
+
+# `repeat()` and `minmax()` are FUNCTION-valued track sizes, and
+# `normalized_grid_track_list` below splits the declaration on spaces — so
+# `repeat(3, minmax(0, 1fr))` arrives as the three fragments `repeat(3,`,
+# `minmax(0,` and `1fr))`. None ends in `fr` or `px`, so the whole list is
+# rejected and `st.grid_template_columns` is never set. An empty track list
+# makes layout skip the grid branch entirely (`st.display == "grid" and
+# grid_columns.len() > 0`, `..._layout.spl:1803`), so the container silently
+# lays out as a BLOCK: every item takes the full content width and stacks
+# vertically. Measured on the catalog's `.grid`
+# (`grid-template-columns: repeat(3, minmax(0, 1fr))`, 900 px viewport):
+# Chrome gives three 292 px columns on one 48 px row, Simple gave three 900 px
+# rows totalling 168 px, and the +120 px shifted every element below it.
+#
+# `minmax(min, max)` reduces to its MAX — the growth limit, which is what an
+# unconstrained track resolves to once free space is distributed; the `min`
+# side would need min-content sizing, which this track sizer does not model.
+# `repeat(n, X)` expands to n space-separated copies of X. Nothing else is
+# rewritten: `auto-fill`/`auto-fit` counts, `fit-content()` and named lines
+# still fall through to the existing reject-and-block-layout path.
+fn grid_expand_track_functions(raw: text) -> text:
+    var out = raw
+    var guard = 0
+    while guard < 16:  # cpu-lane-loop-ok: bounded rewrite of ONE declaration during style resolution, never on a paint path
+        val rep = find_from(out, "repeat(", 0)
+        if rep < 0:
+            break
+        val open_at = rep + 6
+        val close_at = grid_matching_paren(out, open_at)
+        if close_at < 0:
+            return out
+        val comma = grid_top_level_comma(out, open_at + 1, close_at, false)
+        if comma < 0:
+            return out
+        val count = parse_int(out.substring(open_at + 1, comma).trim())
+        if count <= 0 or count > 64:
+            return out
+        val body = out.substring(comma + 1, close_at).trim()
+        if body == "":
+            return out
+        var expanded = body
+        var k = 1
+        while k < count:  # cpu-lane-loop-ok: bounded by the repeat() count, capped at 64 above
+            expanded = expanded + " " + body
+            k = k + 1
+        out = out.substring(0, rep) + expanded + out.substring(close_at + 1, out.len() as i32)
+        guard = guard + 1
+    guard = 0
+    while guard < 64:  # cpu-lane-loop-ok: bounded rewrite of ONE declaration during style resolution, never on a paint path
+        val mm = find_from(out, "minmax(", 0)
+        if mm < 0:
+            break
+        val mm_open = mm + 6
+        val mm_close = grid_matching_paren(out, mm_open)
+        if mm_close < 0:
+            return out
+        val mm_comma = grid_top_level_comma(out, mm_open + 1, mm_close, true)
+        if mm_comma < 0:
+            return out
+        val growth_limit = out.substring(mm_comma + 1, mm_close).trim()
+        if growth_limit == "":
+            return out
+        out = out.substring(0, mm) + growth_limit + out.substring(mm_close + 1, out.len() as i32)
+        guard = guard + 1
+    out
+
+fn normalized_grid_track_list(raw_declaration: text) -> text:
+    val raw = grid_expand_track_functions(raw_declaration)
     val parts = raw.trim().split(" ")
     var normalized = ""
     for part in parts:
@@ -1106,6 +1213,17 @@ fn apply_decls_without_display_on_writing_mode(
 fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
     apply_decls_on_writing_mode(st, decls, em_base, "")
 
+# Chrome's UA stylesheet gives form controls their own font instead of letting
+# them inherit the page's: `font: 400 13.3333px <system>`, `line-height: normal`.
+# 13.3333 px rounds to this engine's integer px.
+val FORM_CONTROL_UA_FONT_SIZE_PX: i32 = 13
+# `normal` as a unitless ratio sentinel (-12 == 1.2), which resolves to the 15 px
+# line box Chrome reports at 13 px. The plain `normal` sentinel (0) is NOT used:
+# `style_line_h`'s fallback is `9 * (fs / 8)`, which yields 9 px at fs=13.
+# Widening that fallback is a separate change — see
+# doc/08_tracking/bug/web_form_control_inherits_page_font_2026-09-12.md.
+val FORM_CONTROL_UA_LINE_HEIGHT_RATIO: i32 = -12
+
 # default per-tag tweaks (block/inline, heading sizes, spacing)
 fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
     var display_v = st.display
@@ -1250,12 +1368,20 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         display_v = "inline-block"
         pad_l_v = 2
         pad_r_v = 2
-    elif tag == "input":
-        display_v = "inline"
-        pad_l_v = 2
-        pad_r_v = 2
-        pad_t_v = 1
-        pad_b_v = 1
+    elif tag == "input" or tag == "select" or tag == "textarea":
+        # UA default (Chrome html.css): form controls do NOT inherit the page
+        # font — `font: 400 13.3333px <system>` with `line-height: normal`. See
+        # the FORM_CONTROL_UA_* note below the `button` branch.
+        display_v = if tag == "textarea": "inline-block" else: "inline"
+        font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
+        line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
+        if tag == "textarea":
+            font_family_v = "monospace"
+        if tag == "input":
+            pad_l_v = 2
+            pad_r_v = 2
+            pad_t_v = 1
+            pad_b_v = 1
     elif tag == "button":
         # UA default (Chrome html.css): buttons are inline-block boxes that
         # establish their own inline formatting context with centered labels.
@@ -1265,9 +1391,14 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         pad_r_v = 6
         pad_t_v = 1
         pad_b_v = 1
-        margin_b_v = 3
+        # Chrome's html.css gives `button` `margin: 0em`; getComputedStyle on a
+        # real headless Chrome reports `mb=0px`. The 3 px that used to sit here
+        # made every button row 3 px too tall.
         # UA default: button labels are centered (Chrome/html.css text-align: center)
         text_align_v = "center"
+        # Form controls do not inherit `font` from their ancestors.
+        font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
+        line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
     elif tag == "a":
         fg_v = argb(0, 0, 238)
         underline_v = true

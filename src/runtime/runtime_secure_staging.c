@@ -21,10 +21,125 @@
 
 #define RT_SECURE_PATH_MAX 4096
 
+/* These four functions are needed by bootstrap_main but their historical
+ * owners (runtime.c/runtime_native.c) cannot be compiled into native_all:
+ * they collide with hundreds of Rust-owned rt_* definitions.  Keep the
+ * native_all-only mirrors in this deliberately narrow translation unit. */
+int64_t rt_simple_abi_version(void) {
+    return (int64_t)SIMPLE_ABI_VERSION;
+}
+
+int64_t rt_simple_abi_version_deferred(void) {
+    return SIMPLE_ABI_VERSION_DEFERRED ? 1 : 0;
+}
+
 static int secure_copy_path(const uint8_t* ptr, uint64_t len, char* out, size_t cap) {
     if (!ptr || !out || len == 0 || len >= cap || memchr(ptr, 0, (size_t)len)) return 0;
     memcpy(out, ptr, (size_t)len); out[len] = 0; return 1;
 }
+
+int rt_file_create_excl(const char* path_ptr, int64_t path_len,
+                        const char* content_ptr, int64_t content_len) {
+    char path[RT_SECURE_PATH_MAX];
+    if (path_len <= 0 || content_len < 0 ||
+        !secure_copy_path((const uint8_t*)path_ptr, (uint64_t)path_len,
+                          path, sizeof(path)) ||
+        (content_len > 0 && !content_ptr)) return 0;
+#if defined(_WIN32)
+    HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    DWORD written = 0;
+    int ok = content_len <= (int64_t)UINT32_MAX;
+    if (ok && content_len > 0)
+        ok = WriteFile(file, content_ptr, (DWORD)content_len, &written, NULL) &&
+            written == (DWORD)content_len;
+    if (!CloseHandle(file)) ok = 0;
+    return ok;
+#else
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return 0;
+    int64_t done = 0;
+    while (done < content_len) {
+        ssize_t n = write(fd, content_ptr + done, (size_t)(content_len - done));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        done += n;
+    }
+    int ok = done == content_len && close(fd) == 0;
+    if (!ok) { if (done != content_len) close(fd); unlink(path); }
+    return ok;
+#endif
+}
+
+int rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_SECURE_PATH_MAX];
+    if (!secure_copy_path(path_ptr, path_len, path, sizeof(path))) return 0;
+#if defined(_WIN32)
+    HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    int ok = FlushFileBuffers(file);
+    if (!CloseHandle(file)) ok = 0;
+    return ok;
+#else
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return 0;
+    int ok = fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    return ok;
+#endif
+}
+
+#if defined(_WIN32)
+/* Create a directory without the MAX_PATH ceiling. See the call site for why.
+ * The path separator and the extended-length prefix are built from the numeric
+ * code point (92) rather than written literally, purely to keep this source
+ * free of escape sequences. */
+static BOOL rt_secure_create_directory_long(const char* path,
+                                            SECURITY_ATTRIBUTES* attributes) {
+    static const wchar_t sep = (wchar_t)92;
+    wchar_t wide[32768], full[32768], prefixed[32768];
+    wchar_t* scan;
+    DWORD n;
+    size_t len;
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide,
+                            (int)(sizeof(wide) / sizeof(wide[0]))) == 0) {
+        return CreateDirectoryA(path, attributes);
+    }
+    for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+    n = GetFullPathNameW(wide, (DWORD)(sizeof(full) / sizeof(full[0])), full, NULL);
+    if (n == 0 || n >= sizeof(full) / sizeof(full[0])) {
+        return CreateDirectoryA(path, attributes);
+    }
+    /* Already extended-length, or a UNC path: hand it over unchanged. */
+    if (full[0] == sep && full[1] == sep) {
+        return CreateDirectoryW(full, attributes);
+    }
+    len = wcslen(full);
+    if (len + 5 >= sizeof(prefixed) / sizeof(prefixed[0])) {
+        return CreateDirectoryA(path, attributes);
+    }
+    prefixed[0] = sep; prefixed[1] = sep; prefixed[2] = L'?'; prefixed[3] = sep;
+    memcpy(prefixed + 4, full, (len + 1) * sizeof(wchar_t));
+    return CreateDirectoryW(prefixed, attributes);
+}
+#endif
+
+#if defined(_WIN32)
+/* Canonical implementation of the secure-staging pair (this file's own header
+ * says "implemented once, in C"). Every Windows failure mode returned an empty
+ * string, so the AOT diagnostic-staging caller could only ever say "diagnostic
+ * staging unavailable". Name the failing step and the Win32 error.
+ * SIMPLE_QUIET_SECURE_TEMP_DIAG=1 silences. */
+static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
+    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
+    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
+            stage, (unsigned long)GetLastError(), detail ? detail : "");
+    fflush(stderr);
+}
+#endif
 
 int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
                            const uint8_t* prefix_ptr, uint64_t prefix_len) {
@@ -37,16 +152,26 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     typedef BOOL (WINAPI *SddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
     HMODULE bcrypt = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
     RandomFn fill = bcrypt ? (RandomFn)GetProcAddress(bcrypt, "BCryptGenRandom") : NULL;
-    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { if (bcrypt) FreeLibrary(bcrypt); return rt_string_new(NULL, 0); }
+    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { rt_secure_temp_dir_diag("BCryptGenRandom", parent); if (bcrypt) FreeLibrary(bcrypt); return rt_string_new(NULL, 0); }
     FreeLibrary(bcrypt); char suffix[33];
     for (size_t i = 0; i < sizeof(random); i++) snprintf(suffix + i * 2, 3, "%02x", random[i]);
     int n = snprintf(path, sizeof(path), "%s\\%s-%s", parent, prefix, suffix);
     HMODULE advapi = LoadLibraryA("advapi32.dll"); PSECURITY_DESCRIPTOR descriptor = NULL;
     SddlFn convert = advapi ? (SddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
-    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
+    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { rt_secure_temp_dir_diag("ConvertStringSecurityDescriptor", path); if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
-    BOOL created = CreateDirectoryA(path, &attributes); LocalFree(descriptor); FreeLibrary(advapi);
-    if (!created) return rt_string_new(NULL, 0);
+    /* CreateDirectoryA is capped at MAX_PATH, and for a DIRECTORY the usable
+     * limit is MAX_PATH-12 (248) because Windows reserves room for an 8.3 name
+     * plus a separator. The bootstrap's staging parent --
+     * <repo>/.simple/storage/build/bootstrap/stage3/<triple>/stage2-home/
+     * .cache/simple/v1/projects/<64-hex>/native-build/ -- lands at 258 chars,
+     * so this returned ERROR_FILENAME_EXCED_RANGE (206) and the empty result
+     * surfaced four layers up as "diagnostic staging unavailable", failing
+     * Stage 2 sanity. The wide API with the extended-length prefix lifts the
+     * limit to ~32767. */
+    BOOL created = rt_secure_create_directory_long(path, &attributes);
+    LocalFree(descriptor); FreeLibrary(advapi);
+    if (!created) { rt_secure_temp_dir_diag("CreateDirectoryA", path); return rt_string_new(NULL, 0); }
 #else
     int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
     if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);

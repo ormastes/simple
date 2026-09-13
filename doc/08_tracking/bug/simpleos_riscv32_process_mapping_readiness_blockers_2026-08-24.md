@@ -1,4 +1,5 @@
 # SimpleOS RV32 process mapping readiness blockers — 2026-08-24
+**Status:** OPEN (unverified 2026-09-12)
 
 RV32 ELF admission exists and the bounded initial-stack owner can now serialize
 four-byte SysV words, but canonical process-image readiness remains false.
@@ -121,3 +122,6 @@ record the active root under the architecture mutex. Reap failure must retain
 the Zombie TCB and handle for retry. Fork must never alias the handle, and exec
 requires a two-mapping transaction. `riscv32.process_image_builder_ready` stays
 false until this complete sequence and filesystem-backed QEMU evidence exist.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

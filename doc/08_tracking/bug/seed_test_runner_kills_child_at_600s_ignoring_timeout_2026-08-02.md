@@ -1,5 +1,7 @@
 # Seed test-runner kills the spec child at ~600s regardless of --timeout
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-08-02 · **Severity:** high (blocks long system specs) · **Area:** test runner / seed delegation
 
 ## Symptom
@@ -36,3 +38,7 @@ ceiling.
 Run the showcase spec as above on a loaded box (interpreter + contention
 pushes it past 600s); observe exit 255 + `Process timed out` at ~600s while
 the child was still progressing (per-thread utime still advancing).
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

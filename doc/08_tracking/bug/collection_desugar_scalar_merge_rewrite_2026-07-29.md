@@ -1,7 +1,7 @@
 # Bug: AST collection-desugar rewrites `x = x + n` to `x.merge(n)` on scalar (non-collection) targets
 
 - **Date:** 2026-07-29
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** MEDIUM — silently changes program shape (Assign -> MethodCall) for a
   extremely common idiom (`total = total + item`, `x = x + 1`); found as a side
   discovery while implementing E1047 (param-mutability-semantic, lane G2), not yet
@@ -77,3 +77,6 @@ fn bump(x: i64) -> i64:
 Parse with `parse_full_frontend`, lower with `HirLowering`, inspect the resulting
 `HirStmtKind` for `bump`'s body: it is `Expr(MethodCall(NamedVar(x), "merge", [IntLit(1)]))`,
 not `Assign(NamedVar(x), Add, IntLit(1))`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

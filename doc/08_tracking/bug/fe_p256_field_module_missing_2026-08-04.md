@@ -1,6 +1,6 @@
 # `std.common.math.field.fe_p256` does not exist; 2 specs and 43 examples cannot run
 
-**Status:** OPEN
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/math/field/fe_p256_skeleton_spec.spl` now PASSes)
 **Found:** 2026-08-04
 **Severity:** medium — P-256 field arithmetic is the base layer under
 `crypto/ecdsa_p256.spl`, and its two spec files have never executed a single
@@ -69,3 +69,6 @@ keeps partial products inside a signed i64 (29 bits is the practical ceiling:
 with its own correctness risk, and it wants to land against the 419-line
 `fe_p256_full_spec.spl` as its acceptance gate rather than be bolted on at the
 end of an unrelated session.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/math/field/fe_p256_skeleton_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

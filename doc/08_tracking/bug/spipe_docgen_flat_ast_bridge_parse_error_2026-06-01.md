@@ -1,6 +1,14 @@
 # SPipe Docgen Blocked By Flat AST Bridge Parse Error
 
-Status: open (triaged 2026-06-11)
+## Closed 2026-09-13 — Does not reproduce: the file that failed to parse no longer exists and docgen processes the spec
+
+- **measured** `bin/simple-interp spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl -o <dir>` printed `Processing specs:` then `OK ide_office_plugin_suite_spec (106 lines)` — no parse error.
+- **measured** `src/compiler/10.frontend/flat_ast_bridge_part2.spl`, the file named in the reported error, is gone; only `flat_ast_bridge.spl` remains.
+- **measured** The run does end `EXIT=139` after emitting the doc — a separate teardown crash, not the reported parse failure; file it separately if it blocks the gate.
+- **inferred** With the offending source file deleted and the spec generating cleanly, the flat-AST-bridge parse blocker is closed.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Date
 2026-06-01

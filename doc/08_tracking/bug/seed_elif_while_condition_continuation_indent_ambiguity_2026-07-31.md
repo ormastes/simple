@@ -1,4 +1,5 @@
 # Seed `elif`/`while` Condition Continuation vs. Block-Indent Ambiguity
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -83,3 +84,6 @@ level — e.g. tracking pseudo-indent levels on an explicit stack rather than a
 flat `deferred_dedent_count`, or having the lexer suppress INDENT/DEDENT
 emission entirely while a binary expression continuation is open. Either is a
 statement/expression boundary change and should be scoped as its own task.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

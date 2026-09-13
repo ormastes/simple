@@ -1,5 +1,7 @@
 # Light test daemon serializes all concurrent `bin/simple test` invocations
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-21
 - Status: OPEN
 - Severity: high (corrupts every concurrent test sweep's verdict data)
@@ -90,3 +92,6 @@ These emitted verdicts and are honest failures, not harness artifacts:
 | lib/common/web/browser_session_cookies_spec.spl | 12 total, 10 passed, 2 failed |
 | lib/common/web/browser_session_dom_generation_runtime_spec.spl | 1 total, 0 passed, 1 failed |
 | lib/common/web/browser_session_async_spec.spl | 24 executed, 22 passed, 2 failed |
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

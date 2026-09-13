@@ -44,6 +44,17 @@ ROWS = tuple(
 )
 OUTPUT_LIMIT = 1024 * 1024
 SCRIPT_SUFFIXES = {".spl", ".py", ".js", ".sh", ".shs", ".cmd", ".ps1"}
+PROVIDER_ROWS = {"devhub_github", "devhub_jira", "devhub_confluence"}
+PROVIDER_UNAVAILABLE_PATTERNS = (
+    r"(?im)^\s*(?:error:\s*)?(?:http\s+)?(?:401|403)(?:\b|:)",
+    r"(?im)^\s*(?:error:\s*)?(?:not authenticated|authentication required)\s*[.!:]?\s*$",
+    r"(?im)^\s*(?:error:\s*)?(?:credentials? (?:missing|unavailable)|provider .+ not configured)\s*[.!:]?\s*$",
+    r"(?im)^\s*(?:error:\s*)?(?:gh cli not found|acli not found)\s*[.!:]?\s*$",
+    r"(?im)^\s*(?:error:\s*)?could not resolve host(?:\s*[:.].*)?$",
+    r"(?im)^\s*(?:error:\s*)?request failed:\s*(?:network|dns|connect(?:ion|ivity)?|timeout|timed out)\b.*$",
+    r"(?im)^\s*to get started with github cli, please run:\s*gh auth login\s*$",
+    r"(?im)^\s*you are not logged into any github hosts\s*[.!]?\s*$",
+)
 
 
 class Verdict(Exception):
@@ -476,10 +487,22 @@ def command_for(row, artifact, inventory):
     raise Verdict("FAIL", "row-kind-invalid")
 
 
-def check_output(row, code, output, errors=""):
+def provider_unavailable(row_name, output):
+    return row_name in PROVIDER_ROWS and any(
+        re.search(pattern, output) for pattern in PROVIDER_UNAVAILABLE_PATTERNS
+    )
+
+
+def process_crashed(code):
+    return code < 0 or code >= 128
+
+
+def check_output(row_name, row, code, output, errors=""):
     if code != 0:
         combined = output + "\n" + errors
-        if any(marker.lower() in combined.lower() for marker in row.get("blocked_output", [])):
+        if process_crashed(code):
+            raise Verdict("FAIL", "process-crashed")
+        if provider_unavailable(row_name, combined):
             raise Verdict("BLOCKED", "provider-auth-or-connectivity-unavailable")
         raise Verdict("FAIL", "process-nonzero-exit")
     lowered = output.lower()
@@ -629,7 +652,7 @@ def run_row(manifest, manifest_path, manifest_sha, output, timeout, row_name, sc
         code, stdout = child.finish()
         receipt["exit_code"] = code
         errors = child.stderr.decode("utf-8", errors="replace").replace("\r\n", "\n")
-        check_output(row, code, stdout, errors)
+        check_output(row_name, row, code, stdout, errors)
         compiler_after = admitted_artifact(manifest, "compiler")
         artifact_after = admitted_artifact(manifest, row["artifact"])
         current_authority_after = validate_current_phase_authority(manifest)

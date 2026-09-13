@@ -1,0 +1,249 @@
+# Purpose and audience: executable closure-packer evidence for compiler owners.
+# @req REQ-CSM-027
+
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.physical_tld_v1.{
+    PhysicalTldHeaderV1, TldPayloadRoleV1, physical_tld_section_table_digest_v1,
+}
+use compiler.common.cache_contract.snapshot_contract_v1.{CacheObjectRefV1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadFallbackV1, ThreePayloadSemanticBinding,
+    ThreePayloadSemanticRefV2,
+    closure_coverage_dimension_v1,
+}
+use compiler.frontend.cache_artifact.{
+    ThreePayloadSemanticBindBounds, encode_physical_tld_v1,
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    ThreePayloadSnapshotV2, ThreePayloadParentGenerationV2,
+    ThreePayloadModuleClosureV2, ThreePayloadVerifiedSemanticBindingsV2,
+    ThreePayloadPackBoundsV2, seal_three_payload_bound_closure_v2,
+}
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1, ThreePayloadSemanticRefLocationV1,
+    ThreePayloadSemanticRefV1, ThreePayloadWorkerReadCountersV1,
+    ThreePayloadAdmissionErrorV1
+}
+use compiler.driver.cache.closure.three_payload_closure_packer.{
+    ThreePayloadTldSectionV1, ThreePayloadPackInputV1,
+    three_payload_pack_and_admit_v1, three_payload_publish_host_admitted_v1
+}
+use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1}
+use compiler.driver.cache.catalog.cache_catalog_projection.{CacheCatalogProjectionV1}
+use common.cache_daemon_host_authority_v1.{
+    AuthenticatedPeerReceiptV1, CacheReadinessReceiptV1, DurableWriterEpochV1
+}
+
+extern fn rt_getpid() -> i64
+extern fn rt_file_exists(path: text) -> bool
+
+fn warm_input() -> ThreePayloadPackInputV1:
+    val init = "package demo\n"
+    val prior = "type Request\n"
+    ThreePayloadPackInputV1(
+        generation_digest: "generation-v1",
+        source_payload: "fn parse() -> Request: pass\n",
+        prior_tld_payload: Some(prior),
+        package_init_tld_payload: init,
+        membership_root_digest: "membership-v1",
+        absence_witness_root_digest: "absence-v1",
+        tld_sections: [
+            ThreePayloadTldSectionV1(name: "prior.tld", bytes: prior, digest: sha256_text(prior)),
+            ThreePayloadTldSectionV1(name: "__init__.tld", bytes: init, digest: sha256_text(init))
+        ],
+        semantic_refs: [ThreePayloadSemanticRefV1(
+            kind: ThreePayloadSemanticRefKindV1.MacroExpansion,
+            stable_entity_id: "macro.expand", callable_signature_digest: "signature",
+            effect_digest: "effects", body_or_object_digest: "body",
+            location: ThreePayloadSemanticRefLocationV1.EmbeddedTldSection,
+            embedded_section_index: Some(0))], max_decode_bytes: 4096
+    )
+
+fn warm_reads(rr_reads: i64) -> ThreePayloadWorkerReadCountersV1:
+    ThreePayloadWorkerReadCountersV1(
+        source_payload_reads: 1, prior_tld_payload_reads: 1,
+        package_init_tld_payload_reads: 1, imported_summary_reads: 0,
+        exceptional_body_reads: 0, rr_reads: rr_reads
+    )
+
+fn complete_binding_roots() -> [ClosureCoverageRootV1]:
+    var roots: [ClosureCoverageRootV1] = []
+    var index: i64 = 0
+    while index < 9:
+        roots.push(ClosureCoverageRootV1(dimension: closure_coverage_dimension_v1(index),
+            root_digest: sha256_text("packer-root:{index}"),
+            coverage: SemanticCoverageV1.Complete))
+        index = index + 1
+    roots
+
+describe "Three-payload closure packer":
+    it "packs admitted tld sections and enforces warm 1/1/1 reads":
+        step("Pack source, prior tld, and package init tld without rr data")
+        match three_payload_pack_and_admit_v1(warm_input(), warm_reads(0)):
+            case Ok(prepared):
+                expect(prepared.seal.source_payload_digest).to_equal(
+                    sha256_text("fn parse() -> Request: pass\n"))
+                expect(prepared.seal.section_count).to_equal(2)
+                expect(prepared.seal.prior_tld_payload_digest.is_some()).to_equal(true)
+                expect(prepared.seal.semantic_refs[0].embedded_section_index).to_equal(Some(1))
+                expect(prepared.payload_digest).to_equal(sha256_text(prepared.canonical_payload))
+            case Err(_): fail("warm pack rejected")
+
+    it "admits a cold source plus init tld with zero prior reads":
+        step("Allow new files to omit the prior tld payload")
+        val warm = warm_input()
+        val init = warm.package_init_tld_payload
+        val cold = ThreePayloadPackInputV1(
+            generation_digest: warm.generation_digest,
+            source_payload: warm.source_payload,
+            prior_tld_payload: nil,
+            package_init_tld_payload: init,
+            membership_root_digest: warm.membership_root_digest,
+            absence_witness_root_digest: warm.absence_witness_root_digest,
+            tld_sections: [ThreePayloadTldSectionV1(name: "__init__.tld", bytes: init,
+                digest: sha256_text(init))],
+            semantic_refs: [], max_decode_bytes: 4096
+        )
+        val reads = ThreePayloadWorkerReadCountersV1(
+            source_payload_reads: 1, prior_tld_payload_reads: 0,
+            package_init_tld_payload_reads: 1, imported_summary_reads: 0,
+            exceptional_body_reads: 0, rr_reads: 0
+        )
+        match three_payload_pack_and_admit_v1(cold, reads):
+            case Ok(prepared):
+                expect(prepared.seal.prior_tld_payload_digest.is_none()).to_equal(true)
+            case Err(_): fail("cold pack rejected")
+
+    it "rejects rr reads and malformed tld sections before admission":
+        step("Keep reverse references coordinator-only and verify section digests")
+        match three_payload_pack_and_admit_v1(warm_input(), warm_reads(1)):
+            case Ok(_): fail("rr read was admitted")
+            case Err(error):
+                match error:
+                    case InvalidWorkerReads(reason): expect(reason).to_equal("rr_is_coordinator_only")
+                    case _: fail("wrong rr rejection type")
+
+        val bad = warm_input()
+        bad.tld_sections[0] = ThreePayloadTldSectionV1(name: "prior.tld", bytes: "tampered",
+            digest: sha256_text("type Request\n"))
+        match three_payload_pack_and_admit_v1(bad, warm_reads(0)):
+            case Ok(_): fail("tampered section was admitted")
+            case Err(error):
+                match error:
+                    case InvalidSeal(reason): expect(reason).to_equal("section_digest_mismatch")
+                    case _: fail("wrong section rejection type")
+
+    it "fails closed before CAS when mutation-scoped writer authority is absent":
+        step("Refuse publication until the existing writer boundary can pin the epoch")
+        val prepared = match three_payload_pack_and_admit_v1(warm_input(), warm_reads(0)):
+            case Ok(value): value
+            case Err(_): fail("could not prepare publication fixture")
+        val journal = ActionRootJournalV1.empty(1)
+        val catalog = CacheCatalogProjectionV1.memory().unwrap()
+        val root = "build/three-payload-publication-test-{rt_getpid()}"
+        val result = three_payload_publish_host_admitted_v1(
+            root,
+            AuthenticatedPeerReceiptV1(opaque_handle: -1),
+            CacheReadinessReceiptV1(opaque_handle: -1),
+            [],
+            DurableWriterEpochV1(opaque_handle: -1),
+            journal, catalog, "action-digest", "dependency-manifest", prepared)
+        match result:
+            case Err(reason): expect(reason).to_equal("mutation_scoped_authority_unavailable")
+            case Ok(_): fail("publication bypassed mutation-scoped authority")
+        # The authority guard is before cas_put: no root, VERSION, blob, or
+        # temporary staging directory may be created by this rejected call.
+        expect(rt_file_exists(root)).to_equal(false)
+        expect(rt_file_exists(root + "/VERSION")).to_equal(false)
+        val digest = prepared.payload_digest
+        val blob = root + "/cas/sha256/" + digest.substring(0, 2) + "/" + digest.substring(2, digest.len())
+        expect(rt_file_exists(blob)).to_equal(false)
+
+    it "prepares the strict typed binding adapter without activating a worker":
+        step("Bind exact semantic objects")
+        val profile = sha256_text("packer-profile")
+        val access = sha256_text("packer-access")
+        val generation = sha256_text("packer-generation")
+        val receipt = sha256_text("packer-owner-receipt")
+        val source = text_to_bytes("fn value() -> i64: 7\n")
+        val init_header = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PackageInitTld,
+            semantic_record_digest: sha256_text("packer-init-record"),
+            section_table_digest: physical_tld_section_table_digest_v1([]),
+            payload_bytes: 0, sections: [])
+        val init_bytes = encode_physical_tld_v1(init_header, []).unwrap()
+        val object_digest = sha256_text("packer-trait-object")
+        val signature = sha256_text("packer-trait-signature")
+        val effects = sha256_text("packer-trait-effects")
+        val selection = sha256_text("packer-trait-selection")
+        val reference = ThreePayloadSemanticRefV2(
+            kind: ThreePayloadSemanticRefKindV1.TraitCallable,
+            stable_entity_id: "trait.call", callable_signature_digest: signature,
+            effect_digest: effects, body_or_object_digest: object_digest,
+            embedded: nil, selection_contract_digest: selection)
+        val exact_binding = ThreePayloadSemanticBinding(
+            stable_entity_id: "trait.call",
+            semantic_use_kind: ThreePayloadSemanticRefKindV1.TraitCallable,
+            object_ref: CacheObjectRefV1(kind: "portable_hir_object", schema: 2,
+                object_digest: object_digest), embedded_role: nil,
+            embedded_section_index: nil, raw_section_digest: nil,
+            access_policy_digest: access, semantic_profile_digest: profile,
+            callable_signature_digest: signature, effect_digest: effects,
+            selection_contract_digest: selection)
+        val bind_limits = ThreePayloadSemanticBindBounds(max_bindings: 4,
+            max_sections: 4, max_retained_bytes: 1024, max_decoded_bytes: 1024,
+            expected_input_generation_digest: generation,
+            expected_access_policy_digest: access,
+            expected_owner_receipt_digest: receipt,
+            presented_owner_receipt_digest: receipt,
+            expected_module_id: "demo", presented_module_id: "demo")
+        val result = seal_three_payload_bound_closure_v2(
+            ThreePayloadSnapshotV2(snapshot_digest: sha256_text("packer-snapshot"),
+                source_digest: sha256_u8_hex(source), source_bytes: source),
+            ThreePayloadParentGenerationV2(generation_digest: generation,
+                prior_tld_digest: nil, prior_tld_bytes: nil, prior_tld_header: nil),
+            ThreePayloadModuleClosureV2(module_id: "demo",
+                init_tld_digest: sha256_u8_hex(init_bytes), init_tld_bytes: init_bytes,
+                init_tld_header: init_header, semantic_refs: [reference],
+                coverage_roots: complete_binding_roots()),
+            ThreePayloadVerifiedSemanticBindingsV2(
+                compiler_semantics_digest: profile,
+                consumed_inputs_digest: sha256_text("packer-inputs"),
+                bindings: [exact_binding], bind_bounds: bind_limits),
+            ThreePayloadPackBoundsV2(max_sections: 4, max_payload_bytes: 4096,
+                max_decode_bytes: 4096))
+        match result:
+            case Err(ThreePayloadFallbackV1.AuthorityUnavailable): pass
+            case _: fail("public binding DTOs were promoted into CAS-owner authority")
+
+        val prior_header = PhysicalTldHeaderV1(schema: 1,
+            role: TldPayloadRoleV1.PriorModuleTld,
+            semantic_record_digest: sha256_text("packer-prior-record"),
+            section_table_digest: physical_tld_section_table_digest_v1([]),
+            payload_bytes: 0, sections: [])
+        val prior_bytes = encode_physical_tld_v1(prior_header, []).unwrap()
+        var tight_limits = bind_limits
+        # Each owner fits alone; their combined retained wire does not.
+        tight_limits.max_retained_bytes = init_bytes.len() + prior_bytes.len() - 1
+        val aggregate = seal_three_payload_bound_closure_v2(
+            ThreePayloadSnapshotV2(snapshot_digest: sha256_text("packer-snapshot"),
+                source_digest: sha256_u8_hex(source), source_bytes: source),
+            ThreePayloadParentGenerationV2(generation_digest: generation,
+                prior_tld_digest: Some(sha256_u8_hex(prior_bytes)),
+                prior_tld_bytes: Some(prior_bytes), prior_tld_header: Some(prior_header)),
+            ThreePayloadModuleClosureV2(module_id: "demo",
+                init_tld_digest: sha256_u8_hex(init_bytes), init_tld_bytes: init_bytes,
+                init_tld_header: init_header, semantic_refs: [reference],
+                coverage_roots: complete_binding_roots()),
+            ThreePayloadVerifiedSemanticBindingsV2(
+                compiler_semantics_digest: profile,
+                consumed_inputs_digest: sha256_text("packer-inputs"),
+                bindings: [exact_binding], bind_bounds: tight_limits),
+            ThreePayloadPackBoundsV2(max_sections: 4, max_payload_bytes: 4096,
+                max_decode_bytes: 4096))
+        match aggregate:
+            case Err(ThreePayloadFallbackV1.BoundsExceeded): pass
+            case _: fail("combined owners were decoded before aggregate retained preflight")

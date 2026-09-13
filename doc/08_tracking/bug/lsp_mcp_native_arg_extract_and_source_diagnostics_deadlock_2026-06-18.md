@@ -1,5 +1,7 @@
 # Bug: simple-lsp-mcp native tools/call broken + source-mode diagnostics deadlock
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 - **Filed:** 2026-06-18
 - **Severity:** P1 (LSP MCP tools unusable on native; diagnostics unusable in source mode)
 - **Components:** `src/app/simple_lsp_mcp/`, native AOT codegen, interpreter `process_run`
@@ -86,3 +88,6 @@ printf '%s\n' \
 # source diagnostics: hang (zombie child + parent futex_wait) — only with the gate disabled
 SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 SIMPLE_LIB=$PWD/src bin/simple run src/app/simple_lsp_mcp/main.spl  # then send lsp_diagnostics
 ```
+
+## Triage 2026-09-12
+Older than 45 days. The record's own "Current mitigation (shipped 2026-06-18)" section already documents the live workaround (source-mode default, diagnostics gated off); the two "Real fixes (pending)" items were not re-tested (native binary not rebuilt in this pass, and the diagnostics deadlock path is deliberately not exercised here to avoid hanging the triage run). Closing per age policy; reopen with a fresh repro if the native/diagnostics fixes are attempted. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

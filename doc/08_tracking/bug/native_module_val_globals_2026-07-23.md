@@ -1,5 +1,7 @@
 # native (bootstrap/entry-closure): module-level `val` globals read as uninitialized stack garbage
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-23  **Status:** FIXED (three-layer fix, same change set)
 - **Severity:** critical — any native app using a module-level `val` (e.g.
   `simple_lsp_mcp_server`'s `SERVER_NAME`) SIGSEGVs or misbehaves at startup.
@@ -44,3 +46,7 @@ No compile error is raised (silent).
 ## Repro
 `src/app/mcprepro`-style entry with the two `val`s above; native-build with
 `--entry-closure`; run and check output (fixed: `name=repro-server cap=1048576`).
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

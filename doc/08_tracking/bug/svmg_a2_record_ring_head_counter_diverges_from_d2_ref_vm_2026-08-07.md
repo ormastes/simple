@@ -1,5 +1,7 @@
 # A2 record-ring layout diverges from D2/ref_vm's (no head-counter word)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-07
 Found by: Task B3 (cuda_vm per-launch executor)
 
@@ -58,3 +60,14 @@ Either:
 
 Filed rather than silently worked around, per repo policy (fix-or-file,
 never route around silently).
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Triage 2026-09-13
+
+CUDA VM per-launch executor record-ring layout divergence -- requires
+GPU hardware and deep CUDA lane internals knowledge. No GPU available.
+Leaving OPEN.
+

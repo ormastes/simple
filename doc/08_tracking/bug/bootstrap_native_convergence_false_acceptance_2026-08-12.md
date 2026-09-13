@@ -1,4 +1,5 @@
 # Bootstrap native convergence accepted unequal compiler artifacts
+**Status:** OPEN (unverified 2026-09-12)
 
 **Filed/fixed:** 2026-08-12
 **Severity:** critical — release/bootstrap authority
@@ -19,3 +20,6 @@ only in the error diagnostic. Both integration-spec locations invoke the real
 verifier over temporary retained blobs and cover identity, mismatch at byte
 zero, mismatch later in the file, and unequal ELF-shaped inputs with equal
 symbol counts.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

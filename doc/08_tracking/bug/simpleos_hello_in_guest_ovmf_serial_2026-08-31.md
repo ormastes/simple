@@ -1,4 +1,5 @@
 # SimpleOS x86_64 hello-world in-guest — literal OVMF serial transcript
+**Status:** OPEN (unverified 2026-09-12)
 
 Captured 2026-08-31 by `scripts/check/check-simpleos-hello-world-in-guest-ovmf.shs`.
 Boot chain: OVMF pflash -> GRUB-EFI -> multiboot1. No `-kernel`, no isa-debug-exit.
@@ -65,3 +66,6 @@ BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x3,0x0)
 [spawn] entering user cs=0x2b iopl=3 rip=0x4194304 rsp=0x549757910912
 ABC
 ```
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

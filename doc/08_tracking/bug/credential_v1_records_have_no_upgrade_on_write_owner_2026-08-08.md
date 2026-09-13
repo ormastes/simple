@@ -75,3 +75,14 @@ credential records are still never rewritten to v2 on a config write.
 
 Status: OPEN (unchanged). Severity remains LOW-MED — a stale-format record is
 still readable; this is a migration gap, not a wrong-result defect.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Re-confirmed unchanged at `f26970e9d93`: `config_parser.spl` (400 lines) still
+has no `v1`/`upgrade`/`rewrite` match and still no `rt_file_write_text`/rename
+call — it is read-only, and `credential_upgrade_record` still performs no I/O
+by design. Implementing this properly needs a round-trip SDN serializer (the
+parser has no matching writer that preserves untouched fields/formatting)
+plus the atomic-write primitive and load-time wiring described above — a real
+feature addition past a shard triage budget, not a local one-line fix. No
+change made. Leaving OPEN as filed.

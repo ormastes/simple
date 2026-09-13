@@ -1,0 +1,201 @@
+#!/bin/sh
+set -eu
+
+# Terra startup/RSS handoff contract.  This is deliberately test-owned: the
+# producer must emit the receipt consumed here; this checker never measures or
+# invents production evidence.
+
+die() { echo "FAIL: $*" >&2; exit 1; }
+need() { grep -Eq "^$1=" "$2" || die "missing $1"; }
+val() { sed -n "s/^$1=//p" "$2" | tail -n 1; }
+uint() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
+is_hash() { case "$1" in ""|*[!0-9a-f]*) return 1;; esac; [ "${#1}" -eq 64 ]; }
+hash() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+
+check_receipt() {
+    r=$1
+    test -s "$r" || die "empty receipt"
+    for k in schema status sample_count successful_sample_count mode output_sha256 argv_sha256 \
+      attempted_sample_count failed_sample_count executable_path executable_sha256 \
+      dependency_manifest_sha256 input_sha256 checksum selfhost_status fallback_used delegation \
+      env_no_stub_fallback executable_provenance compiler_source_checksum compiler_execution_checksum \
+      metrics_command metrics_command_sha256 p50_elapsed_us p95_elapsed_us max_rss_kib \
+      branch_eligible_count branch_covered_count branch_coverage_percent \
+      compiler_parse_budget_ms compiler_type_budget_ms compiler_mir_budget_ms \
+      compiler_codegen_budget_ms compiler_link_budget_ms compiler_total_budget_ms \
+      compiler_parse_observed_ms compiler_type_observed_ms compiler_mir_observed_ms \
+      compiler_codegen_observed_ms compiler_link_observed_ms compiler_total_observed_ms \
+      interpreter_mode interpreter_seed_used interpreter_delegation \
+      dynlib_active dynlib_plan dynlib_observed dynlib_inactive_loads \
+      no_op_status help_status version_status no_op_startup_session_count help_startup_session_count version_startup_session_count \
+      mcp_startup_session_count lsp_startup_session_count mcp_lsp_shared_session_count \
+      mcp_first_response_status mcp_warm_request_status lsp_first_response_status lsp_warm_request_status \
+      mcp_first_response_raw_sha256 mcp_warm_request_raw_sha256 lsp_first_response_raw_sha256 lsp_warm_request_raw_sha256 \
+      mcp_first_session_id mcp_warm_session_id lsp_first_session_id lsp_warm_session_id \
+      raw_samples_sha256; do
+        need "$k" "$r"
+    done
+    test "$(val schema "$r")" = terra-startup-rss-handoff-v1 || die "schema"
+    test "$(val status "$r")" = PASS || die "status"
+    is_hash "$(val output_sha256 "$r")" || die "output digest"
+    is_hash "$(val argv_sha256 "$r")" || die "argv digest"
+    n=$(val sample_count "$r"); s=$(val successful_sample_count "$r"); attempted=$(val attempted_sample_count "$r"); failed=$(val failed_sample_count "$r")
+    uint "$n" && [ "$n" -ge 15 ] || die "sample_count=$n (need >=15)"
+    test "$attempted" = "$n" || die "attempted denominator is not sample_count"
+    test "$s" = "$n" || die "successful samples are not authoritative"
+    test "$failed" = 0 || die "failed attempts admitted"
+    test "$(val mode "$r")" = interpreter || die "unsupported mode"
+    test "$(val selfhost_status "$r")" = true || die "non-selfhost evidence"
+    test "$(val fallback_used "$r")" = false || die "fallback evidence"
+    test "$(val delegation "$r")" = none || die "delegation evidence"
+    test "$(val env_no_stub_fallback "$r")" = 1 || die "SIMPLE_NO_STUB_FALLBACK evidence"
+    test "$(val executable_provenance "$r")" = selfhosted || die "executable provenance"
+    test -n "$(val executable_path "$r")" || die "executable identity"
+    for k in executable_sha256 dependency_manifest_sha256 input_sha256 output_sha256 argv_sha256 checksum metrics_command_sha256; do
+        is_hash "$(val "$k" "$r")" || die "invalid identity $k"
+    done
+    test "$(val metrics_command "$r")" = perf-command-metrics.c || die "metrics provenance"
+    for k in compiler_source_checksum compiler_execution_checksum; do is_hash "$(val "$k" "$r")" || die "invalid compiler identity $k"; done
+    test "$(val compiler_source_checksum "$r")" != "$(val compiler_execution_checksum "$r")" || die "compiler source/execution identity conflated"
+    eligible=$(val branch_eligible_count "$r"); covered=$(val branch_covered_count "$r"); pct=$(val branch_coverage_percent "$r")
+    uint "$eligible" && uint "$covered" && uint "$pct" && [ "$eligible" -gt 0 ] && [ "$covered" -le "$eligible" ] && [ "$pct" -ge 80 ] || die "eligible/covered branch evidence"
+    raw=$(sed -n '/^sample|/p' "$r")
+    for k in compiler_parse_budget_ms compiler_type_budget_ms compiler_mir_budget_ms compiler_codegen_budget_ms compiler_link_budget_ms compiler_total_budget_ms; do
+        v=$(val "$k" "$r"); uint "$v" && [ "$v" -gt 0 ] || die "invalid compiler budget $k"
+    done
+    for pair in parse type mir codegen link total; do
+        budget=$(val "compiler_${pair}_budget_ms" "$r"); observed=$(val "compiler_${pair}_observed_ms" "$r")
+        uint "$observed" && [ "$observed" -le "$budget" ] || die "compiler budget exceeded: $pair"
+    done
+    for k in 4 5 6 7 8 9; do is_hash "$(printf '%s\n' "$raw" | cut -d'|' -f"$k" | head -n 1)" || die "raw identity hash $k"; done
+    test "$(val interpreter_mode "$r")" = interpreter || die "interpreter mode"
+    test "$(val interpreter_seed_used "$r")" = false || die "seed admission"
+    test "$(val interpreter_delegation "$r")" = none || die "interpreter delegation"
+    test "$(val dynlib_active "$r")" = false || die "unexpected active dynlib synthetic mode"
+    test "$(val dynlib_plan "$r")" = none || die "dynlib plan"
+    test "$(val dynlib_observed "$r")" = none || die "dynlib observed"
+    test "$(val dynlib_inactive_loads "$r")" = 0 || die "inactive dynlib load"
+    for k in no_op_startup_session_count help_startup_session_count version_startup_session_count; do
+        test "$(val "$k" "$r")" = 0 || die "$k is nonzero"
+    done
+    for k in no_op_status help_status version_status; do test "$(val "$k" "$r")" = PASS || die "$k"; done
+    test "$(val mcp_lsp_shared_session_count "$r")" = 0 || die "MCP/LSP startup session shared"
+    for k in mcp_first_response_status mcp_warm_request_status lsp_first_response_status lsp_warm_request_status; do
+        test "$(val "$k" "$r")" = PASS || die "$k"
+    done
+    for k in mcp_first_response_raw_sha256 mcp_warm_request_raw_sha256 lsp_first_response_raw_sha256 lsp_warm_request_raw_sha256; do is_hash "$(val "$k" "$r")" || die "$k"; done
+    test "$(val mcp_first_session_id "$r")" != "$(val mcp_warm_session_id "$r")" || die "MCP sessions are not independent"
+    test "$(val lsp_first_session_id "$r")" != "$(val lsp_warm_session_id "$r")" || die "LSP sessions are not independent"
+    count=$(printf '%s\n' "$raw" | sed '/^$/d' | wc -l | tr -d ' ')
+    test "$count" = "$n" || die "raw sample count=$count expected=$n"
+    expected_mode=$(val mode "$r")
+    expected_output=$(val output_sha256 "$r")
+    expected_argv=$(val argv_sha256 "$r")
+    printf '%s\n' "$raw" | awk -F'|' -v m="$expected_mode" -v o="$expected_output" -v a="$expected_argv" 'NF != 13 || $1 != "sample" || $2 !~ /^[0-9]+$/ || $3 != m || $4 == "" || $5 == "" || $6 == "" || $7 != a || $8 != o || $9 == "" || $10 != "0" || $11 != "1" || $12 !~ /^[0-9]+$/ || $13 !~ /^[0-9]+$/ { bad=1 } END { exit bad }' || die "raw mode/output/digest/status mismatch"
+    ids=$(printf '%s\n' "$raw" | cut -d'|' -f2 | sort -n | uniq -d)
+    test -z "$ids" || die "duplicate sample IDs"
+    raw_canon=$(mktemp)
+    printf '%s\n' "$raw" >"$raw_canon"
+    test "$(sha256sum "$raw_canon" | awk '{print $1}')" = "$(val raw_samples_sha256 "$r")" || die "raw digest mismatch"
+    rm -f "$raw_canon"
+    p50_rank=$(((n + 1) / 2)); p95_rank=$(((n * 95 + 99) / 100))
+    actual_p50=$(printf '%s\n' "$raw" | cut -d'|' -f12 | sort -n | awk -v rank="$p50_rank" 'NR == rank {print; exit}')
+    actual_p95=$(printf '%s\n' "$raw" | cut -d'|' -f12 | sort -n | awk -v rank="$p95_rank" 'NR == rank {print; exit}')
+    actual_rss=$(printf '%s\n' "$raw" | cut -d'|' -f13 | sort -n | tail -1)
+    test "$actual_p50" = "$(val p50_elapsed_us "$r")" || die "p50 mismatch"
+    test "$actual_p95" = "$(val p95_elapsed_us "$r")" || die "p95 mismatch"
+    test "$actual_rss" = "$(val max_rss_kib "$r")" || die "max RSS mismatch"
+    test "$(sha256sum "$r" | awk '{print $1}')" != "" || die "receipt digest"
+}
+
+if [ "${1:-}" = --selftest ]; then
+    d=$(mktemp -d)
+    trap 'rm -rf "$d"' EXIT
+    r=$d/handoff.env
+    {
+        echo schema=terra-startup-rss-handoff-v1
+        echo status=PASS
+        echo sample_count=21
+        echo successful_sample_count=21
+        echo attempted_sample_count=21
+        echo failed_sample_count=0
+        echo mode=interpreter
+        echo executable_path=/synthetic/simple
+        echo executable_sha256=$(hash synthetic-executable)
+        echo dependency_manifest_sha256=$(hash synthetic-dependencies)
+        echo input_sha256=$(hash synthetic-input)
+        echo output_sha256=$(hash terra-output)
+        echo argv_sha256=$(hash terra-argv)
+        echo checksum=$(hash synthetic-checksum)
+        echo selfhost_status=true
+        echo fallback_used=false
+        echo delegation=none
+        echo env_no_stub_fallback=1
+        echo executable_provenance=selfhosted
+        echo compiler_source_checksum=$(hash synthetic-source)
+        echo compiler_execution_checksum=$(hash synthetic-execution)
+        echo metrics_command=perf-command-metrics.c
+        echo metrics_command_sha256=$(hash perf-command-metrics.c)
+        echo p50_elapsed_us=11
+        echo p95_elapsed_us=20
+        echo max_rss_kib=200
+        echo branch_eligible_count=10
+        echo branch_covered_count=9
+        echo branch_coverage_percent=90
+        echo compiler_parse_budget_ms=100
+        echo compiler_type_budget_ms=200
+        echo compiler_mir_budget_ms=300
+        echo compiler_codegen_budget_ms=400
+        echo compiler_link_budget_ms=500
+        echo compiler_total_budget_ms=1500
+        echo compiler_parse_observed_ms=10
+        echo compiler_type_observed_ms=20
+        echo compiler_mir_observed_ms=30
+        echo compiler_codegen_observed_ms=40
+        echo compiler_link_observed_ms=50
+        echo compiler_total_observed_ms=150
+        echo interpreter_mode=interpreter
+        echo interpreter_seed_used=false
+        echo interpreter_delegation=none
+        echo dynlib_active=false
+        echo dynlib_plan=none
+        echo dynlib_observed=none
+        echo dynlib_inactive_loads=0
+        echo no_op_startup_session_count=0
+        echo help_startup_session_count=0
+        echo version_startup_session_count=0
+        echo no_op_status=PASS
+        echo help_status=PASS
+        echo version_status=PASS
+        echo mcp_startup_session_count=1
+        echo lsp_startup_session_count=1
+        echo mcp_lsp_shared_session_count=0
+        echo mcp_first_response_status=PASS
+        echo mcp_warm_request_status=PASS
+        echo lsp_first_response_status=PASS
+        echo lsp_warm_request_status=PASS
+        echo mcp_first_response_raw_sha256=$(hash mcp-first)
+        echo mcp_warm_request_raw_sha256=$(hash mcp-warm)
+        echo lsp_first_response_raw_sha256=$(hash lsp-first)
+        echo lsp_warm_request_raw_sha256=$(hash lsp-warm)
+        echo mcp_first_session_id=mcp-cold
+        echo mcp_warm_session_id=mcp-warm
+        echo lsp_first_session_id=lsp-cold
+        echo lsp_warm_session_id=lsp-warm
+        i=1
+        while [ "$i" -le 21 ]; do echo "sample|$i|interpreter|$(hash synthetic-executable)|$(hash synthetic-dependencies)|$(hash synthetic-input)|$(hash terra-argv)|$(hash terra-output)|$(hash synthetic-checksum)|0|1|$i|200"; i=$((i + 1)); done
+    } >"$r"
+    raw_tmp=$d/raw
+    sed -n '/^sample|/p' "$r" >"$raw_tmp"
+    printf 'raw_samples_sha256=%s\n' "$(sha256sum "$raw_tmp" | awk '{print $1}')" >>"$r"
+    check_receipt "$r"
+    cp "$r" "$d/bad"
+    sed -i 's/successful_sample_count=21/successful_sample_count=20/' "$d/bad"
+    if sh "$0" "$d/bad" >/dev/null 2>&1; then die "accepted mismatched successful count"; fi
+    echo "PASS: terra handoff selftest (N=21, six compiler budgets, fail-closed controls)"
+    exit 0
+fi
+
+receipt=${1:-build/terra_startup_rss/handoff.env}
+check_receipt "$receipt"
+echo "PASS: terra startup/RSS handoff admitted (N=$(val sample_count "$receipt"), mode=$(val mode "$receipt"))"

@@ -1,5 +1,7 @@
 # LLM Caret OpenCode Spec Compiler Conflict Blocker - 2026-07-01
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Resolved in source and verified locally with `bin/simple test` after restoring
@@ -98,3 +100,7 @@ All checks passed (1 file(s))
 bin/simple check src/app/llm_runtime/serve_plan.spl
 EXIT_CODE=255 after compiler warning output; no serve-plan diagnostic emitted
 ```
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

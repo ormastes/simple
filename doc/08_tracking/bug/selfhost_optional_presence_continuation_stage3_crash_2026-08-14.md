@@ -1,4 +1,5 @@
 # Self-host optional-presence continuation rejected during Stage 3
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Failure
 
@@ -31,3 +32,6 @@ the release gate because the previous failure occurred only under self-host.
 The secondary crash-after-parser-error is retained as a distinct hardening gap;
 this grammar repair must not be cited as proof that malformed input exits
 without a signal.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

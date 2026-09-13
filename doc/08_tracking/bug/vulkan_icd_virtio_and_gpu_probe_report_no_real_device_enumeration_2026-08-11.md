@@ -1,5 +1,7 @@
 # Bug: candidate Vulkan sources report no real device enumeration data
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-08-11
 **Boundary:** `vulkan.device.enumeration@1` (lane L2 of the board Vulkan
 counterpart effort)
@@ -104,3 +106,7 @@ different lane, H3/probe-adapter) were not touched here — see that lane's
 scope. A real virtio-gpu transport (ring buffer I/O, Venus
 `VK_STRUCTURE_TYPE_*` decode) still does not exist; `_venus_device_available`
 is the single wire-in point for when it does.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

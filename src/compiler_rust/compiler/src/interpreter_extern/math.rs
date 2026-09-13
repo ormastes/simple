@@ -568,12 +568,8 @@ mod tests {
     #[test]
     fn test_rt_math_fma_is_fused_and_validates_arity() {
         let delta = 2.0f64.powi(-27);
-        let result = rt_math_fma_fn(&[
-            Value::Float(1.0 + delta),
-            Value::Float(1.0 - delta),
-            Value::Float(-1.0),
-        ])
-        .unwrap();
+        let result =
+            rt_math_fma_fn(&[Value::Float(1.0 + delta), Value::Float(1.0 - delta), Value::Float(-1.0)]).unwrap();
         assert_eq!(result, Value::Float(-2.0f64.powi(-54)));
         assert!(rt_math_fma_fn(&[Value::Float(1.0)]).is_err());
     }

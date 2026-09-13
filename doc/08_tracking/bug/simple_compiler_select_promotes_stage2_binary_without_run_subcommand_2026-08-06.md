@@ -131,3 +131,14 @@ Option 2 alone is honesty, not a fix. Option 1 is the actual repair.
 
 **Not attempted here** because verifying either requires a stage2/stage3
 rebuild, and two Stage 3 builds were already live on this host.
+
+## Triage 2026-09-13
+
+Architectural gap: the bootstrap CLI (src/app/cli/bootstrap_main.spl)
+never implemented a `run` subcommand at all -- confirmed no staged
+binary in the tree has one. 19 scripts call simple_compiler_select and
+assume `run` exists. Adding `run` to the bootstrap CLI is a real
+feature addition affecting the bootstrap-deployment lane, explicitly
+filed as "needs a bootstrap/compiler-deployment owner" rather than a
+guard-script fix. Out of this lane's scope. Leaving OPEN.
+

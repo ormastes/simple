@@ -1,4 +1,5 @@
 # Electron keyboard input drops all modifier state and most non-printable keys
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 Open.
@@ -23,3 +24,6 @@ Any app-level keyboard shortcut bound to modifier combo or non-whitelisted speci
 
 ## Next Step
 Add modifier-field to protocol; read and forward `ctrlKey`/`metaKey`/`altKey`/`shiftKey`; consolidate duplicated allowlist. Separately: implement missing `request_fetch` and other round-trip handlers in bridge.js (currently latent traps).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

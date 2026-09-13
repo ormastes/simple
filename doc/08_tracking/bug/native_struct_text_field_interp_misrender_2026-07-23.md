@@ -1,5 +1,7 @@
 # native (entry-closure): struct text fields misrender in string interpolation
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-23  **Status:** SOURCE FIXED; staged execution pending
 - **Severity:** medium — no crash; wrong output when interpolating struct
   text fields. Comparisons/assignments appear functional.
@@ -42,3 +44,7 @@ The exact W83 before/after assignment oracle now lives in
 FreeBSD, AArch64/RISC-V64 execution, and ARM32/RV32/Windows-ARM64 object gates.
 A focused source contract pins both type-propagation steps. Rebuilt execution
 remains pending.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

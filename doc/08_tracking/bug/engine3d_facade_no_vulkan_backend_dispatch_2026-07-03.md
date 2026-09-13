@@ -1,7 +1,7 @@
 # Engine3D facade never dispatches to the Vulkan backend
 
 Date: 2026-07-03
-Status: open
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Severity: P3
 Found by: W6d lane agent (game.rollball, G4.1 Vulkan leg)
 
@@ -50,3 +50,6 @@ and `rt_vk3d_available()`), forwarding the render methods to it. Separately,
 wire `VulkanBackend3D` to submit through the `rt_vk3d_*` device path (with a
 lavapipe software ICD for deterministic CI) so the Vulkan leg exercises a real
 device rather than a CPU reimplementation.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

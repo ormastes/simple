@@ -1,5 +1,14 @@
 # ctype Static LUT Benchmark Export Fix
 
+## Closed 2026-09-13 — confirmed fixed: the exports exist and the benchmark runs
+- **measured** — `test/05_perf/ctype/ctype_lut_tables.spl:28` reads
+  `export CTYPE_FLAG_TABLE, CTYPE_BYTE_SMOKE_TABLE` — the missing exports this entry
+  records adding.
+- **measured** — `bin/simple run test/05_perf/ctype/bench_ctype_static_lut.spl`
+  (Rust seed v1.0.0-rc.1, Windows) completes all four benchmarks, e.g.
+  `lang=simple_static_lut bench=is_alpha ops=128000000 ops_per_ms=80369 checksum=52000000`,
+  ending `combined_checksum=142000000`.
+
 Date: 2026-06-21
 
 ## Summary

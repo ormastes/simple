@@ -226,3 +226,30 @@ Specs added:
 `src/lib/common/image/ppm_decode.spl:137` is listed as class 1a but is not
 defective: its `header` is a locally built `"P6\n{width} {height}\n255\n"`,
 always ASCII, so byte length and codepoint count coincide by construction.
+
+## Re-check 2026-09-13 (BUGFIX-12 shard 22) — all 4 "confirmed broken, NOT fixed" sites are now fixed
+
+Re-verified each site in the "Confirmed broken, NOT fixed" table against
+`f26970e9d93`:
+
+- `nogc_sync_mut/aws_sigv4.spl:29` `_aws_sigv4_text_to_bytes` — now iterates
+  `s.bytes()`, with a docstring explicitly recording the old
+  `char_code_at`-bounded-by-byte-`len()` defect as fixed.
+- `nogc_sync_mut/aws_sigv4.spl:66` `sigv4_uri_encode` — now iterates
+  `s.bytes()` for both the byte code and the one-byte ASCII slice, with the
+  same kind of fix-recording comment.
+- `nogc_async_mut/fs_driver/fat32_dir_ops.spl` — `char_at(...) as u8` no
+  longer appears in the file; only a comment describing the old defect
+  remains.
+- `common/ui/html_ui/doc_ops.spl:176` `_to_lower` — now iterates `s.bytes()`
+  with a docstring recording both R1 (cast) and R2 (`.chr()`) as fixed; no
+  `char_at(...) as i64` or `.chr()` call remains in the file.
+
+All four sites this doc flagged as needing their own fix have already been
+fixed (by other sessions, undated in-tree) since the 2026-08-17 follow-up.
+The two systemic root causes (R1/R2 in the Rust seed) were already marked
+FIXED 2026-08-06 above. No `src/lib` action remains from this doc.
+
+Status: CLOSED (2026-09-13) — all `src/lib` sites fixed; verified by content
+inspection against sha `f26970e9d93` (no test run needed, comment-fix
+correspondence is unambiguous and each site's docstring records its own fix).

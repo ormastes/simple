@@ -1,0 +1,585 @@
+#!/bin/sh
+# setup-cef-dynlib.shs — locate, download, verify and stage a PINNED CEF (libcef) binary
+# distribution for the Chrome render dynlib (src/runtime/browser/chrome_render_shim.c).
+#
+# POSIX sh; runs on Linux, macOS, FreeBSD and MSYS/git-bash. The native Windows twin is
+# scripts/setup/setup-cef-dynlib.ps1 (same flags, same receipt keys).
+#
+# The pinned VERSION LINE lives in ONE data file, config/cef/cef_pin.sdn. Archive names
+# and digests are NOT stored there: they are resolved at install time from the publisher's
+# own index (https://cef-builds.spotifycdn.com/index.json), which already publishes a
+# per-file `sha1` per platform. See that pin file's header for why a hand-maintained digest
+# table was removed rather than filled in.
+#
+# Modes:
+#   --check      (default) report what is staged; never touches the network
+#   --install    resolve the archive from the index, admit it against the index's sha1,
+#                extract under build/cef/, then RECORD the measured sha256 at
+#                build/cef/<version>/<platform>/admitted.sha256
+#   --env        print `export SIMPLE_CEF_ROOT=...` lines for a staged drop
+#   --selftest   fatal fixture run; never touches the network
+#
+# Extra flags: --allow-unpinned (a version NOT in the index, e.g. a locally built drop —
+# loud, and still marks cef_sha256_status=unpinned), --index-file <path> (use a local copy
+# of the index instead of fetching it), --platform, --pin-file.
+#
+# Every run ends with a key=value receipt block whose LAST line is:
+#   cef_status=present | missing | hash-mismatch
+# Exit 0 only when cef_status=present (or a selftest passes); every other outcome is
+# non-zero with the reason in cef_reason=. A version with no index entry is REFUSED unless
+# --allow-unpinned; a staged drop with no admitted.sha256 record is `unadmitted` and is
+# reported `missing`, never `present` — nothing ever verified it.
+#
+# Destructive operations are confined to $INSTALL_ROOT (build/cef); nothing outside it is
+# ever removed.
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+PIN_FILE="${SIMPLE_CEF_PIN:-$ROOT_DIR/config/cef/cef_pin.sdn}"
+MODE="check"
+ALLOW_UNPINNED=0
+FORCE_PLATFORM=""
+# A local copy of the publisher index. Set by --index-file; the selftest uses it to prove
+# the parser without network, and an operator can use it to re-verify an earlier install.
+INDEX_FILE=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check) MODE="check"; shift ;;
+        --install) MODE="install"; shift ;;
+        --env) MODE="env"; shift ;;
+        --selftest) MODE="selftest"; shift ;;
+        --allow-unpinned) ALLOW_UNPINNED=1; shift ;;
+        --platform) FORCE_PLATFORM="${2:-}"; shift 2 ;;
+        --pin-file) PIN_FILE="${2:-}"; shift 2 ;;
+        --index-file) INDEX_FILE="${2:-}"; shift 2 ;;
+        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        *) echo "cef_reason=unknown-argument-$1"; echo "cef_status=missing"; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------- pin file access
+
+# Scalar directly under `cef_pin:`.
+pin_scalar() {
+    awk -v key="$1" '
+        $1 == key":" { $1 = ""; sub(/^ +/, ""); gsub(/^"|"$/, "", $0); print; exit }
+    ' "$PIN_FILE"
+}
+
+# Field of the row whose `platform:` equals $1. Field name is $2.
+pin_row_field() {
+    awk -v want="$1" -v field="$2" '
+        /^[ \t]*- platform:[ \t]*/ {
+            line = $0; sub(/^[ \t]*- platform:[ \t]*/, "", line)
+            gsub(/^"|"$/, "", line); current = line; next
+        }
+        current == want {
+            line = $0
+            sub(/^[ \t]*/, "", line)
+            if (index(line, field ":") == 1) {
+                sub(/^[^:]*:[ \t]*/, "", line)
+                gsub(/^"|"$/, "", line)
+                print line
+                exit
+            }
+        }
+    ' "$PIN_FILE"
+}
+
+# ---------------------------------------------------------------- platform detection
+
+detect_platform() {
+    os_name="$(uname -s 2>/dev/null || echo unknown)"
+    arch_name="$(uname -m 2>/dev/null || echo unknown)"
+    case "$os_name" in
+        Linux)  os_key="linux" ;;
+        Darwin) os_key="macos" ;;
+        FreeBSD) os_key="freebsd" ;;
+        MINGW*|MSYS*|CYGWIN*) os_key="windows" ;;
+        *) os_key="unknown" ;;
+    esac
+    case "$arch_name" in
+        x86_64|amd64) arch_key="64" ;;
+        arm64|aarch64) arch_key="arm64" ;;
+        *) arch_key="unknown" ;;
+    esac
+    if [ "$os_key" = unknown ] || [ "$arch_key" = unknown ]; then
+        echo "unsupported"
+        return 0
+    fi
+    case "$os_key$arch_key" in
+        linux64) echo "linux64" ;;
+        linuxarm64) echo "linuxarm64" ;;
+        macos64) echo "macosx64" ;;
+        macosarm64) echo "macosarm64" ;;
+        windows64) echo "windows64" ;;
+        windowsarm64) echo "windowsarm64" ;;
+        # CEF publishes no FreeBSD distribution. Say so rather than guessing a near match.
+        freebsd*) echo "unsupported" ;;
+        *) echo "unsupported" ;;
+    esac
+}
+
+# ---------------------------------------------------------------- publisher index
+#
+# Resolves `<archive-name> <sha1>` for a platform + version-prefix + distribution type out
+# of CEF's index.json. Shape:
+#   { "<platform>": { "versions": [ { "cef_version": "...", "files": [
+#       { "type": "minimal", "name": "cef_binary_....tar.bz2", "sha1": "..." } ] } ] } }
+#
+# Written as a depth-tracking scanner rather than a regex because the file is minified and
+# the same key names (`name`, `sha1`) occur under several platforms and versions; matching
+# by regex alone would cheerfully return another platform's digest. Prints nothing when
+# there is no match, which every caller treats as a refusal — never as a pass.
+index_resolve() {
+    _ir_file=$1; _ir_platform=$2; _ir_prefix=$3; _ir_type=$4
+    sed 's/[][{}]/\
+&\
+/g; s/,/,\
+/g' "$_ir_file" | awk -v want_plat="$_ir_platform" -v want_pref="$_ir_prefix" -v want_type="$_ir_type" '
+        function strip(s) { gsub(/^[ \t]*"|"[ \t]*,?[ \t]*$|[ \t]*,[ \t]*$/, "", s); return s }
+        /^[ \t]*\{[ \t]*$/ { depth++; name=""; sha1=""; ftype=""; next }
+        /^[ \t]*\}[ \t]*,?[ \t]*$/ {
+            if (ftype == want_type && name != "" && sha1 != "" &&
+                plat == want_plat && index(ver, want_pref) == 1) {
+                print name " " sha1; found=1; exit
+            }
+            depth--; next
+        }
+        depth == 1 && /^[ \t]*"[A-Za-z0-9_]+"[ \t]*:[ \t]*$/ {
+            line=$0; sub(/^[ \t]*"/, "", line); sub(/"[ \t]*:[ \t]*$/, "", line); plat=line; next
+        }
+        /"cef_version"[ \t]*:/ { line=$0; sub(/^.*"cef_version"[ \t]*:[ \t]*/, "", line); ver=strip(line); next }
+        /"type"[ \t]*:/  { line=$0; sub(/^.*"type"[ \t]*:[ \t]*/, "", line);  ftype=strip(line); next }
+        /"name"[ \t]*:/  { line=$0; sub(/^.*"name"[ \t]*:[ \t]*/, "", line);  name=strip(line); next }
+        /"sha1"[ \t]*:/  { line=$0; sub(/^.*"sha1"[ \t]*:[ \t]*/, "", line);  sha1=strip(line); next }
+        END { if (!found) exit 0 }
+    '
+}
+
+# Echoes `verified` | `hash-mismatch` | `no-sha1-tool`.
+verify_sha1() {
+    _vs_file=$1; _vs_expected=$2
+    if command -v sha1sum >/dev/null 2>&1; then
+        _vs_actual=$(sha1sum "$_vs_file" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then
+        _vs_actual=$(shasum -a 1 "$_vs_file" | awk '{print $1}')
+    else
+        echo "no-sha1-tool"; return 0
+    fi
+    if [ "$_vs_actual" != "$_vs_expected" ]; then
+        echo "hash-mismatch"; return 0
+    fi
+    echo "verified"
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+# ---------------------------------------------------------------- receipt
+
+emit_receipt() {
+    # $1 platform, $2 version, $3 lib, $4 sha256_status, $5 reason, $6 status
+    echo "cef_platform=$1"
+    echo "cef_version=$2"
+    echo "cef_lib=$3"
+    echo "cef_sha256_status=$4"
+    if [ -n "${MACOS_HELPER_STATUS:-}" ]; then
+        echo "macos_helper_status=$MACOS_HELPER_STATUS"
+    fi
+    echo "cef_reason=$5"
+    echo "cef_status=$6"
+}
+
+# Inspects a staged drop root. Echoes "<status>|<reason>|<libpath>".
+inspect_drop() {
+    drop_root="$1"
+    rel_lib="$2"
+    if [ ! -d "$drop_root" ]; then
+        echo "missing|no-cef-drop|"
+        return 0
+    fi
+    if [ ! -f "$drop_root/include/capi/cef_app_capi.h" ]; then
+        echo "missing|headers-absent|"
+        return 0
+    fi
+    if [ -z "$rel_lib" ] || [ ! -e "$drop_root/$rel_lib" ]; then
+        echo "missing|libcef-absent|"
+        return 0
+    fi
+    echo "present||$drop_root/$rel_lib"
+}
+
+# ---------------------------------------------------------------- selftest
+
+selftest() {
+    passed=0
+    total=0
+    tmp="$(mktemp -d 2>/dev/null || mktemp -d -t cefself)"
+
+    # Fixture 1 — the platform detection table maps this host to a known row or to the
+    # explicit token `unsupported`; it never invents a platform.
+    total=$((total + 1))
+    detected="$(detect_platform)"
+    case "$detected" in
+        linux64|linuxarm64|macosx64|macosarm64|windows64|windowsarm64|unsupported)
+            passed=$((passed + 1)) ;;
+        *) echo "selftest: fixture 1 detected unknown platform '$detected'" >&2 ;;
+    esac
+
+    # Fixture 2 — a fake extracted tree with headers and a lib passes inspection.
+    total=$((total + 1))
+    mkdir -p "$tmp/good/include/capi" "$tmp/good/Release"
+    : > "$tmp/good/include/capi/cef_app_capi.h"
+    : > "$tmp/good/Release/libcef.so"
+    r2="$(inspect_drop "$tmp/good" "Release/libcef.so")"
+    if [ "${r2%%|*}" = "present" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 2 (complete tree) was not present: $r2" >&2
+    fi
+
+    # Fixture 3 — a tree with headers but no library is `missing`, never present.
+    total=$((total + 1))
+    mkdir -p "$tmp/nolib/include/capi"
+    : > "$tmp/nolib/include/capi/cef_app_capi.h"
+    r3="$(inspect_drop "$tmp/nolib" "Release/libcef.so")"
+    case "$r3" in
+        missing\|libcef-absent\|*) passed=$((passed + 1)) ;;
+        *) echo "selftest: fixture 3 (no libcef) was not refused: $r3" >&2 ;;
+    esac
+
+    # Fixture 4 — an UNSET pin is refused without --allow-unpinned.
+    total=$((total + 1))
+    if [ "$(pin_gate UNSET 0)" = "refused" ] && [ "$(pin_gate UNSET 1)" = "unpinned" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 4 (UNSET pin gate) misbehaved" >&2
+    fi
+
+    # Fixture 5 — a digest that does not match the pin is hash-mismatch, never present.
+    total=$((total + 1))
+    printf 'x' > "$tmp/archive.bin"
+    actual="$(sha256_of "$tmp/archive.bin")"
+    if [ -n "$actual" ] && [ "$(verify_digest "$tmp/archive.bin" "deadbeef")" = "hash-mismatch" ] &&
+       [ "$(verify_digest "$tmp/archive.bin" "$actual")" = "verified" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 5 (digest verification) misbehaved" >&2
+    fi
+
+    # Fixtures 6-9 — the publisher-index parser, proved on a canned index with NO network.
+    # The fixture deliberately carries a second platform and a second version whose file
+    # names and sha1s would be picked up by a naive regex, which is the whole point.
+    cat > "$tmp/index.json" <<'CEFIDX'
+{"linux64":{"versions":[
+ {"cef_version":"142.0.9+gaaa+chromium-142.0.1.0","channel":"stable","files":[
+   {"type":"minimal","name":"cef_binary_142.0.9_linux64_minimal.tar.bz2","sha1":"1111111111111111111111111111111111111111"}]},
+ {"cef_version":"143.0.13+gbbb+chromium-143.0.7444.0","channel":"stable","files":[
+   {"type":"standard","name":"cef_binary_143.0.13_linux64.tar.bz2","sha1":"2222222222222222222222222222222222222222"},
+   {"type":"minimal","name":"cef_binary_143.0.13_linux64_minimal.tar.bz2","sha1":"3333333333333333333333333333333333333333"}]}]},
+"macosarm64":{"versions":[
+ {"cef_version":"143.0.13+gbbb+chromium-143.0.7444.0","channel":"stable","files":[
+   {"type":"minimal","name":"cef_binary_143.0.13_macosarm64_minimal.tar.bz2","sha1":"4444444444444444444444444444444444444444"}]}]}}
+CEFIDX
+
+    total=$((total + 1))
+    r6="$(index_resolve "$tmp/index.json" linux64 143.0.13 minimal)"
+    if [ "$r6" = "cef_binary_143.0.13_linux64_minimal.tar.bz2 3333333333333333333333333333333333333333" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 6 (index resolve) got '$r6'" >&2
+    fi
+
+    # 7 — the platform axis is real: the same version on another platform resolves to that
+    # platform's own file and digest, never to linux64's.
+    total=$((total + 1))
+    r7="$(index_resolve "$tmp/index.json" macosarm64 143.0.13 minimal)"
+    if [ "$r7" = "cef_binary_143.0.13_macosarm64_minimal.tar.bz2 4444444444444444444444444444444444444444" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 7 (platform axis) got '$r7'" >&2
+    fi
+
+    # 8 — a version line that is not in the index resolves to NOTHING, so the caller is
+    # forced to refuse rather than silently install a different version.
+    total=$((total + 1))
+    r8="$(index_resolve "$tmp/index.json" linux64 999.0.1 minimal)"
+    if [ -z "$r8" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 8 (absent version) resolved '$r8'" >&2
+    fi
+
+    # 9 — sha1 verification discriminates, and a correct digest verifies.
+    total=$((total + 1))
+    printf 'cef' > "$tmp/a.bin"
+    a1="$(verify_sha1 "$tmp/a.bin" deadbeef)"
+    if command -v sha1sum >/dev/null 2>&1; then
+        real1=$(sha1sum "$tmp/a.bin" | awk '{print $1}')
+    else
+        real1=$(shasum -a 1 "$tmp/a.bin" | awk '{print $1}')
+    fi
+    if [ "$a1" = "hash-mismatch" ] && [ "$(verify_sha1 "$tmp/a.bin" "$real1")" = "verified" ]; then
+        passed=$((passed + 1))
+    else
+        echo "selftest: fixture 9 (sha1 verification) misbehaved" >&2
+    fi
+
+    rm -rf "$tmp"
+    echo "selftest: $passed/$total fixtures passed"
+    if [ "$passed" -ne "$total" ] || [ "$total" -lt 4 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Pin admission: echoes `refused` | `unpinned` | `pinned`.
+pin_gate() {
+    gate_digest="$1"
+    gate_allow="$2"
+    if [ -z "$gate_digest" ] || [ "$gate_digest" = "UNSET" ]; then
+        if [ "$gate_allow" -eq 1 ]; then
+            echo "unpinned"
+        else
+            echo "refused"
+        fi
+        return 0
+    fi
+    echo "pinned"
+}
+
+# Echoes `verified` | `hash-mismatch` | `no-sha256-tool`.
+verify_digest() {
+    file_path="$1"
+    expected="$2"
+    actual="$(sha256_of "$file_path")"
+    if [ -z "$actual" ]; then
+        echo "no-sha256-tool"
+        return 0
+    fi
+    if [ "$actual" != "$expected" ]; then
+        echo "hash-mismatch"
+        return 0
+    fi
+    echo "verified"
+}
+
+# ---------------------------------------------------------------- main
+
+if [ ! -f "$PIN_FILE" ]; then
+    emit_receipt "unknown" "unknown" "" "unknown" "pin-file-absent:$PIN_FILE" "missing"
+    exit 2
+fi
+
+if [ "$MODE" = "selftest" ]; then
+    selftest
+    SELF_RC=$?
+    if [ "$SELF_RC" -ne 0 ]; then
+        echo "CEF SETUP: SELFTEST FAIL"
+        exit 1
+    fi
+    echo "CEF SETUP: SELFTEST PASS — 9/9 fixtures"
+    exit 0
+fi
+
+PLATFORM="${FORCE_PLATFORM:-$(detect_platform)}"
+VERSION="$(pin_scalar version)"
+INSTALL_ROOT="$ROOT_DIR/$(pin_scalar install_root)"
+
+if [ "$PLATFORM" = "unsupported" ]; then
+    emit_receipt "unsupported" "$VERSION" "" "unknown" "no-cef-distribution-for-$(uname -s)-$(uname -m)" "missing"
+    exit 2
+fi
+
+REL_LIB="$(pin_row_field "$PLATFORM" lib)"
+# Archive name and digest are NOT in the pin file any more — they are resolved from the
+# publisher index at install time (see config/cef/cef_pin.sdn for why).
+ARCHIVE=""
+INDEX_SHA1=""
+if [ -z "$REL_LIB" ]; then
+    emit_receipt "$PLATFORM" "$VERSION" "" "unknown" "no-pin-row-for-platform" "missing"
+    exit 2
+fi
+
+# An explicitly staged root wins over the managed install path.
+DROP_ROOT="${SIMPLE_CEF_ROOT:-$INSTALL_ROOT/$VERSION/$PLATFORM}"
+
+case "$PLATFORM" in
+    macosx64|macosarm64)
+        if [ "$(pin_scalar macos_helper_required)" = "true" ]; then
+            # Stage B needs CEF's render/GPU subprocesses, which macOS spawns from a
+            # separate helper .app bundle. Loading libcef from a NON-bundled CLI is
+            # UNVERIFIED (blocked row B2) — recorded, never inferred as working.
+            MACOS_HELPER_STATUS="required-unverified-from-non-bundled-cli"
+        fi
+        ;;
+esac
+
+if [ "$MODE" = "install" ]; then
+    DISTRIBUTION="$(pin_scalar distribution)"
+    INDEX_URL="$(pin_scalar index_url)"
+    STAGE_DIR="$INSTALL_ROOT/.download"
+    mkdir -p "$STAGE_DIR"
+
+    # 1. Obtain the publisher index (or use a local copy supplied with --index-file).
+    if [ -z "$INDEX_FILE" ]; then
+        INDEX_FILE="$STAGE_DIR/index.json"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fSL --retry 3 -o "$INDEX_FILE.part" "$INDEX_URL" && mv "$INDEX_FILE.part" "$INDEX_FILE"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -O "$INDEX_FILE.part" "$INDEX_URL" && mv "$INDEX_FILE.part" "$INDEX_FILE"
+        fi
+    fi
+    if [ ! -f "$INDEX_FILE" ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "unknown" "publisher-index-unavailable" "missing"
+        exit 2
+    fi
+
+    # 2. Resolve THIS platform's archive for the pinned version line, and its sha1.
+    RESOLVED="$(index_resolve "$INDEX_FILE" "$PLATFORM" "$VERSION" "$DISTRIBUTION")"
+    ARCHIVE="${RESOLVED%% *}"
+    INDEX_SHA1="${RESOLVED##* }"
+    if [ -z "$RESOLVED" ] || [ -z "$ARCHIVE" ] || [ "$ARCHIVE" = "$INDEX_SHA1" ]; then
+        ARCHIVE=""
+        INDEX_SHA1=""
+        if [ "$ALLOW_UNPINNED" -ne 1 ]; then
+            echo "cef_warning=REFUSED: no $DISTRIBUTION archive for $PLATFORM starts with version $VERSION in the index." >&2
+            echo "cef_warning=Correct config/cef/cef_pin.sdn, or re-run with --allow-unpinned for a locally built drop." >&2
+            emit_receipt "$PLATFORM" "$VERSION" "" "unset" "version-not-in-index" "missing"
+            exit 2
+        fi
+    fi
+    GATE="$(pin_gate "$INDEX_SHA1" "$ALLOW_UNPINNED")"
+    if [ "$GATE" = "unpinned" ]; then
+        echo "cef_warning=*** --allow-unpinned: installing a CEF archive with NO publisher digest. ***" >&2
+        echo "cef_warning=*** The resulting drop is NOT admitted evidence for any gate.          ***" >&2
+    fi
+    echo "cef_index_sha1=${INDEX_SHA1:-none}"
+    echo "cef_archive=${ARCHIVE:-none}"
+    if [ -z "$ARCHIVE" ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "archive-name-unresolved" "missing"
+        exit 2
+    fi
+
+    URL_TEMPLATE="$(pin_scalar url_template)"
+    URL="$(printf '%s' "$URL_TEMPLATE" | sed "s|{archive}|$ARCHIVE|")"
+
+    DOWNLOADER=""
+    if command -v curl >/dev/null 2>&1; then
+        DOWNLOADER="curl"
+    elif command -v wget >/dev/null 2>&1; then
+        DOWNLOADER="wget"
+    fi
+    if [ -z "$DOWNLOADER" ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "no-downloader-on-path" "missing"
+        exit 2
+    fi
+
+    ARCHIVE_PATH="$STAGE_DIR/$ARCHIVE"
+    if [ ! -f "$ARCHIVE_PATH" ]; then
+        if [ "$DOWNLOADER" = "curl" ]; then
+            curl -fSL --retry 3 -o "$ARCHIVE_PATH.part" "$URL"
+        else
+            wget -O "$ARCHIVE_PATH.part" "$URL"
+        fi
+        DL_RC=$?
+        if [ "$DL_RC" -ne 0 ]; then
+            rm -f "$ARCHIVE_PATH.part"
+            emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "download-failed-rc-$DL_RC" "missing"
+            exit 2
+        fi
+        mv "$ARCHIVE_PATH.part" "$ARCHIVE_PATH"
+    fi
+
+    # 3. Admit the downloaded archive against the INDEX's own sha1 for that exact file.
+    if [ "$GATE" = "pinned" ]; then
+        VERDICT="$(verify_sha1 "$ARCHIVE_PATH" "$INDEX_SHA1")"
+        if [ "$VERDICT" = "hash-mismatch" ]; then
+            # Keep the offending file for inspection; never silently re-download over it.
+            emit_receipt "$PLATFORM" "$VERSION" "" "mismatch" "archive-sha1-does-not-match-index" "hash-mismatch"
+            exit 3
+        fi
+        if [ "$VERDICT" != "verified" ]; then
+            emit_receipt "$PLATFORM" "$VERSION" "" "unknown" "$VERDICT" "missing"
+            exit 2
+        fi
+    fi
+
+    TARGET="$INSTALL_ROOT/$VERSION/$PLATFORM"
+    # Only ever removes a path under build/cef.
+    case "$TARGET" in
+        "$INSTALL_ROOT"/*) rm -rf "$TARGET" ;;
+        *) emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "refusing-to-write-outside-install-root" "missing"; exit 2 ;;
+    esac
+    mkdir -p "$TARGET"
+    # CEF ships .tar.bz2 for every platform, Windows included.
+    tar -xjf "$ARCHIVE_PATH" -C "$TARGET" --strip-components=1
+    EX_RC=$?
+    if [ "$EX_RC" -ne 0 ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "$GATE" "extract-failed-rc-$EX_RC" "missing"
+        exit 2
+    fi
+    # 4. Record the MEASURED sha256 of the admitted archive. This is what every later
+    #    --check verifies against; it is written only on this path, only after the index
+    #    sha1 admitted the bytes (or after an explicit --allow-unpinned), so its presence
+    #    means "these bytes were admitted once", not merely "a file is here".
+    ADMITTED_SHA256="$(sha256_of "$ARCHIVE_PATH")"
+    if [ -n "$ADMITTED_SHA256" ]; then
+        {
+            echo "archive=$ARCHIVE"
+            echo "index_sha1=${INDEX_SHA1:-none}"
+            echo "gate=$GATE"
+            echo "sha256=$ADMITTED_SHA256"
+        } > "$TARGET/admitted.sha256"
+    fi
+    DROP_ROOT="$TARGET"
+fi
+
+RESULT="$(inspect_drop "$DROP_ROOT" "$REL_LIB")"
+STATUS="${RESULT%%|*}"
+REST="${RESULT#*|}"
+REASON="${REST%%|*}"
+LIB_PATH="${REST#*|}"
+
+# --check never touches the network: it reads the record the install wrote. A drop with no
+# admitted.sha256 is `unadmitted` and is NOT present, because nothing ever verified it.
+ADMIT_FILE="$DROP_ROOT/admitted.sha256"
+if [ -f "$ADMIT_FILE" ]; then
+    SHA_STATUS="$(sed -n 's/^gate=//p' "$ADMIT_FILE")"
+    [ -n "$SHA_STATUS" ] || SHA_STATUS="unknown"
+    echo "cef_admitted_sha256=$(sed -n 's/^sha256=//p' "$ADMIT_FILE")"
+    echo "cef_index_sha1=$(sed -n 's/^index_sha1=//p' "$ADMIT_FILE")"
+else
+    SHA_STATUS="unadmitted"
+    if [ "$STATUS" = "present" ]; then
+        STATUS="missing"
+        REASON="no-admitted-sha256-record-run---install"
+    fi
+fi
+
+if [ "$MODE" = "env" ]; then
+    if [ "$STATUS" != "present" ]; then
+        emit_receipt "$PLATFORM" "$VERSION" "" "$SHA_STATUS" "$REASON" "missing"
+        exit 1
+    fi
+    echo "export SIMPLE_CEF_ROOT=\"$DROP_ROOT\""
+    echo "export SIMPLE_CEF_LIB=\"$LIB_PATH\""
+    echo "export SIMPLE_CEF_PLATFORM=\"$PLATFORM\""
+fi
+
+if [ "$STATUS" = "present" ]; then
+    emit_receipt "$PLATFORM" "$VERSION" "$LIB_PATH" "$SHA_STATUS" "ok" "present"
+    exit 0
+fi
+
+emit_receipt "$PLATFORM" "$VERSION" "" "$SHA_STATUS" "$REASON" "missing"
+exit 1

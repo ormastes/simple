@@ -1,5 +1,7 @@
 # Vulkan 8K full-frame image re-upload misses 80 fps
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open; measured on 2026-09-04.
@@ -30,3 +32,7 @@ device identity and checksum, zero timed upload/readback, known completion, no
 fallback, p95 at or below 12.5 ms, and Simple p95 at most twice C p95. Merely
 moving upload outside the timer without exposing retained-resource semantics is
 not acceptable evidence.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

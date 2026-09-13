@@ -198,3 +198,19 @@ run: a reader currently attributes the failure to an unimplemented parser that
 is in fact implemented. The remaining structural cause (if the pilot is still
 RED) is downstream of parsing and has not been isolated here — see the
 Unproven section.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Confirmed the 2026-08-17 re-triage's finding still holds: WP-A is landed
+(`parse_resource_decl` present and wired in `enum_module_body.spl`,
+`resource_decl_spec.spl` passing), and
+`resource_sffi_pilot_spec.spl` is still RED for the harness reason (seed
+parser, not the pure-Simple frontend, reads a spec file's own module-level
+syntax and doesn't know the `resource` soft keyword) — genuinely out of scope
+for a pure-Simple shard fix. Corrected the pilot spec's own docstring, which
+still claimed (stale, pre-2026-08-07-update) "resource is not a parsed
+declaration kind anywhere" — the 2026-08-17 re-triage had already flagged
+this exact paragraph as something "must be rewritten before any conclusion is
+drawn" and nobody had done it yet. No assertions changed; the spec is
+unchanged at `Results: 1 total, 0 passed, 1 failed` (verified by inspection —
+the change is docstring-only, non-executable). Leaving OPEN.

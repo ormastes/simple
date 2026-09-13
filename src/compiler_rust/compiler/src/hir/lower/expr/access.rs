@@ -704,7 +704,11 @@ impl Lowerer {
         })
     }
 
-    fn try_resolve_receiver_struct_name_from_expr(&mut self, receiver: &Expr, ctx: &FunctionContext) -> Option<String> {
+    pub(crate) fn try_resolve_receiver_struct_name_from_expr(
+        &mut self,
+        receiver: &Expr,
+        ctx: &FunctionContext,
+    ) -> Option<String> {
         match receiver {
             Expr::Identifier(name) => {
                 let local = ctx.lookup(name).and_then(|idx| ctx.locals.get(idx));

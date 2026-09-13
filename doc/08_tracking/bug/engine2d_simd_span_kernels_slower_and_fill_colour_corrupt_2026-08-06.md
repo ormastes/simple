@@ -218,3 +218,29 @@ inferred from this host result.
   `nogc_async_mut/gpu/engine2d/simd_{kernels,provider}.spl` files are 21- and
   9-line re-export facades over `nogc_sync_mut`, and exactly one
   `fn simd_blend_row` exists in `src/lib`. There is no duplicate implementation.
+
+
+## Re-check 2026-09-12 — evidence only, status deliberately unchanged
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/perf/graphics_2d/span_kernel_pixel_correctness_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/perf/graphics_2d/span_kernel_pixel_correctness_spec.spl outcome=OK declared>=4 executed=4 passed=4 failed=0 skipped=0 dropped=0
+```
+
+The spec is green, and this record is **not** being closed on that, because the
+residual scope is the SIMD-vs-scalar timing comparison in §3, which is a perf measurement this correctness spec does not make.
+
+Recording the green so the next triage pass does not re-run it expecting red,
+and so nobody mistakes a passing interpreter-lane spec for the lane that is
+actually open.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Residual scope (§3, SIMD-vs-scalar timing under a C runtime build without
+swapping the shared binary) is unchanged and out of scope for a shard triage
+pass. §1/§2/D-F8 remain resolved per the notes above. No change made.
+Leaving OPEN (P3) as documented.

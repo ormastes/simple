@@ -1,5 +1,7 @@
 # BUG: x86_64 freestanding — `rt_string_to_int` is a hardcoded stub returning 0
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 Open. Found 2026-07-12 while root-causing the SSH command-decode bug (Phase 2e).
 Not yet fixed; low blast radius today but a real correctness hole.
@@ -31,3 +33,7 @@ negative/whitespace case.
 - `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md` (sibling
   freestanding text-op corrections; §Status point 3 = the deep-stack `starts_with`
   bug, still open)
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

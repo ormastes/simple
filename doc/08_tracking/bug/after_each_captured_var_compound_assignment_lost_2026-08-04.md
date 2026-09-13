@@ -94,3 +94,7 @@ does not) by varying nesting and hook count one factor at a time.
 
 **Do not "fix" the spec** by deleting the `after_each` assertion — verifying
 that `after_each` actually runs is the entire point of that example.
+
+## Triage 2026-09-13
+
+The doc's own recommended next step is a careful bisection (constant vs. self-referencing write, nesting, hook count) of shared spec-harness capture semantics that every spec in the repo runs through -- high blast-radius, not appropriate to guess at within a single-bug budget. Leaving OPEN, no code change made; did not weaken the `after_each` assertion.

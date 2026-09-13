@@ -10,8 +10,26 @@ use crate::value::Value;
 use super::super::{
     evaluate_call, evaluate_call_args, evaluate_method_call, exec_function_with_values, exec_method_function,
     find_and_exec_method_with_self, find_and_exec_method_with_self_owned_values, object_method_exists, ClassDef, Enums,
-    Env, FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
+    set_owned_global, Env, FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
+    MODULE_GLOBALS,
 };
+
+fn write_back_identifier_receiver(env: &mut Env, name: &str, value: Value) {
+    let owned_binding = if env.is_local(name) {
+        None
+    } else {
+        env.global_binding(name)
+    };
+    env.insert(name.to_owned(), value.clone());
+    if let Some((owner, source_name)) = owned_binding {
+        set_owned_global(&owner, &source_name, value.clone(), false);
+    }
+    if !env.is_local(name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
+        MODULE_GLOBALS.with(|cell| {
+            cell.borrow_mut().insert(name.to_owned(), value);
+        });
+    }
+}
 
 /// Call a method whose receiver is a *place* — a variable followed by an
 /// arbitrary chain of field/index projections (`a.b.c`, `a.b[i].c`, `self.w.s`)
@@ -39,6 +57,25 @@ fn try_place_receiver_method_call(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
+    // In-place kernel first (2026-09-12): `self.inner.xs.push(x)`,
+    // `rows[i].push(x)`, `self.d.insert(k, v)` and `arr[i].inc()` mutate the leaf
+    // where it lives instead of evaluating the receiver to a COPY, running the
+    // functional builtin (which clones the whole container) and rebuilding the
+    // root through `updated_root` — O(container) per call. Same kernel the
+    // statement-position path in `interpreter_helpers/patterns.rs` uses, so the
+    // two spellings of the same call cannot diverge.
+    if let Some(result) = super::super::interpreter_helpers::patterns::try_place_mutation_in_place(
+        receiver,
+        method,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )? {
+        return Ok(Some(result));
+    }
     let place = match super::super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)? {
         Some(place) => place,
         None => return Ok(None),
@@ -147,14 +184,53 @@ pub(super) fn eval_call_expr(
                             Some(pair) => pair,
                             None => unreachable!("object_method_exists checked before the receiver was taken"),
                         };
-                        env.insert(var_name.clone(), new_self.clone());
-                        if !env.is_local(var_name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(var_name)) {
-                            MODULE_GLOBALS.with(|cell| {
-                                cell.borrow_mut().insert(var_name.clone(), new_self);
-                            });
-                        }
+                        write_back_identifier_receiver(env, var_name, new_self);
                         return Ok(Some(result));
                     }
+                }
+                // ARRAY-MUT-EXPR (2026-09-12): expression-context twin of the
+                // statement fast path in interpreter_helpers::patterns (the
+                // Array identifier branch there, gated the same way on
+                // ARRAY_MUTATING_METHODS). `evaluate_method_call_with_self_update`
+                // just below evaluates the receiver to a COPY, so
+                // `handle_array_methods`'s pop/remove/insert arm clones the
+                // whole backing Vec on every call when the mutator is nested
+                // in a larger expression (`acc = acc + arr.pop()`,
+                // `f(arr.pop())`, `if arr.pop() % 2 == 0:`) — O(n) per call,
+                // O(n^2) per loop. The statement path doesn't have this
+                // defect because it mutates the SAME env slot's Arc in place
+                // via `Arc::make_mut`; route through that identical kernel
+                // instead of hand-writing a second copy of it. Gated on the
+                // mutator set (not just "is an Array"): a non-mutator
+                // (`arr.len()`) must fall through unchanged, since the
+                // patterns.rs Array branch itself recurses back into THIS
+                // function for any method outside that set, and an
+                // unconditional route here would loop forever. Dict is
+                // deliberately NOT included — patterns.rs's Dict branch has
+                // no in-place kernel of its own; it delegates to
+                // `evaluate_expr`, which lands back here, so routing Dict
+                // through the same call would recurse forever too.
+                // doc/08_tracking/bug/interpreter_identifier_array_mutator_in_expression_clones_2026-09-12.md
+                if matches!(env.get(var_name), Some(Value::Array(_)))
+                    && crate::interpreter::interpreter_helpers::patterns::ARRAY_MUTATING_METHODS
+                        .contains(&method.as_str())
+                {
+                    let (result, _updated_self) =
+                        crate::interpreter::interpreter_helpers::patterns::handle_method_call_with_self_update(
+                            expr,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
+                    // No further write-back needed: the kernel above already
+                    // mutated the env slot's Arc in place (local receiver) or
+                    // synced MODULE_GLOBALS itself (non-local receiver) —
+                    // exactly like its statement-context callers
+                    // (interpreter/node_exec.rs, interpreter/block_exec.rs)
+                    // consume it.
+                    return Ok(Some(result));
                 }
                 // Use the self-update variant to get both result and updated self
                 let (result, updated_self) = super::super::evaluate_method_call_with_self_update(
@@ -169,15 +245,11 @@ pub(super) fn eval_call_expr(
                 )?;
                 // If self was updated (from a me method), update the variable in env
                 if let Some(new_self) = updated_self {
-                    env.insert(var_name.clone(), new_self.clone());
-                    // Sync mutating method updates to MODULE_GLOBALS so that
-                    // module-level vars (e.g., arrays used as global state)
-                    // persist across function calls within an imported module.
-                    if !env.is_local(var_name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(var_name)) {
-                        MODULE_GLOBALS.with(|cell| {
-                            cell.borrow_mut().insert(var_name.clone(), new_self);
-                        });
-                    }
+                    // Keep both the compatibility map and the owner-indexed
+                    // store current. A cloned control-flow frame refreshes from
+                    // the owner store before dirty write-back; updating only the
+                    // flat map restores the pre-call object at match-arm exit.
+                    write_back_identifier_receiver(env, var_name, new_self);
                 }
                 Ok(Some(result))
             } else if let Expr::FieldAccess {

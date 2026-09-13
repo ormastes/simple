@@ -1,0 +1,629 @@
+#!/bin/sh
+set -Eeuo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/setup/host-env.shs"
+host_env_apply_path
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) echo 'BLOCKED: Windows/MSYS required' >&2; exit 77 ;; esac
+for tool in powershell cygpath git od awk cmp sha256sum; do
+    command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool" >&2; exit 77; }
+done
+case_name=setup
+trap 'rc=$?; echo "FIRST FAILURE: case=$case_name line=$LINENO command=$BASH_COMMAND exit=$rc" >&2; [ ! -f "${tmp:-}/last.log" ] || cat "$tmp/last.log" >&2; exit "$rc"' ERR
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-materialize-links.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT
+export TMPDIR="$tmp"
+
+new_repo() {
+    case_name=$1
+    repo="$tmp/repo-$1"
+    specs="$tmp/specs-$1"
+    : >"$specs"
+    mkdir -p "$repo"
+    git -C "$repo" init -q
+    git -C "$repo" config core.symlinks false
+    git -C "$repo" config user.email test@example.invalid
+    git -C "$repo" config user.name materializer-test
+}
+add_link() {
+    link=$1 target=$2
+    printf '%s' "$target" >"$repo/$link"
+    blob=$(printf '%s' "$target" | git -C "$repo" hash-object -w --stdin)
+    git -C "$repo" update-index --add --cacheinfo "120000,$blob,$link"
+    printf '%s\t%s\n' "$link" "$target" >>"$specs"
+}
+commit_repo() {
+    git -C "$repo" add -A
+    while IFS='	' read -r link target; do
+        [ -n "$link" ] || continue
+        blob=$(printf '%s' "$target" | git -C "$repo" hash-object -w --stdin)
+        git -C "$repo" update-index --add --cacheinfo "120000,$blob,$link"
+    done <"$specs"
+    git -C "$repo" commit -qm fixture
+}
+run_materializer() {
+    receipt=$1
+    if sh "$root/scripts/setup/materialize-symlinks-windows.shs" \
+        --strict-missing --receipt "$receipt" "$repo" >"$tmp/last.log" 2>&1; then
+        materializer_status=0
+    else
+        materializer_status=$?
+    fi
+}
+fixture_junction() {
+    FIXTURE_LINK="$(cygpath -w "$1")" FIXTURE_TARGET="$(cygpath -w "$2")" \
+        powershell -NoProfile -NonInteractive -Command '
+        $ErrorActionPreference="Stop"
+        New-Item -ItemType Junction -Path $env:FIXTURE_LINK -Target $env:FIXTURE_TARGET | Out-Null
+        $link = Get-Item -LiteralPath $env:FIXTURE_LINK -Force
+        if ($link.LinkType -ne "Junction") { throw "fixture is not a junction" }
+        if ([string]::Compare((Resolve-Path -LiteralPath @($link.Target)[0]).Path, (Resolve-Path -LiteralPath $env:FIXTURE_TARGET).Path, [StringComparison]::OrdinalIgnoreCase) -ne 0) { throw "fixture target mismatch" }
+        '
+}
+remove_junction() {
+    FIXTURE_JUNCTION="$(cygpath -w "$1")" powershell -NoProfile -NonInteractive -Command '
+        $ErrorActionPreference="Stop"
+        [System.IO.Directory]::Delete($env:FIXTURE_JUNCTION, $false)
+        '
+}
+
+new_repo positive
+printf 'payload\n' >"$repo/target.txt"
+printf 'quoted\n' >"$repo/target with space.txt"
+printf 'unicode\n' >"$repo/ü target.txt"
+mkdir "$repo/target-dir"
+printf 'nested\n' >"$repo/target-dir/nested.txt"
+add_link file-link.txt target.txt
+add_link 'quoted link.txt' 'target with space.txt'
+add_link 'ünicode link.txt' 'ü target.txt'
+add_link dir-link target-dir
+special="apostrophe' [bracket] "'$dollar; & (literal)'
+printf 'special payload' >"$repo/$special.txt"
+mkdir "$repo/$special-dir"
+printf nested >"$repo/$special-dir/nested"
+add_link "$special-link.txt" "$special.txt"
+add_link "$special-link-dir" "$special-dir"
+commit_repo
+run_materializer "$tmp/positive.env"
+test "$materializer_status" -eq 0
+grep -Fqx 'schema=simple-windows-materialized-links-v2' "$receipt"
+grep -Fqx 'result=complete' "$receipt"
+grep -Fqx 'pending_count=0' "$receipt"
+# Select by decoded path_hex, then check every field on that exact row.
+ORACLE_SPECS="$(cygpath -w "$specs")" ORACLE_RECEIPT="$(cygpath -w "$receipt")" ORACLE_REPO="$(cygpath -w "$repo")" powershell -NoProfile -NonInteractive -Command '
+$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition @"
+using System; using System.IO; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;
+public static class ReceiptOracle {
+[StructLayout(LayoutKind.Sequential)] public struct Details {
+ public uint Attributes, CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh, Volume, SizeHigh, SizeLow, Links, High, Low;
+}
+[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern SafeFileHandle CreateFileW(string p,uint a,uint s,IntPtr x,uint d,uint f,IntPtr t);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetFileInformationByHandle(SafeFileHandle h,out Details i);
+public static Details Inspect(string path) {
+ using(var h=CreateFileW(path,0,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero)) {
+  Details i; if(h.IsInvalid || !GetFileInformationByHandle(h,out i)) throw new IOException("oracle identity failed"); return i;
+ }
+}
+}
+"@
+$utf8 = New-Object Text.UTF8Encoding($false,$true)
+function Decode($hex) {
+ if ($hex -notmatch "^(?:[0-9a-f]{2})+$") { throw "oracle malformed hex" }
+ $bytes = New-Object byte[] ($hex.Length/2)
+ for ($n=0;$n -lt $bytes.Length;$n++) { $bytes[$n]=[Convert]::ToByte($hex.Substring(2*$n,2),16) }
+ $utf8.GetString($bytes)
+}
+function Equal($actual,$expected,$field) {
+ if ([string]$actual -cne [string]$expected) { throw "oracle $field expected=[$expected] actual=[$actual]" }
+}
+$rows = @(); $inside=$false
+foreach ($line in [IO.File]::ReadAllLines($env:ORACLE_RECEIPT)) {
+ if ($line -eq "records_begin") { $inside=$true; continue }
+ if ($line -eq "records_end") { $inside=$false; continue }
+ if (!$inside) { continue }
+ $row=@{}
+ foreach ($field in $line.Split([char]124)) {
+  $pair=$field.Split(@([char]61),2)
+  if ($pair.Length -ne 2 -or $row.ContainsKey($pair[0])) { throw "oracle duplicate/malformed field" }
+  $row[$pair[0]]=$pair[1]
+ }
+ $rows += ,$row
+}
+Equal $rows.Count 6 "all fixture rows"
+foreach ($spec in [IO.File]::ReadAllLines($env:ORACLE_SPECS, $utf8)) {
+ $pair=$spec.Split([char]9); $name=$pair[0]; $target=$pair[1]
+ $matches=@($rows | Where-Object { (Decode $_.path_hex) -ceq $name })
+ Equal $matches.Count 1 "$name row count"
+ $r=$matches[0]; Equal $r.Count 12 "$name field count"
+ $kind=if ([IO.Directory]::Exists([IO.Path]::Combine($env:ORACLE_REPO,$target))) { "directory" } else { "file" }
+ $native=[IO.Path]::Combine($env:ORACLE_REPO,$target)
+ # Fixture path has no aliases; derive expected final DOS spelling independently.
+ $expected="\\?\" + $native.Substring(0,1).ToUpperInvariant() + $native.Substring(1)
+ $info=[ReceiptOracle]::Inspect($native)
+ Equal $r.path_len ($utf8.GetByteCount($name)) "$name path_len"
+ Equal (Decode $r.target_hex) $target "$name target_hex"
+ Equal $r.target_len ($utf8.GetByteCount($target)) "$name target_len"
+ Equal (Decode $r.target_resolved_hex) $expected "$name final path"
+ Equal $r.target_resolved_len ($utf8.GetByteCount($expected)) "$name final length"
+ Equal $r.target_volume $info.Volume "$name volume"
+ Equal $r.target_file_id ("{0}:{1}" -f $info.High,$info.Low) "$name file id"
+ Equal $r.target_size (([uint64]$info.SizeHigh * 4294967296) + $info.SizeLow) "$name size"
+ $sha=if ($kind -eq "file") { (Get-FileHash -LiteralPath $native -Algorithm SHA256).Hash.ToLowerInvariant() } else { "-" }
+ Equal $r.target_sha256 $sha "$name sha"
+ Equal $r.kind $kind "$name kind"
+ Equal $r.state "created" "$name state"
+}
+'
+awk '/^records_begin$/{on=1;next}/^records_end$/{on=0}on' "$receipt" >"$tmp/records.txt"
+test "$(sha256sum "$tmp/records.txt" | awk '{print $1}')" = "$(sed -n 's/^records_sha256=//p' "$receipt")"
+test "$(stat -c '%d:%i' "$repo/file-link.txt")" = "$(stat -c '%d:%i' "$repo/target.txt")"
+test "$(cat "$repo/$special-link.txt")" = 'special payload'
+test "$(cat "$repo/$special-link-dir/nested")" = nested
+# Independent raw numeric tag oracle, not localized fsutil text.
+MATERIALIZER_TEST_LINK="$(cygpath -w "$repo/dir-link")" powershell -NoProfile -NonInteractive -Command '
+$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;
+public static class TagOracle {
+[DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern SafeFileHandle CreateFileW(string p,uint a,uint s,IntPtr x,uint d,uint f,IntPtr t);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool DeviceIoControl(SafeFileHandle h,uint c,IntPtr i,int n,byte[] o,int l,out int r,IntPtr v);
+}
+"@
+$h = [TagOracle]::CreateFileW($env:MATERIALIZER_TEST_LINK,0,7,[IntPtr]::Zero,3,0x02200000,[IntPtr]::Zero)
+try {
+    $b = New-Object byte[] 16384; $n=0
+    if ($h.IsInvalid -or ![TagOracle]::DeviceIoControl($h,0x000900A8,[IntPtr]::Zero,0,$b,$b.Length,[ref]$n,[IntPtr]::Zero) -or $n -lt 8) { throw "tag oracle API failed" }
+    if ([BitConverter]::ToUInt32($b,0) -ne [uint32]2684354563) { throw "tag oracle mismatch" }
+} finally { $h.Dispose() }
+'
+MATERIALIZER_TEST_LINK="$(cygpath -w "$repo/dir-link")" MATERIALIZER_TEST_TARGET="$(cygpath -w "$repo/target-dir")" powershell -NoProfile -NonInteractive -Command '
+$ErrorActionPreference = "Stop"
+$link = Get-Item -LiteralPath $env:MATERIALIZER_TEST_LINK -Force
+if ($link.LinkType -ne "Junction") { throw "created link is not a junction" }
+$target = @($link.Target)[0]
+$actual = (Resolve-Path -LiteralPath $target).Path
+$expected = (Resolve-Path -LiteralPath $env:MATERIALIZER_TEST_TARGET).Path
+if ([string]::Compare($actual, $expected, [StringComparison]::OrdinalIgnoreCase) -ne 0) { throw "junction target identity mismatch" }
+'
+case_name=existing-identity
+run_materializer "$tmp/existing.env"
+test "$materializer_status" -eq 0
+grep -Fqx 'created=0' "$receipt"
+grep -Fqx 'already_ok=6' "$receipt"
+case_name=receipt-no-clobber
+cp "$receipt" "$tmp/receipt-before"
+run_materializer "$receipt"
+test "$materializer_status" -ne 0
+cmp "$receipt" "$tmp/receipt-before"
+
+for kind in copied wrong external dangling pending ordinary-dir tampered; do
+    new_repo "$kind"
+    case "$kind" in
+        copied|wrong|tampered)
+            printf 'payload\n' >"$repo/target.txt"
+            add_link file-link.txt target.txt
+            case "$kind" in copied) printf 'payload\n' >"$repo/file-link.txt" ;; wrong) printf wrong >"$repo/file-link.txt" ;; esac ;;
+        external) add_link file-link.txt /outside-target ;;
+        dangling) printf tracked >"$repo/missing-target.txt"; add_link file-link.txt missing-target.txt ;;
+        pending) mkdir -p "$repo/.codex/commands"; add_link .codex/commands/dev.md ../skills/dev/SKILL.md ;;
+        ordinary-dir)
+            mkdir "$repo/target-dir"
+            printf nested >"$repo/target-dir/nested"
+            add_link dir-link target-dir ;;
+    esac
+    commit_repo
+    if [ "$kind" = dangling ]; then
+        rm "$repo/missing-target.txt"
+        git -C "$repo" update-index --force-remove missing-target.txt
+    fi
+    if [ "$kind" = ordinary-dir ]; then rm "$repo/dir-link"; mkdir "$repo/dir-link"; fi
+    receipt="$tmp/$kind.env"
+    if [ "$kind" = tampered ]; then
+        run_materializer "$receipt"
+        test "$materializer_status" -eq 0
+        rm -f "$receipt" "$repo/file-link.txt"
+        printf 'tampered\n' >"$repo/file-link.txt"
+    fi
+    run_materializer "$receipt"
+    if [ "$kind" = pending ]; then test "$materializer_status" -eq 0; else test "$materializer_status" -ne 0; fi
+    if [ "$kind" = pending ]; then
+        grep -Fqx 'result=complete' "$receipt"
+        grep -Fqx 'pending_count=1' "$receipt"
+        grep -Fq 'state=pending-untracked' "$receipt"
+    else
+        test ! -e "$receipt"
+    fi
+    if [ "$kind" = ordinary-dir ]; then grep -Fq 'tag.expected=0xA0000003:actual=0x00000000' "$tmp/last.log"; fi
+done
+
+for malformed in newline nul invalid utf8 trailing-dot reserved; do
+    new_repo "blob-$malformed"
+    printf payload >"$repo/target.txt"
+    add_link alias target.txt
+    commit_repo
+    case "$malformed" in
+        newline) printf 'target.txt\n' >"$tmp/bad-blob" ;;
+        nul) printf 'target.txt\000ignored' >"$tmp/bad-blob" ;;
+        invalid) printf 'target?.txt' >"$tmp/bad-blob" ;;
+        utf8) printf 'target\377.txt' >"$tmp/bad-blob" ;;
+        trailing-dot) printf 'target.txt.' >"$tmp/bad-blob" ;;
+        reserved) printf 'NUL.txt' >"$tmp/bad-blob" ;;
+    esac
+    blob=$(git -C "$repo" hash-object -w "$tmp/bad-blob")
+    git -C "$repo" update-index --cacheinfo "120000,$blob,alias"
+    git -C "$repo" commit -qm malformed
+    cp "$tmp/bad-blob" "$repo/alias"
+    run_materializer "$tmp/blob-$malformed.env"
+    test "$materializer_status" -ne 0
+    test ! -e "$receipt"
+    cmp "$tmp/bad-blob" "$repo/alias"
+done
+new_repo placeholder-newline
+printf payload >"$repo/target.txt"
+add_link alias target.txt
+commit_repo
+printf 'target.txt\n' >"$repo/alias"
+run_materializer "$tmp/placeholder-newline.env"
+test "$materializer_status" -ne 0
+test ! -e "$receipt"
+grep -Fq 'tampered placeholder bytes' "$tmp/last.log"
+
+new_repo head-untracked
+mkdir -p "$repo/.codex/commands"
+add_link .codex/commands/dev.md ../skills/dev/SKILL.md
+commit_repo
+blob=$(printf staged | git -C "$repo" hash-object -w --stdin)
+git -C "$repo" update-index --add --cacheinfo "100644,$blob,.codex/commands/dev.md"
+run_materializer "$tmp/head-untracked.env"
+test "$materializer_status" -eq 0
+grep -Fqx 'result=complete' "$receipt"
+grep -Fqx 'pending_count=1' "$receipt"
+grep -Fq 'target_resolved_len=0|target_resolved_hex=-|target_volume=-|target_file_id=-|target_size=-|target_sha256=-|kind=unknown|state=pending-untracked' "$receipt"
+
+policy="$root/scripts/setup/windows-materialized-pending-policy.tsv"
+test "$(wc -l <"$policy" | tr -d ' ')" -eq 4
+grep -Fqx $'.codex/commands/dev.md\t../skills/dev/SKILL.md' "$policy"
+grep -Fqx $'bin/bb\t../tools/bb-cli/bin/bb' "$policy"
+grep -Fqx $'bin/bug\t../tools/bug-cli/bin/bug' "$policy"
+grep -Fqx $'bin/jira\t../tools/jira-cli/bin/jira' "$policy"
+
+
+for policy_row in dev bb bug jira; do
+    for match in exact path-near target-near; do
+        new_repo "policy-$policy_row-$match"
+        case "$policy_row" in
+            dev) policy_link=.codex/commands/dev.md; policy_target=../skills/dev/SKILL.md ;;
+            *) policy_link=bin/$policy_row; policy_target=../tools/$policy_row-cli/bin/$policy_row ;;
+        esac
+        case "$match" in path-near) policy_link=$policy_link-near ;; target-near) policy_target=$policy_target-near ;; esac
+        mkdir -p "$repo/$(dirname "$policy_link")"
+        add_link "$policy_link" "$policy_target"
+        commit_repo
+        run_materializer "$tmp/policy-$policy_row-$match.env"
+        if [ "$match" = exact ]; then
+            test "$materializer_status" -eq 0
+            grep -Fqx 'pending_count=1' "$receipt"
+        else
+            test "$materializer_status" -ne 0
+            test ! -e "$receipt"
+        fi
+    done
+done
+
+new_repo wrong-junction
+mkdir "$repo/expected" "$repo/wrong"
+printf expected >"$repo/expected/file"
+printf wrong >"$repo/wrong/file"
+add_link alias expected
+commit_repo
+rm "$repo/alias"
+fixture_junction "$repo/alias" "$repo/wrong"
+run_materializer "$tmp/wrong-junction.env"
+test "$materializer_status" -ne 0
+test ! -e "$receipt"
+grep -Fq 'identity.volume-file-id.mismatch' "$tmp/last.log"
+
+# A reparse target must not be accepted after pathname canonicalization.
+new_repo target-reparse
+mkdir "$repo/expected"
+printf expected >"$repo/expected/file"
+add_link alias expected
+commit_repo
+rm "$repo/alias"
+fixture_junction "$repo/alias" "$repo/expected"
+# Retargeting via a second junction makes the expected target itself reparse.
+remove_junction "$repo/alias"
+mv "$repo/expected" "$repo/original"
+fixture_junction "$repo/expected" "$repo/original"
+fixture_junction "$repo/alias" "$repo/expected"
+run_materializer "$tmp/target-reparse.env"
+test "$materializer_status" -ne 0
+test ! -e "$receipt"
+grep -Fq 'target.reparse' "$tmp/last.log"
+
+new_repo receipt-ancestor
+printf payload >"$repo/target.txt"
+add_link alias target.txt
+commit_repo
+mkdir "$tmp/real-output"
+fixture_junction "$tmp/output-alias" "$tmp/real-output"
+test ! -e "$tmp/real-output/new"
+FIXTURE_LINK="$(cygpath -w "$tmp/output-alias")" powershell -NoProfile -NonInteractive -Command '
+$ErrorActionPreference="Stop"
+$link = Get-Item -LiteralPath $env:FIXTURE_LINK -Force
+if ($link.LinkType -ne "Junction") { throw "receipt ancestor is not a junction" }
+'
+run_materializer "$tmp/output-alias/new/receipt.env"
+test "$materializer_status" -ne 0
+test ! -e "$tmp/real-output/new"
+grep -Fq 'ancestor.reparse' "$tmp/last.log"
+grep -Fq 'output-alias' "$tmp/last.log"
+! grep -Fq 'real-output' "$tmp/last.log"
+run_materializer "$tmp/output-alias"
+test "$materializer_status" -ne 0
+test -d "$tmp/real-output"
+
+for invalid_receipt in relative.env /tmp/receipt.env /c/Users/ormas/AppData/Local/Temp/a//b.env /c/Users/ormas/AppData/Local/Temp/CON.env /c/Users/ormas/AppData/Local/Temp/a/../b.env; do
+    run_materializer "$invalid_receipt"
+    test "$materializer_status" -ne 0
+done
+valid_receipt="$tmp/receipt apostrophe' [bracket] \$;().env"
+run_materializer "$valid_receipt"
+test "$materializer_status" -eq 0
+test -f "$valid_receipt"
+
+# Receipt-root creation belongs to the producer's alias-safe prepare action.
+if grep -Fq 'mkdir -p "${materialized_receipt_dir}"' "$root/scripts/bootstrap/bootstrap-windows.sh"; then
+    echo 'wrapper must not create the receipt parent' >&2
+    false
+fi
+grep -Fq 'native_action prepare' "$root/scripts/setup/materialize-symlinks-windows.shs"
+
+# Replace the target after link validation, immediately before metadata capture.
+# A pathname-only metadata reader would certify the replacement as the target.
+new_repo metadata-replacement
+printf original >"$repo/target.txt"
+add_link file-link.txt target.txt
+commit_repo
+mkdir "$tmp/metadata-hooks"
+real_powershell=$(command -v powershell)
+cat >"$tmp/metadata-hooks/powershell" <<'HOOK'
+#!/bin/sh
+if [ "${MATERIALIZER_ACTION:-}" = metadata ]; then
+    mv -- "$FIXTURE_TARGET_POSIX" "$FIXTURE_TARGET_POSIX.old" || exit 31
+    printf replacement >"$FIXTURE_TARGET_POSIX" || exit 32
+fi
+exec "$FIXTURE_POWERSHELL" "$@"
+HOOK
+chmod +x "$tmp/metadata-hooks/powershell"
+export FIXTURE_POWERSHELL="$real_powershell" FIXTURE_TARGET_POSIX="$repo/target.txt"
+PATH="$tmp/metadata-hooks:$PATH" run_materializer "$tmp/metadata-replacement.env"
+test "$materializer_status" -ne 0
+test ! -e "$receipt"
+grep -Fq 'identity.volume-file-id.mismatch' "$tmp/last.log"
+test "$(cat "$repo/file-link.txt")" = original
+test "$(cat "$repo/target.txt")" = replacement
+
+
+mkdir "$tmp/parser-hooks"
+cat >"$tmp/parser-hooks/powershell" <<'HOOK'
+#!/bin/sh
+if [ "${MATERIALIZER_ACTION:-}" = metadata ]; then
+    "$FIXTURE_POWERSHELL" "$@" >"$FIXTURE_RESPONSE" || exit $?
+    case "$FIXTURE_BAD_METADATA" in
+        extra) sed 's/$/|extra/' "$FIXTURE_RESPONSE" ;;
+        missing) sed 's/|[^|]*$//' "$FIXTURE_RESPONSE" ;;
+        line) cat "$FIXTURE_RESPONSE"; printf '\n' ;;
+        number) sed 's/^[^|]*/18446744073709551616/' "$FIXTURE_RESPONSE" ;;
+        volume) awk -F'|' 'BEGIN{OFS="|"}{$3="4294967296";print}' "$FIXTURE_RESPONSE" ;;
+        id) awk -F'|' 'BEGIN{OFS="|"}{$4="0:4294967296";print}' "$FIXTURE_RESPONSE" ;;
+        size) awk -F'|' 'BEGIN{OFS="|"}{$5="18446744073709551616";print}' "$FIXTURE_RESPONSE" ;;
+        sha) sed 's/|[^|]*$/|-/' "$FIXTURE_RESPONSE" ;;
+        utf8) awk -F'|' 'BEGIN{OFS="|"}{$1=7;$2="ffffffffffffff";print}' "$FIXTURE_RESPONSE" ;;
+        namespace) awk -F'|' 'BEGIN{OFS="|"}{$1=7;$2="61626364656667";print}' "$FIXTURE_RESPONSE" ;;
+    esac
+    exit 0
+fi
+exec "$FIXTURE_POWERSHELL" "$@"
+HOOK
+chmod +x "$tmp/parser-hooks/powershell"
+export FIXTURE_RESPONSE="$tmp/native-response"
+for bad in extra missing line number volume id size sha utf8 namespace; do
+    new_repo "parser-$bad"
+    printf payload >"$repo/target.txt"
+    add_link alias target.txt
+    commit_repo
+    export FIXTURE_BAD_METADATA="$bad"
+    PATH="$tmp/parser-hooks:$PATH" run_materializer "$tmp/parser-$bad.env"
+    test "$materializer_status" -ne 0
+    test ! -e "$receipt"
+done
+
+# Dependency wrappers inject deterministic failures/races; no producer hooks.
+real_sha=$(command -v sha256sum)
+real_git=$(command -v git)
+mkdir "$tmp/hooks"
+cat >"$tmp/hooks/sha256sum" <<'HOOK'
+#!/bin/sh
+for operand do :; done
+case "$operand" in */records) ;; *) exec "$FIXTURE_SHA" "$@" ;; esac
+case "$FIXTURE_FAULT" in
+    digest)
+        case "$operand" in */records) printf '%s  records\n' "$FIXTURE_DIGEST" ;; *) "$FIXTURE_SHA" "$@" ;; esac ;;
+    hash-fail)
+        case "$operand" in */records) exit 23 ;; *) "$FIXTURE_SHA" "$@" ;; esac ;;
+    target-replace) mv "$FIXTURE_TARGET" "$FIXTURE_TARGET.old"; printf replacement >"$FIXTURE_TARGET"; "$FIXTURE_SHA" "$@" ;;
+    target-content) printf replacement >"$FIXTURE_TARGET"; "$FIXTURE_SHA" "$@" ;;
+    link-replace) rm "$FIXTURE_LINK_PATH"; printf replacement >"$FIXTURE_LINK_PATH"; "$FIXTURE_SHA" "$@" ;;
+    collision) printf sentinel >"$FIXTURE_RECEIPT"; "$FIXTURE_SHA" "$@" ;;
+    ancestor) FIXTURE_LINK="$FIXTURE_PARENT" FIXTURE_TARGET="$FIXTURE_OTHER" powershell -NoProfile -NonInteractive -Command '
+        Remove-Item -LiteralPath $env:FIXTURE_LINK -Force -ErrorAction Stop
+        New-Item -ItemType Junction -Path $env:FIXTURE_LINK -Target $env:FIXTURE_TARGET -ErrorAction Stop | Out-Null
+        ' || exit 24
+        "$FIXTURE_SHA" "$@" ;;
+    interrupt) kill -TERM "$PPID"; exit 25 ;;
+    *) "$FIXTURE_SHA" "$@" ;;
+esac
+HOOK
+cat >"$tmp/hooks/git" <<'HOOK'
+#!/bin/sh
+if [ "$FIXTURE_FAULT" = head-change ] && [ "$1" = rev-parse ] && [ "${2:-}" = --verify ]; then
+    if [ -e "$FIXTURE_MARKER" ]; then printf '%040d\n' 0; exit 0; fi
+    : >"$FIXTURE_MARKER"
+fi
+exec "$FIXTURE_GIT" "$@"
+HOOK
+chmod +x "$tmp/hooks/sha256sum" "$tmp/hooks/git"
+export FIXTURE_SHA="$real_sha" FIXTURE_GIT="$real_git"
+base_path=$PATH
+for fault in digest hash-fail collision ancestor interrupt head-change target-replace target-content link-replace; do
+    new_repo "fault-$fault"
+    printf payload >"$repo/target.txt"
+    add_link alias target.txt
+    commit_repo
+    mkdir "$tmp/out-$fault" "$tmp/other-$fault"
+    export FIXTURE_FAULT="$fault" FIXTURE_RECEIPT="$tmp/out-$fault/receipt.env"
+    export FIXTURE_PARENT="$(cygpath -w "$tmp/out-$fault")" FIXTURE_OTHER="$(cygpath -w "$tmp/other-$fault")"
+    export FIXTURE_TARGET="$repo/target.txt" FIXTURE_LINK_PATH="$repo/alias"
+    export FIXTURE_MARKER="$tmp/head-marker"
+    export FIXTURE_DIGEST="aa0000000000000000000000000000000000000000000000000000000000000g"
+    PATH="$tmp/hooks:$base_path" run_materializer "$FIXTURE_RECEIPT"
+    test "$materializer_status" -ne 0
+    case "$fault" in
+        digest) grep -Fq 'invalid materialization record digest character' "$tmp/last.log" ;;
+        hash-fail) grep -Fq 'cannot hash materialization records' "$tmp/last.log" ;;
+        ancestor) grep -Fq 'ancestor.reparse' "$tmp/last.log" ;;
+        head-change) grep -Fq 'Git HEAD changed' "$tmp/last.log" ;;
+    esac
+    if [ "$fault" = collision ]; then test "$(cat "$receipt")" = sentinel; else test ! -e "$receipt"; fi
+    test "$(find "$tmp/other-$fault" -mindepth 1 | wc -l)" -eq 0
+    test "$(find "$tmp/out-$fault" -maxdepth 1 -name '.materializer-*.tmp' | wc -l)" -eq 0
+done
+
+# Exercise the publication parser directly in one compiled helper, with receipt
+# bytes mutated independently and row digests recomputed to reach row checks.
+new_repo receipt-contract
+mkdir -p "$repo/.codex/commands"
+add_link .codex/commands/dev.md ../skills/dev/SKILL.md
+commit_repo
+mkdir "$tmp/contract-hooks"
+cat >"$tmp/contract-hooks/powershell" <<'HOOK'
+#!/bin/sh
+if [ "${MATERIALIZER_ACTION:-}" = publish ]; then
+    for helper do :; done
+    export FIXTURE_HELPER="$helper"
+    exec "$FIXTURE_POWERSHELL" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$FIXTURE_CONTRACT"
+fi
+exec "$FIXTURE_POWERSHELL" "$@"
+HOOK
+chmod +x "$tmp/contract-hooks/powershell"
+cat >"$tmp/contract.ps1" <<'CONTRACT'
+$ErrorActionPreference = "Stop"
+try {
+$utf8 = New-Object Text.UTF8Encoding($false,$true)
+$code = [IO.File]::ReadAllText($env:FIXTURE_HELPER)
+$match = [regex]::Match($code, '(?s)Add-Type -TypeDefinition @"\r?\n(.*?)\r?\n"@')
+if (!$match.Success) { throw "helper extraction" }
+$native = $match.Groups[1].Value
+# Use a private policy copy; never mutate the shared producer policy.
+$policy = $env:MATERIALIZER_LINK_WIN + ".policy"
+[IO.File]::Copy($env:MATERIALIZER_POLICY,$policy)
+$env:MATERIALIZER_POLICY = $policy
+# Both an in-place write and a path swap must fail while the policy is held,
+# after digest capture and again immediately before receipt rename.
+$probe = @'
+bool writeBlocked = false, swapBlocked = false;
+try { using (var writer = new FileStream(policyFile, FileMode.Open, FileAccess.Write, FileShare.ReadWrite)) {} } catch (IOException) { writeBlocked = true; }
+try { File.Move(policyFile, policyFile + ".swapped"); } catch (IOException) { swapBlocked = true; }
+if (!writeBlocked || !swapBlocked) throw new IOException("fixture.policy-lock-missing");
+'@
+$native = $native.Replace('if (policyDigest != headers["policy_sha256"])', '{' + $probe + '} if (policyDigest != headers["policy_sha256"])')
+$native = $native.Replace('if (Fingerprint(policyHandle) != policyIdentity)', '{' + $probe + '} if (Fingerprint(policyHandle) != policyIdentity)')
+Add-Type -TypeDefinition $native
+$source = $env:MATERIALIZER_LINK_WIN
+$destination = $env:MATERIALIZER_TARGET_WIN
+$original = [IO.File]::ReadAllText($source,$utf8)
+if (!$original.Contains("pending_requires_consumer_revalidation=1`n")) { throw "missing consumer flag" }
+$cases = @{
+ duplicate = $original.Replace("result=complete", "result=complete`nresult=complete")
+ missing = $original.Replace("result=complete`n", "")
+ extra = $original.Replace("result=complete", "extra=1`nresult=complete")
+ result = $original.Replace("result=complete", "result=partial")
+ failed = $original.Replace("failed=0", "failed=1")
+ leading = $original.Replace("record_count=1", "record_count=01")
+ negative = $original.Replace("created=0", "created=-1")
+ overflow = $original.Replace("created=0", "created=18446744073709551616")
+ partition = $original.Replace("created=0", "created=1")
+ tracked = $original.Replace("tracked_mode120000=1", "tracked_mode120000=2")
+ pending = $original.Replace("pending_untracked=1", "pending_untracked=0")
+ skipped = $original.Replace("skipped_pending=0", "skipped_pending=1")
+ rowcount = $original.Replace("record_count=1", "record_count=2")
+ pendingcount = $original.Replace("pending_count=1", "pending_count=0")
+ flag = $original.Replace("pending_requires_consumer_revalidation=1", "pending_requires_consumer_revalidation=0")
+ missingflag = $original.Replace("pending_requires_consumer_revalidation=1`n", "")
+ trailing = $original + "result=complete`n"
+ rowextra = $original.Replace("|kind=unknown", "|extra=0|kind=unknown")
+ rowmissing = $original.Replace("|kind=unknown", "")
+ rowduplicate = $original.Replace("|kind=unknown", "|state=unknown")
+ roworder = $original.Replace("|kind=unknown|state=pending-untracked", "|state=pending-untracked|kind=unknown")
+ length = [regex]::Replace($original,'(?m)^path_len=[0-9]+','path_len=1')
+ oddhex = $original.Replace("|target_len=", "f|target_len=")
+ badhex = $original.Replace("path_hex=", "path_hex=gg")
+ unbounded = [regex]::Replace($original,'(?m)^path_len=[0-9]+','path_len=131069')
+ state = $original.Replace("state=pending-untracked", "state=bogus")
+ kind = $original.Replace("kind=unknown", "kind=file")
+ sentinel = $original.Replace("target_size=-", "target_size=0")
+ resolved = $original.Replace("target_resolved_len=0", "target_resolved_len=1")
+}
+foreach ($badPath in @('/absolute','../escape','a//b','a/./b','a/../b','a\b','C:drive','NUL.txt')) {
+ $hex = [BitConverter]::ToString($utf8.GetBytes($badPath)).Replace('-','').ToLowerInvariant()
+ $cases["path-$badPath"] = [regex]::Replace($original,'path_len=[0-9]+\|path_hex=[0-9a-f]+',("path_len={0}|path_hex={1}" -f $utf8.GetByteCount($badPath),$hex))
+}
+foreach ($badTarget in @('/absolute','../../../escape','a//b','a/../b','C:drive')) {
+ $hex = [BitConverter]::ToString($utf8.GetBytes($badTarget)).Replace('-','').ToLowerInvariant()
+ $cases["target-$badTarget"] = [regex]::Replace($original,'\|target_len=[0-9]+\|target_hex=[0-9a-f]+',("|target_len={0}|target_hex={1}" -f $utf8.GetByteCount($badTarget),$hex))
+}
+foreach ($name in $cases.Keys) {
+ $text = $cases[$name]
+ $rows = [regex]::Match($text,'(?s)records_begin\n(.*?)records_end\n').Groups[1].Value
+ $hash = [Security.Cryptography.SHA256]::Create()
+ try { $digest = [BitConverter]::ToString($hash.ComputeHash($utf8.GetBytes($rows))).Replace('-','').ToLowerInvariant() } finally { $hash.Dispose() }
+ $text = [regex]::Replace($text,'(?m)^records_sha256=.*$',"records_sha256=$digest")
+ [IO.File]::WriteAllText($source,$text,$utf8)
+ $rejected = $false
+ try { [MaterializerApi]::Publish($source,$destination,$false) } catch {
+  if ($_.Exception.ToString() -notmatch 'receipt\.|metadata.number') { throw }
+  $rejected = $true
+ }
+ if (!$rejected -or [IO.File]::Exists($destination)) { throw "accepted malformed case $name" }
+}
+[IO.File]::WriteAllText($source,$original,$utf8)
+# A swapped policy with different bytes cannot retain the earlier digest.
+[IO.File]::WriteAllText($policy,"different`n",$utf8)
+$rejected = $false
+try { [MaterializerApi]::Publish($source,$destination,$false) } catch {
+ if ($_.Exception.ToString() -notmatch 'receipt.policy-digest-mismatch') { throw }; $rejected = $true
+}
+if (!$rejected) { throw "policy digest mismatch accepted" }
+[IO.File]::Copy($env:FIXTURE_POLICY,$policy,$true)
+[MaterializerApi]::Publish($source,$destination,$false)
+if (![IO.File]::Exists($destination)) { throw "valid pending receipt missing" }
+[IO.File]::Delete($policy)
+exit 0
+} catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }
+CONTRACT
+export FIXTURE_CONTRACT="$(cygpath -w "$tmp/contract.ps1")" FIXTURE_POLICY="$(cygpath -w "$policy")"
+PATH="$tmp/contract-hooks:$PATH" run_materializer "$tmp/contract.env"
+test "$materializer_status" -eq 0
+grep -Fqx 'pending_requires_consumer_revalidation=1' "$receipt"
+
+new_repo empty
+printf empty >"$repo/file"
+commit_repo
+printf sentinel >"$tmp/.materializer-collision.tmp"
+run_materializer "$tmp/empty.env"
+test "$materializer_status" -eq 0
+grep -Fqx 'record_count=0' "$receipt"
+test "$(cat "$tmp/.materializer-collision.tmp")" = sentinel
+test "$(find "$tmp" -maxdepth 1 -name 'materializer.*' | wc -l)" -eq 0
+printf 'PASS: Windows materialization receipt producer behavioral fixtures\n'

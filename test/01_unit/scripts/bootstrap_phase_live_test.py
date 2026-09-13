@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location("phase_live", ROOT / "scripts/check/check-bootstrap-phase-live.py")
@@ -15,6 +16,45 @@ SPEC.loader.exec_module(LIVE)
 
 
 class PhaseLiveContract(unittest.TestCase):
+    def test_provider_usage_words_do_not_mask_failure_but_exact_unauthorized_blocks(self):
+        usage = "Usage: devhub auth login --token TOKEN\nrequest failed: http parser panic\n"
+        with self.assertRaises(LIVE.Verdict) as failure:
+            LIVE.parse_provider("github", usage, 1, "org/repo")
+        self.assertEqual(failure.exception.status, "FAIL")
+        self.assertEqual(failure.exception.reason, "provider-command-failed")
+        with self.assertRaises(LIVE.Verdict) as unavailable:
+            LIVE.parse_provider("github", "HTTP 401\n", 1, "org/repo")
+        self.assertEqual(unavailable.exception.status, "BLOCKED")
+
+    def test_provider_crash_precedes_unauthorized_classification(self):
+        with self.assertRaises(LIVE.Verdict) as result:
+            LIVE.parse_provider("github", "HTTP 401\n", 139, "org/repo")
+        self.assertEqual(result.exception.status, "FAIL")
+        self.assertEqual(result.exception.reason, "provider-process-crashed")
+
+    def test_identity_command_failure_is_not_auth_unavailability(self):
+        class FailingIdentityChild:
+            def __init__(self, argv, env, timeout):
+                self.output = bytearray(b"identity implementation failure\n")
+                self.errors = bytearray()
+
+            def finish(self):
+                return 1, self.output.decode()
+
+            def close(self):
+                pass
+
+        manifest = {
+            "resources": {"github_principal": "fixture-user"},
+            "github_cli": {"path": str(Path(sys.executable).resolve()),
+                           "sha256": LIVE.digest(sys.executable)},
+        }
+        with mock.patch.object(LIVE, "Child", FailingIdentityChild):
+            with self.assertRaises(LIVE.Verdict) as result:
+                LIVE.provider_identity(manifest, "github", ["unused"], {}, 1, {})
+        self.assertEqual(result.exception.status, "FAIL")
+        self.assertEqual(result.exception.reason, "identity-command-failed")
+
     def test_provider_expected_identity_is_required(self):
         with self.assertRaises(LIVE.Verdict) as result:
             LIVE.provider_identity({}, "jira", ["unused"], {}, 1, {})

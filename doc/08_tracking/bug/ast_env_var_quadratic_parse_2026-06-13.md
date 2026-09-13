@@ -1,8 +1,16 @@
 # Bug: AST env-var backing store causes O(N²) parse time
 
+## Closed 2026-09-13 — Fixed: the AST store is array-backed; env writes survive only as a gated bootstrap mirror
+
+- **measured** (grep of current source): the proposed fix is in place. `stmt_alloc` (`src/compiler/10.frontend/core/ast_stmt.spl:285`) pushes to arrays (`stmt_tag`, `stmt_span`, `stmt_name`, ...) and the count lives in `stmt_count_slot`, not in `SIMPLE_BOOTSTRAP_STMT_COUNT`.
+- **measured**: every remaining `rt_env_set` is behind `stmt_env_mirror_enabled()` — `stmt_i64_set`/`stmt_text_set` (`:209-215`) are no-ops unless `SIMPLE_BOOTSTRAP=1` and `SIMPLE_NATIVE_ARENA_DECLS!=1`. The unconditional per-field `setenv()`/`getenv()` that made parsing O(N^2) is gone from the ordinary `check` path this bug was reported against.
+- **measured**: two of the three files the entry names, `ast_part1.spl` and `ast_part2.spl`, no longer exist — that layer was refactored after this report.
+- **inferred**: the 52s/146s/timeout table cannot be re-measured here. `bin/simple` on this host is the Rust seed, whose frontend is Rust; the quadratic store lived in the pure-Simple self-hosted frontend and no self-hosted binary is deployed.
+- Residual, stated rather than papered over: under `SIMPLE_BOOTSTRAP=1` the env mirror still runs and is still linear-per-write. That is a deliberate interpreter-persistence compat shim, not the reported defect.
+
 **ID:** ast_env_var_quadratic_parse_2026-06-13  
 **Severity:** P1 — `check` on 400+ top-level functions times out (>300 s)  
-**Status:** Localized, fix proposed, not yet implemented  
+**Status:** CLOSED 2026-09-13 (implemented; array-backed store). Originally: Localized, fix proposed, not yet implemented  
 **Reported:** 2026-06-13
 
 ---

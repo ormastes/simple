@@ -1,0 +1,138 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer removing the packed-font write race recorded
+in `doc/08_tracking/bug/web_catalog_900x760_frame_checksum_nondeterministic_2026-09-12.md`.
+
+The packed font kernel (`font_atlas_composite.spl:266`) runs one invocation per
+`(pixel, glyph)` and blends with a **non-atomic read-modify-write** on
+`dst[di]`. Two quads in the SAME dispatch whose destination rects share a pixel
+are two concurrent invocations racing on that word, and the loser's blend is
+dropped -- measured directly: pixel (89,392) of `css-layout.html` at 900x760
+reads **139** in one run and **226** in another of the same binary, against a
+CPU oracle of 124. `vulkan_font_partition_quads` assigns each quad a sub-batch
+index so that no two quads in one dispatch overlap.
+
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ <simple> run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_quad_partition_spec.spl`
+
+No GPU. The partition is a pure function of quad geometry, and the property that
+matters -- does it keep overlapping quads in their original relative order? --
+is a statement about the returned indices, not about pixels. Requiring a device
+would only make the file skippable on hosts that cannot run it.
+
+## Compatibility and limitations
+This file pins the ASSIGNMENT. It does not prove the dispatch loop consumes the
+assignment correctly, nor that the barrier between dispatches exists -- the
+latter is a property of `interpreter_extern/gpu.rs:5340-5359`, verified by
+reading it, and the former belongs to a device run whose oracle is two
+byte-identical 900x760 renders.
+
+Destination coordinates only, with no origin offset applied: the origin is one
+constant added to every quad in a batch, so it cannot change whether two of them
+intersect.
+
+## Verification guidance and troubleshooting
+The load-bearing example is the **A/B/C chain**, and it is the one a plausible
+wrong implementation fails. First-fit assignment -- "put each quad in the lowest
+bucket where it fits" -- satisfies "no two overlapping quads share a bucket"
+perfectly, and still inverts painter order: with C overlapping B but NOT A,
+first-fit puts C in bucket 0 next to A, so C dispatches BEFORE B, while the CPU
+raster paints B then C. `1 + max(bucket(p))` over earlier overlapping `p` is
+what preserves the order.
+
+Sabotage: replace the `1 + max` accumulation with first-fit. The chain example
+goes red with C in bucket 0; every other example stays green.
+"""
+# Lifecycle: doc/08_tracking/bug/web_catalog_900x760_frame_checksum_nondeterministic_2026-09-12.md
+# @manual_section: vulkan_font_quad_partition
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl 2%
+# @tag: unit, gpu, engine2d, vulkan, font
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_partition_quads,
+    vulkan_font_partition_bucket_count, vulkan_font_count_overlapping_quads}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderQuad}
+
+fn quad(x: i32, y: i32, w: i32, h: i32) -> FontRenderQuad:
+    FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: x, dst_y: y,
+        width: w, height: h, atlas_x: 0i32, atlas_y: 0i32,
+        color: 0xFFFFFFFFu32, cluster: 0)
+
+describe "Quads are partitioned so no dispatch blends two overlapping glyphs":
+
+    it "leaves non-overlapping quads in ONE sub-batch":
+        # BASELINE, and the common case: 300x253 of the measured page has zero
+        # overlapping pairs across 5 batches. Everything must stay in bucket 0
+        # there, so the split is byte-for-byte today's behaviour and costs
+        # nothing on pages that never needed it.
+        val quads = [quad(0i32, 0i32, 10i32, 10i32), quad(20i32, 0i32, 10i32, 10i32),
+            quad(40i32, 0i32, 10i32, 10i32)]
+        val buckets = vulkan_font_partition_quads(quads)
+        expect(vulkan_font_partition_bucket_count(buckets)).to_equal(1)
+
+    it "separates two overlapping quads into consecutive sub-batches":
+        # REPRODUCING, minimally. Two glyphs sharing a destination pixel are the
+        # whole defect; they must not be dispatched together.
+        val quads = [quad(0i32, 0i32, 10i32, 10i32), quad(5i32, 5i32, 10i32, 10i32)]
+        val buckets = vulkan_font_partition_quads(quads)
+        expect(buckets[0] == 0 and buckets[1] == 1).to_equal(true)
+
+    it "keeps an A/B/C overlap CHAIN in painter order":
+        # THE LOAD-BEARING EXAMPLE, and the sabotage target. C overlaps B but
+        # NOT A. A first-fit partition puts C in bucket 0 -- no bucket then
+        # contains an overlapping pair, yet C is dispatched before B while the
+        # CPU raster paints B then C. `1 + max` gives 0/1/2 and preserves it.
+        val a = quad(0i32, 0i32, 10i32, 10i32)
+        val b = quad(8i32, 0i32, 10i32, 10i32)
+        val c = quad(16i32, 0i32, 10i32, 10i32)
+        val buckets = vulkan_font_partition_quads([a, b, c])
+        expect(buckets[0] == 0 and buckets[1] == 1 and buckets[2] == 2).to_equal(true)
+
+    it "does NOT promote a quad past a bucket it has no conflict with":
+        # The other direction: the rule must not degenerate into "one bucket per
+        # quad", which would turn every batch into N dispatches. D overlaps only
+        # A, so it belongs in bucket 1 regardless of how many unrelated quads
+        # were assigned higher buckets before it.
+        val a = quad(0i32, 0i32, 10i32, 10i32)
+        val b = quad(8i32, 0i32, 10i32, 10i32)
+        val c = quad(16i32, 0i32, 10i32, 10i32)
+        val d = quad(2i32, 0i32, 4i32, 4i32)
+        val buckets = vulkan_font_partition_quads([a, b, c, d])
+        expect(buckets[3]).to_equal(1)
+
+    it "produces buckets whose members never overlap each other":
+        # THE INVARIANT ITSELF, checked rather than assumed from the rule. Every
+        # pair sharing a bucket is counted with the same census the product uses
+        # on the device path, so a partition that satisfied the index
+        # expectations above while still colliding would be caught here.
+        val quads = [quad(0i32, 0i32, 10i32, 10i32), quad(5i32, 2i32, 10i32, 10i32),
+            quad(9i32, 4i32, 10i32, 10i32), quad(40i32, 40i32, 6i32, 6i32),
+            quad(43i32, 42i32, 6i32, 6i32)]
+        val buckets = vulkan_font_partition_quads(quads)
+        val count = vulkan_font_partition_bucket_count(buckets)
+        var collisions: i64 = 0
+        var b: i64 = 0
+        while b < count:
+            var members: [FontRenderQuad] = []
+            var i: i64 = 0
+            while i < quads.len().to_i64():
+                if buckets[i] == b:
+                    members.push(quads[i])
+                i = i + 1
+            collisions = collisions + vulkan_font_count_overlapping_quads(members)
+            b = b + 1
+        expect(collisions).to_equal(0)
+
+    it "assigns exactly one index per quad":
+        # Non-vacuity. A partition that returned an empty array would satisfy
+        # the collision invariant above perfectly and drop every glyph.
+        val quads = [quad(0i32, 0i32, 10i32, 10i32), quad(5i32, 5i32, 10i32, 10i32),
+            quad(30i32, 30i32, 10i32, 10i32)]
+        expect(vulkan_font_partition_quads(quads).len().to_i64()).to_equal(3)
+
+    it "handles an empty batch without inventing a dispatch":
+        # BOUNDARY. A batch with no quads must imply no sub-batches, not one
+        # empty dispatch.
+        expect(vulkan_font_partition_bucket_count(vulkan_font_partition_quads([]))).to_equal(0)

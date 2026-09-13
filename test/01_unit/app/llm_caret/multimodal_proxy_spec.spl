@@ -1,0 +1,120 @@
+# codex-impl
+use std.spec.*
+use app.llm_caret.server.{parse_chat_request_messages_json,
+    multimodal_messages_have_image_v1, validate_proxy_image_messages_v1,
+    validate_proxy_image_messages_with_limits_v1,
+    openai_messages_to_anthropic_v1, anthropic_messages_to_openai_v1,
+    anthropic_system_text_v1}
+use app.llm_caret.main.{proxy_handle_multimodal,
+    validate_proxy_image_model_selection_v1}
+use app.llm_caret.provider.{LLMResponse}
+use app.llm_caret.multimodal_types.*
+use app.llm_caret.multimodal_provider.{multimodal_messages_json_v1}
+
+var CAPTURED_MULTIMODAL_MESSAGES = ""
+
+fn capture_multimodal_dispatch(content: text, model: text, messages_json: text) -> LLMResponse:
+    CAPTURED_MULTIMODAL_MESSAGES = messages_json
+    LLMResponse(content: "ok", model: model, provider: "fixture", session_id: "",
+        stop_reason: "stop", input_tokens: 1, output_tokens: 1, error: "",
+        is_error: false, raw: "")
+
+describe "REQ-002 multimodal proxy preservation":
+    it "pins image requests to the configured image profile":
+        val profile = ModelProfileV1(profile_id: "image-profile", provider: "slang",
+            endpoint: "http://localhost:8721", model_id: "vision-model",
+            model_revision: "r1", secret_ref: "", vision: true,
+            structured_output: true, remote_egress: false, fallback_provider: "",
+            max_images: 1, max_pixels: 1000000, max_request_bytes: 1048576,
+            max_output_tokens: 4096, timeout_ms: 30000, max_concurrency: 1,
+            trust_scope: "test")
+        expect(validate_proxy_image_model_selection_v1("", profile)).to_equal("")
+        expect(validate_proxy_image_model_selection_v1("image-profile", profile)).to_equal("")
+        expect(validate_proxy_image_model_selection_v1("vision-model", profile)).to_equal("")
+        expect(validate_proxy_image_model_selection_v1("text-model", profile)).to_equal(
+            "requested image model does not match the configured image-read profile")
+
+    it "serializes Claude images with Anthropic base64 source objects":
+        val image = image_data_part_v1("fixture.png", "image/png", 1, 1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "high", "data:image/png;base64,AA==")
+        val encoded = multimodal_messages_json_v1([
+            MultimodalMessageV1(role: "system", parts: [text_part_v1("policy")]),
+            MultimodalMessageV1(role: "user", parts: [image])], "claude_api")
+        expect(encoded).to_contain("\"type\":\"image\"")
+        expect(encoded).to_contain("\"media_type\":\"image/png\"")
+        expect(encoded).to_contain("\"data\":\"AA==\"")
+        expect(encoded.contains("\"role\":\"system\"")).to_be(false)
+
+    it "serializes local Slang with ordered OpenAI-compatible typed parts":
+        val image = image_data_part_v1("fixture.png", "image/png", 1, 1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "high", "data:image/png;base64,AA==")
+        val encoded = multimodal_messages_json_v1([
+            MultimodalMessageV1(role: "user", parts: [
+                text_part_v1("before"), image, text_part_v1("after")])], "slang")
+        expect(encoded).to_contain("\"type\":\"image_url\"")
+        expect(encoded).to_contain("\"detail\":\"high\"")
+        expect(encoded.index_of("before")).to_be_less_than(encoded.index_of("data:image/png"))
+        expect(encoded.index_of("data:image/png")).to_be_less_than(encoded.index_of("after"))
+
+    it "preserves ordered roles and typed image content arrays":
+        val body = "{\"model\":\"vision-local\",\"messages\":[{\"role\":\"system\",\"content\":\"faithful\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"read\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AA==\",\"detail\":\"high\"}}]}]}"
+        val messages = parse_chat_request_messages_json(body)
+        expect(messages).to_start_with("[")
+        expect(messages).to_end_with("]")
+        expect(messages).to_contain("\"role\":\"system\"")
+        expect(messages).to_contain("\"role\":\"user\"")
+        expect(messages).to_contain("\"type\":\"image_url\"")
+        expect(messages).to_contain("data:image/png;base64,AA==")
+
+        val result = proxy_handle_multimodal("POST", "/v1/chat/completions", body, capture_multimodal_dispatch)
+        expect(result.0).to_equal(200)
+        expect(CAPTURED_MULTIMODAL_MESSAGES).to_equal(messages)
+
+    it "preserves Anthropic top-level system content as an ordered message":
+        val body = "{\"model\":\"vision-local\",\"system\":\"keep Unicode 한국어\",\"messages\":[{\"role\":\"user\",\"content\":\"read\"}]}"
+        val result = proxy_handle_multimodal("POST", "/v1/messages", body,
+            capture_multimodal_dispatch)
+        expect(result.0).to_equal(200)
+        expect(CAPTURED_MULTIMODAL_MESSAGES).to_start_with("[{\"role\":\"system\"")
+        expect(CAPTURED_MULTIMODAL_MESSAGES).to_contain("keep Unicode 한국어")
+
+    it "rejects absent and unterminated message arrays":
+        expect(parse_chat_request_messages_json("{}")).to_equal("")
+        expect(parse_chat_request_messages_json("{\"messages\":[{")).to_equal("")
+
+    it "does not confuse text containing image keys or URLs with an image":
+        val body = "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"explain image_url and https://example.invalid\"}]}]}"
+        expect(multimodal_messages_have_image_v1(parse_chat_request_messages_json(body))).to_be(false)
+
+    it "rejects remote image URLs after structural parsing":
+        val messages = "[{\"role\":\"user\",\"content\":[{\"type\" : \"image_url\",\"image_url\":{\"url\":\"https://example.invalid/a.png\"}}]}]"
+        expect(multimodal_messages_have_image_v1(messages)).to_be(true)
+        expect(validate_proxy_image_messages_v1(messages, 1000)).to_contain("requires PNG, JPEG, or WebP")
+
+    it "rejects system-role images before provider conversion can drop them":
+        val messages = "[{\"role\":\"system\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AA==\"}}]}]"
+        expect(validate_proxy_image_messages_v1(messages, 1000)).to_equal(
+            "image input parts require a user message")
+
+    it "verifies inline bytes against the declared image MIME type":
+        val valid = "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\"}}]}]"
+        expect(validate_proxy_image_messages_v1(valid, 1000)).to_equal("")
+        expect(validate_proxy_image_messages_v1(valid, 68)).to_equal("")
+        expect(validate_proxy_image_messages_v1(valid, 67)).to_contain("image bytes")
+        val fake = valid.replace("iVBORw0K", "QUFBQUFB")
+        expect(validate_proxy_image_messages_v1(fake, 1000)).to_contain("does not match")
+        expect(validate_proxy_image_messages_with_limits_v1(valid, 1000, 1, 0)).to_contain("decoded pixels")
+        expect(validate_proxy_image_messages_with_limits_v1(valid, 1000, 0, 1)).to_contain("image count")
+
+    it "converts OpenAI image parts and lifts system text for Claude":
+        val messages = "[{\"role\":\"system\",\"content\":\"policy\"},{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AA==\"}}]}]"
+        val converted = openai_messages_to_anthropic_v1(messages)
+        expect(anthropic_system_text_v1(messages)).to_equal("policy")
+        expect(converted.contains("\"role\":\"system\"")).to_be(false)
+        expect(converted).to_contain("\"type\":\"image\"")
+        expect(converted).to_contain("\"media_type\":\"image/png\"")
+        val round_trip = anthropic_messages_to_openai_v1(converted)
+        expect(round_trip).to_contain("\"type\":\"image_url\"")
+        expect(round_trip).to_contain("data:image/png;base64,AA==")

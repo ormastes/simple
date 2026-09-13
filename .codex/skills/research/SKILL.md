@@ -17,6 +17,14 @@ description: "Codex research skill (Step 2 in cooperative pipeline). Forked para
 
 ## Phase 1: Local Research
 
+Before repository research, locate common SPipe through the shared locator when
+available. The target order is `SPIPE_HOME`, the project's configured common
+route, `~/spipe`, `~/.spipe/common`, then legacy `.spipe/spipe` compatibility.
+Load applicable common and authorized scope `skills/`, the ownership/setup
+guides, and `wiki/index.md` before selecting leaves. A path is not authorization;
+do not probe denied scopes or recursively scan every wiki. If common cannot be
+located, report the setup error rather than silently skipping SPipe guidance.
+
 Resolve the exact feature and planned source paths through
 `doc/00_llm_process/knowledge_registry.sdn`. Retain exact feature-group and
 longest-prefix layer-base selection in `.spipe/<feature>/knowledge_selection.sdn`.

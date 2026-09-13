@@ -11,55 +11,24 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
 
-thread_local! {
-    /// Per-process memo of PARSED imported modules, keyed by resolved path.
-    ///
-    /// `preregister_imported_type_names` and `load_imported_types` each read AND
-    /// fully re-parsed the imported file on every `use` that names it. Measured
-    /// with a call-site read trace on a lint of a TWO-LINE file: 2,672 reads at
-    /// the pre-register site and 611 at the load site out of 3,522 traced reads
-    /// -- `10.frontend/core/ast.spl` alone parsed 749 + 121 times. Both sites
-    /// consume the result immutably (`&imported_module.items`), and parsing is a
-    /// deterministic function of the file's bytes, so one parse per path per
-    /// process is observationally identical.
-    ///
-    /// `None` memoizes "unreadable or unparseable", which both sites previously
-    /// recomputed on every visit (the pre-register site silently skips, the load
-    /// site reports a module-resolution error).
-    ///
-    /// Per-PROCESS only -- a `src/lib/**` edit is still picked up by the next
-    /// run, so the "edit stdlib, no build needed" property is unchanged.
-    static IMPORTED_MODULE_AST: std::cell::RefCell<
-        std::collections::HashMap<std::path::PathBuf, Option<std::sync::Arc<simple_parser::ast::Module>>>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// Read + parse an imported module, memoized per process. See `IMPORTED_MODULE_AST`.
+/// Read + parse an imported module, memoized per process.
+///
+/// The memo itself is `module_cache::PARSED_SOURCE_CACHE`, which the
+/// INTERPRETER's module loader also reads: a file both lanes reach is read once
+/// and parsed once instead of twice. It was a private `IMPORTED_MODULE_AST`
+/// here until 2026-09-12; the keying (`normalize_path_key`, so alias spellings
+/// of one physical file are one unit) and the "memoize unreadable/unparseable
+/// as `None`" behaviour are unchanged, only the owner moved.
+///
+/// `IMPORT_AST_PARSES` still counts the parses THIS lane caused, which is why
+/// the lookup and the fill are separate calls.
 pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync::Arc<simple_parser::ast::Module>> {
-    if let Some(hit) = IMPORTED_MODULE_AST.with(|c| c.borrow().get(path).cloned()) {
+    if let Some(hit) = crate::interpreter::shared_source_lookup(path) {
         crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_HITS, 1);
-        return hit;
+        return hit.ast();
     }
     crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_PARSES, 1);
-    let parsed = match crate::read_trace::rts(file!(), line!(), path) {
-        Ok(mut source) => {
-            if source.contains('\r') {
-                source = source.replace('\r', "");
-            }
-            simple_parser::Parser::new(&source)
-                .parse()
-                .ok()
-                .map(std::sync::Arc::new)
-        }
-        Err(_) => None,
-    };
-    IMPORTED_MODULE_AST.with(|c| c.borrow_mut().insert(path.to_path_buf(), parsed.clone()));
-    parsed
-}
-
-/// Drop the imported-module parse memo.
-pub(crate) fn clear_imported_module_ast_cache() {
-    IMPORTED_MODULE_AST.with(|c| c.borrow_mut().clear());
+    crate::interpreter::shared_source(path).ast()
 }
 
 impl Lowerer {
@@ -265,6 +234,7 @@ impl Lowerer {
             Node::Const(const_stmt) => const_stmt.name == name,
             Node::Let(let_stmt) => Self::extract_pattern_name(&let_stmt.pattern).as_deref() == Some(name),
             Node::Extern(extern_fn) => extern_fn.name == name,
+            Node::ExportUseStmt(export_use) => Self::import_target_exports_name(&export_use.target, name),
             _ => false,
         }
     }
@@ -285,6 +255,7 @@ impl Lowerer {
         match item {
             Node::Function(func_def) => func_def.name == name,
             Node::Extern(extern_fn) => extern_fn.name == name,
+            Node::ExportUseStmt(export_use) => Self::import_target_exports_name(&export_use.target, name),
             _ => false,
         }
     }
@@ -314,6 +285,9 @@ impl Lowerer {
 
             if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
                 self.globals.insert(alias_name.clone(), symbol_ty);
+            }
+            if let Some(return_ty) = self.method_return_types.get(&original_name).copied() {
+                self.method_return_types.insert(alias_name.clone(), return_ty);
             }
 
             let is_callable = items
@@ -703,22 +677,33 @@ impl Lowerer {
 
         let mut imported_count = 0;
         for sibling_path in sibling_files {
-            if self.loaded_modules.contains(&sibling_path) {
+            // Same unit identity as `load_imported_types`: one physical file is one
+            // entry, whichever spelling the package scan produced.
+            let sibling_key = crate::interpreter::normalize_path_key(&sibling_path);
+            if self.loaded_modules.contains(&sibling_key) {
                 continue;
             }
-            self.loaded_modules.insert(sibling_path.clone());
+            self.loaded_modules.insert(sibling_key);
 
-            let mut source = crate::read_trace::rts(file!(), line!(), &sibling_path).map_err(|e| {
-                LowerError::ModuleResolution(format!("Failed to read sibling module file {:?}: {}", sibling_path, e))
-            })?;
-            if source.contains('\r') {
-                source = source.replace('\r', "");
-            }
-
-            let mut parser = simple_parser::Parser::new(&source);
-            let sibling_module = parser
-                .parse()
-                .map_err(|e| LowerError::ModuleResolution(format!("Failed to parse sibling module: {}", e)))?;
+            // Shared memo, but the two failure messages are reproduced verbatim
+            // from the cached text: the cache keeps the io/parse error's
+            // `Display` rather than the error itself, precisely so a borrowed
+            // entry yields the same diagnostic a private read+parse did.
+            let sibling_module = match crate::interpreter::shared_source(&sibling_path) {
+                crate::interpreter::SharedSource::Parsed { ast: Ok(ast), .. } => ast,
+                crate::interpreter::SharedSource::Parsed { ast: Err(e), .. } => {
+                    return Err(LowerError::ModuleResolution(format!(
+                        "Failed to parse sibling module: {}",
+                        e
+                    )));
+                }
+                crate::interpreter::SharedSource::ReadError(e) => {
+                    return Err(LowerError::ModuleResolution(format!(
+                        "Failed to read sibling module file {:?}: {}",
+                        sibling_path, e
+                    )));
+                }
+            };
 
             imported_count += self.register_imported_symbols_from_items(&sibling_module.items, target)?;
         }
@@ -811,18 +796,11 @@ impl Lowerer {
         sibling_files.sort();
 
         for sibling_path in sibling_files {
-            let mut source = match crate::read_trace::rts(file!(), line!(), &sibling_path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            if source.contains('\r') {
-                source = source.replace('\r', "");
-            }
-
-            let mut parser = simple_parser::Parser::new(&source);
-            let sibling_module = match parser.parse() {
-                Ok(m) => m,
-                Err(_) => continue,
+            // Same memo as `load_imported_types`, so a sibling this lane (or
+            // the interpreter) already read is not read and parsed again. Both
+            // failure modes still skip the file silently, as before.
+            let Some(sibling_module) = parsed_imported_module(&sibling_path) else {
+                continue;
             };
 
             for item in &sibling_module.items {
@@ -869,7 +847,12 @@ impl Lowerer {
         // Resolve module path to filesystem location
         let resolved = self.resolve_imported_module_path(resolver, current_file, module_path, target)?;
 
-        let import_key = (resolved.path.clone(), Self::import_target_cache_key(target));
+        // Identity of the UNIT, not of the spelling that reached it: `src/std/x.spl`
+        // and `src/lib/x.spl` are one file, and so are the relative and absolute
+        // forms of either. `import_stack` and `current_file` deliberately keep the
+        // raw path -- they feed cycle reports and `base_dir` resolution.
+        let unit_key = crate::interpreter::normalize_path_key(&resolved.path);
+        let import_key = (unit_key.clone(), Self::import_target_cache_key(target));
         if self.loaded_import_targets.contains(&import_key) {
             return Ok(());
         }
@@ -890,17 +873,17 @@ impl Lowerer {
         // graph is permanently empty and the check is a guaranteed `Ok(())`.
         // This is where the real graph is walked, so this is where the cycle is
         // observable.
-        if self.loaded_modules.contains(&resolved.path) {
+        if self.loaded_modules.contains(&unit_key) {
             self.record_import_cycle(&resolved.path);
             return Ok(());
         }
-        self.loaded_modules.insert(resolved.path.clone());
+        self.loaded_modules.insert(unit_key.clone());
         self.import_stack.push(resolved.path.clone());
 
         if resolved.path.extension().is_some_and(|ext| ext == "smf") {
             let result = self.load_types_from_smf(&resolved.path, target);
             self.import_stack.pop();
-            self.loaded_modules.remove(&resolved.path);
+            self.loaded_modules.remove(&unit_key);
             if result.is_ok() {
                 self.loaded_import_targets.insert(import_key);
             }
@@ -955,7 +938,7 @@ impl Lowerer {
 
         self.current_file = previous_file;
         self.import_stack.pop();
-        self.loaded_modules.remove(&resolved.path);
+        self.loaded_modules.remove(&unit_key);
         if result.is_ok() {
             self.loaded_import_targets.insert(import_key);
         }
@@ -971,7 +954,16 @@ impl Lowerer {
     /// once per import target group, and reporting it many times would bury the
     /// distinct cycles.
     pub(super) fn record_import_cycle(&mut self, repeated: &Path) {
-        let Some(start) = self.import_stack.iter().position(|p| p == repeated) else {
+        // `loaded_modules` is keyed by canonical realpath while the stack keeps the
+        // raw spellings the reports print, so the position search has to compare
+        // identities, not strings -- otherwise a cycle closed through an alias
+        // spelling would go unnamed.
+        let repeated_key = crate::interpreter::normalize_path_key(repeated);
+        let Some(start) = self
+            .import_stack
+            .iter()
+            .position(|p| crate::interpreter::normalize_path_key(p) == repeated_key)
+        else {
             // `repeated` is in `loaded_modules` but not on the ordered stack.
             // That happens for the sibling-package scan, which marks modules
             // visited without pushing them; there is no cycle to name.
@@ -1125,6 +1117,45 @@ mod tests {
     use crate::test_helpers::create_test_project;
     use simple_parser::Parser;
     use std::fs;
+
+    /// Two spellings of ONE physical file are ONE loader unit.
+    ///
+    /// The repo reaches the same stdlib file through a symlinked directory
+    /// (`src/std` -> `lib`, `src/compiler/common` -> `00.common`) and through
+    /// both relative and absolute spellings. Keying the parse memo by the raw
+    /// path made each spelling its own unit: one extra read + full re-parse per
+    /// alias, and a second registration of the same types into the lowerer.
+    /// Object identity is the observable -- one unit means one `Arc`.
+    #[test]
+    fn alias_spellings_of_one_file_are_one_parsed_unit() {
+        let dir = create_test_project();
+        let real_dir = dir.path().join("pkg");
+        fs::create_dir_all(&real_dir).expect("create pkg dir");
+        let m = real_dir.join("types.spl");
+        fs::write(&m, "pub struct Aliased:\n    id: i64\n").expect("write module");
+
+        // `src/std` -> `lib` in the repo; the same shape here.
+        let link_dir = dir.path().join("pkg_alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("pkg", &link_dir).expect("symlink alias dir");
+        #[cfg(not(unix))]
+        return;
+
+        crate::interpreter::clear_module_cache_selective();
+
+        let direct = parsed_imported_module(&m).expect("direct spelling parses");
+        let via_symlink = parsed_imported_module(&link_dir.join("types.spl")).expect("symlink spelling parses");
+        let via_dotdot = parsed_imported_module(&real_dir.join(".").join("types.spl")).expect("dot spelling parses");
+
+        assert!(
+            std::sync::Arc::ptr_eq(&direct, &via_symlink),
+            "symlinked spelling must reuse the same parsed unit, not re-parse the file"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&direct, &via_dotdot),
+            "`.`-relative spelling must reuse the same parsed unit, not re-parse the file"
+        );
+    }
 
     #[test]
     fn lowers_field_access_through_reexported_use_shim() {
@@ -1467,7 +1498,7 @@ mod imported_module_ast_memo_tests {
     #[test]
     fn repeated_import_of_the_same_module_parses_it_exactly_once() {
         crate::perf_counters::set_enabled(true);
-        clear_imported_module_ast_cache();
+        crate::interpreter::clear_parsed_source_cache();
         crate::perf_counters::IMPORT_AST_PARSES.store(0, Ordering::Relaxed);
         crate::perf_counters::IMPORT_AST_HITS.store(0, Ordering::Relaxed);
 

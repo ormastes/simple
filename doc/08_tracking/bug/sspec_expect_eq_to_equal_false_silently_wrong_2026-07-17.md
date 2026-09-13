@@ -4,7 +4,7 @@
 **Severity:** high (silently asserts the OPPOSITE of what the test author
 intended; a naive grep found 18 spec files using this exact pattern, listed
 below -- not audited/fixed here, out of scope for this task)
-**Status:** open — found incidentally while writing new hardening unit specs
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 for the test-runner engine packages; not fixed here (test-authoring landmine,
 not something a spec-only task should patch in the runner/matcher source)
 
@@ -275,3 +275,7 @@ the rewrite lived in `interpreter_call/bdd.rs`. The mechanism that fixed it is
 visible there now: the comparison arm returns `Value::Bool(matched)` and marks a
 false result PROVISIONAL, so a chained `.to_*()` matcher stays authoritative.
 Probe `_scratch/eq_probe2_spec.spl`. Not fixed by this session.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

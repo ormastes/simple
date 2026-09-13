@@ -702,3 +702,7 @@ and the blocker is named: the lean bridge must capture `has_default` faithfully 
 **That is the real fix target, not `resolve.spl`.** No patch applied: arming the check
 without the bridge fix would false-fire on every valid omitted-default call, which is a
 worse regression than the bug. Prerequisite filed as the actual dependency.
+
+## Triage 2026-09-13
+
+Confirmed the doc's own finding still holds: the arity checker is written-and-deliberately-suppressed pending the lean bridge capturing `has_default` faithfully -- arming it now would false-fire on every valid omitted-default call, a worse regression than the bug. The real fix target is the lean bridge, not `resolve.spl`, and that prerequisite is out of this pass's budget. Leaving OPEN, no code change made.

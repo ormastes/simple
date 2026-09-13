@@ -1,0 +1,187 @@
+# @tag: engine2d, rendering, gpu
+"""# A Vulkan readback frame downloads the surface ONCE, and never unpacks it in interpreted Simple
+
+A steady 900x760 web frame measured 5,872 ms on macOS/M4 under
+`SIMPLE_EXECUTION_MODE=interpreter`, and 99.6% of it was one statement:
+`vulkan_sffi_readback_u32_into`'s interpreter fallback unpacking 684,000
+pixels byte-by-byte into `[u32]` at 3.6 us/pixel -- **twice per frame**, once
+for `read_pixels_with_source()` and once for `present()`'s host-mirror
+refresh, which re-downloaded the whole framebuffer for a mirror no offscreen
+caller reads. See
+`doc/10_metrics/ui/web_render_frame_profile_macos_2026-09-12.md` and
+`doc/08_tracking/bug/vulkan_readback_interpreted_unpack_dominates_frame_2026-09-12.md`.
+
+Two independent properties are pinned, because the two defects are
+independent and either one alone leaves a per-pixel frame:
+
+- **one download per frame.** `readback -> present` must perform exactly ONE
+  device readback, not two. This holds on EVERY binary, including ones built
+  before the bulk primitive existed, because it is a pure-Simple change.
+- **zero interpreted per-pixel iterations.** With `SIMPLE_VK_READBACK=native`
+  the unpack is a single native call, so the interpreted-iteration counter
+  stays at 0. Without it the counter is `pixel_count` -- the opt-in exists
+  because calling an unregistered extern is an UNCATCHABLE interpreter abort
+  on an already-deployed binary
+  (`doc/08_tracking/bug/typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md`).
+
+The oracle is absolute, not a self-comparison: the surface is cleared to a
+FIXED colour and the readback must return exactly that value at exactly that
+pixel count. A counter spec that did not also check pixels would go green on
+a readback that downloaded nothing.
+"""
+
+"""
+## Purpose and audience
+Purpose: Pin the cost accounting of Vulkan readback and unpack operations.
+Audience: maintainers of the feature under test.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_readback_calls,
+    vulkan_sffi_readback_unpack_iterations,
+    vulkan_sffi_reset_readback_counters,
+    vulkan_sffi_native_readback_opt_in
+}
+
+val ORACLE_COLOR: u32 = 0xFF3A7BD5u32
+
+fn vulkan_available() -> bool:
+    val probe = Engine2D.create_with_backend_fast(8, 8, "vulkan")
+    probe.backend_name() == "vulkan"
+
+# One offscreen frame in the shape draw_ir_adv composes: clear, draw, submit,
+# read back, THEN present -- readback before present, so strict device
+# provenance stays satisfiable.
+fn readback_then_present(engine: Engine2D) -> [u32]:
+    engine.clear(ORACLE_COLOR)
+    engine.submit_batch()
+    val pixels = engine.read_pixels_with_source().pixels
+    engine.present()
+    pixels
+
+describe "Vulkan offscreen readback cost":
+    it "downloads a 64x64 frame exactly once across readback + present":
+        step("Exercise a Vulkan readback and unpack")
+        # @req REQ-GPU-VULKAN-READBACK-UNPACK-COST-001
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val engine = Engine2D.create_with_backend_fast(64, 64, "vulkan")
+            # Frame 1 seeds the surface; the steady frame is the one measured.
+            readback_then_present(engine)
+            vulkan_sffi_reset_readback_counters()
+            val pixels = readback_then_present(engine)
+            # absolute oracle first: a counter of 1 over an empty download
+            # would otherwise pass.
+            expect(pixels.len()).to_equal(4096)
+            expect(pixels[0]).to_equal(ORACLE_COLOR)
+            expect(pixels[4095]).to_equal(ORACLE_COLOR)
+            # the property: ONE device readback, not the two that made the
+            # profile's frame 5,872 ms.
+            expect(vulkan_sffi_readback_calls()).to_equal(1)
+
+    it "spends zero interpreted per-pixel iterations when the native primitive is selected":
+        step("Exercise a Vulkan readback and unpack")
+        # @req REQ-GPU-VULKAN-READBACK-UNPACK-COST-002
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val engine = Engine2D.create_with_backend_fast(64, 64, "vulkan")
+            readback_then_present(engine)
+            vulkan_sffi_reset_readback_counters()
+            val pixels = readback_then_present(engine)
+            expect(pixels[0]).to_equal(ORACLE_COLOR)
+            if vulkan_sffi_native_readback_opt_in():
+                expect(vulkan_sffi_readback_unpack_iterations()).to_equal(0)
+            else:
+                # Default path: still exactly one pass, never two.
+                expect(vulkan_sffi_readback_unpack_iterations()).to_equal(4096)
+
+describe "Vulkan readback stays correct around present":
+    it "keeps readback pixels intact after a following present, and across sizes":
+        step("Exercise a Vulkan readback and unpack")
+        # @req REQ-GPU-VULKAN-READBACK-UNPACK-COST-003
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            # The host mirror and the returned readback now share one array, so
+            # a present AFTER a readback must not disturb the pixels already
+            # handed to the caller.
+            val engine = Engine2D.create_with_backend_fast(64, 64, "vulkan")
+            engine.clear(ORACLE_COLOR)
+            engine.submit_batch()
+            val pixels = engine.read_pixels_with_source().pixels
+            engine.present()
+            engine.present()
+            expect(pixels.len()).to_equal(4096)
+            expect(pixels[0]).to_equal(ORACLE_COLOR)
+            expect(pixels[4095]).to_equal(ORACLE_COLOR)
+
+    it "handles 1x1 and odd surface sizes":
+        step("Exercise a Vulkan readback and unpack")
+        # @req REQ-GPU-VULKAN-READBACK-UNPACK-COST-004
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            val tiny = Engine2D.create_with_backend_fast(1, 1, "vulkan")
+            val tiny_px = readback_then_present(tiny)
+            expect(tiny_px.len()).to_equal(1)
+            expect(tiny_px[0]).to_equal(ORACLE_COLOR)
+
+            val odd = Engine2D.create_with_backend_fast(7, 3, "vulkan")
+            val odd_px = readback_then_present(odd)
+            expect(odd_px.len()).to_equal(21)
+            expect(odd_px[0]).to_equal(ORACLE_COLOR)
+            expect(odd_px[20]).to_equal(ORACLE_COLOR)
+
+describe "Vulkan host mirror does not write through a handed-out readback":
+    it "leaves an earlier frame's readback pixels alone when a later present refreshes the mirror":
+        step("Exercise a Vulkan readback and unpack")
+        # @req REQ-GPU-VULKAN-READBACK-UNPACK-COST-005
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            # The mirror is seeded FROM the readback array, so a later
+            # present() that refreshes the mirror in place would overwrite
+            # pixels the earlier caller still holds. Draw between the two
+            # frames so the second present really does refresh.
+            val engine = Engine2D.create_with_backend_fast(64, 64, "vulkan")
+            engine.clear(ORACLE_COLOR)
+            engine.submit_batch()
+            val first = engine.read_pixels_with_source().pixels
+            expect(first[0]).to_equal(ORACLE_COLOR)
+            engine.clear(0xFF102030u32)
+            engine.submit_batch()
+            engine.present()
+            expect(first[0]).to_equal(ORACLE_COLOR)
+            expect(first[4095]).to_equal(ORACLE_COLOR)
+
+describe "Vulkan frame receipt stays truthful when the second download is skipped":
+    it "still reports readback and host-cache refresh completed, with no extra full readback":
+        step("Exercise a Vulkan readback and unpack")
+        # @req REQ-GPU-VULKAN-READBACK-UNPACK-COST-006
+        if not vulkan_available():
+            skip("no Vulkan ICD on this host")
+        else:
+            # Removing the duplicate download must not turn a real refresh into
+            # a reported one. The mirror IS refreshed from the device for this
+            # frame -- by the readback -- so both receipt flags stay true while
+            # present_full_readback_count does NOT advance.
+            val backend = VulkanBackend.create()
+            if not backend.init(8, 8):
+                skip("VulkanBackend.init failed on this host")
+            else:
+                backend.clear(ORACLE_COLOR)
+                backend.present()
+                val baseline_full = backend.present_full_readback_count
+                backend.clear(0xFF0A0B0Cu32)
+                val pixels = backend.read_pixels_with_source().pixels
+                expect(pixels.len()).to_equal(64)
+                backend.present()
+                val receipt = backend.latest_frame_receipt()
+                expect(receipt.readback_completed).to_equal(true)
+                expect(receipt.host_cache_refresh_completed).to_equal(true)
+                expect(backend.present_full_readback_count).to_equal(baseline_full)

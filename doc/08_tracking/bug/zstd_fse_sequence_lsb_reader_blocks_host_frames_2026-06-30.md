@@ -1,6 +1,12 @@
 # zstd FSE sequence decoder uses non-standard LSB backward reader — blocks real host frames
 
-- **Status:** OPEN
+## Closed 2026-09-13 — the FSE sequence decoder now uses the standard MSB-first backward reader
+
+- **inferred** `src/lib/common/compress/zstd_seq.spl:2` imports `ZstdMsbBackwardBits, zstd_msb_bits_init, zstd_msb_bits_read, zstd_msb_bits_remaining`, and every sequence-decode helper is typed on it (`_zstd_read_sequence_bits:279`, `_zstd_read_sequence_state:292`, `_zstd_advance_sequence_state:323`, `_zstd_read_extra_bits:436`).
+- **measured** `grep -n zstd_bits_init src/lib/common/compress/zstd_seq.spl` returns nothing — the non-standard LSB-first `ZstdBackwardBits` reader named as the root cause is no longer used in this file.
+- **inferred** Not executed against a real host zstd frame: `bin/simple test` is unusable on this Windows host, so this is a source-level verification of the exact change the entry asked for.
+
+- **Status:** Closed (fixed) 2026-09-13
 - **Date:** 2026-06-30
 - **Area:** `src/lib/common/compress/zstd_seq.spl`
 - **Severity:** Medium (blocks decoding of any real host-zstd compressed block that carries sequences)

@@ -1,0 +1,32 @@
+use compiler.loader.settlement.linker.{
+    SettlementLinker, SymbolEntry, SymbolBinding, ImportRef, RelocationKind
+}
+
+fn import_ref(name: text, module_id: text) -> ImportRef:
+    ImportRef(
+        symbol_name: name,
+        from_module: module_id,
+        relocation_offset: 0,
+        relocation_kind: RelocationKind.Abs64
+    )
+
+describe "settlement linker cardinality":
+    it "counts unique exports and keeps replacement or rejection neutral":
+        val linker = SettlementLinker.create()
+        var weak = SymbolEntry.resolved("shared", 1, 8, "weak_owner")
+        weak.binding = SymbolBinding.Weak
+        expect(linker.add_export(weak).is_ok()).to_equal(true)
+        expect(linker.add_export(SymbolEntry.resolved("shared", 2, 8, "strong_owner")).is_ok()).to_equal(true)
+        expect(linker.add_export(SymbolEntry.resolved("shared", 3, 8, "duplicate_owner")).is_err()).to_equal(true)
+
+        expect(linker.stats().total_exports).to_equal(1)
+        expect(linker.get_export("shared").unwrap().module_id).to_equal("strong_owner")
+
+    it "counts import names rather than references":
+        val linker = SettlementLinker.create()
+        linker.add_import(import_ref("missing", "consumer_a"))
+        linker.add_import(import_ref("missing", "consumer_b"))
+        linker.add_import(import_ref("other", "consumer_a"))
+
+        expect(linker.stats().total_imports).to_equal(2)
+        expect(linker.imports["missing"].len()).to_equal(2)

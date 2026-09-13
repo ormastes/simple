@@ -1,0 +1,345 @@
+#!/bin/sh
+# check-chrome-dynlib-probe.shs — two-stage probe of the Chrome (CEF) render dynlib.
+#
+# Stage A (every host): build, digest, DynLib.load, resolve ALL 10 frozen ABI v1 symbols,
+#   assert abi_version()==1, destroy, spl_dlclose.
+# Stage B (needs a pinned CEF drop): call the real create() and record the outcome as the
+#   FIELD backend_stage=ok|blocked:<reason>. Stage B is never a silent skip: the value is
+#   always derived from a real create() return code or from an explicit missing-drop check.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  exit 0   CHROME_DYNLIB PROBE: ALL PASS — 10/10 symbols, abi=1, lib_sha256=<d>, backend_stage=<s>
+#   FAIL  exit 1   CHROME_DYNLIB PROBE: FAIL — <what>
+#   ERROR exit 2   CHROME_DYNLIB PROBE: ERROR — nothing was checked (<reason>)
+#
+# A probe that resolved 0 symbols is ERROR, never a pass. --selftest runs first and is fatal.
+#
+# `set -e` is deliberately NOT used: this script classifies every exit code itself (several
+# fixtures expect a non-zero child), and an implicit abort would leave no verdict line at
+# all — which is exactly the silent-exit-0 failure mode the repo's guards forbid.
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+BUILD_SCRIPT="$ROOT_DIR/scripts/check/build-chrome-render-shim.shs"
+LIB_DIR="$ROOT_DIR/build/chrome-render"
+REQUIRE_BACKEND=0
+SELFTEST_ONLY=0
+SKIP_BUILD=0
+LIB_OVERRIDE=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --require-backend) REQUIRE_BACKEND=1; shift ;;
+        --lib) LIB_OVERRIDE="${2:-}"; SKIP_BUILD=1; shift 2 ;;
+        --no-build) SKIP_BUILD=1; shift ;;
+        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        *) echo "CHROME_DYNLIB PROBE: ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+find_runner() {
+    if [ -n "${SIMPLE_RUNNER:-}" ] && [ -x "${SIMPLE_RUNNER}" ]; then
+        printf '%s\n' "$SIMPLE_RUNNER"
+        return 0
+    fi
+    # bin/simple is the BOOTSTRAP cli (compile / native-build only) and has no `run`, so it
+    # is deliberately never used here.
+    if [ -x "$ROOT_DIR/src/compiler_rust/target/bootstrap/simple" ]; then
+        printf '%s\n' "$ROOT_DIR/src/compiler_rust/target/bootstrap/simple"
+        return 0
+    fi
+    return 1
+}
+
+write_driver() {
+    driver_path="$1"
+    cat > "$driver_path" <<'DRIVER_EOF'
+use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{ChromeRenderLoadRequest,
+    chrome_render_symbol_names, chrome_render_load, chrome_render_backend_stage,
+    chrome_render_create, chrome_render_release, chrome_render_destroy}
+use std.nogc_sync_mut.env.variables.{env_get}
+
+fn main():
+    val library_path = env_get("CHROME_PROBE_LIB")
+    val expected_digest = env_get("CHROME_PROBE_SHA256")
+    val require_backend = env_get("CHROME_PROBE_REQUIRE_BACKEND") == "1"
+    val request = ChromeRenderLoadRequest(
+        library_path: library_path,
+        manifest_sha256: expected_digest,
+        expected_abi_version: 1,
+        required_symbols: chrome_render_symbol_names(),
+        max_request_bytes: 1048576,
+        max_response_bytes: 268435456)
+    val result = chrome_render_load(request)
+    if not result.ok:
+        print("probe_status=fail")
+        print("probe_reason=" + result.status)
+        print("missing_symbol=" + result.missing_symbol)
+        print("symbols_resolved=0")
+        print("abi=0")
+        print("backend_stage=blocked:stage-a-failed")
+        return
+    val handle = result.handle.?
+    print("probe_status=ok")
+    print("probe_reason=ok")
+    print("missing_symbol=")
+    print("symbols_resolved=" + chrome_render_symbol_names().len().to_text())
+    print("abi=" + result.abi.version.to_text())
+    # Stage A proves `destroy` is CALLABLE, not merely resolvable: session 0 is legal and
+    # must answer invalid-handle (2) without crashing.
+    print("destroy_zero=" + chrome_render_destroy(handle, 0).to_text())
+    var stage = "blocked:no-cef-drop"
+    if require_backend:
+        val created = chrome_render_create(handle, "{\"headless\":true}")
+        stage = chrome_render_backend_stage(created)
+        chrome_render_release(handle, created)
+    else:
+        chrome_render_release(handle, 0)
+    print("backend_stage=" + stage)
+DRIVER_EOF
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# Runs stage A (+ optional stage B) against one library. Echoes the driver's key=value
+# output on stdout; the caller classifies. Returns 2 when nothing could be checked.
+run_probe() {
+    probe_lib="$1"
+    probe_require_backend="$2"
+    if [ ! -f "$probe_lib" ]; then
+        echo "probe_status=error"
+        echo "probe_reason=library-not-found"
+        return 0
+    fi
+    if [ ! -f "$probe_lib.sha256" ]; then
+        echo "probe_status=error"
+        echo "probe_reason=digest-sidecar-missing"
+        return 0
+    fi
+    sidecar_digest="$(awk '{print $1}' < "$probe_lib.sha256")"
+    driver_dir="$(mktemp -d 2>/dev/null || mktemp -d -t chromeprobe)"
+    write_driver "$driver_dir/probe_driver.spl"
+    CHROME_PROBE_LIB="$probe_lib" \
+    CHROME_PROBE_SHA256="$sidecar_digest" \
+    CHROME_PROBE_REQUIRE_BACKEND="$probe_require_backend" \
+        "$RUNNER" run "$driver_dir/probe_driver.spl" > "$driver_dir/out.txt" 2>"$driver_dir/err.txt"
+    driver_rc=$?
+    if [ "$driver_rc" -ne 0 ]; then
+        echo "probe_status=error"
+        echo "probe_reason=driver-exit-$driver_rc"
+        rm -rf "$driver_dir"
+        return 0
+    fi
+    grep -E '^(probe_status|probe_reason|missing_symbol|symbols_resolved|abi|backend_stage|backend_reason|destroy_zero)=' \
+        "$driver_dir/out.txt" || true
+    rm -rf "$driver_dir"
+}
+
+field_of() {
+    printf '%s\n' "$2" | grep "^$1=" | tail -1 | sed "s/^$1=//"
+}
+
+# ------------------------------------------------------------------------ selftest
+selftest() {
+    fixtures_passed=0
+    fixtures_total=0
+    tmp_root="$(mktemp -d 2>/dev/null || mktemp -d -t chromeprobeself)"
+
+    # Fixture 1 — a clean build passes stage A with all 10 symbols and abi=1.
+    fixtures_total=$((fixtures_total + 1))
+    sh "$BUILD_SCRIPT" --out-dir "$tmp_root/clean" > "$tmp_root/build1.log" 2>&1
+    b1=$?
+    clean_lib="$(ls "$tmp_root"/clean/libsimple_chrome_render.* 2>/dev/null | grep -v '\.sha256$' | head -1)"
+    if [ "$b1" -eq 0 ] && [ -n "$clean_lib" ]; then
+        out1="$(run_probe "$clean_lib" 0)"
+        if [ "$(field_of probe_status "$out1")" = "ok" ] &&
+           [ "$(field_of symbols_resolved "$out1")" = "10" ] &&
+           [ "$(field_of abi "$out1")" = "1" ]; then
+            fixtures_passed=$((fixtures_passed + 1))
+        else
+            echo "selftest: fixture 1 (clean PASS) did not pass: $out1" >&2
+        fi
+    else
+        echo "selftest: fixture 1 could not build a clean library" >&2
+    fi
+
+    # Fixture 2 — a library missing one export FAILs, naming that symbol.
+    fixtures_total=$((fixtures_total + 1))
+    sh "$BUILD_SCRIPT" --out-dir "$tmp_root/dropped" \
+        --drop-symbol simple_chrome_render_read_pixels_into > "$tmp_root/build2.log" 2>&1 || true
+    dropped_lib="$(ls "$tmp_root"/dropped/libsimple_chrome_render.* 2>/dev/null | grep -v '\.sha256$' | head -1)"
+    if [ -n "$dropped_lib" ]; then
+        sha256_of "$dropped_lib" > "$tmp_root/d.txt"
+        printf '%s  %s\n' "$(cat "$tmp_root/d.txt")" "$(basename -- "$dropped_lib")" > "$dropped_lib.sha256"
+        out2="$(run_probe "$dropped_lib" 0)"
+        if [ "$(field_of probe_status "$out2")" = "fail" ] &&
+           [ "$(field_of missing_symbol "$out2")" = "simple_chrome_render_read_pixels_into" ]; then
+            fixtures_passed=$((fixtures_passed + 1))
+        else
+            echo "selftest: fixture 2 (missing symbol) did not fail naming the symbol: $out2" >&2
+        fi
+    else
+        echo "selftest: fixture 2 could not build a symbol-dropped library" >&2
+    fi
+
+    # Fixture 3 — a tampered digest sidecar FAILs before any symbol is resolved.
+    fixtures_total=$((fixtures_total + 1))
+    if [ -n "$clean_lib" ]; then
+        cp "$clean_lib.sha256" "$tmp_root/sidecar.bak"
+        printf '%s  %s\n' "0000000000000000000000000000000000000000000000000000000000000000" \
+            "$(basename -- "$clean_lib")" > "$clean_lib.sha256"
+        out3="$(run_probe "$clean_lib" 0)"
+        cp "$tmp_root/sidecar.bak" "$clean_lib.sha256"
+        if [ "$(field_of probe_status "$out3")" = "fail" ] &&
+           [ "$(field_of probe_reason "$out3")" = "manifest-mismatch" ]; then
+            fixtures_passed=$((fixtures_passed + 1))
+        else
+            echo "selftest: fixture 3 (digest mismatch) did not fail: $out3" >&2
+        fi
+    else
+        echo "selftest: fixture 3 had no library to tamper with" >&2
+    fi
+
+    # Fixture 4 — no library at all is an ERROR, never a pass.
+    fixtures_total=$((fixtures_total + 1))
+    out4="$(run_probe "$tmp_root/absent/libsimple_chrome_render.dylib" 0)"
+    if [ "$(field_of probe_status "$out4")" = "error" ] &&
+       [ "$(field_of probe_reason "$out4")" = "library-not-found" ]; then
+        fixtures_passed=$((fixtures_passed + 1))
+    else
+        echo "selftest: fixture 4 (absent library) was not an error: $out4" >&2
+    fi
+
+    # Fixture 5 — a library with no digest sidecar is an ERROR, not an unverified pass.
+    fixtures_total=$((fixtures_total + 1))
+    if [ -n "$clean_lib" ]; then
+        cp "$clean_lib" "$tmp_root/nosidecar.$$"
+        out5="$(run_probe "$tmp_root/nosidecar.$$" 0)"
+        if [ "$(field_of probe_status "$out5")" = "error" ] &&
+           [ "$(field_of probe_reason "$out5")" = "digest-sidecar-missing" ]; then
+            fixtures_passed=$((fixtures_passed + 1))
+        else
+            echo "selftest: fixture 5 (no sidecar) was not an error: $out5" >&2
+        fi
+    else
+        echo "selftest: fixture 5 had no library to copy" >&2
+    fi
+
+    rm -rf "$tmp_root"
+    echo "selftest: $fixtures_passed/$fixtures_total fixtures passed"
+    if [ "$fixtures_passed" -ne "$fixtures_total" ] || [ "$fixtures_total" -lt 4 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# ------------------------------------------------------------------------ main
+RUNNER="$(find_runner || true)"
+if [ -z "$RUNNER" ]; then
+    echo "CHROME_DYNLIB PROBE: ERROR — nothing was checked (no runnable Simple; set SIMPLE_RUNNER)"
+    exit 2
+fi
+
+# Selftest runs first, always, and is fatal.
+selftest
+SELFTEST_RC=$?
+if [ "$SELFTEST_RC" -ne 0 ]; then
+    echo "CHROME_DYNLIB PROBE: ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "CHROME_DYNLIB PROBE: SELFTEST PASS — 5/5 fixtures"
+    exit 0
+fi
+
+if [ -n "$LIB_OVERRIDE" ]; then
+    LIB_PATH="$LIB_OVERRIDE"
+else
+    case "$(uname -s)" in
+        Darwin) LIB_PATH="$LIB_DIR/libsimple_chrome_render.dylib" ;;
+        *)      LIB_PATH="$LIB_DIR/libsimple_chrome_render.so" ;;
+    esac
+    if [ "$SKIP_BUILD" -eq 0 ]; then
+        # A host with a staged CEF drop builds the REAL shim (-DSIMPLE_CHROME_CEF); a host
+        # without one builds the stub. The drop root comes from the setup script's --env
+        # output, which is the single place that knows the pin and the platform layout.
+        CEF_BUILD_ARGS=""
+        CEF_ENV_OUT="$(sh "$ROOT_DIR/scripts/setup/setup-cef-dynlib.shs" --env 2>/dev/null)"
+        CEF_ENV_RC=$?
+        if [ "$CEF_ENV_RC" -eq 0 ]; then
+            CEF_ROOT_LINE="$(printf '%s\n' "$CEF_ENV_OUT" | grep '^export SIMPLE_CEF_ROOT=' | head -1)"
+            CEF_ROOT_VALUE="$(printf '%s' "$CEF_ROOT_LINE" | sed 's/^export SIMPLE_CEF_ROOT=//; s/^"//; s/"$//')"
+            if [ -n "$CEF_ROOT_VALUE" ]; then
+                CEF_BUILD_ARGS="--cef-root $CEF_ROOT_VALUE"
+            fi
+        fi
+        # shellcheck disable=SC2086
+        sh "$BUILD_SCRIPT" --out-dir "$LIB_DIR" $CEF_BUILD_ARGS > /dev/null 2>&1
+        BUILD_RC=$?
+        if [ "$BUILD_RC" -ne 0 ]; then
+            echo "CHROME_DYNLIB PROBE: ERROR — nothing was checked (shim build failed rc=$BUILD_RC)"
+            exit 2
+        fi
+    fi
+fi
+
+# Stage B is attempted only when a pinned CEF drop is present; the reason is recorded
+# either way, derived from a real check or a real create() return code.
+CEF_STATUS_LINE="$(sh "$ROOT_DIR/scripts/setup/setup-cef-dynlib.shs" --check 2>/dev/null | tail -1)"
+CEF_STATUS="${CEF_STATUS_LINE#cef_status=}"
+STAGE_B_ARG=0
+if [ "$CEF_STATUS" = "present" ] || [ "$REQUIRE_BACKEND" -eq 1 ]; then
+    STAGE_B_ARG=1
+fi
+
+OUT="$(run_probe "$LIB_PATH" "$STAGE_B_ARG")"
+STATUS="$(field_of probe_status "$OUT")"
+REASON="$(field_of probe_reason "$OUT")"
+RESOLVED="$(field_of symbols_resolved "$OUT")"
+ABI="$(field_of abi "$OUT")"
+MISSING="$(field_of missing_symbol "$OUT")"
+STAGE="$(field_of backend_stage "$OUT")"
+
+if [ -z "$STATUS" ]; then
+    echo "CHROME_DYNLIB PROBE: ERROR — nothing was checked (probe produced no fields)"
+    exit 2
+fi
+if [ "$STATUS" = "error" ]; then
+    echo "CHROME_DYNLIB PROBE: ERROR — nothing was checked ($REASON)"
+    exit 2
+fi
+if [ "$STATUS" != "ok" ]; then
+    if [ -n "$MISSING" ]; then
+        echo "CHROME_DYNLIB PROBE: FAIL — $REASON, missing symbol: $MISSING"
+    else
+        echo "CHROME_DYNLIB PROBE: FAIL — $REASON"
+    fi
+    exit 1
+fi
+if [ "$RESOLVED" != "10" ] || [ "$ABI" != "1" ]; then
+    echo "CHROME_DYNLIB PROBE: FAIL — resolved=$RESOLVED/10, abi=$ABI (expected 10 and 1)"
+    exit 1
+fi
+DESTROY_ZERO="$(field_of destroy_zero "$OUT")"
+if [ "$DESTROY_ZERO" != "2" ]; then
+    echo "CHROME_DYNLIB PROBE: FAIL — destroy(0) returned '$DESTROY_ZERO', expected 2 (invalid-handle)"
+    exit 1
+fi
+if [ "$STAGE_B_ARG" -eq 0 ]; then
+    STAGE="blocked:no-cef-drop"
+fi
+if [ "$REQUIRE_BACKEND" -eq 1 ] && [ "$STAGE" != "ok" ]; then
+    echo "CHROME_DYNLIB PROBE: FAIL — --require-backend but backend_stage=$STAGE"
+    exit 1
+fi
+
+DIGEST="$(awk '{print $1}' < "$LIB_PATH.sha256")"
+echo "CHROME_DYNLIB PROBE: ALL PASS — 10/10 symbols, abi=1, lib_sha256=$DIGEST, backend_stage=$STAGE"
+exit 0

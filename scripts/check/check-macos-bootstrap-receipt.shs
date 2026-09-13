@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+simple_bin=${SIMPLE_BIN:-$root/bin/simple}
+selftest=$root/scripts/check/check_macos_bootstrap_receipt.spl
+
+portable_check() {
+    manifest=$root/src/compiler/00.common/cache/darwin_runtime_provider_manifest.spl
+    producer=$root/src/app/io/_CliCompile/compile_targets.spl
+    identity=$root/src/app/build/targets/action_identity.spl
+    orchestrator=$root/src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl
+    linker=$root/src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl
+    integration=$root/test/02_integration/app/macos_native_action_identity_production_spec.spl
+    manifest_spec=$root/test/01_unit/compiler/cache/darwin_runtime_provider_manifest_spec.spl
+    identity_spec=$root/test/01_unit/app/build/macos_bootstrap_receipt_spec.spl
+    m4=$root/scripts/check/check-macos-reverse-reference-m4.shs
+    m5=$root/scripts/release/macos-universal-m5.shs
+    grep -q 'content-identity=' "$manifest"
+    grep -q 'member=' "$manifest"
+    grep -q 'sha256_u8_hex(payload)' "$manifest"
+    grep -q 'provider-artifact-corrupt-fat-slice' "$manifest"
+    grep -q 'provider-archive-missing-padding' "$manifest"
+    grep -q 'slice_offsets' "$manifest"
+    grep -q 'relative_offset < prior_end' "$manifest"
+    grep -q 'target_found' "$manifest"
+    grep -q '_llvm_darwin_snapshot_link_inputs(' "$orchestrator"
+    grep -q 'all_objects, requested_arch' "$orchestrator"
+    grep -q 'darwin_macho_slice_error_v1(output, architecture)' "$producer"
+    grep -q 'darwin_sdk_identity_v1(sdk_root)' "$producer"
+    grep -q 'SDKSettings.json' "$identity"
+    grep -q 'current-runtime-provider-bytes-mismatch' "$identity"
+    grep -q 'publish_darwin_link_tool_identity(execution_linker_path)' "$linker"
+    grep -q 'darwin_link_tool_identity_v1(cache_dir)' "$producer"
+    grep -q 'non-Mach-O runtime artifact' "$integration"
+    grep -q 'wrong Mach-O slice' "$integration"
+    grep -q 'content-identity=' "$integration"
+    grep -q 'fat headers without a real slice' \
+        "$manifest_spec"
+    grep -q 'malformed non-target and overlapping fat slices' "$manifest_spec"
+    grep -q 'binds archive member ordering' "$manifest_spec"
+    grep -q 'length-separates target identity fields before hashing' "$identity_spec"
+    for key in target_identity_digest deployment_target sdk_identity; do
+        grep -q "${key}=\$(require_admission_value ${key})" "$m4"
+        grep -q "${key}" "$m5"
+    done
+    grep -q 'retained Xcode identity is malformed' "$m5"
+    grep -q 'retained clang identity is malformed' "$m5"
+    grep -q 'arm64_xcode_version_sha256=' "$m5"
+    grep -q 'x86_64_clang_version_sha256=' "$m5"
+    printf 'STRUCTURAL_ONLY: M0/M1 production receipt integrity contract\n'
+}
+
+portable_check
+[ "${1:-}" = "--portable" ] && exit 0
+
+[ -x "$simple_bin" ] || { printf 'FAIL: simple-binary-unavailable:%s\n' "$simple_bin" >&2; exit 1; }
+[ -f "$selftest" ] || { printf 'FAIL: selftest-missing:%s\n' "$selftest" >&2; exit 1; }
+
+output=$(SIMPLE_LIB="$root/src" "$simple_bin" "$selftest" 2>&1) || {
+    printf '%s\n' "$output" >&2
+    exit 1
+}
+printf '%s\n' "$output"
+printf '%s\n' "$output" | grep -qx 'PORTABLE-LOGIC: native action admission and Darwin linker policy' || exit 1
+
+if [ "$(uname -s)" != Darwin ]; then
+    printf 'cross_host_row=apple-silicon status=blocked evidence=non-darwin-host native-bootstrap=not-run\n'
+    printf 'cross_host_row=intel-macos status=blocked evidence=non-darwin-host native-bootstrap=not-run\n'
+    exit 1
+fi
+
+integration=$root/test/02_integration/app/macos_native_action_identity_production_spec.spl
+native_output=$(SIMPLE_LIB="$root/src" "$simple_bin" test "$integration" --mode=interpreter 2>&1) || {
+    printf '%s\n' "$native_output" >&2
+    exit 1
+}
+printf '%s\n' "$native_output"
+printf '%s\n' "$native_output" | grep -Eq 'Results: [1-9][0-9]* total, [1-9][0-9]* passed, 0 failed' || exit 1
+case "$(uname -m)" in
+    arm64) native_row=apple-silicon ;;
+    x86_64) native_row=intel-macos ;;
+    *) printf 'FAIL: unsupported-native-architecture\n' >&2; exit 1 ;;
+esac
+printf 'cross_host_row=%s status=pass evidence=production-native-action-test native-bootstrap=not-run\n' "$native_row"
+printf 'm0_native_bootstrap status=blocked evidence=canonical-bootstrap-from-scratch-not-run\n'
+exit 1

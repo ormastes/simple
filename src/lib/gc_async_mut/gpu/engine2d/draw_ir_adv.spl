@@ -34,6 +34,8 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
 }
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
+use std.nogc_sync_mut.text_layout.font_advance_layout.{font_advances_codepoint_arity}
+use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
     Engine2dGlassMaterialConfig,
@@ -131,6 +133,13 @@ struct Engine2dDrawIrAdvResult:
     # fence counters. Device readback is a separate attestation below.
     device_submit_count: i64 = 0
     device_fence_count: i64 = 0
+    # Production window-present evidence records the separate async admission
+    # gate. A packet checksum proves canonical encoding only; async_claim is
+    # false until the provider binds this exact session/surface authoritatively.
+    async_admission_status: text = ""
+    async_admission_reason: text = ""
+    async_packet_checksum: i64 = 0
+    async_claim: bool = false
 
 # A strict Vulkan submission receipt deliberately carries no framebuffer
 # pixels.  The retained Engine2D and composition let an evidence caller make
@@ -453,24 +462,49 @@ fn _engine2d_draw_ir_gradient_stop_count(props: [DrawIrStyleProp]) -> i32:
         _engine2d_draw_ir_style_value(props, "background-gradient-stop-count"), 0, 0
     ) as i32
 
+# Resolved advances, ALWAYS returned in per-CODEPOINT arity.
+#
+# Two conventions reach this gate and both are accepted: the canonical
+# per-codepoint array from `ResolvedFontMetrics.advances`, and round 5's
+# byte-expanded array (advance on the UTF-8 lead byte, 0 on continuations),
+# which `font_advances_codepoint_arity` collapses losslessly. The producer can
+# state which one it sent with the `font-advance-arity` style prop
+# ("codepoint" | "byte"); when it disagrees with what actually arrived the run
+# takes the flat fallback instead of being silently reinterpreted.
+fn _engine2d_draw_ir_text_advance_arity(command: DrawIrCommand) -> text:
+    _engine2d_draw_ir_style_value(command.computed_style, "font-advance-arity")
+
+fn _engine2d_draw_ir_advance_arity_agrees(declared: text, raw_len: i64, codepoint_count: i64, byte_count: i64) -> bool:
+    if declared == "codepoint":
+        return raw_len == codepoint_count
+    if declared == "byte":
+        return raw_len == byte_count
+    # Unset (or any future value): fall back to detection by length.
+    true
+
 fn _engine2d_draw_ir_text_advances(command: DrawIrCommand) -> [i32]:
+    val codepoints = text_codepoints(command.text_value)
+    val character_count = codepoints.len()
+    val declared_arity = _engine2d_draw_ir_text_advance_arity(command)
     if command.advance_widths.len() > 0:
         if command.advance_widths.len() > _E2D_DRAW_IR_MAX_TEXT_ITEMS:
             return []
-        var character_count: i64 = 0
-        for ch in command.text_value:
-            character_count = character_count + 1
-        if command.advance_widths.len() != character_count:
+        if not _engine2d_draw_ir_advance_arity_agrees(declared_arity, command.advance_widths.len(), character_count, command.text_value.len()):
+            print("[e2d-adv] arity-declared-mismatch declared={declared_arity} advances={command.advance_widths.len()} chars={character_count}")
+            return []
+        val resolved = font_advances_codepoint_arity(codepoints, command.advance_widths)
+        if resolved.len() != character_count:
+            print("[e2d-adv] arity advances={command.advance_widths.len()} chars={character_count} text_len={command.text_value.len()}")
             return []
         var width: i64 = 0
-        for advance in command.advance_widths:
+        for advance in resolved:
             val advance_i64 = advance as i64
             if advance < 0 or width > 2147483647 - advance_i64:
                 return []
             width = width + advance_i64
         if width != command.width as i64:
             return []
-        return command.advance_widths
+        return resolved
     val encoded = _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths")
     if encoded == "":
         return []
@@ -492,16 +526,17 @@ fn _engine2d_draw_ir_text_advances(command: DrawIrCommand) -> [i32]:
             return []
         advances.push(advance)
         width = width + advance_i64
-    var character_count: i64 = 0
-    for ch in command.text_value:
-        character_count = character_count + 1
     val command_width = command.width as i64
-    if advances.len() != character_count or width != command_width:
+    if not _engine2d_draw_ir_advance_arity_agrees(declared_arity, advances.len(), character_count, command.text_value.len()):
+        print("[e2d-adv] arity-declared-mismatch declared={declared_arity} advances={advances.len()} chars={character_count}")
+        return []
+    val resolved_encoded = font_advances_codepoint_arity(codepoints, advances)
+    if resolved_encoded.len() != character_count or width != command_width:
         # Silent on healthy frames: fires only for the command about to be
         # skipped as text-font-advances, attributing WHICH gate rejected.
         print("[e2d-adv] mismatch advances={advances.len()} chars={character_count} width={width} cmd_width={command_width} text_len={command.text_value.len()}")
         return []
-    advances
+    resolved_encoded
 
 fn _engine2d_draw_ir_shaping_requested(command: DrawIrCommand) -> bool:
     _engine2d_draw_ir_style_value(command.computed_style, "font-shaping") == "selected-pure-simple"
@@ -2187,8 +2222,20 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         print("[e2d-text-probe] ir kind={branch_kind} shaped={shaped} payload_valid={payload_valid} glyphs={glyph_count} advances={advances.len()} drawn={drawn}")
                     if drawn:
                         rendered = rendered + 1
-                    else:
+                    elif shaped:
+                        # A shaped run whose payload does not describe the text
+                        # stays FAIL-CLOSED: painting it with the plain path
+                        # would show glyphs the shaper never authorised.
                         font_ready = false
+                    else:
+                        # A resolved-advance run that could not be staged is a
+                        # different case: the text itself is known and only the
+                        # advances are unusable. Paint it with the font's own
+                        # advances rather than dropping it -- one unstageable
+                        # run used to cost every pixel of the page.
+                        eng.mark_cpu_fallback_reason("text-advance-arity")
+                        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                        rendered = rendered + 1
                         # Discriminator vs the callee-side receipt: this line
                         # with shaped=false and NO [e2d-batch] line means the
                         # callee returned true but the bool return crossing
@@ -2199,8 +2246,16 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         val skip_font_size = _engine2d_draw_ir_text_font_size(command.computed_style)
                         print("[e2d-ir] draw-false shaped={skip_shaped} payload_valid={skip_payload} advances={advances.len()} text_len={command.text_value.len()} glyphs={command.glyph_run.glyph_ids.len()} size={skip_font_size} text='{command.text_value}'")
                 elif has_resolved_advances:
-                    font_ready = false
-                    font_failure_kind = if shaped: "text-font-shaping" else: "text-font-advances"
+                    # The resolved advances could not be staged (arity the
+                    # staging loop cannot consume, or a rejected width). That
+                    # used to mark the command unsupported, and a single such
+                    # run -- one em dash -- took every pixel of the page with
+                    # it. Paint the run with the font's own advances instead
+                    # and RECORD the boundary crossing; never drop the Draw IR.
+                    eng.mark_cpu_fallback_reason("text-advance-arity")
+                    eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    rendered = rendered + 1
+                    print("[e2d-ir] text-advance-arity-fallback text_len={command.text_value.len()} shaped={shaped}")
                 else:
                     if probe_this:
                         _e2d_text_probe_count = _e2d_text_probe_count + 1
@@ -2810,8 +2865,18 @@ fn engine2d_draw_ir_adv_composition_window_present_with_images(engine: Engine2D,
     No framebuffer readback or host-cache refresh is requested. An unavailable
     or failed window presentation is reported as an explicit fallback reason.
     """
+    val async_admission = engine.vulkan_async_admission(3)
+    # Query the same live Engine2D context used by the window-present route.
+    # The current provider cannot prove session/device/surface membership, so
+    # this deliberately falls through to the existing synchronous owner.  A
+    # future admitted branch must submit the packet and return separate compute
+    # and presenter receipts; it may not reinterpret this sync path as async.
     var result = _engine2d_draw_ir_adv_composition_with_images(
         engine, composition, true, images, false, false, false)
+    result.async_admission_status = async_admission.status
+    result.async_admission_reason = async_admission.reason
+    result.async_packet_checksum = async_admission.packet.checksum
+    result.async_claim = async_admission.async_claim
     if result.fallback_required or result.skipped_command_count != 0:
         return result
     if not engine.present_window_device():

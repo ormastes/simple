@@ -1,4 +1,5 @@
 # Pure-Simple frontend parser rejects `actor` declarations (Rust seed accepts them)
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/unit/compiler/parser/parser_actor_spec.spl -> 8 passed, 0 failed)
 
 **Date:** 2026-09-05
 **Found by:** sspec score-80 wave 2 (modernizing `test/unit/compiler/parser/parser_actor_spec.spl`)
@@ -38,3 +39,6 @@ flip the three `rejects … actor …` scenarios in
 
 Pure-Simple `parse_module` accepts `actor`, `pub actor`, and `actor T<...>`
 forms without errors; spec twins updated to assert the positive contract.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/unit/compiler/parser/parser_actor_spec.spl` on the deployed seed; the spec now passes in full (8/8), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

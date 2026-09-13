@@ -259,3 +259,13 @@ pointed at a stub that exits 42):
 The ladders are deliberate (they absorb a deployed binary that predates a newly
 added extern), so removing them is a separate decision, but they must not be
 mistaken for override coverage.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Client-side lane bypass fix stays landed; the protocol-level fix (threading
+environment through `light_request_encode`/the daemon's request handling)
+touches the shared, long-lived test-daemon protocol and its Rust-seed
+dispatch (`test_should_use_light_daemon_client`) — a cross-process protocol
+change too risky to land and verify safely within a shard pass on a host
+where `bin/simple test` invocations take 300-900s. No change made. Leaving
+OPEN as documented.

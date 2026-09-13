@@ -1,0 +1,637 @@
+# Strict orchestration resource contract (ORCH-001, ORCH-003).
+#
+# Canonical typed form of a Simple Orchestrator resource, plus the STRICT SDN
+# decode profile: it wraps the canonical parser (`parse_with_spans_and_issues`)
+# and rejects everything the ordinary parser tolerates — duplicate keys
+# (last-wins in `parse`), unknown fields, wrong types, unparseable quantities,
+# and selector/template label disagreement. Rejections carry a schema path and
+# 1-based source line/column so a caller can point at the offending line.
+#
+# Scope is deliberately Pod + Deployment. Job, Service, Node, ArtifactSet and
+# the Simple manifest-builder API are the next slice; a resource kind that is
+# not decoded here is REJECTED, never partially accepted.
+#
+# Research: doc/01_research/os/container/simple_orchestrator_and_container_2026-09-06.md
+
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+
+pub const ORCHESTRATION_API_VERSION_V1 = "orchestration.simple/v1alpha1"
+
+# One reason a document was refused. `path` is the dotted schema path of the
+# offending node; `line`/`col` are 1-based source coordinates, 0 when the
+# parser recorded no span for that path.
+pub struct RejectionV1:
+    kind: text
+    path: text
+    message: text
+    line: i64
+    col: i64
+
+pub struct ObjectMetaV1:
+    name: text
+    # `ns` is the Kubernetes `metadata.namespace`; the SDN key stays `namespace`.
+    # The field cannot be named `namespace` — the compiler hard-rejects that
+    # identifier (doc/08_tracking/bug/namespace_identifier_hard_rejected_2026-09-07.md).
+    ns: text
+    labels: Dict<text, text>
+
+pub struct ContainerPortV1:
+    name: text
+    container_port: i64
+
+# Resource amounts are canonicalized to integers at decode time: CPU in
+# millicores, memory in bytes. No float ever reaches the resource model.
+pub struct ResourcesV1:
+    cpu_request_millis: i64
+    cpu_limit_millis: i64
+    memory_request_bytes: i64
+    memory_limit_bytes: i64
+
+# Exactly one of `image` / `artifact_set_ref` is set; the other is "".
+#
+# `command` and `args` carry Kubernetes semantics: `command` is the executable
+# and its leading arguments, `args` the trailing arguments. For a
+# `native-container` an empty `command` means "use the image entrypoint"; for
+# `native-sandbox`/`native-process` there is no entrypoint to inherit, so
+# `command` is required there — see `decode_pod_spec`.
+pub struct ContainerV1:
+    name: text
+    image: text
+    artifact_set_ref: text
+    command: [text]
+    args: [text]
+    ports: [ContainerPortV1]
+    resources: ResourcesV1
+
+pub struct PodSpecV1:
+    os_name: text
+    runtime_class: text
+    network_profile: text
+    containers: [ContainerV1]
+
+pub struct PodTemplateV1:
+    labels: Dict<text, text>
+    spec: PodSpecV1
+
+pub struct DeploymentV1:
+    meta: ObjectMetaV1
+    replicas: i64
+    selector_labels: Dict<text, text>
+    template: PodTemplateV1
+
+pub struct PodResourceV1:
+    meta: ObjectMetaV1
+    spec: PodSpecV1
+
+pub enum ResourceV1:
+    Pod(PodResourceV1)
+    Deployment(DeploymentV1)
+
+# ---- rejection helpers ----
+
+pub fn reject(kind: text, path: text, message: text, spans: Dict<text, SdnSpan>) -> RejectionV1:
+    if spans.contains_key(path):
+        val s = spans[path]
+        return RejectionV1(kind: kind, path: path, message: message, line: s.line, col: s.column)
+    RejectionV1(kind: kind, path: path, message: message, line: 0, col: 0)
+
+# ---- scalar decoding ----
+
+# Digits-only text to i64; -1 for empty or any non-digit character. Deliberately
+# not `text.to_int()`, which fails open to 0 on garbage.
+fn digits_to_int(s: text) -> i64:
+    if s.len() == 0:
+        return -1
+    val digits = "0123456789"
+    var acc = 0
+    var i = 0
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        var d = -1
+        var k = 0
+        while k < 10:
+            if digits.substring(k, k + 1) == c:
+                d = k
+            k = k + 1
+        if d < 0:
+            return -1
+        acc = acc * 10 + d
+        if acc < 0:
+            return -1
+        i = i + 1
+    acc
+
+fn split_suffix(s: text, suffix: text) -> text:
+    s.slice(0, s.len() - suffix.len())
+
+# CPU: bare integer = whole cores, `Nm` = millicores. Result is millicores.
+fn parse_cpu_millis(s: text) -> i64:
+    if s.ends_with("m"):
+        return digits_to_int(split_suffix(s, "m"))
+    val whole = digits_to_int(s)
+    if whole < 0:
+        return -1
+    whole * 1000
+
+# Memory: bare integer = bytes, binary Ki/Mi/Gi, decimal K/M/G. Result is bytes.
+fn scaled_memory(s: text, suffix: text, scale: i64) -> i64:
+    val n = digits_to_int(split_suffix(s, suffix))
+    if n < 0:
+        return -1
+    n * scale
+
+fn parse_memory_bytes(s: text) -> i64:
+    if s.ends_with("Ki"):
+        return scaled_memory(s, "Ki", 1024)
+    if s.ends_with("Mi"):
+        return scaled_memory(s, "Mi", 1048576)
+    if s.ends_with("Gi"):
+        return scaled_memory(s, "Gi", 1073741824)
+    if s.ends_with("K"):
+        return scaled_memory(s, "K", 1000)
+    if s.ends_with("M"):
+        return scaled_memory(s, "M", 1000000)
+    if s.ends_with("G"):
+        return scaled_memory(s, "G", 1000000000)
+    digits_to_int(s)
+
+# ---- field access ----
+
+pub fn as_dict(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<Dict<text, SdnValue>, RejectionV1>:
+    match v:
+        case SdnValue.Dict(fields): Ok(fields)
+        case _: Err(reject("type", path, path + " must be a mapping", spans))
+
+pub fn as_array(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<[SdnValue], RejectionV1>:
+    match v:
+        case SdnValue.Array(items): Ok(items)
+        case _: Err(reject("type", path, path + " must be a sequence", spans))
+
+pub fn as_text(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    match v:
+        case SdnValue.String(s): Ok(s)
+        case SdnValue.Int(i): Ok(i.to_text())
+        case _: Err(reject("type", path, path + " must be text", spans))
+
+pub fn as_int(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    match v:
+        case SdnValue.Int(i): Ok(i)
+        case _: Err(reject("type", path, path + " must be an integer", spans))
+
+# Every key present must be declared. An undeclared key is an error, never an
+# extension point (research §5.2).
+pub fn only_known(fields: Dict<text, SdnValue>, allowed: [text], path: text,
+              spans: Dict<text, SdnSpan>) -> Result<bool, RejectionV1>:
+    for key in fields.keys():
+        if not allowed.contains(key):
+            return Err(reject("unknown_field", path + "." + key,
+                              "unknown field '" + key + "' at " + path, spans))
+    Ok(true)
+
+pub fn require(fields: Dict<text, SdnValue>, key: text, path: text,
+           spans: Dict<text, SdnSpan>) -> Result<SdnValue, RejectionV1>:
+    if not fields.contains_key(key):
+        return Err(reject("missing_field", path + "." + key,
+                          "missing required field '" + key + "' at " + path, spans))
+    Ok(fields[key])
+
+pub fn label_map(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<Dict<text, text>, RejectionV1>:
+    var out: Dict<text, text> = {}
+    match as_dict(v, path, spans):
+        case Err(r): return Err(r)
+        case Ok(fields):
+            for key in fields.keys():
+                match as_text(fields[key], path + "." + key, spans):
+                    case Err(r): return Err(r)
+                    case Ok(s): out[key] = s
+    Ok(out)
+
+# ---- resource decoding ----
+
+fn decode_resources(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<ResourcesV1, RejectionV1>:
+    var cpu_req = 0
+    var cpu_lim = 0
+    var mem_req = 0
+    var mem_lim = 0
+    match as_dict(v, path, spans):
+        case Err(r): return Err(r)
+        case Ok(fields):
+            match only_known(fields, ["requests", "limits"], path, spans):
+                case Err(r): return Err(r)
+                case Ok(_): pass
+            for group in ["requests", "limits"]:
+                if not fields.contains_key(group):
+                    continue
+                val gpath = path + "." + group
+                match as_dict(fields[group], gpath, spans):
+                    case Err(r): return Err(r)
+                    case Ok(g):
+                        match only_known(g, ["cpu", "memory"], gpath, spans):
+                            case Err(r): return Err(r)
+                            case Ok(_): pass
+                        if g.contains_key("cpu"):
+                            val cpath = gpath + ".cpu"
+                            match as_text(g["cpu"], cpath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(raw):
+                                    val millis = parse_cpu_millis(raw)
+                                    if millis < 0:
+                                        return Err(reject("quantity", cpath,
+                                            "cpu quantity '" + raw + "' is not an integer core or millicore value", spans))
+                                    if group == "requests":
+                                        cpu_req = millis
+                                    else:
+                                        cpu_lim = millis
+                        if g.contains_key("memory"):
+                            val mpath = gpath + ".memory"
+                            match as_text(g["memory"], mpath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(raw):
+                                    val bytes = parse_memory_bytes(raw)
+                                    if bytes < 0:
+                                        return Err(reject("quantity", mpath,
+                                            "memory quantity '" + raw + "' is not an integer byte value", spans))
+                                    if group == "requests":
+                                        mem_req = bytes
+                                    else:
+                                        mem_lim = bytes
+    if cpu_lim > 0 and cpu_req > cpu_lim:
+        return Err(reject("quantity", path + ".requests.cpu",
+                          "cpu request exceeds cpu limit", spans))
+    if mem_lim > 0 and mem_req > mem_lim:
+        return Err(reject("quantity", path + ".requests.memory",
+                          "memory request exceeds memory limit", spans))
+    Ok(ResourcesV1(cpu_request_millis: cpu_req, cpu_limit_millis: cpu_lim,
+                   memory_request_bytes: mem_req, memory_limit_bytes: mem_lim))
+
+fn decode_ports(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<[ContainerPortV1], RejectionV1>:
+    var out: [ContainerPortV1] = []
+    match as_array(v, path, spans):
+        case Err(r): return Err(r)
+        case Ok(items):
+            var i = 0
+            while i < items.len():
+                val ppath = path + "." + i.to_text()
+                match as_dict(items[i], ppath, spans):
+                    case Err(r): return Err(r)
+                    case Ok(fields):
+                        match only_known(fields, ["name", "containerPort"], ppath, spans):
+                            case Err(r): return Err(r)
+                            case Ok(_): pass
+                        var pname = ""
+                        if fields.contains_key("name"):
+                            match as_text(fields["name"], ppath + ".name", spans):
+                                case Err(r): return Err(r)
+                                case Ok(s): pname = s
+                        match require(fields, "containerPort", ppath, spans):
+                            case Err(r): return Err(r)
+                            case Ok(pv):
+                                match as_int(pv, ppath + ".containerPort", spans):
+                                    case Err(r): return Err(r)
+                                    case Ok(n):
+                                        if n < 1 or n > 65535:
+                                            return Err(reject("range", ppath + ".containerPort",
+                                                "containerPort must be 1..65535", spans))
+                                        out.push(ContainerPortV1(name: pname, container_port: n))
+                i = i + 1
+    Ok(out)
+
+fn decode_container(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<ContainerV1, RejectionV1>:
+    var name = ""
+    var image = ""
+    var artifact = ""
+    var command: [text] = []
+    var args: [text] = []
+    var ports: [ContainerPortV1] = []
+    var resources = ResourcesV1(cpu_request_millis: 0, cpu_limit_millis: 0,
+                                memory_request_bytes: 0, memory_limit_bytes: 0)
+    match as_dict(v, path, spans):
+        case Err(r): return Err(r)
+        case Ok(fields):
+            match only_known(fields, ["name", "image", "artifactSetRef", "command", "args", "ports", "resources"], path, spans):
+                case Err(r): return Err(r)
+                case Ok(_): pass
+            match require(fields, "name", path, spans):
+                case Err(r): return Err(r)
+                case Ok(nv):
+                    match as_text(nv, path + ".name", spans):
+                        case Err(r): return Err(r)
+                        case Ok(s): name = s
+            if name == "":
+                return Err(reject("empty_field", path + ".name", "container name is empty", spans))
+            if fields.contains_key("image"):
+                match as_text(fields["image"], path + ".image", spans):
+                    case Err(r): return Err(r)
+                    case Ok(s): image = s
+            if fields.contains_key("artifactSetRef"):
+                match as_text(fields["artifactSetRef"], path + ".artifactSetRef", spans):
+                    case Err(r): return Err(r)
+                    case Ok(s): artifact = s
+            # Whether an artifact reference is REQUIRED depends on the runtime
+            # class, which only `decode_pod_spec` knows; here we only refuse an
+            # ambiguous pair.
+            if image != "" and artifact != "":
+                return Err(reject("ambiguous_artifact", path + ".artifactSetRef",
+                    "container declares both image and artifactSetRef", spans))
+            if fields.contains_key("command"):
+                val cmpath = path + ".command"
+                match as_array(fields["command"], cmpath, spans):
+                    case Err(r): return Err(r)
+                    case Ok(items):
+                        var ci = 0
+                        while ci < items.len():
+                            match as_text(items[ci], cmpath + "." + ci.to_text(), spans):
+                                case Err(r): return Err(r)
+                                case Ok(s): command.push(s)
+                            ci = ci + 1
+                if command.len() == 0:
+                    return Err(reject("empty_field", cmpath, "command must not be empty when declared", spans))
+            if fields.contains_key("args"):
+                val apath = path + ".args"
+                match as_array(fields["args"], apath, spans):
+                    case Err(r): return Err(r)
+                    case Ok(items):
+                        var i = 0
+                        while i < items.len():
+                            match as_text(items[i], apath + "." + i.to_text(), spans):
+                                case Err(r): return Err(r)
+                                case Ok(s): args.push(s)
+                            i = i + 1
+            if fields.contains_key("ports"):
+                match decode_ports(fields["ports"], path + ".ports", spans):
+                    case Err(r): return Err(r)
+                    case Ok(p): ports = p
+            if fields.contains_key("resources"):
+                match decode_resources(fields["resources"], path + ".resources", spans):
+                    case Err(r): return Err(r)
+                    case Ok(res): resources = res
+    Ok(ContainerV1(name: name, image: image, artifact_set_ref: artifact,
+                   command: command, args: args, ports: ports, resources: resources))
+
+pub fn decode_pod_spec(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<PodSpecV1, RejectionV1>:
+    var os_name = ""
+    var runtime_class = ""
+    var network_profile = ""
+    var containers: [ContainerV1] = []
+    match as_dict(v, path, spans):
+        case Err(r): return Err(r)
+        case Ok(fields):
+            match only_known(fields, ["os", "runtimeClassName", "networkProfile", "containers"], path, spans):
+                case Err(r): return Err(r)
+                case Ok(_): pass
+            match require(fields, "os", path, spans):
+                case Err(r): return Err(r)
+                case Ok(ov):
+                    val opath = path + ".os"
+                    match as_dict(ov, opath, spans):
+                        case Err(r): return Err(r)
+                        case Ok(osf):
+                            match only_known(osf, ["name"], opath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(_): pass
+                            match require(osf, "name", opath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(nv):
+                                    match as_text(nv, opath + ".name", spans):
+                                        case Err(r): return Err(r)
+                                        case Ok(s): os_name = s
+            if not ["linux", "windows", "macos", "freebsd", "simpleos"].contains(os_name):
+                return Err(reject("unsupported_os", path + ".os.name",
+                    "unsupported os.name '" + os_name + "'", spans))
+            match require(fields, "runtimeClassName", path, spans):
+                case Err(r): return Err(r)
+                case Ok(rv):
+                    match as_text(rv, path + ".runtimeClassName", spans):
+                        case Err(r): return Err(r)
+                        case Ok(s): runtime_class = s
+            if not ["native-container", "native-sandbox", "native-process"].contains(runtime_class):
+                return Err(reject("unsupported_runtime_class", path + ".runtimeClassName",
+                    "unsupported runtimeClassName '" + runtime_class + "'", spans))
+            # macOS has no verified native container equivalent: a native-container
+            # request there is refused, never downgraded (research §4.4, MAC-003).
+            if os_name == "macos" and runtime_class == "native-container":
+                return Err(reject("unsupported_os_runtime_class", path + ".runtimeClassName",
+                    "native-container is not supported on macos; select native-sandbox or native-process", spans))
+            if fields.contains_key("networkProfile"):
+                match as_text(fields["networkProfile"], path + ".networkProfile", spans):
+                    case Err(r): return Err(r)
+                    case Ok(s): network_profile = s
+                if not ["endpoint-v1", "pod-ip-v1"].contains(network_profile):
+                    return Err(reject("unsupported_network_profile", path + ".networkProfile",
+                        "unsupported networkProfile '" + network_profile + "'", spans))
+            else:
+                network_profile = "endpoint-v1"
+            val cpath = path + ".containers"
+            match require(fields, "containers", path, spans):
+                case Err(r): return Err(r)
+                case Ok(cv):
+                    match as_array(cv, cpath, spans):
+                        case Err(r): return Err(r)
+                        case Ok(items):
+                            var i = 0
+                            while i < items.len():
+                                match decode_container(items[i], cpath + "." + i.to_text(), spans):
+                                    case Err(r): return Err(r)
+                                    case Ok(c): containers.push(c)
+                                i = i + 1
+            if containers.len() == 0:
+                return Err(reject("empty_field", cpath, "containers must not be empty", spans))
+            var seen: [text] = []
+            var ci2 = 0
+            while ci2 < containers.len():
+                val c = containers[ci2]
+                if seen.contains(c.name):
+                    return Err(reject("duplicate_container", cpath,
+                        "duplicate container name '" + c.name + "'", spans))
+                seen.push(c.name)
+                val ipath = cpath + "." + ci2.to_text()
+                if runtime_class == "native-container":
+                    # A container image is the unit of distribution here, so
+                    # exactly one artifact reference is required.
+                    if c.image == "" and c.artifact_set_ref == "":
+                        return Err(reject("missing_field", ipath + ".image",
+                            "a native-container needs exactly one of image or artifactSetRef", spans))
+                else:
+                    # A sandbox/process container has no image entrypoint to
+                    # inherit, so its executable must be stated, not guessed —
+                    # and an image reference there would be meaningless.
+                    if c.command.len() == 0:
+                        return Err(reject("missing_field", ipath + ".command",
+                            "runtimeClassName '" + runtime_class + "' has no image entrypoint; command is required", spans))
+                    if c.image != "" or c.artifact_set_ref != "":
+                        return Err(reject("unexpected_field", ipath + ".image",
+                            "runtimeClassName '" + runtime_class + "' does not run an image; use command", spans))
+                ci2 = ci2 + 1
+    Ok(PodSpecV1(os_name: os_name, runtime_class: runtime_class,
+                 network_profile: network_profile, containers: containers))
+
+pub fn decode_meta(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<ObjectMetaV1, RejectionV1>:
+    var name = ""
+    var ns = "default"
+    var labels: Dict<text, text> = {}
+    match as_dict(v, path, spans):
+        case Err(r): return Err(r)
+        case Ok(fields):
+            match only_known(fields, ["name", "namespace", "labels"], path, spans):
+                case Err(r): return Err(r)
+                case Ok(_): pass
+            match require(fields, "name", path, spans):
+                case Err(r): return Err(r)
+                case Ok(nv):
+                    match as_text(nv, path + ".name", spans):
+                        case Err(r): return Err(r)
+                        case Ok(s): name = s
+            if name == "":
+                return Err(reject("empty_field", path + ".name", "metadata.name is empty", spans))
+            if fields.contains_key("namespace"):
+                match as_text(fields["namespace"], path + ".namespace", spans):
+                    case Err(r): return Err(r)
+                    case Ok(s): ns = s
+            if fields.contains_key("labels"):
+                match label_map(fields["labels"], path + ".labels", spans):
+                    case Err(r): return Err(r)
+                    case Ok(m): labels = m
+    Ok(ObjectMetaV1(name: name, ns: ns, labels: labels))
+
+fn decode_deployment(meta: ObjectMetaV1, v: SdnValue, spans: Dict<text, SdnSpan>) -> Result<ResourceV1, RejectionV1>:
+    val path = "spec"
+    var replicas = 1
+    var selector: Dict<text, text> = {}
+    var tmpl_labels: Dict<text, text> = {}
+    var tmpl_spec = PodSpecV1(os_name: "", runtime_class: "", network_profile: "", containers: [])
+    match as_dict(v, path, spans):
+        case Err(r): return Err(r)
+        case Ok(fields):
+            match only_known(fields, ["replicas", "selector", "template"], path, spans):
+                case Err(r): return Err(r)
+                case Ok(_): pass
+            if fields.contains_key("replicas"):
+                match as_int(fields["replicas"], path + ".replicas", spans):
+                    case Err(r): return Err(r)
+                    case Ok(n):
+                        if n < 0:
+                            return Err(reject("range", path + ".replicas", "replicas must be >= 0", spans))
+                        replicas = n
+            val spath = path + ".selector"
+            match require(fields, "selector", path, spans):
+                case Err(r): return Err(r)
+                case Ok(sv):
+                    match as_dict(sv, spath, spans):
+                        case Err(r): return Err(r)
+                        case Ok(sf):
+                            match only_known(sf, ["matchLabels"], spath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(_): pass
+                            match require(sf, "matchLabels", spath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(mv):
+                                    match label_map(mv, spath + ".matchLabels", spans):
+                                        case Err(r): return Err(r)
+                                        case Ok(m): selector = m
+            if selector.keys().len() == 0:
+                return Err(reject("empty_field", spath + ".matchLabels",
+                    "selector.matchLabels must not be empty", spans))
+            val tpath = path + ".template"
+            match require(fields, "template", path, spans):
+                case Err(r): return Err(r)
+                case Ok(tv):
+                    match as_dict(tv, tpath, spans):
+                        case Err(r): return Err(r)
+                        case Ok(tf):
+                            match only_known(tf, ["metadata", "spec"], tpath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(_): pass
+                            match require(tf, "metadata", tpath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(tmv):
+                                    val mpath = tpath + ".metadata"
+                                    match as_dict(tmv, mpath, spans):
+                                        case Err(r): return Err(r)
+                                        case Ok(tmf):
+                                            match only_known(tmf, ["labels"], mpath, spans):
+                                                case Err(r): return Err(r)
+                                                case Ok(_): pass
+                                            match require(tmf, "labels", mpath, spans):
+                                                case Err(r): return Err(r)
+                                                case Ok(lv):
+                                                    match label_map(lv, mpath + ".labels", spans):
+                                                        case Err(r): return Err(r)
+                                                        case Ok(m): tmpl_labels = m
+                            match require(tf, "spec", tpath, spans):
+                                case Err(r): return Err(r)
+                                case Ok(tsv):
+                                    match decode_pod_spec(tsv, tpath + ".spec", spans):
+                                        case Err(r): return Err(r)
+                                        case Ok(ps): tmpl_spec = ps
+    # A selector that does not select its own template is unschedulable intent.
+    for key in selector.keys():
+        if not tmpl_labels.contains_key(key):
+            return Err(reject("selector_template_mismatch", "spec.template.metadata.labels",
+                "template labels are missing selector label '" + key + "'", spans))
+        if tmpl_labels[key] != selector[key]:
+            return Err(reject("selector_template_mismatch", "spec.template.metadata.labels",
+                "template label '" + key + "' does not match the selector value", spans))
+    Ok(ResourceV1.Deployment(DeploymentV1(meta: meta, replicas: replicas,
+        selector_labels: selector,
+        template: PodTemplateV1(labels: tmpl_labels, spec: tmpl_spec))))
+
+# Decode one orchestration resource document under the strict profile.
+# Any duplicate key, unknown field, wrong type, unparseable quantity or
+# selector/template disagreement is returned as a single RejectionV1 naming the
+# schema path and, where the parser recorded one, the source line and column.
+pub fn decode_resource(source: text) -> Result<ResourceV1, RejectionV1>:
+    var spans: Dict<text, SdnSpan> = {}
+    match parse_with_spans_and_issues(source):
+        case Err(e):
+            return Err(RejectionV1(kind: "parse", path: "", message: e, line: 0, col: 0))
+        case Ok(parsed):
+            spans = parsed.1
+            # `parse` resolves duplicate keys last-wins; the strict profile must not.
+            val issues = parsed.2
+            if issues.len() > 0:
+                val issue = issues[0]
+                return Err(RejectionV1(kind: issue.kind, path: issue.path,
+                                       message: issue.message, line: issue.line, col: issue.col))
+            match as_dict(parsed.0, "", spans):
+                case Err(r): return Err(r)
+                case Ok(top):
+                    match only_known(top, ["apiVersion", "kind", "metadata", "spec"], "document", spans):
+                        case Err(r): return Err(r)
+                        case Ok(_): pass
+                    match require(top, "apiVersion", "document", spans):
+                        case Err(r): return Err(r)
+                        case Ok(av):
+                            match as_text(av, "apiVersion", spans):
+                                case Err(r): return Err(r)
+                                case Ok(s):
+                                    if s != ORCHESTRATION_API_VERSION_V1:
+                                        return Err(reject("unsupported_api_version", "apiVersion",
+                                            "unsupported apiVersion '" + s + "'", spans))
+                    var meta = ObjectMetaV1(name: "", ns: "default", labels: {})
+                    match require(top, "metadata", "document", spans):
+                        case Err(r): return Err(r)
+                        case Ok(mv):
+                            match decode_meta(mv, "metadata", spans):
+                                case Err(r): return Err(r)
+                                case Ok(m): meta = m
+                    var kind = ""
+                    match require(top, "kind", "document", spans):
+                        case Err(r): return Err(r)
+                        case Ok(kv):
+                            match as_text(kv, "kind", spans):
+                                case Err(r): return Err(r)
+                                case Ok(k): kind = k
+                    match require(top, "spec", "document", spans):
+                        case Err(r): return Err(r)
+                        case Ok(sv):
+                            if kind == "Pod":
+                                match decode_pod_spec(sv, "spec", spans):
+                                    case Err(r): return Err(r)
+                                    case Ok(ps):
+                                        return Ok(ResourceV1.Pod(PodResourceV1(meta: meta, spec: ps)))
+                            if kind == "Deployment":
+                                return decode_deployment(meta, sv, spans)
+                            return Err(reject("unsupported_kind", "kind",
+                                "kind '" + kind + "' is not decoded by this contract version", spans))
+    Err(RejectionV1(kind: "internal", path: "", message: "decode fell through", line: 0, col: 0))

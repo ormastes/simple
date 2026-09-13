@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-17
 **Scope:** `src/lib/nogc_sync_mut/tls/validation.spl` (deleted `validate_chain`)
-**Status:** Deliberately deferred, not fixed. Dead code removed rather than
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 faked; this doc tracks the real gap for whoever picks up TLS chain-of-trust
 validation.
 
@@ -63,3 +63,6 @@ To implement real chain-of-trust validation:
    to `validation.spl` using those primitives instead of a phantom import.
 3. Add real test coverage (currently none existed even for the deleted
    phantom-backed version).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

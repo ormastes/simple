@@ -1,7 +1,7 @@
 # Bootstrap is blocked repo-wide: stage 1 dies on unknown extern rt_transient_array_scope_begin
 
 - **Filed:** 2026-07-27
-- **Status:** open, blocks every session
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** blocks ALL compiler-side work — no fix to `src/compiler/**` can be
   verified until this is cleared, because the only way to exercise such a fix is
   to rebuild the compiler.
@@ -125,3 +125,6 @@ change.
 Do not "fix" this by deleting the extern reference from `module_assembly.spl` —
 it is load-bearing for the parser memory bound that `1282f6e04d7` added, and
 removing it would reintroduce the memory blowup that commit was fixing.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

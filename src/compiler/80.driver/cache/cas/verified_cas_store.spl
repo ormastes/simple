@@ -6,9 +6,18 @@ use compiler.common.cache_contract.errors_v1 (
     RejectTelemetryV1
 )
 use compiler.common.cache_contract.canonical_cache_codec_v1.*
-use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.portable_object_ref_v1.{PortableObjectRefV1,
+    portable_object_ref_valid_v1}
+use compiler.hir.portable_object_profile_v1.{
+    portable_hir_semantic_verifier_digest_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.common.binary_io.{bytes_to_string}
 use common.cache_host_authority_v1.*
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_known_v1, verified_cas_kind_available_v1,
+    verified_cas_kind_digest_v1,
+    verified_cas_verify_kind_bytes_v1,
+    verified_cas_verify_portable_hir_bytes_v1}
 
 # The host receipt ABI deliberately caps one read at 64 MiB. Hex encoding is
 # twice the canonical envelope size, so admission is bounded at 32 MiB.
@@ -94,7 +103,7 @@ pub fn verified_cas_digest_v1(canonical_envelope: [u8]) -> text:
     canonical_cache_object_digest_v1(canonical_envelope)
 
 pub fn verified_cas_object_path_v1(root: text, kind: text, digest: text) -> Result<text, CacheErrorV1>:
-    if (root == "" or not _cas_kind_valid(kind) or _cas_expected_kind_tag(kind) < 0 or
+    if (root == "" or not _cas_kind_valid(kind) or not verified_cas_kind_known_v1(kind) or
             not _cas_digest_valid(digest)):
         return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
             RetryClassV1.Never, "cas-object-address-invalid"))
@@ -109,7 +118,8 @@ struct _CasAddressV1:
 
 fn _cas_open_address(root_path: text, kind_name: text, digest: text,
                      create: bool) -> Result<_CasAddressV1, CacheErrorV1>:
-    if not _cas_kind_valid(kind_name) or _cas_expected_kind_tag(kind_name) < 0 or not _cas_digest_valid(digest):
+    if not _cas_kind_valid(kind_name) or not verified_cas_kind_known_v1(kind_name) or
+            not _cas_digest_valid(digest):
         return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied, RetryClassV1.Never,
             "cas-object-address-invalid"))
     val root = cache_host_open_root_v1(root_path)
@@ -162,6 +172,15 @@ pub fn verified_cas_get_v1(
     if max_envelope_bytes < 0 or max_envelope_bytes > VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1:
         return Err(_cas_error(CacheErrorCodeV1.CacheBoundsExceeded,
             RetryClassV1.Never, "cas-read-bound-invalid"))
+    if not verified_cas_kind_known_v1(kind):
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "unknown-cas-kind"))
+    if kind == "portable_hir_object":
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "portable-hir-requires-reference-aware-api"))
+    if not verified_cas_kind_available_v1(kind):
+        return Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+            RetryClassV1.AfterStateChange, "cas-kind-verifier-unavailable"))
     val address_result = _cas_open_address(root, kind, digest, false)
     val address = match address_result:
         Ok(value): value
@@ -197,28 +216,14 @@ pub fn verified_cas_get_v1(
             _ = cache_host_close_object_v1(object)
             _cas_close_address(address)
             return Err(error)
-    val envelope = canonical_cache_decode_envelope_v1(bytes)
-    if not envelope.ok:
+    val verification = verified_cas_verify_kind_bytes_v1(kind, bytes)
+    if not verification.ok:
         _ = _cas_quarantine(address, object, digest)
         _ = cache_host_close_object_v1(object)
         _cas_close_address(address)
         return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
-            RetryClassV1.Never, "cas-envelope-invalid:" + envelope.error))
-    val decoded = match envelope.value:
-        case value: value
-        case nil:
-            _ = _cas_quarantine(address, object, digest)
-            _ = cache_host_close_object_v1(object)
-            _cas_close_address(address)
-            return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
-                RetryClassV1.Never, "cas-envelope-missing"))
-    if decoded.kind != _cas_expected_kind_tag(kind) or decoded.schema != 1:
-        _ = _cas_quarantine(address, object, digest)
-        _ = cache_host_close_object_v1(object)
-        _cas_close_address(address)
-        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
-            RetryClassV1.Never, "cas-envelope-kind-or-schema-mismatch"))
-    if verified_cas_digest_v1(bytes) != digest:
+            RetryClassV1.Never, "cas-kind-verification-failed:" + verification.error))
+    if verified_cas_kind_digest_v1(kind, bytes) != digest:
         _ = _cas_quarantine(address, object, digest)
         _ = cache_host_close_object_v1(object)
         _cas_close_address(address)
@@ -238,9 +243,16 @@ pub fn verified_cas_get_pinned_v1(pin: CacheReaderPinAuthorityV1, kind: text,
     if max_envelope_bytes < 0 or max_envelope_bytes > VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1:
         return Err(_cas_error(CacheErrorCodeV1.CacheBoundsExceeded,
             RetryClassV1.Never, "cas-read-bound-invalid"))
-    if not _cas_kind_valid(kind) or _cas_expected_kind_tag(kind) < 0 or not _cas_digest_valid(digest):
+    if not _cas_kind_valid(kind) or not verified_cas_kind_known_v1(kind) or
+            not _cas_digest_valid(digest):
         return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
             RetryClassV1.Never, "cas-object-address-invalid"))
+    if kind == "portable_hir_object":
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "portable-hir-requires-reference-aware-api"))
+    if not verified_cas_kind_available_v1(kind):
+        return Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+            RetryClassV1.AfterStateChange, "cas-kind-verifier-unavailable"))
     val object = cache_host_open_pinned_cas_v1(pin, kind, digest, now)
     if not cache_host_object_valid_v1(object):
         return Ok(VerifiedCasLookupV1(present: false, kind: kind,
@@ -257,19 +269,11 @@ pub fn verified_cas_get_pinned_v1(pin: CacheReaderPinAuthorityV1, kind: text,
             RetryClassV1.Never, "cas-object-receipt-changed"))
     _ = cache_host_close_object_v1(object)
     val bytes = _cas_hex_decode(bytes_to_string(encoded_bytes), max_envelope_bytes)?
-    val envelope = canonical_cache_decode_envelope_v1(bytes)
-    if not envelope.ok:
+    val verification = verified_cas_verify_kind_bytes_v1(kind, bytes)
+    if not verification.ok:
         return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
-            RetryClassV1.Never, "cas-envelope-invalid:" + envelope.error))
-    val decoded = match envelope.value:
-        case value: value
-        case nil:
-            return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
-                RetryClassV1.Never, "cas-envelope-missing"))
-    if decoded.kind != _cas_expected_kind_tag(kind) or decoded.schema != 1:
-        return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
-            RetryClassV1.Never, "cas-envelope-kind-or-schema-mismatch"))
-    if verified_cas_digest_v1(bytes) != digest:
+            RetryClassV1.Never, "cas-kind-verification-failed:" + verification.error))
+    if verified_cas_kind_digest_v1(kind, bytes) != digest:
         return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
             RetryClassV1.Never, "cas-object-digest-mismatch"))
     Ok(VerifiedCasLookupV1(present: true, kind: kind,
@@ -281,7 +285,18 @@ pub fn verified_cas_put_v1(
     if canonical_envelope.len() > VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1:
         return Err(_cas_error(CacheErrorCodeV1.CacheBoundsExceeded,
             RetryClassV1.Never, "cas-publish-bound-exceeded"))
-    val digest = verified_cas_digest_v1(canonical_envelope)
+    if kind == "portable_hir_object":
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "portable-hir-requires-reference-aware-api"))
+    if verified_cas_kind_known_v1(kind) and not verified_cas_kind_available_v1(kind):
+        return Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+            RetryClassV1.AfterStateChange, "cas-kind-verifier-unavailable"))
+    val verification = verified_cas_verify_kind_bytes_v1(kind, canonical_envelope)
+    if not verification.ok:
+        return Err(_cas_error(if verified_cas_kind_known_v1(kind):
+                CacheErrorCodeV1.CacheCorrupt else: CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "cas-kind-verification-failed:" + verification.error))
+    val digest = verified_cas_kind_digest_v1(kind, canonical_envelope)
     val existing = verified_cas_get_v1(root, kind, digest, canonical_envelope.len())?
     if existing.present:
         return Ok(digest)
@@ -309,6 +324,50 @@ pub fn verified_cas_put_v1(
         return Err(_cas_error(CacheErrorCodeV1.CacheCorrupt,
             RetryClassV1.Never, "cas-publish-readback-mismatch"))
     Ok(digest)
+
+# Portable HIR is intentionally unreachable through the generic get/put APIs.
+# These reference-aware entry points remain closed while the semantic verifier
+# reports unavailable; future admission must still address exactly the digest
+# bound by PortableObjectRefV1 and verify the unwrapped HIR bytes.
+pub fn verified_cas_get_portable_hir_v1(root: text, reference: PortableObjectRefV1,
+        verifier_digest: text, expected_target_contract: text?,
+        max_object_bytes: i64) -> Result<VerifiedCasLookupV1, CacheErrorV1>:
+    if root == "" or not portable_object_ref_valid_v1(reference) or
+            reference.ir_schema != 2 or
+            verifier_digest != portable_hir_semantic_verifier_digest_v1() or
+            reference.target_contract_digest != expected_target_contract or
+            max_object_bytes < 0 or max_object_bytes > VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1:
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "portable-hir-reference-or-bound-invalid"))
+    val address = verified_cas_object_path_v1(root, "portable_hir_object",
+        reference.content_digest)?
+    if address == "":
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "portable-hir-address-invalid"))
+    if not verified_cas_kind_available_v1("portable_hir_object"):
+        return Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+            RetryClassV1.AfterStateChange, "portable-hir-semantic-verifier-unavailable"))
+    # No generic raw read is authorized until the verifier becomes available.
+    Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+        RetryClassV1.AfterStateChange, "portable-hir-read-not-admitted"))
+
+pub fn verified_cas_put_portable_hir_v1(root: text, reference: PortableObjectRefV1,
+        encoded_hir: [u8], verifier_digest: text,
+        expected_target_contract: text?) -> Result<text, CacheErrorV1>:
+    if root == "" or not portable_object_ref_valid_v1(reference) or
+            reference.target_contract_digest != expected_target_contract or
+            sha256_u8_hex(encoded_hir) != reference.content_digest:
+        return Err(_cas_error(CacheErrorCodeV1.CacheAccessDenied,
+            RetryClassV1.Never, "portable-hir-reference-invalid"))
+    val verification = verified_cas_verify_portable_hir_bytes_v1(reference,
+        encoded_hir, verifier_digest, expected_target_contract)
+    if not verification.ok:
+        return Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+            RetryClassV1.AfterStateChange, verification.error))
+    # Keep the write closed until a reference-aware raw readback path is
+    # reviewed together with an available semantic verifier.
+    Err(_cas_error(CacheErrorCodeV1.CacheUnavailable,
+        RetryClassV1.AfterStateChange, "portable-hir-publication-not-admitted"))
 
 export VERIFIED_CAS_MAX_ENVELOPE_BYTES_V1
 export verified_cas_get_pinned_v1

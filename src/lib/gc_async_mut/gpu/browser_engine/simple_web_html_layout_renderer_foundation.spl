@@ -9,6 +9,7 @@ use std.common.animation.timing.{parse_timing_function}
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_flat_projection_with_limits
 }
+use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value_checked}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
@@ -213,6 +214,117 @@ fn _web_render_budget_ms_env_override() -> i64:
 # reverted -- keep it in the tree.
 fn _web_phase_trace_enabled() -> bool:
     (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
+
+# ---------------------------------------------------------------------------
+# Level-gated style-stage cost counters (SIMPLE_WEB_STYLE_COUNTERS=1).
+#
+# The phase boundaries say the style stage is 86% of the cold document pipeline
+# but not WHICH leaf owns it, and two plausible-looking fixes (a cascade memo, a
+# presence-set short-circuit) each moved the total by ~10%, which is exactly the
+# signature of attributing cost to the wrong leaf. These count calls and
+# microseconds per leaf so the next change is chosen from a measurement.
+# Permanent and default-off per the log-retention policy.
+# ---------------------------------------------------------------------------
+fn _web_style_counters_enabled() -> bool:
+    (env_get("SIMPLE_WEB_STYLE_COUNTERS") ?? "") == "1"
+
+var _wsc_on: bool = false
+var _wsc_probe_calls: i64 = 0
+var _wsc_probe_us: i64 = 0
+var _wsc_dispatch_calls: i64 = 0
+var _wsc_dispatch_us: i64 = 0
+var _wsc_table_calls: i64 = 0
+var _wsc_table_us: i64 = 0
+var _wsc_table_entries: i64 = 0
+var _wsc_selector_calls: i64 = 0
+var _wsc_selector_us: i64 = 0
+var _wsc_candidates: i64 = 0
+
+pub fn web_style_counters_arm():
+    _wsc_on = _web_style_counters_enabled()
+    _wsc_probe_calls = 0
+    _wsc_probe_us = 0
+    _wsc_dispatch_calls = 0
+    _wsc_dispatch_us = 0
+    _wsc_table_calls = 0
+    _wsc_table_us = 0
+    _wsc_table_entries = 0
+    _wsc_selector_calls = 0
+    _wsc_selector_us = 0
+    _wsc_candidates = 0
+    _wsc_sec_a = 0
+    _wsc_sec_b = 0
+    _wsc_sec_c = 0
+    _wsc_sec_d = 0
+    _wsc_sec_e = 0
+    _wsc_sec_f = 0
+    _wsc_sec_g = 0
+    _wsc_sec_h = 0
+
+fn _wsc_armed() -> bool:
+    _wsc_on
+
+fn _wsc_now_us() -> i64:
+    _web_budget_clock.now_micros()
+
+fn _wsc_add_probe(us: i64):
+    _wsc_probe_calls = _wsc_probe_calls + 1
+    _wsc_probe_us = _wsc_probe_us + us
+
+fn _wsc_add_dispatch(us: i64):
+    _wsc_dispatch_calls = _wsc_dispatch_calls + 1
+    _wsc_dispatch_us = _wsc_dispatch_us + us
+
+fn _wsc_add_table(us: i64, entries: i64):
+    _wsc_table_calls = _wsc_table_calls + 1
+    _wsc_table_us = _wsc_table_us + us
+    _wsc_table_entries = _wsc_table_entries + entries
+
+fn _wsc_add_selector(us: i64):
+    _wsc_selector_calls = _wsc_selector_calls + 1
+    _wsc_selector_us = _wsc_selector_us + us
+
+fn _wsc_add_candidates(n: i64):
+    _wsc_candidates = _wsc_candidates + n
+
+var _wsc_sec_a: i64 = 0
+var _wsc_sec_b: i64 = 0
+var _wsc_sec_c: i64 = 0
+var _wsc_sec_d: i64 = 0
+var _wsc_sec_e: i64 = 0
+var _wsc_sec_f: i64 = 0
+var _wsc_sec_g: i64 = 0
+var _wsc_sec_h: i64 = 0
+
+fn _wsc_add_section(which: i32, us: i64):
+    if which == 0:
+        _wsc_sec_a = _wsc_sec_a + us
+    elif which == 1:
+        _wsc_sec_b = _wsc_sec_b + us
+    elif which == 2:
+        _wsc_sec_c = _wsc_sec_c + us
+    elif which == 3:
+        _wsc_sec_d = _wsc_sec_d + us
+    elif which == 4:
+        _wsc_sec_e = _wsc_sec_e + us
+    elif which == 5:
+        _wsc_sec_f = _wsc_sec_f + us
+    elif which == 6:
+        _wsc_sec_g = _wsc_sec_g + us
+    else:
+        _wsc_sec_h = _wsc_sec_h + us
+
+pub fn web_style_counters_report() -> text:
+    "probe_calls={_wsc_probe_calls} probe_ms={_wsc_probe_us / 1000}" +
+        " dispatch_calls={_wsc_dispatch_calls} dispatch_ms={_wsc_dispatch_us / 1000}" +
+        " table_calls={_wsc_table_calls} table_ms={_wsc_table_us / 1000}" +
+        " table_entries={_wsc_table_entries}" +
+        " selector_calls={_wsc_selector_calls} selector_ms={_wsc_selector_us / 1000}" +
+        " candidates={_wsc_candidates}" +
+        " sec_inherit_ms={_wsc_sec_a / 1000} sec_select_ms={_wsc_sec_b / 1000}" +
+        " sec_cascade_ms={_wsc_sec_c / 1000} sec_wm_ms={_wsc_sec_d / 1000}" +
+        " sec_metrics_ms={_wsc_sec_e / 1000} sec_store_ms={_wsc_sec_f / 1000}" +
+        " sec_lang_ms={_wsc_sec_g / 1000} sec_resolve_ms={_wsc_sec_h / 1000}"
 # Cap on the number of style rules the cascade will apply per node; rules beyond
 # this index (CSS source order) are skipped so the first rules keep their effect.
 val WEB_STYLE_RULE_QUOTA: i32 = 4096
@@ -270,6 +382,19 @@ pub fn web_budget_now_and_deadline() -> text:
 # early). Quota drops do NOT set this — they are silent by design.
 pub fn simple_web_layout_last_render_degraded() -> bool:
     _web_render_degraded
+
+# Clear the module-global degrade latch without arming a budget.
+#
+# The latch is normally cleared by `_web_budget_begin`, i.e. by STARTING a
+# render. A document-pipeline cache hit skips the whole compose (and therefore
+# the begin), so without this the latch would still carry whatever the last
+# real render left behind, and the execution result — which reads
+# `simple_web_layout_last_render_degraded()` AFTER compose — would report a
+# cached, complete frame as degraded. Only cache hits of results whose own
+# `render_degraded` field is false call this; a degraded result is never
+# cached, so this can never launder an exhausted render into a clean one.
+pub fn simple_web_layout_clear_render_degraded():
+    _web_render_degraded = false
 
 # Short diagnostic suffix for the degrade_reason field callers append to their
 # "reason=budget-exhausted:" receipt string (see simple_web_html_layout_renderer.spl).
@@ -1143,7 +1268,31 @@ fn parse_color(raw: text) -> u32:
             val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
             if c1 >= 0 and c2 >= 0 and c2 < rp:
                 return argb(parse_int_range(s, lp + 1, c1), parse_int_range(s, c1 + 1, c2), parse_int_range(s, c2 + 1, rp))
-    0u32
+    _parse_color_delegated(s)
+
+fn _parse_color_delegated(lowered: text) -> u32:
+    """Named colors, hsl()/hsla() and the other CSS color forms this local
+    parser never learned, delegated to the browser-engine color parser
+    (`dom_color.parse_color_value_checked`, RGBA-packed) and converted to the
+    ARGB packing used here. `currentcolor` is excluded: it needs the inherited
+    text color, which this context-free entry point does not have, and the
+    delegate would silently answer opaque black."""
+    if lowered == "currentcolor":
+        return 0u32
+    val first = if lowered.len() > 0: lowered.char_at(0) else: ""
+    if dec_val(first) < 10 or first == ".":
+        # The delegate ends with a bare `parse_i64`, so `1` would come back as
+        # a nonzero "color". No CSS color starts with a digit or a dot, and
+        # callers here read nonzero as "a color was found".
+        return 0u32
+    val parsed = parse_color_value_checked(lowered)
+    if parsed == nil:
+        return 0u32
+    val rgba = parsed ?? 0u32
+    val a = rgba & 0xFFu32
+    if a == 0u32:
+        return 0u32
+    (a << 24) | ((rgba >> 8) & 0xFFFFFFu32)
 
 fn parse_color_any(raw: text) -> u32:
     val direct = parse_color(raw)
@@ -2404,6 +2553,14 @@ fn decl_entry_count(decls: text) -> i32:
 # Flat table, stride 2: [name0, value0, name1, value1, ...] in source order.
 # Names are trimmed+lowered, values trimmed — exactly as `decl_get` does.
 fn decl_table_build(decls: text) -> [text]:
+    if _wsc_armed():
+        val t0 = _wsc_now_us()
+        val built = _decl_table_build_inner(decls)
+        _wsc_add_table(_wsc_now_us() - t0, (built.len() as i64) / 2)
+        return built
+    _decl_table_build_inner(decls)
+
+fn _decl_table_build_inner(decls: text) -> [text]:
     val n = decl_entry_count(decls)
     if n == 0:
         val empty: [text] = []
@@ -2425,6 +2582,43 @@ fn decl_table_build(decls: text) -> [text]:
             break
         pos = semi + 1
     tbl
+
+# ---------------------------------------------------------------------------
+# Presence set over a declaration table.
+#
+# `_apply_decls_without_grid` probes ~283 property names against ONE table, and
+# every probe below is a BACKWARDS LINEAR SCAN of that table. A node that
+# matched many rules carries a merged table with hundreds of entries, so the
+# full probe body costs 283 x E string comparisons -- measured at ~1.2 s for a
+# single such node under the interpreter, and 22 of them accounted for ~26 s of
+# the 26.2 s css-layout style stage even with the cascade memo answering 96% of
+# nodes (doc/08_tracking/bug/
+# web_style_cascade_apply_decls_reparses_per_node_2026-09-12.md).
+#
+# Building the set of property names present in the table costs one O(E) pass;
+# each probe for an ABSENT property then answers in O(1). This is exactly
+# behaviour-preserving and needs no reasoning about cascade order: if a name is
+# not in the table at all, the scan it replaces was always going to return the
+# empty/absent answer. Probes for names that ARE present still take the original
+# scan, so last-wins and last-VALID semantics are untouched.
+# ---------------------------------------------------------------------------
+fn decl_tbl_presence(tbl: [text]) -> Dict<text, i32>:
+    var present: Dict<text, i32> = {}
+    var i = 0
+    while i < tbl.len():  # cpu-lane-loop-ok: one pass over ONE declaration table recording which property names occur; bound is that table's entry count
+        present[tbl[i]] = 1
+        i = i + 2
+    present
+
+fn decl_tbl_get_p(tbl: [text], present: Dict<text, i32>, prop: text) -> text:
+    if not present.has(prop):
+        return ""
+    decl_tbl_get(tbl, prop)
+
+fn decl_tbl_last_index_p(tbl: [text], present: Dict<text, i32>, prop: text) -> i32:
+    if not present.has(prop):
+        return -1
+    decl_tbl_last_index(tbl, prop)
 
 # Table-backed `decl_get`. Backwards walk == last-wins on duplicates.
 fn decl_tbl_get(tbl: [text], prop: text) -> text:

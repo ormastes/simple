@@ -695,6 +695,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // symbol undeclared was not established; if such a case is ever
             // observed failing the same way, this is where it belongs.
             | "rt_is_some"
+            | "rt_is_present"
             | "rt_is_none"
             | "rt_enum_check_variant"
             | "rt_value_as_u64"
@@ -2491,11 +2492,9 @@ impl<M: Module> CodegenBackend<M> {
 
         let init_name = module_init_symbol(self.module_prefix.as_deref());
         let module_init_trace_id = if module_init_trace_enabled() {
-            Some(
-                *self.runtime_funcs.get("rt_eprintln_str").ok_or_else(|| {
-                    BackendError::ModuleError("rt_eprintln_str not declared for module-init trace".into())
-                })?,
-            )
+            Some(*self.runtime_funcs.get("rt_eprintln_str").ok_or_else(|| {
+                BackendError::ModuleError("rt_eprintln_str not declared for module-init trace".into())
+            })?)
         } else {
             None
         };
@@ -3114,6 +3113,11 @@ mod tests {
     #[test]
     fn option_presence_predicate_runtime_symbols_are_retained() {
         assert!(runtime_symbol_is_codegen_root("rt_is_some"));
+        // `.?` lowers to `rt_is_present`; if it is not a codegen root the LLVM
+        // and Cranelift lanes both fail to declare it and the whole module
+        // bails out to the interpreter.
+        // doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+        assert!(runtime_symbol_is_codegen_root("rt_is_present"));
         assert!(runtime_symbol_is_codegen_root("rt_is_none"));
         assert!(runtime_symbol_is_codegen_root("rt_contains"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_check_variant"));

@@ -1,5 +1,7 @@
 # Stage 4 full CLI second-module call-argument SIGSEGV
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 SIGSEGV fixed on 2026-07-31 by replacing `_hir_expr_symbol`'s fragile
@@ -83,3 +85,7 @@ the test-ABI fallback.
 - The new bounded failure is
   `Module surface/source fingerprint mismatch for
   src/lib/nogc_async_mut/cli/log_modes.spl`, after lowering, not a signal.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

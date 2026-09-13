@@ -37,16 +37,20 @@ struct OwnedResources:
 # Ownership Registry
 # ============================================================================
 
-struct OwnershipRegistry:
+class OwnershipRegistry:
     """Central registry mapping modules to their owned resources."""
     owner_resources: Dict<text, OwnedResources>
     # Reverse map: jit_symbol -> triggering module path
     jit_origin: Dict<text, text>
+    owner_count: i64
+    jit_count: i64
 
 fn ownershipregistry_new() -> OwnershipRegistry:
     OwnershipRegistry(
         owner_resources: {},
-        jit_origin: {}
+        jit_origin: {},
+        owner_count: 0,
+        jit_count: 0
     )
 
 # ============================================================================
@@ -63,7 +67,7 @@ fn lifecycleconfig_default() -> LifecycleConfig:
 # Resource Lifecycle Manager
 # ============================================================================
 
-struct ResourceLifecycleManager:
+class ResourceLifecycleManager:
     """Central coordinator for resource tracking and deallocation."""
     registry: OwnershipRegistry
     smf_cache_mgr: SmfCacheManager
@@ -96,6 +100,8 @@ fn lifecycle_with_defaults(smf_cache_mgr: SmfCacheManager) -> ResourceLifecycleM
 
 fn lifecycle_on_module_load(self: ResourceLifecycleManager, module_path: text, generation: i32, load_time: i64):
     """Start tracking a new module."""
+    if not self.registry.owner_resources.has(module_path):
+        self.registry.owner_count = self.registry.owner_count + 1
     self.registry.owner_resources[module_path] = OwnedResources(
         module_path: module_path,
         exec_symbols: [],
@@ -118,8 +124,22 @@ fn lifecycle_on_symbol_mapped(self: ResourceLifecycleManager, module_path: text,
 
 fn lifecycle_on_jit_triggered(self: ResourceLifecycleManager, triggering_module: text, jit_symbol: text):
     """Record JIT symbol origin so unload can find it."""
+    var attach_to_owner = true
+    if self.registry.jit_origin.has(jit_symbol):
+        val prior_owner = self.registry.jit_origin[jit_symbol]
+        attach_to_owner = prior_owner != triggering_module
+        if attach_to_owner and self.registry.owner_resources.has(prior_owner):
+            var prior = self.registry.owner_resources[prior_owner]
+            var retained: [text] = []
+            for prior_symbol in prior.jit_symbols:
+                if prior_symbol != jit_symbol:
+                    retained.push(prior_symbol)
+            prior.jit_symbols = retained
+            self.registry.owner_resources[prior_owner] = prior
+    else:
+        self.registry.jit_count = self.registry.jit_count + 1
     self.registry.jit_origin[jit_symbol] = triggering_module
-    if self.registry.owner_resources.has(triggering_module):
+    if attach_to_owner and self.registry.owner_resources.has(triggering_module):
         var owned = self.registry.owner_resources[triggering_module]
         owned.jit_symbols = owned.jit_symbols.push(jit_symbol)
         self.registry.owner_resources[triggering_module] = owned
@@ -169,6 +189,7 @@ fn lifecycle_unload_module(self: ResourceLifecycleManager, exec_mapper: SharedEx
         _ = exec_mapper.unmap_symbol(jit_sym)
         if self.registry.jit_origin.has(jit_sym):
             self.registry.jit_origin = self.registry.jit_origin.remove(jit_sym)
+            self.registry.jit_count = self.registry.jit_count - 1
 
     # 2. Free loader-mapped exec pages for this module.
     _ = exec_mapper.unmap_owner(module_path)
@@ -179,6 +200,7 @@ fn lifecycle_unload_module(self: ResourceLifecycleManager, exec_mapper: SharedEx
 
     # 4. Remove ownership record.
     self.registry.owner_resources = self.registry.owner_resources.remove(module_path)
+    self.registry.owner_count = self.registry.owner_count - 1
 
     if self.config.verbose:
         val jit_count = owned.jit_symbols.len()
@@ -205,10 +227,10 @@ fn lifecycle_get_jit_origin(self: ResourceLifecycleManager, jit_symbol: text) ->
     nil
 
 fn lifecycle_tracked_module_count(self: ResourceLifecycleManager) -> i32:
-    self.registry.owner_resources.keys().len()
+    self.registry.owner_count as i32
 
 fn lifecycle_tracked_jit_count(self: ResourceLifecycleManager) -> i32:
-    self.registry.jit_origin.keys().len()
+    self.registry.jit_count as i32
 
 # ============================================================================
 # Sweep — epoch-based LRU eviction
@@ -246,9 +268,9 @@ fn lifecycle_stats(self: ResourceLifecycleManager) -> LifecycleStats:
     """Aggregate stats from registry, smf_cache_mgr, and sweeper."""
     val sw = sweeper_stats(self.sweeper)
     LifecycleStats(
-        tracked_modules: self.registry.owner_resources.keys().len(),
-        total_jit_symbols: self.registry.jit_origin.keys().len(),
-        smf_tracked_count: self.smf_cache_mgr.ref_counts.keys().len(),
+        tracked_modules: self.registry.owner_count,
+        total_jit_symbols: self.registry.jit_count,
+        smf_tracked_count: self.smf_cache_mgr.tracked_count as i64,
         sweeper_epoch: sw.epoch,
         sweeper_tracked: sw.tracked_count,
         sweeper_stale: sw.stale_count
@@ -284,4 +306,3 @@ fn lifecycle_destroy(self: ResourceLifecycleManager, exec_mapper: SharedExecMapp
 # ============================================================================
 # Exports
 # ============================================================================
-

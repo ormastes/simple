@@ -1,5 +1,7 @@
 # Stage-4 compiled in-process paths broken: RuntimeDict never grows (root cause) + Cranelift Host→x86-64 leak
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-11 · **Status:** both fixes implemented; seed/runtime rebuild + stage-4 redeploy required
 **Symptoms fixed by this:** deployed `bin/simple native-build …` traps instantly
 ("runtime error: field access on nil receiver", exit 132 in `SymbolTable.lookup`);
@@ -173,3 +175,7 @@ and times out after 180s before producing a binary — the known slow-interprete
 blocker (see `doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-08.md`). Stage-4
 rebuild/redeploy with the fixed runtime is still required for the deployed binary to pick up
 dict growth.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

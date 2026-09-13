@@ -58,11 +58,18 @@ missing resources/identity setup, unavailable authentication, and timeouts are
 drift fail. Exit 0 requires every requested row to pass, 1 denotes failure,
 and 2 denotes unavailable rows. Unavailable rows remain release blockers.
 
-Stage 4 adds required `phase_live_services` after the named suites and protocol
-gates. Set `STAGE4_PHASE_LIVE_MANIFEST` before starting a new matrix ID. The
-matrix freezes that manifest and requires the exact CLI/MCP/LSP candidates.
-Adding a manifest after a matrix starts changes its identity: use a new matrix
-ID. Compiler/interpreter tests, Caret/DevHub/SPipe full suites, startup/RSS NFRs,
+Provider output is classified as unavailable only for the fixed GitHub, Jira,
+and Confluence rows and only for anchored 401/403, explicit unauthenticated,
+missing provider CLI, or typed DNS/network/connectivity failures. Help text or
+incidental words such as `login`, `token`, `authentication`, and `request
+failed: http parser` do not mask implementation failures. Negative exits and
+statuses 128 or above are crashes and always FAIL, including when earlier
+output contained a valid unauthorized line.
+
+Run the standalone controller against admitted Stage 4 artifacts after the
+named suites and protocol gates. Automatic integration into the Stage 4 tooling
+matrix is separate work; this controller does not add a matrix admission row.
+Compiler/interpreter tests, Caret/DevHub/SPipe full suites, startup/RSS NFRs,
 deployment verification, and cross-host acceptance remain separate gates.
 
 Controller verification:
@@ -71,7 +78,7 @@ Controller verification:
 python test/01_unit/scripts/bootstrap_phase_live_test.py
 ```
 
-Its eight tests use synthetic child fixtures exclusively to test the checker;
+Its eleven tests use synthetic child fixtures exclusively to test the checker;
 they are never live service or bootstrap admission evidence.
 
 Phase 1 matrix tools require the current committed Rust seed generation from

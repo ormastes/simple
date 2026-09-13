@@ -1,5 +1,7 @@
 # BUG: native path — untyped text `==` never matches + fused boolean conditions evaluate wrong
 
+**Status:** RESOLVED (2026-07-15, verified fixed at origin tip 8932fcb3a148)
+
 **Status (2026-07-15):** RESOLVED — verified fixed at origin tip 8932fcb3a148.
 
 ## Resolution
@@ -36,3 +38,6 @@ SIMPLE_RUNTIME_PATH), run with matching argv — guard never fires.
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148: `probe06_untyped_text_eq_a.spl` (`fn check(a: text) -> i64` computing `a == "spl"`, `a.starts_with("d")`, `a.ends_with("l")`, and fused `not starts_d and ends_l`; called with `"spl"` and `"dashl"`). Oracle: `bin/simple run` → `11` then `0`. Native: `native-build --entry --clean` exit 0, binary built, run → `110` (= both values concatenated, matches oracle). Text equality now uses shared runtime content comparison and boolean fusion evaluates correctly.
+
+## Triage 2026-09-12
+Reviewed 2026-09-12: the record's own status (RESOLVED, verified fixed) is already accurate and consistent with its body; added a top-level Status line for gate compliance only, no reclassification. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

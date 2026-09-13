@@ -1,0 +1,53 @@
+use compiler.driver.cache.native_noop_admission.{
+    native_noop_request_v1, native_noop_publish_v1,
+    native_noop_publish_fault_v1, native_noop_admit_v1,
+    native_noop_admission_hit_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{get_args}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_write(path: text, content: text) -> bool
+
+fn request(root: text):
+    native_noop_request_v1(
+        root, "{root}/app", "llvm", "aarch64-apple-darwin", 2,
+        true, false, false, "release", ["gc_sync_mut"], "",
+        "rev", "tree", "inventory", "authority", sha256_text("env"),
+        "invocation", ["{root}/main.spl"])
+
+fn main() -> i64:
+    val args = get_args() ?? []
+    if args.len() < 3:
+        return 64
+    val mode = args[1]
+    val root = args[2]
+    if mode == "reset":
+        val _removed = rt_dir_remove_all(root)
+        if not rt_dir_create_all(root) or
+                not rt_file_write("{root}/main.spl", "fn main():\n    print 1\n") or
+                not rt_file_write("{root}/app", "native-output"):
+            return 65
+        return 0
+    if mode == "crash":
+        if args.len() != 4:
+            return 66
+        val _ = native_noop_publish_fault_v1(
+            request(root), ["{root}/main.spl"], args[3])
+        return 67
+    if mode == "check-miss":
+        if native_noop_admission_hit_v1(native_noop_admit_v1(request(root))):
+            return 68
+        return 0
+    if mode == "check-hit":
+        if not native_noop_admission_hit_v1(native_noop_admit_v1(request(root))):
+            return 68
+        return 0
+    if mode == "recover":
+        if native_noop_publish_v1(request(root), ["{root}/main.spl"]) != "ok":
+            return 69
+        if not native_noop_admission_hit_v1(native_noop_admit_v1(request(root))):
+            return 70
+        return 0
+    71

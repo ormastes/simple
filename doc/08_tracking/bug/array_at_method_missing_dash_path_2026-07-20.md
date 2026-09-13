@@ -68,3 +68,6 @@ creep beyond this campaign's mandate.
   under `bin/simple run` on a 3-line standalone repro
   (`val bytes: [i64] = [99, 111, 108]; bytes.at(1)`), confirming this is a
   missing builtin, not a test-vs-run evaluator divergence.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/unit/lib/skia/stroke_dash_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

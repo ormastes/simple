@@ -1,5 +1,7 @@
 # The spec suite is structurally blind to JIT-only defects (2026-07-30)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Motivation: `SIMPLE_EXECUTION_MODE=jit` is the default engine for plain
 `simple run`, but `bin/simple test` unconditionally forces interpreter mode
 for every child spec (proved with a direct code citation in
@@ -253,3 +255,6 @@ programs under test rather than reporting green unconditionally.
   llvm::` as a cheap sanity check) at the moment of testing, not just "the
   deployed binary," so a later reconciliation can confirm or rule out a
   binary swap as the explanation (§3a).
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

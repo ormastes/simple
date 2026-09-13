@@ -1,5 +1,7 @@
 # Hosted volatile-u16 migration Stage 4 evidence blocked — 2026-08-20
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 HOLD. The pure-Simple hosted owner and ABI-preserving facade migration are
@@ -41,3 +43,7 @@ Using an admitted current-source pure-Simple Stage 4 runtime, run each once:
 100% decision/branch coverage, focused mutation kills, compiled C/Simple parity,
 and warm native performance medians. Until those rows pass, component verdict
 remains HOLD and the broader envelope must not claim GO.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

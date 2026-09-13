@@ -338,19 +338,77 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
 /// reparse-point and directory attributes from that handle. Unsupported hosts
 /// fail closed. `NIL` denotes every admission/read/UTF-8 failure, while an
 /// allocated empty text remains a successful empty-file result.
+/// Why the last `rt_file_read_regular_no_follow_bounded` call returned `NIL`.
+///
+/// That function has eight indistinguishable `NIL` returns, and its Simple
+/// caller can only report "returned nil". The Stage 2 bootstrap failure stayed
+/// unexplainable across many sessions for exactly that reason: the AOT
+/// diagnostic was written successfully, read back as nil, and nothing could say
+/// which admission arm rejected it. `rt_secure_temp_dir_diag` solved the same
+/// problem for the staging directory; this is its counterpart for the reader.
+/// Starts at a sentinel rather than zero so a readout is never ambiguous:
+/// `READ_NF_NEVER_CALLED` means the reader never ran, `READ_NF_OK` means it
+/// succeeded, 1..=10 name a rejected arm, and a literal 0 means this diagnostic
+/// extern is itself unresolved in the lane that read it. Zero used to collapse
+/// all three of those onto one number, which is how a readout of "arm 0" got
+/// read as a success it was not.
+/// Thread-local, NOT a global. A process-wide cell is worthless here: the
+/// bootstrap reads with 24 jobs in flight, so a concurrent successful read on
+/// another thread overwrites the code before the failing caller can report it.
+/// Measured — the first cut was a global atomic and answered "read succeeded"
+/// for a call that had plainly returned nil.
+thread_local! {
+    static READ_NO_FOLLOW_LAST_FAILURE: std::cell::Cell<i64> =
+        const { std::cell::Cell::new(READ_NF_NEVER_CALLED) };
+}
+
+// Failure-arm codes. Small integers so the value crosses the SFFI boundary
+// without allocating inside a path that is already failing.
+const READ_NF_NEVER_CALLED: i64 = 77;
+const READ_NF_OK: i64 = 100;
+const READ_NF_CAPABILITY: i64 = 1;
+const READ_NF_BAD_ARGS: i64 = 2;
+const READ_NF_BAD_UTF8_PATH: i64 = 3;
+const READ_NF_OPEN: i64 = 4;
+const READ_NF_METADATA: i64 = 5;
+const READ_NF_NOT_REGULAR: i64 = 6;
+const READ_NF_TOO_LARGE: i64 = 7;
+const READ_NF_REPARSE: i64 = 8;
+const READ_NF_READ: i64 = 9;
+const READ_NF_BAD_UTF8_CONTENT: i64 = 10;
+/// Created, but the value did not decode as a heap string on the way out.
+/// This separates "the string was born bad" from "it went bad after crossing
+/// into Simple" -- the caller sees a present-but-undecodable text? and cannot
+/// tell those apart, and they have completely different owners.
+const READ_NF_BORN_UNDECODABLE: i64 = 101;
+
+fn read_no_follow_fail(code: i64) -> RuntimeValue {
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(code));
+    RuntimeValue::NIL
+}
+
+/// Read the arm code recorded by the most recent bounded no-follow read.
+#[no_mangle]
+pub extern "C" fn rt_file_read_regular_no_follow_last_failure() -> i64 {
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.get())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     path_ptr: *const u8,
     path_len: u64,
     max_bytes: i64,
 ) -> RuntimeValue {
-    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) || path_ptr.is_null() || max_bytes < 0 {
-        return RuntimeValue::NIL;
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
+        return read_no_follow_fail(READ_NF_CAPABILITY);
+    }
+    if path_ptr.is_null() || max_bytes < 0 {
+        return read_no_follow_fail(READ_NF_BAD_ARGS);
     }
     let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
     let path_str = match std::str::from_utf8(path_bytes) {
         Ok(path) if !path.is_empty() && !path.as_bytes().contains(&0) => path,
-        _ => return RuntimeValue::NIL,
+        _ => return read_no_follow_fail(READ_NF_BAD_UTF8_PATH),
     };
     let path = Path::new(path_str);
     let mut options = OpenOptions::new();
@@ -363,33 +421,47 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     return RuntimeValue::NIL;
     let mut file = match options.open(path) {
         Ok(file) => file,
-        Err(_) => return RuntimeValue::NIL,
+        Err(_) => return read_no_follow_fail(READ_NF_OPEN),
     };
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(_) => return RuntimeValue::NIL,
+        Err(_) => return read_no_follow_fail(READ_NF_METADATA),
     };
-    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
-        return RuntimeValue::NIL;
+    if !metadata.is_file() {
+        return read_no_follow_fail(READ_NF_NOT_REGULAR);
+    }
+    if metadata.len() > max_bytes as u64 {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
     }
     #[cfg(windows)]
     if metadata.file_attributes() & 0x0000_0400 != 0 {
         // FILE_ATTRIBUTE_REPARSE_POINT
-        return RuntimeValue::NIL;
+        return read_no_follow_fail(READ_NF_REPARSE);
     }
     let read_limit = match (max_bytes as u64).checked_add(1) {
         Some(limit) => limit,
-        None => return RuntimeValue::NIL,
+        None => return read_no_follow_fail(READ_NF_TOO_LARGE),
     };
     let mut raw = Vec::new();
     let mut bounded = file.take(read_limit);
-    if bounded.read_to_end(&mut raw).is_err() || raw.len() as i64 > max_bytes {
-        return RuntimeValue::NIL;
+    if bounded.read_to_end(&mut raw).is_err() {
+        return read_no_follow_fail(READ_NF_READ);
+    }
+    if raw.len() as i64 > max_bytes {
+        return read_no_follow_fail(READ_NF_TOO_LARGE);
     }
     if std::str::from_utf8(&raw).is_err() {
-        return RuntimeValue::NIL;
+        return read_no_follow_fail(READ_NF_BAD_UTF8_CONTENT);
     }
-    rt_string_new(raw.as_ptr(), raw.len() as u64)
+    let value = rt_string_new(raw.as_ptr(), raw.len() as u64);
+    let born_len = crate::value::collections::rt_string_len(value);
+    let code = if born_len == raw.len() as i64 {
+        READ_NF_OK
+    } else {
+        READ_NF_BORN_UNDECODABLE
+    };
+    READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(code));
+    value
 }
 
 /// Read entire file as text (RuntimeValue wrapper)
@@ -535,6 +607,161 @@ pub unsafe extern "C" fn rt_file_write_text(
 
     invalidate_file_caches(path_str);
     std::fs::write(path_str, content_str).is_ok()
+}
+
+/// Copy `source` to `destination`, refusing to overwrite an existing
+/// destination and refusing to follow a symlink at either path.
+///
+/// Rust twin of `rt_file_copy_create_excl_no_follow` in
+/// `src/runtime/runtime.c` — that giant monolithic C runtime is NOT compiled
+/// into this crate (see the file whitelist in `runtime/build.rs`'s
+/// `compile_c_runtime_sources`), so a native build needs a real definition of
+/// this symbol here too, or linking fails with `undefined symbol`.
+///
+/// Mirrors the C function's semantics exactly: `source` is opened with
+/// `O_RDONLY|O_NOFOLLOW` and must stat as a regular file (a symlinked or
+/// missing source fails); `destination` is opened with
+/// `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` at mode `0600` (an existing path —
+/// regular file or symlink — fails with `EEXIST`/`ELOOP` before any data is
+/// touched); the bytes are copied and `fsync`ed; any failure along the way
+/// removes the partially-written destination before returning `false`.
+/// Unsupported on Windows, matching the C `#if defined(_WIN32)` branch.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
+    source_ptr: *const u8,
+    source_len: u64,
+    destination_ptr: *const u8,
+    destination_len: u64,
+) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (source_ptr, source_len, destination_ptr, destination_len);
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        if source_ptr.is_null() || destination_ptr.is_null() || source_len == 0 || destination_len == 0 {
+            return false;
+        }
+        let source_bytes = std::slice::from_raw_parts(source_ptr, source_len as usize);
+        let destination_bytes = std::slice::from_raw_parts(destination_ptr, destination_len as usize);
+        if source_bytes.contains(&0) || destination_bytes.contains(&0) {
+            return false;
+        }
+        let source_path = Path::new(std::ffi::OsStr::from_bytes(source_bytes));
+        let destination_path = Path::new(std::ffi::OsStr::from_bytes(destination_bytes));
+
+        let mut input = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(source_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        match input.metadata() {
+            Ok(m) if m.is_file() => {}
+            _ => return false,
+        }
+
+        let mut output = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(destination_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        let ok = std::io::copy(&mut input, &mut output).is_ok() && output.sync_all().is_ok();
+        drop(output);
+        drop(input);
+        if !ok {
+            let _ = std::fs::remove_file(destination_path);
+        }
+        ok
+    }
+}
+
+/// Hard-link `source` to `destination`, refusing to replace an existing
+/// destination and refusing to follow a symlink at either path.
+///
+/// Rust twin of `rt_file_link_create_excl_no_follow` in
+/// `src/runtime/runtime.c` — same "not compiled into this crate" gap as
+/// `rt_file_copy_create_excl_no_follow` above.
+///
+/// Mirrors the C function's semantics exactly: `source` is opened with
+/// `O_RDONLY|O_NOFOLLOW` and must stat as a regular file; `link(2)` itself
+/// refuses an existing `destination` (`EEXIST`, whether that path is a
+/// regular file or a symlink); after linking, the destination is re-stat'd
+/// (`lstat`, i.e. `symlink_metadata`, never following) and must be a regular
+/// file with the SAME device/inode as the originally-opened source — a
+/// mismatch (e.g. `source` was swapped between the open and the link) removes
+/// the destination and fails. Unsupported on Windows, matching the C `#if`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_link_create_excl_no_follow(
+    source_ptr: *const u8,
+    source_len: u64,
+    destination_ptr: *const u8,
+    destination_len: u64,
+) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (source_ptr, source_len, destination_ptr, destination_len);
+        false
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt as UnixMetadataExt;
+
+        if source_ptr.is_null() || destination_ptr.is_null() || source_len == 0 || destination_len == 0 {
+            return false;
+        }
+        let source_bytes = std::slice::from_raw_parts(source_ptr, source_len as usize);
+        let destination_bytes = std::slice::from_raw_parts(destination_ptr, destination_len as usize);
+        if source_bytes.contains(&0) || destination_bytes.contains(&0) {
+            return false;
+        }
+        let source_path = Path::new(std::ffi::OsStr::from_bytes(source_bytes));
+        let destination_path = Path::new(std::ffi::OsStr::from_bytes(destination_bytes));
+
+        let input = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(source_path)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let source_meta = match input.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => return false,
+        };
+
+        if std::fs::hard_link(source_path, destination_path).is_err() {
+            drop(input);
+            return false;
+        }
+
+        let ok = match std::fs::symlink_metadata(destination_path) {
+            Ok(dest_meta) => {
+                dest_meta.file_type().is_file()
+                    && dest_meta.dev() == source_meta.dev()
+                    && dest_meta.ino() == source_meta.ino()
+            }
+            Err(_) => false,
+        };
+        if !ok {
+            let _ = std::fs::remove_file(destination_path);
+        }
+        drop(input);
+        ok
+    }
 }
 
 /// Synchronize file contents and metadata with durable storage.
@@ -1442,6 +1669,22 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
         return RuntimeValue::NIL;
     }
 
+    // PERF (2026-09-06): a `[u8]` built by ordinary Simple code is stored in
+    // the PACKED byte representation, whose elements are `u8` by construction
+    // — neither rejection below can fire for it. Reading its bytes as one
+    // slice therefore returns exactly what the loop would have built, while
+    // skipping a boxed `rt_array_get` call per byte. That per-element round
+    // trip cost ~46 ns/BYTE on the codegen (Cranelift JIT) lane, which made
+    // every bulk bytes->text conversion in the stdlib (base64 decode output,
+    // utf8 validation, file reads) an order of magnitude slower than the
+    // pure-Simple loop that produced the bytes (~2 ns/byte). Boxed-element
+    // arrays keep the checked loop verbatim, so out-of-range or non-int
+    // elements still yield NIL exactly as before.
+    // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
+    if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
+        return unsafe { rt_string_new(packed.as_ptr(), packed.len() as u64) };
+    }
+
     let mut out = Vec::with_capacity(len as usize);
     for i in 0..len {
         let value = crate::value::collections::rt_array_get(bytes, i);
@@ -1642,6 +1885,83 @@ mod tests {
     // Helper to create string pointer for SFFI
     fn str_to_ptr(s: &str) -> (*const u8, u64) {
         (s.as_ptr(), s.len() as u64)
+    }
+
+    /// Runnable proof for `rt_file_copy_create_excl_no_follow`'s exclusive
+    /// -create and no-follow guarantees: success on a fresh destination,
+    /// refusal of an already-existing destination, refusal of a symlinked
+    /// destination (left untouched), and refusal of a symlinked source.
+    #[cfg(unix)]
+    #[test]
+    fn file_copy_create_excl_no_follow_refuses_existing_and_symlinked_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("source.txt");
+        fs::write(&source_path, b"hello").unwrap();
+        let (sp, sl) = str_to_ptr(source_path.to_str().unwrap());
+
+        // Success: destination does not exist yet.
+        let dest_path = temp_dir.path().join("dest.txt");
+        let (dp, dl) = str_to_ptr(dest_path.to_str().unwrap());
+        assert!(unsafe { rt_file_copy_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination already exists (would overwrite).
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination is a symlink, and leaves it untouched.
+        let symlink_dest = temp_dir.path().join("dest_symlink.txt");
+        std::os::unix::fs::symlink(temp_dir.path().join("nonexistent"), &symlink_dest).unwrap();
+        let (sdp, sdl) = str_to_ptr(symlink_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(sp, sl, sdp, sdl) });
+        assert!(symlink_dest.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Refuses: source is a symlink, and creates nothing at the destination.
+        let symlink_source = temp_dir.path().join("source_symlink.txt");
+        std::os::unix::fs::symlink(&source_path, &symlink_source).unwrap();
+        let (ssp, ssl) = str_to_ptr(symlink_source.to_str().unwrap());
+        let fresh_dest = temp_dir.path().join("dest2.txt");
+        let (fdp, fdl) = str_to_ptr(fresh_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_copy_create_excl_no_follow(ssp, ssl, fdp, fdl) });
+        assert!(!fresh_dest.exists());
+    }
+
+    /// Runnable proof for `rt_file_link_create_excl_no_follow`'s exclusive
+    /// -create and no-follow guarantees: success on a fresh destination,
+    /// refusal of an already-existing destination, refusal of a symlinked
+    /// destination (left untouched), and refusal of a symlinked source.
+    #[cfg(unix)]
+    #[test]
+    fn file_link_create_excl_no_follow_refuses_existing_and_symlinked_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_path = temp_dir.path().join("source.txt");
+        fs::write(&source_path, b"hello").unwrap();
+        let (sp, sl) = str_to_ptr(source_path.to_str().unwrap());
+
+        // Success: destination does not exist yet.
+        let dest_path = temp_dir.path().join("dest.txt");
+        let (dp, dl) = str_to_ptr(dest_path.to_str().unwrap());
+        assert!(unsafe { rt_file_link_create_excl_no_follow(sp, sl, dp, dl) });
+        assert_eq!(fs::read(&dest_path).unwrap(), b"hello");
+
+        // Refuses: destination already exists (now hard-linked to source).
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(sp, sl, dp, dl) });
+
+        // Refuses: destination is a symlink, and leaves it untouched.
+        let symlink_dest = temp_dir.path().join("dest_symlink.txt");
+        std::os::unix::fs::symlink(temp_dir.path().join("nonexistent"), &symlink_dest).unwrap();
+        let (sdp, sdl) = str_to_ptr(symlink_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(sp, sl, sdp, sdl) });
+        assert!(symlink_dest.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Refuses: source is a symlink, and creates nothing at the destination.
+        let symlink_source = temp_dir.path().join("source_symlink.txt");
+        std::os::unix::fs::symlink(&source_path, &symlink_source).unwrap();
+        let (ssp, ssl) = str_to_ptr(symlink_source.to_str().unwrap());
+        let fresh_dest = temp_dir.path().join("dest2.txt");
+        let (fdp, fdl) = str_to_ptr(fresh_dest.to_str().unwrap());
+        assert!(!unsafe { rt_file_link_create_excl_no_follow(ssp, ssl, fdp, fdl) });
+        assert!(!fresh_dest.exists());
     }
 
     #[cfg(unix)]

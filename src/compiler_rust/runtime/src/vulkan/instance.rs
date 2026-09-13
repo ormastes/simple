@@ -76,9 +76,7 @@ impl VulkanInstance {
                 Ok(lib) => lib,
                 Err(_) => continue,
             };
-            let get_proc_addr = unsafe {
-                lib.get::<vk::PFN_vkGetInstanceProcAddr>(b"vkGetInstanceProcAddr\0")
-            };
+            let get_proc_addr = unsafe { lib.get::<vk::PFN_vkGetInstanceProcAddr>(b"vkGetInstanceProcAddr\0") };
             if let Ok(get_proc_addr) = get_proc_addr {
                 let entry = unsafe {
                     ash::Entry::from_static_fn(ash::StaticFn {

@@ -1,4 +1,5 @@
 # Browser WebGPU JS/WASM System Spec Perf Threshold - 2026-06-14
+**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` still FAILs — still reproduces)
 
 ## Status
 
@@ -33,3 +34,6 @@ integration spec while keeping the broad scenario manual intact.
   cost grows again.
 - Keep `webgpu_js_wasm_simple_spec.spl` as broad end-to-end evidence, but avoid
   adding more expensive setup-heavy cases without splitting.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

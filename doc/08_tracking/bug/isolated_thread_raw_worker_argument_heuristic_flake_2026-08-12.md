@@ -19,3 +19,12 @@ Cross-runtime companion gap: `src/runtime/runtime_thread.c` passes two worker
 arguments raw and lacks the Rust runtime's registered synchronized-handle
 classification. It must fail closed or consume an equivalent typed transfer
 envelope before claiming isolated-thread parity.
+
+## Triage 2026-09-13
+
+Both halves are out of pure-Simple scope: `native_callable()`'s
+argument heuristic lives in the Rust seed test/runtime harness, and
+`src/runtime/runtime_thread.c` is fenced C runtime. Requires a Rust
+seed rebuild (worker-ABI as an explicit callable-record property) to
+fix, not reachable from a .spl/.shs change. Leaving OPEN, no attempt.
+

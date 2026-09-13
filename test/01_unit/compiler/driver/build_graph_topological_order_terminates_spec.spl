@@ -1,0 +1,71 @@
+use std.spec.*
+use compiler.driver.driver_build.parallel.{BuildGraph}
+
+# Contract pin for `BuildGraph.topological_order()`.
+#
+# HONEST SCOPE, read before trusting a green run here. This spec runs on the SEED
+# INTERPRETER, and the seed interpreter evaluates `.?` on an empty array
+# CORRECTLY. The defect this spec was written alongside —
+# doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md,
+# where `.?` on an empty array is TRUE under native codegen and the DFS loop in
+# `topological_order` therefore never terminated — DOES NOT REPRODUCE HERE, and
+# this spec passes both before and after that fix. It cannot discriminate it.
+#
+# What this spec does pin is the ORDERING CONTRACT its callers depend on
+# (`parallel.spl:418,743`): every unit appears exactly once, and every dependency
+# appears before the unit that depends on it. The discriminating evidence for the
+# native defect is the compiled fixture recorded in that bug record.
+
+fn order_positions(order: [i64]) -> text:
+    """Render a unit order as a comma-separated text, for comparison."""
+    var rendered = ""
+    var first = true
+    for id in order:
+        if first:
+            rendered = "{id}"
+            first = false
+        else:
+            rendered = "{rendered},{id}"
+    rendered
+
+describe "BuildGraph.topological_order":
+    it "returns every zero-dependency unit exactly once":
+        # The shape the Stage-2 Stage-3 route actually builds: two units, no edges.
+        # Under the native defect this walk appended nil forever instead of
+        # returning after 4 iterations.
+        var graph = BuildGraph.empty()
+        val a = graph.add_unit("a.spl", [])
+        val b = graph.add_unit("b.spl", [])
+        val order = graph.topological_order()
+        expect(order.len()).to_equal(2)
+        # Compared as TEXT, deliberately. Inside a spec `it` closure an i64 that
+        # came out of `order` does not compare equal to the i64 `add_unit`
+        # returned: with order holding 0 and 1 and `a == 0`, `order.contains(a)`
+        # answers false, and a bare `id == a` is likewise false. Rendering both
+        # sides sidesteps that erased-value equality gap so this spec pins the
+        # ordering contract rather than the gap. Recorded in
+        # doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md.
+        expect(order_positions(order)).to_equal("{a},{b}")
+
+    it "places every dependency before the unit that depends on it":
+        # A chain with fan-in: root <- mid_a, root <- mid_b, both <- leaf.
+        var graph = BuildGraph.empty()
+        val root = graph.add_unit("root.spl", [])
+        val mid_a = graph.add_unit("mid_a.spl", [root])
+        val mid_b = graph.add_unit("mid_b.spl", [root])
+        val leaf = graph.add_unit("leaf.spl", [mid_a, mid_b])
+        val order = graph.topological_order()
+
+        expect(order.len()).to_equal(4)
+        # Same text-comparison reason as the first example. The DFS visits
+        # dependencies first, so the only admissible order for this graph is
+        # root, then the two mids, then leaf. Asserting the exact rendering pins
+        # BOTH the dependency-before-dependent contract and determinism.
+        expect(order_positions(order)).to_equal(
+            "{root},{mid_a},{mid_b},{leaf}")
+
+    it "returns an empty order for an empty graph":
+        # The loop must not run at all, and must not emit a nil entry.
+        var graph = BuildGraph.empty()
+        val order = graph.topological_order()
+        expect(order.len()).to_equal(0)

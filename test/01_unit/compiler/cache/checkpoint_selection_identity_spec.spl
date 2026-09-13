@@ -1,0 +1,234 @@
+# @req REQ-CSM-008 REQ-CSM-012
+# @cover src/compiler/80.driver/cache/journal/checkpoint_superblock_v1.spl 90%
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.journal.checkpoint_superblock_v1.*
+
+fn checkpoint_fixture_v1(slot_a: CheckpointSlotV1?,
+        slot_b: CheckpointSlotV1?) -> CheckpointSuperblockV1:
+    CheckpointSuperblockV1(slot_a: slot_a, slot_b: slot_b)
+
+fn expect_checkpoint_state_v1(superblock: CheckpointSuperblockV1, journal: text,
+        expected: CheckpointSelectionStateV1):
+    expect(superblock.select_checked(journal)).to_equal(expected)
+
+fn expect_legacy_checkpoint_absent_v1(superblock: CheckpointSuperblockV1, journal: text):
+    val legacy = superblock.select(journal)
+    expect(legacy.present).to_equal(false)
+    expect(legacy.slot.is_some()).to_equal(false)
+
+fn expect_checkpoint_slot_v1(actual: CheckpointSlotV1?, expected: CheckpointSlotV1?):
+    expect(actual.is_some()).to_equal(expected.is_some())
+    if val expected_slot = expected:
+        val actual_slot = actual.unwrap()
+        expect(actual_slot.generation).to_equal(expected_slot.generation)
+        expect(actual_slot.journal_bytes).to_equal(expected_slot.journal_bytes)
+        expect(actual_slot.journal_digest).to_equal(expected_slot.journal_digest)
+        expect(actual_slot.catalog_digest).to_equal(expected_slot.catalog_digest)
+        expect(actual_slot.checksum).to_equal(expected_slot.checksum)
+
+fn expect_checkpoint_unchanged_v1(superblock: CheckpointSuperblockV1,
+        expected_a: CheckpointSlotV1?, expected_b: CheckpointSlotV1?):
+    expect_checkpoint_slot_v1(superblock.slot_a, expected_a)
+    expect_checkpoint_slot_v1(superblock.slot_b, expected_b)
+
+fn expect_checkpoint_publish_error_v1(superblock: CheckpointSuperblockV1,
+        journal: text, catalog: text, expected_error: CheckpointPublishErrorV1,
+        expected_a: CheckpointSlotV1?, expected_b: CheckpointSlotV1?):
+    expect(superblock.publish(journal, catalog)).to_equal(Err(expected_error))
+    expect_checkpoint_unchanged_v1(superblock, expected_a, expected_b)
+
+fn catalog_digest_v1(label: text) -> text:
+    sha256_text("catalog:" + label)
+
+fn malformed_slot_v1(generation: i64, journal_bytes: i64, journal_digest: text,
+        catalog_digest: text, checksum: text) -> CheckpointSlotV1:
+    CheckpointSlotV1(generation: generation, journal_bytes: journal_bytes,
+        journal_digest: journal_digest, catalog_digest: catalog_digest, checksum: checksum)
+
+describe "Checkpoint checked selection and publication V1":
+    it "should initialize empty storage and publish consecutive generations":
+        step("Publish the first checkpoint and its successor")
+        val journal = "first\\n"
+        val superblock = CheckpointSuperblockV1.empty()
+        expect_checkpoint_state_v1(superblock, journal, CheckpointSelectionStateV1.Empty)
+        expect_legacy_checkpoint_absent_v1(superblock, journal)
+        val first = superblock.publish(journal, catalog_digest_v1("first")).unwrap()
+        expect(first.generation).to_equal(0)
+        expect_checkpoint_state_v1(superblock, journal, CheckpointSelectionStateV1.Selected(first))
+        val second = superblock.publish(journal, catalog_digest_v1("second")).unwrap()
+        expect(second.generation).to_equal(1)
+        expect_checkpoint_state_v1(superblock, journal, CheckpointSelectionStateV1.Selected(second))
+        expect_checkpoint_unchanged_v1(superblock, Some(first), Some(second))
+
+    it "should reject catalog and prefix conflicts without resetting generation":
+        step("Reject unsafe checkpoint publication without mutation")
+        val prefix = "accepted\\n"
+        val journal = prefix + "suffix\\n"
+        val catalog_a = catalog_digest_v1("a")
+        val catalog_b = catalog_digest_v1("b")
+        val catalog_left = checkpoint_slot_v1(7, prefix.len(), sha256_text(prefix), catalog_a)
+        val catalog_right = checkpoint_slot_v1(7, prefix.len(), sha256_text(prefix), catalog_b)
+        val catalog_first = checkpoint_fixture_v1(Some(catalog_left), Some(catalog_right))
+        val catalog_second = checkpoint_fixture_v1(Some(catalog_right), Some(catalog_left))
+        expect_checkpoint_state_v1(catalog_first, journal, CheckpointSelectionStateV1.Conflict)
+        expect_checkpoint_state_v1(catalog_second, journal, CheckpointSelectionStateV1.Conflict)
+        expect_legacy_checkpoint_absent_v1(catalog_first, journal)
+        expect_legacy_checkpoint_absent_v1(catalog_second, journal)
+        expect_checkpoint_publish_error_v1(catalog_first, journal, catalog_a,
+            CheckpointPublishErrorV1.ConflictingGeneration, Some(catalog_left), Some(catalog_right))
+        expect_checkpoint_publish_error_v1(catalog_second, journal, catalog_a,
+            CheckpointPublishErrorV1.ConflictingGeneration, Some(catalog_right), Some(catalog_left))
+
+        val prefix_left = checkpoint_slot_v1(8, prefix.len(), sha256_text(prefix), catalog_a)
+        val prefix_right = checkpoint_slot_v1(8, journal.len(), sha256_text(journal), catalog_a)
+        val prefix_first = checkpoint_fixture_v1(Some(prefix_left), Some(prefix_right))
+        val prefix_second = checkpoint_fixture_v1(Some(prefix_right), Some(prefix_left))
+        expect_checkpoint_state_v1(prefix_first, journal, CheckpointSelectionStateV1.Conflict)
+        expect_checkpoint_state_v1(prefix_second, journal, CheckpointSelectionStateV1.Conflict)
+        expect_legacy_checkpoint_absent_v1(prefix_first, journal)
+        expect_legacy_checkpoint_absent_v1(prefix_second, journal)
+        expect_checkpoint_publish_error_v1(prefix_first, journal, catalog_a,
+            CheckpointPublishErrorV1.ConflictingGeneration, Some(prefix_left), Some(prefix_right))
+        expect_checkpoint_publish_error_v1(prefix_second, journal, catalog_a,
+            CheckpointPublishErrorV1.ConflictingGeneration, Some(prefix_right), Some(prefix_left))
+
+    it "should reject invalid existing storage without treating it as empty":
+        step("Reject unsafe checkpoint publication without mutation")
+        val journal = "records\\n"
+        val catalog = catalog_digest_v1("valid")
+        val invalid = checkpoint_slot_v1(-1, 0, sha256_text(""), catalog)
+        val single_invalid_a = checkpoint_fixture_v1(Some(invalid), nil)
+        val single_invalid_b = checkpoint_fixture_v1(nil, Some(invalid))
+        val both_invalid = checkpoint_fixture_v1(Some(invalid), Some(invalid))
+        expect_checkpoint_state_v1(single_invalid_a, journal, CheckpointSelectionStateV1.Invalid)
+        expect_checkpoint_state_v1(single_invalid_b, journal, CheckpointSelectionStateV1.Invalid)
+        expect_checkpoint_state_v1(both_invalid, journal, CheckpointSelectionStateV1.Invalid)
+        expect_legacy_checkpoint_absent_v1(single_invalid_a, journal)
+        expect_legacy_checkpoint_absent_v1(single_invalid_b, journal)
+        expect_legacy_checkpoint_absent_v1(both_invalid, journal)
+        expect_checkpoint_publish_error_v1(single_invalid_a, journal, catalog,
+            CheckpointPublishErrorV1.InvalidExistingSlots, Some(invalid), nil)
+        expect_checkpoint_publish_error_v1(single_invalid_b, journal, catalog,
+            CheckpointPublishErrorV1.InvalidExistingSlots, nil, Some(invalid))
+        expect_checkpoint_publish_error_v1(both_invalid, journal, catalog,
+            CheckpointPublishErrorV1.InvalidExistingSlots, Some(invalid), Some(invalid))
+
+    it "should preserve the selected checkpoint during fallback publication":
+        step("Preserve the selected checkpoint during fallback publication")
+        val journal = "fallback\\n"
+        val catalog = catalog_digest_v1("fallback")
+        val valid = checkpoint_slot_v1(5, journal.len(), sha256_text(journal), catalog)
+        val invalid = checkpoint_slot_v1(-1, journal.len(), sha256_text(journal), catalog)
+        val valid_a = checkpoint_fixture_v1(Some(valid), Some(invalid))
+        val valid_b = checkpoint_fixture_v1(Some(invalid), Some(valid))
+        expect_checkpoint_state_v1(valid_a, journal, CheckpointSelectionStateV1.Selected(valid))
+        expect_checkpoint_state_v1(valid_b, journal, CheckpointSelectionStateV1.Selected(valid))
+        val next_a = valid_a.publish(journal, catalog_digest_v1("next-a")).unwrap()
+        val next_b = valid_b.publish(journal, catalog_digest_v1("next-b")).unwrap()
+        expect(next_a.generation).to_equal(6)
+        expect(next_b.generation).to_equal(6)
+        expect_checkpoint_unchanged_v1(valid_a, Some(valid), Some(next_a))
+        expect_checkpoint_unchanged_v1(valid_b, Some(next_b), Some(valid))
+
+        val older = checkpoint_slot_v1(3, journal.len(), sha256_text(journal), catalog)
+        val newer = checkpoint_slot_v1(4, journal.len(), sha256_text(journal), catalog)
+        val newer_a = checkpoint_fixture_v1(Some(newer), Some(older))
+        val newer_b = checkpoint_fixture_v1(Some(older), Some(newer))
+        expect_checkpoint_state_v1(newer_a, journal, CheckpointSelectionStateV1.Selected(newer))
+        expect_checkpoint_state_v1(newer_b, journal, CheckpointSelectionStateV1.Selected(newer))
+        val after_newer_a = newer_a.publish(journal, catalog_digest_v1("after-newer-a")).unwrap()
+        val after_newer_b = newer_b.publish(journal, catalog_digest_v1("after-newer-b")).unwrap()
+        expect(after_newer_a.generation).to_equal(5)
+        expect(after_newer_b.generation).to_equal(5)
+        expect_checkpoint_unchanged_v1(newer_a, Some(newer), Some(after_newer_a))
+        expect_checkpoint_unchanged_v1(newer_b, Some(after_newer_b), Some(newer))
+
+    it "should advance identical equal-generation copies from the retained A slot":
+        step("Preserve the selected checkpoint during fallback publication")
+        val journal = "identical\\n"
+        val catalog = catalog_digest_v1("identical")
+        val identical = checkpoint_slot_v1(12, journal.len(), sha256_text(journal), catalog)
+        val superblock = checkpoint_fixture_v1(Some(identical), Some(identical))
+        expect_checkpoint_state_v1(superblock, journal, CheckpointSelectionStateV1.Selected(identical))
+        val next = superblock.publish(journal, catalog_digest_v1("next")).unwrap()
+        expect(next.generation).to_equal(13)
+        expect_checkpoint_unchanged_v1(superblock, Some(identical), Some(next))
+
+    it "should refuse publication at the maximum generation without wrapping":
+        step("Reject unsafe checkpoint publication without mutation")
+        val journal = "maximum\\n"
+        val catalog = catalog_digest_v1("maximum")
+        val maximum = checkpoint_slot_v1(9223372036854775807, journal.len(), sha256_text(journal), catalog)
+        val superblock = checkpoint_fixture_v1(Some(maximum), nil)
+        expect_checkpoint_state_v1(superblock, journal, CheckpointSelectionStateV1.Selected(maximum))
+        expect_checkpoint_publish_error_v1(superblock, journal, catalog,
+            CheckpointPublishErrorV1.GenerationExhausted, Some(maximum), nil)
+
+    it "should validate every stored digest before accepting checkpoint identity":
+        step("Validate checkpoint identity before journal hashing")
+        val journal = "digest-validation\\n"
+        val catalog = catalog_digest_v1("valid")
+        val correct_digest = sha256_text(journal)
+        val valid = checkpoint_slot_v1(0, journal.len(), correct_digest, catalog)
+        val malformed_digests = ["", "a".repeat(63), "a".repeat(65), "A".repeat(64),
+            "g".repeat(64), "a".repeat(63) + "|"]
+        for malformed in malformed_digests:
+            val bad_journal = malformed_slot_v1(0, journal.len(), malformed, catalog, sha256_text("checksum"))
+            val bad_catalog = checkpoint_slot_v1(0, journal.len(), correct_digest, malformed)
+            val bad_checksum = malformed_slot_v1(0, journal.len(), correct_digest, catalog, malformed)
+            expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(bad_journal), nil), journal,
+                CheckpointSelectionStateV1.Invalid)
+            expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(bad_catalog), nil), journal,
+                CheckpointSelectionStateV1.Invalid)
+            expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(bad_checksum), nil), journal,
+                CheckpointSelectionStateV1.Invalid)
+
+        val wrong_digest = checkpoint_slot_v1(0, journal.len(), sha256_text("other"), catalog)
+        val wrong_checksum = malformed_slot_v1(0, journal.len(), correct_digest, catalog, sha256_text("wrong"))
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(wrong_digest), nil), journal,
+            CheckpointSelectionStateV1.Invalid)
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(wrong_checksum), nil), journal,
+            CheckpointSelectionStateV1.Invalid)
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(valid), nil), journal,
+            CheckpointSelectionStateV1.Selected(valid))
+
+    it "should validate zero full suffix negative and oversized journal lengths":
+        step("Validate checkpoint identity before journal hashing")
+        val journal = "prefix\\nsuffix\\n"
+        val catalog = catalog_digest_v1("lengths")
+        val zero = checkpoint_slot_v1(0, 0, sha256_text(""), catalog)
+        val full = checkpoint_slot_v1(0, journal.len(), sha256_text(journal), catalog)
+        val prefix = "prefix\\n"
+        val suffix = checkpoint_slot_v1(0, prefix.len(), sha256_text(prefix), catalog)
+        val negative_generation = checkpoint_slot_v1(-1, 0, sha256_text(""), catalog)
+        val negative_length = checkpoint_slot_v1(0, -1, sha256_text(""), catalog)
+        val oversized = checkpoint_slot_v1(0, journal.len() + 1, sha256_text(journal + "x"), catalog)
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(zero), nil), journal,
+            CheckpointSelectionStateV1.Selected(zero))
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(full), nil), journal,
+            CheckpointSelectionStateV1.Selected(full))
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(suffix), nil), journal,
+            CheckpointSelectionStateV1.Selected(suffix))
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(negative_generation), nil), journal,
+            CheckpointSelectionStateV1.Invalid)
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(negative_length), nil), journal,
+            CheckpointSelectionStateV1.Invalid)
+        expect_checkpoint_state_v1(checkpoint_fixture_v1(Some(oversized), nil), journal,
+            CheckpointSelectionStateV1.Invalid)
+
+    it "should reject malformed incoming catalog digests without mutating empty or populated storage":
+        step("Reject unsafe checkpoint publication without mutation")
+        val journal = "incoming\\n"
+        val catalog = catalog_digest_v1("current")
+        val existing = checkpoint_slot_v1(4, journal.len(), sha256_text(journal), catalog)
+        val malformed = ["", "a".repeat(63), "a".repeat(65), "A".repeat(64),
+            "g".repeat(64), "a".repeat(63) + "|"]
+        for incoming in malformed:
+            val empty = CheckpointSuperblockV1.empty()
+            val populated = checkpoint_fixture_v1(Some(existing), nil)
+            expect_checkpoint_publish_error_v1(empty, journal, incoming,
+                CheckpointPublishErrorV1.InvalidCatalogDigest, nil, nil)
+            expect_checkpoint_publish_error_v1(populated, journal, incoming,
+                CheckpointPublishErrorV1.InvalidCatalogDigest, Some(existing), nil)

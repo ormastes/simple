@@ -1,6 +1,6 @@
 # CUDA backend requires 2 args for gpu_warp_ballot but codegen (and the intrinsic's real signature) only uses 1
 
-**Status:** Open
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Category:** GENUINE-BUG (backend arity-validation bug, precisely root-caused)
 **Discovered:** 2026-07-20 (whole-suite triage campaign, shard meas_01u_03)
 
@@ -89,3 +89,6 @@ campaign's src/** edit restriction — filed here instead.
 ## Affected specs
 
 - `test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl` (1 of 24 examples: "emits vote.sync.ballot.b32 for gpu_warp_ballot")
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

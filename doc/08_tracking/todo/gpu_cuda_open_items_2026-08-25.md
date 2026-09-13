@@ -1,5 +1,7 @@
 # GPU/CUDA open items after the 2026-08-25 hardening landing
 
+Status: OPEN (unverified 2026-09-12)
+
 Landed: `8a291217121` (simple) + `b58990d` (simple_cuda_example).
 Plan: `doc/03_plan/lib/gpu/gpu_cuda_hardening_plan_2026-08-25.md`.
 Guide: `doc/07_guide/lib/gpu_3d/cuda_gpu_programming.md`.

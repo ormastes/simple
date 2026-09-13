@@ -1,4 +1,5 @@
 # `src/lib/gc_sync_mut/` exists (869 files) despite being documented as "not a public variant directory"
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-07-20
 **Scope:** `src/lib/gc_sync_mut/**` (existence itself)
@@ -64,3 +65,6 @@ docstring/assertion to match.
 Not fixed (spec still red on the deployed binary). Left as-is per "never
 weaken/delete the assertion to force green" — the assertion is correct per
 the documented architecture; the source tree is the thing that's wrong.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -2,6 +2,42 @@
 # Production bootstrap authority wiring shared by bootstrap-from-scratch and
 # focused behavioral tests. All mutation entrypoints require an owned lock.
 
+# MSVC reports C1083 with an empty generated-file name when cc-rs /Fo paths
+# exceed MAX_PATH. Keep Windows Cargo outputs outside the long receipt/HOME
+# tree, while retaining the complete input fingerprint and the repo-wide Rust
+# authority lock. Retries (including different log roots) reuse this same cache;
+# changed inputs get a different cache. This selector never moves/removes data.
+bootstrap_authority_rust_cargo_target() (
+  [ "$#" -eq 4 ] || return 64
+  bootstrap_cargo_repo=$1
+  bootstrap_cargo_host=$2
+  bootstrap_cargo_fingerprint=$3
+  bootstrap_cargo_legacy_root=$4
+  if [ "${bootstrap_cargo_host}" != windows ]; then
+    printf '%s/target\n' "${bootstrap_cargo_legacy_root}"
+    return 0
+  fi
+  printf '%s\n' "${bootstrap_cargo_fingerprint}" |
+    LC_ALL=C grep -Eq '^[0-9a-f]{64}$' || return 64
+  bootstrap_cargo_target="${bootstrap_cargo_repo}/build/c/${bootstrap_cargo_fingerprint}"
+  bootstrap_cargo_native=$(cygpath -am "${bootstrap_cargo_target}") || return 1
+  case "${bootstrap_cargo_native}" in
+    [A-Za-z]:/*) ;;
+    *) echo 'error: Windows Cargo cache requires a local checkout' >&2; return 1 ;;
+  esac
+  # Reserve 120 bytes for target/profile/build/crate/out/object nesting under a
+  # conservative 240-byte path budget. Counting UTF-8 bytes is conservative for
+  # Windows UTF-16 paths, and leaves space below MAX_PATH for tool temporaries.
+  LC_ALL=C
+  export LC_ALL
+  if [ "${#bootstrap_cargo_native}" -gt 120 ]; then
+    printf 'error: Windows Cargo target prefix is %s bytes (limit 120); use a shorter checkout path\n' \
+      "${#bootstrap_cargo_native}" >&2
+    return 1
+  fi
+  printf '%s\n' "${bootstrap_cargo_target}"
+)
+
 # Fingerprint helpers use mktemp internally. Keep that scratch traffic on the
 # bootstrap output filesystem: a full /tmp must not make an otherwise healthy
 # authority build fail, and pre/post/commit observations must share one routing

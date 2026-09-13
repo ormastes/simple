@@ -201,3 +201,12 @@ This is the same shape as the `TestRunResult::success()` defect called out in
 the session brief: a run in which ZERO specs executed is reported through the
 normal result type. Verdict: LIVE, P1 retained.
 Not proven in this lane: that no outer caller downgrades the early return.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still unchanged: the early-return-with-`files: []` shape is still present.
+Both prior sessions correctly declined to land the "narrow the blast radius"
+fix given the three-accumulation-path risk to the SHARED test runner (a wrong
+threading corrupts every session's verdict) — the same caution applies now,
+compounded by this host's 300-900s per-test-invocation cost making a safe
+verify-before-land loop impractical this pass. No change made. Leaving OPEN.

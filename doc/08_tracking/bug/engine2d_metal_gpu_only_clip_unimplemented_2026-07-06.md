@@ -1,6 +1,6 @@
 # Bug: Engine2D Metal GPU-only-mode scissor clip is unimplemented (silent no-op)
 
-- **Status:** implemented; current-source native Metal evidence pending
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** P2 (implementation complete; deployment evidence remains)
 - **Component:** `src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl`
   (`set_clip` ~line 389, `clear_clip` ~line 400)
@@ -52,3 +52,6 @@ and honestly marked rather than faked.
 Draw a primitive larger than a `set_clip` region on the fast Metal lane, read
 back the full GPU framebuffer, and assert pixels outside the clip rect equal the
 background (absolute-pixel oracle), and pixels inside equal the draw color.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

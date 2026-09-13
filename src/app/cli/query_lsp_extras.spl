@@ -4,7 +4,10 @@
 # Each function takes file/line/col parameters and prints output to stdout.
 # Returns 0 on success, 1 on error.
 
-use app.cli.query_rich_common.{query_file_read_rich, query_process_run}
+use app.cli.query_rich_common.{query_file_read_rich}
+use std.nogc_sync_mut.lsp.lsp_bounded_search.{lsp_bounded_search_budget_default_v1,
+    lsp_bounded_search_decl_kinds_v1, lsp_bounded_search_impl_v1,
+    lsp_bounded_search_truncation_note_v1}
 use app.cli.query_helpers.{_count_indent}
 
 # ============================================================================
@@ -100,13 +103,25 @@ fn _classify_highlight(line: text, pos: i64, symbol: text) -> text:
         return "Write"
     "Read"
 
-fn _safe_grep(pattern: text, dir: text, include: text) -> (text, i64):
-    val (stdout, stderr, code) = query_process_run("grep", ["-rn", pattern, dir, "--include=" + include])
-    (stdout, code)
+# Cross-file search is a BOUNDED pure-Simple walk, not an unbounded `grep -rn`
+# child (see src/lib/nogc_sync_mut/lsp/lsp_bounded_search.spl). Both helpers
+# return (lines, truncation_note); the note is "" when the walk covered its
+# whole root, and callers print it so a short answer is never shown as complete.
+fn _bounded_type_search(symbol: text) -> ([text], text):
+    val found = lsp_bounded_search_decl_kinds_v1(
+        "src", ".spl", symbol, ["class ", "struct ", "enum ", "trait "],
+        lsp_bounded_search_budget_default_v1())
+    (found.lines, lsp_bounded_search_truncation_note_v1(found))
 
-fn _safe_grep_file(pattern: text, file: text) -> (text, i64):
-    val (stdout, stderr, code) = query_process_run("grep", ["-n", pattern, file])
-    (stdout, code)
+fn _bounded_trait_search(symbol: text) -> ([text], text):
+    val found = lsp_bounded_search_decl_kinds_v1(
+        "src", ".spl", symbol, ["trait "], lsp_bounded_search_budget_default_v1())
+    (found.lines, lsp_bounded_search_truncation_note_v1(found))
+
+fn _bounded_impl_search(symbol: text) -> ([text], text):
+    val found = lsp_bounded_search_impl_v1(
+        "src", ".spl", symbol, lsp_bounded_search_budget_default_v1())
+    (found.lines, lsp_bounded_search_truncation_note_v1(found))
 
 fn _read_position_context(file: text, line_num: i64, col: i64) -> _PositionContext:
     val content = query_file_read_rich(file) ?? ""
@@ -223,18 +238,20 @@ fn query_type_definition(file: text, line_num: i64, col: i64) -> i64:
         return 0
 
     # Cross-file search
-    val pattern = "^class " + found_type + "\\|^struct " + found_type + "\\|^enum " + found_type + "\\|^trait " + found_type
-    val (out, code) = _safe_grep(pattern, "src/", "*.spl")
-    if out.trim() != "":
-        val result_lines = out.split("\n")
+    val (type_hits, type_note) = _bounded_type_search(found_type)
+    if type_hits.len() > 0:
         var rcount = 0
-        for rline in result_lines:
+        for rline in type_hits:
             if rline.trim() != "" and rcount < 10:
                 print rline
                 rcount = rcount + 1
+        if type_note != "":
+            print type_note
         return 0
 
     print "Type definition not found for: {found_type}"
+    if type_note != "":
+        print type_note
     1
 
 fn _extract_type_name(s: text) -> text:
@@ -273,37 +290,29 @@ fn query_implementation(file: text, line_num: i64, col: i64) -> i64:
 
     # Check if symbol is a trait
     var is_trait = false
-    val (trait_out, trait_code) = _safe_grep("^trait " + symbol, "src/", "*.spl")
-    if trait_out.trim() != "":
+    val (trait_hits, _trait_note) = _bounded_trait_search(symbol)
+    if trait_hits.len() > 0:
         is_trait = true
 
     var found_count = 0
-    if is_trait:
-        # Find all impl blocks that implement this trait
-        # Pattern: impl TraitName for TypeName or impl TraitName
-        val (impl_out, _) = _safe_grep("impl " + symbol, "src/", "*.spl")
-        if impl_out.trim() != "":
+    val (impl_hits, impl_note) = _bounded_impl_search(symbol)
+    if impl_hits.len() > 0:
+        if is_trait:
             print "--- Implementations of trait {symbol} ---"
-            val result_lines = impl_out.split("\n")
-            for rline in result_lines:
-                if rline.trim() != "" and found_count < 50:
-                    print rline
-                    found_count = found_count + 1
-    else:
-        # Symbol is a class/struct — find impl blocks for it
-        # Pattern: impl TypeName or impl TraitName for TypeName
-        val (impl_out, _) = _safe_grep("impl.*" + symbol, "src/", "*.spl")
-        if impl_out.trim() != "":
+        else:
             print "--- Implementations for {symbol} ---"
-            val result_lines = impl_out.split("\n")
-            for rline in result_lines:
-                if rline.trim() != "" and found_count < 50:
-                    print rline
-                    found_count = found_count + 1
+        for rline in impl_hits:
+            if rline.trim() != "" and found_count < 50:
+                print rline
+                found_count = found_count + 1
 
     if found_count == 0:
         print "No implementations found for: {symbol}"
+        if impl_note != "":
+            print impl_note
         return 1
+    if impl_note != "":
+        print impl_note
     0
 
 # ============================================================================

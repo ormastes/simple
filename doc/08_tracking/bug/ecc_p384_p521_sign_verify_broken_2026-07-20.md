@@ -5,7 +5,7 @@
   `test/unit/lib/crypto/ecc_p384_p521_kat_spec.spl`
 - **Severity:** high (sign is non-functional for P-384; verify fails NIST
   CAVP vectors for both curves).
-- **Status:** OPEN. **Do not touch the NIST CAVP vectors.**
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -75,3 +75,6 @@ length.
 - `test/unit/lib/crypto/ecc_p384_p521_kat_spec.spl` (all 5 reported
   failures: P-384 CAVP verify, P-384 sign+round-trip ×4, P-384 SSH mpint
   helper, P-521 CAVP verify)
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

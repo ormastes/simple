@@ -16,16 +16,15 @@
 # - Reads template bytes directly from mapped memory
 
 use ...monomorphize.note_sdn (NoteSdnMetadata, PossibleInstantiationEntry, InstantiationEntry, InstantiationStatus)
-use ..linker.smf_reader (SmfReaderImpl, SmfHeader)
+use ..linker.smf_reader (SmfReaderImpl, SmfReaderHeader, SmfFlags)
 use ..linker.smf_header (SMF_HEADER_SIZE)
 use .smf_mmap_native.{native_mmap_file, native_munmap, native_mmap_read_bytes, native_mmap_read_string, native_madvise}
 use std.sdn.parser (parse)
 use std.sdn.value (SdnValue)
-
-extern fn rt_file_size(path: text) -> i64
+use std.nogc_sync_mut.io_runtime.{file_size_signed}
 
 fn file_size_for_mmap(path: text) -> i64:
-    rt_file_size(path)
+    file_size_signed(path)
 
 fn mmap_file(path: text, prot: i32, flags: i32, offset: i64, length: i64) -> (i64, i64):
     native_mmap_file(path, prot as i64, flags as i64, offset, length)
@@ -65,7 +64,7 @@ struct MappedSmf:
     path: text
     address: i64                    # Base address of mapped memory
     size: i64                       # Size of mapped region
-    header: SmfHeader               # Parsed SMF header
+    header: SmfReaderHeader         # Parsed SMF header
     section_count: i32
     note_sdn: NoteSdnMetadata?      # Cached note.sdn metadata
     template_section_offset: i64    # Offset to TemplateCode section
@@ -95,9 +94,9 @@ impl MappedSmf:
         val header_offset = mapped_size - SMF_HEADER_SIZE
         val header_bytes = mmap_read_bytes(address, header_offset, SMF_HEADER_SIZE)
 
-        # Parse header (simplified - full implementation would use SmfHeader.from_bytes)
+        # Parse header (simplified - full implementation would validate all fields)
         # For now, create minimal header
-        val header: SmfHeader = parse_header_minimal(header_bytes)
+        val header: SmfReaderHeader = parse_header_minimal(header_bytes)
 
         # Parse section table to find TemplateCode and note.sdn offsets
         # Section table format: 64-byte entries starting at header.section_table_offset
@@ -309,30 +308,28 @@ impl SmfCache:
         Ok(mapped)
 
     me clear():
-        """Clear the cache and unmap all files."""
+        """Unmap cached files, retaining failed releases for a later retry."""
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for path in self.cached_files.keys():
-            val mapped = self.cached_files[path]
-            val _ = mapped.close()
-
-        self.cached_files = {}
-        self.stats = CacheStats(
-            total_files: 0,
-            total_memory: 0,
-            cache_hits: self.stats.cache_hits,
-            cache_misses: self.stats.cache_misses
-        )
+            val _ = self.evict(path)
 
     me evict(path: text) -> bool:
         """Evict a single file from the cache and unmap it.
 
-        Returns true if the file was in the cache and was evicted.
+        Returns true only after the mapping was successfully released.
+        Failed releases remain owned and accounted so cleanup can retry.
         """
         if not self.cached_files.has(path):
             return false
 
         val mapped = self.cached_files[path]
-        val _ = mapped.close()
+        # A malformed/failed mapping has no releasable extent.  Keep it in
+        # the cache so the owner retains accounting and a later retry can
+        # observe a corrected release handle.
+        if mapped.address <= 0 or mapped.size <= 0:
+            return false
+        if not mapped.close():
+            return false
 
         self.stats.total_files = self.stats.total_files - 1
         self.stats.total_memory = self.stats.total_memory - mapped.size
@@ -358,13 +355,13 @@ impl SmfCache:
 
     fn cached_count() -> i32:
         """Get number of cached files."""
-        self.cached_files.keys().len()
+        self.stats.total_files
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
-fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
+fn parse_header_minimal(bytes: [u8]) -> SmfReaderHeader:
     """Parse SMF header from trailer bytes.
 
     SMF v1.1 trailer format (128 bytes, little-endian):
@@ -389,11 +386,10 @@ fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
     ROBUSTNESS: Falls back to safe defaults if bytes are too short.
     """
     use ..linker.smf_enums (Platform, Arch, CompressionType)
-    use ..linker.smf_reader (SmfHeader as ParsedHeader, SmfFlags)
 
     if bytes.len() < 128:
         # Insufficient data - return minimal defaults
-        return ParsedHeader(
+        return SmfReaderHeader(
             version: (1, 1),
             platform: Platform.Linux,
             arch: Arch.X86_64,
@@ -410,7 +406,7 @@ fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
             entry_point: 0,
             has_templates: false,
             has_note_sdn: false,
-            compression: CompressionType.None
+            compression: CompressionType.None_
         )
 
     # Read magic and validate
@@ -449,16 +445,16 @@ fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
     # Read compression type (u32 at offset 48)
     val compression_raw = bytes_to_u32(bytes[48..52])
     val compression = match compression_raw:
-        0: CompressionType.None
+        0: CompressionType.None_
         1: CompressionType.Zstd
-        _: CompressionType.None
+        _: CompressionType.None_
 
     # Determine template/note.sdn presence by checking section count
     # Templates are present if section_count > 1 (more than just code section)
     val has_templates = section_count > 1
     val has_note_sdn = section_count > 3
 
-    ParsedHeader(
+    SmfReaderHeader(
         version: (version_major, version_minor),
         platform: platform,
         arch: arch,

@@ -1,6 +1,6 @@
 # A spec doing several bcrypt KDF derivations aborts the test child with rc=255 and NO verdict
 
-Status: OPEN (P2)
+Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/terminal/credential_key_full_width_spec.spl` now PASSes)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 - **Filed:** 2026-08-08
@@ -75,3 +75,6 @@ greps identically to "not run" is the part that makes this dangerous.
 
 - `doc/09_report/lib/crypto/credential_store_aes_cbc_adversarial_review_2026-08-08.md`
 - `.claude/rules/testing.md` § "Take `$?` from the command under test"
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/terminal/credential_key_full_width_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

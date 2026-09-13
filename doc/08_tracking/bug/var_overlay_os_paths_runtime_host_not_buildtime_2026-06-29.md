@@ -1,5 +1,11 @@
 # Variant Overlay — os/env paths path_separator: Runtime-Host Decision, Not Build-Time
 
+## Closed 2026-09-13 — the OS lane's qualifying seam is implemented; `path_separator` itself stays rejected
+
+- **measured** `src/lib/nogc_sync_mut/target_ext.spl` exists in the tree — the landed replacement seam (`lib_ext`/`exe_ext`) the entry says resolved the OS lane.
+- **inferred** The entry's own body already records `RESOLVED — OS lane IMPLEMENTED via a different (qualifying) seam`, with `platform.spl` delegating and `variants/platform/{windows,mac,linux}/nogc_sync_mut/target_ext.spl` supplying fixed extensions.
+- **inferred** `path_separator` remains a deliberate runtime-host decision (criterion 2 failure), which is a verdict, not an open defect.
+
 Date: 2026-06-29
 Candidate: `variants/os/` overlay keyed on `path_separator` (`:` vs `;`)
 

@@ -393,3 +393,6 @@ interpreter thread-local state that an example cannot read from inside itself
 (two designs tried and discarded — an exported drain helper in spec.spl reads a
 stale module env and always returns 0; a child-process spec produced no output
 under the runner). The fixture above is the pin until the seed builds.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

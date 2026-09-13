@@ -27,9 +27,25 @@
 #
 # CONTRACT
 # --------
-#   sh scripts/check/check-stage-log-diagnosable.shs --log PATH --status N \
-#      [--stage NAME] [--transcript PATH]
+#   sh scripts/check/check-stage-log-diagnosable.shs --log PATH [--log PATH...] \
+#      --status N [--stage NAME] [--transcript PATH]
 #   sh scripts/check/check-stage-log-diagnosable.shs --selftest
+#
+# `--log` is REPEATABLE, and repeating it is not a convenience — it is the
+# second half of the defect this guard exists for. A stage's exit status is set
+# by any of several sub-steps, and each writes its own log. Stage 2, for
+# instance, sets `stage2_status` from the native-build AND from the post-build
+# sanity gate; the caller passed only `stage2-native-build.log`, so when the
+# BUILD succeeded ("Build complete: 834 compiled, 0 cached, 0 failed") and the
+# SANITY GATE failed, this guard scanned a clean success log, found no
+# diagnostic pattern, and reported UNDIAGNOSABLE — pointing every reader at the
+# wrong file while the real error
+# (`native-capsule-source-mutated:...hello_world`) sat in
+# `stage2-sanity.env.frontend-failure.log`. That cost two full bootstrap runs on
+# 2026-09-07. Every log a stage's sub-steps can write is therefore passed, all
+# of them are scanned, and the verdict NAMES the file that carried the hits.
+# Fail-closed is unchanged: a candidate that does not exist is not evidence, and
+# when NO candidate carries diagnostic text the verdict is still UNDIAGNOSABLE.
 #
 # The verdict is the LAST line of stdout, and the question it answers is
 # "could a reader learn from this run why the stage failed?":
@@ -51,6 +67,8 @@ set -u
 EV_CHECKED=0
 EV_STAGE="stage"
 EV_LOG=""
+EV_LOGS=""
+EV_LOG_COUNT=0
 EV_STATUS=""
 EV_TRANSCRIPT=""
 
@@ -62,8 +80,43 @@ EV_TRANSCRIPT=""
 diag_pattern='error:|\[hir-fatal\]|\[hir-poisoned\]|\[collect-all\]|panicked|segmentation fault|sigsegv|assertion|fatal|undefined reference|cannot find|no space left|failed files|build failed|unsupported .*construct'
 
 usage() {
-    echo "usage: $0 --log PATH --status N [--stage NAME] [--transcript PATH]"
+    echo "usage: $0 --log PATH [--log PATH...] --status N [--stage NAME] [--transcript PATH]"
     echo "       $0 --selftest"
+}
+
+# scan_secondary_logs PRIMARY
+# Scans every candidate log EXCEPT the primary for diagnostic text, printing a
+# named excerpt for the first one that carries any. Returns 0 when a secondary
+# log explained the failure, 1 otherwise. Iteration is fed by a here-document,
+# not a pipe, so the loop body runs in THIS shell and its variable writes
+# survive (a pipe would silently discard every hit).
+scan_secondary_logs() {
+    _primary="$1"
+    _found=0
+    _found_log=""
+    _found_hits=0
+    while IFS= read -r _cand; do
+        [ -n "${_cand}" ] || continue
+        [ "${_cand}" != "${_primary}" ] || continue
+        [ -s "${_cand}" ] || continue
+        _chits=$(grep -c -i -E "${diag_pattern}" "${_cand}" 2>/dev/null)
+        [ -n "${_chits}" ] || _chits=0
+        if [ "${_chits}" -gt 0 ] && [ "${_found}" -eq 0 ]; then
+            _found=1
+            _found_log="${_cand}"
+            _found_hits="${_chits}"
+        fi
+    done <<EOF
+${EV_LOGS}
+EOF
+    [ "${_found}" -eq 1 ] || return 1
+    echo "  diagnosis: the PRIMARY log carries no diagnostic text, but a sibling log"
+    echo "             written by another sub-step of this stage does. The stage did"
+    echo "             not fail where the primary log was produced."
+    echo "  real log:  ${_found_log}"
+    echo "  ${_found_hits} diagnostic line(s) found there. First 5:"
+    grep -i -E "${diag_pattern}" "${_found_log}" 2>/dev/null | head -5 | sed 's/^/    | /'
+    return 0
 }
 
 # classify_failure LOG STATUS
@@ -85,6 +138,9 @@ classify_failure() {
     fi
 
     if [ ! -e "${_log}" ]; then
+        if scan_secondary_logs "${_log}"; then
+            return 0
+        fi
         echo "  diagnosis: the log was NEVER CREATED, so nothing ever executed."
         echo "             This is a wrapper PRECONDITION refusal (pre-exec), not a"
         echo "             compile failure. Nothing in the compiler is implicated."
@@ -93,6 +149,9 @@ classify_failure() {
     fi
 
     if [ ! -s "${_log}" ]; then
+        if scan_secondary_logs "${_log}"; then
+            return 0
+        fi
         echo "  diagnosis: the log EXISTS but is 0 bytes. The compiler was executed and"
         echo "             died without flushing anything. native-build buffers stdout/"
         echo "             stderr to a non-tty until completion or a flushed error, so a"
@@ -112,6 +171,9 @@ classify_failure() {
         _hits=0
     fi
     if [ "${_hits}" -eq 0 ]; then
+        if scan_secondary_logs "${_log}"; then
+            return 0
+        fi
         _bytes=$(wc -c < "${_log}" 2>/dev/null | tr -d ' ')
         echo "  diagnosis: the log has content (${_bytes} bytes) but NOT ONE line matching"
         echo "             any diagnostic pattern. Counts and progress without a reason."
@@ -141,6 +203,17 @@ run_check() {
     EV_CHECKED=1
     echo "stage: ${EV_STAGE}"
     echo "log:   ${EV_LOG}"
+    if [ "${EV_LOG_COUNT}" -gt 1 ]; then
+        # Name every candidate. A reader who only sees the primary path cannot
+        # tell whether the other sub-step logs were consulted at all.
+        while IFS= read -r _listed; do
+            [ -n "${_listed}" ] || continue
+            [ "${_listed}" != "${EV_LOG}" ] || continue
+            echo "also:  ${_listed}"
+        done <<EOF
+${EV_LOGS}
+EOF
+    fi
     echo "exit:  ${EV_STATUS}"
     if [ -n "${EV_TRANSCRIPT}" ]; then
         echo "transcript: ${EV_TRANSCRIPT}"
@@ -158,7 +231,7 @@ run_check() {
         echo "PASS — ${EV_CHECKED} check(s), stage ${EV_STAGE} failed (exit ${EV_STATUS}) and said why"
         exit 0
     fi
-    echo "FAIL — ${EV_CHECKED} check(s), stage ${EV_STAGE} failed (exit ${EV_STATUS}) with NO diagnostic text"
+    echo "FAIL — ${EV_CHECKED} check(s), stage ${EV_STAGE} failed (exit ${EV_STATUS}) with NO diagnostic text in any of ${EV_LOG_COUNT} log(s)"
     exit 1
 }
 
@@ -233,6 +306,41 @@ selftest() {
     # 10. a non-numeric status must ERROR rather than being coerced
     _assert "bad-status-must-error" 2 --log "${_dir}/ok.log" --status abc --stage t10
 
+    # 11. THE WRONG-LOG DEFECT, replayed exactly (2026-09-07). The primary log
+    #     is a clean, SUCCESSFUL native-build; the real failure text lives in a
+    #     sibling log written by the stage's post-build sanity gate. With one
+    #     --log this is the false UNDIAGNOSABLE that cost two bootstrap runs;
+    #     with both logs it must PASS and name the sanity log.
+    printf 'Linked: build/stage2/simple (149076 KB) via clang++\nBuild complete: 834 compiled, 0 cached, 0 failed\n' \
+        > "${_dir}/native-build.log"
+    printf 'ERROR: 1 unit(s)\n  - hello_world\n      reason: native-capsule-source-mutated:hello_world\nerror: in-process native-build: build failed: 1 failed\n' \
+        > "${_dir}/sanity-frontend-failure.log"
+    _assert "wrong-log-single-must-fail" 1 \
+        --log "${_dir}/native-build.log" --status 1 --stage t11a
+    _assert "sibling-log-carries-reason-must-pass" 0 \
+        --log "${_dir}/native-build.log" \
+        --log "${_dir}/sanity-frontend-failure.log" \
+        --status 1 --stage t11b
+
+    # 12. fail-closed on the multi-log path: extra candidates that do not exist,
+    #     are empty, or carry no diagnostic text must NOT launder a failure into
+    #     a pass. Absence of a log is absence of evidence.
+    : > "${_dir}/also-empty.log"
+    printf 'progress 1/9\nprogress 9/9\n' > "${_dir}/also-quiet.log"
+    _assert "extra-logs-without-text-must-fail" 1 \
+        --log "${_dir}/native-build.log" \
+        --log "${_dir}/never-made-either.log" \
+        --log "${_dir}/also-empty.log" \
+        --log "${_dir}/also-quiet.log" \
+        --status 1 --stage t12
+
+    # 13. a missing PRIMARY log with a real sibling reason is still diagnosable:
+    #     the sub-step that failed is not always the one that owns the primary.
+    _assert "missing-primary-with-sibling-must-pass" 0 \
+        --log "${_dir}/never-made.log" \
+        --log "${_dir}/sanity-frontend-failure.log" \
+        --status 1 --stage t13
+
     rm -rf "${_dir}"
     if [ "${_ran}" -eq 0 ]; then
         echo "ERROR — nothing was checked (selftest ran 0 fixtures)"
@@ -249,7 +357,14 @@ selftest() {
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) selftest ;;
-        --log) EV_LOG="${2:-}"; shift 2 ;;
+        --log)
+            _new_log="${2:-}"
+            [ -n "${EV_LOG}" ] || EV_LOG="${_new_log}"
+            EV_LOGS="${EV_LOGS}${_new_log}
+"
+            EV_LOG_COUNT=$((EV_LOG_COUNT + 1))
+            shift 2
+            ;;
         --status) EV_STATUS="${2:-}"; shift 2 ;;
         --stage) EV_STAGE="${2:-}"; shift 2 ;;
         --transcript) EV_TRANSCRIPT="${2:-}"; shift 2 ;;

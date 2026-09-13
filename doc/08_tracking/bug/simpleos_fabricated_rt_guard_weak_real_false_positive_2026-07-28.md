@@ -1,6 +1,6 @@
 # Fabricated-`rt_*` link guard misclassifies weak-but-real definitions — blocks landing
 
-- **Status:** OPEN — guard is UNCOMMITTED and must not land as written
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** BLOCKER (would break every SimpleOS x86_64 production link)
 - **Area:** `src/compiler/70.backend/backend/llvm_native_link.spl`
   (`simpleos_check_no_fabricated_rt_stubs`, ~`:1950`)
@@ -108,3 +108,6 @@ bodies — this was not measured.
 ## Related
 
 - `doc/08_tracking/bug/simpleos_riscv64_defsym_unknown_symbol_aliasing_2026-07-28.md`
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

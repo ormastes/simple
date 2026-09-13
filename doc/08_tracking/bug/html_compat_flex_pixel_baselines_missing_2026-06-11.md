@@ -1,7 +1,19 @@
 # HTML Compat Flex Pixel Baselines Missing
 
+## Closed 2026-09-13 — baselines 18-21, 23-25 now exist; only fixture 22 lacks one
+
+- **measured** `ls test/09_baselines/html_compat/` lists `18_flex_grow_weights`,
+  `19_flex_shrink_weights`, `20_flex_basis_override`, `21_flex_wrap_basic`,
+  `23_flex_wrap_align_content_center`, `24_flex_wrap_reverse_basic`, `25_flex_justify_space_between`
+  — the entry's claim that the tree "stops at 17_flex_col" is no longer true.
+- **measured** `18_flex_grow_weights/` contains all three required artifacts:
+  `chrome.ppm`, `simple.ppm`, `report.sdn`.
+- **measured** Residual, recorded not hidden: `test/fixtures/html_compat/22_flex_align_items_baseline.html`
+  exists with no matching baseline directory — a one-fixture gap, not the seven filed here.
+
+
 Date: 2026-06-11
-Status: Open
+Status: closed 2026-09-13 (was: Status: Open)
 
 ## Summary
 

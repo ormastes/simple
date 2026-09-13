@@ -9,6 +9,7 @@
 use std.nogc_sync_mut.env.{env_get}
 use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_rename}
 use std.io.{time_now_unix_micros}
+use std.common.time_utils.{timestamp_get_year, timestamp_get_month, timestamp_get_day}
 use app.devhub.flags.{_has_flag}
 use app.devhub.output.{print_error, print_info, print_success}
 use app.devhub.adapter_outlook_curl.{
@@ -160,13 +161,24 @@ fn _iso_now() -> text:
     val secs = time_now_unix()
     "{secs}"   # TODO: format as RFC3339 once a date formatter lands.
 
+fn _pad2(n: i64) -> text:
+    """Zero-pad a one- or two-digit calendar field."""
+    if n < 10:
+        "0{n}"
+    else:
+        "{n}"
+
+fn daily_debug_day_stamp(secs: i64) -> text:
+    """Format a UTC unix-seconds timestamp as `YYYY-MM-DD`."""
+    val micros = secs * 1000000
+    val y = timestamp_get_year(micros)
+    val m = timestamp_get_month(micros)
+    val d = timestamp_get_day(micros)
+    "{y}-{_pad2(m)}-{_pad2(d)}"
+
 fn _today_yyyy_mm_dd() -> text:
     """Best-effort YYYY-MM-DD for the daily digest filename."""
-    # TODO: use a real calendar formatter; unix-seconds bucket suffices for
-    # the per-day digest until a date library lands.
-    val secs = time_now_unix()
-    val day = secs / 86400
-    "day-{day}"
+    daily_debug_day_stamp(time_now_unix())
 
 fn _digest_path() -> text:
     """Resolve `doc/08_tracking/debug/<YYYY-MM-DD>.md`."""
@@ -302,13 +314,27 @@ fn _render_digest(messages: [DailyMessage], artifacts: [TriagedArtifact]) -> tex
 # Public entry point
 # ---------------------------------------------------------------------------
 
+fn _print_daily_debug_help():
+    """Print daily-debug subcommand help."""
+    print "Usage: itf daily-debug [flags]"
+    print ""
+    print "Flags:"
+    print "  --quiet     suppress step 7 (notify)"
+    print "  --dry-run   plan only; no file writes, no watermark save, no notify"
+    print "  --help, -h  print this help and exit"
+
 fn run_daily_debug(args: [text]) -> i64:
     """Run the 7-step daily-debug pipeline. Returns process exit code.
 
     Flags:
       --quiet     suppress step 7 (notify)
       --dry-run   plan only; no file writes, no watermark save, no notify
+      --help, -h  print usage and exit; no pipeline step runs
     """
+    if _has_flag(args, "--help") or _has_flag(args, "-h"):
+        _print_daily_debug_help()
+        return 0
+
     val quiet = _has_flag(args, "--quiet")
     val dry_run = _has_flag(args, "--dry-run")
 

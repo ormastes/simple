@@ -1,7 +1,18 @@
 # Bug: out-of-bounds array read SIGSEGVs in cranelift binaries (interpreter returns 0)
 
+## Closed 2026-09-13 — no longer reproduces; OOB read returns a value, no SIGSEGV
+
+- **measured** `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) on the entry's exact
+  repro prints `OOB val nil`, rc=0 — no crash. (June behaviour: interpreter `0`,
+  cranelift SIGSEGV rc=139.)
+- **measured** `decl_get_is_async` / `decl_get_is_gpu_kernel` guards named in the fix are
+  present in `src/compiler/10.frontend/core/ast_part1.spl`.
+- **inferred** Standalone-native (cranelift) confirmation not possible here: `native-build`
+  is broken on this Windows host for unrelated reasons (SCV snapshot-cache ownership).
+
+
 - **Date:** 2026-06-11
-- **Status:** fixed — committed in adc8dcad379 (fix(parser): M9, bundled with parser work)
+Status: closed 2026-09-13 (was: - **Status:** fixed — committed in adc8dcad379 (fix(parser): M9, bundled with parser work))
 - **Severity:** high — semantics diverge between interpreter and compiled code
 
 ## Symptom

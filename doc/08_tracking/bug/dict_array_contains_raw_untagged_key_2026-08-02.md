@@ -1,6 +1,6 @@
 # `.has()` / `.contains()` / `in` answer membership questions with an untagged key
 
-- **Status:** OPEN — root cause PROVED, **emitter LOCATED 2026-08-02** (Rust seed
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/dict_array_membership_tagged_key_spec.spl` now PASSes)
   LLVM backend `bare_rt_redirect`, see "The emitter, LOCATED"), codegen fix
   specified but NOT landed (no host pipeline can verify it; see "Reproduction
   gap")
@@ -262,3 +262,24 @@ inside an `it` block is silently INERT in this spec DSL — `assert 1 == 2` stil
 reported `7 passed, 0 failed`. Only `expect(...).to_equal(...)` actually
 asserts. Any spec in this tree written with bare `assert` should be treated as
 unverified until converted.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/dict_array_membership_tagged_key_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-12 — evidence only, status deliberately unchanged
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/compiler/dict_array_membership_tagged_key_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/compiler/dict_array_membership_tagged_key_spec.spl outcome=OK declared>=7 executed=7 passed=7 failed=0 skipped=0 dropped=0
+```
+
+The spec is green, and this record is **not** being closed on that, because the
+residual scope is the self-hosted / native LLVM codegen lane where the record locates the emitter (`bare_rt_redirect` in the Rust seed LLVM backend); the record's own "Reproduction gap" section says no host pipeline can verify it.
+
+Recording the green so the next triage pass does not re-run it expecting red,
+and so nobody mistakes a passing interpreter-lane spec for the lane that is
+actually open.

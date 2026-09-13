@@ -1,5 +1,7 @@
 # TODO: bind protected DBFS objects to production descriptor owners
 
+Status: OPEN (unverified 2026-09-12)
+
 ## Current blocker
 
 The C ABI `open`/`rename` path is now task-bound and fail-closed for

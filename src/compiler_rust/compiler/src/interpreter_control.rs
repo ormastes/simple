@@ -66,7 +66,7 @@ use super::{
 };
 
 // Import helpers for pattern binding
-use super::interpreter_helpers::{bind_pattern, iter_to_vec};
+use super::interpreter_helpers::{bind_for_pattern, bind_pattern, iter_to_vec};
 
 // Import from interpreter_call for exec_block_value (sibling module)
 use super::interpreter_call::exec_block_value;
@@ -396,6 +396,15 @@ pub(super) fn exec_while(
     }
 
     if let Some(ctrl) = try_exec_two_arg_int_helper_while_loop(while_stmt, env, functions)? {
+        return Ok(ctrl);
+    }
+
+    // Runs LAST of the shape matchers, so every shape the specialised matchers
+    // above already recognise keeps its existing, cheaper path untouched. This
+    // one generalises the assigned value to an integer expression tree, which
+    // is what closes the ~940x cliff between `acc = f(acc, i)` and
+    // `acc = acc + f(i, 0)`. See try_exec_inline_int_expr_while_loop.
+    if let Some(ctrl) = try_exec_inline_int_expr_while_loop(while_stmt, env, functions)? {
         return Ok(ctrl);
     }
 
@@ -2013,6 +2022,7 @@ fn try_exec_one_arg_int_helper_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
+    crate::perf_counters::bump(&crate::perf_counters::WHILE_INLINE_INT_ITERS, iterations);
     env.insert(loop_shape.target, Value::Int(target));
     env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
@@ -2165,6 +2175,7 @@ fn try_exec_two_arg_int_helper_while_loop(
         iterations = iterations.wrapping_add(1);
     }
 
+    crate::perf_counters::bump(&crate::perf_counters::WHILE_INLINE_INT_ITERS, iterations);
     env.insert(loop_shape.target, Value::Int(target));
     env.insert(loop_shape.index, Value::Int(index));
     Ok(Some(Control::Next))
@@ -2248,6 +2259,374 @@ fn parse_two_arg_int_helper_loop(
         left: substitute_inline_operand(left, &params, &call_args)?,
         right: substitute_inline_operand(right, &params, &call_args)?,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Generalised inline-integer-expression while loop.
+//
+// The matchers above recognise an assignment whose value is *exactly* a call
+// (`acc = add(acc, i)`) or *exactly* a binary of index/const operands
+// (`acc = acc + i`). Neither recognises the accumulate idiom the standard
+// library is written in, `acc = acc + f(i, 0)`, because the call sits inside a
+// binary operand. Two loops with identical semantics therefore differed by
+// ~940x on this host, measured 2026-09-12:
+// doc/08_tracking/bug/interpreter_while_loop_fast_path_shape_cliff_2026-09-12.md
+//
+// Rather than adding one more literal shape, this matcher generalises the
+// assigned value to an integer EXPRESSION TREE flattened to a post-order step
+// list: leaves are the existing `InlineIntOperand`s, interior nodes are
+// Add/Sub/Mul, and a call to a single-expression helper is inlined by splicing
+// the steps of its arguments in for its parameters. `acc = f(acc, i)`,
+// `acc = acc + f(i, 0)` and `acc = f(i, 0) + acc` are then all the same shape.
+//
+// Semantics preserved against the generic AST walk:
+//   * Add/Sub/Mul WRAP on i64 overflow, exactly as `fast_int_binop`
+//     (interpreter/expr/ops.rs:127) does on the generic path.
+//   * Div/Mod are deliberately NOT inlinable: the generic path raises a
+//     division-by-zero error, which a wrapping evaluator cannot reproduce.
+//   * Only helpers whose whole body is one expression over their own
+//     parameters and integer literals are inlined, so an inlined call can have
+//     no side effects and its position in the evaluation order is unobservable.
+//     A helper that reads a module global is declined outright rather than
+//     resolved against the caller frame.
+//   * A parameter or return type annotated as anything but a 64-bit integer is
+//     declined, so a float-typed helper keeps the generic path's coercion.
+//
+// Pinned by test/05_perf/interp/while_loop_shape_parity_spec.spl.
+// ---------------------------------------------------------------------------
+
+/// Maximum evaluation-stack depth an inline integer expression may need.
+const INLINE_INT_STACK_MAX: usize = 16;
+/// Maximum helper-call nesting the inline parser follows before declining.
+const INLINE_INT_MAX_CALL_DEPTH: u32 = 4;
+/// Maximum number of post-order steps an inline integer expression may expand
+/// to. Parameter substitution duplicates an argument's steps once per use, so
+/// this bounds the expansion of shapes like `f(f(f(x)))` where `f(x) = x * x`.
+const INLINE_INT_MAX_STEPS: usize = 64;
+
+#[derive(Clone, Copy)]
+enum InlineIntArith {
+    Add,
+    Sub,
+    Mul,
+}
+
+#[derive(Clone)]
+enum InlineIntStep {
+    Push(InlineIntOperand),
+    Apply(InlineIntArith),
+}
+
+struct InlineIntExprLoop {
+    target: String,
+    index: String,
+    end: InlineIntOperand,
+    steps: Vec<InlineIntStep>,
+}
+
+fn inline_int_arith(op: &BinOp) -> Option<InlineIntArith> {
+    match op {
+        BinOp::Add => Some(InlineIntArith::Add),
+        BinOp::Sub => Some(InlineIntArith::Sub),
+        BinOp::Mul => Some(InlineIntArith::Mul),
+        _ => None,
+    }
+}
+
+/// A helper is only inlinable when every annotated parameter and its return
+/// type are 64-bit integers. An unannotated parameter is fine: every operand
+/// this matcher can build is an integer by construction.
+fn inline_int_type_is_integer(ty: &simple_parser::ast::Type) -> bool {
+    matches!(ty, simple_parser::ast::Type::Simple(name) if matches!(name.as_str(), "i64" | "int"))
+}
+
+fn inline_int_signature_is_integer(function: &FunctionDef) -> bool {
+    if !function.generic_params.is_empty() {
+        return false;
+    }
+    if let Some(ret) = &function.return_type {
+        if !inline_int_type_is_integer(ret) {
+            return false;
+        }
+    }
+    function
+        .params
+        .iter()
+        .all(|param| param.ty.as_ref().is_none_or(inline_int_type_is_integer))
+}
+
+/// Flatten `expr` into post-order `out` steps, or decline.
+///
+/// `bindings` is `None` at the loop's own (caller) scope, where a bare
+/// identifier reads a local. Inside an inlined helper body it is `Some`, and
+/// then ONLY the helper's own parameters and integer literals are legal — a
+/// free identifier there would be a module global that must not be resolved
+/// against the caller frame.
+fn emit_inline_int_expr(
+    expr: &Expr,
+    bindings: Option<&[(String, Vec<InlineIntStep>)]>,
+    index: &str,
+    env: &Env,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+    depth: u32,
+    out: &mut Vec<InlineIntStep>,
+) -> Option<()> {
+    if out.len() >= INLINE_INT_MAX_STEPS {
+        return None;
+    }
+    match expr {
+        Expr::Integer(value) | Expr::TypedInteger(value, _) => {
+            out.push(InlineIntStep::Push(InlineIntOperand::Const(*value)));
+            Some(())
+        }
+        Expr::Identifier(name) => match bindings {
+            Some(binds) => {
+                let (_, steps) = binds.iter().find(|(param, _)| param == name)?;
+                if out.len() + steps.len() > INLINE_INT_MAX_STEPS {
+                    return None;
+                }
+                out.extend(steps.iter().cloned());
+                Some(())
+            }
+            None => {
+                out.push(InlineIntStep::Push(InlineIntOperand::EnvVar(name.clone())));
+                Some(())
+            }
+        },
+        Expr::Binary { op, left, right } if inline_int_arith(op).is_some() => {
+            let arith = inline_int_arith(op)?;
+            emit_inline_int_expr(left, bindings, index, env, functions, depth, out)?;
+            emit_inline_int_expr(right, bindings, index, env, functions, depth, out)?;
+            if out.len() >= INLINE_INT_MAX_STEPS {
+                return None;
+            }
+            out.push(InlineIntStep::Apply(arith));
+            Some(())
+        }
+        Expr::Call { callee, args } => {
+            if depth >= INLINE_INT_MAX_CALL_DEPTH {
+                return None;
+            }
+            let Expr::Identifier(function_name) = callee.as_ref() else {
+                return None;
+            };
+            // A local of the same name shadows the function; decline rather
+            // than inline a body the call would never have reached.
+            if env.get(function_name).is_some() {
+                return None;
+            }
+            let function = functions.get(function_name)?;
+            if function.params.is_empty() || function.params.len() != args.len() {
+                return None;
+            }
+            if !inline_int_signature_is_integer(function) {
+                return None;
+            }
+            let body_expr = match function.body.statements.as_slice() {
+                [Node::Expression(expr)] => expr,
+                [Node::Return(ret)] => ret.value.as_ref()?,
+                _ => return None,
+            };
+            let mut binds: Vec<(String, Vec<InlineIntStep>)> = Vec::with_capacity(args.len());
+            for (param, arg) in function.params.iter().zip(args.iter()) {
+                if arg.name.is_some() || arg.label.is_some() {
+                    return None;
+                }
+                if param.default.is_some() || param.variadic || param.inject || param.call_site_label.is_some() {
+                    return None;
+                }
+                let mut arg_steps = Vec::new();
+                emit_inline_int_expr(&arg.value, bindings, index, env, functions, depth + 1, &mut arg_steps)?;
+                binds.push((param.name.clone(), arg_steps));
+            }
+            emit_inline_int_expr(body_expr, Some(&binds), index, env, functions, depth + 1, out)
+        }
+        // Caller-scope-only leaves: `arr.len()`, `d["key"]`, `i % k`, `i & m`.
+        other => {
+            if bindings.is_some() {
+                return None;
+            }
+            let operand = parse_direct_int_body_operand(other, index)?;
+            out.push(InlineIntStep::Push(operand));
+            Some(())
+        }
+    }
+}
+
+/// Validate the step list is a well-formed post-order expression and report the
+/// evaluation-stack depth it needs.
+fn inline_int_steps_max_depth(steps: &[InlineIntStep]) -> Option<usize> {
+    let mut sp = 0usize;
+    let mut max = 0usize;
+    for step in steps {
+        match step {
+            InlineIntStep::Push(_) => {
+                sp += 1;
+                if sp > max {
+                    max = sp;
+                }
+            }
+            InlineIntStep::Apply(_) => {
+                if sp < 2 {
+                    return None;
+                }
+                sp -= 1;
+            }
+        }
+    }
+    if sp == 1 {
+        Some(max)
+    } else {
+        None
+    }
+}
+
+fn parse_inline_int_expr_loop(
+    while_stmt: &WhileStmt,
+    env: &Env,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Option<InlineIntExprLoop> {
+    let [value_node, increment_node] = while_stmt.body.statements.as_slice() else {
+        return None;
+    };
+    let Node::Assignment(value_assign) = value_node else {
+        return None;
+    };
+    if value_assign.op != AssignOp::Assign {
+        return None;
+    }
+    let Expr::Identifier(target) = &value_assign.target else {
+        return None;
+    };
+    let (index, end) = parse_simple_index_less_than(&while_stmt.condition)?;
+    let Node::Assignment(increment_assign) = increment_node else {
+        return None;
+    };
+    if increment_assign.op != AssignOp::Assign
+        || !matches!(&increment_assign.target, Expr::Identifier(name) if name == &index)
+    {
+        return None;
+    }
+    if !is_increment_by_one(&increment_assign.value, &index) {
+        return None;
+    }
+
+    let mut steps = Vec::new();
+    emit_inline_int_expr(&value_assign.value, None, &index, env, functions, 0, &mut steps)?;
+    Some(InlineIntExprLoop {
+        target: target.clone(),
+        index,
+        end,
+        steps,
+    })
+}
+
+fn try_exec_inline_int_expr_while_loop(
+    while_stmt: &WhileStmt,
+    env: &mut Env,
+    functions: &HashMap<String, Arc<FunctionDef>>,
+) -> Result<Option<Control>, CompileError> {
+    if while_stmt.is_suspend
+        || while_stmt.let_pattern.is_some()
+        || while_stmt.label.is_some()
+        || !while_stmt.invariants.is_empty()
+        || is_coverage_enabled()
+        || crate::interpreter::is_execution_limit_enabled()
+    {
+        return Ok(None);
+    }
+
+    let Some(loop_shape) = parse_inline_int_expr_loop(while_stmt, env, functions) else {
+        return Ok(None);
+    };
+    if loop_shape.target == loop_shape.index
+        || inline_operand_is_env_var(&loop_shape.end, &loop_shape.target)
+        || inline_operand_len_receiver_conflicts(&loop_shape.end, &loop_shape.target, &loop_shape.index)
+        || inline_operand_dict_receiver_conflicts(&loop_shape.end, &loop_shape.target, &loop_shape.index)
+        || CONST_NAMES.with(|cell| cell.borrow().contains(&loop_shape.target))
+        || IMMUTABLE_VARS.with(|cell| cell.borrow().contains(&loop_shape.target))
+        || CONST_NAMES.with(|cell| cell.borrow().contains(&loop_shape.index))
+        || IMMUTABLE_VARS.with(|cell| cell.borrow().contains(&loop_shape.index))
+    {
+        return Ok(None);
+    }
+    for step in &loop_shape.steps {
+        if let InlineIntStep::Push(operand) = step {
+            if inline_operand_len_receiver_conflicts(operand, &loop_shape.target, &loop_shape.index)
+                || inline_operand_dict_receiver_conflicts(operand, &loop_shape.target, &loop_shape.index)
+            {
+                return Ok(None);
+            }
+        }
+    }
+    let Some(needed_depth) = inline_int_steps_max_depth(&loop_shape.steps) else {
+        return Ok(None);
+    };
+    if needed_depth > INLINE_INT_STACK_MAX {
+        return Ok(None);
+    }
+
+    let mut target = match env.get(&loop_shape.target) {
+        Some(Value::Int(value)) => *value,
+        _ => return Ok(None),
+    };
+    let mut index = match env.get(&loop_shape.index) {
+        Some(Value::Int(value)) => *value,
+        _ => return Ok(None),
+    };
+    let end = match eval_stable_inline_operand(&loop_shape.end, env, target, index) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let mut steps = Vec::with_capacity(loop_shape.steps.len());
+    for step in loop_shape.steps {
+        match step {
+            InlineIntStep::Push(operand) => {
+                match lower_stable_inline_operand(operand, env, &loop_shape.target, &loop_shape.index) {
+                    Ok(lowered) => steps.push(InlineIntStep::Push(lowered)),
+                    Err(_) => return Ok(None),
+                }
+            }
+            InlineIntStep::Apply(op) => steps.push(InlineIntStep::Apply(op)),
+        }
+    }
+
+    let mut stack = [0i64; INLINE_INT_STACK_MAX];
+    let mut iterations = 0u64;
+    while index < end {
+        if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
+        }
+        let mut sp = 0usize;
+        for step in steps.iter() {
+            match step {
+                InlineIntStep::Push(operand) => {
+                    stack[sp] = eval_inline_operand(operand, target, index);
+                    sp += 1;
+                }
+                InlineIntStep::Apply(op) => {
+                    let rhs = stack[sp - 1];
+                    let lhs = stack[sp - 2];
+                    sp -= 1;
+                    stack[sp - 1] = match op {
+                        InlineIntArith::Add => lhs.wrapping_add(rhs),
+                        InlineIntArith::Sub => lhs.wrapping_sub(rhs),
+                        InlineIntArith::Mul => lhs.wrapping_mul(rhs),
+                    };
+                }
+            }
+        }
+        target = stack[0];
+        index = index.wrapping_add(1);
+        iterations = iterations.wrapping_add(1);
+    }
+
+    crate::perf_counters::bump(&crate::perf_counters::WHILE_INLINE_INT_ITERS, iterations);
+    env.insert(loop_shape.target, Value::Int(target));
+    env.insert(loop_shape.index, Value::Int(index));
+    Ok(Some(Control::Next))
 }
 
 fn parse_simple_index_less_than(expr: &Expr) -> Option<(String, InlineIntOperand)> {
@@ -3457,16 +3836,10 @@ fn exec_for_inner(
         iterable
     };
 
-    // Check if iterating over a Dict - auto_enumerate doesn't apply since
-    // dict iteration already returns (key, value) tuples
-    let is_dict_iteration = matches!(&iterable, Value::Dict(_));
-
     // Use iter_to_vec to handle all iterable types uniformly
     let items = iter_to_vec(&iterable)?;
 
-    // If auto_enumerate, wrap items with indices as tuples
-    // But NOT for dict iteration - dict items are already (key, value) tuples
-    for (index, item) in items.into_iter().enumerate() {
+    for item in items.into_iter() {
         check_interrupt!();
         check_execution_limit!();
         check_timeout!();
@@ -3474,16 +3847,15 @@ fn exec_for_inner(
         // For for~ (is_suspend), await each item if it's a Promise
         let item = if for_stmt.is_suspend { await_value(item)? } else { item };
 
-        // Create the value to bind - either (index, item) tuple or just item
-        // For dict iteration, items are already (key, value) tuples, so don't wrap
-        let bind_value = if for_stmt.auto_enumerate && !is_dict_iteration {
-            Value::Tuple(vec![Value::Int(index as i64), item])
-        } else {
-            item
-        };
-
-        // Use bind_pattern to handle all pattern types (identifier, tuple, etc.)
-        if !bind_pattern(&for_stmt.pattern, &bind_value, env) {
+        // A comma loop pattern is ALWAYS a tuple destructure, whatever the
+        // iterable is -- `for a, b in e:` is `for (a, b) in e:`, and the
+        // parser produces one `Pattern::Tuple` for both. There is no
+        // enumerate shorthand: enumerate intent is `for i, x in
+        // e.enumerate():`, which destructures the (index, item) pairs
+        // `.enumerate()` yields, with no second wrap. See
+        // doc/08_tracking/bug/
+        // seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md.
+        if !bind_for_pattern(&for_stmt.pattern, item, env) {
             // Pattern didn't match - skip this iteration
             continue;
         }
@@ -3596,7 +3968,6 @@ struct StringMatchCountForLoop {
 
 fn try_exec_enumerated_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || !for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -3681,7 +4052,26 @@ fn parse_enumerated_int_array_for_loop(for_stmt: &ForStmt) -> Option<EnumeratedI
     let [Pattern::Identifier(index_var), Pattern::Identifier(item_var)] = patterns.as_slice() else {
         return None;
     };
-    let Expr::Identifier(array) = &for_stmt.iterable else {
+    // Keyed on an EXPLICIT `.enumerate()` call, which is the only spelling
+    // that means "index, item" now that the bare-comma enumerate shorthand is
+    // gone (doc/08_tracking/bug/
+    // seed_for_loop_enumerate_shorthand_diverges_from_pure_simple_2026-09-12.md).
+    // A bare `for i, x in arr:` is a tuple destructure and must NOT reach this
+    // fast path, or it would answer index/item while the general path answers
+    // element 0/element 1.
+    let Expr::MethodCall {
+        receiver,
+        method,
+        args,
+        ..
+    } = &for_stmt.iterable
+    else {
+        return None;
+    };
+    if method != "enumerate" || !args.is_empty() {
+        return None;
+    }
+    let Expr::Identifier(array) = receiver.as_ref() else {
         return None;
     };
     let [node] = for_stmt.body.statements.as_slice() else {
@@ -3746,7 +4136,6 @@ fn enumerated_int_array_operand_uses_item(operand: &EnumeratedIntArrayOperand) -
 
 fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -3909,7 +4298,6 @@ fn parse_single_static_char(expr: &Expr) -> Option<char> {
 
 fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4028,7 +4416,6 @@ fn try_exec_float_array_match_count_for_loop(
     env: &mut Env,
 ) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4191,7 +4578,6 @@ fn parse_static_float(expr: &Expr) -> Option<f64> {
 
 fn try_exec_float_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4308,7 +4694,6 @@ fn eval_float_for_operand(operand: &FloatForOperand, target: f64, loop_value: f6
 
 fn try_exec_int_array_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4472,7 +4857,6 @@ fn parse_static_int(expr: &Expr) -> Option<i64> {
 
 fn try_exec_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()
@@ -4593,7 +4977,6 @@ fn range_operand_uses_loop_var(operand: &RangeForOperand) -> bool {
 
 fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Option<Control>, CompileError> {
     if for_stmt.is_suspend
-        || for_stmt.auto_enumerate
         || for_stmt.label.is_some()
         || !for_stmt.invariants.is_empty()
         || is_coverage_enabled()

@@ -26,6 +26,17 @@ impl Lowerer {
         Ok(out)
     }
 
+    pub(in crate::hir::lower) fn lower_nonescaping_call_args(
+        &mut self,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirExpr>> {
+        let capability_checkpoint = self.capability_env.clone();
+        let result = self.lower_call_args(args, ctx);
+        self.capability_env = capability_checkpoint;
+        result
+    }
+
     /// Helper to lower builtin function calls with consistent handling
     pub(in crate::hir::lower) fn lower_builtin_call(
         &mut self,

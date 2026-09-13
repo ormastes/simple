@@ -145,3 +145,16 @@ and the `mimalloc_page/page_policy/secure.spl:55/37/31` triplets.
 plus the three-engine probe recipe in the table above, which is reproducible from
 this file in under a minute and is the only form that catches the divergence —
 a single-engine run cannot.
+
+## Triage 2026-09-13
+
+Deep engine-semantics divergence (interpreter vs JIT vs native/AOT
+struct-field mutation through by-value receivers), with a shared root
+cause across a family of related bugs
+(interpreter_return_boundary_never_merges_shared_collections_2026-08-17,
+enum_payload_dict_copied_on_function_return_2026-07-28,
+jit_struct_assignment_aliases_not_copies_2026-08-10) and an open
+design question about intended semantics. A fix here risks subtle
+core-interpreter regressions and is far beyond this lane's per-item
+budget. Leaving OPEN, no attempt.
+

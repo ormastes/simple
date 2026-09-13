@@ -742,11 +742,11 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
-        // `d.entries()` on a Dict<K, V>: mirrors the interpreter's
-        // "entries"|"items" (interpreter_method/collections.rs) — an array
-        // of (key, value) tuples. `rt_dict_entries` (runtime/src/value/
-        // dict.rs) already exists and already had a linker manifest entry
-        // (common/src/runtime_symbols.rs, "for-in iteration over
+        // `d.entries()` / `d.items()` on a Dict<K, V>: mirrors the
+        // interpreter's "entries"|"items" (interpreter_method/collections.rs)
+        // — an array of (key, value) tuples. `rt_dict_entries` (runtime/src/
+        // value/dict.rs) already exists and already had a linker manifest
+        // entry (common/src/runtime_symbols.rs, "for-in iteration over
         // dicts/arrays") but was never declared in the codegen SFFI table
         // (codegen/runtime_sffi.rs) or wired to a dispatch arm, so it fell
         // through to `rt_method_not_found`. Returns a fresh array pointer —
@@ -758,7 +758,17 @@ impl<'a> MirLowerer<'a> {
         // order (the SAME already-known `dict.keys()`/`dict.values()`
         // ordering gap the audit doc calls out separately) — the result SET
         // matches, the SEQUENCE does not.
-        if method == "entries" && args.is_empty() && self.receiver_is_dict(receiver, receiver_local_ty) {
+        // `items` was originally left out of this `if` (only `entries` was
+        // checked) even though the HIR type-inference table above already
+        // treats them as aliases — that gap is
+        // doc/08_tracking/bug/dict_items_for_loop_destructure_and_jit_missing_2026-09-12.md
+        // defect 2: `d.items()` fell through to `rt_method_not_found` under
+        // the default JIT while `d.entries()` (the exact same runtime call)
+        // already worked.
+        if matches!(method, "entries" | "items")
+            && args.is_empty()
+            && self.receiver_is_dict(receiver, receiver_local_ty)
+        {
             let receiver_reg = self.lower_expr(receiver)?;
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -2015,7 +2025,18 @@ impl<'a> MirLowerer<'a> {
             None
         };
 
-        let func_name = if let Some(class_ty) = erased_class_receiver_ty
+        let declared_trait_owner = match &receiver.kind {
+            crate::hir::HirExprKind::Local(index) => self
+                .local_type_name_hints
+                .get(index)
+                .filter(|name| self.trait_infos.is_some_and(|infos| infos.contains_key(name.as_str())))
+                .cloned(),
+            _ => None,
+        };
+
+        let func_name = if let Some(trait_name) = declared_trait_owner {
+            format!("{}.{}", trait_name, method)
+        } else if let Some(class_ty) = erased_class_receiver_ty
             .filter(|_| !wrapper_enum_builtin_collision)
             .and_then(|t| self.type_registry.and_then(|r| r.get_type_name(t)).map(|n| (t, n)))
             .map(|(_, n)| n)
@@ -2087,7 +2108,6 @@ impl<'a> MirLowerer<'a> {
             method.to_string()
         };
 
-        let dispatch_receiver_ty = receiver_local_ty.unwrap_or(receiver.ty);
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch).

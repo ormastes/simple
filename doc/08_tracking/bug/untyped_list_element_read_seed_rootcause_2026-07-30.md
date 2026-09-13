@@ -1,5 +1,7 @@
 # Untyped `list` element-read seed root cause + kafka fallback fix (2026-07-30)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Assignment (leverage play): root-cause and, if contained, fix the untyped-
 `list` element-read miscompile IN THE SEED — one codegen fix would retire
 all ~750 danger sites named in the previous census pass at once.
@@ -396,3 +398,7 @@ above therefore no longer holds.
 
 **Status: CLOSE as already-fixed.** Kept open only if a lane can show a
 `list`-read miscompile on a seed built from current source.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

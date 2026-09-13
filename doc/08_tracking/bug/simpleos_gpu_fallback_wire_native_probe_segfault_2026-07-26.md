@@ -1,4 +1,5 @@
 # SimpleOS GPU Fallback Wire Request Completion Timeout
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -83,3 +84,6 @@ Prepared-host Metal/Vulkan failure rows remain separate macOS tasks. Do not
 reintroduce a synchronous compositor wait derived from poll count.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

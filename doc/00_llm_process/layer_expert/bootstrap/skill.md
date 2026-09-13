@@ -35,7 +35,7 @@ DevHub and independent GitHub/Jira/Confluence fixture reads. Keep missing phase
 tools, provider identity routes, credentials and read scope as explicit blockers;
 `auth status` configuration output never earns live access PASS. The controller
 cannot create its own admission authority or promote fixture tests to live
-evidence. See the full-pure-Simple SIMD trusted deployment matrix for exact argv
+evidence. See `doc/07_guide/tooling/bootstrap_phase_live_services.md` for exact argv
 and receipt contracts.
 
 Rust seed tool discovery is owned by the shell authority boundary. Normalize
@@ -627,6 +627,14 @@ emitted at `scripts/bootstrap/bootstrap-from-scratch.sh:2703` and again at
 admission compares a `bootstrap_stage3_source_snapshot` taken before and after
 the stage; any drift invalidates the private copy, which is deliberate — it
 prevents a stop-after-stage2 false admission.
+
+## macOS current-source Stage2 handoff (2026-09-08)
+
+The current Apple Silicon lane reduced LLVM failed files from 374 to one.
+`cache_gateway_v1.spl` still loses the slot for generic/imported
+`CacheGatewayV1.virtual_source_store`; no Stage4 candidate exists and the July
+deployment must remain untouched. The exact resume condition and capped-cycle
+history are in `doc/03_plan/compiler/bootstrap/stage4_macos_deploy_2026-07-25.md`.
 
 **Use a private worktree pinned to a commit.** `scripts/bootstrap/bootstrap-in-snapshot.shs`
 exists exactly for this: it materialises COMMITTED content into

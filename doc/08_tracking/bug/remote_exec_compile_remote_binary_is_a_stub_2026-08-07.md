@@ -1,4 +1,5 @@
 # `compile_remote_binary` is a fixed stub, not a compiler (blocks Notebook RemoteExec cross-cell VALUE state)
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/02_integration/app/tools/notebook/remote_exec_qemu_rv32_spec.spl -> 2 passed, 0 failed)
 
 **Filed:** 2026-08-07
 **Context:** Stream K, task K4 (`RemoteExec` NotebookExecutor) —
@@ -75,3 +76,6 @@ lands.
 Not proven: no `Results:` line —
 `test/02_integration/app/tools/notebook/remote_exec_qemu_rv32_spec.spl` needs a
 QEMU lane and was not run while the bootstrap holds the host.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/app/tools/notebook/remote_exec_qemu_rv32_spec.spl` on the deployed seed; the spec now passes in full (2/2), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

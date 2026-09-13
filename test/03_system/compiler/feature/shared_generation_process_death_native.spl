@@ -1,0 +1,47 @@
+use compiler.driver.cache.shared_generation_store.{
+    shared_generation_publish_v1, shared_generation_pin_current_owned_v1,
+    shared_generation_reclaim_dead_leases_v1, shared_generation_read_valid_v1
+}
+use std.io_runtime.{get_args, getpid, process_spawn_async, process_is_running, process_wait}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_start_identity(pid: i64) -> i64
+
+fn main() -> i64:
+    val args = get_args() ?? []
+    if args.len() == 3 and args[1] == "child":
+        val child_root = args[2]
+        val child_pid = getpid()
+        val child_start = rt_process_start_identity(child_pid)
+        if child_start <= 0:
+            return 78
+        val child_read = shared_generation_pin_current_owned_v1(
+            child_root, "child-owner", "pid:{child_pid}:{child_start}", 1)
+        if not shared_generation_read_valid_v1(child_read):
+            return 79
+        return 0
+    val root = "/tmp/simple-shared-generation-process-death"
+    val _removed = rt_dir_remove_all(root)
+    if not rt_dir_create_all(root):
+        return 70
+    if shared_generation_publish_v1(root, "", 1, "stable").len() != 64:
+        return 71
+    if args.len() == 0:
+        return 72
+    val pid = process_spawn_async(args[0], ["child", root])
+    if pid <= 0:
+        return 72
+    val _waited = process_wait(pid)
+    if process_is_running(pid):
+        return 75
+    if not rt_file_exists("{root}/leases/child-owner.lease"):
+        return 73
+    val reclaimed = shared_generation_reclaim_dead_leases_v1(
+        root, 9223372036854775807, [])
+    if reclaimed.is_err() or reclaimed.unwrap() != 1:
+        return 76
+    if rt_file_exists("{root}/leases/child-owner.lease"):
+        return 77
+    0

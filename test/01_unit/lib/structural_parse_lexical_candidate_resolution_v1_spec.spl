@@ -1,0 +1,105 @@
+use std.spec.*
+use std.nogc_async_mut.structural.parse.lexical_block_summary_v1.*
+use std.nogc_async_mut.structural.parse.lexical_transition_table_v1.*
+use std.nogc_async_mut.structural.parse.lexical_candidate_resolution_v1.*
+
+fn _corpus_lcr() -> [[u8]]:
+    [[], [97u8], [34u8, 97u8, 34u8], [39u8, 92u8, 39u8, 39u8],
+     [35u8, 97u8, 10u8, 98u8], [47u8, 47u8, 42u8], [123u8, 44u8, 125u8],
+     [114u8, 34u8, 97u8], [10u8, 32u8, 97u8], [92u8, 92u8, 34u8],
+     [97u8 for _ in 0..32], [34u8 for _ in 0..32]]
+
+describe "SIMD candidate classification and scalar state resolution V1":
+    it "classifies every one of the 256 byte values into the published classes":
+        var v = 0
+        while v < 256:
+            val b = v as u8
+            var want = 0u32
+            if b == 39u8: want = want | LEX_CAND_SINGLE_QUOTE_V1
+            if b == 34u8: want = want | LEX_CAND_DOUBLE_QUOTE_V1
+            if b == 92u8: want = want | LEX_CAND_BACKSLASH_V1
+            if b == 35u8: want = want | LEX_CAND_HASH_V1
+            if b == 10u8: want = want | LEX_CAND_NEWLINE_V1
+            if b == 47u8: want = want | LEX_CAND_SLASH_V1
+            if b == 42u8: want = want | LEX_CAND_STAR_V1
+            if b == 123u8 or b == 125u8: want = want | LEX_CAND_BRACES_V1
+            if b == 40u8 or b == 41u8 or b == 91u8 or b == 93u8 or b == 123u8 or
+               b == 125u8 or b == 44u8 or b == 58u8: want = want | LEX_CAND_STRUCTURAL_V1
+            expect(lexical_candidate_class_of_byte_v1(b)).to_equal(want)
+            v = v + 1
+
+    it "folds per-byte classes into exactly the block candidate masks":
+        var checked = 0
+        for bytes in _corpus_lcr():
+            val masks = lexical_candidate_masks_scalar_v1(bytes).unwrap()
+            expect(masks.byte_count).to_equal(bytes.len() as u32)
+            expect(lexical_candidate_masks_valid_v1(masks)).to_equal(true)
+            expect(masks).to_equal(lexical_candidate_masks_from_classes_v1(bytes).unwrap())
+            expect(masks.braces & masks.structural_delimiters).to_equal(masks.braces)
+            checked = checked + 1
+        expect(checked).to_equal(_corpus_lcr().len())
+
+    it "keeps candidate masks inside the block width and rejects wider blocks":
+        expect(lexical_candidate_masks_scalar_v1([0u8 for _ in 0..33])).to_equal(
+            Err(LexicalCandidateErrorV1.BlockTooWide))
+        val masks = lexical_candidate_masks_scalar_v1([34u8, 97u8]).unwrap()
+        expect(masks.double_quote).to_equal(1u32)
+        expect(masks.single_quote).to_equal(0u32)
+        var wide = masks
+        wide.newline = 1u32 << 5u32
+        expect(lexical_candidate_masks_valid_v1(wide)).to_equal(false)
+
+    it "resolves the oracle state for all 256 byte values across every admitted state":
+        val states = lexical_transition_admitted_states_v1()
+        var checked = 0
+        var mismatches = 0
+        var identity_checked = 0
+        var v = 0
+        while v < 256:
+            val bytes = [v as u8]
+            val rows = lexical_transition_rows_build_unsealed_v1(bytes).unwrap()
+            val resolved = lexical_resolve_states_unsealed_v1(rows).unwrap()
+            expect(resolved.len()).to_equal(states.len())
+            var s = 0
+            while s < states.len():
+                val oracle = lexical_block_summary_scalar_v1(bytes, states[s]).unwrap()
+                if resolved[s] != oracle.output_state: mismatches = mismatches + 1
+                checked = checked + 1
+                # The identity-selection path is quadratic in the state table, so
+                # cross-check it against the batch on every 16th byte value only.
+                if v % 16 == 0:
+                    if lexical_resolve_state_unsealed_v1(rows, states[s]).unwrap() != resolved[s]:
+                        mismatches = mismatches + 1
+                    identity_checked = identity_checked + 1
+                s = s + 1
+            v = v + 1
+        expect(checked).to_equal(256 * (LEXICAL_TRANSITION_STATE_COUNT_V1 as i64))
+        expect(identity_checked).to_equal(16 * (LEXICAL_TRANSITION_STATE_COUNT_V1 as i64))
+        expect(mismatches).to_equal(0)
+
+    it "resolves the frozen corpus through the sealed table exactly like the oracle":
+        val states = lexical_transition_admitted_states_v1()
+        var checked = 0
+        var mismatches = 0
+        for bytes in _corpus_lcr():
+            val resolved = lexical_resolve_states_sealed_v1(bytes).unwrap()
+            expect(resolved.len()).to_equal(states.len())
+            var s = 0
+            while s < states.len():
+                if resolved[s] != lexical_block_summary_scalar_v1(bytes, states[s]).unwrap().output_state:
+                    mismatches = mismatches + 1
+                checked = checked + 1
+                s = s + 1
+            # The single-state sealed path selects by state identity, not index.
+            expect(lexical_resolve_state_sealed_v1(bytes, states[0]).unwrap()).to_equal(resolved[0])
+        expect(checked).to_equal(_corpus_lcr().len() * states.len())
+        expect(mismatches).to_equal(0)
+
+    it "refuses resolution for an unadmitted input state and an over-wide block":
+        var bad = lexical_block_initial_state_v1()
+        bad.in_block_comment = true
+        expect(lexical_resolve_state_sealed_v1([97u8], bad)).to_equal(
+            Err(LexicalCandidateErrorV1.StateNotAdmitted))
+        expect(lexical_resolve_state_sealed_v1([0u8 for _ in 0..33],
+            lexical_block_initial_state_v1())).to_equal(
+            Err(LexicalCandidateErrorV1.BlockTooWide))

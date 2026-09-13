@@ -1,39 +1,111 @@
-"""Authored ownership/race contracts for the executable-mapping prerequisite.
+"""Evidence-only ownership contracts for the executable-mapping prerequisite.
 
-This source is intentionally unexecuted in the mapper-foundation change.  It
-records the future executable-aspect handoff without claiming that v1 facet
-unpin already supplies a final-unpin lease.
+These scenarios validate only pointer-free receipt/result vocabulary. They do
+not invoke a mapper endpoint or claim final-unpin, native release, concurrency,
+race, or production integration evidence.
 """
 
-use std.spec.{describe, it, assert_true, assert_eq}
+use std.spec.*
 use std.common.structural.parallel_commit.executable_mapping_receipt.{
     ExecutableMappingProducerKindV1,
+    ExecutableMappingReleaseOutcomeV1,
     executable_mapping_receipt_v1,
-    executable_mapping_receipt_v1_well_formed
+    executable_mapping_receipt_v1_well_formed,
+    executable_mapping_receipt_v1_same_identity,
+    executable_mapping_release_result_v1,
+    executable_mapping_release_result_v1_well_formed,
+    executable_mapping_release_result_v1_matches,
 }
 
 describe "executable mapping receipt ownership contracts":
     it "AMR-OWN-001 mapper issues a pointer-free coordinate, not address authority":
+        step("Construct a pointer-free receipt with the exact mapper instance")
         val receipt = executable_mapping_receipt_v1(
             ExecutableMappingProducerKindV1.SegmentMapper,
+            "segment-mapper-instance-17",
             "module-a", "module-a#0", 7, 4096, 1)
-        assert_true(executable_mapping_receipt_v1_well_formed(receipt))
-        assert_eq(receipt.mapping_generation, 7)
+        expect(executable_mapping_receipt_v1_well_formed(receipt)).to_equal(true)
+        expect(receipt.mapper_instance_id).to_equal("segment-mapper-instance-17")
+        expect(receipt.owner_id).to_equal("module-a")
+        expect(receipt.mapping_key).to_equal("module-a#0")
+        expect(receipt.mapping_generation).to_equal(7)
+        expect(receipt.mapped_bytes).to_equal(4096)
+        expect(receipt.segment_count).to_equal(1)
         # Receipt fields intentionally exclude native address/function-pointer.
 
     it "AMR-RACE-004 requires the future final-unpin port before native release":
-        # No mapper `unmap_receipt` API exists.  A future aspect owner alone
-        # implements ExecutableMappingReleasePortV1 after final-unpin prepare.
+        step("Compare exact release identities, accounting, and attempt IDs")
+        # Only the physical mapper owner supplies the concrete release endpoint.
+        # The loader association may retain/invoke it after final-unpin validation;
+        # the aspect owner and a copied receipt never own native release authority.
         val receipt = executable_mapping_receipt_v1(
             ExecutableMappingProducerKindV1.SegmentMapper,
+            "segment-mapper-instance-17",
             "module-a", "module-a#0", 8, 4096, 1)
-        assert_eq(receipt.segment_count, 1)
+        val released = executable_mapping_release_result_v1(
+            receipt, ExecutableMappingReleaseOutcomeV1.Released,
+            receipt.mapped_bytes, receipt.segment_count, 17)
+        val final_unpin_required = executable_mapping_release_result_v1(
+            receipt, ExecutableMappingReleaseOutcomeV1.FinalUnpinRequired,
+            0, 0, 18)
+        val native_failure = executable_mapping_release_result_v1(
+            receipt, ExecutableMappingReleaseOutcomeV1.NativeReleaseFailed,
+            0, 0, 19)
+        val forged_accounting = executable_mapping_release_result_v1(
+            receipt, ExecutableMappingReleaseOutcomeV1.Released,
+            receipt.mapped_bytes - 1, receipt.segment_count, 20)
+        val foreign_receipt = executable_mapping_receipt_v1(
+            ExecutableMappingProducerKindV1.SegmentMapper,
+            "segment-mapper-instance-18",
+            receipt.owner_id, receipt.mapping_key, receipt.mapping_generation,
+            receipt.mapped_bytes, receipt.segment_count)
+        val foreign_release = executable_mapping_release_result_v1(
+            foreign_receipt, ExecutableMappingReleaseOutcomeV1.Released,
+            foreign_receipt.mapped_bytes, foreign_receipt.segment_count, 17)
+
+        expect(executable_mapping_receipt_v1_same_identity(
+            receipt, foreign_receipt)).to_equal(false)
+        expect(executable_mapping_release_result_v1_well_formed(
+            released)).to_equal(true)
+        expect(executable_mapping_release_result_v1_matches(
+            released, receipt, 17)).to_equal(true)
+        expect(executable_mapping_release_result_v1_matches(
+            released, receipt, 18)).to_equal(false)
+        expect(released.released_bytes).to_equal(4096)
+        expect(released.released_segments).to_equal(1)
+
+        expect(executable_mapping_release_result_v1_well_formed(
+            final_unpin_required)).to_equal(true)
+        expect(executable_mapping_release_result_v1_matches(
+            final_unpin_required, receipt, 18)).to_equal(true)
+        expect(final_unpin_required.released_bytes).to_equal(0)
+        expect(final_unpin_required.released_segments).to_equal(0)
+
+        expect(executable_mapping_release_result_v1_well_formed(
+            native_failure)).to_equal(true)
+        expect(executable_mapping_release_result_v1_matches(
+            native_failure, receipt, 19)).to_equal(true)
+        expect(native_failure.released_bytes).to_equal(0)
+        expect(native_failure.released_segments).to_equal(0)
+
+        expect(executable_mapping_release_result_v1_well_formed(
+            forged_accounting)).to_equal(false)
+        expect(executable_mapping_release_result_v1_matches(
+            forged_accounting, receipt, 20)).to_equal(false)
+        expect(executable_mapping_release_result_v1_matches(
+            foreign_release, receipt, 17)).to_equal(false)
 
     it "AMR-STALE-008 distinguishes a remap generation":
+        step("Compare remap generations under one mapper instance")
         val old_receipt = executable_mapping_receipt_v1(
             ExecutableMappingProducerKindV1.SharedExecMapper,
+            "shared-exec-mapper-instance-4",
             "module-a", "symbol", 10, 64, 1)
         val new_receipt = executable_mapping_receipt_v1(
             ExecutableMappingProducerKindV1.SharedExecMapper,
+            "shared-exec-mapper-instance-4",
             "module-a", "symbol", 11, 64, 1)
-        assert_true(old_receipt.mapping_generation != new_receipt.mapping_generation)
+        expect(old_receipt.mapping_generation).to_equal(10)
+        expect(new_receipt.mapping_generation).to_equal(11)
+        expect(executable_mapping_receipt_v1_same_identity(
+            old_receipt, new_receipt)).to_equal(false)

@@ -1,0 +1,194 @@
+use std.spec.{describe, it, expect}
+use compiler.common.backend_plugin.model.*
+use compiler.common.backend_plugin.receipt.{BackendProviderReceipt}
+use compiler.backend.backend_plugin.kpf_worker.*
+use compiler.backend.backend_plugin.transport.backend_plugin_envelope_encode_v1
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.kernel_plugin.worker_process.KpfWorkerProcessFacadeV1
+use os.smf.kernel_plugin.worker_transport.KpfWorkerTransportV1
+use os.smf.kernel_plugin.worker_protocol.*
+use os.smf.kernel_plugin.shared_memory_ring.KpfSharedMemoryRingV1
+use os.smf.kernel_plugin.shared_memory_transport.KpfSharedMemoryWorkerTransportV1
+use os.smf.kernel_plugin.shared_memory_wire.*
+use os.smf.kernel_plugin.real_worker_process.KpfRealWorkerProcessV1
+use os.smf.kernel_plugin.real_worker_transport.KpfRealWorkerTransportV1
+use std.nogc_sync_mut.io.thread.thread_native_sleep_ms
+
+fn worker_request() -> BackendPluginRequestV1:
+    BackendPluginRequestV1(BackendRole.CompilerAot, "fixture", "host", "generic",
+        [], "debug", "mir-v1", [BackendCapability.ObjectEmit], "", false)
+
+fn provider_receipt() -> BackendProviderReceipt:
+    BackendProviderReceipt("fixture", "1.0", "toolchain-sha256", 1, "mir-v1",
+        "host", [], BackendRole.CompilerAot, "debug", "worker")
+
+fn completion(generation: i64, session_epoch: i64, slot: i64, epoch: i64,
+        payload: [u8]) -> KpfWorkerFrameV1:
+    KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1,
+        kind: KpfWorkerFrameKind.Completion, generation: generation,
+        session_epoch: session_epoch, request_slot: slot, request_epoch: epoch,
+        capability_bits: 1, payload_length: payload.len, payload: payload)
+
+fn zero_bytes(count: i64) -> [u8]:
+    var result: [u8] = []
+    for _ in 0..count: result.push(0u8)
+    result
+
+fn descriptors(count: i64) -> [KpfSharedMemoryDescriptorV1]:
+    var result: [KpfSharedMemoryDescriptorV1] = []
+    for _ in 0..count: result.push(kpf_shared_memory_empty_descriptor_v1())
+    result
+
+fn occupied(count: i64) -> [bool]:
+    var result: [bool] = []
+    for _ in 0..count: result.push(false)
+    result
+
+fn epochs(count: i64) -> [i64]:
+    var result: [i64] = []
+    for _ in 0..count: result.push(0)
+    result
+
+fn shared_ring(count: i64, payload_bytes: i64) -> KpfSharedMemoryRingV1:
+    KpfSharedMemoryRingV1.bind(zero_bytes(count * payload_bytes),
+        descriptors(count), occupied(count), payload_bytes)
+
+fn poll_real_into(session: BackendKpfRealWorkerSessionV1,
+        output: [u8]) -> Result<i64, text>:
+    var result = session.poll_into(1, output)
+    var attempts = 0
+    while result.is_err() and attempts < 1000:
+        thread_native_sleep_ms(1)
+        result = session.poll_into(1, output)
+        attempts = attempts + 1
+    result
+
+describe "backend KPF worker placement parity":
+    it "retains one admitted worker session across a module batch":
+        val receipt = backend_kpf_worker_receipt_v1(provider_receipt(), 41, 7,
+            "toolchain-sha256", "toolchain-sha256", "worker").ok().unwrap()
+        val process = KpfWorkerProcessFacadeV1.create(8)
+        val transport = KpfWorkerTransportV1.create(process, 41, 3, 7, 4096, 1, 1000)
+        var session = BackendKpfWorkerSessionV1.create(transport, worker_request(), receipt, 1)
+
+        expect(session.handshake(0)).to_equal(KpfWorkerOutcome.Accepted)
+        val sent_handshake = session.transport.process.take_sent().1
+        expect(sent_handshake.kind).to_equal(KpfWorkerFrameKind.Handshake)
+        session.transport.process.inject_from_worker(KpfWorkerFrameV1(
+            protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.HandshakeAccepted, generation: 41,
+            session_epoch: 7, request_slot: -1, request_epoch: 0,
+            capability_bits: 1, payload_length: 0, payload: []))
+        expect(session.transport.poll(1).outcome).to_equal(KpfWorkerOutcome.Accepted)
+
+        val first = KpfRequestHandleV1(generation: 41, session_slot: 3,
+            request_slot: 0, request_epoch: 1)
+        val second = KpfRequestHandleV1(generation: 41, session_slot: 3,
+            request_slot: 1, request_epoch: 1)
+        expect(session.submit_encoded(first, [1, 2], 2)).to_equal(KpfWorkerOutcome.Accepted)
+        expect(session.submit_encoded(second, [3, 4], 3)).to_equal(KpfWorkerOutcome.Accepted)
+        expect(session.submitted_modules).to_equal(2)
+        expect(session.receipt.generation).to_equal(41)
+        expect(session.receipt.toolchain_digest).to_equal("toolchain-sha256")
+
+    it "copies worker results into caller-owned output equal to native fixtures":
+        val receipt = backend_kpf_worker_receipt_v1(provider_receipt(), 41, 7,
+            "toolchain-sha256", "toolchain-sha256", "worker").ok().unwrap()
+        val process = KpfWorkerProcessFacadeV1.create(8)
+        var transport = KpfWorkerTransportV1.create(process, 41, 3, 7, 4096, 1, 1000)
+        transport.handshaken = true
+        var session = BackendKpfWorkerSessionV1.create(transport, worker_request(), receipt, 1)
+        val request = KpfRequestHandleV1(generation: 41, session_slot: 3,
+            request_slot: 0, request_epoch: 1)
+        expect(session.submit_encoded(request, [1], 0)).to_equal(KpfWorkerOutcome.Accepted)
+        session.transport.process.take_sent()
+        val native_fixture = backend_plugin_envelope_encode_v1(0, 1,
+            [109, 111, 100, 117, 108, 101, 45, 111, 107], "")
+        session.transport.process.inject_from_worker(completion(41, 7, 0, 1, native_fixture))
+        var caller_output: [u8] = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+        expect(session.poll_into(1, caller_output)).to_equal(Ok(9))
+        expect(caller_output).to_equal([109, 111, 100, 117, 108, 101, 45, 111, 107])
+
+    it "preserves the same parity through bounded shared-memory placement":
+        val receipt = backend_kpf_worker_receipt_v1(provider_receipt(), 41, 7,
+            "toolchain-sha256", "toolchain-sha256", "shared-memory").ok().unwrap()
+        val shared = KpfSharedMemoryWorkerTransportV1.create(
+            shared_ring(4, 128), shared_ring(4, 128), zero_bytes(128),
+            epochs(4), occupied(4), 41, 3, 7, 1)
+        var session = BackendKpfSharedMemorySessionV1.create(
+            shared, worker_request(), receipt, 1)
+        expect(session.handshake()).to_equal(KpfWorkerOutcome.Accepted)
+        session.transport.submissions.dequeue_into(zero_bytes(128))
+        session.transport.completions.enqueue(KpfWorkerFrameV1(
+            protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.HandshakeAccepted, generation: 41,
+            session_epoch: 7, request_slot: -1, request_epoch: 0,
+            capability_bits: 1, payload_length: 0, payload: []))
+        expect(session.transport.poll().outcome).to_equal(KpfWorkerOutcome.Accepted)
+
+        val first = KpfRequestHandleV1(generation: 41, session_slot: 3,
+            request_slot: 0, request_epoch: 1)
+        val second = KpfRequestHandleV1(generation: 41, session_slot: 3,
+            request_slot: 1, request_epoch: 1)
+        expect(session.submit_encoded(first, [1])).to_equal(KpfWorkerOutcome.Accepted)
+        expect(session.submit_encoded(second, [2])).to_equal(KpfWorkerOutcome.Accepted)
+        session.transport.submissions.dequeue_into(zero_bytes(128))
+        session.transport.submissions.dequeue_into(zero_bytes(128))
+        val native_module = backend_plugin_envelope_encode_v1(0, 1,
+            [109, 111, 100, 117, 108, 101, 45, 111, 107], "")
+        val native_object = backend_plugin_envelope_encode_v1(0, 2,
+            [111, 98, 106, 101, 99, 116, 45, 111, 107], "")
+        session.transport.completions.enqueue(completion(41, 7, 0, 1, native_module))
+        session.transport.completions.enqueue(completion(41, 7, 1, 1, native_object))
+        var module_output = zero_bytes(9)
+        var object_output = zero_bytes(9)
+        expect(session.poll_into(module_output)).to_equal(Ok(9))
+        expect(session.poll_into(object_output)).to_equal(Ok(9))
+        expect(module_output).to_equal([109, 111, 100, 117, 108, 101, 45, 111, 107])
+        expect(object_output).to_equal([111, 98, 106, 101, 99, 116, 45, 111, 107])
+        expect(session.submitted_modules).to_equal(2)
+
+    it "retains one real child process across backend module batches":
+        val receipt = backend_kpf_worker_receipt_v1(provider_receipt(), 41, 7,
+            "toolchain-sha256", "toolchain-sha256", "real-worker").ok().unwrap()
+        val process = KpfRealWorkerProcessV1.spawn_fixture_unisolated("/bin/sh",
+            ["test/01_unit/compiler/backend_plugin/kpf_worker/fake_backend_worker.shs"],
+            256, 4096, 1)
+        val real = KpfRealWorkerTransportV1.create(process, 41, 3, 7, 1)
+        var session = BackendKpfRealWorkerSessionV1.create(
+            real, worker_request(), receipt, 1)
+        expect(session.handshake(1000)).to_equal(KpfWorkerOutcome.Accepted)
+        var handshake_attempts = 0
+        var handshake = session.transport.poll(1)
+        while handshake.outcome == KpfWorkerOutcome.Empty and handshake_attempts < 1000:
+            thread_native_sleep_ms(1)
+            handshake = session.transport.poll(1)
+            handshake_attempts = handshake_attempts + 1
+        expect(handshake.outcome).to_equal(KpfWorkerOutcome.Accepted)
+
+        val first = KpfRequestHandleV1(generation: 41, session_slot: 3,
+            request_slot: 0, request_epoch: 1)
+        val second = KpfRequestHandleV1(generation: 41, session_slot: 3,
+            request_slot: 1, request_epoch: 1)
+        expect(session.submit_encoded(first, [1], 1000)).to_equal(KpfWorkerOutcome.Accepted)
+        var first_output = zero_bytes(9)
+        expect(poll_real_into(session, first_output)).to_equal(Ok(9))
+        expect(session.submit_encoded(second, [2], 1000)).to_equal(KpfWorkerOutcome.Accepted)
+        var second_output = zero_bytes(9)
+        expect(poll_real_into(session, second_output)).to_equal(Ok(9))
+        expect(first_output).to_equal(second_output)
+        expect(first_output).to_equal([109, 111, 100, 117, 108, 101, 45, 111, 107])
+        expect(session.submitted_modules).to_equal(2)
+
+    it "rejects stale generations and mismatched toolchains":
+        expect(backend_kpf_worker_receipt_v1(provider_receipt(), 41, 7,
+            "expected", "actual", "worker").is_err()).to_equal(true)
+        val receipt = backend_kpf_worker_receipt_v1(provider_receipt(), 41, 7,
+            "toolchain-sha256", "toolchain-sha256", "worker").ok().unwrap()
+        val process = KpfWorkerProcessFacadeV1.create(4)
+        var transport = KpfWorkerTransportV1.create(process, 41, 3, 7, 4096, 1, 1000)
+        transport.handshaken = true
+        var session = BackendKpfWorkerSessionV1.create(transport, worker_request(), receipt, 1)
+        val stale = KpfRequestHandleV1(generation: 40, session_slot: 3,
+            request_slot: 0, request_epoch: 1)
+        expect(session.submit_encoded(stale, [1], 0)).to_equal(KpfWorkerOutcome.StaleCompletion)

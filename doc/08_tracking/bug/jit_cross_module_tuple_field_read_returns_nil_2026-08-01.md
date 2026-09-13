@@ -1,7 +1,7 @@
 # JIT: cross-module tuple `.0` read returns nil
 
-**Status:** OPEN — found 2026-08-01 while fixing
-`common_encoding_yaml_broken_cross_submodule_import_2026-07-20`.
+**Status:** CLOSED (2026-09-12) — not reproducible; see "Re-check 2026-09-12" at the end. (Was: OPEN — found 2026-08-01 while fixing
+`common_encoding_yaml_broken_cross_submodule_import_2026-07-20`.)
 
 **Engine:** Cranelift JIT (`simple run` path). Not observed on the tree-walk
 interpreter.
@@ -112,3 +112,42 @@ blanket-claim error (which was about the *interpreter*, not the JIT). Status
 unchanged: **OPEN — ARCHITECTURAL (Cranelift JIT codegen,
 `src/compiler_rust/compiler/src/codegen/**`, re-confirmed by fresh repro
 2026-08-10, unchanged output `field0=nil`)**.
+
+## Re-check 2026-09-12
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`,
+sha256 `3d120a6f9ab5704b…`, `Simple Language v1.0.0-rc.1` (aarch64 host).
+
+The record's own reproducer, importing the real `std.common.yaml.types`:
+
+```
+$ SIMPLE_EXECUTION_MODE=jit         bin/simple run tuple.spl
+f0=string f1=hi scalar=true isstr=true
+$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run tuple.spl
+f0=string f1=hi scalar=true isstr=true
+```
+
+`yaml_string("hi").0` is `"string"`, not `nil`. **Not reproducible** — status
+CLOSED.
+
+Two of the three "Not yet established" questions are now answered on this seed:
+the index does **not** matter (both `.0` and `.1` read correctly), and the
+same-module predicate and the cross-module positional read agree. The third —
+whether the whole-program native path shares the defect — is still unmeasured;
+this re-check covers `run` only, on both engines.
+
+Regression guard: `test/01_unit/bugs/jit_cross_module_tuple_field_read_spec.spl`
+(8 examples). Each cross-module positional read is paired with the same-module
+predicate over the same tuple. That pairing is the point: the predicates stayed
+correct throughout the defect, so a guard built only from predicates would be
+vacuous, and pairing them makes a future failure attributable to the read rather
+than to the constructor. The `v.0 == "string"` caller-branch shape — the one
+that took the false branch forever — is pinned in both polarities.
+
+```
+SPEC FILE VERDICT: test/01_unit/bugs/jit_cross_module_tuple_field_read_spec.spl outcome=OK declared>=8 executed=8 passed=8 failed=0 skipped=0 dropped=0
+```
+
+Non-vacuity proof: substituting the documented buggy answers (`v.0` is `nil`,
+the tag comparison is false) turns the file RED —
+`outcome=ERROR declared>=8 executed=8 passed=6 failed=2 skipped=0 dropped=0`.

@@ -1,0 +1,50 @@
+"""Native measurement fixture for ContextStoreV1 read ordering.
+
+The fixture owns no sort implementation and keeps the expected rows independent
+from the store result. The collector selects one N per process through
+CONTEXT_STORE_SORT_N (64, 128, or 256), so the measured interval contains one
+replace_all followed by exactly one query_literal call.
+"""
+
+use app.io.context_store_v1.{ContextPackV1, ContextStoreV1}
+use std.io_runtime.{env_get, exit}
+
+fn context_store_sort_reverse_rows_v1(n: i64) -> [ContextPackV1]:
+    var rows: [ContextPackV1] = []
+    var id = n
+    while id > 0:
+        rows.push(ContextPackV1(id: id, source: "row/" + id.to_text(),
+            target: "target/" + id.to_text(), status: "ready", lines: id,
+            token_estimate: id * 10, content: "content/" + id.to_text()))
+        id = id - 1
+    rows
+
+fn context_store_sort_query_once_v1(store: ContextStoreV1) -> [ContextPackV1]:
+    store.query_literal("row/").unwrap()
+
+fn context_store_sort_expect_ascending_rows_v1(actual: [ContextPackV1], n: i64):
+    assert actual.len() == n
+    var index: i64 = 0
+    while index < n:
+        val id = index + 1
+        val row = actual[index]
+        assert row.id == id
+        assert row.source == "row/" + id.to_text()
+        assert row.target == "target/" + id.to_text()
+        assert row.status == "ready"
+        assert row.lines == id
+        assert row.token_estimate == id * 10
+        assert row.content == "content/" + id.to_text()
+        index = index + 1
+
+fn main():
+    val raw_n = env_get("CONTEXT_STORE_SORT_N") ?? ""
+    val n = raw_n.to_i64() ?? 0
+    assert n == 64 or n == 128 or n == 256
+    val store = ContextStoreV1.memory().unwrap()
+    val reverse_rows = context_store_sort_reverse_rows_v1(n)
+    assert store.replace_all(reverse_rows).is_ok()
+    val actual = context_store_sort_query_once_v1(store)
+    context_store_sort_expect_ascending_rows_v1(actual, n)
+    print "context_store_sort_probe n={n} rows={actual.len()} verified=true"
+    exit(0)

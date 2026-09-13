@@ -15,6 +15,29 @@
 # check can see. So this gate is tree-wide and negative -- it counts DECLARERS,
 # not calls, and the bar is one.
 #
+# Flags: --rev <REV>   scan the COMMITTED tree at REV instead of the working
+#                      checkout (this is what the push hook passes)
+#        --root <DIR>  treat DIR as the repository root
+#
+# Why --rev exists (2026-09-07). As a `tree`-mode push row this gate scanned the
+# shared WORKING CHECKOUT, not the commit being pushed. Under concurrent agent
+# load those two trees routinely disagree, so the gate could scream about a
+# stray extern that was NOT being pushed while staying silent about one that
+# WAS. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+# and the row census in
+# doc/08_tracking/bug/push_gate_tree_mode_row_census_2026-09-06.md
+#
+# ROT AXES. The census names two independent ways a converted gate rots: the
+# SCAN ROOT reverting to the checkout, and the BASELINE/ALLOWLIST reverting to
+# the checkout. **This guard has no baseline and no allowlist file** -- the sole
+# owner path is a literal in this script (env-overridable only so the fixtures
+# can drive it), and no on-disk data file participates in the verdict. The
+# second axis therefore has no surface here, and fixture 4 covering only the
+# scan root is the COMPLETE form, not the weaker one-axis form the census warns
+# about. If a baseline file is ever added to this guard, fixture 4 must gain the
+# second injection at the same time.
+#
 # Verdict is the LAST stdout line, per the repo convention:
 #   PASS  -- <n> declaring file(s) checked ...      exit 0   (n is always > 0)
 #   FAIL  -- ...                                    exit 1
@@ -22,20 +45,35 @@
 # Scanning zero files is ERROR, never PASS: absence of evidence is not evidence.
 set -eu
 
-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-SCAN_DIR=${PORT_IO_SCAN_DIR:-"$ROOT/src/os"}
+SELF=$0
+ROOT=""
+REV=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) shift ;;
+        --rev) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--rev needs a value)"; exit 2; }
+               REV="$2"; shift 2 ;;
+        --root) [ $# -ge 2 ] || { echo "ERROR — nothing was checked (--root needs a value)"; exit 2; }
+               ROOT="$2"; shift 2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+[ -n "$ROOT" ] || ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OWNER=${PORT_IO_OWNER:-"src/os/kernel/arch/x86/port_io_owner.spl"}
 PATTERN='extern fn rt_port_'
 
 scan() {
-    # Prints one repo-relative path per declaring file. Deliberately NOT piped
-    # into the caller's status check -- a pipeline's $? is the last command's,
-    # which has produced false greens in this repo before.
+    # Prints one path per declaring file, relative to the scanned src/os tree.
+    # Deliberately NOT piped into the caller's status check -- a pipeline's $?
+    # is the last command's, which has produced false greens in this repo.
     ( cd "$1" && grep -rl "$PATTERN" . 2>/dev/null | sed 's|^\./||' ) || true
 }
 
 selftest() {
     st=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+    rc=0
     # 1. one declarer, and it is the owner -> PASS
     mkdir -p "$st/a/kernel/arch/x86"
     printf 'extern fn rt_port_inb(port: u16) -> u8\n' > "$st/a/kernel/arch/x86/port_io_owner.spl"
@@ -47,11 +85,77 @@ selftest() {
     # 3. a tree with no declarer at all must scan to 0, forcing the caller to ERROR
     mkdir -p "$st/b"; printf 'val x = 1\n' > "$st/b/nothing.spl"
     n=$(scan "$st/b" | wc -l); [ "$n" -eq 0 ] || { echo "selftest: empty fixture saw $n"; rm -rf "$st"; return 1; }
+
+    # 4. --rev must read COMMITTED content, and the two paths must DISAGREE.
+    #    A fixture that only proves --rev does not crash proves nothing: the
+    #    regression guarded against here is a silently WRONG verdict, so the
+    #    working-tree scan of the SAME directory must produce the OPPOSITE
+    #    verdict. If --rev ever falls back to the checkout, both invocations
+    #    return the FAIL line and the first case below rejects it.
+    if ! command -v git >/dev/null 2>&1; then
+        echo "selftest: git unavailable, cannot verify the --rev committed-content path"
+        rc=1
+    else
+        mkdir -p "$st/f4/src/os/kernel/arch/x86"
+        printf 'extern fn rt_port_inb(port: u16) -> u8\n' > "$st/f4/src/os/kernel/arch/x86/port_io_owner.spl"
+        ( cd "$st/f4" \
+          && git init -q . \
+          && git config user.email selftest@example.com \
+          && git config user.name selftest \
+          && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+        # Working copy ONLY: a second declarer that disagrees about the ABI --
+        # the 2026-09-06 incident's exact shape. It is not in the commit, so
+        # --rev must not see it, and a working-tree scan must.
+        mkdir -p "$st/f4/src/os/drivers/rtc"
+        printf 'extern fn rt_port_inb(port: u64) -> u64\n' > "$st/f4/src/os/drivers/rtc/rtc.spl"
+
+        got=$(PORT_IO_SELFTEST_CHILD=1 sh "$SELF" --root "$st/f4" --rev HEAD 2>&1 | tail -1)
+        case "$got" in
+          "PASS — 1 declaring file(s) checked, all rt_port_* externs confined to $OWNER") : ;;
+          *) echo "selftest: fixture 4 --rev did not read committed content, got [$got]"; rc=1 ;;
+        esac
+        got=$(PORT_IO_SELFTEST_CHILD=1 sh "$SELF" --root "$st/f4" 2>&1 | tail -1)
+        case "$got" in
+          "FAIL — 2 declaring file(s) checked, 1 must not declare rt_port_* externs") : ;;
+          *) echo "selftest: fixture 4 working-tree scan did not see the dirty edit, got [$got]"; rc=1 ;;
+        esac
+    fi
+
     rm -rf "$st"
-    echo "selftest: 3 fixtures, ok"
+    [ "$rc" -eq 0 ] || return 1
+    echo "selftest: 4 fixtures, ok"
 }
 
-selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+# Fixture 4 invokes this script recursively; re-running the selftest there would
+# recurse without end. The child exercises the real scan path, which is the
+# whole point of the fixture.
+if [ "${PORT_IO_SELFTEST_CHILD:-0}" != 1 ]; then
+    selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+fi
+
+WORK=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# --rev wins over PORT_IO_SCAN_DIR on purpose: the sha the push hook hands us is
+# the authority, and a stray env var must not quietly redirect the scan at some
+# other tree -- that is the very defect --rev exists to close.
+SCAN_DIR=${PORT_IO_SCAN_DIR:-"$ROOT/src/os"}
+if [ -n "$REV" ]; then
+    if ! ( cd "$ROOT" && git rev-parse --verify --quiet "$REV^{commit}" ) >/dev/null 2>&1; then
+        echo "ERROR — nothing was checked (not a commit in $ROOT: $REV)"
+        exit 2
+    fi
+    mkdir -p "$WORK/rev"
+    # The whole of src/os, not a *.spl glob: the scan is content-based, so a .c
+    # or .S file declaring the extern stays visible exactly as it is today.
+    ( cd "$ROOT" && git archive "$REV" -- src/os ) 2>/dev/null \
+        | tar -x -C "$WORK/rev" 2>/dev/null
+    if [ ! -d "$WORK/rev/src/os" ]; then
+        echo "ERROR — nothing was checked (could not materialise src/os at $REV)"
+        exit 2
+    fi
+    SCAN_DIR="$WORK/rev/src/os"
+fi
 
 [ -d "$SCAN_DIR" ] || { echo "ERROR — nothing was checked (no scan dir $SCAN_DIR)"; exit 2; }
 

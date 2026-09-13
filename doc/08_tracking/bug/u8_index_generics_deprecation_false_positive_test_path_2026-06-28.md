@@ -1,5 +1,12 @@
 # `[u8]` Indexing Mis-Flagged as Deprecated Generics in Test Path
 
+## Closed 2026-09-13 — `[u8]` indexing no longer emits the deprecated-generics warning
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** A file whose function takes `s: [u8]` and indexes `s[i]` in a loop compiles and runs (`sum=6`) with `grep -icE 'deprecat|fix-generics'` over the full stderr returning `0`.
+- **measured** Repeated under `SIMPLE_EXECUTION_MODE=interpret` (the mode the test runner uses): still `0` deprecation hits, `sum=6`.
+- **inferred** The exact reported invocation was `bin/simple test`, which is unusable on this Windows host (empty `Compilation failed:` on scratch specs; outer-bound timeout on a repo spec), so interpret-mode `run` was used as the proxy.
+
 Date: 2026-06-28
 
 Lane: `.spipe/simpleos-alpine-harden-musl-busybox`

@@ -1,9 +1,14 @@
 # Bug: unit-return function pointer `fn() -> ()` hard-crashes (SIGILL)
 
+## Closed 2026-09-13 — Fixed: a `fn() -> ()` function pointer calls cleanly
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's repro shape — `fn run_warm(iters: i64, body: fn() -> ()) -> i64` calling `body()` once plus twice in a loop, passed a unit-returning `tick` — runs to completion printing `t t t` then `0`, exit 0. No SIGILL, no rc=132.
+- **inferred**: the entry says the crash hit both the interpreter and compiled SMF. Only the default `bin/simple run` lane was exercised here; the SMF lane was not, so the compiled half rests on the shared call-lowering fix rather than a direct measurement.
+
 - **ID:** unit_return_fn_pointer_sigill
 - **Severity:** P2 (hard crash, but a narrow type; easy workaround)
 - **Area:** compiler / function-pointer call lowering (interpreter AND smf/compiled)
-- **Status:** OPEN
+- **Status:** CLOSED 2026-09-13 (fixed; verified by execution)
 - **Date:** 2026-06-14
 
 ## Symptom

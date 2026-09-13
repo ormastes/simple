@@ -1,5 +1,7 @@
 # Import alias captures dependency internal name
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Importing `read_file_text as rt_file_read_text` from `std.io_runtime` causes
 the imported module's internal `file_read` path to resolve recursively through
 the consumer alias. The observable result is a stack overflow at recursion
@@ -26,3 +28,6 @@ not rewrite or capture identifiers resolved inside the dependency module.
 Until resolver ownership is fixed and tested across interpreter/JIT/native,
 callers use the canonical exported name directly. Raw SFFI exports must not be
 restored as a workaround.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

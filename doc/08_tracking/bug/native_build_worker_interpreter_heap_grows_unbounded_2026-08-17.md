@@ -1,5 +1,19 @@
 # native-build worker leaks unboundedly in the seed interpreter's execution phase
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
+> **CORRECTED 2026-09-06 — read the addendum at the bottom before acting on
+> anything below it.** The attribution in this record ("values allocated by the
+> interpreted program are never reclaimed"; the `HEAP_ALLOCATION_REGISTRY` /
+> `rt_core_unregister_immortal_ptr` mechanism) is **wrong for the interpreter
+> lane** and **right for the compiled/JIT lane**, which this record never
+> examined. Measured directly with an instrumented seed: the whole-compiler-graph
+> worker run registers **374 runtime-heap objects / 13 KB** against **3.25 GB
+> RSS** — five orders of magnitude off. The 22 MB/s phase-B growth also no longer
+> reproduces; that was fixed by `e73a0bec647` (2026-08-21). What remains, and what
+> actually caused the 2026-09-06 host OOM, is a **bounded 3.25 GB plateau** during
+> module load. Details, tables and the surviving claims: § Addendum.
+
 - **Filed:** 2026-08-17 (lane LEAK)
 - **Severity:** P1 — host-wide. Causes earlyoom kills of every `native-build`
   worker on this box, which blocks the mandatory pre-push guard
@@ -165,3 +179,1108 @@ today and destroyed other lanes' processes. Correct procedure:
    the in-process path (owned by the scripts lane — not changed here).
 
 This lane started exactly one worker (PID 1615953) and killed exactly that one.
+
+---
+
+## Addendum 2026-09-06 — measured with an instrumented seed; the attribution above is wrong for the interpreter lane
+
+**Method.** The 2026-08-17 investigation stopped at "attach-based profiling is
+unavailable and rebuilding `bin/simple` clobbers ~15 lanes". Both are true and
+neither blocks the measurement: a seed built into a **private**
+`CARGO_TARGET_DIR` and run by absolute path touches no deployed binary. Build:
+`cd src/compiler_rust && CARGO_TARGET_DIR=$HOME/.cargo-target-memfix cargo build
+--release --bin simple -j6`; binary sha256 `d3be122e16a44cac...`, tree `ef8b58f3dab`,
+host aarch64 Linux, 20 CPUs, 121 GB. Instrumentation was a temporary sampler
+thread printing `VmRSS`, `mem_trace::live()`, `rt_heap_registry_count()`,
+`rt_heap_live_bytes()`, `rt_heap_aux_live_bytes()`, `rt_heap_alloc_count()` and
+`rt_heap_free_count()` every 1-5 s. It has been removed; the retained artefacts
+are this addendum and the regression test named at the end. The pre-existing
+`SIMPLE_MEM_TRACE=1` / `SIMPLE_CACHE_SIZE_REPORT=<n>` reports supplied the
+per-module and per-cache attribution and needed no new code.
+
+### The finding: there are two lanes, and this record conflated them
+
+| | interpreter lane (`run`, `lint`, `native_build_worker`) | compiled / JIT lane (a user program the JIT accepts) |
+|---|---|---|
+| value representation | Rust `Value` enum -- `Arc`/`Vec`/`String` (`compiler/src/value.rs`) | `RuntimeValue` heap objects (`runtime/src/value/heap.rs`) |
+| enters `HEAP_ALLOCATION_REGISTRY` | **no** (374 objects / 13 KB observed) | **yes** (110,758,831 objects in 75 s) |
+| ever freed | yes, on scope exit (Rust drop) | **never** -- `rt_heap_free_count() == 0` throughout |
+| growth | **bounded**, plateaus | **unbounded**, ~80 MB/s |
+
+The mechanism this record describes -- immortal-by-default registration, freed
+only by a hand-written destructor call -- is **real and unrefuted**, but it lives
+in the lane this record never ran.
+
+### Interpreter lane: bounded, and the registry is irrelevant
+
+Reproducer exactly as filed (2-line `tiny.spl` through
+`src/app/cli/native_build_worker.spl`), with and without `SIMPLE_BOOTSTRAP=1`
+(the original run set neither; both were tried, with no material difference):
+
+| t | RSS | Rust live | `rt_registry` | `rt_live_bytes` | `rt_frees` |
+|---|---|---|---|---|---|
+| 0 s | 11 MB | 0 MB | 0 | 0 | 0 |
+| 5 s | 1264 MB | 1150 MB | 0 | 0 | 0 |
+| 10 s | 2905 MB | 2500 MB | 0 | 0 | 0 |
+| 15 s | 3256 MB | 2791 MB | 374 | 13,052 | 1 |
+| 20 s | 3256 MB | 2791 MB | 374 | 13,052 | 1 |
+| 25 s | 3256 MB | 2791 MB | 374 | 13,052 | 1 |
+
+**The registry accounts for 13 kilobytes of a 3.25 gigabyte process.** RSS
+tracks `mem_trace::live()` -- the Rust allocator -- not the runtime value heap.
+
+**Phase B does not grow.** The run reaches the end of the pipeline in ~15-30 s
+and RSS is flat from t=15 s. `bin/simple lint src/lib/common/base_encoding.spl`
+completes in under 5 s, also flat.
+
+**Confirmed on the DEPLOYED binary too, not just the instrumented build.** The
+same reproducer against `bin/release/aarch64-unknown-linux-gnu/simple`
+(read-only, `/proc` polling, nothing written to `bin/`) gives
+`t=0s 4.6 MB, t=10s 2.54 GB, t=20s exited` -- same shape, same bounded plateau.
+This matters because a fresh mtime on a deployed seed is exactly what a stale
+copy looks like (`.claude/rules/bootstrap.md`), so the plateau claim below is
+not resting on a binary that only this lane built.
+
+The 22 MB/s climb reported for 2026-08-17 is **not reproducible on a seed
+containing `e73a0bec647` "perf(seed): scope-chain CowEnv replaces per-call env
+clone" (2026-08-21)**, whose own commit message records the same symptom class
+("lint driver_types 90 s/2 GB -> ~24 s/0.5 GB"), and `SIMPLE_MEM_TRACE=1` now
+reports `captured_env_with_live_globals: calls=0`, i.e. the O(globals)-per-call
+path this record was measuring is dead code. That is correlation plus a dead
+code path, not a bisect: no pre-fix seed was built and run.
+
+**`rc=1` on this reproducer is `ld.lld: error: unable to find library -lSDL2`,
+not OOM and not the leak.** Do not read a non-zero exit here as the defect.
+
+### What the 3.25 GB actually is, and why it OOM'd the host
+
+`SIMPLE_MEM_TRACE=1` at process exit, for a 2-line input:
+
+```
+module_loads=738  source=12.7MB  ast_items=18883
+parse_retained=453.9MB  eval_retained=1405.6MB  parse_bytes_per_source_byte=35.7
+env_entries=1357503  export_entries=1348600
+globals census: owners=257 module_envs=743 import_bindings=1330952
+  (shallow bytes: module_envs 139.7MB, import_bindings 131.5MB)
+live=2224.3MB  peak=2797.7MB  rss=3250.7MB
+```
+
+12.7 MB of source becomes 3.25 GB of RSS -- a **256x** blowup -- because the
+worker interprets the whole compiler + LLVM graph before looking at the entry
+file (this record's "why input size is irrelevant" section is correct and
+unchanged). Per-module env width grows with the graph: `driver_pipeline.spl` is
+237 bytes of source with 4 items and carries an env of **10,239** entries.
+
+**This plateau, not runaway growth, is the 2026-09-06 OOM.** 128 concurrent
+processes x ~3.2 GB against 121 GB of RAM is the arithmetic, and the "largest
+3.5 GB anon-rss" in that incident is this plateau, not a process caught
+mid-climb. Attribution is diffuse -- parse 454 MB, module envs 140 MB, import
+bindings 132 MB, exports ~140 MB, with ~1.1 GB unattributed and **no single
+structure above 30%** -- so there is no small diff here. Reducing it is a real P1
+and a *different* bug from the one filed; the levers are the per-module
+env/export materialisation and the fact that a 2-line build loads 738 modules at
+all. `SIMPLE_NATIVE_BUILD_RUST=1` remains the correct route for anything that
+must succeed today.
+
+### Compiled / JIT lane: this IS unbounded, and the mechanism is exactly as filed
+
+Reproducer -- a loop whose live working set is 40 elements, run through the JIT:
+
+```simple
+fn build(n: i64) -> i64:
+    var a = []
+    var i = 0
+    while i < n:
+        a.push("item-" + i.to_text())
+        i = i + 1
+    var d = {}
+    var j = 0
+    while j < n:
+        d["k" + j.to_text()] = a[j]
+        j = j + 1
+    a.len() + d.len()
+
+fn main() -> i64:
+    var total = 0
+    var r = 0
+    while r < 200000:
+        total = total + build(200)
+        r = r + 1
+    print(total)
+    0
+```
+
+| t | RSS | Rust live | `rt_registry` | `rt_live_bytes` | `rt_aux_bytes` | `rt_frees` |
+|---|---|---|---|---|---|---|
+| 0 s | 8 MB | 0 MB | 0 | 0 | 0 | **0** |
+| 15 s | 1517 MB | 1374 MB | 27,580,947 | 773 MB | 361 MB | **0** |
+| 30 s | 2949 MB | 2701 MB | 54,091,938 | 1517 MB | 708 MB | **0** |
+| 45 s | 4429 MB | 4101 MB | 75,094,732 | 2105 MB | 983 MB | **0** |
+| 60 s | 5213 MB | 4815 MB | 93,302,152 | 2616 MB | 1222 MB | **0** |
+| 75 s | 5967 MB | 5500 MB | 110,758,831 | 3105 MB | 1450 MB | **0** |
+
+Monotonic, no plateau, **not one object freed in 110 million allocations**. Of
+the 5.5 GB live: ~3.1 GB object headers, ~1.45 GB container backing, and ~1.1 GB
+is the `HashSet<usize>` registry itself (~10 bytes/object of pure bookkeeping on
+top of a leak).
+
+**No small fix exists for this, and one was not invented.** `HeapHeader` carries
+`gc_color`/`mark_gray`/`mark_black`/`pin` but there is no collector and no
+refcount field. The runtime *does* have a working reclamation mechanism --
+`rt_transient_array_scope_begin`/`_end` with `rt_transient_heap_promote`
+(`runtime/src/value/collections.rs`), used by `src/app/check/main.spl::check_one`
+for its per-file scope -- and codegen registers `rt_array_free`, `rt_string_free`
+and the transient-scope entry points in its SFFI spec table
+(`compiler/src/codegen/runtime_sffi.rs`). **Codegen emits none of them
+automatically**: reclamation was never wired, not disabled. Wiring a transient
+scope per JIT frame is unsound without escape analysis -- anything stored into a
+global, a capture, an outer container, or retained by a callee would be freed
+while reachable. Closing this needs either a collector or codegen-emitted scope
+reclamation with escape analysis. That is a project, not a patch, and is
+deliberately left open rather than half-built.
+
+The global `Mutex<HashSet<usize>>` on every allocation is a genuine throughput
+smell but is **not** worth fixing on its own evidence: the lane that OOM'd the
+host took 375 lock acquisitions in a whole run, and the JIT lane's 110 M
+acquisitions are uncontended (the interpreter and JIT run single-threaded, and
+the 20-core pressure is 128 *separate processes*, which share no mutex).
+Sharding it would buy nothing measurable and would not bound the memory.
+
+### Side defect found while building the regression test (not chased)
+
+`fn main() -> i64:` with typed parameters SIGBUSes inside
+`simple_driver::interpreter::run_code` on the exact program above, while the same
+program with untyped `fn` parameters and the `main = <expr>` form runs clean.
+`bin/simple run <file>` on the typed form is fine (it JITs). Untriaged; recorded
+here so the next lane does not lose an hour to it.
+
+### Runnable check
+
+`src/compiler_rust/driver/tests/interpreter_heap_reclaim.rs` --
+`cd src/compiler_rust && cargo test --release -p simple-driver --test interpreter_heap_reclaim`.
+
+Runs the churn program through the **interpreter** in-process at 500 and 5,000
+iterations (10x the work, same live working set) and fails if the allocator
+high-water mark grows by more than 4 MB, if more than 4 MB survives the run, or
+if more than 10,000 runtime-heap objects get registered. Measured green:
+`peak+25,052 B  live+23,610 B  rt_registry=0` for the 5,000-iteration run.
+Verified to discriminate: retaining each iteration's array instead of dropping it
+makes the same test fail at `peak+27,547,839 B`. The test binary installs its own
+`TrackingAlloc` (it is declared in `driver/src/main.rs`, the bin, so
+`mem_trace::live()` reads zero in a test binary otherwise) and runs the body on a
+64 MB stack (a `#[test]` thread's 2 MB stack dies with SIGBUS in the
+interpreter). The compiled/JIT lane is deliberately not covered -- it would fail,
+correctly, and the fix for it does not exist yet.
+
+### Claims from the original record that survive unchanged
+
+- The phase-split methodology (log output plateaus while RSS does not) and its
+  three eliminations -- not output buffering, not re-parsing, not module-graph
+  re-materialisation.
+- "Why input size is irrelevant": a 2-line entry costs what the whole tree costs.
+- Not fixable in `.spl`; `native_build_worker.spl` has nothing in it to leak.
+- `SIMPLE_NATIVE_BUILD_RUST=1` is the route for anything that must succeed.
+- Classify rc=255/137 by the absence of the `[TIMEOUT: ...]` line before calling
+  it a timeout. (Add: classify rc=1 by reading the error -- here it is `-lSDL2`.)
+- Do not mass-kill; reap only PIDs you started.
+
+## Addendum 2026-09-06 (lane GC, aarch64) — reclamation exists, works, and is measured
+
+This addendum **corrects three claims** that had been circulating about this row
+and records the first paired before/after measurement of the reclamation path.
+
+### Corrections
+
+1. **"Codegen declares the transient-scope symbols but emits none" is false.**
+   `rt_transient_array_scope_begin/_pause/_end` and `rt_transient_heap_promote`
+   are registered in `codegen/runtime_sffi.rs:368-371`, in the interpreter
+   extern table (`interpreter_extern/mod.rs:414`), and in the JIT symbol table
+   (`elf_utils.rs:497-500`). They are **called from `.spl`** at three sites:
+   `80.driver/driver_source_pipeline_parsing.spl:94`,
+   `80.driver/driver_hir_pipeline_lowering.spl:65`, and
+   `10.frontend/_FlatAstBridge/module_assembly.spl:116`. The begin -> pause ->
+   promote -> end protocol in `lower_streaming_surface_source` is **fully
+   paired on every path**, including each error path, which rolls back the flat
+   HIR row count before ending the scope. There is no missing `end`.
+
+2. **"The registry has zero frees, always" is false, and the earlier reading
+   that the seed interpreter bypasses the registry was an artifact.**
+   `rt_heap_alloc_count` / `rt_heap_free_count` were declared in `.spl` probes
+   but registered in **neither** extern table, so they were unbacked externs
+   returning nil — indistinguishable from a true 0 (the exact trap in
+   `unregistered_extern_silent_nil_2026-08-01`). With them registered, a probe
+   allocating 20,000 arrays inside a transient scope reports
+   `allocs=40284 frees=20000`: the scope reclaimed **exactly** what it tracked.
+
+3. **"`rt_core_reclaim_transient_immortal` deliberately skips strings"
+   (carried from `compiled_checker_multifile_rss_retention_2026-08-03`) is
+   stale.** `runtime_native.c` now reclaims a string when
+   `RT_CORE_STRING_FLAG_TRANSIENT` is set and `..._FLAG_SHARED` is not, and the
+   Rust `free_transient_heap` (`value/collections.rs:1870`) frees strings via
+   `rt_string_free`. Measured directly: 800k interpolated strings cost
+   **158,820 kB** unscoped and **1,404 kB** scoped, same exit status.
+
+### Measurement (natively compiled Simple, aarch64, this host)
+
+Fixtures do byte-identical work; only the transient scope differs. Peak RSS from
+`/usr/bin/time -v`; both fixtures return the same exit status, so the memory
+difference is reclamation, not less work.
+
+| fixture | work | peak RSS | wall | exit |
+|---|---|---:|---:|---:|
+| arrays, no scope | 3e6 arrays | **374,232 kB** | 0.92 s | 160 |
+| arrays, scope/1000 | 3e6 arrays | **1,056 kB** | 0.40 s | 160 |
+| strings, no scope | 8e5 strings | **158,820 kB** | 1.33 s | 31 |
+| strings, scope/1000 | 8e5 strings | **1,404 kB** | 0.65 s | 31 |
+
+**354x** and **113x** reductions, and the scoped build is also **2.3x faster** —
+reclaiming early keeps the working set in cache rather than costing time.
+
+### Metric note: the `[heap]` brk figure is ARENA-dependent, not arch-specific
+
+An earlier draft of this addendum claimed the 37 GB `[heap]` brk mapping was
+x86_64-specific because this lane's small fixtures showed only a 132 kB brk.
+**That was wrong, and a live process on this same aarch64 host disproves it.**
+Another lane's Stage-3 worker (PID 3108862, `stage2-admitted/simple` building
+`bootstrap_main.spl`) measured, read directly from `/proc/3108862/smaps`:
+
+```
+[heap]  Size:  37,313,356 kB
+        Rss:   37,171,428 kB
+VmRSS (whole process):  44,279,636 kB
+```
+
+That is the reported 37 GB brk mapping, reproduced on aarch64, and it independently
+re-confirms this row's headline symptom on a currently-running process.
+
+The difference is the glibc **arena**, not the architecture: a small
+single-threaded fixture is served from mmap'd arenas, while the long-lived
+multi-threaded worker grows its **main** arena via `brk`. Practical consequence
+for anyone writing a budget here: measure **both**. A brk-only budget reads as
+flat for small or thread-pool-served processes; an RSS-only budget hides which
+mapping is responsible. `smaps_rollup` has no `[heap]` line, so the per-mapping
+figure must come from `/proc/<pid>/smaps`, and peak from `/usr/bin/time -v`.
+
+### Runnable gate
+
+`scripts/check/check-transient-scope-reclaims.shs` builds both fixtures
+natively, requires an identical exit status (correctness before memory), and
+gates on a ratio plus an absolute cap. Discrimination is proven, not asserted:
+
+- as shipped: `PASS -- 2 fixture(s) measured, scoped 1056 kB vs unscoped 374224 kB (354x)`, exit 0
+- with the scope call sites removed (the pre-fix shape): `FAIL -- ... scoped-over-budget(374088kB>65536kB) reclamation-ineffective(ratio=1x<8x)`, exit 1
+
+### What is NOT fixed, and why
+
+**No new reclamation point was added to the compiler.** Coverage is
+`80.driver` (2 files) and `10.frontend` (1 file); `20.semantic`, `30.hir`,
+`40.mir`, `50.mir`, `60.opt` and `70.backend` have **zero** transient scopes.
+Adding one there was not done because it could not be **measured** here. The
+precise blocker, after two corrections to this lane's own first answer:
+
+**Correction A — "the self-hosted compiler cannot be built here" was wrong.**
+A first attempt did fail with 167 unresolved runtime symbols (`rt_cranelift_*`
+79, `rt_simd_*` 22, `rt_math_*` 18, `rt_io_file_*` 12, `rt_mmap`/`rt_munmap`,
+`rt_exec`, `rt_native_build`, `spl_backend_plugin_run_v1`, ...), but that used
+the **default runtime archive**. The sanctioned bootstrap path names a bundle
+(`bootstrap-from-scratch.sh:1662`). With it, the build succeeds:
+
+```
+native-build --runtime-bundle core-c-bootstrap --backend cranelift \
+  --source src/compiler --source src/app --source src/lib --entry-closure \
+  --mode one-binary --entry src/app/cli/bootstrap_main.spl
+=> Build complete: 834 compiled, 0 cached, 0 failed
+   Binary: 37,759 KB;  501.9s compile + 101.9s link = 603.8s   rc=0
+```
+
+So a self-hosted compiler **does** build on this tree. Any future claim to the
+contrary should be checked against a bundle build before it is believed. (A
+second lane was in fact building stage3 on this box the whole time, which is
+what exposed the error.)
+
+**Correction B — the real blocker is running it, not building it.** The
+resulting binary does not start:
+
+```
+stage1b.bin: error while loading shared libraries:
+  libunwind.so.1: cannot open shared object file
+```
+
+This host has only nongnu `libunwind.so.8` (`/usr/lib/aarch64-linux-gnu`, plus
+snap copies). LLVM's `libunwind.so.1` is a **different library with a different
+ABI**, so symlinking `.so.8` into place would risk a silently wrong unwinder
+inside the compiler. Given this row's own standard — a use-after-free or
+miscompile in the compiler is worse than the memory — that shortcut was refused,
+so the self-hosted compiler could not be executed and no MIR/backend scope could
+be measured or shown safe.
+
+**The blocker is therefore a missing `libunwind.so.1` on this host, not the
+reclamation design** (which the numbers above show works) and not the runtime
+symbol set (which the bundle resolves). Installing LLVM's libunwind, or linking
+the stage binary against the unwinder it actually has, unblocks the measurement.
+
+The safe boundary, when the tree can build one, is the one
+`lower_streaming_surface_source` already demonstrates: begin -> work -> pause ->
+`rt_transient_heap_promote` for **every** escaping root -> end, failing closed
+if `begin` returns false. Note `TRANSIENT_HEAP_SCOPE` is `thread_local!` and
+`begin` returns false if a scope is already live, so any new site must be
+per-thread and must not nest inside an existing scope.
+
+---
+
+## Addendum 2026-09-06 (lane MIR) — the libunwind blocker is resolved, and the MIR lane now has a scope
+
+### The blocker was a `LD_LIBRARY_PATH`, not a missing library
+
+"Correction B" above refused to symlink nongnu `libunwind.so.8` over LLVM's
+`libunwind.so.1` — correctly; the ABIs differ and a `dlopen` that succeeds on
+the wrong unwinder is silent corruption. **The shortcut was never needed.** LLVM's
+own libunwind is already on this host:
+
+```
+/home/yoon/dev/llvm/install/lib/aarch64-unknown-linux-gnu/libunwind.so.1
+  SONAME libunwind.so.1        18 defined _Unwind_* symbols (incl. _Unwind_RaiseException)
+```
+
+so `LD_LIBRARY_PATH=/home/yoon/dev/llvm/install/lib/aarch64-unknown-linux-gnu`
+resolves it with the matching ABI and no symlink. Anyone re-running the
+self-hosted lane on this box should export that, not install anything.
+
+### Correction to "Correction A": `--runtime-bundle core-c-bootstrap` is NOT sufficient
+
+A build with only that flag compiles all 834 modules and then **fails to link**
+with the same 167 unresolved runtime symbols the record blamed on the default
+archive (`rt_cranelift_*` 79, `rt_simd_*` 22, `rt_math_*` 18, `rt_io_file_*` 12,
+`rt_mmap`/`rt_munmap`, `rt_exec`, `rt_native_build`, `spl_backend_plugin_run_v1`,
+...). The bundle name is not what resolves them. The sanctioned invocation
+(`bootstrap-from-scratch.sh:1656-1670`, `bootstrap_native_build_main`) also
+passes **`--runtime-path "${bootstrap_runtime_authority_path}"`**, i.e.
+`src/compiler_rust/target/bootstrap` — which is where `libsimple_native_all.a`
+(390 MB) and `libsimple_compiler_backfill.a` live. Without `--runtime-path` the
+link cannot succeed no matter which bundle is named. `SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1`
+is NOT an answer: the driver states outright that it yields a NULL GOT slot per
+name and a SEGV on first call.
+
+### The scope
+
+`MirLowering.lower_module_transient_scoped`
+(`src/compiler/50.mir/_MirLowering/module_lowering.spl`), called from the
+`--entry-closure` per-module loop in
+`src/compiler/80.driver/driver_pipeline_lowering.spl`. Same protocol as
+`lower_streaming_surface_source`: begin -> lower -> pause -> promote every
+escaping root -> end, with every `return Err` path closing the scope first and
+refusing to hand back the module it would otherwise have returned.
+
+**Escape set, enumerated — this is what makes the boundary safe, and the reason
+one whole path is excluded rather than scoped:**
+
+1. the returned `MirModule` — promoted;
+2. everything `lower_module` writes into the lowering owner. `MirLowering` has
+   **97 fields** and the `--entry-closure` loop shares ONE instance across all
+   modules, so `errors`, `composite_layout_*`, `struct_field_*`, `builder` and
+   `external_layout_traces` all accumulate across the boundary. The owner is
+   promoted **as a whole** rather than by a hand-written field list: a list that
+   drifts one field behind the struct is a use-after-free, not a missed
+   optimisation, and this struct demonstrably grows.
+3. module-level mutable globals. On the non-ambient-bootstrap path there are
+   **none reachable**, measured rather than assumed: 50.mir's only non-bootstrap
+   heap-typed globals are `mir_data.spl:_mir_trace_scope_slot` (an `[i64]` whose
+   writes store no heap value) and `mir_bitfield.spl:BITFIELD_REGISTRY`, which
+   has **no write site anywhere in the tree**; 25.traits, 40.mono and 30.types
+   declare no heap-typed globals at all; the only 35.semantics import into
+   50.mir is the bool reader `rt_hal_compilation_requires_finalize`; the only
+   15.blocks import is the `BlockValue` type; and none of the seven std modules
+   50.mir imports declares a module-level `var`.
+
+**Ambient bootstrap (`SIMPLE_BOOTSTRAP=1`) is deliberately EXCLUDED.** That path
+writes the flat `_bootstrap_mir_*` arrays (`_MirLowering/bootstrap_globals.spl`),
+`mir_data.spl`'s `_bootstrap_fn_*` dicts and `_bootstrap_type_runtime_names`.
+None of those is reachable from either promoted root, so reclaiming the arena
+there would dangle them. That escape set is not proven, so the scope is not
+taken and the path runs byte-for-byte as before. **Consequence, stated plainly:
+the sanctioned bootstrap lane (which sets `SIMPLE_BOOTSTRAP=1`) is still
+uncovered** — including the Stage-3 worker whose 37,171,428 kB `[heap]` mapping
+is this row's headline symptom. Extending the scope to that path means adding
+promotion accessors for those ~30 flat registries, in the shape of
+`driver_promote_frontend_registry_owners()`; it is the obvious next lane and is
+not done here.
+
+### Runnable gate
+
+`scripts/check/check-mir-transient-scope-boundary.shs` — a ratchet on the CALL
+SITE and its pairing discipline, which is the property that was missing.
+`check-transient-scope-reclaims.shs` proves the runtime mechanism reclaims and
+stays green while nothing on the compiler's hot path calls it; this one fails in
+exactly that state. Nine invariants, `--selftest` fatal and first (6 fixtures,
+including the pre-fix shape, an unclosed error path, a missing owner promotion
+and a removed ambient-bootstrap guard). Verified against the real tree, not only
+fixtures: on the committed pre-fix content of the two files it reports
+`FAIL — 3 invariant(s) checked ...: driver-entry-closure-loop-not-scoped;
+driver-still-calls-unscoped-lower_module; wrapper-missing` (exit 1), and on the
+fixed tree `PASS — 9 invariant(s) checked` (exit 0).
+
+### Measurement — and the negative result that matters more than the scope
+
+Paired runs of the **same** 24-module generated closure (25 modules lowered;
+`[build] mir 25/25` reached in both), seed
+`/home/yoon/.cargo-target-mir/release/simple` built from this worktree,
+`--entry-closure --threads 1`, sampled every 2 s from `/proc/<pid>/status` and
+`/proc/<pid>/smaps`. Both runs end `rc=1` at `native_compile` on the SAME cause
+(`error: semantic: unknown extern function: rt_secure_temp_dir` — the seed's
+interpreter extern table, another lane's row), so the work performed is
+identical and the comparison is honest:
+
+| run | peak VmRSS | `[heap]` Rss | wall | mir mark | rc |
+|---|---:|---:|---:|---|---:|
+| pre  (no MIR scope) | **3,520,180 kB** | 8 kB | 168 s | mir 25/25 | 1 |
+| post (MIR scope)    | **3,521,688 kB** | 8 kB | 160 s | mir 25/25 | 1 |
+
+**0.04% apart — noise. The scope reclaims nothing in this lane, and the reason
+is structural, not a defect in the scope.** `rt_transient_array_scope_*` frees
+only what `track_transient_heap` recorded, and that hook sits in the Rust
+`simple_runtime` allocators (`rt_array_new`/`rt_string_new`/`rt_dict_new`/
+`RuntimeObject`...). In the **seed interpreter** the compiler's own values are
+interpreter-side values that never pass through those allocators, so the scope's
+object list is essentially empty and `end` frees essentially nothing. This is
+the same fact this row already states as the root mechanism — "**self-hosted**,
+`rt_array_new`/... resolve into the Rust `simple_runtime`" — read in the other
+direction, and it is why the existing 354x/113x numbers were measured on
+**natively compiled** fixtures.
+
+**Consequence for anyone continuing this: the interpreted lane cannot measure a
+compiler-side transient scope at all.** Do not repeat this measurement; it will
+always read as noise. The scope must be measured with a self-hosted (natively
+compiled) compiler.
+
+`[heap]` brk read 8 kB in both runs, confirming this row's own arena warning:
+this process is served from mmap'd arenas, so a brk-only budget is vacuous here.
+Peak RSS is dominated by the ~3 GB the seed spends loading and interpreting the
+whole compiler graph, which no per-module scope touches.
+
+### What still blocks the self-hosted measurement (not libunwind any more)
+
+All 834 modules compile (643 s cold, 23 s warm from the content-keyed object
+cache), then the **link** fails with the 167 unresolved runtime symbols listed
+above, with `--runtime-bundle core-c-bootstrap` AND `--runtime-path` AND
+`SIMPLE_RUNTIME_PATH` all pointing at `src/compiler_rust/target/bootstrap`
+(which does contain `libsimple_native_all.a`, 390 MB). Reading
+`native_project/config.rs:375-395`, `is_authorized_stage4_compiler_entry()` is
+checked BEFORE `bootstrap_hosted_native_all_runtime(...)` and returns the
+core-C archive alone, so on this entry the `native_all` archive is never
+consulted. That is runtime-archive/linker selection — a different lane's
+territory — so it was left alone rather than worked around;
+`SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1` is explicitly NOT an answer, the driver
+itself states it yields a NULL GOT slot per name and a SEGV on first call.
+
+**Therefore, stated plainly: the MIR scope is landed and gated, but its memory
+effect is UNMEASURED.** The 354x/113x figures in the earlier addendum belong to
+the runtime mechanism, not to this boundary, and must not be re-quoted as if
+they did. The first thing to do on this row is a self-hosted build once the
+archive selection above is fixed, then re-run the paired closure with it.
+
+**And the same fact bounds the CORRECTNESS evidence, not just the memory
+evidence.** Because the interpreter's values never enter the scope's object
+list, the paired runs above exercised `begin`/`pause`/`promote`/`end` as calls
+but never exercised the FREE path — nothing was reclaimed, so nothing could
+dangle. What they do establish is that the change is behaviour-neutral through
+parse/HIR/MIR/native_cache: the modified compiler lowers all 25 modules
+(`[build] mir 25/25`), emits no scope-failure diagnostic, and stops at the same
+place with the same rc as the unmodified one. Producing a runnable binary from
+the modified pipeline was attempted on this host and is not possible right now:
+`--backend cranelift` needs `rt_secure_temp_dir` (missing from the seed's
+interpreter extern table), `--backend llvm-lib` fails `spl_dlopen ... LLVM-C.dll`,
+and `--backend c` / `--backend native` are refused outright ("not available in
+the pure Simple command path"). So the escape analysis above is argued from an
+enumerated write set and NOT yet corroborated by a run that actually frees. Do
+not treat this scope as proven safe until a self-hosted compiler has been built
+with it and has produced a correct binary.
+
+## Addendum 2026-09-07 — escape-set audit, a real compiled binary through the scoped path, and why the native measurement is still blocked (not by this boundary)
+
+Continuing the row above from a fresh session. Rebased the three landed commits
+(`feat(check)` reclaims gate + heap counters, `fix(check)` brk correction,
+`feat(mir)` the MIR scope itself, plus the two follow-up `docs(bug)` notes) onto
+current `origin/main` (clean cherry-picks, one additive merge conflict in this
+file resolved by keeping both addenda). `origin/main` did **not** yet carry any
+of this — `check-transient-scope-reclaims.shs` and
+`check-mir-transient-scope-boundary.shs` do not exist there and the MIR scope is
+still absent, so the prior session's "left undone rather than landed
+unvalidated" stance was correct and this row was still open.
+
+### 1. The escape-set audit the prior session called "argued, not corroborated" — now corroborated statically
+
+Re-derived the escape set for `lower_module_transient_scoped` from the actual
+call graph rather than trusting the commit message's enumeration:
+
+- **`rt_transient_heap_promote` is genuinely transitive.**
+  `collections.rs:1921-1971` walks Array elements, Tuple elements, Dict
+  keys+values, `RuntimeObject::fields()` (covers struct/class instances,
+  therefore every field of `self`), Closure captures, and Enum payload
+  (`transient_heap_children`, `collections.rs:1839-1885`). Promoting `self` as a
+  whole is therefore sound: no field of the 97-field `MirLowering` struct can be
+  missed by a hand list, because there is no hand list.
+- **The input `module: HirModule` is never mutated in place** by anything
+  `lower_module` reaches. Grepped every `<ident>.<field> =` and
+  `<ident>.<field>.(push|insert|remove|clear)(` pattern across all of
+  `src/compiler/50.mir/**` for the HIR-typed parameter names in scope
+  (`module`, `func`, `struct_def`, `class_def`, `hir_func`, `raw_func`,
+  `hir_module`). Every hit resolves to `self.builder.module` (the OUTPUT
+  `MirModule`, reached via the copy-modify-reassign idiom `var m =
+  bldr.module; m.x = ...; bldr.module = m`) or to `self.module` on
+  `MirModuleBuilder` — never to the HIR argument. This is the exact bug shape
+  the row's own precedent (`module_surfaces_freeze` UAF) warns about, and it
+  does not recur here: the only escape roots this boundary needs are the ones
+  already promoted (`lowered`, `self`).
+- **No cross-thread scope sharing.** The `--entry-closure` loop
+  (`driver_pipeline_lowering.spl:273-303`) is a plain sequential `while`, single
+  `direct_lowering` instance, no thread/actor spawn anywhere in it.
+  `TRANSIENT_HEAP_SCOPE` is `thread_local!`, so this is moot here, but worth
+  recording since it is exactly the kind of assumption that silently breaks if
+  someone later parallelises the loop.
+
+No new defect found; the boundary as landed is sound for the entry-closure call
+site specifically. The two OTHER `lower_module` call sites in the same file
+(bootstrap fixed-path at line ~234, the non-entry-closure fallback loop at line
+~328) remain deliberately unscoped, same as the prior session's design — not
+audited to the same depth here, out of scope for this pass.
+
+### 2. A real, running native binary through the scoped path (req. 2), not just a same-rc replay
+
+Rather than repeat the prior session's 24-module `--entry-closure` replay (which
+only proves "stops at the same place"), built an actual runnable artifact
+through the modified pipeline. `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1` makes the
+entry-closure branch — and therefore `lower_module_transient_scoped` — the code
+path for *any* native-build, including a single trivial file, since
+`driver_pipeline_lowering.spl:239 if self.ctx.sources.len() > 0` always holds:
+
+```
+$ SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 \
+    /home/yoon/.cargo-target-mir/release/simple native-build hello.spl -o hello.out
+Linked: .../hello.out (34 KB) via clang
+$ ./hello.out
+hello from scoped MIR lowering
+$ echo $?
+0
+```
+
+This is a genuine improvement on the prior session's evidence: a real linked,
+executed, correct native binary produced via the scoped call site, not a run
+that merely reaches the same failure point. It is still an **interpreted-seed**
+compile (the seed's own Rust frontend/backend do the work; `MirLowering` is
+interpreted `.spl`), so it still only proves the FIRST half of req. 2
+(behaviour-neutral, produces a correct binary) — the reclamation-under-native-
+execution question (req. 1, the free path) is separate and addressed next.
+
+### 3. Native RSS/brk measurement of THIS boundary: still blocked, narrower gap than reported, still not worth the risk
+
+Re-ran the runtime-mechanism gate fresh (not reused numbers) to confirm the
+underlying primitive still reclaims on this host/build:
+`check-transient-scope-reclaims.shs` — `PASS -- 2 fixture(s) measured, scoped
+1036 kB vs unscoped 374232 kB (361x), identical exit status 124` (`--selftest`
+also green). This is the array/string mechanism, proven again, not the MIR
+boundary — restated here only so the two are not conflated.
+
+Attempted a smaller alternative to the full self-hosted bootstrap the prior
+session was blocked on (167 unresolved symbols): natively compiling a tiny
+probe that only `use compiler.mir._MirLowering.module_lowering.*` (not the
+whole compiler + LLVM backend). Import resolution and full frontend
+compilation of the entire `50.mir` + transitive `20.hir`/`00.common` dependency
+graph **succeeded** — a real improvement in diagnosis over "no self-hosted
+compiler can be built here" — but the **link** still fails, now on a smaller,
+different 59-symbol set (`rt_math_*`, `rt_simd_*`, `rt_coverage_*`, `rt_mmap`/
+`rt_msync`/`rt_munmap`, `rt_file_lock`/`rt_file_mmap_read_bytes`, `rt_exec`,
+`rt_process_run_with_limits`, others) pulled in transitively by modules 50.mir
+imports, not by anything the transient scope touches. `SIMPLE_ALLOW_UNRESOLVED_
+RUNTIME=1` would link it, but per this row's own prior finding that yields a
+NULL GOT slot per name and a SEGV on first call through one of them — the exact
+mechanism that crashed every self-hosted stage binary on hello world in the
+`rt_unwrap_or_trap` incident (2026-08-21) referenced above. Building a synthetic
+`HirModule` by hand to drive `lower_module_transient_scoped` without the
+frontend was also considered and rejected: the code's own comments record that
+a hand-duplicated `MirLowering` constructor once drifted 8 fields behind the
+struct and silently nil-filled the rest
+(`native_build_entry_struct_construction_buildfail_2026-07-20`), i.e. hand-built
+HIR/MIR structs are a known landmine in this codebase, and a wrong-by-
+construction fixture would produce a measurement that looks real and isn't.
+
+**Conclusion, stated as plainly as the prior session's:** this is genuinely
+closer than 2026-09-06 left it (167 unresolved symbols -> 59, all outside the
+scope's own dependency set; a real executed binary through the scoped path
+where before there was only a same-rc replay) but the native RSS/brk
+measurement of the MIR boundary specifically remains blocked on runtime-archive
+completeness — a linker/runtime-archive-selection concern, not a reclamation-
+design concern, and out of this session's scope per the task boundary (the
+sibling backend/runtime-archive lane owns that surface). Per this row's
+standing rule — a use-after-free in the compiler is worse than the memory it
+saves — landing an unmeasured-but-statically-audited scope, rather than forcing
+a measurement through `SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1`, is the correct
+tradeoff.
+
+### 4. What this session adds to the gate surface
+
+No new gate script; `check-mir-transient-scope-boundary.shs` (landed
+2026-09-06) already does the job req. 3 asks for. Re-verified rather than
+re-built: `PASS — 9 invariant(s) checked` on the fixed tree,
+`FAIL — 3 invariant(s) checked ...: driver-entry-closure-loop-not-scoped;
+driver-still-calls-unscoped-lower_module; wrapper-missing` (exit 1) when pointed
+at `origin/main`'s pre-fix content via `--root` — discrimination re-proven
+against the real tree, not only its own fixtures.
+
+## Addendum 2026-09-07 (session 2) — the second named-uncovered call site is now scoped; the third (ambient bootstrap) stays open with its blocker unchanged
+
+Continuing from the audit above. Of the two `lower_module` call sites this row's
+own MIR addendum named as "remaining, deliberately unscoped" (bootstrap
+fixed-path ~line 289-303, non-entry-closure fallback loop ~line 391-414 in
+current line numbers), one is now closed.
+
+### 1. The non-entry-closure fallback loop is scoped
+
+`driver_pipeline_lowering.spl`, the `if self.ctx.sources.len() <= 0:` branch
+(reached when the driver has HIR modules but no populated `ctx.sources` list —
+distinct from both the bootstrap-fixed branch above it, which returns first,
+and the `--entry-closure` branch, which requires `sources.len() > 0`). Before:
+`var mir_module = lowering.lower_module(hir_module)`, one shared `lowering`
+instance across `self.ctx.hir_modules`, never reclaimed — the same
+immortal-arena shape the entry-closure loop had before 2026-09-06. Changed to
+`lowering.lower_module_transient_scoped(hir_module)`, with the same fail-closed
+handling as the entry-closure site: an `Err` adds a compile error and returns
+`false` without touching `self.ctx.mir_modules[name]`.
+
+**Escape set: identical to the audited entry-closure boundary, verbatim, for a
+structural reason rather than by re-argument.** `lower_module_transient_scoped`
+(module_lowering.spl:1213) is the same function called from both sites, with
+the same three-part contract: (1) the returned `MirModule`, promoted; (2)
+everything `lower_module` writes into the `MirLowering` owner, promoted by
+promoting the owner as a whole (`promote_transient_owner`, walks all 97 fields
+transitively — no hand list to drift); (3) module-level mutable globals, none
+of which are reachable from `lower_module` on the non-ambient path (the 2026-09-07
+census earlier in this file already re-derived this by grepping every mutation
+site under `src/compiler/50.mir/**`, and that census does not vary by caller —
+it is a property of what `lower_module` touches, not of which loop calls it).
+**The critical safety property is that `lower_module_transient_scoped` checks
+`self.ambient_bootstrap_enabled()` internally and falls back to plain
+`self.lower_module(module)`, unscoped, whenever `SIMPLE_BOOTSTRAP=1`** — so this
+new call site never attempts to reclaim the arena while the flat
+`_bootstrap_mir_*` / `_bootstrap_fn_*` / `_bootstrap_hir_*` registries (whose
+reachability is proven NOT established, see below) could be live, regardless of
+which of the two branches reaches it. This is why the fix is "nearly free": no
+new escape-set argument was needed, only reuse of one already audited.
+
+**Live-repro caveat, stated rather than glossed over.** A concrete input that
+drives `self.ctx.sources.len() <= 0` while `self.ctx.hir_modules` is populated
+was not found in this session (grepped `src/compiler/80.driver/*.spl` and
+`src/compiler/80.driver/bootstrap_api*.spl` for a caller that fills
+`hir_modules` without also filling `sources`; none surfaced, meaning this
+branch's live trigger is likely an internal driver-API/test-harness compile path
+rather than the CLI `native-build`/`run` entry points this session's fixtures
+exercise). The change is therefore verified STATICALLY (identical contract,
+identical callee, fail-closed on error) and by the fact that it does not alter
+any other code path in the file — not by a paired before/after RSS run of this
+specific branch. Do not read the RSS numbers in the runtime-mechanism section
+below as measuring this boundary; they re-confirm the underlying primitive
+only, exactly as the prior addendum's own caveat about the MIR boundary said.
+
+### 2. Ratchet extended
+
+`check-mir-transient-scope-boundary.shs` gained two invariants (now 11, up from
+9): `driver-fallback-loop-not-scoped` (the fallback loop must call
+`lowering.lower_module_transient_scoped(hir_module)`) and
+`driver-fallback-still-calls-unscoped-lower_module` (it must not also retain
+the bare `lowering.lower_module(hir_module)` call — grepped on the exact
+receiver/argument pair so the bootstrap-fixed branch's legitimate bare call,
+`bootstrap_lowering.lower_module(bootstrap_hir)`, is not a false positive). A
+seventh selftest fixture (`fallback_prefix`) isolates this from the
+entry-closure fixtures and proves the two new invariants alone catch the
+pre-fix fallback shape. Verified against the real tree:
+`sh scripts/check/check-mir-transient-scope-boundary.shs --selftest` ->
+`PASS — 7 selftest fixture(s) checked`; against the current (fixed) worktree ->
+`PASS — 11 invariant(s) checked`; against `origin/main`'s committed content (git
+show into a scratch tree, `--root`) -> `FAIL — 11 invariant(s) checked ...:
+driver-fallback-loop-not-scoped; driver-fallback-still-calls-unscoped-lower_module`
+— discrimination proven on the real pre-fix tree, not only synthetic fixtures.
+
+### 3. The third call site (bootstrap fixed-path, `SIMPLE_BOOTSTRAP=1 and not
+STAGE4`, line ~289-303) is deliberately left unscoped, and switching its
+receiver to `lower_module_transient_scoped` would be a no-op
+
+That branch's own guard condition IS `SIMPLE_BOOTSTRAP=1`, so
+`lower_module_transient_scoped` would immediately observe
+`ambient_bootstrap_enabled()==true` and fall back to plain `lower_module`
+every time — there is no state in which this specific call site would ever
+scope. Cosmetic substitution was rejected as noise. This branch also lowers
+exactly one module (`app.cli.bootstrap_main`) per invocation, not the hundreds
+the entry-closure/fallback loops lower, so it is not believed to be a
+significant contributor to the 37 GB regardless.
+
+**The actual location of the 37 GB remains the ambient-bootstrap path as a
+whole** (the Stage-3 worker that produced the 37,171,428 kB `[heap]`
+measurement runs with `SIMPLE_BOOTSTRAP=1`), and it is excluded from every
+scope in the tree — not just this one — for the same unresolved reason each
+prior session recorded: the flat `_bootstrap_mir_*` registries
+(`_MirLowering/bootstrap_globals.spl`), `mir_data.spl`'s `_bootstrap_fn_*`
+dicts, and 20.hir's `_bootstrap_hir_*` arrays are read from other parts of the
+compiler by name/index after `lower_module` returns, and no census in this
+session or prior ones has enumerated their write sites well enough to prove
+they are unreachable from a promoted root (the way the non-ambient globals were
+proven unreachable). `driver_promote_frontend_registry_owners()`
+(`driver_source_pipeline_parsing.spl:257`) was located as the requested
+template, but it promotes a DIFFERENT registry set (aspect/effect/rt_criticality/
+layer_eq, used by the frontend/parse-phase scope) — it is a pattern to copy, not
+a promoter that already covers the bootstrap MIR registries. Writing the
+bootstrap-registry equivalent (grep every write site across
+`bootstrap_globals.spl`, `mir_data.spl`'s bootstrap dicts, and 20.hir's
+bootstrap arrays, confirm none is written from outside 50.mir's reachable call
+graph or from a closure/callback, then add a
+`driver_promote_bootstrap_mir_registry_owners()`-shaped function and call it
+from inside `lower_module_transient_scoped`'s ambient-bootstrap branch instead
+of skipping the scope) is a full session's own work, not a same-session
+extension of this one, and was not attempted here given the remaining time
+budget and the standing rule that an unproven escape set is refused rather than
+forced.
+
+### 4. Backend/codegen emission lane: looked at, not scoped, escape set not
+attempted
+
+Two other loop candidates were read this session and rejected as targets for
+now, both because their escape sets were not judged provable inside this
+session's time budget, not because they were found unsafe:
+
+- **`optimize_mir_level` (`driver_pipeline_passes.spl:35`)**, the per-module MIR
+  optimization pass (`optimize_module_for_backend`, `60.mir_opt/mir_opt/mod.spl`
+  and its full pass pipeline, 1937 lines in `mod.spl` alone plus however many
+  pass files it dispatches to). The loop discards the pre-optimization
+  `MirModule` and keeps only the returned one, which is a plausible transient-
+  scope shape, but a proper escape-set census (every module-level `var` write
+  reachable from `pipeline_optimize`, across a much larger and less-audited
+  surface than 50.mir) was not done. Undertaking it without doing the grep-based
+  census this row insists on would repeat exactly the mistake this row's own
+  history warns against.
+- **`CodegenPipeline.compile_module` (`70.backend/codegen.spl:715`)**, the JIT
+  Cranelift lane. Read and set aside for a different reason: its per-module
+  state (`CraneliftCodegenState`) is mostly a handle onto native Cranelift
+  compiler state reached via `rt_cranelift_*` externs, not Simple-heap objects
+  registered in `HEAP_ALLOCATION_REGISTRY`, so a `.spl`-level transient scope
+  around it is unlikely to reclaim the thing this row is about; disposal there
+  is `release_codegen_module()` -> `codegen.free_module()`, a different
+  (already-explicit) reclamation path, not the immortal-heap defect.
+
+Both are recorded here as the next places to look, not as closed or ruled out.
+
+### 5. Verification, corrected after a re-check found the first pass over-claimed
+
+The first draft of this addendum reused the prior session's
+`SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 ... native-build
+hello.spl` result as proof that a real binary ran through the modified file.
+**That reuse was wrong and is retracted.** Re-run with
+`SIMPLE_COMPILER_TRACE=1` added (which makes every `log_phase` call —
+including `aot:lower_to_mir:module:start/done`, present in the very function
+this session edited — print a `[BOOTSTRAP-PHASE]` line): zero such lines were
+printed, for either run. `SIMPLE_NATIVE_BUILD_RUST=1` routes the whole build
+through the seed's own compiled Rust native pipeline; for a zero-import
+`hello.spl` this apparently never touches the interpreted `.spl` driver
+(`driver_pipeline_lowering.spl`) at all, consistent with the total wall time
+(0.0s compile + ~4s link — far below the 15-30s the record's own reproducer
+needs just to load the compiler graph). So that command proves the SEED still
+emits correct binaries; it proves nothing about this session's edit, and the
+predecessor's 2026-09-07 §2 claim that it "exercises the entry-closure branch"
+should be read the same way going forward.
+
+**What was actually run instead, in order of how much it proves:**
+
+1. **Plain `native-build` (no `RUST=1`) and the direct
+   `SIMPLE_NATIVE_BUILD_WORKER=1 ... run src/app/cli/native_build_worker.spl`
+   reproducer, both against the same `hello.spl`** — both spawn/route through
+   the INTERPRETED `.spl` compiler graph (confirmed by the volume of
+   cross-module warnings emitted, matching the record's phase-A description),
+   and both fail identically: `error: semantic: unknown extern function:
+   rt_env_vars` (exit 1), before reaching MIR lowering. **This is a
+   pre-existing, unrelated defect, not introduced by this session and not
+   fixable within it**: `rt_env_vars` is registered in the codegen SFFI table
+   (`codegen/runtime_sffi.rs:1944`) and in `common/runtime_symbols.rs:803`, but
+   grepping `src/compiler_rust/compiler/src/interpreter_extern/*.rs` for it
+   returns nothing — it was never added to the INTERPRETER's extern table, on
+   any seed build available this session (all built 2026-09-06/07 from this
+   same tree lineage). Every full-graph interpreted compile is therefore
+   currently blocked, independent of anything in this row.
+2. **`/home/yoon/.cargo-target-mir/release/simple lint
+   src/compiler/80.driver/driver_pipeline_lowering.spl`** — lint does NOT
+   execute the interpreted whole-graph pipeline (it is a static frontend pass:
+   parse, resolve, type-check), so it is unaffected by the `rt_env_vars` gap
+   and DID complete: `Found 0 error(s), 7 warning(s), 0 auto-fix(es) available`.
+   All 7 warnings are pre-existing `RAW-RT-001`/`RAW-RT-002` (raw `rt_env_get`
+   calls already in the file before this session) and one pre-existing
+   duplicate-typed-argument style warning; none names anything this session
+   added. This is real evidence the edited file **parses and type-checks
+   cleanly** under the actual compiler frontend — it is not evidence the
+   fallback loop executes correctly at runtime.
+3. `sh scripts/check/check-mir-transient-scope-boundary.shs --selftest` — `PASS
+   — 7 selftest fixture(s) checked, scanner discriminates the pre-fix shape`.
+4. `sh scripts/check/check-mir-transient-scope-boundary.shs` (this worktree) —
+   `PASS — 11 invariant(s) checked, per-module MIR lowering runs inside a paired
+   transient scope with both escaping roots promoted`.
+5. Same script against `origin/main`'s committed content — `FAIL — 11
+   invariant(s) checked ...: driver-fallback-loop-not-scoped;
+   driver-fallback-still-calls-unscoped-lower_module`.
+6. `SIMPLE_SEED=/home/yoon/.cargo-target-mir/release/simple sh
+   scripts/check/check-transient-scope-reclaims.shs` (mechanism re-proof, fresh,
+   not reused numbers) — `PASS -- 2 fixture(s) measured, scoped 1052 kB vs
+   unscoped 374236 kB (355x), identical exit status 124`. This is the
+   array/string primitive, re-confirmed on this host/build; it was never a
+   measurement of the fallback-loop boundary and is not claimed as one.
+
+**Stated plainly, matching this row's own standard of not overclaiming:** no
+session, including this one, has produced a paired before/after RSS/brk
+measurement OR a successful end-to-end run of ANY MIR-lowering transient scope
+(entry-closure, fallback, or otherwise) through the fully interpreted
+self-hosted pipeline. The entry-closure scope's "real running binary" evidence
+from 2026-09-07 needs the same re-check this addendum just gave its own
+claim — it was not re-verified with phase tracing in this session, so treat it
+as unconfirmed rather than re-affirmed. What IS established for the fallback
+loop specifically: it type-checks cleanly, it reuses a callee whose behavior
+is unconditionally safe under ambient bootstrap by construction, and the
+ratchet gate proves the source-level shape is correct and discriminates the
+pre-fix tree. No collector was designed. Per the task's own preference order,
+coverage extension was judged reachable and was done first; the ambient-
+bootstrap path (§3), the two backend/opt candidates (§4), and — newly found
+this pass — the missing `rt_env_vars` interpreter extern (blocks re-verifying
+ANY of this by full interpreted execution) are the next things to attempt.
+
+## Addendum 2026-09-07 — the ambient-bootstrap census, and the fix
+
+The previous addendum left the ambient-bootstrap exclusion in
+`lower_module_transient_scoped` (`50.mir/_MirLowering/module_lowering.spl`) in
+place because "the `_bootstrap_mir_*` / `_bootstrap_fn_*` / `_bootstrap_hir_*`
+registries' write-sites were never censused to the same rigour as the
+non-ambient set." This addendum is that census, run against
+`origin/main@a44cad728e5` from a fresh worktree on `work/mir-bootstrap-transient-census`.
+
+### Census table
+
+Every `_bootstrap_mir_*`, `_bootstrap_fn_*` and `_bootstrap_hir_*` registry,
+grepped exhaustively (assignment, `.push`, `.pop`, dict-index-assign, `.remove`)
+across the whole tree — not reasoned from shape.
+
+| registry family | declared at | write sites | written during MIR lowering? | outlives per-module scope? |
+|---|---|---|---|---|
+| `_bootstrap_mir_functions`, `_function_names`, `_function_modules`, `_function_return_type_tags`, `_function_return_unsigned`, `_function_param_starts`, `_function_param_counts`, `_function_param_type_tags`, `_module_count_value` (9 vars, statics below) | `50.mir/_MirLowering/bootstrap_globals.spl:95-111` | ALL confined to `bootstrap_globals.spl`: `bootstrap_mir_functions_add` (:177-205), `bootstrap_mir_modules_add` (:253-300), plus the flat-bridge helpers `bootstrap_lower_flat_hir_module_to_mir` (:388-508), `bootstrap_lower_hir_globals_to_mir_module_for_target` (:813-932), `bootstrap_lower_extra_hir_module_to_mir_for_target` (:936-1047). Called from `module_lowering.spl:1438,1456,2009` (inside `lower_module`, reached via `lower_module_transient_scoped`) AND from `driver_bootstrap.spl:169,195,216,289` (the SIMPLE_BOOTSTRAP_REAL_LLVM lane, which runs with NO transient scope active at all — ambient-safe by construction, contributes to the 37 GB but not to the UAF risk). | YES, on the entry-closure path (`module_lowering.spl:1429-1456`, gated on `ambient_bootstrap_enabled()`). | YES — read in `bootstrap_llvm_name_index_ensure` (:638-695) from **70.backend** (`_MirToLlvm/core_codegen.spl:2818,2827`, `bootstrap_llvm_exact_function_index`/`bootstrap_llvm_module_local_function_index`), a phase that runs strictly after every per-module MIR scope has begun-and-ended. Also read cross-module by later-lowered modules via `bootstrap_mir_function_*_at` accessors during backend codegen. |
+| `_bootstrap_mir_static_modules/_symbol_ids/_names/_type_tags/_init_kinds/_init_payloads/_alignments/_visibilities` (8 vars) | `bootstrap_globals.spl:104-111` | Same functions as above (`bootstrap_mir_modules_add`, copy-modify-reassign pattern at :258-299). | YES, same path. | YES, read via `bootstrap_mir_static_*_at` accessors (:748-773), used by 70.backend to emit global data after the lowering loop ends. |
+| `_bootstrap_function_value_names` | `bootstrap_globals.spl:112` | `bootstrap_function_value_names_reset` (:114), `bootstrap_register_function_value_module` (:117-123) | YES | Lower risk than the two families above (reset per-module, drained into `lowering.current_function_names` at :413, which is covered by `promote_transient_owner()`'s whole-`self` walk) — but the global var itself is still live heap that could be read by a subsequent module before its own reset if ordering ever changes, so promoted defensively. |
+| `_bootstrap_fn_ret_types`, `_ret_hir_types`, `_ret_hir_ambig`, `_ret_shapes`, `_ret_shape_ambig`, `_ret_ok_shapes`, `_ret_ok_shape_ambig`, `_param_hir_types`, `_param_defaults`, `_param_defaults_ambig` (10 Dicts) | `50.mir/mir_data.spl:917-1048` | ALL confined to `mir_data.spl`'s 6 `bootstrap_fn_*_register` functions (:919,940,959,989,1011,1056), each a `dict[name] = value` in-place mutation. Called from `module_lowering.spl:1154-1211` (prescan, before the module's own functions lower) and `:1429` (per-function, inside `lower_module`), all inside `lower_module_transient_scoped`. Also called from `bootstrap_globals.spl:145-149,384,860-861,983-986` (same flat-bridge helpers as above). | YES | YES by explicit design — `mir_data.spl:911-916`'s own comment: "the registry must accumulate across ALL closure modules because cross-module call sites need the callee module's declared types" — i.e. module N+1's lowering reads a value module N wrote. This is the single strongest piece of evidence in the whole census: the code's own author already documented the cross-scope read requirement. |
+| `_bootstrap_hir_functions`, `_hir_module_names/_symbols/_functions/_constants/_enums/_structs/_classes`, `_hir_entry_index`, `_hir_module_committed_count` | `20.hir/hir_lowering/_Items/lowering_helpers.spl:50-72` | `bootstrap_hir_modules_reset/_add/_add_from_module` (:94-159) | YES, but in the **HIR** lowering phase, not MIR — **OUT OF SCOPE for this fix**, and already solved: `bootstrap_hir_modules_promote_last()` (:198-219) promotes both the newly-committed row AND all seven outer owner arrays, called from `driver_hir_pipeline_lowering.spl:159` inside `lower_streaming_surface_source`'s own per-file transient scope (:131-165), which begins/pauses/promotes/ends before MIR lowering ever starts. `bootstrap_hir_modules_rollback_last` (:220-238) additionally undoes a partial commit on promotion failure — a rollback discipline this fix's MIR side does not need to replicate because `lower_module_transient_scoped`'s existing convention already treats ANY `Err` as fatal-abort-the-compile (see `driver_pipeline_lowering.spl:355-361`, "never continue on a half-reclaimed lowering"), so a promotion failure just aborts rather than needing a partial-row rollback. | N/A to this fix; this family is the reference implementation the MIR fix mirrors. |
+
+### Dict/Array transitivity, verified against the runtime source (not assumed)
+
+`rt_transient_heap_promote` (`compiler_rust/runtime/src/value/collections.rs:1921-1966`)
+walks the reachable graph via `transient_heap_children` (:1838-1889) and calls
+`rt_transient_raw_promote`/removes each visited object from the active scope's
+kill-list (`scope.objects.retain(...)`) rather than copying — so aliasing
+across structures (confirmed separately for `_bootstrap_mir_functions`'
+`MirFunction.name` fields by `driver_types.spl:1286-1288`'s "aliased from
+OUTSIDE the dict ... by `_bootstrap_mir_functions`" comment) is safe: promotion
+removes an object from the CURRENT scope's free-list, it does not clone it.
+`transient_heap_children`'s `Dict` arm (:1857-1874) walks every bucket's
+key+value pair, `Array`'s arm walks the element slice — both covering the
+"outer container, not just the pushed element" requirement, because `.push()`/
+dict-insert can reallocate backing storage while a scope is active, and only
+promoting the container adopts that reallocation too (the same reasoning
+`bootstrap_hir_modules_promote_last` already documents for its own outer
+arrays).
+
+### Conclusion: (a) — promotable, and the change is made
+
+The registries are promotable, following the `_bootstrap_hir_*` family's
+already-proven pattern exactly. Change made on `work/mir-bootstrap-transient-census`:
+
+- `bootstrap_mir_registries_promote()` added (`bootstrap_globals.spl`, after
+  `_bootstrap_function_value_names`'s declaration) — promotes all 17 `_bootstrap_mir_*`
+  arrays plus `_bootstrap_function_value_names`.
+- `bootstrap_fn_registries_promote()` added (`mir_data.spl`, after the last
+  `bootstrap_fn_param_defaults_lookup`, exported) — promotes all 10
+  `_bootstrap_fn_*` Dicts.
+- `lower_module_transient_scoped` (`module_lowering.spl`): the
+  `if self.ambient_bootstrap_enabled(): return Ok(self.lower_module(module))`
+  early-return is **removed** — the ambient-bootstrap path now takes the same
+  scoped route as every other module. Both new promote calls are inserted
+  after `self.promote_transient_owner()` and before `rt_transient_array_scope_end()`,
+  each following the existing fail-closed convention (promotion failure ->
+  `rt_transient_array_scope_end()` + `Err(...)`, which the caller already
+  treats as fatal).
+- `_bootstrap_hir_*` (20.hir) is untouched — it is a different phase with its
+  own already-working scope, not part of this escape set.
+
+### Gate extension (done, and proven to fail on pre-fix content)
+
+`scripts/check/check-mir-transient-scope-boundary.shs` check (8) previously
+asserted the ambient-bootstrap exclusion **must stay** (`ambient_bootstrap_enabled()`
+present in the wrapper body). It now asserts the opposite invariant: both
+`bootstrap_mir_registries_promote()` and `bootstrap_fn_registries_promote()`
+must appear in the wrapper body. Fixture E (`noambient`) is repurposed from
+"guard removed" (previously a FAIL case under the OLD invariant) to "guard
+removed AND registries not promoted" (the real hazard shape under the NEW
+invariant) — still a required FAIL fixture.
+
+Verified directly, not just via the fixture:
+
+```
+$ sh scripts/check/check-mir-transient-scope-boundary.shs --selftest
+PASS — 7 selftest fixture(s) checked, scanner discriminates the pre-fix shape
+
+$ sh scripts/check/check-mir-transient-scope-boundary.shs   # this worktree, fixed
+PASS — 12 invariant(s) checked, per-module MIR lowering runs inside a paired
+transient scope with both escaping roots promoted
+
+$ sh scripts/check/check-mir-transient-scope-boundary.shs --root <origin/main checkout>
+FAIL — 12 invariant(s) checked in <root>: bootstrap-mir-registries-not-promoted;
+bootstrap-fn-registries-not-promoted
+```
+
+The last run extracted `origin/main@a44cad728e5`'s committed
+`driver_pipeline_lowering.spl` and `module_lowering.spl` into an isolated temp
+tree (not this worktree, not the shared checkout) and ran the extended gate
+against it — proving the new assertion genuinely discriminates real pre-fix
+content, not just the synthetic selftest fixtures.
+
+### What this addendum does NOT establish — stated plainly, not papered over
+
+Per the task's own hard constraint (a second bootstrap must not contend with
+the one already running on this host) and the pre-existing, unrelated
+`rt_env_vars` interpreter-extern gap this record's previous addendum already
+found (blocks running the full interpreted `.spl` compiler graph end-to-end —
+see above), this session did **not**:
+
+1. Rebuild a self-hosted `bin/simple` from this changed source and run a real
+   `SIMPLE_BOOTSTRAP=1` native compile of a hello-world fixture through it.
+   Source-level verification only: the gate script's static scan, and the
+   changed code's structural identity with the already-proven, already-running
+   `_bootstrap_hir_*` promotion pattern (same runtime primitives, same
+   promote-the-outer-container discipline, same fail-closed-on-promote-failure
+   convention).
+2. Measure before/after peak RSS or `[heap]` brk from `/proc/<pid>/smaps_rollup`
+   on a natively compiled fixture, for the same reason (needs a rebuilt
+   compiler binary to exercise the changed `.spl` source).
+3. Prove the resulting binary's output is unchanged for a hello-world program.
+
+These three are the genuine residual gap. The right time to close them is the
+next session that already has a freshly bootstrapped `bin/simple` reflecting
+this change (or once the in-flight bootstrap on this host completes and frees
+the machine) — at that point: `SIMPLE_BOOTSTRAP=1 bin/simple native-build
+hello.spl`, compare `/proc/<pid>/smaps_rollup` `[heap]` Rss against a run built
+from `origin/main` at the same revision, and confirm `./hello` still prints
+`Hello, world!`. Do not treat this addendum's conclusion (a) as closing the
+issue until that measurement exists — it establishes the change is
+*source-level correct and consistent with the one proven precedent in this
+codebase*, not that it has been measured.
+(0x3f8bd14), `rt_dict_new` (0x3fa7050), `rt_string_new` (0x3f8f2f4) all resolve
+(0x3f90bc4); only `rt_alloc` (0x6941340) is the C one. So every array, dict and
+### 1. The seed's ~3.3 GB is the module-graph LOAD, not leaked interpreted values
+### 2. The self-hosted lane is the actual defect, and it is ~12x
+**3.30 GB is already resident before the worker executes one statement, and the
+### 3. What CAN be attacked without a collector: the multiplier in front of it
+### 4. Limits of this addendum, stated rather than papered over
+  a build path.
+`.../add_dir/add_dir.spl` both sanitising to one native module name. That pair
+## Addendum 2026-09-06 — the phase-B diagnosis above is WRONG for this workload
+  a live Stage 3 observed at ~30 min. Same job family, not the same instant. The
+A monotonically growing, fully-resident brk arena means millions of *small*
+analysis. No collector was built here.
+[anon]       4,810,236 kB   across 35 mmaps
+Anonymous:  42,355,160 kB
+are never reclaimed". The original phase-A/phase-B reading was inferred from a
+--backend llvm --mode dynload ... src/app/cli/bootstrap_main.spl`:
+  binaries dispatch `run src/app/cli/native_build_worker.spl` to a *baked-in*
+| candidate / workload | peak RSS | RSS at `worker_entry` | registry_count at entry |
+codegen emits no scope calls and per-frame scoping is unsound without escape
+compiler is Rust and freed by `Drop`; in the self-hosted binary the compiler IS
+compiler's entire 776-module closure for four minutes then adds only ~0.22 GB.
+  composition evidence (a single monotonic brk mapping vs. a Rust interpreter's
+**Correction to an earlier draft of this addendum:** this is NOT a stale
+deployed binary. `git log -- src/compiler/80.driver/driver_source_pipeline_loading.spl`
+# deployed stage2: FAIL — 2 probe(s) executed, ... open_rc=1,
+`driver_source_owner_text_copy` — and materialises that whole import graph into
+  Drop-managed structures) is what carries the conclusion, not the ratio alone.
+— effectively all 16,273 `.spl` files, 123 MB of source, held twice via
+| `--entry` alone (unbounded roots) | 145,840 kB | 0.7 s | **1** |
+`--entry-closure` run that completes in 5 s and 191 MB. A guard that grepped for
+| `--entry --entry-closure` | 191,756 kB | 5.3 s | 0 |
+`--entry <file>` without `--source` delegates to the Rust `rt_native_build` FFI
+| `--entry --source <fixture dir>` | 191,780 kB | 4.6 s | 0 |
+`--entry`-without-`--source` delegation above, which is present in current
+exists in `origin/main` and does NOT exist in `/home/yoon/bootstrap-wt`, which
+extending the break. The same job costs the seed 3.5 GB. **12x on identical
+#   fixture even with --source: rc=1)   <- fail-closed, never a pass
+[heap]      37,543,764 kB   in ONE glibc brk mapping
+`HEAP_ALLOCATION_REGISTRY`, and leaves it only via a hand-written
+(heap.rs:125) and `rt_transient_array_scope_*` exists in both runtimes, but
+  here cannot reach them until the next bootstrap ships the instrumented worker.
+  internal entry (`error: unsupported bootstrap internal entry` for any other
+into the `simple_runtime` range, alongside `rt_transient_array_scope_begin`
+is why that lane's Stage 3 runs on to 42 GB instead of aborting in 0.7 s.
+Its three assertions are: the `--source`-bounded build must exit 0
+it would flag a passing shape; an earlier version of the guard below did exactly
+  kind histogram.
+last touched it 2026-09-01 and the stage2 binary was built 2026-09-05 13:42, so
+live allocations that are never returned — allocations above `M_MMAP_THRESHOLD`
+Live bootstrap Stage 3, `stage2-admitted/simple run src/app/cli/native_build_worker.spl
+- `log_mem_snapshot` (`src/compiler/80.driver/driver_log_helpers.spl:239`) has
+Measured on the deployed stage2, same binary, same fixture, this repo:
+Measured this session on aarch64 (121 GB, 20 CPU, shared). Everything below is
+Mechanism, confirmed by symbol addresses in the deployed stage2 binary: the
+`native_build_worker.spl` now carries a gated probe (`SIMPLE_MEM_PROBE=1`) that
+New guard, RED on the deployed stage2 and fail-closed everywhere else:
+- **No per-kind attribution for the self-hosted lane.** The deployed stage
+`note: --entry without --source scans the DEFAULT source roots (whole project)`
+#   offender(s): outcome:rc=1(Build failed: native module name collision ...)
+**Only the second assertion has ever fired.** The RSS budget is a real threshold
+  path) and never interpret the file, so the `SIMPLE_MEM_PROBE` counters added
+  `perf_event_paranoid=4`); no seed was rebuilt, so nothing was measured that
+- `perf`/heaptrack attach is unavailable (`ptrace_scope=1`,
+poller; direct counters contradict it. The no-GC mechanism described above is
+(precondition, else ERROR); the unbounded build must also exit 0; and the
+prints the runtime's own heap counters at the worker's first and last
+real and still applies to the SELF-HOSTED lane (below); it is not what dominates
+representation of the compiler module graph — a real, bounded, one-shot working
+  required one.
+Rss:        42,386,084 kB
+# Rust seed:      ERROR — nothing was checked (candidate cannot build the
+  seed at 240 s, killed mid-compile of the 776-module closure; 42,386,084 kB is
+| seed, `--entry-closure --entry hello_world.spl` | 3,321,180 kB | 3,398,381,568 B | 0 |
+| seed, `--entry-closure --entry src/app/cli/bootstrap_main.spl` (240 s, killed) | 3,524,932 kB | 3,302,420,480 B | **257 objects / 6,424 B** |
+| seed, positional `src/app/cli/bootstrap_main.spl` (240 s, killed) | 3,764,752 kB | — | — |
+self-hosted binary links the **Rust** runtime for its allocator — `rt_array_new`
+set — and **not** "values allocated by the interpreted program during execution
+| shape | peak RSS | wall | rc |
+short-circuits the unbounded run before it can grow. Do not report the budget as
+sh scripts/check/check-native-build-entry-memory-budget.shs --candidate <bin>
+Simple heap registry holds 257 objects (6.4 kB) at that moment.** Compiling the
+So for this workload the seed's memory is the Rust interpreter's own
+source and is doing what it says.
+(`src/app/cli/bootstrap_main.spl:379-381`), which scans the DEFAULT source roots
+`src/app/llm_caret/claude_full/commands/add-dir/add-dir.spl` and
+(`src/compiler_rust/runtime/src/value/heap.rs:248`) into the process-global
+statement. At `worker_entry` — before `cli_native_build` is called at all:
+string the compiled compiler allocates goes through `register_heap_ptr`
+that and was corrected.
+- **The 12x is across two binaries and two run states.** 3,524,932 kB is the
+  The 37.5 GB is attributed by `smaps` to "brk, small, never freed", not to a
+the assertion that caught anything until it does.
+the deployed compiler already contains today's `nb_entry_closure` suppression.
+the interpreted-language heap. That is the whole 12x.
+the never-reclaimed heap before any codegen, for a two-line fixture.
+**The scan NOTE is not a usable signal.** bootstrap_main prints
+the seed.
+The unbounded run is *cheaper* only because it dies early: materialising the
+The whole-project scan comes from the `bootstrap_main.spl`
+**This needs a collector.** `HeapHeader` already carries `gc_color` bits
+unbounded peak RSS must stay within 2.00x of the bounded build and under 6 GB.
+`unregister_heap_ptr*` that compiled Simple code never emits. In the seed the
+`/usr/bin/time -v` peak RSS and `/proc/<pid>/smaps`, never a poller estimate.
+whenever `--entry` is given without `--source` — including on the bounded
+whole tree surfaces a collision between two files a hello world never imports —
+with real numbers but is unexercised, because in this tree the collision
+  worker probe added here is the only live reader of the `rt_heap_*` counters on
+work is not a working set; it is a defect.**
+would land in mmap, and any real reclamation would let glibc reuse instead of
+  **zero callers** — the phase-boundary snapshot facility is dead code. The
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

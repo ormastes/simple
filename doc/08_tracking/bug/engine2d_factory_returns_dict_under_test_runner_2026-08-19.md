@@ -1,7 +1,7 @@
 # Engine2D factory returns a module-namespace dict under the test runner (match-arm binding shadowed by MODULE_GLOBALS)
 
 - **ID:** `engine2d_factory_returns_dict_under_test_runner_2026-08-19`
-- Status: OPEN (P1)
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
 - **Found:** 2026-08-19
 - Related: `module_named_like_its_class_shadows_it_inside_it_blocks_2026-08-04`
   (same root fact 1: importing one symbol registers the WHOLE module under its
@@ -109,3 +109,25 @@ basenames.
   vs `use ...engine2d.color`, and a `for` / `if-let` pattern binding variant.
 - After fix: `bin/simple test test/02_integration/rendering/engine2d_drawing_spec.spl`
   (2/2), `vulkan_strict_spec.spl`, `cuda_strict_spec.spl` stay green.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/rendering/engine2d_drawing_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-12
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/02_integration/rendering/engine2d_drawing_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/02_integration/rendering/engine2d_drawing_spec.spl outcome=OK declared>=2 executed=2 passed=2 failed=0 skipped=0 dropped=0
+```
+
+Every example in the spec this record names as its reproduction passes. Scope
+of the claim, stated plainly: the re-check exercised **that spec only**, on the
+**deployed seed** on **aarch64**. It did not re-measure any other lane (native
+LLVM / self-hosted binary / other architecture), and it did not audit whether
+the spec's assertions still cover the original symptom as tightly as when the
+record was written. If a residual lane is known to be uncovered, reopen with
+the lane named rather than relying on this line.

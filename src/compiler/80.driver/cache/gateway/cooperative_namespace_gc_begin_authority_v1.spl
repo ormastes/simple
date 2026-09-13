@@ -1,0 +1,462 @@
+"""Descriptor-bound contributor bridge for cooperative namespace GC.
+
+Copied contribution counts remain preflight data, never authority.  The V3
+host namespace is the sole issuer: it captures the complete root union while
+holding the existing per-root mutation gate.  This module owns the bounded
+page consumer and keeps the collect scope live until finish or abort is
+acknowledged.  It deliberately declares no host ABI of its own.
+"""
+
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use common.cache_daemon_host_authority_v1.{
+    CacheNamespaceAuthorityV3, CacheNamespaceScopeV3,
+    CacheNamespaceModeV3,
+    CacheNamespaceExpectedHeadV3, CacheNamespaceCommitStatusV3,
+    cache_host_namespace_available_v3, cache_host_namespace_begin_v3,
+    cache_host_namespace_gc_roots_page_v3,
+    cache_host_namespace_finish_v3, cache_host_namespace_abort_v3}
+use compiler.driver.cache.gateway.cooperative_namespace_host_prerequisite_v1.{
+    cache_cooperative_namespace_host_prerequisite_available_v1}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_known_v1, verified_cas_kind_schema_v1}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedCasTypedIdentityV1, VerifiedGenerationRootV1}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    L78AttemptKeyV4, L78OwnerTokenV4, L78LimitsV4,
+    L78BoundaryErrorV4, L78OwnedResultV4}
+
+val CACHE_COOPERATIVE_NAMESPACE_GC_MAX_CONTRIBUTORS_V1: i64 = 65536
+val CACHE_COOPERATIVE_NAMESPACE_GC_MAX_ROOT_STREAM_BYTES_V3: i64 = 16777216
+val CACHE_COOPERATIVE_NAMESPACE_GC_ROOT_STREAM_MAGIC_V3: text =
+    "simple.cache.namespace-roots.v3"
+
+# These are bounded validation claims to be checked by the future host issuer;
+# no copied field, digest, boolean, root, or epoch can mint an authority.
+pub struct CacheCooperativeNamespaceGcContributionsV1:
+    namespace_generation: i64
+    expected_generation: i64
+    expected_writer_incarnation: i64
+    observed_writer_incarnation: i64
+    root_owner_count: i64
+    reader_domain_count: i64
+    lease_contributor_count: i64
+    explicit_pin_contributor_count: i64
+    root_set_complete: bool
+    reader_domains_complete: bool
+    lease_set_complete: bool
+    explicit_pin_set_complete: bool
+
+pub enum CacheCooperativeNamespaceGcBeginFailureV1:
+    InvalidContributionBounds
+    IncompleteNamespaceUnion
+    StaleGeneration
+    StaleWriter
+    HostNamespaceIssuanceUnavailable
+
+pub enum CacheCooperativeNamespaceGcRootKindV3:
+    GenerationRoot
+    ProtectedObject
+
+pub struct CacheCooperativeNamespaceGcRootMemberV3:
+    member_kind: CacheCooperativeNamespaceGcRootKindV3
+    generation: i64
+    object_kind: text
+    schema: i64
+    digest: text
+    protection_reason: text
+
+pub struct CacheCooperativeNamespaceGcRootUnionV3:
+    members: [CacheCooperativeNamespaceGcRootMemberV3]
+    generation_roots: [VerifiedGenerationRootV1]
+    protected_objects: [VerifiedCasTypedIdentityV1]
+    canonical_bytes: [u8]
+
+pub enum CacheCooperativeNamespaceGcBridgeFailureV3:
+    InvalidPreflight
+    HostUnavailable
+    HostRejected
+    PageBounds
+    RootStreamInvalid
+    ScopeClosed
+
+pub class CacheCooperativeNamespaceGcScopeOwnerV3:
+    host_scope: CacheNamespaceScopeV3
+    max_roots: i64
+    max_page_bytes: i64
+    root_union: CacheCooperativeNamespaceGcRootUnionV3?
+    closed: bool
+
+    pub me load_complete_root_union(
+    ) -> Result<CacheCooperativeNamespaceGcRootUnionV3,
+                CacheCooperativeNamespaceGcBridgeFailureV3>:
+        if self.closed:
+            return Err(CacheCooperativeNamespaceGcBridgeFailureV3.ScopeClosed)
+        var cursor: i64 = 0
+        var encoded: [u8] = []
+        while true:
+            var page: [u8] = []
+            var index: i64 = 0
+            while index < self.max_page_bytes:
+                page.push(0u8)
+                index = index + 1
+            val count = cache_host_namespace_gc_roots_page_v3(
+                self.host_scope, cursor, page)
+            if count < 0 or count > self.max_page_bytes:
+                return Err(CacheCooperativeNamespaceGcBridgeFailureV3.HostRejected)
+            if count == 0:
+                break
+            if cursor > CACHE_COOPERATIVE_NAMESPACE_GC_MAX_ROOT_STREAM_BYTES_V3 - count:
+                return Err(CacheCooperativeNamespaceGcBridgeFailureV3.PageBounds)
+            index = 0
+            while index < count:
+                encoded.push(page[index])
+                index = index + 1
+            cursor = cursor + count
+        val parsed = cache_cooperative_namespace_gc_root_union_decode_v3(
+            encoded, self.max_roots)
+        match parsed:
+            case Ok(value):
+                self.root_union = Some(value)
+                Ok(value)
+            case Err(_):
+                Err(CacheCooperativeNamespaceGcBridgeFailureV3.RootStreamInvalid)
+
+    pub fn root_union_loaded() -> bool:
+        not self.closed and self.root_union != nil
+
+    pub me finish() -> CacheNamespaceCommitStatusV3:
+        if self.closed: return CacheNamespaceCommitStatusV3.Invalid
+        val status = cache_host_namespace_finish_v3(self.host_scope)
+        if _gc_scope_terminal_status_v3(status): self.closed = true
+        status
+
+    pub me abort() -> CacheNamespaceCommitStatusV3:
+        if self.closed: return CacheNamespaceCommitStatusV3.Invalid
+        val status = cache_host_namespace_abort_v3(self.host_scope)
+        if _gc_scope_terminal_status_v3(status): self.closed = true
+        status
+
+fn _gc_scope_terminal_status_v3(status: CacheNamespaceCommitStatusV3) -> bool:
+    match status:
+        case CacheNamespaceCommitStatusV3.Committed: true
+        case _: false
+
+fn _gc_ascii_token_v3(value: text) -> bool:
+    if value == "" or value.len() > 256: return false
+    for byte in value.bytes():
+        val code = byte.to_i64()
+        if not ((code >= 48 and code <= 57) or
+                (code >= 65 and code <= 90) or
+                (code >= 97 and code <= 122) or
+                code == 45 or code == 46 or code == 95):
+            return false
+    true
+
+fn _gc_canonical_nonnegative_i64_v3(value: text) -> i64?:
+    if value == "" or (value.len() > 1 and value[0] == '0'): return nil
+    val parsed = value.to_i64() ?? -1
+    if parsed < 0 or parsed.to_string() != value: return nil
+    Some(parsed)
+
+fn _gc_object_identity_valid_v3(kind: text, schema: i64,
+        digest: text) -> bool:
+    _gc_ascii_token_v3(kind) and schema >= 0 and
+        verified_cas_kind_known_v1(kind) and
+        verified_cas_kind_schema_v1(kind) == schema and
+        sha256_lower_hex_valid(digest)
+
+fn _gc_protection_reason_valid_v3(reason: text) -> bool:
+    reason == "lease_artifact" or reason == "reader_object" or
+        reason == "explicit_pin" or reason == "recovery_root"
+
+fn _gc_root_record_v3(member: CacheCooperativeNamespaceGcRootMemberV3) -> text:
+    match member.member_kind:
+        case CacheCooperativeNamespaceGcRootKindV3.GenerationRoot:
+            "G\n" + member.generation.to_string() + "\n" +
+                member.object_kind + "\n" + member.schema.to_string() + "\n" +
+                member.digest + "\n"
+        case CacheCooperativeNamespaceGcRootKindV3.ProtectedObject:
+            "O\n" + member.object_kind + "\n" + member.schema.to_string() +
+                "\n" + member.digest + "\n" + member.protection_reason + "\n"
+
+pub fn cache_cooperative_namespace_gc_root_union_decode_v3(
+    encoded: [u8],
+    max_roots: i64,
+) -> Result<CacheCooperativeNamespaceGcRootUnionV3, text>:
+    if (max_roots <= 0 or
+            max_roots > CACHE_COOPERATIVE_NAMESPACE_GC_MAX_CONTRIBUTORS_V1 or
+            encoded.len() > CACHE_COOPERATIVE_NAMESPACE_GC_MAX_ROOT_STREAM_BYTES_V3):
+        return Err("namespace root stream bound is invalid")
+    val decoded = validated_utf8_bytes_to_text_linear(encoded)
+    val wire = match decoded:
+        case Ok(value): value
+        case Err(_): return Err("namespace root stream is not canonical UTF-8")
+    val lines = wire.split("\n")
+    if lines.len() < 3 or lines[0] != CACHE_COOPERATIVE_NAMESPACE_GC_ROOT_STREAM_MAGIC_V3:
+        return Err("namespace root stream header is invalid")
+    val declared = match _gc_canonical_nonnegative_i64_v3(lines[1]):
+        case Some(value): value
+        case nil: return Err("namespace root count is not canonical")
+    if declared > max_roots or lines.len() != 3 + declared * 5 or
+            lines[lines.len() - 1] != "":
+        return Err("namespace root stream count is inconsistent")
+    var members: [CacheCooperativeNamespaceGcRootMemberV3] = []
+    var generation_roots: [VerifiedGenerationRootV1] = []
+    var protected_objects: [VerifiedCasTypedIdentityV1] = []
+    var line_index: i64 = 2
+    var previous_record = ""
+    while members.len() < declared:
+        val tag = lines[line_index]
+        val member = if tag == "G":
+            val generation = match _gc_canonical_nonnegative_i64_v3(
+                    lines[line_index + 1]):
+                case Some(value): value
+                case nil: return Err("generation root generation is invalid")
+            val schema = match _gc_canonical_nonnegative_i64_v3(
+                    lines[line_index + 3]):
+                case Some(value): value
+                case nil: return Err("generation root schema is invalid")
+            if lines[line_index + 2] != "generation_manifest" or
+                    not _gc_object_identity_valid_v3(lines[line_index + 2], schema,
+                        lines[line_index + 4]):
+                return Err("generation root identity is invalid")
+            val result = CacheCooperativeNamespaceGcRootMemberV3(
+                member_kind: CacheCooperativeNamespaceGcRootKindV3.GenerationRoot,
+                generation: generation, object_kind: lines[line_index + 2],
+                schema: schema, digest: lines[line_index + 4],
+                protection_reason: "")
+            generation_roots.push(VerifiedGenerationRootV1(
+                generation: generation, manifest_digest: result.digest))
+            result
+        elif tag == "O":
+            val schema = match _gc_canonical_nonnegative_i64_v3(
+                    lines[line_index + 2]):
+                case Some(value): value
+                case nil: return Err("protected root schema is invalid")
+            if (not _gc_object_identity_valid_v3(lines[line_index + 1], schema,
+                    lines[line_index + 3]) or
+                    not _gc_protection_reason_valid_v3(lines[line_index + 4])):
+                return Err("protected root identity or reason is invalid")
+            val result = CacheCooperativeNamespaceGcRootMemberV3(
+                member_kind: CacheCooperativeNamespaceGcRootKindV3.ProtectedObject,
+                generation: -1, object_kind: lines[line_index + 1],
+                schema: schema, digest: lines[line_index + 3],
+                protection_reason: lines[line_index + 4])
+            protected_objects.push(VerifiedCasTypedIdentityV1(
+                kind: result.object_kind, digest: result.digest))
+            result
+        else:
+            return Err("namespace root tag is invalid")
+        val canonical_record = _gc_root_record_v3(member)
+        if previous_record != "" and canonical_record <= previous_record:
+            return Err("namespace roots are not strictly sorted and unique")
+        previous_record = canonical_record
+        members.push(member)
+        line_index = line_index + 5
+    Ok(CacheCooperativeNamespaceGcRootUnionV3(
+        members: members, generation_roots: generation_roots,
+        protected_objects: protected_objects, canonical_bytes: encoded))
+
+pub fn cache_cooperative_namespace_gc_begin_scope_v3(
+    namespace_authority: CacheNamespaceAuthorityV3,
+    expected_head: CacheNamespaceExpectedHeadV3,
+    contributions: CacheCooperativeNamespaceGcContributionsV1,
+    max_roots: i64,
+    max_page_bytes: i64,
+) -> Result<CacheCooperativeNamespaceGcScopeOwnerV3,
+            CacheCooperativeNamespaceGcBridgeFailureV3>:
+    if (not cache_cooperative_namespace_gc_union_complete_v1(contributions) or
+            contributions.namespace_generation != contributions.expected_generation or
+            contributions.expected_writer_incarnation !=
+                contributions.observed_writer_incarnation or
+            max_roots <= 0 or max_roots >
+                CACHE_COOPERATIVE_NAMESPACE_GC_MAX_CONTRIBUTORS_V1 or
+            max_page_bytes <= 0 or max_page_bytes > 1048576):
+        return Err(CacheCooperativeNamespaceGcBridgeFailureV3.InvalidPreflight)
+    if not cache_cooperative_namespace_gc_host_issuance_available_v1():
+        return Err(CacheCooperativeNamespaceGcBridgeFailureV3.HostUnavailable)
+    val scope = cache_host_namespace_begin_v3(namespace_authority,
+        CacheNamespaceModeV3.Collect, expected_head, nil)
+    match scope:
+        case Ok(value): Ok(CacheCooperativeNamespaceGcScopeOwnerV3(
+            host_scope: value, max_roots: max_roots,
+            max_page_bytes: max_page_bytes, root_union: nil, closed: false))
+        case Err(_): Err(CacheCooperativeNamespaceGcBridgeFailureV3.HostRejected)
+
+# Root pages are diagnostic/retention inputs until a live semantic owner can
+# prove transitive closure for both G and O roots while this scope stays held.
+# Copied closure receipts never enable the descriptor-unlink calls.
+pub fn cache_cooperative_namespace_gc_semantic_delete_available_v3() -> bool:
+    false
+
+# L7/L8 dependency port. Until an authentic live namespace owner is bound,
+# the only implementation is closed. Diagnostic root pages cannot become
+# deletion authority through this boundary.
+pub trait L78NamespacePortV4:
+    me begin(mode: CacheNamespaceModeV3,
+        expected: CacheNamespaceExpectedHeadV3,
+        attempt: L78AttemptKeyV4,
+        limits: L78LimitsV4,
+        ) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>
+    me roots(token: L78OwnerTokenV4
+        ) -> Result<CacheCooperativeNamespaceGcRootUnionV3, L78BoundaryErrorV4>
+    me closure(token: L78OwnerTokenV4
+        ) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>
+    me finish(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>
+    me abort(token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>
+
+pub struct L78ClosedNamespacePortV4:
+    reason: text
+
+impl L78NamespacePortV4 for L78ClosedNamespacePortV4:
+    me begin(_mode: CacheNamespaceModeV3,
+        _expected: CacheNamespaceExpectedHeadV3,
+        _attempt: L78AttemptKeyV4,
+        _limits: L78LimitsV4,
+        ) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me roots(_token: L78OwnerTokenV4
+        ) -> Result<CacheCooperativeNamespaceGcRootUnionV3, L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me closure(_token: L78OwnerTokenV4
+        ) -> Result<L78OwnerTokenV4, L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me finish(_token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+    me abort(_token: L78OwnerTokenV4) -> Result<(), L78BoundaryErrorV4>:
+        Err(L78BoundaryErrorV4.Unavailable)
+
+pub fn l78_closed_namespace_port_v4(reason: text) -> L78ClosedNamespacePortV4:
+    L78ClosedNamespacePortV4(reason: reason)
+
+pub fn l78_capture_roots_with_port_v4<P: L78NamespacePortV4>(
+    owner: P,
+    token: L78OwnerTokenV4,
+) -> L78OwnedResultV4<P, CacheCooperativeNamespaceGcRootUnionV3>:
+    val outcome = owner.roots(token)
+    L78OwnedResultV4<P, CacheCooperativeNamespaceGcRootUnionV3>(
+        owner: owner, outcome: outcome)
+
+# The remaining four owner-returning runners complete section 8.4's port.
+# Each one only carries the port's own verdict out with the updated owner: the
+# generation, lease, slot and bounds decisions belong to the issuer behind the
+# trait, never to a local copied field, domain enum or positive-integer check
+# here.  The caller must retain the returned owner on every branch, including
+# Unknown, so outstanding namespace and closure tokens stay live.
+
+pub fn l78_begin_namespace_with_port_v4<P: L78NamespacePortV4>(
+    owner: P,
+    mode: CacheNamespaceModeV3,
+    expected: CacheNamespaceExpectedHeadV3,
+    attempt: L78AttemptKeyV4,
+    limits: L78LimitsV4,
+) -> L78OwnedResultV4<P, L78OwnerTokenV4>:
+    val outcome = owner.begin(mode, expected, attempt, limits)
+    L78OwnedResultV4<P, L78OwnerTokenV4>(owner: owner, outcome: outcome)
+
+pub fn l78_closure_with_port_v4<P: L78NamespacePortV4>(
+    owner: P,
+    token: L78OwnerTokenV4,
+) -> L78OwnedResultV4<P, L78OwnerTokenV4>:
+    val outcome = owner.closure(token)
+    L78OwnedResultV4<P, L78OwnerTokenV4>(owner: owner, outcome: outcome)
+
+pub fn l78_finish_with_port_v4<P: L78NamespacePortV4>(
+    owner: P,
+    token: L78OwnerTokenV4,
+) -> L78OwnedResultV4<P, ()>:
+    val outcome = owner.finish(token)
+    L78OwnedResultV4<P, ()>(owner: owner, outcome: outcome)
+
+pub fn l78_abort_with_port_v4<P: L78NamespacePortV4>(
+    owner: P,
+    token: L78OwnerTokenV4,
+) -> L78OwnedResultV4<P, ()>:
+    val outcome = owner.abort(token)
+    L78OwnedResultV4<P, ()>(owner: owner, outcome: outcome)
+
+pub fn cache_cooperative_namespace_gc_contributions_valid_v1(
+    contributions: CacheCooperativeNamespaceGcContributionsV1,
+) -> bool:
+    if (contributions.namespace_generation < 0 or
+            contributions.expected_generation < 0 or
+            contributions.expected_writer_incarnation < 0 or
+            contributions.observed_writer_incarnation < 0 or
+            contributions.root_owner_count < 0 or
+            contributions.reader_domain_count < 0 or
+            contributions.lease_contributor_count < 0 or
+            contributions.explicit_pin_contributor_count < 0):
+        return false
+    contributions.root_owner_count <= 1 and
+        contributions.reader_domain_count <= CACHE_COOPERATIVE_NAMESPACE_GC_MAX_CONTRIBUTORS_V1 and
+        contributions.lease_contributor_count <= CACHE_COOPERATIVE_NAMESPACE_GC_MAX_CONTRIBUTORS_V1 and
+        contributions.explicit_pin_contributor_count <= CACHE_COOPERATIVE_NAMESPACE_GC_MAX_CONTRIBUTORS_V1
+
+pub fn cache_cooperative_namespace_gc_union_complete_v1(
+    contributions: CacheCooperativeNamespaceGcContributionsV1,
+) -> bool:
+    cache_cooperative_namespace_gc_contributions_valid_v1(contributions) and
+        contributions.root_owner_count == 1 and
+        contributions.root_set_complete and
+        contributions.reader_domains_complete and
+        contributions.lease_set_complete and
+        contributions.explicit_pin_set_complete
+
+# The V3 availability probe is a host-backed call.  A host that does not
+# export it is not merely "not committed": reaching the probe at all aborts
+# the caller with an unknown extern.  This private wrapper is the ONLY site
+# that touches it, so every reader has to pass the checked capability below
+# first and an absent host stays fail-closed instead of aborting.
+fn _gc_raw_host_namespace_probe_v3() -> CacheNamespaceCommitStatusV3:
+    cache_host_namespace_available_v3()
+
+# Checked capability: the namespace host probe may be reached only when the
+# additive host prerequisite inventory is complete AND physically qualified.
+# Presence of an API shape is not authority; this predicate only decides
+# whether asking the host is safe, never whether the answer grants anything.
+pub fn cache_cooperative_namespace_gc_host_probe_reachable_v1() -> bool:
+    cache_cooperative_namespace_host_prerequisite_available_v1()
+
+# L7/L8 boundary form of the same capability.  An unreachable probe and a
+# reachable-but-uncommitted host are both `Unavailable`; no other boundary
+# error can be produced here, because no request has been validated yet.
+pub fn l78_namespace_host_capability_v4() -> Result<(), L78BoundaryErrorV4>:
+    if not cache_cooperative_namespace_gc_host_probe_reachable_v1():
+        return Err(L78BoundaryErrorV4.Unavailable)
+    match _gc_raw_host_namespace_probe_v3():
+        case CacheNamespaceCommitStatusV3.Committed: Ok(())
+        case _: Err(L78BoundaryErrorV4.Unavailable)
+
+pub fn cache_cooperative_namespace_gc_host_issuance_available_v1() -> bool:
+    l78_namespace_host_capability_v4().is_ok()
+
+pub fn cache_cooperative_namespace_gc_begin_authority_available_v1() -> bool:
+    cache_cooperative_namespace_gc_host_issuance_available_v1()
+
+# The compatibility route owns no namespace handle, so copied claims remain
+# unavailable even when a qualified V3 provider is installed.
+pub fn cache_cooperative_namespace_gc_begin_authority_v1(
+    contributions: CacheCooperativeNamespaceGcContributionsV1,
+) -> Result<(), CacheCooperativeNamespaceGcBeginFailureV1>:
+    if not cache_cooperative_namespace_gc_contributions_valid_v1(contributions):
+        return Err(CacheCooperativeNamespaceGcBeginFailureV1.InvalidContributionBounds)
+    if contributions.namespace_generation != contributions.expected_generation:
+        return Err(CacheCooperativeNamespaceGcBeginFailureV1.StaleGeneration)
+    if contributions.expected_writer_incarnation != contributions.observed_writer_incarnation:
+        return Err(CacheCooperativeNamespaceGcBeginFailureV1.StaleWriter)
+    if not cache_cooperative_namespace_gc_union_complete_v1(contributions):
+        return Err(CacheCooperativeNamespaceGcBeginFailureV1.IncompleteNamespaceUnion)
+    # Copied claims never carry the V3 namespace capability. Callers that own
+    # that capability use cache_cooperative_namespace_gc_begin_scope_v3.
+    Err(CacheCooperativeNamespaceGcBeginFailureV1.HostNamespaceIssuanceUnavailable)
+
+# Writer integration must use this closed gate in addition to its existing
+# durable-head handle; it must never substitute a receipt digest for a future
+# issuer-owned capability.
+pub fn cache_cooperative_namespace_gc_begin_available_v2() -> bool:
+    cache_cooperative_namespace_gc_begin_authority_available_v1()

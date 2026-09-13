@@ -1,4 +1,5 @@
 # Bootstrap-seed LLVM backend: `mcall_direct` emits wrong argument count → whole-compiler LLVM build fails verification
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/backend/llvm_call_arity_reconcile_spec.spl -> 2 passed, 0 failed)
 
 Current status (2026-07-17): the `mcall_direct` arity defect is fixed. The
 remaining LLVM bootstrap blocker is local/generic binding provenance before
@@ -320,3 +321,6 @@ The remaining `args`, `T`, and `count` captures require binding provenance:
 destructured locals must remain MIR locals and active generics must not lower
 as runtime globals. No Stage 2 binary was produced; the next session must fix
 that frontend/MIR metadata boundary rather than add another name heuristic.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/backend/llvm_call_arity_reconcile_spec.spl` on the deployed seed; the spec now passes in full (2/2), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

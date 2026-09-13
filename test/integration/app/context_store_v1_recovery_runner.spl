@@ -1,0 +1,193 @@
+use app.io.context_store_v1.{ContextPackV1, ContextStoreV1, ContextStoreErrorV1}
+use std.database.pure_sql.{PureDatabase}
+use std.database.sql.types.{DbValue}
+use std.io_runtime.{file_read, file_write}
+
+extern fn rt_cli_get_args() -> [text]
+
+fn args() -> [text]:
+    rt_cli_get_args() ?? []
+
+fn seed_rows() -> [ContextPackV1]:
+    [
+        ContextPackV1(id: 7, source: "src/z.spl", target: "zeta", status: "ready",
+            lines: 2, token_estimate: 5, content: "z|quote='\t雪"),
+        ContextPackV1(id: 2, source: "src/a.spl", target: "alpha", status: "ready",
+            lines: 1, token_estimate: 1, content: "alpha")
+    ]
+
+fn run_write(path: text):
+    var store = ContextStoreV1.open(path).unwrap()
+    if store.replace_all(seed_rows()).is_err():
+        panic("context writer replacement failed")
+    if store.put(ContextPackV1(id: 0, source: "src/m.spl", target: "middle",
+        status: "ready", lines: 1, token_estimate: 1, content: "middle")).is_err():
+        panic("context writer allocation failed")
+    if store.close().is_err():
+        panic("context writer close failed")
+    print "CONTEXT_STORE_WRITER_COMMITTED rows=3"
+
+fn run_read(path: text):
+    val store = ContextStoreV1.open(path).unwrap()
+    val rows = store.query_literal("src/").unwrap()
+    if rows.len() != 3:
+        panic("context reader row count changed")
+    if rows[0].id != 2 or rows[1].id != 7 or rows[2].id != 8:
+        panic("context reader IDs were not recovered in order")
+    if rows[1].content != "z|quote='\t雪":
+        panic("context reader content changed")
+    if store.get_exact("src/m.spl").unwrap()[0].target != "middle":
+        panic("context reader allocated row changed")
+    print "CONTEXT_STORE_READER_REOPENED rows={rows.len()} ids={rows[0].id},{rows[1].id},{rows[2].id}"
+
+fn run_conflict(path: text):
+    val store = ContextStoreV1.open(path).unwrap()
+    val conflict = store.put(ContextPackV1(id: 7, source: "src/other.spl",
+        target: "other", status: "ready", lines: 1, token_estimate: 1,
+        content: "other"))
+    if not conflict.is_err() or conflict.unwrap_err() != ContextStoreErrorV1.DuplicateIdentity:
+        panic("explicit identity conflict was accepted")
+    if store.query_literal("src/").unwrap().len() != 3:
+        panic("identity conflict changed the durable image")
+    val max_store = ContextStoreV1.open(path + ".max").unwrap()
+    if max_store.replace_all([ContextPackV1(id: 9223372036854775807,
+        source: "max", target: "max", status: "ready", lines: 1,
+        token_estimate: 1, content: "max")]).is_err():
+        panic("maximum identity was not persisted")
+    val overflow = max_store.put(ContextPackV1(id: 0, source: "overflow",
+        target: "overflow", status: "ready", lines: 1, token_estimate: 1,
+        content: "overflow"))
+    if not overflow.is_err() or overflow.unwrap_err() != ContextStoreErrorV1.InvalidIdentity:
+        panic("identity generation overflow was accepted")
+    max_store.close()
+    store.close()
+    print "CONTEXT_STORE_CONFLICT_REFUSED generation=9223372036854775807"
+
+fn run_reject(path: text, expected: text):
+    val before = file_read(path)
+    if ContextStoreV1.open(path).is_ok():
+        panic("invalid context image was accepted: {expected}")
+    if file_read(path) != before:
+        panic("invalid context image was rewritten: {expected}")
+    print "CONTEXT_STORE_IMAGE_REJECTED kind={expected}"
+
+fn context_schema_sql() -> text:
+    "CREATE TABLE context_packs (id INTEGER PRIMARY KEY, source TEXT, target TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)"
+
+fn install_exact_schema(db: PureDatabase):
+    if db.exec_sql(context_schema_sql()).is_err():
+        panic("failed to create context table fixture")
+
+fn run_malformed(path: text, kind: text):
+    var db = PureDatabase.open(path).unwrap()
+    if kind == "reordered-columns":
+        if db.exec_sql("CREATE TABLE context_packs (id INTEGER PRIMARY KEY, target TEXT, source TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)").is_err():
+            panic("failed to create reordered context table fixture")
+        # Only same-typed source/target positions differ. If physical order
+        # were ignored, this is an otherwise valid sole-table context image.
+        if db.put("context_packs", [
+            DbValue.Integer(value: 7), DbValue.Text(value: "src/reordered.spl"),
+            DbValue.Text(value: "target"), DbValue.Text(value: "ready"),
+            DbValue.Integer(value: 1), DbValue.Integer(value: 1), DbValue.Text(value: "content")
+        ]).is_err():
+            panic("failed to insert reordered context row fixture")
+    elif kind == "wrong-row-type":
+        install_exact_schema(db)
+        if db.put("context_packs", [
+            DbValue.Text(value: "not-an-integer-id"), DbValue.Text(value: "bad"),
+            DbValue.Text(value: "bad"), DbValue.Text(value: "ready"),
+            DbValue.Integer(value: 1), DbValue.Integer(value: 1), DbValue.Text(value: "bad")
+        ]).is_err():
+            panic("failed to create wrong-type row fixture")
+    elif kind == "duplicate-id":
+        install_exact_schema(db)
+        if (db.put("context_packs", [
+            DbValue.Integer(value: 7), DbValue.Text(value: "first"), DbValue.Text(value: "first"),
+            DbValue.Text(value: "ready"), DbValue.Integer(value: 1), DbValue.Integer(value: 1), DbValue.Text(value: "first")
+        ]).is_err() or db.put("context_packs", [
+            DbValue.Integer(value: 7), DbValue.Text(value: "second"), DbValue.Text(value: "second"),
+            DbValue.Text(value: "ready"), DbValue.Integer(value: 1), DbValue.Integer(value: 1), DbValue.Text(value: "second")
+        ]).is_err()):
+            panic("failed to create duplicate-id row fixture")
+    elif kind == "extra-table":
+        install_exact_schema(db)
+        if db.exec_sql("CREATE TABLE unrelated_context_data (id INTEGER PRIMARY KEY, value TEXT)").is_err():
+            panic("failed to create extra-table fixture")
+    elif kind == "wrong-declared-type":
+        if db.exec_sql("CREATE TABLE context_packs (id TEXT PRIMARY KEY, source TEXT, target TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)").is_err():
+            panic("failed to create wrong-declared-type context table fixture")
+        if db.put("context_packs", [
+            DbValue.Integer(value: 7), DbValue.Text(value: "src/type.spl"),
+            DbValue.Text(value: "target"), DbValue.Text(value: "ready"),
+            DbValue.Integer(value: 1), DbValue.Integer(value: 1), DbValue.Text(value: "content")
+        ]).is_err():
+            panic("failed to create wrong-declared-type row fixture")
+    elif kind == "wrong-primary-key":
+        if db.exec_sql("CREATE TABLE context_packs (id INTEGER, source TEXT PRIMARY KEY, target TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)").is_err():
+            panic("failed to create wrong-primary-key context table fixture")
+        if db.put("context_packs", [
+            DbValue.Integer(value: 7), DbValue.Text(value: "src/pk.spl"),
+            DbValue.Text(value: "target"), DbValue.Text(value: "ready"),
+            DbValue.Integer(value: 1), DbValue.Integer(value: 1), DbValue.Text(value: "content")
+        ]).is_err():
+            panic("failed to create wrong-primary-key row fixture")
+    else:
+        panic("unknown malformed context fixture")
+    if db.close().is_err():
+        panic("failed to publish malformed context fixture")
+    run_reject(path, kind)
+
+fn run_corrupt(path: text, kind: text):
+    var store = ContextStoreV1.open(path).unwrap()
+    if (store.put(ContextPackV1(id: 0, source: "src/base.spl", target: "base",
+        status: "ready", lines: 1, token_estimate: 1, content: "base")).is_err() or
+            store.close().is_err()):
+        panic("failed to publish valid v3 corruption base")
+    val valid = file_read(path)
+    if not valid.starts_with("simple-pure-db-v3\n"):
+        panic("corruption base was not v3")
+    var damaged = valid
+    if kind == "checksum":
+        var lines = valid.split("\n")
+        if lines.len() < 4 or lines[2].len() != 64:
+            panic("valid v3 base lacks checksum envelope")
+        val replacement = if lines[2].starts_with("f"): "0" else: "f"
+        lines[2] = replacement + lines[2].slice(1, lines[2].len())
+        damaged = lines.join("\n")
+    elif kind == "truncated":
+        if valid.len() < 2:
+            panic("valid v3 base is too short to truncate")
+        damaged = valid.slice(0, valid.len() - 1)
+    else:
+        panic("unknown valid-v3 corruption fixture")
+    if not file_write(path, damaged):
+        panic("failed to mutate valid v3 corruption fixture")
+    run_reject(path, kind)
+
+fn run_busy(path: text):
+    if ContextStoreV1.open(path).is_ok():
+        panic("second ContextStore owner was admitted")
+    print "CONTEXT_STORE_OWNER_BUSY"
+
+fn main():
+    val argv = args()
+    if argv.len() < 3:
+        panic("usage: context_store_v1_recovery_runner.spl <write|read|conflict|reject> <path> [label]")
+    val mode = argv[1]
+    val path = argv[2]
+    if mode == "write":
+        run_write(path)
+    elif mode == "read":
+        run_read(path)
+    elif mode == "conflict":
+        run_conflict(path)
+    elif mode == "reject" and argv.len() == 4:
+        run_reject(path, argv[3])
+    elif mode == "malformed" and argv.len() == 4:
+        run_malformed(path, argv[3])
+    elif mode == "corrupt" and argv.len() == 4:
+        run_corrupt(path, argv[3])
+    elif mode == "busy":
+        run_busy(path)
+    else:
+        panic("invalid context store recovery arguments")

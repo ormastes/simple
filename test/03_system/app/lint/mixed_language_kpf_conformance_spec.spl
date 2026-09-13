@@ -1,0 +1,79 @@
+# Purpose and audience: executable mixed-language KPF lint truth and mutation evidence.
+# @req REQ-KPF-009
+# @cover src/lib/common/lint_kernel/mixed_language.spl 80%
+# @cover src/app/lint/mixed_language.spl 80%
+# @tag: system, lint, kpf, mixed_language, mutation
+
+use std.spec.{describe, it, expect}
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use common.lint_kernel.model.LintVerdict
+use common.lint_kernel.mixed_language.{LintLanguageExpectationV1, lint_merge_language_results_v1}
+use app.lint.mixed_language.{simple_lint_language_result_v1, rust_lint_language_result_v1, cpp_lint_language_result_v1}
+use app.lint.provider.rust.worker.{RustLintToolV1, RustLintWorkerConfigV1, run_rust_lint_worker}
+use app.lint.provider.cpp.worker.{cpp_lint_worker_default_limits_v1, run_cpp_lint_worker_v1}
+use app.lint.provider.cpp.model.CppToolchainFingerprintV1
+
+fn id(value: u64) -> KpfId128:
+    KpfId128(0, value)
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(value, value + 1, value + 2, value + 3)
+
+fn expectations() -> [LintLanguageExpectationV1]:
+    [
+        LintLanguageExpectationV1(id(1), 1, 2, 3),
+        LintLanguageExpectationV1(id(2), 1, 1, 5),
+        LintLanguageExpectationV1(id(3), 1, 1, 9),
+    ]
+
+fn rust_config() -> RustLintWorkerConfigV1:
+    RustLintWorkerConfigV1(
+        workspace_root: "test/fixtures/app/lint/rust_worker/workspace",
+        cargo_path: "test/fixtures/app/lint/rust_worker/bin/cargo",
+        rustc_path: "test/fixtures/app/lint/rust_worker/bin/rustc",
+        clippy_path: "test/fixtures/app/lint/rust_worker/bin/clippy-driver",
+        target: "aarch64-unknown-linux-gnu",
+        features: "demo",
+        timeout_ms: 5000,
+        maximum_output_bytes: 16384,
+        maximum_diagnostics: 8,
+        tool: RustLintToolV1.Clippy,
+    )
+
+fn cpp_database() -> text:
+    "[{\"directory\":\"/workspace\",\"file\":\"/workspace/a.cc\",\"arguments\":[\"clang++\",\"-std=c++20\",\"-c\",\"a.cc\"],\"configuration_id\":\"debug\"}]"
+
+fn cpp_toolchain() -> CppToolchainFingerprintV1:
+    CppToolchainFingerprintV1("clang-tidy", "20.1.0", "arm64-apple-darwin", "/toolchain/lib/clang/20", digest(90))
+
+fn language_results():
+    val simple = simple_lint_language_result_v1(id(1), id(11), LintVerdict.CompleteClean, 1, 2, 3, 0, 0, 0, digest(101))
+    val rust_receipt = run_rust_lint_worker(rust_config(), false)
+    val rust = rust_lint_language_result_v1(id(2), id(12), rust_receipt, 1, 5, digest(102))
+    val cpp_run = run_cpp_lint_worker_v1(cpp_database(), "/workspace/build/compile_commands.json", "/workspace/a.cc", "debug", "test/01_unit/app/lint/provider/cpp/fixtures/fake_clang_tidy_wrapper.shs", 7, cpp_toolchain(), cpp_lint_worker_default_limits_v1())
+    val cpp = cpp_lint_language_result_v1(id(3), id(13), cpp_run.result, 1, 9, digest(103))
+    [simple, rust, cpp]
+
+describe "mixed Simple Rust and C++ KPF lint conformance":
+    it "executes all language providers and merges findings deterministically":
+        val result = lint_merge_language_results_v1(expectations(), language_results(), digest(200))
+        expect(result.verdict).to_equal(LintVerdict.CompleteWithFindings)
+        expect(result.coverage.requested_unit_count).to_equal(3)
+        expect(result.coverage.completed_unit_count).to_equal(3)
+        expect(result.coverage.requested_rule_count).to_equal(4)
+        expect(result.coverage.completed_rule_count).to_equal(4)
+        expect(result.diagnostic_count).to_equal(2)
+
+    it "rejects the mutation that omits one required language provider":
+        val all_results = language_results()
+        val result = lint_merge_language_results_v1(expectations(), [all_results[0], all_results[1]], digest(200))
+        expect(result.verdict).to_equal(LintVerdict.NotAnalyzed)
+        expect(result.coverage.not_analyzed_unit_count).to_equal(1)
+        expect(result.coverage.skipped_rule_count).to_equal(1)
+
+    it "rejects the mutation that strips provider authority evidence":
+        val all_results = language_results()
+        var cpp = all_results[2]
+        cpp.authoritative = false
+        val result = lint_merge_language_results_v1(expectations(), [all_results[0], all_results[1], cpp], digest(200))
+        expect(result.verdict).to_equal(LintVerdict.Failed)

@@ -1,5 +1,7 @@
 # 22 kernel functions are `use`-imported but defined nowhere in the tree
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 **Filed** 2026-09-01 · **Status** OPEN (routed around, not fixed) · **Severity** high
 
 ## Symptom
@@ -47,3 +49,6 @@ Implement or delete each. A `use` of a name the target module does not export
 should be a resolve-time error, not a link-time undefined symbol -- that check is
 the real fix, since it makes the whole class visible at once instead of one
 lane's closure at a time.
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

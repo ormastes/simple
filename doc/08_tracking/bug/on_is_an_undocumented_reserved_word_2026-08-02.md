@@ -52,3 +52,24 @@ The grammar position that consumes `on` was not identified — it does not appea
 as a keyword string in the pure-Simple lexer or in
 `src/compiler_rust/compiler/src/lexer/token.rs` under a plain `"on"` match, so
 whatever introduces the `On` token is indirect. Finding it is part of the fix.
+
+## Re-check 2026-09-13
+
+Not reproducible: `val on = 1` now parses and runs cleanly on the deployed
+seed:
+
+```
+fn main() -> i64:
+    val on = 1
+    print "{on}"
+    0
+```
+prints `1`. `on` is no longer hard-reserved — confirmed in source too:
+`src/compiler/10.frontend/core/tokens.spl:436-441` explicitly documents `on`
+as NOT globally reserved (fixed by a prior bug,
+`doc/08_tracking/bug/aop_on_hard_keyword_blocks_identifier_2026-07-25.md`),
+recognized as a soft keyword only at the module-body AOP-advice dispatch
+site (`current_ident_is_on_advice_decl()` in `enum_module_body.spl`), exactly
+resolution option 1 this doc requested ("make `on` a soft keyword").
+
+- Status: CLOSED (2026-09-13) — already fixed (prior bug aop_on_hard_keyword_blocks_identifier_2026-07-25), verified not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)

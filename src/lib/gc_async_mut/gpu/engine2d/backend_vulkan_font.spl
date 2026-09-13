@@ -3,20 +3,37 @@
 
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_subrect_pixels, font_destination_origin}
 use std.common.crypto.sha256.{sha256_u8_hex}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind, vulkan_classify_error}
-use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_order_trace, vulkan_order_trace_enabled}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanErrorKind, vulkan_classify_error,
+    VulkanFontAtlasMirror, VULKAN_FONT_ATLAS_MIRROR_MAX,
+    vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add,
+    vulkan_timing_note, VK_T_FONT_COMPOSITE, VK_T_FONT_ATLAS_BUILD,
+    VK_T_FONT_ATLAS_PACK, VK_T_FONT_ATLAS_UPLOAD, VK_T_FONT_ATLAS_DIGEST,
+    VK_T_FONT_PACKED_PARAMS, VK_T_FONT_QUAD_VALIDATE, VK_T_FONT_OWNER_IDENTITY,
+    vulkan_font_dirty_note, vulkan_font_pack_note,
+    vulkan_font_selfcheck_enabled, vulkan_font_payload_digest_full,
+    vulkan_font_overlap_enabled, vulkan_font_overlap_note,
+    vulkan_font_mirror_note, vulkan_font_decision_note,
+    vulkan_font_per_owner_mirror_enabled}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_order_trace, vulkan_order_trace_enabled,
+    vulkan_font_mirror_continuity, VK_FONT_MIRROR_FULL, VK_FONT_MIRROR_INCREMENTAL,
+    VK_FONT_MIRROR_ALREADY_TRUTH,
+    vulkan_font_atlas_slot_plan, VK_FONT_SLOT_REUSE_NO_WRITE,
+    VK_FONT_SLOT_WRITE_IN_PLACE, VK_FONT_SLOT_WRITE_FRESH,
+    VK_FONT_SLOT_FLUSH_THEN_WRITE, vulkan_font_atlas_slot_sabotage,
+    vulkan_font_upload_u32_requested, vulkan_font_upload_note}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence, VulkanFontCompositeEvidence}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_spirv.{FONT_ATLAS_COMPOSITE_VULKAN_SPIRV_SHA256}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad, FontExecutionPolicy, font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity}
 use std.gpu.engine2d.helpers_text.{text_metrics}
 use std.gpu.engine2d.glyph.{glyph_data}
-use std.common.string_core.{char_from_code}
+use std.common.string_core.{char_from_code, text_to_utf8_bytes}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
-    vulkan_sffi_copy_to_buffer, vulkan_sffi_read_buffer_bytes,
+    vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_u32,
+    vulkan_sffi_read_buffer_bytes,
     vulkan_sffi_create_descriptor_set, vulkan_sffi_bind_buffer,
     vulkan_sffi_destroy_descriptor_set, vulkan_sffi_begin_compute,
     vulkan_sffi_bind_pipeline, vulkan_sffi_bind_descriptors,
@@ -68,14 +85,9 @@ fn vulkan_font_atlas_composite_params(atlas_width: i32, atlas_height: i32, atlas
                                       atlas_x: i32, atlas_y: i32, quad_width: i32, quad_height: i32,
                                       dst_width: i32, dst_height: i32, dst_count: i64,
                                       dst_x: i32, dst_y: i32, color: u32) -> [u8]:
-    val atlas_product = atlas_width.to_i64() * atlas_height.to_i64()
-    val quad_product = quad_width.to_i64() * quad_height.to_i64()
-    val dst_product = dst_width.to_i64() * dst_height.to_i64()
-    if (atlas_width <= 0 or atlas_height <= 0 or quad_width <= 0 or quad_height <= 0 or
-        dst_width <= 0 or dst_height <= 0 or atlas_count != atlas_product or dst_count != dst_product or
-        atlas_count > 2147483647 or dst_count > 2147483647 or quad_product <= 0 or quad_product > 2147483647 or
-        atlas_x < 0 or atlas_y < 0 or atlas_x > atlas_width or atlas_y > atlas_height or
-        quad_width > atlas_width - atlas_x or quad_height > atlas_height - atlas_y):
+    if not _vulkan_font_atlas_composite_params_valid(
+        atlas_width, atlas_height, atlas_count, atlas_x, atlas_y, quad_width,
+        quad_height, dst_width, dst_height, dst_count):
         return []
     var p: [u8] = [0u8; VULKAN_FONT_PARAMS_BYTES]
     var off = 0
@@ -84,6 +96,20 @@ fn vulkan_font_atlas_composite_params(atlas_width: i32, atlas_height: i32, atlas
     for value in values:
         off = _vulkan_font_pack_i32_le(p, off, value)
     p
+
+fn _vulkan_font_atlas_composite_params_valid(atlas_width: i32, atlas_height: i32,
+                                              atlas_count: i64, atlas_x: i32,
+                                              atlas_y: i32, quad_width: i32,
+                                              quad_height: i32, dst_width: i32,
+                                              dst_height: i32, dst_count: i64) -> bool:
+    val atlas_product = atlas_width.to_i64() * atlas_height.to_i64()
+    val quad_product = quad_width.to_i64() * quad_height.to_i64()
+    val dst_product = dst_width.to_i64() * dst_height.to_i64()
+    not (atlas_width <= 0 or atlas_height <= 0 or quad_width <= 0 or quad_height <= 0 or
+        dst_width <= 0 or dst_height <= 0 or atlas_count != atlas_product or dst_count != dst_product or
+        atlas_count > 2147483647 or dst_count > 2147483647 or quad_product <= 0 or quad_product > 2147483647 or
+        atlas_x < 0 or atlas_y < 0 or atlas_x > atlas_width or atlas_y > atlas_height or
+        quad_width > atlas_width - atlas_x or quad_height > atlas_height - atlas_y)
 
 fn vulkan_font_dispatch_groups(pixel_count: i64) -> i64:
     if pixel_count <= 0 or pixel_count > 2147483647:
@@ -186,6 +212,192 @@ fn _vulkan_font_pixels_to_bytes(pixels: [u32]) -> [u8]:
 # no native byte-buffer SHA-256 extern registered for the interpreter, so
 # routing to native would mean adding one across the Rust seed; that is a
 # separate lane. Externally measured: 4 MB atlas 3.91 s vs ~10 min before.
+fn vulkan_font_count_overlapping_quads(quads: [FontRenderQuad]) -> i64:
+    """Ordered pairs of quads in ONE batch whose destination rects intersect.
+
+    Destination coordinates only: the kernel's race is on `dst[di]`, so two
+    quads sharing an ATLAS region are irrelevant and two sharing a destination
+    pixel are the whole question. Rect intersection is exact, not a bounding-box
+    approximation -- a `FontRenderQuad`'s destination IS an axis-aligned rect.
+
+    The origin offset is deliberately NOT applied: it is one constant added to
+    every quad in the batch, so it cannot change whether two of them intersect.
+    """
+    var pairs: i64 = 0
+    var i: i64 = 0
+    val n = quads.len().to_i64()
+    while i < n:
+        val a = quads[i]
+        val al = a.dst_x.to_i64()
+        val at = a.dst_y.to_i64()
+        val ar = al + a.width.to_i64()
+        val ab = at + a.height.to_i64()
+        var j = i + 1
+        while j < n:
+            val b = quads[j]
+            val bl = b.dst_x.to_i64()
+            val bt = b.dst_y.to_i64()
+            if al < bl + b.width.to_i64() and bl < ar and at < bt + b.height.to_i64() and bt < ab:
+                pairs = pairs + 1
+            j = j + 1
+        i = i + 1
+    pairs
+
+fn vulkan_font_partition_quads(quads: [FontRenderQuad]) -> [i64]:
+    """Sub-batch index per quad, such that no two quads in one index overlap.
+
+    The packed font kernel blends with a non-atomic read-modify-write on
+    `dst[di]` and runs one invocation per (pixel, glyph), so two quads in the
+    SAME dispatch that share a destination pixel race. Dispatching each index
+    separately fixes that, and soundly: the runtime emits a full
+    `vkCmdPipelineBarrier` after every `vkCmdDispatch`
+    (`interpreter_extern/gpu.rs:5340-5359`), so sub-batches are ordered with
+    respect to each other even though invocations within one are not.
+
+    The rule is `bucket(q) = 1 + max(bucket(p))` over EARLIER overlapping `p`,
+    and it is not interchangeable with first-fit. Given A, B overlapping A, and
+    C overlapping B but not A, first-fit assigns C to bucket 0 -- dispatched
+    BEFORE B, inverting the painter order the CPU raster defines. Taking one
+    past the highest earlier conflict keeps every overlapping pair in its
+    original relative order, which is the property that makes the split a pure
+    cost change rather than a rendering change.
+
+    Returns one index per quad, parallel to `quads`. All-zero (a single
+    sub-batch, today's behaviour byte for byte) whenever nothing overlaps, which
+    is the common case: measured on `css-layout.html`, 900x760 has 19
+    overlapping pairs across 496 quads and 300x253 has none.
+    """
+    var buckets: [i64] = [0; quads.len().to_i64()]
+    var i: i64 = 0
+    val n = quads.len().to_i64()
+    while i < n:
+        val a = quads[i]
+        val al = a.dst_x.to_i64()
+        val at = a.dst_y.to_i64()
+        val ar = al + a.width.to_i64()
+        val ab = at + a.height.to_i64()
+        var want: i64 = 0
+        var j: i64 = 0
+        while j < i:
+            val b = quads[j]
+            val bl = b.dst_x.to_i64()
+            val bt = b.dst_y.to_i64()
+            if al < bl + b.width.to_i64() and bl < ar and at < bt + b.height.to_i64() and bt < ab:
+                if buckets[j] + 1 > want:
+                    want = buckets[j] + 1
+            j = j + 1
+        buckets[i] = want
+        i = i + 1
+    buckets
+
+fn _vulkan_font_status_is_failure(status: text) -> bool:
+    """Did a composite fail to draw? Named as a DENY-list, deliberately.
+
+    The success vocabulary has two members and they are reached by different
+    modes: the pooled frame-batching path returns `"recorded"` (queued into the
+    frame's command buffer) and the non-pooled/oracle path returns `"executed"`
+    (submitted and waited). An earlier version of the sub-batch loop tested
+    `status != "recorded"` and would have SILENTLY DROPPED every sub-batch after
+    the first in oracle mode -- glyphs missing from the frame with no error,
+    which is worse than the race the split exists to remove. Testing for the
+    three failure statuses instead means a new SUCCESS status cannot turn into a
+    dropped draw; a new FAILURE status would be caught by its own evidence.
+    """
+    status == "failed" or status == "rejected" or status == "unavailable"
+
+fn _vulkan_font_sub_batch(batch: FontRenderBatch, buckets: [i64],
+                          want: i64) -> FontRenderBatch:
+    """The original batch narrowed to the quads assigned sub-batch `want`.
+
+    **Every** field except `quads` and `dirty_rects` is carried through, and the
+    list must stay exhaustive: the atlas cache-hit branch compares
+    `font_render_batch_atlas_owner_identity`, which folds `atlas_owner_generation`,
+    `render_config_identity` and `transform_identity` alongside the obvious
+    `font_identity`/`face_generation`/size. An earlier version of this function
+    omitted the first two and let them default, so every sub-batch looked like a
+    NEW OWNER and forced a full 4 MB repack: measured `pack_full` 8 -> 14 and
+    `font_atlas_pack_u32_to_u8` 28,949 -> 50,487 ms. A dropped field here does
+    not fail, it silently triples the cost of the thing this split exists to
+    make cheap.
+
+    Only sub-batch 0 carries `dirty_rects`. They drive the mirror repack, which
+    must happen once per real atlas change; replaying them on later sub-batches
+    would repack cells that are already correct.
+    """
+    var members: [FontRenderQuad] = []
+    var i: i64 = 0
+    while i < buckets.len().to_i64():
+        if buckets[i] == want:
+            members.push(batch.quads[i])
+        i = i + 1
+    FontRenderBatch(
+        program_version: batch.program_version,
+        transform_identity: batch.transform_identity,
+        font_identity: batch.font_identity,
+        face_generation: batch.face_generation,
+        valid: batch.valid,
+        atlas_width: batch.atlas_width,
+        atlas_height: batch.atlas_height,
+        atlas_pixels: batch.atlas_pixels,
+        quads: members,
+        atlas_generation: batch.atlas_generation,
+        dirty_rects: if want == 0: batch.dirty_rects else: [],
+        atlas_owner_generation: batch.atlas_owner_generation,
+        atlas_owner_sequence: batch.atlas_owner_sequence,
+        render_config_identity: batch.render_config_identity,
+        execution_target: batch.execution_target,
+        execution_policy: batch.execution_policy)
+
+fn vulkan_font_partition_bucket_count(buckets: [i64]) -> i64:
+    """How many dispatches `vulkan_font_partition_quads` implies. 1 when clean."""
+    var highest: i64 = -1
+    for b in buckets:
+        if b > highest: highest = b
+    highest + 1
+
+fn vulkan_font_atlas_identity_digest(owner: text, generation: i64, width: i32,
+                                      height: i32, count: i64) -> text:
+    """O(1) atlas token: the generation/owner pair the upload cache already trusts.
+
+    Same output shape as `_vulkan_font_atlas_payload_digest` -- SHA-256 over a
+    56-byte, seven-lane preimage, so it is 64 lowercase hex characters and every
+    evidence assertion in the tree keeps holding -- but the four content lanes
+    carry the OWNER IDENTITY and the ATLAS GENERATION rather than a fold of a
+    million pixels. See `vulkan_font_payload_digest_full` in backend_vulkan.spl
+    for why that loses no information: the same pair is what decides whether the
+    atlas is re-uploaded at all.
+
+    The owner text is folded with the same FNV constants and index mixing the
+    payload digest uses, over its BYTES -- an identity string is tens of
+    characters, not a million pixels, so this stays O(1) in the atlas.
+    """
+    val mask32: i64 = 4294967295
+    val prime: i64 = 16777619
+    var l0: i64 = 2166136261
+    var l1: i64 = 2246822519
+    var l2: i64 = 3266489917
+    var l3: i64 = 668265263
+    val owner_bytes = text_to_utf8_bytes(owner)
+    var i: i64 = 0
+    while i < owner_bytes.len().to_i64():
+        l0 = ((l0 ^ (owner_bytes[i].to_i64() + i)) * prime) & mask32
+        i = i + 1
+    l1 = ((l1 ^ generation) * prime) & mask32
+    l2 = ((l2 ^ (owner_bytes.len().to_i64() + 1)) * prime) & mask32
+    l3 = ((l3 ^ (count + 7)) * prime) & mask32
+    val lanes: [i64] = [l0, l1, l2, l3, count, width.to_i64(), height.to_i64()]
+    var pre: [u8] = [0u8; 56]
+    var k: i64 = 0
+    while k < 7:
+        val w = lanes[k]
+        val base = k * 8
+        var b: i64 = 0
+        while b < 8:
+            pre[base + b] = ((w >> (b * 8)) & 255).to_u8()
+            b = b + 1
+        k = k + 1
+    sha256_u8_hex(pre)
+
 fn _vulkan_font_atlas_payload_digest(pixels: [u32], width: i32, height: i32) -> text:
     val mask32: i64 = 4294967295
     val prime: i64 = 16777619
@@ -452,6 +664,10 @@ fn vulkan_bitmap_text_atlas_eligible(text_val: text) -> bool:
     """
     if text_val.len() == 0:
         return false
+    # `.len()` is BYTE-indexed and `.char_code_at()` is CHAR-indexed; the two
+    # agree only because the caller above already rejected any string with a
+    # code outside printable ASCII. Widening that gate without switching this
+    # loop to `.bytes()` desyncs it at the first multi-byte character.
     var i: i64 = 0
     while i < text_val.len():
         val code = text_val.char_code_at(i)
@@ -514,6 +730,10 @@ fn vulkan_bitmap_text_quads(text_val: text, color: u32, scale: i32, advance: i32
     val cell_w = (VULKAN_BITMAP_FONT_CELL_COLUMNS * scale.to_i64()) as i32
     val cell_h = glyph_height_px * scale
     val advance64 = advance.to_i64()
+    # `.len()` is BYTE-indexed and `.char_code_at()` is CHAR-indexed; the two
+    # agree only because the caller above already rejected any string with a
+    # code outside printable ASCII. Widening that gate without switching this
+    # loop to `.bytes()` desyncs it at the first multi-byte character.
     var i: i64 = 0
     while i < text_val.len():
         val code = text_val.char_code_at(i)
@@ -536,7 +756,53 @@ fn vulkan_bitmap_text_quads(text_val: text, color: u32, scale: i32, advance: i32
         i = i + 1
     quads
 
-fn vulkan_bitmap_text_atlas_block_reason(initialized: bool, clip_enabled: bool, mask_bytes: i64,
+fn vulkan_bitmap_text_clip_quads(quads: [FontRenderQuad], origin_x: i32, origin_y: i32,
+                                 clip_x: i32, clip_y: i32, clip_w: i32,
+                                 clip_h: i32) -> [FontRenderQuad]:
+    """Intersect every quad's destination rect with an axis-aligned scissor.
+
+    The scissor is baked into the quad geometry on the HOST so the glyph compute
+    dispatch needs no clip uniform and the packed params layout stays frozen (it
+    is a twin of the Metal font batcher). For an axis-aligned rect this is
+    pixel-identical to letting the CPU raster path clip the blit: the composite
+    reads `atlas[atlas_x + u, atlas_y + v]` for `u < width`, so advancing
+    `atlas_x`/`atlas_y` by the amount cut off the left/top and shrinking
+    `width`/`height` selects exactly the surviving sub-rect of the same glyph.
+    A quad clipped to nothing is dropped rather than dispatched.
+    """
+    var kept: [FontRenderQuad] = []
+    if clip_w <= 0 or clip_h <= 0:
+        return kept
+    val cl = clip_x.to_i64()
+    val ct = clip_y.to_i64()
+    val cr = cl + clip_w.to_i64()
+    val cb = ct + clip_h.to_i64()
+    for q in quads:
+        val dl = origin_x.to_i64() + q.dst_x.to_i64()
+        val dt = origin_y.to_i64() + q.dst_y.to_i64()
+        val dr = dl + q.width.to_i64()
+        val db = dt + q.height.to_i64()
+        val nl = if dl > cl: dl else: cl
+        val nt = if dt > ct: dt else: ct
+        val nr = if dr < cr: dr else: cr
+        val nb = if db < cb: db else: cb
+        if nr <= nl or nb <= nt:
+            continue
+        kept.push(FontRenderQuad(
+            codepoint: q.codepoint,
+            byte_offset: q.byte_offset,
+            dst_x: (nl - origin_x.to_i64()) as i32,
+            dst_y: (nt - origin_y.to_i64()) as i32,
+            width: (nr - nl) as i32,
+            height: (nb - nt) as i32,
+            atlas_x: (q.atlas_x.to_i64() + (nl - dl)) as i32,
+            atlas_y: (q.atlas_y.to_i64() + (nt - dt)) as i32,
+            color: q.color,
+            cluster: q.cluster
+        ))
+    kept
+
+fn vulkan_bitmap_text_atlas_block_reason(initialized: bool, clip_unbakeable: bool, mask_bytes: i64,
                                          pipeline_status: text, shader_handle: i64,
                                          pipeline_handle: i64, color: u32, glyph_count: i64,
                                          text_eligible: bool, scale: i32,
@@ -544,13 +810,18 @@ fn vulkan_bitmap_text_atlas_block_reason(initialized: bool, clip_enabled: bool, 
     """Empty when the bitmap atlas path may run; otherwise the honest reason it may not.
 
     Every rejection here is a case where the font composite would NOT reproduce
-    the CPU raster: it applies neither the scissor rect nor the mask buffer, and
-    it alpha-blends rather than writing, so a non-opaque colour would diverge.
+    the CPU raster: it applies no mask buffer, and it alpha-blends rather than
+    writing, so a non-opaque colour would diverge.
+
+    `clip_unbakeable` is NOT `self.clip_enabled`. An axis-aligned scissor IS
+    reproduced now, by intersecting it into the quad rects on the host
+    (`vulkan_bitmap_text_clip_quads`); callers pass true only for a clip this
+    module cannot express that way. Mask and non-opaque colour stay blocked.
     """
     if not initialized: return "backend-uninitialized"
     if pipeline_status != "ready" or shader_handle <= 0 or pipeline_handle <= 0:
         return "font-pipeline-not-ready"
-    if clip_enabled: return "clip-unsupported-by-font-composite"
+    if clip_unbakeable: return "clip-unsupported-by-font-composite"
     if mask_bytes > 0: return "mask-unsupported-by-font-composite"
     if ((color >> 24) & 0xFFu32) != 255u32: return "non-opaque-text-color"
     if not text_eligible: return "glyph-outside-atlas-charset"
@@ -586,6 +857,144 @@ fn vulkan_text_atlas_fallback_safe(status: text) -> bool:
     status == "unavailable" or status == "rejected"
 
 impl VulkanBackend:
+    me _font_mirror_activate(owner: text, entry_valid: bool) -> bool:
+        """Make `owner`'s host mirror the active one; return whether it is coherent.
+
+        Two font identities on one page alternate batches, and a single active
+        mirror keyed on the owner meant every switch missed and repacked all
+        1,048,576 atlas pixels -- each owner destroying the other's mirror.
+        Park the outgoing owner's bytes instead and swap the incoming owner's
+        back in, bounded to VULKAN_FONT_ATLAS_MIRROR_MAX slots (index 0 = least
+        recently used, evicted first).
+
+        `entry_valid` is the ACTIVE mirror's validity as captured at the start
+        of the composite, before it was cleared: a mirror that was already stale
+        must never be parked, or a later switch would resurrect it.
+
+        All dirty-cell writes keep going through `self.font_atlas_host_bytes`;
+        a parked slot's bytes are only ever replaced wholesale, never mutated in
+        place.
+        """
+        if owner == "":
+            return false
+        if not vulkan_font_per_owner_mirror_enabled():
+            return self.font_atlas_host_identity == owner and entry_valid
+        if self.font_atlas_host_identity == owner:
+            return entry_valid
+        # Park the outgoing owner, replacing any older slot of the same name.
+        # In the typed (`SIMPLE_VK_FONT_UPLOAD=u32`) lane no byte mirror is
+        # ever built -- the device receives the atlas WORDS directly -- so a
+        # slot legitimately carries an empty `bytes` and only the identity /
+        # generation / sequence triple that the continuity verdict reads. The
+        # non-empty test would otherwise refuse to park every owner and
+        # collapse F24's per-owner continuity into a full-write every switch.
+        if entry_valid and self.font_atlas_host_identity != "" and
+            self.font_atlas_host_generation >= 0 and
+            (vulkan_font_upload_u32_requested() or self.font_atlas_host_bytes.len() > 0):
+            var existing = -1
+            var pi = 0
+            while pi < self.font_atlas_mirror_slots.len():
+                if self.font_atlas_mirror_slots[pi].identity == self.font_atlas_host_identity:
+                    existing = pi
+                pi = pi + 1
+            if existing >= 0:
+                self.font_atlas_mirror_slots.remove(existing)
+            if self.font_atlas_mirror_slots.len() >= VULKAN_FONT_ATLAS_MIRROR_MAX:
+                self.font_atlas_mirror_slots.remove(0)
+            self.font_atlas_mirror_slots.push(VulkanFontAtlasMirror(
+                identity: self.font_atlas_host_identity,
+                generation: self.font_atlas_host_generation,
+                owner_sequence: self.font_atlas_host_owner_sequence,
+                bytes: self.font_atlas_host_bytes))
+        # Swap the incoming owner in, if it has a parked slot.
+        var found = -1
+        var i = 0
+        while i < self.font_atlas_mirror_slots.len():
+            if self.font_atlas_mirror_slots[i].identity == owner:
+                found = i
+            i = i + 1
+        if found < 0:
+            self.font_atlas_host_identity = ""
+            self.font_atlas_host_generation = -1
+            self.font_atlas_host_owner_sequence = -1
+            self.font_atlas_host_bytes = []
+            return false
+        val slot = self.font_atlas_mirror_slots[found]
+        self.font_atlas_mirror_slots.remove(found)
+        self.font_atlas_host_identity = slot.identity
+        self.font_atlas_host_generation = slot.generation
+        self.font_atlas_host_owner_sequence = slot.owner_sequence
+        self.font_atlas_host_bytes = slot.bytes
+        true
+
+    me _repack_atlas_dirty_cells(batch: FontRenderBatch) -> bool:
+        """Rewrite only the glyph cells this batch inserted into the host mirror.
+
+        `batch.dirty_rects` carries exactly the quads whose glyph was newly
+        rasterized into the atlas (font_renderer.spl: `if inserted: dirty =
+        dirty.push(quad)`), so every atlas pixel that changed since the mirror
+        was last coherent is inside one of them. Cost is O(inserted glyph
+        pixels) instead of O(atlas), which on a 1024x1024 atlas is the whole
+        point: the full pack is 1,048,576 interpreted iterations.
+
+        Returns false if any rect falls outside the atlas, in which case the
+        caller must fall back to a full repack rather than upload a mirror it
+        cannot vouch for."""
+        val atlas_w = batch.atlas_width.to_i64()
+        val atlas_h = batch.atlas_height.to_i64()
+        val pixel_count = atlas_w * atlas_h
+        if atlas_w <= 0 or atlas_h <= 0 or batch.atlas_pixels.len() != pixel_count:
+            return false
+        if self.font_atlas_host_bytes.len().to_i64() != pixel_count * 4:
+            return false
+        for q in batch.dirty_rects:
+            val qx = q.atlas_x.to_i64()
+            val qy = q.atlas_y.to_i64()
+            val qw = q.width.to_i64()
+            val qh = q.height.to_i64()
+            if qx < 0 or qy < 0 or qw <= 0 or qh <= 0 or qx + qw > atlas_w or qy + qh > atlas_h:
+                return false
+            var row: i64 = 0
+            while row < qh:
+                val src_base = (qy + row) * atlas_w + qx
+                var col: i64 = 0
+                while col < qw:
+                    val p = batch.atlas_pixels[src_base + col]
+                    val off = (src_base + col) * 4
+                    self.font_atlas_host_bytes[off] = (p & 0xffu32) as u8
+                    self.font_atlas_host_bytes[off + 1] = ((p >> 8) & 0xffu32) as u8
+                    self.font_atlas_host_bytes[off + 2] = ((p >> 16) & 0xffu32) as u8
+                    self.font_atlas_host_bytes[off + 3] = ((p >> 24) & 0xffu32) as u8
+                    col = col + 1
+                row = row + 1
+        true
+
+    me _bitmap_font_atlas_pixels(scale: i32, glyph_height_px: i32) -> [u32]:
+        """Host coverage atlas, memoised on the identity the device cache keys on.
+
+        `composite_font_batch` discards `batch.atlas_pixels` unless
+        `font_atlas_generation`/`font_atlas_owner_identity` changed (:820-828),
+        and both derive from `scale`, so rebuilding the 95-cell atlas on every
+        `draw_text` was pure waste — one raster per text run on a 4K page.
+        """
+        val key_scale = scale.to_i64()
+        val key_height = glyph_height_px.to_i64()
+        if (self.font_atlas_cpu_scale == key_scale and
+            self.font_atlas_cpu_glyph_height == key_height and
+            self.font_atlas_cpu_pixels.len() > 0):
+            return self.font_atlas_cpu_pixels
+        # The memo above should make this run once per (scale, glyph_height);
+        # timing it is how a cache that silently stopped hitting becomes visible
+        # as N builds instead of 1.
+        val _t_atlas = vulkan_timing_now_us()
+        val built = vulkan_bitmap_font_atlas_pixels(scale, glyph_height_px)
+        vulkan_timing_add(VK_T_FONT_ATLAS_BUILD, _t_atlas)
+        self.font_atlas_cpu_build_count = self.font_atlas_cpu_build_count + 1
+        self.font_atlas_cpu_scale = key_scale
+        self.font_atlas_cpu_glyph_height = key_height
+        self.font_atlas_cpu_pixels = built
+        built
+
     me _bitmap_text_atlas_path(x: i32, y: i32, text_val: text, color: u32,
                                font_size: i32) -> bool:
         """Composite bitmap text through the font atlas.
@@ -597,7 +1006,7 @@ impl VulkanBackend:
         val metrics = text_metrics(text_val, font_size)
         val pipeline = self.font_atlas_pipeline_evidence()
         val blocked = vulkan_bitmap_text_atlas_block_reason(
-            self.initialized, self.clip_enabled, self.mask_buf.len(),
+            self.initialized, false, self.mask_buf.len(),
             pipeline.status, pipeline.shader_handle, pipeline.pipeline_handle,
             color, text_val.len(), vulkan_bitmap_text_atlas_eligible(text_val),
             metrics.scale, metrics.glyph_height_px)
@@ -605,8 +1014,19 @@ impl VulkanBackend:
             self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
             self.last_text_fallback_reason = blocked
             return true
-        val quads = vulkan_bitmap_text_quads(
+        val unclipped = vulkan_bitmap_text_quads(
             text_val, color, metrics.scale, metrics.advance, metrics.glyph_height_px)
+        val quads = if self.clip_enabled:
+            vulkan_bitmap_text_clip_quads(unclipped, x, y, self.clip_x, self.clip_y,
+                                          self.clip_w, self.clip_h)
+        else:
+            unclipped
+        if self.clip_enabled and unclipped.len() > 0 and quads.len() == 0:
+            # Every glyph fell outside the scissor. The CPU path would draw
+            # nothing either, so a redraw would only burn a raster + upload.
+            self.last_text_path = VULKAN_TEXT_PATH_FONT_ATLAS
+            self.last_text_fallback_reason = ""
+            return false
         if quads.len() == 0:
             self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
             self.last_text_fallback_reason = "empty-glyph-batch"
@@ -621,11 +1041,12 @@ impl VulkanBackend:
             valid: true,
             atlas_width: vulkan_bitmap_font_atlas_width(metrics.scale),
             atlas_height: vulkan_bitmap_font_atlas_height(metrics.scale, metrics.glyph_height_px),
-            atlas_pixels: vulkan_bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px),
+            atlas_pixels: self._bitmap_font_atlas_pixels(metrics.scale, metrics.glyph_height_px),
             quads: quads,
             atlas_generation: metrics.scale.to_i64(),
             dirty_rects: no_dirty,
             atlas_owner_generation: -1,
+            atlas_owner_sequence: -1,
             render_config_identity: VULKAN_BITMAP_FONT_CONFIG_IDENTITY,
             transform_identity: "uniform-scale;translate-late",
             execution_target: "vulkan",
@@ -654,7 +1075,7 @@ impl VulkanBackend:
         val metrics = text_metrics(text_val, font_size)
         val pipeline = self.font_atlas_pipeline_evidence()
         val blocked = vulkan_bitmap_text_atlas_block_reason(
-            self.initialized, self.clip_enabled, self.mask_buf.len(),
+            self.initialized, false, self.mask_buf.len(),
             pipeline.status, pipeline.shader_handle, pipeline.pipeline_handle,
             fg, text_val.len(), vulkan_bitmap_text_atlas_eligible(text_val),
             metrics.scale, metrics.glyph_height_px)
@@ -665,28 +1086,17 @@ impl VulkanBackend:
         # The CPU path COPIED a background-filled buffer over the whole band, so
         # the band is a plain rect write and the glyphs then blend over it.
         self.draw_rect_filled(x, y, metrics.width, metrics.height, bg)
-        # Nothing in this backend emits a Vulkan barrier between compute
-        # dispatches, so a batched glyph dispatch could read the band before the
-        # rect dispatch wrote it. `_flush_pending_compute` submits AND waits on a
-        # fence (`vulkan_sffi_submit_and_wait_fence`,
-        # backend_vulkan_helpers.spl:236), so the band is complete before the
-        # glyphs are recorded.
-        # TODO: [gpu][P2] this flushes the WHOLE pending primitive batch, not
-        # just the background band, so a text-heavy frame with `draw_text_bg`
-        # degrades from one submit per frame to one per background-text draw.
-        # The fix is a pipeline barrier between the two dispatches; `sffi_vulkan`
-        # exposes no barrier entry point today (grep: zero `barrier` call sites
-        # in src/lib/**/engine2d). Add `vulkan_sffi_pipeline_barrier` and replace
-        # this flush. `draw_text` (no background band) is unaffected.
-        if self.pending_compute_command > 0:
-            val flushed = self._flush_pending_compute()
-            if flushed <= 0:
-                self.last_text_path = VULKAN_TEXT_PATH_FONT_ATLAS_ABANDONED
-                self.last_text_fallback_reason = if flushed < 0:
-                    "background-band-completion-unknown"
-                else:
-                    "background-band-submit-failed"
-                return false
+        # The band-then-glyphs RAW hazard is already resolved inside the command
+        # buffer: every `vulkan_sffi_dispatch` records a `cmd_dispatch` IMMEDIATELY
+        # followed by a `VkMemoryBarrier` with
+        # src=COMPUTE_SHADER/SHADER_WRITE -> dst=COMPUTE_SHADER|TRANSFER /
+        # SHADER_READ|SHADER_WRITE|TRANSFER_READ
+        # (`rt_vulkan_dispatch`, src/compiler_rust/runtime/src/vulkan_graphics_runtime_compute.rs:469-496,
+        # masks from `dispatch_memory_barrier` :456-465, pinned by the Rust unit
+        # test `dispatch_barrier_orders_compute_writes_before_compute_and_transfer_reads`
+        # :504-523). The rect dispatch's writes are therefore visible to the glyph
+        # dispatch that follows it in the same batch, so no submit+fence-wait is
+        # needed between them and `draw_text_bg` stays inside the one frame batch.
         self._bitmap_text_atlas_path(x, y, text_val, fg, font_size)
 
     me set_font_oracle_mode(enabled: bool):
@@ -698,16 +1108,87 @@ impl VulkanBackend:
                             batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
         val clock = default_frame_clock()
         val started_ns = clock.now_micros() * 1000
-        var evidence = self._composite_font_batch_impl(origin_x, origin_y, batch, clock)
+        # Split a batch whose quads overlap into sub-batches that do not, and
+        # composite them in order. The packed kernel runs one invocation per
+        # (pixel, glyph) and blends with a NON-ATOMIC read-modify-write on
+        # `dst[di]`, so two overlapping quads in one dispatch race and one
+        # blend is lost -- measured as pixel (89,392) reading 139 in one run
+        # and 226 in another of the same binary. Separate dispatches are
+        # ordered: the runtime emits a full pipeline barrier after every
+        # dispatch (`interpreter_extern/gpu.rs:5340-5359`).
+        #
+        # Re-entering the impl per sub-batch is cheap, and specifically it does
+        # NOT re-upload the atlas: sub-batch 2..N carries the same
+        # `atlas_generation` and owner identity as sub-batch 1, so each takes
+        # the impl's cache-hit branch instead of packing 4 MB again. The split
+        # is skipped entirely -- byte-for-byte today's single call -- whenever
+        # nothing overlaps, which is the common case (measured: 0 overlapping
+        # pairs at 300x253, 19 across 496 quads at 900x760).
+        val buckets = vulkan_font_partition_quads(batch.quads)
+        val bucket_count = vulkan_font_partition_bucket_count(buckets)
+        var evidence = if bucket_count > 1:
+            self._composite_font_sub_batches(origin_x, origin_y, batch, buckets,
+                bucket_count, clock)
+        else:
+            self._composite_font_batch_impl(origin_x, origin_y, batch, clock)
         val total_ns = vulkan_font_elapsed_ns(started_ns, clock.now_micros() * 1000)
+        # Reuse the composite's own clock rather than starting a second one:
+        # this path is already measured, it just never reached the lane census.
+        vulkan_timing_note(VK_T_FONT_COMPOSITE, total_ns / 1000)
         evidence.elapsed_ns = vulkan_font_timed_ns(total_ns, evidence.evidence_overhead_ns)
         evidence.atlas_upload_count = self.font_atlas_upload_count
         evidence.atlas_upload_bytes = self.font_atlas_upload_bytes
         evidence.gpu_resource_high_water_bytes = self.font_gpu_resource_high_water_bytes
         evidence
 
+    me _composite_font_sub_batches(origin_x: i32, origin_y: i32,
+                                   batch: FontRenderBatch, buckets: [i64],
+                                   bucket_count: i64,
+                                   clock: FrameClock) -> VulkanFontCompositeEvidence:
+        """Composite one batch as N overlap-free dispatches, in painter order.
+
+        Returns the LAST sub-batch's evidence with `quad_count` restored to the
+        original batch's, because callers read it as "how many glyphs did this
+        batch draw" and the last sub-batch knows only its own share. A sub-batch
+        that does not reach `recorded`/`completed` short-circuits the rest:
+        continuing would paint later glyphs over a hole the caller was never
+        told about.
+        """
+        var evidence = self._composite_font_batch_impl(origin_x, origin_y,
+            _vulkan_font_sub_batch(batch, buckets, 0), clock)
+        if _vulkan_font_status_is_failure(evidence.status):
+            evidence.quad_count = batch.quads.len()
+            return evidence
+        var b: i64 = 1
+        while b < bucket_count:
+            evidence = self._composite_font_batch_impl(origin_x, origin_y,
+                _vulkan_font_sub_batch(batch, buckets, b), clock)
+            if _vulkan_font_status_is_failure(evidence.status):
+                evidence.quad_count = batch.quads.len()
+                return evidence
+            b = b + 1
+        evidence.quad_count = batch.quads.len()
+        evidence.sub_batch_count = bucket_count
+        evidence
+
     me _composite_font_batch_impl(origin_x: i32, origin_y: i32,
                                   batch: FontRenderBatch, clock: FrameClock) -> VulkanFontCompositeEvidence:
+        # The host mirror is stale for the whole of this call and is revalidated
+        # ONLY on a path that provably leaves it describing the atlas: a
+        # successful upload, or a cache hit that proves the atlas did not move.
+        #
+        # This must happen BEFORE the early returns below, not inside the dirty
+        # branch. A batch rejected up there (glyph cap, invalid quad, invalid
+        # destination, pipeline not ready, ...) still carries `dirty_rects` for
+        # glyphs the producer HAS already rasterized into the atlas; leaving the
+        # mirror marked valid across such a return makes the next batch apply
+        # only ITS OWN dirty cells to a mirror that is already missing the
+        # rejected batch's, and the missing glyph cells then render stale.
+        # Measured: with the invalidation inside the dirty branch the 900x760
+        # frame checksum moved (2936851417192293 -> 2936851411469080) while
+        # 300x253, which happens to reject nothing, stayed byte-identical.
+        val mirror_was_valid = self.font_atlas_host_valid
+        self.font_atlas_host_valid = false
         if self.font_oracle_mode:
             val evidence_flush = self._flush_pending_compute()
             if evidence_flush <= 0:
@@ -740,6 +1221,7 @@ impl VulkanBackend:
         var evidence_overhead_ns: i64 = 0
         var dirty_upload_ns: i64 = 0
 
+        val _t_qv = vulkan_timing_now_us()
         var checked: i64 = 0
         while checked < batch.quads.len():
             val q = batch.quads[checked]
@@ -748,11 +1230,12 @@ impl VulkanBackend:
             val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
             if vulkan_font_dispatch_groups(total) == 0 or dst_x == nil or dst_y == nil:
                 return _vulkan_font_evidence(pipeline, "rejected", "invalid-font-quad", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-            val packed = vulkan_font_atlas_composite_params(batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
-                q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count, dst_x.?, dst_y.?, q.color)
-            if packed.len() != VULKAN_FONT_PARAMS_BYTES:
+            if not _vulkan_font_atlas_composite_params_valid(
+                batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
+                q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count):
                 return _vulkan_font_evidence(pipeline, "rejected", "invalid-font-params", self.d_font_atlas, self.d_font_params, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
             checked = checked + 1
+        vulkan_timing_add(VK_T_FONT_QUAD_VALIDATE, _t_qv)
 
         if (pipeline.device_type != "discrete" and pipeline.device_type != "integrated" and
             pipeline.device_type != "virtual" and pipeline.device_type != "cpu"):
@@ -766,60 +1249,352 @@ impl VulkanBackend:
         val dependency_identity = if self.session.device > 0 and self.session.generation > 0:
             "device=" + self.session.device.to_string() + ";generation=" + self.session.generation.to_string()
         else: ""
+        val _t_oi = vulkan_timing_now_us()
         val owner_identity = font_atlas_composite_cache_identity(
             font_render_batch_atlas_owner_identity(batch), "vulkan2d", device_features,
             pipeline.artifact_identity, dependency_identity)
+        vulkan_timing_add(VK_T_FONT_OWNER_IDENTITY, _t_oi)
         if owner_identity == "":
             return _vulkan_font_evidence(pipeline, "rejected", "incomplete-font-cache-identity", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
         val atlas_bytes = atlas_count * 4
         val dimensions_changed = self.font_atlas_width != batch.atlas_width or self.font_atlas_height != batch.atlas_height
-        val atlas_content_changed = self.font_atlas_generation != batch.atlas_generation or self.font_atlas_owner_identity != owner_identity
-        if self.pending_font_descriptors.len() > 0 and (dimensions_changed or atlas_content_changed):
-            val atlas_flush = self._flush_pending_compute()
-            if atlas_flush <= 0:
-                return _vulkan_font_evidence(pipeline, "failed",
-                    if atlas_flush < 0: "font-atlas-transition-completion-unknown" else: "font-atlas-transition-submit-failed",
-                    self.d_font_atlas, self.d_font_params, 0, 0,
-                    batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-        if self.d_font_atlas == 0 or dimensions_changed:
-            val fresh = vulkan_sffi_alloc_buffer(atlas_bytes, _VULKAN_STORAGE_BUFFER)
-            if fresh == 0:
-                return _vulkan_font_evidence(pipeline, "failed", "atlas-allocation-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-            if self.d_font_atlas != 0:
-                val old_freed = vulkan_sffi_free_buffer(self.d_font_atlas)
-                if not old_freed:
-                    val fresh_freed = vulkan_sffi_free_buffer(fresh)
-                    val reason = vulkan_font_atlas_replacement_status(true, false, fresh_freed)
-                    return _vulkan_font_evidence(pipeline, "failed", reason, self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
-            self.d_font_atlas = fresh
+        # ATLAS DIMENSIONS are the one change that invalidates every slot at
+        # once: the buffers are the wrong SIZE, so nothing can be reused and the
+        # recorded dispatches that read them cannot be allowed to run against
+        # replacements. This is the only remaining unconditional flush, and it
+        # fires at most once per surface resize, not once per text run.
+        if dimensions_changed:
+            if self.pending_font_descriptors.len() > 0:
+                val atlas_flush = self._flush_pending_compute()
+                if atlas_flush <= 0:
+                    return _vulkan_font_evidence(pipeline, "failed",
+                        if atlas_flush < 0: "font-atlas-transition-completion-unknown" else: "font-atlas-transition-submit-failed",
+                        self.d_font_atlas, self.d_font_params, 0, 0,
+                        batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            self._font_atlas_release_slots()
             self.font_atlas_width = batch.atlas_width
             self.font_atlas_height = batch.atlas_height
             self.font_atlas_generation = -1
             self.font_atlas_owner_identity = ""
             self.font_atlas_payload_sha256 = ""
-            val allocated_bytes = vulkan_font_gpu_resource_bytes(atlas_bytes, dst_count * 4, self.d_font_params != 0)
-            if allocated_bytes > self.font_gpu_resource_high_water_bytes:
-                self.font_gpu_resource_high_water_bytes = allocated_bytes
-        if self.font_atlas_generation != batch.atlas_generation or self.font_atlas_owner_identity != owner_identity:
+        val atlas_owner = font_render_batch_atlas_owner_identity(batch)
+        # Swap this owner's parked mirror in BEFORE deciding anything. Without
+        # this the continuity check compares against whatever owner ran last, so
+        # two alternating font identities each forced the other's full repack.
+        # It is done unconditionally now (it used to sit inside the upload
+        # branch) because the slot decision below needs the continuity verdict,
+        # and because on a no-write run the mirror should still follow the owner
+        # that is now active -- F24's "the mirror follows the slot that was last
+        # written" still holds, since a no-write run writes nothing.
+        val mirror_coherent = self._font_mirror_activate(atlas_owner, mirror_was_valid)
+        # Captured BEFORE any repack folds this batch in: the slot plan needs to
+        # know which sequence the device copy would have to match for an
+        # in-place write to be provably non-relocating.
+        val host_sequence_before = self.font_atlas_host_owner_sequence
+        # Generation continuity is the load-bearing condition. `dirty_rects`
+        # lists only the cells THIS batch inserted, so applying it to the mirror
+        # is correct only if the mirror already holds every earlier insertion. A
+        # batch that never reached this backend at all still bumped the global
+        # generation counter, and no state inside this function can see that --
+        # but the gap it leaves in the sequence can. Decision lives in the free
+        # function `vulkan_font_mirror_continuity` so it is testable without a
+        # device.
+        val continuity = vulkan_font_mirror_continuity(
+            mirror_coherent, atlas_owner, self.font_atlas_host_identity,
+            vulkan_font_upload_u32_requested() or
+                self.font_atlas_host_bytes.len().to_i64() == atlas_bytes,
+            self.font_atlas_host_generation, batch.atlas_generation,
+            self.font_atlas_host_owner_sequence, batch.atlas_owner_sequence,
+            batch.dirty_rects.len().to_i64())
+        var slot_index = self._font_atlas_slot_index(atlas_owner)
+        val slot_sequence = if slot_index >= 0: self.font_atlas_slot_sequences[slot_index] else: -1
+        val slot_referenced = slot_index >= 0 and self.font_atlas_slot_referenced[slot_index]
+        var spare_slot = self._font_atlas_spare_slot_index()
+        var slot_plan = vulkan_font_atlas_slot_plan(
+            slot_index >= 0, slot_sequence, host_sequence_before,
+            batch.atlas_owner_sequence, slot_referenced, continuity,
+            spare_slot != -1)
+        if vulkan_font_atlas_slot_sabotage() and self.font_atlas_slot_handles.len() > 0:
+            # SABOTAGE CONTROL, off by default. Bind slot 0 for every owner and
+            # claim it needs no write, which is exactly the mistake the design
+            # must not make. Under `SIMPLE_VK_FONT_SELFCHECK=1` the owner
+            # assertion below catches it (`atlas-slot-owner-mismatch`); without
+            # the selfcheck the pixels go wrong, which is the point.
+            slot_plan = VK_FONT_SLOT_REUSE_NO_WRITE
+            slot_index = 0
+        if vulkan_order_trace_enabled():
+            # Permanent, zero-cost-when-off evidence for the atlas upload-once
+            # invariant. The decision note below shares a fixed 4000-char budget
+            # with the continuity notes and truncates after ~30 runs, which is
+            # exactly the population an upload census has to see; this line does
+            # not, and is armed by the same flag the GPU-boundary audit already
+            # sets, so a re-upload regression is visible in the gate's own log.
+            vulkan_order_trace(
+                "font-slot owner={atlas_owner} slot={slot_index} slot_seq={slot_sequence}" +
+                " host_seq_before={host_sequence_before} batch_seq={batch.atlas_owner_sequence}" +
+                " referenced={slot_referenced} continuity={continuity} spare={spare_slot}" +
+                " plan={slot_plan} dirty={batch.dirty_rects.len()}")
+        if vulkan_font_selfcheck_enabled():
+            vulkan_font_decision_note(
+                "owner={atlas_owner} slot={slot_index} slot_seq={slot_sequence}" +
+                " host_seq_before={host_sequence_before} batch_seq={batch.atlas_owner_sequence}" +
+                " referenced={slot_referenced} continuity={continuity} spare={spare_slot}" +
+                " plan={slot_plan} dirty={batch.dirty_rects.len()}")
+        if slot_plan == VK_FONT_SLOT_FLUSH_THEN_WRITE:
+            self.font_atlas_slot_forced_flushes = self.font_atlas_slot_forced_flushes + 1
+            if self.pending_font_descriptors.len() > 0 or self.pending_compute_command > 0:
+                val relocating_flush = self._flush_pending_compute()
+                if relocating_flush <= 0:
+                    return _vulkan_font_evidence(pipeline, "failed",
+                        if relocating_flush < 0: "font-atlas-transition-completion-unknown" else: "font-atlas-transition-submit-failed",
+                        self.d_font_atlas, self.d_font_params, 0, 0,
+                        batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            # The flush cleared every `referenced` flag, so a spare now exists.
+            spare_slot = self._font_atlas_spare_slot_index()
+        # Resolve the slot this run will bind. A write plan that has no slot of
+        # its own takes the spare: -2 means "append a new one".
+        var target_slot = slot_index
+        if slot_plan == VK_FONT_SLOT_WRITE_FRESH or (slot_plan == VK_FONT_SLOT_FLUSH_THEN_WRITE and slot_index < 0):
+            if spare_slot == -2:
+                val fresh = vulkan_sffi_alloc_buffer(atlas_bytes, _VULKAN_STORAGE_BUFFER)
+                if fresh == 0:
+                    return _vulkan_font_evidence(pipeline, "failed", "atlas-allocation-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+                self.font_atlas_slot_handles.push(fresh)
+                self.font_atlas_slot_owners.push("")
+                self.font_atlas_slot_sequences.push(-1)
+                self.font_atlas_slot_referenced.push(false)
+                target_slot = self.font_atlas_slot_handles.len().to_i64() - 1
+            elif spare_slot >= 0:
+                target_slot = spare_slot
+            else:
+                return _vulkan_font_evidence(pipeline, "failed", "atlas-slot-unavailable", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+        if target_slot < 0:
+            return _vulkan_font_evidence(pipeline, "failed", "atlas-slot-unavailable", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+        if not self._font_atlas_bind_slot(target_slot):
+            return _vulkan_font_evidence(pipeline, "failed", "atlas-slot-bind-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+        # SABOTAGE DETECTOR. The whole design rests on a slot never holding a
+        # DIFFERENT owner's pixels than the dispatch about to read it expects.
+        # Binding the wrong slot is the exact failure the sabotage spec injects,
+        # and it is invisible to the pixel oracle on pages where the two atlases
+        # happen to agree in the sampled cells.
+        if vulkan_font_selfcheck_enabled() and slot_plan == VK_FONT_SLOT_REUSE_NO_WRITE:
+            if self.font_atlas_slot_owners[target_slot] != atlas_owner:
+                return _vulkan_font_evidence(pipeline, "failed", "atlas-slot-owner-mismatch", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+        val slot_resource_bytes = vulkan_font_gpu_resource_bytes(
+            atlas_bytes * self.font_atlas_slot_handles.len().to_i64(), dst_count * 4, self.d_font_params != 0)
+        if slot_resource_bytes > self.font_gpu_resource_high_water_bytes:
+            self.font_gpu_resource_high_water_bytes = slot_resource_bytes
+        vulkan_font_dirty_note(
+            self.font_atlas_generation != batch.atlas_generation,
+            self.font_atlas_owner_identity != owner_identity,
+            dimensions_changed, batch.atlas_generation)
+        if slot_plan == VK_FONT_SLOT_REUSE_NO_WRITE:
+            # The device buffer already holds exactly this owner's atlas at this
+            # published sequence. Nothing to pack, nothing to upload, nothing to
+            # flush -- this is the branch that turns an alternating two-font
+            # page from `1 + runs` submits into 1.
+            self.font_atlas_slot_hits = self.font_atlas_slot_hits + 1
+            self.font_atlas_generation = batch.atlas_generation
+            self.font_atlas_owner_identity = owner_identity
+            # Only ALREADY_TRUTH proves the HOST mirror also matches; any other
+            # verdict leaves it stale, and saying so forces the next batch for
+            # this owner to repack in full rather than trust bytes it cannot
+            # vouch for.
+            if continuity == VK_FONT_MIRROR_ALREADY_TRUTH:
+                self.font_atlas_host_identity = atlas_owner
+                self.font_atlas_host_generation = batch.atlas_generation
+                self.font_atlas_host_owner_sequence = batch.atlas_owner_sequence
+                self.font_atlas_host_valid = atlas_owner != ""
+            # The payload digest names what the device buffer holds. It must be
+            # restated on this branch too, or the evidence would keep naming
+            # whichever owner last took the upload path.
+            self.font_atlas_payload_sha256 = if vulkan_font_payload_digest_full():
+                _vulkan_font_atlas_payload_digest(
+                    batch.atlas_pixels, batch.atlas_width, batch.atlas_height)
+            else:
+                vulkan_font_atlas_identity_digest(owner_identity,
+                    batch.atlas_generation, batch.atlas_width, batch.atlas_height,
+                    batch.atlas_pixels.len().to_i64())
+        else:
+            if slot_plan == VK_FONT_SLOT_WRITE_IN_PLACE:
+                self.font_atlas_slot_inplace_writes = self.font_atlas_slot_inplace_writes + 1
             val dirty_upload_started = clock.now_micros() * 1000
-            val atlas_payload = _vulkan_font_pixels_to_bytes(batch.atlas_pixels)
-            val atlas_uploaded = vulkan_sffi_copy_to_buffer(self.d_font_atlas, atlas_payload, 0)
+            # TYPED ATLAS UPLOAD (`SIMPLE_VK_FONT_UPLOAD=u32`, default OFF).
+            #
+            # `batch.atlas_pixels` is already `[u32]`; the byte lane below only
+            # exists because `vulkan_sffi_copy_to_buffer` truncates each element
+            # to one byte, so a word payload has to be exploded into four host
+            # array stores per pixel first. That explosion IS the host pixel
+            # loop the GPU-boundary audit reports as
+            # `font_atlas_pack_u32_to_u8`: 1,048,576 interpreted iterations per
+            # full repack of the fixed 1024x1024 atlas. Handing the words over
+            # as words removes the pack, the mirror repack and the mirror
+            # itself from this lane -- the device copy IS the atlas, so nothing
+            # needs to be mirrored to decide what changed.
+            #
+            # Default OFF because `rt_vulkan_copy_to_buffer_u32` is an extern a
+            # binary built before PR #534 has never heard of, and the
+            # interpreter aborts the whole process on an unknown extern before
+            # any guard can decline. Same opt-in shape as the rect and image
+            # flags. The byte path below stays the fallback, byte-identical on
+            # the wire, and also runs when the typed lane DECLINES.
+            val typed_upload = vulkan_font_upload_u32_requested()
+            var atlas_uploaded = false
+            var mirror_ready = false
+            var packed_on_host = false
+            if typed_upload:
+                # UPLOAD ONCE PER SLOT PER FLUSH, not once per text run.
+                #
+                # Every run that inserts a glyph bumps the owner's sequence and
+                # so lands here, and this copy used to move the FULL atlas (4 MB
+                # at 1024x1024) each time -- 15 copies, ~60 MB, for a page with
+                # one atlas. All but the last are dead: within a flush the atlas
+                # only grows (`WRITE_IN_PLACE` already rests on cells being
+                # inserted, never relocated), so the final state is a superset
+                # of every intermediate one, and every dispatch that reads the
+                # atlas is recorded into the same not-yet-submitted command
+                # buffer. Parking the copy and draining it immediately before
+                # the submit is therefore observationally identical.
+                #
+                # A park aimed at a DIFFERENT buffer than the one already parked
+                # drains that one first, so the upload count is bounded by the
+                # number of distinct slots written in the frame -- never by the
+                # number of runs.
+                if (self.font_atlas_deferred_buffer != 0 and
+                    self.font_atlas_deferred_buffer != self.d_font_atlas):
+                    self.font_atlas_drain_deferred_upload()
+                self.font_atlas_deferred_buffer = self.d_font_atlas
+                self.font_atlas_deferred_slot = target_slot
+                self.font_atlas_deferred_pixels = batch.atlas_pixels
+                atlas_uploaded = self.d_font_atlas != 0
+                # The device now holds exactly this atlas, so the "mirror" (the
+                # atlas words themselves) is truth by construction.
+                mirror_ready = atlas_uploaded
+                vulkan_font_upload_note(
+                    if atlas_uploaded: "u32" else: "bytes",
+                    if atlas_uploaded: "typed-requested" else: "typed-declined")
+                # No decision note here on purpose: `vulkan_font_decision_note`
+                # shares a fixed 4000-char budget with the slot/continuity
+                # notes, and one extra line per composite truncates exactly the
+                # sequence a mirror investigation reads. The typed lane's mode
+                # and reason are reachable via `vulkan_font_upload_last_mode()`
+                # / `vulkan_font_upload_last_reason()`.
+            if not atlas_uploaded:
+                if not typed_upload:
+                    vulkan_font_upload_note("bytes", "typed-not-requested")
+                packed_on_host = true
+                val _t_pack = vulkan_timing_now_us()
+                # `atlas_owner`, `mirror_coherent` and `continuity` are computed
+                # ONCE above, before the slot plan, because the plan depends on the
+                # continuity verdict. They are keyed on the ATLAS owner, not on
+                # `owner_identity`: the mirror is a copy of `batch.atlas_pixels`, so
+                # its validity depends only on which atlas produced those pixels --
+                # the font face. The composite identity additionally folds in device
+                # features, artifact identity and the session's device generation;
+                # when one of THOSE moves the device buffer must be rewritten (and
+                # is, below, in full) but the host bytes are still an accurate copy
+                # of the same atlas, so repacking them would be pure waste.
+                val can_increment = continuity == VK_FONT_MIRROR_INCREMENTAL
+                mirror_ready = continuity == VK_FONT_MIRROR_ALREADY_TRUTH
+                if can_increment:
+                    mirror_ready = self._repack_atlas_dirty_cells(batch)
+                if vulkan_font_selfcheck_enabled():
+                    vulkan_font_decision_note(
+                        "gen={batch.atlas_generation} host_gen={self.font_atlas_host_generation}" +
+                        " was_valid={mirror_coherent} owner_match={self.font_atlas_host_identity == atlas_owner}" +
+                        " len_match={self.font_atlas_host_bytes.len().to_i64() == atlas_bytes}" +
+                        " dirty={batch.dirty_rects.len()} seq={batch.atlas_owner_sequence}" +
+                        " host_seq={self.font_atlas_host_owner_sequence}" +
+                        " continuity={continuity} can_inc={can_increment} ready={mirror_ready}")
+                if not mirror_ready:
+                    self.font_atlas_host_bytes = _vulkan_font_pixels_to_bytes(batch.atlas_pixels)
+                elif vulkan_font_selfcheck_enabled():
+                    # Ground truth: what a full pack of this same atlas produces.
+                    val truth = _vulkan_font_pixels_to_bytes(batch.atlas_pixels)
+                    var bad: i64 = 0
+                    var detail = ""
+                    var bi: i64 = 0
+                    while bi < truth.len():
+                        if truth[bi] != self.font_atlas_host_bytes[bi]:
+                            bad = bad + 1
+                            if detail == "":
+                                val px = bi / 4
+                                val ax = px % batch.atlas_width.to_i64()
+                                val ay = px / batch.atlas_width.to_i64()
+                                var inside = false
+                                for q in batch.dirty_rects:
+                                    if (ax >= q.atlas_x.to_i64() and ax < q.atlas_x.to_i64() + q.width.to_i64() and
+                                        ay >= q.atlas_y.to_i64() and ay < q.atlas_y.to_i64() + q.height.to_i64()):
+                                        inside = true
+                                detail = "gen={batch.atlas_generation} px=({ax},{ay}) inside_dirty_rect={inside}"
+                        bi = bi + 1
+                    vulkan_font_mirror_note(bad, detail)
+                vulkan_timing_add(VK_T_FONT_ATLAS_PACK, _t_pack)
+                val _t_up = vulkan_timing_now_us()
+                atlas_uploaded = vulkan_sffi_copy_to_buffer(self.d_font_atlas, self.font_atlas_host_bytes, 0)
+                vulkan_timing_add(VK_T_FONT_ATLAS_UPLOAD, _t_up)
             dirty_upload_ns = vulkan_font_elapsed_ns(dirty_upload_started, clock.now_micros() * 1000)
             if not atlas_uploaded:
                 self.font_atlas_generation = -1
                 self.font_atlas_owner_identity = ""
                 self.font_atlas_payload_sha256 = ""
+                self.font_atlas_host_identity = ""
+                self.font_atlas_host_owner_sequence = -1
+                # Poison THIS SLOT only, not the whole table: a failed upload
+                # leaves one buffer holding unknown bytes, and a -1 sequence
+                # with no owner can never satisfy the reuse or in-place rules.
+                self.font_atlas_slot_owners[target_slot] = ""
+                self.font_atlas_slot_sequences[target_slot] = -1
                 return _vulkan_font_evidence(pipeline, "failed", "atlas-upload-failed", self.d_font_atlas, 0, 0, 0, batch.quads.len(), 0, false, false, framebuffer, 0, 0, 0, false)
+            # ONE SLOT PER OWNER. A relocating (`WRITE_FRESH`) run takes a
+            # different slot than the one this owner already held, and the old
+            # slot used to keep the owner's NAME while its bytes stayed at the
+            # stale sequence. `_font_atlas_slot_index` returns the FIRST match,
+            # so every later run for that owner found the stale slot, could not
+            # reuse or write in place, and eventually exhausted the table into a
+            # `FLUSH_THEN_WRITE` -- an extra submit per frame on css-layout.html
+            # even with eight slots. Disowning the stale copies keeps the lookup
+            # single-valued and returns their buffers to the spare pool.
+            var stale: i64 = 0
+            while stale < self.font_atlas_slot_owners.len().to_i64():
+                if stale != target_slot and self.font_atlas_slot_owners[stale] == atlas_owner:
+                    self.font_atlas_slot_owners[stale] = ""
+                    self.font_atlas_slot_sequences[stale] = -1
+                stale = stale + 1
+            # The slot now holds exactly this owner's atlas at this sequence, so
+            # the next run for this owner can reuse it with no write at all.
+            self.font_atlas_slot_owners[target_slot] = atlas_owner
+            self.font_atlas_slot_sequences[target_slot] = batch.atlas_owner_sequence
+            # The device buffer now holds exactly the mirror, so the mirror is
+            # coherent again and the next batch for this owner may go dirty-only.
+            self.font_atlas_host_identity = atlas_owner
+            self.font_atlas_host_generation = batch.atlas_generation
+            self.font_atlas_host_owner_sequence = batch.atlas_owner_sequence
+            self.font_atlas_host_valid = atlas_owner != ""
+            if packed_on_host:
+                vulkan_font_pack_note(mirror_ready)
             val payload_hash_started = clock.now_micros() * 1000
-            self.font_atlas_payload_sha256 = _vulkan_font_atlas_payload_digest(
-                batch.atlas_pixels, batch.atlas_width, batch.atlas_height)
+            val _t_digest = vulkan_timing_now_us()
+            self.font_atlas_payload_sha256 = if vulkan_font_payload_digest_full():
+                _vulkan_font_atlas_payload_digest(
+                    batch.atlas_pixels, batch.atlas_width, batch.atlas_height)
+            else:
+                vulkan_font_atlas_identity_digest(owner_identity,
+                    batch.atlas_generation, batch.atlas_width, batch.atlas_height,
+                    batch.atlas_pixels.len().to_i64())
+            vulkan_timing_add(VK_T_FONT_ATLAS_DIGEST, _t_digest)
             evidence_overhead_ns = evidence_overhead_ns + vulkan_font_elapsed_ns(payload_hash_started, clock.now_micros() * 1000)
             self.font_atlas_generation = batch.atlas_generation
             self.font_atlas_owner_identity = owner_identity
             self.font_atlas_upload_count = self.font_atlas_upload_count + 1
             self.font_atlas_upload_bytes = self.font_atlas_upload_bytes + atlas_bytes
         if pipeline.artifact_mode == "precompiled-spirv" or pipeline.artifact_mode == "runtime-glsl":
+            if vulkan_font_overlap_enabled():
+                vulkan_font_overlap_note(batch.quads.len().to_i64(),
+                    vulkan_font_count_overlapping_quads(batch.quads))
+            val _t_packed = vulkan_timing_now_us()
             val packed = vulkan_font_packed_params(batch, origin_x, origin_y, width, height)
+            vulkan_timing_add(VK_T_FONT_PACKED_PARAMS, _t_packed)
             val pool_index = self.pending_font_params.len()
             val use_packed_pool = self.frame_batching_enabled and not self.font_oracle_mode
             if packed.len() == 0 or packed.len() > VULKAN_FONT_PACKED_MAX_BYTES:
@@ -887,6 +1662,10 @@ impl VulkanBackend:
                     self.font_frame_command_count = self.font_frame_command_count + 1
                 self.pending_font_descriptors.push(packed_descriptor)
                 self.pending_font_params.push(packed_params)
+                # A dispatch that READS the active atlas slot is now sitting in
+                # an unsubmitted command buffer. Until the next flush, any
+                # relocating write to that slot is a hazard.
+                self._font_atlas_mark_slot_referenced()
                 self.pending_font_glyph_count = self.pending_font_glyph_count + batch.quads.len()
                 var packed_evidence = _vulkan_font_evidence(pipeline, "recorded", "queued-packed-font-batch",
                     self.d_font_atlas, packed_params, packed_descriptor, packed_command, batch.quads.len(), 1,
@@ -1086,6 +1865,9 @@ impl VulkanBackend:
                 self.font_frame_command_count = self.font_frame_command_count + 1
             for descriptor in descriptors: self.pending_font_descriptors.push(descriptor)
             for params in params_handles: self.pending_font_params.push(params)
+            # Same hazard bookkeeping as the packed path above: these dispatches
+            # read the active atlas slot and are not submitted yet.
+            self._font_atlas_mark_slot_referenced()
             self.pending_font_glyph_count = self.pending_font_glyph_count + batch.quads.len()
             val retained_params_count = self.pending_font_params.len() + (if self.d_font_params > 0: 1 else: 0)
             val retained_resource_bytes = vulkan_font_gpu_resource_bytes_for_params(
@@ -1219,6 +2001,8 @@ export vulkan_font_frame_batch_contract
 export VULKAN_FONT_FRAME_GLYPH_CAP, vulkan_font_gpu_resource_bytes_for_params
 export VULKAN_FONT_PACKED_HEADER_WORDS, VULKAN_FONT_PACKED_GLYPH_WORDS
 export VULKAN_FONT_PACKED_MAX_BYTES, vulkan_font_packed_params
+export vulkan_font_atlas_identity_digest, vulkan_font_count_overlapping_quads
+export vulkan_font_partition_quads, vulkan_font_partition_bucket_count
 export VULKAN_BITMAP_FONT_FIRST_CODE, VULKAN_BITMAP_FONT_LAST_CODE
 export VULKAN_BITMAP_FONT_CELL_COUNT, VULKAN_BITMAP_FONT_CELL_COLUMNS
 export VULKAN_BITMAP_FONT_CONFIG_IDENTITY
@@ -1227,6 +2011,7 @@ export VULKAN_TEXT_PATH_CPU_RASTER, VULKAN_TEXT_PATH_NOT_DRAWN
 export vulkan_bitmap_font_atlas_width, vulkan_bitmap_font_atlas_height
 export vulkan_bitmap_font_identity, vulkan_bitmap_text_atlas_eligible
 export vulkan_bitmap_font_atlas_pixels, vulkan_bitmap_text_quads
+export vulkan_bitmap_text_clip_quads
 export vulkan_bitmap_text_atlas_block_reason, vulkan_font_batch_composited
 export vulkan_text_atlas_fallback_safe
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}

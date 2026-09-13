@@ -250,6 +250,20 @@ void spl_condvar_destroy(spl_condvar_handle handle);
  */
 int64_t spl_thread_cpu_count(void);
 
+/* Current-thread AVX2 affinity lease. Linux only; other hosts fail closed. */
+int64_t rt_cpu_affinity_avx2_acquire(void);
+int64_t rt_cpu_affinity_avx2_generation(int64_t handle);
+int64_t rt_cpu_affinity_avx2_thread_id(int64_t handle);
+int64_t rt_cpu_affinity_avx2_cpu(int64_t handle);
+bool rt_cpu_affinity_avx2_validate(int64_t handle, int64_t generation,
+                                   int64_t thread_id, int64_t cpu);
+bool rt_cpu_affinity_avx2_release(int64_t handle, int64_t generation,
+                                  int64_t thread_id);
+bool rt_cpu_affinity_avx2_call_enter(int64_t handle, int64_t generation,
+                                     int64_t thread_id, int64_t cpu);
+bool rt_cpu_affinity_avx2_call_exit(int64_t handle, int64_t generation,
+                                    int64_t thread_id, int64_t cpu);
+
 /* ===== Thread Pool Helper ===== */
 
 /**

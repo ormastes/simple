@@ -1,0 +1,292 @@
+# codex-impl
+# Baseline-safe compiler host EnvironmentSnapshotV1 adapter and bounded x86
+# CPUID/OS-state acquisition owner.
+#
+# Platform/ABI identities and policy are supplied by their existing authority.
+# This adapter performs no environment reads and never initializes a GPU.  The
+# X86 level expansion is exact and keeps hardware declarations, OS usability,
+# and policy ceilings distinct.  No GPU is initialized here.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    ENV_VARIANT_SCHEMA_V1, ENV_ARCH_X86_64_V1, ENV_ARCH_AARCH64_V1,
+    ENV_VECTOR_NONE_V1, ENV_VECTOR_FIXED_V1, EnvironmentDigest256V1,
+    EnvironmentArenaRangeV1, EnvironmentFeatureSetV1, EnvironmentSnapshotV1,
+    environment_snapshot_validate_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.{
+    ENV_FEATURE_X86_64_BASELINE_V2, ENV_FEATURE_X86_64_LEVEL2_V2,
+    ENV_FEATURE_X86_64_LEVEL3_V2,
+    ENV_FEATURE_X86_64_LEVEL4_V2, ENV_X86_FEATURE_WORD_TAG_V2,
+    ENV_X86_FEATURE_BASELINE_V2, ENV_X86_FEATURE_CMPXCHG16B_V2,
+    ENV_X86_FEATURE_LAHF_SAHF_V2, ENV_X86_FEATURE_POPCNT_V2,
+    ENV_X86_FEATURE_SSE3_V2, ENV_X86_FEATURE_SSSE3_V2,
+    ENV_X86_FEATURE_SSE41_V2, ENV_X86_FEATURE_SSE42_V2,
+    ENV_X86_FEATURE_AVX_V2, ENV_X86_FEATURE_AVX2_V2,
+    ENV_X86_FEATURE_BMI1_V2, ENV_X86_FEATURE_BMI2_V2,
+    ENV_X86_FEATURE_F16C_V2, ENV_X86_FEATURE_FMA_V2,
+    ENV_X86_FEATURE_LZCNT_V2, ENV_X86_FEATURE_MOVBE_V2,
+    ENV_X86_FEATURE_OSXSAVE_V2, ENV_X86_FEATURE_AVX512F_V2,
+    ENV_X86_FEATURE_AVX512BW_V2, ENV_X86_FEATURE_AVX512CD_V2,
+    ENV_X86_FEATURE_AVX512DQ_V2, ENV_X86_FEATURE_AVX512VL_V2,
+    ENV_X86_FEATURE_AVX512VBMI_V2, ENV_X86_FEATURE_AVX512VBMI2_V2,
+    environment_feature_registry_lookup_v2,
+    environment_feature_registry_x86_level_complete_v2,
+    environment_feature_registry_x86_validate_v2,
+    environment_feature_registry_validate_v1
+}
+
+use std.sffi.host.{cpu_is_x86_64, cpuid, x86_avx512_os_state_usable, xgetbv}
+
+pub const COMPILER_HOST_SNAPSHOT_ADAPTER_SCHEMA_V1: u16 = 1u16
+pub const COMPILER_HOST_X86_POLICY_NATIVE_V1: u32 = 0u32
+
+pub enum CompilerHostSnapshotErrorV1:
+    InvalidAuthority
+    UnsupportedArchitecture
+    HostArchitectureMismatch
+    InvalidPolicyCeiling
+    InvalidFeatureAuthority
+    InvalidSnapshot
+
+pub struct CompilerHostPlatformAuthorityV1:
+    execution_architecture: u16
+    os_id: u32
+    abi_id: u32
+    object_format_id: u32
+    endian_id: u16
+    pointer_width_bits: u16
+    snapshot_identity: EnvironmentDigest256V1
+    snapshot_generation: u64
+    execution_domain_identity: EnvironmentDigest256V1
+    loader_permission_bits: u64
+    allowed_effect_bits: u64
+    numerical_contract_id: u32
+    resource_layout_digest: EnvironmentDigest256V1
+
+pub struct CompilerHostVectorFactsV1:
+    hardware_feature_bits: u64
+    os_usable_feature_bits: u64
+    policy_allowed_feature_bits: u64
+    vector_state_mode: u16
+    vector_length_bits: u32
+
+pub struct CompilerHostX86CpuidFactsV1:
+    maximum_basic_leaf: u32
+    maximum_extended_leaf: u32
+    leaf1_ecx: u32
+    leaf7_0_ebx: u32
+    leaf7_0_ecx: u32
+    leaf80000001_ecx: u32
+    avx_os_state_usable: bool
+    avx512_os_state_usable: bool
+
+pub struct CompilerHostEnvironmentSnapshotV1:
+    schema_version: u16
+    snapshot: EnvironmentSnapshotV1
+    feature_words: [u64]
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _authority_valid_v1(authority: CompilerHostPlatformAuthorityV1) -> bool:
+    authority.os_id != 0u32 and authority.abi_id != 0u32 and
+        authority.object_format_id != 0u32 and
+        (authority.endian_id == 1u16 or authority.endian_id == 2u16) and
+        (authority.pointer_width_bits == 32u16 or authority.pointer_width_bits == 64u16) and
+        _digest_declared_v1(authority.snapshot_identity) and
+        authority.snapshot_generation > 0u64 and
+        _digest_declared_v1(authority.execution_domain_identity) and
+        authority.numerical_contract_id != 0u32 and
+        _digest_declared_v1(authority.resource_layout_digest)
+
+fn _cpuid_bit_v1(word: u32, bit: u32) -> bool:
+    (word & (1u32 << bit)) != 0u32
+
+fn _x86_registered_mask_v1(feature_id: u32) -> u64:
+    match environment_feature_registry_lookup_v2(feature_id):
+        case Ok(entry): entry.feature_mask
+        case Err(_): 0u64
+
+fn _x86_hardware_mask_v1(facts: CompilerHostX86CpuidFactsV1) -> u64:
+    var bits = ENV_X86_FEATURE_WORD_TAG_V2 | ENV_X86_FEATURE_BASELINE_V2
+    if facts.maximum_basic_leaf >= 1u32:
+        if _cpuid_bit_v1(facts.leaf1_ecx, 13u32): bits = bits | ENV_X86_FEATURE_CMPXCHG16B_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 23u32): bits = bits | ENV_X86_FEATURE_POPCNT_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 0u32): bits = bits | ENV_X86_FEATURE_SSE3_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 9u32): bits = bits | ENV_X86_FEATURE_SSSE3_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 19u32): bits = bits | ENV_X86_FEATURE_SSE41_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 20u32): bits = bits | ENV_X86_FEATURE_SSE42_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 28u32): bits = bits | ENV_X86_FEATURE_AVX_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 29u32): bits = bits | ENV_X86_FEATURE_F16C_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 12u32): bits = bits | ENV_X86_FEATURE_FMA_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 22u32): bits = bits | ENV_X86_FEATURE_MOVBE_V2
+        if _cpuid_bit_v1(facts.leaf1_ecx, 27u32): bits = bits | ENV_X86_FEATURE_OSXSAVE_V2
+    if facts.maximum_basic_leaf >= 7u32:
+        if _cpuid_bit_v1(facts.leaf7_0_ebx, 3u32): bits = bits | ENV_X86_FEATURE_BMI1_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ebx, 5u32): bits = bits | ENV_X86_FEATURE_AVX2_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ebx, 8u32): bits = bits | ENV_X86_FEATURE_BMI2_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ebx, 16u32): bits = bits | ENV_X86_FEATURE_AVX512F_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ebx, 30u32): bits = bits | ENV_X86_FEATURE_AVX512BW_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ebx, 28u32): bits = bits | ENV_X86_FEATURE_AVX512CD_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ebx, 17u32): bits = bits | ENV_X86_FEATURE_AVX512DQ_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ebx, 31u32): bits = bits | ENV_X86_FEATURE_AVX512VL_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ecx, 1u32): bits = bits | ENV_X86_FEATURE_AVX512VBMI_V2
+        if _cpuid_bit_v1(facts.leaf7_0_ecx, 6u32): bits = bits | ENV_X86_FEATURE_AVX512VBMI2_V2
+    if facts.maximum_extended_leaf >= 0x80000001u32:
+        if _cpuid_bit_v1(facts.leaf80000001_ecx, 0u32): bits = bits | ENV_X86_FEATURE_LAHF_SAHF_V2
+        if _cpuid_bit_v1(facts.leaf80000001_ecx, 5u32): bits = bits | ENV_X86_FEATURE_LZCNT_V2
+    bits
+
+fn _x86_usable_mask_v1(hardware: u64, facts: CompilerHostX86CpuidFactsV1) -> u64:
+    val avx_family = ENV_X86_FEATURE_AVX_V2 | ENV_X86_FEATURE_AVX2_V2 |
+        ENV_X86_FEATURE_F16C_V2 | ENV_X86_FEATURE_FMA_V2
+    val avx512_family = ENV_X86_FEATURE_AVX512F_V2 |
+        ENV_X86_FEATURE_AVX512BW_V2 | ENV_X86_FEATURE_AVX512CD_V2 |
+        ENV_X86_FEATURE_AVX512DQ_V2 | ENV_X86_FEATURE_AVX512VL_V2 |
+        ENV_X86_FEATURE_AVX512VBMI_V2 | ENV_X86_FEATURE_AVX512VBMI2_V2
+    var usable = hardware
+    val avx_state_usable = facts.avx_os_state_usable and
+        (hardware & ENV_X86_FEATURE_OSXSAVE_V2) != 0u64
+    if not avx_state_usable:
+        usable = usable & ~(avx_family | avx512_family)
+    elif not facts.avx512_os_state_usable:
+        usable = usable & ~avx512_family
+    usable
+
+pub fn compiler_host_environment_snapshot_x86_from_cpuid_facts_v1(
+    authority: CompilerHostPlatformAuthorityV1, facts: CompilerHostX86CpuidFactsV1,
+    policy_ceiling: u32
+) -> Result<CompilerHostEnvironmentSnapshotV1, CompilerHostSnapshotErrorV1>:
+    if authority.execution_architecture != ENV_ARCH_X86_64_V1:
+        return Err(CompilerHostSnapshotErrorV1.UnsupportedArchitecture)
+    val hardware = _x86_hardware_mask_v1(facts)
+    val usable = _x86_usable_mask_v1(hardware, facts)
+    var allowed = usable
+    if policy_ceiling != COMPILER_HOST_X86_POLICY_NATIVE_V1:
+        val ceiling = match environment_feature_registry_lookup_v2(policy_ceiling):
+            case Ok(value): value
+            case Err(_): return Err(CompilerHostSnapshotErrorV1.InvalidPolicyCeiling)
+        if ceiling.architecture != ENV_ARCH_X86_64_V1:
+            return Err(CompilerHostSnapshotErrorV1.InvalidPolicyCeiling)
+        allowed = usable & ceiling.feature_mask
+    var width = 128u32
+    if environment_feature_registry_x86_level_complete_v2(
+        ENV_FEATURE_X86_64_LEVEL4_V2, usable):
+        width = 512u32
+    elif environment_feature_registry_x86_level_complete_v2(
+        ENV_FEATURE_X86_64_LEVEL3_V2, usable):
+        width = 256u32
+    compiler_host_environment_snapshot_from_facts_v1(authority,
+        CompilerHostVectorFactsV1(hardware_feature_bits: hardware,
+            os_usable_feature_bits: usable, policy_allowed_feature_bits: allowed,
+            vector_state_mode: ENV_VECTOR_FIXED_V1, vector_length_bits: width))
+
+pub fn compiler_host_environment_snapshot_x86_live_v1(
+    authority: CompilerHostPlatformAuthorityV1, policy_ceiling: u32
+) -> Result<CompilerHostEnvironmentSnapshotV1, CompilerHostSnapshotErrorV1>:
+    if authority.execution_architecture != ENV_ARCH_X86_64_V1:
+        return Err(CompilerHostSnapshotErrorV1.UnsupportedArchitecture)
+    unsafe(capabilities: [ffi]):
+        if cpu_is_x86_64() != 1:
+            return Err(CompilerHostSnapshotErrorV1.HostArchitectureMismatch)
+        val basic = cpuid(0, 0).0 as u32
+        val extended = cpuid(-2147483648, 0).0 as u32
+        var leaf1 = (0 as i32, 0 as i32, 0 as i32, 0 as i32)
+        var leaf7 = (0 as i32, 0 as i32, 0 as i32, 0 as i32)
+        var leaf_extended = (0 as i32, 0 as i32, 0 as i32, 0 as i32)
+        if basic >= 1u32: leaf1 = cpuid(1, 0)
+        if basic >= 7u32: leaf7 = cpuid(7, 0)
+        if extended >= 0x80000001u32:
+            leaf_extended = cpuid(-2147483647, 0)
+        var avx_state_usable = false
+        if basic >= 1u32 and _cpuid_bit_v1(leaf1.2 as u32, 26u32) and
+           _cpuid_bit_v1(leaf1.2 as u32, 27u32):
+            avx_state_usable = ((xgetbv(0) as u64) & 0x6u64) == 0x6u64
+        compiler_host_environment_snapshot_x86_from_cpuid_facts_v1(authority,
+            CompilerHostX86CpuidFactsV1(maximum_basic_leaf: basic,
+                maximum_extended_leaf: extended, leaf1_ecx: leaf1.2 as u32,
+                leaf7_0_ebx: leaf7.1 as u32, leaf7_0_ecx: leaf7.2 as u32,
+                leaf80000001_ecx: leaf_extended.2 as u32,
+                avx_os_state_usable: avx_state_usable,
+                avx512_os_state_usable: x86_avx512_os_state_usable()),
+            policy_ceiling)
+
+pub fn compiler_host_environment_snapshot_from_facts_v1(
+    authority: CompilerHostPlatformAuthorityV1, facts: CompilerHostVectorFactsV1
+) -> Result<CompilerHostEnvironmentSnapshotV1, CompilerHostSnapshotErrorV1>:
+    if not _authority_valid_v1(authority):
+        return Err(CompilerHostSnapshotErrorV1.InvalidAuthority)
+    if authority.execution_architecture != ENV_ARCH_X86_64_V1 and
+       authority.execution_architecture != ENV_ARCH_AARCH64_V1:
+        return Err(CompilerHostSnapshotErrorV1.UnsupportedArchitecture)
+    if facts.os_usable_feature_bits & facts.hardware_feature_bits != facts.os_usable_feature_bits or
+       facts.policy_allowed_feature_bits & facts.os_usable_feature_bits != facts.policy_allowed_feature_bits:
+        return Err(CompilerHostSnapshotErrorV1.InvalidFeatureAuthority)
+    val words = [facts.hardware_feature_bits, facts.os_usable_feature_bits,
+                 facts.policy_allowed_feature_bits]
+    val snapshot = EnvironmentSnapshotV1(
+        descriptor_size: 232u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        execution_architecture: authority.execution_architecture,
+        os_id: authority.os_id, abi_id: authority.abi_id,
+        object_format_id: authority.object_format_id, endian_id: authority.endian_id,
+        pointer_width_bits: authority.pointer_width_bits,
+        snapshot_identity: authority.snapshot_identity,
+        snapshot_generation: authority.snapshot_generation,
+        execution_domain_identity: authority.execution_domain_identity,
+        hardware_features: EnvironmentFeatureSetV1(
+            architecture: authority.execution_architecture,
+            words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32)),
+        os_usable_features: EnvironmentFeatureSetV1(
+            architecture: authority.execution_architecture,
+            words: EnvironmentArenaRangeV1(offset: 1u32, count: 1u32)),
+        policy_allowed_features: EnvironmentFeatureSetV1(
+            architecture: authority.execution_architecture,
+            words: EnvironmentArenaRangeV1(offset: 2u32, count: 1u32)),
+        vector_state_mode: facts.vector_state_mode,
+        vector_length_bits: facts.vector_length_bits,
+        loader_permission_bits: authority.loader_permission_bits,
+        allowed_effect_bits: authority.allowed_effect_bits,
+        numerical_contract_id: authority.numerical_contract_id,
+        resource_layout_digest: authority.resource_layout_digest,
+        gpu_devices: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+    val registry_valid = if authority.execution_architecture == ENV_ARCH_X86_64_V1:
+        (environment_feature_registry_x86_validate_v2(facts.hardware_feature_bits) and
+         environment_feature_registry_x86_validate_v2(facts.os_usable_feature_bits) and
+         environment_feature_registry_x86_validate_v2(facts.policy_allowed_feature_bits)) or
+        (environment_feature_registry_validate_v1(snapshot.hardware_features, words) == Ok(()) and
+         environment_feature_registry_validate_v1(snapshot.os_usable_features, words) == Ok(()) and
+         environment_feature_registry_validate_v1(snapshot.policy_allowed_features, words) == Ok(()))
+    else:
+        environment_feature_registry_validate_v1(snapshot.hardware_features, words) == Ok(()) and
+        environment_feature_registry_validate_v1(snapshot.os_usable_features, words) == Ok(()) and
+        environment_feature_registry_validate_v1(snapshot.policy_allowed_features, words) == Ok(())
+    if environment_snapshot_validate_v1(snapshot, words, []) != Ok(()) or not registry_valid:
+        return Err(CompilerHostSnapshotErrorV1.InvalidSnapshot)
+    Ok(CompilerHostEnvironmentSnapshotV1(
+        schema_version: COMPILER_HOST_SNAPSHOT_ADAPTER_SCHEMA_V1,
+        snapshot: snapshot, feature_words: words))
+
+pub fn compiler_host_environment_snapshot_baseline_v1(
+    authority: CompilerHostPlatformAuthorityV1
+) -> Result<CompilerHostEnvironmentSnapshotV1, CompilerHostSnapshotErrorV1>:
+    # SSE2 is mandatory for x86-64 and ASIMD/NEON is mandatory for AArch64.
+    # The architecture authority therefore proves the baseline bit without a
+    # weaker SSE1 probe or optional device initialization.
+    var baseline_usable = true
+    if authority.execution_architecture == ENV_ARCH_X86_64_V1:
+        baseline_usable = true
+    elif authority.execution_architecture == ENV_ARCH_AARCH64_V1:
+        baseline_usable = true
+    else:
+        return Err(CompilerHostSnapshotErrorV1.UnsupportedArchitecture)
+    val bits: u64 = if authority.execution_architecture == ENV_ARCH_X86_64_V1:
+        _x86_registered_mask_v1(ENV_FEATURE_X86_64_BASELINE_V2)
+    else:
+        1u64
+    val mode: u16 = if baseline_usable: ENV_VECTOR_FIXED_V1 else ENV_VECTOR_NONE_V1
+    val width: u32 = if baseline_usable: 128u32 else 0u32
+    compiler_host_environment_snapshot_from_facts_v1(
+        authority, CompilerHostVectorFactsV1(
+            hardware_feature_bits: bits, os_usable_feature_bits: bits,
+            policy_allowed_feature_bits: bits,
+            vector_state_mode: mode, vector_length_bits: width))

@@ -1,4 +1,20 @@
 # `check-c-runtime-compiles-push.shs` is RED on origin/main when run on macOS aarch64
+**Status:** RESOLVED — re-verified on macOS aarch64 (Darwin 25.5.0, Xcode clang) at
+`origin/main@b9667d6584f`, 2026-09-12. The gate is green on this host:
+
+```
+$ sh scripts/check/check-c-runtime-compiles-push.shs ; echo rc=$?
+check-c-runtime-compiles-push: compiler = clang
+check-c-runtime-compiles-push: selftest 13/13 fixtures correct
+PASS — 143 file(s) compiled, 0 errors (6 skipped for unavailable external dependencies)
+rc=0
+```
+
+The 6 skips are genuine external-SDK-header SKIPs (`counterpart_worker_runtime.c`,
+`scilib/cublas_shim.c`, `scilib/cusolver_shim.c`, `scv_wasm_shim.c`,
+`slang_ggml_shim.c`, `test/rt_tls_client_openssl_selfcheck.c`) — never counted as
+compiled. No source change was needed in this lane; the Linux-only `st_mtim`
+guard that made this red for every macOS host landed with PR #455.
 
 ## FIXED — 2026-08-17
 
@@ -105,3 +121,6 @@ green rather than compare failure lists.
    passed, but distinguishable from a real defect. Until then the guard cannot
    reach PASS on macOS and every landing from this host has to reason around
    it manually.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

@@ -1,4 +1,5 @@
 # A hardware-gated spec whose only example is `skip_if`-skipped reports file-level FAIL, not SKIP
+**Status:** OPEN (unverified 2026-09-12)
 
 **Date:** 2026-08-11
 **Found by:** two lanes writing forward-looking hardware-gated system specs, independently
@@ -67,3 +68,6 @@ as written (correct `it`-level skip behavior, correct reason text) since
 rewriting them to dodge this runner quirk (e.g. padding with a dummy always-run
 example) would obscure their actual purpose. The file-level FAIL is a known,
 accepted cosmetic issue until the runner is fixed.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

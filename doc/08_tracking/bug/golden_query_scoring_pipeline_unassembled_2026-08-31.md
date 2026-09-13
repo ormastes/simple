@@ -1,5 +1,7 @@
 # Golden query→score pipeline is not yet assembled (P11)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-08-31 · **Status:** OPEN · **Severity:** informational (scope gap, not a defect)
 
 ## Summary
@@ -95,3 +97,7 @@ already disclaims exact parity:
   (`explanation_reconciliation_mismatch` fails closed if it doesn't).
 
 No golden vector was skipped or weakened to reach green.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

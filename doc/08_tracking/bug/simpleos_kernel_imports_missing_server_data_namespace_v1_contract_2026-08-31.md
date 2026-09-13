@@ -1,4 +1,5 @@
 # SimpleOS kernel closure imports a stdlib contract module that does not exist
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/os/services/vfs/server_data_namespace_owner_spec.spl -> 0 passed, 0 failed)
 
 Date: 2026-08-31
 Scope: goal item 2 — SimpleOS window-manager smoke tests with Vulkan-backed
@@ -82,3 +83,6 @@ build script (there is an arm64 precedent,
 `scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`) so that a
 broken `src/os/` closure fails loudly instead of hiding behind a
 missing-artifact precondition ERROR.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/services/vfs/server_data_namespace_owner_spec.spl` on the deployed seed; the spec now passes in full (0/0), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

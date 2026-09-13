@@ -2,7 +2,7 @@
 
 - **ID:** BUG-2026-08-05-deployed-seed-not-selfhosted
 - **Date:** 2026-08-05
-- Status: OPEN (P2)
+- Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler_core/interpreter/match_fallthrough_diagnostic_spec.spl` now PASSes)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** medium — contradicts stated policy, hides pure-Simple interpreter
   fixes from `bin/simple run`/`bin/simple test` until redeployed
@@ -163,3 +163,27 @@ The three attempted optimizer processes measured 8.48 s / 270,628 KiB, 5.67 s /
 280,312 KiB, and 5.34 s / 279,484 KiB, respectively, but those findings are
 diagnostic-only and cannot be accepted as pure-Simple verification. No retry or
 seed substitution was performed.
+
+## Update 2026-09-09 — Windows deployment remains an unadmitted Rust seed
+
+The deployed Windows launcher resolves to
+`bin/release/x86_64-pc-windows-msvc/simple.exe`; the byte-identical convenience
+copy is `bin/simple.exe`. Both files are 16,347,136 bytes and have SHA-256
+`6094dcae291aa984973ccd681f956e67a7a60543ab99f76a29313fbbfdee96d1`.
+The executable identifies itself as the Rust bootstrap seed. No deployment or
+provenance receipt in the repository binds that digest as an admitted
+pure-Simple Stage 4 CLI. A fresh timestamp or placement beneath `bin/release/`
+is not admission evidence.
+
+The 2026-09-09 Phase 1 smoke matrix also observed abnormal exits while probing
+`test`, `native-build`, `fmt`, `lint`, and `query` help/dispatch paths. Those
+observations remain attached here pending retained per-command logs that prove
+whether they share one source-loading cause. This note deliberately does not
+invent a compiler root cause from correlated failures on a disqualified seed.
+
+Status remains **OPEN**. This digest must not certify Phase 1 tools or MCP/LSP
+verification. Closure requires a provenance-admitted self-hosted Stage 4
+deployment and a fresh essential-tools smoke over the deployed bytes.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler_core/interpreter/match_fallthrough_diagnostic_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

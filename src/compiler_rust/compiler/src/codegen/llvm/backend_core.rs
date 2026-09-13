@@ -1665,6 +1665,33 @@ impl NativeBackend for LlvmBackend {
         let module_name = module.name.as_deref().unwrap_or("module");
         self.create_module(module_name)?;
 
+        // Outline lambda/generator/future body blocks into standalone
+        // top-level MIR functions BEFORE anything else touches
+        // `module.functions`. Without this, a MIR function that assigns a
+        // lambda to a local (`val f: fn(i64) -> i64 = \x: x * 2`) keeps the
+        // lambda's body as an extra, disconnected basic block INSIDE its
+        // parent function (confirmed via `SIMPLE_DUMP_IR`: the dumped IR
+        // showed `bb1: ; No predecessors!` still inside `@spl_main`, and no
+        // `@main_outlined_1` function anywhere in the module) instead of
+        // becoming its own callable function. `compile_closure_create`
+        // (functions/objects.rs) then does `module.get_function(func_name)`
+        // for that never-emitted outlined name, finds nothing, and silently
+        // falls back to `i8_ptr_type.const_null()` as the closure's function
+        // pointer. Every later indirect call through that closure value then
+        // loads and calls a NULL function pointer — measured exit 133
+        // (SIGTRAP) for a plain local closure and exit 139 (SIGSEGV) for one
+        // read back out of a class field, both fixed by this outlining pass
+        // (see doc/08_tracking/bug/native_closure_value_indirect_call_segv_2026-09-07.md).
+        // `codegen::common_backend::compile_all_functions` (the Cranelift/JIT
+        // path) already calls `expand_with_outlined` for exactly this reason;
+        // the LLVM/native backend never did, so a call through a closure
+        // VALUE (as opposed to calling a function by its bare name, which
+        // never goes through ClosureCreate/IndirectCall) always crashed.
+        let outlined_functions = crate::codegen::shared::expand_with_outlined(module);
+        let mut owned_module = module.clone();
+        owned_module.functions = outlined_functions;
+        let module: &MirModule = &owned_module;
+
         // Pre-declare runtime functions with correct signatures.
         // This prevents compile_call from creating wrong declarations when
         // MIR calls a runtime function with a different number of arguments

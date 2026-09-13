@@ -1,0 +1,48 @@
+# Site 7 (BOOT-7, 2026-09-13): `module_surfaces_promote` answered false on every
+# Stage-2 positional Stage-3 route run, so `--stop-after-stage2` could never admit
+# a compiler. Measured with gdb on the Stage-2 candidate
+# (sha256 3ad6fc2a0ac80727..., 152199192 B): the 24-call per-surface chain answered
+# TRUE 24 times, and the false came from `module_surface_promote_freeze_names`'s
+# post-condition, whose premise is wrong.
+#
+# That post-condition assumed "a second rt_transient_heap_promote reports true only
+# for a value that is STILL owned by the dying scope". That holds for a transient
+# heap STRING, whose RT_CORE_STRING_FLAG_TRANSIENT the C runtime clears on promote
+# (runtime_native.c:2474), and for nothing else: a raw allocation only has its
+# RT_CORE_TRANSIENT_RAW_OWNED_BIT cleared while staying in the lookup table
+# (runtime_native.c:2488), and an array/dict/enum/closure only has its
+# transient_scope_id zeroed — and `rt_core_transient_classify` (runtime_native.c:2362)
+# consults NEITHER. So a repeat promote of those representations answers true forever.
+# The gdb trace shows exactly that: calls #25, #26 and #29 all carry the SAME value
+# 0x782ee81 and all three answer 1.
+#
+# See doc/08_tracking/bug/stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md
+use std.spec
+use std.io.{file_read}
+
+val REGISTRY = "src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+
+describe "freeze-name promotion does not gate on a repeat promote":
+    it "still promotes the four names freeze re-assigns":
+        val registry = file_read(REGISTRY)
+        # Fail closed on a vacuous read: an empty file would satisfy every
+        # negative assertion below.
+        expect(registry.len() > 4000).to_be_true()
+        expect(registry).to_contain("fn module_surface_promote_freeze_names(")
+        expect(registry).to_contain("rt_transient_heap_promote(surface.logical_name)")
+        expect(registry).to_contain("rt_transient_heap_promote(surface.canonical_name)")
+        expect(registry).to_contain("rt_transient_heap_promote(surface.package_name)")
+        expect(registry).to_contain(
+            "rt_transient_heap_promote(surface.preferred_registry_name)")
+
+    it "does not treat a second promote as a failure":
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        val gates_on_repeat_promote = registry.contains(
+            "if rt_transient_heap_promote(surface.logical_name) or")
+        expect(gates_on_repeat_promote).to_be_false()
+
+    it "records why the repeat-promote premise is unsound":
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        expect(registry).to_contain("rt_core_transient_classify")

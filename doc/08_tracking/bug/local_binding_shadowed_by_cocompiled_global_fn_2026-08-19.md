@@ -1,5 +1,7 @@
 # Interpreter: `if val <name> = ...` local binding misresolved to a co-compiled global `fn <name>`
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-19
 - Status: WORKED AROUND (rename at one site); interpreter defect OPEN
 - Defect class: sibling of `compiler_cross_module_private_symbol_collision`,
@@ -37,3 +39,6 @@ Locals (including `if val` pattern bindings) must always win name resolution
 over co-compiled globals from other modules. This is the same resolution bug
 family as the CSSValue enum collision
 (`doc/08_tracking/bug/cross_module_cssvalue_enum_collision_2026-08-19.md`).
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

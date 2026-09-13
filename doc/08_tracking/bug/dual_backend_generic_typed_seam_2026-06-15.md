@@ -1,8 +1,14 @@
 # Bug: generic fn over trait bound fails for typed dual-backend seam
 
+## Closed 2026-09-13 — Fixed: a generic fn with a trait bound resolves its type parameter
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the entry's minimal repro runs. `trait ByteEq: fn to_bytes() -> [u8]`, `struct Foo` implementing it, and `fn run_typed<T: ByteEq>(a: T) -> i64: a.to_bytes().len()` called with `Foo(data: [1u8, 2u8, 3u8])` prints `3`. No `Unknown type: T`.
+- **measured**: the sibling bug this entry distinguishes itself from, `crypto_digest_generic_struct_2026-06-15` (type parameters on struct definitions), was verified fixed in the same pass — both manifestations are gone.
+- **inferred**: the Seam A non-generic helper workaround can therefore be retired when that lane chooses to; not done here, as it is a `src/lib` API change outside this triage.
+
 **ID:** dual_backend_generic_typed_seam_2026-06-15
 **Filed:** 2026-06-15
-**Severity:** P2 — language expressiveness gap (workaround exists: Seam A non-generic helpers)
+**Status:** CLOSED 2026-09-13 (fixed). **Severity:** P2 — language expressiveness gap (workaround exists: Seam A non-generic helpers)
 **Component:** compiler / generics
 
 ## Summary

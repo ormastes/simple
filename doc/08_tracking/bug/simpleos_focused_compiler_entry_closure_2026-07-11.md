@@ -1,4 +1,5 @@
 # SimpleOS focused compiler target closure remains overbroad
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Evidence
 
@@ -104,3 +105,6 @@ failures), and disassembly proves `rt_set_args` stores through the C owner while
 `rt_cli_get_args` reloads argc/argv. New ELF SHA-256 is
 `7859f1522e587765409dd8655b572ac76a392f8b609cde8cdae0ed1a3bb61b98`.
 The three-run cap prevents another QEMU claim this cycle.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

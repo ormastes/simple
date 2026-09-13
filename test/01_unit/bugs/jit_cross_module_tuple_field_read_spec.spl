@@ -1,0 +1,113 @@
+"""
+# Cross-module tuple positional field read Specification
+
+**Feature IDs:** N/A
+**Category:** Runtime
+**Difficulty:** 3/5
+**Status:** Fixed
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/jit_cross_module_tuple_field_read_returns_nil_2026-08-01.md
+
+## Overview
+
+`jit_cross_module_tuple_field_read_returns_nil_2026-08-01` reported that a
+tuple built by a function in ANOTHER module read back `nil` through positional
+field access (`yaml_string("hi").0` -> `nil`, expected `"string"`), while a
+predicate compiled **alongside** the constructor (`is_yaml_scalar`) read the
+same tuple correctly. The value was intact; only the cross-module positional
+read was wrong, so a caller branching on `v.0 == "string"` took the false
+branch forever with no diagnostic.
+
+The record left three things explicitly "not yet established": whether the
+index matters (`.0` vs `.1`), whether it is tuples specifically, and whether
+the native path shares it. This spec settles the first two on the current seed
+by asserting both positions and by pairing each cross-module read with the
+same-module predicate that was always correct — that pairing is the whole
+point, because a same-module accessor stayed green throughout the defect and a
+guard built only from predicates would be vacuous.
+
+Re-checked 2026-09-12: both positions read correctly on both lanes.
+
+## Syntax
+
+```simple
+use std.common.yaml.types.{yaml_string}
+yaml_string("hi").0        # must be "string", not nil
+```
+
+"""
+
+use std.spec
+use std.common.yaml.types.{yaml_string, yaml_number, yaml_boolean, is_yaml_scalar, is_yaml_string, is_yaml_number}
+
+
+# ============================================================================
+# Test Group 1: the record's own reproducer
+# ============================================================================
+
+describe "positional read of a tuple built in another module":
+    """
+    ## `yaml_string("hi")`
+
+    Position 0 is the tag the defect returned `nil` for; position 1 is the
+    payload the record never measured.
+    """
+
+    it "reads position 0 as the tag, not nil":
+        val v = yaml_string("hi")
+        expect(v.0).to_equal("string")
+
+    it "reads position 1 as the payload":
+        val v = yaml_string("hi")
+        expect(v.1).to_equal("hi")
+
+    it "reads position 0 of a differently-tagged constructor":
+        val v = yaml_boolean(true)
+        expect(v.0).to_equal("boolean")
+
+
+# ============================================================================
+# Test Group 2: the same-module predicate control
+# ============================================================================
+
+describe "same-module predicate over the same tuple":
+    """
+    ## Control
+
+    These were correct while the defect was live. They are kept so a future
+    failure can be attributed to the cross-module READ rather than to the
+    constructor producing a wrong tuple.
+    """
+
+    it "classifies a string node as a scalar":
+        expect(is_yaml_scalar(yaml_string("hi"))).to_equal(true)
+
+    it "classifies a string node as a string":
+        expect(is_yaml_string(yaml_string("hi"))).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: the caller-branch shape that stayed silently wrong
+# ============================================================================
+
+describe "branching on a cross-module positional read":
+    """
+    ## The silent-wrong-result shape
+
+    `v.0 == "string"` is the comparison that took the false branch forever.
+    Both polarities are pinned.
+    """
+
+    it "takes the true branch for a matching tag":
+        val v = yaml_string("hi")
+        expect(v.0 == "string").to_equal(true)
+
+    it "takes the false branch for a non-matching tag":
+        val v = yaml_number(1.0)
+        expect(v.0 == "string").to_equal(false)
+
+    it "agrees with the same-module predicate on a number node":
+        val v = yaml_number(1.0)
+        expect(is_yaml_number(v)).to_equal(true)

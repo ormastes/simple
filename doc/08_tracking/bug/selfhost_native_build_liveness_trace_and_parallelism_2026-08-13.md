@@ -1,4 +1,5 @@
 # Self-hosted native build has no usable liveness trace or parallel compilation
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Evidence
 
@@ -76,3 +77,6 @@ V9's source-level and bootstrap evidence cannot become admitted production
 qualification until the self-hosted runtime can be built and its progress is
 observable. Re-running the same uninstrumented multi-minute command provides
 no additional evidence.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

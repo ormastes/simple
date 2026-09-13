@@ -1,4 +1,5 @@
 # Bootstrap Stage 4 AST/HIR overlap exhausts the no-GC heap registry
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 
@@ -366,3 +367,6 @@ suite pass. Entry publication, imported-alias refresh, and block/function
 shadow relay regressions bring the serialized suite to 25/25. This is focused
 evidence only; method/lambda lifecycle review and a
 new bounded Retry 12 remain required for Stage 4 admission.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

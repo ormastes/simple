@@ -1,4 +1,5 @@
 # `bin/simple test` never delegates to `simple_seed` when invoked via the symlink
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Date:** 2026-07-24 (corrected 2026-07-25) · **Severity:** high (tooling) · **Status:** source fix landed (`6cf217f0febb`); deployed binary awaits redeploy
 
@@ -86,3 +87,6 @@ parallel session's whole-WC sync commit.
 
 - `smf_stub_shadowing_unresolved_describe_2026-07-24.md` (same symptom, different cause — check `.smf` stubs first)
 - `native_cli_run_std_hardware_brace_import_unresolved_2026-07-24.md` (deploy clobber that removed the sibling)
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

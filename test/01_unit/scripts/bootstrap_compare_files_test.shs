@@ -1,0 +1,141 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+mkdir_path=$(command -v mkdir)
+rm_path=$(command -v rm)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-compare-files.XXXXXX")
+trap '"$rm_path" -rf -- "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/cmp" <<'EOF'
+#!/bin/sh
+[ -f "${CMP_MODE_FILE:-}" ] && exit "$(cat "$CMP_MODE_FILE")"
+[ "$1" = -s ] && shift
+[ "$#" -eq 2 ] || exit 2
+left=$(sha256sum "$1") || exit 2
+right=$(sha256sum "$2") || exit 2
+[ "${left%% *}" = "${right%% *}" ]
+EOF
+chmod +x "$tmp/bin/cmp"
+ln_path=$(command -v ln)
+printf 'same\n' >"$tmp/one"
+cp "$tmp/one" "$tmp/two"
+printf 'different\n' >"$tmp/three"
+PATH="$tmp/bin:/usr/bin:/bin"
+export PATH
+bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"
+test "$BOOTSTRAP_STAGE3_COMPARE_TOOL" = "$tmp/bin/cmp"
+test "$(bootstrap_stage3_hash_file "$tmp/bin/cmp")" = \
+    "$BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256"
+if bootstrap_stage3_compare_files "$tmp/one" "$tmp/three"; then
+    echo 'FAIL: different files admitted' >&2
+    exit 1
+elif [ "$?" -ne 1 ]; then
+    echo 'FAIL: different files returned non-cmp status' >&2
+    exit 1
+fi
+if bootstrap_stage3_compare_files "$tmp/one" "$tmp/missing"; then
+    echo 'FAIL: missing file admitted' >&2
+    exit 1
+elif [ "$?" -le 1 ]; then
+    echo 'FAIL: missing file did not return unavailable status' >&2
+    exit 1
+fi
+for mode in 2 126 127; do
+    printf '%s\n' "$mode" >"$tmp/mode"
+    CMP_MODE_FILE="$tmp/mode"
+    export CMP_MODE_FILE
+    if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
+        echo "FAIL: comparator status $mode admitted" >&2
+        exit 1
+    elif [ "$?" -ne "$mode" ]; then
+        echo "FAIL: comparator status $mode was not preserved" >&2
+        exit 1
+    fi
+done
+for mode in 0 1 2 126 127; do
+    printf '%s\n' "$mode" >"$tmp/mode"
+    CMP_MODE_FILE="$tmp/mode"
+    export CMP_MODE_FILE
+    if bootstrap_stage3_require_equal "set-e status $mode" \
+        "$tmp/one" "$tmp/two"; then
+        require_status=0
+    else
+        require_status=$?
+    fi
+    test "$require_status" -eq "$mode"
+done
+unset CMP_MODE_FILE
+unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+"$mkdir_path" -p "$tmp/empty"
+PATH="$tmp/empty"
+export PATH
+if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
+    echo 'FAIL: unavailable cmp admitted' >&2
+    exit 1
+elif [ "$?" -le 1 ]; then
+    echo 'FAIL: unavailable cmp did not return unavailable status' >&2
+    exit 1
+fi
+"$mkdir_path" -p "$tmp/shadow-dir"
+if "$ln_path" -s "$tmp/bin/cmp" "$tmp/shadow-dir/cmp" 2>/dev/null; then
+    PATH="$tmp/shadow-dir"
+    export PATH
+    if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
+        echo 'FAIL: initial symlink comparator admitted' >&2
+        exit 1
+    elif [ "$?" -le 1 ]; then
+        echo 'FAIL: initial symlink comparator was not rejected' >&2
+        exit 1
+    fi
+fi
+PATH="$tmp/bin:/usr/bin:/bin"
+export PATH
+unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"
+printf '# drift\n' >>"$tmp/bin/cmp"
+if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
+    echo 'FAIL: comparator hash drift admitted' >&2
+    exit 1
+elif [ "$?" -le 1 ]; then
+    echo 'FAIL: comparator hash drift was not rejected' >&2
+    exit 1
+fi
+if "$ln_path" -s "$tmp/bin/cmp" "$tmp/shadow-cmp" 2>/dev/null; then
+    BOOTSTRAP_STAGE3_COMPARE_TOOL="$tmp/shadow-cmp"
+    BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256=
+    export BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+    if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
+        echo 'FAIL: symlink comparator admitted' >&2
+        exit 1
+    elif [ "$?" -le 1 ]; then
+        echo 'FAIL: symlink comparator was not rejected as infrastructure error' >&2
+        exit 1
+    fi
+fi
+unset BOOTSTRAP_STAGE3_COMPARE_TOOL BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256
+PATH="$tmp/bin:/usr/bin:/bin"
+export PATH
+bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"
+"$mkdir_path" -p "$tmp/alternate-dir"
+cp "$tmp/bin/cmp" "$tmp/alternate-dir/cmp"
+PATH="$tmp/alternate-dir:/usr/bin:/bin"
+export PATH
+if bootstrap_stage3_compare_files "$tmp/one" "$tmp/two"; then
+    echo 'FAIL: alternate PATH comparator shadow admitted' >&2
+    exit 1
+elif [ "$?" -le 1 ]; then
+    echo 'FAIL: alternate PATH comparator shadow was not rejected' >&2
+    exit 1
+fi
+grep -Fq 'file cmp' "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+grep -Fq 'BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256' \
+    "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+grep -Fq 'trap '\''rm -f "$bootstrap_stage3_tool_tmp"' \
+    "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+grep -Fq 'mv "$bootstrap_stage3_tool_tmp" "$bootstrap_stage3_tool_output"' \
+    "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+! grep -Fq 'cmp -s' "$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+test "$(grep -c 'bootstrap_stage3_require_equal' \
+    "$root/scripts/bootstrap/bootstrap-from-scratch.sh")" -ge 12
+printf 'PASS: compare helper equal/different/unavailable statuses and cmp authority binding\n'

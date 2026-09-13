@@ -1,7 +1,14 @@
 # GUI macOS SMF dynlib hot-call evidence missing
 
+## Closed 2026-09-13 — Stale by host: the only remaining blocker is macOS arm64 `.dylib` evidence and no macOS host exists here
+
+- **measured** Triage host is Windows 11 x86_64; `bin/simple --version` -> `Simple Language v1.0.0-rc.1` (Rust seed). No Darwin/arm64 machine is available to produce a `.dylib` hot-call transcript.
+- **inferred** Per the body the Linux host lane already passes below the 1 ms target; the open item is platform evidence, not a code defect, so it cannot be advanced here.
+- **inferred** Re-file against a macOS arm64 runner if that evidence is still wanted; the `spl_dlopen`/`spl_dlsym`/`spl_wffi_call_i64` probe path is unchanged.
+
+
 Date: 2026-06-01
-Status: open (triaged 2026-06-11, macOS arm64 evidence still missing per body)
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 

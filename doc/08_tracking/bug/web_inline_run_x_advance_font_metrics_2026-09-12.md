@@ -1,0 +1,75 @@
+# Inline-run x advance disagrees with Chrome: plain text over-measured, bold under-measured
+
+- Status: OPEN
+- Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl`
+  (`intrinsic_text_width`, `inline_text_advance_width`, `style_text_advance`)
+- Found by: `scripts/check/check-chrome-layout-geometry-diff.shs` at `GEOM_DIFF_HEIGHT=20000`
+
+This is the whole remaining mismatch set on `overview.html` (5 of 5 rows) after
+the round-3 vertical fix in
+`web_inline_box_takes_line_height_not_content_area_2026-09-12.md`, and it is a
+DIFFERENT cause from that one — flow positioning is now correct; the advances
+are not.
+
+## Evidence (900 px, font `16px/1.5`, `<p>Paragraph with <strong>strong</strong>, …`)
+
+| element | Chrome x | Simple x | dx | Chrome w | Simple w | dw |
+|---|---|---|---|---|---|---|
+| `strong` | 113 | 140 | 27 | 51 | 43 | 8 |
+| `em` | 173 | 198 | 25 | 69 | 68 | 1 |
+| `a` | 295 | 331 | 36 | 111 | 108 | 3 |
+
+Two independent errors, in opposite directions:
+
+1. **Plain text is over-measured.** The leading run `"Paragraph with "` is
+   112 px in Chrome and ~140 px in Simple — about 25 % wide. `style_text_advance`
+   derives a single per-codepoint advance from the font size; real proportional
+   metrics vary per glyph, and the flat advance is too generous.
+2. **Bold is under-measured.** `<strong>strong</strong>` is 51 px in Chrome and
+   43 px in Simple: the `font-weight: bold` face's wider advances are not
+   applied at all — the styled run measures as if it were regular.
+
+The dx column growing (27 → 25 → 36) is the accumulation of (1) across the
+successive plain-text runs between the styled ones, not a per-boundary
+whitespace bug: the per-element `dw` stays near zero for the runs whose face
+Simple measures correctly.
+
+## Why it was not fixed in round 3
+
+`style_text_advance` is on every text path in the renderer, including paint and
+wrapping. Changing it moves the width of every text box on every page at once,
+so it needs its own before/after pixel-differ pass over all 8 catalog pages
+rather than being folded into a layout-flow change. `Style` already carries
+`resolved_font_advances` / `resolved_font_width` for the real-metrics path; the
+work is to make that path cover these runs (including the bold/italic faces)
+instead of falling back to the flat advance.
+
+## RESOLVED (plain text) 2026-09-12 — round 4
+
+Cause 1 is fixed. The real-metrics path was not merely "not covering these
+runs": it was UNREACHABLE for them. `inline_text_advance_width` checked the
+advance array's arity against the codepoints of `node.text_data` (UNTRIMMED),
+while `..._core.spl`'s style stage measures `metric_text`, which is
+`node.text_trimmed` for everything except `white-space: nowrap`. Any run with
+leading or trailing whitespace — i.e. most prose, including every run in the
+evidence table above — could never match, so the flat `style_text_advance`
+fallback always won. The check now uses the trimmed string and charges the
+trimmed-off edge whitespace separately (CSS collapses each edge run to one
+space), taking the space's advance out of the measured array when it has one.
+
+Measured after, same page and viewport:
+
+| element | Chrome x | Simple x before | Simple x after |
+|---|---|---|---|
+| `strong` | 113 | 140 | **112** |
+| `em` | 173 | 198 | 164 |
+| `a` | 295 | 331 | 285 |
+
+The leading run `"Paragraph with "` is now within 1 px of Chrome. The residual
+drift on `em`/`a` is entirely cause 2 (bold under-measured), which accumulates
+after the bold run — split out to
+`web_inline_bold_face_advances_never_selected_2026-09-12.md` and still OPEN,
+blocked on a font-metrics signature that carries no weight.
+
+Pin: `test/01_unit/browser_engine/inline_run_advance_and_break_boxes_spec.spl`
+AC-1.

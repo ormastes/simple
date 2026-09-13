@@ -1,5 +1,7 @@
 # Jupyter E2E helper scripts referenced but never built
 
+Status: OPEN (unverified 2026-09-12)
+
 `doc/07_guide/app/tools/jupyter.md` documents two local E2E test helpers,
 `test/03_system/tools/jupyter/helpers/run_server_check.py` (full server E2E
 over HTTP + ZMQ) and `run_notebook_server_test.py` (notebook execution via

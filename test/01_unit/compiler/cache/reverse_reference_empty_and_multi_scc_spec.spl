@@ -1,0 +1,142 @@
+# Purpose: focused RR scheduling RED contract for empty work and partition SCCs.
+# @req REQ-CSM-016 REQ-CSM-017 REQ-CSM-023 REQ-CSM-024
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadV1,
+    SemanticQueryReadManifestV1, semantic_query_read_manifest_encode_v1}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceEdgeV1, ReverseReferenceShardV1}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    ChangedSemanticFacetV1, VerifiedSccGroupV1, VerifiedAffectedDomainV1,
+    VerifiedForwardManifestV1, plan_affected_queries_v1,
+    verified_scc_group_receipt_v1, verified_affected_domain_receipt_v1,
+    affected_scc_group_candidate_v1}
+
+fn digest(value: text) -> text: sha256_text(value)
+
+fn query(label: text) -> SemanticQueryKeyV1:
+    SemanticQueryKeyV1(kind: "resolve", stable_entity_id: label,
+        semantic_profile_digest: digest("profile"), parameter_digest: digest(label))
+
+fn empty_domain() -> VerifiedAffectedDomainV1:
+    var value = VerifiedAffectedDomainV1(dimension: "membership",
+        candidate_root_digest: digest("candidate"), membership_root_digest: digest("membership"),
+        absence_root_digest: digest("absence"), coverage: SemanticCoverageV1.Complete,
+        receipt_digest: "")
+    value.receipt_digest = verified_affected_domain_receipt_v1(value)
+    value
+
+fn verified_manifest(consumer: SemanticQueryKeyV1, partition: text,
+                     group_id: text, members: [SemanticQueryKeyV1],
+                     producer: SemanticQueryKeyV1) -> VerifiedForwardManifestV1:
+    val read = SemanticQueryReadV1(producer: producer, consumer: consumer,
+        facet: "membership", ordinal: 0, consumed_fingerprint: digest("old"),
+        witness_digest: digest("witness"), partition_id: partition,
+        completeness: SemanticCoverageV1.Complete)
+    val manifest = SemanticQueryReadManifestV1(schema: 1, consumer: consumer,
+        ordered_reads: [read])
+    val group = VerifiedSccGroupV1(partition_id: partition, group_identity: group_id,
+        member_queries: members,
+        receipt_digest: verified_scc_group_receipt_v1(partition, group_id, members))
+    VerifiedForwardManifestV1(
+        manifest_digest: sha256_u8_hex(semantic_query_read_manifest_encode_v1(manifest)),
+        manifest: manifest, scc_group: group, affected_domains: [empty_domain()])
+
+fn shard(partition: text, producer: SemanticQueryKeyV1,
+         consumer: SemanticQueryKeyV1, manifest: VerifiedForwardManifestV1) -> ReverseReferenceShardV1:
+    ReverseReferenceShardV1(schema: 1, partition_id: partition,
+        coverage: SemanticCoverageV1.Complete,
+        sorted_edges: [ReverseReferenceEdgeV1(producer: producer, facet: "membership",
+            consumer: consumer, consumed_fingerprint: digest("old"),
+            forward_manifest_digest: manifest.manifest_digest, partition_id: partition)])
+
+describe "reverse-reference empty work and partition SCC selection":
+    it "should reject unauthenticated no-work instead of treating an empty set as success":
+        step("Reject unauthenticated empty reverse-reference work")
+        val result = plan_affected_queries_v1([], [], [], [])
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("affected_domain_authority_unavailable")
+
+    it "should resolve multiple SCCs in one partition by affected consumer and partition":
+        step("Resolve affected consumers across multiple SCCs in one partition")
+        val producer = query("producer")
+        val consumer_a = query("consumer-a")
+        val consumer_a_peer = query("consumer-a-peer")
+        val consumer_b = query("consumer-b")
+        val consumer_b_peer = query("consumer-b-peer")
+        val partition = "partition-shared"
+        val group_a = verified_manifest(consumer_a, partition, digest("group-a"),
+            [consumer_a, consumer_a_peer], producer)
+        val group_b = verified_manifest(consumer_b, partition, digest("group-b"),
+            [consumer_b, consumer_b_peer], producer)
+        val changes = [ChangedSemanticFacetV1(producer: producer, facet: "membership",
+            dimension: "membership", old_fingerprint: Some(digest("old")),
+            new_fingerprint: Some(digest("new")))]
+        val result = plan_affected_queries_v1(changes, [], [group_a, group_b],
+            [shard(partition, producer, consumer_a, group_a),
+             shard(partition, producer, consumer_b, group_b)])
+        expect(group_a.scc_group.partition_id).to_equal(partition)
+        expect(group_b.scc_group.partition_id).to_equal(partition)
+        expect(group_a.manifest.consumer).to_equal(consumer_a)
+        expect(group_b.manifest.consumer).to_equal(consumer_b)
+        expect(result.accepted).to_equal(false)
+        expect(result.rejection_reason).to_equal("affected_domain_authority_unavailable")
+
+        val overlapping_a = verified_manifest(consumer_a, partition, digest("overlap-a"),
+            [consumer_a, consumer_b], producer)
+        val overlapping_b = verified_manifest(consumer_b, partition, digest("overlap-b"),
+            [consumer_b, query("consumer-c")], producer)
+        expect(overlapping_a.scc_group.member_queries.len()).to_equal(2)
+        expect(overlapping_b.scc_group.member_queries.len()).to_equal(2)
+        expect(overlapping_a.scc_group.member_queries[1]).to_equal(consumer_b)
+
+        # The authenticated planner accepts only an opaque writer grant, which
+        # this unit cannot construct.  The approved pure coordinator seam is
+        # therefore exercised directly and remains RED until implemented.
+        val selected_a = affected_scc_group_candidate_v1(partition, consumer_a,
+            [group_a.scc_group, group_b.scc_group])
+        val selected_b = affected_scc_group_candidate_v1(partition, consumer_b,
+            [group_a.scc_group, group_b.scc_group])
+        expect(selected_a.is_some()).to_equal(true)
+        expect(selected_b.is_some()).to_equal(true)
+        match selected_a:
+            case Some(value):
+                expect(value.member_queries.len()).to_equal(2)
+                expect(value.member_queries[1]).to_equal(consumer_a_peer)
+            case nil: fail("missing SCC candidate for consumer-a")
+        match selected_b:
+            case Some(value):
+                expect(value.member_queries.len()).to_equal(2)
+                expect(value.member_queries[1]).to_equal(consumer_b_peer)
+            case nil: fail("missing SCC candidate for consumer-b")
+        expect(affected_scc_group_candidate_v1(partition, consumer_a,
+            [group_a.scc_group, group_a.scc_group]).is_some()).to_equal(true)
+        expect(affected_scc_group_candidate_v1(partition, consumer_a,
+            [overlapping_a.scc_group, overlapping_b.scc_group]).is_none()).to_equal(true)
+        expect(affected_scc_group_candidate_v1(partition, query("missing"),
+            [group_a.scc_group, group_b.scc_group]).is_none()).to_equal(true)
+        val conflicting = verified_manifest(consumer_a, partition, digest("conflict-group"),
+            [consumer_a, consumer_a_peer], producer)
+        expect(affected_scc_group_candidate_v1(partition, consumer_a,
+            [group_a.scc_group, conflicting.scc_group]).is_none()).to_equal(true)
+
+    it "should reject an aggregate group set before canonical hashing exceeds its byte budget":
+        step("Reject oversized SCC candidate input before hashing and sorting")
+        val consumer = query("budget-consumer")
+        val large_partition = "partition-budget-" + "x".repeat(8192)
+        var groups: [VerifiedSccGroupV1] = []
+        val base_group_id = digest("budget-group")
+        val base_members = [consumer]
+        val base_group = VerifiedSccGroupV1(partition_id: large_partition,
+            group_identity: base_group_id, member_queries: base_members,
+            receipt_digest: verified_scc_group_receipt_v1(
+                large_partition, base_group_id, base_members))
+        var index: i64 = 0
+        while index < 2048:
+            groups.push(base_group)
+            index = index + 1
+        expect(groups.len()).to_equal(2048)
+        expect(affected_scc_group_candidate_v1(large_partition, consumer, groups).is_none()).to_equal(true)

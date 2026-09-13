@@ -1,9 +1,14 @@
 # Class constructor: out-of-declaration-order named args drop fields
 
+## Closed 2026-09-13 — out-of-order named args bind to the correct fields
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's own fence prints `out-of-order named args -> x=1 y=2 z=3 (expected 1 2 3)` — the dropped/zeroed field is gone.
+
 **Date:** 2026-06-30
 **Severity:** medium
 **Component:** compiler/interpreter (class literal construction with named args)
-**Status:** source fix implemented; executable verification pending
+**Status:** Closed (fixed, execution-verified) 2026-09-13
 
 ## Summary
 

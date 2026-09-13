@@ -77,3 +77,11 @@ need a decision this lane cannot make alone:
    implementation goes red.
 
 Blocked on (1): the owner of `#PARSER-NODE-API-001` / "Phase 2.3".
+
+## Triage 2026-09-13
+
+Explicitly recorded as "architectural -- blocked on owner decision,
+not a lane-fixable defect" (implement a real TreeSitter Node FFI
+wrapper, or delete the module/spec -- a product-direction decision
+this lane cannot make unilaterally). Leaving OPEN as recorded.
+

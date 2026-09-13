@@ -1,10 +1,16 @@
 # Compiled stage4 misevaluates comparisons against imported constants
 
+## Closed 2026-09-13 — Already fixed (2026-06-14 const literal-type inference); no longer reproduces
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): cross-module repro — `consts.spl` with `const EXPR_STRING_LIT = 3`, importer doing `if tag == EXPR_STRING_LIT` — prints `1` then `0` for `check_tag(3)` / `check_tag(2)`. Correct.
+- **measured**: the landed fix is present in the seed source — `src/compiler_rust/compiler/src/hir/lower/import_loader.rs:490` `} else if matches!(&const_stmt.value, Expr::Integer(_)) {` (the unannotated-const literal-type inference described in the Resolution section).
+- **inferred**: the original symptom was in the compiled stage4 binary, which cannot be rebuilt here (concurrent bootstrap); closure rests on the resolution note plus the surviving fix code and a clean interpreted/JIT repro.
+
 - **ID:** stage4_imported_const_compare
 - **Severity:** P1 (silent logic divergence between interpreted and compiled code)
 - **Date:** 2026-06-12
 - **Component:** stage4 native pipeline (cranelift lane) — imported `const` resolution in compiled comparisons
-- **Status:** resolved (2026-06-14)
+- **Status:** CLOSED 2026-09-13 (resolved 2026-06-14, re-verified)
 
 ## Resolution (2026-06-14)
 

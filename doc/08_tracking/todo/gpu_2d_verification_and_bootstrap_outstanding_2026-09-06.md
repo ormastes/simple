@@ -1,5 +1,7 @@
 # GPU/2D lane — outstanding verification and bootstrap work
 
+Status: OPEN (unverified 2026-09-12)
+
 **Opened:** 2026-09-06. One entry per outstanding item. Every implementation
 item in this lane is complete in source; what remains is evidence, plus two
 things that are blocked on hardware or a build this session is forbidden to run.

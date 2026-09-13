@@ -1,6 +1,6 @@
 # SimpleOS WM: pointer-release render hangs forever in taskbar-tray text measurement (2026-07-26)
 
-Status: UNVERIFIED — an unretained local x86 fullscreen run reportedly passed;
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 the latest canonical tracked report is FAIL, and ARM/SIMD remain unverified
 
 ## Local rerun53 observation (2026-07-26; not retained evidence)
@@ -326,3 +326,6 @@ press+release with correct coordinates and button codes (left=0, right=1) as
 long as the window is mapped and polling is prompt. Synthetic XTEST clicks on
 an UNMAPPED winit window (`xwininfo` Map State: IsUnMapped) are silently lost
 — check map state before trusting a negative event result on a bare X server.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

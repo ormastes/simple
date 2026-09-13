@@ -29,19 +29,28 @@ EOF
 }
 
 strategy=normal
-output_arg=build/bootstrap
+strategy_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+strategy_repo_root=$(CDPATH= cd -- "${strategy_dir}/../.." && pwd -P) || exit 70
+. "${strategy_dir}/lib/centralized-storage.shs"
+simple_bootstrap_storage_init "${strategy_repo_root}" || exit 70
+output_arg=${SIMPLE_BOOTSTRAP_BUILD_ROOT}
+stage_engine_delimiter_seen=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --strategy=*) strategy=${1#*=} ;;
         --output=*) output_arg=${1#*=} ;;
-        --) shift; break ;;
+        --) stage_engine_delimiter_seen=1; shift; break ;;
         --help|-h) usage; exit 0 ;;
         *) echo "bootstrap-scheduler-error: unknown supervisor option: $1" >&2; exit 2 ;;
     esac
     shift
 done
-[ "$#" -gt 0 ] || {
-    echo 'bootstrap-scheduler-error: missing stage-engine arguments after --' >&2
+# The stage engine takes no required arguments -- a plain `bootstrap-from-scratch.sh`
+# with no options is the documented default run, and forwards an EMPTY list here.
+# Fail closed on a caller that omitted the `--` delimiter entirely (which would
+# mean its option list was never terminated), not on an empty-but-delimited list.
+[ "$stage_engine_delimiter_seen" -eq 1 ] || {
+    echo 'bootstrap-scheduler-error: missing -- delimiter before stage-engine arguments' >&2
     exit 2
 }
 case "$strategy" in adhoc|normal|full) ;; *)
@@ -252,6 +261,14 @@ event task-start stage-engine building
     if [ "$memory_enforcement" = ulimit-v ]; then
         ulimit -v $((critical_memory * 1024)) || exit 70
     fi
+    # An explicit job count (user --jobs or SIMPLE_NATIVE_BUILD_THREADS) is
+    # passed through untouched; the scheduler's critical_cpu split is only the
+    # default when neither is given. Validation stays in bootstrap_select_jobs.
+    forced_jobs=$critical_cpu
+    [ -z "${SIMPLE_NATIVE_BUILD_THREADS:-}" ] || forced_jobs=
+    for engine_arg in "$@"; do
+        case "$engine_arg" in --jobs|--jobs=*) forced_jobs= ;; esac
+    done
     SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
     SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER="$generation_dir/stage2-cleanup.ready" \
     SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
@@ -260,19 +277,15 @@ event task-start stage-engine building
         my $jobs = shift @ARGV;
         my $engine = shift @ARGV;
         my @out;
-        my $skip_value = 0;
         for my $arg (@ARGV) {
-            if ($skip_value) { $skip_value = 0; next; }
-            if ($arg eq "--jobs") { $skip_value = 1; next; }
-            next if $arg =~ /^--jobs=/;
             next if $arg eq "--full-cli" || $arg eq "--deploy" ||
                 $arg eq "--release" || $arg eq "--clean-release";
             push @out, $arg;
         }
-        push @out, "--jobs=$jobs";
+        push @out, "--jobs=$jobs" if length $jobs;
         exec "/bin/sh", $engine, @out;
         die "exec stage engine failed: $!";
-    ' "$critical_cpu" "$engine" "$@" \
+    ' "$forced_jobs" "$engine" "$@" \
         >"$generation_dir/stage-engine.log" 2>&1
     rc=$?
     done_tmp="$engine_done.tmp.$$"

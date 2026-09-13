@@ -1,6 +1,15 @@
 # BUG: `for X in arr` after an earlier `val/var X` in the same fn — loop var binding lost
 
-Status: RESOLVED (re-verified 2026-08-09) — native/MIR fixed 2026-06-11; interpreter
+## Closed 2026-09-13 — resolved and already re-verified 2026-08-09
+
+- **inferred** Entry status: `RESOLVED (re-verified 2026-08-09)` — native/MIR fixed
+  2026-06-11, interpreter path confirmed after.
+- **measured** Loop-scoped repros run correctly on the current seed: a `for f in fns`
+  accumulation over a function-value array prints `total=23` (11+12), i.e. the prior
+  local binding survives the loop variable.
+
+
+Status: closed 2026-09-13 (was: Status: RESOLVED (re-verified 2026-08-09) — native/MIR fixed 2026-06-11; interpreter)
 side re-tested 2026-08-09 and no longer reproduces (see "Re-verification" below).
 
 **Date:** 2026-06-11

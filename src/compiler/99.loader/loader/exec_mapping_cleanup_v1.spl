@@ -1,0 +1,1078 @@
+# codex-impl: retained pre-publication executable-mapping cleanup owner.
+#
+# It composes MappingLifetimeLedgerV1 and owns allocation-to-publication cleanup.
+#
+# returns StaleReceipt for unauthenticated cleanup completion, retains
+# NativeReleaseFailed rows, exposes retry_failed_receipts through bounded map
+# entry draining, and applies skip_released_receipt by removing successful rows.
+# retry_attempt_id is the MappingClosePermitV1.close_token.
+
+use compiler.loader.loader.mapping_lifetime_accounting_v1.{
+    MAPPING_LIFETIME_SEQUENCE_MAX_V1,
+    MappingLifetimePhaseV1, MappingLifetimeFailureV1,
+    MappingLifetimeRecordV1, MappingClosePermitV1,
+    MappingLifetimeLedgerV1,
+    mapping_lifetime_ledger_v1, mapping_lifetime_get_v1,
+    mapping_lifetime_check_v1, mapping_lifetime_admit_v1,
+    mapping_lifetime_begin_close_v1, mapping_lifetime_finish_close_v1}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+
+val EXEC_CLEANUP_MAX_SLOTS_V1: i64 = 64
+val EXEC_CLEANUP_MAX_OWNED_BYTES_V1: i64 = 1073741824
+val EXEC_CLEANUP_RETRY_DRAIN_LIMIT_V1: i64 = 4
+val _EXEC_CLEANUP_ID_MAX_BYTES_V1: i64 = 256
+val _EXEC_CLEANUP_MAX_ADDRESS_V1: i64 = 9223372036854775807
+val _EXEC_CLEANUP_CONTROL_STRIDE_V1: i64 = 64
+val _EXEC_CLEANUP_CONTROL_ACTION_STRIDE_V1: i64 = 8
+val _EXEC_CLEANUP_CONTROL_GENERATION_MAX_V1: i64 = 144115188075855870
+val _EXEC_CLEANUP_CONTROL_EMPTY_V1: i64 = 0
+val _EXEC_CLEANUP_CONTROL_ARMING_V1: i64 = 1
+val _EXEC_CLEANUP_CONTROL_ARMED_V1: i64 = 2
+val _EXEC_CLEANUP_CONTROL_PUBLISHING_V1: i64 = 3
+val _EXEC_CLEANUP_CONTROL_READY_V1: i64 = 4
+val _EXEC_CLEANUP_CONTROL_DRAINING_V1: i64 = 5
+val _EXEC_CLEANUP_ACTION_CONSTRUCT_V1: i64 = 1
+val _EXEC_CLEANUP_ACTION_RELEASE_V1: i64 = 2
+
+enum ExecCleanupSlotPhaseV1:
+    Reserved
+    Allocated
+    Constructing
+    Quarantined
+
+struct ExecCleanupSlotV1:
+    token: i64
+    mapping_id: text
+    extent: i64
+    address: i64
+    phase: ExecCleanupSlotPhaseV1
+    outcome_ticket_id: i64
+    outcome_action_generation: i64
+    outcome_pending: bool
+
+struct ExecCleanupStateV1:
+    next_token: i64
+    next_action_generation: i64
+    max_records: i64
+    max_owned_bytes: i64
+    reserved_bytes: i64
+    slots: [ExecCleanupSlotV1]
+    lifetime: MappingLifetimeLedgerV1
+
+struct ExecCleanupCompletionV1:
+    token: i64
+    permit: MappingClosePermitV1
+    close_succeeded: bool
+
+struct ExecCleanupTransitionV1:
+    ok: bool
+    reason: text
+    state: ExecCleanupStateV1
+    token: i64
+    permit_present: bool
+    permit: MappingClosePermitV1
+    release_address: i64
+    release_bytes: i64
+
+enum ExecCleanupNativeOutcomeKindV1:
+    ConstructSucceeded
+    ConstructFailed
+    NativeReleaseSucceeded
+    NativeReleaseFailed
+
+struct ExecCleanupOutcomeTicketV1:
+    cleanup_owner: text
+    ledger_epoch: i64
+    token: i64
+    action_generation: i64
+    mapping_id: text
+    address: i64
+    extent: i64
+
+class ExecCleanupCompletionCellV1:
+    ticket_id: i64
+    # The control word is the sole synchronization authority.  The remaining
+    # atomics are compatibility observations and descriptor storage; no state
+    # transition is inferred from them.
+    control: AtomicI64
+    token: AtomicI64
+    action_generation: AtomicI64
+    address: AtomicI64
+    extent: AtomicI64
+    outcome: AtomicI64
+    ready: AtomicI64
+    mapping_id: text
+
+    me install_descriptor(ticket: ExecCleanupOutcomeTicketV1):
+        self.mapping_id = ticket.mapping_id
+        self.action_generation.store(
+            ticket.action_generation, MemoryOrdering.Relaxed)
+        self.address.store(ticket.address, MemoryOrdering.Relaxed)
+        self.extent.store(ticket.extent, MemoryOrdering.Relaxed)
+        self.token.store(ticket.token, MemoryOrdering.Relaxed)
+
+    me install_outcome(code: i64):
+        self.outcome.store(code, MemoryOrdering.Relaxed)
+        self.ready.store(1, MemoryOrdering.Relaxed)
+
+    me clear_descriptor():
+        self.mapping_id = ""
+        self.ready.store(0, MemoryOrdering.Relaxed)
+        self.outcome.store(0, MemoryOrdering.Relaxed)
+        self.address.store(0, MemoryOrdering.Relaxed)
+        self.extent.store(0, MemoryOrdering.Relaxed)
+        self.action_generation.store(0, MemoryOrdering.Relaxed)
+        self.token.store(0, MemoryOrdering.Relaxed)
+
+struct ExecCleanupCompletionMailboxV1:
+    capacity: i64
+    cells: [ExecCleanupCompletionCellV1]
+
+struct ExecCleanupNativeDispatchV1:
+    transition: ExecCleanupTransitionV1
+    ticket_present: bool
+    ticket: ExecCleanupOutcomeTicketV1
+    operation: ExecCleanupNativeOutcomeKindV1
+
+struct ExecCleanupNativeDrainV1:
+    ok: bool
+    reason: text
+    state: ExecCleanupStateV1
+    drained: i64
+    dispatch_present: bool
+    dispatch: ExecCleanupNativeDispatchV1
+
+fn _exec_cleanup_empty_permit_v1() -> MappingClosePermitV1:
+    MappingClosePermitV1(
+        ledger_owner: "", ledger_epoch: 0, mapping_id: "",
+        mapping_sequence: 0, close_token: 0, mapped_bytes: 0)
+
+fn _exec_cleanup_empty_ticket_v1() -> ExecCleanupOutcomeTicketV1:
+    ExecCleanupOutcomeTicketV1(
+        cleanup_owner: "", ledger_epoch: 0, token: 0,
+        action_generation: 0, mapping_id: "", address: 0, extent: 0)
+
+fn _exec_cleanup_empty_dispatch_v1(
+        state: ExecCleanupStateV1) -> ExecCleanupNativeDispatchV1:
+    ExecCleanupNativeDispatchV1(
+        transition: _exec_cleanup_transition_v1(
+            false, "native-dispatch-unavailable", state, 0),
+        ticket_present: false, ticket: _exec_cleanup_empty_ticket_v1(),
+        operation: ExecCleanupNativeOutcomeKindV1.ConstructFailed)
+
+fn _exec_cleanup_transition_v1(
+        ok: bool, reason: text, state: ExecCleanupStateV1,
+        token: i64) -> ExecCleanupTransitionV1:
+    ExecCleanupTransitionV1(
+        ok: ok, reason: reason, state: state, token: token,
+        permit_present: false, permit: _exec_cleanup_empty_permit_v1(),
+        release_address: 0, release_bytes: 0)
+
+fn _exec_cleanup_release_transition_v1(
+        reason: text, state: ExecCleanupStateV1, token: i64,
+        permit: MappingClosePermitV1, address: i64,
+        extent: i64) -> ExecCleanupTransitionV1:
+    ExecCleanupTransitionV1(
+        ok: true, reason: reason, state: state, token: token,
+        permit_present: true, permit: permit,
+        release_address: address, release_bytes: extent)
+
+fn _exec_cleanup_untracked_release_transition_v1(
+        reason: text, state: ExecCleanupStateV1, token: i64,
+        address: i64, extent: i64) -> ExecCleanupTransitionV1:
+    ExecCleanupTransitionV1(
+        ok: true, reason: reason, state: state, token: token,
+        permit_present: false, permit: _exec_cleanup_empty_permit_v1(),
+        release_address: address, release_bytes: extent)
+
+fn exec_cleanup_state_v1() -> ExecCleanupStateV1:
+    return ExecCleanupStateV1(
+        next_token: 1, next_action_generation: 1,
+        max_records: EXEC_CLEANUP_MAX_SLOTS_V1,
+        max_owned_bytes: EXEC_CLEANUP_MAX_OWNED_BYTES_V1,
+        reserved_bytes: 0, slots: [],
+        lifetime: mapping_lifetime_ledger_v1(
+            "exec-mapping-cleanup-v1", 1,
+            EXEC_CLEANUP_MAX_SLOTS_V1,
+            EXEC_CLEANUP_MAX_OWNED_BYTES_V1))
+
+fn exec_cleanup_completion_mailbox_v1() -> ExecCleanupCompletionMailboxV1:
+    var cells: [ExecCleanupCompletionCellV1] = []
+    var ticket_id: i64 = 1
+    while ticket_id <= EXEC_CLEANUP_MAX_SLOTS_V1:
+        cells = cells.push(ExecCleanupCompletionCellV1(
+            ticket_id: ticket_id,
+            control: atomic_i64_new(0),
+            token: atomic_i64_new(0), action_generation: atomic_i64_new(0),
+            address: atomic_i64_new(0), extent: atomic_i64_new(0),
+            outcome: atomic_i64_new(0), ready: atomic_i64_new(0),
+            mapping_id: ""))
+        ticket_id = ticket_id + 1
+    return ExecCleanupCompletionMailboxV1(
+        capacity: EXEC_CLEANUP_MAX_SLOTS_V1, cells: cells)
+
+fn _exec_cleanup_control_v1(
+        generation: i64, phase: i64, action: i64) -> i64:
+    generation * _EXEC_CLEANUP_CONTROL_STRIDE_V1 +
+        action * _EXEC_CLEANUP_CONTROL_ACTION_STRIDE_V1 + phase
+
+fn _exec_cleanup_control_generation_v1(control: i64) -> i64:
+    control / _EXEC_CLEANUP_CONTROL_STRIDE_V1
+
+fn _exec_cleanup_control_phase_v1(control: i64) -> i64:
+    control % _EXEC_CLEANUP_CONTROL_ACTION_STRIDE_V1
+
+fn _exec_cleanup_control_action_v1(control: i64) -> i64:
+    (control % _EXEC_CLEANUP_CONTROL_STRIDE_V1) /
+        _EXEC_CLEANUP_CONTROL_ACTION_STRIDE_V1
+
+fn _exec_cleanup_generation_encodable_v1(generation: i64) -> bool:
+    generation > 0 and
+        generation <= _EXEC_CLEANUP_CONTROL_GENERATION_MAX_V1
+
+fn _exec_cleanup_find_slot_v1(state: ExecCleanupStateV1,
+                              token: i64) -> i64:
+    var index: i64 = 0
+    while index < state.slots.len():
+        if state.slots[index].token == token:
+            return index
+        index = index + 1
+    -1
+
+fn _exec_cleanup_mapping_slot_v1(state: ExecCleanupStateV1,
+                                 mapping_id: text) -> i64:
+    var index: i64 = 0
+    while index < state.slots.len():
+        if state.slots[index].mapping_id == mapping_id:
+            return index
+        index = index + 1
+    -1
+
+fn _exec_cleanup_ticket_id_available_v1(
+        state: ExecCleanupStateV1, ticket_id: i64) -> bool:
+    for slot in state.slots:
+        if slot.outcome_ticket_id == ticket_id:
+            return false
+    true
+
+fn _exec_cleanup_next_ticket_id_v1(state: ExecCleanupStateV1) -> i64:
+    var ticket_id: i64 = 1
+    while ticket_id <= EXEC_CLEANUP_MAX_SLOTS_V1:
+        if _exec_cleanup_ticket_id_available_v1(state, ticket_id):
+            return ticket_id
+        ticket_id = ticket_id + 1
+    0
+
+fn _exec_cleanup_attempted_v1(token: i64, attempted: [i64]) -> bool:
+    for prior in attempted:
+        if prior == token:
+            return true
+    false
+
+fn _exec_cleanup_ranges_overlap_v1(
+        left_address: i64, left_extent: i64,
+        right_address: i64, right_extent: i64) -> bool:
+    if (left_address <= 0 or right_address <= 0 or
+            left_extent <= 0 or right_extent <= 0):
+        return false
+    if (left_address > _EXEC_CLEANUP_MAX_ADDRESS_V1 - left_extent or
+            right_address > _EXEC_CLEANUP_MAX_ADDRESS_V1 - right_extent):
+        return true
+    left_address < right_address + right_extent and
+        right_address < left_address + left_extent
+
+fn _exec_cleanup_record_matches_slot_v1(
+        record: MappingLifetimeRecordV1,
+        slot: ExecCleanupSlotV1) -> bool:
+    if record.mapping_id != slot.mapping_id or record.mapped_bytes != slot.extent:
+        return false
+    if slot.phase == ExecCleanupSlotPhaseV1.Constructing:
+        return record.phase == MappingLifetimePhaseV1.Live
+    if slot.phase == ExecCleanupSlotPhaseV1.Quarantined:
+        return record.phase == MappingLifetimePhaseV1.Closing or
+            record.phase == MappingLifetimePhaseV1.Retryable
+    false
+
+fn exec_cleanup_check_v1(state: ExecCleanupStateV1) -> bool:
+    if (state.max_records != EXEC_CLEANUP_MAX_SLOTS_V1 or
+            state.max_owned_bytes != EXEC_CLEANUP_MAX_OWNED_BYTES_V1 or
+            state.next_token <= 0 or
+            state.next_token > MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+            state.next_action_generation <= 0 or
+            state.next_action_generation > MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+            not _exec_cleanup_generation_encodable_v1(
+                state.next_action_generation) or
+            state.reserved_bytes < 0 or
+            state.reserved_bytes > state.max_owned_bytes or
+            state.slots.len() > state.max_records or
+            not mapping_lifetime_check_v1(state.lifetime).ok):
+        return false
+    var computed_bytes: i64 = 0
+    var expected_records: i64 = 0
+    var index: i64 = 0
+    while index < state.slots.len():
+        val slot = state.slots[index]
+        if (slot.token <= 0 or slot.token >= state.next_token or
+                slot.outcome_ticket_id <= 0 or
+                slot.outcome_ticket_id > EXEC_CLEANUP_MAX_SLOTS_V1 or
+                slot.outcome_action_generation < 0 or
+                slot.outcome_action_generation >= state.next_action_generation or
+                slot.mapping_id.len() <= 0 or
+                slot.mapping_id.len() > _EXEC_CLEANUP_ID_MAX_BYTES_V1 or
+                slot.extent <= 0 or
+                computed_bytes > state.max_owned_bytes - slot.extent):
+            return false
+        computed_bytes = computed_bytes + slot.extent
+        val record = mapping_lifetime_get_v1(
+            state.lifetime, slot.mapping_id)
+        if slot.phase == ExecCleanupSlotPhaseV1.Reserved:
+            if (slot.address != 0 or record.? or slot.outcome_pending or
+                    slot.outcome_action_generation != 0):
+                return false
+        elif slot.phase == ExecCleanupSlotPhaseV1.Allocated:
+            if (slot.address <= 0 or
+                    slot.address > _EXEC_CLEANUP_MAX_ADDRESS_V1 - slot.extent or
+                    record.? or
+                    (slot.outcome_pending and
+                        slot.outcome_action_generation <= 0)):
+                return false
+        else:
+            if (slot.address <= 0 or
+                    slot.address > _EXEC_CLEANUP_MAX_ADDRESS_V1 - slot.extent or
+                    not record.? or
+                    not _exec_cleanup_record_matches_slot_v1(
+                        record.unwrap(), slot)):
+                return false
+            expected_records = expected_records + 1
+            if slot.phase == ExecCleanupSlotPhaseV1.Constructing and
+                    not slot.outcome_pending:
+                return false
+            if slot.phase == ExecCleanupSlotPhaseV1.Quarantined:
+                val closing = record.unwrap().phase == MappingLifetimePhaseV1.Closing
+                if closing != slot.outcome_pending:
+                    return false
+        var other: i64 = index + 1
+        while other < state.slots.len():
+            val peer = state.slots[other]
+            if slot.token == peer.token or slot.mapping_id == peer.mapping_id:
+                return false
+            if slot.outcome_ticket_id == peer.outcome_ticket_id:
+                return false
+            if slot.address > 0 and peer.address > 0 and
+                    _exec_cleanup_ranges_overlap_v1(
+                        slot.address, slot.extent,
+                        peer.address, peer.extent):
+                return false
+            other = other + 1
+        index = index + 1
+    computed_bytes == state.reserved_bytes and
+        expected_records == state.lifetime.records.len()
+
+fn exec_cleanup_reserve_v1(
+        state: ExecCleanupStateV1, mapping_id: text,
+        extent: i64) -> ExecCleanupTransitionV1:
+    if not exec_cleanup_check_v1(state):
+        return _exec_cleanup_transition_v1(
+            false, "invalid-state", state, 0)
+    if (mapping_id.len() <= 0 or
+            mapping_id.len() > _EXEC_CLEANUP_ID_MAX_BYTES_V1 or extent <= 0):
+        return _exec_cleanup_transition_v1(
+            false, "invalid-reservation", state, 0)
+    if _exec_cleanup_mapping_slot_v1(state, mapping_id) >= 0:
+        return _exec_cleanup_transition_v1(
+            false, "duplicate-mapping", state, 0)
+    if (state.slots.len() >= state.max_records or
+            extent > state.max_owned_bytes - state.reserved_bytes):
+        return _exec_cleanup_transition_v1(
+            false, "capacity-refused", state, 0)
+    if state.next_token >= MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return _exec_cleanup_transition_v1(
+            false, "token-exhausted", state, 0)
+    val ticket_id = _exec_cleanup_next_ticket_id_v1(state)
+    if ticket_id <= 0:
+        return _exec_cleanup_transition_v1(
+            false, "mailbox-capacity-refused", state, 0)
+    var next = state
+    val token = next.next_token
+    next.slots = next.slots.push(ExecCleanupSlotV1(
+        token: token, mapping_id: mapping_id, extent: extent,
+        address: 0, phase: ExecCleanupSlotPhaseV1.Reserved,
+        outcome_ticket_id: ticket_id, outcome_action_generation: 0,
+        outcome_pending: false))
+    next.reserved_bytes = next.reserved_bytes + extent
+    next.next_token = next.next_token + 1
+    return _exec_cleanup_transition_v1(true, "reserved", next, token)
+
+fn exec_cleanup_begin_construct_v1(
+        state: ExecCleanupStateV1, token: i64,
+        address: i64) -> ExecCleanupTransitionV1:
+    if not exec_cleanup_check_v1(state):
+        return _exec_cleanup_transition_v1(
+            false, "invalid-state", state, token)
+    val index = _exec_cleanup_find_slot_v1(state, token)
+    if index < 0:
+        return _exec_cleanup_transition_v1(
+            false, "StaleReceipt", state, token)
+    val original = state.slots[index]
+    if ((original.phase != ExecCleanupSlotPhaseV1.Reserved and
+            original.phase != ExecCleanupSlotPhaseV1.Allocated) or
+            address <= 0 or
+            address > _EXEC_CLEANUP_MAX_ADDRESS_V1 - original.extent or
+            (original.phase == ExecCleanupSlotPhaseV1.Allocated and
+                original.address != address) or original.outcome_pending):
+        return _exec_cleanup_transition_v1(
+            false, "construct-bind-refused", state, token)
+    for peer in state.slots:
+        if peer.token != token and peer.address > 0 and
+                _exec_cleanup_ranges_overlap_v1(
+                    address, original.extent, peer.address, peer.extent):
+            return _exec_cleanup_transition_v1(
+                false, "retained-range-overlap", state, token)
+
+    # Canonical owner records the exact native allocation before the fallible
+    # lifetime bind.  Every later failure therefore returns a state that still
+    # owns the address/extent pair.
+    var retained = state
+    var retained_slot = original
+    retained_slot.address = address
+    retained_slot.phase = ExecCleanupSlotPhaseV1.Allocated
+    var retained_slots = retained.slots
+    retained_slots[index] = retained_slot
+    retained.slots = retained_slots
+    val admitted = mapping_lifetime_admit_v1(
+        retained.lifetime, retained_slot.mapping_id, retained_slot.extent)
+    if not admitted.ok:
+        return _exec_cleanup_transition_v1(
+            false, "lifetime-admission-refused", retained, token)
+    if (retained.next_action_generation >= MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+            not _exec_cleanup_generation_encodable_v1(
+                retained.next_action_generation)):
+        return _exec_cleanup_transition_v1(
+            false, "outcome-generation-exhausted", retained, token)
+    var next = retained
+    var bound = retained_slot
+    bound.phase = ExecCleanupSlotPhaseV1.Constructing
+    bound.outcome_action_generation = next.next_action_generation
+    bound.outcome_pending = true
+    var bound_slots = next.slots
+    bound_slots[index] = bound
+    next.slots = bound_slots
+    next.lifetime = admitted.ledger
+    next.next_action_generation = next.next_action_generation + 1
+    return _exec_cleanup_transition_v1(true, "constructing", next, token)
+
+fn _exec_cleanup_remove_slot_v1(
+        state: ExecCleanupStateV1, index: i64,
+        remove_lifetime: bool) -> ExecCleanupStateV1:
+    var next = state
+    val removed = next.slots[index]
+    var retained_slots: [ExecCleanupSlotV1] = []
+    var slot_index: i64 = 0
+    while slot_index < next.slots.len():
+        if slot_index != index:
+            retained_slots = retained_slots.push(next.slots[slot_index])
+        slot_index = slot_index + 1
+    next.slots = retained_slots
+    next.reserved_bytes = next.reserved_bytes - removed.extent
+    if remove_lifetime:
+        var retained_records: [MappingLifetimeRecordV1] = []
+        for record in next.lifetime.records:
+            if record.mapping_id != removed.mapping_id:
+                retained_records = retained_records.push(record)
+        next.lifetime.records = retained_records
+        next.lifetime.resident_bytes =
+            next.lifetime.resident_bytes - removed.extent
+    next
+
+fn exec_cleanup_complete_construct_v1(
+        state: ExecCleanupStateV1, token: i64,
+        transferred: bool) -> ExecCleanupTransitionV1:
+    if not exec_cleanup_check_v1(state):
+        return _exec_cleanup_transition_v1(
+            false, "invalid-state", state, token)
+    val index = _exec_cleanup_find_slot_v1(state, token)
+    if index < 0:
+        return _exec_cleanup_transition_v1(
+            false, "StaleReceipt", state, token)
+    val slot = state.slots[index]
+    if slot.phase == ExecCleanupSlotPhaseV1.Reserved:
+        if transferred:
+            return _exec_cleanup_transition_v1(
+                false, "construction-transfer-without-mapping", state, token)
+        val released = _exec_cleanup_remove_slot_v1(state, index, false)
+        return _exec_cleanup_transition_v1(
+            true, "construction-aborted-before-allocation", released, token)
+    if slot.phase != ExecCleanupSlotPhaseV1.Constructing:
+        return _exec_cleanup_transition_v1(
+            false, "construction-already-quarantined", state, token)
+    if not slot.outcome_pending:
+        return _exec_cleanup_transition_v1(
+            false, "construction-outcome-missing", state, token)
+    val record = mapping_lifetime_get_v1(state.lifetime, slot.mapping_id)
+    if not record.? or not _exec_cleanup_record_matches_slot_v1(
+            record.unwrap(), slot):
+        return _exec_cleanup_transition_v1(
+            false, "construction-lifetime-mismatch", state, token)
+    if transferred:
+        val committed = _exec_cleanup_remove_slot_v1(state, index, true)
+        return _exec_cleanup_transition_v1(
+            true, "CommittedLive", committed, token)
+    if (state.next_action_generation >= MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+            not _exec_cleanup_generation_encodable_v1(
+                state.next_action_generation)):
+        return _exec_cleanup_transition_v1(
+            false, "outcome-generation-exhausted", state, token)
+    val closing = mapping_lifetime_begin_close_v1(
+        state.lifetime, slot.mapping_id)
+    if not closing.ok or not closing.close_permit_present:
+        return _exec_cleanup_transition_v1(
+            false, "quarantine-close-refused", state, token)
+    var next = state
+    var quarantined = slot
+    quarantined.phase = ExecCleanupSlotPhaseV1.Quarantined
+    quarantined.outcome_action_generation = next.next_action_generation
+    quarantined.outcome_pending = true
+    var quarantined_slots = next.slots
+    quarantined_slots[index] = quarantined
+    next.slots = quarantined_slots
+    next.lifetime = closing.ledger
+    next.next_action_generation = next.next_action_generation + 1
+    return _exec_cleanup_release_transition_v1(
+        "ReleasePending", next, token, closing.close_permit,
+        slot.address, slot.extent)
+
+fn exec_cleanup_completion_v1(
+        token: i64, permit: MappingClosePermitV1,
+        close_succeeded: bool) -> ExecCleanupCompletionV1:
+    ExecCleanupCompletionV1(
+        token: token, permit: permit,
+        close_succeeded: close_succeeded)
+
+fn exec_cleanup_quarantine_completion_v1(
+        state: ExecCleanupStateV1,
+        completion: ExecCleanupCompletionV1) -> ExecCleanupTransitionV1:
+    if not exec_cleanup_check_v1(state):
+        return _exec_cleanup_transition_v1(
+            false, "invalid-state", state, completion.token)
+    val index = _exec_cleanup_find_slot_v1(state, completion.token)
+    if index < 0:
+        return _exec_cleanup_transition_v1(
+            false, "StaleReceipt", state, completion.token)
+    val slot = state.slots[index]
+    val record = mapping_lifetime_get_v1(state.lifetime, slot.mapping_id)
+    if (slot.phase != ExecCleanupSlotPhaseV1.Quarantined or
+            not slot.outcome_pending or
+            not record.? or
+            record.unwrap().phase != MappingLifetimePhaseV1.Closing or
+            completion.permit.mapping_id != slot.mapping_id or
+            completion.permit.mapped_bytes != slot.extent or
+            completion.permit.ledger_owner != state.lifetime.ledger_owner or
+            completion.permit.ledger_epoch != state.lifetime.ledger_epoch or
+            completion.permit.mapping_sequence !=
+                record.unwrap().mapping_sequence or
+            completion.permit.close_token !=
+                record.unwrap().active_close_token):
+        return _exec_cleanup_transition_v1(
+            false, "StaleReceipt", state, completion.token)
+    val finished = mapping_lifetime_finish_close_v1(
+        state.lifetime, completion.permit,
+        completion.close_succeeded)
+    if not completion.close_succeeded:
+        if (finished.ok or
+                finished.failure != MappingLifetimeFailureV1.CloseFailed):
+            return _exec_cleanup_transition_v1(
+                false, "internal-close-failure", state, completion.token)
+        var retained = state
+        retained.lifetime = finished.ledger
+        var retryable_slot = retained.slots[index]
+        retryable_slot.outcome_pending = false
+        var retryable_slots = retained.slots
+        retryable_slots[index] = retryable_slot
+        retained.slots = retryable_slots
+        return _exec_cleanup_transition_v1(
+            true, "NativeReleaseFailed", retained, completion.token)
+    if not finished.ok:
+        return _exec_cleanup_transition_v1(
+            false, "close-completion-refused", state, completion.token)
+    var released_state = state
+    released_state.lifetime = finished.ledger
+    released_state = _exec_cleanup_remove_slot_v1(
+        released_state, index, false)
+    return _exec_cleanup_transition_v1(
+        true, "released", released_state, completion.token)
+
+fn exec_cleanup_retry_at_map_entry_v1(
+        state: ExecCleanupStateV1,
+        attempted_tokens: [i64]) -> ExecCleanupTransitionV1:
+    if not exec_cleanup_check_v1(state):
+        return _exec_cleanup_transition_v1(
+            false, "invalid-state", state, 0)
+    if attempted_tokens.len() >= EXEC_CLEANUP_RETRY_DRAIN_LIMIT_V1:
+        return _exec_cleanup_transition_v1(
+            true, "retry-drain-limit", state, 0)
+    for slot in state.slots:
+        if (slot.phase == ExecCleanupSlotPhaseV1.Allocated and
+                not slot.outcome_pending and
+                not _exec_cleanup_attempted_v1(
+                    slot.token, attempted_tokens)):
+            if (state.next_action_generation >=
+                    MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+                    not _exec_cleanup_generation_encodable_v1(
+                        state.next_action_generation)):
+                return _exec_cleanup_transition_v1(
+                    false, "outcome-generation-exhausted", state, slot.token)
+            var next = state
+            val index = _exec_cleanup_find_slot_v1(next, slot.token)
+            var pending_slot = next.slots[index]
+            pending_slot.outcome_action_generation =
+                next.next_action_generation
+            pending_slot.outcome_pending = true
+            var pending_slots = next.slots
+            pending_slots[index] = pending_slot
+            next.slots = pending_slots
+            next.next_action_generation = next.next_action_generation + 1
+            return _exec_cleanup_untracked_release_transition_v1(
+                "retry_failed_receipts", next, slot.token,
+                slot.address, slot.extent)
+        if (slot.phase == ExecCleanupSlotPhaseV1.Quarantined and
+                not _exec_cleanup_attempted_v1(
+                    slot.token, attempted_tokens)):
+            val record = mapping_lifetime_get_v1(
+                state.lifetime, slot.mapping_id)
+            if record.? and
+                    record.unwrap().phase == MappingLifetimePhaseV1.Retryable:
+                if (state.next_action_generation >=
+                        MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+                        not _exec_cleanup_generation_encodable_v1(
+                            state.next_action_generation)):
+                    return _exec_cleanup_transition_v1(
+                        false, "outcome-generation-exhausted", state, slot.token)
+                val closing = mapping_lifetime_begin_close_v1(
+                    state.lifetime, slot.mapping_id)
+                if not closing.ok or not closing.close_permit_present:
+                    return _exec_cleanup_transition_v1(
+                        false, "retry-close-refused", state, slot.token)
+                var next = state
+                next.lifetime = closing.ledger
+                var pending_slot = next.slots[
+                    _exec_cleanup_find_slot_v1(next, slot.token)]
+                pending_slot.outcome_action_generation = next.next_action_generation
+                pending_slot.outcome_pending = true
+                var pending_slots = next.slots
+                pending_slots[_exec_cleanup_find_slot_v1(next, slot.token)] = pending_slot
+                next.slots = pending_slots
+                next.next_action_generation = next.next_action_generation + 1
+                return _exec_cleanup_release_transition_v1(
+                    "retry_failed_receipts", next, slot.token,
+                    closing.close_permit, slot.address, slot.extent)
+    return _exec_cleanup_transition_v1(
+        true, "retry-drain-empty", state, 0)
+
+fn exec_cleanup_free_range_allowed_v1(
+        state: ExecCleanupStateV1,
+        address: i64, extent: i64) -> bool:
+    if (not exec_cleanup_check_v1(state) or address <= 0 or extent <= 0 or
+            address > _EXEC_CLEANUP_MAX_ADDRESS_V1 - extent):
+        return false
+    for slot in state.slots:
+        if slot.address > 0 and _exec_cleanup_ranges_overlap_v1(
+                address, extent, slot.address, slot.extent):
+            return false
+    true
+
+fn _exec_cleanup_dispatch_from_transition_v1(
+        transition: ExecCleanupTransitionV1,
+        operation: ExecCleanupNativeOutcomeKindV1,
+        require_permit: bool) -> ExecCleanupNativeDispatchV1:
+    if not transition.ok:
+        return ExecCleanupNativeDispatchV1(
+            transition: transition, ticket_present: false,
+            ticket: _exec_cleanup_empty_ticket_v1(), operation: operation)
+    val index = _exec_cleanup_find_slot_v1(
+        transition.state, transition.token)
+    if index < 0:
+        return ExecCleanupNativeDispatchV1(
+            transition: transition, ticket_present: false,
+            ticket: _exec_cleanup_empty_ticket_v1(), operation: operation)
+    val slot = transition.state.slots[index]
+    if (require_permit and not transition.permit_present and
+            slot.phase != ExecCleanupSlotPhaseV1.Allocated):
+        return ExecCleanupNativeDispatchV1(
+            transition: transition, ticket_present: false,
+            ticket: _exec_cleanup_empty_ticket_v1(), operation: operation)
+    if not slot.outcome_pending or slot.outcome_action_generation <= 0:
+        return ExecCleanupNativeDispatchV1(
+            transition: transition, ticket_present: false,
+            ticket: _exec_cleanup_empty_ticket_v1(), operation: operation)
+    return ExecCleanupNativeDispatchV1(
+        transition: transition, ticket_present: true,
+        ticket: ExecCleanupOutcomeTicketV1(
+            cleanup_owner: transition.state.lifetime.ledger_owner,
+            ledger_epoch: transition.state.lifetime.ledger_epoch,
+            token: slot.token,
+            action_generation: slot.outcome_action_generation,
+            mapping_id: slot.mapping_id, address: slot.address,
+            extent: slot.extent),
+        operation: operation)
+
+fn exec_cleanup_construct_dispatch_v1(
+        transition: ExecCleanupTransitionV1) -> ExecCleanupNativeDispatchV1:
+    return _exec_cleanup_dispatch_from_transition_v1(
+        transition, ExecCleanupNativeOutcomeKindV1.ConstructFailed, false)
+
+fn exec_cleanup_release_dispatch_v1(
+        transition: ExecCleanupTransitionV1,
+        operation: ExecCleanupNativeOutcomeKindV1) -> ExecCleanupNativeDispatchV1:
+    return _exec_cleanup_dispatch_from_transition_v1(
+        transition, operation, true)
+
+fn exec_cleanup_bind_failure_v1(
+        state: ExecCleanupStateV1, token: i64,
+        address: i64) -> ExecCleanupNativeDispatchV1:
+    val bound = exec_cleanup_begin_construct_v1(state, token, address)
+    if not bound.ok:
+        val index = _exec_cleanup_find_slot_v1(bound.state, token)
+        if index >= 0:
+            val allocated = bound.state.slots[index]
+            if (allocated.phase == ExecCleanupSlotPhaseV1.Allocated and
+                    not allocated.outcome_pending and
+                    bound.state.next_action_generation <
+                        MAPPING_LIFETIME_SEQUENCE_MAX_V1 and
+                    _exec_cleanup_generation_encodable_v1(
+                        bound.state.next_action_generation)):
+                var retained = bound.state
+                var pending = allocated
+                pending.outcome_action_generation =
+                    retained.next_action_generation
+                pending.outcome_pending = true
+                var retained_slots = retained.slots
+                retained_slots[index] = pending
+                retained.slots = retained_slots
+                retained.next_action_generation =
+                    retained.next_action_generation + 1
+                val releasing = _exec_cleanup_untracked_release_transition_v1(
+                    "allocation-release-pending", retained, token,
+                    allocated.address, allocated.extent)
+                return exec_cleanup_release_dispatch_v1(
+                    releasing,
+                    ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)
+        return ExecCleanupNativeDispatchV1(
+            transition: bound, ticket_present: false,
+            ticket: _exec_cleanup_empty_ticket_v1(),
+            operation: ExecCleanupNativeOutcomeKindV1.ConstructFailed)
+    val pending = exec_cleanup_complete_construct_v1(
+        bound.state, token, false)
+    return exec_cleanup_release_dispatch_v1(
+        pending, ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)
+
+fn exec_cleanup_arm_native_dispatch_v1(
+        mailbox: ExecCleanupCompletionMailboxV1,
+        dispatch: ExecCleanupNativeDispatchV1) -> bool:
+    if (not dispatch.ticket_present or not dispatch.transition.ok or
+            mailbox.capacity != EXEC_CLEANUP_MAX_SLOTS_V1):
+        return false
+    val slot_index = _exec_cleanup_find_slot_v1(
+        dispatch.transition.state, dispatch.ticket.token)
+    if slot_index < 0:
+        return false
+    val slot = dispatch.transition.state.slots[slot_index]
+    if (not slot.outcome_pending or
+            slot.outcome_action_generation != dispatch.ticket.action_generation or
+            not _exec_cleanup_generation_encodable_v1(
+                dispatch.ticket.action_generation) or
+            slot.mapping_id != dispatch.ticket.mapping_id or
+            slot.address != dispatch.ticket.address or
+            slot.extent != dispatch.ticket.extent or
+            dispatch.ticket.cleanup_owner !=
+                dispatch.transition.state.lifetime.ledger_owner or
+            dispatch.ticket.ledger_epoch !=
+                dispatch.transition.state.lifetime.ledger_epoch):
+        return false
+    val cell_index = slot.outcome_ticket_id - 1
+    if cell_index < 0 or cell_index >= mailbox.cells.len():
+        return false
+    val cell = mailbox.cells[cell_index]
+    var action: i64 = 0
+    if slot.phase == ExecCleanupSlotPhaseV1.Constructing and
+            dispatch.operation == ExecCleanupNativeOutcomeKindV1.ConstructFailed:
+        action = _EXEC_CLEANUP_ACTION_CONSTRUCT_V1
+    elif (slot.phase == ExecCleanupSlotPhaseV1.Quarantined or
+            slot.phase == ExecCleanupSlotPhaseV1.Allocated) and
+            (dispatch.operation ==
+                ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded or
+             dispatch.operation ==
+                ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed):
+        action = _EXEC_CLEANUP_ACTION_RELEASE_V1
+    else:
+        return false
+    val empty_control = cell.control.load(MemoryOrdering.Acquire)
+    if (_exec_cleanup_control_phase_v1(empty_control) !=
+            _EXEC_CLEANUP_CONTROL_EMPTY_V1 or
+            dispatch.ticket.action_generation <=
+                _exec_cleanup_control_generation_v1(empty_control)):
+        return false
+    val arming_control = _exec_cleanup_control_v1(
+        dispatch.ticket.action_generation,
+        _EXEC_CLEANUP_CONTROL_ARMING_V1, action)
+    if not cell.control.compare_exchange(
+            empty_control, arming_control,
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        return false
+    cell.install_descriptor(dispatch.ticket)
+    val armed_control = _exec_cleanup_control_v1(
+        dispatch.ticket.action_generation,
+        _EXEC_CLEANUP_CONTROL_ARMED_V1, action)
+    cell.control.compare_exchange(
+        arming_control, armed_control,
+        MemoryOrdering.Release, MemoryOrdering.Acquire)
+
+fn _exec_cleanup_outcome_code_v1(
+        outcome: ExecCleanupNativeOutcomeKindV1) -> i64:
+    if outcome == ExecCleanupNativeOutcomeKindV1.ConstructSucceeded:
+        return 1
+    if outcome == ExecCleanupNativeOutcomeKindV1.ConstructFailed:
+        return 2
+    if outcome == ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded:
+        return 3
+    4
+
+fn _exec_cleanup_outcome_matches_action_v1(
+        action: i64,
+        outcome: ExecCleanupNativeOutcomeKindV1) -> bool:
+    if action == _EXEC_CLEANUP_ACTION_CONSTRUCT_V1:
+        return (outcome == ExecCleanupNativeOutcomeKindV1.ConstructSucceeded or
+            outcome == ExecCleanupNativeOutcomeKindV1.ConstructFailed)
+    if action == _EXEC_CLEANUP_ACTION_RELEASE_V1:
+        return (outcome ==
+                ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded or
+            outcome == ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)
+    false
+
+fn exec_cleanup_publish_native_outcome_v1(
+        mailbox: ExecCleanupCompletionMailboxV1,
+        ticket: ExecCleanupOutcomeTicketV1,
+        outcome: ExecCleanupNativeOutcomeKindV1) -> bool:
+    if ticket.cleanup_owner != "exec-mapping-cleanup-v1" or
+            ticket.ledger_epoch != 1 or
+            not _exec_cleanup_generation_encodable_v1(
+                ticket.action_generation):
+        return false
+    for cell in mailbox.cells:
+        val armed_control = cell.control.load(MemoryOrdering.Acquire)
+        val action = _exec_cleanup_control_action_v1(armed_control)
+        if (_exec_cleanup_control_phase_v1(armed_control) ==
+                _EXEC_CLEANUP_CONTROL_ARMED_V1 and
+                _exec_cleanup_control_generation_v1(armed_control) ==
+                    ticket.action_generation and
+                _exec_cleanup_outcome_matches_action_v1(action, outcome)):
+            val publishing_control = _exec_cleanup_control_v1(
+                ticket.action_generation,
+                _EXEC_CLEANUP_CONTROL_PUBLISHING_V1, action)
+            # Descriptor access is forbidden until this exact CAS succeeds.
+            if not cell.control.compare_exchange(
+                    armed_control, publishing_control,
+                    MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+                continue
+            if (cell.token.load(MemoryOrdering.Relaxed) != ticket.token or
+                    cell.action_generation.load(MemoryOrdering.Relaxed) !=
+                        ticket.action_generation or
+                    cell.address.load(MemoryOrdering.Relaxed) != ticket.address or
+                    cell.extent.load(MemoryOrdering.Relaxed) != ticket.extent or
+                    cell.mapping_id != ticket.mapping_id):
+                _ = cell.control.compare_exchange(
+                    publishing_control, armed_control,
+                    MemoryOrdering.Release, MemoryOrdering.Acquire)
+                return false
+            cell.install_outcome(_exec_cleanup_outcome_code_v1(outcome))
+            val ready_control = _exec_cleanup_control_v1(
+                ticket.action_generation,
+                _EXEC_CLEANUP_CONTROL_READY_V1, action)
+            return cell.control.compare_exchange(
+                publishing_control, ready_control,
+                MemoryOrdering.Release, MemoryOrdering.Acquire)
+    false
+
+fn _exec_cleanup_clear_mailbox_cell_v1(
+        cell: ExecCleanupCompletionCellV1,
+        draining_control: i64) -> bool:
+    val generation = _exec_cleanup_control_generation_v1(draining_control)
+    cell.clear_descriptor()
+    cell.control.compare_exchange(
+        draining_control,
+        _exec_cleanup_control_v1(
+            generation, _EXEC_CLEANUP_CONTROL_EMPTY_V1, 0),
+        MemoryOrdering.Release, MemoryOrdering.Acquire)
+
+fn _exec_cleanup_native_drain_v1(
+        ok: bool, reason: text, state: ExecCleanupStateV1,
+        drained: i64,
+        dispatch: ExecCleanupNativeDispatchV1) -> ExecCleanupNativeDrainV1:
+    return ExecCleanupNativeDrainV1(
+        ok: ok, reason: reason, state: state, drained: drained,
+        dispatch_present: dispatch.ticket_present, dispatch: dispatch)
+
+fn exec_cleanup_drain_native_outcomes_v1(
+        state: ExecCleanupStateV1,
+        mailbox: ExecCleanupCompletionMailboxV1) -> ExecCleanupNativeDrainV1:
+    val empty = _exec_cleanup_empty_dispatch_v1(state)
+    if not exec_cleanup_check_v1(state):
+        return _exec_cleanup_native_drain_v1(
+            false, "invalid-state", state, 0, empty)
+    var chosen: i64 = -1
+    var generation: i64 = MAPPING_LIFETIME_SEQUENCE_MAX_V1
+    var index: i64 = 0
+    while index < mailbox.cells.len():
+        val control = mailbox.cells[index].control.load(MemoryOrdering.Acquire)
+        val candidate = _exec_cleanup_control_generation_v1(control)
+        if (_exec_cleanup_control_phase_v1(control) ==
+                _EXEC_CLEANUP_CONTROL_READY_V1 and
+                candidate > 0 and candidate < generation):
+            chosen = index
+            generation = candidate
+        index = index + 1
+    if chosen < 0:
+        return _exec_cleanup_native_drain_v1(
+            true, "native-outcome-empty", state, 0, empty)
+    val cell = mailbox.cells[chosen]
+    val ready_control = cell.control.load(MemoryOrdering.Acquire)
+    if (_exec_cleanup_control_phase_v1(ready_control) !=
+            _EXEC_CLEANUP_CONTROL_READY_V1 or
+            _exec_cleanup_control_generation_v1(ready_control) != generation):
+        return _exec_cleanup_native_drain_v1(
+            true, "native-outcome-contended", state, 0, empty)
+    val action = _exec_cleanup_control_action_v1(ready_control)
+    val draining_control = _exec_cleanup_control_v1(
+        generation, _EXEC_CLEANUP_CONTROL_DRAINING_V1, action)
+    if not cell.control.compare_exchange(
+            ready_control, draining_control,
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        return _exec_cleanup_native_drain_v1(
+            true, "native-outcome-contended", state, 0, empty)
+    # The successful claim is the acquire edge for every descriptor read.
+    val token = cell.token.load(MemoryOrdering.Relaxed)
+    val slot_index = _exec_cleanup_find_slot_v1(state, token)
+    if slot_index < 0:
+        _ = cell.control.compare_exchange(
+            draining_control, ready_control,
+            MemoryOrdering.Release, MemoryOrdering.Acquire)
+        return _exec_cleanup_native_drain_v1(
+            false, "native-outcome-stale", state, 0, empty)
+    val slot = state.slots[slot_index]
+    if (not slot.outcome_pending or slot.outcome_ticket_id != cell.ticket_id or
+            slot.outcome_action_generation != generation or
+            slot.mapping_id != cell.mapping_id or
+            slot.address != cell.address.load(MemoryOrdering.Relaxed) or
+            slot.extent != cell.extent.load(MemoryOrdering.Relaxed) or
+            (slot.phase == ExecCleanupSlotPhaseV1.Constructing and
+                action != _EXEC_CLEANUP_ACTION_CONSTRUCT_V1) or
+            ((slot.phase == ExecCleanupSlotPhaseV1.Quarantined or
+                slot.phase == ExecCleanupSlotPhaseV1.Allocated) and
+                action != _EXEC_CLEANUP_ACTION_RELEASE_V1)):
+        _ = cell.control.compare_exchange(
+            draining_control, ready_control,
+            MemoryOrdering.Release, MemoryOrdering.Acquire)
+        return _exec_cleanup_native_drain_v1(
+            false, "native-outcome-mismatch", state, 0, empty)
+    val outcome = cell.outcome.load(MemoryOrdering.Relaxed)
+    if ((action == _EXEC_CLEANUP_ACTION_CONSTRUCT_V1 and
+            outcome != _exec_cleanup_outcome_code_v1(
+                ExecCleanupNativeOutcomeKindV1.ConstructSucceeded) and
+            outcome != _exec_cleanup_outcome_code_v1(
+                ExecCleanupNativeOutcomeKindV1.ConstructFailed)) or
+            (action == _EXEC_CLEANUP_ACTION_RELEASE_V1 and
+            outcome != _exec_cleanup_outcome_code_v1(
+                ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded) and
+            outcome != _exec_cleanup_outcome_code_v1(
+                ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed))):
+        _ = cell.control.compare_exchange(
+            draining_control, ready_control,
+            MemoryOrdering.Release, MemoryOrdering.Acquire)
+        return _exec_cleanup_native_drain_v1(
+            false, "native-outcome-kind-mismatch", state, 0, empty)
+    if slot.phase == ExecCleanupSlotPhaseV1.Constructing:
+        val completed = exec_cleanup_complete_construct_v1(
+            state, token,
+            outcome == _exec_cleanup_outcome_code_v1(
+                ExecCleanupNativeOutcomeKindV1.ConstructSucceeded))
+        if not completed.ok:
+            return _exec_cleanup_native_drain_v1(
+                false, "construction-outcome-refused", state, 0, empty)
+        if not _exec_cleanup_clear_mailbox_cell_v1(cell, draining_control):
+            return _exec_cleanup_native_drain_v1(
+                false, "native-outcome-clear-refused", state, 0, empty)
+        if completed.permit_present:
+            val release_dispatch = exec_cleanup_release_dispatch_v1(
+                completed, ExecCleanupNativeOutcomeKindV1.ConstructFailed)
+            return _exec_cleanup_native_drain_v1(
+                release_dispatch.ticket_present,
+                "construction-failure-retained", completed.state, 1,
+                release_dispatch)
+        return _exec_cleanup_native_drain_v1(
+            true, "construction-transferred", completed.state, 1, empty)
+    if slot.phase == ExecCleanupSlotPhaseV1.Allocated:
+        var completed = state
+        var reason = "NativeReleaseFailed"
+        if outcome == _exec_cleanup_outcome_code_v1(
+                ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded):
+            completed = _exec_cleanup_remove_slot_v1(
+                completed, slot_index, false)
+            reason = "released"
+        else:
+            var retryable = slot
+            retryable.outcome_pending = false
+            var retryable_slots = completed.slots
+            retryable_slots[slot_index] = retryable
+            completed.slots = retryable_slots
+        if not _exec_cleanup_clear_mailbox_cell_v1(cell, draining_control):
+            return _exec_cleanup_native_drain_v1(
+                false, "native-outcome-clear-refused", state, 0, empty)
+        return _exec_cleanup_native_drain_v1(
+            true, reason, completed, 1, empty)
+    val record = mapping_lifetime_get_v1(state.lifetime, slot.mapping_id)
+    if not record.? or record.unwrap().phase != MappingLifetimePhaseV1.Closing:
+        _ = cell.control.compare_exchange(
+            draining_control, ready_control,
+            MemoryOrdering.Release, MemoryOrdering.Acquire)
+        return _exec_cleanup_native_drain_v1(
+            false, "native-release-permit-missing", state, 0, empty)
+    val permit = MappingClosePermitV1(
+        ledger_owner: state.lifetime.ledger_owner,
+        ledger_epoch: state.lifetime.ledger_epoch,
+        mapping_id: slot.mapping_id,
+        mapping_sequence: record.unwrap().mapping_sequence,
+        close_token: record.unwrap().active_close_token,
+        mapped_bytes: slot.extent)
+    val completed = exec_cleanup_quarantine_completion_v1(
+        state, exec_cleanup_completion_v1(
+            token, permit,
+            outcome == _exec_cleanup_outcome_code_v1(
+                ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded)))
+    if not completed.ok:
+        _ = cell.control.compare_exchange(
+            draining_control, ready_control,
+            MemoryOrdering.Release, MemoryOrdering.Acquire)
+        return _exec_cleanup_native_drain_v1(
+            false, "native-release-outcome-refused", state, 0, empty)
+    if not _exec_cleanup_clear_mailbox_cell_v1(cell, draining_control):
+        return _exec_cleanup_native_drain_v1(
+            false, "native-outcome-clear-refused", state, 0, empty)
+    return _exec_cleanup_native_drain_v1(
+        true, completed.reason, completed.state, 1, empty)
+
+export EXEC_CLEANUP_MAX_SLOTS_V1, EXEC_CLEANUP_MAX_OWNED_BYTES_V1
+export EXEC_CLEANUP_RETRY_DRAIN_LIMIT_V1
+export ExecCleanupSlotPhaseV1, ExecCleanupSlotV1, ExecCleanupStateV1
+export ExecCleanupCompletionV1, ExecCleanupTransitionV1
+export ExecCleanupNativeOutcomeKindV1, ExecCleanupOutcomeTicketV1
+export ExecCleanupCompletionCellV1, ExecCleanupCompletionMailboxV1
+export ExecCleanupNativeDispatchV1, ExecCleanupNativeDrainV1
+export exec_cleanup_state_v1, exec_cleanup_check_v1
+export exec_cleanup_completion_mailbox_v1
+export exec_cleanup_reserve_v1, exec_cleanup_begin_construct_v1
+export exec_cleanup_complete_construct_v1, exec_cleanup_completion_v1
+export exec_cleanup_quarantine_completion_v1
+export exec_cleanup_retry_at_map_entry_v1, exec_cleanup_free_range_allowed_v1
+export exec_cleanup_construct_dispatch_v1, exec_cleanup_release_dispatch_v1
+export exec_cleanup_bind_failure_v1, exec_cleanup_arm_native_dispatch_v1
+export exec_cleanup_publish_native_outcome_v1
+export exec_cleanup_drain_native_outcomes_v1

@@ -10,6 +10,26 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 
+int64_t rt_parser_mask_call_u8x32(int64_t function_address,
+                                  int64_t source_address,
+                                  int64_t first, int64_t second) {
+    if (function_address <= 0 || source_address <= 0 ||
+        first < 0 || first > 255 || second < 0 || second > 255) return -1;
+    typedef uint32_t (*parser_mask_fn)(const uint8_t *, uint8_t, uint8_t);
+    parser_mask_fn function = (parser_mask_fn)(uintptr_t)function_address;
+    return (int64_t)function((const uint8_t *)(uintptr_t)source_address,
+                             (uint8_t)first, (uint8_t)second);
+}
+
+int64_t rt_parser_lexical_mask_call_u8x32(int64_t function_address,
+                                          int64_t source_address,
+                                          int64_t needle) {
+    if (function_address <= 0 || source_address <= 0 || needle < 0 || needle > 255) return -1;
+    typedef uint32_t (*parser_lexical_mask_fn)(const uint8_t *, uint8_t);
+    parser_lexical_mask_fn function = (parser_lexical_mask_fn)(uintptr_t)function_address;
+    return (int64_t)function((const uint8_t *)(uintptr_t)source_address, (uint8_t)needle);
+}
+
 #if defined(_WIN32) || defined(_WIN64)
 #  include <windows.h>
 #  if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -98,6 +118,35 @@ bool rt_simd_has_avx2(void) {
     if (!rt_msvc_x86_os_avx_enabled()) return false;
     __cpuidex(regs, 7, 0);
     return (regs[1] & (1 << 5)) != 0;
+#else
+    return false;
+#endif
+}
+
+bool rt_x86_avx512_os_state_usable(void) {
+#if defined(SIMPLE_RUNTIME_FORCE_NO_X86_XSTATE)
+    return false;
+#elif SIMD_HAS_X86 && defined(_MSC_VER)
+    int regs[4];
+    __cpuid(regs, 1);
+    const uint32_t ecx = (uint32_t)regs[2];
+    const uint32_t xsave_osxsave = (1U << 26) | (1U << 27);
+    if ((ecx & xsave_osxsave) != xsave_osxsave) return false;
+    return simd_x86_avx512_os_state_usable_from_raw(
+        ecx, (uint64_t)_xgetbv(0));
+#elif SIMD_HAS_X86 && (defined(__GNUC__) || defined(__clang__))
+    unsigned int eax = 0;
+    unsigned int ebx = 0;
+    unsigned int ecx = 0;
+    unsigned int edx = 0;
+    const unsigned int xsave_osxsave = (1U << 26) | (1U << 27);
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
+    if ((ecx & xsave_osxsave) != xsave_osxsave) return false;
+    unsigned int xcr0_eax = 0;
+    unsigned int xcr0_edx = 0;
+    __asm__ volatile("xgetbv" : "=a"(xcr0_eax), "=d"(xcr0_edx) : "c"(0));
+    const uint64_t xcr0 = ((uint64_t)xcr0_edx << 32) | xcr0_eax;
+    return simd_x86_avx512_os_state_usable_from_raw(ecx, xcr0);
 #else
     return false;
 #endif
@@ -2563,4 +2612,376 @@ int64_t rt_simd_shuffle_u8x16(int64_t a, int64_t b, int64_t mask) {
         out[i] = (int64_t)(uint64_t)r;
     }
     return rt_simd_result_vec(out, 16);
+}
+
+/* ==========================================================================
+ * Stage2 link census (doc/08_tracking/bug/
+ * stage2_link_full_undefined_symbol_census_2026-09-07.md), bucket
+ * "2-deferred: Rust-only, C-lane gap" -- the rt_simd_* i32x4/i32x8/u8x16/
+ * u64x2 family (22 symbols). Undefined in the core-C-bootstrap link because
+ * they exist only in src/compiler_rust/runtime/src/value/{simd_int_ops,
+ * simd_byte_ops,simd_aes_ops,simd_clmul_ops}.rs, which are never linked into
+ * this archive.
+ *
+ * ABI: same convention as the f32x4/f32x8/f64x4/i64x4/u32x4/u64x4 family
+ * above (rt_simd_vec_payload / rt_simd_lane_u64 / rt_simd_result_vec) --
+ * confirmed empirically against the REAL kept failed-link object set
+ * (native-objects-8HIZif/mod_842.o for i32x4/i32x8, mod_843.o for
+ * u8x16/u64x2), not from the Rust `pub extern "C"` signatures in
+ * simd_int_ops.rs / simd_byte_ops.rs, which are stale scalar-lane-array ABIs
+ * their own comments admit are provisional ("once a Vec4i marshalling layer
+ * lands they will receive the actual lane data") and are not what this
+ * archive's generated wrapper code (lib__nogc_sync_mut__simd__simd_add_i32x4
+ * etc.) actually calls: every real call site tail-calls with exactly two
+ * tagged-pointer i64 args (three for the two-vector-plus-scalar-shift and
+ * aes_round forms), matching this file's established Vec-struct convention.
+ * `rt_simd_aes_round_u8x16`/`rt_simd_aes_round_last_u8x16` additionally match
+ * the `&[I64, I64] -> &[I64]` RUNTIME_FUNCS spec already registered for them
+ * in codegen/runtime_sffi.rs:594-595.
+ *
+ * Semantics mirror the Rust lane kernels exactly:
+ *   - i32x{4,8} add/sub/mul: 32-bit wrapping (two's-complement wraparound),
+ *     matching Rust's `wrapping_{add,sub,mul}`.
+ *   - i32x{4,8} xor/and/or: bitwise.
+ *   - i32x{4,8} shl/shr: LOGICAL (zero-fill) shift, count masked to 0..31
+ *     (simd_int_ops.rs::mask_shift, `n & 31`). `shr` is logical, not
+ *     arithmetic -- matches `((x as u32).wrapping_shr(count)) as i32`.
+ *   - u8x16 add: per-lane wrapping byte add, no cross-lane carry.
+ *   - u8x16 xor: per-lane bitwise XOR.
+ *   - aes_round_u8x16(state,key)      = MixColumns(SubBytes(ShiftRows(state))) XOR key
+ *   - aes_round_last_u8x16(state,key) =            SubBytes(ShiftRows(state))  XOR key
+ *     (matches Intel `_mm_aesenc_si128` / `_mm_aesenclast_si128`; FIPS 197
+ *     column-major byte ordering and shared SBOX, mirroring
+ *     simd_aes_ops.rs's scalar fallback byte for byte).
+ *   - clmul_lo_u64(a,b) = carryless 64x64 mul of a.lo, b.lo -> [lo,hi]
+ *     (matches `_mm_clmulepi64_si128(a,b,0x00)`); Vec2u64's field order is
+ *     (lo, hi) per src/lib/nogc_sync_mut/simd_crypto.spl, i.e. lane 0 = lo,
+ *     lane 1 = hi.
+ *   - clmul_hi_u64(a,b) = carryless 64x64 mul of a.hi, b.hi -> [lo,hi]
+ *     (matches `_mm_clmulepi64_si128(a,b,0x11)`).
+ *   - xor_u64x2: lane-wise XOR.
+ * ========================================================================== */
+
+/* ---- i32x4 (Vec4i): 32-bit wrapping/bitwise ---- */
+
+#define RT_SIMD_I32X4_BINOP(NAME, EXPR)                                    \
+    int64_t NAME(int64_t a, int64_t b) {                                   \
+        const int64_t* pa = rt_simd_vec_payload(a);                        \
+        const int64_t* pb = rt_simd_vec_payload(b);                        \
+        int64_t out[4];                                                    \
+        int i;                                                             \
+        for (i = 0; i < 4; i++) {                                          \
+            uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);                \
+            uint32_t y = (uint32_t)rt_simd_lane_u64(pb, i);                \
+            out[i] = (int64_t)(int32_t)(uint32_t)(EXPR);                   \
+        }                                                                  \
+        return rt_simd_result_vec(out, 4);                                 \
+    }
+
+RT_SIMD_I32X4_BINOP(rt_simd_add_i32x4, x + y)
+RT_SIMD_I32X4_BINOP(rt_simd_sub_i32x4, x - y)
+RT_SIMD_I32X4_BINOP(rt_simd_mul_i32x4, x * y)
+RT_SIMD_I32X4_BINOP(rt_simd_xor_i32x4, x ^ y)
+RT_SIMD_I32X4_BINOP(rt_simd_and_i32x4, x & y)
+RT_SIMD_I32X4_BINOP(rt_simd_or_i32x4,  x | y)
+
+int64_t rt_simd_shl_i32x4(int64_t a, int64_t n) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned count = (unsigned)(((uint64_t)n) & 31ULL);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++) {
+        uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);
+        out[i] = (int64_t)(int32_t)(uint32_t)(x << count);
+    }
+    return rt_simd_result_vec(out, 4);
+}
+
+int64_t rt_simd_shr_i32x4(int64_t a, int64_t n) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned count = (unsigned)(((uint64_t)n) & 31ULL);
+    int64_t out[4];
+    int i;
+    for (i = 0; i < 4; i++) {
+        uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);
+        out[i] = (int64_t)(int32_t)(uint32_t)(x >> count);
+    }
+    return rt_simd_result_vec(out, 4);
+}
+
+/* ---- i32x8 (Vec8i): same semantics, 8 lanes ---- */
+
+#define RT_SIMD_I32X8_BINOP(NAME, EXPR)                                    \
+    int64_t NAME(int64_t a, int64_t b) {                                   \
+        const int64_t* pa = rt_simd_vec_payload(a);                        \
+        const int64_t* pb = rt_simd_vec_payload(b);                        \
+        int64_t out[8];                                                    \
+        int i;                                                             \
+        for (i = 0; i < 8; i++) {                                          \
+            uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);                \
+            uint32_t y = (uint32_t)rt_simd_lane_u64(pb, i);                \
+            out[i] = (int64_t)(int32_t)(uint32_t)(EXPR);                   \
+        }                                                                  \
+        return rt_simd_result_vec(out, 8);                                 \
+    }
+
+RT_SIMD_I32X8_BINOP(rt_simd_add_i32x8, x + y)
+RT_SIMD_I32X8_BINOP(rt_simd_sub_i32x8, x - y)
+RT_SIMD_I32X8_BINOP(rt_simd_mul_i32x8, x * y)
+RT_SIMD_I32X8_BINOP(rt_simd_xor_i32x8, x ^ y)
+RT_SIMD_I32X8_BINOP(rt_simd_and_i32x8, x & y)
+RT_SIMD_I32X8_BINOP(rt_simd_or_i32x8,  x | y)
+
+int64_t rt_simd_shl_i32x8(int64_t a, int64_t n) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned count = (unsigned)(((uint64_t)n) & 31ULL);
+    int64_t out[8];
+    int i;
+    for (i = 0; i < 8; i++) {
+        uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);
+        out[i] = (int64_t)(int32_t)(uint32_t)(x << count);
+    }
+    return rt_simd_result_vec(out, 8);
+}
+
+int64_t rt_simd_shr_i32x8(int64_t a, int64_t n) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    unsigned count = (unsigned)(((uint64_t)n) & 31ULL);
+    int64_t out[8];
+    int i;
+    for (i = 0; i < 8; i++) {
+        uint32_t x = (uint32_t)rt_simd_lane_u64(pa, i);
+        out[i] = (int64_t)(int32_t)(uint32_t)(x >> count);
+    }
+    return rt_simd_result_vec(out, 8);
+}
+
+/* ---- u8x16 (Vec16u8): add/xor ---- */
+
+int64_t rt_simd_add_u8x16(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    int64_t out[16];
+    int i;
+    for (i = 0; i < 16; i++) {
+        uint8_t x = (uint8_t)rt_simd_lane_u64(pa, i);
+        uint8_t y = (uint8_t)rt_simd_lane_u64(pb, i);
+        out[i] = (int64_t)(uint64_t)(uint8_t)(x + y);
+    }
+    return rt_simd_result_vec(out, 16);
+}
+
+int64_t rt_simd_xor_u8x16(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    int64_t out[16];
+    int i;
+    for (i = 0; i < 16; i++) {
+        uint8_t x = (uint8_t)rt_simd_lane_u64(pa, i);
+        uint8_t y = (uint8_t)rt_simd_lane_u64(pb, i);
+        out[i] = (int64_t)(uint64_t)(uint8_t)(x ^ y);
+    }
+    return rt_simd_result_vec(out, 16);
+}
+
+/* ---- u8x16 AES round primitives ----
+ * FIPS 197 SBOX, ShiftRows, MixColumns -- mirrors simd_aes_ops.rs's scalar
+ * fallback (shift_rows/sub_bytes/mix_columns/xtime) byte for byte, including
+ * its column-major state layout. */
+
+static const uint8_t rt_simd_aes_sbox[256] = {
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+};
+
+static void rt_simd_aes_shift_rows(const uint8_t s[16], uint8_t r[16]) {
+    r[0] = s[0];  r[4] = s[4];  r[8]  = s[8];  r[12] = s[12];
+    r[1] = s[5];  r[5] = s[9];  r[9]  = s[13]; r[13] = s[1];
+    r[2] = s[10]; r[6] = s[14]; r[10] = s[2];  r[14] = s[6];
+    r[3] = s[15]; r[7] = s[3];  r[11] = s[7];  r[15] = s[11];
+}
+
+static void rt_simd_aes_sub_bytes(uint8_t s[16]) {
+    int i;
+    for (i = 0; i < 16; i++) s[i] = rt_simd_aes_sbox[s[i]];
+}
+
+static uint8_t rt_simd_aes_xtime(uint8_t b) {
+    uint8_t shifted = (uint8_t)(b << 1);
+    return (b & 0x80) ? (uint8_t)(shifted ^ 0x1B) : shifted;
+}
+
+static void rt_simd_aes_mix_columns(uint8_t s[16]) {
+    int col;
+    for (col = 0; col < 4; col++) {
+        int base = col * 4;
+        uint8_t s0 = s[base], s1 = s[base + 1], s2 = s[base + 2], s3 = s[base + 3];
+        uint8_t t = (uint8_t)(s0 ^ s1 ^ s2 ^ s3);
+        s[base]     = (uint8_t)(s0 ^ t ^ rt_simd_aes_xtime((uint8_t)(s0 ^ s1)));
+        s[base + 1] = (uint8_t)(s1 ^ t ^ rt_simd_aes_xtime((uint8_t)(s1 ^ s2)));
+        s[base + 2] = (uint8_t)(s2 ^ t ^ rt_simd_aes_xtime((uint8_t)(s2 ^ s3)));
+        s[base + 3] = (uint8_t)(s3 ^ t ^ rt_simd_aes_xtime((uint8_t)(s3 ^ s0)));
+    }
+}
+
+static void rt_simd_aes_unpack(const int64_t* p, uint8_t out[16]) {
+    int i;
+    for (i = 0; i < 16; i++) out[i] = (uint8_t)rt_simd_lane_u64(p, i);
+}
+
+/* rt_simd_aes_round_u8x16 / rt_simd_aes_round_last_u8x16 are ALSO defined,
+ * with the exact same (I64,I64)->I64 tagged-pointer ABI and RUNTIME_FUNCS
+ * registration (codegen/runtime_sffi.rs:594-595), in
+ * src/compiler_rust/runtime/src/value/simd_aes_ops.rs as
+ * `#[no_mangle] pub extern "C" fn`s that unpack/pack the same flat Vec16u8
+ * layout used here. Unlike the other 21 symbols in this Stage2 census block
+ * (which are Rust-side dead/wrong-ABI provisional stubs -- see
+ * doc/08_tracking/bug/simple_runtime_cdylib_rt_simd_duplicate_symbol_2026-09-07.md),
+ * the Rust versions of THESE TWO are the tested, actively-registered,
+ * currently-reachable compiled-mode entry points, so deleting them would
+ * silently swap a verified implementation for a newly-added one on any
+ * Rust-linked target. Resolve the link collision the same way
+ * runtime_memtrack.c already resolves rt_heap_live_bytes/rt_heap_peak_bytes
+ * against value::heap: weak here so a link that also carries the Rust
+ * runtime keeps the Rust definition, while the standalone core-C-bootstrap
+ * Stage2 link (which never links the Rust runtime) keeps these as the sole
+ * provider. See build.rs's SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16
+ * definition for the MSVC/Windows-GNU exception, mirroring the heap-counters
+ * precedent exactly (no weak attribute on MSVC; a GNU-style weak symbol
+ * becomes a dead COFF alias under MinGW --gc-sections). */
+#if defined(SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16)
+/* Rust's value/simd_aes_ops.rs owns these; defining them here too would be a
+ * duplicate on any link that also carries the Rust runtime. */
+#elif (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
+__attribute__((weak)) int64_t rt_simd_aes_round_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    rt_simd_aes_mix_columns(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+
+__attribute__((weak)) int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+#else
+/* MSVC (no weak attribute) and Windows-GNUC both land here; the
+ * Rust-provider case is already excluded by
+ * SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16 above, so this branch is only
+ * reached by a standalone (non-Rust-linked) Windows C build. */
+int64_t rt_simd_aes_round_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    rt_simd_aes_mix_columns(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+
+int64_t rt_simd_aes_round_last_u8x16(int64_t state, int64_t key) {
+    const int64_t* ps = rt_simd_vec_payload(state);
+    const int64_t* pk = rt_simd_vec_payload(key);
+    uint8_t s[16], k[16], shifted[16];
+    int64_t out[16];
+    int i;
+    rt_simd_aes_unpack(ps, s);
+    rt_simd_aes_unpack(pk, k);
+    rt_simd_aes_shift_rows(s, shifted);
+    rt_simd_aes_sub_bytes(shifted);
+    for (i = 0; i < 16; i++) out[i] = (int64_t)(uint64_t)(uint8_t)(shifted[i] ^ k[i]);
+    return rt_simd_result_vec(out, 16);
+}
+#endif
+
+/* ---- u64x2 (Vec2u64): carryless multiply + XOR ---- */
+
+/* Scalar 64x64 -> 128 carryless (GF(2)[x]) multiply. Mirrors
+ * simd_clmul_ops.rs::clmul64_scalar's shift-and-XOR loop exactly. */
+static void rt_simd_clmul64(uint64_t a, uint64_t b, uint64_t* lo_out, uint64_t* hi_out) {
+    uint64_t lo = 0, hi = 0, bb = b;
+    unsigned i = 0;
+    while (bb != 0) {
+        if (bb & 1) {
+            if (i == 0) {
+                lo ^= a;
+            } else if (i < 64) {
+                lo ^= a << i;
+                hi ^= a >> (64 - i);
+            } else {
+                hi ^= a << (i - 64);
+            }
+        }
+        bb >>= 1;
+        i++;
+    }
+    *lo_out = lo;
+    *hi_out = hi;
+}
+
+int64_t rt_simd_clmul_lo_u64(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    uint64_t lo, hi;
+    int64_t out[2];
+    rt_simd_clmul64(rt_simd_lane_u64(pa, 0), rt_simd_lane_u64(pb, 0), &lo, &hi);
+    out[0] = (int64_t)lo;
+    out[1] = (int64_t)hi;
+    return rt_simd_result_vec(out, 2);
+}
+
+int64_t rt_simd_clmul_hi_u64(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    uint64_t lo, hi;
+    int64_t out[2];
+    rt_simd_clmul64(rt_simd_lane_u64(pa, 1), rt_simd_lane_u64(pb, 1), &lo, &hi);
+    out[0] = (int64_t)lo;
+    out[1] = (int64_t)hi;
+    return rt_simd_result_vec(out, 2);
+}
+
+int64_t rt_simd_xor_u64x2(int64_t a, int64_t b) {
+    const int64_t* pa = rt_simd_vec_payload(a);
+    const int64_t* pb = rt_simd_vec_payload(b);
+    int64_t out[2];
+    out[0] = (int64_t)(rt_simd_lane_u64(pa, 0) ^ rt_simd_lane_u64(pb, 0));
+    out[1] = (int64_t)(rt_simd_lane_u64(pa, 1) ^ rt_simd_lane_u64(pb, 1));
+    return rt_simd_result_vec(out, 2);
 }

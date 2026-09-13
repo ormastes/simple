@@ -2,6 +2,8 @@
 
 ## Status
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 Source-fixed; execution pending.
 
 Strict Stage4 selected `runtime_native.o`, whose complete member dependency
@@ -56,3 +58,7 @@ archive and object tools rather than `lib.exe`. The broader hosted architecture
 surface is Linux x86_64/AArch64/RISC-V64, macOS x86_64/AArch64, FreeBSD
 x86_64/AArch64, and Windows x86_64; x86, ARM32, and RISC-V32 are not claimed
 for Stage4.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

@@ -316,6 +316,55 @@ fn fb_rounded_rect_row_span_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, 
         px = px + 1
     out
 
+fn _isqrt_i64(v: i64) -> i64:
+    if v <= 0:
+        return 0
+    var guess = v
+    var next = (guess + 1) / 2
+    while next < guess:  # cpu-lane-loop-ok: Newton iteration, converges in O(log v) steps
+        guess = next
+        next = (guess + v / guess) / 2
+    guess
+
+# Pixel coverage (0..256) of a rounded corner whose arc has radius `r`, for a
+# pixel whose centre is (dx, dy) away from the arc centre. The ramp is one pixel
+# wide and crosses 1/2 exactly on the arc; the previous hard `dx*dx+dy*dy<=r*r`
+# test produced a stair-stepped corner with no intermediate value anywhere.
+#
+# This is the SHARED ROUNDED-RECT CORNER COVERAGE FORMULA v1, whose single
+# definition is the comment block above `emu_draw_rounded_rect` in
+# src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl. Keep the two in step:
+# this repo has two rounded-rect rasterizers (this framebuffer painter and the
+# Engine2D one) and they are meant to agree.
+#
+# The `2*d + 1` terms are load-bearing. The arc centre is the continuous point
+# (x+r, y+r) and a pixel centre is (px+0.5, py+0.5), so the true offset is
+# `dx + 0.5`; doubling clears the halves, which makes the sum FOUR TIMES the
+# squared distance and is why the scale is `* 16384`, not `<< 16`. The original
+# 2026-09-12 version of this function used `sq * 65536`, i.e. it measured from
+# the arc-centre PIXEL — that pushes the whole arc outward by half a pixel.
+# It looks fine in isolation (this file's own spec only asserts "some pixels
+# are intermediate") but puts the ramp in the wrong place, which
+# test/01_unit/browser_engine/border_radius_antialias_engine2d_spec.spl's AC-1
+# coordinates detect on the Engine2D side.
+fn _corner_coverage256(dx: i32, dy: i32, r: i32) -> i32:
+    val ex = (2 * dx + 1) as i64
+    val ey = (2 * dy + 1) as i64
+    val dist256 = _isqrt_i64((ex * ex + ey * ey) * 16384)
+    val cov = ((r as i64) * 256 + 128 - dist256) as i32
+    if cov < 0:
+        return 0
+    if cov > 256:
+        return 256
+    cov
+
+fn _blend_alpha256(src: u32, dst: u32, a: i32) -> u32:
+    val ia = 256 - a
+    val r = ((((src >> 16) & 0xFFu32) as i32) * a + (((dst >> 16) & 0xFFu32) as i32) * ia) / 256
+    val g = ((((src >> 8) & 0xFFu32) as i32) * a + (((dst >> 8) & 0xFFu32) as i32) * ia) / 256
+    val b = (((src & 0xFFu32) as i32) * a + ((dst & 0xFFu32) as i32) * ia) / 256
+    (src & 0xFF000000u32) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+
 fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, rtl: i32, rtr: i32, rbr: i32, rbl: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
     val tl = clamp_corner_radius(rtl, w, h)
     val tr = clamp_corner_radius(rtr, w, h)
@@ -349,28 +398,26 @@ fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y
         val row = py * fbw
         var px = x0
         while px < x1:
-            var inside = true
+            # Analytic coverage (0..256) instead of a hard in/out test, so the
+            # corner arc is anti-aliased: a pixel centred exactly on the arc
+            # gets 1/2 coverage and the ramp is one pixel wide.
+            var cov = 256
             if tl > 0 and px < x + tl and py < y + tl:
-                val dx = (x + tl - 1) - px
-                val dy = (y + tl - 1) - py
-                inside = dx * dx + dy * dy <= tl * tl
+                cov = _corner_coverage256((x + tl - 1) - px, (y + tl - 1) - py, tl)
             elif tr > 0 and px >= x + w - tr and py < y + tr:
-                val dx = px - (x + w - tr)
-                val dy = (y + tr - 1) - py
-                inside = dx * dx + dy * dy <= tr * tr
+                cov = _corner_coverage256(px - (x + w - tr), (y + tr - 1) - py, tr)
             elif bl > 0 and px < x + bl and py >= y + h - bl:
-                val dx = (x + bl - 1) - px
-                val dy = py - (y + h - bl)
-                inside = dx * dx + dy * dy <= bl * bl
+                cov = _corner_coverage256((x + bl - 1) - px, py - (y + h - bl), bl)
             elif br > 0 and px >= x + w - br and py >= y + h - br:
-                val dx = px - (x + w - br)
-                val dy = py - (y + h - br)
-                inside = dx * dx + dy * dy <= br * br
-            if inside:
-                if opacity_pct >= 100:
+                cov = _corner_coverage256(px - (x + w - br), py - (y + h - br), br)
+            if cov > 0:
+                var alpha256 = cov
+                if opacity_pct < 100:
+                    alpha256 = (alpha256 * opacity_pct) / 100
+                if alpha256 >= 256:
                     out[row + px] = color
-                else:
-                    out[row + px] = blend_opacity(color, out[row + px], opacity_pct)
+                elif alpha256 > 0:
+                    out[row + px] = _blend_alpha256(color, out[row + px], alpha256)
             px = px + 1
         py = py + 1
     out
@@ -971,6 +1018,32 @@ fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32,
         if gi >= 0 and gi != 36:
             out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
         cx = cx + if code == 32: space_advance else: advance
+        i = i + 1
+    out
+
+# Same rasterizer as `fb_text_thin_scaled_clip_range`, stepping by the
+# per-BYTE advance table the LAYOUT measured the run with (see
+# `style_run_byte_advances` in ..._layout.spl) instead of a flat per-character
+# estimate. `by` must carry one entry per byte of `s`; when it does not, this
+# falls back to the flat stepping so the width call and the glyph walk stay in
+# agreement.
+fn fb_text_thin_scaled_clip_range_adv(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, start: i32, endv: i32, color: u32, scale: i32, advance: i32, space_advance: i32, italic: bool, clip: ClipRect, by: [i32]) -> [u32]:
+    if by.len() != s.len():
+        return fb_text_thin_scaled_clip_range(fb, fbw, fbh, x, y, s, start, endv, color, scale, advance, space_advance, italic, clip)
+    var out = fb
+    val glyph_h = 7 * scale
+    if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
+        return out
+    var i = start
+    var cx = x
+    while i < endv:
+        if cx >= fbw or cx >= clip.x1:
+            return out
+        val code = s.char_code_at(i)
+        val gi = glyph_index_for_char_code(code)
+        if gi >= 0 and gi != 36:
+            out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+        cx = cx + by[i]
         i = i + 1
     out
 

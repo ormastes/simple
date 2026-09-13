@@ -1,0 +1,70 @@
+# codex-impl
+
+use std.common.crypto.sha256.{sha256_text}
+use app.llm_caret.multimodal_types.{ModelProfileV1}
+use app.io.mod.{dir_create_all, file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded, file_atomic_write}
+
+struct ExtractionCacheHitV1:
+    content: text
+    hit: bool
+    error: text
+
+fn _cache_field_v1(value: text) -> text:
+    value.len().to_text() + ":" + value
+
+fn _cache_fields_v1(values: [text]) -> text:
+    var encoded: [text] = []
+    for value in values: encoded = encoded + [_cache_field_v1(value)]
+    encoded.join("|")
+
+fn _cache_path_v1(cache_root: text, key: text) -> text:
+    cache_root + "/" + key + ".json"
+
+fn model_profile_fingerprint_v1(profile: ModelProfileV1) -> text:
+    sha256_text(_cache_fields_v1([profile.profile_id, profile.provider, profile.endpoint,
+        profile.model_id, profile.model_revision, profile.secret_ref,
+        profile.vision.to_text(),
+        profile.structured_output.to_text(), profile.remote_egress.to_text(),
+        profile.fallback_provider, profile.max_images.to_text(),
+        profile.max_pixels.to_text(), profile.max_request_bytes.to_text(),
+        profile.max_output_tokens.to_text(), profile.timeout_ms.to_text(),
+        profile.max_concurrency.to_text(), profile.trust_scope]))
+
+fn image_extraction_cache_key_v1(
+    source_sha256: text,
+    profile: ModelProfileV1,
+    detail: text,
+    prompt_version: text,
+    schema_version: text,
+    preprocessing_version: text
+) -> text:
+    sha256_text(
+        _cache_fields_v1(["image-extraction-cache/v1", source_sha256,
+            model_profile_fingerprint_v1(profile), detail, prompt_version,
+            schema_version, preprocessing_version])
+    )
+
+fn load_image_extraction_cache_v1(cache_root: text, key: text, max_bytes: i64) -> ExtractionCacheHitV1:
+    if cache_root == "" or key.len() != 64:
+        return ExtractionCacheHitV1(content: "", hit: false, error: "invalid cache identity")
+    val path = _cache_path_v1(cache_root, key)
+    val digest_path = path + ".sha256"
+    if not file_is_regular_no_follow(path) or not file_is_regular_no_follow(digest_path):
+        return ExtractionCacheHitV1(content: "", hit: false, error: "")
+    val read = file_read_regular_no_follow_bounded(path, max_bytes)
+    if read.is_err(): return ExtractionCacheHitV1(content: "", hit: false, error: read.unwrap_err())
+    val digest = file_read_regular_no_follow_bounded(digest_path, 65)
+    if digest.is_err(): return ExtractionCacheHitV1(content: "", hit: false, error: digest.unwrap_err())
+    if digest.unwrap().trim() != sha256_text(read.unwrap()):
+        return ExtractionCacheHitV1(content: "", hit: false, error: "cache content hash mismatch")
+    ExtractionCacheHitV1(content: read.unwrap(), hit: true, error: "")
+
+fn store_image_extraction_cache_v1(cache_root: text, key: text, content: text) -> text:
+    if cache_root == "" or key.len() != 64: return "invalid cache identity"
+    if not dir_create_all(cache_root): return "cannot create image extraction cache"
+    val path = _cache_path_v1(cache_root, key)
+    if not file_atomic_write(path, content): return "cannot write image extraction cache"
+    if not file_atomic_write(path + ".sha256", sha256_text(content) + "\n"):
+        return "cannot write image extraction cache digest"
+    ""

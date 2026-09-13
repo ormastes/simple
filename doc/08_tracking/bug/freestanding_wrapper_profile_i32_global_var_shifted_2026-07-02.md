@@ -11,7 +11,7 @@
   `_needs_freestanding_stub_env`; reproduced on the `wm-simple-web` x86_64
   QEMU target, `--target x86_64-unknown-none`, host macOS aarch64 building
   x86_64)
-- **Status:** OPEN — root cause isolated 2026-07-07 (see "Root cause
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
   (isolated)" below: two stackable seed-codegen defects B1+B2; the old
   "store-side `>>3`" theory is WRONG — the store is correct, the corruption is
   on the read/fstring-display side). Fix is Rust-seed, gated on
@@ -142,3 +142,6 @@ relinked by any `native-build` without touching the seed/bootstrap.
   module `var` as a regression guard once fixed. Then mark this bug CLOSED and
   correct `project_simpleos_gui_boot_2026-05-28`'s "UNFIXED root cause B"
   (superseded by B0 above).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

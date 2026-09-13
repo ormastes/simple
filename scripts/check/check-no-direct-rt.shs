@@ -4,7 +4,7 @@
 # Counts are measured, never assumed. See:
 #   doc/03_plan/infra/binary_runtime_hardening/plan.md
 #   doc/01_research/infra/sspec_binary/binary_sspec_rt_hardening_frozen_design_2026-08-18.md
-# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...] [--offenders FILE]
+# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...] [--offenders FILE] [--rev REV] [--baseline-rev REV]
 #
 # --roots (comma-separated repo-relative dirs, default "src,examples,tools,scripts,test"):
 # widened 2026-08-28 from src-only to also scan examples/, tools/, scripts/ and
@@ -68,6 +68,9 @@
 set -u
 
 ROOT="$(pwd)"
+REV=""
+BASELINE_REV=""
+COUNT_ONLY=0
 SELFTEST_ONLY=0
 ROOTS="src,examples,tools,scripts,test"
 # --critical (or SIMPLE_RT_CRITICAL=1): phase-A error mode — ANY forbidden
@@ -91,18 +94,105 @@ GENERATE_BASELINE=0
 # the offender tally is computed and then deleted, so only the top 5 are ever
 # visible and only on a FAIL.
 OFFENDERS_OUT=""
+# Every value-taking option is read through require_value(). Writing the old
+# `shift; VAR="$1"` inline meant that a value-taking option given LAST (the
+# dispatcher builds these command lines from a manifest row, so a row that
+# ends in a bare `--rev` is a single typo away) shifted the argument list
+# empty and then expanded "$1" under `set -u`, killing the guard with
+#
+#   scripts/check/check-no-direct-rt.shs: line 105: $1: unbound variable
+#
+# and NO verdict line at all -- a blocking push gate dying with a raw shell
+# trace, which .claude/rules/vcs.md's PASS/FAIL/ERROR convention exists
+# precisely to forbid. Reproduced on macOS 2026-09-12 with
+# `--roots src --rev`. The failure is fail-CLOSED (non-zero), so it never
+# laundered a pass; it was unreadable, not unsafe.
+require_value() {
+  # $1 = option name, $2 = number of args remaining INCLUDING the option
+  [ "$2" -ge 2 ] || { echo "ERROR — nothing was checked: $1 requires a value"; exit 2; }
+}
 while [ $# -gt 0 ]; do
   case "$1" in
     --selftest-only) SELFTEST_ONLY=1 ;;
     --generate-baseline) GENERATE_BASELINE=1 ;;
-    --offenders) shift; OFFENDERS_OUT="$1" ;;
+    --offenders) require_value "$1" $#; shift; OFFENDERS_OUT="$1" ;;
     --critical) CRITICAL=1 ;;
-    --root) shift; ROOT="$1" ;;
-    --roots) shift; ROOTS="$1" ;;
+    --root) require_value "$1" $#; shift; ROOT="$1" ;;
+    --roots) require_value "$1" $#; shift; ROOTS="$1" ;;
+    --rev) require_value "$1" $#; shift; REV="$1" ;;
+    --baseline-rev) require_value "$1" $#; shift; BASELINE_REV="$1" ;;
+    --count-only) COUNT_ONLY=1 ;;
     *) echo "ERROR — unknown argument: $1"; exit 2 ;;
   esac
   shift
 done
+
+if [ -n "$BASELINE_REV" ] && [ -z "$REV" ]; then
+  echo "ERROR — nothing was checked: --baseline-rev requires --rev"
+  exit 2
+fi
+if [ -n "$BASELINE_REV" ] && { [ "$CRITICAL" -eq 1 ] || [ "$GENERATE_BASELINE" -eq 1 ]; }; then
+  echo "ERROR — nothing was checked: --baseline-rev is incompatible with --critical and --generate-baseline"
+  exit 2
+fi
+ORIGINAL_ROOT="$ROOT"
+
+# --rev <REV>: scan the COMMITTED tree at REV instead of the working checkout.
+#
+# Why (2026-09-07). As a `tree`-mode push row this MANDATORY gate scanned
+# whatever happened to be in the shared working checkout, which under
+# concurrent agent load is not the commit being pushed — so it could FAIL on
+# another session's uncommitted edit while missing new forbidden call sites in
+# the content actually going out. See
+# doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md
+#
+# BOTH rot axes are closed by relocating ROOT itself: the sources, the
+# ALLOWLIST and the BASELINE_FILE are all derived from $ROOT below, so
+# materialising the revision and repointing ROOT moves every input together.
+# Comparing committed sources against the working copy's baseline or allowlist
+# would still be a wrong-tree verdict. Selftest fixture 17 injects both.
+if [ -n "$REV" ]; then
+  if [ "$GENERATE_BASELINE" -eq 1 ]; then
+    # It would write into the temp checkout and vanish with the trap: a silent
+    # no-op that looks like success.
+    echo "ERROR — nothing was checked: --generate-baseline is incompatible with --rev"
+    exit 2
+  fi
+  if ! ( cd "$ROOT" && git rev-parse --verify --quiet "$REV^{commit}" ) >/dev/null 2>&1; then
+    echo "ERROR — nothing was checked: not a commit in $ROOT: $REV"
+    exit 2
+  fi
+  RT_REV_WORK=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+  trap 'rm -rf "$RT_REV_WORK"' EXIT INT TERM
+  # Only the *.spl of the requested roots, plus the two ratchet data files —
+  # archiving all of src/ would be gigabytes for a scan that reads *.spl only.
+  # A root absent from the revision is skipped here exactly as scan_roots
+  # skips a root absent from a working tree.
+  rt_saved_ifs=$IFS
+  IFS=,
+  set -- $ROOTS
+  IFS=$rt_saved_ifs
+  rt_specs=""
+  for rt_r in "$@"; do
+    [ -n "$rt_r" ] || continue
+    ( cd "$ROOT" && git cat-file -e "$REV:$rt_r" ) >/dev/null 2>&1 || continue
+    rt_specs="$rt_specs :(glob)$rt_r/**/*.spl"
+  done
+  if [ -z "$rt_specs" ]; then
+    echo "ERROR — nothing was checked: no scan root of '$ROOTS' exists at $REV"
+    exit 2
+  fi
+  # shellcheck disable=SC2086 -- rt_specs is a deliberately word-split pathspec list
+  ( cd "$ROOT" && git archive "$REV" -- $rt_specs \
+      scripts/check/no_direct_rt_allowlist.txt \
+      scripts/check/no_direct_rt_baseline.txt ) 2>/dev/null \
+    | tar -x -C "$RT_REV_WORK" 2>/dev/null
+  if [ ! -d "$RT_REV_WORK/src" ]; then
+    echo "ERROR — nothing was checked: could not materialise $REV"
+    exit 2
+  fi
+  ROOT="$RT_REV_WORK"
+fi
 
 ALLOWLIST="$ROOT/scripts/check/no_direct_rt_allowlist.txt"
 BASELINE_FILE="$ROOT/scripts/check/no_direct_rt_baseline.txt"
@@ -428,12 +518,98 @@ selftest() {
   NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/j" --roots src --critical >/dev/null 2>&1
   st_crit_rc2=$?
   if [ "$st_crit_rc2" != "0" ]; then echo "ERROR — selftest failed: --critical did not PASS on zero forbidden sites (rc=$st_crit_rc2)"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 17: --rev must read COMMITTED content on EVERY input, and the two
+  # paths must DISAGREE. A fixture that only proves --rev does not crash is
+  # worthless here: the regression is a silently WRONG verdict, which is
+  # exactly what slipped past on 2026-09-06.
+  #
+  # The census names two independent rot axes and this one fixture injects
+  # both (doc/08_tracking/bug/push_gate_tree_mode_row_census_2026-09-06.md):
+  #   axis 1 — SCAN ROOT reverts to the checkout: the working copy carries an
+  #            UNCOMMITTED extra forbidden call site, so a rotted scan root
+  #            counts 2 against a baseline of 1 and FAILs.
+  #   axis 2 — BASELINE reverts to the checkout: the working copy's baseline
+  #            says 9, so a rotted baseline read turns the same committed
+  #            count into a "count improved" note and silently accepts 8 sites
+  #            of new headroom.
+  #   axis 2b — ALLOWLIST reverts to the checkout: the working copy allowlists
+  #            src/lib/ wholesale, so a rotted allowlist read reclassifies the
+  #            committed offender as a sanctioned provider and reports
+  #            forbidden=0. The allowlist is the second data file the verdict
+  #            depends on and rots independently of the baseline.
+  # The assertion below pins the exact committed numbers, so any of the three
+  # changes the verdict line.
+  if ! command -v git >/dev/null 2>&1; then
+    echo "ERROR — selftest failed: git unavailable, cannot verify the --rev committed-content path"; rm -rf "$st_dir"; exit 2
+  fi
+  mkdir -p "$st_dir/k/src/lib" "$st_dir/k/scripts/check"
+  printf 'fn f(): rt_one()\n' > "$st_dir/k/src/lib/one.spl"
+  printf '1\n' > "$st_dir/k/scripts/check/no_direct_rt_baseline.txt"
+  : > "$st_dir/k/scripts/check/no_direct_rt_allowlist.txt"
+  ( cd "$st_dir/k" \
+    && git init -q . \
+    && git config user.email selftest@example.com \
+    && git config user.name selftest \
+    && git add -A && git commit -q -m committed ) >/dev/null 2>&1
+  # WORKING COPY ONLY, never committed: axis-1 dirt and axis-2 dirt.
+  printf 'fn g(): rt_two()\n' > "$st_dir/k/src/lib/two.spl"
+  printf '9\n' > "$st_dir/k/scripts/check/no_direct_rt_baseline.txt"
+  printf 'src/lib/\n' > "$st_dir/k/scripts/check/no_direct_rt_allowlist.txt"
+  st_rev_out=$(NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/k" --roots src --rev HEAD 2>&1 | tail -1)
+  case "$st_rev_out" in
+    "PASS — 1 file(s) scanned (roots=src, src=1), forbidden=1, extern_decls=0 (baseline 1)") : ;;
+    *) echo "ERROR — selftest failed: --rev did not read committed content, got [$st_rev_out]"; rm -rf "$st_dir"; exit 2 ;;
+  esac
+  # The SAME tree scanned as a working tree must DISAGREE, proving the two
+  # paths differ rather than both being blind to the edits.
+  st_wt_out=$(NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/k" --roots src 2>&1 | tail -1)
+  case "$st_wt_out" in
+    "PASS — 2 file(s) scanned (roots=src, src=0), forbidden=0, extern_decls=0 (baseline 9)") : ;;
+    *) echo "ERROR — selftest failed: working-tree scan did not see the dirty edits, got [$st_wt_out]"; rm -rf "$st_dir"; exit 2 ;;
+  esac
+  # fixtures 18-19: a push comparison ratchets against its committed base,
+  # independently of a stale tracked baseline. Unchanged debt passes; one new
+  # direct call fails. Both revisions deliberately retain baseline=0.
+  mkdir -p "$st_dir/l/src/lib" "$st_dir/l/scripts/check"
+  printf 'fn f(): rt_one()\n' > "$st_dir/l/src/lib/one.spl"
+  printf '0\n' > "$st_dir/l/scripts/check/no_direct_rt_baseline.txt"
+  : > "$st_dir/l/scripts/check/no_direct_rt_allowlist.txt"
+  ( cd "$st_dir/l" \
+    && git init -q . \
+    && git config user.email selftest@example.com \
+    && git config user.name selftest \
+    && git add -A && git commit -q -m base \
+    && printf 'harmless\n' > note.txt \
+    && git add note.txt && git commit -q -m unchanged ) >/dev/null 2>&1
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/l" --roots src --rev HEAD --baseline-rev HEAD~1 >/dev/null 2>&1
+  st_relative_same_rc=$?
+  if [ "$st_relative_same_rc" != "0" ]; then echo "ERROR — selftest failed: unchanged committed debt did not pass base-relative ratchet (rc=$st_relative_same_rc)"; rm -rf "$st_dir"; exit 2; fi
+  ( cd "$st_dir/l" \
+    && printf 'fn g(): rt_two()\n' > src/lib/two.spl \
+    && git add src/lib/two.spl && git commit -q -m regression ) >/dev/null 2>&1
+  NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$st_dir/l" --roots src --rev HEAD --baseline-rev HEAD~1 >/dev/null 2>&1
+  st_relative_new_rc=$?
+  if [ "$st_relative_new_rc" != "1" ]; then echo "ERROR — selftest failed: new committed debt did not fail base-relative ratchet (rc=$st_relative_new_rc)"; rm -rf "$st_dir"; exit 2; fi
+  # fixture 20: a value-taking option given with NO value must produce the
+  # ERROR verdict line and exit 2, never a bare `$1: unbound variable` shell
+  # trace with no verdict at all (measured on macOS 2026-09-12 for
+  # `--roots src --rev`). Asserted for EVERY value-taking option, and on BOTH
+  # channels: the verdict must be on stdout (a caller reading the last stdout
+  # line must see it) and the exit status must be 2.
+  for st_opt in --offenders --root --roots --rev --baseline-rev; do
+    st_missing_out=$(NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" "$st_opt" 2>/dev/null)
+    st_missing_rc=$?
+    if [ "$st_missing_rc" != "2" ] || [ "$st_missing_out" != "ERROR — nothing was checked: $st_opt requires a value" ]; then
+      echo "ERROR — selftest failed: $st_opt with no value did not emit the ERROR verdict on stdout (rc=$st_missing_rc, out=[$st_missing_out])"
+      rm -rf "$st_dir"; exit 2
+    fi
+  done
   rm -rf "$st_dir"
 }
 
 if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 16 selftest fixture(s) checked"
+  echo "PASS — 20 selftest fixture(s) checked"
   exit 0
 fi
 
@@ -472,6 +648,14 @@ if [ $((allowed + forbidden)) -ne "$direct_total" ]; then
   exit 2
 fi
 
+# Internal machine-readable path used to measure a committed comparison ref.
+# It deliberately stops before either the tracked-baseline or critical verdict.
+if [ "$COUNT_ONLY" -eq 1 ]; then
+  rt_off_done
+  echo "COUNT $forbidden"
+  exit 0
+fi
+
 echo "rt_boundary:"
 echo "  scanner_ran: true"
 echo "  roots: $ROOTS"
@@ -496,7 +680,21 @@ fi
 
 # ---- baseline ratchet ----
 # Read-only unless --generate-baseline was passed.
-if [ ! -f "$BASELINE_FILE" ]; then
+if [ -n "$BASELINE_REV" ]; then
+  baseline_out=$(NO_DIRECT_RT_SELFTEST_CHILD=1 sh "$0" --root "$ORIGINAL_ROOT" --roots "$ROOTS" --rev "$BASELINE_REV" --count-only 2>&1)
+  baseline_rc=$?
+  baseline_line=$(printf '%s\n' "$baseline_out" | tail -1)
+  case "$baseline_rc:$baseline_line" in
+    0:"COUNT "*) baseline=${baseline_line#COUNT } ;;
+    *)
+      rt_off_done
+      echo "ERROR — nothing was checked: could not measure baseline revision $BASELINE_REV"
+      exit 2 ;;
+  esac
+  case "$baseline" in *[!0-9]*|'') rt_off_done; echo "ERROR — invalid count from baseline revision $BASELINE_REV"; exit 2 ;; esac
+  BASELINE_FILE=""
+fi
+if [ -z "$BASELINE_REV" ] && [ ! -f "$BASELINE_FILE" ]; then
   if [ $GENERATE_BASELINE -eq 1 ]; then
     echo "$forbidden" > "$BASELINE_FILE"
     rt_off_done
@@ -507,8 +705,10 @@ if [ ! -f "$BASELINE_FILE" ]; then
   echo "ERROR — nothing was checked: no baseline at $BASELINE_FILE (run with --generate-baseline to record one)"
   exit 2
 fi
-baseline=$(head -1 "$BASELINE_FILE" | tr -cd '0-9')
-if [ -z "$baseline" ]; then rt_off_done; echo "ERROR — baseline file unreadable: $BASELINE_FILE"; exit 2; fi
+if [ -z "$BASELINE_REV" ]; then
+  baseline=$(head -1 "$BASELINE_FILE" | tr -cd '0-9')
+  if [ -z "$baseline" ]; then rt_off_done; echo "ERROR — baseline file unreadable: $BASELINE_FILE"; exit 2; fi
+fi
 
 if [ "$forbidden" -gt "$baseline" ]; then
   top=$(sort -rn "$OFF_FILE" | head -5 | awk '{printf "%s:%s ", $2, $1}')
@@ -528,6 +728,10 @@ rt_off_done
 if [ $GENERATE_BASELINE -eq 1 ]; then
   echo "$forbidden" > "$BASELINE_FILE"
   echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (baseline updated $baseline -> $forbidden)"
+  exit 0
+fi
+if [ -n "$BASELINE_REV" ]; then
+  echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (base $BASELINE_REV: $baseline)"
   exit 0
 fi
 if [ "$forbidden" -lt "$baseline" ]; then

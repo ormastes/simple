@@ -1,5 +1,7 @@
 # Interpreter HIR-Lowering Flake on `<style>`-Block `background`/`color` During Software Paint
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 ## Summary
 
 Rendering HTML through the pure-Simple layout renderer's software-pixels entry
@@ -69,3 +71,6 @@ path (grep the renderer for the `background`/`color` shorthand expansion reached
 only from the block cascade). Likely the same class as other "variable X not
 found while lowering" lazy-JIT resolution gaps. A compiled (non-interpreter)
 build should be checked to confirm it is interpreter-only.
+
+## Triage 2026-09-12
+Older than 45 days; the minimal trigger needs an HTML+CSS layout harness, not a trivial <=3 min check. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

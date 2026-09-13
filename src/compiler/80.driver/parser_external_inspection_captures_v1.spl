@@ -1,0 +1,99 @@
+# Owner-side normalization of exact retained input and tool captures. This
+# returns inert data: only an admitted tool/process owner can issue authority.
+# Callers cannot supply already-decoded projections to this entrypoint.
+use std.common.crypto.sha256.sha256_u8_hex
+use compiler.driver.parser_external_inspection_contract_v1.ParserInspectionToolTerminalV1
+use compiler.driver.parser_llvm_readobj_codec_v1.parser_llvm_readobj_decode_v1
+use compiler.driver.parser_llvm_readobj_relocation_codec_v1.parser_llvm_readobj_relocations_decode_v1
+use compiler.driver.parser_llvm_readobj_group_codec_v1.parser_llvm_readobj_groups_decode_v1
+use compiler.driver.parser_llvm_objdump_codec_v1.parser_llvm_objdump_decode_v1
+use compiler.driver.parser_llvm_inspection_projection_join_v1.*
+use compiler.driver.parser_external_inspection_features_v2.*
+use compiler.driver.parser_external_inspection_terminal_join_v2.*
+
+pub const PARSER_EXTERNAL_INSPECTION_CAPTURES_MAX_INPUT_V1: i64 = 16777216
+
+pub enum ParserExternalInspectionCapturesErrorV1:
+    InputLimit
+    OutputLimit
+    InputMismatch
+    ReadobjDecode
+    RelocationDecode
+    GroupDecode
+    ObjdumpDecode
+    SectionInputMismatch
+    DataJoin
+    FeatureJoin
+    TerminalJoin
+
+pub struct ParserExternalInspectionCapturedProjectionV1:
+    data: ParserLlvmInspectionDataV1
+    features: ParserExternalInspectionFeaturesProjectionV2
+    terminal: ParserExternalInspectionTerminalProjectionV2
+
+# A live inspection owner supplies its own retained fields here. Calling this
+# publicly with invented terminal facts never creates an InspectionToken.
+pub fn parser_external_inspection_captures_v1(
+    artifact_bytes: [u8],
+    readobj_terminal: ParserInspectionToolTerminalV1,
+    objdump_terminal: ParserInspectionToolTerminalV1,
+    readobj_stdout: text, readobj_stderr: text,
+    objdump_stdout: text, objdump_stderr: text,
+    requested_features: [text], scalar_reference: bool
+) -> Result<ParserExternalInspectionCapturedProjectionV1,
+            ParserExternalInspectionCapturesErrorV1>:
+    if artifact_bytes.len() <= 0 or
+       artifact_bytes.len() > PARSER_EXTERNAL_INSPECTION_CAPTURES_MAX_INPUT_V1:
+        return Err(ParserExternalInspectionCapturesErrorV1.InputLimit)
+    # Reject large captures before the JSON parsers allocate their trees.
+    if (readobj_stdout.len() > PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_OUTPUT_V2 or
+        readobj_stderr.len() > PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_OUTPUT_V2 or
+        objdump_stdout.len() > PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_OUTPUT_V2 or
+        objdump_stderr.len() > PARSER_EXTERNAL_INSPECTION_TERMINAL_MAX_OUTPUT_V2):
+        return Err(ParserExternalInspectionCapturesErrorV1.OutputLimit)
+    val input_digest = sha256_u8_hex(artifact_bytes)
+    if (readobj_terminal.input_digest != input_digest or
+        objdump_terminal.input_digest != input_digest or
+        readobj_terminal.input_byte_count != artifact_bytes.len() or
+        objdump_terminal.input_byte_count != artifact_bytes.len()):
+        return Err(ParserExternalInspectionCapturesErrorV1.InputMismatch)
+
+    val readobj_result = parser_llvm_readobj_decode_v1(readobj_stdout, "<stdin>")
+    if readobj_result.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.ReadobjDecode)
+    val readobj = readobj_result.unwrap()
+    # The two decoders agreeing with each other is insufficient: each reported
+    # executable section must also match the exact input supplied to both tools.
+    for section in readobj.sections:
+        if section.executable:
+            if (section.file_offset < 0 or section.byte_count <= 0 or
+                section.file_offset > artifact_bytes.len() or
+                section.byte_count > artifact_bytes.len() - section.file_offset):
+                return Err(ParserExternalInspectionCapturesErrorV1.SectionInputMismatch)
+            for prior in readobj.sections:
+                if prior.section_index >= section.section_index: break
+                if prior.executable:
+                    if (section.file_offset < prior.file_offset + prior.byte_count and
+                        prior.file_offset < section.file_offset + section.byte_count):
+                        return Err(ParserExternalInspectionCapturesErrorV1.SectionInputMismatch)
+            val section_bytes = artifact_bytes[section.file_offset..(section.file_offset + section.byte_count)]
+            if sha256_u8_hex(section_bytes) != section.section_data_digest:
+                return Err(ParserExternalInspectionCapturesErrorV1.SectionInputMismatch)
+
+    val relocations = parser_llvm_readobj_relocations_decode_v1(readobj_stdout, "<stdin>")
+    if relocations.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.RelocationDecode)
+    val groups = parser_llvm_readobj_groups_decode_v1(readobj_stdout, "<stdin>")
+    if groups.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.GroupDecode)
+    val objdump = parser_llvm_objdump_decode_v1(objdump_stdout, readobj.sections)
+    if objdump.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.ObjdumpDecode)
+    val data = parser_llvm_inspection_join_v1(readobj, relocations.unwrap(),
+        groups.unwrap(), objdump.unwrap())
+    if data.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.DataJoin)
+    val features = parser_external_inspection_features_v2(data.unwrap(),
+        objdump.unwrap(), requested_features, scalar_reference)
+    if features.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.FeatureJoin)
+    val terminal = parser_external_inspection_terminal_join_v2(
+        readobj_terminal, objdump_terminal, readobj_stdout, readobj_stderr,
+        objdump_stdout, objdump_stderr, data.unwrap(), features.unwrap())
+    if terminal.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.TerminalJoin)
+    Ok(ParserExternalInspectionCapturedProjectionV1(data: data.unwrap(),
+        features: features.unwrap(), terminal: terminal.unwrap()))

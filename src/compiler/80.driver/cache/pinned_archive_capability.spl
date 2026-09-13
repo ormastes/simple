@@ -1,0 +1,215 @@
+use std.common.crypto.sha256.{sha256_bytes, sha256_text}
+use std.async.cancellation.{token_new}
+use std.common.io.file_read_policy.{FileReadPolicyV1}
+use std.common.io.read_only_file_view.{
+    read_only_file_view_adopt_descriptor_v1,
+    read_only_file_view_read_v1
+}
+use compiler.driver.cache.package_archive_types.{
+    PackageArchiveMemberReceiptV1, PackageArchiveReceiptV1,
+    package_archive_receipt_canonical_fields_v1
+}
+
+val PINNED_ARCHIVE_MAX_BYTES_V1: i64 = 1073741824
+
+enum PinnedArchiveErrorV1:
+    path_outside_cas
+    symlink_or_non_regular
+    open_failed
+    identity_changed
+    size_mismatch
+    digest_mismatch
+    receipt_mismatch
+    capability_closed
+    unsupported_platform_identity
+
+struct ArchiveFileIdentityV1:
+    device: u64
+    inode: u64
+    size: u64
+    content_digest: text
+
+class PinnedArchiveCapability:
+    descriptor: i64
+    identity: ArchiveFileIdentityV1
+    archive_digest: text
+    receipt_digest: text
+    members: [PackageArchiveMemberReceiptV1]
+    open: bool
+
+fn pinned_archive_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn pinned_archive_token_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn pinned_archive_receipt_canonical_v1(receipt: PackageArchiveReceiptV1) -> text:
+    if (not pinned_archive_digest_valid_v1(receipt.action_key) or
+            not pinned_archive_digest_valid_v1(receipt.archive_digest) or
+            not pinned_archive_digest_valid_v1(receipt.normalized_metadata_digest) or
+            not pinned_archive_token_valid_v1(receipt.producer_identity) or
+            receipt.members.len() == 0):
+        return ""
+    var previous_end: u64 = 0
+    var previous_name = ""
+    for member in receipt.members:
+        if (not pinned_archive_token_valid_v1(member.name) or
+                not pinned_archive_digest_valid_v1(member.payload_digest) or
+                member.extent == 0 or member.offset < previous_end or
+                (previous_name != "" and member.name <= previous_name)):
+            return ""
+        previous_end = member.offset + member.extent
+        if previous_end < member.offset:
+            return ""
+        previous_name = member.name
+    package_archive_receipt_canonical_fields_v1(receipt)
+
+fn pinned_archive_receipt_valid_v1(receipt: PackageArchiveReceiptV1) -> bool:
+    val canonical = pinned_archive_receipt_canonical_v1(receipt)
+    canonical != "" and pinned_archive_digest_valid_v1(receipt.receipt_digest) and
+        sha256_text(canonical) == receipt.receipt_digest
+
+fn pinned_archive_member_v1(
+    members: [PackageArchiveMemberReceiptV1], name: text
+) -> PackageArchiveMemberReceiptV1?:
+    if not pinned_archive_token_valid_v1(name):
+        return nil
+    for member in members:
+        if member.name == name:
+            return Some(member)
+    nil
+
+fn pinned_archive_same_identity_v1(
+    left: ArchiveFileIdentityV1, right: ArchiveFileIdentityV1
+) -> bool:
+    (left.device == right.device and left.inode == right.inode and
+        left.size == right.size)
+
+fn pinned_archive_open_verified_v1(
+    cas_root: text, archive_path: text, receipt: PackageArchiveReceiptV1
+) -> Result[PinnedArchiveCapability, PinnedArchiveErrorV1]:
+    if not pinned_archive_receipt_valid_v1(receipt):
+        return Err(PinnedArchiveErrorV1.receipt_mismatch)
+    var descriptor: i64 = -1
+    unsafe(capabilities: [ffi]):
+        descriptor = rt_pinned_archive_open_beneath_v1(cas_root, archive_path)
+    if descriptor == -2:
+        return Err(PinnedArchiveErrorV1.path_outside_cas)
+    if descriptor == -3:
+        return Err(PinnedArchiveErrorV1.symlink_or_non_regular)
+    if descriptor == -4:
+        return Err(PinnedArchiveErrorV1.unsupported_platform_identity)
+    if descriptor < 0:
+        return Err(PinnedArchiveErrorV1.open_failed)
+
+    val identity = pinned_archive_identity_v1(descriptor)
+    if identity == nil:
+        pinned_archive_close_descriptor_v1(descriptor)
+        return Err(PinnedArchiveErrorV1.unsupported_platform_identity)
+    if identity!.size == 0 or identity!.size > PINNED_ARCHIVE_MAX_BYTES_V1.to_u64():
+        pinned_archive_close_descriptor_v1(descriptor)
+        return Err(PinnedArchiveErrorV1.size_mismatch)
+    val last = receipt.members[receipt.members.len() - 1]
+    if last.offset + last.extent > identity!.size:
+        pinned_archive_close_descriptor_v1(descriptor)
+        return Err(PinnedArchiveErrorV1.size_mismatch)
+    val digest = pinned_archive_digest_descriptor_v1(descriptor, identity!.size)
+    if digest == nil or digest! != receipt.archive_digest:
+        pinned_archive_close_descriptor_v1(descriptor)
+        return Err(PinnedArchiveErrorV1.digest_mismatch)
+    val after = pinned_archive_identity_v1(descriptor)
+    if after == nil or not pinned_archive_same_identity_v1(identity!, after!):
+        pinned_archive_close_descriptor_v1(descriptor)
+        return Err(PinnedArchiveErrorV1.identity_changed)
+    Ok(PinnedArchiveCapability(
+        descriptor: descriptor,
+        identity: ArchiveFileIdentityV1(
+            identity!.device, identity!.inode, identity!.size, digest!),
+        archive_digest: digest!, receipt_digest: receipt.receipt_digest,
+        members: receipt.members, open: true))
+
+fn pinned_archive_read_member_v1(
+    capability: &PinnedArchiveCapability, member_name: text
+) -> Result[[u8], PinnedArchiveErrorV1]:
+    if not capability.open or capability.descriptor < 0:
+        return Err(PinnedArchiveErrorV1.capability_closed)
+    val member = pinned_archive_member_v1(capability.members, member_name)
+    if member == nil:
+        return Err(PinnedArchiveErrorV1.receipt_mismatch)
+    val view = read_only_file_view_adopt_descriptor_v1(
+        capability.descriptor, capability.archive_digest,
+        FileReadPolicyV1.auto_map, member!.extent)
+    if view.is_err():
+        return Err(PinnedArchiveErrorV1.identity_changed)
+    var adopted_view = view.unwrap()
+    val read = read_only_file_view_read_v1(
+        &adopted_view, member!.offset, member!.extent, token_new())
+    if read.is_err():
+        return Err(PinnedArchiveErrorV1.size_mismatch)
+    val payload = read.unwrap().bytes
+    val after = pinned_archive_identity_v1(capability.descriptor)
+    if after == nil or not pinned_archive_same_identity_v1(capability.identity, after!):
+        return Err(PinnedArchiveErrorV1.identity_changed)
+    if sha256_bytes(payload) != member!.payload_digest:
+        return Err(PinnedArchiveErrorV1.digest_mismatch)
+    Ok(payload)
+
+fn pinned_archive_close_v1(
+    capability: PinnedArchiveCapability
+) -> Result[(), PinnedArchiveErrorV1]:
+    if not capability.open or capability.descriptor < 0:
+        return Err(PinnedArchiveErrorV1.capability_closed)
+    capability.open = false
+    val descriptor = capability.descriptor
+    capability.descriptor = -1
+    var closed = false
+    unsafe(capabilities: [ffi]):
+        closed = rt_pinned_archive_close_v1(descriptor)
+    if not closed:
+        return Err(PinnedArchiveErrorV1.open_failed)
+    Ok(())
+
+fn pinned_archive_identity_v1(descriptor: i64) -> ArchiveFileIdentityV1?:
+    var device: i64 = -1
+    var inode: i64 = -1
+    var size: i64 = -1
+    unsafe(capabilities: [ffi]):
+        device = rt_pinned_archive_device_v1(descriptor)
+        inode = rt_pinned_archive_inode_v1(descriptor)
+        size = rt_pinned_archive_size_v1(descriptor)
+    if device < 0 or inode < 0 or size < 0:
+        return nil
+    Some(ArchiveFileIdentityV1(
+        device.to_u64(), inode.to_u64(), size.to_u64(), ""))
+
+fn pinned_archive_digest_descriptor_v1(descriptor: i64, size: u64) -> text?:
+    val view = read_only_file_view_adopt_descriptor_v1(
+        descriptor, "archive-open", FileReadPolicyV1.auto_map, size)
+    if view.is_err():
+        return nil
+    var adopted_view = view.unwrap()
+    val read = read_only_file_view_read_v1(
+        &adopted_view, 0, size, token_new())
+    if read.is_err() or read.unwrap().bytes.len().to_u64() != size:
+        return nil
+    Some(sha256_bytes(read.unwrap().bytes))
+
+fn pinned_archive_close_descriptor_v1(descriptor: i64):
+    unsafe(capabilities: [ffi]):
+        _ = rt_pinned_archive_close_v1(descriptor)
+
+@unsafe(reason: "archive capability no-follow beneath-root open boundary", capabilities: [ffi])
+extern fn rt_pinned_archive_open_beneath_v1(cas_root: text, archive_path: text) -> i64
+@unsafe(reason: "archive capability descriptor device identity boundary", capabilities: [ffi])
+extern fn rt_pinned_archive_device_v1(descriptor: i64) -> i64
+@unsafe(reason: "archive capability descriptor inode identity boundary", capabilities: [ffi])
+extern fn rt_pinned_archive_inode_v1(descriptor: i64) -> i64
+@unsafe(reason: "archive capability descriptor size identity boundary", capabilities: [ffi])
+extern fn rt_pinned_archive_size_v1(descriptor: i64) -> i64
+@unsafe(reason: "archive capability consuming descriptor close boundary", capabilities: [ffi])
+extern fn rt_pinned_archive_close_v1(descriptor: i64) -> bool

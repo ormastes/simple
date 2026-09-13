@@ -3,7 +3,7 @@
 - **Date:** 2026-07-20
 - **Area:** `src/lib/common/crypto/constant_time.spl`
 - **Severity:** medium (blocks 4 of 5 examples in the file).
-- **Status:** OPEN.
+- **Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/unit/lib/crypto/black_box_spec.spl` now PASSes)
 
 ## Symptom
 
@@ -51,3 +51,6 @@ is a genuine gap.
 ## Affected specs
 
 - `test/unit/lib/crypto/black_box_spec.spl` (4 of 5 examples)
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/unit/lib/crypto/black_box_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

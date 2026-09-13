@@ -1,5 +1,7 @@
 # Stage 4 CLI lint lazy-facade names are unresolved
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fixed in the LLVM 23.1 Stage 4 bootstrap lane on 2026-08-04.
@@ -27,3 +29,7 @@ keeps only the short-grammar rule on the rules facade, and uses the canonical
 EasyFix accessors from the types owner. The duplicate EasyFix facade import is
 removed. `stage4_cli_lint_hir_contract.spl` imports and executes the real CLI
 lint handler so native entry-closure lowering must resolve the complete body.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

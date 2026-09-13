@@ -18,7 +18,7 @@ use tracing::trace;
 
 use crate::error::CompileError;
 use crate::fs_probe::{clear_fs_probe_cache, p_exists, p_is_dir, p_is_file, STAT_CALLS, STAT_MISSES};
-use crate::stdlib_variant::{active_simd_tier_name, stdlib_root_candidates};
+use crate::stdlib_variant::{active_simd_tier_name, stdlib_root_candidates_present};
 
 fn normalize_base_dir(base_dir: &Path) -> PathBuf {
     if base_dir.is_absolute() {
@@ -863,7 +863,7 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
                     let stdlib_relative: PathBuf = stdlib_parts.iter().collect();
 
-                    for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
+                    for stdlib_root in stdlib_root_candidates_present(&stdlib_candidate) {
                         if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
                             let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
                             if p_exists(&compat_init) && p_is_file(&compat_init) {

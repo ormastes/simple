@@ -1,0 +1,163 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing the GPU-resident rect-batch shader
+(`src/lib/gc_async_mut/gpu/engine2d/shaders/rect_batch.comp`), the shader-side
+half of
+`doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md`.
+The host-side batch (F4) already reduced N interpreter transits to one, but it
+still recorded N `vkCmdDispatch` calls and paid two SFFI calls per rect. This
+file answers the question that change could not: does a batch of N rects now
+reach the device as exactly ONE compute dispatch, with the rect list read out of
+a GPU storage buffer?
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ bin/release/<triple>/simple run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_rect_batch_one_dispatch_spec.spl`
+Add `SIMPLE_VK_ORDER_TRACE=1` to see the `rect-batch-gpu` trace line carrying the
+slot, rect count and bounding box of each batched dispatch.
+## Compatibility and limitations
+This file REQUIRES a real Vulkan device and says so by FAILING, never skipping:
+the first expectation asserts `backend_name() == "vulkan"`, and the second
+asserts the batch pipeline actually installed. A green run on a host with no
+admitted ICD is impossible by construction, which is the point -- the dispatch
+count is a property of recorded device commands, and a CPU fallback would report
+zero and look like a pass if it were merely compared against `<= 1`.
+## Verification guidance and troubleshooting
+`vulkan_last_frame_dispatch_count()` is read AFTER the frame is finalized,
+because the live counter is reset by the flush. If it reports 64 rather than 1,
+the GPU lane declined and the host loop ran: read
+`vulkan_rect_batch_fallback_reason()`, which is empty only when the pipeline is
+installed. If it reports 1 but the pixels are wrong, the fault is in the shader,
+not the wiring -- `backend_vulkan_rect_batch_pixel_oracle_spec.spl` is the
+oracle for that, and `sh scripts/check/check-rect-batch-spirv-pinned.shs` proves
+the committed SPIR-V still corresponds to the committed GLSL.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md
+# @manual_section: vulkan_rect_batch_one_dispatch
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl 10%
+# @cover src/lib/gc_async_mut/gpu/engine2d/vulkan_session.spl 8%
+# @tag: unit, gpu, engine2d, vulkan, batching, perf
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val FB: i32 = 256
+val COUNT: i64 = 64
+
+fn grid_rects(n: i64) -> [i32]:
+    var out: [i32] = [0i32; n * 4]
+    var k: i64 = 0
+    while k < n:
+        out[k * 4] = ((k % 8) * 32).to_i32()
+        out[k * 4 + 1] = ((k / 8) * 32).to_i32()
+        out[k * 4 + 2] = 32i32
+        out[k * 4 + 3] = 32i32
+        k = k + 1
+    out
+
+fn grid_colors(n: i64) -> [u32]:
+    var out: [u32] = [0u32; n]
+    var k: i64 = 0
+    while k < n:
+        out[k] = (4278190080 + k * 4096 + k * 7 + 3).to_i32().to_u32()
+        k = k + 1
+    out
+
+fn rect_dispatches_for_batch(n: i64) -> i64:
+    """Dispatches the RECTS cost in one frame that paints `n` rects as a batch.
+
+    `clear` is itself one compute dispatch, so the frame count is measured and
+    the clear's own dispatch subtracted rather than hand-waved; the "records no
+    dispatch at all for an empty list" example below pins that the subtrahend
+    really is 1.
+    """
+    val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+    e.clear(0xFF101010u32)
+    e.draw_rect_list_filled(grid_rects(n), grid_colors(n))
+    e.finalize_compute_frame_no_readback()
+    val d = e.vulkan_last_frame_dispatch_count()
+    e.shutdown()
+    d - 1
+
+describe "A Vulkan rect batch reaches the device as ONE compute dispatch":
+
+    it "runs on a real Vulkan device, and fails rather than skipping when it cannot":
+        # REPRODUCING (precondition). Everything below counts DEVICE commands.
+        # A CPU fallback would record none and could be mistaken for a pass, so
+        # the backend identity is asserted first and a missing device is RED.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        val name = e.backend_name()
+        e.shutdown()
+        expect(name).to_equal("vulkan")
+
+    it "installs the batched-rect pipeline with no fallback reason":
+        # REPRODUCING. The lane is optional by design: a driver that rejects the
+        # two-binding SPIR-V leaves the F4 host loop running and records why.
+        # On THIS device it must install, otherwise the dispatch count below
+        # would be measuring the fallback and proving nothing about the shader.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        val reason = e.vulkan_rect_batch_fallback_reason()
+        e.shutdown()
+        expect(reason).to_equal("")
+
+    it "records exactly one dispatch for a 64-rect batch":
+        # THE CLAIM. Before the shader landed this was 64 -- one
+        # vkCmdPushConstants + one vkCmdDispatch per rect, which is the 4.33 ms
+        # of per-dispatch interpreter cost the bug record attributes. Now the
+        # rect list lives in a GPU storage buffer and one dispatch covers the
+        # whole batch.
+        expect(rect_dispatches_for_batch(COUNT)).to_equal(1)
+
+    it "records exactly one dispatch for a single-rect batch of two":
+        # BOUNDARY. The GPU lane engages at RECT_BATCH_MIN_RECTS == 2; a list of
+        # exactly two must already be one dispatch, not two.
+        expect(rect_dispatches_for_batch(2)).to_equal(1)
+
+    it "leaves a one-rect list on the single-rect lane":
+        # BOUNDARY, stated as behaviour rather than an accident: one rect does
+        # not amortise a buffer upload and a bounding-box grid, so it stays on
+        # the single-rect path. That path is still exactly one dispatch, so the
+        # count alone cannot distinguish the lanes -- this expectation pins the
+        # count, and the `rect-batch-gpu` trace line (absent for n == 1) is the
+        # lane evidence.
+        expect(rect_dispatches_for_batch(1)).to_equal(1)
+
+    it "records no dispatch at all for an empty list":
+        # BOUNDARY. N == 0 must not allocate a slot, upload a buffer, or record
+        # a degenerate zero-extent dispatch. The clear that precedes it is the
+        # only device work, and `clear` is a dispatch, so the frame count is 1.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        val empty_rects: [i32] = []
+        val empty_colors: [u32] = []
+        e.draw_rect_list_filled(empty_rects, empty_colors)
+        e.finalize_compute_frame_no_readback()
+        val d = e.vulkan_last_frame_dispatch_count()
+        e.shutdown()
+        expect(d).to_equal(1)
+
+    it "keeps two batches in one frame on two separate slots, not one clobbered slot":
+        # REGRESSION GUARD for the mid-frame reuse bug this lane invites:
+        # `copy_to_buffer` writes at RECORD time but the dispatch reads at
+        # SUBMIT time, so reusing one rect-list buffer for a second batch would
+        # silently repaint the FIRST dispatch with the SECOND batch's rects.
+        # Two disjoint batches in one frame must therefore both survive: the
+        # left half keeps batch A's colour and the right half batch B's.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(0xFF101010u32)
+        val a_rects: [i32] = [0i32, 0i32, 64i32, 64i32, 0i32, 64i32, 64i32, 64i32]
+        val a_colors: [u32] = [0xFF00FF00u32, 0xFF00FF00u32]
+        val b_rects: [i32] = [128i32, 0i32, 64i32, 64i32, 128i32, 64i32, 64i32, 64i32]
+        val b_colors: [u32] = [0xFF0000FFu32, 0xFF0000FFu32]
+        e.draw_rect_list_filled(a_rects, a_colors)
+        e.draw_rect_list_filled(b_rects, b_colors)
+        e.finalize_compute_frame_no_readback()
+        val dispatches = e.vulkan_last_frame_dispatch_count()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        # clear + two batched dispatches.
+        expect(dispatches).to_equal(3)
+        expect(px[32 * FB.to_i64() + 32]).to_equal(0xFF00FF00u32)
+        expect(px[96 * FB.to_i64() + 32]).to_equal(0xFF00FF00u32)
+        expect(px[32 * FB.to_i64() + 160]).to_equal(0xFF0000FFu32)
+        expect(px[96 * FB.to_i64() + 160]).to_equal(0xFF0000FFu32)

@@ -1,8 +1,41 @@
-use app.io._CliCompile.compile_targets.{cli_native_build}
+use app.io._CliCompile.compile_targets.{
+    cli_native_build_with_environment_variant_policy_v1}
 use app.io.args_ops.{get_args}
 use app.io.env_ops.{env_get}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_extract_v1
+}
 
 extern fn rt_exit(code: i64)
+
+# --- Memory probe (SIMPLE_MEM_PROBE=1, default OFF) --------------------------
+# The worker is the process that OOMs this host during a bootstrap, and until
+# now nothing on the path ever read the runtime's own heap counters: the
+# counters are exported (rt_heap_* in src/compiler_rust/runtime/src/value/heap.rs)
+# and `log_mem_snapshot` (src/compiler/80.driver/driver_log_helpers.spl) has
+# ZERO callers, so a 40 GB worker could only ever be described by its RSS.
+# One line per boundary, gated, no per-allocation cost when off.
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_heap_live_bytes() -> i64
+extern fn rt_heap_live_bytes_by_kind(kind: i64) -> i64
+extern fn rt_heap_live_count_by_kind(kind: i64) -> i64
+extern fn rt_heap_aux_live_bytes() -> i64
+extern fn rt_heap_array_capacity_bytes() -> i64
+extern fn memory_usage() -> i64
+
+fn mem_probe_enabled() -> bool:
+    (env_get("SIMPLE_MEM_PROBE") ?? "") == "1"
+
+fn mem_probe_dump(tag: text):
+    if not mem_probe_enabled():
+        return
+    print "[MEMPROBE] tag={tag} rss={memory_usage()} registry_count={rt_heap_registry_count()} header_live={rt_heap_live_bytes()} aux_live={rt_heap_aux_live_bytes()} array_cap={rt_heap_array_capacity_bytes()}"
+    var kind = 1
+    while kind <= 30:
+        val live_count = rt_heap_live_count_by_kind(kind)
+        if live_count != 0:
+            print "[MEMPROBE-KIND] tag={tag} kind={kind} live_bytes={rt_heap_live_bytes_by_kind(kind)} live_count={live_count}"
+        kind = kind + 1
 
 fn native_build_entry_args() -> [text]:
     val raw_args = get_args()
@@ -24,4 +57,14 @@ fn main() -> i64:
     if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1":
         print "error: native_build_worker.spl is an internal entrypoint"
         rt_exit(1)
-    cli_native_build(native_build_entry_args())
+    val opened = match environment_variant_policy_handoff_extract_v1(
+        native_build_entry_args()):
+        case Ok(value): value
+        case Err(_):
+            print "error: native-build worker rejected its internal policy handoff"
+            rt_exit(1)
+    mem_probe_dump("worker_entry")
+    val worker_rc = cli_native_build_with_environment_variant_policy_v1(
+        opened.user_args, opened.handoff.collection)
+    mem_probe_dump("worker_exit")
+    worker_rc

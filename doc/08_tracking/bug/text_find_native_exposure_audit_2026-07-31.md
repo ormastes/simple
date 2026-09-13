@@ -1,5 +1,7 @@
 # Text `.find()` Native Codegen Exposure Audit — 2026-07-31
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## RETRACTION (2026-07-31, same day) — the BYTE/CHAR-RISK section is WRONG
 
 **The 6 BYTE/CHAR-RISK sites below are NOT bugs.** This audit's core premise —
@@ -216,3 +218,7 @@ val failed_start = output.find("\"failed\":") + 9
 **Defects Referenced:**
 - `doc/08_tracking/bug/native_text_search_http_hot_path_2026-05-13.md` — native codegen bug
 - `doc/08_tracking/bug/interp_text_find_byte_offset_vs_slice_char_offset_2026-06-30.md` — byte/char divergence
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

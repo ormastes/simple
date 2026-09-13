@@ -1,0 +1,66 @@
+# codex-impl
+# Bounded local PNG/JPEG/WebP admission with magic-derived MIME and dimensions.
+
+use app.io.mod.{file_is_regular_no_follow, file_read_regular_no_follow_bounded}
+use app.io.file_ops.{path_absolute}
+use std.common.imaging.png_ingest.{ingest_png_bytes}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+use std.common.crypto.sha256.{sha256_text}
+use app.llm_caret.multimodal_types.{ContentPartV1, image_data_part_v1}
+use app.llm_caret.image_format.{inspect_image_bytes_v1}
+
+struct AdmittedImageV1:
+    part: ContentPartV1
+    error_code: text
+    error_message: text
+
+fn _failed_image_v1(code: text, message: text) -> AdmittedImageV1:
+    AdmittedImageV1(
+        part: image_data_part_v1("", "image/png", 0, 0, "", "auto", ""),
+        error_code: code, error_message: message)
+
+fn path_within_allowed_root_v1(path: text, allowed_root: text) -> bool:
+    if path == "" or allowed_root == "" or path.contains("/../") or path.ends_with("/.."):
+        return false
+    val normalized_path = path_absolute(path).replace("\\", "/")
+    val normalized_root = path_absolute(allowed_root).replace("\\", "/")
+    if normalized_path == "" or normalized_root == "": return false
+    normalized_path == normalized_root or normalized_path.starts_with(normalized_root + "/")
+
+fn admit_local_image_with_limits_v1(path: text, allowed_root: text, max_bytes: i64,
+        max_pixels: i64, detail: text) -> AdmittedImageV1:
+    if not path_within_allowed_root_v1(path, allowed_root):
+        return _failed_image_v1("path_not_allowed", "image path is outside the permitted root")
+    if max_bytes <= 0 or max_bytes > 20971520:
+        return _failed_image_v1("invalid_limit", "image byte limit must be between 1 and 20971520")
+    if not file_is_regular_no_follow(path):
+        return _failed_image_v1("not_regular_file", "image must be a regular non-symlink file")
+    val read_result = file_read_regular_no_follow_bounded(path, max_bytes)
+    if read_result.is_err(): return _failed_image_v1("read_failed", read_result.unwrap_err())
+    val raw_text = read_result.unwrap()
+    val raw = raw_text.bytes()
+    val inspected = inspect_image_bytes_v1(raw)
+    if inspected.error != "":
+        return _failed_image_v1("unsupported_or_malformed_image", inspected.error)
+    if max_pixels <= 0 or inspected.width > max_pixels or inspected.height > max_pixels or
+            inspected.width > max_pixels / inspected.height:
+        return _failed_image_v1("pixel_limit_exceeded", "decoded pixels exceed configured profile limit")
+    if inspected.mime_type == "image/png":
+        val decoded = ingest_png_bytes(raw)
+        if decoded.is_err(): return _failed_image_v1("unsupported_or_malformed_image", decoded.unwrap_err())
+        val image = decoded.unwrap()
+        if image.width as i64 != inspected.width or image.height as i64 != inspected.height:
+            return _failed_image_v1("unsupported_or_malformed_image", "PNG decoder dimensions disagree with container")
+    val digest = sha256_text(raw_text)
+    val data_url = "data:" + inspected.mime_type + ";base64," + base64_encode_bytes(raw)
+    AdmittedImageV1(part: image_data_part_v1("sha256:" + digest, inspected.mime_type,
+        inspected.width, inspected.height, digest, detail, data_url), error_code: "", error_message: "")
+
+fn admit_local_image_v1(path: text, allowed_root: text, max_bytes: i64, detail: text) -> AdmittedImageV1:
+    admit_local_image_with_limits_v1(path, allowed_root, max_bytes, 268435456, detail)
+
+fn admit_local_png_v1(path: text, allowed_root: text, max_bytes: i64, detail: text) -> AdmittedImageV1:
+    val admitted = admit_local_image_v1(path, allowed_root, max_bytes, detail)
+    if admitted.error_code == "" and admitted.part.mime_type != "image/png":
+        return _failed_image_v1("unsupported_or_malformed_image", "expected a PNG image")
+    admitted

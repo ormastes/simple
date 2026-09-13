@@ -1,4 +1,5 @@
 # Pure-Simple `list`-param element read: correct for int content, SIGSEGV on non-int content (2026-08-08)
+**Status:** OPEN (unverified 2026-09-12)
 
 Assignment: implement, in pure Simple, the fix for the seed-documented
 `<<3` untyped-`list`-element-read bug
@@ -148,3 +149,19 @@ plus a `KNOWN-OPEN` line reporting `list0=40 list1=56` (value*8). That KNOWN-OPE
 belongs to the SEED lane and is tracked by
 `untyped_list_element_read_seed_rootcause_2026-07-30.md`, not by this pure-Simple
 doc.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Re-confirmed unchanged at `f26970e9d93`: `hir_lowering/types.spl:671` still
+collapses bare `list` to `Array{element: Any}`, `function_lowering.spl` still
+lowers `Any` unconditionally to `MirType.i64()`, and `expr_dispatch.spl`'s
+`lower_index_expr`/`decode_runtime_value` still take the unconditional
+integer-unbox arm for that result type. A real fix needs a new erased/ANY MIR
+representation (or a runtime type tag check before unboxing) threaded through
+HIR->MIR lowering and codegen — a compiler type-system change with segfault
+blast radius if done wrong, well past a shard triage budget and requiring
+native-codegen verification this worktree cannot run safely. No change made.
+Leaving OPEN as filed.

@@ -1,5 +1,7 @@
 # SimpleOS mission-critical release blocked by missing SymbiYosys stack
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 - **Date:** 2026-07-05
 - **Severity:** P1 (release evidence — mission-critical SimpleOS release cannot
   pass strict RTL proof gate)
@@ -50,3 +52,7 @@ command -v boolector || command -v z3
 sh scripts/check/check-simpleos-mission-critical-prereqs.shs
 sh scripts/check/check-simpleos-mission-critical-release.shs
 ```
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

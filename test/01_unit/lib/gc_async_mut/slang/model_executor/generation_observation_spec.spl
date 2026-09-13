@@ -1,0 +1,58 @@
+"""
+The observation DTOs preserve the decode loops' produced counter without
+changing the established text-only generation API. Native/provider fixtures
+own loop execution; these focused tests pin the two boundary values callers
+must be able to distinguish.
+"""
+
+use std.spec.step
+use std.gc_async_mut.slang.model_executor.backend.{BackendGeneration, parse_nonnegative_i64_text_exact}
+use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGeneration, PagedGenerationRequest, PagedExecutorError, paged_executor_generate_observed_request}
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationObservation, EngineGenerationRequest, engine_generate_observed_request}
+
+describe "Slang generation observation values":
+    it "parses exact scalar text without tagged optional scaling":
+        step("preserve positive decimal magnitude")
+        expect(parse_nonnegative_i64_text_exact("16")).to_equal(16)
+        expect(parse_nonnegative_i64_text_exact("2147483648")).to_equal(2147483648)
+        expect(parse_nonnegative_i64_text_exact("0")).to_equal(0)
+        expect(parse_nonnegative_i64_text_exact("9223372036854775807")).to_equal(9223372036854775807)
+
+    it "rejects malformed and overflowing budgets before backend use":
+        step("a malformed text budget must not select the default generation limit")
+        for budget in ["", "two", "-1", "+1", "9223372036854775808"]:
+            val engine = engine_generate_observed_request(EngineGenerationRequest(
+                prompt: "budget validation", max_tokens: budget))
+            expect(engine.unwrap_err()).to_equal("max_tokens must be a nonnegative signed 64-bit integer")
+            val paged = paged_executor_generate_observed_request(PagedGenerationRequest(
+                prompt: "budget validation", max_tokens: budget))
+            expect(paged.unwrap_err()).to_equal(PagedExecutorError.InvalidConfiguration)
+
+    it "retains the authoritative max-token produced count":
+        step("represent a decode loop which consumed its complete four-token budget")
+        val backend = BackendGeneration(output: "x", generated_tokens: "4")
+        val paged = PagedGeneration(output: backend.output,
+            generated_tokens: backend.generated_tokens)
+        val engine = EngineGenerationObservation(output: paged.output,
+            generated_tokens: paged.generated_tokens)
+        expect(engine.output).to_equal("x")
+        expect(engine.generated_tokens).to_equal("4")
+
+    it "represents EOG before the first generated token as zero":
+        step("preserve empty output separately from a consumed generation token")
+        val backend = BackendGeneration(output: "nonempty", generated_tokens: "0")
+        val paged = PagedGeneration(output: backend.output,
+            generated_tokens: backend.generated_tokens)
+        val engine = EngineGenerationObservation(output: paged.output,
+            generated_tokens: paged.generated_tokens)
+        expect(engine.output).to_equal("nonempty")
+        expect(engine.generated_tokens).to_equal("0")
+
+    it "keeps token budgets textual across mixed composite request boundaries":
+        step("use unequal prompt length and token budget sentinels")
+        val engine = EngineGenerationRequest(prompt: "sixteen-letters!!",
+            max_tokens: "2")
+        val paged = PagedGenerationRequest(prompt: engine.prompt,
+            max_tokens: engine.max_tokens)
+        expect(paged.prompt).to_equal("sixteen-letters!!")
+        expect(paged.max_tokens).to_equal("2")

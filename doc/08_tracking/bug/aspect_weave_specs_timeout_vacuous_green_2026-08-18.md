@@ -31,7 +31,7 @@
 
 **Date:** 2026-08-18
 **Lane:** aspect dynload + startup perf
-**Status:** OPEN — reproduced, not fixed
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/compiler/semantics/aspect_join_point_spec.spl` now PASSes)
 **Binary:** `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
 (Rust seed, `59546088 2026-08-18 07:53:39.517227740 +0000`)
 
@@ -304,3 +304,6 @@ Known limit, stated rather than papered over: the detector covers the entry's
 own `extern` declarations (1 today), not the 85 symbols that arrive through the
 `--entry-closure` transitive graph; and its wiring half is a static check on
 driver source, not a link proof.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/semantics/aspect_join_point_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

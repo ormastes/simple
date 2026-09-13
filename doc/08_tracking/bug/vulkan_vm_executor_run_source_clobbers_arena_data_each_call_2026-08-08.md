@@ -1,5 +1,7 @@
 # `VulkanVmExecutor.run_source` clobbers arena DATA on every call — unusable as-is for K6's cross-cell persistence contract
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Found while implementing:** Stream K, task K6 (`VulkanExec` notebook executor),
 `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`.
 
@@ -88,3 +90,14 @@ Verified: `test/02_integration/app/tools/notebook/vulkan_exec_spec.spl` —
 lint clean. The "suggested real fix" above remains open and unattempted;
 any future attempt must preserve absolute addressing, not `data_off`-relative
 offsets.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Triage 2026-09-13
+
+Requires real Vulkan device execution (VulkanVmExecutor.run_source
+against actual GPU arena state) to reproduce/verify -- no Vulkan
+device available in this environment. Leaving OPEN.
+

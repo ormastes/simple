@@ -1,5 +1,7 @@
 # SpirvBuilder drops its whole module to the interpreter via an unresolved JIT symbol
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Filed:** 2026-08-11
 **Impact:** cost roughly four hours across two lanes before being diagnosed
 
@@ -73,3 +75,7 @@ convert a mysterious timeout into a named error.
 
 Open. Not a defect in `SpirvBuilder`'s SPIR-V output, which is proven conformant
 under Khronos SPIRV-Tools v2025.1 — this is purely a JIT symbol-resolution gap.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

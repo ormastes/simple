@@ -1,0 +1,132 @@
+# Purpose: mutation-sensitive executable proof of a real MDSOC++ product generation upgrade.
+# @req REQ-KPF-MDSOCPP-UPGRADE
+# @cover src/lib/mdsocpp/pilot/ide_tooling_generation_upgrade.spl 100%
+
+"""
+# MDSOC++ IDE/Tooling Product Generation Upgrade
+
+The IDE document capsule migrates live state before an atomic generation swap.
+Existing requests remain pinned to the old generation until drain completes.
+Receipts retain every accepted phase, and rollback restores the exact old state
+while it remains retained.
+"""
+
+use std.spec.*
+use common.kernel_plugin.ids.KpfDigest256
+use std.mdsocpp.pilot.*
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn baseline() -> IdeToolingPilotDeploymentV1:
+    ide_tooling_pilot_seal_v1(ide_tooling_pilot_generation_v1(
+        20, digest(20), IDE_PILOT_CAPABILITIES_LOCAL, 4096, false,
+        1, 0, 1, 0,
+    ))
+
+fn state() -> IdeToolingDocumentStateV1:
+    IdeToolingDocumentStateV1(
+        schema_major: 1,
+        schema_minor: 0,
+        revision: 77,
+        open_document_count: 3,
+        diagnostic_epoch: 9,
+        migrated_from_generation: 0,
+    )
+
+fn successor() -> IdeToolingPilotGenerationV1:
+    ide_tooling_pilot_generation_v1(
+        21, digest(21), IDE_PILOT_CAPABILITIES_LOCAL, 4096, false,
+        1, 0, 1, 1,
+    )
+
+describe "MDSOC++ real IDE/tooling generation upgrade":
+    it "migrates state, atomically publishes, drains old work, and retains receipts":
+        step("Create the product owner around generation 20 and live document state")
+        val owner = IdeToolingGenerationOwnerV1.create(baseline(), state(), 8)
+
+        step("Publish generation 21 while two generation-20 requests remain pinned")
+        val published = owner.publish_upgrade(successor(), 2)
+        expect(published.status).to_equal(IdeToolingGenerationStatusV1.Accepted)
+        expect(published.phase).to_equal(IdeToolingGenerationPhaseV1.Draining)
+        expect(owner.active.generation.policy.generation).to_equal(21u64)
+        expect(owner.draining.generation.policy.generation).to_equal(20u64)
+        expect(owner.active_state.schema_minor).to_equal(1u32)
+        expect(owner.active_state.revision).to_equal(77u64)
+        expect(owner.active_state.open_document_count).to_equal(3u32)
+        expect(owner.active_state.diagnostic_epoch).to_equal(10u64)
+        expect(owner.active_state.migrated_from_generation).to_equal(20u64)
+        expect(owner.receipts.len()).to_equal(3)
+        expect(owner.receipts[0].phase).to_equal(IdeToolingGenerationPhaseV1.StateMigrated)
+        expect(owner.receipts[1].phase).to_equal(IdeToolingGenerationPhaseV1.Published)
+        expect(owner.receipts[2].phase).to_equal(IdeToolingGenerationPhaseV1.Draining)
+
+        step("Drain one pinned request without retiring the old generation")
+        val partial = owner.drain_old_generation(1)
+        expect(partial.phase).to_equal(IdeToolingGenerationPhaseV1.Draining)
+        expect(partial.remaining_inflight).to_equal(1u32)
+        expect(owner.has_draining).to_equal(true)
+
+        step("Drain the final request and retire generation 20")
+        val retired = owner.drain_old_generation(1)
+        expect(retired.phase).to_equal(IdeToolingGenerationPhaseV1.Retired)
+        expect(retired.candidate_generation).to_equal(20u64)
+        expect(owner.has_draining).to_equal(false)
+        expect(owner.draining.generation.policy.generation).to_equal(0u64)
+        expect(owner.active.generation.policy.generation).to_equal(21u64)
+        expect(owner.receipts.len()).to_equal(5)
+        expect(owner.receipts[4].sequence).to_equal(5u64)
+
+    it "rolls back the published candidate to the exact retained state":
+        step("Publish a successor but keep generation 20 retained")
+        val owner = IdeToolingGenerationOwnerV1.create(baseline(), state(), 8)
+        owner.publish_upgrade(successor(), 2)
+
+        step("Roll back after a post-publication product health failure")
+        val receipt = owner.rollback_published_generation()
+        expect(receipt.status).to_equal(IdeToolingGenerationStatusV1.Accepted)
+        expect(receipt.phase).to_equal(IdeToolingGenerationPhaseV1.RolledBack)
+        expect(receipt.candidate_generation).to_equal(21u64)
+        expect(owner.active.generation.policy.generation).to_equal(20u64)
+        expect(owner.active_state.schema_minor).to_equal(0u32)
+        expect(owner.active_state.revision).to_equal(77u64)
+        expect(owner.active_state.diagnostic_epoch).to_equal(9u64)
+        expect(owner.has_draining).to_equal(false)
+        expect(owner.draining.generation.policy.generation).to_equal(0u64)
+        expect(owner.receipts.len()).to_equal(4)
+
+    it "fails closed before mutation when receipt or lifecycle invariants are invalid":
+        step("Reject publication when the retained receipt budget cannot hold all phases")
+        val constrained = IdeToolingGenerationOwnerV1.create(baseline(), state(), 2)
+        val capacity = constrained.publish_upgrade(successor(), 1)
+        expect(capacity.status).to_equal(IdeToolingGenerationStatusV1.ReceiptCapacityExceeded)
+        expect(constrained.active.generation.policy.generation).to_equal(20u64)
+        expect(constrained.active_state.schema_minor).to_equal(0u32)
+        expect(constrained.receipts.len()).to_equal(0)
+
+        step("Reject an over-counted drain without changing the retained generation")
+        val owner = IdeToolingGenerationOwnerV1.create(baseline(), state(), 8)
+        owner.publish_upgrade(successor(), 1)
+        val invalid = owner.drain_old_generation(2)
+        expect(invalid.status).to_equal(IdeToolingGenerationStatusV1.DrainCountInvalid)
+        expect(owner.draining_inflight).to_equal(1u32)
+        expect(owner.has_draining).to_equal(true)
+
+        step("Retire the old generation and prove rollback cannot resurrect it")
+        owner.drain_old_generation(1)
+        val unavailable = owner.rollback_published_generation()
+        expect(unavailable.status).to_equal(IdeToolingGenerationStatusV1.RollbackUnavailable)
+        expect(owner.active.generation.policy.generation).to_equal(21u64)
+
+    it "rejects a mutated migration declaration without publishing the candidate":
+        step("Mutation guard: remove the required 1.0 to 1.1 state migration")
+        val owner = IdeToolingGenerationOwnerV1.create(baseline(), state(), 8)
+        var mutated = successor()
+        mutated.capsules[4].state_migrations = []
+        val receipt = owner.publish_upgrade(mutated, 2)
+        expect(receipt.status).to_equal(IdeToolingGenerationStatusV1.UpgradeRejected)
+        expect(receipt.phase).to_equal(IdeToolingGenerationPhaseV1.RolledBack)
+        expect(owner.active.generation.policy.generation).to_equal(20u64)
+        expect(owner.active_state.schema_minor).to_equal(0u32)
+        expect(owner.has_draining).to_equal(false)
+        expect(owner.receipts.len()).to_equal(1)

@@ -1,6 +1,6 @@
 # 26 duplicate `enum HirType` declarations collide with the canonical struct, dropping a whole module to the interpreter
 
-Status: OPEN (P3)
+Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/async_core_spec.spl` now PASSes)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 repro (`SIMPLE_TIMEOUT_SECONDS=0 timeout 200 bin/simple test`) now shows 0
 `irrefutable BINDING` lines; the single `[jit-fallback]` at startup is a
@@ -118,3 +118,6 @@ de-duplicate `HirType` so exactly one declaration is registered. (a) is the
 smaller change and turns every remaining instance of this class into a visible
 failure instead of a silent wrong answer; `SIMPLE_JIT_STRICT=1` already does
 this for the JIT path only.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/async_core_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

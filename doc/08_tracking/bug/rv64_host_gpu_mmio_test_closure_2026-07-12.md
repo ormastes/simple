@@ -1,4 +1,5 @@
 # RV64 host-GPU MMIO test closure
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 The canonical RV64 host-GPU entry closure reaches the correct PCI, ivshmem,
 protocol, MMIO, and SBI owners. `os.kernel.boot.mmio` also contains allocating
@@ -21,3 +22,6 @@ exits without producing an ELF.
 TODO: fix deployed RV freestanding-runtime object selection and lower SBI
 `unsafe`/inline assembly at the compiler owner. Do not add firmware-local
 runtime shims.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -26,14 +26,21 @@ use std.gpu.engine2d.helpers_text.{text_blit_buffer}
 # module back — the same mutual pair backend_vulkan_helpers.spl already forms.
 # Importing the provenance constant keeps that dependency explicit and loaded.
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{VULKAN_TEXT_PATH_CPU_RASTER, VULKAN_TEXT_PATH_NOT_DRAWN}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassMaterialConfig, ENGINE2D_GLASS_MAX_WORK_PIXELS,
+    engine2d_glass_corner_radius
+}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_circle_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
+    _pack_glass_material_pc, _pack_blur_rect_pc,
+    vulkan_dispatch_region_kernel_checked,
     _pixels_to_bytes, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
     vulkan_dispatch_image_composite_checked,
     vulkan_order_trace, vulkan_order_trace_enabled,
-    VK_DISPATCH_COMPLETED_INELIGIBLE,
+    vulkan_image_pack_note_byte_fallback,
+    VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
     VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER
 }
 use std.gpu.engine2d.backend_emu.{
@@ -53,9 +60,16 @@ use std.gpu.engine2d.backend_emu.{
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_is_available,
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
-    vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_from_buffer,
+    vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_prefix,
+    vulkan_sffi_copy_to_buffer_u32,
+    vulkan_image_upload_u32_requested, vulkan_image_upload_note,
+    vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
+    vulkan_sffi_accepted_compute_submit_count,
+    vulkan_sffi_copy_from_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
     vulkan_sffi_readback_u32_into,
+    vulkan_sffi_readback_u32_alloc,
+    vulkan_sffi_readback_u32_alloc_checksum,
     vulkan_sffi_copy_u32_into,
     vulkan_sffi_destroy_shader, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_last_error,
@@ -68,6 +82,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 }
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_font_types.{VulkanFontPipelineEvidence}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
 # ============================================================================
 # Vulkan Availability Check
@@ -188,6 +203,24 @@ fn _vulkan_scaled_image_args_valid(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i3
 # Vulkan Backend
 # ============================================================================
 
+# One parked host byte mirror of a font atlas, keyed on the atlas OWNER identity
+# (the font face) and the atlas generation those bytes incorporate. Nothing here
+# is device state: the bytes are a copy of `batch.atlas_pixels`, so a parked slot
+# stays valid across device buffer rewrites and is invalidated only by a
+# generation gap, which the incremental repack already requires to be exactly +1.
+class VulkanFontAtlasMirror:
+    identity: text
+    generation: i64
+    # This owner's own atlas sequence as of `bytes`. The GLOBAL `generation` is
+    # bumped by every owner, so it cannot express continuity across an
+    # interleave; `owner_sequence` advances by exactly 1 per dirty batch for
+    # THIS owner and is what the incremental path tests. -1 = the producer
+    # published none and the global +1 rule applies instead.
+    owner_sequence: i64 = -1
+    bytes: [u8]
+
+val VULKAN_FONT_ATLAS_MIRROR_MAX: i32 = 4
+
 class VulkanBackend:
     """Vulkan compute shader 2D renderer.
 
@@ -228,12 +261,141 @@ class VulkanBackend:
     pipe_triangle: i64
     pipe_gradient: i64
     pipe_blit: i64
+    # Batched-rect lane: ONE dispatch for N rects, rect list in a GPU buffer.
+    # The session owns the pipeline; the surface owns the per-frame rect-list
+    # buffers, because they must stay alive until the frame fence retires.
+    pipe_rect_batch: i64
+    rect_batch_error: text
+    # Slot pool, one slot per batch recorded in the current frame. A slot may
+    # NOT be reused inside a frame: `copy_to_buffer` writes at RECORD time but
+    # the dispatch reads at SUBMIT time, so overwriting slot 0 for a second
+    # batch would silently repaint the first batch's dispatch with the second
+    # batch's rects. `rect_batch_slot` is the next free slot and resets only
+    # when the pending command is cleared (i.e. after the fence).
+    rect_batch_buffers: [i64]
+    rect_batch_capacities: [i64]
+    rect_batch_descriptors: [i64]
+    rect_batch_slot: i64
+    # Dispatches recorded into the current frame's command buffer, counted so
+    # the bench can assert one dispatch per batched frame rather than N.
+    # SCOPE, stated so a reader does not over-trust it: this counts the
+    # FRAMEBUFFER compute lanes only -- `_enqueue_framebuffer_compute` (clear,
+    # rect, line, circle, ...) and `_enqueue_rect_batch*`. Image composites and
+    # font dispatches are NOT counted; it is a rect-lane discriminator, not a
+    # total device-command census.
+    frame_dispatch_count: i64
+    # Dispatch count of the last flushed frame, so a caller can read it after
+    # end_frame without racing the live counter.
+    last_frame_dispatch_count: i64
+    # Cumulative count of REAL device dispatches recorded by the rect-list
+    # (batched rect) lane since `create()`. Unlike `frame_dispatch_count` this
+    # is never reset at flush, so a caller can read it after the frame has been
+    # submitted and read back. A batch that collapses n rects into one device
+    # dispatch increments this by exactly 1; a CPU fallback increments nothing.
+    rect_list_device_dispatch_count: i64
     # Per-surface font composite storage; the session owns the pipeline.
     d_font_atlas: i64
     d_font_params: i64
     font_atlas_generation: i64
     font_atlas_owner_identity: text
     font_atlas_payload_sha256: text
+    # Host byte mirror of the device font atlas, kept so a dirty batch repacks
+    # only the glyph cells it actually inserted instead of all 1,048,576 atlas
+    # pixels. `font_atlas_host_valid` is cleared at the START of every upload
+    # and set again only once that upload has SUCCEEDED, so a composite that
+    # returns early (glyph cap, invalid quad, failed upload) leaves the mirror
+    # stale and forces the next one to repack in full -- which is what makes
+    # the incremental path sound without assuming batches arrive unbroken.
+    font_atlas_host_bytes: [u8]
+    font_atlas_host_identity: text
+    font_atlas_host_valid: bool
+    # Parked mirrors for atlas owners that are not currently active. Two font
+    # identities on one page used to evict each other's mirror on every switch,
+    # so BOTH paid a full 1,048,576-pixel repack per batch (measured: every
+    # owner switch was a `pack_full`). Parking the outgoing owner's bytes and
+    # swapping the incoming owner's back in makes an alternating A,B,A,B page
+    # repack only its dirty cells. Bounded LRU: index 0 is the least recently
+    # used and is evicted first.
+    font_atlas_mirror_slots: [VulkanFontAtlasMirror]
+    # The atlas generation the mirror actually incorporated. Generations come
+    # from ONE global counter bumped once per dirty batch, so `batch
+    # .atlas_generation == font_atlas_host_generation + 1` proves no other dirty
+    # batch slipped between this one and the mirror's last update -- including
+    # batches this backend never saw at all, which no flag inside the composite
+    # can observe. Any gap forces a full repack, which is always safe.
+    font_atlas_host_generation: i64
+    # The per-owner atlas sequence the mirror bytes incorporate; parked and
+    # restored with them. -1 = unknown / producer publishes none.
+    font_atlas_host_owner_sequence: i64 = -1
+    # PER-OWNER DEVICE ATLAS SLOTS (F32).
+    #
+    # There used to be exactly ONE device atlas buffer (`d_font_atlas`). Every
+    # font run whose atlas content moved therefore had to flush the pending
+    # command buffer before its host write, because the dispatches already
+    # recorded in that command buffer read the very bytes the write was about
+    # to replace -- a genuine read-after-write hazard. With one buffer the
+    # cheapest honest cap was `1 + font runs`, and the catalog page measured 17
+    # submits / 17 fence waits per frame against an invariant of 1.
+    #
+    # A round-robin ring does not fix this (run 3 finds both slots referenced
+    # and flushes anyway, landing at ~runs/2). What fixes it is keying the slot
+    # on the ATLAS OWNER and exploiting the two facts F16/F24 already
+    # established:
+    #   * an owner whose parked atlas is restored unchanged (`ALREADY_TRUTH`)
+    #     needs NO device write at all -- its slot still holds exactly those
+    #     bytes -- so an alternating A,B,A,B page costs zero uploads and zero
+    #     flushes after the first pass over each owner;
+    #   * an `INCREMENTAL` batch writes only cells this batch inserted. Every
+    #     cell an already-recorded dispatch reads keeps byte-identical content,
+    #     so the write is not a hazard and needs no flush either.
+    # A flush is then required only for a FULL repack (cells may have moved)
+    # into a slot a recorded dispatch still references, and only when no
+    # unreferenced slot is free to take the write instead.
+    #
+    # Parallel arrays rather than a struct array: the tables are tiny (bounded
+    # by VULKAN_FONT_ATLAS_SLOT_MAX) and every other pooled resource in this
+    # backend is already shaped this way.
+    font_atlas_slot_handles: [i64]
+    font_atlas_slot_owners: [text]
+    # The owner's published `atlas_owner_sequence` the slot's bytes incorporate.
+    # -1 = unknown (producer publishes none), which never matches and so always
+    # forces a write -- fail-closed.
+    font_atlas_slot_sequences: [i64]
+    # Bound by a dispatch recorded into the CURRENT, not-yet-submitted command
+    # buffer. Cleared wholesale by `_clear_pending_compute_state`, which runs at
+    # the end of every flush path including the failure ones.
+    font_atlas_slot_referenced: [bool]
+    # DEFERRED ATLAS UPLOAD (typed `u32` lane only).
+    #
+    # A text run that inserts glyphs bumps the owner's published sequence, so
+    # the slot plan is WRITE_IN_PLACE and the whole 1024x1024 atlas used to be
+    # copied to the device once PER RUN -- 15 copies (~60 MB) for a page that
+    # has exactly one atlas. Every one of those copies but the last is dead:
+    # the atlas only ever GROWS within a frame (cells are inserted, never
+    # relocated, which is the same invariant `WRITE_IN_PLACE` already rests on),
+    # so the final state is a superset of every intermediate one, and every
+    # dispatch that reads the atlas is recorded into the SAME pending command
+    # buffer and runs only after the flush. Parking the copy and performing it
+    # once, immediately before the submit, is therefore observationally
+    # identical and collapses the count to one upload per slot per flush.
+    #
+    # Only one park is held at a time: a write aimed at a DIFFERENT buffer
+    # drains the parked one first, so the count is bounded by the number of
+    # distinct slots written, never by the number of runs. 0 = nothing parked.
+    font_atlas_deferred_buffer: i64
+    font_atlas_deferred_slot: i64
+    font_atlas_deferred_pixels: [u32]
+    font_atlas_deferred_uploads: i64
+    # Index into the tables above of the slot `d_font_atlas` currently aliases.
+    # -1 = none bound yet.
+    font_atlas_active_slot: i64 = -1
+    # Counters, for the audit gate and the bug record. `hits` are runs that
+    # needed no device write at all; `inplace` are writes that skipped a flush
+    # because they were incremental; `forced` are the flushes that genuinely
+    # remained.
+    font_atlas_slot_hits: i64
+    font_atlas_slot_inplace_writes: i64
+    font_atlas_slot_forced_flushes: i64
     font_atlas_width: i32
     font_atlas_height: i32
     font_atlas_upload_count: i64
@@ -255,6 +417,40 @@ class VulkanBackend:
     present_damage_rects: [i64]  # Validated flat x,y,w,h tuples owned by this backend
     present_damage_valid: bool
     host_mirror_valid: bool
+    # Live per-frame damage union, accumulated by the draw calls themselves.
+    # `frame_damage_full` is the FAIL-SAFE state: any device dispatch whose
+    # destination rectangle this backend cannot name marks the whole surface
+    # damaged, so an unhinted primitive can never produce a stale mirror.
+    # x1/y1 are EXCLUSIVE. See doc/08_tracking/bug/
+    # vulkan_damage_path_dead_interpreted_copy_2026-09-12.md.
+    frame_damage_valid: bool
+    frame_damage_full: bool
+    frame_damage_x0: i64
+    frame_damage_y0: i64
+    frame_damage_x1: i64
+    frame_damage_y1: i64
+    # Destination hint published by a draw call immediately before it dispatches;
+    # consumed (and cleared) by the dispatch funnel. Absent hint => full damage.
+    pending_damage_hint: bool
+    pending_damage_hx: i64
+    pending_damage_hy: i64
+    pending_damage_hw: i64
+    pending_damage_hh: i64
+    # Evidence counters: pixels in the damage union actually re-downloaded, and
+    # interpreted element writes spent patching the host mirror this frame.
+    damage_rect_px: i64
+    mirror_copy_iterations: i64
+    # What the readback that seeded the mirror actually transferred, carried
+    # across to present()'s dedup arm (which zeroes present_readback_bytes on
+    # entry) so the receipt describes the real download, not a nominal one.
+    readback_frame_bytes: i64
+    readback_frame_rects: i64
+    # True when host_buf already holds THIS frame's device surface, so present()
+    # must not download the whole framebuffer a second time. Set by the readback
+    # that performed the download, cleared by every `dirty = true`. See
+    # doc/08_tracking/bug/
+    # vulkan_readback_interpreted_unpack_dominates_frame_2026-09-12.md.
+    host_mirror_frame_fresh: bool
     last_host_checksum: i64  # checksum of the last host_buf refresh (same algorithm as engine2d_readback_with_identity)
     present_readback_bytes: i64
     present_readback_rect_count: i64
@@ -279,13 +475,51 @@ class VulkanBackend:
     frame_device_present: bool
     frame_batching_enabled: bool
     pending_compute_command: i64
-    pending_compute_pipelines: [i64]   # preallocated, 256 damage/dependency slots
-    pending_compute_descriptors: [i64] # preallocated, parallel to pipelines
+    pending_compute_pipelines: [i64]   # block-grown slot table; entries [0, pending_compute_count) are live
+    pending_compute_descriptors: [i64] # parallel to pipelines
     pending_compute_sources: [i64]     # image source buffer per slot; zero for framebuffer-only work
     pending_compute_count: i64         # live entries in the two arrays above
+    # Batched image composites retain their source buffers until the frame
+    # fence.  Reuse completed per-surface buffers instead of allocating and
+    # freeing one Vulkan storage buffer for every web image draw.
+    image_source_pool: [i64]
+    image_source_pool_capacity: [i64]
+    image_source_pool_device_identity: i64
+    image_source_pool_session_generation: i64
+    image_source_pool_surface_identity: i64
+    image_source_pool_reuse_count: i64
+    image_source_pool_allocation_count: i64
+    image_source_pool_replacement_count: i64
+    image_source_upload_count: i64
+    image_source_upload_bytes: i64
+    # Reusable host staging for source-image marshalling. Native ABI lanes may
+    # upload a bounded prefix; interpreter lanes use the exact-size fallback.
+    image_upload_scratch: [u8]
+    image_upload_scratch_reuse_count: i64
+    image_upload_scratch_resize_count: i64
+    image_upload_scratch_fallback_count: i64
     pending_font_descriptors: [i64]
     pending_font_params: [i64]
     pending_font_glyph_count: i64
+    image_descriptor_pool: [i64] # warm frame-reusable image-composite descriptors
+    # Host-side coverage atlas for the built-in face, memoised on the SAME
+    # identity the device-side generation cache keys on (scale + glyph height).
+    font_atlas_cpu_scale: i64
+    font_atlas_cpu_glyph_height: i64
+    font_atlas_cpu_pixels: [u32]
+    font_atlas_cpu_build_count: i64   # host coverage-atlas rasters actually performed
+    # Attribution for every mid-frame flush: the LAST caller site tag, printed
+    # by the `[vk-order] flush` trace. Without it `submits_per_frame=17` names a
+    # count and no cause, and the wrong file gets edited.
+    last_flush_site: text
+    pending_flush_site: text
+    image_source_pool_key: [i64]      # parallel to `image_source_pool`; producer
+                                      # identity+generation key, 0 = unkeyed slot
+    pending_image_key: i64            # one-shot key for the NEXT image composite
+    image_source_key_hit_count: i64   # uploads skipped because the key matched
+    midframe_flush_count: i64         # CUMULATIVE `_flush_pending_compute` calls since
+                                      # create/shutdown — NOT reset per frame. One frame that
+                                      # ends in a single finalize contributes exactly 1.
     font_descriptor_pool: [i64] # warm frame-reusable glyph descriptors
     font_params_pool: [i64]     # parallel 52-byte parameter buffers
     font_params_pool_capacity: [i64]
@@ -341,11 +575,38 @@ class VulkanBackend:
             pipe_triangle: 0,
             pipe_gradient: 0,
             pipe_blit: 0,
+            pipe_rect_batch: 0,
+            rect_batch_error: "not-installed",
+            rect_batch_buffers: [],
+            rect_batch_capacities: [],
+            rect_batch_descriptors: [],
+            rect_batch_slot: 0,
+            frame_dispatch_count: 0,
+            last_frame_dispatch_count: 0,
+            rect_list_device_dispatch_count: 0,
             d_font_atlas: 0,
             d_font_params: 0,
             font_atlas_generation: -1,
             font_atlas_owner_identity: "",
             font_atlas_payload_sha256: "",
+            font_atlas_host_bytes: [],
+            font_atlas_host_identity: "",
+            font_atlas_host_valid: false,
+            font_atlas_mirror_slots: [],
+            font_atlas_host_generation: -1,
+            font_atlas_host_owner_sequence: -1,
+            font_atlas_slot_handles: [],
+            font_atlas_slot_owners: [],
+            font_atlas_slot_sequences: [],
+            font_atlas_slot_referenced: [],
+            font_atlas_deferred_buffer: 0,
+            font_atlas_deferred_slot: -1,
+            font_atlas_deferred_pixels: [],
+            font_atlas_deferred_uploads: 0,
+            font_atlas_active_slot: -1,
+            font_atlas_slot_hits: 0,
+            font_atlas_slot_inplace_writes: 0,
+            font_atlas_slot_forced_flushes: 0,
             font_atlas_width: 0,
             font_atlas_height: 0,
             font_atlas_upload_count: 0,
@@ -365,6 +626,22 @@ class VulkanBackend:
             present_damage_rects: [],
             present_damage_valid: false,
             host_mirror_valid: false,
+            frame_damage_valid: false,
+            frame_damage_full: false,
+            frame_damage_x0: 0,
+            frame_damage_y0: 0,
+            frame_damage_x1: 0,
+            frame_damage_y1: 0,
+            pending_damage_hint: false,
+            pending_damage_hx: 0,
+            pending_damage_hy: 0,
+            pending_damage_hw: 0,
+            pending_damage_hh: 0,
+            damage_rect_px: 0,
+            mirror_copy_iterations: 0,
+            readback_frame_bytes: 0,
+            readback_frame_rects: 0,
+            host_mirror_frame_fresh: false,
             last_host_checksum: 0,
             present_readback_bytes: 0,
             present_readback_rect_count: 0,
@@ -389,13 +666,38 @@ class VulkanBackend:
             frame_device_present: false,
             frame_batching_enabled: false,
             pending_compute_command: 0,
-            pending_compute_pipelines: [0i64; 256],
-            pending_compute_descriptors: [0i64; 256],
-            pending_compute_sources: [0i64; 256],
+            pending_compute_pipelines: [],
+            pending_compute_descriptors: [],
+            pending_compute_sources: [],
             pending_compute_count: 0,
+            image_source_pool: [],
+            image_source_pool_capacity: [],
+            image_source_pool_device_identity: 0,
+            image_source_pool_session_generation: 0,
+            image_source_pool_surface_identity: 0,
+            image_source_pool_reuse_count: 0,
+            image_source_pool_allocation_count: 0,
+            image_source_pool_replacement_count: 0,
+            image_source_upload_count: 0,
+            image_source_upload_bytes: 0,
+            image_upload_scratch: [],
+            image_upload_scratch_reuse_count: 0,
+            image_upload_scratch_resize_count: 0,
+            image_upload_scratch_fallback_count: 0,
             pending_font_descriptors: [],
             pending_font_params: [],
             pending_font_glyph_count: 0,
+            image_descriptor_pool: [],
+            font_atlas_cpu_scale: -1,
+            font_atlas_cpu_glyph_height: -1,
+            font_atlas_cpu_pixels: [],
+            font_atlas_cpu_build_count: 0,
+            last_flush_site: "untagged",
+            pending_flush_site: "untagged",
+            image_source_pool_key: [],
+            pending_image_key: 0,
+            image_source_key_hit_count: 0,
+            midframe_flush_count: 0,
             font_descriptor_pool: [],
             font_params_pool: [],
             font_params_pool_capacity: [],
@@ -433,6 +735,63 @@ fn _vulkan_submission_is_proven(backend: VulkanBackend) -> bool:
     if backend.observed_device_submit_count <= 0: return false
     backend.observed_device_fence_count >= backend.observed_device_submit_count
 
+val VK_IMAGE_INLINE_KEY_MAX_PIXELS: i64 = 64
+
+fn inline_image_key(pixels: [u32], pixel_count: i64, w: i32, h: i32,
+                    opacity_milli: i32, composite_mode: i32) -> i64:
+    """Digest a SMALL image's own words, once per draw.
+
+    The real page draws 76 one-pixel composites per frame (measured on
+    `web_catalog/overview.html`); each was a full upload of four bytes plus an
+    SFFI crossing, every frame, forever. For an image this size the content IS
+    cheap enough to be its own identity -- which is why the caller applies a
+    hard pixel bound before calling here, and never digests a large image.
+
+    `opacity_milli` and `composite_mode` are folded in even though they do not
+    change the SOURCE bytes: they are free here, and folding them keeps the key
+    a strictly finer partition than the buffer's contents.
+    """
+    var hash: i64 = 1469598103934665603
+    hash = _fnv_mix_i64(hash, _i64(w))
+    hash = _fnv_mix_i64(hash, _i64(h))
+    hash = _fnv_mix_i64(hash, _i64(opacity_milli))
+    hash = _fnv_mix_i64(hash, _i64(composite_mode))
+    var i: i64 = 0
+    while i < pixel_count:
+        hash = _fnv_mix_i64(hash, _i64(pixels[i].to_i32()))
+        i = i + 1
+    if hash == 0: 1 else: hash
+
+fn text_blit_image_key(text_val: text, color: u32, font_size: i32, w: i32, h: i32) -> i64:
+    """FNV-1a over a text blit's IDENTITY -- never over its pixels.
+
+    The raster `text_blit_buffer` produces is a pure function of these five
+    values (it carries no position), so this walks the string once per draw
+    instead of digesting the 4 * w * h bytes it would cost to hash the raster.
+    A per-frame pixel digest would cost more than the upload it saves, which is
+    exactly why the key must come from the producer.
+
+    Non-zero by construction: 0 is reserved for "no key", and a hash that landed
+    on it would silently disable the cache for that one string.
+    """
+    var hash: i64 = 1469598103934665603
+    hash = _fnv_mix_i64(hash, _i64(color.to_i32()))
+    hash = _fnv_mix_i64(hash, _i64(font_size))
+    hash = _fnv_mix_i64(hash, _i64(w))
+    hash = _fnv_mix_i64(hash, _i64(h))
+    for ch in text_val.chars():
+        hash = _fnv_mix_i64(hash, ch.to_i64())
+    if hash == 0: 1 else: hash
+
+fn _fnv_mix_i64(hash: i64, value: i64) -> i64:
+    """Fold all 8 bytes of `value` into an FNV-1a accumulator."""
+    var h = hash
+    var shift: i64 = 0
+    while shift < 64:
+        h = (h ^ ((value >> shift) & 255)) * 1099511628211
+        shift = shift + 8
+    h
+
 fn vulkan_submitted_framebuffer_handle(backend: VulkanBackend) -> i64:
     """Framebuffer handle safe to present directly, or 0 when unproven."""
     if not _vulkan_submission_is_proven(backend): return 0
@@ -463,6 +822,19 @@ fn vulkan_submitted_generation(backend: VulkanBackend) -> i64:
     """
     if not _vulkan_submission_is_proven(backend): return 0
     backend.observed_device_fence_count
+
+fn vulkan_accepted_compute_submits(backend: VulkanBackend) -> i64:
+    """Queue submissions the device has ACCEPTED so far, process-wide.
+
+    Deliberately not derived from `observed_device_fence_count`: that counter
+    advances once per proven completion, so a frame with two submissions and
+    one wait reads the same as a frame with one submission. This is the
+    submission count itself, which is what a "one submit per frame" claim is
+    about. Zero when no device is up, which callers must treat as unknown
+    rather than as a passing measurement.
+    """
+    if backend.completion_unknown: return 0
+    vulkan_sffi_accepted_compute_submit_count()
 
 fn vulkan_cancel_submitted_present_source(
     mut backend: VulkanBackend, framebuffer: i64, receipt: i64
@@ -610,6 +982,8 @@ impl RenderBackend for VulkanBackend:
         self.pipe_triangle       = session.pipe_triangle
         self.pipe_gradient       = session.pipe_gradient
         self.pipe_blit           = session.pipe_blit
+        self.pipe_rect_batch     = session.pipe_rect_batch
+        self.rect_batch_error    = session.rect_batch_error
 
         self.w = width
         self.h = height
@@ -639,6 +1013,7 @@ impl RenderBackend for VulkanBackend:
         self.present_damage_rects = []
         self.present_damage_valid = false
         self.host_mirror_valid = false
+        self._clear_frame_damage()
         self.present_readback_bytes = 0
         self.present_readback_rect_count = 0
         self.present_full_readback_count = 0
@@ -659,10 +1034,25 @@ impl RenderBackend for VulkanBackend:
         self.frame_fallback_reason = ""
         self.frame_device_present = false
         self.pending_compute_command = 0
-        self.pending_compute_pipelines = [0i64; 256]
-        self.pending_compute_descriptors = [0i64; 256]
-        self.pending_compute_sources = [0i64; 256]
+        self.pending_compute_pipelines = []
+        self.pending_compute_descriptors = []
+        self.pending_compute_sources = []
         self.pending_compute_count = 0
+        self.image_source_pool = []
+        self.image_source_pool_capacity = []
+        self.image_source_pool_key = []
+        self.image_source_pool_device_identity = 0
+        self.image_source_pool_session_generation = 0
+        self.image_source_pool_surface_identity = 0
+        self.image_source_pool_reuse_count = 0
+        self.image_source_pool_allocation_count = 0
+        self.image_source_pool_replacement_count = 0
+        self.image_source_upload_count = 0
+        self.image_source_upload_bytes = 0
+        self.image_upload_scratch = []
+        self.image_upload_scratch_reuse_count = 0
+        self.image_upload_scratch_resize_count = 0
+        self.image_upload_scratch_fallback_count = 0
         self.cpu_fallback_used = false
         self.cpu_fallback_reason = ""
         true
@@ -691,7 +1081,11 @@ impl RenderBackend for VulkanBackend:
         self.last_error = "Vulkan framebuffer readback byte count mismatch"
 
     me shutdown():
-        val pending_status = self._flush_pending_compute()
+        # Host-only upload staging is never a GPU dependency. Release it even
+        # when unknown device completion forces the GPU-resource quarantine
+        # path to return early below.
+        self.image_upload_scratch = []
+        val pending_status = self._flush_pending_compute_at("shutdown")
         if pending_status < 0:
             self.completion_unknown = true
         if self.completion_unknown:
@@ -700,6 +1094,7 @@ impl RenderBackend for VulkanBackend:
                 # quarantine owns eventual process-level cleanup.
                 return
             self.completion_unknown = false
+        self._destroy_image_source_pool()
         if self.presentation_swapchain != 0:
             vulkan_sffi_destroy_swapchain(self.presentation_swapchain)
             self.presentation_swapchain = 0
@@ -707,19 +1102,55 @@ impl RenderBackend for VulkanBackend:
         if self.d_font_params != 0:
             vulkan_sffi_free_buffer(self.d_font_params)
             self.d_font_params = 0
+        for descriptor in self.image_descriptor_pool:
+            if not vulkan_sffi_destroy_descriptor_set(descriptor):
+                vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
+        self.image_descriptor_pool = []
+        self.font_atlas_cpu_scale = -1
+        self.font_atlas_cpu_glyph_height = -1
+        self.font_atlas_cpu_pixels = []
+        self.font_atlas_cpu_build_count = 0
+        self.midframe_flush_count = 0
         for descriptor in self.font_descriptor_pool:
             vulkan_sffi_destroy_descriptor_set(descriptor)
         for params in self.font_params_pool:
             vulkan_sffi_free_buffer(params)
+        self.image_descriptor_pool = []
         self.font_descriptor_pool = []
         self.font_params_pool = []
         self.font_params_pool_capacity = []
+        # Free every per-owner slot. `d_font_atlas` aliases whichever slot was
+        # active, so it must NOT be freed a second time below.
+        for slot_handle in self.font_atlas_slot_handles:
+            if slot_handle != 0:
+                vulkan_sffi_free_buffer(slot_handle)
+        # A parked upload names a buffer that is about to be freed. Discarding
+        # it is the only correct action -- draining would copy into a doomed
+        # buffer, and keeping it would leave a dangling handle for the next
+        # flush to write through.
+        self.font_atlas_deferred_buffer = 0
+        self.font_atlas_deferred_slot = -1
+        self.font_atlas_deferred_pixels = []
+        val atlas_was_slotted = self.font_atlas_slot_handles.len() > 0
+        self.font_atlas_slot_handles = []
+        self.font_atlas_slot_owners = []
+        self.font_atlas_slot_sequences = []
+        self.font_atlas_slot_referenced = []
+        self.font_atlas_active_slot = -1
         if self.d_font_atlas != 0:
-            vulkan_sffi_free_buffer(self.d_font_atlas)
+            if not atlas_was_slotted:
+                vulkan_sffi_free_buffer(self.d_font_atlas)
             self.d_font_atlas = 0
         self.font_atlas_generation = -1
         self.font_atlas_owner_identity = ""
         self.font_atlas_payload_sha256 = ""
+        # The device buffer is gone, so the mirror no longer describes anything.
+        self.font_atlas_host_bytes = []
+        self.font_atlas_host_identity = ""
+        self.font_atlas_host_valid = false
+        self.font_atlas_host_generation = -1
+        self.font_atlas_host_owner_sequence = -1
+        self.font_atlas_mirror_slots = []
         self.font_atlas_width = 0
         self.font_atlas_height = 0
         self.font_atlas_upload_count = 0
@@ -783,6 +1214,7 @@ impl RenderBackend for VulkanBackend:
         self.present_damage_rects = []
         self.present_damage_valid = false
         self.host_mirror_valid = false
+        self._clear_frame_damage()
         self.w = 0
         self.h = 0
         self.mask_buf = []
@@ -795,25 +1227,43 @@ impl RenderBackend for VulkanBackend:
         val total = _i64(self.w) * _i64(self.h)
         val workgroups = (total + 255) / 256
         val pc = _pack_clear_pc(color, self.w, self.h)
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1)
+        self.hint_damage(0, 0, _i64(self.w), _i64(self.h))
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1, "clear-dispatch-failed")
         if dispatched > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
         else:
-            self.mark_cpu_fallback("clear-dispatch-failed")
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
                 self.dirty = true
+                self.host_mirror_frame_fresh = false
+                # A dispatch that failed leaves the device surface in an
+                # unknown state; the hinted rect no longer bounds the change.
+                self.note_damage_full()
 
     me draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
-        self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1)
+        self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
+        self._dispatch_framebuffer_checked(self.pipe_rect_outline, pc, gx, gy, 1, "rect-outline-dispatch-failed")
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        # Timed shim: the body is unchanged in `_draw_rect_filled_impl`. Split
+        # this way rather than by start/stop pairs at every `return` because the
+        # body has six exits and a missed one would silently under-report.
+        if not vulkan_timing_enabled():
+            self._draw_rect_filled_impl(x, y, w, h, color)
+            return
+        val _t = vulkan_timing_now_us()
+        self._draw_rect_filled_impl(x, y, w, h, color)
+        vulkan_timing_add(VK_T_RECT, _t)
+
+    me _draw_rect_filled_impl(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self.completion_unknown: return
+        _vk_stat_rect(w, h, color_a(color) < 255, self.mask_buf.len() > 0 and color_a(color) >= 255)
         if color_a(color) < 255:
             val pixel_count = _i64(w) * _i64(h)
             if pixel_count <= 0:
@@ -838,18 +1288,108 @@ impl RenderBackend for VulkanBackend:
             val masked_pixels: [u32] = [color; w * h]
             self.draw_image(x, y, w, h, masked_pixels)
             return
+        if w <= 0 or h <= 0:
+            # A zero-area opaque rect paints nothing. The alpha and masked arms
+            # above already return here; this arm did not, and `(0 + 15) / 16`
+            # is 0 workgroups, which the enqueue rejects as invalid. The reject
+            # was then read as a transient bind-chain failure, costing a full
+            # flush (an extra SUBMIT), a futile retry and a CPU-fallback latch.
+            # Measured on css-layout.html: 2 such rects per frame, which is the
+            # entire `submits_per_frame=3` overshoot.
+            return
         val pc = _pack_rect_pc(x, y, w, h, color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1)
+        self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_rect_filled, pc, gx, gy, 1, "rect-dispatch-failed")
         if dispatched > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
         else:
-            self.mark_cpu_fallback("rect-dispatch-failed")
             if dispatched < 0:
                 self.completion_unknown = true
             elif self.initialized and self.d_framebuffer > 0:
                 self.dirty = true
+                self.host_mirror_frame_fresh = false
+                # A dispatch that failed leaves the device surface in an
+                # unknown state; the hinted rect no longer bounds the change.
+                self.note_damage_full()
+
+    me draw_rect_list_filled(rects: [i32], colors: [u32]):
+        """Paint N filled rects with ONE interpreter transit and one dispatch each.
+
+        Packed layout (frozen, see `_enqueue_rect_batch`):
+          rects[4k..4k+4] = x,y,w,h of rect k; colors[k] = its colour.
+        Painter order is array order. A malformed pair (length mismatch) paints
+        nothing rather than painting a guessed prefix.
+
+        Semantics are identical to calling `draw_rect_filled` once per rect --
+        this method is a throughput lane, not a different renderer. Anything
+        the fast lane cannot express (an active stencil mask, or any
+        non-opaque colour, both of which route through the host image path in
+        the single-rect method) falls back to the single-rect loop for the
+        WHOLE list, so painter order can never be reordered by a partial
+        fallback.
+
+        One deliberate, stated divergence: a zero-or-negative-area rect is
+        SKIPPED here, whereas the single-rect path dispatches it, gets rc 0 back
+        from a gx=0 dispatch, and consequently flushes mid-frame and marks a CPU
+        fallback. The PIXELS are identical either way (a zero-area rect paints
+        nothing); the counters are not. Skipping is the correct behaviour and
+        the single path's is arguably the bug, but this method does not claim to
+        reproduce it.
+        """
+        if self.completion_unknown: return
+        _vk_stat_rect_list_op()
+        val count = colors.len().to_i64()
+        if count <= 0: return
+        if rects.len().to_i64() != count * 4: return
+        if self.mask_buf.len() > 0:
+            self._draw_rect_list_single(rects, colors, 0, count)
+            return
+        var k: i64 = 0
+        while k < count:
+            if color_a(colors[k]) < 255:
+                self._draw_rect_list_single(rects, colors, 0, count)
+                return
+            k = k + 1
+        # Preferred lane: ONE compute dispatch reading the rect list out of a
+        # GPU storage buffer. This is what removes the per-rect interpreter
+        # cost entirely rather than halving it -- the host loop below still
+        # pays two SFFI calls per rect. When the batch pipeline is unavailable
+        # (old driver, SPIR-V rejected; `rect_batch_error` carries the reason)
+        # the host loop is the fallback, and its pixels are identical.
+        var enqueued: i64 = 0
+        if (self.frame_batching_enabled and self.pipe_rect_batch > 0 and
+            count >= RECT_BATCH_MIN_RECTS):
+            enqueued = self._enqueue_rect_batch_gpu(rects, colors)
+        if enqueued == 0 and self.frame_batching_enabled:
+            enqueued = self._enqueue_rect_batch(self.pipe_rect_filled, rects, colors)
+        if enqueued < 0:
+            self.completion_unknown = true
+            self.mark_cpu_fallback("rect-batch-dispatch-failed")
+            return
+        if enqueued > 0:
+            self.dirty = true
+            self.host_mirror_frame_fresh = false
+            # The batch enqueues bypass `_dispatch_framebuffer_checked`, so the
+            # funnel never sees them. Widening to the whole surface is the
+            # fail-safe reading; a per-rect union here would be a second,
+            # independently-wrong damage accountant.
+            self.note_damage_full()
+            self.mark_device_content_changed()
+        if enqueued < count:
+            # Replay only the tail; everything before `enqueued` is already
+            # recorded, so order holds.
+            self._draw_rect_list_single(rects, colors, enqueued, count)
+
+    me _draw_rect_list_single(rects: [i32], colors: [u32], from: i64, to: i64):
+        var k = from
+        while k < to:
+            val base = k * 4
+            self.draw_rect_filled(rects[base], rects[base + 1], rects[base + 2],
+                                  rects[base + 3], colors[k])
+            k = k + 1
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         if self.completion_unknown: return
@@ -873,13 +1413,14 @@ impl RenderBackend for VulkanBackend:
                 rx, ry, rw, rh, color, self.w, self.h,
                 self.clip_x, self.clip_y, self.clip_w, self.clip_h,
                 self.clip_enabled)
+            self.hint_damage(_i64(rx), _i64(ry), _i64(rw), _i64(rh))
             val rect_dispatched = self._dispatch_framebuffer_checked(
                 self.pipe_rect_filled, rect_pc,
-                (_i64(rw) + 15) / 16, (_i64(rh) + 15) / 16, 1)
+                (_i64(rw) + 15) / 16, (_i64(rh) + 15) / 16, 1, "axis-line-rect-dispatch-failed")
             if rect_dispatched > 0:
                 self.dirty = true
+                self.host_mirror_frame_fresh = false
             else:
-                self.mark_cpu_fallback("axis-line-rect-dispatch-failed")
                 if rect_dispatched < 0:
                     self.completion_unknown = true
             return
@@ -897,11 +1438,11 @@ impl RenderBackend for VulkanBackend:
             self.clip_x, self.clip_y, self.clip_w, self.clip_h,
             self.clip_enabled)
         val dispatched = self._dispatch_framebuffer_checked(
-            self.pipe_line, pc, 1, 1, 1)
+            self.pipe_line, pc, 1, 1, 1, "line-dispatch-failed")
         if dispatched > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
         else:
-            self.mark_cpu_fallback("line-dispatch-failed")
         if dispatched < 0:
             self.completion_unknown = true
 
@@ -922,12 +1463,16 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(bw) + 15) / 16
         val gy = (_i64(bh) + 15) / 16
         val pc = _pack_circle_pc(cx, cy, r, color, self.w, self.h, 1, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        self._dispatch_framebuffer_checked(self.pipe_circle_filled, pc, gx, gy, 1)
+        self._dispatch_framebuffer_checked(self.pipe_circle_filled, pc, gx, gy, 1, "circle-filled-dispatch-failed")
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
         if self.completion_unknown: return
         # Filled rounded rect composed from real GPU draw_rect_filled dispatches
-        # (rect body + midpoint corner arcs), matching SoftwareBackend exactly.
+        # (3 band rects + 4 anti-aliased corner boxes), matching SoftwareBackend
+        # exactly — this IS the Vulkan lane's implementation of the SHARED
+        # ROUNDED-RECT CORNER COVERAGE FORMULA v1, since the AA lives in the emu
+        # expansion and reaches the GPU as per-pixel alpha-modulated fills. The
+        # formula is defined once above emu_draw_rounded_rect in backend_emu.spl.
         # The dedicated rounded_rect SPIR-V kernel fills a plain rect (ignores the
         # corner radius), diverging from the engine contract, so it stays unwired.
         # See bug vulkan_raster_kernels_noop_and_divergent_2026-06-17.
@@ -954,14 +1499,15 @@ impl RenderBackend for VulkanBackend:
         val gx = (_i64(bw) + 15) / 16
         val gy = (_i64(bh) + 15) / 16
         val pc = _pack_triangle_pc(x1, y1, x2, y2, x3, y3, color, self.w, self.h, min_x, min_y, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        self._dispatch_framebuffer_checked(self.pipe_triangle, pc, gx, gy, 1)
+        self._dispatch_framebuffer_checked(self.pipe_triangle, pc, gx, gy, 1, "triangle-filled-dispatch-failed")
 
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
         if self.completion_unknown: return
         val gx = (_i64(w) + 15) / 16
         val gy = (_i64(h) + 15) / 16
         val pc = _pack_gradient_pc(x, y, w, h, top_color, bottom_color, self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled)
-        self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1)
+        self.hint_damage(_i64(x), _i64(y), _i64(w), _i64(h))
+        self._dispatch_framebuffer_checked(self.pipe_gradient, pc, gx, gy, 1, "gradient-rect-dispatch-failed")
 
     # Bitmap text goes through the font-atlas pipeline whenever that pipeline can
     # reproduce the CPU raster exactly (`_bitmap_text_atlas_path`,
@@ -969,12 +1515,23 @@ impl RenderBackend for VulkanBackend:
     # runs unchanged. `last_text_path` / `last_text_fallback_reason` always say
     # which of the two actually happened.
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        if not vulkan_timing_enabled():
+            self._draw_text_impl(x, y, text_val, color, font_size)
+            return
+        val _t = vulkan_timing_now_us()
+        self._draw_text_impl(x, y, text_val, color, font_size)
+        vulkan_timing_add(VK_T_TEXT, _t)
+
+    me _draw_text_impl(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        _vk_stat_text_op()
         if self.completion_unknown:
             self.last_text_path = VULKAN_TEXT_PATH_NOT_DRAWN
             self.last_text_fallback_reason = "completion-unknown"
             return
         if not self.initialized:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
+            self.note_damage_full()
             self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
             self.last_text_fallback_reason = "backend-uninitialized"
             return
@@ -983,14 +1540,44 @@ impl RenderBackend for VulkanBackend:
         val text_buf = text_blit_buffer(text_val, color, 0x00000000u32, font_size)
         if text_buf.is_empty():
             return
+        # The FIRST in-tree producer of an image key. This blit's pixels are a
+        # pure function of (text, color, font_size, w, h) -- the raster carries
+        # no position -- so the key is computed ONCE per draw call from those
+        # five, never from the pixels: the hash walks the string, not the
+        # 4 * w * h words it would cost to digest the raster. Identical labels
+        # (a repeated table header, a re-rendered frame) therefore upload once.
+        self.hint_image_key(text_blit_image_key(text_val, color, font_size,
+            text_buf.width, text_buf.height))
         self.draw_image_blend(x, y, text_buf.width, text_buf.height, text_buf.pixels)
 
     me _draw_image_composite_native(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
+        if not vulkan_timing_enabled():
+            return self._draw_image_composite_native_impl(x, y, dst_w, dst_h, src_w, src_h, pixels, opacity_milli, composite_mode, require_wholly_bounded)
+        val _t = vulkan_timing_now_us()
+        val rc = self._draw_image_composite_native_impl(x, y, dst_w, dst_h, src_w, src_h, pixels, opacity_milli, composite_mode, require_wholly_bounded)
+        vulkan_timing_add(VK_T_IMAGE_COMPOSITE, _t)
+        # Split this call into the full-surface or the small population with its
+        # own wall time, so the 443 s / 102 s split the attribution run inferred
+        # from maxima is measured directly rather than reconstructed.
+        vulkan_image_size_note(_i64(src_w) * _i64(src_h), _i64(self.w) * _i64(self.h),
+            vulkan_timing_now_us() - _t)
+        rc
+
+    me _draw_image_composite_native_impl(x: i32, y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32], opacity_milli: i32, composite_mode: i32, require_wholly_bounded: bool) -> i64:
+        # Consume the producer key FIRST, before any validation return. A key
+        # names THIS call's pixels; leaving it armed on a rejected composite
+        # (clipped out, bad geometry, uninitialized) would hand this identity to
+        # the next, unrelated image -- which would then be stamped with it and
+        # skip a genuine upload on a later frame.
+        val image_key = self.pending_image_key
+        self.pending_image_key = 0
         if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0 or self.pipe_blit <= 0:
+            vulkan_image_reason_note(VK_IMG_R_STATE)
             return 0
         if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or self.mask_buf.len() > 0 or
             opacity_milli <= 0 or opacity_milli > 1000 or
             (composite_mode != VK_IMAGE_COMPOSITE_COPY and composite_mode != VK_IMAGE_COMPOSITE_SRC_OVER)):
+            vulkan_image_reason_note(VK_IMG_R_ARGS)
             return 0
 
         val pixel_count = _i64(src_w) * _i64(src_h)
@@ -999,30 +1586,151 @@ impl RenderBackend for VulkanBackend:
         if (pixel_count <= 0 or pixel_count > 4294967295 or pixel_count > 9223372036854775807 / 4 or
             pixels.len().to_i64() != pixel_count or
             scale_x_product > 2147483647 or scale_y_product > 2147483647):
+            vulkan_image_reason_note(VK_IMG_R_GEOM)
             return 0
         val right = _i64(x) + _i64(dst_w)
         val bottom = _i64(y) + _i64(dst_h)
         if right - 1 > 2147483647 or bottom - 1 > 2147483647:
+            vulkan_image_reason_note(VK_IMG_R_GEOM)
             return 0
         if require_wholly_bounded and (_i64(x) < 0 or _i64(y) < 0 or right > _i64(self.w) or bottom > _i64(self.h)):
+            vulkan_image_reason_note(VK_IMG_R_CLIP)
             return 0
         if self.clip_enabled:
             val clip_right = _i64(self.clip_x) + _i64(self.clip_w)
             val clip_bottom = _i64(self.clip_y) + _i64(self.clip_h)
             if self.clip_w <= 0 or self.clip_h <= 0 or clip_right > 2147483647 or clip_bottom > 2147483647:
+                vulkan_image_reason_note(VK_IMG_R_CLIP)
                 return 0
             if require_wholly_bounded and (_i64(x) < _i64(self.clip_x) or _i64(y) < _i64(self.clip_y) or
                 right > clip_right or bottom > clip_bottom):
+                vulkan_image_reason_note(VK_IMG_R_CLIP)
                 return 0
 
         val src_size = pixel_count * 4
-        val d_src = vulkan_sffi_alloc_buffer(src_size, 0x80)
+        # An image small enough that hashing it costs less than uploading it
+        # gets a key even with no producer. The bound is what makes this honest:
+        # at or below `VK_IMAGE_INLINE_KEY_MAX_PIXELS` words the digest is
+        # cheaper than the staging pack plus the SFFI crossing it replaces, and
+        # above it the pixels are never touched -- a per-frame digest of a large
+        # image would cost more than the upload it saves.
+        val effective_key = if image_key != 0:
+            image_key
+        elif pixel_count <= VK_IMAGE_INLINE_KEY_MAX_PIXELS:
+            inline_image_key(pixels, pixel_count, src_w, src_h, opacity_milli, composite_mode)
+        else:
+            0
+        if effective_key != 0 and self.frame_batching_enabled:
+            val keyed = self._acquire_keyed_image_source(src_size, effective_key)
+            if keyed > 0:
+                # The slot already holds these exact pixels from an earlier
+                # frame (or an earlier draw in this one). No upload at all --
+                # this is the whole point of the key.
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("image-upload-skipped key={effective_key} bytes={src_size} src={keyed}")
+                return self._finish_image_composite(keyed, x, y, dst_w, dst_h, src_w, src_h,
+                    opacity_milli, composite_mode)
+        val _t_alloc = vulkan_timing_now_us()
+        var d_src = if self.frame_batching_enabled:
+            self._acquire_image_source(src_size)
+        else:
+            vulkan_sffi_alloc_buffer(src_size, 0x80)
+        if (d_src <= 0 and self.frame_batching_enabled and
+            self._image_source_pool_is_fully_pending()):
+            # A full source pool means all slots are still dependencies of the
+            # current command buffer.  Flush once, then retry acquisition so a
+            # large image-heavy frame can continue without a CPU fallback.
+            val flushed = self._flush_pending_compute_at("_draw_image_composite_native_impl")
+            if flushed < 0:
+                return -1
+            if flushed > 0:
+                d_src = self._acquire_image_source(src_size)
         if d_src <= 0:
+            vulkan_timing_add(VK_T_IMAGE_ALLOC, _t_alloc)
+            vulkan_image_reason_note(VK_IMG_R_SOURCE)
             return 0
-        val source_bytes = _pixels_to_bytes(pixels, pixel_count)
-        if source_bytes.len().to_i64() != src_size or not vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0):
-            vulkan_sffi_free_buffer(d_src)
+        vulkan_timing_add(VK_T_IMAGE_ALLOC, _t_alloc)
+
+        # FASTEST when it runs: `pixels` is already `[u32]`, so the typed lane
+        # uploads the caller's own words and performs NO host packing at all --
+        # the runtime widens each word to four little-endian bytes, byte for
+        # byte what the interpreted loop below produces. That loop is
+        # `4 * pixel_count` interpreted array stores (2.7M for one 900x760
+        # full-surface composite) and is the measured dominant term of this
+        # function. Opt-in via `SIMPLE_VK_IMAGE_UPLOAD=u32`; see
+        # `_VULKAN_IMAGE_UPLOAD_U32_REQUESTED` for why it cannot be the default.
+        var upload_ok = false
+        if vulkan_image_upload_u32_requested():
+            upload_ok = vulkan_sffi_copy_to_buffer_u32(d_src, pixels, 0)
+            vulkan_image_upload_note("u32",
+                if upload_ok: "typed-requested" else: "typed-declined")
+        if upload_ok:
+            self.image_source_upload_count = self.image_source_upload_count + 1
+            self.image_source_upload_bytes = self.image_source_upload_bytes + src_size
+            self._record_image_source_key(d_src, effective_key)
+            return self._finish_image_composite(d_src, x, y, dst_w, dst_h, src_w, src_h,
+                opacity_milli, composite_mode)
+        if vulkan_image_upload_u32_requested():
+            # The typed lane declined (native array ABI). Fall through to the
+            # byte path, which is behaviour-preserving, only slower.
+            vulkan_image_upload_note("bytes", "typed-declined")
+        else:
+            vulkan_image_upload_note("bytes", "typed-not-requested")
+
+        val scratch_reused = self.image_upload_scratch.len().to_i64() == src_size
+        val _t_pack = vulkan_timing_now_us()
+        val scratch_prepared = self._prepare_image_upload(pixels, pixel_count)
+        vulkan_timing_add(VK_T_IMAGE_PACK, _t_pack)
+        upload_ok = scratch_prepared
+        if scratch_prepared:
+            # Timed separately from the composite total: it hands the staging
+            # array across the SFFI boundary. Since `_prepare_image_upload`
+            # sizes that array to EXACTLY `src_size`, the prefix is the whole
+            # array and the interpreter-ABI admission test
+            # (`byte_count == data.len()`) holds, so the exact-size byte
+            # fallback below is dead for every admitted size instead of firing
+            # on 262 of 264 composites.
+            val _t_up = vulkan_timing_now_us()
+            upload_ok = vulkan_sffi_copy_to_buffer_prefix(
+                d_src, self.image_upload_scratch, src_size, 0)
+            vulkan_timing_add(VK_T_UPLOAD, _t_up)
+            if upload_ok and scratch_reused:
+                # Count only successful prefix uploads that avoided allocating
+                # the legacy exact-size payload, not merely packing attempts.
+                self.image_upload_scratch_reuse_count = self.image_upload_scratch_reuse_count + 1
+            elif not upload_ok:
+                # The prefix facade is unavailable on this ABI lane; the
+                # exact-size fallback below remains behavior-preserving.
+                self.image_upload_scratch_fallback_count = self.image_upload_scratch_fallback_count + 1
+        if not upload_ok:
+            # Preserve the exact-size legacy path for oversized images and
+            # interpreter array ABIs that cannot upload a prefix.
+            val _t_bf = vulkan_timing_now_us()
+            vulkan_image_pack_note_byte_fallback()
+            val source_bytes = _pixels_to_bytes(pixels, pixel_count)
+            upload_ok = source_bytes.len().to_i64() == src_size and
+                vulkan_sffi_copy_to_buffer(d_src, source_bytes, 0)
+            vulkan_timing_add(VK_T_IMAGE_BYTE_FALLBACK, _t_bf)
+        if not upload_ok:
+            self._release_image_source(d_src)
+            vulkan_image_reason_note(VK_IMG_R_UPLOAD)
             return 0
+        self.image_source_upload_count = self.image_source_upload_count + 1
+        self.image_source_upload_bytes = self.image_source_upload_bytes + src_size
+        self._record_image_source_key(d_src, effective_key)
+        self._finish_image_composite(d_src, x, y, dst_w, dst_h, src_w, src_h,
+            opacity_milli, composite_mode)
+
+    me _finish_image_composite(d_src: i64, x: i32, y: i32, dst_w: i32, dst_h: i32,
+                               src_w: i32, src_h: i32, opacity_milli: i32,
+                               composite_mode: i32) -> i64:
+        """Descriptor + dispatch + damage, once a source buffer holds the image.
+
+        Split out so the typed `[u32]` upload and the packed byte upload share
+        one dispatch path instead of duplicating it -- the two lanes must be
+        byte-identical downstream or the opt-in flag would change pixels.
+        """
+        val _t_disp = vulkan_timing_now_us()
         val pc = _pack_image_composite_pc(x, y, dst_w, dst_h, self.w, self.h,
             self.clip_x, self.clip_y, self.clip_w, self.clip_h, self.clip_enabled,
             opacity_milli, composite_mode, src_w, src_h)
@@ -1036,9 +1744,18 @@ impl RenderBackend for VulkanBackend:
             vulkan_order_trace("image-composite x={x} y={y} w={dst_w} h={dst_h} mode={composite_mode} rc={dispatched} fb={self.d_framebuffer}")
         if dispatched > 0:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
+            # Image composite also bypasses the dispatch funnel, but its
+            # destination rect IS known exactly, so fold it rather than widen.
+            self.hint_damage(_i64(x), _i64(y), _i64(dst_w), _i64(dst_h))
+            self.consume_damage_hint()
             self.mark_device_content_changed()
             if dispatched == VK_DISPATCH_COMPLETED_INELIGIBLE:
                 self.mark_cpu_fallback("image-composite-cleanup-ineligible")
+            vulkan_image_reason_note(VK_IMG_R_OK)
+        else:
+            vulkan_image_reason_note(VK_IMG_R_DISPATCH)
+        vulkan_timing_add(VK_T_IMAGE_DISPATCH, _t_disp)
         dispatched
 
     me _draw_image_native(x: i32, y: i32, w: i32, h: i32, pixels: [u32]) -> i64:
@@ -1071,6 +1788,7 @@ impl RenderBackend for VulkanBackend:
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if self.completion_unknown: return
+        _vk_stat_image_op(w, h, false)
         val native_status = self._draw_image_native(x, y, w, h, pixels)
         if native_status > 0:
             return
@@ -1078,7 +1796,7 @@ impl RenderBackend for VulkanBackend:
             self.mark_cpu_fallback("image-copy-completion-unknown")
             self.completion_unknown = true
             return
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("draw_image")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
@@ -1154,7 +1872,7 @@ impl RenderBackend for VulkanBackend:
         """
         if self.completion_unknown:
             return false
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("submit_batch")
         if pending_status < 0:
             self.completion_unknown = true
             return false
@@ -1226,7 +1944,7 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown:
             self.frame_fallback_reason = "completion-unknown"
             return false
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("_present_device")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
@@ -1287,7 +2005,7 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown:
             self.frame_fallback_reason = "completion-unknown"
             return false
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("finalize_compute_frame_no_readback")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
@@ -1342,6 +2060,160 @@ impl RenderBackend for VulkanBackend:
     me _clear_present_damage():
         self.present_damage_rects = []
         self.present_damage_valid = false
+        # Every caller of this is a frame boundary (present / device present /
+        # finalize), so the accumulated draw-call union retires with it.
+        self._clear_frame_damage()
+
+    me hint_image_key(key: i64):
+        """Name the identity+generation of the NEXT image composite's pixels.
+
+        Producer-supplied, computed ONCE where the image is produced or decoded
+        -- never a per-frame digest of `pixels`, which would cost more than the
+        upload it saves. A non-zero key promises: same key => byte-identical
+        pixels. Zero (the default) means "unknown", and every unkeyed image
+        uploads exactly as before. Consumed once, by
+        `_draw_image_composite_native_impl`; see `hint_damage` for the same
+        arm-then-consume shape.
+        """
+        self.pending_image_key = key
+
+    me hint_damage(x: i64, y: i64, w: i64, h: i64):
+        """Publish the destination rect of the draw call about to dispatch.
+
+        The dispatch funnel consumes this; an absent hint is read as "this
+        primitive's footprint is unknown" and marks the whole surface damaged.
+        Fail-safe by construction: forgetting a hint costs speed, never
+        correctness."""
+        self.pending_damage_hint = true
+        self.pending_damage_hx = x
+        self.pending_damage_hy = y
+        self.pending_damage_hw = w
+        self.pending_damage_hh = h
+
+    me note_damage_full():
+        self.pending_damage_hint = false
+        self.frame_damage_valid = true
+        self.frame_damage_full = true
+
+    me consume_damage_hint():
+        """Fold the pending hint into the frame union, or widen to full."""
+        if not self.pending_damage_hint:
+            self.note_damage_full()
+            return
+        val hx = self.pending_damage_hx
+        val hy = self.pending_damage_hy
+        val hw = self.pending_damage_hw
+        val hh = self.pending_damage_hh
+        self.pending_damage_hint = false
+        if hw <= 0 or hh <= 0:
+            # A degenerate footprint paints nothing; leave the union untouched
+            # rather than widening it to the whole surface.
+            return
+        # Clip to the surface. A rect entirely outside it damages nothing.
+        var x0 = if hx < 0: 0 else: hx
+        var y0 = if hy < 0: 0 else: hy
+        var x1 = hx + hw
+        var y1 = hy + hh
+        if x1 > _i64(self.w): x1 = _i64(self.w)
+        if y1 > _i64(self.h): y1 = _i64(self.h)
+        if x1 <= x0 or y1 <= y0:
+            return
+        # An active clip can only SHRINK the painted area, so ignoring it keeps
+        # the union conservative (a superset), which is the safe direction.
+        if not self.frame_damage_valid or self.frame_damage_full:
+            if self.frame_damage_full:
+                return
+            self.frame_damage_valid = true
+            self.frame_damage_x0 = x0
+            self.frame_damage_y0 = y0
+            self.frame_damage_x1 = x1
+            self.frame_damage_y1 = y1
+            return
+        if x0 < self.frame_damage_x0: self.frame_damage_x0 = x0
+        if y0 < self.frame_damage_y0: self.frame_damage_y0 = y0
+        if x1 > self.frame_damage_x1: self.frame_damage_x1 = x1
+        if y1 > self.frame_damage_y1: self.frame_damage_y1 = y1
+
+    me _clear_frame_damage():
+        self.frame_damage_valid = false
+        self.frame_damage_full = false
+        self.frame_damage_x0 = 0
+        self.frame_damage_y0 = 0
+        self.frame_damage_x1 = 0
+        self.frame_damage_y1 = 0
+        self.pending_damage_hint = false
+
+    fn frame_damage_rect_px() -> i64:
+        """Pixels in this frame's damage union (evidence counter)."""
+        self.damage_rect_px
+
+    fn frame_mirror_copy_iterations() -> i64:
+        """Interpreted element writes spent patching the host mirror."""
+        self.mirror_copy_iterations
+
+    me _refresh_host_frame_damage() -> bool:
+        """Re-download ONLY this frame's damage union into the host mirror.
+
+        Returns false whenever the damage-scoped route is not applicable or
+        not profitable, so every caller keeps the full refresh as its fallback.
+
+        The row download uses the interpreter-legal scalars-in / array-out
+        primitive F8 added (`vulkan_sffi_readback_u32_alloc`), one native call
+        per damaged row: that is the only shape this lane marshals, and it is
+        what keeps the byte->u32 unpack out of interpreted code. The scatter
+        into `host_buf` is still an interpreted element write per damaged
+        pixel -- there is NO extern on this lane that takes a destination array
+        -- but it is bounded by the damage area instead of the surface, which
+        is the whole point. `mirror_copy_iterations` reports it honestly."""
+        if not self.host_mirror_valid or not self.frame_damage_valid:
+            return false
+        if self.frame_damage_full:
+            return false
+        val px_total = _i64(self.w) * _i64(self.h)
+        if self.host_buf.len().to_i64() != px_total:
+            return false
+        val x0 = self.frame_damage_x0
+        val y0 = self.frame_damage_y0
+        val rw = self.frame_damage_x1 - x0
+        val rh = self.frame_damage_y1 - y0
+        if rw <= 0 or rh <= 0:
+            return false
+        if rh > 16384:
+            return false
+        val area = rw * rh
+        # Below half the surface the per-row call overhead is repaid many times
+        # over; at or above it the single contiguous full download is cheaper.
+        if area * 2 >= px_total:
+            return false
+        var row: i64 = 0
+        var iterations: i64 = 0
+        while row < rh:
+            val src_px = (y0 + row) * _i64(self.w) + x0
+            val band = vulkan_sffi_readback_u32_alloc(
+                self.d_framebuffer, rw.to_i32(), src_px * 4)
+            if band.len().to_i64() != rw:
+                return false
+            var col: i64 = 0
+            while col < rw:
+                self.host_buf[src_px + col] = band[col]
+                col = col + 1
+            iterations = iterations + rw
+            row = row + 1
+        # The mirror identity must still describe the WHOLE surface. This is one
+        # native fold over device memory (no interpreted loop and no second
+        # unpack), so it stays honest without reintroducing the cost this path
+        # exists to remove. A lane without the native arm returns -1 and the
+        # caller falls back to the full refresh.
+        val checksum = vulkan_sffi_readback_u32_alloc_checksum(
+            self.d_framebuffer, self.w * self.h, 0)
+        if checksum < 0:
+            return false
+        self.last_host_checksum = checksum
+        self.damage_rect_px = area
+        self.mirror_copy_iterations = iterations
+        self.present_readback_bytes = area * 4
+        self.present_readback_rect_count = 1
+        true
 
     me _refresh_host_full() -> bool:
         val fb_size = _i64(self.w) * _i64(self.h) * 4
@@ -1353,10 +2225,20 @@ impl RenderBackend for VulkanBackend:
         # 480,000-element allocation. See
         # doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md.
         val px_count = self.w * self.h
-        if self.host_buf.len() != px_count:
-            self.host_buf = [0u32; px_count]
-        val checksum = vulkan_sffi_readback_u32_into(
-            self.host_buf, self.d_framebuffer, px_count, 0)
+        # Bulk native unpack when the interpreter lane offers it; the
+        # caller-owned-destination facade stays the fallback on every other
+        # lane and on any failure of this one.
+        val bulk = vulkan_sffi_readback_u32_alloc(self.d_framebuffer, px_count, 0)
+        var checksum: i64 = -1
+        if bulk.len() == px_count:
+            self.host_buf = bulk
+            checksum = vulkan_sffi_readback_u32_alloc_checksum(
+                self.d_framebuffer, px_count, 0)
+        else:
+            if self.host_buf.len() != px_count:
+                self.host_buf = [0u32; px_count]
+            checksum = vulkan_sffi_readback_u32_into(
+                self.host_buf, self.d_framebuffer, px_count, 0)
         if checksum < 0:
             self._mark_readback_length_failed()
             return false
@@ -1365,6 +2247,11 @@ impl RenderBackend for VulkanBackend:
         self.present_readback_bytes = fb_size
         self.present_readback_rect_count = 1
         self.present_full_readback_count += 1
+        self.host_mirror_frame_fresh = true
+        # The whole surface now matches the device, so nothing is outstanding.
+        self.damage_rect_px = _i64(self.w) * _i64(self.h)
+        self.mirror_copy_iterations = 0
+        self._clear_frame_damage()
         true
 
     me _refresh_host_damage() -> bool:
@@ -1398,15 +2285,44 @@ impl RenderBackend for VulkanBackend:
             expected_pixels += pixel_count
             total_rows += rh
             i += 4
-        val packed = vulkan_sffi_read_buffer_regions_bytes(
-            self.d_framebuffer, regions)
-        val packed_pixels = _bytes_to_pixel_array(
-            packed, expected_pixels.to_i32())
+        # Prefer the native per-row download used by `_refresh_host_frame_damage`:
+        # one call per damaged row, so the byte->u32 unpack never runs
+        # interpreted. `_bytes_to_pixel_array` below is that same unpack done
+        # one pixel at a time and is kept only as the fallback for lanes that
+        # do not offer the native arm.
+        var packed_pixels: [u32] = []
+        var native_rows = true
+        i = 0
+        while i < self.present_damage_rects.len():
+            val nx = self.present_damage_rects[i]
+            val ny = self.present_damage_rects[i + 1]
+            val nw = self.present_damage_rects[i + 2]
+            val nh = self.present_damage_rects[i + 3]
+            var nrow: i64 = 0
+            while nrow < nh and native_rows:
+                val src_px = (ny + nrow) * _i64(self.w) + nx
+                val band = vulkan_sffi_readback_u32_alloc(
+                    self.d_framebuffer, nw.to_i32(), src_px * 4)
+                if band.len().to_i64() != nw:
+                    native_rows = false
+                else:
+                    var bcol: i64 = 0
+                    while bcol < nw:
+                        packed_pixels.push(band[bcol])
+                        bcol = bcol + 1
+                nrow = nrow + 1
+            i += 4
+        if not native_rows or packed_pixels.len().to_i64() != expected_pixels:
+            val packed = vulkan_sffi_read_buffer_regions_bytes(
+                self.d_framebuffer, regions)
+            packed_pixels = _bytes_to_pixel_array(
+                packed, expected_pixels.to_i32())
         if packed_pixels.len().to_i64() != expected_pixels:
             self.last_error = "Vulkan damaged framebuffer readback byte count mismatch"
             return false
 
         var source_index: i64 = 0
+        var patched: i64 = 0
         i = 0
         while i < self.present_damage_rects.len():
             val x = self.present_damage_rects[i].to_i32()
@@ -1421,7 +2337,10 @@ impl RenderBackend for VulkanBackend:
                     source_index += 1
                     col += 1
                 row += 1
+            patched = patched + _i64(rw) * _i64(rh)
             i += 4
+        self.damage_rect_px = expected_pixels
+        self.mirror_copy_iterations = patched
         self.present_readback_bytes = expected_pixels * 4
         self.present_readback_rect_count = self.present_damage_rects.len().to_i64() / 4
         true
@@ -1437,7 +2356,7 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown:
             self.frame_fallback_reason = "completion-unknown"
             return
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("present")
         if trace_present:
             vulkan_order_trace("present flush_us={time_now_unix_micros() - pt0}")
         if pending_status <= 0:
@@ -1454,6 +2373,31 @@ impl RenderBackend for VulkanBackend:
         var pt1: i64 = 0
         if trace_present:
             pt1 = time_now_unix_micros()
+        if self.host_mirror_frame_fresh and self.host_mirror_valid:
+            # A readback already downloaded this frame's surface into host_buf
+            # (draw_ir_adv reads pixels BEFORE present, so strict device
+            # provenance stays satisfiable). The receipt fields below stay
+            # truthful -- the mirror IS refreshed from the device for this
+            # frame -- it is simply not downloaded twice.
+            # Report what the readback ACTUALLY transferred. A damage-scoped
+            # readback moved only its rect, and overwriting that with the full
+            # surface size would make the receipt describe a download that did
+            # not happen.
+            if self.readback_frame_bytes > 0:
+                self.present_readback_bytes = self.readback_frame_bytes
+                self.present_readback_rect_count = self.readback_frame_rects
+            else:
+                self.present_readback_bytes = _i64(self.w) * _i64(self.h) * 4
+                self.present_readback_rect_count = 1
+            self.frame_present_mode = "host-cache-from-readback"
+            self.dirty = false
+            self.frame_readback_completed = true
+            self.frame_host_cache_refresh_completed = true
+            self.host_mirror_frame_fresh = false
+            self.readback_frame_bytes = 0
+            self.readback_frame_rects = 0
+            self._clear_present_damage()
+            return
         if self.present_damage_valid and self.host_mirror_valid:
             if not self._refresh_host_damage():
                 self.frame_fallback_reason = "damaged-host-cache-refresh-failed"
@@ -1475,7 +2419,12 @@ impl RenderBackend for VulkanBackend:
         self._clear_present_damage()
 
     me read_pixels() -> [u32]:
-        self.read_pixels_with_source().pixels
+        if not vulkan_timing_enabled():
+            return self.read_pixels_with_source().pixels
+        val _t = vulkan_timing_now_us()
+        val out = self.read_pixels_with_source().pixels
+        vulkan_timing_add(VK_T_READBACK, _t)
+        out
 
     fn sample_host_mirror(indices: [i64]) -> [u32]:
         """Copy bounded evidence samples while the physical owner is known.
@@ -1493,6 +2442,7 @@ impl RenderBackend for VulkanBackend:
         samples
 
     me read_pixels_with_source() -> Engine2DReadback:
+        vulkan_stat_note_readback(_i64(self.w) * _i64(self.h))
         if vulkan_order_trace_enabled():
             vulkan_order_trace("readback-entry dirty={self.dirty} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown} fb={self.d_framebuffer}")
         if self.completion_unknown:
@@ -1507,7 +2457,7 @@ impl RenderBackend for VulkanBackend:
         # reflected an earlier (or empty) frame. Flush here too, exactly as
         # present() does, so read_pixels()/read_pixels_with_source() are
         # correct regardless of whether present() was ever called.
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("read_pixels_with_source")
         if pending_status < 0:
             self.completion_unknown = true
             return engine2d_readback([], "completion_unknown")
@@ -1516,13 +2466,64 @@ impl RenderBackend for VulkanBackend:
         # fn contract forbids self mutation: dirty reads fetch straight from the
         # device; present() owns the host_buf cache refresh.
         if self.dirty:
+            self.damage_rect_px = 0
+            self.mirror_copy_iterations = 0
+            # Damage-scoped route FIRST: when a valid mirror from the previous
+            # frame survives and this frame's draw calls named a sub-rect, only
+            # that rect is re-downloaded. The mirror and the returned pixels
+            # share one array here exactly as the full arm below does (F8's
+            # readback/present/readback spec pins that consumers treat a
+            # readback as read-only), so no full-surface copy is needed.
+            if self._refresh_host_frame_damage():
+                # Deliberately does NOT clear `dirty` or the frame union, so
+                # present() reaches the same `host_mirror_frame_fresh` dedup arm
+                # the full route reaches and the frame receipt stays identical
+                # for both routes. Clearing `dirty` here sent present() down its
+                # `not dirty` noop arm, whose receipt reports no readback at all.
+                self.host_mirror_frame_fresh = true
+                self.readback_frame_bytes = self.damage_rect_px * 4
+                self.readback_frame_rects = 1
+                if self.cpu_fallback_used:
+                    return engine2d_readback(self.host_buf, "cpu_fallback")
+                return Engine2DReadback(
+                    pixels: self.host_buf, source: "device_readback",
+                    backend_handle: self.d_framebuffer,
+                    device_identity: self.session.device,
+                    pixel_count: self.host_buf.len().to_i64(),
+                    checksum: self.last_host_checksum)
             # Fill a local buffer in place; see _refresh_host_full for why the
             # destination is passed in rather than returned in a tuple.
-            var pixels: [u32] = [0u32; self.w * self.h]
-            val checksum = vulkan_sffi_readback_u32_into(
-                pixels, self.d_framebuffer, self.w * self.h, 0)
+            val bulk_px = vulkan_sffi_readback_u32_alloc(
+                self.d_framebuffer, self.w * self.h, 0)
+            var pixels: [u32] = []
+            var checksum: i64 = -1
+            if bulk_px.len() == self.w * self.h:
+                pixels = bulk_px
+                checksum = vulkan_sffi_readback_u32_alloc_checksum(
+                    self.d_framebuffer, self.w * self.h, 0)
+            else:
+                pixels = [0u32; self.w * self.h]
+                checksum = vulkan_sffi_readback_u32_into(
+                    pixels, self.d_framebuffer, self.w * self.h, 0)
             if checksum < 0:
                 return engine2d_readback([], "readback_failed")
+            # Seed the host mirror from the download that just happened. Before
+            # this, an offscreen frame that read pixels and then presented paid
+            # for the SAME surface twice -- 48% of a 900x760 web frame -- to
+            # refresh a mirror no offscreen caller reads. The mirror and this
+            # readback share one array: every mirror writer rebinds or writes
+            # through `self.host_buf`, and a readback's pixels are read-only to
+            # its consumers (pinned by the readback/present/readback spec).
+            if pixels.len() == self.w * self.h:
+                self.host_buf = pixels
+                self.host_mirror_valid = true
+                self.last_host_checksum = checksum
+                self.host_mirror_frame_fresh = true
+                # A full download re-establishes the whole surface.
+                self.damage_rect_px = _i64(self.w) * _i64(self.h)
+                self.readback_frame_bytes = self.damage_rect_px * 4
+                self.readback_frame_rects = 1
+                self._clear_frame_damage()
             if self.cpu_fallback_used:
                 return engine2d_readback(pixels, "cpu_fallback")
             return Engine2DReadback(
@@ -1530,6 +2531,9 @@ impl RenderBackend for VulkanBackend:
                 backend_handle: self.d_framebuffer,
                 device_identity: self.session.device,
                 pixel_count: pixels.len().to_i64(), checksum: checksum)
+        # A clean frame downloads nothing and patches nothing.
+        self.damage_rect_px = 0
+        self.mirror_copy_iterations = 0
         var copy: [u32] = [0u32; self.w * self.h]
         # One native slot memcpy instead of an interpreted per-pixel loop. The
         # loop was ~482 ms per 7680x4320 frame — more than half the frame, and
@@ -1646,7 +2650,16 @@ impl RenderBackend for VulkanBackend:
         emu_draw_rect_blend(self, x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if not vulkan_timing_enabled():
+            self._draw_image_blend_impl(x, y, w, h, pixels)
+            return
+        val _t = vulkan_timing_now_us()
+        self._draw_image_blend_impl(x, y, w, h, pixels)
+        vulkan_timing_add(VK_T_IMAGE_BLEND, _t)
+
+    me _draw_image_blend_impl(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         if self.completion_unknown: return
+        _vk_stat_image_op(w, h, true)
         val native_status = self._draw_image_blend_native(x, y, w, h, pixels, 1000)
         if native_status > 0:
             return
@@ -1694,10 +2707,209 @@ impl RenderBackend for VulkanBackend:
         if self.completion_unknown: return
         emu_draw_triangle_outline(self, x1, y1, x2, y2, x3, y3, color, thickness)
 
+    me draw_ir_apply_glass_material_device(config: Engine2dGlassMaterialConfig) -> bool:
+        """Paint the whole glass rect on the device, with no host round trip.
+
+        This replaces the lane's single largest CPU<->GPU boundary crossing:
+        the CPU twin reads the ENTIRE framebuffer back to the host, blurs and
+        tints one rect there, and uploads that rect again -- one full-surface
+        readback plus one upload per glass rect per frame. The kernel reads the
+        framebuffer where it already lives.
+
+        Fail-closed on every path: a `false` return has left the framebuffer
+        untouched, so the caller's CPU twin still paints the identical pixels.
+        The validation below deliberately MIRRORS
+        `engine2d_draw_ir_glass_material_pixels`' own guards -- a config that
+        one rejects must not be painted by the other, or the two lanes differ.
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
+            self.last_error = "glass-device-state-unavailable"
+            return false
+        if self.pipe_blit <= 0 or self.session.pipe_glass_material <= 0:
+            self.last_error = if self.session.glass_error != "":
+                self.session.glass_error
+            else:
+                "glass-device-pipeline-unavailable"
+            return false
+        if self.mask_buf.len() > 0:
+            # A mask changes which pixels the copy-back may touch; the CPU twin
+            # has no such concept, so parity is not established here.
+            self.last_error = "glass-device-mask-unsupported"
+            return false
+        if (config.framebuffer_width != self.w or config.framebuffer_height != self.h or
+            config.width <= 0 or config.height <= 0 or config.x < 0 or config.y < 0 or
+            _i64(config.x) + _i64(config.width) > _i64(self.w) or
+            _i64(config.y) + _i64(config.height) > _i64(self.h)):
+            self.last_error = "glass-device-geometry-rejected"
+            return false
+        val pixel_count = _i64(config.width) * _i64(config.height)
+        if pixel_count <= 0 or pixel_count > ENGINE2D_GLASS_MAX_WORK_PIXELS:
+            self.last_error = "glass-device-work-budget-exceeded"
+            return false
+
+        val out_bytes = pixel_count * 4
+        # One acquisition serves both roles: the kernel's output buffer and,
+        # immediately after, the image source of the copy-back -- so the pool
+        # owns its lifetime exactly as it does for an ordinary image upload.
+        var d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0 and self._image_source_pool_is_fully_pending():
+            val retried = self._flush_pending_compute_at("glass-device-retry")
+            if retried < 0:
+                self.completion_unknown = true
+                self.last_error = "glass-device-flush-unknown"
+                return false
+            if retried > 0:
+                d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0:
+            self.last_error = "glass-device-output-unavailable"
+            return false
+
+        val blur = if config.blur_radius < 0:
+            0
+        elif config.blur_radius > 4:
+            4
+        else:
+            config.blur_radius
+        val pc = _pack_glass_material_pc(
+            self.w, self.h, config.x, config.y, config.width, config.height,
+            engine2d_glass_corner_radius(config), blur,
+            config.saturation_milli, config.surface_alpha_milli,
+            config.surface_color, config.gradient_from, config.gradient_to,
+            config.gradient_enabled, config.gradient_layered_over_surface)
+        val gx = (_i64(config.width) + 15) / 16
+        val gy = (_i64(config.height) + 15) / 16
+        # Recorded rather than submitted, for the same reason as the blur twin
+        # above: every dispatch already carries a full memory barrier.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_glass_material, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_glass_material, d_out, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("glass-device x={config.x} y={config.y} w={config.width} h={config.height} blur={blur} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
+            if produced < 0:
+                self.completion_unknown = true
+            self.last_error = "glass-device-dispatch-failed"
+            return false
+
+        # Reuse the ordinary image-composite tail so the copy-back is exactly
+        # what `draw_image(x, y, w, h, pixels)` does today -- same clip, same
+        # damage and dirty bookkeeping -- with the pixels already on the device.
+        val composited = self._finish_image_composite(
+            d_out, config.x, config.y, config.width, config.height,
+            config.width, config.height, 1000, VK_IMAGE_COMPOSITE_COPY)
+        if composited <= 0:
+            if composited < 0:
+                self.completion_unknown = true
+            self.last_error = "glass-device-composite-failed"
+            return false
+        vulkan_stat_note_device_glass_material()
+        self.last_error = ""
+        true
+
+    me _draw_blur_rect_device(x: i32, y: i32, w: i32, h: i32, radius: i32) -> bool:
+        """Box-blur a rect entirely on the device. False = nothing was drawn.
+
+        The host twin this replaces reads the ENTIRE framebuffer back, blurs
+        one rect on the CPU and uploads that rect again -- a full-surface
+        readback per blurred rect per frame, and the largest remaining
+        CPU<->GPU crossing on the web renderer's Vulkan lane. It was also a
+        SILENT one: the flush it performs succeeds, so no cpu-fallback reason
+        was ever recorded for it.
+
+        Fail-closed: every `false` return has left the framebuffer untouched,
+        so the caller falls through to the host twin and paints the identical
+        pixels (proven byte-for-byte by the parity spec).
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
+            return false
+        if self.pipe_blit <= 0 or self.session.pipe_blur_rect <= 0:
+            return false
+        if self.mask_buf.len() > 0:
+            return false
+        # Mirror emu_draw_blur_rect()'s own guards exactly: a rect it would
+        # decline must not be painted here either.
+        if w <= 0 or h <= 0 or radius <= 0:
+            return false
+        val pixel_count = _i64(w) * _i64(h)
+        if pixel_count <= 0 or pixel_count > 4294967295 or pixel_count > 9223372036854775807 / 4:
+            return false
+
+        val out_bytes = pixel_count * 4
+        # One acquisition serves both roles: the kernel's output buffer and,
+        # immediately after, the image source of the copy-back, so the pool
+        # owns its lifetime exactly as for an ordinary image upload.
+        var d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0 and self._image_source_pool_is_fully_pending():
+            val retried = self._flush_pending_compute_at("blur-device-retry")
+            if retried < 0:
+                self.completion_unknown = true
+                return false
+            if retried > 0:
+                d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0:
+            return false
+
+        val pc = _pack_blur_rect_pc(x, y, w, h, self.w, self.h, radius)
+        val gx = (_i64(w) + 15) / 16
+        val gy = (_i64(h) + 15) / 16
+        # FROZEN PRECONDITION for reusing the image-composite enqueue with a
+        # foreign pipeline: blur_rect.comp, glass_material.comp and _glsl_blit
+        # all declare the SAME descriptor set layout -- exactly two storage
+        # buffers, 0 = framebuffer and 1 = source -- and all fit the 64-byte
+        # push-constant range. The batcher's warm descriptor pool hands out
+        # sets built for the blit pipeline, which are layout-compatible with
+        # these only while that holds. A third binding, or a different binding
+        # order, means a new pool, not a new caller here.
+        #
+        # RECORDED, not submitted. The kernel samples framebuffer content that
+        # earlier dispatches in this same command buffer produced, and that is
+        # safe without a flush because `rt_vulkan_dispatch` emits a full memory
+        # barrier after EVERY dispatch (vulkan_graphics_runtime_compute.rs:480-494).
+        # Flushing here instead would cost one queue submission per blurred
+        # rect -- which is exactly what the host path cost, so the boundary
+        # crossing would be gone while the submit count stood still.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_blur_rect, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_blur_rect, d_out, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("blur-device x={x} y={y} w={w} h={h} r={radius} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
+            if produced < 0:
+                self.completion_unknown = true
+            return false
+
+        # Same tail as an ordinary image upload, so the copy-back is exactly
+        # what emu_draw_blur_rect's `core.draw_image(x, y, w, h, temp)` does --
+        # same clip, same damage and dirty bookkeeping.
+        val composited = self._finish_image_composite(
+            d_out, x, y, w, h, w, h, 1000, VK_IMAGE_COMPOSITE_COPY)
+        if composited <= 0:
+            if composited < 0:
+                self.completion_unknown = true
+            return false
+        vulkan_stat_note_device_blur_rect()
+        true
+
     me draw_blur_rect(x: i32, y: i32, w: i32, h: i32, radius: i32):
         if self.completion_unknown: return
+        if self._draw_blur_rect_device(x, y, w, h, radius):
+            return
         if not self._flush_for_host_fallback("blur-host-readback"):
             return
+        # Reached only when the device kernel declined. Record it: this is a
+        # full-surface readback plus an upload, and it used to happen with
+        # cpu_fallback_count reading 0.
+        self.mark_cpu_fallback("glass-device-unavailable")
         emu_draw_blur_rect(self, x, y, w, h, radius)
 
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
@@ -1746,6 +2958,11 @@ impl Engine2DExtended for VulkanBackend:
         self.pipe_triangle = 0
         self.pipe_gradient = 0
         self.pipe_blit = 0
+        # The session owns the batch pipeline and destroys it; the surface only
+        # drops its copy of the handle and its own rect-list buffers.
+        self.pipe_rect_batch = 0
+        self.rect_batch_error = "not-installed"
+        self._free_rect_batch_pool()
 
     me install_font_atlas_pipeline(spirv_bytes: [u8]) -> VulkanFontPipelineEvidence:
         """Install through the retained shared session; standalone mode fails closed."""
@@ -1778,6 +2995,8 @@ impl Engine2DExtended for VulkanBackend:
             return
         if not self.initialized:
             self.dirty = true
+            self.host_mirror_frame_fresh = false
+            self.note_damage_full()
             self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
             self.last_text_fallback_reason = "backend-uninitialized"
             return
@@ -1787,3 +3006,573 @@ impl Engine2DExtended for VulkanBackend:
         if text_buf.is_empty():
             return
         self.draw_image(x, y, text_buf.width, text_buf.height, text_buf.pixels)
+
+# ---------------------------------------------------------------------------
+# Draw-kind census (process-global, instrumentation only)
+# ---------------------------------------------------------------------------
+# Counts what each Vulkan draw entry point actually DID, split by the branch it
+# took, so a page probe can attribute a frame instead of guessing. Module-level
+# rather than per-backend fields because a probe reads them without holding the
+# backend, and exactly one Vulkan surface is live on the page lane.
+#
+# The load-bearing split is `rect_alpha_blend`: `draw_rect_filled` turns ANY
+# colour with alpha < 255 into a full `draw_image_blend`, which on this lane is a
+# staging upload + dispatch + fence. `rect_alpha_1x1` counts the degenerate
+# single-pixel case that anti-aliased shape decomposition emits.
+
+var _vk_stat_rect_opaque: i64 = 0
+var _vk_stat_rect_alpha_blend: i64 = 0
+var _vk_stat_rect_alpha_1x1: i64 = 0
+var _vk_stat_rect_masked: i64 = 0
+var _vk_stat_rect_list: i64 = 0
+var _vk_stat_image_blend: i64 = 0
+var _vk_stat_image_blend_small: i64 = 0
+var _vk_stat_image: i64 = 0
+var _vk_stat_text: i64 = 0
+
+pub fn vulkan_draw_census_reset():
+    _vk_stat_rect_opaque = 0
+    _vk_stat_rect_alpha_blend = 0
+    _vk_stat_rect_alpha_1x1 = 0
+    _vk_stat_rect_masked = 0
+    _vk_stat_rect_list = 0
+    _vk_stat_image_blend = 0
+    _vk_stat_image_blend_small = 0
+    _vk_stat_image = 0
+    _vk_stat_text = 0
+
+pub fn vulkan_draw_census_line() -> text:
+    ("rect_opaque={_vk_stat_rect_opaque}" +
+     " rect_alpha_blend={_vk_stat_rect_alpha_blend}" +
+     " rect_alpha_1x1={_vk_stat_rect_alpha_1x1}" +
+     " rect_masked={_vk_stat_rect_masked}" +
+     " rect_list={_vk_stat_rect_list}" +
+     " image_blend={_vk_stat_image_blend}" +
+     " image_blend_le16px={_vk_stat_image_blend_small}" +
+     " image={_vk_stat_image}" +
+     " text={_vk_stat_text}")
+
+fn _vk_stat_rect(w: i32, h: i32, alpha: bool, masked: bool):
+    if masked:
+        _vk_stat_rect_masked = _vk_stat_rect_masked + 1
+    elif alpha:
+        _vk_stat_rect_alpha_blend = _vk_stat_rect_alpha_blend + 1
+        if w == 1 and h == 1:
+            _vk_stat_rect_alpha_1x1 = _vk_stat_rect_alpha_1x1 + 1
+    else:
+        _vk_stat_rect_opaque = _vk_stat_rect_opaque + 1
+
+fn _vk_stat_image_op(w: i32, h: i32, blend: bool):
+    if blend:
+        _vk_stat_image_blend = _vk_stat_image_blend + 1
+        if w * h <= 16:
+            _vk_stat_image_blend_small = _vk_stat_image_blend_small + 1
+    else:
+        _vk_stat_image = _vk_stat_image + 1
+
+fn _vk_stat_text_op():
+    _vk_stat_text = _vk_stat_text + 1
+
+fn _vk_stat_rect_list_op():
+    _vk_stat_rect_list = _vk_stat_rect_list + 1
+
+# Full-surface readbacks and checksum walks are O(framebuffer) EACH, so a frame
+# that performs several is superlinear in page content even when its draw count
+# is small. These are cumulative for the process, unlike the frame-scoped
+# `present_*_count` fields, which a frame boundary resets before a probe can
+# read them.
+var _vk_stat_readbacks: i64 = 0
+var _vk_stat_readback_pixels: i64 = 0
+
+pub fn vulkan_stat_note_readback(pixel_count: i64):
+    _vk_stat_readbacks = _vk_stat_readbacks + 1
+    _vk_stat_readback_pixels = _vk_stat_readback_pixels + pixel_count
+
+pub fn vulkan_readback_count() -> i64:
+    """Full-surface readbacks this process has performed.
+
+    Exposed on its own, not only inside the census line, because the device
+    glass/blur claim is exactly "this counter did not move" and parsing a
+    formatted line to assert that would be a worse oracle than reading it.
+    """
+    _vk_stat_readbacks
+
+# Device-side replacements for what used to be host round trips. These rise
+# while `_vk_stat_readbacks` stays put -- that pairing, not either number on
+# its own, is what distinguishes "painted on the device" from "painted
+# correctly by some path".
+var _vk_stat_device_blur_rects: i64 = 0
+var _vk_stat_device_glass_materials: i64 = 0
+
+pub fn vulkan_stat_note_device_blur_rect():
+    _vk_stat_device_blur_rects = _vk_stat_device_blur_rects + 1
+
+pub fn vulkan_stat_note_device_glass_material():
+    _vk_stat_device_glass_materials = _vk_stat_device_glass_materials + 1
+
+pub fn vulkan_device_blur_rect_count() -> i64:
+    _vk_stat_device_blur_rects
+
+pub fn vulkan_device_glass_material_count() -> i64:
+    _vk_stat_device_glass_materials
+
+pub fn vulkan_device_material_census_line() -> text:
+    "device_blur_rects={_vk_stat_device_blur_rects} device_glass_materials={_vk_stat_device_glass_materials}"
+
+pub fn vulkan_device_material_census_reset():
+    _vk_stat_device_blur_rects = 0
+    _vk_stat_device_glass_materials = 0
+
+pub fn vulkan_readback_census_line() -> text:
+    "readbacks={_vk_stat_readbacks} readback_pixels={_vk_stat_readback_pixels}"
+
+pub fn vulkan_readback_census_reset():
+    _vk_stat_readbacks = 0
+    _vk_stat_readback_pixels = 0
+
+# ---------------------------------------------------------------------------
+# Per-op wall-clock attribution (process-global, instrumentation only)
+# ---------------------------------------------------------------------------
+# The draw-kind census above answers "how many ops", which was enough to find
+# the 1x1-composite population but NOT enough to explain the residual: at
+# 300x253 the Vulkan lane costs 68 s against 25 s for cpu_simd on the same page,
+# and 187 counted ops cannot account for a 43 s delta at any plausible per-
+# dispatch cost. So this records WHERE the wall clock goes, split by call kind
+# AND by SFFI sub-step, with count / total / max per bucket.
+#
+# Gated: every probe is `if vulkan_timing_enabled()`, resolved from the
+# environment ONCE at module init and never per call, so an unarmed frame pays
+# one already-resolved bool test per op and no clock syscall at all.
+#
+# Module-global rather than per-backend fields for the same reason the draw
+# census is: a page probe and a spec both read these without holding the
+# backend, and the per-instance counters were measured reading back zero
+# (`submits=0` against 111 drawn rects) because the pooled slot a probe can
+# reach is not always the instance that drew.
+
+val VK_T_COUNT: i64 = 34
+
+val VK_T_RECT: i64 = 0
+val VK_T_RECT_LIST: i64 = 1
+val VK_T_IMAGE: i64 = 2
+val VK_T_IMAGE_BLEND: i64 = 3
+val VK_T_IMAGE_COMPOSITE: i64 = 4
+val VK_T_TEXT: i64 = 5
+val VK_T_TEXT_BG: i64 = 6
+val VK_T_READBACK: i64 = 7
+val VK_T_PRESENT: i64 = 8
+val VK_T_ENQUEUE: i64 = 9
+val VK_T_FLUSH: i64 = 10
+val VK_T_SFFI_BEGIN: i64 = 11
+val VK_T_SFFI_REAP: i64 = 12
+val VK_T_SFFI_DESC: i64 = 13
+val VK_T_SFFI_BIND_PIPE: i64 = 14
+val VK_T_SFFI_BIND_DESC: i64 = 15
+val VK_T_SFFI_PUSH: i64 = 16
+val VK_T_SFFI_DISPATCH: i64 = 17
+val VK_T_SFFI_END: i64 = 18
+val VK_T_SFFI_SUBMIT: i64 = 19
+val VK_T_SFFI_WAIT_FENCE: i64 = 20
+val VK_T_UPLOAD: i64 = 21
+val VK_T_FONT_COMPOSITE: i64 = 22
+val VK_T_FONT_ATLAS_BUILD: i64 = 23
+# Sub-steps of `composite_font_batch`, which the first attribution run measured
+# at 27.3 s across 5 calls on a 300x253 page -- 58% of the whole frame.
+val VK_T_FONT_ATLAS_PACK: i64 = 24
+val VK_T_FONT_ATLAS_UPLOAD: i64 = 25
+val VK_T_FONT_ATLAS_DIGEST: i64 = 26
+val VK_T_FONT_PACKED_PARAMS: i64 = 27
+val VK_T_FONT_QUAD_VALIDATE: i64 = 28
+val VK_T_FONT_OWNER_IDENTITY: i64 = 29
+# Sub-steps of `_draw_image_composite_native_impl`, which the 900x760
+# attribution run measured at 544 s across 264 calls -- 69% of the whole frame,
+# with the split between host packing, device allocation and dispatch
+# UNMEASURED. These four buckets settle it in one run.
+val VK_T_IMAGE_PACK: i64 = 30
+val VK_T_IMAGE_ALLOC: i64 = 31
+val VK_T_IMAGE_DISPATCH: i64 = 32
+val VK_T_IMAGE_BYTE_FALLBACK: i64 = 33
+
+var _vk_timing_armed: bool = false
+var _vk_timing_resolved: bool = false
+
+var _vk_t_us: [i64] = [0; 34]
+var _vk_t_n: [i64] = [0; 34]
+var _vk_t_max: [i64] = [0; 34]
+
+pub fn vulkan_timing_enabled() -> bool:
+    """True when `SIMPLE_VK_TIMING=1`. The environment is read exactly once."""
+    if not _vk_timing_resolved:
+        val v = env_get("SIMPLE_VK_TIMING") ?? ""
+        _vk_timing_armed = v == "1" or v == "true"
+        _vk_timing_resolved = true
+    _vk_timing_armed
+
+pub fn vulkan_timing_now_us() -> i64:
+    if not vulkan_timing_enabled():
+        return 0
+    default_frame_clock().now_micros()
+
+pub fn vulkan_timing_add(bucket: i64, started_us: i64):
+    """Fold one completed op into `bucket`. No-op unless timing is armed."""
+    if not vulkan_timing_enabled():
+        return
+    if bucket < 0 or bucket >= VK_T_COUNT:
+        return
+    val elapsed = default_frame_clock().now_micros() - started_us
+    if elapsed < 0:
+        return
+    _vk_t_us[bucket] = _vk_t_us[bucket] + elapsed
+    _vk_t_n[bucket] = _vk_t_n[bucket] + 1
+    if elapsed > _vk_t_max[bucket]:
+        _vk_t_max[bucket] = elapsed
+
+pub fn vulkan_timing_note(bucket: i64, elapsed_us: i64):
+    """Fold a pre-measured duration into `bucket`, for a caller that already
+    holds a start/finish pair (e.g. the font composite's own evidence clock)."""
+    if not vulkan_timing_enabled():
+        return
+    if bucket < 0 or bucket >= VK_T_COUNT or elapsed_us < 0:
+        return
+    _vk_t_us[bucket] = _vk_t_us[bucket] + elapsed_us
+    _vk_t_n[bucket] = _vk_t_n[bucket] + 1
+    if elapsed_us > _vk_t_max[bucket]:
+        _vk_t_max[bucket] = elapsed_us
+
+pub fn vulkan_timing_reset():
+    vulkan_font_dirty_reset()
+    vulkan_image_stats_reset()
+    var i: i64 = 0
+    while i < VK_T_COUNT:
+        _vk_t_us[i] = 0
+        _vk_t_n[i] = 0
+        _vk_t_max[i] = 0
+        i = i + 1
+
+fn _vk_timing_name(bucket: i64) -> text:
+    if bucket == VK_T_RECT: return "rect"
+    if bucket == VK_T_RECT_LIST: return "rect_list"
+    if bucket == VK_T_IMAGE: return "image"
+    if bucket == VK_T_IMAGE_BLEND: return "image_blend"
+    if bucket == VK_T_IMAGE_COMPOSITE: return "image_composite"
+    if bucket == VK_T_TEXT: return "text"
+    if bucket == VK_T_TEXT_BG: return "text_bg"
+    if bucket == VK_T_READBACK: return "readback"
+    if bucket == VK_T_PRESENT: return "present"
+    if bucket == VK_T_ENQUEUE: return "enqueue"
+    if bucket == VK_T_FLUSH: return "flush"
+    if bucket == VK_T_SFFI_BEGIN: return "sffi_begin_compute"
+    if bucket == VK_T_SFFI_REAP: return "sffi_reap_quarantine"
+    if bucket == VK_T_SFFI_DESC: return "sffi_descriptor"
+    if bucket == VK_T_SFFI_BIND_PIPE: return "sffi_bind_pipeline"
+    if bucket == VK_T_SFFI_BIND_DESC: return "sffi_bind_descriptors"
+    if bucket == VK_T_SFFI_PUSH: return "sffi_push_constants"
+    if bucket == VK_T_SFFI_DISPATCH: return "sffi_dispatch"
+    if bucket == VK_T_SFFI_END: return "sffi_end_compute"
+    if bucket == VK_T_SFFI_SUBMIT: return "sffi_submit_and_wait"
+    if bucket == VK_T_SFFI_WAIT_FENCE: return "sffi_wait_fence"
+    if bucket == VK_T_UPLOAD: return "sffi_upload"
+    if bucket == VK_T_FONT_COMPOSITE: return "font_composite"
+    if bucket == VK_T_FONT_ATLAS_BUILD: return "font_atlas_cpu_build"
+    if bucket == VK_T_FONT_ATLAS_PACK: return "font_atlas_pack_u32_to_u8"
+    if bucket == VK_T_FONT_ATLAS_UPLOAD: return "font_atlas_sffi_upload"
+    if bucket == VK_T_FONT_ATLAS_DIGEST: return "font_atlas_payload_sha256"
+    if bucket == VK_T_FONT_PACKED_PARAMS: return "font_packed_params"
+    if bucket == VK_T_FONT_QUAD_VALIDATE: return "font_quad_validate"
+    if bucket == VK_T_FONT_OWNER_IDENTITY: return "font_owner_identity"
+    if bucket == VK_T_IMAGE_PACK: return "image_pack_u32_to_u8"
+    if bucket == VK_T_IMAGE_ALLOC: return "image_source_alloc"
+    if bucket == VK_T_IMAGE_DISPATCH: return "image_descriptor_dispatch"
+    if bucket == VK_T_IMAGE_BYTE_FALLBACK: return "image_exact_size_byte_fallback"
+    "bucket{bucket}"
+
+# Why the font-atlas upload cache missed, per composite. The timing table says
+# the 4 MB repack+redigest ran 5 times on a page whose atlas should be built
+# once; these counters separate "the atlas genuinely changed" (new glyphs were
+# rasterized between batches) from "the cache key is unstable" (same atlas,
+# different identity), because the correct fix differs in each case.
+var _vk_font_dirty_gen: i64 = 0
+var _vk_font_dirty_identity: i64 = 0
+var _vk_font_dirty_dims: i64 = 0
+var _vk_font_composites: i64 = 0
+var _vk_font_gen_trace: text = ""
+
+pub fn vulkan_font_dirty_note(gen_changed: bool, identity_changed: bool,
+                              dims_changed: bool, generation: i64):
+    if not vulkan_timing_enabled():
+        return
+    _vk_font_composites = _vk_font_composites + 1
+    if gen_changed: _vk_font_dirty_gen = _vk_font_dirty_gen + 1
+    if identity_changed: _vk_font_dirty_identity = _vk_font_dirty_identity + 1
+    if dims_changed: _vk_font_dirty_dims = _vk_font_dirty_dims + 1
+    if _vk_font_composites <= 16:
+        _vk_font_gen_trace = _vk_font_gen_trace + " {generation}"
+
+var _vk_font_pack_full: i64 = 0
+var _vk_font_pack_incremental: i64 = 0
+
+pub fn vulkan_font_per_owner_mirror_enabled() -> bool:
+    """Per-owner atlas mirrors, on by default; `0` restores the single mirror.
+
+    The off position exists as a MEASUREMENT CONTROL: it lets the same binary
+    and the same tree produce the pre-change pack counts, so a before/after
+    comparison cannot be contaminated by a rebuild.
+    """
+    (env_get("SIMPLE_VK_FONT_PER_OWNER_MIRROR") ?? "") != "0"
+
+pub fn vulkan_font_pack_note(incremental: bool):
+    """Record whether an atlas upload repacked the whole atlas or only the
+    cells the batch inserted. Always counted, not just when timing is armed:
+    a spec asserts on these without wanting the clock overhead."""
+    if incremental:
+        _vk_font_pack_incremental = _vk_font_pack_incremental + 1
+    else:
+        _vk_font_pack_full = _vk_font_pack_full + 1
+
+pub fn vulkan_font_pack_full_count() -> i64:
+    _vk_font_pack_full
+
+pub fn vulkan_font_pack_incremental_count() -> i64:
+    _vk_font_pack_incremental
+
+pub fn vulkan_font_pack_reset():
+    _vk_font_pack_full = 0
+    _vk_font_pack_incremental = 0
+
+# Mirror self-check (SIMPLE_VK_FONT_SELFCHECK=1). After an incremental repack,
+# the mirror is compared byte-for-byte against a full pack of the same atlas --
+# the ground truth. This is the only way to tell the three candidate causes of a
+# moved frame apart: a mismatch INSIDE a reported dirty rect means the repack
+# loop is wrong; a mismatch OUTSIDE every dirty rect means the producer changes
+# cells it does not report; zero mismatches means the divergence is downstream
+# of the mirror entirely. Costs a full pack per incremental repack, so it is
+# opt-in and never on in a timed run.
+var _vk_font_mirror_checks: i64 = 0
+var _vk_font_mirror_bad_calls: i64 = 0
+var _vk_font_mirror_bad_bytes: i64 = 0
+var _vk_font_mirror_first: text = ""
+var _vk_font_decisions: text = ""
+
+pub fn vulkan_font_selfcheck_enabled() -> bool:
+    (env_get("SIMPLE_VK_FONT_SELFCHECK") ?? "") == "1"
+
+# Atlas payload digest source (SIMPLE_VK_FONT_DIGEST=payload restores the walk).
+#
+# The digest is EVIDENCE -- callers assert it is 64 lowercase hex characters and
+# that it moves when the atlas moves; nothing reads it to decide whether to
+# re-upload. That decision is made, and has always been made, by
+# `(atlas_generation, owner_identity)`: `_vulkan_font_upload_atlas` re-uploads
+# exactly when either changes, so if that pair were not a sound content key the
+# upload cache would already be painting stale glyphs. Hashing 1,048,576 pixels
+# in interpreted Simple to restate what the pair already says cost **37,650 ms
+# across 21 calls** of a 259,523 ms 900x760 frame -- 53% of `font_composite` and
+# the single largest remaining term. The default digest therefore folds the same
+# geometry with that pair instead of the pixels, and keeps the identical
+# `sha256_u8_hex` shape so every existing evidence assertion still holds.
+#
+# `SIMPLE_VK_FONT_DIGEST=payload` restores the full pixel walk for anyone who
+# wants a content-derived token (e.g. to audit the generation counter itself);
+# `SIMPLE_VK_FONT_SELFCHECK=1` implies it, because a run that exists to check the
+# mirror against ground truth should not be reading a token that cannot see the
+# pixels.
+pub fn vulkan_font_payload_digest_full() -> bool:
+    (env_get("SIMPLE_VK_FONT_DIGEST") ?? "") == "payload" or vulkan_font_selfcheck_enabled()
+
+# Overlapping-quad census (SIMPLE_VK_FONT_OVERLAP=1). The packed font kernel
+# (`font_atlas_composite.spl:266`) runs ONE INVOCATION PER (pixel, glyph) and
+# blends with a plain non-atomic read-modify-write on `dst[di]`. Two glyphs in
+# the SAME dispatch whose destination rects share a pixel are therefore two
+# concurrent invocations racing on that word, and the loser's blend is dropped --
+# which produces exactly the graded, run-varying per-texel error F18 measured on
+# thin glyph stems (139 vs 226 against a CPU oracle of 124). This counter is the
+# host-side evidence for that: it counts, per batch, how many ordered quad pairs
+# have intersecting destination rects. O(n^2) in the glyph count, so it is
+# opt-in and never on in a timed run.
+var _vk_font_overlap_batches: i64 = 0
+var _vk_font_overlap_pairs: i64 = 0
+var _vk_font_overlap_max_batch: i64 = 0
+var _vk_font_overlap_quads: i64 = 0
+
+pub fn vulkan_font_overlap_enabled() -> bool:
+    (env_get("SIMPLE_VK_FONT_OVERLAP") ?? "") == "1"
+
+pub fn vulkan_font_overlap_note(quads: i64, pairs: i64):
+    _vk_font_overlap_batches = _vk_font_overlap_batches + 1
+    _vk_font_overlap_quads = _vk_font_overlap_quads + quads
+    _vk_font_overlap_pairs = _vk_font_overlap_pairs + pairs
+    if pairs > _vk_font_overlap_max_batch:
+        _vk_font_overlap_max_batch = pairs
+
+pub fn vulkan_font_overlap_report() -> text:
+    """`"batches=<n> quads=<n> overlapping_pairs=<n> max_in_one_batch=<n>"`.
+
+    `overlapping_pairs=0` across every batch would REFUTE the write-race
+    hypothesis for the packed font dispatch; any non-zero count confirms that at
+    least one destination word is written by two concurrent invocations.
+    """
+    "batches={_vk_font_overlap_batches} quads={_vk_font_overlap_quads} overlapping_pairs={_vk_font_overlap_pairs} max_in_one_batch={_vk_font_overlap_max_batch}"
+
+pub fn vulkan_font_mirror_note(mismatched_bytes: i64, detail: text):
+    _vk_font_mirror_checks = _vk_font_mirror_checks + 1
+    if mismatched_bytes > 0:
+        _vk_font_mirror_bad_calls = _vk_font_mirror_bad_calls + 1
+        _vk_font_mirror_bad_bytes = _vk_font_mirror_bad_bytes + mismatched_bytes
+        if _vk_font_mirror_first == "":
+            _vk_font_mirror_first = detail
+
+pub fn vulkan_font_decision_note(detail: text):
+    """One line per composite recording every `can_increment` input and the
+    decision, so a full<->incremental swap is visible without re-deriving it."""
+    if _vk_font_decisions.len() < 4000:
+        _vk_font_decisions = _vk_font_decisions + "\n    " + detail
+
+pub fn vulkan_font_mirror_line() -> text:
+    ("font_mirror_selfcheck checks={_vk_font_mirror_checks}" +
+     " bad_calls={_vk_font_mirror_bad_calls}" +
+     " bad_bytes={_vk_font_mirror_bad_bytes}" +
+     " first=[{_vk_font_mirror_first}]" +
+     " decisions:{_vk_font_decisions}")
+
+pub fn vulkan_font_mirror_reset():
+    _vk_font_mirror_checks = 0
+    _vk_font_mirror_bad_calls = 0
+    _vk_font_mirror_bad_bytes = 0
+    _vk_font_mirror_first = ""
+    _vk_font_decisions = ""
+
+pub fn vulkan_font_dirty_line() -> text:
+    ("font_atlas_dirty composites={_vk_font_composites}" +
+     " gen_changed={_vk_font_dirty_gen}" +
+     " identity_changed={_vk_font_dirty_identity}" +
+     " dims_changed={_vk_font_dirty_dims}" +
+     " generations=[{_vk_font_gen_trace} ]" +
+     " pack_full={_vk_font_pack_full} pack_incremental={_vk_font_pack_incremental}" +
+     (if _vk_font_mirror_checks > 0 or _vk_font_decisions != "": "\n  " + vulkan_font_mirror_line() else: ""))
+
+pub fn vulkan_font_dirty_reset():
+    vulkan_font_pack_reset()
+    vulkan_font_mirror_reset()
+    _vk_font_dirty_gen = 0
+    _vk_font_dirty_identity = 0
+    _vk_font_dirty_dims = 0
+    _vk_font_composites = 0
+    _vk_font_gen_trace = ""
+
+# Why an image composite declined the device path, and how big it was.
+#
+# `_draw_image_composite_native_impl` has ten `return 0` exits; every one of
+# them drops the caller to `emu_draw_image_*`, which does a full host
+# `core.read_pixels()` and a software blend. Until these counters existed the
+# 544 s attributed to `image_composite` at 900x760 could not be split between
+# "the device path ran and the interpreted u32->u8 pack was slow" and "the
+# device path declined and the cost is a host readback", which need opposite
+# fixes. The size tally separates the 3 full-surface composites (684k px) from
+# the 261 small ones, because those two populations also need different fixes.
+val VK_IMG_R_OK: i64 = 0
+val VK_IMG_R_STATE: i64 = 1
+val VK_IMG_R_ARGS: i64 = 2
+val VK_IMG_R_GEOM: i64 = 3
+val VK_IMG_R_CLIP: i64 = 4
+val VK_IMG_R_SOURCE: i64 = 5
+val VK_IMG_R_UPLOAD: i64 = 6
+val VK_IMG_R_DISPATCH: i64 = 7
+val VK_IMG_R_COUNT: i64 = 8
+
+var _vk_img_reason: [i64] = [0; 8]
+var _vk_img_full_surface: i64 = 0
+var _vk_img_small: i64 = 0
+var _vk_img_full_surface_us: i64 = 0
+var _vk_img_small_us: i64 = 0
+var _vk_img_max_px: i64 = 0
+
+pub fn vulkan_image_reason_note(reason: i64):
+    """Record the exit taken by one `_draw_image_composite_native_impl` call."""
+    if reason < 0 or reason >= VK_IMG_R_COUNT:
+        return
+    _vk_img_reason[reason] = _vk_img_reason[reason] + 1
+
+pub fn vulkan_image_size_note(pixel_count: i64, surface_pixels: i64, elapsed_us: i64):
+    """Tally one composite as full-surface or small, with its wall time.
+
+    "Full surface" is >= 90% of the destination surface: a viewport-sized
+    layer composite, which is the population that costs ~443 s of the 544 s.
+    """
+    if pixel_count > _vk_img_max_px:
+        _vk_img_max_px = pixel_count
+    if surface_pixels > 0 and pixel_count * 10 >= surface_pixels * 9:
+        _vk_img_full_surface = _vk_img_full_surface + 1
+        _vk_img_full_surface_us = _vk_img_full_surface_us + elapsed_us
+    else:
+        _vk_img_small = _vk_img_small + 1
+        _vk_img_small_us = _vk_img_small_us + elapsed_us
+
+fn _vk_img_reason_name(reason: i64) -> text:
+    if reason == VK_IMG_R_OK: return "ok"
+    if reason == VK_IMG_R_STATE: return "backend_state"
+    if reason == VK_IMG_R_ARGS: return "bad_args_or_mask"
+    if reason == VK_IMG_R_GEOM: return "geometry_overflow"
+    if reason == VK_IMG_R_CLIP: return "clip_reject"
+    if reason == VK_IMG_R_SOURCE: return "no_device_source"
+    if reason == VK_IMG_R_UPLOAD: return "upload_failed"
+    if reason == VK_IMG_R_DISPATCH: return "dispatch_declined"
+    "reason{reason}"
+
+pub fn vulkan_image_stats_line() -> text:
+    var reasons = ""
+    var i: i64 = 0
+    while i < VK_IMG_R_COUNT:
+        if _vk_img_reason[i] > 0:
+            reasons = reasons + " {_vk_img_reason_name(i)}={_vk_img_reason[i]}"
+        i = i + 1
+    ("image_composite_stats full_surface={_vk_img_full_surface}" +
+     " full_surface_ms={_vk_img_full_surface_us / 1000}" +
+     " small={_vk_img_small} small_ms={_vk_img_small_us / 1000}" +
+     " max_px={_vk_img_max_px} upload_mode={vulkan_image_upload_last_mode()}" +
+     " upload_reason={vulkan_image_upload_last_reason()}" +
+     " reasons:" + reasons)
+
+pub fn vulkan_image_full_surface_count() -> i64:
+    _vk_img_full_surface
+
+pub fn vulkan_image_small_count() -> i64:
+    _vk_img_small
+
+pub fn vulkan_image_reason_count(reason: i64) -> i64:
+    if reason < 0 or reason >= VK_IMG_R_COUNT: return 0
+    _vk_img_reason[reason]
+
+pub fn vulkan_image_stats_reset():
+    var i: i64 = 0
+    while i < VK_IMG_R_COUNT:
+        _vk_img_reason[i] = 0
+        i = i + 1
+    _vk_img_full_surface = 0
+    _vk_img_small = 0
+    _vk_img_full_surface_us = 0
+    _vk_img_small_us = 0
+    _vk_img_max_px = 0
+
+pub fn vulkan_timing_count(bucket: i64) -> i64:
+    if bucket < 0 or bucket >= VK_T_COUNT: return 0
+    _vk_t_n[bucket]
+
+pub fn vulkan_timing_total_us(bucket: i64) -> i64:
+    if bucket < 0 or bucket >= VK_T_COUNT: return 0
+    _vk_t_us[bucket]
+
+pub fn vulkan_timing_table() -> text:
+    """Multi-line `bucket n total_ms max_ms` table, or one line when disarmed."""
+    if not vulkan_timing_enabled():
+        return "vk-timing: disarmed (set SIMPLE_VK_TIMING=1)"
+    var out = ("vk-timing bucket n total_ms max_ms\n  " + vulkan_font_dirty_line() +
+        "\n  " + vulkan_image_stats_line())
+    if vulkan_font_overlap_enabled():
+        out = out + "\n  font_quad_overlap " + vulkan_font_overlap_report()
+    var i: i64 = 0
+    while i < VK_T_COUNT:
+        if _vk_t_n[i] > 0:
+            val total_ms = _vk_t_us[i] / 1000
+            val max_ms = _vk_t_max[i] / 1000
+            out = out + "\n  {_vk_timing_name(i)} {_vk_t_n[i]} {total_ms} {max_ms}"
+        i = i + 1
+    out

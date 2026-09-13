@@ -1,10 +1,16 @@
 # Bug: array indexing `name[expr]` misread as `[...]` generics in some contexts
 
+## Closed 2026-09-13 — Fixed: `name[expr]` is no longer misread as a generic application
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the exact shape from the report — `while j >= 0 and matched[j].w > 2:` with `matched[j]` read inside the loop — parses and runs, printing `5` then `3`. No `Use angle brackets: matched<...>` error.
+- **measured**: the load-time consequence is gone. `use std.common.ui.style.*` in a fresh file loads and runs (`style-ok`), so `common.ui.style` and its transitive dependents (`common.ui.widget`, `app.office.slides.render`) are importable again.
+- **inferred**: `src/lib/common/ui/style.spl` around the cited lines has also been rewritten to build the match list with `push` rather than indexed assignment, so the original call site no longer depends on the parser behaviour either way.
+
 - **ID:** parser_array_index_misread_as_generics_2026-06-14
 - **Severity:** P2 (blocks loading `common.ui.style`, hence the slides/word GUI
   widget render chain, from new dependents)
 - **Discovered:** 2026-06-14, wiring slides render to the office style resolver
-- **Status:** OPEN
+- **Status:** CLOSED 2026-09-13 (fixed; verified by execution)
 
 ## Summary
 

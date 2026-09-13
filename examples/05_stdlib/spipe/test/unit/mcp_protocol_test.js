@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createRouter } from "../../mcp/protocol/router.js";
+import { readDoc } from "../../mcp/protocol/tools.js";
 import { createLineHandler } from "../../mcp/transport/stdio.js";
 import { stableJson, stableSdn } from "../../src/format/stable.js";
 
@@ -95,4 +96,10 @@ test("stable serializers order nested values without collapsing them", () => {
   assert.equal(stableJson({ z: { b: 2, a: 1 }, a: [2, 1] }), '{"a":[2,1],"z":{"a":1,"b":2}}');
   assert.equal(stableSdn({ nested: { b: 2, a: 1 }, ready: true }),
     'nested: "{\\"a\\":1,\\"b\\":2}"\nready: true');
+});
+
+test("MCP documentation paths keep POSIX-relative semantics on Linux", () => {
+  assert.match(readDoc(moduleRoot, "doc/00_llm_process/spipe/skill.md"), /SPipe/);
+  assert.throws(() => readDoc(moduleRoot, "/etc/passwd"), /relative path|allowlist/);
+  assert.throws(() => readDoc(moduleRoot, "doc\\00_llm_process\\spipe\\skill.md"), /relative path|allowlist/);
 });

@@ -1,6 +1,8 @@
 # BUG: native path — statement-form `if` with print-only arms emits `%lN = alloca void` (invalid IR)
 
-**Status (2026-07-15):** source implemented; historical native/oracle
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+**Status (2026-07-15 -> CLOSED-STALE 2026-09-12):** source implemented; historical native/oracle
 regression evidence is recorded in `3f6dbe1b4abd`.
 
 ## Resolution
@@ -42,3 +44,6 @@ fixtures; re-derive with the shape above on the normal native path.)
 ## Triage note (2026-07-17)
 
 Confirmed fixed by commit `3f6dbe1b4abd` ("#169 materialize void spill slots as i64 (llc reject)", 2026-07-13). The commit directly addresses the `alloca void` symptom; commit message includes verified native==oracle regression evidence confirming the fix closes the gap.
+
+## Triage 2026-09-12
+The 2026-07-15 status already noted "no fresh execution was performed"; still no execution 2 months later. Older than 45 days with no cheap repro re-run; closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

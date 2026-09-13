@@ -1,5 +1,12 @@
 # Bug: HPACK huffman single-symbol decode returns empty; concat-built [u8] encodes wrong
 
+## Closed 2026-09-13 — both the huffman symptom and its `[u8]` concat root cause are gone
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Entry repro 1: `hpack_huffman_decode(hpack_huffman_encode([97]), 0, enc.len()).unwrap().len()` prints `1` (was `0`).
+- **measured** Entry repro 2 (the documented ROOT CAUSE): `var p: [u8] = []; p = p + [97]; p[0]` prints `97` (was `8`).
+- **measured** The localization cases also pass: `var c:[u8]=[10]; var e:[u8]=[97]; (c+e)` yields `10,97` (was `10,0`).
+
 **Date:** 2026-06-30
 **Severity:** Medium — `hpack_huffman_decode` drops short payloads; blocks
 `hpack/huffman_h2_spec` "round-trips 256-byte indexed payload".

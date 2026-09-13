@@ -1,6 +1,7 @@
 # `auto` is a hard keyword: rejected as a named-argument label
+**Status:** OPEN (unverified 2026-09-12)
 
-**Date:** 2026-09-05 · **Status:** CLOSED 2026-09-06 (fixed in #377, seed deployed 2026-09-05 20:09, workaround dropped) · **Class:** reserved token rejected at the USE site
+**Date:** 2026-09-05 · **Status:** REOPENED 2026-09-08 (not accepted by every deployed/admitted seed; positional boundary restored) · **Class:** reserved token rejected at the USE site
 (same family as `examples`/`and_then` 2026-08-10, `move` 2026-08-15, `admit`/`assume` 2026-08-21).
 
 ## Symptom
@@ -59,6 +60,18 @@ Regression spec: `test/01_unit/compiler/parser_auto_contextual_keyword_spec.spl`
 `frontend_offload_switch.spl` stays until the deployed `bin/simple` seed carries
 this fix.
 
-## Closed (2026-09-06)
+## Premature closure (2026-09-06)
 
 The deployed seed (`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f…`) carries the fix; `frontend_offload_switch.spl` now constructs `FrontendOffloadSwitch` with named arguments at both sites and the positional workaround is gone.
+
+## Reopened (2026-09-08)
+
+The macOS landing lane and the current Rust debug seed both reject the restored
+named form while loading the compiler startup tree (`function arguments`).
+This broke the supposedly clean fixture of the blocking main-test-runnable
+push gate. Both construction sites are positional again. Closure requires the
+named form to pass on every admitted bootstrap binary used by push lanes, not
+only one Linux deployment.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

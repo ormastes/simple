@@ -1,4 +1,5 @@
 # Cranelift miscompiles zero-arg method access without parentheses on structs
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 Open.
@@ -25,3 +26,6 @@ Any bit-flag struct using zero-arg method access for bit tests may silently prod
 
 ## Next Step
 Investigate cranelift lowering of property-syntax method calls (no parens). Compare generated code vs. explicit-paren version. File cranelift issue or fix in Simple compiler's HIR→MIR lowering for property-access desugaring.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -30,6 +30,9 @@ mod vulkan_graphics_runtime_swapchain;
 #[path = "vulkan_graphics_runtime_render.rs"]
 mod vulkan_graphics_runtime_render;
 
+#[path = "vulkan_graphics_runtime_async.rs"]
+mod vulkan_graphics_runtime_async;
+
 pub use vulkan_graphics_runtime_buffer::{
     rt_vulkan_copy_from_buffer_array, rt_vulkan_copy_from_buffer_regions, rt_vulkan_copy_from_buffer_strided,
     rt_vulkan_copy_to_buffer_array,

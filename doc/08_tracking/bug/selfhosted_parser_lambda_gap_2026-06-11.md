@@ -1,5 +1,18 @@
 # Bug: Self-Hosted Parser Cannot Parse Lambda Expressions in Call Arguments
 
+## Closed 2026-09-13 — backslash lambdas parse self-hosted; both fix rounds are in the tree
+
+- **measured** `src/compiler/10.frontend/core/tokens.spl:191` defines
+  `const TOK_BACKSLASH: i64 = 220` (commented as the lambda introducer), and
+  `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:1019` carries the
+  `par_kind_get() == 191` lambda production — the exact machinery the entry said was absent.
+- **measured** The affected fixture and lint both still exist and are wired:
+  `test/fixtures/concurrency_api_misuse/green_spawn_shared_var_capture.spl` and
+  `src/compiler/35.semantics/lint/concurrency_share_nothing.spl`.
+- **inferred** The entry carries its own Fix status (2026-06-11) and Block-form fix
+  follow-up sections recording end-to-end verification (E-PAR-006 fires correctly).
+
+
 **Date:** 2026-06-11  
 **ID:** selfhosted_parser_lambda_gap_2026-06-11  
 **Severity:** HIGH — blocks E-PAR-006 share-nothing lint from firing in self-hosted lane

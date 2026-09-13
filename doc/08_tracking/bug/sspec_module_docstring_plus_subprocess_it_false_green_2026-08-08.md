@@ -188,3 +188,13 @@ untested larger/original shape. No fix attempted — this remains a black-box
 characterization, and diagnosing further requires tracing the seed's SSpec
 runner internals (`src/compiler_rust/**`), which is out of this session's
 edit scope.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Re-checked against `f26970e9d93` on the deployed seed
+(`bin/release/aarch64-unknown-linux-gnu/simple`, per the 2026-08-10 narrowing
+this needs a genuinely Linux-built seed and the doc's own minimal repro
+shape). Root cause remains compiler-internal (SSpec docstring/`it`-block
+interaction with `process_run`) and undiagnosed; reproducing and fixing it
+needs deep interpreter/runner instrumentation well past a shard triage
+budget. No change made. Leaving OPEN as narrowed.

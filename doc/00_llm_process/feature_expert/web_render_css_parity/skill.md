@@ -254,3 +254,42 @@ code via a one-line probe; not something this change caused or could fix
 blocks other browser_engine spec work: the `lib.` alias path is otherwise
 documented as preferred for app code, but for this module tree `std.` is the
 only alias that currently loads cleanly.
+
+## Round 3 (2026-09-12) — grid `repeat()`/`minmax()`, flex-wrap grow, inline content area
+
+Three layout defects closed against a Chrome oracle, each with a pinned spec and
+a sabotage triple. Read the bug records before touching the same code:
+
+- `doc/08_tracking/bug/web_grid_repeat_minmax_track_list_falls_through_to_block_2026-09-12.md`
+  — a track list that fails to parse does NOT degrade the grid, it disables it:
+  layout gates on `grid_columns.len() > 0` and falls through to block. Any future
+  track-list syntax gap has this same silent shape.
+- `doc/08_tracking/bug/web_flex_wrap_line_never_distributes_flex_grow_2026-09-12.md`
+  — the WRAP branch of row flex is a separate implementation from the nowrap
+  branch and has repeatedly been the one missing a rule. Check it explicitly.
+- `doc/08_tracking/bug/web_inline_box_takes_line_height_not_content_area_2026-09-12.md`
+  — `line-height` sizes the LINE box; the inline box is the font content area,
+  half-leaded. Wrapped runs are excluded because this renderer still models a
+  wrapped `#text` as one tall box rather than N line boxes.
+
+**Measurement gotchas that cost a whole pass here:**
+
+1. Run `check-chrome-layout-geometry-diff.shs` with `GEOM_DIFF_HEIGHT=20000`.
+   At the default 760 px the Draw IR viewport clip means the differ only sees
+   ~6 % of a long page (158 elements across 8 pages, against 1257), and any
+   ranking derived from it is unrepresentative.
+2. In a git worktree, `check-chrome-catalog-pixel-diff.shs` needs an explicit
+   `SIMPLE_BIN=` — a worktree carries no `build/` and it answers
+   `ERROR — nothing was checked` otherwise.
+3. The differ's own key scheme was wrong (it numbered `::marker` boxes as
+   elements). After fixing it, mismatch counts are NOT comparable across the
+   change; the round-3 metrics table carries a third column measured with the
+   corrected differ over the OLD layout code for exactly this reason.
+4. On long pages the mismatch COUNT saturates near 97 % because one early
+   block-flow error cascades through every sibling below and the `inherited`
+   filter only catches parent-repeat. Track the sum of `|dx|+|dy|+|dw|+|dh|`
+   over root rows instead; that is what moves.
+
+Current metrics: `doc/10_metrics/ui/chrome_vs_simple_catalog_diff_macos_2026-09-12.md`
+§ Round 3. Largest remaining defect: block auto-height inside `<li>` (an inline
+run before a nested `<p>` takes 2-3 line-heights where Chrome takes 1).

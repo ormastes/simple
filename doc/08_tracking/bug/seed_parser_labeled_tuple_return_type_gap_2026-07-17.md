@@ -5,7 +5,7 @@
 used by both the frozen Rust seed (`src/compiler_rust/target/bootstrap/simple`)
 and the current self-hosted binary (`bin/simple`).
 **Severity:** high — was blocking Stage-1 bootstrap end-to-end (see repro below).
-**Status:** worked around at the one bootstrap-critical call site (see Fix);
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 the underlying parser gap is NOT fixed.
 
 ## Symptom
@@ -132,3 +132,6 @@ is out of scope for this parse-blocker fix.
 ## Status (2026-07-18)
 
 OPEN (parser gap in both seeds). Workaround applied aee3289936b: reverted process_run to unlabeled tuple. Stage-1 now proceeds to next blocker. Parser fix + seed redeploy remain pending; see cross-ref to mcp_main_lazy_json doc UNRESOLVABLE-at-call-site analysis.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

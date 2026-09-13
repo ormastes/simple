@@ -1,0 +1,163 @@
+# One ledger may be shared across every typed body in an aggregate attempt.
+# Checked reservations happen before traversal/index/copy work.
+
+use compiler.hir.portable_body_profile_types.{PortableBodyLimitsV1,
+    PortableBodyBudgetCountersV1, PortableBodyErrorV1}
+
+pub fn portable_body_sort_work_v1(count: i64) -> i64:
+    if count <= 1: return 0
+    # Count merge rounds by halving instead of doubling a width that can
+    # overflow for an arbitrary public i64 input.
+    var remaining = count - 1
+    var rounds: i64 = 0
+    while remaining > 0:
+        remaining = remaining / 2
+        rounds = rounds + 1
+    if rounds <= 0 or count > 9223372036854775807 / rounds:
+        return -1
+    count * rounds
+
+pub class PortableBodyLedgerV1:
+    limits: PortableBodyLimitsV1
+    var counters: PortableBodyBudgetCountersV1
+    var failure_detail: text
+
+    pub static fn create(limits: PortableBodyLimitsV1) -> Result<PortableBodyLedgerV1,
+            PortableBodyErrorV1>:
+        if (limits.max_body_objects <= 0 or limits.max_body_objects > 1024 or
+                limits.max_functions <= 0 or limits.max_functions > 1024 or
+                limits.max_symbols <= 0 or limits.max_symbols > 65536 or
+                limits.max_scopes <= 0 or limits.max_scopes > 65536 or
+                limits.max_exports < 0 or limits.max_exports > 1024 or
+                limits.max_parameters < 0 or limits.max_parameters > 65536 or
+                limits.max_nodes <= 0 or limits.max_nodes > 65536 or
+                limits.max_graph_nodes <= 0 or limits.max_graph_nodes > 1024 or
+                limits.max_dependency_edges < 0 or limits.max_dependency_edges > 65536 or
+                limits.max_call_occurrences < 0 or limits.max_call_occurrences > 65536 or
+                limits.max_call_chain_depth <= 0 or limits.max_call_chain_depth > 128 or
+                limits.max_semantic_depth <= 0 or limits.max_semantic_depth > 128 or
+                limits.max_text_bytes < 0 or limits.max_text_bytes > 8 * 1024 * 1024 or
+                limits.max_encoded_bytes < 0 or limits.max_encoded_bytes > 8 * 1024 * 1024 or
+                limits.max_retained_bytes < 0 or limits.max_retained_bytes > 128 * 1024 * 1024 or
+                limits.max_work_units <= 0 or limits.max_work_units > 1000000):
+            return Err(PortableBodyErrorV1.BoundsExceeded("invalid semantic limits"))
+        Ok(PortableBodyLedgerV1(limits: limits,
+            counters: PortableBodyBudgetCountersV1(body_objects: 0, functions: 0,
+                symbols: 0, scopes: 0, exports: 0, parameters: 0, nodes: 0,
+                graph_nodes: 0,
+                dependency_edges: 0,
+                call_occurrences: 0, text_bytes: 0, encoded_bytes: 0,
+                retained_bytes: 0, work_units: 0), failure_detail: ""))
+
+    me _charge(current: i64, amount: i64, maximum: i64, detail: text) -> i64:
+        if self.failure_detail != "": return current
+        if amount < 0 or current < 0 or amount > maximum - current:
+            self.failure_detail = detail
+            return current
+        current + amount
+
+    me charge_body_objects(amount: i64) -> bool:
+        self.counters.body_objects = self._charge(self.counters.body_objects,
+            amount, self.limits.max_body_objects, "body object budget")
+        self.failure_detail == ""
+
+    me charge_functions(amount: i64) -> bool:
+        self.counters.functions = self._charge(self.counters.functions,
+            amount, self.limits.max_functions, "function budget")
+        self.failure_detail == ""
+
+    me charge_symbols(amount: i64) -> bool:
+        self.counters.symbols = self._charge(self.counters.symbols,
+            amount, self.limits.max_symbols, "symbol budget")
+        self.failure_detail == ""
+
+    me charge_scopes(amount: i64) -> bool:
+        self.counters.scopes = self._charge(self.counters.scopes,
+            amount, self.limits.max_scopes, "scope budget")
+        self.failure_detail == ""
+
+    me charge_exports(amount: i64) -> bool:
+        self.counters.exports = self._charge(self.counters.exports,
+            amount, self.limits.max_exports, "export budget")
+        self.failure_detail == ""
+
+    me charge_parameters(amount: i64) -> bool:
+        self.counters.parameters = self._charge(self.counters.parameters,
+            amount, self.limits.max_parameters, "parameter budget")
+        self.failure_detail == ""
+
+    me charge_nodes(amount: i64) -> bool:
+        self.counters.nodes = self._charge(self.counters.nodes,
+            amount, self.limits.max_nodes, "semantic node budget")
+        self.failure_detail == ""
+
+    me charge_graph_nodes(amount: i64) -> bool:
+        self.counters.graph_nodes = self._charge(self.counters.graph_nodes,
+            amount, self.limits.max_graph_nodes, "dependency graph node budget")
+        self.failure_detail == ""
+
+    me charge_dependency_edges(amount: i64) -> bool:
+        self.counters.dependency_edges = self._charge(self.counters.dependency_edges,
+            amount, self.limits.max_dependency_edges, "dependency edge budget")
+        self.failure_detail == ""
+
+    me charge_call_occurrences(amount: i64) -> bool:
+        self.counters.call_occurrences = self._charge(self.counters.call_occurrences,
+            amount, self.limits.max_call_occurrences, "call occurrence budget")
+        self.failure_detail == ""
+
+    me charge_text_bytes(amount: i64) -> bool:
+        self.counters.text_bytes = self._charge(self.counters.text_bytes,
+            amount, self.limits.max_text_bytes, "semantic text budget")
+        self.failure_detail == ""
+
+    me charge_encoded_bytes(amount: i64) -> bool:
+        self.counters.encoded_bytes = self._charge(self.counters.encoded_bytes,
+            amount, self.limits.max_encoded_bytes, "encoded body budget")
+        self.failure_detail == ""
+
+    me charge_retained_bytes(amount: i64) -> bool:
+        self.counters.retained_bytes = self._charge(self.counters.retained_bytes,
+            amount, self.limits.max_retained_bytes, "retained semantic budget")
+        self.failure_detail == ""
+
+    me charge_work(amount: i64) -> bool:
+        self.counters.work_units = self._charge(self.counters.work_units,
+            amount, self.limits.max_work_units, "semantic work budget")
+        self.failure_detail == ""
+
+    # Multiplication is validated against the configured cap before it is
+    # evaluated, so a hostile count cannot wrap into a small successful charge.
+    me charge_work_product(count: i64, units_per_item: i64) -> bool:
+        if self.failure_detail != "": return false
+        if (count < 0 or units_per_item < 0 or
+                (units_per_item > 0 and
+                    count > self.limits.max_work_units / units_per_item)):
+            self.failure_detail = "semantic work budget"
+            return false
+        self.charge_work(count * units_per_item)
+
+    me charge_retained_product(count: i64, bytes_per_item: i64) -> bool:
+        if self.failure_detail != "": return false
+        if (count < 0 or bytes_per_item < 0 or
+                (bytes_per_item > 0 and
+                    count > self.limits.max_retained_bytes / bytes_per_item)):
+            self.failure_detail = "retained semantic budget"
+            return false
+        self.charge_retained_bytes(count * bytes_per_item)
+
+    me check_semantic_depth(depth: i64) -> bool:
+        if self.failure_detail != "": return false
+        if depth < 0 or depth > self.limits.max_semantic_depth:
+            self.failure_detail = "semantic traversal depth budget"
+            return false
+        true
+
+    fn ok() -> bool:
+        self.failure_detail == ""
+
+    fn error() -> PortableBodyErrorV1:
+        PortableBodyErrorV1.BoundsExceeded(self.failure_detail)
+
+    fn snapshot() -> PortableBodyBudgetCountersV1:
+        self.counters

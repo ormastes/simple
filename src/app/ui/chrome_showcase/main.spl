@@ -1,0 +1,264 @@
+"""S2 — Chrome-backed, Engine2D-composited HTML/CSS catalog showcase.
+
+Pipeline per tab: shared catalog page -> Chrome dynlib (`create` -> `load_html` ->
+`resize` -> `render_frame` -> `read_pixels_into`) -> BGRA -> Engine2D ARGB
+`draw_image` on the requested backend -> `read_pixels` -> `build/chrome-showcase/<tab>.ppm`,
+with one `key=value` receipt at `build/chrome-showcase/receipt.env`.
+
+The catalog is generated from the 4K lane's own inventory and fixture — this file does NOT
+author a second catalog. The pages land in `examples/06_io/ui/web_catalog/` with a
+`catalog.sdn` index so the Simple web renderer showcase consumes byte-identical input.
+
+HONEST SCOPE ON THIS HOST: there is no CEF drop, so `create()` cannot succeed and the
+composited frame is the twin's deterministic test pattern. Every such run records
+`frame_source=stub-pattern`, a non-empty `reason`, and verdict `environment-blocked`.
+Engine2D, the PPM writer and the receipt still run end to end, which is what S3 measures.
+
+READBACK (was a recorded runtime gap, now wired): `simple_chrome_render_read_pixels_into`
+writes into a caller-owned OUT buffer, which the host dynlib facade could not express until
+`spl_wffi_call_i64_into_bytes` landed beside the IN-only `..._with_bytes`. The readback is
+now a REAL bounded pull into a Simple-owned `[u8]` of `width * height * 4`. What has NOT
+changed is the verdict: with no CEF drop the provider still answers
+BACKEND_UNAVAILABLE/NO_FRAME, so `frame_source` stays `stub-pattern` and the run stays
+`environment-blocked`. No new `rt_*` is introduced here.
+"""
+
+use std.io_runtime.{cwd_process, dir_create_all, env_get, file_exists, file_hash_sha256_or_empty,
+    file_read, file_write, file_write_bytes, time_now_unix_micros}
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.{
+    web_renderable_feature_inventory, web_renderable_feature_inventory_apply_to_showcase}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{ChromeRenderLoadRequest,
+    ChromeRenderHandle, chrome_render_symbol_names, chrome_render_load, chrome_render_create,
+    chrome_render_backend_stage, chrome_render_release, chrome_render_load_html,
+    chrome_render_resize, chrome_render_frame, chrome_render_read_pixels_into,
+    ChromeRenderReadback,
+    chrome_render_event, chrome_render_pointer_event_json, chrome_render_key_event_json,
+    chrome_render_sequence_steps, chrome_render_destroy}
+use app.ui.chrome_showcase.catalog.{CHROME_CATALOG_DIR, CHROME_CATALOG_INDEX,
+    CHROME_CATALOG_SOURCE, chrome_catalog_tabs, chrome_catalog_file_for,
+    chrome_catalog_page, chrome_catalog_index_text}
+use app.ui.chrome_showcase.frame.{chrome_frame_stub_image, chrome_frame_nonblank,
+    chrome_frame_bgra_to_argb,
+    chrome_frame_ppm_bytes}
+use app.ui.chrome_showcase.receipt.{ChromeShowcaseReceipt, ChromeShowcaseTabRow,
+    chrome_showcase_receipt_text, CHROME_SHOWCASE_FRAME_STUB, CHROME_SHOWCASE_FRAME_CHROME}
+
+val CHROME_SHOWCASE_OUT_DIR: text = "build/chrome-showcase"
+val CHROME_SHOWCASE_LIB: text = "build/chrome-render/libsimple_chrome_render.dylib"
+val CHROME_SHOWCASE_LIB_SO: text = "build/chrome-render/libsimple_chrome_render.so"
+
+fn _env_or(key: text, fallback: text) -> text:
+    val raw = env_get(key)
+    if raw == "":
+        return fallback
+    raw
+
+fn _env_i64(key: text, fallback: i64) -> i64:
+    val raw = env_get(key)
+    if raw == "":
+        return fallback
+    val parsed = raw.to_i64()
+    if parsed <= 0:
+        return fallback
+    parsed
+
+"""The binding requires an absolute library path (`chrome_render_request_valid`)."""
+fn _absolute(path: text) -> text:
+    if path.starts_with("/"):
+        return path
+    cwd_process() + "/" + path
+
+"""The built shim, or "" when this host has none. Never fabricates a path."""
+fn _chrome_library_path() -> text:
+    if file_exists(CHROME_SHOWCASE_LIB):
+        return CHROME_SHOWCASE_LIB
+    if file_exists(CHROME_SHOWCASE_LIB_SO):
+        return CHROME_SHOWCASE_LIB_SO
+    ""
+
+"""Writes the shared catalog: one page per tab, then the index that binds their digests.
+
+Each page is hashed and its digest recorded in `catalog.sdn`, so the receipt's
+`catalog_sha256` (a digest of that one index file) transitively covers every page byte —
+which is what lets S3 claim the Chrome and Simple showcases consumed the SAME catalog and
+not merely the same file names.
+"""
+fn _write_catalog(tabs: [text]):
+    val inventory = web_renderable_feature_inventory()
+    val composed = web_renderable_feature_inventory_apply_to_showcase(
+        file_read(CHROME_CATALOG_SOURCE), inventory)
+    val _made = dir_create_all(CHROME_CATALOG_DIR)
+    var digests: [text] = []
+    for tab in tabs:
+        val page = chrome_catalog_page(composed, tab)
+        if page == "":
+            print "[chrome-showcase] catalog page missing for tab " + tab
+        val path = CHROME_CATALOG_DIR + "/" + chrome_catalog_file_for(tab)
+        val _written = file_write(path, page)
+        digests.push(file_hash_sha256_or_empty(path))
+    val _index = file_write(CHROME_CATALOG_INDEX,
+        chrome_catalog_index_text(inventory.version, tabs, digests))
+
+"""Drives the FULL frozen per-tab ABI sequence and returns one rc per step, in order.
+
+`create` -> `load_html` -> `resize` -> `render_frame` -> `read_pixels_into` ->
+`event`(pointer) -> `event`(key) -> `destroy`. Every rc is the provider's real return
+value; nothing here substitutes a value when a call is refused, and the sequence is NOT
+short-circuited on the first refusal — a later step's rc is evidence in its own right, and
+stopping early would hide which steps are reachable at all.
+
+Step count and order are frozen by `chrome_render_sequence_steps()`, so a receipt's
+`call_rcs` can never silently drift out of step with its labels.
+"""
+struct ChromeTabDrive:
+    rcs: [i64]
+    readback: ChromeRenderReadback
+
+fn _drive_tab_sequence(handle: ChromeRenderHandle, page_html: text,
+                       width: i64, height: i64) -> ChromeTabDrive:
+    var rcs: [i64] = []
+    val session = chrome_render_create(handle,
+        "{\"width\":" + width.to_text() + ",\"height\":" + height.to_text() + "}")
+    rcs.push(session)
+    rcs.push(chrome_render_load_html(handle, session, page_html))
+    rcs.push(chrome_render_resize(handle, session, width, height))
+    val frame_rc = chrome_render_frame(handle, session, 5000)
+    rcs.push(frame_rc)
+    # A REAL bounded readback now, not a null probe. Its rc occupies the same step slot as
+    # before, so `chrome_render_sequence_steps()` and the receipt labels are unchanged.
+    val readback = chrome_render_read_pixels_into(handle, session, width, height,
+        frame_rc == 0)
+    rcs.push(readback.rc)
+    rcs.push(chrome_render_event(handle, session,
+        chrome_render_pointer_event_json(width / 2, height / 2)))
+    rcs.push(chrome_render_event(handle, session, chrome_render_key_event_json("Tab")))
+    rcs.push(chrome_render_destroy(handle, session))
+    ChromeTabDrive(rcs: rcs, readback: readback)
+
+fn _rcs_text(rcs: [i64]) -> text:
+    var out = ""
+    var index: i64 = 0
+    while index < rcs.len():
+        if index > 0:
+            out = out + ","
+        out = out + rcs[index].to_text()
+        index = index + 1
+    out
+
+fn _steps_text() -> text:
+    var out = ""
+    for step in chrome_render_sequence_steps():
+        if out != "":
+            out = out + ","
+        out = out + step
+    out
+
+fn _catalog_digest() -> text:
+    file_hash_sha256_or_empty(CHROME_CATALOG_INDEX)
+
+fn main() -> i64:
+    val requested = _env_or("SIMPLE_2D_BACKEND", "cpu_simd")
+    val width = _env_i64("SIMPLE_CHROME_SHOWCASE_WIDTH", 320)
+    val height = _env_i64("SIMPLE_CHROME_SHOWCASE_HEIGHT", 180)
+    val tabs = chrome_catalog_tabs()
+
+    val out_dir = _env_or("SIMPLE_CHROME_SHOWCASE_OUT", CHROME_SHOWCASE_OUT_DIR)
+
+    _write_catalog(tabs)
+    val _made = dir_create_all(out_dir)
+
+    # Drive the REAL binding as far as it goes: sha256 -> DynLib.load -> exact 10-symbol
+    # resolution -> sha256 again -> `create()`. `backend_stage` is the MEASURED return of
+    # that call mapped through the twin, never a hardcoded string — that distinction is the
+    # whole point of the field. With a stub shim (no CEF) `create()` answers
+    # CHROME_RENDER_E_BACKEND_UNAVAILABLE and the stage reads `blocked:backend-unavailable`.
+    val library_path = _chrome_library_path()
+    var backend_stage = "blocked:no-shim-built"
+    var frame_source = CHROME_SHOWCASE_FRAME_STUB
+    var reason = "no-chrome-render-shim"
+    var lib_sha256 = ""
+    var provider: ChromeRenderHandle? = nil
+    if library_path != "":
+        lib_sha256 = file_hash_sha256_or_empty(library_path)
+        val request = ChromeRenderLoadRequest(
+            library_path: _absolute(library_path), manifest_sha256: lib_sha256,
+            expected_abi_version: 1, required_symbols: chrome_render_symbol_names(),
+            max_request_bytes: 1048576, max_response_bytes: 268435456)
+        val loaded = chrome_render_load(request)
+        if not loaded.ok:
+            backend_stage = "blocked:load-" + loaded.status
+            reason = "shim-load-refused:" + loaded.error
+            if loaded.missing_symbol != "":
+                reason = reason + ":" + loaded.missing_symbol
+        else:
+            provider = loaded.handle
+
+    var engine = Engine2D.create_with_backend_fast(width.to_i32(), height.to_i32(), requested)
+    val reported = engine.backend_name()
+    print "[chrome-showcase] engine2d requested=" + requested + " reported=" + reported
+
+    var rows: [ChromeShowcaseTabRow] = []
+    var tab_index: i64 = 0
+    for tab in tabs:
+        val started = time_now_unix_micros()
+        # Drive the real ABI sequence for THIS tab's catalog page before compositing.
+        # Its rcs go into the receipt whatever they are, and the readback's own pixels are
+        # composited when — and only when — the provider actually delivered a full frame.
+        # Whether pixels arrived and what the calls returned stay separate receipt fields.
+        var call_rcs = ""
+        var chrome_pixels: [u32] = []
+        if val handle = provider:
+            val page = file_read(CHROME_CATALOG_DIR + "/" + chrome_catalog_file_for(tab))
+            val drive = _drive_tab_sequence(handle, page, width, height)
+            call_rcs = _rcs_text(drive.rcs)
+            if drive.readback.pulled:
+                chrome_pixels = chrome_frame_bgra_to_argb(drive.readback.pixels,
+                    width * height)
+            if tab_index == 0:
+                backend_stage = chrome_render_backend_stage(drive.rcs[0])
+                if backend_stage == "ok" and not drive.readback.pulled:
+                    # A real backend answered `create` but no frame came back. Say which of
+                    # the two it was, rather than letting a live session imply live pixels.
+                    reason = "readback-refused:rc=" + drive.readback.rc.to_text()
+                elif backend_stage != "ok":
+                    reason = "no-cef-drop:" + backend_stage
+        var source_image = chrome_frame_stub_image(width, height, tab_index)
+        if chrome_pixels.len() == width * height:
+            source_image = chrome_pixels
+            frame_source = CHROME_SHOWCASE_FRAME_CHROME
+            reason = ""
+        engine.clear(4278190080u32)
+        engine.draw_image(0i32, 0i32, width.to_i32(), height.to_i32(), source_image)
+        engine.present()
+        val composited = engine.read_pixels()
+        val elapsed_ms = (time_now_unix_micros() - started) / 1000
+        val ppm_path = out_dir + "/" + tab + ".ppm"
+        val wrote = file_write_bytes(ppm_path, chrome_frame_ppm_bytes(composited, width, height))
+        var recorded_path = ppm_path
+        if not wrote:
+            recorded_path = ""
+        rows.push(ChromeShowcaseTabRow(tab: tab, wall_ms: elapsed_ms,
+            pixels: composited.len(), nonblank: chrome_frame_nonblank(composited),
+            ppm_path: recorded_path, call_rcs: call_rcs))
+        tab_index = tab_index + 1
+    engine.shutdown()
+
+    val binary_path = _env_or("SIMPLE_SHOWCASE_BINARY", "")
+    val receipt = ChromeShowcaseReceipt(
+        binary_path: binary_path,
+        binary_size: _env_i64("SIMPLE_SHOWCASE_BINARY_SIZE", 0),
+        binary_mtime: _env_i64("SIMPLE_SHOWCASE_BINARY_MTIME", 0),
+        chrome_lib_sha256: lib_sha256,
+        backend_stage: backend_stage,
+        engine2d_backend_requested: requested,
+        engine2d_backend_reported: reported,
+        inventory_version: web_renderable_feature_inventory().version,
+        catalog_sha256: _catalog_digest(),
+        sequence_steps: _steps_text(),
+        viewport_width: width, viewport_height: height,
+        frame_source: frame_source, reason: reason, timed_out: false, rows: rows)
+    val body = chrome_showcase_receipt_text(receipt)
+    val _written = file_write(out_dir + "/receipt.env", body)
+    print body
+    0

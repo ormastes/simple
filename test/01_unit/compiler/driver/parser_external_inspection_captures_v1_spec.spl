@@ -1,0 +1,93 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.driver.parser_external_inspection_contract_v1.ParserInspectionToolTerminalV1
+use compiler.driver.parser_external_inspection_captures_v1.*
+
+# Synthetic retained captures test normalization only, never tool authority.
+fn artifact_pic() -> [u8]:
+    [0xc5u8, 0xf9u8, 0xefu8, 0xc0u8]
+
+fn section_pic(index: i64, name: text, kind: text, flags: i64,
+    offset: i64, size: i64, extra: text = "") -> text:
+    "{\"Section\":{\"Index\":" + index.to_text() +
+        ",\"Name\":{\"Name\":\"" + name + "\",\"Value\":0}," +
+        "\"Type\":{\"Name\":\"" + kind + "\",\"Value\":0}," +
+        "\"Flags\":{\"Value\":" + flags.to_text() + "}," +
+        "\"Offset\":" + offset.to_text() + ",\"Size\":" + size.to_text() +
+        ",\"Link\":0,\"Info\":0" + extra + "}" + "}"
+
+fn readobj_pic(offset: i64 = 0, bytes: text = "197,249,239,192") -> text:
+    "[{\"FileSummary\":{\"File\":\"<stdin>\",\"Format\":\"elf64-x86-64\"," +
+        "\"Arch\":\"x86_64\",\"AddressSize\":\"64bit\"}," +
+        "\"ElfHeader\":{\"Type\":{\"Name\":\"Relocatable\",\"Value\":1}," +
+        "\"Machine\":{\"Name\":\"Advanced Micro Devices X86-64\",\"Value\":62}" + "}," +
+        "\"Sections\":[" + section_pic(0, "", "SHT_NULL", 0, 0, 0) + "," +
+        section_pic(1, ".text", "SHT_PROGBITS", 6, offset, 4,
+            ",\"SectionData\":{\"Offset\":0,\"Bytes\":[" + bytes + "]}") + "," +
+        section_pic(2, ".symtab", "SHT_SYMTAB", 0, 0, 24) + "]," +
+        "\"Symbols\":[{\"Symbol\":{\"Name\":{\"Name\":\"\",\"Value\":0}," +
+        "\"Section\":{\"Name\":\"Undefined\",\"Value\":0},\"Value\":0,\"Size\":0}" +
+        "}],\"Relocations\":[]}]"
+
+fn objdump_pic() -> text:
+    "<stdin>:\tfile format elf64-x86-64\n\nDisassembly of section .text:\n" +
+        "0000000000000000 <f>:\n       0: c5 f9 ef c0\tvpxor\n"
+
+fn terminal_pic(output: text, tool: text) -> ParserInspectionToolTerminalV1:
+    ParserInspectionToolTerminalV1(tool_bundle_digest: sha256_text("tools"),
+        tool_generation: 1u64, argv_digest: sha256_text(tool),
+        environment_digest: sha256_text("env"), input_digest: sha256_u8_hex(artifact_pic()),
+        input_byte_count: 4, input_fully_written_and_closed: true, exit_code: 0,
+        timed_out: false, cancelled: false, stdout_digest: sha256_text(output),
+        stdout_seen_bytes: output.len(), stdout_kept_bytes: output.len(),
+        stderr_digest: sha256_text(""), stderr_seen_bytes: 0, stderr_kept_bytes: 0,
+        output_overflow: false, process_identity_revalidated: true,
+        process_group_terminated: false, reaped: true, collected: true)
+
+fn capture_pic(bytes: [u8], readobj: text, terminal: ParserInspectionToolTerminalV1
+) -> Result<ParserExternalInspectionCapturedProjectionV1, ParserExternalInspectionCapturesErrorV1>:
+    val objdump = objdump_pic()
+    parser_external_inspection_captures_v1(bytes, terminal,
+        terminal_pic(objdump, "objdump"), readobj, "", objdump, "", ["avx"], false)
+
+describe "retained external inspection captures V1":
+    it "derives all normalized projections from the retained captures":
+        val readobj = readobj_pic()
+        val result = capture_pic(artifact_pic(), readobj,
+            terminal_pic(readobj, "readobj")).unwrap()
+        expect(result.data.instructions.len()).to_equal(1)
+        expect(result.features.observed_features).to_equal(["avx"])
+        expect(result.terminal.input_digest).to_equal(sha256_u8_hex(artifact_pic()))
+        expect(result.terminal.feature_projection_digest).to_equal(result.features.projection_digest)
+
+    it "rejects substituted retained bytes even when the tool pair agrees":
+        val readobj = readobj_pic()
+        expect(capture_pic([0xc5u8, 0xf9u8, 0xefu8, 0xc1u8], readobj,
+            terminal_pic(readobj, "readobj"))).to_equal(
+                Err(ParserExternalInspectionCapturesErrorV1.InputMismatch))
+
+    it "rejects reported executable bytes outside or different from the input":
+        val outside = readobj_pic(offset: 2)
+        expect(capture_pic(artifact_pic(), outside, terminal_pic(outside, "readobj"))).to_equal(
+            Err(ParserExternalInspectionCapturesErrorV1.SectionInputMismatch))
+        val substituted = readobj_pic(bytes: "197,249,239,193")
+        expect(capture_pic(artifact_pic(), substituted,
+            terminal_pic(substituted, "readobj"))).to_equal(
+                Err(ParserExternalInspectionCapturesErrorV1.SectionInputMismatch))
+
+    it "rejects malformed captured data before issuing a projection":
+        expect(capture_pic(artifact_pic(), "{}", terminal_pic("{}", "readobj"))).to_equal(
+            Err(ParserExternalInspectionCapturesErrorV1.ReadobjDecode))
+        expect(capture_pic([], readobj_pic(), terminal_pic(readobj_pic(), "readobj"))).to_equal(
+            Err(ParserExternalInspectionCapturesErrorV1.InputLimit))
+
+    it "rejects unreaped or substituted terminal captures":
+        val readobj = readobj_pic()
+        var terminal = terminal_pic(readobj, "readobj")
+        terminal.reaped = false
+        expect(capture_pic(artifact_pic(), readobj, terminal)).to_equal(
+            Err(ParserExternalInspectionCapturesErrorV1.TerminalJoin))
+        terminal = terminal_pic(readobj, "readobj")
+        terminal.stdout_digest = sha256_text("substituted")
+        expect(capture_pic(artifact_pic(), readobj, terminal)).to_equal(
+            Err(ParserExternalInspectionCapturesErrorV1.TerminalJoin))

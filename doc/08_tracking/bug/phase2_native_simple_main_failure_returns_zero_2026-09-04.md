@@ -1,4 +1,5 @@
 # Phase 2 native `__simple_main` failure returns process zero
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -26,3 +27,6 @@ through `__simple_main` to the platform process entry. Add a focused failing
 main fixture that returns `1` after observable output and require process exit
 1 on macOS, Linux, Windows, and BSD. Rebuild the Phase 2/3 artifact before
 using exit status as admission evidence.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # Project statistics self-hosted generation blocked
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -32,3 +33,21 @@ Markdown, TLDR, SimpleOS-native slide source, and a nine-slide PPTX are generate
 The broader full-CLI bootstrap remains independently useful, but is no longer
 required to consume this report package. Keep the focused parser and protocol
 regressions green when the shared CLI is next rebuilt.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+`bin/simple stats --quality=summary` still refuses on this host (Rust
+seed only, no pure-Simple stats tool deployed). Re-ran `bin/simple
+check` on the cited stopping file
+(web_paint_chunk_frame.spl); the specific "Unexpected token: expected
+LParen, found Dot" no longer reproduces, but single-file `check`
+against it now reports 54 unresolved-type/unresolved-name errors
+("missing importing module surface", DrawIrBatch/PaintChunks/etc. all
+unresolved) -- a module-surface/full-project-context issue when
+checked standalone, not the parenthesization defect originally filed,
+and not diagnosable as a small fix within this lane's budget. The
+underlying blocker (self-hosted stats tool) is unchanged. Leaving OPEN.
+

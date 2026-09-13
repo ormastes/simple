@@ -32,6 +32,10 @@ counters!(
     ARR_MUT_CALLS,
     ARR_MUT_COW_CLONES,
     ARR_MUT_COW_ELEMS_CLONED,
+    // identifier-receiver dict mutation (d.insert(k, v) / d.remove(k) and friends)
+    DICT_MUT_CALLS,
+    DICT_MUT_COW_CLONES,
+    DICT_MUT_COW_ENTRIES_CLONED,
     // object-field array mutation (obj.field.push(x) / self.field.push(x))
     SELF_FIELD_ARR_MUT_CALLS,
     SELF_FIELD_ARR_COW_CLONES,
@@ -56,14 +60,77 @@ counters!(
     // import-resolution probe file reads (see module_cache::probe_source_cached)
     PROBE_SOURCE_READS,
     PROBE_SOURCE_HITS,
-    // imported-module AST memo (hir::lower::import_loader::parsed_imported_module)
+    // imported-module AST memo (hir::lower::import_loader::parsed_imported_module):
+    // parses/hits ATTRIBUTED TO THE HIR LANE, i.e. the fills that lane caused.
     IMPORT_AST_PARSES,
     IMPORT_AST_HITS,
+    // cross-lane source+AST cache (module_cache::shared_source). PARSES counts
+    // physical files read+parsed once for every lane; HITS counts every lookup
+    // served from it. The interpreter counters below split its own consumption:
+    // AST_REUSE borrowed the shared parse, PARSES had to parse its own source
+    // because host `@cfg` stripping changed the bytes.
+    SHARED_SRC_PARSES,
+    SHARED_SRC_HITS,
+    INTERP_MODULE_AST_REUSE,
+    INTERP_MODULE_PARSES,
+    // place-receiver mutation (`self.inner.xs.push(x)`, `rows[i].push(x)`,
+    // `self.d.insert(k, v)`, `arr[i].inc()`) — the in-place kernel in
+    // interpreter_helpers/patterns.rs::try_place_mutation_in_place.
+    PLACE_MUT_CALLS,
+    PLACE_MUT_COW_CLONES,
+    PLACE_MUT_COW_ELEMS_CLONED,
     // numbered-layer-directory memos (module_resolver::resolution)
     NUMBERED_DIR_MISSES,
     NUMBERED_DIR_HITS,
     SEGMENT_WITHIN_NUMBERED_MISSES,
     SEGMENT_WITHIN_NUMBERED_HITS,
+    // while-loop iterations executed by an inline-integer fast path instead of
+    // the generic AST walk (interpreter_control.rs: the one-arg/two-arg helper
+    // matchers and the generalised inline-expression matcher). Bumped once per
+    // loop with the iteration count, so it is free in the hot loop.
+    //
+    // This is also the observable that makes those fast paths diagnosable. A
+    // matched loop used to touch no counter at all, so the process emitted NO
+    // `interp-perf-counters:` block, and "no block" had to be read as "a fast
+    // path ran" -- see the hazard section of
+    // doc/08_tracking/bug/interpreter_while_loop_fast_path_shape_cliff_2026-09-12.md.
+    // Now a matched loop reports the iterations it accelerated.
+    WHILE_INLINE_INT_ITERS,
+    // block-scope shadow bookkeeping (interpreter/block_exec.rs:
+    // capture_node_scope_shadows / restore_block_scope_shadows). Every
+    // execution of a block that directly declares a `var`/`val`/`const`/
+    // `static` pays this, which for a loop body means once per iteration --
+    // measured, on child USER CPU time, at ~250 ns/iteration on top of the same
+    // body with the temporary hoisted out of the loop, i.e. about 20% of a
+    // ~1,170 ns generic iteration. (Wall clock on the measuring host does not
+    // survive its own control; see
+    // doc/08_tracking/bug/perf_wall_clock_ratio_unmeasurable_on_loaded_host_2026-09-13.md.)
+    // NAMES counts names captured; OWNER_WRITES and
+    // OWNER_PROBES count the module-global-store accesses that only a name
+    // aliasing a module global needs. They are the observable that makes the
+    // per-name bookkeeping countable from a spec instead of asserted, and they
+    // fail a spec closed when the block-scope path is not entered at all.
+    BLOCK_SHADOW_NAMES,
+    BLOCK_SHADOW_OWNER_WRITES,
+    BLOCK_SHADOW_OWNER_PROBES,
+    // retention bounds on the loader memos (module_cache, bounded_cache).
+    // EVICTIONS counts entries dropped to stay under the limit; PINNED_SKIPS
+    // counts enforcement passes that could free nothing because every
+    // over-limit candidate was still borrowed (the cache then stays OVER its
+    // limit rather than freeing a live entry); RETAINED_MAX is a high-water
+    // entry count, written with `set_max`, not `bump`.
+    PARSED_SOURCE_EVICTIONS,
+    PARSED_SOURCE_PINNED_SKIPS,
+    PARSED_SOURCE_RETAINED_MAX,
+    PROBE_SOURCE_EVICTIONS,
+    PROBE_SOURCE_PINNED_SKIPS,
+    PROBE_SOURCE_RETAINED_MAX,
+    PATH_KEY_EVICTIONS,
+    PATH_KEY_PINNED_SKIPS,
+    PATH_KEY_RETAINED_MAX,
+    FILTERED_DICT_EVICTIONS,
+    FILTERED_DICT_PINNED_SKIPS,
+    FILTERED_DICT_RETAINED_MAX,
 );
 
 #[inline(always)]
@@ -141,6 +208,16 @@ pub fn bump(counter: &AtomicU64, by: u64) {
     }
 }
 
+/// Raise `counter` to `value` if `value` is larger, for high-water marks such
+/// as `*_RETAINED_MAX`. Adding these with `bump` would report the sum of every
+/// sample, which is meaningless for a maximum.
+#[inline(always)]
+pub fn set_max(counter: &AtomicU64, value: u64) {
+    if enabled() {
+        counter.fetch_max(value, Ordering::Relaxed);
+    }
+}
+
 /// Dump on SIGTERM/SIGINT as well as at exit.
 ///
 /// `atexit` never runs when the process is killed by a signal, and the
@@ -194,5 +271,18 @@ mod tests {
         assert!(text.contains("VT_ARRAY_ELEMS_CLONED"));
         assert!(text.contains('7'));
         VT_ARRAY_ELEMS_CLONED.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn set_max_keeps_the_high_water_not_the_sum() {
+        let was = STATE.load(Ordering::Relaxed);
+        set_enabled(true);
+        let counter = AtomicU64::new(0);
+        set_max(&counter, 5);
+        set_max(&counter, 3);
+        set_max(&counter, 9);
+        set_max(&counter, 4);
+        assert_eq!(counter.load(Ordering::Relaxed), 9, "a maximum, not 5+3+9+4");
+        STATE.store(was, Ordering::Relaxed);
     }
 }

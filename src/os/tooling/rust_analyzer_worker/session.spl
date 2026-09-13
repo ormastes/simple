@@ -1,0 +1,51 @@
+use os.tooling.rust_analyzer_worker.model.{RustAnalysisState, RustToolchainIdentityV1, RustAnalysisResultV1}
+use os.tooling.rust_analyzer_worker.json_ingest.{ingest_rust_json_lines}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+pub struct RustWorkerConfigV1:
+    workspace_root: text
+    cargo_path: text
+    rustc_version: text
+    cargo_version: text
+    clippy_version: text
+    rust_analyzer_version: text
+    target: text
+    features: text
+    timeout_ms: i64
+    maximum_output_bytes: i64
+    maximum_diagnostics: u32
+
+fn stable_fingerprint(parts: [text]) -> text:
+    var hash: u64 = 1469598103934665603
+    for part in parts:
+        var index = 0
+        while index < part.len():
+            hash = (hash ^ part.char_code_at(index).to_u64()) * 1099511628211
+            index = index + 1
+        hash = (hash ^ 255) * 1099511628211
+    hash.to_text()
+
+pub fn rust_worker_identity(config: RustWorkerConfigV1) -> RustToolchainIdentityV1:
+    RustToolchainIdentityV1(
+        cargo_version: config.cargo_version,
+        rustc_version: config.rustc_version,
+        clippy_version: config.clippy_version,
+        rust_analyzer_version: config.rust_analyzer_version,
+        workspace_fingerprint: stable_fingerprint([config.workspace_root]),
+        configuration_fingerprint: stable_fingerprint([config.target, config.features, config.rustc_version, config.clippy_version])
+    )
+
+pub fn run_rust_lint(config: RustWorkerConfigV1, cancelled: bool) -> RustAnalysisResultV1:
+    val identity = rust_worker_identity(config)
+    if cancelled:
+        return RustAnalysisResultV1(state: RustAnalysisState.Cancelled, identity: identity, diagnostics: [], malformed_record_count: 0, truncated: false, stderr_text: "")
+    var args = ["clippy", "--message-format=json"]
+    if config.target != "": args = args + ["--target", config.target]
+    if config.features != "": args = args + ["--features", config.features]
+    val (stdout, stderr, exit_code) = process_run_bounded(config.cargo_path, args, config.timeout_ms, config.maximum_output_bytes)
+    val page = ingest_rust_json_lines(stdout, config.maximum_output_bytes.to_u64(), config.maximum_diagnostics)
+    var state = page.state
+    if exit_code == 124: state = RustAnalysisState.TimedOut
+    elif exit_code != 0 and page.diagnostics.len() == 0: state = RustAnalysisState.Failed
+    elif exit_code != 0 and state == RustAnalysisState.Complete: state = RustAnalysisState.Partial
+    RustAnalysisResultV1(state: state, identity: identity, diagnostics: page.diagnostics, malformed_record_count: page.malformed_record_count, truncated: page.truncated, stderr_text: stderr)

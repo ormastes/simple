@@ -1,8 +1,16 @@
 # rt_file_exists Returns Bool but Interpreted Resolver Compares == 1
 
+## Closed 2026-09-13 — Fixed 2026-06-11 and pinned by a regression spec that still exists
+
+- **inferred** The Status line records the extern's declared return type changed `i64 -> bool` with all `== 1` comparisons removed.
+- **measured** The named regression spec is present: `test/01_unit/compiler/interpreter/module_resolver_file_exists_spec.spl` exists in the tree today.
+- **measured** Module resolution demonstrably works on the current seed — several multi-import repros and `src/app/ide/main.spl` (a large import closure) loaded and ran to completion during this triage.
+- **inferred** The spec itself could not be executed: `bin/simple test` is killed by `process_run_bounded` at its outer bound on this host for every spec.
+
+
 Date: 2026-06-10
 
-Status: fixed (2026-06-11, B5 hardening sweep — declared extern return type changed from i64→bool, all == 1 comparisons removed; regression spec: test/01_unit/compiler/interpreter/module_resolver_file_exists_spec.spl)
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 

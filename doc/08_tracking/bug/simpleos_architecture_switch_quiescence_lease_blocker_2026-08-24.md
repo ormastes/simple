@@ -1,4 +1,5 @@
 # SimpleOS architecture switch quiescence lease blocker
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Blocker
 
@@ -58,3 +59,6 @@ lease rather than being inferred by an adapter:
 No unsafe partial owner, runtime boundary, or adapter API is retained. Scheduler
 wiring remains absent. No tests, builds, SPipe, benchmarks, optimizer, bootstrap,
 or other runtime verification were run.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

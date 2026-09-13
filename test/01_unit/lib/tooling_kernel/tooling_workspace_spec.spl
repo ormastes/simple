@@ -1,0 +1,69 @@
+use std.spec.*
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.lint_kernel.model.{ArtifactKeyV1, SourceSpanV1, DiagnosticV1}
+use std.tooling_kernel.*
+
+fn id(value: u64) -> KpfId128:
+    KpfId128(hi: 0, lo: value)
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn diagnostic(language: KpfId128, revision: u64) -> DiagnosticV1:
+    val artifact = ArtifactKeyV1(workspace_id: id(1), language_id: language, path_id: id(2), target_id: id(3), configuration_digest: digest(10))
+    DiagnosticV1(rule_id: id(4), provider_id: id(5), severity: 2, category: 1, primary_span: SourceSpanV1(artifact: artifact, revision: revision, start_byte: 1, end_byte: 2), message_id: id(6), fix_digest: digest(20))
+
+describe "tooling workspace":
+    it "rejects stale diagnostics after a newer immutable revision":
+        var workspace = ToolingWorkspaceV1.create(2, 2, 4, 4)
+        val language = id(100)
+        val opened = workspace.documents.open(ToolingDocumentSnapshotV1(document_id: id(200), language_id: language, revision: 1, content_digest: digest(1)))
+        val session = workspace.open_language_session(language, 7).handle
+        val old_request = workspace.begin_request(opened.handle, session).handle
+        expect(workspace.documents.update(opened.handle, ToolingDocumentSnapshotV1(document_id: id(200), language_id: language, revision: 2, content_digest: digest(2)))).to_equal(ToolingStatusV1.Ok)
+        val new_request = workspace.begin_request(opened.handle, session).handle
+        expect(workspace.is_request_cancelled(old_request)).to_be(true)
+        val stale = workspace.publish_diagnostics(old_request, digest(1), [diagnostic(language, 1)])
+        expect(stale.status).to_equal(ToolingStatusV1.Cancelled)
+        expect(stale.accepted_count).to_equal(0)
+        val current = workspace.publish_diagnostics(new_request, digest(2), [diagnostic(language, 2)])
+        expect(current.status).to_equal(ToolingStatusV1.Ok)
+        expect(current.accepted_count).to_equal(1)
+        expect(workspace.diagnostic_count).to_equal(1)
+
+    it "disconnect cancels requests and releases the generation lease":
+        var workspace = ToolingWorkspaceV1.create(1, 1, 2, 2)
+        val language = id(101)
+        val document = workspace.documents.open(ToolingDocumentSnapshotV1(document_id: id(201), language_id: language, revision: 1, content_digest: digest(3))).handle
+        val session = workspace.open_language_session(language, 8).handle
+        val request = workspace.begin_request(document, session).handle
+        expect(workspace.generation_pin_count(session)).to_equal(1)
+        expect(workspace.disconnect_session(session)).to_equal(ToolingStatusV1.Ok)
+        expect(workspace.generation_pin_count(session)).to_equal(0)
+        expect(workspace.is_request_cancelled(request)).to_be(true)
+        expect(workspace.begin_request(document, session).status).to_equal(ToolingStatusV1.SessionNotFound)
+
+    it "keeps mixed-language sessions separate":
+        var workspace = ToolingWorkspaceV1.create(2, 2, 2, 2)
+        val simple_language = id(300)
+        val rust_language = id(301)
+        val simple_document = workspace.documents.open(ToolingDocumentSnapshotV1(document_id: id(400), language_id: simple_language, revision: 1, content_digest: digest(4))).handle
+        val rust_document = workspace.documents.open(ToolingDocumentSnapshotV1(document_id: id(401), language_id: rust_language, revision: 1, content_digest: digest(5))).handle
+        val simple_session = workspace.open_language_session(simple_language, 10).handle
+        val rust_session = workspace.open_language_session(rust_language, 11).handle
+        expect(simple_session.slot == rust_session.slot).to_be(false)
+        expect(simple_session.generation == rust_session.generation).to_be(false)
+        expect(workspace.begin_request(simple_document, simple_session).status).to_equal(ToolingStatusV1.Ok)
+        expect(workspace.begin_request(rust_document, rust_session).status).to_equal(ToolingStatusV1.Ok)
+        expect(workspace.begin_request(simple_document, rust_session).status).to_equal(ToolingStatusV1.LanguageMismatch)
+
+    it "bounds diagnostic publication without partial writes":
+        var workspace = ToolingWorkspaceV1.create(1, 1, 1, 1)
+        val language = id(500)
+        val document = workspace.documents.open(ToolingDocumentSnapshotV1(document_id: id(501), language_id: language, revision: 1, content_digest: digest(6))).handle
+        val session = workspace.open_language_session(language, 12).handle
+        val request = workspace.begin_request(document, session).handle
+        val result = workspace.publish_diagnostics(request, digest(6), [diagnostic(language, 1), diagnostic(language, 1)])
+        expect(result.status).to_equal(ToolingStatusV1.CapacityExceeded)
+        expect(result.accepted_count).to_equal(0)
+        expect(workspace.diagnostic_count).to_equal(0)

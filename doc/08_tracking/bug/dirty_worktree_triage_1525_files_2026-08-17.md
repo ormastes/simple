@@ -1,4 +1,5 @@
 # Dirty-working-copy triage: 1,525 files left by ~20 spend-limit-killed sessions
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/language/u64_high_bit_ordering_comparison_spec.spl` now PASSes)
 
 Date: 2026-08-17. Landed as `d7213eb6174` (src, 69), `fb87405c18e` (test, 160),
 `a9a463eb061` (scripts, 25), `2868222ffbc` (docs, 1053).
@@ -62,3 +63,6 @@ rather than deleted — dropping them from disk is not this lane's call.
 
 114,906 files (band 90,000–150,000); `src/` 16 entries (band 13..25);
 `src/runtime` 218 files (canary >= 150).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/language/u64_high_bit_ordering_comparison_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

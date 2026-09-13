@@ -1,0 +1,334 @@
+#!/bin/sh
+# Shared, artifact-bound admission contract for cross-implementation
+# performance comparisons. This file is sourced by check scripts.
+
+perf_admission_skip() {
+    PERF_ADMISSION_STATUS=skipped
+    PERF_ADMISSION_REASON=$1
+}
+
+perf_admission_hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+perf_admission_valid_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+perf_admission_positive_integer() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    # Keep later POSIX-shell arithmetic inside a portable signed range.
+    [ "${#1}" -le 15 ] && [ "$1" -gt 0 ] 2>/dev/null
+}
+
+perf_admission_value_of() {
+    awk -v wanted="$2" '
+        index($0, "=") > 0 {
+            key = substr($0, 1, index($0, "=") - 1)
+            if (key == wanted) print substr($0, index($0, "=") + 1)
+        }
+    ' "$1"
+}
+
+# Admission projections have an exact schema. Consumer status and timing
+# values stay outside this projection, so they cannot smuggle in duplicate or
+# unknown evidence fields.
+perf_admission_validate_projection() {
+    perf_admission_projection=$1
+    perf_admission_prefix=$2
+    if [ -L "$perf_admission_projection" ] || [ ! -f "$perf_admission_projection" ] || [ ! -s "$perf_admission_projection" ]; then
+        printf '%s\n' invalid-row-file
+        return 1
+    fi
+    LC_ALL=C awk -v prefix="$perf_admission_prefix" '
+        BEGIN {
+            names = "workload_id viewport_width viewport_height warmup_count sample_count timing_scope readback_mode capture_mode gpu_identity fallback_state source_path source_revision checksum_semantics binary_kind binary_path binary_sha256 binary_admission_path binary_admission_sha256 artifact_path artifact_sha256 checksum"
+            n = split(names, ordered, " ")
+            for (i = 1; i <= n; i++) allowed[ordered[i]] = 1
+        }
+        function reject(reason) { if (failure == "") failure = reason }
+        {
+            if (index($0, "\r") != 0) { reject("control-character"); next }
+            equals = index($0, "=")
+            if (equals <= 1) { reject("malformed-line"); next }
+            key = substr($0, 1, equals - 1)
+            value = substr($0, equals + 1)
+            if (substr(key, 1, length(prefix)) != prefix) { reject("foreign-prefix"); next }
+            suffix = substr(key, length(prefix) + 1)
+            if (!(suffix in allowed)) { reject("unexpected-key-" suffix); next }
+            if (++seen[suffix] != 1) { reject("duplicate-key-" suffix); next }
+            values[suffix] = value
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                name = ordered[i]
+                if (!(name in seen) && failure == "") failure = "missing-key-" name
+                else if (values[name] == "" && failure == "") failure = "empty-key-" name
+            }
+            if (failure != "") { print failure; exit 1 }
+        }
+    ' "$perf_admission_projection"
+}
+
+perf_admission_validate_receipt() {
+    perf_admission_receipt=$1
+    perf_admission_receipt_hash=$2
+    perf_admission_kind=$3
+    perf_admission_binary_hash=$4
+    perf_admission_validate_bound_file "$perf_admission_receipt" "$perf_admission_receipt_hash" || return 1
+    LC_ALL=C awk -v expected_kind="$perf_admission_kind" -v expected_hash="$perf_admission_binary_hash" '
+        BEGIN { allowed["schema"]=1; allowed["status"]=1; allowed["binary_kind"]=1; allowed["binary_sha256"]=1 }
+        {
+            eq = index($0, "=")
+            if (eq <= 1) exit 1
+            key = substr($0, 1, eq - 1); value = substr($0, eq + 1)
+            if (!(key in allowed) || ++seen[key] != 1 || value == "") exit 1
+            count++
+            values[key] = value
+        }
+        END {
+            if (NR != 4 || count != 4 ||
+                values["schema"] != "perf-binary-admission-v1" ||
+                values["status"] != "admitted" ||
+                values["binary_kind"] != expected_kind ||
+                values["binary_sha256"] != expected_hash) exit 1
+        }
+    ' "$perf_admission_receipt"
+}
+
+perf_admission_validate_bound_file() {
+    perf_admission_bound_path=$1
+    perf_admission_bound_hash=$2
+    case "$perf_admission_bound_path" in ''|-*) return 1 ;; esac
+    [ ! -L "$perf_admission_bound_path" ] && [ -f "$perf_admission_bound_path" ] && [ -s "$perf_admission_bound_path" ] || return 1
+    if stat -f '%l' "$perf_admission_bound_path" >/dev/null 2>&1; then
+        [ "$(stat -f '%l' "$perf_admission_bound_path")" -eq 1 ] || return 1
+    elif stat -c '%h' "$perf_admission_bound_path" >/dev/null 2>&1; then
+        [ "$(stat -c '%h' "$perf_admission_bound_path")" -eq 1 ] || return 1
+    else
+        return 1
+    fi
+    perf_admission_valid_sha256 "$perf_admission_bound_hash" || return 1
+    [ "$(perf_admission_hash_file "$perf_admission_bound_path")" = "$perf_admission_bound_hash" ]
+}
+
+# Write the binary-admission receipt that perf_admission_validate_receipt reads.
+# Until 2026-09-12 NO caller anywhere produced this file, so every comparison
+# row carried an empty binary_admission_path/sha256 and the pairwise admission
+# could only ever answer `invalid-<side>-binary-admission`. Callers must invoke
+# this only after that leg's own live-contract checks have passed: the receipt
+# asserts "this exact binary, of this kind, was admitted", nothing more.
+#   perf_compare_write_binary_admission OUT_PATH BINARY_KIND BINARY_SHA256
+# Echoes the receipt's own sha256 on success.
+perf_compare_write_binary_admission() {
+    perf_admission_out=$1
+    perf_admission_kind=$2
+    perf_admission_binary_hash=$3
+    case "$perf_admission_kind" in
+        native-reference|system-browser|admitted-selfhosted) ;;
+        *) return 1 ;;
+    esac
+    perf_admission_valid_sha256 "$perf_admission_binary_hash" || return 1
+    rm -f "$perf_admission_out"
+    {
+        echo "schema=perf-binary-admission-v1"
+        echo "status=admitted"
+        echo "binary_kind=$perf_admission_kind"
+        echo "binary_sha256=$perf_admission_binary_hash"
+    } >"$perf_admission_out" || return 1
+    perf_admission_hash_file "$perf_admission_out"
+}
+
+# Per-leg admission. The pairwise perf_compare_admit_env below can only run once
+# BOTH legs already read `admitted`, so on its own it can never promote a leg out
+# of `measured-unadmitted` -- the admission step was gated behind the very status
+# it exists to produce, and a perfectly clean measurement reported
+# `compare_status=skipped` unconditionally (bug vulkan_2d_c_compare_skips_on_macos,
+# Cause 1). This performs exactly the SINGLE-SIDED checks the pairwise function
+# already performs, over one projected row, and nothing else: the cross-leg
+# equality checks stay in perf_compare_admit_env and are not weakened.
+# Sets PERF_LEG_ADMISSION_STATUS (admitted|unadmitted) and PERF_LEG_ADMISSION_REASON.
+perf_compare_admit_leg() {
+    perf_leg_row=$1
+    perf_leg_prefix=$2
+    PERF_LEG_ADMISSION_STATUS=unadmitted
+    PERF_LEG_ADMISSION_REASON=not-evaluated
+
+    perf_leg_validation=$(perf_admission_validate_projection "$perf_leg_row" "$perf_leg_prefix") || {
+        PERF_LEG_ADMISSION_REASON="invalid-row:$perf_leg_validation"
+        return 0
+    }
+
+    for perf_leg_key in viewport_width viewport_height warmup_count sample_count; do
+        perf_leg_value=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}${perf_leg_key}")
+        if ! perf_admission_positive_integer "$perf_leg_value"; then
+            PERF_LEG_ADMISSION_REASON="invalid-$perf_leg_key"
+            return 0
+        fi
+    done
+
+    perf_leg_value=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}fallback_state")
+    if [ "$perf_leg_value" != none ]; then
+        PERF_LEG_ADMISSION_REASON="fallback-$perf_leg_value"
+        return 0
+    fi
+
+    case "$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}gpu_identity")" in
+        unknown|unverified|synthetic|software|*fallback*)
+            PERF_LEG_ADMISSION_REASON=invalid-gpu-identity; return 0 ;;
+    esac
+    case "$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}checksum")" in
+        *[!0-9A-Za-z:._+-]*) PERF_LEG_ADMISSION_REASON=invalid-checksum; return 0 ;;
+    esac
+
+    perf_leg_source=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}source_path")
+    perf_leg_revision=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}source_revision")
+    if ! perf_admission_validate_bound_file "$perf_leg_source" "$perf_leg_revision"; then
+        PERF_LEG_ADMISSION_REASON=stale-source
+        return 0
+    fi
+
+    perf_leg_binary=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_path")
+    perf_leg_binary_hash=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_sha256")
+    perf_leg_kind=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_kind")
+    case "$perf_leg_kind" in
+        native-reference|system-browser|admitted-selfhosted) ;;
+        *) PERF_LEG_ADMISSION_REASON=invalid-binary-kind; return 0 ;;
+    esac
+    if ! perf_admission_validate_bound_file "$perf_leg_binary" "$perf_leg_binary_hash" ||
+       [ ! -x "$perf_leg_binary" ]; then
+        PERF_LEG_ADMISSION_REASON=stale-binary
+        return 0
+    fi
+    case "$perf_leg_binary" in
+        *compiler_rust*|*bootstrap*|*rust-seed*|*/seed/*|*seed-simple*)
+            PERF_LEG_ADMISSION_REASON=seed-binary-forbidden; return 0 ;;
+    esac
+    if [ "$perf_leg_kind" = admitted-selfhosted ] && command -v strings >/dev/null 2>&1 &&
+       LC_ALL=C strings "$perf_leg_binary" 2>/dev/null | grep -Eqi 'bootstrap seed only|compiler_rust/target|rust-built Simple binary'; then
+        PERF_LEG_ADMISSION_REASON=seed-binary-content-forbidden
+        return 0
+    fi
+
+    perf_leg_receipt=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_admission_path")
+    perf_leg_receipt_hash=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}binary_admission_sha256")
+    if ! perf_admission_valid_sha256 "$perf_leg_receipt_hash" ||
+       ! perf_admission_validate_receipt "$perf_leg_receipt" "$perf_leg_receipt_hash" "$perf_leg_kind" "$perf_leg_binary_hash"; then
+        PERF_LEG_ADMISSION_REASON=invalid-binary-admission
+        return 0
+    fi
+
+    perf_leg_artifact=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}artifact_path")
+    perf_leg_artifact_hash=$(perf_admission_value_of "$perf_leg_row" "${perf_leg_prefix}artifact_sha256")
+    if ! perf_admission_validate_bound_file "$perf_leg_artifact" "$perf_leg_artifact_hash"; then
+        PERF_LEG_ADMISSION_REASON=stale-artifact
+        return 0
+    fi
+
+    PERF_LEG_ADMISSION_STATUS=admitted
+    PERF_LEG_ADMISSION_REASON=admitted
+}
+
+perf_compare_admit_env() {
+    perf_admission_left=$1
+    perf_admission_left_prefix=$2
+    perf_admission_right=$3
+    perf_admission_right_prefix=$4
+    PERF_ADMISSION_STATUS=admitted
+    PERF_ADMISSION_REASON=admitted
+
+    perf_admission_validation=$(perf_admission_validate_projection "$perf_admission_left" "$perf_admission_left_prefix") || {
+        perf_admission_skip "invalid-left-row:$perf_admission_validation"
+        return 0
+    }
+    perf_admission_validation=$(perf_admission_validate_projection "$perf_admission_right" "$perf_admission_right_prefix") || {
+        perf_admission_skip "invalid-right-row:$perf_admission_validation"
+        return 0
+    }
+
+    # These fields describe the common experiment and observation boundary.
+    # Implementation source revisions deliberately are not in this list: C,
+    # Chrome, and Simple are distinct implementations and each is pinned below.
+    for perf_admission_key in \
+        workload_id viewport_width viewport_height warmup_count sample_count \
+        timing_scope readback_mode capture_mode gpu_identity fallback_state \
+        checksum_semantics checksum; do
+        perf_admission_left_value=$(perf_admission_value_of "$perf_admission_left" "${perf_admission_left_prefix}${perf_admission_key}")
+        perf_admission_right_value=$(perf_admission_value_of "$perf_admission_right" "${perf_admission_right_prefix}${perf_admission_key}")
+        if [ "$perf_admission_left_value" != "$perf_admission_right_value" ]; then
+            perf_admission_skip "mismatch-$perf_admission_key"
+            return 0
+        fi
+    done
+
+    for perf_admission_key in viewport_width viewport_height warmup_count sample_count; do
+        perf_admission_left_value=$(perf_admission_value_of "$perf_admission_left" "${perf_admission_left_prefix}${perf_admission_key}")
+        if ! perf_admission_positive_integer "$perf_admission_left_value"; then
+            perf_admission_skip "invalid-$perf_admission_key"
+            return 0
+        fi
+    done
+
+    perf_admission_fallback=$(perf_admission_value_of "$perf_admission_left" "${perf_admission_left_prefix}fallback_state")
+    if [ "$perf_admission_fallback" != none ]; then
+        perf_admission_skip "fallback-$perf_admission_fallback"
+        return 0
+    fi
+
+    case "$(perf_admission_value_of "$perf_admission_left" "${perf_admission_left_prefix}gpu_identity")" in
+        unknown|unverified|synthetic|software|*fallback*) perf_admission_skip invalid-gpu-identity; return 0 ;;
+    esac
+    perf_admission_checksum=$(perf_admission_value_of "$perf_admission_left" "${perf_admission_left_prefix}checksum")
+    case "$perf_admission_checksum" in *[!0-9A-Za-z:._+-]*) perf_admission_skip invalid-checksum; return 0 ;; esac
+
+    for perf_admission_side in left right; do
+        if [ "$perf_admission_side" = left ]; then
+            perf_admission_file=$perf_admission_left; perf_admission_prefix=$perf_admission_left_prefix
+        else
+            perf_admission_file=$perf_admission_right; perf_admission_prefix=$perf_admission_right_prefix
+        fi
+        perf_admission_source=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}source_path")
+        perf_admission_revision=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}source_revision")
+        if ! perf_admission_validate_bound_file "$perf_admission_source" "$perf_admission_revision"; then
+            perf_admission_skip "stale-$perf_admission_side-source"
+            return 0
+        fi
+
+        perf_admission_binary=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}binary_path")
+        perf_admission_binary_hash=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}binary_sha256")
+        perf_admission_kind=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}binary_kind")
+        case "$perf_admission_kind" in native-reference|system-browser|admitted-selfhosted) ;; *) perf_admission_skip "invalid-$perf_admission_side-binary-kind"; return 0 ;; esac
+        if ! perf_admission_validate_bound_file "$perf_admission_binary" "$perf_admission_binary_hash" || [ ! -x "$perf_admission_binary" ]; then
+            perf_admission_skip "stale-$perf_admission_side-binary"
+            return 0
+        fi
+        case "$perf_admission_binary" in *compiler_rust*|*bootstrap*|*rust-seed*|*/seed/*|*seed-simple*) perf_admission_skip "seed-$perf_admission_side-binary-forbidden"; return 0 ;; esac
+        if [ "$perf_admission_kind" = admitted-selfhosted ] && command -v strings >/dev/null 2>&1 &&
+           LC_ALL=C strings "$perf_admission_binary" 2>/dev/null | grep -Eqi 'bootstrap seed only|compiler_rust/target|rust-built Simple binary'; then
+            perf_admission_skip "seed-$perf_admission_side-binary-content-forbidden"
+            return 0
+        fi
+
+        perf_admission_receipt=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}binary_admission_path")
+        perf_admission_receipt_hash=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}binary_admission_sha256")
+        if ! perf_admission_valid_sha256 "$perf_admission_receipt_hash" ||
+           ! perf_admission_validate_receipt "$perf_admission_receipt" "$perf_admission_receipt_hash" "$perf_admission_kind" "$perf_admission_binary_hash"; then
+            perf_admission_skip "invalid-$perf_admission_side-binary-admission"
+            return 0
+        fi
+
+        perf_admission_artifact=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}artifact_path")
+        perf_admission_artifact_hash=$(perf_admission_value_of "$perf_admission_file" "${perf_admission_prefix}artifact_sha256")
+        if ! perf_admission_validate_bound_file "$perf_admission_artifact" "$perf_admission_artifact_hash"; then
+            perf_admission_skip "stale-$perf_admission_side-artifact"
+            return 0
+        fi
+    done
+}

@@ -1,4 +1,5 @@
 # Census: enum-variant / struct-name bare-match collisions (repo-wide, ENUM1)
+**Status:** OPEN (unverified 2026-09-12)
 
 Date: 2026-07-30
 Scope: `src/compiler/**` and `src/lib/**`
@@ -233,3 +234,6 @@ resolution-order condition triggers the misdispatch. This means:
 Not performed in this lane (per instructions): no struct/class renames, no
 `git`/`jj` operations, no `src/` edits. Only the throwaway
 `/tmp/claude-1000/enum1_probe.spl` was written.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

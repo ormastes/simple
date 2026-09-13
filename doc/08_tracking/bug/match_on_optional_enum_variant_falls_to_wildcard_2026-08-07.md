@@ -88,3 +88,7 @@ persist, the defect is in the interpreter/JIT's match-on-`Option<enum>`
 lowering (likely `Option` flattening not applying when matched against bare
 enum-variant patterns) and needs a fix in the compiler's match desugaring,
 not in caller code.
+
+## Triage 2026-09-13
+
+Reproduces on the deployed seed: `bin/simple test test/01_unit/compiler/codegen/cross_engine_silent_divergence_spec.spl --no-session-daemon` -> `7 total, 4 passed, 3 failed`, matching the recorded defect. Per the 2026-08-17 re-attribution, the defect lives in the tree-walk interpreter (not the pure-Simple `50.mir` lowering), and no pure-Simple interpreter implements `match` dispatch under `src/compiler/95.interp` — this is the Rust seed's interpreter (`src/compiler_rust/compiler/src/interpreter/**`). Fixing it needs a cargo build/redeploy cycle, out of scope for this pure-Simple TDD pass. Leaving OPEN, no code change made.

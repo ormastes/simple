@@ -1,5 +1,7 @@
 # HDA pure-Simple PCI scan Phase-3 SIGSEGV
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open compiler/runtime optimization issue, not an HDA production blocker.
@@ -30,3 +32,7 @@ Fix the Phase-3 native failure before replacing the existing scalar C hardware
 boundary with pure-Simple config-port enumeration. QEMU audio remains a failed
 runtime gate for the separate controller/stream/IRQ wiring and live-evidence
 work, not for missing PCI providers.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,4 +1,5 @@
 # `--no-verify` bypass evidence: lane stage3-memguard, 2026-08-19
+**Status:** OPEN (unverified 2026-09-12)
 
 Authorised explicitly by the user ("no verify push"). This file is the mandatory record.
 
@@ -51,3 +52,6 @@ This lane cannot satisfy its own pre-push hook until a compiler is deployed into
 symlinking `bin/simple` at a deployed binary or by bootstrapping the lane — do not let
 `--no-verify` become the routine path. This is the second such record in two days
 (cf. `f0f5c5d1a70`), which is itself the signal worth acting on.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

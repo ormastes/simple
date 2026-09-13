@@ -81,3 +81,6 @@ The mutation example operates on the loaded production
 registration, or swapping their order must each flip the same real oracle from
 true to false. Status remains review-pending until an independent focused run
 and reviewer GO validate this hardened postimage.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

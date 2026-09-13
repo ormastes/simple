@@ -36,6 +36,7 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
 @unsafe(reason: "opens one no-follow file descriptor, verifies regular-file metadata, and returns at most the caller-owned bound", capabilities: [ffi])
 extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+extern fn rt_file_read_regular_no_follow_last_failure() -> i64
 @unsafe(reason: "requests durable synchronization of an opened file", capabilities: [ffi])
 extern fn rt_file_fsync(path: text) -> bool
 # extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
@@ -103,9 +104,47 @@ fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<tex
     unsafe(capabilities: [ffi]):
         content = rt_file_read_regular_no_follow_bounded(host_path_native(path), max_bytes)
     if content.?:
-        Ok(content.unwrap())
+        # `.len() < 0` is the nil marker. The extern can answer "present" with a
+        # payload that is itself nil, and `.?` only tests the OPTIONAL, not the
+        # value inside it -- so a failed read was handed back as `Ok(<nil>)`.
+        # Callers then saw a successful read of an empty string and reported the
+        # file as empty rather than unreadable, which is exactly how the Stage 2
+        # backend diagnostic ("wrote 29 bytes but reads back -1") stayed
+        # invisible across many bootstrap cycles. Same nil-vs-empty family as the
+        # secure temp dir and provider diagnostic guards.
+        val value = content.unwrap()
+        if value.len() < 0:
+            return Err("regular no-follow bounded file read returned nil ({_read_no_follow_failure_name()}): {path}")
+        Ok(value)
     else:
-        Err("regular no-follow bounded file read failed: {path}")
+        Err("regular no-follow bounded file read failed ({_read_no_follow_failure_name()}): {path}")
+
+fn _read_no_follow_failure_name() -> text:
+    """Name the admission arm that rejected the most recent bounded read.
+
+    The extern has eight indistinguishable nil returns. Reporting only "returned
+    nil" is what kept the Stage 2 backend failure unexplainable: the AOT
+    diagnostic was written successfully and read back as nil with nothing able to
+    say which arm refused it.
+    """
+    var code: i64 = -1
+    unsafe(capabilities: [ffi]):
+        code = rt_file_read_regular_no_follow_last_failure()
+    if code == 0: "diagnostic extern unresolved in this lane"
+    elif code == 77: "reader never called"
+    elif code == 100: "read succeeded"
+    elif code == 101: "read succeeded but the value did not decode at birth"
+    elif code == 1: "capability denied"
+    elif code == 2: "bad arguments"
+    elif code == 3: "path is not valid utf-8"
+    elif code == 4: "open failed"
+    elif code == 5: "metadata unavailable"
+    elif code == 6: "not a regular file"
+    elif code == 7: "larger than the read bound"
+    elif code == 8: "reparse point"
+    elif code == 9: "read failed"
+    elif code == 10: "content is not valid utf-8"
+    else: "arm {code}"
 
 fn file_size_raw(path: text) -> i64:
     unsafe(capabilities: [ffi]):
@@ -143,7 +182,14 @@ fn secure_temp_dir(parent: text, prefix: text) -> Result<text, text>:
     if parent == "" or prefix == "" or prefix.contains("/") or prefix.contains("\\"):
         return Err("secure temporary directory requires a parent and a leaf-name prefix")
     val path = secure_temp_dir_raw(parent, prefix)
-    if path == "":
+    # `.len() <= 0`, not `== ""`. rt_secure_temp_dir signals every failure by
+    # returning an empty/nil text, and a NIL compares UNEQUAL to "" -- the same
+    # trap driver_aot_native_output.spl:2333 documents for its diagnostic
+    # payload. With the old guard a failed creation sailed through as
+    # `Ok(<nil>)`, so callers built paths on it and every later operation failed
+    # somewhere far away with no hint of the real cause. Measured: len() on the
+    # returned value was -1 while `path == ""` was false.
+    if path.len() <= 0:
         return Err("secure temporary directory creation failed")
     Ok(path)
 

@@ -1,4 +1,5 @@
 # Two `cli_debug` specs import symbols that never existed anywhere in `src/`
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Symptom
 - `test/01_unit/app/cli_debug/service_commands_v1_spec.spl` — 3 of 5 examples fail:
@@ -85,3 +86,6 @@ at its line 1 carries the pointer into `todo_db.sdn`. The landed writer is
 `src/app/cli_debug/evidence_write_v1.spl` (app layer, per the design's runtime-boundary
 decision); whether the orphaned lib-layer writer holds anything worth porting is an open
 question, not a fix.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

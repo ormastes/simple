@@ -118,3 +118,25 @@ cases added by this task, all passing).
 **Unblock condition:** update the spec's `file_read()` target(s) to the
 current file(s) containing the MIR dispatch string for
 `rt_engine2d_simd_fill_span_u32` / `rt_engine2d_simd_copy_span_u32`.
+
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+Per-item at `f26970e9d93`:
+- **#1** (Vulkan `draw_rect_filled` interior-pixel corruption): still unfixed,
+  no change found on the cited files; genuine GPU pixel-shading defect, out
+  of scope for this shard. Leave OPEN.
+- **#2**: already CLOSED as documented — unaffected.
+- **#3** (`vulkan_engine2d_frame_batch_contract_spec.spl` "Module count limit
+  (800) exceeded"): the limit lives in
+  `src/compiler_rust/compiler/src/memory_guard.rs:59` — a Rust seed change,
+  out of scope for this shard. Leave OPEN.
+- **#4** (`simd_kernels_spec.spl` stale `mir_source` path): **already fixed**
+  — the spec (`test/01_unit/lib/gpu/engine2d/simd_kernels_spec.spl:183`) now
+  reads `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`,
+  which contains `name == "rt_engine2d_simd_fill_span_u32"` /
+  `"rt_engine2d_simd_copy_span_u32"` (verified by grep) — the file-split move
+  this item called out has already been reconciled by another change. No
+  action needed here.
+
+Net: record stays OPEN (items #1 and #3 unresolved, both out of scope for a
+shard triage pass); item #4 is stale and can be dropped from future re-checks.

@@ -1,7 +1,7 @@
 # WM window titlebar title text never renders in-guest (close X, taskbar labels, clock all render)
 
 - **ID:** wm_window_title_text_not_rendered_2026-07-20
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** medium (visual completeness; only n=1 window observable on diskless boots)
 - **Found by:** GUI-CHECK surface lane, 2026-07-20
 
@@ -36,3 +36,7 @@ Gated probe on the live chrome title call: print title.len(), first bytes,
 computed max_chars, and the backend draw entry — one boot names whether
 the string, the fit math, or the draw is at fault; then fix at root with
 the campaign's boring-construct recipes.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

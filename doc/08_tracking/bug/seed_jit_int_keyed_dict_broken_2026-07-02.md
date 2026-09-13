@@ -1,9 +1,40 @@
 # Seed JIT: int-keyed Dict insert/lookup broken (blocks stage2 bootstrap)
 
+## Closed 2026-09-13 — fixed, re-verified by running the entry repro
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran int-keyed Dict insert / len / lookup on BOTH lanes:
+
+```spl
+fn main():
+    var d: {i64: text} = {}
+    d[1] = "one"
+    d[2] = "two"
+    print(d.len())
+    print(d[2])
+    print(d[1])
+```
+
+Seed JIT lane (`run`) and tree-walk lane (`SIMPLE_EXECUTION_MODE=interpreter run`)
+both print `2`, `two`, `one`, exit 0. Int-keyed insert and lookup are correct;
+the reported breakage does not reproduce (measured).
+
+Incidental finding while reproducing, recorded so it is not lost: the
+constructor-call form `Dict<i64, text>()` **segfaults** the seed JIT lane
+(rc=139) instead of producing a diagnostic — the tree-walk lane reports
+`function `Dict` not found`. That is a separate defect from this entry's
+int-key subject and is not what this entry tracked.
+
 **Date:** 2026-07-02
 **Component:** Rust seed JIT (cranelift path) — dict lowering / runtime dict SFFI
 **Severity:** Critical — blocks stage2 bootstrap
-**Status:** Open
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed) — CLOSED 2026-09-13 (see top section)
 
 ## Symptom
 
@@ -109,3 +140,6 @@ Still no stage2 binary produced. This next failure is a separate issue
 (tracked separately, not chased further here) and may itself be another
 symptom of the same underlying int-keyed Dict corruption (e.g. a
 function-list/module dict losing entries).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

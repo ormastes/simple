@@ -80,3 +80,6 @@ runs, so it was not attempted from this lane. It is a small change — add
 it to `BDD_KEYWORDS` — but it needs a lane that owns the seed rebuild, plus a
 SPipe-owner decision on whether `feature` is blessed vocabulary or the specs
 should be migrated instead.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

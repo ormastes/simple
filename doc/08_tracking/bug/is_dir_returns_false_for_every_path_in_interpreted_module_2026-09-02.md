@@ -1,5 +1,7 @@
 # `is_dir` answers false for every real path inside an interpreter-fallback module (and for any backslash path even under JIT)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-09-02
 - Status: OPEN
 - Severity: high (silently disables every `is_dir`-guarded code path)
@@ -70,3 +72,6 @@ is recorded as the first thing to check, not as a finding.
    and `file_exists` already accept forms `is_dir` rejects, so the three
    disagree today.
 3. Grep for `is_dir(` guards in tooling paths — each is a latent silent no-op.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

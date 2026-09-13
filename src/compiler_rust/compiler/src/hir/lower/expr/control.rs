@@ -11,6 +11,22 @@ use crate::hir::lower::error::LowerResult;
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
+fn hir_expr_definitely_returns(expr: &HirExpr) -> bool {
+    match &expr.kind {
+        HirExprKind::Block(stmts) => match stmts.last() {
+            Some(HirStmt::Return(_)) => true,
+            Some(HirStmt::Expr(inner)) => hir_expr_definitely_returns(inner),
+            _ => false,
+        },
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => hir_expr_definitely_returns(then_branch) && hir_expr_definitely_returns(else_branch),
+        _ => false,
+    }
+}
+
 impl Lowerer {
     pub(super) fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
@@ -444,6 +460,12 @@ impl Lowerer {
 
         // Recursively build the else branch from remaining arms
         let else_branch = self.lower_match_arms(subject_idx, subject_ty, remaining_arms, ctx)?;
+        // A return-only arm does not contribute a value to the match join.
+        // Using its return expression type as the whole match type degraded
+        // `Err(_): return Err(...); Ok(value): value` to ANY.  Arithmetic then
+        // re-boxed the otherwise raw i64 before a direct i64 call (6 -> 48).
+        let then_diverges = hir_expr_definitely_returns(&then_branch);
+        let result_ty = if then_diverges { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -451,7 +473,7 @@ impl Lowerer {
                 then_branch: Box::new(then_branch),
                 else_branch: Some(Box::new(else_branch)),
             },
-            ty: then_ty,
+            ty: result_ty,
         })
     }
 
@@ -2099,7 +2121,13 @@ impl Lowerer {
             let inner_hir = self.lower_expr(inner, ctx)?;
             return Ok(HirExpr {
                 kind: HirExprKind::BuiltinCall {
-                    name: "rt_is_some".to_string(),
+                    // `rt_is_present`, NOT `rt_is_some`: `.?` is absent for an
+                    // empty array/dict/string too, exactly as the interpreter's
+                    // `Expr::ExistsCheck` arm decides it. `rt_is_some` made
+                    // `while arr.?:` loop forever on a drained array under
+                    // native codegen —
+                    // doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+                    name: "rt_is_present".to_string(),
                     args: vec![inner_hir],
                 },
                 ty: TypeId::BOOL,
@@ -2149,7 +2177,9 @@ impl Lowerer {
         // CANONICAL SEMANTICS (decided, not silently picked): `if x:` on an
         // optional/reference-typed `x` means PRESENCE — "x is not nil" — the
         // same meaning `x.?` already carries in condition position two dozen
-        // lines above, and the same predicate (`rt_is_some`) implements both.
+        // lines above. NOTE: they are no longer the SAME predicate -- a bare `.?`
+        // uses `rt_is_present` (nil/None or an empty array/dict/string is absent)
+        // while this tagged-slot wrap keeps `rt_is_some` (not the nil sentinel).
         // This deliberately does NOT adopt `RuntimeValue::truthy`'s
         // emptiness-aware rule; see the residual note below.
         //
@@ -2199,8 +2229,8 @@ impl Lowerer {
     /// whole browser-engine module to the interpreter.
     ///
     /// Recognizes exactly the shape `lower_exists_check` emits —
-    /// `LetIn { value, body: If { condition: rt_is_some(Local(idx)), .. } }` —
-    /// and replaces it with `rt_is_some(value)`, dropping the now-unused
+    /// `LetIn { value, body: If { condition: rt_is_present(Local(idx)), .. } }` —
+    /// and replaces it with `rt_is_present(value)`, dropping the now-unused
     /// binding. Recurses through `and`/`or`/`not` so
     /// `fn f() -> bool: a.? and b.?` is covered too.
     pub(crate) fn coerce_exists_value_to_bool_in_place(expr: &mut HirExpr) {
@@ -2236,7 +2266,7 @@ impl Lowerer {
                     HirExprKind::If { condition, .. } => matches!(
                         &condition.kind,
                         HirExprKind::BuiltinCall { name, args }
-                            if name == "rt_is_some"
+                            if name == "rt_is_present"
                                 && matches!(
                                     args.first().map(|a| &a.kind),
                                     Some(HirExprKind::Local(idx)) if idx == local_idx
@@ -2253,7 +2283,8 @@ impl Lowerer {
                         },
                     );
                     expr.kind = HirExprKind::BuiltinCall {
-                        name: "rt_is_some".to_string(),
+                        // Same presence rule as `lower_condition` — see there.
+                        name: "rt_is_present".to_string(),
                         args: vec![subject],
                     };
                     expr.ty = TypeId::BOOL;
@@ -2380,7 +2411,10 @@ impl Lowerer {
 
         let condition = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_is_some".to_string(),
+                // Presence, not mere non-nil: an empty array/dict/string makes
+                // `.?` yield nil in value position too, matching the
+                // interpreter. See `lower_condition`.
+                name: "rt_is_present".to_string(),
                 args: vec![HirExpr {
                     kind: HirExprKind::Local(subject_idx),
                     ty: subject_ty,
@@ -2704,8 +2738,30 @@ impl Lowerer {
                     // would make the next consumer read `42 << 3` as a raw int.
                     // `ANY` is what every other tagged-value producer reports.
                     let _ = pointee;
+                    // Identity on the VALUE is not the same as returning the
+                    // word unchanged. A `T?` STATIC type does not guarantee a
+                    // bare runtime word: `Some(x)` lowers to `BuiltinCall
+                    // "Some"` (calls.rs:638) and boxes a real Option enum, so
+                    // `val b: text? = Some("world"); b!` handed the Option
+                    // WRAPPER to the next consumer — `b!.len()` answered -1 and
+                    // `"[" + b! + "]"` answered "". That is a silent wrong
+                    // answer, and it is what made every MCP CLI tool report
+                    // "centralized child storage environment is unavailable":
+                    // `_optional_environment` (storage_roots/environment_owner.spl:13)
+                    // returns `Some(value)` into `text?`, and the resolver's
+                    // `environment.local_app_data! == ""` then compared the
+                    // wrapper, not the path.
+                    // `rt_unwrap_or_self` is precisely the normalizer for this:
+                    // it is the identity on a bare/flat word and on every
+                    // non-Option enum, and yields the payload only for the
+                    // reserved OPTION_ENUM_ID (runtime/src/value/objects.rs:326).
+                    // So a genuinely-flat nullable keeps its previous behaviour
+                    // bit for bit, and a boxed `Some(x)` is flattened to `x`.
                     return Ok(HirExpr {
-                        kind: inner_hir.kind,
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![inner_hir],
+                        },
                         ty: TypeId::ANY,
                     });
                 }
@@ -2741,8 +2797,20 @@ impl Lowerer {
                     self.module.types.get(pointee),
                     Some(HirType::Struct { .. }) | Some(HirType::Enum { .. })
                 ) {
+                    // Same `Some(x)`-into-`T?` boxing hazard as the scalar case
+                    // above, and it is on the same incident path one line down:
+                    // `tooling_paths.spl` caches `_tooling_roots = Some(roots)`
+                    // (a `StorageRoots?`) and then returns `Ok(_tooling_roots!)`,
+                    // so the second call in a request handed the Option wrapper
+                    // out typed as `StorageRoots`. `rt_unwrap_or_self` leaves a
+                    // real object reference — and every non-Option user enum —
+                    // untouched, so the class/enum identity this branch exists
+                    // to preserve is preserved.
                     return Ok(HirExpr {
-                        kind: inner_hir.kind,
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![inner_hir],
+                        },
                         ty: pointee,
                     });
                 }

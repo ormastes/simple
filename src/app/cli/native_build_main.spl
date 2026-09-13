@@ -4,7 +4,7 @@ use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait}
 
 use std.io_runtime.{get_args}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, file_delete}
 use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{dir_create_all, dir_remove_all}
@@ -13,6 +13,10 @@ use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb}
 use app.cli.native_build_warm_receipt.{
     NATIVE_BUILD_WARM_CANDIDATE_ENV, native_build_warm_receipt_prepare,
     native_build_warm_artifact_restore, native_build_warm_receipt_finish
+}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_prepare_v1,
+    environment_variant_policy_handoff_attach_v1
 }
 
 # Absolute path of the current bootstrap-stage compiler.
@@ -125,6 +129,7 @@ fn resolve_simple_binary() -> text:
     "bin/simple"
 
 val OUTPUT_LIMIT = 12000
+var native_build_stderr_spill_seq: i64 = 0
 
 fn native_build_text_eq(a: text, b: text) -> bool:
     a.len() == b.len() and a.starts_with(b)
@@ -172,7 +177,7 @@ fn print_help():
     print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
     print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
     print "  --mode <name>        Build mode: dynload (default) or one-binary"
-    print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
+    print "  --cache-dir <dir>    Native cache directory (default: SIMPLE_USER_STORAGE_ROOT/cache/compiler/native-build/v1)"
     print "  --timeout <secs>     Worker timeout in seconds (default 7200)"
     print "  --emit-object        Emit relocatable object output"
     print "  --emit-archive       Emit a static archive instead of an executable"
@@ -263,11 +268,17 @@ fn output_path_arg(args: [text]) -> text:
         i = i + 1
     ""
 
-fn native_build_prefixed_arg(args: [text], prefix: text) -> text:
-    for a in args:
-        if a.starts_with(prefix):
-            return a.substring(prefix.len())
-    ""
+pub fn native_build_strict_stub_evidence(output: text) -> bool:
+    output.contains("stub functions for unresolved symbols") or
+        output.contains("Unresolved symbol preview:") or
+        output.contains("fabricated as weak stubs") or
+        output.contains("fabricated stub") or
+        output.contains("stub fallback")
+
+pub fn native_build_strict_stub_violation(strict_no_stub: bool, stdout: text, stderr: text) -> bool:
+    strict_no_stub and
+        (native_build_strict_stub_evidence(stdout) or
+            native_build_strict_stub_evidence(stderr))
 
 # Keep the front-end cache beside the explicitly selected native-build cache.
 # Parse shards inherit this environment, so an isolated bootstrap worktree can
@@ -350,6 +361,11 @@ fn native_build_range_is_diagnostic(
         or native_build_range_contains(output, "Segmentation fault", line_start, line_end)
         or native_build_range_contains(output, "dumped core", line_start, line_end)
         or native_build_range_contains(output, "core dumped", line_start, line_end)
+        or native_build_range_contains(output, "[hir-fatal", line_start, line_end)
+        or native_build_range_contains(output, "[post-hir-validation-fatal", line_start, line_end)
+        or native_build_range_contains(output, "[bootstrap-phase3-error", line_start, line_end)
+        or native_build_range_contains(output, "[mir-type-invariant]", line_start, line_end)
+        or native_build_range_contains(output, "[mir-tag-probe]", line_start, line_end)
 
 fn native_build_collect_diagnostics(output: text) -> [text]:
     """Every diagnostic line in the WHOLE stream, including the part head+tail drops."""
@@ -397,19 +413,35 @@ fn eprint_bounded(output: text):
     # TEMP (or TMP). Falling through to "/tmp" there made file_write fail on
     # every truncated build, so the FULL stderr was lost and 1.3 MB of
     # diagnostics were dropped from the middle (measured 2026-08-31 on the
-    # lint_entry native-build). Order matters: TMPDIR first keeps POSIX
-    # behaviour byte-identical (TEMP/TMP are normally unset on Linux/macOS).
+    # lint_entry native-build). A provenance-bound native cache is preferred
+    # when available so cleanup of TMPDIR cannot erase the full stream; the
+    # platform temp variables remain the portable fallback.
+    val cache_dir_env = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
     val tmpdir_env = env_get("TMPDIR") ?? ""
     val temp_env = env_get("TEMP") ?? ""
     val tmp_env = env_get("TMP") ?? ""
     var spill_root = "/tmp"
-    if tmpdir_env != "":
+    if cache_dir_env != "":
+        val durable_diagnostic_dir = "{cache_dir_env}/diagnostics"
+        if dir_create_all(durable_diagnostic_dir):
+            spill_root = durable_diagnostic_dir
+        elif tmpdir_env != "":
+            spill_root = tmpdir_env
+        elif temp_env != "":
+            spill_root = temp_env
+        elif tmp_env != "":
+            spill_root = tmp_env
+    elif tmpdir_env != "":
         spill_root = tmpdir_env
     elif temp_env != "":
         spill_root = temp_env
     elif tmp_env != "":
         spill_root = tmp_env
-    val spill_path = "{spill_root}/native-build-stderr-{getpid()}.log"
+    native_build_stderr_spill_seq = native_build_stderr_spill_seq + 1
+    var spill_path = "{spill_root}/native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log"
+    while file_exists(spill_path):
+        native_build_stderr_spill_seq = native_build_stderr_spill_seq + 1
+        spill_path = "{spill_root}/native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log"
     if file_write(spill_path, output):
         eprint "[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}"
     else:
@@ -529,7 +561,10 @@ fn parse_shard_queue_dir() -> text:
     if root == "":
         val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
         val lane_name = if lane == "": "default" else: lane
-        root = "build/bootstrap/native_cache/{lane_name}/frontend"
+        val user_root = env_get("SIMPLE_USER_STORAGE_ROOT") ?? ""
+        if user_root == "":
+            return ""
+        root = "{user_root}/cache/compiler/native-build/v1/{lane_name}/frontend"
     val dir = "{root}/queue-{getpid()}"
     if not dir_create_all(dir):
         return ""
@@ -632,7 +667,10 @@ fn hir_shard_queue_dir() -> text:
     if root == "":
         val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
         val lane_name = if lane == "": "default" else: lane
-        root = "build/bootstrap/native_cache/{lane_name}/hir"
+        val user_root = env_get("SIMPLE_USER_STORAGE_ROOT") ?? ""
+        if user_root == "":
+            return ""
+        root = "{user_root}/cache/compiler/native-build/v1/{lane_name}/hir"
     val dir = "{root}/queue-{getpid()}"
     if not dir_create_all(dir):
         return ""
@@ -667,6 +705,17 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     print "[hir-shard] {done}/{count} shard(s) completed split={mode}"
 
 pub fn run_native_build_worker(args: [text]) -> i64:
+    val policy = match environment_variant_policy_handoff_prepare_v1(args):
+        case Ok(value): value
+        case Err(_):
+            eprint "error: native-build could not collect a valid environment variant policy"
+            return 1
+    val forwarded_args = match environment_variant_policy_handoff_attach_v1(
+        args, policy.encoded_payload):
+        case Ok(value): value
+        case Err(_):
+            eprint "error: native-build could not create its internal policy handoff"
+            return 1
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     val mode = env_get("SIMPLE_EXECUTION_MODE")
     # A compiled bootstrap capsule can route the two internal `run` targets
@@ -677,12 +726,10 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
     if (mode == nil or mode == "") and not compiled_bootstrap_route:
         env_set("SIMPLE_EXECUTION_MODE", "interpret")
-    for arg in args:
-        # Already folded into SIMPLE_FRONTEND_OFFLOAD* below; forwarding the flag
-        # text as well only risks a `run` path reading it as a file (see
-        # src/app/run/main.spl).
-        if not (arg.starts_with("--frontend-offload=") or arg.starts_with("--frontend-offload-fallback=")):
-            worker_args = worker_args.push(arg)
+    for arg in forwarded_args:
+        # Preserve every public argument byte and its order. Only the worker
+        # removes the one internal handoff argument before cli_native_build.
+        worker_args = worker_args.push(arg)
     val simple_bin = resolve_simple_binary()
     # Propagate the resolved absolute/validated binary so the worker (and any
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
@@ -691,17 +738,10 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     val frontend_cache_dir = native_build_frontend_cache_dir_arg(args)
     if frontend_cache_dir != "":
         env_set("SIMPLE_FRONTEND_CACHE_DIR", frontend_cache_dir)
-    # CLI beats env: the driver reads only SIMPLE_FRONTEND_OFFLOAD*, so the
-    # flag wins by overwriting the variable the worker inherits.
-    val frontend_offload = native_build_prefixed_arg(args, "--frontend-offload=")
-    if frontend_offload != "":
-        env_set("SIMPLE_FRONTEND_OFFLOAD", frontend_offload)
-    val frontend_offload_fallback = native_build_prefixed_arg(args, "--frontend-offload-fallback=")
-    if frontend_offload_fallback != "":
-        env_set("SIMPLE_FRONTEND_OFFLOAD_FALLBACK", frontend_offload_fallback)
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
-    val warm_receipt = native_build_warm_receipt_prepare(args, simple_bin)
+    val warm_receipt = native_build_warm_receipt_prepare(
+        args, simple_bin, policy.handoff.cache_identity)
     if warm_receipt.hit:
         if native_build_warm_artifact_restore(warm_receipt):
             print "[native-build-warm] exact final artifact restored; worker skipped"
@@ -724,13 +764,13 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
     if shard_count > 0:
-        run_parse_shards(args, shard_count, simple_bin, native_build_timeout_ms(args))
+        run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
     # phase is then pure cache hits.
     val hir_shard_count = native_build_hir_shard_count(args)
     if hir_shard_count > 1:
-        run_hir_shards(args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
+        run_hir_shards(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
     # Publish the candidate path only for the real worker. Parse-shard_main
     # computes its closure before setting SIMPLE_PARSE_SHARD, so inheriting this
     # env into warm-up children would let a partial child author the candidate.
@@ -746,6 +786,14 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
     val output_ok = output_path != "" and file_exists(output_path)
+    val strict_no_stub = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
+    if native_build_strict_stub_violation(strict_no_stub, stdout, stderr):
+        if output_ok:
+            file_delete(output_path)
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+        eprint "error: SIMPLE_NO_STUB_FALLBACK=1 rejected native-build output containing unresolved-symbol stub evidence."
+        eprint "  The worker reported success, but strict mode forbids publishing or caching a fabricated binary."
+        return 1
     val _warm_promoted = native_build_warm_receipt_finish(
         warm_receipt, stdout, code == 0, output_ok)
     env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
@@ -877,6 +925,10 @@ fn native_build_is_value_consuming_flag(arg: text) -> bool:
         or arg == "--cache-dir" or arg == "--target" or arg == "--cpu"
         or arg == "--opt-level" or arg == "--timeout" or arg == "--threads"
         or arg == "--jobs" or arg == "-j" or arg == "--log"
+        or arg == "--parser-impl" or arg == "--parser-prefer"
+        or arg == "--parser-require" or arg == "--host-cpu-max"
+        or arg == "--frontend-offload"
+        or arg == "--frontend-offload-fallback"
 
 fn native_build_has_entry(args: [text]) -> bool:
     var i = 0

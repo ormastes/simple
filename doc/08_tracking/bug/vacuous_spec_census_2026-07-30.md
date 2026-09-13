@@ -1,5 +1,7 @@
 # Vacuous-spec census: 905 specs and ~14,500 test cases are disabled behind fake-green placeholders
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Lane PLACEHOLDER1**, run inline by the orchestrator after the subagent was
 halted on an API quota. Method is shell counting over `test/01_unit/**` and
 `test/unit/**`; every number below is reproducible with the commands recorded
@@ -97,3 +99,7 @@ skipping failing tests *and* mass-changing test state without approval.
    the 103 OOM-on-numbered-directory-resolution group, which is one bug.
 3. **Report the real number.** Any statement of suite health that counts these
    905 as passing is overstated by ~14,500 cases.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

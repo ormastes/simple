@@ -1,0 +1,197 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Alloca-slot transform: the `Ret` terminator's optional operand must be read
+# with the `?? <invalid sentinel>` spelling, never `.unwrap()`.
+#
+# REPRODUCER (structural) for
+# doc/08_tracking/bug/stage2_route_llvm_ir_duplicate_local_name_2026-09-13.md
+# (site 11 of the Stage-2 admission chain).
+#
+# Measured 2026-09-13 on the Stage-2 candidate sha256 99ba0cf430d255a4: every
+# function whose MIR terminator is `Ret(Some(<local>))` was refused by
+# `ssa_alloca_transform_blocks` with reason "invalid terminator operands", so
+# the transform never ran on it and its multi-def locals reached llc as
+# duplicate `%lN` definitions:
+#
+#   define ptr @shape(ptr %l0) nounwind {     ; allocas=0, `%l1` defined twice
+#   bb0: %l1 = getelementptr i8, ptr %l0, i64 0  ; copy
+#   bb2: %l1 = getelementptr i8, ptr %l13, i64 0 ; copy
+#   bb1: ret ptr %l1
+#
+# while a `Ret(None)`-terminated function in the same module WAS slotted
+# (`@__simple_main`: `%l5 = alloca ptr`, store/load, `ret i64 0`, no duplicate).
+# The real blocker was `module_logical_name_from_path`, whose `mod_path` is
+# written 10 times: `module.ll:102:3: error: multiple definition of local value
+# named 'l13'`.
+#
+# The SAME MIR shape is admitted under the seed's tree-walking interpreter
+# (`applied=true reason=ready`), which localises the divergence to `.unwrap()`
+# on an optional -- it lowers to `rt_enum_payload`, which yields nil/raw 0 on
+# the staged-native LLVM lane (filed as
+# doc/08_tracking/bug/stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md, and
+# documented in var_reassign_ssa.spl's own Call arm). Because the defect is
+# lane-specific, the BEHAVIOURAL examples below pass before AND after the fix --
+# they are regression guards, not the RED evidence. The RED evidence is the
+# STRUCTURAL example: it is the divergent spelling itself that must not come
+# back, and it failed before the fix and passes after.
+#
+# Vacuity: the source read must be non-trivial (> 2000 bytes) and all three
+# `case Ret(value):` arms must be FOUND, or the example FAILS. "No `.unwrap()`
+# in a file we could not read" is not a pass.
+
+use std.spec.step
+
+use compiler.mir.mir_instructions.{
+    BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind,
+    MirTerminator
+}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirType}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{
+    ssa_alloca_transform_blocks, ssa_reassigned_locals_for_blocks
+}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val SSA_SOURCE = "src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl"
+
+fn local(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn cop(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(local(id)))
+
+fn text_local(id: i64) -> MirLocal:
+    MirLocal(id: local(id), name: nil, type_: MirType.ptr(MirType.bits(8), false),
+             kind: LocalKind.Var, is_ghost: false)
+
+# The measured `@shape` shape: local 14 (`var s`) is written in the entry block
+# and again in the loop body, and the function RETURNS it -- so its terminator
+# is `Ret(Some(Copy(14)))`, the exact operand shape the admission gate refused.
+fn loop_carried_value_return() -> [MirBlock]:
+    [
+        MirBlock(
+            id: BlockId.new(0), label: "bb0",
+            instructions: [
+                MirInst(kind: MirInstKind.Call(Some(local(13)), cop(0), [cop(0)]), span: nil),
+                MirInst(kind: MirInstKind.Copy(local(14), cop(13)), span: nil)
+            ],
+            terminator: MirTerminator.Goto(BlockId.new(1))
+        ),
+        MirBlock(
+            id: BlockId.new(1), label: "bb1",
+            instructions: [
+                MirInst(kind: MirInstKind.Call(Some(local(21)), cop(0), [cop(14)]), span: nil)
+            ],
+            terminator: MirTerminator.If(cop(21), BlockId.new(2), BlockId.new(3))
+        ),
+        MirBlock(
+            id: BlockId.new(2), label: "bb2",
+            instructions: [
+                MirInst(kind: MirInstKind.Call(Some(local(25)), cop(0), [cop(14)]), span: nil),
+                MirInst(kind: MirInstKind.Copy(local(14), cop(25)), span: nil)
+            ],
+            terminator: MirTerminator.Goto(BlockId.new(1))
+        ),
+        MirBlock(
+            id: BlockId.new(3), label: "bb3",
+            instructions: [],
+            terminator: MirTerminator.Ret(Some(cop(14)))
+        )
+    ]
+
+fn transform_loop_carried() -> Any:
+    val locals = [text_local(0), text_local(13), text_local(14), text_local(21),
+                  text_local(25)]
+    ssa_alloca_transform_blocks(loop_carried_value_return(), locals, BlockId.new(0))
+
+# Every LLVM local name is minted from a MIR local id, so "a local id defined
+# more than once in one function body" IS "a duplicate `%lN` in the emitted
+# text". Counting defs on the transformed MIR measures the llc verdict without
+# shelling out to llc (a shell-out that captures 0 bytes is a vacuity hazard).
+fn duplicate_def_count(blocks: [MirBlock]) -> i64:
+    var ids: [i64] = []
+    var dups = 0
+    for b in blocks:
+        for inst in b.instructions:
+            var written = -1
+            match inst.kind:
+                case Copy(d, _): written = d.id
+                case Move(d, _): written = d.id
+                case Const(d, _, _): written = d.id
+                case Alloc(d, _): written = d.id
+                case Load(d, _): written = d.id
+                case _: written = -1
+            if written >= 0:
+                var seen = false
+                for known in ids:
+                    if known == written:
+                        seen = true
+                if seen:
+                    dups = dups + 1
+                else:
+                    ids = ids.push(written)
+    dups
+
+fn ret_arm_count(source: text) -> i64:
+    var n = 0
+    for piece in source.split("case Ret(value):"):
+        n = n + 1
+    n - 1
+
+fn ret_arm_unwrap_count(source: text) -> i64:
+    # An arm's body is whatever follows its `case Ret(value):` header up to the
+    # next `case ` at the same nesting, which is close enough for a fence: the
+    # spelling under test is `value.unwrap()`, and it appears nowhere else.
+    var n = 0
+    for piece in source.split("value.unwrap()"):
+        n = n + 1
+    n - 1
+
+describe "SSA alloca slotting reads the Ret operand without .unwrap()":
+    # @manual scenario evidence
+
+    it "does not read the Ret terminator's optional operand with .unwrap()":
+        # @req REQ-SSPEC-UNIT
+        step("does not read the Ret terminator's optional operand with .unwrap()")
+        val source = rt_file_read_text(SSA_SOURCE) ?? ""
+        # Vacuity gate FIRST: an unread or truncated source must FAIL, never
+        # pass for want of a match.
+        assert_true(source.len() > 2000)
+        val arms = ret_arm_count(source)
+        assert_true(arms >= 3)
+        # Known limit, stated rather than papered over: this counts
+        # `value.unwrap()` over the WHOLE file, so removing one phi-path read
+        # and re-adding one on the alloca path would slip through. It is a
+        # ratchet on the population, not a per-arm fence.
+        # RED before the fix: three `value.unwrap()` reads on the alloca path
+        # (the admission gate, the cross-block-live use scan, and the terminator
+        # rewrite). The two remaining ones live on the phi FALLBACK path
+        # (ssa_rewrite_term / ssa_replace_term_operands_for_local), which the
+        # bootstrap LLVM lane never takes; they are named in the bug record.
+        assert_true(ret_arm_unwrap_count(source) <= 2)
+
+    it "admits a loop-carried multi-def local in a value-returning function":
+        # @req REQ-SSPEC-UNIT
+        step("admits a loop-carried multi-def local in a value-returning function")
+        # Regression guard (lane-independent, passes before and after): the
+        # interpreter never reproduced the refusal, so this pins the behaviour
+        # the candidate lost.
+        val reassigned = ssa_reassigned_locals_for_blocks(loop_carried_value_return())
+        assert_equal(reassigned.len(), 1)
+        assert_equal(reassigned[0], 14)
+        val result = transform_loop_carried()
+        assert_not_equal(result.reason, "invalid terminator operands")
+        assert_true(result.applied)
+
+    it "leaves no local defined twice once the function is slotted":
+        # @req REQ-SSPEC-UNIT
+        step("leaves no local defined twice once the function is slotted")
+        val result = transform_loop_carried()
+        assert_true(result.applied)
+        # The measured failure was 10 defs of one local reaching llc; zero is
+        # the only acceptable count, and asserting on a non-empty block set
+        # keeps the check from passing vacuously.
+        assert_true(result.blocks.len() >= 4)
+        assert_equal(duplicate_def_count(result.blocks), 0)

@@ -20,9 +20,32 @@
 val _ADV_ASCII_LO: i32 = 32
 val _ADV_ASCII_HI: i32 = 126
 val _ADV_ASCII_SPAN: i32 = 95
-var _adv_ascii_identity: text = ""
-var _adv_ascii_size: i32 = -1
-var _adv_ascii_vals: [i32] = [-1; 95]
+# The ASCII fast lane holds several (identity, size) buckets, not one.
+# It used to hold exactly one: a single `_adv_ascii_identity`/`_adv_ascii_size`
+# pair, and `_adv_cache_store` wiped the whole 95-entry table whenever either
+# differed. A real page mixes font sizes (heading, body, code, caption), and the
+# cascade visits their text nodes interleaved, so the single slot thrashed and
+# essentially every character fell through to the SFFI-dylib backend's full
+# pixel rasterize just to read `.advance`. Measured on the shared catalog page
+# (908 nodes, 900x760, interpreter): 24,141 ms inside measure_text_advances for
+# 2,601 characters -- 9.3 ms PER CHARACTER, 80% of the whole style stage.
+# See doc/10_metrics/ui/web_style_cascade_after_memo_macos_2026-09-12.md.
+# 8 slots, not 1. Raising this to 32 was measured and made no difference on the
+# catalog page (13,084 ms vs 13,118 ms style), so 8 covers the sizes a real page
+# actually interleaves; the residual per-character cost is elsewhere.
+val _ADV_ASCII_SLOTS: i32 = 8
+var _adv_ascii_identity: [text] = [""; 8]
+var _adv_ascii_size: [i32] = [-1; 8]
+var _adv_ascii_vals: [[i32]] = [[-1; 95]; 8]
+var _adv_ascii_cursor: i32 = 0
+
+fn _adv_ascii_slot(identity: text, font_size: i32) -> i32:
+    var i: i32 = 0
+    while i < _ADV_ASCII_SLOTS:  # cpu-lane-loop-ok: scans the 8 fixed ASCII advance-cache buckets for a matching (face identity, size) pair
+        if _adv_ascii_size[i] == font_size and _adv_ascii_identity[i] == identity:
+            return i
+        i = i + 1
+    -1
 var _adv_overflow_identity: [text] = []
 var _adv_overflow_size: [i32] = []
 var _adv_overflow_cp: [i32] = []
@@ -30,10 +53,144 @@ var _adv_overflow_val: [i32] = []
 val _ADV_OVERFLOW_CAP: i32 = 1024
 var _adv_overflow_cursor: i32 = 0
 
+# ---------------------------------------------------------------------------
+# Per-face ASCII glyph-id table (2026-09-12). A glyph id is a property of the
+# FACE, not of the size, so this is keyed on the face identity alone -- unlike
+# the advance and kern caches beside it.
+#
+# It exists because resolving one codepoint to a glyph id re-parsed the whole
+# cmap: `sfnt_cmap_glyph_id` calls `parse_cmap_format12`/`parse_cmap_format4`,
+# which rebuild the complete segment arrays and glyph-id array from the font
+# blob on EVERY call. Measured on css-layout.html that was 15 ms per lookup and
+# 1,626 ms of a 1,716 ms metrics miss, paid twice per miss (once by
+# `has_glyph`, once by the advance lookup). Warming the whole ASCII range from
+# a single parse via `sfnt_blob_glyph_ids_into` replaces 2N parses with one.
+val _GID_SLOTS: i32 = 4
+var _gid_identity: [text] = [""; 4]
+var _gid_vals: [[i64]] = [[0; 95]; 4]
+var _gid_cursor: i32 = 0
+
+fn _gid_slot(identity: text) -> i32:
+    var i: i32 = 0
+    while i < _GID_SLOTS:  # cpu-lane-loop-ok: scans the 4 fixed glyph-id buckets for a matching face identity
+        if _gid_identity[i] == identity:
+            return i
+        i = i + 1
+    -1
+
+# Warm one face's ASCII glyph ids from a single cmap parse. Returns the slot.
+fn _gid_warm(identity: text, blob: [u8]) -> i32:
+    if identity == "" or blob.len() == 0:
+        return -1
+    val existing = _gid_slot(identity)
+    if existing >= 0:
+        return existing
+    var codepoints: [i64] = [0; 95]
+    var i: i32 = 0
+    while i < _ADV_ASCII_SPAN:  # cpu-lane-loop-ok: builds the fixed ASCII 32..126 request vector
+        codepoints[i] = (_ADV_ASCII_LO + i) as i64
+        i = i + 1
+    var ids: [i64] = [0; 95]
+    sfnt_blob_glyph_ids_into(blob, codepoints, ids)
+    val slot = _gid_cursor
+    _gid_cursor = (_gid_cursor + 1) % _GID_SLOTS
+    _gid_identity[slot] = identity
+    _gid_vals[slot] = ids
+    slot
+
+# Glyph id for an ASCII codepoint on a warmed face. Returns -1 when this table
+# cannot answer (non-ASCII, or the face was never warmed), which is NOT the
+# same as 0 -- 0 is the definitive "this face has no glyph for it".
+fn _gid_lookup(slot: i32, codepoint: i32) -> i64:
+    if slot < 0 or codepoint < _ADV_ASCII_LO or codepoint > _ADV_ASCII_HI:
+        return -1
+    _gid_vals[slot][codepoint - _ADV_ASCII_LO]
+
+# ---------------------------------------------------------------------------
+# Kern-pair memo (2026-09-12), keyed by (loaded-face identity, font_size, left,
+# right). `horizontal_kern` crosses the SFFI dylib boundary once per character
+# PAIR and was not cached at all, so a measured run paid one foreign call per
+# character on top of the advance lookup. The ASCII 32..126 square is a single
+# FLAT i32 table per (identity, size) slot -- flat because the nested-array
+# `bucket = table[slot]; bucket[i] = v; table[slot] = bucket` store pattern
+# copies the whole inner array on every write, which for a 9,025-entry table
+# would cost far more than the call it replaces.
+# Kern is legitimately 0 or NEGATIVE, so the empty sentinel has to sit outside
+# the representable range of a real kern value.
+val _KERN_EMPTY: i32 = 2147483647
+val _KERN_SQUARE: i32 = 9025          # 95 * 95
+var _kern_ascii_vals: [i32] = [_KERN_EMPTY; 72200]   # 8 slots * 9025
+
+# Clear one slot's kern square. Called only when the advance cache evicts that
+# slot to a different (identity, size) pair, which is rare.
+fn _kern_cache_clear_slot(slot: i32):
+    if slot < 0 or slot >= _ADV_ASCII_SLOTS:
+        return
+    val base = slot * _KERN_SQUARE
+    var i: i32 = 0
+    while i < _KERN_SQUARE:  # cpu-lane-loop-ok: resets one evicted kern square
+        _kern_ascii_vals[base + i] = _KERN_EMPTY
+        i = i + 1
+
+# ---------------------------------------------------------------------------
+# Run-level advance memo (2026-09-12), keyed by (loaded-face identity,
+# font_size, run text). Bounded ring; stores a COPY-free reference to the
+# advance array the measure loop just built, which is never mutated afterwards.
+val _RUN_MEMO_LIMIT: i32 = 256
+val _RUN_MEMO_MAX_CHARS: i32 = 512
+var _run_memo_keys: [text] = []
+var _run_memo_vals: [[i32]] = []
+var _run_memo_cursor: i32 = 0
+
+fn _run_memo_key(identity: text, font_size: i32, content: text) -> text:
+    identity + "\n" + font_size.to_string() + "\n" + content
+
+fn _run_memo_lookup(identity: text, font_size: i32, content: text) -> [i32]:
+    val key = _run_memo_key(identity, font_size, content)
+    var i: i32 = 0
+    while i < _run_memo_keys.len():
+        if _run_memo_keys[i] == key:
+            return _run_memo_vals[i]
+        i = i + 1
+    []
+
+fn _run_memo_store(identity: text, font_size: i32, content: text, advances: [i32]):
+    if advances.len() == 0:
+        return
+    val key = _run_memo_key(identity, font_size, content)
+    if _run_memo_keys.len() < _RUN_MEMO_LIMIT:
+        _run_memo_keys = _run_memo_keys.push(key)
+        _run_memo_vals = _run_memo_vals.push(advances)
+        return
+    _run_memo_keys[_run_memo_cursor] = key
+    _run_memo_vals[_run_memo_cursor] = advances
+    _run_memo_cursor = (_run_memo_cursor + 1) % _RUN_MEMO_LIMIT
+
+# Slot-direct ASCII advance read, for callers that already resolved the slot
+# once for a whole run instead of re-resolving (and re-comparing the identity
+# text up to 8 times) per character.
+fn _adv_cache_lookup_slot(slot: i32, codepoint: i32) -> i32:
+    if slot < 0 or codepoint < _ADV_ASCII_LO or codepoint > _ADV_ASCII_HI:
+        return -1
+    _adv_ascii_vals[slot][codepoint - _ADV_ASCII_LO]
+
+fn _kern_cache_lookup_slot(slot: i32, left: i32, right: i32) -> i32:
+    if (slot < 0 or left < _ADV_ASCII_LO or left > _ADV_ASCII_HI or
+        right < _ADV_ASCII_LO or right > _ADV_ASCII_HI):
+        return _KERN_EMPTY
+    _kern_ascii_vals[slot * _KERN_SQUARE + (left - _ADV_ASCII_LO) * 95 + (right - _ADV_ASCII_LO)]
+
+fn _kern_cache_store_slot(slot: i32, left: i32, right: i32, kern: i32):
+    if (slot < 0 or left < _ADV_ASCII_LO or left > _ADV_ASCII_HI or
+        right < _ADV_ASCII_LO or right > _ADV_ASCII_HI or kern == _KERN_EMPTY):
+        return
+    _kern_ascii_vals[slot * _KERN_SQUARE + (left - _ADV_ASCII_LO) * 95 + (right - _ADV_ASCII_LO)] = kern
+
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
-        if identity == _adv_ascii_identity and font_size == _adv_ascii_size:
-            return _adv_ascii_vals[codepoint - _ADV_ASCII_LO]
+        val slot = _adv_ascii_slot(identity, font_size)
+        if slot >= 0:
+            return _adv_ascii_vals[slot][codepoint - _ADV_ASCII_LO]
         return -1
     var i: i32 = 0
     while i < _adv_overflow_cp.len():
@@ -47,11 +204,23 @@ fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32
     if advance <= 0:
         return
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
-        if identity != _adv_ascii_identity or font_size != _adv_ascii_size:
-            _adv_ascii_identity = identity
-            _adv_ascii_size = font_size
-            _adv_ascii_vals = [-1; 95]
-        _adv_ascii_vals[codepoint - _ADV_ASCII_LO] = advance
+        var slot = _adv_ascii_slot(identity, font_size)
+        if slot < 0:
+            # Round-robin eviction across the fixed slots: bounded, and never
+            # discards a bucket that is still being filled by the current size
+            # unless every slot is in use by another (identity, size) pair.
+            slot = _adv_ascii_cursor
+            _adv_ascii_cursor = (_adv_ascii_cursor + 1) % _ADV_ASCII_SLOTS
+            _adv_ascii_identity[slot] = identity
+            _adv_ascii_size[slot] = font_size
+            _adv_ascii_vals[slot] = [-1; 95]
+            # The kern square is keyed by the SAME slot, so it must be
+            # invalidated with it or the new (identity, size) pair would read
+            # the evicted pair's kerning.
+            _kern_cache_clear_slot(slot)
+        var bucket = _adv_ascii_vals[slot]
+        bucket[codepoint - _ADV_ASCII_LO] = advance
+        _adv_ascii_vals[slot] = bucket
         return
     if _adv_overflow_cp.len() < _ADV_OVERFLOW_CAP:
         _adv_overflow_identity = _adv_overflow_identity.push(identity)
@@ -85,6 +254,8 @@ use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances}
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # Glyph iteration is by CODEPOINT. `text.len()` is a UTF-8 BYTE count while
 # `char_code_at(i)` is CODEPOINT indexed, so `while ci < content.len()` walked
 # a 3-character string 6 times and read phantom zero codepoints past the end —
@@ -92,7 +263,7 @@ use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_measure_glyph_into, sfnt_render_glyph_into}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
@@ -312,6 +483,7 @@ fn resolved_font_metric_cache_misses() -> i64:
 
 fn _resolved_font_metric_cache_reset_for_test():
     """Test-only: clear entries AND counters so a spec gets a cold cache."""
+    _resolved_font_front_reset()
     _resolved_font_metric_keys = []
     _resolved_font_metric_values = []
     _resolved_font_metric_cursor = 0
@@ -556,7 +728,13 @@ val _VEC_ATLAS_PROBE: bool = false
 # WARNING: adding NEW prints inside this file's hot paths has regressed the WM
 # lane before (probing _resolved_font_metric_cached re-broke the font execution
 # plan and lost every PPM) — this region is layout-sensitive.
-val _WM_TRACE: bool = true
+# Level-gated (default OFF). This was hardcoded `true`, so four [rfm] lines were
+# printed for EVERY font resolution on every render -- pure I/O in the hot path
+# that no caller asked for. Keeping the probes (log-retention policy) while
+# gating them restores the "default off" the surrounding comment assumes.
+# `env_get` returns "" (not nil) when unset, so the `?? "" == "1"` form is the
+# only correct gate idiom here; a `!= nil` test is always true.
+val _WM_TRACE: bool = (env_get("SIMPLE_WM_TRACE") ?? "") == "1"
 var _vec_atlas_probe_count: i32 = 0
 var _vec_glyph_probe_count: i32 = 0
 
@@ -781,6 +959,48 @@ class GlyphCache:
         FontCacheStats(entries: self.entries.len().to_i64(), bytes: self.payload_bytes, generation: self.observed_generation, font_identity: self.observed_font_identity, hits: self.hits, misses: self.misses, rasterizations: self.rasterizations, evictions: self.evictions, render_config_identity: self.observed_render_config_identity)
 
 # ============================================================================
+# Parked font atlases (2026-09-12)
+# ============================================================================
+# One FontRenderer owns exactly ONE atlas buffer (Engine2D keeps a single
+# renderer, `font_owner.active[0]`), and until now a face switch called
+# `_reset_font_atlas`, wiping it. On a page where two font identities
+# interleave (A,B,A,B) that re-rasterises every glyph on every switch and
+# forces the GPU backends to repack all 1,048,576 pixels each time.
+#
+# A park is a whole-atlas snapshot keyed by the same `(font_identity,
+# face_generation)` pair the switch tests. Returning to a parked owner
+# restores its buffer verbatim, so its `atlas_owner_sequence` stays
+# contiguous and a consumer's incremental-repack path applies.
+#
+# The list is bounded and every mutation REPLACES the field wholesale --
+# never `self.atlas_parks[i].field = x` -- because in-place mutation of a
+# nested place clones the container on the interpreter lane (see
+# doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md).
+val FONT_ATLAS_PARK_MAX: i64 = 4
+
+class FontAtlasPark:
+    key: text
+    pixels: [u32]
+    codepoints: [i32]
+    face_ids: [i64]
+    face_generations: [i64]
+    glyph_indices: [i32]
+    font_sizes: [i32]
+    xs: [i32]
+    ys: [i32]
+    widths: [i32]
+    heights: [i32]
+    cursor_x: i32
+    cursor_y: i32
+    row_height: i32
+    owner_sequence: i64
+    unpublished_mutation: bool = false
+
+fn font_atlas_park_key(font_identity: text, face_generation: i64) -> text:
+    "font-atlas-park-v1|" + font_identity.len().to_string() + ":" + font_identity +
+        "|face-generation=" + face_generation.to_string()
+
+# ============================================================================
 # Font Renderer
 # ============================================================================
 
@@ -807,6 +1027,35 @@ class FontRenderer:
     atlas_generation: i64
     atlas_face_generation: i64
     atlas_font_identity: text
+    # Per-owner sequence for the CURRENT atlas. See FontRenderBatch
+    # .atlas_owner_sequence. Seeded from the globally-monotone dependency
+    # counter on every reset so values are never reused after a wipe, then
+    # advanced by exactly 1 per dirty batch.
+    atlas_owner_sequence: i64 = -1
+    # True while the atlas holds glyph cells that no dirty batch has published.
+    # Several staging paths insert a glyph and then abort with `valid: false`
+    # before reaching the `dirty.len() > 0` bump, so the atlas can move without
+    # the sequence moving. A consumer that took the sequence at face value
+    # there could trust a mirror that is missing those cells, which is exactly
+    # what the VK_FONT_MIRROR_ALREADY_TRUTH outcome must never do. While this
+    # is set, `_stage_batch` publishes -1 (no continuity claim) and the
+    # consumer falls back to a full repack.
+    atlas_unpublished_mutation: bool = false
+    # The park key of the CURRENTLY ACTIVE atlas, captured at the moment that
+    # owner became active. It must NOT be re-derived from `atlas_font_identity`
+    # / `atlas_face_generation` at park time: the shaped-run `-2` branch
+    # reassigns both (`atlas_font_identity = dependencies`, generation `-2`),
+    # so a re-derived key files the slot under a name the next lookup never
+    # asks for. Traced 2026-09-12: 2 resident slots, 2 alternating lookup keys,
+    # ZERO restores in 5 switches -- see the bug record.
+    atlas_active_park_key: text = ""
+    # Parked atlases, one per font owner, index 0 = least recently used.
+    # Without this a face switch WIPES the atlas (`_reset_font_atlas`), so an
+    # A,B,A,B page re-rasterises every glyph and forces a full 1,048,576-pixel
+    # repack downstream on each switch -- the 8 `pack_full`s measured at
+    # 900x760. Bounded at FONT_ATLAS_PARK_MAX; an evicted owner falls back to
+    # the wipe, i.e. to the previous behaviour.
+    atlas_parks: [FontAtlasPark] = []
     active_render_config_identity: text = ""
     # ---- Staged FontRenderBatch payload -----------------------------------
     # The prepared batch is written HERE instead of being returned. A
@@ -834,6 +1083,7 @@ class FontRenderer:
     staged_face_generation: i64 = 0
     staged_atlas_generation: i64 = 0
     staged_atlas_owner_generation: i64 = -1
+    staged_atlas_owner_sequence: i64 = -1
     # `true` reproduces the one construction site that deliberately publishes
     # an EMPTY atlas (stale end-of-run identity), without copying the 1 MiB
     # atlas into the staged slot in every other case.
@@ -843,6 +1093,10 @@ class FontRenderer:
     staged_render_config_identity: text = "coverage8;hint=none;subpixel=none"
     staged_execution_target: text = "auto"
     staged_execution_policy: FontExecutionPolicy = FontExecutionPolicy.Suggested
+    # Named refusal for a degenerate staged payload (acceptance item 4 of
+    # doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md).
+    # "" means the staged payload is drawable.
+    staged_reject_reason: text = ""
     # Boolean-only native diagnostic receipts for the array-bearing batch
     # boundary. They distinguish local quad production, inbound aggregate
     # transport, and final staged-field storage without returning an aggregate
@@ -1081,8 +1335,25 @@ class FontRenderer:
         self.staged_face_generation = batch.face_generation
         self.staged_atlas_generation = batch.atlas_generation
         self.staged_atlas_owner_generation = batch.atlas_owner_generation
+        self.staged_atlas_owner_sequence = if self.atlas_unpublished_mutation: -1 else: self.atlas_owner_sequence
         self.staged_atlas_empty = batch.atlas_pixels.len() == 0
-        self.staged_quads = batch.quads
+        # Reject a zero-glyph or all-zero-area payload with a NAMED reason
+        # instead of storing a zero-length payload that a backend would then
+        # be asked to draw.
+        var drawable_quads: i64 = 0
+        var scan_i: i64 = 0
+        while scan_i < batch.quads.len():
+            if batch.quads[scan_i].width > 0 and batch.quads[scan_i].height > 0:
+                drawable_quads = drawable_quads + 1
+            scan_i = scan_i + 1
+        val reject_reason = if batch.quads.len() == 0: "empty-quads"
+            elif drawable_quads == 0: "zero-area-quads"
+            else: ""
+        self.staged_reject_reason = reject_reason
+        if reject_reason == "":
+            self.staged_quads = batch.quads
+        else:
+            self.staged_quads = []
         self.quad_phase_stored_nonempty = self.staged_quads.len() > 0
         self.staged_dirty_rects = batch.dirty_rects
         self.staged_render_config_identity = batch.render_config_identity
@@ -1096,6 +1367,8 @@ class FontRenderer:
 
     me receipt_staged_valid() -> bool: self.staged_valid
     me receipt_staged_quads_nonempty() -> bool: self.staged_quads.len() > 0
+    me staged_reject_reason_text() -> text: self.staged_reject_reason
+    me staged_is_drawable() -> bool: self.staged_reject_reason == ""
     me receipt_quad_phase_local_nonempty(token: bool) -> bool:
         token and self.quad_phase_local_nonempty
     me receipt_quad_phase_inbound_nonempty(token: bool) -> bool:
@@ -1214,6 +1487,7 @@ class FontRenderer:
             atlas_generation: self.staged_atlas_generation,
             dirty_rects: self.staged_dirty_rects,
             atlas_owner_generation: self.staged_atlas_owner_generation,
+            atlas_owner_sequence: self.staged_atlas_owner_sequence,
             render_config_identity: self.staged_render_config_identity,
             execution_target: self.staged_execution_target,
             execution_policy: self.staged_execution_policy
@@ -1261,11 +1535,19 @@ class FontRenderer:
     me horizontal_kern(left_codepoint: i32, right_codepoint: i32, font_size: i32) -> i32:
         val rast = self.ttf_rasterizer
         if rast != nil:
+            # No memo lookup here, deliberately. The foreign kern call is ~0.01 ms;
+            # resolving the face identity and scanning the slot table in front of
+            # it costs ~0.35 ms, so a memo checked HERE is 35x slower than the
+            # call it replaces. The memo belongs to callers that resolve the slot
+            # once per run -- see `measure_text_advances`, which owns both the
+            # lookup and the store.
+            val _k_t0 = _fr_probe_now()
             # Typed intermediate + `as i32`: bare `.to_i32()` on an erased
             # method-call result misdispatches to the lone user method
             # Px.to_i32 on the native lane (a06bc1d5 class; guest fault at
             # Px.to_i32 from this frame, 2026-07-18).
             val kern_value: i64 = rast.horizontal_kern(left_codepoint as i64, right_codepoint as i64, font_size as i64)
+            _fr_probe_add_kern(_fr_probe_now() - _k_t0, false)
             return kern_value as i32
         0
 
@@ -1533,9 +1815,10 @@ class FontRenderer:
     me get_glyph_advance(codepoint: i32, font_size: i32) -> i32:
         if codepoint < 0 or codepoint > 1114111 or font_size <= 0 or font_size > 512:
             return 0
-        var cache = self.cache
         val active_rasterizer = self.ttf_rasterizer
+        val _id_t0 = _fr_probe_now()
         val _adv_identity: text = if active_rasterizer != nil: active_rasterizer.cache_identity() else: ""
+        _fr_probe_add_identity(_fr_probe_now() - _id_t0)
         # Bounded advance-cache fast path (2026-07-29): short-circuits the
         # per-instance GlyphCache lookup AND, on the SFFI-dylib-without-
         # selected-blob backend, the full pixel rasterize that backend's
@@ -1544,8 +1827,16 @@ class FontRenderer:
         # every FontRenderer instance sharing the same loaded face.
         if _adv_identity != "":
             val _adv_fast = _adv_cache_lookup(_adv_identity, font_size, codepoint)
+            _fr_probe_add_adv(_adv_fast > 0)
             if _adv_fast > 0:
                 return _adv_fast
+        # `self.cache` is read only AFTER the module-level advance-cache fast
+        # path has missed. Reading it above the fast path cost a full copy of
+        # the per-instance GlyphCache aggregate (its CachedGlyph entries carry
+        # pixel arrays) on EVERY measured character, including the ~96% that
+        # the fast path answers without ever touching it -- measured as the
+        # dominant residual term in measure_text_advances, far above kerning.
+        var cache = self.cache
         if active_rasterizer != nil:
             cache.sync_face_identity(active_rasterizer.cache_identity_generation(), _adv_identity)
         val cached = cache.lookup(codepoint, font_size)
@@ -1560,6 +1851,31 @@ class FontRenderer:
             _adv_cache_store(_adv_identity, font_size, codepoint, cached_adv.advance)
             return cached_adv.advance
 
+        # Selected-blob fast lane, ahead of `has_glyph`: on this backend
+        # `has_glyph` IS `sfnt_blob_glyph_exists`, i.e. the same cmap parse the
+        # advance lookup was about to repeat -- two 15 ms table rebuilds to
+        # answer one character. The per-face glyph-id table answers both from a
+        # single parse, and a non-zero id is exactly what `has_glyph` reports
+        # true for over the same blob. A `-1` (face not warmed, or non-ASCII)
+        # falls through to the original path untouched.
+        val _blob = self.selected_outline_blob
+        if _blob.len() > 0 and _adv_identity != "":
+            val _gid_s = _gid_warm(_adv_identity, _blob)
+            val _gid = _gid_lookup(_gid_s, codepoint)
+            # Only a POSITIVE id takes the fast lane. `0` (this face has no such
+            # glyph) and `-1` (not answerable here) both fall through to the
+            # original `has_glyph` path, so the non-selected-blob backends and
+            # the vector/bitmap fallbacks keep their exact previous behaviour.
+            if _gid > 0:
+                # Metrics-only, by glyph INDEX: skips the cmap entirely, and
+                # skips the `glyf` outline decode that `sfnt_measure_glyph_into`
+                # performs for ink extents this caller never reads.
+                var index_meta: [i64] = [0; 20]
+                sfnt_glyph_advance_into(_blob, SFNT_GLYPH_SELECTOR_INDEX, _gid, font_size.to_i64(), index_meta)
+                if index_meta[7] == 310031 and index_meta[2] > 0:
+                    val _adv_index = index_meta[2] as i32
+                    _adv_cache_store(_adv_identity, font_size, codepoint, _adv_index)
+                    return _adv_index
         val rast_has_glyph = active_rasterizer != nil and active_rasterizer.has_glyph(codepoint.to_i64())
         if rast_has_glyph:
             if self.selected_outline_blob.len() > 0:
@@ -1573,7 +1889,9 @@ class FontRenderer:
                     return _adv_direct
             # SFFI dylib backend (or a measure failure on the selected blob):
             # no metrics-only entry point exists, fall back unchanged.
+            val _rm_t0 = _fr_probe_now()
             val _gfp_result = self.get_glyph(codepoint, font_size).advance
+            _fr_probe_add_raster_metric(_fr_probe_now() - _rm_t0)
             _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result)
             return _gfp_result
 
@@ -1639,22 +1957,60 @@ class FontRenderer:
         total_w
 
     me measure_text_advances(content: text, font_size: i32) -> [i32]:
-        var advances: [i32] = []
-        var prev_cp = -1
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
-        var ci = 0
         val content_cps = text_codepoints(content)
         val content_len = content_cps.len()
+        if content_len == 0:
+            return []
+        # Run-level memo: identical (face, size, text) runs recur across a
+        # document (repeated labels, table cells, nav items). Keyed on the
+        # loaded-face identity so a face swap cannot serve a stale run.
+        val _run_identity: text = if self.ttf_rasterizer != nil: self.ttf_rasterizer.?.cache_identity() else: ""
+        if _run_identity != "" and content_len <= _RUN_MEMO_MAX_CHARS:
+            val _run_hit = _run_memo_lookup(_run_identity, font_size, content)
+            _fr_probe_add_run(_run_hit.len() > 0)
+            if _run_hit.len() > 0:
+                return _run_hit
+        # Sized up front, then written by index: the former `advances.push(...)`
+        # reallocated and copied the whole array once per character, which is
+        # quadratic in the run length.
+        var advances: [i32] = [0; content_len]
+        var prev_cp = -1
+        var ci = 0
+        # Slot resolved ONCE for the whole run. Every `self.<field>` read and
+        # every `_adv_ascii_slot` identity comparison used to happen per
+        # character, inside `get_glyph_advance`/`horizontal_kern`; reading
+        # `self.ttf_rasterizer` alone copies an aggregate that owns the whole
+        # selected font blob. Resolved once, the warm per-character path is two
+        # flat array reads. The slot is re-resolved after any miss, since a
+        # miss can create or evict slots.
+        var slot = if _run_identity != "": _adv_ascii_slot(_run_identity, font_size) else: -1
         while ci < content_len:
             val cp = content_cps[ci] as i32
             if prev_cp >= 0:
-                val previous = advances.len() - 1
-                advances[previous] = advances[previous] + self.horizontal_kern(prev_cp, cp, font_size)
-            val glyph_advance = self.get_glyph_advance(cp, font_size)
-            val advance = if glyph_advance > 0: glyph_advance else: font_size * 55 / 100
-            advances = advances.push(advance)
+                val kern_memo = _kern_cache_lookup_slot(slot, prev_cp, cp)
+                if kern_memo != _KERN_EMPTY:
+                    _fr_probe_add_kern(0, true)
+                    advances[ci - 1] = advances[ci - 1] + kern_memo
+                else:
+                    val kern_live = self.horizontal_kern(prev_cp, cp, font_size)
+                    _kern_cache_store_slot(slot, prev_cp, cp, kern_live)
+                    advances[ci - 1] = advances[ci - 1] + kern_live
+            val adv_memo = _adv_cache_lookup_slot(slot, cp)
+            if adv_memo > 0:
+                _fr_probe_add_adv(true)
+                advances[ci] = adv_memo
+            else:
+                val _miss_t0 = _fr_probe_now()
+                val glyph_advance = self.get_glyph_advance(cp, font_size)
+                _fr_probe_add_adv_miss(_fr_probe_now() - _miss_t0)
+                advances[ci] = if glyph_advance > 0: glyph_advance else: font_size * 55 / 100
+                if _run_identity != "":
+                    slot = _adv_ascii_slot(_run_identity, font_size)
             prev_cp = cp
             ci = ci + 1
+        if _run_identity != "" and content_len <= _RUN_MEMO_MAX_CHARS:
+            _run_memo_store(_run_identity, font_size, content, advances)
         advances
 
     # -----------------------------------------------------------------------
@@ -1777,8 +2133,91 @@ class FontRenderer:
         self.atlas_cursor_y = 0
         self.atlas_row_height = 0
         self.atlas_generation = _next_font_atlas_dependency_generation()
+        # Seeded from the SAME globally-monotone counter, never from 0: an
+        # owner whose atlas was wiped must not reuse a sequence value a
+        # consumer's mirror may still be holding, or the mirror would look
+        # contiguous against content that no longer exists.
+        self.atlas_owner_sequence = _next_font_atlas_dependency_generation()
+        self.atlas_unpublished_mutation = false
         self.atlas_face_generation = face_generation
         self.atlas_font_identity = font_identity
+        # Capture the key HERE, while it still names this owner.
+        self.atlas_active_park_key = font_atlas_park_key(font_identity, face_generation)
+
+    # Park the current atlas (if any) under its own key, then restore the
+    # incoming owner's parked atlas, or wipe when it has none. This replaces
+    # the bare `_reset_font_atlas` call on a face switch.
+    me _switch_font_atlas(face_generation: i64, font_identity: text):
+        # MEASUREMENT CONTROL: `SIMPLE_FONT_ATLAS_PARK=0` restores the bare
+        # wipe, so before/after pack counts come from the same binary and the
+        # same tree and cannot be contaminated by a rebuild.
+        if (env_get("SIMPLE_FONT_ATLAS_PARK") ?? "") == "0":
+            self._reset_font_atlas(face_generation, font_identity)
+            return
+        val outgoing_key = self.atlas_active_park_key
+        if outgoing_key != "" and self.atlas_pixels.len() > 0:
+            var kept: [FontAtlasPark] = []
+            for park in self.atlas_parks:
+                if park.key != outgoing_key:
+                    kept = kept.push(park)
+            # Index 0 is least recently used; drop from the front when full.
+            while kept.len() >= FONT_ATLAS_PARK_MAX:
+                var tail: [FontAtlasPark] = []
+                var di: i64 = 1
+                while di < kept.len():
+                    tail = tail.push(kept[di])
+                    di = di + 1
+                kept = tail
+            self.atlas_parks = kept.push(FontAtlasPark(
+                key: outgoing_key, pixels: self.atlas_pixels,
+                codepoints: self.atlas_codepoints, face_ids: self.atlas_face_ids,
+                face_generations: self.atlas_face_generations,
+                glyph_indices: self.atlas_glyph_indices, font_sizes: self.atlas_font_sizes,
+                xs: self.atlas_xs, ys: self.atlas_ys,
+                widths: self.atlas_widths, heights: self.atlas_heights,
+                cursor_x: self.atlas_cursor_x, cursor_y: self.atlas_cursor_y,
+                row_height: self.atlas_row_height,
+                owner_sequence: self.atlas_owner_sequence,
+                unpublished_mutation: self.atlas_unpublished_mutation))
+        val incoming_key = font_atlas_park_key(font_identity, face_generation)
+        var found = false
+        var remaining: [FontAtlasPark] = []
+        for park in self.atlas_parks:
+            if park.key == incoming_key and not found:
+                found = true
+                # Restore wholesale. The active owner then holds NO park slot,
+                # so no two live places ever alias the same atlas arrays.
+                self.atlas_pixels = park.pixels
+                self.atlas_codepoints = park.codepoints
+                self.atlas_face_ids = park.face_ids
+                self.atlas_face_generations = park.face_generations
+                self.atlas_glyph_indices = park.glyph_indices
+                self.atlas_font_sizes = park.font_sizes
+                self.atlas_xs = park.xs
+                self.atlas_ys = park.ys
+                self.atlas_widths = park.widths
+                self.atlas_heights = park.heights
+                self.atlas_cursor_x = park.cursor_x
+                self.atlas_cursor_y = park.cursor_y
+                self.atlas_row_height = park.row_height
+                self.atlas_owner_sequence = park.owner_sequence
+                self.atlas_unpublished_mutation = park.unpublished_mutation
+            else:
+                remaining = remaining.push(park)
+        if (env_get("SIMPLE_FONT_ATLAS_TRACE") ?? "") == "1":
+            print("[atlas-park] {if found: "restore" else: "reset"} parked={self.atlas_parks.len()} key={incoming_key}")
+        if found:
+            self.atlas_parks = remaining
+            # The GLOBAL generation must still move: the consumer's device copy
+            # holds the other owner's atlas and has to be rewritten. Only the
+            # per-owner sequence stays put, and that is what makes the restored
+            # mirror usable without a repack.
+            self.atlas_generation = _next_font_atlas_dependency_generation()
+            self.atlas_face_generation = face_generation
+            self.atlas_font_identity = font_identity
+            self.atlas_active_park_key = incoming_key
+        else:
+            self._reset_font_atlas(face_generation, font_identity)
 
     fn _font_atlas_dependency_identity(face_id: i64, face_generation: i64) -> text:
         var identities: [text] = []
@@ -1817,6 +2256,9 @@ class FontRenderer:
             return -1
         if glyph.pixels.len() != glyph.width.to_i64() * glyph.height.to_i64():
             return -1
+        # From here the atlas is about to change. Mark it unpublished until a
+        # dirty batch names the cells; see `atlas_unpublished_mutation`.
+        self.atlas_unpublished_mutation = true
         val padded_width = glyph.width + 1
         val padded_height = glyph.height + 1
         var x = self.atlas_cursor_x
@@ -1908,7 +2350,7 @@ class FontRenderer:
         if content == "":
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         if self.atlas_face_generation != face_generation or self.atlas_font_identity != font_identity:
-            self._reset_font_atlas(face_generation, font_identity)
+            self._switch_font_atlas(face_generation, font_identity)
         var layout = self.layout_text(content, font_size, 0)
         # Scalar mirrors of the fallback layout entries. On the freestanding
         # native lane, an i64 field written into a struct pushed into an
@@ -2036,6 +2478,8 @@ class FontRenderer:
                         self._reset_font_atlas(face_generation, font_identity)
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = generation
+                    self.atlas_owner_sequence = self.atlas_owner_sequence + 1
+                    self.atlas_unpublished_mutation = false
                 if quads.len() > 0:
                     val end_cache_stats = self.cache.stats()
                     var end_generation = end_cache_stats.generation
@@ -2182,7 +2626,7 @@ class FontRenderer:
         cache.sync_face_identity(generation, identity)
         self.cache = cache
         if self.atlas_face_generation != generation or self.atlas_font_identity != identity:
-            self._reset_font_atlas(generation, identity)
+            self._switch_font_atlas(generation, identity)
         var ascent = self.horizontal_line_metric(font_size, 0)
         if self.selected_outline_blob.len() > 0:
             var ascent_meta: [i64] = [0; 20]
@@ -2232,6 +2676,8 @@ class FontRenderer:
                         self._reset_font_atlas(generation, identity)
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = dependency_generation
+                    self.atlas_owner_sequence = self.atlas_owner_sequence + 1
+                    self.atlas_unpublished_mutation = false
                 val after_generation = active.cache_identity_generation()
                 val after_identity = active.cache_identity()
                 if after_generation != generation or after_identity != identity:
@@ -2275,6 +2721,13 @@ class FontRenderer:
             run.glyph_ids.len() != run.clusters.len()):
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         if self.atlas_face_generation != -2:
+            # BYPASSES the park: a text->shaped transition wipes the shared
+            # shaped atlas even though the text side parked one under
+            # (dependencies, -2). Traced rather than fixed blind -- routing it
+            # through _switch_font_atlas changes what the shared-atlas owner
+            # identity means for every consumer.
+            if (env_get("SIMPLE_FONT_ATLAS_TRACE") ?? "") == "1":
+                print("[atlas-park] reset-2 from_gen={self.atlas_face_generation}")
             self._reset_font_atlas(-2, font_identity)
         else:
             val dependencies = self._font_atlas_dependency_identity(face_id, run.face_generation)
@@ -2328,6 +2781,8 @@ class FontRenderer:
                         self._reset_font_atlas(-2, font_identity)
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = generation
+                    self.atlas_owner_sequence = self.atlas_owner_sequence + 1
+                    self.atlas_unpublished_mutation = false
                 return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty))
             self._reset_font_atlas(-2, font_identity)
             attempt = attempt + 1
@@ -2453,7 +2908,146 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
     _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0)
 
+# ---------------------------------------------------------------------------
+# Front memo for resolved font metrics.
+#
+# The identity-keyed cache below this point only answers AFTER the language /
+# category / codepoint classification, the optional shaping pass and the
+# default-face lookup have already run, and its early lookup is reachable only
+# when a language-selected asset exists (`expected_identity != ""`), i.e. never
+# for the common `language == "und"` page. The web lane resolves the same
+# (family, size, language, text) tuple at least twice for every #text node —
+# once in the style cascade and again in Draw-IR compose — so that classification
+# work was paid twice per node for nothing
+# (doc/10_metrics/ui/web_catalog_cold_render_profile_macos_2026-09-12.md, leaf #3).
+#
+# This front memo keys on the full argument tuple, which determines the result,
+# and short-circuits before any of that work. Same bound and same cacheability
+# predicate as the identity cache. Caveat, stated rather than hidden: like the
+# identity cache it assumes the font registry does not change underneath a
+# document; `_resolved_font_metric_cache_reset_for_test` clears both.
+# ---------------------------------------------------------------------------
+# Level-gated cost probe for the measurement leaf (SIMPLE_WEB_STYLE_COUNTERS=1),
+# the counterpart of the browser engine's style-stage counters.
+var _fr_probe_on: i32 = -1
+var _fr_measure_us: i64 = 0
+var _fr_measure_calls: i64 = 0
+var _fr_measure_chars: i64 = 0
+# Leaf split inside the measurement loop (F14): which of the residual
+# per-character cost is kerning, which is the advance cache miss that has to
+# rasterize, and which is the identity/slot resolution in front of both.
+var _fr_kern_calls: i64 = 0
+var _fr_kern_us: i64 = 0
+var _fr_kern_hits: i64 = 0
+var _fr_adv_hits: i64 = 0
+var _fr_adv_misses: i64 = 0
+var _fr_raster_metric_calls: i64 = 0
+var _fr_raster_metric_us: i64 = 0
+var _fr_adv_miss_calls: i64 = 0
+var _fr_adv_miss_us: i64 = 0
+var _fr_identity_us: i64 = 0
+var _fr_run_hits: i64 = 0
+var _fr_run_misses: i64 = 0
+
+fn _fr_probe_armed() -> bool:
+    if _fr_probe_on < 0:
+        _fr_probe_on = if (env_get("SIMPLE_WEB_STYLE_COUNTERS") ?? "") == "1": 1 else: 0
+    _fr_probe_on == 1
+
+fn _fr_probe_now() -> i64:
+    if _fr_probe_armed():
+        return rt_time_now_micros()
+    0
+
+fn _fr_probe_add_measure(us: i64, chars: i64):
+    if _fr_probe_armed():
+        _fr_measure_us = _fr_measure_us + us
+        _fr_measure_calls = _fr_measure_calls + 1
+        _fr_measure_chars = _fr_measure_chars + chars
+
+fn _fr_probe_add_kern(us: i64, hit: bool):
+    if _fr_probe_armed():
+        _fr_kern_calls = _fr_kern_calls + 1
+        _fr_kern_us = _fr_kern_us + us
+        if hit:
+            _fr_kern_hits = _fr_kern_hits + 1
+
+fn _fr_probe_add_adv(hit: bool):
+    if _fr_probe_armed():
+        if hit:
+            _fr_adv_hits = _fr_adv_hits + 1
+        else:
+            _fr_adv_misses = _fr_adv_misses + 1
+
+fn _fr_probe_add_raster_metric(us: i64):
+    if _fr_probe_armed():
+        _fr_raster_metric_calls = _fr_raster_metric_calls + 1
+        _fr_raster_metric_us = _fr_raster_metric_us + us
+
+# The whole `get_glyph_advance` body on an advance-cache miss, as seen by the
+# measurement loop. Distinct from `raster_metric` above, which counts ONLY the
+# backend fallthrough that rasterizes a full glyph just to read `.advance`.
+fn _fr_probe_add_adv_miss(us: i64):
+    if _fr_probe_armed():
+        _fr_adv_miss_calls = _fr_adv_miss_calls + 1
+        _fr_adv_miss_us = _fr_adv_miss_us + us
+
+fn _fr_probe_add_identity(us: i64):
+    if _fr_probe_armed():
+        _fr_identity_us = _fr_identity_us + us
+
+fn _fr_probe_add_run(hit: bool):
+    if _fr_probe_armed():
+        if hit:
+            _fr_run_hits = _fr_run_hits + 1
+        else:
+            _fr_run_misses = _fr_run_misses + 1
+
+pub fn font_measure_probe_report() -> text:
+    "measure_calls={_fr_measure_calls} measure_ms={_fr_measure_us / 1000} measure_chars={_fr_measure_chars}" +
+        " kern_calls={_fr_kern_calls} kern_ms={_fr_kern_us / 1000} kern_hits={_fr_kern_hits}" +
+        " adv_hits={_fr_adv_hits} adv_misses={_fr_adv_misses}" +
+        " adv_miss_calls={_fr_adv_miss_calls} adv_miss_ms={_fr_adv_miss_us / 1000}" +
+        " raster_metric_calls={_fr_raster_metric_calls} raster_metric_ms={_fr_raster_metric_us / 1000}" +
+        " identity_ms={_fr_identity_us / 1000} run_hits={_fr_run_hits} run_misses={_fr_run_misses}"
+
+val RESOLVED_FONT_FRONT_CACHE_LIMIT: i64 = 512
+var _resolved_font_front_index: Dict<text, i64> = {}
+var _resolved_font_front_values: [ResolvedFontMetrics] = []
+var _resolved_font_front_hits: i64 = 0
+var _resolved_font_front_misses: i64 = 0
+
+pub fn resolved_font_front_memo_hits() -> i64:
+    _resolved_font_front_hits
+
+pub fn resolved_font_front_memo_misses() -> i64:
+    _resolved_font_front_misses
+
+fn _resolved_font_front_reset():
+    _resolved_font_front_index = {}
+    _resolved_font_front_values = []
+    _resolved_font_front_hits = 0
+    _resolved_font_front_misses = 0
+
 fn _resolve_font_metrics_with_language_config(family: text, content: text, font_size: i32,
+                                              language: text, render_config_identity: text) -> ResolvedFontMetrics:
+    if not _resolved_font_metrics_cacheable(family, content):
+        return _resolve_font_metrics_with_language_config_uncached(
+            family, content, font_size, language, render_config_identity)
+    val front_key = family + "\n" + font_size.to_string() + "\n" + language + "\n" +
+        render_config_identity.len().to_string() + ":" + render_config_identity + "\n" + content
+    if _resolved_font_front_index.has(front_key):
+        _resolved_font_front_hits = _resolved_font_front_hits + 1
+        return _resolved_font_front_values[_resolved_font_front_index[front_key]]
+    _resolved_font_front_misses = _resolved_font_front_misses + 1
+    val resolved = _resolve_font_metrics_with_language_config_uncached(
+        family, content, font_size, language, render_config_identity)
+    if resolved.valid and _resolved_font_front_values.len() < RESOLVED_FONT_FRONT_CACHE_LIMIT:
+        _resolved_font_front_index[front_key] = _resolved_font_front_values.len()
+        _resolved_font_front_values = _resolved_font_front_values.push(resolved)
+    resolved
+
+fn _resolve_font_metrics_with_language_config_uncached(family: text, content: text, font_size: i32,
                                               language: text, render_config_identity: text) -> ResolvedFontMetrics:
     if family.trim() == "" or font_size <= 0 or font_size > 512:
         return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "invalid-font-request", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: false)
@@ -2514,7 +3108,9 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
             if _WM_TRACE: print("[rfm] at=cache-hit")
             return cached
     if _WM_TRACE: print("[rfm] at=measure shaped_valid={shaped.valid}")
+    val _fr_t0 = _fr_probe_now()
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
+    _fr_probe_add_measure(_fr_probe_now() - _fr_t0, (text_codepoints(content).len() as i64))
     if _WM_TRACE: print("[rfm] at=measured advances={advances.len()}")
     var width = 0
     if shaped.valid:

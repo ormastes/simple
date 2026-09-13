@@ -873,3 +873,44 @@ Scope note: this run measured the **Rust seed's** interpreter. The package
 attributed the row to
 `src/compiler/10.frontend/core/interpreter/eval_calls.spl`; that is a heuristic
 path mapping, and the pure-Simple interpreter was not separately measured here.
+
+## Triage 2026-09-12 — still reproduces, and is now WORSE on the interpreter
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+```simple
+fn main():
+    val n = 6
+    match n:
+        case Some(i): print("SOME {i}")
+        case _: print("WILDCARD")
+    print(n.unwrap_or(-99))
+```
+
+```
+$ SIMPLE_RUST_SEED_WARNING=0 bin/simple run /tmp/b_option.spl
+SOME <value:0x6>
+<value:0x6>
+```
+
+Compared with the record's table, the interpreter's behaviour has changed and the
+defect is now uniform across both consumers rather than engine-divergent:
+
+| expression (`n` is a bare `i64` = 6) | record (2026-07-27, interpreter) | measured 2026-09-12 |
+|---|---|---|
+| `match n: Some(i)` | matched neither arm | takes the `Some` arm, binds a **raw tag box** |
+| `n.unwrap_or(-99)` | returned the receiver (`6`) | `<value:0x6>` — the tag box leaks into text |
+
+So the interpreter now behaves like the old JIT row: `Some(_)` is accepted on a
+non-Option scrutinee and the payload binds to the undecoded scalar box, which
+`print` renders as `<value:0x6>`. The "interpreter does not match `_`" second
+defect no longer reproduces (the `Some` arm is taken first now), but that is a
+symptom change, not a fix — the type-checking hole is unchanged.
+
+Fix direction (unchanged): reject `Some(_)`/`None` patterns and `.unwrap_or` when
+the scrutinee/receiver type is not an `Option`, instead of coercing the scalar.
+
+Not fixable from pure Simple: `bin/simple` is the Rust bootstrap seed, so this is
+the seed's type checker / pattern matcher.
+
+- Status: OPEN (2026-09-12) — reproduced on 3d120a6f, diagnosed, needs a Rust-seed change

@@ -185,6 +185,31 @@ class PhaseFeatureMatrixContract(unittest.TestCase):
                 MATRIX.bound_file({"path": str(script.resolve()), "sha256": MATRIX.digest(script)}, native=True)
             self.assertEqual(result.exception.reason, "native-executable-required")
 
+    def test_provider_help_words_cannot_hide_implementation_failure(self):
+        row = {"blocked_output": ["login", "token", "request failed"]}
+        output = "Usage: devhub auth login --token TOKEN\nfatal implementation crash\n"
+        with self.assertRaises(MATRIX.Verdict) as result:
+            MATRIX.check_output("devhub_github", row, 1, output)
+        self.assertEqual(result.exception.status, "FAIL")
+        self.assertEqual(result.exception.reason, "process-nonzero-exit")
+
+    def test_anchored_auth_failure_is_blocked_only_for_provider_rows(self):
+        output = "You are not logged into any GitHub hosts.\n"
+        with self.assertRaises(MATRIX.Verdict) as provider:
+            MATRIX.check_output("devhub_github", {}, 1, output)
+        self.assertEqual(provider.exception.status, "BLOCKED")
+        with self.assertRaises(MATRIX.Verdict) as ordinary:
+            MATRIX.check_output("devhub_launch", {}, 1, output)
+        self.assertEqual(ordinary.exception.status, "FAIL")
+
+    def test_crash_cannot_be_downgraded_by_unauthorized_output(self):
+        for code in (-11, 139):
+            with self.subTest(code=code):
+                with self.assertRaises(MATRIX.Verdict) as result:
+                    MATRIX.check_output("devhub_github", {}, code, "HTTP 401\n")
+                self.assertEqual(result.exception.status, "FAIL")
+                self.assertEqual(result.exception.reason, "process-crashed")
+
     def test_absent_rows_fail_and_retain_resume_and_job_evidence(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

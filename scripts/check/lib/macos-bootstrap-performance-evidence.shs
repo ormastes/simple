@@ -1,0 +1,244 @@
+#!/bin/sh
+set -eu
+
+die() { echo "PERF-EVIDENCE FAIL: $*" >&2; exit 1; }
+value() {
+  file=$1; key=$2
+  count=$(awk -F= -v key="$key" '$1 == key { n++ } END { print n + 0 }' "$file")
+  [ "$count" -eq 1 ] || return 1
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$file"
+}
+positive_number() { awk -v n="$1" 'BEGIN { exit !(n ~ /^[0-9]+([.][0-9]+)?$/ && n > 0) }'; }
+nonnegative_integer() { awk -v n="$1" 'BEGIN { exit !(n ~ /^[0-9]+$/) }'; }
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else sha256sum "$1" | awk '{print $1}'; fi
+}
+
+extract() {
+  log=$1; memory=$2; spans=$3; output=$4; request=$5
+  [ -s "$log" ] || die "empty command log"
+  [ -s "$memory" ] || die "missing memory snapshot"
+  [ -s "$spans" ] || die "missing execution metrics"
+  [ ! -e "$output" ] || die "refusing to replace evidence receipt"
+
+  [ "$(awk '$1 == "real" { n++ } END { print n + 0 }' "$log")" -eq 1 ] || die "expected exactly one macOS time real metric"
+  [ "$(awk '$1 == "user" { n++ } END { print n + 0 }' "$log")" -eq 1 ] || die "expected exactly one macOS time user metric"
+  [ "$(awk '$1 == "sys" { n++ } END { print n + 0 }' "$log")" -eq 1 ] || die "expected exactly one macOS time sys metric"
+  [ "$(awk '/maximum resident set size/ { n++ } END { print n + 0 }' "$log")" -eq 1 ] || die "expected exactly one macOS peak RSS metric"
+  wall_seconds=$(awk '$1 == "real" && $2 ~ /^[0-9]+([.][0-9]+)?$/ { print $2 }' "$log")
+  user_seconds=$(awk '$1 == "user" && $2 ~ /^[0-9]+([.][0-9]+)?$/ { v=$2 } END { print v }' "$log")
+  system_seconds=$(awk '$1 == "sys" && $2 ~ /^[0-9]+([.][0-9]+)?$/ { v=$2 } END { print v }' "$log")
+  peak_rss_bytes=$(awk '/maximum resident set size/ { v=$1 } END { print v }' "$log")
+  retained_rss_kib=$(awk '{ for (i=1;i<=NF;i++) if ($i ~ /^rss_kib=/) { sub(/^rss_kib=/,"",$i); v=$i } } END { print v }' "$memory")
+  retained_hwm_kib=$(awk '{ for (i=1;i<=NF;i++) if ($i ~ /^hwm_kib=/) { sub(/^hwm_kib=/,"",$i); v=$i } } END { print v }' "$memory")
+  source_reads=$(awk '/^\[M4 parse\] / { for (i=1;i<=NF;i++) if ($i ~ /^module=/) { p=$i; sub(/^module=/,"",p); if (!seen[p]++) n++ } } END { print n + 0 }' "$log")
+  import_count=$(awk '/^\[M4 parse\] / { for (i=1;i<=NF;i++) if ($i ~ /^imports=/) { v=$i; sub(/^imports=/,"",v); n+=v } } END { print n + 0 }' "$log")
+  cache_pair=$(sed -n 's/.*cache: \([0-9][0-9]*\) hits, \([0-9][0-9]*\) misses.*/\1 \2/p; s/.*Cache: \([0-9][0-9]*\) hits, \([0-9][0-9]*\) misses.*/\1 \2/p' "$log" | tail -n 1)
+  cache_hits=$(printf '%s\n' "$cache_pair" | awk '{print $1}')
+  cache_misses=$(printf '%s\n' "$cache_pair" | awk '{print $2}')
+  critical_path_ms=$(awk -F, '/^[[:space:]]*[^#|][^|]*,/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $6); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $7); if ($6 ~ /^[0-9]+$/ && $7 ~ /^[0-9]+$/ && $7 >= $6 && $7-$6 > max) max=$7-$6 } END { print max + 0 }' "$spans")
+
+  positive_number "$wall_seconds" || die "invalid wall time"
+  positive_number "$peak_rss_bytes" || die "invalid peak RSS"
+  for number in "$user_seconds" "$system_seconds"; do
+    awk -v n="$number" 'BEGIN { exit !(n ~ /^[0-9]+([.][0-9]+)?$/) }' || die "invalid CPU time"
+  done
+  for number in "$retained_rss_kib" "$retained_hwm_kib" "$source_reads" "$import_count" "$cache_hits" "$cache_misses" "$critical_path_ms"; do
+    nonnegative_integer "$number" || die "missing or invalid metric"
+  done
+  [ "$retained_rss_kib" -gt 0 ] || die "retained RSS is zero"
+  [ "$retained_hwm_kib" -ge "$retained_rss_kib" ] || die "retained HWM is below retained RSS"
+  [ "$source_reads" -gt 0 ] || die "source-read evidence is zero"
+
+  umask 077
+  receipt_temp="$output.tmp.$$"
+  trap 'rm -f "$receipt_temp"' EXIT HUP INT TERM
+  cat >"$receipt_temp" <<EOF
+schema=macos-bootstrap-performance-evidence-v1
+request=$request
+wall_seconds=$wall_seconds
+user_cpu_seconds=$user_seconds
+system_cpu_seconds=$system_seconds
+peak_rss_bytes=$peak_rss_bytes
+retained_rss_kib=$retained_rss_kib
+retained_hwm_kib=$retained_hwm_kib
+source_reads=$source_reads
+import_count=$import_count
+cache_hits=$cache_hits
+cache_misses=$cache_misses
+critical_path_ms=$critical_path_ms
+measurement=time-l-plus-runtime-snapshot-plus-execution-metrics
+peak_rss_kind=darwin-time-l-maximum-resident-set-size-bytes
+retained_rss_kind=runtime-terminal-current-resident-kib
+retained_hwm_kind=runtime-platform-high-water-kib
+command_log_sha256=$(sha256_file "$log")
+memory_snapshot_sha256=$(sha256_file "$memory")
+execution_metrics_sha256=$(sha256_file "$spans")
+EOF
+  mv "$receipt_temp" "$output"
+  chmod 0444 "$output"
+  trap - EXIT HUP INT TERM
+}
+
+residency_gate() {
+  samples_file=$1; output=$2; architecture=$3; baseline_rss=$4; baseline_evidence_sha=$5; baseline_receipt_sha=$6
+  producer_sha=$7; server_sha=$8; responses_sha=$9; decision_source=${10}; authority_document_sha=${11}
+  [ -s "$samples_file" ] || die "missing long-lived residency samples"
+  [ ! -e "$output" ] || die "refusing to replace warm gate receipt"
+  nonnegative_integer "$baseline_rss" && [ "$baseline_rss" -gt 0 ] || die "invalid baseline RSS"
+  max_growth_kib=$((baseline_rss * 10 / 100))
+  max_rss_kib=$((baseline_rss * 110 / 100))
+  case "$architecture" in arm64|x86_64) ;; *) die "invalid baseline architecture" ;; esac
+  [ "$decision_source" = user-final-performance-authority-2026-09-02 ] || die "decision source mismatch"
+  for digest in "$server_sha" "$responses_sha" "$authority_document_sha" \
+      "$baseline_receipt_sha" "$baseline_evidence_sha" "$producer_sha"; do
+    printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$' || die "invalid evidence authority digest"
+  done
+  verdict=$(awk -F '\t' -v baseline="$baseline_rss" '
+    NR == 1 {
+      if ($0 != "sequence\trequest_id\tpid\tprocess_start_token\texecutable_sha256\trss_kib\thwm_kib") exit 2
+      next
+    }
+    {
+      expected = NR - 1
+      if (NF != 7 || $1 != expected || $2 != "m4-residency-" expected ||
+          $3 !~ /^[1-9][0-9]*$/ || $4 !~ /^[0-9a-f]{64}$/ ||
+          $5 !~ /^[0-9a-f]{64}$/ || $6 !~ /^[1-9][0-9]*$/ || $7 !~ /^[1-9][0-9]*$/ || $7 < $6) exit 3
+      if (expected == 1) { pid=$3; token=$4; exe=$5; first_hwm=$7; previous_hwm=$7; max_rss=$6 }
+      else {
+        if ($3 != pid || $4 != token || $5 != exe || $7 < previous_hwm) exit 4
+        previous_hwm=$7
+        if ($6 > max_rss) max_rss=$6
+      }
+      if ($6 * 100 > baseline * 110) exit 5
+      rss = rss (rss == "" ? "" : ",") $6
+      hwm = hwm (hwm == "" ? "" : ",") $7
+      count++
+    }
+    END {
+      if (count != 20) exit 6
+      growth=previous_hwm-first_hwm
+      if (growth < 0 || growth * 100 > baseline * 10) exit 8
+      print pid "\t" token "\t" exe "\t" rss "\t" hwm "\t" max_rss "\t" growth
+    }
+  ' "$samples_file") || die "invalid or baseline-unbounded long-lived residency evidence"
+  pid=$(printf '%s\n' "$verdict" | awk -F '\t' '{print $1}')
+  token=$(printf '%s\n' "$verdict" | awk -F '\t' '{print $2}')
+  executable_sha=$(printf '%s\n' "$verdict" | awk -F '\t' '{print $3}')
+  rss_samples=$(printf '%s\n' "$verdict" | awk -F '\t' '{print $4}')
+  hwm_samples=$(printf '%s\n' "$verdict" | awk -F '\t' '{print $5}')
+  observed_max_steady_rss_kib=$(printf '%s\n' "$verdict" | awk -F '\t' '{print $6}')
+  observed_growth_kib=$(printf '%s\n' "$verdict" | awk -F '\t' '{print $7}')
+  [ "$executable_sha" = "$server_sha" ] || die "sampled executable identity differs from admitted server"
+  [ -n "$pid" ] && [ -n "$token" ] || die "long-lived process identity missing"
+  receipt_temp="$output.tmp.$$"
+  trap 'rm -f "$receipt_temp"' EXIT HUP INT TERM
+  cat >"$receipt_temp" <<EOF
+schema=macos-bootstrap-long-lived-residency-gate-v3
+status=PASS
+request_count=20
+pid=$pid
+process_start_token=$token
+server_sha256=$server_sha
+responses_sha256=$responses_sha
+samples_sha256=$(sha256_file "$samples_file")
+authority_document_sha256=$authority_document_sha
+decision_source=$decision_source
+architecture=$architecture
+baseline_rss_kib=$baseline_rss
+baseline_receipt_sha256=$baseline_receipt_sha
+baseline_evidence_sha256=$baseline_evidence_sha
+producer_sha256=$producer_sha
+request_ids=m4-residency-1..m4-residency-20
+rss_kib_samples=$rss_samples
+hwm_kib_samples=$hwm_samples
+threshold_mode=baseline-relative-10-percent
+steady_rss_limit_percent=110
+growth_limit_percent=10
+steady_rss_ceiling_kib=$max_rss_kib
+growth_ceiling_kib=$max_growth_kib
+observed_max_steady_rss_kib=$observed_max_steady_rss_kib
+observed_nonnegative_growth_kib=$observed_growth_kib
+hwm_kind=observed-request-boundary-high-water
+threshold_requirement=MBH-NFR-003
+process_model=one-production-mcp-process-twenty-correlated-requests
+EOF
+  mv "$receipt_temp" "$output"
+  chmod 0444 "$output"
+  trap - EXIT HUP INT TERM
+}
+
+self_test() {
+  temp=${TMPDIR:-/tmp}/macos-perf-evidence-$$
+  trap 'rm -rf "$temp"' EXIT HUP INT TERM
+  mkdir -p "$temp"
+  cat >"$temp/log" <<'EOF'
+[NATIVE] cache: 3 hits, 1 misses
+[M4 parse] module=/x/a.spl work=1 imports=1
+[M4 parse] module=/x/b.spl work=1 imports=1
+real 1.25
+user 0.75
+sys 0.25
+123456 maximum resident set size
+EOF
+  cat >"$temp/memory" <<'EOF'
+schema=x event=snapshot source_path=/x/a.spl rss_kib=100 hwm_kib=120
+schema=x event=snapshot source_path=/x/b.spl rss_kib=101 hwm_kib=121
+schema=x event=terminal source_path= rss_kib=110 hwm_kib=130
+EOF
+  cat >"$temp/spans" <<'EOF'
+# version: execution-metrics-2
+spans |run_id, span_id, parent_span_id, phase_id, unit_id, started_ms, ended_ms, status, work_name, work_done, work_total, cached|
+    r, s, root, Parse, a, 10, 35, complete, modules, 1, 1, 0|
+EOF
+  extract "$temp/log" "$temp/memory" "$temp/spans" "$temp/receipt" fixture
+  [ "$(value "$temp/receipt" source_reads)" = 2 ] || die "source-read extraction mutation survived"
+  [ "$(value "$temp/receipt" import_count)" = 2 ] || die "import extraction mutation survived"
+  [ "$(value "$temp/receipt" critical_path_ms)" = 25 ] || die "critical-path extraction mutation survived"
+  cp "$temp/log" "$temp/bad-log"; sed -i.bak '/maximum resident set size/d' "$temp/bad-log"
+  if (extract "$temp/bad-log" "$temp/memory" "$temp/spans" "$temp/bad-receipt" fixture) >/dev/null 2>&1; then die "missing peak RSS mutation survived"; fi
+  sed '/^\[M4 parse\]/d' "$temp/log" >"$temp/no-reads-log"
+  if (extract "$temp/no-reads-log" "$temp/memory" "$temp/spans" "$temp/no-reads-receipt" fixture) >/dev/null 2>&1; then die "missing source-read mutation survived"; fi
+  sed '/cache: /d' "$temp/log" >"$temp/no-cache-log"
+  if (extract "$temp/no-cache-log" "$temp/memory" "$temp/spans" "$temp/no-cache-receipt" fixture) >/dev/null 2>&1; then die "missing cache-count mutation survived"; fi
+  token=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  server_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  responses_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  producer_sha=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  authority_document_sha=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  baseline_receipt_sha=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  baseline_evidence_sha=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  printf 'sequence\trequest_id\tpid\tprocess_start_token\texecutable_sha256\trss_kib\thwm_kib\n' >"$temp/samples.tsv"
+  index=1; hwm=0
+  while [ "$index" -le 20 ]; do
+    rss=$((200 + (index % 3)))
+    [ "$rss" -le "$hwm" ] || hwm=$rss
+    printf '%s\tm4-residency-%s\t4242\t%s\t%s\t%s\t%s\n' "$index" "$index" "$token" "$server_sha" "$rss" "$hwm" >>"$temp/samples.tsv"
+    index=$((index + 1))
+  done
+  residency_gate "$temp/samples.tsv" "$temp/residency-pass" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" user-final-performance-authority-2026-09-02 "$authority_document_sha"
+  awk -F '\t' 'BEGIN { OFS="\t" } NR==1 { print; next } { $6=1000+int((NR-2)*100/19); $7=$6; print }' "$temp/samples.tsv" >"$temp/boundary.tsv"
+  residency_gate "$temp/boundary.tsv" "$temp/boundary-pass" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" user-final-performance-authority-2026-09-02 "$authority_document_sha"
+  if (residency_gate "$temp/samples.tsv" "$temp/decision-bad" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" stale-decision "$authority_document_sha") >/dev/null 2>&1; then die "decision-source mutation survived"; fi
+  sed '12s/4242/4243/' "$temp/samples.tsv" >"$temp/pid-mutation.tsv"
+  if (residency_gate "$temp/pid-mutation.tsv" "$temp/pid-bad" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" user-final-performance-authority-2026-09-02 "$authority_document_sha") >/dev/null 2>&1; then die "PID mutation survived"; fi
+  sed '8s/m4-residency-7/m4-residency-wrong/' "$temp/samples.tsv" >"$temp/id-mutation.tsv"
+  if (residency_gate "$temp/id-mutation.tsv" "$temp/id-bad" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" user-final-performance-authority-2026-09-02 "$authority_document_sha") >/dev/null 2>&1; then die "request-id mutation survived"; fi
+  sed '9s/aaaaaaaa/cccccccc/' "$temp/samples.tsv" >"$temp/exe-mutation.tsv"
+  if (residency_gate "$temp/exe-mutation.tsv" "$temp/exe-bad" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" user-final-performance-authority-2026-09-02 "$authority_document_sha") >/dev/null 2>&1; then die "executable mutation survived"; fi
+  awk -F '\t' 'BEGIN { OFS="\t" } NR==1 { print; next } { $6=200+NR; $7=$6; print }' "$temp/samples.tsv" >"$temp/growth.tsv"
+  residency_gate "$temp/growth.tsv" "$temp/bounded-growth-pass" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" user-final-performance-authority-2026-09-02 "$authority_document_sha"
+  sed '20s/20[0-9]\t20[0-9]$/2000\t2000/' "$temp/samples.tsv" >"$temp/unbounded.tsv"
+  if (residency_gate "$temp/unbounded.tsv" "$temp/unbounded-bad" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" user-final-performance-authority-2026-09-02 "$authority_document_sha") >/dev/null 2>&1; then die "steady-RSS mutation survived"; fi
+  awk -F '\t' 'BEGIN { OFS="\t" } NR==1 { print; next } NR==20 { $6=400; $7=400 } { print }' "$temp/samples.tsv" >"$temp/delta.tsv"
+  if (residency_gate "$temp/delta.tsv" "$temp/delta-bad" arm64 1000 "$baseline_evidence_sha" "$baseline_receipt_sha" "$producer_sha" "$server_sha" "$responses_sha" user-final-performance-authority-2026-09-02 "$authority_document_sha") >/dev/null 2>&1; then die "growth-ceiling mutation survived"; fi
+  echo "PASS macOS bootstrap performance evidence portable checker"
+}
+
+case "${1:-}" in
+  extract) [ "$#" -eq 6 ] || die "usage: $0 extract LOG MEMORY SPANS OUTPUT REQUEST"; extract "$2" "$3" "$4" "$5" "$6" ;;
+  residency-gate) [ "$#" -eq 12 ] || die "usage: $0 residency-gate SAMPLES OUTPUT ARCHITECTURE BASELINE_RSS_KIB BASELINE_EVIDENCE_SHA256 BASELINE_RECEIPT_SHA256 PRODUCER_SHA256 SERVER_SHA256 RESPONSES_SHA256 DECISION_SOURCE AUTHORITY_DOCUMENT_SHA256"; residency_gate "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" ;;
+  --self-test) self_test ;;
+  *) die "usage: $0 {extract|residency-gate|--self-test}" ;;
+esac

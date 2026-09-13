@@ -283,6 +283,10 @@ pub struct MirLowerer<'a> {
     /// `Any` local is never statically pinned to one class.
     /// See doc/08_tracking/bug/riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md
     pub(super) erased_local_class_types: HashMap<usize, TypeId>,
+    /// Authored names for locals whose registry type is intentionally erased.
+    /// Trait parameters alias to `Any`, but native dispatch still needs the
+    /// declared trait owner to select its vtable slot.
+    pub(super) local_type_name_hints: HashMap<usize, String>,
     /// F1/S5 — declaration kind per type name, carried from HIR by S3.
     /// `Some(true)` = declared `struct` (value semantics), `Some(false)` =
     /// declared `class`/`actor` (identity semantics), absent = UNKNOWN.
@@ -379,6 +383,7 @@ impl<'a> MirLowerer<'a> {
             refined_types: None,
             type_registry: None,
             erased_local_class_types: HashMap::new(),
+            local_type_name_hints: HashMap::new(),
             type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
@@ -422,6 +427,7 @@ impl<'a> MirLowerer<'a> {
             refined_types: None,
             type_registry: None,
             erased_local_class_types: HashMap::new(),
+            local_type_name_hints: HashMap::new(),
             type_value_kinds: HashMap::new(),
             trait_infos: None,
             global_trait_impls: None,
@@ -1237,7 +1243,12 @@ impl<'a> MirLowerer<'a> {
                         trait_is_implemented(recv)
                     );
                 }
-                return Some((slot_for(recv, sig), sig.param_types.clone(), sig.return_type));
+                // An explicitly trait-typed receiver already proves the ABI:
+                // its authored trait declaration owns this slot even when
+                // entry-closure pruning excludes every concrete impl from the
+                // current native build. The impl-less sentinel is only for
+                // UNKNOWN/duck-typed receivers, where no object ABI is known.
+                return Some((sig.vtable_slot, sig.param_types.clone(), sig.return_type));
             }
         }
         // Concrete receiver with its own `Type.method` definition: devirtualize.
@@ -2013,6 +2024,13 @@ impl<'a> MirLowerer<'a> {
         // recomputed (not accumulated) or one function's locals would be read
         // as another's.
         self.erased_local_class_types = compute_single_assignment_class_types(func, self.type_registry);
+        self.local_type_name_hints = func
+            .params
+            .iter()
+            .chain(func.locals.iter())
+            .enumerate()
+            .filter_map(|(index, local)| local.type_name_hint.clone().map(|name| (index, name)))
+            .collect();
 
         let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);
 

@@ -474,9 +474,7 @@ impl Lowerer {
     /// `doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md`.
     fn import_alias_symbol(&self, name: &str) -> String {
         match self.resolve_function_alias(name) {
-            Some(original)
-                if original != name && self.own_declared_function_names.contains(original) =>
-            {
+            Some(original) if original != name && self.own_declared_function_names.contains(original) => {
                 name.to_string()
             }
             Some(original) => original.to_string(),

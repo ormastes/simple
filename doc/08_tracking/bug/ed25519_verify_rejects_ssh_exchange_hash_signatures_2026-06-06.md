@@ -1,6 +1,13 @@
 # Ed25519 Verify Rejects SSH Exchange-Hash Signatures
 
-Status: Resolved 2026-06-06
+## Closed 2026-09-13 — Resolved 2026-06-06 per the entry's own status
+
+- **inferred** The Status line reads `Resolved 2026-06-06`.
+- **measured** Both product paths the entry references still exist (path scan: 2 referenced, 0 missing).
+- **inferred** The SSH exchange-hash verification lane needs a QEMU/SSHD run that is not available on this Windows host, so closure rests on the recorded resolution.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 **Filed:** 2026-06-06
 **Status:** Resolved 2026-06-06

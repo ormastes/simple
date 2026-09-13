@@ -1,22 +1,6 @@
 #!/bin/sh
 # Native Windows Cargo launch/status ownership. Other host commands retain the
 # existing run_logged route; this adapter is bootstrap host tooling only.
-bootstrap_windows_output_root_preflight() {
-    [ "$#" -eq 1 ] || return 126
-    bworp_root=$1
-    case "$(uname -s)" in MSYS*|MINGW*|CYGWIN*) ;; *) return 0 ;; esac
-    bworp_windows=$(cygpath -aw "$bworp_root") || return 126
-    # Cargo/cc append this worst fixed authority path before creating runtime
-    # objects. Stay below the legacy 260-character Windows path boundary with
-    # room for a terminating NUL and tool-added punctuation.
-    bworp_suffix='\rust-authority-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\target\x86_64-pc-windows-gnu\bootstrap\build\simple-runtime-ffffffffffffffff\out\ffffffffffffffff-runtime_backend_plugin.o'
-    bworp_length=$(printf '%s%s' "$bworp_windows" "$bworp_suffix" | wc -c | tr -d ' ')
-    if [ "$bworp_length" -gt 248 ]; then
-        echo "windows-bootstrap-output-root-too-long: projected-path-length=$bworp_length limit=248 output=$bworp_windows" >&2
-        return 1
-    fi
-}
-
 bootstrap_logged_windows_cargo() (
     [ "$#" -ge 5 ] || return 126
     blwc_root=$1
@@ -39,9 +23,13 @@ bootstrap_logged_windows_cargo() (
         -- "$@" || blwc_status=$?
     # Retain both the capture and the original human-readable build log.
     [ ! -f "$blwc_parent/$blwc_leaf.log" ] || cat "$blwc_parent/$blwc_leaf.log" >>"$blwc_log"
+    # A killed/crashed supervisor cannot publish its receipt. Preserve the
+    # shell-observed status before the admission error replaces it with 126;
+    # this is not the native child status (that requires a complete receipt).
+    printf 'supervisor_shell_status=%s\n' "$blwc_status" >>"$blwc_log"
     printf 'process_receipt=%s\n' "$blwc_parent/$blwc_leaf.env" >>"$blwc_log"
     if [ ! -f "$blwc_parent/$blwc_leaf.env" ]; then
-        echo 'bootstrap-native-cargo-error: missing native process receipt' >&2
+        printf 'bootstrap-native-cargo-error: missing native process receipt (supervisor_shell_status=%s)\n' "$blwc_status" >&2
         return 126
     fi
     blwc_recorded_status=$(sed -n 's/^raw_status=//p' "$blwc_parent/$blwc_leaf.env")

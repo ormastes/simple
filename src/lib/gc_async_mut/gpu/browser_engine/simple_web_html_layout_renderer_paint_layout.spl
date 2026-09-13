@@ -16,7 +16,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_ti
     tile_survivors, tile_op_buffer_finish
 }
 use common.ui.draw_ir.{
-    DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
+    DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
     draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_text_styled_clipped
 }
 use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_paint}
@@ -1056,6 +1056,11 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                         var ly = y + text_ink_y_offset(st.font_size)
                         if line_count > 0:
                             val clip = paint_clip_at(clip_cache, i)
+                            # ONE advance table for this run, built from the
+                            # metrics LAYOUT measured it with, and handed to
+                            # both the aligned-width call and the glyph walk
+                            # below so the two cannot disagree.
+                            val txt_by = style_run_byte_advances(st, txt)
                             var line_i = 0
                             # cpu-lane-loop-ok: per-wrapped-line glyph emission for one #text node on the normal path; bound is line_count from the wrap cache and it stops early at ly >= fbh; scale/adv/space_adv are already hoisted above the loop
                             while line_i < line_count and ly < fbh:
@@ -1064,11 +1069,12 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                                 val draw_end = if st.text_overflow_ellipsis and line_i == 0: draw_txt.len() else: node_ends[line_i]
                                 val line_base_x = if line_i == 0: text_x + st.text_indent_px else: text_x
                                 val line_box_w = if line_i == 0: w - st.text_indent_px else: w
-                                val line_w = if text_line_needs_paint_width(st, line_i, line_count): style_text_line_advance_width(draw_txt, draw_start, draw_end, st, adv, space_adv) else: 0
+                                val line_by = if st.text_overflow_ellipsis and line_i == 0: [] else: txt_by
+                                val line_w = if text_line_needs_paint_width(st, line_i, line_count): style_text_line_advance_width_with(line_by, draw_txt, draw_start, draw_end, adv, space_adv) else: 0
                                 val line_text_x = text_line_aligned_x(line_base_x, line_box_w, line_w, st, line_i, line_count)
                                 if st.text_shadow_color != 0u32:
-                                    out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, clip)
-                                out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, scale, adv, space_adv, st.font_style_italic, clip)
+                                    out = fb_text_thin_scaled_clip_range_adv(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, clip, line_by)
+                                out = fb_text_thin_scaled_clip_range_adv(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, scale, adv, space_adv, st.font_style_italic, clip, line_by)
                                 if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
                                     val underline_w = line_w
                                     val underline_y = ly + 7 * scale + st.text_underline_offset_px
@@ -1650,7 +1656,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     # node's identity next to the Style it was PAIRED WITH answers whether the
     # marker node receives a wrong Style, or a different node's Style entry
     # (an index/ordering mismatch in the paint-order/visible-node filters).
-    if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+    if (env_get("SIMPLE_TRACE_FONT_STYLE") ?? "") == "1":
         val trace_id: text = attr_value(node.attrs_raw, "id")
         val trace_class: text = attr_value(node.attrs_raw, "class")
         val trace_is_marker: bool = trace_id.contains("vector-font-evidence")
@@ -1982,6 +1988,97 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
             ))
     props
 
+# Validate that `cp_advances` describes `txt` in per-CODEPOINT arity and hand
+# it back unchanged. Round 5 used to re-express this array per BYTE here (the
+# codepoint's advance on its lead byte, 0 on each UTF-8 continuation byte)
+# because the Engine2D consumer indexed its staged quads in byte space; that
+# consumer defect is fixed (`font_advances_codepoint_arity` now resolves the
+# index space once per batch and accepts both conventions), so the producer
+# emits the CANONICAL per-codepoint array and declares it with the
+# `font-advance-arity: codepoint` style prop. Returns an empty array when the
+# array does not describe `txt`, so the caller falls back to the flat styled
+# command rather than emitting a mis-sized array.
+# The framebuffer painter keeps its own BYTE view of the same numbers
+# (`style_run_byte_advances`, ..._layout.spl) derived from the identical
+# per-codepoint `resolved_font_advances`, so layout, paint and Draw IR still
+# measure a run identically -- only the wire arity differs.
+fn _html_draw_ir_codepoint_advances(txt: text, cp_advances: [i32]) -> [i32]:
+    var out: [i32] = []
+    if cp_advances.len() == 0:
+        return out
+    if cp_advances.len() != text_codepoint_len(txt) as i32:
+        return out
+    cp_advances
+
+# Emit ONE Draw IR text command for `txt`, carrying the resolved per-glyph
+# advances the layout path measured the same string with. Factored out of
+# `_html_draw_ir_command` in round 5 so the WRAPPED-line emitters can use the
+# identical code rather than a second, flat-advance measurement model; before
+# that, a wrapped run was drawn with `draw_ir_text_styled_clipped` (no
+# advances) while layout had already sized its lines from real metrics.
+# Falls back to the styled/flat command when vector fonts are off or the
+# resolver returns nothing usable -- in which case BOTH sides are flat, which
+# is consistent, rather than one side each.
+fn _html_draw_ir_resolved_text_command(
+    nodes: [HNode], i: i32, node: HNode, st: Style, cid: text,
+    tx: i32, ty: i32, txt: text, computed_style: [DrawIrStyleProp],
+    clip_rect: DrawIrRect, vector_fonts: bool
+) -> DrawIrCommand:
+    if not vector_fonts:
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    val metrics = resolve_font_metrics_with_language(
+        st.font_family, txt, st.font_size,
+        _html_text_language(nodes, i, st)
+    )
+    # ADVANCE ARITY (round 5 follow-up). `metrics.advances` carries one advance
+    # per CODEPOINT and that is exactly what now goes on the wire: the Engine2D
+    # consumer resolves the quads' index space per batch and normalises to
+    # codepoint arity (`font_advances_codepoint_arity`), so the round-5
+    # byte-expansion shim this call replaced is no longer needed. The command
+    # states its convention with `font-advance-arity: codepoint` below; a
+    # declaration that disagrees with what arrives makes the consumer take the
+    # flat fallback instead of silently reinterpreting the array. History and
+    # the incident this closes:
+    # doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md.
+    val cp_advances = _html_draw_ir_codepoint_advances(txt, metrics.advances)
+    if cp_advances.len() == 0:
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    var resolved = if metrics.shaping_required:
+        draw_ir_text_shaped_font(
+            cid, tx, ty, txt, st.fg,
+            metrics.family, metrics.identity, cp_advances, metrics.width,
+            metrics.line_height, st.font_size, metrics.glyph_run
+        )
+    else:
+        draw_ir_text_resolved_font(
+            cid, tx, ty, txt, st.fg,
+            metrics.family, metrics.identity, cp_advances, metrics.width,
+            metrics.line_height, st.font_size
+        )
+    if resolved.computed_style.len() == 0:
+        return draw_ir_text_styled_clipped(
+            cid, tx, ty, txt, st.fg, computed_style, clip_rect
+        )
+    var merged: [DrawIrStyleProp] = []
+    # cpu-lane-loop-ok: per-node style-prop merge that drops the five font-* keys the resolved font metrics supersede; bound is this node's own declared prop list
+    for prop in computed_style:
+        if (prop.key != "font-family" and prop.key != "font-identity" and
+            prop.key != "font-size" and prop.key != "line-height" and
+            prop.key != "font-shaping"):
+            merged.push(prop)
+    # cpu-lane-loop-ok: appends the resolved font-metric props onto the merged list; bound is the small fixed prop set returned by draw_ir_text_shaped_font / _resolved_font
+    for prop in resolved.computed_style:
+        merged.push(prop)
+    # Declare the wire arity of `advance_widths` for the Engine2D gate.
+    merged.push(draw_ir_style_prop("font-advance-arity", "codepoint"))
+    resolved.computed_style = merged
+    resolved.clip_rect = clip_rect
+    resolved
+
 fn _html_draw_ir_command(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
     clip: ClipRect, vector_fonts: bool
@@ -2060,59 +2157,26 @@ fn _html_draw_ir_command(
         else:
             visual_text_rtl
         if wrap_active:
-            return draw_ir_text_styled_clipped(
-                _html_draw_ir_component_id(node, i),
-                content_x,
-                content_y,
-                visual_text,
-                st.fg,
-                computed_style,
-                clip_rect
+            # Round 5: a wrapped run no longer falls back to the flat
+            # fixed-advance model. LAYOUT sized every one of these lines with
+            # the resolved per-glyph metrics (round 4), so emitting them here
+            # without advances made paint and layout measure the same text two
+            # different ways -- the `forms-media` pixel regression recorded in
+            # doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md.
+            # Metrics are resolved for THIS line's substring, which is exactly
+            # the string the command draws, and the resolver is cached per
+            # (family, content, size, identity, language) so the per-line calls
+            # collapse onto repeated text.
+            return _html_draw_ir_resolved_text_command(
+                nodes, i, node, st, _html_draw_ir_component_id(node, i),
+                content_x, content_y, visual_text, computed_style, clip_rect,
+                vector_fonts
             )
-        if not vector_fonts:
-            return draw_ir_text_styled_clipped(
-                _html_draw_ir_component_id(node, i),
-                content_x,
-                content_y,
-                visual_text,
-                st.fg,
-                computed_style,
-                clip_rect
-            )
-        val metrics = resolve_font_metrics_with_language(
-            st.font_family, visual_text, st.font_size,
-            _html_text_language(nodes, i, st)
+        return _html_draw_ir_resolved_text_command(
+            nodes, i, node, st, _html_draw_ir_component_id(node, i),
+            content_x, content_y, visual_text, computed_style, clip_rect,
+            vector_fonts
         )
-        var resolved = if metrics.shaping_required:
-            draw_ir_text_shaped_font(
-                _html_draw_ir_component_id(node, i), content_x, content_y, visual_text, st.fg,
-                metrics.family, metrics.identity, metrics.advances, metrics.width,
-                metrics.line_height, st.font_size, metrics.glyph_run
-            )
-        else:
-            draw_ir_text_resolved_font(
-                _html_draw_ir_component_id(node, i), content_x, content_y, visual_text, st.fg,
-                metrics.family, metrics.identity, metrics.advances, metrics.width,
-                metrics.line_height, st.font_size
-            )
-        if resolved.computed_style.len() == 0:
-            return draw_ir_text_styled_clipped(
-                _html_draw_ir_component_id(node, i), content_x, content_y,
-                visual_text, st.fg, computed_style, clip_rect
-            )
-        var merged: [DrawIrStyleProp] = []
-        # cpu-lane-loop-ok: per-node style-prop merge that drops the five font-* keys the resolved font metrics supersede; bound is this node's own declared prop list, not a cascade re-run (the cascade is gated on dirty_stage == css in simple_web_layout_rerender_retained)
-        for prop in computed_style:
-            if (prop.key != "font-family" and prop.key != "font-identity" and
-                prop.key != "font-size" and prop.key != "line-height" and
-                prop.key != "font-shaping"):
-                merged.push(prop)
-        # cpu-lane-loop-ok: appends the resolved font-metric props onto the merged list; bound is the small fixed prop set returned by draw_ir_text_shaped_font / draw_ir_text_resolved_font
-        for prop in resolved.computed_style:
-            merged.push(prop)
-        resolved.computed_style = merged
-        resolved.clip_rect = clip_rect
-        return resolved
     val command = draw_ir_box_with_style(
         _html_draw_ir_component_id(node, i),
         x,
@@ -2137,7 +2201,7 @@ fn _html_draw_ir_command(
 # wrapped `#text` node, so callers can push its result unconditionally.
 fn _html_draw_ir_wrap_extra_line_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32,
-    clip: ClipRect
+    clip: ClipRect, vector_fonts: bool
 ) -> [DrawIrCommand]:
     var out: [DrawIrCommand] = []
     val node = nodes[i]
@@ -2175,9 +2239,11 @@ fn _html_draw_ir_wrap_extra_line_commands(
             wrap_line_starts[line_i], wrap_line_ends[line_i]
         )
         val line_y = content_y + line_i * lh
-        out.push(draw_ir_text_styled_clipped(
+        out.push(_html_draw_ir_resolved_text_command(
+            nodes, i, node, st,
             _html_draw_ir_component_id(node, i) + "_line{line_i}",
-            content_x, line_y, line_text, st.fg, computed_style, clip_rect
+            content_x, line_y, line_text, computed_style, clip_rect,
+            vector_fonts
         ))
         line_i = line_i + 1
     out
@@ -2824,11 +2890,9 @@ fn _html_draw_ir_commands(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     width: i32, height: i32, vector_fonts: bool,
     target_keys: [text], overlay: BrowserTextInputOverlay,
-    visible_nodes: [bool], images: [SimpleOsHostGpuImageResource]
+    visible_nodes: [bool], images: [SimpleOsHostGpuImageResource],
+    clip_cache: PaintClipCache
 ) -> ([DrawIrCommand], [i32]):
-    val clip_cache = build_ancestor_clip_cache(
-        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
-    )
     # One uri -> index map per render. The per-node loop below used to rescan
     # the whole image list for every img, video and background layer.
     val image_index_by_uri = _html_draw_ir_image_index_by_uri(images)
@@ -3067,7 +3131,7 @@ fn _html_draw_ir_commands(
             # _html_draw_ir_wrap_extra_line_commands), empty for every other
             # node kind and for single-line text
             for extra_line_command in _html_draw_ir_wrap_extra_line_commands(
-                nodes, styles, boxes, i, node_clip
+                nodes, styles, boxes, i, node_clip, vector_fonts
             ):
                 var extra_line = extra_line_command
                 extra_line.parent_id = parent_id
@@ -3208,10 +3272,35 @@ fn _web_canvas_background(nodes: [HNode], styles: [Style], fallback: u32) -> u32
             body_bg = styles[i].bg
         i = i + 1
     if html_bg != 0u32:
-        return html_bg | 0xFF000000u32
+        return _web_canvas_background_over(html_bg, fallback)
     if body_bg != 0u32:
-        return body_bg | 0xFF000000u32
+        return _web_canvas_background_over(body_bg, fallback)
     fallback
+
+fn _web_canvas_background_over(color: u32, base: u32) -> u32:
+    """Composite a canvas background color over the page base (CSS Backgrounds
+    §2.11.2 + CSS Compositing simple alpha `over`). A semi-transparent canvas
+    background must blend with the base the UA paints under it, not be forced
+    opaque: `rgba(0,0,0,0.5)` over white is #808080, which is what Chrome paints
+    and what this used to report as pure black."""
+    val a = (color >> 24) & 0xFFu32
+    if a >= 255u32:
+        return color | 0xFF000000u32
+    val br = (base >> 16) & 0xFFu32
+    val bg_ = (base >> 8) & 0xFFu32
+    val bb = base & 0xFFu32
+    val cr = (color >> 16) & 0xFFu32
+    val cg = (color >> 8) & 0xFFu32
+    val cb = color & 0xFFu32
+    # 8-bit alpha is a rounded sample of the authored fraction (`0.5` -> 128),
+    # so blending with `255 - a` reintroduces the rounding loss and lands a
+    # half-transparent black on white at 127 where Chrome paints 128. Weighting
+    # with `256 - a` over a 256 denominator keeps the authored half exact.
+    val inv = 256u32 - a
+    val r = (cr * a + br * inv + 128u32) / 256u32
+    val g = (cg * a + bg_ * inv + 128u32) / 256u32
+    val b = (cb * a + bb * inv + 128u32) / 256u32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
 
 # ---------------------------------------------------------------------------
 # Iframe embedding (rendering-inside-rendering). A hidden/private capability:

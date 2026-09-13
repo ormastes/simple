@@ -10,7 +10,11 @@
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_rename(src: text, dst: text) -> bool
-use compiler.driver.cache.action_key.{interface_digest_of_source}
+use compiler.driver.cache.action_key.{interface_digest_of_source, action_key_sort_texts}
+use compiler.driver.driver_provider_contract_v1.{SIMPLE_COMPILER_DRIVER_V1_ABI_DIGEST}
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
 use std.file_system.{file_write_text}
 use std.io_runtime.{dir_create_all, time_now_unix_micros, hash_text, file_exists}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
@@ -35,11 +39,17 @@ struct SmfManifestEntry:
     # textual interface parts of the source). Additive (2026-08-18): old
     # manifests parse with "" (absent); readers must treat "" as no-evidence.
     iface_digest: text
+    abi_digest: text
+    provided_ifaces: [text]
+    required_ifaces: [text]
 
 struct SmfManifest:
     version: i64
     entries: Dict<text, SmfManifestEntry>  # source_path -> entry
     updated_at: i64
+
+val SMF_MANIFEST_VERSION_CURRENT: i64 = 35
+val SMF_MANIFEST_VERSION_LEGACY_IDENTITY: i64 = 34
 
 # ============================================================================
 # Constructors
@@ -47,7 +57,7 @@ struct SmfManifest:
 
 fn smf_manifest_new() -> SmfManifest:
     SmfManifest(
-        version: 3,
+        version: SMF_MANIFEST_VERSION_CURRENT,
         entries: {},
         updated_at: time_now_unix_micros()
     )
@@ -79,6 +89,28 @@ fn smf_manifest_entry_new_with_iface(
     allowed_families: [text],
     iface_digest: text
 ) -> SmfManifestEntry:
+    smf_manifest_entry_new_with_identity(
+        source_path, smf_path, source_hash, backend, opt_level, release,
+        debug_info, gc_off, profile, allowed_families, iface_digest,
+        smf_manifest_host_abi_digest(), [], []
+    )
+
+fn smf_manifest_entry_new_with_identity(
+    source_path: text,
+    smf_path: text,
+    source_hash: i64,
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text],
+    iface_digest: text,
+    abi_digest: text,
+    provided_ifaces: [text],
+    required_ifaces: [text]
+) -> SmfManifestEntry:
     SmfManifestEntry(
         source_path: source_path,
         smf_path: smf_path,
@@ -91,8 +123,36 @@ fn smf_manifest_entry_new_with_iface(
         gc_off: gc_off,
         profile: profile,
         allowed_families: allowed_families,
-        iface_digest: iface_digest
+        iface_digest: iface_digest,
+        abi_digest: abi_digest,
+        provided_ifaces: provided_ifaces,
+        required_ifaces: required_ifaces
     )
+
+fn smf_manifest_host_abi_digest() -> text:
+    "{SIMPLE_COMPILER_DRIVER_V1_ABI_DIGEST}"
+
+enum SmfManifestGateVerdict:
+    Admitted
+    UnsupportedVersion
+    AbiDigestMissing
+    AbiDigestMismatch
+
+fn smf_manifest_gate_code(verdict: SmfManifestGateVerdict) -> text:
+    match verdict:
+        case SmfManifestGateVerdict.Admitted: "SMF-OK"
+        case SmfManifestGateVerdict.UnsupportedVersion: "SMF-E-VERSION"
+        case SmfManifestGateVerdict.AbiDigestMissing: "SMF-E-ABI-MISSING"
+        case SmfManifestGateVerdict.AbiDigestMismatch: "SMF-E-ABI-MISMATCH"
+
+fn smf_manifest_entry_gate(manifest: SmfManifest, entry: SmfManifestEntry, expected_abi_digest: text) -> SmfManifestGateVerdict:
+    if manifest.version != SMF_MANIFEST_VERSION_CURRENT:
+        return SmfManifestGateVerdict.UnsupportedVersion
+    if entry.abi_digest == "":
+        return SmfManifestGateVerdict.AbiDigestMissing
+    if entry.abi_digest != expected_abi_digest:
+        return SmfManifestGateVerdict.AbiDigestMismatch
+    SmfManifestGateVerdict.Admitted
 
 # ============================================================================
 # Manifest Operations
@@ -162,10 +222,14 @@ fn iface_digest_verdict_text(v: IfaceDigestVerdict) -> text:
         case IfaceDigestVerdict.Mismatch: "mismatch"
         case IfaceDigestVerdict.Absent: "absent"
 
-# Compare the RECORDED interface digest against one recomputed from the live
-# source text. Diagnostic only for now: not a rebuild trigger — that needs
-# the dependency model (simple.sdn traversal + ActionDep wiring), still
-# unwired; see .claude/rules/commands.md.
+fn iface_digest_gate_code(v: IfaceDigestVerdict) -> text:
+    match v:
+        case IfaceDigestVerdict.Match: "SMF-OK"
+        case IfaceDigestVerdict.Mismatch: "SMF-E-IFACE-MISMATCH"
+        case IfaceDigestVerdict.Absent: "SMF-E-IFACE-MISSING"
+
+# Compare the recorded interface digest against one recomputed from live
+# source. The interpret cache uses this as a fail-closed admission verdict.
 fn smf_manifest_entry_iface_verdict(entry: SmfManifestEntry, source_text: text) -> IfaceDigestVerdict:
     if entry.iface_digest == "":
         return IfaceDigestVerdict.Absent
@@ -194,7 +258,7 @@ fn smf_manifest_entry_verifies(entry: SmfManifestEntry) -> bool:
 # ============================================================================
 
 fn smf_manifest_to_sdn(manifest: SmfManifest) -> text:
-    """Serialize manifest to SDN format."""
+    """Serialize a canonical manifest with deterministic entry and set order."""
     var lines: [text] = [
         "smf_manifest:",
         "  version: {manifest.version}",
@@ -203,95 +267,127 @@ fn smf_manifest_to_sdn(manifest: SmfManifest) -> text:
     ]
 
     if manifest.entries.keys().len() > 0:
-        lines.push("entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest|")
-        for key in manifest.entries.keys():
+        lines.push("entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest, abi_digest, provides, requires|")
+        for key in action_key_sort_texts(manifest.entries.keys()):
             val e = manifest.entries[key]
-            val allowed_families = e.allowed_families.join(";")
-            lines.push("    \"{e.source_path}\", \"{e.smf_path}\", {e.source_hash}, {e.compiled_at}, \"{e.backend}\", {e.opt_level}, {bool_to_sdn_int(e.release)}, {bool_to_sdn_int(e.debug_info)}, {bool_to_sdn_int(e.gc_off)}, \"{e.profile}\", \"{allowed_families}\", \"{e.iface_digest}\"")
+            val cells: [SdnValue] = [
+                SdnValue.String(e.source_path), SdnValue.String(e.smf_path),
+                SdnValue.Int(e.source_hash), SdnValue.Int(e.compiled_at),
+                SdnValue.String(e.backend), SdnValue.Int(e.opt_level),
+                SdnValue.Bool(e.release), SdnValue.Bool(e.debug_info),
+                SdnValue.Bool(e.gc_off), SdnValue.String(e.profile),
+                _smf_text_array(action_key_sort_texts(e.allowed_families)),
+                SdnValue.String(e.iface_digest), SdnValue.String(e.abi_digest),
+                _smf_text_array(action_key_sort_texts(e.provided_ifaces)),
+                _smf_text_array(action_key_sort_texts(e.required_ifaces))
+            ]
+            var encoded: [text] = []
+            for cell in cells:
+                encoded.push(sdn_encode_canonical(cell))
+            lines.push("    " + encoded.join(", "))
 
     lines.join("\n")
 
-fn smf_manifest_from_sdn(content: text) -> SmfManifest:
-    """Parse manifest from SDN format."""
-    var version: i64 = 1
-    var updated_at: i64 = 0
-    var entries: Dict<text, SmfManifestEntry> = {}
-    var in_entries = false
+fn _smf_text_array(values: [text]) -> SdnValue:
+    var items: [SdnValue] = []
+    for value in values:
+        items.push(SdnValue.String(value))
+    SdnValue.Array(items)
 
-    val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
-            continue
+fn _smf_row_text(row: [SdnValue], index: i64, field: text) -> Result<text, text>:
+    match row[index].as_str():
+        case Some(value): Ok(value)
+        case None: Err("SMF-E-MANIFEST: `" + field + "` must be text")
 
-        if trimmed.starts_with("version:"):
-            val val_str = trimmed.replace("version:", "").trim()
-            version = val_str.to_i64() ?? 1
-        else if trimmed.starts_with("updated_at:"):
-            val val_str = trimmed.replace("updated_at:", "").trim()
-            updated_at = val_str.to_i64() ?? 0
-        else if trimmed.starts_with("entries "):
-            in_entries = true
-        else if in_entries and trimmed.starts_with("\""):
-            match parse_manifest_entry_line(trimmed):
-                case Some(e):
-                    entries[e.source_path] = e
-                case nil:
-                    pass
+fn _smf_row_i64(row: [SdnValue], index: i64, field: text) -> Result<i64, text>:
+    match row[index].as_i64():
+        case Some(value): Ok(value)
+        case None: Err("SMF-E-MANIFEST: `" + field + "` must be an integer")
 
-    SmfManifest(version: version, entries: entries, updated_at: updated_at)
+fn _smf_row_bool(row: [SdnValue], index: i64, field: text) -> Result<bool, text>:
+    match row[index].as_bool():
+        case Some(value): Ok(value)
+        case None:
+            match row[index].as_i64():
+                case Some(value):
+                    if value == 0: Ok(false)
+                    elif value == 1: Ok(true)
+                    else: Err("SMF-E-MANIFEST: `" + field + "` integer must be 0 or 1")
+                case None: Err("SMF-E-MANIFEST: `" + field + "` must be bool")
 
-fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
-    """Parse a single SDN table row."""
-    val parts = line.split(", ")
-    if parts.len() < 5:
-        return nil
+fn _smf_row_texts(row: [SdnValue], index: i64, field: text) -> Result<[text], text>:
+    match row[index]:
+        case SdnValue.Array(items):
+            var out: [text] = []
+            for item in items:
+                match item.as_str():
+                    case Some(value): out.push(value)
+                    case None: return Err("SMF-E-MANIFEST: `" + field + "` entries must be text")
+            Ok(out)
+        case SdnValue.String(legacy):
+            if legacy == "": Ok([]) else: Ok(legacy.split(";"))
+        case _: Err("SMF-E-MANIFEST: `" + field + "` must be a text array")
 
-    # Hoisted `.trim().replace(..)` chains: the deployed stage-4 interpreter's
-    # nested-call dispatcher predates the 2026-07-07 seed fix (050209d9b3), so a
-    # chained outer `.replace` in val position aborts the worker ("method
-    # 'replace' not found on value of type str in nested call context") — same
-    # bootstrap Stage-1 post-link wall as cache_validator.source_to_cache_path.
-    val source_path_raw = parts[0].trim()
-    val source_path = source_path_raw.replace("\"", "")
-    val smf_path_raw = parts[1].trim()
-    val smf_path = smf_path_raw.replace("\"", "")
-    val source_hash = parts[2].trim().to_i64() ?? 0
-    val compiled_at = parts[3].trim().to_i64() ?? 0
-    val backend_raw = parts[4].trim()
-    val backend = backend_raw.replace("\"", "")
-    val opt_level = if parts.len() > 5: parts[5].trim().to_i64() ?? 0 else: 0
-    val release = if parts.len() > 6: parse_manifest_bool(parts[6].trim()) else: false
-    val debug_info = if parts.len() > 7: parse_manifest_bool(parts[7].trim()) else: true
-    val gc_off = if parts.len() > 8: parse_manifest_bool(parts[8].trim()) else: false
-    var profile = "dev"
-    if parts.len() > 9:
-        val profile_raw = parts[9].trim()
-        profile = profile_raw.replace("\"", "")
-    var allowed_families_text = ""
-    if parts.len() > 10:
-        val families_raw = parts[10].trim()
-        allowed_families_text = families_raw.replace("\"", "")
-    val allowed_families = if allowed_families_text == "": [] else: allowed_families_text.split(";")
-    var iface_digest = ""
-    if parts.len() > 11:
-        val iface_raw = parts[11].trim()
-        iface_digest = iface_raw.replace("\"", "")
-
-    Some(SmfManifestEntry(
+fn _smf_manifest_entry_from_row(row: [SdnValue]) -> Result<SmfManifestEntry, text>:
+    if row.len() != 15:
+        return Err("SMF-E-MANIFEST: entry row must contain exactly 15 columns")
+    val source_path = _smf_row_text(row, 0, "source_path")?
+    if source_path == "":
+        return Err("SMF-E-MANIFEST: source_path must not be empty")
+    Ok(SmfManifestEntry(
         source_path: source_path,
-        smf_path: smf_path,
-        source_hash: source_hash,
-        compiled_at: compiled_at,
-        backend: backend,
-        opt_level: opt_level,
-        release: release,
-        debug_info: debug_info,
-        gc_off: gc_off,
-        profile: profile,
-        allowed_families: allowed_families,
-        iface_digest: iface_digest
+        smf_path: _smf_row_text(row, 1, "smf_path")?,
+        source_hash: _smf_row_i64(row, 2, "source_hash")?,
+        compiled_at: _smf_row_i64(row, 3, "compiled_at")?,
+        backend: _smf_row_text(row, 4, "backend")?,
+        opt_level: _smf_row_i64(row, 5, "opt_level")?,
+        release: _smf_row_bool(row, 6, "release")?,
+        debug_info: _smf_row_bool(row, 7, "debug_info")?,
+        gc_off: _smf_row_bool(row, 8, "gc_off")?,
+        profile: _smf_row_text(row, 9, "profile")?,
+        allowed_families: _smf_row_texts(row, 10, "allowed_families")?,
+        iface_digest: _smf_row_text(row, 11, "iface_digest")?,
+        abi_digest: _smf_row_text(row, 12, "abi_digest")?,
+        provided_ifaces: _smf_row_texts(row, 13, "provides")?,
+        required_ifaces: _smf_row_texts(row, 14, "requires")?
     ))
+
+fn smf_manifest_from_sdn_checked(content: text) -> Result<SmfManifest, text>:
+    val root = parse(content)?
+    val metadata = match root.get("smf_manifest"):
+        case Some(value): value
+        case None: return Err("SMF-E-MANIFEST: smf_manifest metadata is missing")
+    if not metadata.is_dict():
+        return Err("SMF-E-MANIFEST: smf_manifest metadata must be a map")
+    val version_value = metadata.get("version") ?? SdnValue.Null
+    val version = version_value.as_i64() ?? 0
+    if version != SMF_MANIFEST_VERSION_CURRENT:
+        return Err("SMF-E-VERSION: unsupported manifest version `" +
+            version.to_text() + "`")
+    val updated_at = (metadata.get("updated_at") ?? SdnValue.Null).as_i64() ?? 0
+    var entries: Dict<text, SmfManifestEntry> = {}
+    match root.get("entries"):
+        case None: true
+        case Some(value):
+            match value:
+                case SdnValue.Table(headers, rows):
+                    val expected = ["source_path", "smf_path", "source_hash", "compiled_at",
+                        "backend", "opt_level", "release", "debug_info", "gc_off", "profile",
+                        "allowed_families", "iface_digest", "abi_digest", "provides", "requires"]
+                    if headers != expected:
+                        return Err("SMF-E-MANIFEST: entries header is not canonical")
+                    for row in rows:
+                        val entry = _smf_manifest_entry_from_row(row)?
+                        if entries.has(entry.source_path):
+                            return Err("SMF-E-MANIFEST: duplicate source_path `" + entry.source_path + "`")
+                        entries[entry.source_path] = entry
+                case _: return Err("SMF-E-MANIFEST: entries must be a table")
+    Ok(SmfManifest(version: version, entries: entries, updated_at: updated_at))
+
+fn smf_manifest_from_sdn(content: text) -> SmfManifest:
+    match smf_manifest_from_sdn_checked(content):
+        case Ok(manifest): manifest
+        case Err(_): SmfManifest(version: 0, entries: {}, updated_at: 0)
 
 # ============================================================================
 # File I/O (atomic write)
@@ -308,6 +404,14 @@ fn load_smf_manifest(path: text) -> SmfManifest:
         return smf_manifest_new()
     smf_manifest_from_sdn(content)
 
+fn load_smf_manifest_checked(path: text) -> Result<SmfManifest, text>:
+    if not file_exists(path):
+        return Ok(smf_manifest_new())
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return Err("SMF-E-MANIFEST: manifest is empty")
+    smf_manifest_from_sdn_checked(content)
+
 fn save_smf_manifest(manifest: SmfManifest, path: text) -> bool:
     """Save manifest to file using atomic tmp+rename."""
     val dir = path_dir(path)
@@ -322,6 +426,9 @@ fn save_smf_manifest(manifest: SmfManifest, path: text) -> bool:
 
 fn load_smf_manifest_default() -> SmfManifest:
     load_smf_manifest(SMF_MANIFEST_DEFAULT_PATH)
+
+fn load_smf_manifest_default_checked() -> Result<SmfManifest, text>:
+    load_smf_manifest_checked(SMF_MANIFEST_DEFAULT_PATH)
 
 fn save_smf_manifest_default(manifest: SmfManifest) -> bool:
     save_smf_manifest(manifest, SMF_MANIFEST_DEFAULT_PATH)
@@ -347,7 +454,11 @@ fn update_smf_manifest_entry(
 ) -> bool:
     """Load manifest, update entry, save. Convenience for single-entry updates."""
     val manifest_path = smf_manifest_path_for_smf(smf_path)
-    var manifest = load_smf_manifest(manifest_path)
+    var manifest = match load_smf_manifest_checked(manifest_path):
+        case Ok(existing): existing
+        case Err(_): return false
+    if manifest.version != SMF_MANIFEST_VERSION_CURRENT:
+        return false
     # RECORD the canonical interface digest alongside the whole-source hash.
     # First real caller of action_key.interface_digest_of (2026-08-18).
     val src_text = if file_exists(source_path): rt_file_read_text(source_path) ?? "" else: ""
@@ -378,9 +489,3 @@ fn path_dir(path: text) -> text:
     if last_slash >= 0:
         return path[0:last_slash]
     "."
-
-fn bool_to_sdn_int(value: bool) -> i64:
-    if value: 1 else: 0
-
-fn parse_manifest_bool(value: text) -> bool:
-    value == "1" or value == "true"

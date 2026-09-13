@@ -1,4 +1,5 @@
 # Deployed self-hosted binary: interpret-mode extern registration + baked module table constraints
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Status
 Documented (platform facts, not a single fixable bug) — informs how new
@@ -81,3 +82,6 @@ the same change.
 - `src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl` — both the
   `SIMPLE_ONE_CALL_UPLOAD` split-gate fix and the inline `spl_gpu_transfer`
   bridge live here.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

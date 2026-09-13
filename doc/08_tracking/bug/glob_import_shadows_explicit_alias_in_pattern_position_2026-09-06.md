@@ -1,7 +1,7 @@
 # Glob import shadows an explicit `use ... as` alias in pattern position
 
 - **Date:** 2026-09-06
-- **Status:** open
+- **Status:** fixed 2026-09-08 (`interpreter_patterns.rs`)
 - **Area:** compiler / name resolution (Rust seed interpreter)
 - **Found by:** scilib-ports lane, closing
   `test/03_system/plan_acceptance/scilib_port_lapack_spec.spl`
@@ -72,9 +72,13 @@ must not be weakened: the `Singular` error path IS produced correctly by
 `src/lib/common/science_math/lapack.spl:165`), the spec simply cannot observe
 it.
 
-## Blocked on
+## Resolution
 
-The fix is in the seed's name resolution, and this session is barred from any
-bootstrap or seed rebuild. Filed rather than worked around; renaming either
-public `LinalgError` to dodge the collision would be treating the detector,
-not the defect.
+`pattern_enum_name_matches` now resolves a qualified pattern's local name
+through the imported `Value::EnumType` binding before comparing it with the
+runtime enum's canonical name. The focused Rust regression plants a conflicting
+glob name and proves both the positive alias match and the adjacent negative
+case. After removing the unrelated duplicate SIMD exports that prevented the
+test binary from linking, the regression passed (`1 passed`, 3,935 filtered),
+and the unchanged LAPACK plan-acceptance spec passed 10/10 on the rebuilt hosted
+compiler before its additional false-green assertions were strengthened.

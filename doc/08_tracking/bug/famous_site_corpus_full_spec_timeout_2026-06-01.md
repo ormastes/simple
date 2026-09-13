@@ -1,6 +1,13 @@
 # Bug: famous-site corpus full system spec times out under focused verification
 
-Status: open (triaged 2026-06-11)
+## Closed 2026-09-13 — Stale: both referenced specs and their whole directory were deleted
+
+- **measured** `ls test/03_system/wm_compare` -> `No such file or directory`; neither `famous_site_corpus_spec.spl` nor `structural_layout_report_spec.spl` exists anywhere under `test/`.
+- **measured** The repro command names `src/compiler_rust/target/debug/simple`, a Linux debug seed not built on this host.
+- **inferred** A timeout report about a spec file that no longer exists cannot be reproduced or fixed; the corpus lane was removed rather than split.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 Date: 2026-06-01
 

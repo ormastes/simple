@@ -9,9 +9,14 @@
 #   bin/simple run examples/06_io/ui/web_render_page_ppm.spl <page.html> [out.ppm] [W] [H]
 # Env: PAGE_W / PAGE_H override the resolution.
 
-use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name_with_reason}
 use common.image.ppm_decode.{encode_ppm_p6}
 use std.sffi.cli.{cli_get_args}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{web_draw_ir_route_stage_line}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_timing_table, vulkan_font_mirror_line}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{web_presenter_engine_cache_create_attempt_count, web_presenter_engine_cache_reuse_count}
 use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 
 use std.io_runtime.{read_file, file_exists, env_get}
@@ -31,25 +36,67 @@ fn int_env(key: text, fallback: i32) -> i32:
         return fallback
     v.to_i32()
 
+fn _is_numeric(v: text) -> bool:
+    if v == "":
+        return false
+    var i = 0
+    while i < v.len():
+        val c = v.substring(i, i + 1)
+        if c < "0" or c > "9":
+            return false
+        i = i + 1
+    true
+
+# Positional args after <page.html> [out.ppm]: optional <w> <h>. Env
+# (PAGE_W/PAGE_H) always wins over argv when set.
+fn size_from_args_or_env(args: [text]) -> (i32, i32):
+    var numeric_args: [text] = []
+    var i = 0
+    while i < args.len():
+        if _is_numeric(args[i]):
+            numeric_args = numeric_args + [args[i]]
+        i = i + 1
+    val default_w = if numeric_args.len() >= 2: numeric_args[0].to_i32() else: 900
+    val default_h = if numeric_args.len() >= 2: numeric_args[1].to_i32() else: 760
+    (int_env("PAGE_W", default_w), int_env("PAGE_H", default_h))
+
+# Requested Engine2D backend: SIMPLE_2D_BACKEND, falling back to "cpu_simd".
+fn requested_backend() -> text:
+    val v = env_get("SIMPLE_2D_BACKEND") ?? ""
+    if v == "": "cpu_simd" else: v
+
 fn main() -> i64:
     val hp = arg_with_suffix(".html", "test/09_baselines/web_html_input/vanillastyle_demo.html")
     if not file_exists(hp):
         print "HTML file not found: {hp}"
         return 1
-    val W = int_env("PAGE_W", 900)
-    val H = int_env("PAGE_H", 760)
+    val (W, H) = size_from_args_or_env(cli_get_args())
     val op = arg_with_suffix(".ppm", "/tmp/simple-web-capture/vanillastyle_page.ppm")
+    val requested = requested_backend()
+    val (reported, fallback_reason) = simple_web_resolved_engine2d_backend_name_with_reason(W, H, requested)
+    if fallback_reason != "":
+        print "backend_fallback_reason={fallback_reason}"
+    if requested != "cpu" and requested != "software" and requested != "cpu_simd" and reported == "software" and (env_get("SIMPLE_2D_BACKEND_STRICT") ?? "") == "1":
+        print "error: requested backend '{requested}' unavailable (strict mode): {fallback_reason}"
+        return 1
 
     val html = read_file(hp)
-    print "rendering {hp} at {W}x{H} via pure-Simple web lane (cpu_simd)..."
-    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, W, H, "cpu_simd")
+    print "rendering {hp} at {W}x{H} via pure-Simple web lane (backend_requested={requested} backend_reported={reported} size={W}x{H})..."
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, W, H, requested)
     if pixels.len() < W * H:
         print "render produced too few pixels: {pixels.len()} < {W*H}"
         return 1
 
+    if (env_get("SIMPLE_WEB_ROUTE_STAGES") ?? "") == "1":
+        print web_draw_ir_route_stage_line()
+        print "presenter_engine_cache creates={web_presenter_engine_cache_create_attempt_count()} reuses={web_presenter_engine_cache_reuse_count()}"
+    if (env_get("SIMPLE_VK_TIMING") ?? "") == "1":
+        print vulkan_timing_table()
+    if (env_get("SIMPLE_VK_FONT_SELFCHECK") ?? "") == "1":
+        print vulkan_font_mirror_line()
     val bytes = encode_ppm_p6(W.to_u32(), H.to_u32(), pixels)
     if not file_write_bytes(op, bytes):
         print "failed to write {op}"
         return 1
-    print "wrote {op} ({pixels.len()} px, {bytes.len()} bytes)"
+    print "wrote {op} ({pixels.len()} px, {bytes.len()} bytes) backend_requested={requested} backend_reported={reported} size={W}x{H}"
     0

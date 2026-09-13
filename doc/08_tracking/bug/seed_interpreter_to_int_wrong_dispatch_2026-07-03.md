@@ -1,6 +1,27 @@
 # Seed interpreter: `.to_int()` misdispatches on split()-produced strings
 
-- **Status:** open (seed/Rust interpreter; worked around in Simple code)
+## Closed 2026-09-13 — fixed, re-verified by running the entry repro
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran a `split()`-produced-string `.to_int()` repro:
+
+```spl
+fn main():
+    val parts = "12,34".split(",")
+    print(parts[0].to_int() + parts[1].to_int())
+```
+
+Result: prints `46` (12 + 34) — correct integer dispatch on
+split()-produced strings. The reported misdispatch does not reproduce
+on the seed lane (measured).
+
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed) — CLOSED 2026-09-13 (see top section)
 - **Date:** 2026-07-03
 - **Component:** `src/compiler_rust` interpreter method dispatch
 
@@ -55,3 +76,6 @@ Probe `_scratch/p_str.spl`. Not fixed by this session — it was already correct
 The workaround `core_digits_to_i64` in `src/compiler/10.frontend/core/lexer.spl`
 that this record installed can be revisited independently; it was NOT removed
 here, since removing a live workaround needs its own verification pass.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

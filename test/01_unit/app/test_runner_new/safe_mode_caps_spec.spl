@@ -1,0 +1,102 @@
+"""Safe mode's resource caps, and whether `--no-limits` reaches them.
+
+Audience: anyone who runs `simple test --safe-mode --no-limits` and expects the
+caps to actually come off, and anyone editing `safe_mode_caps` /
+`run_test_file_safe_mode` in `src/app/test_runner_new/test_runner_execute.spl`.
+
+Why this spec exists: `run_test_file_safe_mode` hardcoded its four caps
+(`512MB`, `30s`, `256` fds, `64` pids) and never consulted `options.no_limits`,
+while every sibling lane in the same file gates its caps on it
+(`if options.no_limits: 0 else: options.max_procs`). So safe mode's single
+documented escape hatch silently did nothing. That matters because `ulimit -u`
+is a **per-UID** cap, not a per-test cap: RLIMIT_NPROC counts every process the
+user already has, so a budget of 64 on an interactive workstation makes the
+child's very next `fork` fail with `timeout: fork system call failed: Resource
+temporarily unavailable` — and the runner reports that as an empty compile
+failure, not as an infrastructure problem.
+Bug: doc/08_tracking/bug/test_runner_ulimit_caps_unusable_on_macos_2026-09-05.md
+
+The similar-problem generalisation is NOT "check the pid cap": it is that a
+cap's OFF value must be the one the enforcement layer recognises. Every clause
+in `src/lib/nogc_sync_mut/io/resource_scope.spl` is emitted only when its budget
+is `> 0` (`ulimit -t` at :159/:241, `-n` at :161/:245, `-u` at :243, `-v` at
+:237), so zero means "emit no clause at all" and any other sentinel would
+silently become a real, tiny limit — `ulimit -u 0` or `ulimit -v 0` is far worse
+than the bug being fixed. Both rungs are pinned below: that `--no-limits` turns
+every cap off, and that each off value is exactly the zero the enforcer tests
+for. The bounded case is pinned too, so a future edit cannot "fix" this by
+quietly removing the caps altogether.
+
+# @req REQ-TESTRUNNER-SAFE-MODE-CAPS
+# @req: REQ-SSPEC-APP
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+use app.test_runner_new.test_runner_execute.{safe_mode_caps}
+
+describe "Safe mode's resource caps and the --no-limits escape hatch":
+    # @manual scenario evidence
+
+    it "turns every cap off when --no-limits is given":
+        # @req: REQ-TESTRUNNER-SAFE-MODE-CAPS
+        # @req: REQ-SSPEC-APP
+        step("Verify: turns every cap off when --no-limits is given")
+        """This is the reproducing case. Before the fix these four values were
+        literals that ignored the flag entirely, so `--safe-mode --no-limits`
+        still spawned children under `ulimit -u 64`."""
+
+        step("Ask for safe mode's caps with no_limits = true")
+        val caps = safe_mode_caps(true)
+
+        step("Every cap reads zero — the address-space, cpu, fd and pid budgets")
+        expect(caps.0).to_equal(0)
+        expect(caps.1).to_equal(0)
+        expect(caps.2).to_equal(0)
+        expect(caps.3).to_equal(0)
+
+    it "keeps safe mode's bounded caps when --no-limits is absent":
+        # @req: REQ-TESTRUNNER-SAFE-MODE-CAPS
+        # @req: REQ-SSPEC-APP
+        step("Verify: keeps safe mode's bounded caps when --no-limits is absent")
+        """Safe mode exists to bound a spec that may fork-bomb or leak, so the
+        default must stay bounded. A fix that simply deleted the caps would pass
+        the scenario above and fail this one."""
+
+        step("Ask for safe mode's caps with no_limits = false")
+        val caps = safe_mode_caps(false)
+
+        step("The documented safe-mode budget is unchanged: 512MB / 30s / 256 fds / 64 pids")
+        expect(caps.0).to_equal(536870912)
+        expect(caps.1).to_equal(30)
+        expect(caps.2).to_equal(256)
+        expect(caps.3).to_equal(64)
+
+    it "uses zero as the off value, which is the sentinel the enforcer tests for":
+        # @req: REQ-TESTRUNNER-SAFE-MODE-CAPS
+        # @req: REQ-SSPEC-APP
+        step("Verify: uses zero as the off value, which is the sentinel the enforcer tests for")
+        """The generalisation. resource_scope.spl emits a `ulimit` clause only
+        when the budget is greater than zero, so the off value has to be zero
+        and nothing else — a negative or sentinel value would be emitted as a
+        real, near-zero limit and strangle every child."""
+
+        step("Confirm each off value is not merely falsy but exactly zero, and not negative")
+        val off = safe_mode_caps(true)
+        expect(off.0).to_be_less_than(1)
+        expect(off.1).to_be_less_than(1)
+        expect(off.2).to_be_less_than(1)
+        expect(off.3).to_be_less_than(1)
+        expect(off.0).to_be_greater_than(-1)
+        expect(off.1).to_be_greater_than(-1)
+        expect(off.2).to_be_greater_than(-1)
+        expect(off.3).to_be_greater_than(-1)
+
+        step("And confirm the bounded values are all strictly positive, so they DO get emitted")
+        val on = safe_mode_caps(false)
+        expect(on.0).to_be_greater_than(0)
+        expect(on.1).to_be_greater_than(0)
+        expect(on.2).to_be_greater_than(0)
+        expect(on.3).to_be_greater_than(0)

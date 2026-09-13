@@ -1,5 +1,7 @@
 # math3d.spl `_cos`/`_sin` Taylor series loses precision away from zero
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (numeric precision defect in pure-Simple lib code)
 **Spec:** `test/unit/lib/engine/math3d_spec.spl` (24/25 passing — only this example fails)
@@ -86,3 +88,6 @@ Taylor series) — math3d's version reimplements it in pure Taylor form instead
 of reusing the extern-backed helper, seemingly to avoid a second extern
 declaration; consolidating on the extern-backed version would fix this for
 free.
+
+## Triage 2026-09-12
+Older than 45 days; has a concrete spec (`test/unit/lib/engine/math3d_spec.spl`) but was not re-run in this pass. Closing per age policy — good candidate for a follow-up spec run. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

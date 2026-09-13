@@ -1,5 +1,18 @@
 # Stage4 Windows C ABI inference used the object suffix
 
+Status: FIXED (verified 2026-09-12 against the current tree)
+
+Verification: `stage4_windows_c_object_uses_msvc_abi`
+(`src/compiler/70.backend/backend/stage4_symbol_closure.spl:231-252`) classifies
+the object ABI from the normalized C-driver basename (`cl`/`clang-cl` -> MSVC,
+`gcc`/`cc`/`*-gcc` -> MinGW), rejects an unrecognised driver, rejects
+compiler/linker disagreement in both directions, and rejects an explicit
+`*-pc-windows-msvc` target under a MinGW driver. No object-suffix (`.obj`/`.o`)
+inference remains: `stage4_hosted_provider_object_format` takes the already-
+resolved `msvc_objects: bool` and only maps it to `coff-msvc`/`coff-mingw`.
+Coverage: 13 assertions over that function in
+`test/01_unit/compiler/backend/stage4_final_symbol_closure_spec.spl`.
+
 ## Symptom
 
 Stage4 classified every Windows `.obj` provider as COFF-MSVC and every `.o`

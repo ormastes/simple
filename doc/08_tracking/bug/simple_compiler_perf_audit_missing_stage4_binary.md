@@ -1,4 +1,5 @@
 # Simple compiler performance audit: missing admitted Stage 4 binary
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -41,3 +42,6 @@ Deploy or link a provenance-recorded pure-Simple Stage 4 binary built for commit
 `37bd406e219cc35cae049b4130f5167c21801864` (or rebuild this branch through the
 documented minimal bootstrap composition), then run each planned focused check
 once in isolated output/cache directories.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,0 +1,228 @@
+# @tag: perf, startup, closure, check, lint
+"""
+## Purpose and audience
+Entry-closure ratchet for `simple check` and `simple lint` startup, for
+engineers editing `src/app/cli/check_entry.spl`, `src/app/cli/lint_entry.spl`
+or anything they import. Package L5-D of the generated/deployed binary closure
+wave: an entry must not load the CLI hub to read argv.
+## Operator workflow
+`bin/simple test test/05_perf/startup/check_lint_entry_closure_spec.spl`, then
+read the trailing SPEC FILE VERDICT line. The numbers come from
+`scripts/perf/measure-entry-closure.shs` (the `EntryClosureReceiptV1` producer
+owned by L5-A), whose verdict is its last stdout line.
+## Compatibility and limitations
+Every entry is measured in BOTH execution lanes, because the same entry has a
+different closure in each and a closure number without a lane is ambiguous
+(contract amendment 2026-09-12): `--lane default` leaves SIMPLE_EXECUTION_MODE
+unset and whole-module-compiles, `--lane interpreter` exports it. Each lane is
+held against its OWN baseline, so the lane gap cannot be banked as progress.
+Only the PHYSICAL pair is ratcheted -- `physical_files` and
+`source_bytes_physical`; `spl_opens` and `unit_spellings` move under the seed's
+cross-lane parse cache (L5-E) and are not held here. There is NO skip path. The producer is
+probed with `--list-entries` (which needs no `strace`) and a producer that does
+not answer is a FAILURE, as is a missing or ERROR verdict, a 0 physical-file
+reading or a 0-byte reading -- a measurement that did not happen must never
+read as a pass.
+## Verification guidance and troubleshooting
+A failure prints measured vs allowed for the entry and lane that regressed. The
+usual cause is a new `use` in an entry that resolves to a hub module:
+`std.cli.cli_util` pulls `std.io`, which is
+`src/lib/nogc_sync_mut/io/__init__.spl` and the whole SFFI surface (96 files /
+1,011,061 bytes). Import the leaf owner instead -- but run the entry once under
+`SIMPLE_JIT_STRICT=1` afterwards, because removing a hub can cost the whole
+program its JIT (see the lint scenario below).
+"""
+# Lifecycle: doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+# @manual_section: entry-closure-check-lint
+
+use std.spec.{describe, it, expect, step}
+use app.io.process_ops.{process_run_timeout}
+use std.io_runtime.{read_file_text}
+
+val MEASURER = "scripts/perf/measure-entry-closure.shs"
+val MEASURE_TIMEOUT_MS = 900000
+
+# Wave baselines 2026-09-12, keyed by (entry_id, lane), measured on
+# /home/yoon/dev/simple-wave/src/compiler_rust/target/release/simple
+# sha256 ef528c608113173c0c1aef6edb10ac17f9bf68886f34e05aff21a39c67515562 and
+# reproduced byte-for-byte on the deployed seed.
+val CHECK_DEFAULT_FILES = 132
+val CHECK_DEFAULT_BYTES = 1302861
+val CHECK_INTERP_FILES = 114
+val CHECK_INTERP_BYTES = 1180911
+val LINT_DEFAULT_FILES = 387
+val LINT_DEFAULT_BYTES = 4307651
+val LINT_INTERP_FILES = 291
+val LINT_INTERP_BYTES = 3645845
+
+# Today's cost after this change, measured the same way. The lint entry itself is
+# untouched (see the blocker below); the default-lane drop is the dead
+# `use std.{text, collections}` deleted from
+# src/compiler/35.semantics/resource_families.spl. The interpreter lane does not
+# move, because that hub was never in its closure.
+val LINT_DEFAULT_NOW_FILES = 309
+val LINT_DEFAULT_NOW_BYTES = 3767766
+val LINT_INTERP_NOW_FILES = 291
+val LINT_INTERP_NOW_BYTES = 3645816
+
+# L5-D acceptance: a 25% cut on the physical pair, per lane.
+fn allowed(baseline: i64) -> i64:
+    (baseline * 75) / 100
+
+fn field_after(line: text, key: text) -> i64:
+    val at = line.index_of(key)
+    if at < 0:
+        return -1
+    var i = at + key.len()
+    var digits = ""
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if ch < "0" or ch > "9":
+            i = line.len()
+        else:
+            digits = digits + ch
+            i = i + 1
+    if digits == "":
+        return -1
+    digits.to_int() ?? -1
+
+fn measurer_available() -> bool:
+    # Cheap, strace-free probe: if the producer answers --list-entries then it is
+    # present and runnable, so a later empty verdict is a REAL failure and must
+    # not be excused as a skip. That distinction matters: an earlier revision of
+    # this spec silently passed 5/5 because every measurement came back empty.
+    val (out, _err, _code) = process_run_timeout(
+        "sh", [MEASURER, "--list-entries"], 120000
+    )
+    out.contains("PASS —")
+
+fn measure_verdict(entry_id: text, lane: text) -> text:
+    # `--lane` pins SIMPLE_EXECUTION_MODE for the measured process regardless of
+    # what the caller's environment holds, which matters here: the spec runner
+    # exports SIMPLE_EXECUTION_MODE, and measuring under it while comparing
+    # against a default-lane baseline reads `lint-one-file` as 291 files instead
+    # of 387 -- a 25% phantom win that would ship as a false green.
+    #
+    # The verdict is routed through a file and grepped back rather than read from
+    # the child's stdout: the producer runs the entry under `strace`, and this
+    # seed's process_run_timeout captures nothing at all from such a child (0
+    # bytes, exit 0) even though the command runs correctly. The wrapper's own
+    # `grep` output, which no strace touches, IS captured. `read_file_text` is
+    # not usable either -- it returns "" for a file created after the reading
+    # process started.
+    val log_path = "/tmp/simple_entry_closure_{entry_id}_{lane}.log"
+    val (out, _err, _code) = process_run_timeout(
+        "sh",
+        [
+            "-c",
+            "sh \"$0\" \"$1\" --lane \"$2\" --samples 0 --verify-cold > \"$3\" 2>&1; grep -E '^(PASS|ERROR) ' \"$3\" | tail -1",
+            MEASURER,
+            entry_id,
+            lane,
+            log_path
+        ],
+        MEASURE_TIMEOUT_MS
+    )
+    out.trim()
+
+fn assert_closure(entry_id: text, lane: text, base_files: i64, base_bytes: i64):
+    # NON-VACUITY GUARD (fail closed). The producer is a TRACKED file in this
+    # repo, so it answering nothing means the measurement did not happen -- and
+    # a measurement that did not happen must never read as a pass. The early
+    # `return` this replaces let a scenario that asserted NOTHING count green.
+    expect("measurer runnable: {measurer_available()}").to_equal("measurer runnable: true")
+    val verdict = measure_verdict(entry_id, lane)
+    print "[closure] {entry_id}/{lane} verdict: {verdict}"
+    # The producer is present, so a missing or ERROR verdict is a failure, not a
+    # skip. A measurement that did not happen must never read as a pass.
+    expect(verdict.starts_with("PASS —")).to_equal(true)
+    val files = field_after(verdict, "physical_files=")
+    val bytes = field_after(verdict, "source_bytes_physical=")
+    print "[closure] {entry_id}/{lane} physical_files={files} (base {base_files}, allow {allowed(base_files)})"
+    print "[closure] {entry_id}/{lane} source_bytes_physical={bytes} (base {base_bytes}, allow {allowed(base_bytes)})"
+    expect(files > 0).to_equal(true)
+    expect(bytes > 0).to_equal(true)
+    expect(files <= allowed(base_files)).to_equal(true)
+    expect(bytes <= allowed(base_bytes)).to_equal(true)
+
+fn assert_ceiling(entry_id: text, lane: text, ceiling_files: i64, ceiling_bytes: i64):
+    # NON-VACUITY GUARD (fail closed) -- see assert_closure above.
+    expect("measurer runnable: {measurer_available()}").to_equal("measurer runnable: true")
+    val verdict = measure_verdict(entry_id, lane)
+    expect(verdict.starts_with("PASS —")).to_equal(true)
+    val files = field_after(verdict, "physical_files=")
+    val bytes = field_after(verdict, "source_bytes_physical=")
+    print "[closure] {entry_id}/{lane} ceiling check: {files} files / {bytes} bytes (ceiling {ceiling_files} / {ceiling_bytes})"
+    expect(files > 0).to_equal(true)
+    expect(bytes > 0).to_equal(true)
+    expect(files <= ceiling_files).to_equal(true)
+    expect(bytes <= ceiling_bytes).to_equal(true)
+
+describe "check and lint entry startup closure":
+    it "keeps `simple check --help` under 75% of its default-lane baseline":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): physical file count and source bytes, check entry, default lane
+        step("measure check-help in the default lane with the EntryClosureReceiptV1 producer")
+        assert_closure("check-help", "default", CHECK_DEFAULT_FILES, CHECK_DEFAULT_BYTES)
+
+    it "keeps `simple check --help` under 75% of its interpreter-lane baseline":
+        # @req REQ-SSPEC-PERF
+        # @capture(statistics): physical file count and source bytes, check entry, interpreter lane
+        # Held separately because the interpreter lane's own baseline is already
+        # 114 files / 1,180,911 bytes with no code change: the lane gap is not
+        # progress and must not be allowed to pay for the target.
+        step("measure check-help in the interpreter lane")
+        assert_closure("check-help", "interpreter", CHECK_INTERP_FILES, CHECK_INTERP_BYTES)
+
+    it "keeps `simple lint <one file>` under 75% of its baseline in both lanes":
+        # @req REQ-SSPEC-PERF
+        # EXPECTED RED, deliberately not weakened. `lint_entry.spl` still imports
+        # the CLI hub, because removing it stops the whole lint/fmt/fix program
+        # from JIT-compiling: `SIMPLE_JIT_STRICT=1 simple lint --help` exits 1
+        # with no output at all, "unresolved external symbol 'io_runtime_cwd'".
+        # Two independent blockers, both outside this package, both with
+        # reproducers in the lane receipt:
+        #   1. src/lib/nogc_sync_mut/sffi/system.spl:8 reaches `cwd` through
+        #      `use std.io_runtime.{cwd as io_runtime_cwd}`, and only the hub was
+        #      co-compiling that symbol into the same JIT module. Importing the
+        #      alias from the entry by either name does not resolve it. This is
+        #      what blocks the one-line swap.
+        #   2. Even with the swap the default lane floors at 301 files /
+        #      3,388,952 bytes: 8 of the 10 compiler.tools.lint._LintMain.*
+        #      submodules each pull the full 290-file / 3,316,828-byte cluster on
+        #      their own, so splitting the compiler.tools.lint.main facade buys
+        #      nothing.
+        # Measured default-lane ladder, so the parts are not conflated:
+        #      387 / 4,307,651  baseline
+        #      309 / 3,767,766  after deleting resource_families.spl:5 (landed)
+        #      303 / 3,394,671  leaf-importing lint_entry alone (NOT landed)
+        #      222 / 2,848,475  both together (what the target needs)
+        # The interpreter lane is unmoved by the deletion (291 either way) and
+        # needs the swap, hence blocker 1, hence RED in both lanes today.
+        step("measure lint-one-file in the default lane")
+        assert_closure("lint-one-file", "default", LINT_DEFAULT_FILES, LINT_DEFAULT_BYTES)
+        step("measure lint-one-file in the interpreter lane")
+        assert_closure("lint-one-file", "interpreter", LINT_INTERP_FILES, LINT_INTERP_BYTES)
+
+    it "holds `simple lint <one file>` at or below today's closure in both lanes":
+        # @req REQ-SSPEC-PERF
+        # The part that can be held while the blockers above are open: the lint
+        # entry must not GROW past what it already costs, in either lane.
+        step("compare lint-one-file against today's default-lane cost")
+        assert_ceiling("lint-one-file", "default", LINT_DEFAULT_NOW_FILES, LINT_DEFAULT_NOW_BYTES)
+        step("compare lint-one-file against today's interpreter-lane cost")
+        assert_ceiling("lint-one-file", "interpreter", LINT_INTERP_NOW_FILES, LINT_INTERP_NOW_BYTES)
+
+    it "keeps the CLI hub out of the check entry and records that lint still carries it":
+        # @req REQ-SSPEC-PERF
+        step("read the two entry sources and confirm which one still imports the hub")
+        val check_src = read_file_text("src/app/cli/check_entry.spl") ?? ""
+        val lint_src = read_file_text("src/app/cli/lint_entry.spl") ?? ""
+        expect(check_src.len() > 0).to_equal(true)
+        expect(lint_src.len() > 0).to_equal(true)
+        expect(check_src.contains("std.cli.cli_util")).to_equal(false)
+        expect(check_src.contains("app.cli.entry_args")).to_equal(true)
+        # lint_entry still carries the hub -- see the blocker above. Pinned so
+        # that the day it is swapped, this line is the reminder to flip the
+        # target scenario green rather than to quietly delete it.
+        expect(lint_src.contains("std.cli.cli_util")).to_equal(true)

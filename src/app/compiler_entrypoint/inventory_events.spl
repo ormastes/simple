@@ -1,0 +1,250 @@
+# Production bridge from Git/filesystem change journals to the compile-owned
+# source inventory. Git commands are read-only; all writes stay under build/scv.
+
+use app.io.mod.{dir_create, file_atomic_write, file_exists, file_read, process_run_bounded}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.{CompileSourceGitChangeV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_changes_v1, compile_source_inventory_read_current_v1}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+
+struct CompilerInventoryRefreshV1:
+    valid: bool
+    reason: text
+    inventory_digest: text
+    inventory_generation: i64
+
+struct CompilerInventoryCursorV1:
+    valid: bool
+    git_head: text
+    filesystem_rows: i64
+    filesystem_digest: text
+    inventory_digest: text
+    inventory_generation: i64
+
+fn compiler_inventory_invalid_v1(reason: text) -> CompilerInventoryRefreshV1:
+    CompilerInventoryRefreshV1(false, reason, "", -1)
+
+fn compiler_inventory_event_root_v1(cache_root: text) -> text:
+    cache_root + "/compile-events"
+
+fn compiler_inventory_cursor_path_v1(cache_root: text) -> text:
+    compiler_inventory_event_root_v1(cache_root) + "/CURRENT"
+
+fn compiler_inventory_cursor_decode_v1(content: text) -> CompilerInventoryCursorV1:
+    val lines = content.split("\n")
+    if lines.len() != 6 or lines[0] != "simple-compile-event-cursor-v1":
+        return CompilerInventoryCursorV1(false, "", -1, "", "", -1)
+    val head = lines[1].replace("git_head=", "")
+    val rows = lines[2].replace("filesystem_rows=", "").to_i64() ?? -1
+    val filesystem_digest = lines[3].replace("filesystem_digest=", "")
+    val inventory_digest = lines[4].replace("inventory_digest=", "")
+    val generation = lines[5].replace("inventory_generation=", "").to_i64() ?? -1
+    val valid = (head.len() == 40 or head.len() == 64) and rows >= 0 and
+        filesystem_digest.len() == 64 and inventory_digest.len() == 64 and
+        generation >= 0
+    CompilerInventoryCursorV1(
+        valid, head, rows, filesystem_digest, inventory_digest, generation)
+
+fn compiler_inventory_cursor_read_v1(cache_root: text) -> CompilerInventoryCursorV1:
+    val path = compiler_inventory_cursor_path_v1(cache_root)
+    if not file_exists(path):
+        return CompilerInventoryCursorV1(false, "", -1, "", "", -1)
+    compiler_inventory_cursor_decode_v1(file_read(path))
+
+fn compiler_inventory_cursor_write_v1(
+    cache_root: text, git_head: text, filesystem_rows: i64,
+    filesystem_digest: text, inventory: CompileSourceInventoryReadV1
+) -> bool:
+    if not inventory.valid or inventory.inventory == nil:
+        return false
+    val root = compiler_inventory_event_root_v1(cache_root)
+    if not dir_create(root, true):
+        return false
+    val content = [
+        "simple-compile-event-cursor-v1",
+        "git_head={git_head}",
+        "filesystem_rows={filesystem_rows}",
+        "filesystem_digest={filesystem_digest}",
+        "inventory_digest={inventory.digest}",
+        "inventory_generation={inventory.inventory!.generation}"
+    ].join("\n")
+    file_atomic_write(compiler_inventory_cursor_path_v1(cache_root), content)
+
+fn compiler_inventory_git_lines_v1(
+    root: text, args: [text]
+) -> text?:
+    val (stdout, _stderr, status) = process_run_bounded(
+        "git", ["-C", root, "--no-optional-locks"] + args, 10000, 16 * 1024 * 1024)
+    if status != 0: nil else: Some(stdout)
+
+fn compiler_inventory_git_head_v1(root: text) -> text:
+    val output = compiler_inventory_git_lines_v1(root, ["rev-parse", "HEAD"])
+    if output == nil: "" else: output!.trim()
+
+fn compiler_inventory_change_push_v1(
+    changes: [CompileSourceGitChangeV1], root: text, operation: text, path: text
+) -> [CompileSourceGitChangeV1]:
+    val normalized = path.trim().replace("\\", "/")
+    if normalized == "" or normalized.starts_with("build/scv/") or
+            normalized.starts_with(".simple/scv/"):
+        return changes
+    if operation == "delete":
+        return changes.push(CompileSourceGitChangeV1("delete", normalized, ""))
+    val absolute = root + "/" + normalized
+    if not file_exists(absolute):
+        return changes.push(CompileSourceGitChangeV1("delete", normalized, ""))
+    changes.push(CompileSourceGitChangeV1("modify", normalized, file_read(absolute)))
+
+fn compiler_inventory_parse_name_status_v1(
+    root: text, output: text, changes: [CompileSourceGitChangeV1]
+) -> [CompileSourceGitChangeV1]:
+    var result = changes
+    for line in output.split("\n"):
+        if line.trim() == "":
+            continue
+        val separator = line.index_of("\t")
+        if separator <= 0:
+            continue
+        val status = line[:separator]
+        val path = line[separator + 1:]
+        val operation = if status.starts_with("D"): "delete" else: "modify"
+        result = compiler_inventory_change_push_v1(result, root, operation, path)
+    result
+
+fn compiler_inventory_git_changes_v1(
+    root: text, previous_head: text, source_roots: [text], cold_init: bool
+) -> [CompileSourceGitChangeV1]?:
+    var changes: [CompileSourceGitChangeV1] = []
+    if cold_init:
+        val listed = compiler_inventory_git_lines_v1(
+            root, ["ls-files", "--cached", "--others", "--exclude-standard", "--"] + source_roots)
+        if listed == nil:
+            return nil
+        for path in listed!.split("\n"):
+            if path.trim() != "":
+                changes = compiler_inventory_change_push_v1(
+                    changes, root, "create", path)
+        return Some(changes)
+    val head = compiler_inventory_git_head_v1(root)
+    if head == "" or previous_head == "":
+        return nil
+    if head != previous_head:
+        val committed = compiler_inventory_git_lines_v1(
+            root, ["-c", "core.quotePath=false", "diff", "--name-status",
+                "--no-renames", previous_head, head, "--"] + source_roots)
+        if committed == nil:
+            return nil
+        changes = compiler_inventory_parse_name_status_v1(root, committed!, changes)
+    val working = compiler_inventory_git_lines_v1(
+        root, ["-c", "core.quotePath=false", "diff", "--name-status",
+            "--no-renames", "HEAD", "--"] + source_roots)
+    val untracked = compiler_inventory_git_lines_v1(
+        root, ["ls-files", "--others", "--exclude-standard", "--"] + source_roots)
+    if working == nil or untracked == nil:
+        return nil
+    changes = compiler_inventory_parse_name_status_v1(root, working!, changes)
+    for path in untracked!.split("\n"):
+        if path.trim() != "":
+            changes = compiler_inventory_change_push_v1(changes, root, "create", path)
+    Some(changes)
+
+fn compiler_inventory_decode_v1(value: text) -> text:
+    if value == "%empty":
+        return ""
+    value.replace("%0A", "\n").replace("%20", " ").replace("%25", "%")
+
+fn compiler_inventory_filesystem_events_v1(
+    root: text, journal: text, consumed_rows: i64
+) -> [FsWatchEvent]?:
+    var events: [FsWatchEvent] = []
+    val lines = journal.split("\n")
+    if consumed_rows > lines.len():
+        return nil
+    var index = consumed_rows
+    while index < lines.len():
+        val line = lines[index]
+        index = index + 1
+        if not line.contains(" kind=fsevent "):
+            continue
+        val marker = line.index_of(" refs=kind=")
+        if marker < 0:
+            return nil
+        val refs = line[marker + " refs=".len():]
+        val end = refs.index_of(" sha=")
+        if end < 0:
+            return nil
+        val fields = refs[:end].split(",")
+        if fields.len() != 3:
+            return nil
+        val kind = fields[0].replace("kind=", "")
+        val path = compiler_inventory_decode_v1(fields[1].replace("path=", ""))
+        val related = compiler_inventory_decode_v1(fields[2].replace("related=", ""))
+        events = events.push(FsWatchEvent(index, kind, path, related))
+    Some(events)
+
+fn compiler_inventory_journal_prefix_digest_v1(
+    journal: text, consumed_rows: i64
+) -> text?:
+    val lines = journal.split("\n")
+    if consumed_rows < 0 or consumed_rows > lines.len():
+        return nil
+    var prefix: [text] = []
+    var index = 0
+    while index < consumed_rows:
+        prefix = prefix.push(lines[index])
+        index = index + 1
+    Some(sha256_text(prefix.join("\n")))
+
+fn compiler_inventory_refresh_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool
+) -> CompilerInventoryRefreshV1:
+    val cursor = compiler_inventory_cursor_read_v1(cache_root)
+    if not cursor.valid and not cold_init:
+        return compiler_inventory_invalid_v1("compile-event-journal-missing")
+    if cursor.valid:
+        val current = compile_source_inventory_read_current_v1(cache_root)
+        if (not current.valid or current.inventory == nil or
+                current.digest != cursor.inventory_digest or
+                current.inventory!.generation != cursor.inventory_generation):
+            return compiler_inventory_invalid_v1("compile-event-inventory-binding-mismatch")
+    val head = compiler_inventory_git_head_v1(root)
+    if head == "":
+        return compiler_inventory_invalid_v1("git-event-source-unavailable")
+    val git_changes = compiler_inventory_git_changes_v1(
+        root, if cursor.valid: cursor.git_head else: head, source_roots, cold_init)
+    if git_changes == nil:
+        return compiler_inventory_invalid_v1("git-event-refresh-failed")
+    var inventory = compile_source_inventory_apply_git_changes_v1(cache_root, git_changes!)
+    if not inventory.valid:
+        return compiler_inventory_invalid_v1("git-event-apply:" + inventory.reason)
+    val journal_path = root + "/.scv/journal/events.log"
+    if cursor.valid and cursor.filesystem_rows > 0 and not file_exists(journal_path):
+        return compiler_inventory_invalid_v1("filesystem-event-journal-missing")
+    val journal = if file_exists(journal_path): file_read(journal_path) else: ""
+    val filesystem_digest = sha256_text(journal)
+    val consumed_rows = if cursor.valid: cursor.filesystem_rows else: 0
+    if cursor.valid:
+        val prefix_digest = compiler_inventory_journal_prefix_digest_v1(
+            journal, consumed_rows)
+        if prefix_digest == nil:
+            return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
+        if prefix_digest! != cursor.filesystem_digest:
+            return compiler_inventory_invalid_v1("filesystem-event-journal-rewritten")
+    val filesystem_events = compiler_inventory_filesystem_events_v1(
+        root, journal, consumed_rows)
+    if filesystem_events == nil:
+        return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
+    if filesystem_events!.len() > 0:
+        inventory = compile_source_inventory_apply_filesystem_events_v1(
+            root, cache_root, filesystem_events!)
+        if not inventory.valid:
+            return compiler_inventory_invalid_v1(
+                "filesystem-event-apply:" + inventory.reason)
+    val rows = journal.split("\n").len()
+    if not compiler_inventory_cursor_write_v1(
+            cache_root, head, rows, filesystem_digest, inventory):
+        return compiler_inventory_invalid_v1("compile-event-receipt-write-failed")
+    CompilerInventoryRefreshV1(
+        true, "ok", inventory.digest, inventory.inventory!.generation)
+
+export CompilerInventoryRefreshV1
+export compiler_inventory_refresh_v1

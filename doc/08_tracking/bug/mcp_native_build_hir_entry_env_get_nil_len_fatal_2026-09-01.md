@@ -1,5 +1,7 @@
 # MCP native-build HIR-entry fatal: `.len()` on Option::None from ambiguous `env_get` dispatch
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-01 · **Status:** FIXED (`628ac26d38d`) · **Severity:** blocker (made MCP native build unmeasurable)
 
 ## History of the symptom (three layers, one repro command)
@@ -135,3 +137,7 @@ assignment, mutual recursion through a `_inner` helper, a mutating bool-returnin
 `me` called in an `if`, and the same across a cross-module `impl Box:` extension.
 Like the layer-3 `env_get` defect, this only manifests under the full compiler
 closure, which is consistent with the ambiguous-dispatch warnings the run emits.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

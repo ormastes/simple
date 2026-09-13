@@ -282,14 +282,37 @@ impl BuildGraph:
             if visited.has(id):
                 continue
             var stack: [(i64, bool)] = [(id, false)]
-            while stack.?:
+            # `stack.len() > 0`, NOT `stack.?`. House style prefers `.?`, and this
+            # loop used it until 2026-09-13 — but `.?` on an EMPTY array evaluates
+            # TRUE under the seed's native codegen (aarch64-apple-darwin,
+            # --backend llvm), so this loop never terminated. It popped nil off the
+            # empty stack, `unwrap()` did not fail, `visited[nil] = true` did not
+            # make `visited.has(nil)` true, and the body settled into a 2-cycle that
+            # appended a nil to `order` forever — the Stage-2 Stage-3-route timeout
+            # (status 124) on both the macOS and Linux bootstrap lanes. `.len()` is
+            # correct in the same build at every iteration, so it is what guards
+            # here. This deviation is licensed by, and must be removed when the
+            # compiler defect is fixed:
+            # doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+            while stack.len() > 0:
                 # NOTE: `val entry = if val popped = stack.pop(): popped else: break`
                 # mis-evaluates to nil in the seed interpreter — an if-expression
                 # whose else arm diverges (break) returns nil even when the value
                 # arm is taken (only when the condition is an `if val` binding).
-                # The `while stack.?:` guard already ensures the stack is non-empty,
-                # so unwrap directly, matching the working sibling driver/parallel.spl.
-                val (node, expanded) = stack.pop().unwrap()
+                # The loop guard above already ensures the stack is non-empty, so
+                # unwrap directly.
+                # Read the top by INDEX and truncate; do not pop-and-unwrap.
+                # `rt_array_pop` returns the element RAW (never a `Some` enum,
+                # runtime/src/value/collections.rs:1752), while `.unwrap()` lowers to
+                # `rt_enum_payload`, which answers nil for anything that is not an Enum
+                # heap object (objects.rs:519). Measured in the LLVM lane that compiles
+                # Stage 2: `val (n, f) = a.pop().unwrap()` on `[(i64, bool)]` yields nil
+                # for BOTH fields, so nothing is ever marked visited and the DFS
+                # re-expands forever (site 10). See
+                # stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md.
+                val top_index = stack.len() - 1
+                val (node, expanded) = stack[top_index]
+                stack = stack[:top_index]
                 if expanded:
                     order = order.push(node)
                     continue

@@ -126,3 +126,13 @@ development with a live session. The truncation may be deliberate localization
 rather than an accident. This entry deliberately stops at recording the
 recovery path; the decision to restore belongs to the owner of that lane.
 
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/02_integration/app/dashboard_log_modes_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still unfixed, unchanged. This doc's own "Ownership warning" explicitly says
+the path is active `llm-caret`-lane development and must not be restored
+unilaterally by another session — treating this the same as a fenced path.
+No change made. Leaving OPEN (recorded as fenced-by-ownership in the shard
+receipt).

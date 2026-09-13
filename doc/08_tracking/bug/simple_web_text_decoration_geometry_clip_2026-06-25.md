@@ -1,4 +1,5 @@
 # Simple Web Text Decoration Geometry Clip Blocker
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl -> 118 passed, 12 failed, still reproduces)
 
 Date: 2026-06-25
 
@@ -45,3 +46,6 @@ Before claiming support for `text-decoration-thickness` or
 
 Do not add the properties to `CSS_SUPPORTED` as no-ops. That would make
 traceability report support that the renderer cannot prove.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl` on the deployed seed; 12 of 130 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

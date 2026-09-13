@@ -231,3 +231,9 @@ sink under the JIT, so `(5,6).get(0)` binds as `40`. That IS "a raw tagged word
 read as if already untagged", it is minimal, and `sha1`'s context type is
 `(list, list, i64, i64)` read via `ctx.get(2)` / `ctx.get(3)`. It is a strong
 candidate contributor here and is filed separately with a 5-line reproducer.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Root cause is a Rust JIT codegen defect (`src/compiler_rust/compiler/src/codegen/instr/methods.rs`),
+requiring a seed rebuild to fix and verify — out of scope for a pure-Simple
+shard fix. No change made. Leaving OPEN.

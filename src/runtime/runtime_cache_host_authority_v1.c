@@ -16,7 +16,42 @@ int64_t rt_cache_host_boot_identity_v1(int64_t lock) {(void)lock;return -1;}
 int64_t rt_cache_host_advance_writer_epoch_v1(int64_t lock, int64_t boot) {(void)lock;(void)boot;return -1;}
 int64_t rt_cache_host_publish_readiness_v1(int64_t lock,int64_t epoch,const uint8_t*nonce,int64_t len){(void)lock;(void)epoch;(void)nonce;(void)len;return -1;}
 int64_t rt_cache_host_validate_readiness_v1(int64_t peer,int64_t ready,const uint8_t*nonce,int64_t len,int64_t epoch){(void)peer;(void)ready;(void)nonce;(void)len;(void)epoch;return -1;}
+int64_t rt_cache_host_mutation_scope_available_v1(void){return -1;}
+int64_t rt_cache_host_commit_journal_v1(int64_t lock,int64_t peer,int64_t ready,const uint8_t*nonce,int64_t nonce_len,int64_t epoch,int64_t expected,const uint8_t*prefix,int64_t prefix_len,const uint8_t*append,int64_t append_len){(void)lock;(void)peer;(void)ready;(void)nonce;(void)nonce_len;(void)epoch;(void)expected;(void)prefix;(void)prefix_len;(void)append;(void)append_len;return -1;}
+int64_t rt_cache_host_read_journal_v1(int64_t lock,int64_t peer,int64_t ready,const uint8_t*nonce,int64_t nonce_len,int64_t epoch,uint8_t*out,int64_t cap){(void)lock;(void)peer;(void)ready;(void)nonce;(void)nonce_len;(void)epoch;(void)out;(void)cap;return -1;}
 int64_t rt_cache_host_release_daemon_receipt_v1(int64_t handle){(void)handle;return -1;}
+/* Host-GC v2 requires one cross-process writer/reader namespace plus exact
+ * descriptor-bound unlink.  The native-C provider has no admitted receipt
+ * table for that authority and therefore stays explicitly unsupported. */
+int64_t rt_cache_host_capture_durable_head_v2(int64_t lock,int64_t peer,int64_t ready,const uint8_t*nonce,int64_t nonce_len,int64_t writer_epoch,int64_t journal_bytes,const uint8_t*journal_digest,int64_t journal_digest_len,int64_t journal_generation,int64_t superblock_generation,const uint8_t*superblock_digest,int64_t superblock_digest_len,int64_t root_count){(void)lock;(void)peer;(void)ready;(void)nonce;(void)nonce_len;(void)writer_epoch;(void)journal_bytes;(void)journal_digest;(void)journal_digest_len;(void)journal_generation;(void)superblock_generation;(void)superblock_digest;(void)superblock_digest_len;(void)root_count;return -1;}
+int64_t rt_cache_host_gc_begin_v2(int64_t root,int64_t head,int64_t even_epoch,int64_t max_roots,int64_t max_page_bytes,int64_t max_candidates){(void)root;(void)head;(void)even_epoch;(void)max_roots;(void)max_page_bytes;(void)max_candidates;return -1;}
+int64_t rt_cache_host_gc_root_page_v2(int64_t window,int64_t cursor,uint8_t*out,int64_t cap){(void)window;(void)cursor;(void)out;(void)cap;return -1;}
+int64_t rt_cache_host_gc_pin_page_v2(int64_t window,int64_t cursor,uint8_t*out,int64_t cap){(void)window;(void)cursor;(void)out;(void)cap;return -1;}
+int64_t rt_cache_host_gc_open_candidate_v2(int64_t window,const uint8_t*kind,int64_t kind_len,const uint8_t*digest,int64_t digest_len){(void)window;(void)kind;(void)kind_len;(void)digest;(void)digest_len;return -1;}
+int64_t rt_cache_host_gc_unlink_candidate_v2(int64_t window,int64_t candidate){(void)window;(void)candidate;return -1;}
+int64_t rt_cache_host_gc_finish_v2(int64_t window,int64_t odd_epoch){(void)window;(void)odd_epoch;return -1;}
+int64_t rt_cache_host_gc_abort_v2(int64_t window,int64_t odd_epoch){(void)window;(void)odd_epoch;return -1;}
+int64_t rt_cache_host_release_durable_head_v2(int64_t head){(void)head;return -1;}
+
+/* V3 namespace ABI. The native-C capsule deliberately reports Unsupported
+ * on POSIX and Windows until it has the same descriptor registry, durable
+ * recovery barrier, and complete roots/readers/leases/pins inventory as an
+ * admitted provider. Keeping the exact symbols here prevents an
+ * unbacked extern from being mistaken for a successful zero result. */
+int64_t rt_cache_host_namespace_available_v3(void){return -3;}
+int64_t rt_cache_host_namespace_open_v3(int64_t r,int64_t l,int64_t p,int64_t ready,const uint8_t*n,int64_t nl,int64_t we,int64_t mr,int64_t mrd,int64_t mlr,int64_t mso,int64_t mpb,int64_t mc){(void)r;(void)l;(void)p;(void)ready;(void)n;(void)nl;(void)we;(void)mr;(void)mrd;(void)mlr;(void)mso;(void)mpb;(void)mc;return -3;}
+int64_t rt_cache_host_namespace_begin_v3(int64_t ns,int64_t mode,const uint8_t*head,int64_t head_len,int64_t pin){(void)ns;(void)mode;(void)head;(void)head_len;(void)pin;return -3;}
+int64_t rt_cache_host_namespace_sync_object_v3(int64_t scope,int64_t object,const uint8_t*kind,int64_t kind_len,int64_t schema,const uint8_t*digest,int64_t digest_len,int64_t size){(void)scope;(void)object;(void)kind;(void)kind_len;(void)schema;(void)digest;(void)digest_len;(void)size;return -3;}
+int64_t rt_cache_host_namespace_commit_selected_v3(int64_t scope,const uint8_t*head,int64_t head_len,const uint8_t*append,int64_t append_len,const int64_t*objects,int64_t object_count){(void)scope;(void)head;(void)head_len;(void)append;(void)append_len;(void)objects;(void)object_count;return -3;}
+int64_t rt_cache_host_namespace_recovery_capture_v3(int64_t scope){(void)scope;return -3;}
+int64_t rt_cache_host_namespace_recovery_read_v3(int64_t recovery,int64_t part,int64_t offset,uint8_t*out,int64_t cap){(void)recovery;(void)part;(void)offset;(void)out;(void)cap;return -3;}
+int64_t rt_cache_host_namespace_resolve_operation_v3(int64_t recovery,int64_t writer,const uint8_t*operation,int64_t operation_len,int64_t generation,const uint8_t*manifest,int64_t manifest_len){(void)recovery;(void)writer;(void)operation;(void)operation_len;(void)generation;(void)manifest;(void)manifest_len;return -3;}
+int64_t rt_cache_host_namespace_gc_roots_page_v3(int64_t scope,int64_t cursor,uint8_t*out,int64_t cap){(void)scope;(void)cursor;(void)out;(void)cap;return -3;}
+int64_t rt_cache_host_namespace_gc_open_candidate_v3(int64_t scope,const uint8_t*kind,int64_t kind_len,int64_t schema,const uint8_t*digest,int64_t digest_len){(void)scope;(void)kind;(void)kind_len;(void)schema;(void)digest;(void)digest_len;return -3;}
+int64_t rt_cache_host_namespace_gc_unlink_candidate_v3(int64_t scope,int64_t candidate){(void)scope;(void)candidate;return -3;}
+int64_t rt_cache_host_namespace_finish_v3(int64_t scope){(void)scope;return -3;}
+int64_t rt_cache_host_namespace_abort_v3(int64_t scope){(void)scope;return -3;}
+int64_t rt_cache_host_namespace_close_v3(int64_t ns){(void)ns;return -3;}
 
 #ifdef _WIN32
 #define UNSUPPORTED(name, args) int64_t name args { return -1; }
@@ -51,6 +86,15 @@ UNSUPPORTED(rt_cache_host_close_v1, (int64_t h))
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+/* Apple spells the POSIX-2008 nanosecond stat members st_mtimespec/st_ctimespec. */
+#if defined(__APPLE__)
+#define SPL_STAT_MTIM_NSEC(s) ((s).st_mtimespec.tv_nsec)
+#define SPL_STAT_CTIM_NSEC(s) ((s).st_ctimespec.tv_nsec)
+#else
+#define SPL_STAT_MTIM_NSEC(s) ((s).st_mtim.tv_nsec)
+#define SPL_STAT_CTIM_NSEC(s) ((s).st_ctim.tv_nsec)
+#endif
 
 enum cache_cap_kind { CAP_ROOT=1, CAP_DIR=2, CAP_READ=3, CAP_TEMP=4, CAP_CAS_ROOT=5, CAP_CAS_KIND=6, CAP_CAS_SHARD1=7, CAP_CAS_SHARD2=8, CAP_TEMP_CAS=9 };
 struct cache_cap { int64_t token; int fd; int parent_fd; enum cache_cap_kind kind; char temp_name[96]; struct cache_cap *next; };
@@ -118,7 +162,7 @@ int64_t rt_cache_host_open_pinned_cas_v1(int64_t h,const uint8_t*k,int64_t kl,co
 int64_t rt_cache_host_reader_gc_begin_v1(int64_t r,int64_t e){(void)r;(void)e;return-1;}
 int64_t rt_cache_host_reader_gc_end_v1(int64_t r,int64_t e,int64_t g){(void)r;(void)e;(void)g;return-1;}
 int64_t rt_cache_host_size_v1(int64_t h,int64_t maximum){if(maximum<0||maximum>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);struct stat s;int64_t result=(!c||c->kind!=CAP_READ||fstat(c->fd,&s)||(s.st_mode&S_IFMT)!=S_IFREG||s.st_size<0||s.st_size>maximum)?-1:(int64_t)s.st_size;pthread_mutex_unlock(&caps_lock);return result;}
-int64_t rt_cache_host_pread_receipt_v1(int64_t h,int64_t off,uint8_t*out,int64_t cap){if(!out||off||cap<0||cap>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||c->kind!=CAP_READ){pthread_mutex_unlock(&caps_lock);return-1;}struct stat a,b;if(fstat(c->fd,&a)||(a.st_mode&S_IFMT)!=S_IFREG||a.st_size<0||a.st_size>cap){pthread_mutex_unlock(&caps_lock);return-1;}size_t got=0,want=(size_t)a.st_size;while(got<want){ssize_t n=pread(c->fd,out+got,want-got,(off_t)got);if(n<=0){pthread_mutex_unlock(&caps_lock);return-1;}got+=(size_t)n;}uint8_t verify[4096];size_t checked=0;while(checked<want){size_t n=want-checked<sizeof verify?want-checked:sizeof verify;if(pread(c->fd,verify,n,(off_t)checked)!=(ssize_t)n||memcmp(out+checked,verify,n)){pthread_mutex_unlock(&caps_lock);return-2;}checked+=n;}int bad=fstat(c->fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||a.st_mtim.tv_nsec!=b.st_mtim.tv_nsec||a.st_ctim.tv_nsec!=b.st_ctim.tv_nsec||a.st_mtime!=b.st_mtime||a.st_ctime!=b.st_ctime;pthread_mutex_unlock(&caps_lock);return bad?-2:(int64_t)want;}
+int64_t rt_cache_host_pread_receipt_v1(int64_t h,int64_t off,uint8_t*out,int64_t cap){if(!out||off||cap<0||cap>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||c->kind!=CAP_READ){pthread_mutex_unlock(&caps_lock);return-1;}struct stat a,b;if(fstat(c->fd,&a)||(a.st_mode&S_IFMT)!=S_IFREG||a.st_size<0||a.st_size>cap){pthread_mutex_unlock(&caps_lock);return-1;}size_t got=0,want=(size_t)a.st_size;while(got<want){ssize_t n=pread(c->fd,out+got,want-got,(off_t)got);if(n<=0){pthread_mutex_unlock(&caps_lock);return-1;}got+=(size_t)n;}uint8_t verify[4096];size_t checked=0;while(checked<want){size_t n=want-checked<sizeof verify?want-checked:sizeof verify;if(pread(c->fd,verify,n,(off_t)checked)!=(ssize_t)n||memcmp(out+checked,verify,n)){pthread_mutex_unlock(&caps_lock);return-2;}checked+=n;}int bad=fstat(c->fd,&b)||a.st_dev!=b.st_dev||a.st_ino!=b.st_ino||a.st_size!=b.st_size||SPL_STAT_MTIM_NSEC(a)!=SPL_STAT_MTIM_NSEC(b)||SPL_STAT_CTIM_NSEC(a)!=SPL_STAT_CTIM_NSEC(b)||a.st_mtime!=b.st_mtime||a.st_ctime!=b.st_ctime;pthread_mutex_unlock(&caps_lock);return bad?-2:(int64_t)want;}
 int64_t rt_cache_host_secure_temp_v1(int64_t h){pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_ROOT&&c->kind!=CAP_DIR&&c->kind!=CAP_CAS_SHARD2)){pthread_mutex_unlock(&caps_lock);return-1;}int temp_kind=c->kind==CAP_CAS_SHARD2?CAP_TEMP_CAS:CAP_TEMP;int parent=fcntl(c->fd,F_DUPFD_CLOEXEC,3);pthread_mutex_unlock(&caps_lock);if(parent<0)return-1;for(int i=0;i<128;i++){char name[96];snprintf(name,sizeof name,".simple-cache-tmp-%ld-%lld",(long)getpid(),(long long)random_token());int fd=openat(parent,name,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)return add_cap((enum cache_cap_kind)temp_kind,fd,parent,name);if(errno!=EEXIST)break;}close(parent);return-1;}
 int64_t rt_cache_host_write_temp_v1(int64_t h,int64_t off,const uint8_t*p,int64_t n){if(!p||off<0||n<0||n>67108864)return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);ssize_t rc=(!c||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS))?-1:pwrite(c->fd,p,(size_t)n,(off_t)off);pthread_mutex_unlock(&caps_lock);return rc;}
 int64_t rt_cache_host_publish_noreplace_v1(int64_t h,const uint8_t*p,int64_t n){char dest[32769];if(!copy_name(p,n,dest)||!valid_relative(dest)||strchr(dest,'/'))return-1;pthread_mutex_lock(&caps_lock);struct cache_cap*c=find_cap(h);if(!c||(c->kind!=CAP_TEMP&&c->kind!=CAP_TEMP_CAS)||(c->kind==CAP_TEMP_CAS&&!lower_hex_n(dest,60))||fsync(c->fd)||fchmod(c->fd,0444)){pthread_mutex_unlock(&caps_lock);return-1;}

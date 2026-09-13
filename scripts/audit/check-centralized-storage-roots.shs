@@ -1,0 +1,187 @@
+#!/bin/sh
+# Reject newly introduced storage authorities outside the centralized two-root policy.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+MODE="${1:---staged}"
+REF="${2:-}"
+
+usage() {
+    echo 'Usage: sh scripts/audit/check-centralized-storage-roots.shs [--working|--staged|--changed-from REF|--all|--self-test]'
+}
+
+case "$MODE" in
+    --working|--staged|--all|--self-test) ;;
+    --changed-from) [ -n "$REF" ] || { usage >&2; exit 2; } ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+is_production_path() {
+    case "$1" in
+        src/*|scripts/*|bin/*|config/*|sdk/*|include/*|.github/workflows/*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        test/*|*/test/*|*/tests/*|*/fixtures/*|*/fixture/*|*/vendor/*|*/generated/*|build/*) return 1 ;;
+    esac
+    return 0
+}
+
+is_reviewed_owner() {
+    case "$1" in
+        src/lib/common/storage_roots/*|\
+        src/lib/nogc_sync_mut/storage_roots/*|\
+        scripts/audit/check-centralized-storage-roots.shs)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+is_central_projection() {
+    printf '%s\n' "$1" | grep -Eq \
+        'SIMPLE_(USER|WORKTREE)_STORAGE_ROOT|storage_roots|StorageRoots|user_path\(|worktree_path\('
+}
+
+detect_line() {
+    line=$1
+
+    if printf '%s\n' "$line" | grep -Eq '(^|[^[:alnum:]_])(/private)?/tmp(/|[^[:alnum:]_]|$)'; then
+        echo direct-temp-literal
+    fi
+
+    if printf '%s\n' "$line" | grep -Eq \
+        '(rt_env_get|getenv|env::var|std::env::var|process\.env|os\.environ|getEnv|GetEnvironmentVariable)[^\n]*(TMPDIR|TMP|TEMP|HOME|XDG_CACHE_HOME|XDG_STATE_HOME|XDG_DATA_HOME)|\$\{?(TMPDIR|TMP|TEMP|HOME|XDG_CACHE_HOME|XDG_STATE_HOME|XDG_DATA_HOME)\}?'; then
+        echo direct-storage-environment-read
+    fi
+
+    if printf '%s\n' "$line" | grep -Eq '(^|[^[:alnum:]_])mktemp([^[:alnum:]_]|$)'; then
+        echo ambient-mktemp
+    fi
+
+    if ! is_central_projection "$line"; then
+        if printf '%s\n' "$line" | grep -Eqi \
+            "(^|[^[:alnum:]_])(cache|build|temp|tmp|target)_(dir|root|path)[[:space:]]*[:=][[:space:]]*['\"](\.cache|build|cache|target|tmp)(/|['\"])"; then
+            echo third-storage-root
+        elif printf '%s\n' "$line" | grep -Eqi \
+            "(mkdir|create_dir|createDirectory|makedirs).*([[:space:]='/\"])\.?(cache|build|target|tmp)(/|['\"]|[[:space:]]|$)"; then
+            echo third-storage-root
+        elif printf '%s\n' "$line" | grep -Eqi \
+            "([Pp]ath|PathBuf)::?(from|join)\(['\"](\.cache|build|cache|target|tmp)(/|['\"])"; then
+            echo third-storage-root
+        fi
+    fi
+}
+
+if [ "$MODE" = "--self-test" ]; then
+    failures=0
+    expect_rule() {
+        expected=$1
+        sample=$2
+        if ! detect_line "$sample" | grep -qx "$expected"; then
+            echo "STATUS: FAIL centralized-storage-roots self-test missing $expected" >&2
+            failures=$((failures + 1))
+        fi
+    }
+    expect_clean() {
+        sample=$1
+        if [ -n "$(detect_line "$sample")" ]; then
+            echo 'STATUS: FAIL centralized-storage-roots self-test rejected central projection' >&2
+            failures=$((failures + 1))
+        fi
+    }
+
+    expect_rule direct-temp-literal 'val root = "/tmp/simple-cache"'
+    expect_rule direct-temp-literal 'root=/private/tmp/tool'
+    expect_rule direct-storage-environment-read 'val root = rt_env_get("TMPDIR")'
+    expect_rule direct-storage-environment-read 'cache = process.env.XDG_CACHE_HOME'
+    expect_rule ambient-mktemp 'scratch=$(mktemp -d)'
+    expect_rule third-storage-root 'cache_dir = ".cache/simple"'
+    expect_rule third-storage-root 'mkdir -p build/native'
+    expect_clean 'cache_dir = SIMPLE_USER_STORAGE_ROOT + "/cache/compiler"'
+    expect_clean 'val path = storage_roots.worktree_path(request)'
+    is_reviewed_owner src/lib/common/storage_roots/contracts.spl || failures=$((failures + 1))
+    if is_production_path test/fixtures/direct_tmp.spl; then failures=$((failures + 1)); fi
+
+    [ "$failures" -eq 0 ] || exit 1
+    echo 'STATUS: PASS centralized-storage-roots self-test'
+    exit 0
+fi
+
+emit_added_lines() {
+    path=$1
+    if [ "$MODE" = "--all" ]; then
+        awk '{ print NR ":" $0 }' "$path"
+        return
+    fi
+    if [ "$MODE" = "--working" ] && ! git ls-files --error-unmatch "$path" >/dev/null 2>&1; then
+        awk '{ print NR ":" $0 }' "$path"
+        return
+    fi
+    case "$MODE" in
+        --staged)
+            git diff --cached --unified=0 --diff-filter=ACMR -- "$path"
+            ;;
+        --working)
+            git diff HEAD --unified=0 --diff-filter=ACMR -- "$path"
+            ;;
+        --changed-from)
+            base=$(git merge-base HEAD "$REF")
+            git diff "$base" --unified=0 --diff-filter=ACMR -- "$path"
+            ;;
+    esac | awk '
+        /^@@ / {
+            split($0, fields, " ")
+            next_line = fields[3]
+            sub(/^\+/, "", next_line)
+            sub(/,.*/, "", next_line)
+            active = 1
+            next
+        }
+        active && /^\+\+\+/ { next }
+        active && /^\+/ { print next_line ":" substr($0, 2); next_line++; next }
+        active && /^-/ { next }
+        active { next_line++ }
+    '
+}
+
+list_paths() {
+    case "$MODE" in
+        --all) git ls-files ;;
+        --staged) git diff --cached --name-only --diff-filter=ACMR ;;
+        --working) { git diff HEAD --name-only --diff-filter=ACMR; git ls-files --others --exclude-standard; } ;;
+        --changed-from)
+            base=$(git merge-base HEAD "$REF")
+            { git diff "$base" --name-only --diff-filter=ACMR; git ls-files --others --exclude-standard; }
+            ;;
+    esac
+}
+
+findings=$(list_paths | sort -u | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    [ -f "$path" ] || continue
+    is_production_path "$path" || continue
+    is_reviewed_owner "$path" && continue
+
+    emit_added_lines "$path" | while IFS= read -r numbered; do
+        line_number=${numbered%%:*}
+        line=${numbered#*:}
+        rules=$(detect_line "$line")
+        [ -n "$rules" ] || continue
+        printf '%s\n' "$rules" | while IFS= read -r rule; do
+            printf '%s:%s: %s: %s\n' "$path" "$line_number" "$rule" "$line"
+        done
+    done
+done)
+
+if [ -n "$findings" ]; then
+    printf '%s\n' "$findings" >&2
+    violations=$(printf '%s\n' "$findings" | awk 'END { print NR }')
+    echo "STATUS: FAIL centralized-storage-roots violations=$violations" >&2
+    exit 1
+fi
+
+echo 'STATUS: PASS centralized-storage-roots'

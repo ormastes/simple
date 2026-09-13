@@ -513,6 +513,45 @@ impl RuntimeArray {
     }
 }
 
+/// Widen a Simple `[u32]`/`[i64]` word array into little-endian bytes, four per
+/// element.
+///
+/// The counterpart of `byte_array_bytes` for payloads that are words rather
+/// than bytes. `byte_array_bytes` masks every element with `0xff`, so a caller
+/// holding `u32` data has to explode each word into four array stores on the
+/// Simple side before it can hand the payload over; this reads the words
+/// directly. A byte-packed array is rejected (`None`) rather than reinterpreted
+/// -- its elements are bytes, and silently regrouping them four at a time would
+/// be a different payload, not a widening.
+///
+/// Signed elements are taken as their two's-complement `u32`; anything outside
+/// `-2^31 ..= u32::MAX` is rejected rather than truncated.
+pub(crate) fn word_array_le_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let array = unsafe { &*array };
+    if array.len > array.capacity || array.data.is_null() || array.is_byte_packed() {
+        return None;
+    }
+    let len = usize::try_from(array.len).ok()?;
+    let mut bytes = Vec::with_capacity(len * 4);
+    for element in unsafe { array.as_slice() } {
+        if !element.is_int() {
+            return None;
+        }
+        let raw = element.as_int();
+        let widened = if raw < 0 {
+            if raw < i64::from(i32::MIN) {
+                return None;
+            }
+            (raw as i32) as u32
+        } else {
+            u32::try_from(raw).ok()?
+        };
+        bytes.extend_from_slice(&widened.to_le_bytes());
+    }
+    Some(bytes)
+}
+
 /// Copy bytes from either native representation of Simple `[u8]`.
 pub(crate) fn byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
     let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
@@ -528,6 +567,26 @@ pub(crate) fn byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
         .iter()
         .map(|value| value.is_int().then(|| (value.as_int() & 0xff) as u8))
         .collect()
+}
+
+/// Raw bytes of a `[u8]` that is stored in the PACKED representation, or
+/// `None` for any other array (boxed-element arrays, non-arrays, corrupt
+/// headers).
+///
+/// Unlike `byte_array_bytes` this never touches the boxed-element path, so it
+/// cannot mask an out-of-range element into a byte: a packed array's elements
+/// are `u8` by construction. That makes it usable as a fast path by callers
+/// whose contract REJECTS out-of-range elements (`rt_bytes_to_text`) — for a
+/// packed array the rejection can never fire, so skipping the per-element
+/// check is behaviour-preserving rather than a relaxation.
+pub(crate) fn packed_byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let array = unsafe { &*array };
+    if array.len > array.capacity || array.data.is_null() || !array.is_byte_packed() {
+        return None;
+    }
+    let len = usize::try_from(array.len).ok()?;
+    Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec())
 }
 
 /// Write bytes into either native representation of Simple `[u8]`.
@@ -547,6 +606,56 @@ pub(crate) fn byte_array_write(value: RuntimeValue, bytes: &[u8]) -> bool {
         }
     }
     true
+}
+
+/// Validate either runtime representation of `[u8]` and return its length.
+/// This is the Rust-owned provider used by the C owned-process adapter when
+/// runtime_native.c is deliberately absent from the Rust seed composition.
+#[no_mangle]
+pub extern "C" fn rt_array_bytes_validate(raw: i64) -> i64 {
+    let value = RuntimeValue(raw as u64);
+    let Some(array) = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array) else {
+        return -22;
+    };
+    let array = unsafe { &*array };
+    if array.len > array.capacity
+        || array.len > i64::MAX as u64
+        || array.is_u64_packed()
+        || (array.len > 0 && array.data.is_null())
+    {
+        return -22;
+    }
+    if !array.is_byte_packed() {
+        for item in unsafe { array.as_slice() } {
+            if !item.is_int() {
+                return -22;
+            }
+            let byte = item.as_int();
+            if !(0..=255).contains(&byte) {
+                return -22;
+            }
+        }
+    }
+    array.len as i64
+}
+
+/// Copy a validated `[u8]` into caller-owned storage without truncation.
+#[no_mangle]
+pub unsafe extern "C" fn rt_array_bytes_copy_checked(raw: i64, out: *mut u8, capacity: i64) -> i64 {
+    let length = rt_array_bytes_validate(raw);
+    if length < 0 || capacity < length || (length > 0 && out.is_null()) {
+        return -22;
+    }
+    let value = RuntimeValue(raw as u64);
+    let array = &*get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array).expect("validated array");
+    if array.is_byte_packed() {
+        std::ptr::copy_nonoverlapping(array.data.cast::<u8>(), out, length as usize);
+    } else {
+        for (index, item) in array.as_slice().iter().enumerate() {
+            *out.add(index) = item.as_int() as u8;
+        }
+    }
+    length
 }
 
 /// Layout used for the element storage of a `RuntimeArray` with the given
@@ -4158,7 +4267,38 @@ pub extern "C" fn rt_string_join(array: RuntimeValue, separator: RuntimeValue) -
         // the same display formatter the print path uses (rt_value_to_string
         // wraps value_to_display_string) before reading it as UTF-8, so
         // `[1,2,3].join(",")` renders bare ints instead of empty strings.
+        //
+        // PERF (2026-09-06): an element that is ALREADY a heap String needs no
+        // rendering at all — its UTF-8 bytes are exactly what we append. The
+        // unconditional `rt_value_to_string` below cost TWO allocations per
+        // element (a Rust `String` inside `value_to_display_string`, then a
+        // fresh interned `RuntimeValue` string via `rt_string_new`) purely to
+        // read back bytes the element already owned. Measured on the codegen
+        // (Cranelift JIT) lane, `[text].join("")` cost ~237 ns PER ELEMENT
+        // regardless of element length, which made every accumulate-into-
+        // `[text]`-then-join loop in the stdlib (base64's `_bytes_to_text`,
+        // among others) two orders of magnitude slower than the equivalent
+        // `[u8]` loop at ~2 ns/element. Reading an already-String element
+        // directly removes both allocations and is byte-for-byte identical:
+        // `value_to_display_string` on a String value returns that string's
+        // own contents unchanged. Non-String elements keep the old path
+        // exactly, so `[1,2,3].join(",")` is unaffected.
+        // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
         let elem = rt_array_get(array, i);
+        if elem.heap_type() == Some(HeapObjectType::String) {
+            let elem_len = rt_string_len(elem);
+            if elem_len > 0 {
+                let elem_data = rt_string_data(elem);
+                unsafe {
+                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                        elem_data,
+                        elem_len as usize,
+                    ));
+                    result.push_str(s);
+                }
+            }
+            continue;
+        }
         let elem_str = rt_value_to_string(elem);
         let elem_len = rt_string_len(elem_str);
         if elem_len > 0 {
@@ -4213,6 +4353,34 @@ pub extern "C" fn rt_string_to_int(string: RuntimeValue) -> i64 {
     unsafe {
         let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize));
         s.trim().parse::<i64>().unwrap_or(0)
+    }
+}
+
+/// Receiver-dispatched `.to_i64()` / `.to_int()` for the native lanes when the
+/// receiver TYPE WAS ERASED. Twin of the C runtime's `rt_to_int_dynamic`
+/// (`src/runtime/runtime_native.c`); both must exist, because a natively built
+/// program links exactly one of the two runtimes and the compiler emits this
+/// call without knowing which.
+///
+/// The LLVM codegen used to match `to_i64`/`to_int` in an unconditional
+/// integer-cast block and emit a coercion to i64. A `text` handle IS an i64 in
+/// this ABI, so that coercion was the IDENTITY and `text.to_i64()` evaluated to
+/// the handle's own word. Measured 2026-09-07 on the aarch64 Stage 2 candidate:
+/// `native_build_shard_threads` compiled all three of its
+/// `args[i].to_i64() ?? 0` sites to no call at all, so `--threads 1` became a
+/// heap address and the build fanned out to 79 shard workers for a single unit.
+///
+/// Routing bare `to_i64` unconditionally to `rt_string_to_int` is NOT the fix:
+/// that returns 0 for a non-string, which would silently zero every erased
+/// NUMERIC `.to_i64()`. Dispatch on the receiver instead, with an IDENTITY
+/// fallback that is byte-identical to the cast block's previous behaviour for
+/// everything that is not a heap string — so the genuinely-i64 case is
+/// bit-for-bit unchanged.
+#[no_mangle]
+pub extern "C" fn rt_to_int_dynamic(value: RuntimeValue) -> i64 {
+    match value.heap_type() {
+        Some(HeapObjectType::String) => rt_string_to_int(value),
+        _ => value.to_raw() as i64,
     }
 }
 
@@ -4528,7 +4696,14 @@ pub extern "C" fn rt_string_index_of(string: RuntimeValue, needle: RuntimeValue)
 
 /// Hash a text string and return as i64
 ///
-/// Uses the same compact byte hash as the pure collection benchmark/reference.
+/// Canonical algorithm: FNV-1a 64-bit (offset basis `14695981039346656037`,
+/// prime `1099511628211`) — MUST match the C runtime
+/// (`src/runtime/runtime_native.c` `rt_hash_text`), the interpreter extern
+/// (`src/compiler_rust/compiler/src/interpreter_extern/conversion.rs`
+/// `rt_hash_text`), and the pure-Simple twin
+/// (`src/runtime/simple_core/core_string.spl` `rt_hash_text`). Previously
+/// DJB2, which silently diverged from the C oracle — see
+/// doc/08_tracking/bug/rt_hash_text_cross_lane_disagreement_2026-09-07.md.
 #[no_mangle]
 pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64 {
     let len = rt_string_len(string);
@@ -4539,10 +4714,11 @@ pub extern "C" fn rt_hash_text(string: RuntimeValue) -> i64 {
     if data.is_null() {
         return 0;
     }
-    let mut hash = 5381u64;
+    let mut hash = 14695981039346656037u64;
     unsafe {
         for byte in std::slice::from_raw_parts(data, len as usize) {
-            hash = hash.wrapping_mul(33).wrapping_add(*byte as u64);
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(1099511628211u64);
         }
     }
     hash as i64
@@ -6055,7 +6231,8 @@ mod tests;
 #[cfg(test)]
 mod string_free_contract_tests {
     use super::{
-        rt_array_new, rt_array_push, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
+        byte_array_write, rt_array_bytes_copy_checked, rt_array_bytes_validate, rt_array_free, rt_array_new,
+        rt_array_push, rt_byte_array_new_len, rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal,
         rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
         rt_transient_heap_promote,
     };
@@ -6080,6 +6257,48 @@ mod string_free_contract_tests {
         assert_eq!(rt_heap_registry_count(), before + 1, "new string registers");
         assert_eq!(rt_string_free(s), 1, "ordinary string is freed");
         assert_eq!(rt_heap_registry_count(), before, "registry returns to baseline");
+    }
+
+    #[test]
+    fn owned_process_byte_array_provider_validates_both_representations() {
+        let _g = GUARD.lock().unwrap();
+        let boxed = rt_array_new(3);
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(0)));
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(127)));
+        assert!(rt_array_push(boxed, crate::value::RuntimeValue::from_int(255)));
+        let mut boxed_out = [0u8; 3];
+        assert_eq!(rt_array_bytes_validate(boxed.0 as i64), 3);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, boxed_out.as_mut_ptr(), boxed_out.len() as i64) },
+            3
+        );
+        assert_eq!(boxed_out, [0, 127, 255]);
+
+        let packed = rt_byte_array_new_len(3);
+        assert!(byte_array_write(packed, &[1, 2, 3]));
+        let mut packed_out = [0u8; 3];
+        assert_eq!(rt_array_bytes_validate(packed.0 as i64), 3);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(packed.0 as i64, packed_out.as_mut_ptr(), packed_out.len() as i64) },
+            3
+        );
+        assert_eq!(packed_out, [1, 2, 3]);
+
+        let invalid = rt_array_new(1);
+        assert!(rt_array_push(invalid, crate::value::RuntimeValue::from_int(256)));
+        assert_eq!(rt_array_bytes_validate(invalid.0 as i64), -22);
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, std::ptr::null_mut(), 3) },
+            -22
+        );
+        assert_eq!(
+            unsafe { rt_array_bytes_copy_checked(boxed.0 as i64, boxed_out.as_mut_ptr(), 2) },
+            -22
+        );
+
+        rt_array_free(boxed);
+        rt_array_free(packed);
+        rt_array_free(invalid);
     }
 
     #[test]
@@ -6221,6 +6440,33 @@ mod string_free_contract_tests {
         assert_eq!(rt_string_free(literal), 0, "interned literal remains protected");
         assert_eq!(rt_string_free(direct), 1);
         assert_eq!(rt_string_free(post_pause), 1);
+    }
+
+    #[test]
+    fn persistent_native_struct_root_promotes_transient_children() {
+        unsafe extern "C" {
+            fn rt_struct_alloc(size: i64) -> *mut u8;
+            fn rt_free(ptr: *mut u8);
+        }
+
+        let _g = GUARD.lock().unwrap();
+        let root_ptr = unsafe { rt_struct_alloc(16) };
+        assert!(!root_ptr.is_null(), "persistent native owner allocated");
+        let root = crate::value::RuntimeValue((root_ptr as u64) | crate::value::tags::TAG_HEAP);
+
+        assert!(rt_transient_array_scope_begin());
+        let child = mkstr("transient child reached through persistent native owner");
+        unsafe {
+            (root_ptr as *mut u64).write(child.0);
+            (root_ptr as *mut u64).add(1).write(0);
+        }
+        assert!(rt_transient_array_scope_pause());
+        assert!(rt_transient_heap_promote(root));
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_string_len(child), 55, "reachable transient child survives");
+
+        assert_eq!(rt_string_free(child), 1);
+        unsafe { rt_free(root_ptr) };
     }
 
     #[test]

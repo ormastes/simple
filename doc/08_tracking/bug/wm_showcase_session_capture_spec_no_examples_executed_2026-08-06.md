@@ -1,5 +1,7 @@
 # wm_showcase_session_capture_spec: "no examples executed" reproduces on unmodified origin/main
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Symptom
 
 `test/03_system/gui/wm_showcase_session_capture_spec.spl` fails with:
@@ -419,3 +421,7 @@ pushing.
   here), `daemon.spl::execute_test` forwards no `--timeout`, and the session
   daemon runs children under the debug Rust seed.
 - **New:** `2d=external-frame-slot-refused` — file separately.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

@@ -1,5 +1,7 @@
 # JIT closure ABI: lambdas refuse the whole module, and named-fn refs SILENTLY MISCOMPILE
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Filed:** 2026-08-06
 - **Re-verified:** 2026-08-07 — both defects still live, unchanged behavior.
   See "Root cause, precise (2026-08-07)" below for the exact miscompile
@@ -409,3 +411,6 @@ stamping the dest vreg does not change which print sink MIR already chose.
 
 Until then the guard is correct and must stay: a lambda under the JIT is a
 crash or a silently wrong number, not a slow-but-right fallback.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

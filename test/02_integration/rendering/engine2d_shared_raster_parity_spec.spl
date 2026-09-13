@@ -520,66 +520,89 @@ fn _cmp_gradient_kernel_formula(w: i32, h: i32, top: u32, bottom: u32, bg: u32) 
 fn _rr_rect_hit(lx: i32, ly: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool:
     lx >= rx and lx < rx + rw and ly >= ry and ly < ry + rh
 
-# Independent replica of _emu_corner_arc's per-iteration span coverage test,
-# reused by the MSL kernel's corner-arc replay. Decision boundary is `d < 0`
-# (matching backend_emu.spl _emu_corner_arc's own midpoint loop) — DIFFERENT
-# from the `d <= 0` boundary the sw_corner_arc/_rr_ring_hit OUTLINE algorithm
-# uses; draw_rounded_rect and draw_rounded_rect_outline are independent
-# corner-arc algorithms.
-fn _rr_corner_arc_blend(cx: i32, cy: i32, rad: i32, dx_sign: i32, dy_sign: i32, lx: i32, ly: i32, color: u32, bg: u32) -> u32:
-    var px = rad
-    var py = 0
-    var d = 1 - rad
-    var dst = bg
-    while px >= py:
-        val row1 = cy + dy_sign * py
-        val col_a1 = cx
-        val col_b1 = cx + dx_sign * px
-        var lo1 = col_a1
-        var hi1 = col_b1
-        if col_b1 < col_a1:
-            lo1 = col_b1
-            hi1 = col_a1
-        if ly == row1 and lx >= lo1 and lx <= hi1:
-            dst = _gradient_blend_src_over_ref(color, dst)
-        val row2 = cy + dy_sign * px
-        val col_b2 = cx + dx_sign * py
-        var lo2 = col_a1
-        var hi2 = col_b2
-        if col_b2 < col_a1:
-            lo2 = col_b2
-            hi2 = col_a1
-        if ly == row2 and lx >= lo2 and lx <= hi2:
-            dst = _gradient_blend_src_over_ref(color, dst)
-        py = py + 1
-        if d < 0:
-            d = d + 2 * py + 1
-        else:
-            px = px - 1
-            d = d + 2 * (py - px) + 1
-    dst
+# Independent replica of the SHARED ROUNDED-RECT CORNER COVERAGE FORMULA v1
+# (2026-09-12). The single definition lives in the comment block above
+# emu_draw_rounded_rect in src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl;
+# these helpers are deliberately re-implemented here rather than imported —
+# importing the production helpers would make this spec assert `f(x) == f(x)`
+# and prove nothing.
+#
+# Replaces the 2026-07-07 midpoint-circle replay. That replica had to replay
+# CPU's seven primitives in order because their footprints OVERLAPPED at the
+# band/arc seams, double-compositing alpha<255 fills. The regions are now
+# DISJOINT on every lane (CPU, Vulkan, Metal), so each pixel is blended
+# exactly once — the precondition for carrying fractional coverage at all.
+#
+# isqrt is floor(sqrt(v)) by integer Newton. The formula is defined on
+# floor(sqrt(v)), which is algorithm-independent, so any exact isqrt agrees;
+# a float sqrt is the one thing that can break parity, so no lane uses one.
+fn _rr_isqrt_ref(v: i64) -> i64:
+    if v <= 0:
+        return 0
+    var guess = v
+    var next = (guess + 1) / 2
+    while next < guess:
+        guess = next
+        next = (guess + v / guess) / 2
+    guess
 
-# Independent replica of kernel_draw_rounded_rect's whole per-pixel formula:
-# literally replays emu_draw_rounded_rect's seven primitive draws, in the
-# same order, blending every one that covers (lx, ly).
+# q = (2dx+1)^2 + (2dy+1)^2; cov256 = clamp(r*256 + 128 - isqrt(q*16384), 0, 256)
+# dx, dy are measured positive AWAY from the rect interior, so both are >= 0
+# inside a corner box. 256 = interior, 0 = exterior, between = the arc ramp.
+# The 2d+1 terms measure from the pixel CENTRE to the continuous arc centre.
+fn _rr_cov256_ref(dx: i32, dy: i32, r: i32) -> i32:
+    val ex = (2 * dx + 1) as i64
+    val ey = (2 * dy + 1) as i64
+    val dist256 = _rr_isqrt_ref((ex * ex + ey * ey) * 16384)
+    val cov = ((r as i64) * 256 + 128 - dist256) as i32
+    if cov < 0:
+        return 0
+    if cov > 256:
+        return 256
+    cov
+
+# Coverage is applied by modulating the SOURCE ALPHA BYTE only; the blend
+# itself stays the unchanged src-over already pinned by this spec's other rows.
+fn _rr_modulate_alpha_ref(color: u32, cov: i32) -> u32:
+    val a = ((color >> 24) & 0xFFu32) as i32
+    val a_eff = (a * cov) / 256
+    (color & 0x00FFFFFFu32) | ((a_eff as u32) << 24)
+
+# Independent replica of kernel_draw_rounded_rect's whole per-pixel formula.
+# The rect is SEVEN DISJOINT regions — a full-height middle band, two side
+# bands, and four r x r corner boxes — so every pixel is blended EXACTLY ONCE
+# and the result is order-independent.
 fn _rr_kernel_pixel_ref(lx: i32, ly: i32, w: i32, h: i32, radius: i32, color: u32, bg: u32) -> u32:
     var r = radius
     if r > w / 2:
         r = w / 2
     if r > h / 2:
         r = h / 2
-    var dst = bg
+    # Middle band (all rows) or a side band (rows [r, h-r)) — a plain full blend.
     if _rr_rect_hit(lx, ly, r, 0, w - 2 * r, h):
-        dst = _gradient_blend_src_over_ref(color, dst)
+        return _gradient_blend_src_over_ref(color, bg)
     if _rr_rect_hit(lx, ly, 0, r, r, h - 2 * r):
-        dst = _gradient_blend_src_over_ref(color, dst)
+        return _gradient_blend_src_over_ref(color, bg)
     if _rr_rect_hit(lx, ly, w - r, r, r, h - 2 * r):
-        dst = _gradient_blend_src_over_ref(color, dst)
-    dst = _rr_corner_arc_blend(r, r, r, -1, -1, lx, ly, color, dst)
-    dst = _rr_corner_arc_blend(w - r - 1, r, r, 1, -1, lx, ly, color, dst)
-    dst = _rr_corner_arc_blend(r, h - r - 1, r, -1, 1, lx, ly, color, dst)
-    dst = _rr_corner_arc_blend(w - r - 1, h - r - 1, r, 1, 1, lx, ly, color, dst)
-    dst
+        return _gradient_blend_src_over_ref(color, bg)
+    if r <= 0:
+        return bg
+    # A corner box: offsets measured positive away from the rect interior.
+    var dx = lx - (w - r)
+    if lx < r:
+        dx = (r - 1) - lx
+    var dy = ly - (h - r)
+    if ly < r:
+        dy = (r - 1) - ly
+    val cov = _rr_cov256_ref(dx, dy, r)
+    if cov >= 256:
+        return _gradient_blend_src_over_ref(color, bg)
+    if cov <= 0:
+        return bg
+    val c = _rr_modulate_alpha_ref(color, cov)
+    if ((c >> 24) & 0xFFu32) == 0u32:
+        return bg
+    _gradient_blend_src_over_ref(c, bg)
 
 fn _cmp_rounded_rect_kernel_formula(w: i32, h: i32, radius: i32, color: u32, bg: u32) -> i32:
     var sw = _fresh_fill(bg)
@@ -818,7 +841,68 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         it "matches the lerp+blend formula when only one endpoint is transparent (asymmetric alpha)":
             expect(_cmp_gradient_kernel_formula(16, 12, 0x00FFFFFFu32, 0xFFFF0000u32, 0xFF303030u32)).to_equal(0)
 
-    context "Rounded-rect FILL parity fix (2026-07-07) — draw_rounded_rect GPU-kernel formula oracle":
+    context "Rounded-rect corner ANTI-ALIASING, shared formula v1 (2026-09-12)":
+        # ABSOLUTE oracle, not a parity oracle. The rows in the next context
+        # prove CPU == Metal == Vulkan; they would still pass if all three
+        # agreed on a WRONG formula ("MATCH != correct",
+        # .claude/skills/spipe/SKILL.md § false green). These rows pin the
+        # shared formula to hand-derived arithmetic instead.
+        #
+        #   q = (2dx+1)^2 + (2dy+1)^2
+        #   cov256 = clamp(r*256 + 128 - isqrt(q*16384), 0, 256)
+        #
+        # Hand-derived, all at r=6 (so r*256+128 = 1664):
+        #  (0,0): q = 1+1 = 2; isqrt(32768) = 181; 1664-181 = 1483 -> clamps to
+        #         256. The deep interior of a corner is exactly full.
+        #  (4,3): q = 81+49 = 130; isqrt(2130 ... = 130*16384 = 2129920) = 1459
+        #         (sqrt = 1459.42); 1664-1459 = 205. On the ramp.
+        #  (4,4): q = 81+81 = 162; isqrt(162*16384 = 2654208) = 1629
+        #         (sqrt = 1629.18); 1664-1629 = 35. Further out on the ramp.
+        #  (5,5): q = 121+121 = 242; isqrt(242*16384 = 3964928) = 1991
+        #         (sqrt = 1991.21); 1664-1991 < 0 -> 0. The corner TIP is
+        #         untouched background.
+        # Monotonicity (256 -> 205 -> 35 -> 0 as the pixel moves outward) is
+        # itself an oracle: a formula that ramped the wrong way, or was flat,
+        # would still satisfy a bare "0 < v < 256" check.
+
+        it "gives the deep interior of a corner exactly full coverage":
+            expect(_rr_cov256_ref(0, 0, 6)).to_equal(256)
+
+        it "gives a pixel on the arc the hand-derived coverage 205/256":
+            expect(_rr_cov256_ref(4, 3, 6)).to_equal(205)
+
+        it "gives a pixel further out on the arc the hand-derived coverage 35/256":
+            expect(_rr_cov256_ref(4, 4, 6)).to_equal(35)
+
+        it "gives the corner tip zero coverage, so the background is left untouched":
+            expect(_rr_cov256_ref(5, 5, 6)).to_equal(0)
+
+        it "leaves straight edges exact, because band pixels never reach the coverage path":
+            # A notch on a straight edge would mean a band pixel got partial
+            # coverage. The bands are separate disjoint regions, so the tangent
+            # row and column are a plain full blend.
+            expect(_rr_kernel_pixel_ref(8, 0, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)).to_equal(0xFF000000u32)
+            expect(_rr_kernel_pixel_ref(0, 8, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)).to_equal(0xFF000000u32)
+
+        it "modulates only the source alpha, leaving a full-coverage pixel bit-identical to a plain fill":
+            expect(_rr_modulate_alpha_ref(0xFF204080u32, 256)).to_equal(0xFF204080u32)
+            # (255 * 205) / 256 = 204 = 0xCC; RGB is untouched.
+            expect(_rr_modulate_alpha_ref(0xFF204080u32, 205)).to_equal(0xCC204080u32)
+
+        it "renders an opaque black corner over white as a real ramp, not two colours":
+            # The 2026-09-12 defect: a hard in/out test produced exactly 2
+            # distinct colours across a corner. Pixel (1,2) of a 16x16 r=6 rect
+            # is corner-box offset (dx,dy) = (4,3), cov 205, so a_eff =
+            # (255*205)/256 = 204, and src-over of opaque black at alpha 204
+            # over white gives (0*204 + 255*51)/255 = 51.
+            val on_arc = _rr_kernel_pixel_ref(1, 2, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)
+            expect((on_arc & 0xFFu32) as i32).to_equal(51)
+
+        it "keeps the corner interior exactly the fill and the corner tip exactly the background":
+            expect(_rr_kernel_pixel_ref(5, 5, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)).to_equal(0xFF000000u32)
+            expect(_rr_kernel_pixel_ref(0, 0, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)).to_equal(0xFFFFFFFFu32)
+
+    context "Rounded-rect FILL parity fix (2026-07-07, AA'd 2026-09-12) — draw_rounded_rect GPU-kernel formula oracle":
         # SoftwareBackend.draw_rounded_rect (delegates to the canonical
         # emu_draw_rounded_rect fill, the 2026-07-06 outline-vs-fill fix) vs an
         # independent Simple replica of kernel_draw_rounded_rect's band/corner
@@ -828,6 +912,16 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         # kernel replayed the stale pre-fix CPU OUTLINE algorithm instead of a
         # FILL — these rows pin the corner-radius clamp, the plain-radius
         # case, and an alpha-blended fill.
+        #
+        # Updated 2026-09-12 to the SHARED ROUNDED-RECT CORNER COVERAGE FORMULA
+        # v1 (defined once above emu_draw_rounded_rect in backend_emu.spl).
+        # The corner is now anti-aliased and the seven regions are DISJOINT, so
+        # each pixel is blended exactly once. All three lanes moved together —
+        # CPU and Vulkan through emu_draw_rounded_rect, Metal through
+        # kernel_draw_rounded_rect — which is what these rows check. They are a
+        # PARITY oracle only; the absolute oracle for the formula itself is the
+        # context above, because three lanes agreeing on a wrong formula would
+        # satisfy every row here.
 
         it "matches the band/corner formula on the original bug-doc fixture (radius=6, well inside the corner-radius range)":
             expect(_cmp_rounded_rect_kernel_formula(30, 24, 6, 0xFFFF0000u32, 0xFF000000u32)).to_equal(0)

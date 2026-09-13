@@ -1,9 +1,14 @@
 # Bug: `expect(<call>).to_equal(<falsy>)` false-fails in interpreter BDD runner
 
+## Closed 2026-09-13 — repro passes: falsy call results no longer false-fail
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's own spec fence runs green: `3 examples, 0 failures`, `outcome=OK declared>=3`.
+
 **Date:** 2026-06-29
 **Severity:** High — likely a large share of the ~12k baseline test failures
 **Component:** Rust seed BDD interpreter (`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`, `interpreter_method/mod.rs`)
-**Status:** FIXED — commit 62cea5b6f5cb (seed rebuilt + deployed). Monotonic
+**Status:** Closed (fixed) 2026-09-13 — commit 62cea5b6f5cb (seed rebuilt + deployed). Monotonic
 `BDD_MATCHER_RAN` flag (bdd.rs + interpreter_method/mod.rs): a provisional
 hollow-call failure stands only if NO matcher ran. Verified: `expect(falsy_call())
 .to_equal/.to_be/.to_be_gte` pass; genuine mismatches still fail; bare

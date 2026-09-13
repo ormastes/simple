@@ -1,0 +1,68 @@
+# codex-system-test
+# @manual: primary
+# @req NFR-003 NFR-005 NFR-008
+use std.spec.*
+use std.io_runtime.{time_now_unix_micros, file_write, dir_create_all}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_find_v1
+}
+
+fn digest() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn padded_module(index: i64) -> text:
+    val raw = index.to_text()
+    "module." + "00000000".substring(0, 8 - raw.len()) + raw
+
+fn generation_with(count: i64) -> PackageModuleIndexGenerationV1:
+    var entries: [PackageModuleIndexEntryV1] = []
+    var index: i64 = 0
+    while index < count:
+        val module_identity = padded_module(index)
+        entries.push(PackageModuleIndexEntryV1(
+            package_identity: "package." + (index / 64).to_text(),
+            module_identity: module_identity,
+            source_identity: "src/" + module_identity + ".spl",
+            source_digest: digest(), smf_metadata_digest: digest(),
+            export_digest: digest(), abi_digest: digest(),
+            initializer_digest: digest(), provider_digest: digest(),
+            action_digest: digest(), manifest_digest: digest(),
+            scc_identity: module_identity, direct_imports: [],
+            reverse_dependents: []))
+        index = index + 1
+    PackageModuleIndexGenerationV1(
+        schema_version: 1, producer_digest: digest(), root_generation: "perf",
+        scv_revision_id: "revision", scv_commit_id: "commit",
+        scv_tree_id: "tree", inventory_digest: digest(), entries: entries)
+
+fn lookup_elapsed_us(generation: PackageModuleIndexGenerationV1, rounds: i64) -> i64:
+    val started = time_now_unix_micros()
+    var round: i64 = 0
+    while round < rounds:
+        val index = (round * 104729) % generation.entries.len()
+        expect(package_module_index_find_v1(generation, padded_module(index)) != nil).to_be(true)
+        round = round + 1
+    time_now_unix_micros() - started
+
+describe "persistent package module index lookup performance":
+    it "should resolve first middle last and absent identities exactly":
+        val generation = generation_with(4096)
+        val first = package_module_index_find_v1(generation, padded_module(0))
+        val middle = package_module_index_find_v1(generation, padded_module(2048))
+        val last = package_module_index_find_v1(generation, padded_module(4095))
+        expect(first != nil).to_be(true)
+        expect(middle != nil).to_be(true)
+        expect(last != nil).to_be(true)
+        expect(first.unwrap().module_identity).to_equal(padded_module(0))
+        expect(middle.unwrap().module_identity).to_equal(padded_module(2048))
+        expect(last.unwrap().module_identity).to_equal(padded_module(4095))
+        expect(package_module_index_find_v1(generation, "module.absent")).to_be_nil()
+
+    it "should keep repeated warm lookups bounded on a four-thousand-module index":
+        val generation = generation_with(4096)
+        val elapsed_us = lookup_elapsed_us(generation, 16384)
+        expect(elapsed_us).to_be_less_than(5000001)
+        dir_create_all("build/test-artifacts/05_perf/compiler/package_module_index_lookup")
+        file_write("build/test-artifacts/05_perf/compiler/package_module_index_lookup/receipt.txt",
+            "schema=package-module-index-lookup-perf-v1\nalgorithm=binary-search\nmodules=4096\nlookups=16384\nelapsed_us={elapsed_us}\nmax_elapsed_us=5000000\n")

@@ -1,0 +1,221 @@
+# Generation-bound execution leases for aspect dynload quiescence.
+# Canonical registry transitions require serialization by the existing loader
+# lifecycle gate. This module owns no loader/callback/device handle, provides no
+# async ABI, and makes no standalone thread-safety or physical-unmap claim.
+
+val ASPECT_DYNLOAD_ACTIVE_V1: i64 = 1
+val ASPECT_DYNLOAD_QUIESCING_V1: i64 = 2
+val ASPECT_DYNLOAD_RETIRED_V1: i64 = 3
+val ASPECT_DYNLOAD_LEASE_CALLBACK_V1: i64 = 1
+val ASPECT_DYNLOAD_LEASE_AROUND_CONTINUATION_V1: i64 = 2
+val ASPECT_DYNLOAD_LEASE_DEVICE_FENCE_V1: i64 = 3
+val ASPECT_DYNLOAD_MAX_LIFECYCLE_CAPACITY_V1: i64 = 1024
+val ASPECT_DYNLOAD_MAX_LEASE_CAPACITY_V1: i64 = 4096
+val ASPECT_DYNLOAD_MAX_I64_V1: i64 = 9223372036854775807
+
+struct AspectDynloadLifecycleHandleV1:
+    lifecycle_id: i64
+
+struct AspectDynloadExecutionLeaseV1:
+    lifecycle_id: i64
+    facet_key: text
+    generation: i64
+    lease_id: i64
+    kind: i64
+
+struct AspectDynloadLifecycleSnapshotV1:
+    lifecycle_id: i64
+    facet_key: text
+    generation: i64
+    state: i64
+    callback_count: i64
+    around_continuation_count: i64
+    device_fence_count: i64
+    outstanding_count: i64
+
+# Monotonic rows are never removed or reused. Copyable handles resolve one row.
+var _adl_facet: [text] = []
+var _adl_generation: [i64] = []
+var _adl_state: [i64] = []
+var _adl_max_live: [i64] = []
+var _adl_device: [bool] = []
+var _adl_next_lease: [i64] = []
+var _adl_live: [Dict<i64, i64>] = []
+var _adl_callbacks: [i64] = []
+var _adl_around: [i64] = []
+var _adl_fences: [i64] = []
+
+fn _adl_index(handle: AspectDynloadLifecycleHandleV1) -> i64:
+    val index = handle.lifecycle_id - 1
+    if handle.lifecycle_id <= 0 or index >= _adl_state.len():
+        return -1
+    index
+
+fn aspect_dynload_lifecycle_create_v1(facet_key: text, generation: i64,
+        max_live_leases: i64, device_fences_applicable: bool
+    ) -> Result<AspectDynloadLifecycleHandleV1, text>:
+    if facet_key == "": return Err("aspect lifecycle facet key must be nonempty")
+    if generation <= 0: return Err("aspect lifecycle generation must be positive")
+    if max_live_leases <= 0 or max_live_leases > ASPECT_DYNLOAD_MAX_LEASE_CAPACITY_V1:
+        return Err("aspect lifecycle lease capacity is out of range")
+    if _adl_state.len() >= ASPECT_DYNLOAD_MAX_LIFECYCLE_CAPACITY_V1:
+        return Err("aspect lifecycle identity capacity exhausted")
+    val lifecycle_id = _adl_state.len() + 1
+    _adl_facet = _adl_facet.push(facet_key)
+    _adl_generation = _adl_generation.push(generation)
+    _adl_state = _adl_state.push(ASPECT_DYNLOAD_ACTIVE_V1)
+    _adl_max_live = _adl_max_live.push(max_live_leases)
+    _adl_device = _adl_device.push(device_fences_applicable)
+    _adl_next_lease = _adl_next_lease.push(1)
+    _adl_live = _adl_live.push({})
+    _adl_callbacks = _adl_callbacks.push(0)
+    _adl_around = _adl_around.push(0)
+    _adl_fences = _adl_fences.push(0)
+    Ok(AspectDynloadLifecycleHandleV1(lifecycle_id: lifecycle_id))
+
+fn aspect_dynload_lifecycle_snapshot_v1(handle: AspectDynloadLifecycleHandleV1
+    ) -> Result<AspectDynloadLifecycleSnapshotV1, text>:
+    val i = _adl_index(handle)
+    if i < 0: return Err("unknown aspect lifecycle identity")
+    Ok(AspectDynloadLifecycleSnapshotV1(
+        lifecycle_id: handle.lifecycle_id, facet_key: _adl_facet[i],
+        generation: _adl_generation[i], state: _adl_state[i],
+        callback_count: _adl_callbacks[i], around_continuation_count: _adl_around[i],
+        device_fence_count: _adl_fences[i],
+        outstanding_count: _adl_callbacks[i] + _adl_around[i] + _adl_fences[i]))
+
+fn aspect_dynload_lease_is_live_v1(handle: AspectDynloadLifecycleHandleV1,
+        lease: AspectDynloadExecutionLeaseV1) -> bool:
+    val i = _adl_index(handle)
+    if (i < 0 or lease.lifecycle_id != handle.lifecycle_id or
+            lease.facet_key != _adl_facet[i] or
+            lease.generation != _adl_generation[i] or lease.lease_id <= 0):
+        return false
+    if not _adl_live[i].contains_key(lease.lease_id): return false
+    _adl_live[i][lease.lease_id] == lease.kind
+
+fn _adl_adjust(i: i64, kind: i64, delta: i64):
+    if kind == ASPECT_DYNLOAD_LEASE_CALLBACK_V1:
+        _adl_callbacks[i] = _adl_callbacks[i] + delta
+    elif kind == ASPECT_DYNLOAD_LEASE_AROUND_CONTINUATION_V1:
+        _adl_around[i] = _adl_around[i] + delta
+    else:
+        _adl_fences[i] = _adl_fences[i] + delta
+
+fn _adl_retire_if_quiescent(i: i64):
+    if (_adl_state[i] == ASPECT_DYNLOAD_QUIESCING_V1 and
+            _adl_callbacks[i] == 0 and _adl_around[i] == 0 and _adl_fences[i] == 0):
+        _adl_state[i] = ASPECT_DYNLOAD_RETIRED_V1
+
+fn _adl_issue(handle: AspectDynloadLifecycleHandleV1, kind: i64
+    ) -> Result<AspectDynloadExecutionLeaseV1, text>:
+    val i = _adl_index(handle)
+    if i < 0: return Err("unknown aspect lifecycle identity")
+    if _adl_callbacks[i] + _adl_around[i] + _adl_fences[i] >= _adl_max_live[i]:
+        return Err("aspect execution lease capacity exhausted")
+    if _adl_next_lease[i] == ASPECT_DYNLOAD_MAX_I64_V1:
+        return Err("aspect execution lease id exhausted")
+    val lease = AspectDynloadExecutionLeaseV1(
+        lifecycle_id: handle.lifecycle_id, facet_key: _adl_facet[i],
+        generation: _adl_generation[i], lease_id: _adl_next_lease[i], kind: kind)
+    _adl_next_lease[i] = _adl_next_lease[i] + 1
+    var live = _adl_live[i]
+    live[lease.lease_id] = kind
+    _adl_live[i] = live
+    _adl_adjust(i, kind, 1)
+    Ok(lease)
+
+fn aspect_dynload_callback_begin_v1(handle: AspectDynloadLifecycleHandleV1
+    ) -> Result<AspectDynloadExecutionLeaseV1, text>:
+    val i = _adl_index(handle)
+    if i < 0: return Err("unknown aspect lifecycle identity")
+    if _adl_state[i] != ASPECT_DYNLOAD_ACTIVE_V1:
+        return Err("new aspect callback refused after quiescence begins")
+    _adl_issue(handle, ASPECT_DYNLOAD_LEASE_CALLBACK_V1)
+
+fn aspect_dynload_nested_callback_begin_v1(handle: AspectDynloadLifecycleHandleV1,
+        parent: AspectDynloadExecutionLeaseV1
+    ) -> Result<AspectDynloadExecutionLeaseV1, text>:
+    val i = _adl_index(handle)
+    if not aspect_dynload_lease_is_live_v1(handle, parent):
+        return Err("nested callback requires a live exact-generation parent lease")
+    if _adl_state[i] != ASPECT_DYNLOAD_ACTIVE_V1 and _adl_state[i] != ASPECT_DYNLOAD_QUIESCING_V1:
+        return Err("nested callback generation is retired")
+    _adl_issue(handle, ASPECT_DYNLOAD_LEASE_CALLBACK_V1)
+
+fn _adl_replace(handle: AspectDynloadLifecycleHandleV1,
+        lease: AspectDynloadExecutionLeaseV1, replacement_kind: i64
+    ) -> Result<AspectDynloadExecutionLeaseV1, text>:
+    val i = _adl_index(handle)
+    if _adl_next_lease[i] == ASPECT_DYNLOAD_MAX_I64_V1:
+        return Err("aspect execution lease id exhausted")
+    val replacement = AspectDynloadExecutionLeaseV1(
+        lifecycle_id: handle.lifecycle_id, facet_key: _adl_facet[i],
+        generation: _adl_generation[i], lease_id: _adl_next_lease[i], kind: replacement_kind)
+    var live = _adl_live[i]
+    live = live.remove(lease.lease_id)
+    live[replacement.lease_id] = replacement_kind
+    _adl_live[i] = live
+    _adl_adjust(i, lease.kind, -1)
+    _adl_adjust(i, replacement_kind, 1)
+    _adl_next_lease[i] = _adl_next_lease[i] + 1
+    Ok(replacement)
+
+fn aspect_dynload_around_suspend_v1(handle: AspectDynloadLifecycleHandleV1,
+        callback: AspectDynloadExecutionLeaseV1) -> Result<AspectDynloadExecutionLeaseV1, text>:
+    if not aspect_dynload_lease_is_live_v1(handle, callback) or callback.kind != ASPECT_DYNLOAD_LEASE_CALLBACK_V1:
+        return Err("around suspension requires a live callback lease")
+    _adl_replace(handle, callback, ASPECT_DYNLOAD_LEASE_AROUND_CONTINUATION_V1)
+
+fn aspect_dynload_around_resume_v1(handle: AspectDynloadLifecycleHandleV1,
+        continuation: AspectDynloadExecutionLeaseV1) -> Result<AspectDynloadExecutionLeaseV1, text>:
+    if not aspect_dynload_lease_is_live_v1(handle, continuation) or continuation.kind != ASPECT_DYNLOAD_LEASE_AROUND_CONTINUATION_V1:
+        return Err("around resume requires a live continuation lease")
+    _adl_replace(handle, continuation, ASPECT_DYNLOAD_LEASE_CALLBACK_V1)
+
+fn aspect_dynload_device_fence_begin_v1(handle: AspectDynloadLifecycleHandleV1,
+        parent: AspectDynloadExecutionLeaseV1) -> Result<AspectDynloadExecutionLeaseV1, text>:
+    val i = _adl_index(handle)
+    if i < 0: return Err("unknown aspect lifecycle identity")
+    if not _adl_device[i]: return Err("device fence lease is not applicable")
+    if not aspect_dynload_lease_is_live_v1(handle, parent):
+        return Err("device fence requires a live exact-generation parent lease")
+    if _adl_state[i] != ASPECT_DYNLOAD_ACTIVE_V1 and _adl_state[i] != ASPECT_DYNLOAD_QUIESCING_V1:
+        return Err("device fence generation is retired")
+    _adl_issue(handle, ASPECT_DYNLOAD_LEASE_DEVICE_FENCE_V1)
+
+fn aspect_dynload_unload_v1(handle: AspectDynloadLifecycleHandleV1
+    ) -> Result<AspectDynloadLifecycleSnapshotV1, text>:
+    val i = _adl_index(handle)
+    if i < 0: return Err("unknown aspect lifecycle identity")
+    if _adl_state[i] == ASPECT_DYNLOAD_RETIRED_V1:
+        return Err("aspect generation is already retired")
+    if _adl_state[i] == ASPECT_DYNLOAD_ACTIVE_V1: _adl_state[i] = ASPECT_DYNLOAD_QUIESCING_V1
+    _adl_retire_if_quiescent(i)
+    aspect_dynload_lifecycle_snapshot_v1(handle)
+
+fn aspect_dynload_lease_complete_v1(handle: AspectDynloadLifecycleHandleV1,
+        lease: AspectDynloadExecutionLeaseV1) -> Result<AspectDynloadLifecycleSnapshotV1, text>:
+    if not aspect_dynload_lease_is_live_v1(handle, lease):
+        return Err("stale, duplicate, or cross-owner aspect lease result")
+    val i = _adl_index(handle)
+    _adl_live[i] = _adl_live[i].remove(lease.lease_id)
+    _adl_adjust(i, lease.kind, -1)
+    _adl_retire_if_quiescent(i)
+    aspect_dynload_lifecycle_snapshot_v1(handle)
+
+fn aspect_dynload_publish_next_generation_v1(handle: AspectDynloadLifecycleHandleV1
+    ) -> Result<i64, text>:
+    val i = _adl_index(handle)
+    if i < 0: return Err("unknown aspect lifecycle identity")
+    if _adl_state[i] != ASPECT_DYNLOAD_RETIRED_V1:
+        return Err("next aspect generation requires complete retirement")
+    if _adl_generation[i] == ASPECT_DYNLOAD_MAX_I64_V1: return Err("aspect generation exhausted")
+    _adl_generation[i] = _adl_generation[i] + 1
+    _adl_state[i] = ASPECT_DYNLOAD_ACTIVE_V1
+    _adl_next_lease[i] = 1
+    _adl_live[i] = {}
+    _adl_callbacks[i] = 0
+    _adl_around[i] = 0
+    _adl_fences[i] = 0
+    Ok(_adl_generation[i])

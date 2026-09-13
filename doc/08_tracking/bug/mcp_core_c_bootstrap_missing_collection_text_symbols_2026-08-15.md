@@ -1,5 +1,7 @@
 # MCP core-C bootstrap archive misses collection/text symbols
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fixed in the frozen worktree. Rust-seed evidence remains diagnostic only.
@@ -61,3 +63,7 @@ linked artifact. Its single `--help` and `--version` smokes both exited 0, with
 version `Simple MCP Server v4.0.0`.
 
 Provider token usage and comparable completed-bug average: unavailable.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

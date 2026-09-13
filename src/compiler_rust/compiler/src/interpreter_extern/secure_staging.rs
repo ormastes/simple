@@ -154,8 +154,7 @@ mod tests {
         std::fs::create_dir_all(&parent).unwrap();
         let parent_text = parent.to_string_lossy().to_string();
 
-        let value =
-            rt_secure_temp_dir(&[text(&parent_text), text("probe")]).expect("handler errored");
+        let value = rt_secure_temp_dir(&[text(&parent_text), text("probe")]).expect("handler errored");
         let path = as_text(&value);
 
         assert!(!path.is_empty(), "returned the failure sentinel");
@@ -198,29 +197,21 @@ mod tests {
 
     #[test]
     fn publish_noreplace_publishes_once_and_then_reports_the_existing_destination() {
-        let dir = std::env::temp_dir().join(format!(
-            "spl-publish-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("spl-publish-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let staged = dir.join("staged");
         let destination = dir.join("published");
         std::fs::write(&staged, b"payload").unwrap();
 
-        let first = rt_file_publish_noreplace(&[
-            text(&staged.to_string_lossy()),
-            text(&destination.to_string_lossy()),
-        ])
-        .expect("handler errored");
+        let first = rt_file_publish_noreplace(&[text(&staged.to_string_lossy()), text(&destination.to_string_lossy())])
+            .expect("handler errored");
         assert_eq!(first, Value::Int(1), "first publish should report 1");
         assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
 
         std::fs::write(&staged, b"second").unwrap();
-        let second = rt_file_publish_noreplace(&[
-            text(&staged.to_string_lossy()),
-            text(&destination.to_string_lossy()),
-        ])
-        .expect("handler errored");
+        let second =
+            rt_file_publish_noreplace(&[text(&staged.to_string_lossy()), text(&destination.to_string_lossy())])
+                .expect("handler errored");
         assert_eq!(
             second,
             Value::Int(0),

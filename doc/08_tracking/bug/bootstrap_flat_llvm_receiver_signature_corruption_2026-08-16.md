@@ -90,3 +90,6 @@ return unknown, runtime-owned names cannot borrow a local ABI, and no full-tree
 name dictionary remains on the receiver. This is a producer/owner correction;
 `double -> ptr` remains unsupported and no cast was added. Full Stage 2/Stage 3
 verification is intentionally owned by the parent bootstrap run.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/compiler/bootstrap/bootstrap_flat_llvm_receiver_ownership_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # Hardcoded CLI option census — Phase C / C4 migration report (2026-08-18)
 
+Status: OPEN (unverified 2026-09-12)
+
 **Purpose.** Phase C (startup_perf_plan_2026-08-17.md, WP-19c) moves CLI
 options to SCI route data (`cli_option_route.spl` records). C4's help /
 completion generator (`src/lib/nogc_sync_mut/composition/cli_help_gen.spl`)

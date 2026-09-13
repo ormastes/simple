@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-28
 - **Lane:** stage4 one-binary link (core-c-bootstrap), after all compile + archive blockers cleared
-- **Status:** open — link-stage; peer app-code symbol bugs
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Progress
 Every earlier blocker is fixed and at origin: compile 1584/1584 green (closefrom,
@@ -58,3 +58,7 @@ investigation: not "all fn-param calls" but something particular to this
 function/callsite (candidates: the `ui.standalone` dotted package-name path, the
 specific fn-type param signature `fn(UIEvent)`, or this module's discovery/export
 into the closure). One symbol from a clean full-CLI link + deploy.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

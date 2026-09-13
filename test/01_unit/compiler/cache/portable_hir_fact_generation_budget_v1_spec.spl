@@ -1,0 +1,191 @@
+# Focused RED/GREEN boundary tests for portable-HIR fact materialization.
+# These tests grant no verifier, completeness, byte, loader, or release admission.
+
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId,
+    SymbolKind, SymbolTable, ScopeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirBlock, HirExpr,
+    HirExprKind}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.portable_body_profile_types.{PortableBodyLimitsV1,
+    PortableBodyBudgetCountersV1, PortableBodyErrorV1}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1}
+use compiler.hir.portable_body_semantics.{portable_embedded_body_profile_digest_v1,
+    portable_hir_semantic_facts_from_typed_v1}
+
+fn fact_span_v1() -> Span: Span.empty()
+
+fn fact_i64_type_v1() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: fact_span_v1())
+
+fn fact_repeat_v1(value: text, count: i64) -> text:
+    var result = ""
+    var index: i64 = 0
+    while index < count:
+        result = result + value
+        index = index + 1
+    result
+
+fn given_fact_budget_module_v1(function_name: text,
+                               parameter_count: i64) -> HirModule:
+    var parameter_types: [HirType] = []
+    var type_index: i64 = 0
+    while type_index < parameter_count:
+        parameter_types.push(fact_i64_type_v1())
+        type_index = type_index + 1
+    var symbols = SymbolTable.new()
+    val function_type = HirType(kind: HirTypeKind.Function(parameter_types,
+        fact_i64_type_v1(), []), span: fact_span_v1())
+    val function_id = symbols.define(function_name, SymbolKind.Function,
+        Some(function_type), fact_span_v1(), Visibility.Public, false,
+        Some("fact_budget"))
+    var parameters: [HirParam] = []
+    if parameter_count > 0: _ = symbols.push_scope(ScopeKind.Function)
+    var parameter_index: i64 = 0
+    while parameter_index < parameter_count:
+        val parameter_name = "p" + parameter_index.to_string()
+        val parameter_id = symbols.define(parameter_name, SymbolKind.Parameter,
+            Some(fact_i64_type_v1()), fact_span_v1(), Visibility.Private,
+            false, Some("fact_budget"))
+        parameters.push(HirParam(symbol: parameter_id, name: parameter_name,
+            type_: fact_i64_type_v1(), has_default: false, default: nil,
+            span: fact_span_v1(), is_mutable: false))
+        parameter_index = parameter_index + 1
+    if parameter_count > 0: symbols.pop_scope()
+    val result = if parameter_count == 0:
+        HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+            type_: fact_i64_type_v1(), span: fact_span_v1())
+    else:
+        HirExpr(kind: HirExprKind.Var(parameters[0].symbol), has_type_: true,
+            type_: fact_i64_type_v1(), span: fact_span_v1())
+    val function_ = HirFunction(symbol: function_id, name: function_name,
+        type_params: [], params: parameters, return_type: fact_i64_type_v1(),
+        body: HirBlock(stmts: [], has: true, value: result, span: fact_span_v1()),
+        effects: [], visibility: Visibility.Public, is_async: false,
+        is_static: false, is_public: true, is_method: false, is_mutable: false,
+        is_const: false, is_extern: false, func_attr: FunctionAttr.default(),
+        has_export_attr: false, export_attr: nil, has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_suspension: false,
+        has_vhdl_metadata: false, vhdl_metadata: nil, has_doc_comment: false,
+        doc_comment: "", span: fact_span_v1(), is_gpu_kernel: false,
+        gpu_target: "", gpu_backend_order: "", verification_contract: nil,
+        is_generic_template: false)
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[function_id] = function_
+    # SymbolTable.define intentionally does not maintain this legacy COW mirror.
+    # The portable verifier still requires canonical decoded input to carry it.
+    symbols.root_scope_symbols = symbols.scopes[0].symbols
+    HirModule(name: "fact_budget", path: "fact_budget.spl", imports: [],
+        exports: [function_name], domain_blocks: [], symbols: symbols,
+        functions: functions, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        types: [], extend_enums: [])
+
+fn given_utf8_fact_order_module_v1() -> HirModule:
+    val names = ["éclair_z", "alpha", "éclair_a"]
+    var symbols = SymbolTable.new()
+    var functions: Dict<SymbolId, HirFunction> = {}
+    for name in names:
+        val function_type = HirType(kind: HirTypeKind.Function([], fact_i64_type_v1(), []),
+            span: fact_span_v1())
+        val function_id = symbols.define(name, SymbolKind.Function,
+            Some(function_type), fact_span_v1(), Visibility.Public, false,
+            Some("fact_budget"))
+        val result = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+            type_: fact_i64_type_v1(), span: fact_span_v1())
+        functions[function_id] = HirFunction(symbol: function_id, name: name,
+            type_params: [], params: [], return_type: fact_i64_type_v1(),
+            body: HirBlock(stmts: [], has: true, value: result,
+                span: fact_span_v1()), effects: [], visibility: Visibility.Public,
+            is_async: false, is_static: false, is_public: true, is_method: false,
+            is_mutable: false, is_const: false, is_extern: false,
+            func_attr: FunctionAttr.default(), has_export_attr: false,
+            export_attr: nil, has_driver_manifest_attr: false,
+            driver_manifest_attr: nil, has_suspension: false,
+            has_vhdl_metadata: false, vhdl_metadata: nil, has_doc_comment: false,
+            doc_comment: "", span: fact_span_v1(), is_gpu_kernel: false,
+            gpu_target: "", gpu_backend_order: "", verification_contract: nil,
+            is_generic_template: false)
+    symbols.root_scope_symbols = symbols.scopes[0].symbols
+    HirModule(name: "fact_budget", path: "fact_budget.spl", imports: [],
+        exports: names, domain_blocks: [], symbols: symbols, functions: functions,
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn fact_budget_v1(module: HirModule) -> PortableBodyBudgetCountersV1:
+    val ledger = PortableBodyLedgerV1.create(PortableBodyLimitsV1.standard()).unwrap()
+    portable_hir_semantic_facts_from_typed_v1(module,
+        portable_embedded_body_profile_digest_v1(), ledger).unwrap().budget
+
+fn exact_fact_limits_v1(budget: PortableBodyBudgetCountersV1,
+                        retained_delta: i64,
+                        work_delta: i64) -> PortableBodyLimitsV1:
+    val standard = PortableBodyLimitsV1.standard()
+    PortableBodyLimitsV1(max_body_objects: standard.max_body_objects,
+        max_functions: standard.max_functions, max_symbols: standard.max_symbols,
+        max_scopes: standard.max_scopes, max_exports: standard.max_exports,
+        max_parameters: standard.max_parameters, max_nodes: standard.max_nodes,
+        max_graph_nodes: standard.max_graph_nodes,
+        max_dependency_edges: standard.max_dependency_edges,
+        max_call_occurrences: standard.max_call_occurrences,
+        max_call_chain_depth: standard.max_call_chain_depth,
+        max_semantic_depth: standard.max_semantic_depth,
+        max_text_bytes: standard.max_text_bytes,
+        max_encoded_bytes: standard.max_encoded_bytes,
+        max_retained_bytes: budget.retained_bytes + retained_delta,
+        max_work_units: budget.work_units + work_delta)
+
+fn fact_result_v1(module: HirModule,
+                  limits: PortableBodyLimitsV1):
+    val ledger = PortableBodyLedgerV1.create(limits).unwrap()
+    portable_hir_semantic_facts_from_typed_v1(module,
+        portable_embedded_body_profile_digest_v1(), ledger)
+
+describe "Portable HIR fact-generation reservations":
+    it "admits an exact long-name budget and refuses one retained byte over":
+        val short_module = given_fact_budget_module_v1("entry", 0)
+        val long_module = given_fact_budget_module_v1(fact_repeat_v1("n", 2048), 0)
+        val short_budget = fact_budget_v1(short_module)
+        val long_budget = fact_budget_v1(long_module)
+        expect(long_budget.retained_bytes - short_budget.retained_bytes).
+            to_be_greater_than(2043 * 32)
+        expect(long_budget.work_units - short_budget.work_units).
+            to_be_greater_than(2043 * 32)
+        expect(fact_result_v1(long_module,
+            exact_fact_limits_v1(long_budget, 0, 0)).is_ok()).to_equal(true)
+        match fact_result_v1(long_module,
+                exact_fact_limits_v1(long_budget, -1, 0)):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("retained semantic budget")
+            case _: fail("one-over long-name reservation did not fail closed")
+
+    it "admits an exact large-signature budget and refuses one work unit over":
+        val parameter_count: i64 = 128
+        val module = given_fact_budget_module_v1("wide_entry", parameter_count)
+        val budget = fact_budget_v1(module)
+        expect(budget.retained_bytes).to_be_greater_than(parameter_count * 340)
+        expect(budget.work_units).to_be_greater_than(parameter_count * 20)
+        expect(fact_result_v1(module,
+            exact_fact_limits_v1(budget, 0, 0)).is_ok()).to_equal(true)
+        match fact_result_v1(module, exact_fact_limits_v1(budget, 0, -1)):
+            case Err(PortableBodyErrorV1.BoundsExceeded(detail)):
+                expect(detail).to_contain("semantic work budget")
+            case _: fail("one-over large-signature reservation did not fail closed")
+
+    it "reserves multi-key UTF-8 ordering before deterministic export projection":
+        val module = given_utf8_fact_order_module_v1()
+        val budget = fact_budget_v1(module)
+        val ledger = PortableBodyLedgerV1.create(
+            exact_fact_limits_v1(budget, 0, 0)).unwrap()
+        val facts = portable_hir_semantic_facts_from_typed_v1(module,
+            portable_embedded_body_profile_digest_v1(), ledger).unwrap()
+        expect(facts.exported_entries.len()).to_equal(3)
+        expect(facts.exported_entries[0].name).to_equal("alpha")
+        expect(facts.exported_entries[1].name).to_equal("éclair_a")
+        expect(facts.exported_entries[2].name).to_equal("éclair_z")

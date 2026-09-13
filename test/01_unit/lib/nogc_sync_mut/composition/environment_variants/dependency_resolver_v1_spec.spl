@@ -1,0 +1,153 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn requirement(provider: u64, contract: u64, artifact: u64) -> VariantDependencyV1:
+    VariantDependencyV1(
+        provider_identity: d(provider), contract_identity: d(contract),
+        minimum_contract_major: 1u16, minimum_contract_minor: 0u16,
+        artifact_digest: d(artifact))
+
+fn descriptor(
+    provider: u64, variant: u64, artifact: u64,
+    dependency_offset: u32, dependency_count: u32,
+    contract_major: u16, contract_minor: u16
+) -> VariantDescriptorV1:
+    val empty = EnvironmentArenaRangeV1(offset: 0u32, count: 0u32)
+    VariantDescriptorV1(
+        descriptor_size: 360u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        placement: ENV_PLACEMENT_STATIC_V1,
+        provider_identity: d(provider), variant_identity: d(variant),
+        contract_identity: d(300u64), contract_major: contract_major,
+        contract_minor: contract_minor, abi_digest: d(301u64),
+        semantic_identity: d(302u64), grammar_identity: d(303u64),
+        program_identity: d(304u64), artifact_digest: d(artifact),
+        artifact_location: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        required_os_id: 1u32, required_abi_id: 1u32,
+        required_object_format_id: 1u32, required_endian_id: 1u16,
+        required_pointer_width_bits: 64u16,
+        required_loader_permission_bits: 0u64,
+        required_cpu_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1, words: empty),
+        required_os_state_words: empty,
+        required_vector_state_mode: ENV_VECTOR_NONE_V1,
+        required_vector_length_bits: 0u32, required_device_api: 0u32,
+        minimum_device_api_version: 0u32,
+        required_device_features: empty, required_memory_domain_bits: 0u64,
+        minimum_device_buffer_bytes: 0u64,
+        minimum_workgroup_invocations: 0u32, minimum_queue_family_count: 0u32,
+        required_effect_bits: 0u64, numerical_contract_id: 1u32,
+        resource_layout_digest: d(305u64),
+        dependencies: EnvironmentArenaRangeV1(
+            offset: dependency_offset, count: dependency_count),
+        assurance_receipt_digest: d(306u64), startup_budget_us: 10u64,
+        max_session_bytes: 4096u64, max_inflight_operations: 4u32)
+
+fn root_descriptor(offset: u32, count: u32) -> VariantDescriptorV1:
+    descriptor(1u64, 2u64, 3u64, offset, count, 1u16, 0u16)
+
+describe "Environment dependency resolver V1":
+    it "resolves a deterministic dependency-first transitive closure":
+        val root = root_descriptor(0u32, 1u32)
+        val provider = descriptor(10u64, 20u64, 410u64, 1u32, 1u32, 1u16, 2u16)
+        val leaf = descriptor(11u64, 21u64, 411u64, 2u32, 0u32, 1u16, 0u16)
+        val requirements = [
+            requirement(10u64, 300u64, 410u64),
+            requirement(11u64, 300u64, 411u64)]
+        val first = environment_dependency_resolve_v1(
+            root, [provider, leaf], requirements).unwrap()
+        val second = environment_dependency_resolve_v1(
+            root, [leaf, provider], requirements).unwrap()
+        expect(first.resolved_dependencies.len()).to_equal(2)
+        expect(first.resolved_dependencies[0].provider_identity).to_equal(d(11u64))
+        expect(first.resolved_dependencies[1].provider_identity).to_equal(d(10u64))
+        expect(first.closure_identity).to_equal(second.closure_identity)
+        expect(first.resolved_dependencies[0].contract_minor).to_equal(0u16)
+
+    it "rejects missing providers and each exact requirement mismatch":
+        val root = root_descriptor(0u32, 1u32)
+        val provider = descriptor(10u64, 20u64, 410u64, 1u32, 0u32, 1u16, 0u16)
+        expect(environment_dependency_resolve_v1(
+            root, [provider], [requirement(99u64, 300u64, 999u64)]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.MissingProvider))
+        expect(environment_dependency_resolve_v1(
+            root, [provider], [requirement(10u64, 999u64, 410u64)]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.ContractMismatch))
+        expect(environment_dependency_resolve_v1(
+            root, [provider], [VariantDependencyV1(
+                provider_identity: d(10u64), contract_identity: d(300u64),
+                minimum_contract_major: 2u16, minimum_contract_minor: 0u16,
+                artifact_digest: d(410u64))]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.VersionMismatch))
+        expect(environment_dependency_resolve_v1(
+            root, [provider], [requirement(10u64, 300u64, 999u64)]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.ArtifactMismatch))
+        var invalid_extension = provider
+        invalid_extension.required_cpu_features.words = EnvironmentArenaRangeV1(
+            offset: 64u32, count: 1u32)
+        expect(environment_dependency_resolve_v1(
+            root, [invalid_extension], [requirement(10u64, 300u64, 410u64)]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.InvalidDescriptor))
+
+    it "rejects duplicate requirements, duplicate candidates, and cycles":
+        val root = root_descriptor(0u32, 2u32)
+        val provider = descriptor(10u64, 20u64, 410u64, 2u32, 0u32, 1u16, 0u16)
+        val duplicate = [requirement(10u64, 300u64, 410u64), requirement(10u64, 300u64, 410u64)]
+        expect(environment_dependency_resolve_v1(root, [provider], duplicate))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DuplicateRequirement))
+        val duplicate_candidates = [
+            descriptor(10u64, 20u64, 410u64, 1u32, 0u32, 1u16, 0u16),
+            descriptor(10u64, 21u64, 410u64, 1u32, 0u32, 1u16, 0u16)]
+        expect(environment_dependency_resolve_v1(
+            root_descriptor(0u32, 1u32), duplicate_candidates,
+            [requirement(10u64, 300u64, 410u64)]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DuplicateCandidate))
+
+        val cycle_root = root_descriptor(0u32, 1u32)
+        val cycle_node = descriptor(10u64, 20u64, 410u64, 1u32, 1u32, 1u16, 0u16)
+        val cycle_requirements = [
+            requirement(10u64, 300u64, 410u64),
+            requirement(1u64, 300u64, 3u64)]
+        expect(environment_dependency_resolve_v1(
+            cycle_root, [cycle_node, cycle_root], cycle_requirements))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.CycleDetected))
+
+    it "fails closed on depth and resolved-count overflow":
+        var chain: [VariantDescriptorV1] = []
+        var chain_requirements: [VariantDependencyV1] = [
+            requirement(100u64, 300u64, 400u64)]
+        var i: u64 = 0u64
+        while i < 65u64:
+            val provider = 100u64 + i
+            val artifact = 400u64 + i
+            val dependency_count = if i < 64u64: 1u32 else 0u32
+            chain.push(descriptor(
+                provider, 200u64 + i, artifact,
+                (i + 1u64) as u32, dependency_count, 1u16, 0u16))
+            if i < 64u64:
+                chain_requirements.push(requirement(
+                    provider + 1u64, 300u64, artifact + 1u64))
+            i = i + 1u64
+        expect(environment_dependency_resolve_v1(
+            root_descriptor(0u32, 1u32), chain, chain_requirements))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DepthExceeded))
+
+        var leaves: [VariantDescriptorV1] = []
+        var fanout_requirements: [VariantDependencyV1] = [
+            requirement(500u64, 300u64, 900u64)]
+        i = 0u64
+        while i < 64u64:
+            val provider = 600u64 + i
+            val artifact = 1000u64 + i
+            leaves.push(descriptor(provider, 700u64 + i, artifact, 65u32, 0u32, 1u16, 0u16))
+            fanout_requirements.push(requirement(provider, 300u64, artifact))
+            i = i + 1u64
+        val hub = descriptor(500u64, 501u64, 900u64, 1u32, 64u32, 1u16, 0u16)
+        leaves.push(hub)
+        expect(environment_dependency_resolve_v1(
+            root_descriptor(0u32, 1u32), leaves, fanout_requirements))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.CountExceeded))

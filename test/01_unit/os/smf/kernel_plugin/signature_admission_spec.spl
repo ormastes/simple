@@ -1,0 +1,65 @@
+# @req REQ-KPF-SIGNATURE-TRUST-ADMISSION
+
+use std.spec
+use common.kernel_plugin.ids.{KpfDigest256, KpfId128}
+use os.smf.kernel_plugin.native_loader.*
+use os.smf.kernel_plugin.signature_policy.*
+use os.smf.provider_loader.{ProviderAdmissionRequestV1, ProviderCallableEvidenceV1}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SimpleProviderQueryResultV1, SimpleProviderQueryV1
+}
+use std.nogc_sync_mut.kernel_plugin.KpfGenerationTable
+
+fn artifact_digest() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn signature_digest() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+describe "KPF trusted SMF admission":
+    it "requires trust validation before ordinary provider admission":
+        val provider_id = KpfId128(hi: 11, lo: 12)
+        val composition = KpfDigest256(w0: 21, w1: 22, w2: 23, w3: 24)
+        val generations = KpfGenerationTable.create(1, 1)
+        val published = generations.publish(provider_id, composition, 1)
+        val policy = KpfSmfAdmissionPolicyV1(
+            provider_id: provider_id, composition_digest: composition,
+            generation: published.current, interface_id: 91, interface_major: 1,
+            interface_minor: 0, expected_abi_digest: 902,
+            granted_capability_bits: 7, required_capability_bits: 5)
+        val trust_policy = KpfSignatureTrustPolicyV1(
+            expected_artifact_digest: artifact_digest(),
+            trusted_publisher_id: "simple.project", trusted_signing_key_id: "release-2026",
+            required_signature_scheme: "ed25519", expected_signature_digest: signature_digest(),
+            publisher_revoked: false, signing_key_revoked: false)
+        var signature = KpfArtifactSignatureEvidenceV1(
+            artifact_digest: artifact_digest(), publisher_id: "simple.project",
+            signing_key_id: "release-2026", signature_scheme: "ed25519",
+            signature_digest: signature_digest(), signature_present: true,
+            signature_verified: true)
+        val loader_request = ProviderAdmissionRequestV1(
+            artifact_path: "build/providers/lint.smf", artifact_kind: "smf",
+            expected_artifact_digest: artifact_digest(), granted_capability_bits: 7,
+            required_capability_bits: 5, host_abi: 1, minimum_host_abi: 1,
+            maximum_host_abi: 1, requested_interface_major: 1,
+            requested_interface_minor: 0, provided_interface_major: 1,
+            provided_interface_minor: 1)
+        val callable = ProviderCallableEvidenceV1(
+            artifact_exists: true, artifact_digest: artifact_digest(), loader_valid: true,
+            query_symbol_address: 4096, query_symbol_process_callable: true)
+        val query = SimpleProviderQueryV1(
+            descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE, interface_id: 91,
+            minimum_major: 1, minimum_minor: 0, host_abi: 1, target_offset: 0,
+            target_length: 0, requested_capability_bits: 5)
+        val result = SimpleProviderQueryResultV1(
+            status: SIMPLE_PROVIDER_OK, provided_major: 1, provided_minor: 1,
+            descriptor_size: 60, interface_handle: 700, provider_context: 800,
+            provider_identity_digest: 900, implementation_digest: 901, abi_digest: 902)
+        val admitted = kpf_smf_admit_trusted_evidence_v1(
+            policy, trust_policy, signature, loader_request, callable, query, result,
+            generations.view(published.current))
+        assert_true(admitted.admitted)
+        signature.signature_present = false
+        val rejected = kpf_smf_admit_trusted_evidence_v1(
+            policy, trust_policy, signature, loader_request, callable, query, result,
+            generations.view(published.current))
+        assert_false(rejected.admitted)
+        assert_equal(rejected.status, KpfSmfAdmissionStatus.SignatureTrustRejected)

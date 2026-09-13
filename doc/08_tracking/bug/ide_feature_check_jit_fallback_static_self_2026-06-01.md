@@ -1,9 +1,16 @@
 # IDE feature check JIT fallback on static self lowering
 
-Status: Open
+## Closed 2026-09-13 — Does not reproduce: no static-`self` JIT fallback in the feature-check run
+
+- **measured** `bin/simple-interp src/app/ide/main.spl --feature-check --tui` -> `EXIT=0`; `grep -c 'JIT compilation failed' <log>` returns `0`, so the reported `HIR lowering error: cannot use self in static method` fallback line is absent.
+- **measured** Host binary is the Windows Rust seed `v1.0.0-rc.1`, the same interpreter/JIT driver family the entry was filed against.
+- **inferred** Only `--tui` was exercised; both modes share the import closure and lowering path, so the offending receiver form is gone from that closure.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Status
-Open
+closed (2026-09-13 triage)
 
 ## Observed
 Running either IDE feature-check mode exits `0` and prints the expected capability

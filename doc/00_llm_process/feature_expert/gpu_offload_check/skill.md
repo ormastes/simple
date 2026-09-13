@@ -140,6 +140,80 @@ inventory doubles as the burn-down list for making phases 1-5 honest.
 
 ## Verification commands
 
+### UI performance evidence rules
+
+For Engine2D/web optimization, separately report: retained GPU allocation
+bytes/count, upload bytes, readback bytes, submits, fence polls/waits, frames in
+flight, damage area, and fallback reason. A backend name or completed host queue
+packet is not device execution. Require a device identity plus a backend fence
+or timeline receipt. Keep steady device-present measurements readback-free and
+run exact pixel capture as a separate correctness sample.
+
+Chrome comparison is admitted only when both Chrome and Simple artifacts are
+measured and share interval/sample/viewport/device metadata. Cold Chrome
+process-plus-PNG time cannot be divided by warm in-process Simple paint time.
+The current `perf_chrome_runner.spl` synthetic ratio is never publishable.
+
+### Renderer comparison admission traps (2026-09-08)
+
+- The selected Vulkan budget is latency-directional:
+  `Simple p95 / C p95 <= 2.0`. A threshold expressed as Simple FPS being at
+  least 10% of C is a different requirement and must not be used.
+- `measured` is not `admitted`. A ratio requires identical fixture/event hashes,
+  viewport, RGBA format, timing boundary, warmups/samples, and physical device;
+  source/binary identity; real fence completion; a 2–3-slot ring; no fallback;
+  and the full allocation/residency/upload/readback/damage receipt. Unknown
+  counters are `-1` and reject the row; never coerce them to zero.
+- Timed display admits zero framebuffer readback, zero buffer allocation, zero
+  full-frame host upload, and no unconditional submit-and-wait. Correctness may
+  perform one exact RGBA8 capture after timing. Its byte count is exactly
+  `width * height * 4`.
+- A blocking `vkWaitForFences` after each timed submit is not asynchronous even
+  when three command buffers exist. Observe completion with nonblocking fence
+  or timeline polling and report poll and blocking-wait counts separately.
+- Never run renderer performance through a Rust seed. `bin/simple` resolving
+  under `src/compiler_rust` is an explicit unavailable reason, not permission
+  to use a Vulkan-feature seed.
+
+### Chromium oracle SFFI rules (2026-09-08)
+
+The owned reference bridge has exactly five C symbols and remains test-only.
+Hash the explicit library before and after load, resolve every symbol once,
+validate ABI identity before create, bound request/response storage, and destroy
+then close exactly once. Ordinary Simple `[u8]` literals may be boxed and have
+no stable native data pointer in the interpreter. Use the canonical one-call
+`spl_wffi_call_i64_with_bytes` pin for immutable input and
+`rt_byte_array_new_len` for mutable output/length slots. A passing fixture with
+`oracle_identity=fixture-not-chromium` proves transport only—never Chrome or GPU.
+
+### Residency and event-driven scheduling checklist
+
+For every claimed GPU-resident renderer path, identify the owner and lifetime
+of the device-local target, persistent mapped staging ring, and any readback
+buffer. A mapped staging allocation is not a resident render target. The
+steady path must not allocate, map/unmap, upload a full framebuffer, or copy a
+frame to the CPU. Record allocation count, retained/staging bytes, upload
+bytes, and teardown bytes; unknown values are `-1` and fail admission.
+
+When transfer and graphics queues differ, the receipt must identify both queue
+owners and the release/acquire barrier (or an explicit single-queue policy),
+plus the fence/timeline value that makes the handoff visible. A host queue
+packet, backend name, or `submit` return is not a device receipt.
+
+The event path is host-owned: normalize and coalesce events, clip bounded
+damage, tag the scene generation, freeze it into one frame slot, and schedule
+the next available ring slot. Completion is a nonblocking fence/timeline poll;
+only the matching monotonic token retires the slot. Do not drain or wait from
+each event, and do not let stale input mutate an in-flight frame.
+
+Parity has two independent lanes. C Vulkan and Simple Vulkan need identical
+fixture/event hashes, viewport, format, queue/device identity, warmups, samples,
+timing boundary, ring depth, and capture policy. Simple Web and Chrome need an
+identical semantic primitive/event trace plus a device-origin receipt. Missing
+canonical Chrome library or runner is an explicit **non-admission**; a fixture,
+Electron DOM/paint result, or bootstrap diagnostic dylib cannot become a Chrome
+GPU ratio.
+
 - Re-run the scanner (above) after any refactor in the two scanned dirs; the
   diff of blocked-name count and per-root verdicts is the ratchet.
 - Inventory-mode-first policy: warnings, not errors, until the list is burned
@@ -297,6 +371,148 @@ attribution question first.
 - `src/app/clean/main.spl` — `simple clean`, manual + auto temp/cache cleanup.
   Auto mode is **opt-in via `SIMPLE_AUTO_CLEAN=1`** (runs at `simple build`
   start; `SIMPLE_CACHE_MAX_GB` default 20).
+
+## Vulkan rect batch + pinned-shader workflow (2026-09-11)
+
+- Batch API: `Engine2D.draw_rect_list_filled(rects: [i32], colors: [u32])` —
+  frozen host layout `rects[4k..4k+4]`, `colors[k]`. At `n >= 2` it becomes ONE
+  compute dispatch reading a GPU storage buffer; below that, and on any decline,
+  the F4 per-rect host loop runs with identical pixels.
+  Observables: `vulkan_last_frame_dispatch_count()` (rect/framebuffer lanes only,
+  read AFTER finalize) and `vulkan_rect_batch_fallback_reason()` (`""` = installed).
+- Pinned shader: edit `shaders/rect_batch.comp`, then ALWAYS
+  `sh scripts/tool/gen-rect-batch-spirv.shs`, then
+  `sh scripts/check/check-rect-batch-spirv-pinned.shs` (fail-closed; no
+  glslangValidator = ERROR). The `.spv` is never committed. The pin catches a
+  stale blob, NOT a semantic change — the painter-order example in
+  `backend_vulkan_rect_batch_edges_spec.spl` is what catches that.
+- Open, wall clock is FLAT at 900x760/64 (6.663 -> 6.686 ms): `copy_to_buffer`
+  is its OWN blocking queue submit (`vulkan/buffer.rs:338`), so the lane is not
+  one submit per frame; host `[u8]` packing has no typed-upload alternative; the
+  per-pixel walk is O(bbox x N). All three in
+  `doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md`.
+
+## CPU<->GPU boundary fix campaign (F1/F2, same day)
+
+Plan: `doc/03_plan/ui/gpu_offload/web_vulkan_cpu_gpu_boundary_fix_plan_2026-09-11.md`;
+census: `doc/01_research/ui/gpu_offload/cpu_gpu_boundary_census_2026-09-11.md`.
+
+- **Device verification pattern**: `SIMPLE_EXECUTION_MODE=interpreter
+  SIMPLE_TIMEOUT_SECONDS=0 bin/release/aarch64-apple-darwin-macho/simple run
+  <spec>` (resolved triple for the host), reading
+  `observed_device_submit_count` / `observed_device_fence_count` after
+  `finalize_compute_frame_no_readback()` — never a static/no-op count.
+- **Zero-length-readback vs pixel-mismatch lesson**: `vk2d_bench.spl` used to
+  print a hardcoded `status=blocked reason=unconditional-submit-wait` string
+  regardless of backend behaviour (fixed:
+  `doc/08_tracking/bug/vk2d_bench_hardcoded_block_reason_2026-09-11.md`; now
+  `vk2d_verdict()` computes the verdict from real fence-completion counts). A
+  run with 0 frames or a fence/frame mismatch is `status=blocked
+  reason=zero-frames`/`multi-submit-per-frame:N` — never silently reported as
+  a passing pixel comparison. That is distinct from a genuine pixel MISMATCH
+  (comparator ran, values disagree): a zero-length readback is an evidence
+  gap, not a correctness verdict, and must never be laundered into `passed`.
+- **F1** (route-key re-arm): `_web_draw_ir_key` was keyed on a per-mutation
+  counter so the sampler route re-armed on every composition generation even
+  when geometry didn't change — fixed, see
+  `doc/08_tracking/bug/web_draw_ir_sampler_rearms_on_generation_2026-09-11.md`.
+- **F2** (mid-frame fences): `draw_text_bg` used to fence-wait before every
+  background band on a mistaken pipeline-barrier premise (21 submits/21
+  fences for 300 rects + 20 bands); `rt_vulkan_dispatch` already inserts a
+  `VkMemoryBarrier` on every dispatch, so the extra fence was redundant and is
+  now deleted (1 submit/1 fence) — see
+  `doc/08_tracking/bug/vulkan_backend_midframe_fence_and_clip_text_fallback_2026-09-11.md`.
+- **Runtime-owned blockers still open** (not fixable in pure Simple without a
+  runtime/SFFI change) — read these two bug docs directly rather than trusting
+  a paraphrase here: `doc/08_tracking/bug/engine2d_vulkan_pixels_upload_slower_than_cpu_2026-09-11.md`
+  and `doc/08_tracking/bug/indexed_field_assignment_unsupported_2026-09-11.md`.
+
+## R1 round 2 — root cause, opt-in typed upload, wall clock (2026-09-11)
+
+- **R1 root cause found**: a pooled `Engine2D` resumed the next frame with
+  `pending_compute_command` still naming the PREVIOUS frame's already-freed
+  command buffer, so `rt_vulkan_bind_pipeline` refused it and the backend
+  latched `cpu_fallback`. Fix: `slot.engine.vulkan_discard_stale_pending_compute()`
+  at the pool acquire site. Same family as
+  `doc/08_tracking/bug/class_instances_copy_on_bind_and_for_loop_drops_mutation_2026-08-04.md`
+  (class-field write-back dropped on bind) — the fix only clears the
+  pending-compute fields it knows about, so any OTHER `VulkanBackend` field can
+  rewind the same way and would not be caught.
+- Route authorization is now proven correct by `probe_authorize.spl`, but the
+  real page-render path still reports `timing-unavailable` — proof and use
+  diverge, do not conflate them.
+- New typed-upload lane is opt-in: `SIMPLE_VK_RECT_UPLOAD=u32`. WHY opt-in, not
+  default: an unknown extern is an uncatchable interpreter abort, so the fast
+  path must not run unless explicitly requested.
+- A fresh seed for this lane needs `--features vulkan,vulkan-graphics`.
+- Honest wall clock: 900x760 steady-state 7.2s GPU vs 7.9s CPU; 4K cold start
+  87.7s. The bottleneck is interpreter-bound Draw IR/layout, not raster —
+  do not read the GPU win as proof the raster path is fast end-to-end.
+
+- **CPU<->GPU boundary audit gate (2026-09-12):**
+  `scripts/check/check-web-vulkan-gpu-boundary-audit.shs` + aggregator
+  `src/app/ui/chrome_showcase/gpu_boundary_audit.spl` + spec
+  `test/01_unit/app/ui/gpu_boundary_audit_spec.spl`; bootstrap row
+  `web-vulkan-gpu-boundary-audit-selftest`. Emits `submits_per_frame`,
+  `readbacks_per_frame`, `host_pixel_iterations`, `uploads_per_frame`,
+  `atlas_full_repacks`, `fence_waits` and a PASS/FAIL/ERROR verdict.
+  **Read the counters from the `sffi_*` vk-timing buckets, never the pooled-slot
+  census fields** — `submits=`/`fences=` there read 0 against 17 real submits.
+  Two fail-closed rules a future change must not soften: a disarmed
+  `SIMPLE_VK_TIMING` and a `backend_reported` that is not `vulkan` both ERROR,
+  because every boundary counter would otherwise be a structural zero and PASS.
+  Measured result:
+  `doc/10_metrics/ui/web_4k_showcase_gpu_boundary_audit_macos_2026-09-12.md` —
+  the boundary is already node-scaled (identical counts at 900x760 and 4K); only
+  `readback_bytes` scales with pixels.
+
+## CPU<->GPU boundary audit gate — invariants, env, pinned kernels (2026-09-12)
+
+`scripts/check/check-web-vulkan-gpu-boundary-audit.shs` PASS requires, per
+frame: `submits_per_frame=1`, `readbacks_per_frame=1`,
+`host_pixel_iterations=0`, no `atlas_full_repacks` outside the first frame, and
+a `backend_reported=vulkan` with `SIMPLE_VK_TIMING` armed (a disarmed timing
+env or a non-vulkan backend both ERROR, never PASS — see the fail-closed rules
+above). All read from the `sffi_*` vk-timing buckets, never pooled-slot fields.
+Opt-in env (each an uncatchable interpreter abort if the extern is unknown, so
+none is default): `SIMPLE_VK_READBACK=native`, `SIMPLE_VK_IMAGE_UPLOAD=u32`,
+`SIMPLE_VK_RECT_UPLOAD=u32`, `SIMPLE_VK_FONT_UPLOAD=u32`.
+
+Pinned GLSL->SPIR-V kernels, one gate each (fail-closed; no
+`glslangValidator` = ERROR, `.spv` never committed): `rect_batch`
+(`check-rect-batch-spirv-pinned.shs`), `blit` (`check-blit-spirv-pinned.shs`),
+`blur_rect` (`check-blur-rect-spirv-pinned.shs`), `glass_material`
+(`check-glass-material-spirv-pinned.shs`). After editing a `.comp` shader,
+regen via `scripts/tool/gen-rect-batch-spirv.shs` (or the kernel's equivalent)
+before re-running its pin gate.
+
+`scripts/setup/build-gpu-seed.shs --verify` builds/verifies the Vulkan-feature
+seed these lanes need (plain `bin/simple` under `src/compiler_rust` lacks
+Vulkan features — not permission to substitute a Rust-seed run for a real
+renderer-perf measurement, see the admission traps above).
+
+4K numbers (2026-09-12, `doc/10_metrics/ui/web_4k_showcase_after_gpu_boundary_fixes_macos_2026-09-12.md`):
+overview lane PASSes at all three sizes (steady 902/933/979ms,
+`submits_per_frame=1`); the css-layout lane FAILs at all three sizes
+(`submits_per_frame=3`) — the boundary fix is not uniform across pages.
+
+Per-codepoint advance contract (`doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md`):
+`Engine2D.draw_text_with_advances_*` staged one text quad per UTF-8 BYTE
+against a per-CODEPOINT advance array, so a single multi-byte char (e.g. an em
+dash) desynced staging and blacked out the whole page. FIXED in text staging
+2026-09-12; a producer-side (browser-engine) fail-safe guard accepting both
+arities is still in place as containment and is a follow-up removal, not a bug.
+
+Lessons from today's bug records (measure before believing the brief):
+`gpu_seed_feature_set_drift_2026-09-12.md` — a seed built without the exact
+feature flags a lane expects silently degrades rather than erroring; verify
+`--features` at build time, not from memory of a prior build.
+`macos_deployed_test_runner_load_only_greenwash_2026-09-12.md` — a "PASS" from
+a load-only deployed test runner is not evidence of a real run; check which
+binary actually executed. `vk2d_bench_hardcoded_block_reason_2026-09-11.md`
+lineage: a hardcoded status string looked like a real verdict until someone
+read the computation behind it — the same trap this section's boundary-audit
+gate is designed to avoid by reading real vk-timing buckets, never a name.
 
 ## Update Rule
 

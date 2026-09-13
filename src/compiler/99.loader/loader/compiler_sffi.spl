@@ -10,6 +10,9 @@
 # - Template instantiation: Placeholder bytecode generation
 # - All implemented in Simple for self-hosting
 
+use common.string_builder.{StringBuilder}
+use common.text_advanced.{escape_json}
+
 # ============================================================================
 # Compiler Context Handle (Public API)
 # ============================================================================
@@ -43,6 +46,25 @@ impl CompilerContext:
 # Compiler Context Implementation (Internal)
 # ============================================================================
 
+val COMPILER_SFFI_CACHE_LIMIT: i64 = 4096
+
+fn sffi_type_tag_valid(tag: u8) -> bool:
+    tag == 0x00 or tag == 0x10 or tag == 0x11 or tag == 0x20 or
+        tag == 0x30 or tag == 0x40 or tag == 0x50 or tag == 0x60 or
+        tag == 0x70
+
+fn sffi_value_type_tag_valid(tag: u8) -> bool:
+    tag != 0x00 and sffi_type_tag_valid(tag)
+
+fn sffi_type_encoding_valid(ty: TypeInfo) -> bool:
+    if not sffi_value_type_tag_valid(_type_to_tag(ty)):
+        return false
+    if ty.has_bits and (ty.bits <= 0 or ty.bits > 64):
+        return false
+    if ty.has_lanes and (ty.lanes <= 0 or ty.lanes > 255):
+        return false
+    true
+
 class CompilerContextImpl:
     """Compiler context for type inference and template instantiation.
 
@@ -53,8 +75,38 @@ class CompilerContextImpl:
     """
     type_cache: Dict<text, [TypeInfo]>
     instantiation_cache: Dict<text, [u8]>
+    type_cache_keys: [text]
+    instantiation_cache_keys: [text]
+    type_cache_evict_index: i64
+    instantiation_cache_evict_index: i64
+    type_cache_count: i64
+    instantiation_cache_count: i64
     stats: ContextStats
     next_type_var: i64
+
+    me cache_inferred_types(key: text, inferred: [TypeInfo]):
+        if not self.type_cache.contains(key):
+            if self.type_cache_count >= COMPILER_SFFI_CACHE_LIMIT:
+                val victim = self.type_cache_keys[self.type_cache_evict_index]
+                self.type_cache = self.type_cache.remove(victim)
+                self.type_cache_keys[self.type_cache_evict_index] = key
+                self.type_cache_evict_index = (self.type_cache_evict_index + 1) % COMPILER_SFFI_CACHE_LIMIT
+            else:
+                self.type_cache_keys.push(key)
+                self.type_cache_count = self.type_cache_count + 1
+        self.type_cache[key] = inferred
+
+    me cache_instantiation(key: text, code: [u8]):
+        if not self.instantiation_cache.contains(key):
+            if self.instantiation_cache_count >= COMPILER_SFFI_CACHE_LIMIT:
+                val victim = self.instantiation_cache_keys[self.instantiation_cache_evict_index]
+                self.instantiation_cache = self.instantiation_cache.remove(victim)
+                self.instantiation_cache_keys[self.instantiation_cache_evict_index] = key
+                self.instantiation_cache_evict_index = (self.instantiation_cache_evict_index + 1) % COMPILER_SFFI_CACHE_LIMIT
+            else:
+                self.instantiation_cache_keys.push(key)
+                self.instantiation_cache_count = self.instantiation_cache_count + 1
+        self.instantiation_cache[key] = code
 
     me infer_types(tmpl: SffiTemplate, hints: [TypeHint]) -> [TypeInfo]:
         """Infer type arguments for a generic template.
@@ -67,7 +119,7 @@ class CompilerContextImpl:
             Inferred types for type parameters
         """
         # Check cache
-        val cache_key = "{tmpl.name}:{hints_to_key(hints)}"
+        val cache_key = inference_cache_key(tmpl, hints)
         if self.type_cache.contains(cache_key):
             self.stats.cache_hits = self.stats.cache_hits + 1
             return self.type_cache[cache_key]
@@ -77,38 +129,39 @@ class CompilerContextImpl:
 
         # Simple inference: extract types from hints
         var inferred: [TypeInfo] = []
+        var found_type: TypeInfo = nil
+        var found = false
 
-        for param in tmpl.type_params:
-            # Find hint for this parameter
-            var found_type: TypeInfo = nil
-            var found = false
+        for hint in hints:
+            if hint.source == "call_site":
+                found_type = hint.ty
+                found = true
+                break
 
-            for hint in hints:
-                if hint.source == "call_site":
-                    found_type = hint.ty
-                    found = true
-                    break
+        val inferred_type = if found:
+            found_type
+        else:
+            TypeInfo(
+                kind: "int",
+                name: "i64",
+                has_bits: true,
+                bits: 64,
+                has_signed: true,
+                signed: true,
+                has_lanes: false,
+                lanes: 0,
+                args: [],
+                has_elem: false,
+                elem: nil
+            )
 
-            if found:
-                inferred = inferred.push(found_type)
-            else:
-                # Default to i64 if no hint
-                inferred = inferred.push(TypeInfo(
-                    kind: "int",
-                    name: "i64",
-                    has_bits: true,
-                    bits: 64,
-                    has_signed: true,
-                    signed: true,
-                    has_lanes: false,
-                    lanes: 0,
-                    args: [],
-                    has_elem: false,
-                    elem: nil
-                ))
+        var param_index = 0
+        while param_index < tmpl.type_params.len():
+            inferred = inferred.push(inferred_type)
+            param_index = param_index + 1
 
         # Cache result
-        self.type_cache[cache_key] = inferred
+        self.cache_inferred_types(cache_key, inferred)
         inferred
 
     me instantiate_template(tmpl: SffiTemplate, type_args: [TypeInfo]) -> CompilationResult:
@@ -121,8 +174,32 @@ class CompilerContextImpl:
         Returns:
             Compilation result with code or error
         """
+        # Arity and indices are encoded as one byte. Reject impossible requests
+        # before allocating a structural key or touching cache statistics.
+        if tmpl.type_params.len() != type_args.len():
+            return CompilationResult(
+                success: false, code: [], has_error: true,
+                error: "template type argument arity mismatch"
+            )
+        if type_args.len() > 255:
+            return CompilationResult(
+                success: false, code: [], has_error: true,
+                error: "template type argument count exceeds bytecode limit"
+            )
+        if tmpl.has_return_type and not sffi_type_encoding_valid(tmpl.return_type):
+            return CompilationResult(
+                success: false, code: [], has_error: true,
+                error: "unsupported template return type"
+            )
+        for type_arg in type_args:
+            if not sffi_type_encoding_valid(type_arg):
+                return CompilationResult(
+                    success: false, code: [], has_error: true,
+                    error: "unsupported template type argument"
+                )
+
         # Check cache
-        val cache_key = "{tmpl.name}:{types_to_key(type_args)}"
+        val cache_key = instantiation_cache_key(tmpl, type_args)
         if self.instantiation_cache.contains(cache_key):
             self.stats.cache_hits = self.stats.cache_hits + 1
             return CompilationResult(
@@ -189,7 +266,7 @@ class CompilerContextImpl:
             code.push(_type_to_tag(ty))
 
         # Cache result
-        self.instantiation_cache[cache_key] = code
+        self.cache_instantiation(cache_key, code)
 
         CompilationResult(
             success: true,
@@ -221,6 +298,8 @@ class CompilerContextImpl:
         # Check FUNC_ENTRY header
         if code[0] != 0x00:
             return false  # Must start with FUNC_ENTRY
+        if not sffi_type_tag_valid(code[2]):
+            return false  # Invalid return type tag
 
         val param_count = code[1] as i64
 
@@ -229,36 +308,54 @@ class CompilerContextImpl:
         var found_body_start = false
         var found_func_exit = false
         var typed_params_seen = 0
+        var loads_seen = 0
+        var metadata_seen = 0
 
         while i < code_len:
             val opcode = code[i]
 
             if opcode == 0x01:
                 # TYPED_PARAM: tag(1) size(1)
+                if found_body_start or found_func_exit:
+                    return false
                 if i + 2 >= code_len:
                     return false
                 val tag = code[i + 1]
-                val is_valid_tag = tag == 0x10 or tag == 0x20 or tag == 0x30 or tag == 0x40 or tag == 0x50 or tag == 0x00
-                if not is_valid_tag:
+                if not sffi_value_type_tag_valid(tag):
+                    return false
+                val size = code[i + 2]
+                if size != 1 and size != 2 and size != 4 and size != 8:
+                    return false
+                if typed_params_seen >= param_count:
                     return false
                 typed_params_seen = typed_params_seen + 1
                 i = i + 3
             elif opcode == 0x10:
                 # BODY_START
+                if found_body_start or found_func_exit or typed_params_seen != param_count:
+                    return false
                 found_body_start = true
                 i = i + 1
             elif opcode == 0x20:
                 # LOAD_TYPED: param_index(1) type_tag(1)
-                if not found_body_start:
+                if not found_body_start or found_func_exit:
                     return false
                 if i + 2 >= code_len:
                     return false
                 val param_idx = code[i + 1] as i64
-                if param_idx >= param_count:
-                    return false  # Param index out of range
+                if param_idx != loads_seen or param_idx >= param_count:
+                    return false  # Loads are complete and producer-ordered.
+                if not sffi_value_type_tag_valid(code[i + 2]):
+                    return false
+                val parameter_tag_offset = 4 + param_idx * 3
+                if code[i + 2] != code[parameter_tag_offset]:
+                    return false
+                loads_seen = loads_seen + 1
                 i = i + 3
             elif opcode == 0xFE:
                 # FUNC_EXIT
+                if not found_body_start or found_func_exit or loads_seen != param_count:
+                    return false
                 found_func_exit = true
                 i = i + 1
             elif opcode == 0xFF:
@@ -267,15 +364,24 @@ class CompilerContextImpl:
                     return false
                 if i + 1 >= code_len:
                     return false
+                if not sffi_value_type_tag_valid(code[i + 1]):
+                    return false
+                if metadata_seen >= param_count:
+                    return false
+                val parameter_tag_offset = 4 + metadata_seen * 3
+                if code[i + 1] != code[parameter_tag_offset]:
+                    return false
+                metadata_seen = metadata_seen + 1
                 i = i + 2  # tag follows
             else:
-                i = i + 1  # Unknown opcode, skip
+                return false
 
         # Must have BODY_START and FUNC_EXIT
         val valid_structure = found_body_start and found_func_exit
         # Param count must match
         val params_match = typed_params_seen == param_count
-        valid_structure and params_match
+        val metadata_matches = metadata_seen == param_count
+        valid_structure and params_match and loads_seen == param_count and metadata_matches
 
     fn get_stats() -> ContextStats:
         """Get statistics."""
@@ -342,7 +448,6 @@ struct CompilationResult:
 # ============================================================================
 
 var CONTEXT_REGISTRY: Dict<i64, CompilerContextImpl> = {}
-var CONTEXT_HANDLES: [i64] = []
 var NEXT_HANDLE: i64 = 1
 
 fn alloc_handle() -> i64:
@@ -352,16 +457,13 @@ fn alloc_handle() -> i64:
     handle
 
 fn context_registry_remove(handle: i64):
-    # ponytail: O(n) rebuild avoids generated CONTEXT_REGISTRY_dot_remove/keys;
-    # add a dict remove lowering fix if context destruction becomes hot.
-    var next_registry: Dict<i64, CompilerContextImpl> = {}
-    var next_handles: [i64] = []
-    for key in CONTEXT_HANDLES:
-        if key != handle:
-            next_registry[key] = CONTEXT_REGISTRY[key]
-            next_handles.push(key)
-    CONTEXT_REGISTRY = next_registry
-    CONTEXT_HANDLES = next_handles
+    CONTEXT_REGISTRY.remove(handle)
+
+fn compiler_context_registry_count() -> i64:
+    CONTEXT_REGISTRY.length()
+
+fn compiler_context_registry_index_words() -> i64:
+    CONTEXT_REGISTRY.length()
 
 # ============================================================================
 # Public API Functions
@@ -375,6 +477,12 @@ fn compiler_create_context() -> i64:
     val ctx = CompilerContextImpl(
         type_cache: {},
         instantiation_cache: {},
+        type_cache_keys: [],
+        instantiation_cache_keys: [],
+        type_cache_evict_index: 0,
+        instantiation_cache_evict_index: 0,
+        type_cache_count: 0,
+        instantiation_cache_count: 0,
         stats: ContextStats(
             type_inferences: 0,
             template_instantiations: 0,
@@ -386,7 +494,6 @@ fn compiler_create_context() -> i64:
 
     val handle = alloc_handle()
     CONTEXT_REGISTRY[handle] = ctx
-    CONTEXT_HANDLES.push(handle)
     handle
 
 fn create_compiler_context() -> i64:
@@ -484,6 +591,31 @@ fn compiler_instantiate_template(
     # Serialize result
     serialize_compilation_result(result)
 
+fn compiler_instantiate_template_typed(
+    handle: i64,
+    template_name: text,
+    type_params: [text],
+    types: [TypeInfo]
+) -> CompilationResult:
+    """In-process typed entrypoint; avoids JSON round trips for the JIT."""
+    if not CONTEXT_REGISTRY.contains(handle):
+        return CompilationResult(
+            success: false, code: [], has_error: true,
+            error: "Invalid context handle"
+        )
+
+    val ctx = CONTEXT_REGISTRY[handle]
+    val tmpl = SffiTemplate(
+        name: template_name,
+        type_params: type_params,
+        param_types: [],
+        has_return_type: false,
+        return_type: default_type_info()
+    )
+    val result = ctx.instantiate_template(tmpl, types)
+    CONTEXT_REGISTRY[handle] = ctx
+    result
+
 fn compiler_get_stats(handle: i64) -> text:
     """Get compiler context statistics.
 
@@ -499,7 +631,10 @@ fn compiler_get_stats(handle: i64) -> text:
     val ctx: CompilerContextImpl = CONTEXT_REGISTRY[handle]
     val stats = ctx.get_stats()
 
-    '{"type_inferences": {stats.type_inferences}, "template_instantiations": {stats.template_instantiations}, "cache_hits": {stats.cache_hits}, "cache_misses": {stats.cache_misses}}'
+    '{"type_inferences": ' + stats.type_inferences.to_string() +
+        ', "template_instantiations": ' + stats.template_instantiations.to_string() +
+        ', "cache_hits": ' + stats.cache_hits.to_string() +
+        ', "cache_misses": ' + stats.cache_misses.to_string() + '}'
 
 # ============================================================================
 # JSON Parsing Helpers
@@ -517,12 +652,24 @@ fn parse_template_json(json_text: text) -> SffiTemplate:
             if value.len() > 0:
                 type_params.push(value)
 
+    var param_types: [TypeInfo] = []
+    val param_types_body = sffi_json_field_array_body(json_text, "param_types")
+    if param_types_body.len() > 0:
+        param_types = parse_types_json("[" + param_types_body + "]")
+
+    val return_type_object = sffi_json_field_object(json_text, "return_type")
+    val has_return_type = return_type_object.len() > 0
+    val return_type = if has_return_type:
+        json_to_type_info_text(return_type_object)
+    else:
+        default_type_info()
+
     SffiTemplate(
         name: name,
         type_params: type_params,
-        param_types: [],
-        has_return_type: false,
-        return_type: default_type_info()
+        param_types: param_types,
+        has_return_type: has_return_type,
+        return_type: return_type
     )
 
 fn parse_hints_json(json_text: text) -> [TypeHint]:
@@ -535,6 +682,7 @@ fn parse_hints_json(json_text: text) -> [TypeHint]:
 
         var param_idx = 0
         val param_idx_opt = sffi_json_field_i64(elem, "param_index")
+        val has_param_idx = sffi_optional_i64_exists(param_idx_opt)
         if val parsed_param_idx = param_idx_opt:
             param_idx = parsed_param_idx
 
@@ -543,7 +691,10 @@ fn parse_hints_json(json_text: text) -> [TypeHint]:
         if ty_obj.len() > 0:
             ty = json_to_type_info_text(ty_obj)
 
-        hints.push(TypeHint(source: source, has_param_index: true, param_index: param_idx, ty: ty))
+        hints.push(TypeHint(
+            source: source, has_param_index: has_param_idx,
+            param_index: param_idx, ty: ty
+        ))
 
     hints
 
@@ -580,6 +731,18 @@ fn json_to_type_info_text(jv: text) -> TypeInfo:
     val has_signed_value = sffi_optional_bool_exists(signed_opt)
     val has_lanes_value = sffi_optional_i64_exists(lanes_opt)
 
+    var args: [TypeInfo] = []
+    val args_body = sffi_json_field_array_body(jv, "args")
+    if args_body.len() > 0:
+        args = parse_types_json("[" + args_body + "]")
+
+    val elem_object = sffi_json_field_object(jv, "elem")
+    val has_elem_value = elem_object.len() > 0
+    val elem_value = if has_elem_value:
+        json_to_type_info_text(elem_object)
+    else:
+        default_type_info()
+
     TypeInfo(
         kind: kind,
         name: resolved_name,
@@ -589,9 +752,9 @@ fn json_to_type_info_text(jv: text) -> TypeInfo:
         signed: signed_opt.unwrap_or(false),
         has_lanes: has_lanes_value,
         lanes: lanes_opt.unwrap_or(0),
-        args: [],
-        has_elem: false,
-        elem: nil
+        args: args,
+        has_elem: has_elem_value,
+        elem: elem_value
     )
 
 fn compiler_result_json_success(json_text: text) -> bool:
@@ -632,28 +795,140 @@ fn default_type_info() -> TypeInfo:
     )
 
 fn sffi_json_field_tail(json_text: text, key: text) -> text:
-    val marker = '"' + key + '"'
-    val key_idx = json_text.index_of(marker)
-    if key_idx < 0:
-        return ""
-    var tail = json_text[key_idx + marker.len():json_text.len()]
-    val colon_idx = tail.index_of(":")
-    if colon_idx < 0:
-        return ""
-    tail[colon_idx + 1:tail.len()].trim()
+    var object_depth = 0
+    var array_depth = 0
+    var index = 0
+    while index < json_text.len():
+        val ch = json_text[index:index + 1]
+        if ch == "\"":
+            val quote_start = index
+            index = index + 1
+            var escaped = false
+            while index < json_text.len():
+                val string_ch = json_text[index:index + 1]
+                if escaped:
+                    escaped = false
+                elif string_ch == "\\":
+                    escaped = true
+                elif string_ch == "\"":
+                    break
+                index = index + 1
+            if index >= json_text.len():
+                return ""
+            if object_depth == 1 and array_depth == 0:
+                var colon_index = index + 1
+                while colon_index < json_text.len() and (
+                    json_text[colon_index:colon_index + 1] == " " or
+                    json_text[colon_index:colon_index + 1] == "\n" or
+                    json_text[colon_index:colon_index + 1] == "\r" or
+                    json_text[colon_index:colon_index + 1] == "\t"):
+                    colon_index = colon_index + 1
+                if colon_index < json_text.len() and json_text[colon_index:colon_index + 1] == ":":
+                    val decoded_key = sffi_json_unquote(json_text[quote_start:index + 1])
+                    if decoded_key == key:
+                        return json_text[colon_index + 1:json_text.len()].trim()
+        elif ch == "{":
+            object_depth = object_depth + 1
+        elif ch == "}":
+            object_depth = object_depth - 1
+            if object_depth < 0:
+                return ""
+        elif ch == "[":
+            array_depth = array_depth + 1
+        elif ch == "]":
+            array_depth = array_depth - 1
+            if array_depth < 0:
+                return ""
+        index = index + 1
+    ""
 
 fn sffi_json_unquote(raw: text) -> text:
     val s = raw.trim()
-    if s.len() >= 2 and s.starts_with("\"") and s.ends_with("\""):
-        return s[1:s.len() - 1].replace("\\\"", "\"").replace("\\n", "\n")
-    s
+    if s.len() < 2 or not s.starts_with("\"") or not s.ends_with("\""):
+        return s
+    val body = s[1:s.len() - 1]
+    if body.index_of("\\") < 0:
+        return body
+    val builder = StringBuilder.new()
+    var index = 0
+    while index < body.len():
+        val ch = body[index:index + 1]
+        if ch != "\\":
+            builder.push(ch)
+            index = index + 1
+        else:
+            if index + 1 >= body.len():
+                return ""
+            val escaped = body[index + 1:index + 2]
+            if escaped == "\"" or escaped == "\\" or escaped == "/":
+                builder.push(escaped)
+                index = index + 2
+            elif escaped == "b":
+                builder.push(text.from_char_code(8))
+                index = index + 2
+            elif escaped == "f":
+                builder.push(text.from_char_code(12))
+                index = index + 2
+            elif escaped == "n":
+                builder.push("\n")
+                index = index + 2
+            elif escaped == "r":
+                builder.push("\r")
+                index = index + 2
+            elif escaped == "t":
+                builder.push("\t")
+                index = index + 2
+            elif escaped == "u" and index + 5 < body.len():
+                val code = sffi_json_hex4(body[index + 2:index + 6])
+                if code < 0:
+                    return ""
+                builder.push(text.from_char_code(code))
+                index = index + 6
+            else:
+                return ""
+    builder.build()
+
+fn sffi_json_hex_digit(ch: text) -> i64:
+    val code = ch.char_code_at(0)
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 65 and code <= 70:
+        return code - 55
+    if code >= 97 and code <= 102:
+        return code - 87
+    -1
+
+fn sffi_json_hex4(raw: text) -> i64:
+    if raw.len() != 4:
+        return -1
+    var value = 0i64
+    var index = 0
+    while index < 4:
+        val digit = sffi_json_hex_digit(raw[index:index + 1])
+        if digit < 0:
+            return -1
+        value = value * 16 + digit
+        index = index + 1
+    value
 
 fn sffi_json_field_text(json_text: text, key: text) -> text:
     val tail = sffi_json_field_tail(json_text, key)
     if not tail.starts_with("\""):
         return ""
     val rest = tail[1:tail.len()]
-    val end_idx = rest.index_of("\"")
+    var end_idx = -1
+    var escaped = false
+    var index = 0
+    while index < rest.len():
+        val ch = rest[index:index + 1]
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            end_idx = index
+            break
+        index = index + 1
     if end_idx < 0:
         return ""
     sffi_json_unquote('"' + rest[0:end_idx] + '"')
@@ -726,15 +1001,28 @@ fn sffi_json_balanced_body(tail: text, open_ch: text, close_ch: text) -> text:
     if not tail.starts_with(open_ch):
         return ""
     var depth = 0
+    var in_string = false
+    var escaped = false
     var i = 0
     while i < tail.len():
         val ch = tail[i:i + 1]
-        if ch == open_ch:
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+        elif ch == "\"":
+            in_string = true
+        elif ch == open_ch:
             depth = depth + 1
         elif ch == close_ch:
             depth = depth - 1
             if depth == 0:
                 return tail[1:i]
+            if depth < 0:
+                return ""
         i = i + 1
     ""
 
@@ -745,19 +1033,34 @@ fn sffi_json_object_array_items(json_text: text) -> [text]:
     var items: [text] = []
     var depth = 0
     var start = -1
+    var in_string = false
+    var escaped = false
     var i = 0
     while i < body.len():
         val ch = body[i:i + 1]
-        if ch == "{":
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+        elif ch == "\"":
+            in_string = true
+        elif ch == "{":
             if depth == 0:
                 start = i
             depth = depth + 1
         elif ch == "}":
             depth = depth - 1
+            if depth < 0:
+                return []
             if depth == 0 and start >= 0:
                 items = items.push(body[start:i + 1])
                 start = -1
         i = i + 1
+    if depth != 0 or in_string:
+        return []
     items
 
 # ============================================================================
@@ -776,7 +1079,7 @@ fn serialize_types_json(types: [TypeInfo]) -> text:
         parts = parts.push(ty_json)
 
     val joined = parts.join(",")
-    "[{joined}]"
+    "[" + joined + "]"
 
 fn serialize_type_json(ty: TypeInfo) -> text:
     """Serialize single type to JSON.
@@ -785,17 +1088,26 @@ fn serialize_type_json(ty: TypeInfo) -> text:
     """
     var fields: [text] = []
 
-    fields.push('"kind":"{ty.kind}"')
-    fields.push('"name":"{ty.name}"')
+    fields.push('"kind":"' + escape_json(ty.kind) + '"')
+    fields.push('"name":"' + escape_json(ty.name) + '"')
 
     if ty.has_bits:
-        fields.push('"bits":{ty.bits}')
+        fields.push('"bits":' + ty.bits.to_string())
 
     if ty.has_signed:
         var signed_str = "false"
         if ty.signed:
             signed_str = "true"
-        fields.push('"signed":{signed_str}')
+        fields.push('"signed":' + signed_str)
+
+    if ty.has_lanes:
+        fields.push('"lanes":' + ty.lanes.to_string())
+
+    if ty.args.len() > 0:
+        fields.push('"args":' + serialize_types_json(ty.args))
+
+    if ty.has_elem:
+        fields.push('"elem":' + serialize_type_json(ty.elem))
 
     val joined = fields.join(",")
     "{" + joined + "}"
@@ -809,30 +1121,131 @@ fn serialize_compilation_result(result: CompilationResult) -> text:
         val code_bytes = result.code
         var code_parts: [text] = []
         for code_byte in code_bytes:
-            code_parts = code_parts.push("{code_byte}")
+            code_parts = code_parts.push(code_byte.to_string())
         val code_str = code_parts.join(",")
-        '{"success":true,"code":[{code_str}]}'
+        '{"success":true,"code":[' + code_str + ']}'
     else:
-        val error = result.error.unwrap_or("Unknown error")
-        '{"success":false,"error":"{error}"}'
+        val error_text = if result.has_error: result.error else: "Unknown error"
+        '{"success":false,"error":"' + escape_json(error_text) + '"}'
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
 fn hints_to_key(hints: [TypeHint]) -> text:
-    """Convert hints to cache key."""
-    var parts: [text] = []
-    for h in hints:
-        parts = parts.push("{h.source}:{h.param_index.unwrap_or(0)}")
-    parts.join(":")
+    """Encode ordered hint identity, including presence and structural type."""
+    val builder = StringBuilder.new()
+    append_hints_cache_key(builder, hints)
+    builder.build()
+
+fn append_hints_cache_key(builder: StringBuilder, hints: [TypeHint]):
+    """Append ordered structural hints to a shared cache-key builder."""
+    builder.push(hints.len().to_string())
+    builder.push(":")
+    for hint in hints:
+        builder.push(sffi_cache_key_field(hint.source))
+        if hint.has_param_index:
+            builder.push("p1")
+            builder.push(sffi_cache_key_field(hint.param_index.to_string()))
+        else:
+            builder.push("p0")
+        append_type_cache_key(builder, hint.ty)
+
+fn sffi_cache_key_field(value: text) -> text:
+    """Frame one cache-key field so embedded delimiters cannot collide."""
+    value.len().to_string() + "#" + value
+
+fn append_type_cache_key(builder: StringBuilder, ty: TypeInfo):
+    """Append structural TypeInfo identity without copying nested subtrees."""
+    builder.push("t{")
+    builder.push(sffi_cache_key_field(ty.kind))
+    builder.push(sffi_cache_key_field(ty.name))
+
+    if ty.has_bits:
+        builder.push("b1")
+        builder.push(sffi_cache_key_field(ty.bits.to_string()))
+    else:
+        builder.push("b0")
+    if ty.has_signed:
+        val signed_value = if ty.signed: "1" else: "0"
+        builder.push("s1")
+        builder.push(signed_value)
+    else:
+        builder.push("s0")
+    if ty.has_lanes:
+        builder.push("l1")
+        builder.push(sffi_cache_key_field(ty.lanes.to_string()))
+    else:
+        builder.push("l0")
+
+    builder.push("a")
+    builder.push(ty.args.len().to_string())
+    builder.push(":")
+    for arg in ty.args:
+        append_type_cache_key(builder, arg)
+
+    if ty.has_elem:
+        builder.push("e1")
+        append_type_cache_key(builder, ty.elem)
+    else:
+        builder.push("e0")
+    builder.push("}")
+
+fn type_to_cache_key(ty: TypeInfo) -> text:
+    """Encode every semantic TypeInfo field for specialization identity."""
+    val builder = StringBuilder.new()
+    append_type_cache_key(builder, ty)
+    builder.build()
 
 fn types_to_key(types: [TypeInfo]) -> text:
-    """Convert types to cache key."""
-    var parts: [text] = []
-    for t in types:
-        parts = parts.push("{t.kind}:{t.name}")
-    parts.join(":")
+    """Convert an ordered type list to an unambiguous structural cache key."""
+    val builder = StringBuilder.new()
+    append_types_cache_key(builder, types)
+    builder.build()
+
+fn append_types_cache_key(builder: StringBuilder, types: [TypeInfo]):
+    """Append an ordered structural type list to a shared key builder."""
+    builder.push(types.len().to_string())
+    builder.push(":")
+    for ty in types:
+        append_type_cache_key(builder, ty)
+
+fn append_template_cache_key(builder: StringBuilder, tmpl: SffiTemplate):
+    """Append every template field that can affect inference or bytecode."""
+    builder.push("m{")
+    builder.push(sffi_cache_key_field(tmpl.name))
+    builder.push("g")
+    builder.push(tmpl.type_params.len().to_string())
+    builder.push(":")
+    for type_param in tmpl.type_params:
+        builder.push(sffi_cache_key_field(type_param))
+    builder.push("p")
+    append_types_cache_key(builder, tmpl.param_types)
+    if tmpl.has_return_type:
+        builder.push("r1")
+        append_type_cache_key(builder, tmpl.return_type)
+    else:
+        builder.push("r0")
+    builder.push("}")
+
+fn template_to_cache_key(tmpl: SffiTemplate) -> text:
+    val builder = StringBuilder.new()
+    append_template_cache_key(builder, tmpl)
+    builder.build()
+
+fn inference_cache_key(tmpl: SffiTemplate, hints: [TypeHint]) -> text:
+    val builder = StringBuilder.new()
+    append_template_cache_key(builder, tmpl)
+    builder.push("h")
+    append_hints_cache_key(builder, hints)
+    builder.build()
+
+fn instantiation_cache_key(tmpl: SffiTemplate, types: [TypeInfo]) -> text:
+    val builder = StringBuilder.new()
+    append_template_cache_key(builder, tmpl)
+    builder.push("i")
+    append_types_cache_key(builder, types)
+    builder.build()
 
 fn type_to_string(ty: TypeInfo) -> text:
     """Convert TypeInfo to a string representation for name mangling.
@@ -855,15 +1268,24 @@ fn make_int_type(bits: i64, signed: bool) -> TypeInfo:
     var prefix = "u"
     if signed:
         prefix = "i"
-    TypeInfo(kind: "int", name: "{prefix}{bits}", bits: bits, signed: signed, lanes: nil, args: [], elem: nil)
+    var result = TypeInfo(kind: "int", name: "{prefix}{bits}", bits: bits, signed: signed, lanes: nil, args: [], elem: nil)
+    result.has_bits = true
+    result.has_signed = true
+    result
 
 fn make_float_type(bits: i64) -> TypeInfo:
     """Create a float TypeInfo."""
-    TypeInfo(kind: "float", name: "f{bits}", bits: bits, signed: nil, lanes: nil, args: [], elem: nil)
+    var result = TypeInfo(kind: "float", name: "f{bits}", bits: bits, signed: nil, lanes: nil, args: [], elem: nil)
+    result.has_bits = true
+    result.has_signed = false
+    result
 
 fn make_bool_type() -> TypeInfo:
     """Create a bool TypeInfo."""
-    TypeInfo(kind: "bool", name: "bool", bits: nil, signed: nil, lanes: nil, args: [], elem: nil)
+    var result = TypeInfo(kind: "bool", name: "bool", bits: 1, signed: nil, lanes: nil, args: [], elem: nil)
+    result.has_bits = true
+    result.bits = 1
+    result
 
 fn make_string_type() -> TypeInfo:
     """Create a string TypeInfo."""

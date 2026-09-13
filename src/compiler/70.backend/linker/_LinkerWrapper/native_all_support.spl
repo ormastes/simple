@@ -60,7 +60,10 @@ fn native_all_gnu_support_args(inputs: [text], os: text, macos_prefix: text) -> 
     if not native_all_input_present(inputs):
         return []
     if os == "linux":
-        return ["-u", "rt_vulkan_provider_is_available", "-lstdc++", "-lunwind", "-lsqlite3", "-lz", "-lzstd", "-ltinfo", "-lffi", "-lxml2", "-lncurses"]
+        # No `-lunwind`: the unwinder symbols std/libstdc++ reference are
+        # `@GCC_*`-versioned and defined only by libgcc_s.so.1 (auto-added by the
+        # compiler driver). libunwind.so.8 defines zero `_Unwind_*`.
+        return ["-u", "rt_vulkan_provider_is_available", "-lstdc++", "-lsqlite3", "-lz", "-lzstd", "-ltinfo", "-lffi", "-lxml2", "-lncurses"]
     if os == "macos" or os == "darwin":
         return [
             "-u", "_rt_vulkan_provider_is_available", "-L" + macos_prefix + "/lib", "-lc++", "-lz", "-lffi", "-ledit", "-lzstd", "-lxml2", "-lncurses", "-lobjc", "-liconv",
@@ -90,3 +93,74 @@ fn native_all_msvc_support_libraries(inputs: [text]) -> [text]:
         "ncrypt.lib", "iphlpapi.lib", "d3d11.lib", "dxgi.lib", "user32.lib", "gdi32.lib",
         "ucrt.lib", "msvcrt.lib", "vcruntime.lib"
     ]
+
+# ---------------------------------------------------------------------------
+# Target-keyed standard library / CRT table.
+#
+# Before 2026-09-13 every arm of the native link built a Linux-shaped line
+# (`-lc -lpthread -ldl -lm`, crt objects, `-dynamic-linker`) and the darwin arms
+# inherited `-lc` from it. macOS ships no `libc` to link against — libSystem is
+# the C library — so the macOS Stage 2 sanity link died with
+# `ld: library 'c' not found`, right after
+# `ld: warning: ignoring duplicate libraries: '-lSystem'` (the clang driver
+# already appends `-lSystem`, so the Simple side must not add it again).
+# See doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md.
+#
+# `mode` selects the emission site, because the GNU cc arm interleaves the
+# support args between two library chunks and must stay byte-identical:
+#   "ld"      — direct linker invocation (ld.lld/mold/ld64), one contiguous run
+#   "cc-pre"  — compiler-driver fallback, chunk emitted before the support args
+#   "cc-post" — compiler-driver fallback, chunk emitted after the support args
+fn native_link_os_key(os: text) -> text:
+    if os == "macos" or os == "darwin" or os == "Darwin": return "darwin"
+    if os == "freebsd": return "freebsd"
+    if os == "linux": return "linux"
+    os
+
+pub fn native_link_uses_crt_objects(os: text) -> bool:
+    """True when the target links explicit crt1/crti/crtbegin objects and a
+    `-dynamic-linker`. Darwin does not: ld64 gets its entry glue from
+    libSystem, so a missing CRT set there is normal, not a link profile error."""
+    val key = native_link_os_key(os)
+    key == "linux" or key == "freebsd"
+
+pub fn native_link_std_lib_args(os: text, mode: text) -> [text]:
+    """Standard-library flags for one target and one emission site."""
+    val key = native_link_os_key(os)
+    if key == "darwin":
+        # No -lc/-lm/-lpthread: libSystem provides all three on macOS and only
+        # libSystem exists as a link target. sdl2-compat lives in the Homebrew
+        # lib dir, which is not on the default search path.
+        if mode == "ld":
+            # Direct ld64: nobody else supplies libSystem, so name it exactly once.
+            return ["-L", "/opt/homebrew/lib", "-L", "/usr/local/lib", "-lSystem", "-lSDL2"]
+        if mode == "cc-pre":
+            # The clang driver appends -lSystem itself; adding ours produced the
+            # "ignoring duplicate libraries: '-lSystem'" warning.
+            return ["-L", "/opt/homebrew/lib", "-L", "/usr/local/lib", "-lSDL2"]
+        return []
+    if key == "freebsd":
+        if mode == "ld":
+            return ["-lc", "-lpthread", "--as-needed", "-lm", "-lSDL2", "--no-as-needed"]
+        if mode == "cc-pre":
+            return ["-lc", "-lpthread", "-Wl,--as-needed", "-lm", "-lSDL2", "-Wl,--no-as-needed"]
+        return []
+    # linux, and the GNU cc catch-all for unkeyed hosted targets.
+    # -lSDL2 is deliberately ABSENT: runtime_sdl2.c dlopens SDL at first use, so
+    # the runtime archive carries zero undefined SDL_* symbols and hosts without
+    # the SDL2 dev package must still link.
+    # doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
+    if mode == "ld":
+        if key != "linux": return []
+        return ["-lc", "-lpthread", "-ldl", "--as-needed", "-lm", "--no-as-needed"]
+    if mode == "cc-pre":
+        return ["-lc", "-lpthread", "-ldl"]
+    ["-Wl,--as-needed", "-lm", "-Wl,--no-as-needed"]
+
+pub fn native_link_shared_std_libs(os: text) -> [text]:
+    """Standard libraries for a SHARED library link line (no SDL, no -L)."""
+    val key = native_link_os_key(os)
+    if key == "linux": return ["-lc", "-lpthread", "-ldl", "-lm"]
+    if key == "darwin": return ["-lSystem"]
+    if key == "freebsd": return ["-lc", "-lpthread", "-lm"]
+    []

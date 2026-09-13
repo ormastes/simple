@@ -1,4 +1,5 @@
 # CPU hot-loop idiom gate: red at new=158, and the number is key churn, not new debt
+**Status:** OPEN (unverified 2026-09-12)
 
 - **Date:** 2026-08-01
 - **Guard:** `scripts/check/check-cpu-hotloop-idiom.shs`
@@ -391,3 +392,6 @@ numbers describe the pure-Simple self-hosted tool.
   "ratchets clean on the real designated file set", asserts `new=0` and is
   therefore RED for as long as §6's paydown is open. That is the gate working as
   designed, not a spec defect — do not relax the assertion to make it pass.
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

@@ -1,4 +1,5 @@
 # A trait-typed field call (`self.backend.<m>()`) has no vtable on the freestanding native lane
+**Status:** OPEN (unverified 2026-09-12)
 
 - Date: 2026-08-05
 - Lane: freestanding `--target x86_64-unknown-none --backend cranelift
@@ -186,3 +187,6 @@ because it needs its own boot verification.
 
 Related: `jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`,
 `native_with_trait_impl_no_vtable_duck_trap_2026-07-28.md`.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

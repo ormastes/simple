@@ -1,0 +1,110 @@
+# RenderDoc web differential capture lane.
+#
+# Produces RenderDoc .rdc captures for BOTH sides of the web-renderer
+# differential on a GPU-less ubuntu-latest runner, using Mesa lavapipe as the
+# software Vulkan ICD (RenderDoc captures lavapipe fine).
+#
+# NEVER a required check. Triggers are workflow_dispatch plus a path-filtered
+# pull_request, deliberately: the CI queue is slow and the baseline carries
+# many red jobs, so this lane must not add load to unrelated PRs.
+name: RenderDoc Web Diff
+
+on:
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: "Space-separated catalog page names"
+        required: false
+        default: "overview css-layout"
+  pull_request:
+    paths:
+      - 'src/lib/gc_async_mut/gpu/engine2d/**'
+      - 'src/lib/**/browser_engine/**'
+      - 'examples/06_io/ui/web_catalog/**'
+      - 'scripts/tool/renderdoc-*'
+      - 'scripts/check/check-renderdoc-web-*'
+      - 'scripts/setup/setup-renderdoc-linux-lavapipe.shs'
+      - '.github/workflows/renderdoc-web-diff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Capture (lavapipe, 2 pages)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Classifier selftest (fatal, no tools needed)
+        run: sh scripts/check/check-renderdoc-web-capture-lane.shs --selftest
+
+      - name: Cache the Rust seed target dir
+        uses: actions/cache@v4
+        with:
+          path: src/compiler_rust/target
+          key: renderdoc-seed-${{ runner.os }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: renderdoc-seed-${{ runner.os }}-
+
+      # `renderdoc` is not in the Ubuntu noble archive, so the setup script
+      # builds a Vulkan-only RenderDoc from source (~10-20 min). Cache the
+      # installed tree so only the first run on a given ref pays for it.
+      # restore/save are SPLIT deliberately: actions/cache@v4's implicit save
+      # runs only when the job SUCCEEDS, and this lane is expected to fail on
+      # first contact -- which would throw the build away every single run.
+      # The save below is `if: always()`, so the build survives a red lane.
+      - name: Restore the Vulkan-only RenderDoc build
+        id: rdoc-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/tools/renderdoc-linux-vulkan-only
+          key: renderdoc-vulkanonly-${{ runner.os }}-v1.44-py
+
+      - name: Provision lavapipe + RenderDoc + Chrome
+        run: sh scripts/setup/setup-renderdoc-linux-lavapipe.shs
+
+      # The `simple` bin lives in the simple-driver package; `vulkan` is the
+      # feature that reaches simple-compiler/simple-runtime (vulkan-graphics is
+      # a compiler-crate feature and is pulled in transitively there).
+      # UNVERIFIED on Linux from this macOS host -- if it fails, the lane still
+      # runs and reports ERROR (simple-binary-unavailable) rather than passing.
+      - name: Build the Simple binary that runs the web renderer
+        continue-on-error: true
+        working-directory: src/compiler_rust
+        run: |
+          set -eu
+          cargo build --release --bin simple -p simple-driver --features vulkan
+          mkdir -p ../../bin/release/x86_64-unknown-linux-gnu
+          cp target/release/simple ../../bin/release/x86_64-unknown-linux-gnu/simple
+
+      - name: Capture both sides
+        id: capture
+        env:
+          RDOC_WEB_PAGES: ${{ github.event.inputs.pages || 'overview css-layout' }}
+        run: |
+          set -eu
+          args=""
+          for p in $RDOC_WEB_PAGES; do args="$args --page $p"; done
+          # shellcheck disable=SC2086
+          sh scripts/check/check-renderdoc-web-capture-lane.shs $args
+
+      - name: Save the Vulkan-only RenderDoc build
+        if: always() && steps.rdoc-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/tools/renderdoc-linux-vulkan-only
+          key: renderdoc-vulkanonly-${{ runner.os }}-v1.44-py
+
+      - name: Show receipt
+        if: always()
+        run: cat build/renderdoc/receipt.env || echo "no receipt produced"
+
+      - name: Upload captures, events, diff and receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderdoc-web-diff
+          path: build/renderdoc/**
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,4 +1,5 @@
 # Coverage collector never records top-level `val`/`pub val` initializers, `match` heads, expression-position `if` heads, or certain executed `return`/`break` statements
+**Status:** RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/browser_engine/layout_table_coverage_closure_spec.spl` now PASSes)
 
 - **Date:** 2026-08-15
 - **Area:** interpreter coverage collector (`SIMPLE_COVERAGE=1` lane; reporter in
@@ -79,3 +80,6 @@ SIMPLE_COVERAGE=1 bin/simple test --coverage \
 # -> coverage: .../layout_table.spl 96% (96/99), coverage-branch 94% (32/34)
 # lines 97/109/175 are the three tail if-expressions, both branches taken.
 ```
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/browser_engine/layout_table_coverage_closure_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

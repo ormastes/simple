@@ -1,0 +1,51 @@
+# Deterministic append-compatible schema comparison.
+
+use tool.kernel_plugin_schema.model.{KpfCompatibilityReport, KpfInterfaceIr, KpfOperationIr, KpfPackageIr}
+
+fn _find_interface(items: [KpfInterfaceIr], name: text) -> Option<KpfInterfaceIr>:
+    for item in items:
+        if item.name == name:
+            return Some(item)
+    None
+
+fn _find_operation(items: [KpfOperationIr], name: text) -> Option<KpfOperationIr>:
+    for item in items:
+        if item.name == name:
+            return Some(item)
+    None
+
+fn _operation_index(items: [KpfOperationIr], name: text) -> i64:
+    var index = 0
+    for item in items:
+        if item.name == name:
+            return index
+        index = index + 1
+    -1
+
+fn _incompatible(reason: text) -> KpfCompatibilityReport:
+    KpfCompatibilityReport(compatible: false, summary: "incompatible: {reason}")
+
+# Check whether current is an append-compatible successor of previous.
+# Results are deterministic because both package IRs are canonically sorted.
+pub fn check_kpf_compatibility(previous: KpfPackageIr, current: KpfPackageIr) -> KpfCompatibilityReport:
+    if previous.package_name != current.package_name:
+        return _incompatible("package changed from {previous.package_name} to {current.package_name}")
+    for previous_interface in previous.interfaces:
+        val current_interface = match _find_interface(current.interfaces, previous_interface.name):
+            case Some(item): item
+            case None: return _incompatible("removed interface {previous_interface.name}")
+        if previous_interface.major != current_interface.major:
+            return _incompatible("interface {previous_interface.name} major changed")
+        if previous_interface.interface_id != current_interface.interface_id:
+            return _incompatible("interface {previous_interface.name} identity changed")
+        for previous_operation in previous_interface.operations:
+            val current_operation = match _find_operation(current_interface.operations, previous_operation.name):
+                case Some(item): item
+                case None: return _incompatible("removed operation {previous_interface.name}.{previous_operation.name}")
+            if previous_operation.operation_id != current_operation.operation_id:
+                return _incompatible("operation {previous_interface.name}.{previous_operation.name} identity changed")
+            if _operation_index(previous_interface.operations, previous_operation.name) != _operation_index(current_interface.operations, previous_operation.name):
+                return _incompatible("operation {previous_interface.name}.{previous_operation.name} slot changed")
+            if not previous_operation.required and current_operation.required:
+                return _incompatible("optional operation {previous_interface.name}.{previous_operation.name} became required")
+    KpfCompatibilityReport(compatible: true, summary: "compatible: append-only schema evolution")

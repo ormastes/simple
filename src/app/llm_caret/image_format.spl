@@ -1,0 +1,184 @@
+# codex-impl
+# Lossless, bounded image-container inspection shared by local and proxy admission.
+
+struct ImageFormatInfoV1:
+    mime_type: text
+    width: i64
+    height: i64
+    error: text
+
+fn _invalid_image_format_v1(message: text) -> ImageFormatInfoV1:
+    ImageFormatInfoV1(mime_type: "", width: 0, height: 0, error: message)
+
+fn _u16_be_v1(raw: [u8], offset: i64) -> i64:
+    raw[offset] as i64 * 256 + raw[offset + 1] as i64
+
+fn _u24_le_v1(raw: [u8], offset: i64) -> i64:
+    raw[offset] as i64 + raw[offset + 1] as i64 * 256 + raw[offset + 2] as i64 * 65536
+
+fn _u32_be_v1(raw: [u8], offset: i64) -> i64:
+    raw[offset] as i64 * 16777216 + raw[offset + 1] as i64 * 65536 +
+        raw[offset + 2] as i64 * 256 + raw[offset + 3] as i64
+
+fn _u32_le_v1(raw: [u8], offset: i64) -> i64:
+    _u24_le_v1(raw, offset) + raw[offset + 3] as i64 * 16777216
+
+fn _png_crc_v1(raw: [u8], start: i64, length: i64) -> i64:
+    var crc: i64 = 4294967295
+    var index = start
+    while index < start + length:
+        crc = crc ^ (raw[index] as i64)
+        var bit = 0
+        while bit < 8:
+            if (crc & 1) != 0: crc = (crc >> 1) ^ 3988292384
+            else: crc = crc >> 1
+            bit = bit + 1
+        index = index + 1
+    (crc ^ 4294967295) & 4294967295
+
+fn inspect_png_bytes_v1(raw: [u8]) -> ImageFormatInfoV1:
+    if raw.len() < 45 or raw[0] != 137 or raw[1] != 80 or raw[2] != 78 or
+            raw[3] != 71 or raw[4] != 13 or raw[5] != 10 or raw[6] != 26 or raw[7] != 10:
+        return _invalid_image_format_v1("invalid PNG signature or truncated container")
+    var offset: i64 = 8
+    var first = true
+    var saw_iend = false
+    var saw_idat = false
+    var width: i64 = 0
+    var height: i64 = 0
+    while offset + 12 <= raw.len():
+        val length = _u32_be_v1(raw, offset)
+        if length > raw.len() - offset - 12: return _invalid_image_format_v1("PNG chunk exceeds container")
+        val type_offset = offset + 4
+        val is_ihdr = raw[type_offset] == 73 and raw[type_offset + 1] == 72 and raw[type_offset + 2] == 68 and raw[type_offset + 3] == 82
+        val is_iend = raw[type_offset] == 73 and raw[type_offset + 1] == 69 and raw[type_offset + 2] == 78 and raw[type_offset + 3] == 68
+        val is_idat = raw[type_offset] == 73 and raw[type_offset + 1] == 68 and raw[type_offset + 2] == 65 and raw[type_offset + 3] == 84
+        if first and (not is_ihdr or length != 13): return _invalid_image_format_v1("PNG IHDR must be first and 13 bytes")
+        if not first and is_ihdr: return _invalid_image_format_v1("PNG contains duplicate IHDR")
+        if first:
+            width = _u32_be_v1(raw, offset + 8)
+            height = _u32_be_v1(raw, offset + 12)
+            val bit_depth = raw[offset + 16] as i64
+            val color_type = raw[offset + 17] as i64
+            val legal_depth = (color_type == 0 and (bit_depth == 1 or bit_depth == 2 or bit_depth == 4 or bit_depth == 8 or bit_depth == 16)) or
+                (color_type == 2 and (bit_depth == 8 or bit_depth == 16)) or
+                (color_type == 3 and (bit_depth == 1 or bit_depth == 2 or bit_depth == 4 or bit_depth == 8)) or
+                ((color_type == 4 or color_type == 6) and (bit_depth == 8 or bit_depth == 16))
+            if not legal_depth or raw[offset + 18] != 0 or raw[offset + 19] != 0 or
+                    (raw[offset + 20] != 0 and raw[offset + 20] != 1):
+                return _invalid_image_format_v1("invalid PNG IHDR fields")
+        if is_idat:
+            if length == 0: return _invalid_image_format_v1("empty PNG IDAT")
+            saw_idat = true
+        if _png_crc_v1(raw, type_offset, length + 4) != _u32_be_v1(raw, offset + 8 + length):
+            return _invalid_image_format_v1("PNG chunk CRC mismatch")
+        offset = offset + 12 + length
+        first = false
+        if is_iend:
+            if length != 0 or offset != raw.len() or not saw_idat:
+                return _invalid_image_format_v1("invalid PNG IEND or missing IDAT")
+            saw_iend = true
+            break
+    if not saw_iend or width <= 0 or height <= 0: return _invalid_image_format_v1("incomplete PNG container")
+    ImageFormatInfoV1(mime_type: "image/png", width: width, height: height, error: "")
+
+fn inspect_jpeg_bytes_v1(raw: [u8]) -> ImageFormatInfoV1:
+    if raw.len() < 4 or raw[0] != 255 or raw[1] != 216 or
+            raw[raw.len() - 2] != 255 or raw[raw.len() - 1] != 217:
+        return _invalid_image_format_v1("invalid JPEG SOI/EOI framing")
+    var offset: i64 = 2
+    var width: i64 = 0
+    var height: i64 = 0
+    var saw_scan = false
+    while offset + 3 < raw.len():
+        if raw[offset] != 255: return _invalid_image_format_v1("invalid JPEG marker framing")
+        while offset < raw.len() and raw[offset] == 255: offset = offset + 1
+        if offset >= raw.len(): return _invalid_image_format_v1("truncated JPEG marker")
+        val marker = raw[offset] as i64
+        offset = offset + 1
+        if marker == 217:
+            if offset != raw.len() or not saw_scan or width <= 0 or height <= 0:
+                return _invalid_image_format_v1("JPEG EOI precedes a complete scan")
+            return ImageFormatInfoV1(mime_type: "image/jpeg", width: width, height: height, error: "")
+        if marker == 1 or (marker >= 208 and marker <= 215): continue
+        if offset + 2 > raw.len(): return _invalid_image_format_v1("truncated JPEG segment")
+        val segment_length = _u16_be_v1(raw, offset)
+        if segment_length < 2 or segment_length > raw.len() - offset:
+            return _invalid_image_format_v1("JPEG segment exceeds container")
+        val is_sof = marker == 192 or marker == 193 or marker == 194 or marker == 195 or
+            marker == 197 or marker == 198 or marker == 199 or marker == 201 or
+            marker == 202 or marker == 203 or marker == 205 or marker == 206 or marker == 207
+        if is_sof:
+            if segment_length < 7: return _invalid_image_format_v1("truncated JPEG SOF")
+            width = _u16_be_v1(raw, offset + 5)
+            height = _u16_be_v1(raw, offset + 3)
+            if width <= 0 or height <= 0: return _invalid_image_format_v1("JPEG dimensions must be positive")
+        offset = offset + segment_length
+        if marker == 218:
+            if width <= 0 or height <= 0: return _invalid_image_format_v1("JPEG scan precedes SOF")
+            saw_scan = true
+            var found_marker = false
+            while offset + 1 < raw.len():
+                if raw[offset] != 255:
+                    offset = offset + 1
+                    continue
+                val marker_start = offset
+                while offset < raw.len() and raw[offset] == 255: offset = offset + 1
+                if offset >= raw.len(): return _invalid_image_format_v1("truncated JPEG entropy marker")
+                val entropy_marker = raw[offset] as i64
+                if entropy_marker == 0 or (entropy_marker >= 208 and entropy_marker <= 215):
+                    offset = offset + 1
+                    continue
+                offset = marker_start
+                found_marker = true
+                break
+            if not found_marker: return _invalid_image_format_v1("JPEG scan has no terminal marker")
+    _invalid_image_format_v1("incomplete JPEG container")
+
+fn inspect_webp_bytes_v1(raw: [u8]) -> ImageFormatInfoV1:
+    if raw.len() < 25 or raw[0] != 82 or raw[1] != 73 or raw[2] != 70 or raw[3] != 70 or
+            raw[8] != 87 or raw[9] != 69 or raw[10] != 66 or raw[11] != 80:
+        return _invalid_image_format_v1("invalid WebP RIFF signature")
+    if _u32_le_v1(raw, 4) + 8 != raw.len(): return _invalid_image_format_v1("WebP RIFF size mismatch")
+    val first_chunk_size = _u32_le_v1(raw, 16)
+    if first_chunk_size > raw.len() - 20: return _invalid_image_format_v1("WebP primary chunk exceeds RIFF")
+    var width: i64 = 0
+    var height: i64 = 0
+    var image_payload = false
+    if raw[12] == 86 and raw[13] == 80 and raw[14] == 56 and raw[15] == 88:
+        if _u32_le_v1(raw, 16) != 10: return _invalid_image_format_v1("invalid WebP VP8X size")
+        width = _u24_le_v1(raw, 24) + 1
+        height = _u24_le_v1(raw, 27) + 1
+    elif raw[12] == 86 and raw[13] == 80 and raw[14] == 56 and raw[15] == 76:
+        if _u32_le_v1(raw, 16) < 5 or raw[20] != 47: return _invalid_image_format_v1("invalid WebP VP8L")
+        width = 1 + raw[21] as i64 + ((raw[22] as i64 & 63) << 8)
+        height = 1 + ((raw[22] as i64 >> 6) | (raw[23] as i64 << 2) | ((raw[24] as i64 & 15) << 10))
+        image_payload = true
+    elif raw[12] == 86 and raw[13] == 80 and raw[14] == 56 and raw[15] == 32:
+        if _u32_le_v1(raw, 16) < 10 or raw[23] != 157 or raw[24] != 1 or raw[25] != 42:
+            return _invalid_image_format_v1("invalid WebP VP8 frame")
+        width = (raw[26] as i64 | raw[27] as i64 << 8) & 16383
+        height = (raw[28] as i64 | raw[29] as i64 << 8) & 16383
+        image_payload = true
+    else:
+        return _invalid_image_format_v1("unsupported WebP primary chunk")
+    var chunk_offset: i64 = 20 + first_chunk_size + (first_chunk_size % 2)
+    while chunk_offset + 8 <= raw.len():
+        val chunk_size = _u32_le_v1(raw, chunk_offset + 4)
+        if chunk_size > raw.len() - chunk_offset - 8: return _invalid_image_format_v1("WebP chunk exceeds RIFF")
+        val image_chunk = (raw[chunk_offset] == 86 and raw[chunk_offset + 1] == 80 and raw[chunk_offset + 2] == 56 and
+            (raw[chunk_offset + 3] == 32 or raw[chunk_offset + 3] == 76)) or
+            (raw[chunk_offset] == 65 and raw[chunk_offset + 1] == 78 and raw[chunk_offset + 2] == 77 and raw[chunk_offset + 3] == 70)
+        if image_chunk and chunk_size > 0: image_payload = true
+        chunk_offset = chunk_offset + 8 + chunk_size + (chunk_size % 2)
+    if chunk_offset != raw.len(): return _invalid_image_format_v1("WebP chunk alignment mismatch")
+    if width <= 0 or height <= 0 or not image_payload:
+        return _invalid_image_format_v1("WebP has no image payload")
+    ImageFormatInfoV1(mime_type: "image/webp", width: width, height: height, error: "")
+
+fn inspect_image_bytes_v1(raw: [u8]) -> ImageFormatInfoV1:
+    if raw.len() >= 8 and raw[0] == 137 and raw[1] == 80: return inspect_png_bytes_v1(raw)
+    if raw.len() >= 2 and raw[0] == 255 and raw[1] == 216: return inspect_jpeg_bytes_v1(raw)
+    if raw.len() >= 12 and raw[0] == 82 and raw[1] == 73 and raw[2] == 70 and raw[3] == 70:
+        return inspect_webp_bytes_v1(raw)
+    _invalid_image_format_v1("unsupported image signature")

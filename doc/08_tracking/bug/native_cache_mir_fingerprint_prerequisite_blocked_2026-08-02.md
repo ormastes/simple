@@ -35,3 +35,9 @@ Serialization overhead cannot be honestly measured until the complete serializer
 exists. The current incomplete serializer is rejected as a benchmark target.
 Cache-hit delta remains zero and correctness is unchanged.
 
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still BLOCKED, explicitly claimed/audited by another lane (`pure_parser_close`);
+needs a full canonical MIR serializer, out of scope for a shard fix. No
+change made. Leaving OPEN/BLOCKED.

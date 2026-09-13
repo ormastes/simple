@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Purpose: Prove that form controls (`button`, `input`, `select`, `textarea`) do
+NOT inherit the page font, but take Chrome's UA-stylesheet font metrics
+(`font: 400 13.3333px <system>`, `line-height: normal`).
+Audience: browser-engine layout maintainers.
+
+Before this fix a `<button>` inherited `body { font: 16px/1.5 }`, so its content
+box was one 24 px line box instead of Chrome's ~15 px, making every button 9 px
+too tall and every button-bearing strip on the shared catalog over-tall. That is
+half of the "+12 % block vertical advance" recorded in
+doc/08_tracking/bug/web_block_vertical_advance_12pct_2026-09-12.md.
+
+Chrome oracle (headless --dump-dom + getBoundingClientRect on
+examples/06_io/ui/web_catalog/tab-bar.html at 900x760):
+  main                 top=0.00  h=101.00 padding 24px
+  nav.tabs             top=24.00 h=53.00  padding 10px 24px
+  button#tab-overview  top=34.00 h=33.00  fs=13.3333px lh=normal
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FORM-CONTROL-UA-FONT-001 — form controls use the UA font, not the inherited one.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl 4%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 760
+
+# Same shape as the catalog tab strip.
+val TAB_BAR: text = (
+    "<html><body style=\"margin:0;font:16px/1.5 sans-serif\">" +
+    "<main style=\"padding:24px\">" +
+    "<nav id=\"tabs\" style=\"display:flex;gap:8px;padding:10px 24px\">" +
+    "<button id=\"b1\" style=\"padding:8px;border:1px solid #94a3b8\">Overview</button>" +
+    "<button id=\"b2\" style=\"padding:8px;border:1px solid #94a3b8\">HTML</button>" +
+    "</nav></main></body></html>"
+)
+
+fn tab_bar_field(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(TAB_BAR, VW, VH, id, field)
+
+describe "form controls take the UA font, not the inherited page font":
+    it "AC-1: a button's border box is 33 px tall, as Chrome reports":
+        # 8 + 8 padding + 1 + 1 border + a ~15 px `normal` line box at 13 px.
+        expect(tab_bar_field("b1", "h")).to_equal("33")
+
+    it "AC-2: the second button matches the first (no per-item drift)":
+        expect(tab_bar_field("b2", "h")).to_equal(tab_bar_field("b1", "h"))
+
+    it "AC-3: the flex strip around them is 53 px tall, as Chrome reports":
+        # 10 + 10 padding + the 33 px row of buttons.
+        expect(tab_bar_field("tabs", "h")).to_equal("53")
+
+    it "AC-4: the strip starts at y=24 and its buttons at y=34":
+        expect(tab_bar_field("tabs", "y")).to_equal("24")
+        expect(tab_bar_field("b1", "y")).to_equal("34")

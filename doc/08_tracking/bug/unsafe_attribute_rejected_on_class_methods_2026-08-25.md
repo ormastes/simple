@@ -1,5 +1,7 @@
 # `@unsafe` is rejected on class methods
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open compiler/language-surface bug found while hardening `FastTable` SFFI.
@@ -39,3 +41,7 @@ Parse declaration attributes before class `fn`, `me fn`, and `static fn`
 members, preserve them in HIR, and enforce their capabilities at method call
 sites identically to module-level functions. Add parser, HIR, safety-checker,
 and call-site negative coverage before migrating the class-level annotation.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

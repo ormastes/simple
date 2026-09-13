@@ -15,6 +15,14 @@ fail() {
     exit 1
 }
 
+file_mode() {
+    if mode=$(stat -c %a "$1" 2>/dev/null); then
+        printf '%s\n' "$mode"
+    else
+        stat -f %Lp "$1"
+    fi
+}
+
 make_tuple() {
     tuple_root=$1
     mkdir -p "$tuple_root/deps"
@@ -36,6 +44,11 @@ generation_root="$test_tmp/generations"
 make_tuple "$source_root"
 mkdir "$generation_root"
 fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+details_source="$test_tmp/simple.inputs.sha256.details.env"
+printf 'schema=simple-bootstrap-fingerprint-details-v1\naggregate_sha256=%s\n' \
+    "$fingerprint" >"$details_source"
+BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE=$details_source
+export BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE
 
 # The 64 MiB dependency decoy is larger than this RSS budget. Projection must
 # neither copy nor retain it while selecting the three authority members.
@@ -63,9 +76,19 @@ fi
 bootstrap_stage3_prepare_seed_generation "$source_root" "$generation_root" \
     "$fingerprint" simple libsimple_native_all.a \
     libsimple_compiler_backfill.a aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+unset BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE
 staging=$BOOTSTRAP_STAGE3_PREPARED_STAGING
-[ "$(find "$staging" -type f | wc -l | tr -d ' ')" -eq 7 ] ||
+[ "$(find "$staging" -type f | wc -l | tr -d ' ')" -eq 8 ] ||
     fail "prepared generation did not contain consumer tuple plus stamp"
+[ -f "$staging/simple.inputs.sha256.details.env" ] &&
+    [ ! -L "$staging/simple.inputs.sha256.details.env" ] ||
+    fail "fingerprint detail sidecar was not projected as a regular file"
+cmp "$details_source" "$staging/simple.inputs.sha256.details.env" >/dev/null ||
+    fail "fingerprint detail sidecar bytes changed during projection"
+[ "$(file_mode "$staging/simple.inputs.sha256.details.env")" = 400 ] ||
+    fail "fingerprint detail sidecar was not frozen read-only"
+[ "$(file_mode "$staging")" = 700 ] ||
+    fail "prepared staging root was not left publication-writable"
 [ ! -e "$staging/deps/decoy.rlib" ] && [ ! -e "$staging/decoy.d" ] ||
     fail "Cargo decoys entered authority generation"
 [ -f "$staging/deps/libsimple_runtime.a" ] ||
@@ -130,11 +153,11 @@ if bootstrap_stage3_copy_seed_tuple "$replacing" "$test_tmp/replacing-out" \
 fi
 unset BOOTSTRAP_STAGE3_TEST_REPLACE_AFTER_TUPLE_COPY
 
-[ "$(stat -c '%a' "$staging/simple")" = 500 ] ||
+[ "$(file_mode "$staging/simple")" = 500 ] ||
     fail "seed mode was not frozen executable"
-[ "$(stat -c '%a' "$staging/libsimple_native_all.a")" = 400 ] ||
+[ "$(file_mode "$staging/libsimple_native_all.a")" = 400 ] ||
     fail "native-all mode was not frozen read-only"
-[ "$(stat -c '%a' "$staging/deps/libsimple_runtime.a")" = 400 ] ||
+[ "$(file_mode "$staging/deps/libsimple_runtime.a")" = 400 ] ||
     fail "runtime mode was not frozen read-only"
 
 # Name mapping is target-derived: GNU covers Linux, Darwin, and FreeBSD;

@@ -1,0 +1,45 @@
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.marker.*
+use std.io_runtime.{cwd_process, dir_create_all, dir_remove_all, file_exists}
+
+describe "centralized storage root marker":
+    it "round trips schema and canonical root identity":
+        val root = CanonicalPath(value: "/var/simple-user")
+        val marker = StorageRootMarkerV1(
+            root_kind: StorageRootKind.User,
+            canonical_root_digest: storage_root_identity(root),
+            policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+            created_at: "2026-09-03T00:00:00Z",
+            creator_build_digest: "build-123",
+            cleanup_classes: "cache,downloads,toolchains",
+        )
+        val parsed = decode_storage_root_marker(encode_storage_root_marker(marker)).unwrap()
+        expect(parsed.root_kind).to_equal(StorageRootKind.User)
+        expect(parsed.canonical_root_digest).to_equal(storage_root_identity(root))
+        expect(parsed.policy_version).to_equal(STORAGE_ROOT_POLICY_VERSION_V1)
+        expect(validate_storage_root_marker(root, StorageRootKind.User, parsed).is_ok()).to_equal(true)
+
+    it "rejects malformed and mismatched ownership":
+        val root = CanonicalPath(value: "/var/simple-user")
+        expect(decode_storage_root_marker("magic=wrong").is_err()).to_equal(true)
+        val marker = StorageRootMarkerV1(
+            root_kind: StorageRootKind.Worktree,
+            canonical_root_digest: storage_root_identity(root),
+            policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+            created_at: "now",
+            creator_build_digest: "build",
+            cleanup_classes: "evidence",
+        )
+        expect(validate_storage_root_marker(root, StorageRootKind.User, marker).is_err()).to_equal(true)
+
+    it "creates and reuses one exclusive matching marker":
+        val root = CanonicalPath(value: cwd_process() + "/build/test/storage-roots-marker")
+        dir_remove_all(root.value)
+        expect(dir_create_all(root.value)).to_equal(true)
+        val first = ensure_storage_root_marker(root, StorageRootKind.Worktree, "2026-09-03T00:00:00Z", "build-123", "evidence,test-artifacts")
+        val second = ensure_storage_root_marker(root, StorageRootKind.Worktree, "later", "another-build", "other")
+        expect(first.is_ok()).to_equal(true)
+        expect(second.is_ok()).to_equal(true)
+        expect(second.unwrap().created_at).to_equal("2026-09-03T00:00:00Z")
+        expect(file_exists(storage_root_marker_path(root).value)).to_equal(true)
+        dir_remove_all(root.value)

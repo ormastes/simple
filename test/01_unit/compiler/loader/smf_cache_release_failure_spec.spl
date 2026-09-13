@@ -1,0 +1,80 @@
+"""Failed SMF unmap preserves retry ownership and resident accounting.
+
+The fixture uses the native facade's documented zero-address refusal; it does
+not claim a real OS mapping was allocated or an OS munmap failure was injected.
+"""
+
+use std.spec.step
+use compiler.loader.loader.smf_cache.{SmfCache, MappedSmf, CacheStats, parse_header_minimal}
+use compiler.linker.smf_reader.{SmfReaderHeader, SmfFlags}
+use compiler.linker.smf_enums.{Platform, Arch, CompressionType}
+
+fn release_refusal_cache() -> SmfCache:
+    val header = SmfReaderHeader(
+        version: (1, 1), platform: Platform.Linux, arch: Arch.X86_64,
+        flags: SmfFlags(executable: false, reloadable: false, debug_info: false,
+            pic: false, has_stub: false, aspect_pack: false),
+        section_count: 0, symbol_count: 0, entry_point: 0,
+        has_templates: false, has_note_sdn: false, compression: CompressionType.None_
+    )
+
+fn compression_header_bytes(raw: u8) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < 128:
+        bytes.push(0u8)
+        i = i + 1
+    bytes[48] = raw
+    bytes
+    val record = MappedSmf(
+        path: "refused.smf", address: 0, size: 4096,
+        header: header, section_count: 0, note_sdn: nil,
+        template_section_offset: 0, note_sdn_section_offset: 0,
+        section_table_offset: 0
+    )
+    SmfCache(
+        cached_files: {"refused.smf": record}, enabled: true,
+        stats: CacheStats(total_files: 1, total_memory: 4096, cache_hits: 7, cache_misses: 2)
+    )
+
+describe "SMF cache failed release ownership":
+    it "maps absent and unknown compression tags to the declared None_ variant":
+        step("parse compression tags without referencing the nonexistent None variant")
+        expect(parse_header_minimal(compression_header_bytes(0u8)).compression == CompressionType.None_).to_equal(true)
+        expect(parse_header_minimal(compression_header_bytes(99u8)).compression == CompressionType.None_).to_equal(true)
+
+    it "keeps a refused eviction available for retry":
+        # @req NFR-SMF-CACHE-RELEASE-001
+        step("attempt an invalid-address release through the production cache")
+        var cache = release_refusal_cache()
+        expect(cache.evict("refused.smf")).to_equal(false)
+        expect(cache.is_cached("refused.smf")).to_equal(true)
+        expect(cache.cached_count()).to_equal(1)
+        expect(cache.get_stats().total_memory).to_equal(4096)
+        expect(cache.evict("refused.smf")).to_equal(false)
+        expect(cache.cached_count()).to_equal(1)
+
+    it "keeps failed records and historical counters after clear":
+        # @req NFR-SMF-CACHE-RELEASE-002
+        step("clear and retry without claiming failed releases were freed")
+        var cache = release_refusal_cache()
+        cache.clear()
+        expect(cache.is_cached("refused.smf")).to_equal(true)
+        expect(cache.cached_count()).to_equal(1)
+        expect(cache.get_stats().total_memory).to_equal(4096)
+        expect(cache.get_stats().cache_hits).to_equal(7)
+        expect(cache.get_stats().cache_misses).to_equal(2)
+        cache.clear()
+        expect(cache.cached_count()).to_equal(1)
+
+    it "leaves accounting unchanged for absent paths and empty clear":
+        # @req NFR-SMF-CACHE-RELEASE-003
+        step("release absent entries without decrementing resident totals")
+        var cache = release_refusal_cache()
+        expect(cache.evict("absent.smf")).to_equal(false)
+        expect(cache.cached_count()).to_equal(1)
+        expect(cache.get_stats().total_memory).to_equal(4096)
+        var empty = SmfCache.new()
+        empty.clear()
+        expect(empty.cached_count()).to_equal(0)
+        expect(empty.get_stats().total_memory).to_equal(0)

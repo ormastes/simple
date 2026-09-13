@@ -9,10 +9,15 @@ import { dirname, join } from "node:path";
 import { canonicalJson, freezeDeep } from "../storage/canonical.js";
 import { isWorkspaceRegistryV1 } from "../workspace/registry.js";
 import { isSnapshotStoreV1 } from "../storage/snapshot_store.js";
+import { fsyncDirectory } from "../storage/directory_fsync.js";
 
 const PORTS = new WeakSet();
 const PERMITS = new WeakSet();
 const VIEWS = new WeakSet();
+const COMPAT_PORTS = new WeakSet();
+const COMPAT_VIEWS = new WeakMap();
+const COMPAT_TARGETS = new WeakMap();
+const COMPAT_DIRECTORIES = new WeakMap();
 const DIGEST = (value) => `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 const HASH = /^sha256:[0-9a-f]{64}$/;
 const UID = /^W-[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -33,7 +38,7 @@ function atomicWrite(path, bytes) {
   try { fd = openSync(temporary, "wx", 0o600); writeFileSync(fd, bytes, "utf8"); fsyncSync(fd); }
   finally { if (fd !== undefined) closeSync(fd); }
   renameSync(temporary, path);
-  const parent = openSync(dirname(path), "r"); try { fsyncSync(parent); } finally { closeSync(parent); }
+  fsyncDirectory(dirname(path));
 }
 function readCanonical(path) {
   const raw = readFileSync(path, "utf8"); const parsed = JSON.parse(raw);
@@ -129,3 +134,52 @@ export function createSealedSnapshotAuthorityV1({ registry, snapshotStore, autho
   PORTS.add(port); return port;
 }
 export function isSealedSnapshotAuthorityV1(value) { return PORTS.has(value); }
+
+// Compatibility boundary for the original projection-port contract. The
+// admitted sealed service above remains unchanged; this adapter only consumes
+// the branded in-memory TargetInventoryStore used by the legacy port tests.
+export function createSnapshotAuthorityPortV1({ workspaceRegistry, snapshotStore, targetInventoryStore, authorityInstanceUid = "authority-instance-v1" } = {}) {
+  if (!workspaceRegistry || !snapshotStore || !targetInventoryStore || typeof targetInventoryStore.get !== "function") throw new TypeError("SnapshotAuthorityPortV1 requires trusted stores");
+  const ok = (value) => Object.freeze({ ok: true, value });
+  const denied = () => Object.freeze({ ok: false, error: { code: "authority_denied" } });
+  const port = Object.freeze({
+    openBoundSnapshot(binding) {
+      try {
+        const fields = ["workspaceUid", "projectUidOrNull", "worktreeUid", "snapshotUid", "revisionId"];
+        if (!binding || Object.keys(binding).sort().join("\0") !== fields.slice().sort().join("\0") || binding.workspaceUid !== workspaceRegistry.workspace_uid) return denied();
+        const record = targetInventoryStore.get(binding.snapshotUid); const authority = record?.authority; const inventory = record?.inventory;
+        if (!authority || !inventory || authority.snapshot_uid !== binding.snapshotUid || authority.workspace_uid !== binding.workspaceUid || authority.project_uid !== binding.projectUidOrNull || authority.worktree_uid !== binding.worktreeUid || authority.revision_id !== binding.revisionId) return denied();
+        const liveWorktree = workspaceRegistry.worktree(binding.worktreeUid);
+        if (!liveWorktree || liveWorktree.revision_id !== binding.revisionId || `sha256:${createHash("sha256").update(canonicalJson({ ...inventory, root_digest: undefined })).digest("hex")}` !== inventory.root_digest) return denied();
+        const base = snapshotStore.read(authority.base_snapshot_uid);
+        if (!base || base.worktree_uid !== binding.worktreeUid || base.revision_id !== binding.revisionId || (binding.projectUidOrNull !== null && base.project_uid !== binding.projectUidOrNull)) return denied();
+        const state = { port, binding, authority, inventory, authorityInstanceUid, manifestDigest: authority.snapshot_uid };
+        const view = Object.freeze({ authority_instance: authorityInstanceUid, snapshot_uid: binding.snapshotUid, inventory_root: inventory.root_digest, manifest_digest: authority.snapshot_uid });
+        COMPAT_VIEWS.set(view, state); return ok(view);
+      } catch { return denied(); }
+    },
+    resolveCanonicalTarget(view, request) {
+      const state = COMPAT_VIEWS.get(view); if (!state || !request || Object.keys(request).sort().join("\0") !== "targetKind\0targetUid") return denied();
+      const entry = state.inventory.entries.find((item) => item.target_kind === request.targetKind && item.target_uid === request.targetUid); if (!entry) return denied();
+      const target = Object.freeze({ authority_instance: state.authorityInstanceUid, snapshot_uid: state.binding.snapshotUid, inventory_root: state.inventory.root_digest, manifest_digest: state.manifestDigest, target_kind: entry.target_kind, target_uid: entry.target_uid, content_digest: entry.content_digest, children: entry.children ?? [] });
+      COMPAT_TARGETS.set(target, state); return ok(target);
+    },
+    resolveCanonicalAlias(view, request) {
+      const state = COMPAT_VIEWS.get(view); if (!state || !request) return denied();
+      const alias = state.inventory.alias_index.find((item) => item.normalized_alias_uri === request.normalizedAliasUri); return alias ? ok(Object.freeze({ ...alias })) : denied();
+    },
+    listDirectoryTarget(view, request) {
+      const state = COMPAT_VIEWS.get(view); if (!state || !request) return denied();
+      const entry = state.inventory.entries.find((item) => item.target_kind === "directory" && item.view_kind === request.viewKind && item.logical_path === request.normalizedLogicalPath && item.selector_digest === request.selectorDigest); if (!entry) return denied();
+      const directory = Object.freeze({ authority_instance: state.authorityInstanceUid, snapshot_uid: state.binding.snapshotUid, inventory_root: state.inventory.root_digest, manifest_digest: state.manifestDigest, target_kind: entry.target_kind, target_uid: entry.target_uid, selector_digest: entry.selector_digest, children: entry.children ?? [] });
+      COMPAT_DIRECTORIES.set(directory, state); return ok(directory);
+    }
+  });
+  COMPAT_PORTS.add(port); return port;
+}
+
+export function isSnapshotAuthorityPortV1(value) { return PORTS.has(value) || COMPAT_PORTS.has(value); }
+export function isSnapshotAuthorityViewV1(value) { return VIEWS.has(value) || COMPAT_VIEWS.has(value); }
+export function isViewForSnapshotAuthorityPortV1(port, view) { return COMPAT_VIEWS.get(view)?.port === port; }
+export function isCanonicalTargetV1(value) { return COMPAT_TARGETS.has(value); }
+export function isCanonicalDirectoryTargetV1(value) { return COMPAT_DIRECTORIES.has(value); }

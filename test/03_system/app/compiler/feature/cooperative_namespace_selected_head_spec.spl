@@ -1,0 +1,206 @@
+# codex-system-test
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009 REQ-CSM-012
+# @tag: in-development, system, cache, namespace, selected-head, restart, recovery
+
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.gateway.cooperative_namespace_host_prerequisite_v1.{
+    CacheCooperativeSelectedHeadV1, CacheCooperativeDurabilityTraceV1,
+    CacheCooperativeDurabilityOutcomeV1, CacheCooperativeNamespaceRevalidationV1,
+    cache_cooperative_namespace_host_prerequisite_available_v1,
+    cache_cooperative_namespace_selected_head_name_v1,
+    cache_cooperative_selected_head_v1,
+    cache_cooperative_selected_prefix_matches_journal_v1,
+    cache_cooperative_selected_prefix_v1,
+    cache_cooperative_selected_head_matches_operation_and_prefix_v1,
+    cache_cooperative_namespace_revalidation_v1,
+    cache_cooperative_durability_outcome_v1}
+use compiler.driver.cache.gateway.cooperative_namespace_gc_begin_authority_v1.{
+    CacheCooperativeNamespaceGcContributionsV1,
+    CacheCooperativeNamespaceGcBeginFailureV1,
+    cache_cooperative_namespace_gc_begin_authority_v1,
+    cache_cooperative_namespace_gc_begin_available_v2}
+
+"""# Cooperative namespace and selected-head durability
+
+This is an intentionally RED production-oracle crash/restart matrix. It must
+call a real issuer-validated namespace/selected-head provider; a DTO,
+in-memory publisher, direct filesystem write, static scan, or Rust seed is not
+an oracle. Every named row is `MissingEvidence` until that provider also emits
+the fresh-process recovery receipt and Astra independently reviews it. This
+matrix is process-restart evidence only; storage-fault or power-loss durability
+requires a separately qualified storage-fault provider.
+
+The matrix fixture is
+`test/fixtures/cooperative_namespace_selected_head/recovery_matrix_v1.txt`.
+Its rows are a test contract, not a fabricated persistence implementation.
+
+The five `L08-NAMESPACE-D*` controls call the real diagnostic-only production
+components. They prove selected-head metadata, prefix, ordering, comparison,
+and fail-closed GC behavior, not physical persistence or publication authority.
+"""
+
+fn g4_digest_v1(value: text) -> text:
+    sha256_text(value)
+
+fn g4_head_fixture_v1(
+    revision: i64, generation: i64, operation: text,
+) -> CacheCooperativeSelectedHeadV1:
+    cache_cooperative_selected_head_v1(revision, generation,
+        g4_digest_v1("manifest"), 4, g4_digest_v1("abcd"),
+        g4_digest_v1(operation), 11, g4_digest_v1("closure"),
+        g4_digest_v1("registry"))
+
+fn g4_committed_trace_v1() -> CacheCooperativeDurabilityTraceV1:
+    CacheCooperativeDurabilityTraceV1(writer_revalidated: true,
+        head_revalidated: true, immutable_blobs_synced: true,
+        immutable_directories_synced: true, journal_admitted: true,
+        head_replace_started: true, head_replace_confirmed: true,
+        head_directory_synced: true)
+
+fn g4_complete_gc_contributions_v1() -> CacheCooperativeNamespaceGcContributionsV1:
+    CacheCooperativeNamespaceGcContributionsV1(namespace_generation: 7,
+        expected_generation: 7, expected_writer_incarnation: 11,
+        observed_writer_incarnation: 11, root_owner_count: 1,
+        reader_domain_count: 1, lease_contributor_count: 1,
+        explicit_pin_contributor_count: 1, root_set_complete: true,
+        reader_domains_complete: true, lease_set_complete: true,
+        explicit_pin_set_complete: true)
+
+fn g4_require_physical_evidence_v1(row: text):
+    # If executed before the host exists this deliberately produces RED. The
+    # current unexecuted evidence state remains U/MissingEvidence, not PASS.
+    fail("MissingEvidence: cooperative namespace selected-head recovery row=" + row +
+        "; host issuer, independent-process crash harness, owner-issued durable receipt, and Astra review are required")
+
+fn selected_head_production_oracle_v1(row: text):
+    g4_require_physical_evidence_v1(row)
+
+describe "cooperative namespace selected-head publication [importance=critical; importance_weight=3]":
+    # @scenario: L08-NAMESPACE-D01 class=supplemental-diagnostic owner=cooperative_namespace_host_prerequisite_v1 reason=diagnostic-only-host-inventory resume=bind-qualified-host-provider
+    it "should expose the closed physical-host boundary and canonical selected-head name [importance=critical; importance_weight=3]":
+        step("Capture the selected operation")
+        expect(cache_cooperative_namespace_selected_head_name_v1()).to_equal(
+            ".simple-cache-selected-head-v1")
+        expect(cache_cooperative_namespace_host_prerequisite_available_v1()).to_equal(false)
+
+    # @scenario: L08-NAMESPACE-D02 class=supplemental-diagnostic owner=cooperative_namespace_host_prerequisite_v1 reason=diagnostic-prefix-only resume=bind-qualified-reopen-provider
+    it "should retain only the selected prefix while leaving unselected suffix bytes outside it [importance=critical; importance_weight=3]":
+        step("Submit the bounded request")
+        val head = g4_head_fixture_v1(3, 9, "operation")
+        val journal = "abcdcomplete-trailing-record"
+        expect(cache_cooperative_selected_prefix_matches_journal_v1(head, journal)).to_equal(true)
+        expect(cache_cooperative_selected_prefix_v1(head, journal).unwrap()).to_equal("abcd")
+        expect(cache_cooperative_selected_head_matches_operation_and_prefix_v1(
+            head, 3, g4_digest_v1("operation"), journal)).to_equal(true)
+        expect(cache_cooperative_selected_head_matches_operation_and_prefix_v1(
+            head, 3, g4_digest_v1("other-operation"), journal)).to_equal(false)
+
+    # @scenario: L08-NAMESPACE-D03 class=supplemental-diagnostic owner=cooperative_namespace_host_prerequisite_v1 reason=diagnostic-comparison-only resume=bind-qualified-namespace-provider
+    it "should diagnose a stale writer and same-operation divergent selected head before mutation [importance=critical; importance_weight=3]":
+        step("Submit the bounded request")
+        val expected = g4_head_fixture_v1(3, 9, "operation")
+        expect(cache_cooperative_namespace_revalidation_v1(expected, expected, 11, 12)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleWriter)
+        val divergent = g4_head_fixture_v1(4, 9, "operation")
+        expect(cache_cooperative_namespace_revalidation_v1(expected, divergent, 11, 11)).to_equal(
+            CacheCooperativeNamespaceRevalidationV1.StaleHead)
+
+    # @scenario: L08-NAMESPACE-D04 class=supplemental-diagnostic owner=cooperative_namespace_host_prerequisite_v1 reason=diagnostic-durability-order-only resume=bind-storage-fault-provider
+    it "should classify replacement uncertainty separately from a committed durable trace [importance=critical; importance_weight=3]":
+        step("Observe committed or unchanged state")
+        val before_replacement = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_outcome_v1(before_replacement)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.RejectedBeforeHeadReplacement)
+        val uncertain = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: true,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(cache_cooperative_durability_outcome_v1(uncertain)).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.Indeterminate)
+        expect(cache_cooperative_durability_outcome_v1(g4_committed_trace_v1())).to_equal(
+            CacheCooperativeDurabilityOutcomeV1.Committed)
+
+    # @scenario: L08-NAMESPACE-D05 class=supplemental-diagnostic owner=cooperative_namespace_gc_begin_authority_v1 reason=fail-closed-gc-issuer resume=bind-qualified-namespace-gc-provider
+    it "should refuse incomplete namespace GC and a complete copied request without host issuance [importance=critical; importance_weight=3]":
+        step("Observe committed or unchanged state")
+        var incomplete = g4_complete_gc_contributions_v1()
+        incomplete.reader_domains_complete = false
+        expect(cache_cooperative_namespace_gc_begin_authority_v1(incomplete)).to_equal(
+            Err(CacheCooperativeNamespaceGcBeginFailureV1.IncompleteNamespaceUnion))
+        expect(cache_cooperative_namespace_gc_begin_available_v2()).to_equal(false)
+        expect(cache_cooperative_namespace_gc_begin_authority_v1(
+            g4_complete_gc_contributions_v1())).to_equal(
+            Err(CacheCooperativeNamespaceGcBeginFailureV1.HostNamespaceIssuanceUnavailable))
+
+    # @scenario: L08-NAMESPACE-001 class=primary-missing-evidence owner=cache_cooperative_namespace reason=missing-issuer-validated-namespace-and-crash-harness resume=bind-host-namespace-provider
+    it "recovers the previous selected operation when crashing before blob sync [importance=critical; importance_weight=3]":
+        step("Terminate the publishing process before immutable blob directory sync")
+        selected_head_production_oracle_v1("crash-before-blob-sync")
+
+    # @scenario: L08-NAMESPACE-002 class=primary-missing-evidence owner=cache_cooperative_namespace reason=missing-issuer-validated-namespace-and-crash-harness resume=bind-host-namespace-provider
+    it "keeps synced blobs non-authoritative when crashing after blob sync [importance=critical; importance_weight=3]":
+        step("Terminate the publishing process after immutable blob directory sync and before journal admission")
+        selected_head_production_oracle_v1("crash-after-blob-sync")
+
+    # @scenario: L08-NAMESPACE-003 class=primary-missing-evidence owner=cache_cooperative_namespace reason=missing-issuer-validated-namespace-and-crash-harness resume=bind-host-namespace-provider
+    it "recovers the previous selected operation when crashing before journal admission [importance=critical; importance_weight=3]":
+        step("Terminate the publishing process before admission of the exact journal prefix")
+        selected_head_production_oracle_v1("crash-before-journal-admission")
+
+    # @scenario: L08-NAMESPACE-004 class=primary-missing-evidence owner=cache_cooperative_namespace reason=missing-issuer-validated-namespace-and-crash-harness resume=bind-host-namespace-provider
+    it "keeps the previous selection while retaining only the exact admitted operation for recovery [importance=critical; importance_weight=3]":
+        step("Terminate the publishing process after exact journal-prefix admission and before selected-head replacement")
+        selected_head_production_oracle_v1("crash-after-journal-admission")
+
+    # @scenario: L08-NAMESPACE-005 class=primary-missing-evidence owner=three_payload_selected_head_publisher reason=missing-physical-selected-head-owner-and-crash-harness resume=bind-host-selected-head-provider
+    it "recovers the previous selected operation when crashing before selected-head replacement [importance=critical; importance_weight=3]":
+        step("Terminate the publishing process before atomic selected-head replacement")
+        selected_head_production_oracle_v1("crash-before-head-replace")
+
+    # @scenario: L08-NAMESPACE-006 class=primary-missing-evidence owner=three_payload_selected_head_publisher reason=missing-physical-selected-head-owner-and-crash-harness resume=bind-host-selected-head-provider
+    it "reports an indeterminate coherent old-or-new operation when crashing after selected-head replacement [importance=critical; importance_weight=3]":
+        step("Terminate the publishing process after selected-head replacement and before selected-head directory sync")
+        selected_head_production_oracle_v1("crash-after-head-replace")
+
+    # @scenario: L08-NAMESPACE-007 class=primary-missing-evidence owner=three_payload_selected_head_publisher reason=missing-physical-selected-head-owner-and-crash-harness resume=bind-host-selected-head-provider
+    it "does not acknowledge an unsynced selected head when crashing before directory sync [importance=critical; importance_weight=3]":
+        step("Terminate the publishing process before parent-directory sync for the selected-head replacement")
+        selected_head_production_oracle_v1("crash-before-head-directory-sync")
+
+    # @scenario: L08-NAMESPACE-008 class=primary-missing-evidence owner=three_payload_selected_head_publisher reason=missing-physical-selected-head-owner-and-crash-harness resume=bind-host-selected-head-provider
+    it "reopens a selected head only after its directory sync is durable [importance=critical; importance_weight=3]":
+        step("Reopen in an independent process")
+        step("Terminate the publishing process after parent-directory sync and reopen in a fresh process")
+        selected_head_production_oracle_v1("crash-after-head-directory-sync")
+
+    # @scenario: L08-NAMESPACE-009 class=primary-missing-evidence owner=three_payload_selected_head_publisher reason=missing-descriptor-bound-recovery resume=bind-host-selected-head-provider
+    it "treats a complete trailing journal record as non-authoritative [importance=critical; importance_weight=3]":
+        step("Append a complete trailing journal record beyond the selected-head admitted prefix then reopen in a fresh process")
+        selected_head_production_oracle_v1("complete-trailing-record-non-authoritative")
+
+    # @scenario: L08-NAMESPACE-010 class=primary-missing-evidence owner=cache_cooperative_namespace reason=missing-mutation-scoped-writer-cas resume=bind-host-namespace-provider
+    it "rejects a stale writer without changing the selected head [importance=critical; importance_weight=3]":
+        step("Race stale and current writer incarnations under one cooperative namespace and selected-head revision")
+        selected_head_production_oracle_v1("stale-writer-selected-head-unchanged")
+
+    # @scenario: L08-NAMESPACE-011 class=primary-missing-evidence owner=cache_cooperative_namespace reason=missing-independent-process-exclusion resume=bind-host-namespace-provider
+    it "excludes an independent process from an active namespace mutation [importance=critical; importance_weight=3]":
+        step("Start an independent writer process while the first process owns the cooperative namespace mutation scope")
+        selected_head_production_oracle_v1("independent-process-namespace-exclusion")
+
+    # @scenario: L08-NAMESPACE-012 class=primary-missing-evidence owner=compiler.cache.catalog_projection reason=missing-durable-journal-and-closure-recovery-owner resume=bind-host-recovery-provider
+    it "rebuilds the database projection only from the selected durable closure [importance=critical; importance_weight=3]":
+        step("Delete the rebuildable database projection then reopen from the selected head and matching journal closure receipt")
+        selected_head_production_oracle_v1("projection-rebuild-from-selected-closure")
+
+    # @scenario: L08-NAMESPACE-013 class=primary-missing-evidence owner=cache_writer_gc_v2 reason=missing-complete-namespace-capability resume=bind-host-namespace-provider
+    it "refuses GC when any namespace contribution is incomplete [importance=critical; importance_weight=3]":
+        step("Attempt GC with a missing reader lease or explicit-pin contribution in the cooperative namespace")
+        selected_head_production_oracle_v1("gc-refuses-incomplete-namespace")

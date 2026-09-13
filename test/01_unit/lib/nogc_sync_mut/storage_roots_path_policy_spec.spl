@@ -1,0 +1,60 @@
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.path_policy.*
+use std.io_runtime.{cwd_process, dir_create_all, dir_remove_all}
+
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
+
+fn roots() -> StorageRoots:
+    StorageRoots(
+        user_root: CanonicalPath(value: "/var/simple-user"),
+        worktree_root: CanonicalPath(value: "/repo/.simple/storage"),
+        user_source: RootSource.Explicit,
+        worktree_source: RootSource.Explicit,
+        policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        worktree_identity: Digest256(w0: 1u64, w1: 2u64, w2: 3u64, w3: 4u64),
+    )
+
+describe "centralized structured storage paths":
+    it "derives stable user and worktree descendants":
+        val user = derive_user_storage_path(roots(), UserPathRequest(
+            storage_class: StorageClass.ReusableCache,
+            producer: "compiler",
+            schema: "v1",
+            key: "module-abc",
+        )).unwrap()
+        val worktree = derive_worktree_storage_path(roots(), WorktreePathRequest(
+            storage_class: StorageClass.Evidence,
+            operation: OperationId(value: "bootstrap"),
+            session: "run-1",
+            item: "receipt.sdn",
+        )).unwrap()
+        expect(user.value).to_start_with("/var/simple-user/cache/compiler/v1/")
+        expect(user.value).to_end_with("/module-abc")
+        expect(worktree.value).to_equal("/repo/.simple/storage/evidence/bootstrap/run-1/receipt.sdn")
+        expect(is_strict_storage_descendant(roots().user_root, user)).to_equal(true)
+        expect(is_strict_storage_descendant(roots().worktree_root, worktree)).to_equal(true)
+
+    it "rejects traversal separators reserved names and wrong root classes":
+        expect(validate_storage_segment("..").is_err()).to_equal(true)
+        expect(validate_storage_segment("a/b").is_err()).to_equal(true)
+        expect(validate_storage_segment("CON").is_err()).to_equal(true)
+        expect(derive_user_storage_path(roots(), UserPathRequest(
+            storage_class: StorageClass.Build,
+            producer: "compiler",
+            schema: "v1",
+            key: "item",
+        )).is_err()).to_equal(true)
+        expect(validate_storage_containment(roots().user_root, CanonicalPath(value: "/var/simple-user2/item")).is_err()).to_equal(true)
+        expect(validate_storage_containment(roots().user_root, CanonicalPath(value: "/var/simple-user/cache/../escape")).is_err()).to_equal(true)
+
+    it "rejects a descendant whose existing symlink escapes its frozen root":
+        val base = cwd_process() + "/build/test/storage-roots-symlink"
+        val root = CanonicalPath(value: base + "/root")
+        val outside = base + "/outside"
+        dir_remove_all(base)
+        expect(dir_create_all(root.value)).to_equal(true)
+        expect(dir_create_all(outside)).to_equal(true)
+        val status = rt_package_create_symlink(outside, root.value + "/escape")
+        expect(status).to_equal(0)
+        expect(validate_storage_containment(root, CanonicalPath(value: root.value + "/escape/artifact")).is_err()).to_equal(true)
+        dir_remove_all(base)

@@ -1,6 +1,13 @@
 # Multicore Green Stress Scale Blockers - 2026-06-07
 
-Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
+## Closed 2026-09-13 — Recorded fixed in the entry body; the 2026-06-11 sweep already classified it likely-fixed
+
+- **inferred** The body carries resolved/fixed content for each listed blocker and the Status line reads `likely-fixed (triaged 2026-06-11)`.
+- **measured** The entry names no surviving broken product path to check (path scan: 0 backticked source paths), i.e. there is nothing left in it that points at live code.
+- **inferred** The multicore green-thread stress lane needs a Linux runner and a working spec runner; neither exists here (`bin/simple test` is killed at its outer bound on this host), so closure rests on the recorded fixes.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 

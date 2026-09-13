@@ -1,4 +1,5 @@
 # Bug: regex engines expose no importable `.spl` candidate-verify API
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - id: regex_engine_no_spl_candidate_verify_api_2026-06-15
 - date: 2026-06-15
@@ -62,3 +63,6 @@ step. Track as a feature request alongside this bug.
 ## Related
 - AC-4 of `.spipe/search-custom-types/state.md`
 - `doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md`
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

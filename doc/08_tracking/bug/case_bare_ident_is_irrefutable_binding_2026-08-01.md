@@ -674,3 +674,96 @@ Rust suite: `cargo test -p simple-compiler --lib` = **3457 passed / 118 failed**
 against the 3455/118 baseline — the +2 are this change's own unit tests, and the
 118 failure **name sets are byte-identical** (`diff`, not counts).
 `-- hir:: compilability::` = **327 / 7**, exactly baseline.
+
+## Pure-Simple interpreter seam — Probe A FIXED 2026-09-07 (executable proof)
+
+The record's own header said this was "FIXED on the Rust seed's two engines,
+still OPEN for the pure-Simple compiler seams". One of those seams is the
+pure-Simple tree-walk evaluator, `match_pattern` in
+`src/compiler/10.frontend/core/interpreter/eval.spl`. It is now fixed and
+proved by execution.
+
+**The record's stated blocker ("needs a runnable pure-Simple compiler
+artifact") was false.** A spec can `use compiler.core.interpreter.eval.{eval_expr}`,
+build the match expression as an AST by hand, and drive the pure-Simple
+evaluator directly. The Rust seed is only the HOST process; the subject is the
+`.spl` source read out of the tree on every run.
+
+### Reproduction, measured (LANE: pure-Simple interpreter `eval.spl`, driven from a spec)
+
+Fixture: `enum_table_register("Color", ["Red","Green","Blue"])`, scrutinee
+`eval_enum_variant_call("Color", "Green", [])`, arms
+`case NotAVariant: "BOGUS"` / `case Green: "GREEN"` / `case _: "WILDCARD"`.
+
+```
+OBSERVED=BOGUS ERR=
+```
+
+The undeclared capitalized arm bound the boxed enum and swallowed both later
+arms — Probe A's exact shape, on this engine.
+
+### Root cause
+
+`match_pattern`'s `EXPR_IDENT` branch tried `"_"`, `"None"`, and
+`enum_variant_is_declared(name)`, then fell straight through to
+`env_define(name, value_id); return true`. The CALL form of the same pattern
+never had this hole: `pattern_enum_variant_name` already says "Any other bare
+identifier is only treated as a variant when the scrutinee is actually a boxed
+enum". The nullary form simply never got that rule.
+
+### Fix
+
+`src/compiler/10.frontend/core/interpreter/eval.spl` — before the binder,
+when the scrutinee `val_is_boxed_enum` and the identifier
+`name_is_spelled_like_a_variant` (starts uppercase, mirroring the seed's
+`pattern_case_naming.rs::case_name_is_spelled_like_a_variant`), route to
+`match_enum_variant_pattern` instead of binding. Deliberately narrow, so
+under-reporting is the failure mode: a lowercase `case other:` is still an
+irrefutable binder, and a NON-enum scrutinee is untouched.
+
+### Evidence
+
+Spec: `test/01_unit/compiler_core/interpreter/bare_case_ident_variant_pattern_spec.spl`
+(9 rows: 3 reproduction, 2 controls proving the fixture really builds and
+matches a boxed enum, 4 preserved-feature rows).
+
+Binary identity: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192
+bytes, 2026-09-06 09:59 (the Rust seed, used only as host).
+Runner: `SIMPLE_TEST_RUNNER_RUST=1`, spec `touch`ed before every run (the Rust
+runner caches by spec mtime, not by subject source).
+
+One tree, one binary, only `eval.spl` toggled:
+
+```
+defect present (git stash of the eval.spl hunk):  Passed: 6   Failed: 3
+fix applied:                                      Passed: 9   Failed: 0
+```
+
+Directory regression, same A/B, `test/01_unit/compiler_core` (121 spec files):
+
+```
+defect present:  Passed: 3002   Failed: 96
+fix applied:     Passed: 3005   Failed: 93
+```
+
+Exactly +3, the three reproduction rows; no other row moved. The one failure
+inside `test/01_unit/compiler_core/interpreter` is
+`value_spec.spl`, which fails identically with and without this change
+(`Passed: 3  Failed: 1` on both sides) — pre-existing and unrelated.
+
+### Still OPEN after this change
+
+- **Probe B (the const-in-`case`-position shape) is NOT fixed here**, and that
+  is deliberate — the same call the Rust seed made. With an `i64`/`text`
+  scrutinee this engine cannot tell a const pattern from a binder without const
+  resolution, and `env_lookup` does not distinguish a module-level `val` from an
+  outer local, so every available discriminator would turn some valid binder
+  into a comparison. That half is tracked in
+  `match_bare_ident_const_irrefutable_2026-07-20.md`; the spec above pins the
+  current behaviour in a row named "leaves a capitalized arm on a NON-enum
+  scrutinee a binder", so a future const-resolution fix has to change it
+  deliberately rather than by accident.
+- The other two pure-Simple seams named in the header —
+  `50.mir/_MirLoweringExpr/expr_dispatch.spl` `lower_match_case` and
+  `10.frontend/_FlatAstBridge/convert_nodes.spl` `convert_flat_pattern` — were
+  NOT touched and are NOT covered by the proof above.

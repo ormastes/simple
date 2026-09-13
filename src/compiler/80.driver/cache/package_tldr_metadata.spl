@@ -1,0 +1,281 @@
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+
+val PACKAGE_TLDR_SCHEMA_V1: i64 = 1
+
+struct ConfigVariantKeyV1:
+    target_triple: text
+    backend: text
+    features: [text]
+    build_mode: text
+    language_abi: text
+    normalized_options: [text]
+    environment_inputs: [text]
+
+struct PackageSmfSectionV1:
+    kind: text
+    offset: i64
+    extent: i64
+    digest: text
+
+struct PackageExportSmfV1:
+    schema_version: i64
+    package_identity: text
+    module_identity: text
+    variant_digest: text
+    sections: [PackageSmfSectionV1]
+    payload_digest: text
+
+struct PackageTldrHeaderV1:
+    schema_version: i64
+    producer_digest: text
+    package_identity: text
+    module_identity: text
+    source_identity: text
+    variant: ConfigVariantKeyV1
+    source_digest: text
+    source_witness_digest: text
+    smf_digest: text
+    smf_sections: [PackageSmfSectionV1]
+    export_digest: text
+    abi_digest: text
+    initializer_digest: text
+    provider_digest: text
+    generated_source_digest: text
+    reverse_projection_digest: text
+    direct_imports: [text]
+    reverse_dependents: [text]
+    scc_identity: text
+    scc_members: [text]
+    interface_archive_digest: text
+    action_archive_digest: text
+
+struct PackageMetadataAdmissionV1:
+    valid: bool
+    reason: text
+    source_open_required: bool
+    early_cutoff_allowed: bool
+    variant_digest: text
+    interface_key: text
+    action_key: text
+
+fn package_tldr_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn package_tldr_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn package_tldr_sorted_unique_v1(values: [text]) -> [text]:
+    val sorted = canonical_identity_sort_texts(values)
+    var result: [text] = []
+    for value in sorted:
+        if not package_tldr_text_valid_v1(value):
+            return []
+        if result.len() == 0 or result[result.len() - 1] != value:
+            result = result.push(value)
+    result
+
+fn package_tldr_frame_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn package_tldr_list_v1(values: [text]) -> text:
+    val canonical = package_tldr_sorted_unique_v1(values)
+    if values.len() > 0 and canonical.len() == 0:
+        return ""
+    var encoded = "{canonical.len()};"
+    for value in canonical:
+        encoded = encoded + package_tldr_frame_v1(value)
+    encoded
+
+fn package_smf_sections_validate_v1(
+    sections: [PackageSmfSectionV1]
+) -> text:
+    var previous_kind = ""
+    var previous_end = 0
+    for section in sections:
+        if (not package_tldr_text_valid_v1(section.kind) or
+                not package_tldr_digest_valid_v1(section.digest) or
+                section.offset < 0 or section.extent <= 0):
+            return "smf-section-invalid"
+        if previous_kind != "" and section.kind <= previous_kind:
+            return "smf-section-order-or-duplicate"
+        if section.offset < previous_end:
+            return "smf-section-overlap"
+        previous_kind = section.kind
+        previous_end = section.offset + section.extent
+    if sections.len() == 0: "smf-section-directory-empty" else: "ok"
+
+fn package_export_smf_validate_v1(record: PackageExportSmfV1) -> text:
+    if record.schema_version != PACKAGE_TLDR_SCHEMA_V1:
+        return "smf-incompatible-schema"
+    if (not package_tldr_text_valid_v1(record.package_identity) or
+            not package_tldr_text_valid_v1(record.module_identity) or
+            not package_tldr_digest_valid_v1(record.variant_digest) or
+            not package_tldr_digest_valid_v1(record.payload_digest)):
+        return "smf-identity-or-digest-invalid"
+    package_smf_sections_validate_v1(record.sections)
+
+fn package_export_smf_section_v1(
+    record: PackageExportSmfV1, kind: text
+) -> PackageSmfSectionV1?:
+    if package_export_smf_validate_v1(record) != "ok":
+        return nil
+    for section in record.sections:
+        if section.kind == kind:
+            return Some(section)
+    nil
+
+fn config_variant_encode_v1(key: ConfigVariantKeyV1) -> text:
+    val features = package_tldr_list_v1(key.features)
+    val options = package_tldr_list_v1(key.normalized_options)
+    val environment = package_tldr_list_v1(key.environment_inputs)
+    if (not package_tldr_text_valid_v1(key.target_triple) or
+            not package_tldr_text_valid_v1(key.backend) or
+            not package_tldr_text_valid_v1(key.build_mode) or
+            not package_tldr_text_valid_v1(key.language_abi) or
+            features == "" or options == "" or environment == ""):
+        return ""
+    var encoded = "simple/config-variant/v1"
+    for field in [
+            key.target_triple, key.backend, features, key.build_mode,
+            key.language_abi, options, environment]:
+        encoded = encoded + package_tldr_frame_v1(field)
+    encoded
+
+fn config_variant_digest_v1(key: ConfigVariantKeyV1) -> text:
+    val encoded = config_variant_encode_v1(key)
+    if encoded == "": "" else: sha256_text(encoded)
+
+fn package_tldr_header_validate_v1(header: PackageTldrHeaderV1) -> text:
+    if header.schema_version != PACKAGE_TLDR_SCHEMA_V1:
+        return "metadata-incompatible-schema"
+    if (not package_tldr_text_valid_v1(header.package_identity) or
+            not package_tldr_text_valid_v1(header.module_identity) or
+            not package_tldr_text_valid_v1(header.source_identity) or
+            not package_tldr_text_valid_v1(header.scc_identity)):
+        return "metadata-identity-invalid"
+    if config_variant_digest_v1(header.variant) == "":
+        return "metadata-variant-invalid"
+    for digest in [
+            header.producer_digest, header.source_digest,
+            header.source_witness_digest, header.smf_digest,
+            header.export_digest,
+            header.abi_digest, header.initializer_digest,
+            header.provider_digest, header.generated_source_digest,
+            header.reverse_projection_digest, header.interface_archive_digest,
+            header.action_archive_digest]:
+        if not package_tldr_digest_valid_v1(digest):
+            return "metadata-digest-invalid"
+    if package_smf_sections_validate_v1(header.smf_sections) != "ok":
+        return "metadata-smf-directory-invalid"
+    val imports = package_tldr_sorted_unique_v1(header.direct_imports)
+    val dependents = package_tldr_sorted_unique_v1(header.reverse_dependents)
+    val members = package_tldr_sorted_unique_v1(header.scc_members)
+    if (imports.len() != header.direct_imports.len() or
+            dependents.len() != header.reverse_dependents.len() or
+            members.len() != header.scc_members.len()):
+        return "metadata-list-invalid"
+    if not members.contains(header.module_identity):
+        return "metadata-scc-member-missing"
+    "ok"
+
+fn package_tldr_interface_key_v1(header: PackageTldrHeaderV1) -> text:
+    if package_tldr_header_validate_v1(header) != "ok":
+        return ""
+    val variant = config_variant_digest_v1(header.variant)
+    var encoded = "simple/package-interface-archive/v1"
+    for field in [
+            header.producer_digest, header.package_identity,
+            header.module_identity, variant, header.smf_digest,
+            header.export_digest,
+            header.abi_digest, header.initializer_digest,
+            header.provider_digest, header.generated_source_digest,
+            header.reverse_projection_digest]:
+        encoded = encoded + package_tldr_frame_v1(field)
+    sha256_text(encoded)
+
+fn package_tldr_action_key_v1(
+    header: PackageTldrHeaderV1, dependency_interface_keys: [text]
+) -> text:
+    if package_tldr_header_validate_v1(header) != "ok":
+        return ""
+    val dependencies = package_tldr_list_v1(dependency_interface_keys)
+    if dependencies == "":
+        return ""
+    var encoded = "simple/package-action-archive/v1"
+    for field in [
+            header.producer_digest, header.package_identity,
+            header.module_identity, config_variant_digest_v1(header.variant),
+            header.source_digest, header.source_witness_digest,
+            header.generated_source_digest, dependencies]:
+        encoded = encoded + package_tldr_frame_v1(field)
+    sha256_text(encoded)
+
+fn package_tldr_admit_v1(
+    header: PackageTldrHeaderV1?, expected_variant: ConfigVariantKeyV1,
+    current_source_digest: text, source_marked_dirty: bool,
+    dependency_interface_keys: [text]
+) -> PackageMetadataAdmissionV1:
+    val expected_variant_digest = config_variant_digest_v1(expected_variant)
+    if expected_variant_digest == "":
+        return PackageMetadataAdmissionV1(
+            false, "requested-variant-invalid", false, false, "", "", "")
+    if header == nil:
+        return PackageMetadataAdmissionV1(
+            false, "metadata-missing", true, false,
+            expected_variant_digest, "", "")
+    val validation = package_tldr_header_validate_v1(header!)
+    if validation != "ok":
+        return PackageMetadataAdmissionV1(
+            false, validation, true, false,
+            expected_variant_digest, "", "")
+    if config_variant_digest_v1(header!.variant) != expected_variant_digest:
+        return PackageMetadataAdmissionV1(
+            false, "metadata-variant-incompatible", true, false,
+            expected_variant_digest, "", "")
+    if source_marked_dirty or header!.source_digest != current_source_digest:
+        return PackageMetadataAdmissionV1(
+            false, "metadata-dirty", true, false,
+            expected_variant_digest, "", "")
+    val interface_key = package_tldr_interface_key_v1(header!)
+    val action_key = package_tldr_action_key_v1(
+        header!, dependency_interface_keys)
+    if interface_key == "" or action_key == "":
+        return PackageMetadataAdmissionV1(
+            false, "archive-key-invalid", false, false,
+            expected_variant_digest, "", "")
+    PackageMetadataAdmissionV1(
+        true, "ok", false, true, expected_variant_digest,
+        interface_key, action_key)
+
+fn package_tldr_early_cutoff_v1(
+    previous: PackageTldrHeaderV1, rebuilt: PackageTldrHeaderV1
+) -> bool:
+    package_tldr_header_validate_v1(previous) == "ok" and
+        package_tldr_header_validate_v1(rebuilt) == "ok" and
+        previous.package_identity == rebuilt.package_identity and
+        previous.module_identity == rebuilt.module_identity and
+        config_variant_digest_v1(previous.variant) ==
+            config_variant_digest_v1(rebuilt.variant) and
+        previous.export_digest == rebuilt.export_digest and
+        previous.abi_digest == rebuilt.abi_digest and
+        previous.initializer_digest == rebuilt.initializer_digest and
+        previous.provider_digest == rebuilt.provider_digest and
+        previous.generated_source_digest == rebuilt.generated_source_digest and
+        previous.reverse_projection_digest == rebuilt.reverse_projection_digest and
+        previous.interface_archive_digest == rebuilt.interface_archive_digest
+
+export PACKAGE_TLDR_SCHEMA_V1
+export ConfigVariantKeyV1, PackageSmfSectionV1, PackageExportSmfV1
+export PackageTldrHeaderV1, PackageMetadataAdmissionV1
+export config_variant_encode_v1, config_variant_digest_v1
+export package_smf_sections_validate_v1, package_export_smf_validate_v1
+export package_export_smf_section_v1
+export package_tldr_header_validate_v1, package_tldr_interface_key_v1
+export package_tldr_action_key_v1, package_tldr_admit_v1
+export package_tldr_early_cutoff_v1

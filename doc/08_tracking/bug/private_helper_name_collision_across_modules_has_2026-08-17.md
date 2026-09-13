@@ -1,4 +1,5 @@
 # Private module helper `_has` silently resolves to the wrong function across modules
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/app/build/build_targets_spec.spl -> 33 passed, 1 failed, still reproduces)
 
 - Date: 2026-08-17
 - Severity: high (silent wrong answers, not a crash)
@@ -307,3 +308,6 @@ after a std.spec export (`pending`, `fail`, ...) is affected. Worked around in
 that spec by renaming the binding to `pending_request`; the rename is a
 workaround, not a fix — the resolution order (local binding > parameter > global
 function) is what needs correcting, at the same seed sites listed above.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/app/build/build_targets_spec.spl` on the deployed seed; 1 of 34 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

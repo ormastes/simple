@@ -162,3 +162,18 @@ moved this is an argument, not a measurement, and it is recorded as such.
 - `font_render_config_valid` does not validate the language sentinel, so a corrupt
   language reaches selection before anything complains. Tightening it would have
   caught this one gate-run earlier.
+
+## Triage 2026-09-13
+
+The header still says "fix written in the working copy, NOT LANDED",
+but `src/lib/gc_async_mut/gpu/engine2d/engine.spl:221-238`
+(`engine2d_default_font_config_for`) now contains the literal-init
+fix described in "Fix" above -- it IS landed in source (confirmed by
+reading the file directly; the eleven-field cross-struct copy is gone,
+replaced by the literal FontRenderConfig construction with
+`language: "und"`). What remains genuinely blocked is rung-(d)
+verification itself: `check-simpleos-wm-fullscreen-evidence.shs`
+needs a QEMU + OVMF pflash boot reaching desktop readiness, which this
+lane cannot run (no kernel build, no QEMU). Leaving OPEN — source fix
+present, gate verification still pending as originally noted.
+

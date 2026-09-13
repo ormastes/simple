@@ -6,6 +6,7 @@
 # Phase 5: Load-Time JIT Instantiation
 
 use std.env.{env_get_or}
+use std.nogc_sync_mut.io_runtime.{file_write_exact}
 
 use .object_mapper.{
     SharedExecMapper,
@@ -18,20 +19,13 @@ use .object_mapper.{
 use compiler.loader.compiler_sffi.{
     compiler_create_context,
     compiler_destroy_context,
-    compiler_infer_types,
-    compiler_instantiate_template,
-    compiler_get_stats,
-    serialize_types_json,
-    parse_types_json,
-    compiler_result_json_success,
-    compiler_result_json_code,
-    compiler_result_json_error
+    compiler_instantiate_template_typed,
+    TypeInfo,
+    make_named_type
 }
 use .smf_cache.{SmfCache, CacheStats}
 
 # Executable memory mapping is handled by the canonical sibling object mapper.
-
-extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # ============================================================================
 # Result Types
@@ -61,6 +55,8 @@ impl JitInstantiationResult:
 # ============================================================================
 # Configuration
 # ============================================================================
+
+val JIT_POSSIBLE_MISS_LIMIT: i32 = 4096
 
 struct JitInstantiatorConfig:
     """Configuration for JIT instantiation."""
@@ -151,9 +147,14 @@ struct JitInstantiator:
     config: JitInstantiatorConfig
     compiler_ctx_handle: i64  # Compiler context handle (i64, not CompilerContext to avoid constructor issues)
     loaded_metadata: Dict<text, LoadedMetadata>  # Simplified metadata
+    possible_lookup: Dict<text, (text, PossibleInstantiation)>
+    possible_misses: Set<text>
+    possible_miss_count: i32
     in_progress: Set<text>
     depth: i32
     compile_count: i32
+    cached_count: i32
+    loaded_smf_count: i32
     jit_cache: Dict<text, ([u8], i64)>
     jit_semantic_keys: Dict<text, [text]>
     smf_semantic_keys: Dict<text, [text]>
@@ -167,11 +168,16 @@ impl JitInstantiator:
         """Create a new JIT instantiator."""
         JitInstantiator(
             config: config,
-            compiler_ctx_handle: compiler_create_context(),  # Direct i64 handle
+            compiler_ctx_handle: 0,  # Created only on the first actual JIT compile.
             loaded_metadata: {},
+            possible_lookup: {},
+            possible_misses: {},
+            possible_miss_count: 0,
             in_progress: {},
             depth: 0,
             compile_count: 0,
+            cached_count: 0,
+            loaded_smf_count: 0,
             jit_cache: {},
             jit_semantic_keys: {},
             smf_semantic_keys: {},
@@ -187,15 +193,60 @@ impl JitInstantiator:
     me load_smf_metadata(smf_path: text) -> Result<(), text>:
         """Load note.sdn metadata from an SMF file."""
         val metadata = self.read_note_sdn_from_file(smf_path)?
+        if not self.loaded_metadata.has(smf_path):
+            self.loaded_smf_count = self.loaded_smf_count + 1
         self.loaded_metadata[smf_path] = metadata
+        # Replacements can change which SMF wins the existing first-match scan.
+        self.possible_lookup = {}
+        self.possible_misses = {}
+        self.possible_miss_count = 0
         Ok(())
 
     me set_metadata_for_test(smf_path: text, metadata: LoadedMetadata):
         """Set metadata directly (for testing only)."""
+        if not self.loaded_metadata.has(smf_path):
+            self.loaded_smf_count = self.loaded_smf_count + 1
         self.loaded_metadata[smf_path] = metadata
+        self.possible_lookup = {}
+        self.possible_misses = {}
+        self.possible_miss_count = 0
+
+    me remember_possible_miss(symbol: text):
+        if self.possible_misses.contains(symbol):
+            return
+        if self.possible_miss_count >= JIT_POSSIBLE_MISS_LIMIT:
+            self.possible_misses = {}
+            self.possible_miss_count = 0
+        self.possible_misses = self.possible_misses.insert(symbol)
+        self.possible_miss_count = self.possible_miss_count + 1
+
+    me ensure_compiler_ctx() -> i64:
+        if self.compiler_ctx_handle == 0:
+            self.compiler_ctx_handle = compiler_create_context()
+        self.compiler_ctx_handle
+
+    me destroy():
+        """Release JIT mappings, mapped SMFs, compiler state, and indexes."""
+        val cached_symbols = self.jit_cache.keys()
+        for symbol in cached_symbols:
+            self.drop_cached_symbol(symbol)
+        self.exec_mapper.clear()
+        self.smf_cache.clear()
+        if self.compiler_ctx_handle != 0:
+            compiler_destroy_context(self.compiler_ctx_handle)
+            self.compiler_ctx_handle = 0
+        self.loaded_metadata = {}
+        self.possible_lookup = {}
+        self.possible_misses = {}
+        self.possible_miss_count = 0
+        self.smf_semantic_keys = {}
+        self.in_progress = {}
+        self.loaded_smf_count = 0
 
     me set_cache_for_test(symbol: text, code: [u8], address: i64):
         """Set cache entry directly (for testing only)."""
+        if not self.jit_cache.has(symbol):
+            self.cached_count = self.cached_count + 1
         self.jit_cache[symbol] = (code, address)
         self.symbol_table[symbol] = address
 
@@ -220,6 +271,7 @@ impl JitInstantiator:
         """Drop cached JIT bookkeeping and free exec page for one symbol."""
         if self.jit_cache.has(symbol):
             self.jit_cache = self.jit_cache.remove(symbol)
+            self.cached_count = self.cached_count - 1
         if self.jit_semantic_keys.has(symbol):
             self.jit_semantic_keys = self.jit_semantic_keys.remove(symbol)
         if self.symbol_table.has(symbol):
@@ -262,27 +314,28 @@ impl JitInstantiator:
 
         Ok(LoadedMetadata(possible: possible, instantiations: instantiations))
 
-    fn can_jit_instantiate(symbol: text) -> bool:
+    me can_jit_instantiate(symbol: text) -> bool:
         """Check if a symbol can be JIT-instantiated."""
         if not self.config.enabled:
             return false
 
-        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for k in self.loaded_metadata.keys():
-            val metadata = self.loaded_metadata[k]
-            for poss in metadata.possible:
-                if poss.mangled_name == symbol:
-                    return true
-        false
+        self.find_possible(symbol).?
 
-    fn find_possible(symbol: text) -> (text, PossibleInstantiation)?:
+    me find_possible(symbol: text) -> (text, PossibleInstantiation)?:
         """Find possible instantiation for a symbol."""
+        if self.possible_lookup.has(symbol):
+            return Some(self.possible_lookup[symbol])
+        if self.possible_misses.contains(symbol):
+            return nil
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for path in self.loaded_metadata.keys():
             val metadata = self.loaded_metadata[path]
             for entry in metadata.possible:
                 if entry.mangled_name == symbol:
-                    return Some((path, entry))
+                    val found = (path, entry)
+                    self.possible_lookup[symbol] = found
+                    return Some(found)
+        self.remember_possible_miss(symbol)
         nil
 
     me try_jit_instantiate(symbol: text) -> JitInstantiationResult:
@@ -342,26 +395,24 @@ impl JitInstantiator:
         """Perform JIT compilation via compiler SFFI."""
         # Parse type args from comma-separated string
         val type_arg_strs = entry.type_args.split(",")
-        var type_params_json: [text] = []
-        var types_json_parts: [text] = []
+        var type_params: [text] = []
+        var types: [TypeInfo] = []
         for s in type_arg_strs:
             val trimmed = s.trim()
             val normalized = type_from_string(trimmed)
-            type_params_json.push('"{normalized}"')
-            types_json_parts.push('{"kind": "named", "name": "{normalized}"}')
+            type_params.push(normalized)
+            types.push(make_named_type(normalized))
 
-        # Build template and types JSON for compiler SFFI
-        val template_json = '{"name": "{entry.template_name}", "type_params": [' + type_params_json.join(",") + ']}'
-        val types_json = '[' + types_json_parts.join(",") + ']'
+        # Call the in-process typed compiler boundary without JSON encode/decode.
+        val compiler_ctx_handle = self.ensure_compiler_ctx()
+        val typed_result = compiler_instantiate_template_typed(
+            compiler_ctx_handle, entry.template_name, type_params, types
+        )
 
-        # Call compiler SFFI to instantiate template
-        val result_text = compiler_instantiate_template(self.compiler_ctx_handle, template_json, types_json)
-
-        # Parse the generated JSON result to extract code bytes.
-        val code_result = if compiler_result_json_success(result_text):
-            Ok(compiler_result_json_code(result_text))
+        val code_result = if typed_result.success:
+            Ok(typed_result.code)
         else:
-            Err(compiler_result_json_error(result_text))
+            Err(if typed_result.has_error: typed_result.error else: "Unknown error")
 
         match code_result:
             case Ok(compiled_code):
@@ -374,6 +425,8 @@ impl JitInstantiator:
                         )
 
                 # Cache the result
+                if not self.jit_cache.has(entry.mangled_name):
+                    self.cached_count = self.cached_count + 1
                 self.jit_cache[entry.mangled_name] = (compiled_code, fn_pointer)
                 if self.smf_semantic_keys.has(smf_path):
                     self.jit_semantic_keys[entry.mangled_name] = self.smf_semantic_keys[smf_path]
@@ -415,6 +468,9 @@ impl JitInstantiator:
 
             # Remove from possible
             metadata.possible = metadata.possible.filter(_.mangled_name != entry.mangled_name)
+            if self.possible_lookup.has(entry.mangled_name):
+                self.possible_lookup = self.possible_lookup.remove(entry.mangled_name)
+            self.remember_possible_miss(entry.mangled_name)
 
             # Add to instantiations
             val new_inst = LoaderInstantiationRecord(
@@ -433,7 +489,7 @@ impl JitInstantiator:
 
             self.loaded_metadata[smf_path] = metadata
             val sidecar_path = _metadata_sidecar_path(smf_path)
-            val persisted = rt_file_write_text(sidecar_path, serialize_loaded_metadata(metadata))
+            val persisted = file_write_exact(sidecar_path, serialize_loaded_metadata(metadata))
             if not persisted:
                 return Err("Failed to persist JIT metadata sidecar: {sidecar_path}")
 
@@ -446,9 +502,9 @@ impl JitInstantiator:
         """Get JIT statistics."""
         val cache_stats = self.smf_cache.get_stats()
         JitStats(
-            cached_count: self.jit_cache.keys().len(),
+            cached_count: self.cached_count,
             compile_count: self.compile_count,
-            loaded_smf_count: self.loaded_metadata.keys().len(),
+            loaded_smf_count: self.loaded_smf_count,
             smf_cache_hits: cache_stats.cache_hits,
             smf_cache_misses: cache_stats.cache_misses,
             smf_files_mapped: cache_stats.total_files,

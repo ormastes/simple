@@ -7,26 +7,17 @@
 # `gc.lease.reclaim_rule`: "only after proving the owning process/session is
 # dead, or after a conservative timeout PLUS a generation check." This
 # implementation checks liveness via rt_process_exists (kill -0 semantics);
-# a dead process's lease reclaims immediately. A live process whose lease is
-# merely stale (no heartbeat) is reclaimed only past LEASE_STALE_TIMEOUT_SECS
-# AND a heartbeat-generation check (the recorded generation must not have
-# advanced since the reclaim check started reading it).
-# ponytail: LEASE_STALE_TIMEOUT_SECS is a conservative ceiling, not measured
-# against a real build's longest single action; revisit if a legitimate lease
-# is ever reclaimed while its process is still alive but slow.
-
-@unsafe(reason: "raw cache lease process-liveness ABI", capabilities: [ffi])
-extern fn rt_process_exists(pid: i64) -> bool
+# a dead process's lease reclaims immediately. A live process remains a root:
+# this lease format has no bound heartbeat-generation read that could prove a
+# stale process has stopped publishing its retained generation.
 
 use std.crypto.sha256.{sha256_text}
-use std.io_runtime.{dir_create_all, dir_list, file_delete, file_exists, getpid, time_now_unix_micros}
-use std.file_system.{file_write_text}
-use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.io_runtime.{dir_create_all, dir_list, file_delete, file_exists, getpid, process_is_running, time_now_unix_micros}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable, file_write_exact}
 
 @always_inline
 fn lease_file_write_raw(path: text, content: text) -> bool:
-    unsafe(capabilities: [ffi]):
-        file_write_text(path, content)
+    file_write_exact(path, content)
 @always_inline
 fn lease_file_exists_raw(path: text) -> bool:
     unsafe(capabilities: [ffi]):
@@ -53,8 +44,7 @@ fn lease_time_now_unix_micros_raw() -> i64:
         time_now_unix_micros()
 @always_inline
 fn lease_process_exists_raw(pid: i64) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_process_exists(pid)
+    process_is_running(pid)
 
 val LEASE_HEADER: text = "simple-cache-lease-v1"
 val LEASE_STALE_TIMEOUT_SECS: i64 = 21600   # 6h conservative ceiling
@@ -167,13 +157,17 @@ fn lease_read(root: text, lease_id: text) -> CacheLease?:
     lease_parse(maybe_content.unwrap())
 
 # A lease is reclaimable (safe to delete without violating gc_reachability_safe)
-# only if the owning process is provably dead, or the heartbeat generation has
-# not advanced past a conservative staleness timeout.
-fn lease_is_reclaimable(lease: CacheLease, now_unix_micros: i64) -> bool:
+# only if the owning process is provably dead. A timestamp cannot prove a live
+# process has stopped using its cached roots.
+fn lease_is_reclaimable(lease: CacheLease, _now_unix_micros: i64) -> bool:
+    # The current process is authoritative for its own live lease. Avoid a
+    # provider round-trip here; bootstrap/interpreter providers have returned
+    # false for their own PID and incorrectly erased fresh GC roots.
+    if lease.process_id == getpid():
+        return false
     if not lease_process_exists_raw(lease.process_id):
         return true
-    val age_secs = (now_unix_micros - lease.created_at) / 1000000
-    age_secs >= LEASE_STALE_TIMEOUT_SECS
+    false
 
 # All non-reclaimable leases in root, i.e. the GC roots this module contributes.
 fn lease_list_active(root: text) -> [CacheLease]:

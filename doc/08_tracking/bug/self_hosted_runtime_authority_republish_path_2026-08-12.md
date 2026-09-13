@@ -1,4 +1,5 @@
 # Self-hosted runtime-authority republish path (2026-08-12)
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl -> 0 passed, 16 failed, still reproduces)
 
 ## Status
 
@@ -426,3 +427,6 @@ with zero and one explicit argument against the frozen runtime. Stage-3 resume
 must run from this same frozen checkout and revalidate both receipts along with
 the admitted snapshots before writing its manifest. No deployment or rendering
 claim follows from an in-progress or failed Stage-2 run.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl` on the deployed seed; 16 of 16 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

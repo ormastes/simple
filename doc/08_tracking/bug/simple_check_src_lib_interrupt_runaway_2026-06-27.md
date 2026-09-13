@@ -1,6 +1,6 @@
 # simple check src/lib continues after interrupt
 
-Status: guarded in source, pending release-binary verification
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Severity: P2 resource/runaway
 Date: 2026-06-27
 
@@ -36,3 +36,6 @@ Added cooperative checks of the existing `simple_compiler::interpreter::is_inter
 ## Follow-Up
 
 After the release binary is rebuilt, verify with a long directory check in an interactive shell by sending SIGINT during the file loop. Do not rerun this as an unattended broad check in Codex.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

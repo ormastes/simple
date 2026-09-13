@@ -63,3 +63,27 @@ already makes for missing headers.
   may not be the same root cause.
 - Until then, `.spl` additions under `test/01_unit/compiler/codegen/` cannot be
   lint-verified; say so rather than claiming a clean lint.
+
+## Scope is wider than `test/01_unit/compiler/codegen/` (BOOT-6, 2026-09-13)
+
+Measured on `work/bootstrap-full-4-2026-09-12` at `4e8e6426a3c`, seed
+`3d120a6f9ab5704b...`, host load ~28. `bin/simple lint` SIGSEGVs (rc=139,
+"Segmentation fault (core dumped)", after the usual co-compiled-definition
+warning block) on ordinary **product** sources under `src/compiler/`, not only
+on specs:
+
+| file | rc |
+|---|---|
+| `src/compiler/70.backend/backend/llvm_backend_tools.spl` (edited by BOOT-6) | 139 |
+| `src/compiler/80.driver/driver_aot_native_output.spl` (edited by BOOT-6) | 139 |
+| `src/compiler/70.backend/backend/backend_helpers.spl` (**untouched control**) | 139 |
+
+The third row is the point: an untouched file at the same commit crashes
+identically, so the crash is a property of the linter on this tree and NOT of
+any edit. That control is why BOOT-6 reported "lint could not run" rather than
+"lint passed" or "lint failed on my change" — a linter that cannot produce a
+verdict gives neither.
+
+Consequence for the gate: lint coverage is silently zero for at least the
+backend and driver layers of the compiler, which is where the bootstrap lanes
+do all of their work.

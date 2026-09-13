@@ -690,3 +690,580 @@ import-materialization fan-out in the allocation hot path; it does not yet
 prove whether the termination is caused by a cycle, repeated acyclic work, or
 an ownership lifetime defect. The row remains OPEN pending a visited/in-flight
 audit of those three functions and a canonical Stage 3 completion.
+
+## 2026-09-06 (aarch64 measurement lane) — THE RUNTIME ALREADY RECLAIMS AGGREGATES; THE BINDING CONSTRAINT IS TRANSIENT-SCOPE COVERAGE, NOT A MISSING HEADER WORD
+
+Host: aarch64 Linux, 20 cores, 121 GiB RAM, load average 12-45 during the runs
+(contended by construction — treat wall times as an envelope, not a floor).
+Binary identity recorded with every number below:
+
+```
+readlink -f bin/simple
+  /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple
+stat -c '%s %y'  ->  50093192  2026-09-06 09:59
+bin/simple --version | tail -1  ->  Simple Language v1.0.0-rc.1
+  (banner: "this Rust-built Simple binary is a bootstrap seed only")
+```
+
+### 0. Retained-evidence audit, repeated
+
+`build/native_probe/stage3-fresh/build-cycle3.log` is **still gone**, and this
+worktree has **no `build/bootstrap/stage2` or `stage3`** either (`ls -d
+build/bootstrap/stage*` -> no such file). The Restart-12 figures remain quoted
+from this document. No canonical Stage-3 transaction was run in this lane, and
+acceptance item 3 is therefore still open.
+
+### 1. Measured: an rt_alloc'd aggregate outside a transient scope is never freed, at 16 + 8*fields bytes each
+
+Fixture (JIT-compiled by the seed — `bin/simple run` reports **no**
+`[jit-fallback]`, so this is the native C runtime, not the Rust interpreter):
+
+```simple
+class Node:
+    a: i64
+    b: i64
+    c: i64
+    d: i64
+
+fn main():
+    var n: i64 = 0
+    var sum: i64 = 0
+    val limit: i64 = 1000000        # varied per row
+    while n < limit:
+        val node = Node(a: n, b: n + 1, c: n + 2, d: n + 3)
+        sum = sum + node.a
+        n = n + 1
+    print "sum={sum}"
+```
+
+Command per row: `/usr/bin/time -v ./bin/simple run <fixture>.spl`, reading
+`Maximum resident set size (kbytes)`.
+
+| fixture | allocations | max RSS (KiB) | marginal B/alloc |
+|---|---:|---:|---:|
+| `Node` (4 x i64) | 100,000 | 40,332 | — |
+| `Node` (4 x i64) | 1,000,000 | 84,780 | 50.6 |
+| `Node` (4 x i64) | 4,000,000 | 225,484 | **48.03** |
+| `Node` (4 x i64) | 8,000,000 | 412,848 | **47.97** |
+| `Node8` (8 x i64) | 1,000,000 | 115,840 | — |
+| `Node8` (8 x i64) | 4,000,000 | 350,172 | **79.99** |
+| `[i64]` of len 4 | 1,000,000 | 124,320 | — |
+| `[i64]` of len 4 | 4,000,000 | 402,852 | **95.07** |
+
+The slope is constant to within 0.1% across an 80x input range, and 4 -> 8
+fields moves it by exactly 32 B (8 B/field, 16 B fixed). That arithmetic
+attributes the retained bytes to the **instance block itself**, not to the loop,
+the JIT, or allocator fragmentation. Every instance the program drops stays
+resident for the life of the process. Arrays leak on the same path, so this is
+not specific to class/struct aggregates.
+
+### 2. Measured: wrapping the SAME workload in a transient scope flattens the curve to zero slope
+
+Same fixture, same command, with the loop split into 1,000 batches, each
+bracketed by the runtime's existing scope primitives (`extern fn
+rt_transient_array_scope_begin() -> bool` / `rt_transient_array_scope_end() ->
+bool`; both returned `true` on the first batch, printed to prove the scope
+really opened):
+
+| allocations | max RSS (KiB), unscoped | max RSS (KiB), scoped |
+|---:|---:|---:|
+| 1,000,000 | 84,780 | 38,252 |
+| 4,000,000 | 225,484 | 38,284 |
+| 8,000,000 | 412,848 | 38,588 |
+| 16,000,000 | (not run; ~810,000 extrapolated at 48 B) | **39,180** |
+
+Scoped marginal cost across 1M -> 16M allocations: **(39,180 - 38,252) KiB /
+15,000,000 = 0.063 B/alloc** — 762x below the unscoped 48.0 B/alloc, i.e. flat
+inside sampling noise while the input grows 16x. The scoped 38-39 MiB is the
+`bin/simple run` floor (the 100,000-allocation unscoped row is 40 MiB).
+
+### 3. What this corrects in this record's §4 (2026-08-17)
+
+§4 concluded the remaining owner is a runtime **representation** change and
+scoped the fix as "a new registering `rt_object_new`, a new deep-free kind +
+child-word scan, ... a header word [that] shifts every struct field GEP in two
+backends". Re-read against current source, that is **not** what the runtime
+does today, and §2 above is the counter-measurement:
+
+- `rt_alloc` (`src/runtime/runtime_native.c:5920-5946`) already calls
+  `rt_core_transient_raw_register` on **both** the guard-sampled and the plain
+  `malloc` path.
+- `rt_core_transient_classify` (`src/runtime/runtime_native.c:2045-2052`) probes
+  the raw registry **first**, *before* the heap-tag test — so an untagged,
+  header-less `rt_alloc` block is classified `RT_CORE_TRANSIENT_RAW` with its
+  recorded byte size.
+- `rt_transient_heap_promote` already word-scans a RAW node's children
+  (`src/runtime/runtime_native.c:2131-2139`) and clears the owned bit on
+  survivors (`:2156-2161`).
+- `rt_transient_array_scope_end` -> `rt_core_reclaim_transient_raw`
+  (`src/runtime/runtime_native.c:1372-1382`, `:1549-1568`) frees every entry
+  that still carries `RT_CORE_TRANSIENT_RAW_OWNED_BIT`.
+
+So aggregates are *already* registered, *already* traversable, and *already*
+reclaimable — no kind header, no GEP shift, no `rt_object_new`. The
+`SECOND LIMIT` note (`src/runtime/runtime_native.c:6548-6565`) is accurate about
+`rt_core_deep_free_classify`, which is a **different** primitive; it is not the
+constraint on the transient path, and §4 read across the two.
+
+### 4. The actual retention, with file:line
+
+`src/runtime/runtime_native.c:1502`
+
+```c
+static int rt_core_transient_raw_register_state(void* ptr, size_t bytes, int owned) {
+    if (!ptr || !rt_core_transient_array_scope_active) return ptr != NULL;
+```
+
+**An allocation made while no transient scope is active is never recorded, so it
+can never be freed** — there is no registry entry, no header, and no other
+free path for a bare `rt_alloc` block. That single early return is what §1
+measures at 48 B/instance and what §2 removes. Reclamation is therefore a
+question of *scope coverage over the phase*, not of object representation.
+
+In the Stage-3 streaming HIR phase, the scope covers exactly
+`CompilerDriver.lower_streaming_surface_source`
+(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:65-100`): begin ->
+`parse_full_frontend` -> `lower_parser_module_unstub` -> pause -> promote HIR +
+diagnostics + flat rows + frontend registries -> end. Everything else executed
+per source in `lower_and_check_streaming_surfaces_impl` is **outside** any
+scope, including `lowering.begin_module(source.path)` (`:254`, which reallocates
+~20 dicts/arrays and drops the previous module's), the surface
+identity/fingerprint comparisons and their interpolated text (`:213-243`), the
+HIR cache key and cached-module path (`:242-274`), the per-module progress and
+`log_phase` receipts (`:255-260`), and the post-lowering diagnostic projection
+loop (`:294-...`). Each of those allocations is permanently unreclaimable by
+construction.
+
+### 5. Seed-interpreted full-closure control (discriminator, NOT a Stage-3 number)
+
+To separate "a Simple-source data structure is retained per module" from "the
+runtime cannot free what the source correctly dropped", the same pure-Simple
+compiler source was driven under the **Rust seed interpreter**, which has its
+own value lifecycle:
+
+```bash
+./bin/simple run src/app/cli/bootstrap_main.spl compile --format=smf \
+    src/app/cli/bootstrap_main.spl -o out.smf
+# sampled every 2s: VmRSS / VmHWM from /proc/<pid>/status,
+# joined to the driver's own `[build] <phase> N/775 ... +Tms` progress lines
+```
+
+`bootstrap_main.spl` itself drops to the interpreter under the seed
+(`[jit-fallback] ... case KwMod:`), so this run exercises the compiler's HIR
+lowering **source** without the no-GC native runtime underneath it.
+
+Entry closure: **775 sources** (`source_closure 775/775 ... complete` at
+`+23,143 ms`). Process floor before the closure walk: **3,356,704 KiB**.
+
+Parse phase, linear and shallow:
+
+| parse module | VmRSS (KiB) | MiB above floor | MiB/module |
+|---:|---:|---:|---:|
+| 0 | 3,356,704 | 0 | — |
+| 101 | 3,631,876 | 268.7 | 2.66 |
+| 239 | 3,924,160 | 554.2 | 2.32 |
+| 313 | 4,076,252 | 702.7 | 2.25 |
+| 364 | 4,179,828 | 803.8 | 2.21 |
+
+
+### 6. AMENDMENT — the same measurement on `runtime_native.c` itself (the Stage-3 runtime), plus three corrections to §1-§5
+
+**Correction A (runtime identity).** §1 and §2 ran on `bin/simple`, which is the
+Rust seed and therefore links the **Rust twin** of the runtime
+(`rt_transient_array_scope_begin` is defined at
+`src/compiler_rust/runtime/src/value/collections.rs:1786`), not the
+`core-c-bootstrap` `runtime_native.c` that Stage 3 links. Every file:line in §3
+and §4 is `runtime_native.c`. That gap is now **closed by direct measurement**
+rather than by assuming the twins agree.
+
+A 33-line C fixture declares only the three symbols it uses
+(`rt_alloc`, `rt_transient_array_scope_begin`, `rt_transient_array_scope_end`),
+allocates `rt_alloc(32)` in batches of 4,000 and writes 4 words into each block,
+optionally bracketing each batch with begin/end. It is linked directly against
+`src/runtime/runtime_native.c` plus abort-on-call stubs for the 28 unrelated
+`spl_*` / `rt_process_*` / `rt_simd_*` symbols the translation unit references
+(none is on the allocation path; each aborts if reached):
+
+```bash
+~/dev/llvm/install/bin/clang -O2 -o probe main.c stubs.c \
+    src/runtime/runtime_native.c -lm -lpthread          # exit 0
+/usr/bin/time -v ./probe <N> <0|1>
+```
+
+| rt_alloc(32) calls | max RSS, no scope (KiB) | max RSS, scoped (KiB) |
+|---:|---:|---:|
+| 1,000,000 | 48,556 | **1,816** |
+| 4,000,000 | 189,016 | **1,816** |
+| 8,000,000 | 376,544 | **1,816** |
+| 16,000,000 | 751,416 | **1,816** |
+
+Unscoped marginal cost: `(751,416 - 48,556) KiB / 15,000,000 = ` **47.98
+B/alloc** — within 0.1% of the 48.03 B/alloc measured through the Simple/JIT
+lane in §1, so the two runtime twins agree. Scoped: **byte-identical 1,816 KiB
+at every N**, i.e. a slope of exactly zero over a 16x input range, and the
+reclaim is total rather than merely bounded.
+
+This is the Stage-3 runtime, measured, not inferred. §3's conclusion stands on
+`runtime_native.c` directly: no kind header, no `rt_object_new`, and no GEP
+shift are needed for an `rt_alloc` block to be reclaimed — the existing
+transient scope already reclaims 100% of them.
+
+**Correction B (§3 overstated "corrects").** §4 of 2026-08-17 already cited
+`rt_core_transient_raw_register`'s scope-gated behaviour. What this lane adds is
+not that the earlier reading missed registration, but a measurement showing the
+gate is the whole story: the fix is **narrowed** from object representation to
+**scope coverage**. Read §3 as narrowing §4, not as refuting it.
+
+**Correction C (§5 mis-described its own lane).** §5 called the seed-interpreted
+closure run a discriminator "without the no-GC native runtime underneath it".
+That is **false**. `grep -c 'falling back to interpreter'` over that run's log
+returns **1**, and the only module named is `src/app/cli/bootstrap_main.spl`
+itself — the entire compiler import closure, including `80.driver` and
+`20.hir`, is **JIT-compiled** and runs on the seed's runtime with `rt_alloc` and
+the transient-scope machinery live. So §5's parse-phase slope (2.2-2.7
+MiB/module over 775 sources) is not an interpreter control; it is a *near-repro*
+of Stage 3's execution model on a different runtime twin. Treat its slopes as
+indicative and its absolute RSS as not comparable to the Stage-3 figures.
+
+**What is still NOT located, stated plainly.** This lane measured the
+*mechanism* (an allocation outside a transient scope is unreclaimable, at 48
+B/block) and the *scope boundary* in the Stage-3 streaming driver
+(`lower_streaming_surface_source` only). It did **not** locate where the
+Restart-12 ~63 MiB/module actually lands. The candidates remain open and
+unranked: the promoted HIR graph itself, allocations made while the scope is
+*paused* (`rt_core_transient_raw_register` records those with the owned bit
+clear, so `rt_core_reclaim_transient_raw` skips them —
+`src/runtime/runtime_native.c:1512-1514`, `:1553`), the pre-HIR streaming
+**surface** phase, or the per-source loop body outside the scope. The loop-body
+allocations named in §4 are kilobytes per module by inspection and cannot by
+themselves be 63 MiB; §4 names them as *unreclaimable by construction*, not as
+the measured owner. This record has a history of confident owner claims that
+turned out to be small terms — this is not another one.
+
+**Smallest correct fix (proposed, NOT implemented, NOT measured).** Widen the
+per-source transient scope in
+`CompilerDriver.lower_and_check_streaming_surfaces_impl` from
+`lower_streaming_surface_source` alone
+(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:65-100`) to the whole
+loop-body iteration, promoting the small set of values that must outlive it
+(the `HirModule` is already promoted; the `CompileContext` diagnostics and
+poison markers are not). That is a `80.driver`-owned change, not a
+runtime-or-backend one, and is materially cheaper than §4's scoped fix. It must
+not be landed on this evidence alone: the correct next step is an instrumented
+canonical Stage-3 transaction that reports, per module, promoted bytes vs.
+reclaimed bytes vs. RSS delta — which is what would actually rank the four
+candidates above. That transaction cannot run in this worktree (no Stage 2, no
+Stage 3, and the sanctioned bootstrap was explicitly out of scope for this
+lane), so the row stays **OPEN**.
+
+### 7. MEASURED: the PAUSED window inside the Stage-3 HIR scope leaks at the full 48 B/alloc while the active window is reclaimed 100%
+
+Candidate 2 of §6's unranked list is no longer speculation. A second C fixture
+replays the driver's exact sequence from
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:65-100` —
+`begin` -> allocate (the parse + lower window) -> `pause` -> allocate (the
+promotion window) -> `end` — linked the same way against
+`src/runtime/runtime_native.c`:
+
+```bash
+~/dev/llvm/install/bin/clang -O2 -o probe2 main2.c stubs.c \
+    src/runtime/runtime_native.c -lm -lpthread
+/usr/bin/time -v ./probe2 4000 4000 <paused_per_batch>
+```
+
+Every row performs the **same 16,000,000 active allocations** (4,000 batches x
+4,000) and differs only in how many blocks are allocated after `pause`:
+
+| paused per batch | total paused allocs | max RSS (KiB) | RSS above the p=0 floor | B per paused alloc |
+|---:|---:|---:|---:|---:|
+| 0 | 0 | 2,008 | — | — |
+| 10 | 40,000 | 3,928 | 1,920 KiB | 49.2 |
+| 100 | 400,000 | 20,728 | 18,720 KiB | 47.9 |
+| 1,000 | 4,000,000 | 189,528 | 187,520 KiB | **48.0** |
+
+The 16M **active** allocations cost 2,008 KiB in every row — fully reclaimed.
+The **paused** allocations cost **48.0 B each, permanently**, the identical
+slope §6 measured for an allocation made with no scope at all. Mechanism, in
+source: `rt_core_transient_raw_register` passes
+`owned = !rt_core_transient_array_scope_paused`
+(`src/runtime/runtime_native.c:1512-1514`), and
+`rt_core_reclaim_transient_raw` frees only entries carrying
+`RT_CORE_TRANSIENT_RAW_OWNED_BIT` (`:1553`). A paused-window block is recorded,
+then skipped by the reclaim, then erased from the table by
+`rt_core_transient_raw_clear` (`:1567`) — leaked *and* untracked.
+
+**What executes inside that window on Stage 3.** Between
+`rt_transient_array_scope_pause()`
+(`driver_hir_pipeline_lowering.spl:75`) and
+`driver_end_transient_parse_scope()` (`:98`) the driver runs four promotion
+walkers: `rt_transient_heap_promote(hir_module)` (`:79`),
+`lowering.promote_diagnostics_transient_owner()` (`:83`, itself three more
+`rt_transient_heap_promote` calls — `src/compiler/20.hir/hir_lowering/types.spl:564-571`),
+`bootstrap_hir_modules_promote_last()` (`:90`), and
+`driver_promote_frontend_registry_owners()` (`:94`). Every `rt_alloc` any of
+those makes is retained for the life of the process.
+
+**Arithmetic bridge to Restart-12, stated as a hypothesis with its own falsifier.**
+63 MiB/module / 48 B = **~1.38 million leaked blocks per module**. The
+2026-08-22 instrumentation measured **38,060 promoted nodes** for module 1, so
+this window would have to allocate ~36 blocks per promoted node to account for
+the whole slope. That is a *testable* number, not a conclusion: it is refuted if
+an instrumented Stage 3 shows the paused window allocating materially fewer than
+~1.4M blocks per module, in which case the remaining candidates from §6 (the
+promoted graph itself, the pre-HIR surface phase, the unscoped loop body) carry
+the balance. **No Stage-3 run was made in this lane, so the bridge is unverified
+and must not be quoted as the located owner.**
+
+**How to test it cheaply on the next Stage 3.** `rt_core_transient_raw_register_state`
+already sees every block and already knows the paused flag; a counter pair
+(blocks and bytes registered with the owned bit clear, per scope) reported
+alongside the existing `hir-promotion` / `hir-promotion-total` snapshot rows
+would settle the attribution in one transaction, with no representation change
+and no behaviour change.
+
+### 8. Closure-scale control, and one lane that died
+
+Non-streaming full closure (775 sources, `src/app/cli/bootstrap_main.spl`),
+seed JIT, parse phase, VmRSS joined to the driver's own progress lines:
+
+| parse module | VmRSS (KiB) |
+|---:|---:|
+| 0 | 3,412,876 |
+| 160 | 3,737,276 |
+| 320 | 4,096,484 |
+| 480 | 4,512,004 |
+| 640 | 4,824,028 |
+| 688 | 4,929,612 |
+
+Linear at **2,204 KiB/module** over 688 modules (segment slopes 2,136 and 2,264
+KiB/module), i.e. ~2.15 MiB/module — three orders of magnitude below the
+Restart-12 HIR-phase 63 MiB/module, so the parse phase is not the shape this
+P0 is about.
+
+That run was **SIGKILLed (rc=137) at parse 688/775, 4,929,612 KiB**, on a shared
+box where 83 of 121 GiB were held by other agents' processes at the time (101
+GiB free immediately after). It is recorded as a truncated run, not as a
+reproduction of this bug's termination: the record's own 2026-08-14 warning
+applies — a kill without a monotonic HIR-phase RSS trace is not a repro.
+
+### 9. Appendix — the two C fixtures, verbatim, so the numbers can be re-run
+
+Both link the same way. `stubs.c` defines the 28 unrelated `spl_*` /
+`rt_process_*` / `rt_simd_*` / `rt_getcwd` / `rt_is_dir` / `rt_dir_remove_all` /
+`rt_sleep_ms_native` / `rt_text_slice_audit_*` symbols the translation unit
+references as `void name(void) { abort(); }` — none is on the allocation path,
+and any call aborts loudly rather than being silently absent:
+
+```bash
+~/dev/llvm/install/bin/clang -O2 -o probe main.c stubs.c \
+    src/runtime/runtime_native.c -lm -lpthread
+```
+
+`main.c` (§6 — scope vs no scope; `./probe <N> <0|1>`):
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+void*  rt_alloc(int64_t size);
+int8_t rt_transient_array_scope_begin(void);
+int8_t rt_transient_array_scope_end(void);
+
+int main(int argc, char** argv) {
+    if (argc < 3) { fprintf(stderr, "usage: probe N SCOPED\n"); return 1; }
+    long n = atol(argv[1]);
+    int scoped = atoi(argv[2]);
+    long batch = 4000;
+    long done = 0;
+    volatile long sink = 0;
+    while (done < n) {
+        long take = (n - done) < batch ? (n - done) : batch;
+        if (scoped) {
+            if (!rt_transient_array_scope_begin()) { fprintf(stderr, "begin failed\n"); return 2; }
+        }
+        for (long i = 0; i < take; i++) {
+            int64_t* p = (int64_t*)rt_alloc(32);
+            if (!p) { fprintf(stderr, "alloc failed\n"); return 3; }
+            p[0] = i; p[1] = i; p[2] = i; p[3] = i;
+            sink += p[0];
+        }
+        if (scoped) {
+            if (!rt_transient_array_scope_end()) { fprintf(stderr, "end failed\n"); return 4; }
+        }
+        done += take;
+    }
+    printf("n=%ld scoped=%d sink=%ld\n", n, scoped, (long)sink);
+    return 0;
+}
+```
+
+`main2.c` (§7 — active window vs paused window; `./probe2 4000 4000 <paused>`):
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+void*  rt_alloc(int64_t size);
+int8_t rt_transient_array_scope_begin(void);
+int8_t rt_transient_array_scope_pause(void);
+int8_t rt_transient_array_scope_end(void);
+
+/* Replays the Stage-3 driver's sequence in lower_streaming_surface_source:
+   begin -> allocate (parse + lower) -> pause -> allocate (promotion-time work)
+   -> end. ACTIVE blocks are registered owned; PAUSED blocks are registered with
+   the owned bit clear, so rt_core_reclaim_transient_raw skips them. */
+int main(int argc, char** argv) {
+    if (argc < 4) { fprintf(stderr, "usage: probe2 BATCHES ACTIVE PAUSED\n"); return 1; }
+    long batches = atol(argv[1]);
+    long active  = atol(argv[2]);
+    long paused  = atol(argv[3]);
+    volatile long sink = 0;
+    for (long b = 0; b < batches; b++) {
+        if (!rt_transient_array_scope_begin()) { fprintf(stderr, "begin failed at %ld\n", b); return 2; }
+        for (long i = 0; i < active; i++) {
+            int64_t* p = (int64_t*)rt_alloc(32);
+            if (!p) return 3;
+            p[0] = i; sink += p[0];
+        }
+        if (!rt_transient_array_scope_pause()) { fprintf(stderr, "pause failed\n"); return 4; }
+        for (long i = 0; i < paused; i++) {
+            int64_t* p = (int64_t*)rt_alloc(32);
+            if (!p) return 5;
+            p[0] = i; sink += p[0];
+        }
+        if (!rt_transient_array_scope_end()) { fprintf(stderr, "end failed\n"); return 6; }
+    }
+    printf("batches=%ld active=%ld paused=%ld sink=%ld\n", batches, active, paused, (long)sink);
+    return 0;
+}
+```
+
+The Simple-lane fixtures of §1/§2 are the `Node` / `Node8` / `[i64]` loops
+already quoted there; the scoped variant wraps each 1/1000th of the loop in
+`extern fn rt_transient_array_scope_begin() -> bool` /
+`rt_transient_array_scope_end() -> bool` and prints both return values on the
+first batch, so a silently-refused scope cannot be mistaken for a flat curve.
+
+### 10. Refinement to §7's bridge — the paused window is REAL but probably SMALL; the likelier owner is what promotion un-owns
+
+§7's mechanism (a paused-window `rt_alloc` leaks at 48.0 B, measured) stands.
+Its *arithmetic bridge* to 63 MiB/module does not survive inspection of what
+actually runs in that window, and this is recorded now rather than left for the
+next session to chase:
+
+- `driver_promote_frontend_registry_owners`
+  (`src/compiler/80.driver/driver_source_pipeline_parsing.spl:248-253`) is four
+  calls to `*_promote_transient_owner()` and an `and` — no Simple-side
+  allocation of consequence.
+- `HirLowering.promote_diagnostics_transient_owner`
+  (`src/compiler/20.hir/hir_lowering/types.spl:564-571`) is three
+  `rt_transient_heap_promote` calls and an `and` — likewise.
+- `rt_transient_heap_promote` itself allocates its plan/seen arrays with
+  `calloc`/`realloc` and `free`s both before returning
+  (`src/runtime/runtime_native.c:2164-2165`), so it does not go through
+  `rt_alloc` at all and cannot leak through the paused registry.
+
+So the paused window on Stage 3 probably allocates hundreds of blocks per
+module, not ~1.4 million. **§7's bridge is therefore unlikely, and should be
+treated as refuted-pending-measurement rather than as a lead.** The measured
+mechanism remains worth fixing (it is an unbounded leak with no upper bound in
+the code), but it is not the 63 MiB.
+
+**The candidate this promotes to first place instead.** `rt_transient_heap_promote`
+clears the owned bit on *every* node it reaches
+(`src/runtime/runtime_native.c:2141-2162`), and for a `RT_CORE_TRANSIENT_RAW`
+node it enumerates children by scanning **every 8-byte word of the block** and
+calling `rt_core_transient_add` on each (`:2131-2139`). Two consequences:
+
+1. Everything transitively reachable from the promoted HIR module survives the
+   scope end by design — so the per-module retained cost is the *closure* of the
+   HIR graph, not the HIR graph. If any HIR node still points into the
+   `ParserModule`/AST or into per-module lowering scratch, the whole of it is
+   retained, and `ast_reset()` at `driver_hir_pipeline_lowering.spl:427` (which
+   runs once after the loop, not per source) cannot give it back.
+2. The word scan is untyped. Any i64 field whose value happens to collide with a
+   live registered pointer is followed, and whatever it reaches is un-owned too.
+   That is a *conservative* retention path with no bound stated anywhere in the
+   runtime.
+
+Neither is measured here. What distinguishes them from §7's bridge is that the
+2026-08-22 instrumentation already reports exactly the number that would settle
+it — `hir-promotion-total` promoted **38,060 nodes / 1,218,945 bytes** for
+module 1, i.e. ~1.2 MB against an RSS of 640,932 KiB at that point. If the next
+Stage 3 shows promoted bytes staying near 1.2 MB per module while RSS climbs 63
+MiB per module, promotion is *not* the owner either and the remaining candidate
+is the pre-HIR streaming surface phase. If promoted bytes track the RSS slope,
+it is.
+
+**Revised cheapest next test** (supersedes §7's, same spirit, one extra counter):
+report, per source, (a) blocks/bytes registered while the scope was PAUSED,
+(b) blocks/bytes un-owned by promotion, and (c) blocks/bytes actually freed by
+`rt_core_reclaim_transient_raw`, beside the existing `hir-promotion` /
+`hir-promotion-total` rows. All three are already visible inside
+`rt_core_transient_raw_register_state`, `rt_transient_heap_promote` and
+`rt_core_reclaim_transient_raw`; none requires a representation or behaviour
+change. Those three numbers plus RSS rank all four candidates in a single
+transaction.
+
+**§6's proposed fix is withdrawn as a fix.** Widening the per-source transient
+scope to the whole loop-body iteration remains a correct repair for the
+*measured* mechanism (§6's unscoped blocks, §7's paused-window blocks), and is
+still worth doing on its own terms. It cannot address the promotion-closure
+candidate: everything transitively reachable from `hir_module` is un-owned by
+`rt_transient_heap_promote` regardless of where the scope boundary is drawn, so
+if that closure is the owner, widening the scope reclaims nothing additional.
+Do not land it as this P0's fix on the strength of §6 alone.
+
+### 11. Closure-scale phase slopes on a 63-module entry, and the two lanes that could not be driven to HIR
+
+`src/app/info/main.spl` (entry closure **63 sources**) compiled by the same
+`./bin/simple run src/app/cli/bootstrap_main.spl compile --format=smf` lane,
+VmRSS sampled every 2 s from `/proc/<pid>/status` and joined to the driver's own
+`[build] <phase> N/63 ... +Tms` progress lines. **Non-streaming path**
+(`SIMPLE_BOOTSTRAP` unset, so `lower_and_check_impl`, which opens **no**
+transient scope at all — `rt_transient_array_scope_begin` appears once in
+`driver_hir_pipeline_lowering.spl`, at `:65`, on the streaming path only):
+
+| phase | VmRSS start -> end (KiB) | delta | per module |
+|---|---|---:|---:|
+| `source_closure` | 2,180,912 -> 2,475,072 | +294,160 | (JIT warm-up, not per-module) |
+| `parse` | 2,475,072 -> 3,438,312 | +963,240 | 14.9 MiB (warm-up contaminated) |
+| `surface_build` | 3,438,312 -> 3,464,824 | +26,512 | **0.41 MiB** |
+| `hir` | 3,464,824 -> 3,631,176 | +166,352 | **2.58 MiB** |
+
+The run then exited 1 on two pre-existing HIR diagnostics unrelated to memory
+(`unresolved name: rt_file_exists` at `src/app/info/main.spl:17:8`,
+`unresolved name: rt_env_cwd` at
+`src/lib/nogc_async_mut/env/platform.spl:21:20`), after completing `hir 63/63`.
+Peak VmHWM 3,705,852 KiB.
+
+**Read this narrowly.** It is a different runtime twin (Rust seed, §6
+Correction A), a different driver path (non-streaming retain-all, not the
+streaming path Stage 3 uses), and a much smaller and different module population
+than the 617-775 compiler-file closure Restart-12 measured. It does **not**
+attribute Stage 3's 63 MiB/module. What it does say is that the HIR phase's
+per-module allocation *volume* on a real 63-module closure is ~2.6 MiB — the
+same order as the parse phase and **~24x below** the Restart-12 HIR slope — so
+the Stage-3 figure is very unlikely to be the cost of the work itself. The
+`surface_build` slope (0.41 MiB/module) is the first quantitative evidence
+against the surface phase being the owner, and is the weakest of the three
+phases here.
+
+**Two lanes that could not be driven to HIR on this host, stated as blockers:**
+
+- **The Stage-3 streaming path.** With `SIMPLE_BOOTSTRAP=1
+  SIMPLE_STAGE3_STREAMING_SURFACES=1` (the gate at
+  `src/compiler/80.driver/driver_phase_gates.spl:50-62`), the streaming surface
+  build under the seed JIT runs at roughly **30-60 s per surface**: the
+  775-source closure managed 6 surfaces in 723 s before being stopped, and the
+  63-source closure managed 6 surfaces in 614 s (10 min 11 s CPU, RSS flat at
+  3,385,580 KiB) before being stopped. At that rate even the 63-source closure
+  needs ~40 min of surfaces before HIR begins, and the 775-source one ~12 h.
+  **The streaming path therefore cannot be driven to its HIR phase on this host
+  in a session**, which is why §5/§8/§11 are all non-streaming.
+- **The 775-source non-streaming closure** was SIGKILLed at parse 688/775 (§8).
+
+Neither is this bug's termination reproduced. Reproducing it still needs a
+Stage 2 and a canonical Stage 3, neither of which exists in this worktree.

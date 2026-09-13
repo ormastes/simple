@@ -1,5 +1,7 @@
 # rt dual-implementation ratchet red at origin/main: four symbols landed single-lane without a baseline row
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Date:** 2026-09-06 · **Status:** RECORDED (debt baselined, twins still owed) · **Gate:** `scripts/check/check-rt-dual-implementation-ratchet.shs` (push tier, blocking)
 
 ## What was found
@@ -61,3 +63,7 @@ missing-symbol risk.
 Rows updated by hand with a dated note (not `--generate-baseline`, which
 reorders the file and discards prior review notes). Owners of the three files
 should confirm the seed-list addition was intended.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,7 @@
 # macOS Vulkan native entry blockers — 2026-07-24
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 OPEN — Vulkan installation, pure-Simple AOT entry, MoltenVK instance creation,
@@ -252,3 +254,7 @@ the next session must isolate the first remaining fallback transition with
 per-operation provenance before another full live launch. Window capture and
 keyboard/pointer/click evidence remain blocked behind that strict device
 readback gate; web, GUI widgets, WM, Metal, and QEMU were not started.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

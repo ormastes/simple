@@ -1,0 +1,237 @@
+"""
+Explicit one-way context-store importer.
+
+This leaf is deliberately not imported by `context_ops`: normal context SQL
+commands keep their existing SQLite-compatible backend.  The importer accepts
+only the current `SIMPLE_SQLITE_FACADE_V1` carrier because the native SQLite
+wrapper does not yet expose a read-only connection contract.  It stages a
+PureDatabase v3 image, verifies ordered rows, atomically publishes exact stage
+bytes, and verifies the destination before reporting success.
+"""
+
+use app.io.context_ops.{context_sql_db_format}
+use app.io.sqlite_sffi.{
+    sqlite_open, sqlite_close, sqlite_query_all, sqlite_table_exists,
+    sqlite_error_message, sqlite_row_get, sqlite_row_get_int
+}
+use std.database.pure_sql.{PureDatabase}
+use nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read}
+use std.nogc_sync_mut.io.file_ops.{file_publish_noreplace}
+
+struct ContextPureImportReceipt:
+    status: text
+    reason: text
+    source_format: text
+    row_count: i64
+    source_rows_digest: text
+    stage_rows_digest: text
+    destination_rows_digest: text
+    source_bytes_digest_before: text
+    source_bytes_digest_after: text
+    stage_bytes_digest: text
+    destination_bytes_digest: text
+    stage_bytes: i64
+
+fn _context_import_failure(reason: text, source_format: text,
+                           source_bytes_digest: text) -> ContextPureImportReceipt:
+    ContextPureImportReceipt(
+        status: "failed", reason: reason, source_format: source_format,
+        row_count: 0, source_rows_digest: "", stage_rows_digest: "",
+        destination_rows_digest: "",
+        source_bytes_digest_before: source_bytes_digest,
+        source_bytes_digest_after: "",
+        stage_bytes_digest: "", destination_bytes_digest: "", stage_bytes: 0)
+
+fn _context_import_frame(values: [text]) -> text:
+    var out = "{values.len()}:"
+    for value in values:
+        out = out + "{value.len()}:" + value
+    out
+
+fn _context_import_records_digest(records: [text]) -> text:
+    sha256_text(_context_import_frame(records))
+
+fn _context_import_source_records(rows) -> [text]?:
+    var records: [text] = []
+    for row in rows:
+        val id = sqlite_row_get_int(row, "id")
+        if id <= 0:
+            return nil
+        records.push(_context_import_frame([
+            str(id), sqlite_row_get(row, "source"), sqlite_row_get(row, "target"),
+            sqlite_row_get(row, "status"), str(sqlite_row_get_int(row, "lines")),
+            str(sqlite_row_get_int(row, "token_estimate")),
+            sqlite_row_get(row, "content")
+        ]))
+    Some(records)
+
+fn _context_import_pure_records(rows: [DbRow]) -> [text]?:
+    var records: [text] = []
+    for row in rows:
+        if row.values.len() != 7:
+            return nil
+        records.push(_context_import_frame([
+            row.values[0].to_text(), row.values[1].to_text(),
+            row.values[2].to_text(), row.values[3].to_text(),
+            row.values[4].to_text(), row.values[5].to_text(),
+            row.values[6].to_text()
+        ]))
+    Some(records)
+
+fn _context_import_schema() -> text:
+    "CREATE TABLE context_packs (id INTEGER PRIMARY KEY, source TEXT, target TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)"
+
+fn _context_import_select() -> text:
+    "SELECT id, source, target, status, lines, token_estimate, content FROM context_packs ORDER BY id"
+
+fn context_sql_import_facade_to_pure_v2(source_path: text, stage_path: text,
+                                         destination_path: text) -> ContextPureImportReceipt:
+    val source_format = context_sql_db_format(source_path)
+    if source_format != "sqlite-facade":
+        return _context_import_failure("source_format_not_supported", source_format, "")
+    if source_path == stage_path or source_path == destination_path or stage_path == destination_path:
+        return _context_import_failure("paths_must_be_distinct", source_format, "")
+    if file_exists(stage_path):
+        return _context_import_failure("stage_already_exists", source_format, "")
+    if file_exists(destination_path):
+        return _context_import_failure("destination_already_exists", source_format, "")
+
+    val source_bytes_before = file_read(source_path)
+    val source_bytes_digest_before = sha256_text(source_bytes_before)
+    val source_db = sqlite_open(source_path)
+    if not source_db.is_valid:
+        return _context_import_failure(
+            "source_open_failed", source_format, source_bytes_digest_before)
+    if not sqlite_table_exists(source_db, "context_packs"):
+        sqlite_close(source_db)
+        return _context_import_failure(
+            "source_table_missing", source_format, source_bytes_digest_before)
+    val source_rows = sqlite_query_all(source_db, _context_import_select())
+    val source_query_error = sqlite_error_message(source_db)
+    if not sqlite_close(source_db):
+        return _context_import_failure(
+            "source_close_failed", source_format, source_bytes_digest_before)
+    if source_query_error != "":
+        return _context_import_failure(
+            "source_query_failed", source_format, source_bytes_digest_before)
+    val source_records = _context_import_source_records(source_rows) ??
+        return _context_import_failure(
+            "source_row_invalid", source_format, source_bytes_digest_before)
+    val source_rows_digest = _context_import_records_digest(source_records)
+    val source_bytes_after_read = file_read(source_path)
+    if source_bytes_after_read != source_bytes_before:
+        return _context_import_failure(
+            "source_changed_during_read", source_format, source_bytes_digest_before)
+
+    var stage_db = match PureDatabase.open_deferred(stage_path):
+        case Ok(opened): opened
+        case Err(_): return _context_import_failure(
+            "stage_open_failed", source_format, source_bytes_digest_before)
+    if not stage_db.exec_sql(_context_import_schema()).is_ok():
+        return _context_import_failure(
+            "stage_schema_failed", source_format, source_bytes_digest_before)
+    for row in source_rows:
+        val inserted = stage_db.exec(
+            "INSERT INTO context_packs (id, source, target, status, lines, token_estimate, content) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                DbValue.Integer(value: sqlite_row_get_int(row, "id")),
+                DbValue.Text(value: sqlite_row_get(row, "source")),
+                DbValue.Text(value: sqlite_row_get(row, "target")),
+                DbValue.Text(value: sqlite_row_get(row, "status")),
+                DbValue.Integer(value: sqlite_row_get_int(row, "lines")),
+                DbValue.Integer(value: sqlite_row_get_int(row, "token_estimate")),
+                DbValue.Text(value: sqlite_row_get(row, "content"))
+            ])
+        if inserted.is_err():
+            return _context_import_failure(
+                "stage_insert_failed", source_format, source_bytes_digest_before)
+    if not stage_db.checkpoint().is_ok():
+        return _context_import_failure(
+            "stage_checkpoint_failed", source_format, source_bytes_digest_before)
+    if not stage_db.close().is_ok():
+        return _context_import_failure(
+            "stage_close_failed", source_format, source_bytes_digest_before)
+
+    val stage_bytes = file_read(stage_path)
+    if not stage_bytes.starts_with("simple-pure-db-v3\n"):
+        return _context_import_failure(
+            "stage_not_v3", source_format, source_bytes_digest_before)
+    val stage_bytes_digest = sha256_text(stage_bytes)
+    val stage_reopened = match PureDatabase.open_deferred(stage_path):
+        case Ok(opened): opened
+        case Err(_): return _context_import_failure(
+            "stage_reopen_failed", source_format, source_bytes_digest_before)
+    val stage_rows = match stage_reopened.query(_context_import_select(), []):
+        case Ok(rows): rows
+        case Err(_): return _context_import_failure(
+            "stage_query_failed", source_format, source_bytes_digest_before)
+    val stage_records = _context_import_pure_records(stage_rows) ??
+        return _context_import_failure(
+            "stage_row_invalid", source_format, source_bytes_digest_before)
+    val stage_rows_digest = _context_import_records_digest(stage_records)
+    if stage_rows_digest != source_rows_digest or stage_rows.len() != source_rows.len():
+        return _context_import_failure(
+            "stage_rows_mismatch", source_format, source_bytes_digest_before)
+    if not stage_reopened.close().is_ok():
+        return _context_import_failure(
+            "stage_reader_close_failed", source_format, source_bytes_digest_before)
+    if file_read(source_path) != source_bytes_before:
+        return _context_import_failure(
+            "source_changed_before_publish", source_format, source_bytes_digest_before)
+    # The caller is the publication owner. Recheck after potentially long
+    # staging work for a useful deterministic refusal, then use the existing
+    # atomic no-replace primitive as the authority boundary. The check is not
+    # a substitute for publish-no-replace: another publisher can still arrive
+    # between it and the system call.
+    if file_exists(destination_path):
+        return _context_import_failure(
+            "destination_appeared_before_publish", source_format,
+            source_bytes_digest_before)
+
+    val published = match file_publish_noreplace(stage_path, destination_path):
+        case Ok(value): value
+        case Err(_): return _context_import_failure(
+            "destination_publish_failed", source_format, source_bytes_digest_before)
+    if not published:
+        return _context_import_failure(
+            "destination_publish_conflict", source_format, source_bytes_digest_before)
+    val destination_bytes = file_read(destination_path)
+    val destination_bytes_digest = sha256_text(destination_bytes)
+    if destination_bytes != stage_bytes:
+        return _context_import_failure(
+            "destination_bytes_mismatch", source_format, source_bytes_digest_before)
+    val destination_db = match PureDatabase.open_deferred(destination_path):
+        case Ok(opened): opened
+        case Err(_): return _context_import_failure(
+            "destination_reopen_failed", source_format, source_bytes_digest_before)
+    val destination_rows = match destination_db.query(_context_import_select(), []):
+        case Ok(rows): rows
+        case Err(_): return _context_import_failure(
+            "destination_query_failed", source_format, source_bytes_digest_before)
+    val destination_records = _context_import_pure_records(destination_rows) ??
+        return _context_import_failure(
+            "destination_row_invalid", source_format, source_bytes_digest_before)
+    val destination_rows_digest = _context_import_records_digest(destination_records)
+    if destination_rows_digest != source_rows_digest or destination_rows.len() != source_rows.len():
+        return _context_import_failure(
+            "destination_rows_mismatch", source_format, source_bytes_digest_before)
+    if not destination_db.close().is_ok():
+        return _context_import_failure(
+            "destination_reader_close_failed", source_format, source_bytes_digest_before)
+    val source_bytes_after = file_read(source_path)
+    if source_bytes_after != source_bytes_before:
+        return _context_import_failure(
+            "source_changed_after_publish", source_format, source_bytes_digest_before)
+
+    ContextPureImportReceipt(
+        status: "ready", reason: "verified", source_format: source_format,
+        row_count: source_rows.len(), source_rows_digest: source_rows_digest,
+        stage_rows_digest: stage_rows_digest,
+        destination_rows_digest: destination_rows_digest,
+        source_bytes_digest_before: source_bytes_digest_before,
+        source_bytes_digest_after: sha256_text(source_bytes_after),
+        stage_bytes_digest: stage_bytes_digest,
+        destination_bytes_digest: destination_bytes_digest,
+        stage_bytes: stage_bytes.len())

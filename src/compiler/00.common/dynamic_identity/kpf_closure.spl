@@ -1,0 +1,182 @@
+use std.common.binary_inspect.{hex_char_value}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.kernel_plugin.ids.{KpfId128, kpf_id128_equal}
+use compiler.common.dynamic_identity.closure.{Closure}
+use compiler.common.dynamic_identity.persistent_id.{PersistentExtensionId}
+use compiler.common.dynamic_identity.dense_tag_map.{
+    TagCapacity, ClaimedVariant, DenseTagMap, claim_of, freeze_universe
+}
+
+enum KpfClosureError:
+    ConstructorIdMismatch(canonical_text: text)
+    ConstructorIdCollision(left: text, right: text)
+    RequiredOperationMissing(canonical_text: text, operation_id: KpfId128)
+    DuplicateOperation(canonical_text: text, operation_id: KpfId128)
+    DynRejectedInCritical(canonical_text: text)
+    IdentitySealRejected(code: text)
+
+impl KpfClosureError:
+    fn code() -> text:
+        match self:
+            case ConstructorIdMismatch(_): "KPF-CONSTRUCTOR-ID-MISMATCH"
+            case ConstructorIdCollision(_, _): "KPF-CONSTRUCTOR-ID-COLLISION"
+            case RequiredOperationMissing(_, _): "KPF-OPERATION-MISSING"
+            case DuplicateOperation(_, _): "KPF-OPERATION-DUPLICATE"
+            case DynRejectedInCritical(_): "KPF-DYN-CRITICAL"
+            case IdentitySealRejected(_): "KPF-IDENTITY-SEAL"
+
+struct KpfConstructorClaim:
+    identity: PersistentExtensionId
+    claimed_constructor_id: KpfId128
+    closure: Closure
+    required_operations: [KpfId128]
+    provided_operations: [KpfId128]
+
+struct KpfSealedConstructor:
+    identity: PersistentExtensionId
+    constructor_id: KpfId128
+    dense_tag: i64
+    closure: Closure
+    operation_table: [KpfId128]
+
+struct KpfConstructorSeal:
+    dense_map: DenseTagMap
+    constructors: [KpfSealedConstructor]
+    ignored_dyn_count: i64
+
+fn parse_hex_u64(value: text, start: i64) -> u64:
+    var out: u64 = 0
+    var i = 0
+    while i < 16:
+        val digit = hex_char_value(value[start + i])
+        out = (out << 4) | (digit as u64)
+        i = i + 1
+    out
+
+pub fn kpf_constructor_id(identity: PersistentExtensionId) -> KpfId128:
+    val digest = sha256_text("kpf.constructor.v1\n" + identity.canonical_text())
+    KpfId128(hi: parse_hex_u64(digest, 0), lo: parse_hex_u64(digest, 16))
+
+pub fn kpf_operation_id(owner_interface: text, operation_name: text) -> KpfId128:
+    val material = ("kpf.operation.v1\n"
+        + owner_interface.len().to_text() + ":" + owner_interface + "\n"
+        + operation_name.len().to_text() + ":" + operation_name)
+    val digest = sha256_text(material)
+    KpfId128(hi: parse_hex_u64(digest, 0), lo: parse_hex_u64(digest, 16))
+
+pub fn kpf_constructor_claim(identity: PersistentExtensionId, closure: Closure,
+        required_operations: [KpfId128], provided_operations: [KpfId128]) -> KpfConstructorClaim:
+    KpfConstructorClaim(
+        identity: identity,
+        claimed_constructor_id: kpf_constructor_id(identity),
+        closure: closure,
+        required_operations: required_operations,
+        provided_operations: provided_operations
+    )
+
+fn operation_count(operations: [KpfId128], canonical: text) -> Result<i64, KpfClosureError>:
+    var i = 0
+    while i < operations.len():
+        var j = i + 1
+        while j < operations.len():
+            if kpf_id128_equal(operations[i], operations[j]):
+                return Err(KpfClosureError.DuplicateOperation(canonical, operations[i]))
+            j = j + 1
+        i = i + 1
+    Ok(operations.len())
+
+fn provides(operations: [KpfId128], required: KpfId128) -> bool:
+    var i = 0
+    while i < operations.len():
+        if kpf_id128_equal(operations[i], required):
+            return true
+        i = i + 1
+    false
+
+fn id_less(left: KpfId128, right: KpfId128) -> bool:
+    left.hi < right.hi or (left.hi == right.hi and left.lo < right.lo)
+
+fn sorted_operations(operations: [KpfId128]) -> [KpfId128]:
+    var out: [KpfId128] = []
+    var i = 0
+    while i < operations.len():
+        val item = operations[i]
+        var j = out.len()
+        out.push(item)
+        while j > 0 and id_less(item, out[j - 1]):
+            out[j] = out[j - 1]
+            out[j - 1] = item
+            j = j - 1
+        i = i + 1
+    out
+
+fn validate_claim(claim: KpfConstructorClaim) -> Result<i64, KpfClosureError>:
+    val canonical = claim.identity.canonical_text()
+    if not kpf_id128_equal(claim.claimed_constructor_id, kpf_constructor_id(claim.identity)):
+        return Err(KpfClosureError.ConstructorIdMismatch(canonical))
+    operation_count(claim.required_operations, canonical)?
+    val count = operation_count(claim.provided_operations, canonical)?
+    var i = 0
+    while i < claim.required_operations.len():
+        if not provides(claim.provided_operations, claim.required_operations[i]):
+            return Err(KpfClosureError.RequiredOperationMissing(canonical, claim.required_operations[i]))
+        i = i + 1
+    Ok(count)
+
+fn validate_id_collisions(claims: [KpfConstructorClaim]) -> Result<(), KpfClosureError>:
+    var i = 0
+    while i < claims.len():
+        var j = i + 1
+        while j < claims.len():
+            if kpf_id128_equal(claims[i].claimed_constructor_id, claims[j].claimed_constructor_id):
+                val left = claims[i].identity.canonical_text()
+                val right = claims[j].identity.canonical_text()
+                if left != right:
+                    return Err(KpfClosureError.ConstructorIdCollision(left, right))
+            j = j + 1
+        i = i + 1
+    Ok(())
+
+fn claim_for_identity(claims: [KpfConstructorClaim], identity: PersistentExtensionId) -> KpfConstructorClaim?:
+    var i = 0
+    while i < claims.len():
+        if claims[i].identity.equals(identity):
+            return claims[i]
+        i = i + 1
+    nil
+
+pub fn seal_kpf_constructors(claims: [KpfConstructorClaim], capacity: TagCapacity,
+        critical: bool) -> Result<KpfConstructorSeal, KpfClosureError>:
+    validate_id_collisions(claims)?
+    var statics: [ClaimedVariant] = []
+    var completes: [ClaimedVariant] = []
+    var dyn_count = 0
+    var i = 0
+    while i < claims.len():
+        val claim = claims[i]
+        validate_claim(claim)?
+        match claim.closure:
+            case Closure.Static: statics.push(claim_of(claim.identity))
+            case Closure.Complete: completes.push(claim_of(claim.identity))
+            case Closure.Dyn:
+                if critical:
+                    return Err(KpfClosureError.DynRejectedInCritical(claim.identity.canonical_text()))
+                dyn_count = dyn_count + 1
+        i = i + 1
+    val dense = match freeze_universe(statics, completes, capacity):
+        case Ok(value): value
+        case Err(error): return Err(KpfClosureError.IdentitySealRejected(error.code()))
+    var sealed: [KpfSealedConstructor] = []
+    var tag = 0
+    while tag < dense.sealed_count:
+        val identity = dense.entries[tag]
+        if val claim = claim_for_identity(claims, identity):
+            sealed.push(KpfSealedConstructor(
+                identity: identity,
+                constructor_id: claim.claimed_constructor_id,
+                dense_tag: tag,
+                closure: claim.closure,
+                operation_table: sorted_operations(claim.provided_operations)
+            ))
+        tag = tag + 1
+    Ok(KpfConstructorSeal(dense_map: dense, constructors: sealed, ignored_dyn_count: dyn_count))

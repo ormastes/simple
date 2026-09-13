@@ -1,5 +1,9 @@
 # Simple Compiler and Interpreter Performance Program
 
+## Expansion plan
+
+- `doc/03_plan/compiler/perf/demand_driven_smf_compile_pipeline_plan_2026-09-02.md` expands this program with canonical reusable SMF package/class archives, a shared compiler/test artifact-service library, Ninja-like scheduling, lazy import/HIR materialization, generic shape sharing, and common asynchronous file I/O that prefers `mmap` through explicit `auto_map`/`must_map`/`prefer_map`/`buffered` policies.
+
 **Status:** integrated architecture and parallel implementation plan
 **Repository baseline inspected:** ormastes/simple, August 9, 2026
 **Primary targets:** fast compiler iteration, sub-Bun/Python cached startup, substantially faster interpreter throughput, demand-loaded aspects, and safe background SMF generation.

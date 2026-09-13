@@ -251,3 +251,10 @@ was deliberately SIGTERMed by this lane to free host capacity and so exited
 therefore no tree-wide `PASS`/`FAIL` verdict line to quote. The close rests on the
 source content, which is decisive for this specific defect; the tree-wide sweep
 would only add breadth, not settle this row.
+
+## Triage 2026-09-13
+
+JIT-module-drop guard defect requiring live re-compile verification,
+already blocked by an unrelated environment breakage per the record.
+Seed/JIT-side, out of pure-Simple fix scope. Leaving OPEN.
+

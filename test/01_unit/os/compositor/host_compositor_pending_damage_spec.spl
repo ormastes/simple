@@ -1,0 +1,55 @@
+"""Exercise delayed present acknowledgement through the production host path.
+
+The software Engine2D provider records the real frame. Presenter sequence
+observations are supplied by this test; this is owner/control-flow evidence,
+not live window presentation or asynchronous Vulkan admission.
+"""
+# @tag: unit, compositor, event-ack, async
+
+use std.spec.*
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{HostCompositor, host_wm_force_direct_chrome}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.host_frame_ack.{
+    HostFrameAckState, HostFrameReceiptKind, host_frame_ack_can_advance_input
+}
+
+describe "host present acknowledgement preserves later event damage":
+    it "acknowledges the rendered prefix and keeps the next event pending":
+        host_wm_force_direct_chrome(false)
+        var raster = Engine2dCompositorBackend.create_named(240, 180, "software")
+        var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
+        val pending = comp.render_frame_engine2d_evidence(raster)
+        expect(pending.state).to_be(HostFrameAckState.Pending)
+        expect(pending.receipt_kind).to_be(HostFrameReceiptKind.HostBufferPresent)
+        # This rectangle overlaps the captured full-screen damage; spatial
+        # subtraction would incorrectly erase it after the older presentation.
+        comp.dirty.add_rect(30, 40, 5, 6)
+        val completed = comp.acknowledge_host_buffer_present(
+            pending, 91, 240, 180, 7, 8)
+        expect(host_frame_ack_can_advance_input(completed)).to_be(true)
+        expect(comp.frame_ack_pending).to_be(false)
+        expect(comp.dirty.count()).to_equal(1)
+        expect(comp.dirty.rects[0].x).to_equal(30)
+        expect(comp.dirty.rects[0].y).to_equal(40)
+        val replay = comp.acknowledge_host_buffer_present(
+            pending, 91, 240, 180, 7, 8)
+        expect(replay.state).to_be(HostFrameAckState.Unknown)
+        expect(comp.dirty.count()).to_equal(1)
+        raster.shutdown()
+
+    it "rejects a stale damage checkpoint without consuming replacement damage":
+        host_wm_force_direct_chrome(false)
+        var raster = Engine2dCompositorBackend.create_named(240, 180, "software")
+        var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
+        val pending = comp.render_frame_engine2d_evidence(raster)
+        expect(pending.state).to_be(HostFrameAckState.Pending)
+        comp.dirty.clear()
+        comp.dirty.add_full_screen(240, 180)
+        val rejected = comp.acknowledge_host_buffer_present(
+            pending, 91, 240, 180, 7, 8)
+        expect(rejected.state).to_be(HostFrameAckState.Unknown)
+        expect(host_frame_ack_can_advance_input(rejected)).to_be(false)
+        expect(comp.dirty.is_dirty()).to_be(true)
+        expect(comp.dirty.rects[0].w).to_equal(240)
+        raster.shutdown()

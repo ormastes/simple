@@ -1,6 +1,6 @@
 ---
 id: bootstrap_stage4_graph_load_timeout_2026-07-05
-status: OPEN
+status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 severity: high
 discovered: 2026-07-05
 discovered_by: Stage-4 bootstrap execution on Apple M4
@@ -380,3 +380,6 @@ but contains no `timeout`/`7200` handling, and the `module_graph.spl` the doc ci
 from disk (path drift confirmed). Reproduction requires a full stage-4 native build under
 `scripts/bootstrap/bootstrap-from-scratch.sh` — explicitly out of bounds for this lane while
 the users stage-3 bootstrap owns the host. No patch attempted.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # native-build: every phase after parse is single-threaded (2026-08-22)
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 Lane: perf. Sibling of
 `native_build_frontend_not_incremental_2026-08-21.md` (which made PARSE
 parallel via shard processes). Status (2026-08-22, second pass): **parse-shard
@@ -277,3 +279,6 @@ HIR in under an hour on this host (see "What remains").
   this lane was not run: neither closure completes HIR in under an hour on
   this host, so a 2 × multi-hour probe under load 28 with a bootstrap lane in
   flight was out of budget. The fixture numbers above are the evidence.
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

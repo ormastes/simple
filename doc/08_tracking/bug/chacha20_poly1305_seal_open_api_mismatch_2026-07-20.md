@@ -5,7 +5,7 @@
   `src/lib/common/crypto/typed/aead.spl`
 - **Severity:** medium (blocks all examples that call seal/open in both
   affected specs).
-- **Status:** OPEN.
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
 
 ## Symptom
 
@@ -70,3 +70,6 @@ typed API) from whoever owns the AEAD surface.
 
 - `test/unit/lib/crypto/chacha20_poly1305_spec.spl` (all examples)
 - `test/unit/lib/crypto/chacha20_poly1305_wycheproof_spec.spl` (all examples)
+
+## Triage 2026-09-12
+Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

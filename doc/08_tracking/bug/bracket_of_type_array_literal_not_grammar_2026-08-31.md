@@ -1,4 +1,5 @@
 # `[] of text` is not Simple grammar but fails with "function `of` not found"
+**Status:** OPEN (unverified 2026-09-12)
 
 **Filed:** 2026-08-31 · **Status:** OPEN (diagnostic quality)
 **Severity:** low — but the diagnostic is useless and the form looks plausible.
@@ -11,3 +12,6 @@ to a function named `of`, and the user sees
 
 Wanted: either support the form or emit a targeted parse-time diagnostic
 ("`of` is not a type ascription; write `val xs: [text] = []`").
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

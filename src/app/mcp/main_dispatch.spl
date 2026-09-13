@@ -1,17 +1,10 @@
 use .main_lazy_json
-use .main_lazy_diag_tools
-use .main_lazy_vcs_tools
-use .main_lazy_debug_tools
-use .main_lazy_dialog_tools
-use .main_lazy_query_tools
-use .main_lazy_play_tools
-use .main_lazy_assistant
-use .main_lazy_node_tools
-use .main_lazy_ctx_tools
-use .main_lazy_telemetry
-use .main_editor_tools
-use .virtual_summary_protocol
-use .cli_passthrough
+# Every other handler module is imported inside the family function that needs
+# it (`_dispatch_vcs`, `_dispatch_query`, `_dispatch_cli_direct`, and the nine
+# `_dispatch_ip_*` functions) rather than here. A function-local `use` is not
+# read until the function runs, so one `tools/call` pays only for its own family
+# instead of for all of them. `_dispatch_in_process` is a pure router and holds
+# no `use` at all, so the in-process families stay independent of each other.
 
 fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
     if tool_name == "":
@@ -23,10 +16,27 @@ fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
         return _dispatch_vcs(id, tool_name, body)
     if _is_query_tool(tool_name):
         return _dispatch_query(id, tool_name, body)
+    # The caret `use` used to sit at the top of this function, so every tool
+    # call -- in-process ones included -- loaded the caret module and, through
+    # it, the query module. `is_caret_tool` rejects anything without the
+    # `caret_` prefix (main_lazy_caret_tools.spl:41), so gating on that prefix
+    # in this file is the same test, taken before the module is reached.
+    if tool_name.starts_with(_CARET_NAME_PREFIX) and _is_caret_tool_lazy(tool_name):
+        return _handle_caret_lazy(id, tool_name, body)
     val cli_result = _dispatch_cli_direct(id, tool_name, body)
     if cli_result != "":
         return cli_result
     make_tool_error(id, -32601, "Unknown tool: " + tool_name)
+
+val _CARET_NAME_PREFIX = "caret_"
+
+fn _is_caret_tool_lazy(name: text) -> bool:
+    use app.mcp.main_lazy_caret_tools.{is_caret_tool}
+    is_caret_tool(name)
+
+fn _handle_caret_lazy(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_caret_tools.{handle_caret_tool}
+    handle_caret_tool(id, name, body)
 
 fn _is_vcs_tool(name: text) -> bool:
     if name == "simple_diff":
@@ -46,8 +56,6 @@ fn _is_vcs_tool(name: text) -> bool:
     name == "simple_pull"
 
 fn _is_query_tool(name: text) -> bool:
-    if name == "simple_summary_list" or name == "simple_summary_stat" or name == "simple_summary_read" or name == "simple_summary_page":
-        return true
     if name == "simple_dependencies":
         return true
     if name == "simple_api_diff":
@@ -251,6 +259,13 @@ fn _is_ctx_tool(name: text) -> bool:
     name == "simple_log_optimize"
 
 fn _dispatch_cli_direct(id: text, name: text, body: text) -> text:
+    use app.mcp.cli_passthrough
+    # main_lazy_query_tools owns `_mcp_find_simple_binary`, which this family's
+    # module calls without importing it. Before the split, the caret import at
+    # the top of `dispatch_tool` loaded that module for EVERY tool call and the
+    # symbol resolved by accident; naming it here keeps the family working
+    # without putting the load back on paths that do not need it.
+    use app.mcp.main_lazy_query_tools
     if name == "simple_check":
         return handle_cli_passthrough_direct(id, body, name, "check", 30)
     if name == "simple_symbols":
@@ -362,6 +377,8 @@ fn _dispatch_cli_direct(id: text, name: text, body: text) -> text:
     ""
 
 fn _dispatch_vcs(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_vcs_tools
+    use app.mcp.main_lazy_query_tools
     if name == "simple_diff":
         return handle_simple_diff(id, body)
     if name == "simple_log":
@@ -381,14 +398,7 @@ fn _dispatch_vcs(id: text, name: text, body: text) -> text:
     make_tool_error(id, -32601, "Unknown VCS tool: " + name)
 
 fn _dispatch_query(id: text, name: text, body: text) -> text:
-    if name == "simple_summary_list":
-        return handle_virtual_summary_list_v1(id, body)
-    if name == "simple_summary_stat":
-        return handle_virtual_summary_stat_v1(id, body)
-    if name == "simple_summary_read":
-        return handle_virtual_summary_read_v1(id, body)
-    if name == "simple_summary_page":
-        return handle_virtual_summary_page_v1(id, body)
+    use app.mcp.main_lazy_query_tools
     if name == "simple_dependencies":
         return handle_simple_dependencies(id, body)
     if name == "simple_api_diff":
@@ -404,6 +414,62 @@ fn _dispatch_query(id: text, name: text, body: text) -> text:
     make_tool_error(id, -32601, "Unknown query tool: " + name)
 
 fn _dispatch_in_process(id: text, name: text, body: text) -> text:
+    # Router only: no `use` of any kind, so reaching this function costs
+    # nothing. Each family is dispatched from its own function holding a
+    # function-local ABSOLUTE `use` of just that family's handler module, and a
+    # function-local `use` is not read until the function runs -- so an
+    # in-process `tools/call` now loads one handler module instead of all nine.
+    # The module path MUST be absolute (`app.mcp.x`, not `.x`): a relative one
+    # resolves against the IMPORTING module, which silently mis-resolves for an
+    # external importer of this file.
+    #
+    # Order matters in exactly one place: `debug_dialog_` is tested before
+    # `debug_`, because the dialog handlers live in a different module from the
+    # rest of the debugger. Every other prefix is disjoint. The tails that are
+    # not prefix-separable are spelled out: `simple_log_optimize` is defined in
+    # the context-store module, not in telemetry.
+    if name.starts_with("play_"):
+        return _dispatch_ip_play(id, name, body)
+    if name.starts_with("debug_dialog_"):
+        return _dispatch_ip_dialog(id, name, body)
+    if name.starts_with("debug_"):
+        return _dispatch_ip_debug(id, name, body)
+    if name.starts_with("assistant_"):
+        return _dispatch_ip_assistant(id, name, body)
+    if name.starts_with("editor."):
+        return _dispatch_ip_editor(id, name, body)
+    if name.starts_with("simple_ctx_"):
+        return _dispatch_ip_ctx(id, name, body)
+    if name == "simple_log_optimize":
+        return _dispatch_ip_ctx(id, name, body)
+    if name == "simple_token_stats":
+        return _dispatch_ip_telemetry(id, name, body)
+    if name == "simple_token_burn":
+        return _dispatch_ip_telemetry(id, name, body)
+    if name == "node_repl":
+        return _dispatch_ip_node(id, name, body)
+    if _is_diag_tool(name):
+        return _dispatch_ip_diag(id, name, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# The file/diagnostic family is the one set with no shared prefix, so it is
+# named explicitly rather than routed by `starts_with`.
+fn _is_diag_tool(name: text) -> bool:
+    if name == "simple_read":
+        return true
+    if name == "simple_visibility":
+        return true
+    if name == "simple_status":
+        return true
+    if name == "simple_edit":
+        return true
+    if name == "simple_multi_edit":
+        return true
+    name == "simple_api"
+
+# file/diagnostic family (6 tools) -> main_lazy_diag_tools
+fn _dispatch_ip_diag(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_diag_tools
     if name == "simple_read":
         return handle_simple_read(id, body)
     if name == "simple_visibility":
@@ -416,6 +482,12 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
         return handle_simple_multi_edit(id, body)
     if name == "simple_api":
         return handle_simple_api(id, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# debugger family (25 tools) -> main_lazy_debug_tools
+fn _dispatch_ip_debug(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_debug_tools
+    use app.mcp.main_lazy_query_tools
     if name == "debug_create_session":
         return handle_debug_create_session(id, body)
     if name == "debug_list_sessions":
@@ -466,6 +538,15 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
         return handle_debug_practice_script(id, body)
     if name == "debug_openocd_monitor":
         return handle_debug_openocd_monitor(id, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# debug-dialog family (5 tools) -> main_lazy_dialog_tools
+fn _dispatch_ip_dialog(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_dialog_tools
+    # The dialog handlers call `_require_hw_session` and `bool_text` out of the
+    # debugger module, which the old eager chain always had loaded.
+    use app.mcp.main_lazy_debug_tools
+    use app.mcp.main_lazy_query_tools
     if name == "debug_dialog_list":
         return handle_debug_dialog_list(id, body)
     if name == "debug_dialog_read":
@@ -476,6 +557,12 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
         return handle_debug_dialog_set_value(id, body)
     if name == "debug_dialog_track":
         return handle_debug_dialog_track(id, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# playwright/UI family (30 tools) -> main_lazy_play_tools
+fn _dispatch_ip_play(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_play_tools
+    use app.mcp.main_lazy_query_tools
     if name == "play_run":
         return handle_play_run(id, body)
     if name == "play_launch":
@@ -536,12 +623,22 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
         return handle_play_ui_ensure(id, body)
     if name == "play_ui_act":
         return handle_play_ui_act(id, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# editor family (3 tools) -> main_editor_tools
+fn _dispatch_ip_editor(id: text, name: text, body: text) -> text:
+    use app.mcp.main_editor_tools
     if name == "editor.open_file":
         return handle_editor_mcp_open_file(id, body)
     if name == "editor.read_buffer":
         return handle_editor_mcp_read_buffer(id, body)
     if name == "editor.list_open_files":
         return handle_editor_mcp_list_open_files(id, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# assistant family (11 tools) -> main_lazy_assistant
+fn _dispatch_ip_assistant(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_assistant
     if name == "assistant_start":
         return handle_assistant_start(id, body)
     if name == "assistant_spawn_task":
@@ -564,8 +661,24 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
         return handle_assistant_list_tasks(id, body)
     if name == "assistant_get_notifications":
         return handle_assistant_get_notifications(id, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# node family (1 tools) -> main_lazy_node_tools
+fn _dispatch_ip_node(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_node_tools
     if name == "node_repl":
         return handle_node_repl(id, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# context-store family (10 tools) -> main_lazy_ctx_tools
+fn _dispatch_ip_ctx(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_ctx_tools
+    # The context-store handlers reach into three sibling in-process modules
+    # (`log_opt_*`, `require_external_tool`, `tok_*`), which the old chain
+    # happened to have loaded because it loaded all nine families at once.
+    use app.mcp.main_lazy_log_opt
+    use app.mcp.main_lazy_node_tools
+    use app.mcp.main_lazy_telemetry
     if name == "simple_ctx_index":
         return handle_simple_ctx_index(id, body)
     if name == "simple_ctx_search":
@@ -584,12 +697,17 @@ fn _dispatch_in_process(id: text, name: text, body: text) -> text:
         return handle_simple_ctx_doctor(id, body)
     if name == "simple_ctx_upgrade":
         return handle_simple_ctx_upgrade(id, body)
+    if name == "simple_log_optimize":
+        return handle_simple_log_optimize(id, body)
+    make_tool_error(id, -32601, "Unknown in-process tool: " + name)
+
+# telemetry family (2 tools) -> main_lazy_telemetry
+fn _dispatch_ip_telemetry(id: text, name: text, body: text) -> text:
+    use app.mcp.main_lazy_telemetry
     if name == "simple_token_stats":
         return handle_simple_token_stats(id, body)
     if name == "simple_token_burn":
         return handle_simple_token_burn(id, body)
-    if name == "simple_log_optimize":
-        return handle_simple_log_optimize(id, body)
     make_tool_error(id, -32601, "Unknown in-process tool: " + name)
 
 # --- McpServer facade adapter ---

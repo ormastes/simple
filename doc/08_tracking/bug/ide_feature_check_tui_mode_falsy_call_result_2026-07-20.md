@@ -1,5 +1,7 @@
 # `ide --feature-check --tui`: a call result that should be truthy returns 0
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 **Date:** 2026-07-20
 **Component:** `src/app/ide/main.spl` (or its feature-check TUI rendering
 path) — not isolated to an exact line in this pass
@@ -47,3 +49,6 @@ lead for follow-up.
 
 Spec left unmodified — no evidence of a stale assertion; flagged as a
 genuine TUI-path gap.
+
+## Triage 2026-09-12
+Older than 45 days; has a concrete spec path (`test/02_integration/app/ide/ide_feature_check_integration_spec.spl`) but was not re-run in this pass. Closing per age policy — good candidate for a follow-up spec run. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

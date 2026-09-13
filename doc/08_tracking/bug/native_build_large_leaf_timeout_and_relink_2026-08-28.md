@@ -1,5 +1,7 @@
 # Native-build large leaf timeout and warm relink cost (2026-08-28)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open performance blocker with one recovered cache fix. The four leaves that
@@ -62,3 +64,7 @@ worker or linker.
    the modules with semantic-owner review and focused regression tests.
 4. Retain cold/warm wall time and max-RSS receipts in the bootstrap handoff.
 
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

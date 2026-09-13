@@ -134,3 +134,22 @@ production compositor decorations live together, compiled 21 modules with zero
 failures, and returned the exact framebuffer channel values.  The remaining
 closure condition for this row is a focused compiler diagnostic that rejects
 or fully qualifies genuinely ambiguous unaliased duplicate declarations.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/os/compositor/compositor_occlusion_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Real name-collision bug (two unrelated Color declarations collapse to
+one slot in the global name table), but the safe fix has a measured
+17-file blast radius across src/os/drivers/**, src/os/compositor/**,
+and both duplicate test trees, several of which are owned by sibling
+fleet workers per a prior lane's explicit finding -- a partial rename
+from this lane would be clobber-prone. The real root cause (compiler
+should reject/fully-qualify duplicate same-name declarations) lives in
+src/compiler/10.frontend/**, previously flagged as off-limits to that
+investigating lane too. A partial mitigation (FbColor import alias) is
+already landed in production consumers per the 2026-08-21 update;
+decorations.spl and the compositor_occlusion_spec still fail. Leaving
+OPEN, no further rename attempted given the measured blast radius.
+

@@ -243,6 +243,48 @@ fn cmap_lookup(cmap: CmapFormat4, codepoint: u32) -> u32:
     val adjusted = (gid as i32 + cmap.id_deltas[seg]) & 0xFFFF
     adjusted as u32
 
+# Batch codepoint -> glyph id over ONE parse of the cmap subtables.
+#
+# `sfnt_cmap_glyph_id` below re-runs `parse_cmap_format12`/`parse_cmap_format4`
+# on every call, and those functions rebuild the complete segment arrays and the
+# whole glyph-id array from the blob each time. Measured on
+# examples/06_io/ui/web_catalog/css-layout.html that was 15 ms per single-glyph
+# lookup and 1,626 ms of a 1,716 ms font-metric miss -- the dominant term in the
+# whole text-measurement leaf, with the table-directory parse only 76 ms beside
+# it. A caller that needs many glyph ids from one face (a whole ASCII range, a
+# run of text) parses once here instead of once per character.
+#
+# `out[i]` receives the glyph id for `codepoints[i]`, or 0 where absent --
+# exactly what `sfnt_cmap_glyph_id` returns for the same codepoint, since this
+# runs the same two lookups in the same order over the same parsed subtables.
+fn sfnt_cmap_glyph_ids_into(font: OtFont, codepoints: [i64], mut out: [i64]):
+    val count = if codepoints.len() < out.len(): codepoints.len() else: out.len()
+    var i: i64 = 0
+    while i < count:
+        out[i] = 0
+        i = i + 1
+    val maybe_format12 = parse_cmap_format12(font)
+    match maybe_format12:
+        case Some(cmap12):
+            i = 0
+            while i < count:
+                val cp = codepoints[i]
+                if cp >= 0 and cp <= 1114111:
+                    out[i] = cmap12_lookup(cmap12, cp as u32) as i64
+                i = i + 1
+        case None: ()
+    val maybe_format4 = parse_cmap_format4(font)
+    match maybe_format4:
+        case Some(cmap4):
+            i = 0
+            while i < count:
+                if out[i] == 0:
+                    val cp = codepoints[i]
+                    if cp >= 0 and cp <= 1114111:
+                        out[i] = cmap_lookup(cmap4, cp as u32) as i64
+                i = i + 1
+        case None: ()
+
 fn sfnt_cmap_glyph_id(font: OtFont, codepoint: u32) -> u32:
     val maybe_format12 = parse_cmap_format12(font)
     match maybe_format12:

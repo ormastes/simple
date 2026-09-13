@@ -38,6 +38,49 @@
 # - Module loader with SMF files
 
 
+# ============================================================================
+# Real Fixture Harness
+# ============================================================================
+#
+# These tests exercise the real `bin/simple` binary end to end (write a
+# fixture .spl file, run it, inspect stdout/stderr/exit code) rather than the
+# never-implemented `compile`/`compile_and_run`/`compile_to_hir` stubs at the
+# bottom of this file (those stay as documented dead stubs -- see the
+# TODOs still attached to them).
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_write_file(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_file_exists(path: text) -> bool
+
+struct ProcResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn find_simple_binary() -> text:
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    "bin/simple"
+
+fn fixture_root() -> text:
+    "/tmp/spl_cii_" + rt_getpid().to_text()
+
+fn write_fixture(subdir: text, filename: text, content: text) -> text:
+    val dir = fixture_root() + "/" + subdir
+    val _ = rt_dir_create_all(dir)
+    val path = dir + "/" + filename
+    val _ = rt_write_file(path, content)
+    path
+
+fn run_simple_file(path: text) -> ProcResult:
+    val result = rt_process_run(find_simple_binary(), ["run", path])
+    ProcResult(stdout: result[0], stderr: result[1], exit_code: result[2])
+
+fn run_simple_source(subdir: text, filename: text, content: text) -> ProcResult:
+    run_simple_file(write_fixture(subdir, filename, content))
+
 
 # ============================================================================
 # Test Group 1: End-to-End Compilation
@@ -73,8 +116,15 @@ describe "End-to-End Compilation":
         pass
 
     it "compiles struct definitions":
-        # TODO: Test struct compilation
-        pass
+        val result = run_simple_source("struct_compile", "main.spl", """struct Point:
+    x: i64
+    y: i64
+
+val p = Point(x: 3, y: 4)
+print(p.x + p.y)
+""")
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("7")
 
     it "compiles enum definitions":
         # TODO: Test enum compilation
@@ -93,11 +143,18 @@ describe "Symbol Resolution Integration":
     # **Status:** Requires symbol table + HIR fixtures
 
     it "resolves methods across compilation units":
-        # TODO: Test cross-module method resolution
-        # val mod1 = compile("class Foo: fn bar(): 42")
-        # val mod2 = compile("val f = Foo(); f.bar()")
-        # expect(resolution).to(be_ok()
-        pass
+        val _lib = write_fixture("cross_module", "lib_a.spl", """class Foo:
+    fn bar(self) -> i64:
+        return 42
+""")
+        val main_path = write_fixture("cross_module", "main.spl", """use .lib_a.{Foo}
+
+val f = Foo()
+print(f.bar())
+""")
+        val result = run_simple_file(main_path)
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("42")
 
     it "resolves generic instantiation":
         # TODO: Test generic method resolution
@@ -107,8 +164,21 @@ describe "Symbol Resolution Integration":
         pass
 
     it "resolves trait methods":
-        # TODO: Test trait method resolution
-        pass
+        val result = run_simple_source("trait_method", "main.spl", """trait Greeter:
+    fn greet(self) -> text
+
+struct Person:
+    name: text
+
+impl Greeter for Person:
+    fn greet(self) -> text:
+        return "Hello, " + self.name
+
+val p = Person(name: "Ada")
+print(p.greet())
+""")
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("Hello, Ada")
 
     it "resolves UFCS free functions":
         # TODO: Test UFCS resolution
@@ -135,16 +205,28 @@ describe "Type Inference Integration":
         pass
 
     it "infers function return types":
-        # TODO: Test return type inference
-        pass
+        val result = run_simple_source("return_type_inference", "main.spl",
+            "fn double(x: i64):\n    return x * 2\n\nval y = double(21)\nprint(y)\n")
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("42")
 
     it "infers generic type arguments":
         # TODO: Test generic type argument inference
         pass
 
     it "propagates type errors correctly":
-        # TODO: Test type error reporting
-        pass
+        val result = run_simple_source("type_error", "main.spl", """struct Point:
+    x: i64
+    y: i64
+
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+val p = Point(x: 1, y: 2)
+print(add(p, 3))
+""")
+        expect(result.exit_code).to_equal(1)
+        expect(result.stderr).to_contain("type mismatch")
 
     it "handles recursive type definitions":
         # TODO: Test recursive types
@@ -163,11 +245,9 @@ describe "Error Propagation":
     # **Status:** Requires complete error infrastructure
 
     it "propagates parse errors":
-        # TODO: Test parse error reporting
-        # val source = "val x = "  # Incomplete
-        # val result = compile(source)
-        # expect(result).to(be_err()
-        pass
+        val result = run_simple_source("parse_error", "main.spl", "val x = \n")
+        expect(result.exit_code).to_equal(1)
+        expect(result.stderr).to_contain("parse:")
 
     it "propagates compilation errors":
         # TODO: Test compilation error reporting
@@ -177,19 +257,23 @@ describe "Error Propagation":
         pass
 
     it "propagates runtime errors":
-        # TODO: Test runtime error reporting
-        # val source = "val x = 1 / 0"  # Division by zero
-        # val result = run(source)
-        # expect(result).to(be_err()
-        pass
+        val result = run_simple_source("runtime_error", "main.spl",
+            "print(undefined_variable_xyz)\n")
+        expect(result.exit_code).to_equal(1)
+        expect(result.stderr).to_contain("undefined_variable_xyz")
+        expect(result.stderr).to_contain("not found")
 
     it "provides error location information":
         # TODO: Test span/location in errors
         pass
 
     it "suggests fixes for common errors":
-        # TODO: Test error suggestions
-        pass
+        val result = run_simple_source("error_suggestions", "main.spl",
+            "val x = 1 / 0\nprint(x)\n")
+        expect(result.exit_code).to_equal(1)
+        expect(result.stderr).to_contain("division by zero")
+        expect(result.stderr).to_contain("help:")
+        expect(result.stderr).to_contain("check the divisor")
 
 
 # ============================================================================
@@ -222,8 +306,25 @@ describe "Module System Integration":
         pass
 
     it "loads transitive dependencies":
-        # TODO: Test dependency graph resolution
-        pass
+        # Raw (brace-literal) triple-quoted strings: a plain "..." fixture
+        # containing `use .c.{from_c}` would have its `{from_c}` consumed as
+        # THIS file's own string interpolation instead of being written
+        # verbatim to the child fixture.
+        val _c = write_fixture("dep_graph", "c.spl", """pub fn from_c() -> i64:
+    return 7
+""")
+        val _b = write_fixture("dep_graph", "b.spl", """use .c.{from_c}
+
+pub fn from_b() -> i64:
+    return from_c() * 2
+""")
+        val main_path = write_fixture("dep_graph", "main.spl", """use .b.{from_b}
+
+print(from_b())
+""")
+        val result = run_simple_file(main_path)
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("14")
 
     it "handles module reload":
         # TODO: Test hot reload
@@ -263,11 +364,10 @@ describe "Memory Management Integration":
         pass
 
     it "handles stack overflow gracefully":
-        # TODO: Test deep recursion
-        # val source = "fn recurse(): recurse(); recurse()"
-        # val result = run(source)
-        # expect(result).to(be_err()
-        pass
+        val result = run_simple_source("deep_recursion", "main.spl",
+            "fn recurse(n: i64) -> i64:\n    return recurse(n + 1)\n\nprint(recurse(0))\n")
+        expect(result.exit_code).to_equal(1)
+        expect(result.stderr).to_contain("stack overflow")
 
 
 # ============================================================================

@@ -1,5 +1,7 @@
 # Headless render history retained every HTML snapshot
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fixed on 2026-08-21.
@@ -23,3 +25,7 @@ evicted, matching its existing unavailable-index behavior.
 The focused regression renders 80 times and verifies a cumulative count of 80,
 a retained count of 64, eviction of render 15, and availability of renders 16
 and 79.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

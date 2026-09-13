@@ -6,7 +6,12 @@
 # Depends on: backend_vulkan.spl (VulkanBackend class)
 #             backend_vulkan_glsl.spl (shader sources, accessed via main init)
 
-use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend,
+    vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add,
+    VK_T_ENQUEUE, VK_T_FLUSH, VK_T_SFFI_BEGIN, VK_T_SFFI_REAP, VK_T_SFFI_DESC,
+    VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
+    VK_T_SFFI_DISPATCH, VK_T_SFFI_END, VK_T_SFFI_SUBMIT, VK_T_SFFI_WAIT_FENCE,
+    VK_T_FONT_ATLAS_UPLOAD}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
@@ -18,12 +23,14 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_fence_submission_supported,
     vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
     vulkan_sffi_destroy_fence, vulkan_sffi_free_buffer,
-    vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer,
+    vulkan_sffi_alloc_buffer,
+    vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_u32,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_wait_idle,
     vulkan_sffi_dispatch_buffer_compute_checked,
     vulkan_sffi_quarantine_dependencies,
     vulkan_sffi_quarantine_unsubmitted_command,
-    vulkan_sffi_reap_dependency_quarantine
+    vulkan_sffi_reap_dependency_quarantine,
+    vulkan_sffi_last_error
 }
 
 # ============================================================================
@@ -36,6 +43,28 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
 
 val VK_PUSH_CONSTANT_SIZE: i64 = 64
 val VK_DISPATCH_COMPLETED_INELIGIBLE: i64 = 2
+# Batched-rect lane. FROZEN, mirrors shaders/rect_batch.comp binding 1:
+# 5 u32 words per rect -- x, y, w, h, colour.
+val RECT_BATCH_WORDS_PER_RECT: i64 = 5
+# VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, as backend_vulkan_font.spl:36.
+val RECT_BATCH_STORAGE_USAGE: i64 = 0x80
+# Smallest rect-list buffer, 256 rects. Sized so a typical UI frame never grows
+# the slot at all; growth doubles from here.
+val RECT_BATCH_MIN_BYTES: i64 = 5120
+# Below this the single-rect lane is cheaper: one dispatch costs a buffer
+# upload and a whole-bounding-box grid, which a lone rect does not amortise.
+val RECT_BATCH_MIN_RECTS: i64 = 2
+# Retained image-source staging buffers kept warm across frames. This is a
+# HOST-MEMORY bound, not a command-buffer bound: `rt_vulkan_create_descriptor_set`
+# (src/compiler_rust/runtime/src/vulkan_graphics_runtime_compute.rs:19-70) creates
+# a FRESH VkDescriptorPool per set, so the SFFI imposes no ceiling on the number
+# of descriptor sets or dispatches recorded into one command buffer. The pending
+# dependency table is therefore grown by push and no longer forces a mid-frame
+# submit+fence-wait when a frame exceeds a fixed slot count.
+val VK_IMAGE_SOURCE_POOL_CAPACITY: i64 = 256
+# Bound retained host staging so a pathological web image cannot pin
+# unbounded CPU memory on the long-lived compositor surface.
+val VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES: i64 = 67108864
 
 # ============================================================================
 # Submission-order probe (level-gated, default OFF)
@@ -43,6 +72,145 @@ val VK_DISPATCH_COMPLETED_INELIGIBLE: i64 = 2
 
 val _VULKAN_ORDER_TRACE_ENABLED =
     (env_get("SIMPLE_VK_ORDER_TRACE") ?? "") == "1"
+
+# The typed word upload (`vulkan_sffi_copy_to_buffer_u32` ->
+# `rt_vulkan_copy_to_buffer_u32`) calls an extern that a deployed binary built
+# before this extern existed does not recognise AT ALL. On the interpreter
+# that is not a value-level failure the callee can decline from inside a
+# guard -- the interpreter's own "unknown extern function" path aborts the
+# process outright, so any call site reached at runtime on an old binary
+# crashes the whole run before `_vulkan_copy_to_buffer_u32_abi`'s ABI check
+# ever gets a chance to return false. There is no capability probe in this
+# tree that can answer "is rt_vulkan_copy_to_buffer_u32 backed?" without
+# calling it (no `rt_runtime_version`, no unbacked-extern-safe probe for a
+# name the interpreter has literally never heard of), so the only universally
+# safe default is OPT-IN: default to the byte payload, which every deployed
+# binary supports, and only take the typed lane when a caller EXPLICITLY
+# opts in via `SIMPLE_VK_RECT_UPLOAD=u32` on a binary it knows is fresh
+# enough. See doc/08_tracking/bug/typed_vulkan_upload_no_fallback_on_old_binary_2026-09-11.md.
+val _VULKAN_RECT_UPLOAD_U32_REQUESTED =
+    (env_get("SIMPLE_VK_RECT_UPLOAD") ?? "") == "u32"
+
+# The same opt-in, for the IMAGE composite path, under its own flag so the two
+# populations can be measured independently. The image case is strictly better
+# than the rect one: `pixels` is ALREADY `[u32]`, so the typed lane does not
+# pack at all -- it hands the caller's own words straight to the runtime, which
+# widens each to four little-endian bytes exactly as `_prepare_image_upload`
+# does by hand. That removes `4 * pixel_count` interpreted array stores per
+# composite: 2.7M stores for one 900x760 full-surface image. Default OFF for
+# the same reason as the rect flag -- calling `rt_vulkan_copy_to_buffer_u32` on
+# a binary built before the extern existed aborts the whole process from inside
+# the interpreter's unknown-extern path, before any guard can decline.
+val _VULKAN_IMAGE_UPLOAD_U32_REQUESTED =
+    (env_get("SIMPLE_VK_IMAGE_UPLOAD") ?? "") == "u32"
+
+var _vulkan_image_upload_last_mode: text = "unset"
+var _vulkan_image_upload_last_reason: text = "no-upload-yet"
+
+pub fn vulkan_image_upload_last_mode() -> text:
+    """`"u32"` or `"bytes"`, whichever payload shape the last image composite
+    upload actually used. `"unset"` before any composite has uploaded."""
+    _vulkan_image_upload_last_mode
+
+pub fn vulkan_image_upload_last_reason() -> text:
+    """`"typed-requested"`, `"typed-not-requested"` (default, byte path), or
+    `"typed-declined"` (u32 requested but the runtime refused the words)."""
+    _vulkan_image_upload_last_reason
+
+pub fn vulkan_image_upload_u32_requested() -> bool:
+    _VULKAN_IMAGE_UPLOAD_U32_REQUESTED
+
+pub fn vulkan_image_upload_note(mode: text, reason: text):
+    _vulkan_image_upload_last_mode = mode
+    _vulkan_image_upload_last_reason = reason
+
+# The same opt-in, for the FONT ATLAS upload, under its own flag so the three
+# populations (rect / image / font) can be measured independently. The font
+# case is the image case again, only larger: `batch.atlas_pixels` is ALREADY
+# `[u32]`, so the typed lane hands the caller's own words straight to the
+# runtime and the interpreted `[u32] -> [u8]` pack disappears entirely --
+# 1,048,576 loop iterations per full repack of the fixed 1024x1024 atlas, which
+# is the last host pixel loop the GPU-boundary audit still reports. Default OFF
+# for the same reason as the other two: calling `rt_vulkan_copy_to_buffer_u32`
+# on a binary built before the extern existed aborts the whole process from
+# inside the interpreter's unknown-extern path, before any guard can decline.
+val _VULKAN_FONT_UPLOAD_U32_REQUESTED =
+    (env_get("SIMPLE_VK_FONT_UPLOAD") ?? "") == "u32"
+
+var _vulkan_font_upload_last_mode: text = "unset"
+var _vulkan_font_upload_last_reason: text = "no-upload-yet"
+
+pub fn vulkan_font_upload_u32_requested() -> bool:
+    """True when `SIMPLE_VK_FONT_UPLOAD=u32` asked for the typed atlas upload."""
+    _VULKAN_FONT_UPLOAD_U32_REQUESTED
+
+pub fn vulkan_font_upload_last_mode() -> text:
+    """`"u32"` or `"bytes"`, whichever payload shape the last font-atlas upload
+    actually used. `"unset"` before any atlas has been uploaded."""
+    _vulkan_font_upload_last_mode
+
+pub fn vulkan_font_upload_last_reason() -> text:
+    """`"typed-requested"`, `"typed-not-requested"` (default, byte path), or
+    `"typed-declined"` (u32 requested but the runtime refused the words)."""
+    _vulkan_font_upload_last_reason
+
+pub fn vulkan_font_upload_note(mode: text, reason: text):
+    _vulkan_font_upload_last_mode = mode
+    _vulkan_font_upload_last_reason = reason
+
+# How many times the byte lane actually WALKED an image, split by which walk.
+# Module-global rather than per-backend because the oracle that needs them --
+# "one image, exactly one pack" -- reads them through the engine facade, which
+# does not expose the backend struct. They count walks, not attempts: a
+# composite that packs once and uploads once adds 1 to `packs` and 0 to
+# `byte_fallbacks`. Ungated by `SIMPLE_VK_TIMING`, unlike the `VK_T_*` buckets,
+# so a spec can assert on them in a default process.
+var _vulkan_image_pack_count: i64 = 0
+var _vulkan_image_byte_fallback_count: i64 = 0
+var _vulkan_image_scratch_resize_count: i64 = 0
+
+pub fn vulkan_image_pack_note_pack():
+    _vulkan_image_pack_count = _vulkan_image_pack_count + 1
+
+pub fn vulkan_image_pack_note_byte_fallback():
+    _vulkan_image_byte_fallback_count = _vulkan_image_byte_fallback_count + 1
+
+pub fn vulkan_image_pack_note_resize():
+    _vulkan_image_scratch_resize_count = _vulkan_image_scratch_resize_count + 1
+
+pub fn vulkan_image_pack_counts_reset():
+    _vulkan_image_pack_count = 0
+    _vulkan_image_byte_fallback_count = 0
+    _vulkan_image_scratch_resize_count = 0
+
+pub fn vulkan_image_pack_counts() -> text:
+    """`"packs=<n> byte_fallbacks=<n> scratch_resizes=<n>"` since process start
+    or the last `vulkan_image_pack_counts_reset()`.
+
+    `byte_fallbacks > 0` means some composite packed the image a SECOND time
+    because `vulkan_sffi_copy_to_buffer_prefix` declined the staging array. On
+    the exact-size scratch that must never happen for an admitted size.
+    """
+    "packs={_vulkan_image_pack_count} byte_fallbacks={_vulkan_image_byte_fallback_count} scratch_resizes={_vulkan_image_scratch_resize_count}"
+
+# Evidence of which payload shape the last `_enqueue_rect_batch_gpu` upload
+# actually took, and why -- read by tests/tooling that need to tell an
+# extern-unavailable byte fallback apart from an explicit-request byte
+# fallback, both of which look identical on the wire.
+var _vulkan_rect_upload_last_mode: text = "unset"
+var _vulkan_rect_upload_last_reason: text = "no-upload-yet"
+
+fn vulkan_rect_upload_last_mode() -> text:
+    """`"u32"` or `"bytes"`, whichever payload shape the last rect-batch
+    upload actually used. `"unset"` before any batch has uploaded."""
+    _vulkan_rect_upload_last_mode
+
+fn vulkan_rect_upload_last_reason() -> text:
+    """Why that mode was chosen: `"typed-requested"` (SIMPLE_VK_RECT_UPLOAD=u32
+    and the typed lane accepted), `"typed-not-requested"` (default; the typed
+    lane is opt-in), or `"typed-declined"` (u32 requested but
+    `_vulkan_copy_to_buffer_u32_abi` returned false, e.g. native array ABI)."""
+    _vulkan_rect_upload_last_reason
 
 fn vulkan_order_trace_enabled() -> bool:
     """True when SIMPLE_VK_ORDER_TRACE=1 armed the `[vk-order]` probe.
@@ -76,6 +244,78 @@ val VK_IMAGE_COMPOSITE_SRC_OVER: i32 = 1
 fn vulkan_dispatch_framebuffer_compute_checked(d_framebuffer: i64, pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
     """Engine2D compatibility name for the shared checked buffer dispatch."""
     vulkan_sffi_dispatch_buffer_compute_checked(d_framebuffer, pipe, push_data, gx, gy, gz)
+
+fn vulkan_dispatch_region_kernel_checked(d_framebuffer: i64, pipe: i64, d_out: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    """Dispatch a region kernel: framebuffer (binding 0) -> output (binding 1).
+
+    Deliberately NOT `vulkan_dispatch_image_composite_checked`: that one OWNS
+    its binding-1 buffer and frees it on every exit, which is correct for a
+    one-shot image upload and fatal here -- the caller needs the output buffer
+    alive afterwards to blit it back over the framebuffer. This variant never
+    frees `d_out`; the caller owns it on every path, success or failure.
+
+    Same completion contract as its sibling: 1 = receipt-eligible completion,
+    2 = completed mutation with ineligible cleanup evidence, 0 = no submission,
+    -1 = completion or dependency release unknown.
+    """
+    if d_framebuffer <= 0 or pipe <= 0 or d_out <= 0 or push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0:
+        return 0
+    if not vulkan_sffi_reap_dependency_quarantine():
+        return -1
+    if not vulkan_sffi_fence_submission_supported():
+        return 0
+    val desc = vulkan_sffi_create_descriptor_set(pipe)
+    if desc <= 0:
+        return 0
+
+    var cmd: i64 = 0
+    var ready = vulkan_sffi_bind_buffer(desc, 0, d_framebuffer)
+    if ready:
+        ready = vulkan_sffi_bind_buffer(desc, 1, d_out)
+    if ready:
+        cmd = vulkan_sffi_begin_compute()
+        ready = cmd > 0
+    if ready:
+        ready = vulkan_sffi_bind_pipeline(cmd, pipe)
+    if ready:
+        ready = vulkan_sffi_bind_descriptors(cmd, desc)
+    if ready:
+        ready = vulkan_sffi_push_constants(cmd, pipe, push_data)
+    if ready:
+        ready = vulkan_sffi_dispatch(cmd, gx, gy, gz)
+    if ready:
+        ready = vulkan_sffi_end_compute(cmd)
+
+    if not ready:
+        val command_released = cmd <= 0 or vulkan_sffi_discard_command(cmd)
+        if not command_released:
+            # 0 for the source slot: this helper owns no buffer to quarantine.
+            vulkan_sffi_quarantine_unsubmitted_command(cmd, desc, 0)
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    if fence < 0:
+        if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
+            return -1
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return VK_DISPATCH_COMPLETED_INELIGIBLE
+    if fence == 0:
+        val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+        return 0
+
+    val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+    if not completion_waited:
+        if not vulkan_sffi_wait_idle():
+            vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
+            return -1
+    val fence_destroyed = vulkan_sffi_destroy_fence(fence)
+    val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
+    if completion_waited and fence_destroyed and descriptor_destroyed:
+        return 1
+    VK_DISPATCH_COMPLETED_INELIGIBLE
 
 fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
     """Dispatch image copy/src-over with a non-replayable completion status.
@@ -158,23 +398,410 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
 
 impl VulkanBackend:
 
+    me _prepare_image_upload(pixels: [u32], count: i64) -> bool:
+        """Pack an image into EXACT-SIZE reusable host staging.
+
+        `vulkan_sffi_copy_to_buffer_prefix` snapshots the initialized prefix
+        immediately into the destination Vulkan buffer. The pooled device
+        source remains fenced independently, so this CPU scratch is safe to
+        reuse by the next sequential draw.
+
+        The scratch is sized to `byte_count` EXACTLY, never grown to a
+        high-water mark. That is not a style choice: on the interpreter array
+        ABI the prefix facade admits an upload only when
+        `byte_count == data.len()` (`sffi_vulkan.spl`, and it cannot do better
+        -- the legacy extern derives the length from the array itself), so a
+        high-water scratch makes every composite after the first large one
+        decline the prefix and pack the WHOLE image a second time through
+        `_pixels_to_bytes`. Measured at 900x760: 262 of 264 composites paid
+        that second pack, 181 s of an 830 s frame. Reuse survives where it is
+        actually free -- a repeat of the same size hits the same array -- and
+        a size change now costs one runtime-side allocation instead of a
+        second interpreted walk of the image.
+        """
+        if count <= 0 or pixels.len().to_i64() != count:
+            return false
+        if count > 9223372036854775807 / 4:
+            return false
+        val byte_count = count * 4
+        if byte_count > VULKAN_IMAGE_UPLOAD_SCRATCH_MAX_BYTES:
+            self.image_upload_scratch_fallback_count = self.image_upload_scratch_fallback_count + 1
+            return false
+        if self.image_upload_scratch.len().to_i64() != byte_count:
+            self.image_upload_scratch = [0u8; byte_count]
+            self.image_upload_scratch_resize_count = self.image_upload_scratch_resize_count + 1
+            vulkan_image_pack_note_resize()
+        vulkan_image_pack_note_pack()
+        var i: i64 = 0
+        while i < count:
+            val pixel = pixels[i]
+            val offset = i * 4
+            self.image_upload_scratch[offset] = _u32_to_u8(pixel & 0xFF)
+            self.image_upload_scratch[offset + 1] = _u32_to_u8((pixel >> 8) & 0xFF)
+            self.image_upload_scratch[offset + 2] = _u32_to_u8((pixel >> 16) & 0xFF)
+            self.image_upload_scratch[offset + 3] = _u32_to_u8((pixel >> 24) & 0xFF)
+            i = i + 1
+        true
+
+    me _ensure_pending_compute_slot():
+        """Guarantee slot `pending_compute_count` exists in the three tables.
+
+        The tables start empty (a fresh backend has no preallocated dispatch
+        ceiling -- R6) and grow in whole blocks of
+        `VK_IMAGE_SOURCE_POOL_CAPACITY`, never by one. Growth is unbounded, so
+        no `count >= len()` ceiling ever forces a mid-frame flush; the block
+        only avoids a reallocation per primitive and keeps the post-fence
+        table length stable across frames.
+        """
+        val have = self.pending_compute_pipelines.len().to_i64()
+        if self.pending_compute_count < have:
+            return
+        var added: i64 = 0
+        while added < VK_IMAGE_SOURCE_POOL_CAPACITY:
+            self.pending_compute_pipelines.push(0)
+            self.pending_compute_descriptors.push(0)
+            self.pending_compute_sources.push(0)
+            added = added + 1
+
+    me _image_source_is_pending(source: i64) -> bool:
+        if source <= 0:
+            return false
+        var i: i64 = 0
+        while i < self.pending_compute_count:
+            if self.pending_compute_sources[i] == source:
+                return true
+            i = i + 1
+        false
+
+    me _image_descriptor_is_pooled(descriptor: i64) -> bool:
+        if descriptor <= 0:
+            return false
+        for pooled in self.image_descriptor_pool:
+            if pooled == descriptor:
+                return true
+        false
+
+    me _pending_image_composite_count() -> i64:
+        var n: i64 = 0
+        var i: i64 = 0
+        while i < self.pending_compute_count:
+            if self.pending_compute_sources[i] > 0:
+                n = n + 1
+            i = i + 1
+        n
+
+    me _image_source_is_pooled(source: i64) -> bool:
+        if source <= 0:
+            return false
+        val pool_len = self.image_source_pool.len().to_i64()
+        var i: i64 = 0
+        while i < pool_len:
+            if self.image_source_pool[i] == source:
+                return true
+            i = i + 1
+        false
+
+    me _image_source_pool_owner_matches() -> bool:
+        if (not self.initialized or self.d_framebuffer <= 0 or
+            not self.session.is_valid() or self.session.device <= 0 or
+            self.session.generation <= 0):
+            return false
+        if self.image_source_pool.len() == 0:
+            return true
+        (self.image_source_pool_device_identity == self.session.device and
+         self.image_source_pool_session_generation == self.session.generation and
+         self.image_source_pool_surface_identity == self.d_framebuffer)
+
+    me _image_source_pool_is_fully_pending() -> bool:
+        val pool_len = self.image_source_pool.len().to_i64()
+        if (not self._image_source_pool_owner_matches() or
+            pool_len < VK_IMAGE_SOURCE_POOL_CAPACITY):
+            return false
+        var i: i64 = 0
+        while i < pool_len:
+            val source = self.image_source_pool[i]
+            if source <= 0 or not self._image_source_is_pending(source):
+                return false
+            i = i + 1
+        true
+
+    me _image_source_pool_key_at(index: i64) -> i64:
+        if index < 0 or index >= self.image_source_pool_key.len().to_i64():
+            return 0
+        self.image_source_pool_key[index]
+
+    me _set_image_source_pool_key(index: i64, key: i64):
+        """Keep the key table exactly parallel to the pool, growing as it does."""
+        while self.image_source_pool_key.len().to_i64() <= index:
+            self.image_source_pool_key.push(0)
+        self.image_source_pool_key[index] = key
+
+    me _acquire_keyed_image_source(byte_count: i64, key: i64) -> i64:
+        """Return a pooled source that ALREADY holds `key`'s pixels, or 0.
+
+        The caller skips its upload on a hit. Two dispatches reading one source
+        buffer is not a hazard, so a slot that is still a dependency of the
+        pending command buffer is reusable here -- unlike
+        `_acquire_image_source`, which hands out a slot to be OVERWRITTEN.
+        The capacity must match exactly: a larger slot holds a previous,
+        larger image and only its prefix would be this one's pixels.
+        """
+        if key == 0 or byte_count <= 0 or not self._image_source_pool_owner_matches():
+            return 0
+        val pool_len = self.image_source_pool.len().to_i64()
+        var i: i64 = 0
+        while i < pool_len:
+            val source = self.image_source_pool[i]
+            if (source > 0 and self.image_source_pool_capacity[i] == byte_count and
+                self._image_source_pool_key_at(i) == key):
+                self.image_source_key_hit_count = self.image_source_key_hit_count + 1
+                return source
+            i = i + 1
+        0
+
+    me _record_image_source_key(source: i64, key: i64):
+        """Stamp (or clear) the key of the slot `source` occupies.
+
+        An unkeyed acquisition MUST clear the slot's old key, otherwise a slot
+        overwritten with different pixels keeps claiming the previous identity
+        and a later frame skips a real upload.
+        """
+        if source <= 0:
+            return
+        val pool_len = self.image_source_pool.len().to_i64()
+        var i: i64 = 0
+        while i < pool_len:
+            if self.image_source_pool[i] == source:
+                self._set_image_source_pool_key(i, key)
+                return
+            i = i + 1
+
+    me _acquire_image_source(byte_count: i64) -> i64:
+        """Return a completed source buffer large enough for one image.
+
+        Batched image composites keep their source dependency until the one
+        frame fence.  A pooled buffer is therefore reusable only when it is
+        absent from the current pending dependency table.  The pool is bounded
+        by `VK_IMAGE_SOURCE_POOL_CAPACITY`; exhaustion keeps the caller's
+        existing fail-closed path intact.
+        """
+        if byte_count <= 0 or byte_count % 4 != 0:
+            return 0
+        val pool_len = self.image_source_pool.len().to_i64()
+        if not self._image_source_pool_owner_matches():
+            return 0
+        var i: i64 = 0
+        while i < pool_len:
+            val source = self.image_source_pool[i]
+            if (source > 0 and
+                self.image_source_pool_capacity[i] >= byte_count and
+                not self._image_source_is_pending(source)):
+                self.image_source_pool_reuse_count = self.image_source_pool_reuse_count + 1
+                return source
+            i = i + 1
+        if pool_len >= VK_IMAGE_SOURCE_POOL_CAPACITY:
+            # The pool can be full of completed buffers that are smaller than
+            # a later image. Replace one completed undersized slot instead of
+            # permanently failing every larger draw after saturation.
+            var replace_index: i64 = -1
+            var replace_capacity: i64 = 9223372036854775807
+            i = 0
+            while i < pool_len:
+                val source = self.image_source_pool[i]
+                val capacity = self.image_source_pool_capacity[i]
+                if source <= 0:
+                    replace_index = i
+                    replace_capacity = -1
+                elif (replace_capacity >= 0 and
+                    not self._image_source_is_pending(source) and
+                    capacity < replace_capacity):
+                    replace_index = i
+                    replace_capacity = capacity
+                i = i + 1
+            if replace_index < 0:
+                return 0
+            val replaced = self.image_source_pool[replace_index]
+            self.image_source_pool[replace_index] = 0
+            self.image_source_pool_capacity[replace_index] = 0
+            if replaced > 0 and not vulkan_sffi_free_buffer(replaced):
+                vulkan_sffi_quarantine_dependencies(0, replaced, 0, 0)
+            val replacement = vulkan_sffi_alloc_buffer(byte_count, 0x80)
+            if replacement <= 0:
+                return 0
+            self.image_source_pool[replace_index] = replacement
+            self.image_source_pool_capacity[replace_index] = byte_count
+            self._set_image_source_pool_key(replace_index, 0)
+            self.image_source_pool_allocation_count = self.image_source_pool_allocation_count + 1
+            if replaced > 0:
+                self.image_source_pool_replacement_count = self.image_source_pool_replacement_count + 1
+            return replacement
+        val source = vulkan_sffi_alloc_buffer(byte_count, 0x80)
+        if source <= 0:
+            return 0
+        if pool_len == 0:
+            self.image_source_pool_device_identity = self.session.device
+            self.image_source_pool_session_generation = self.session.generation
+            self.image_source_pool_surface_identity = self.d_framebuffer
+        self.image_source_pool.push(source)
+        self.image_source_pool_capacity.push(byte_count)
+        self._set_image_source_pool_key(pool_len, 0)
+        self.image_source_pool_allocation_count = self.image_source_pool_allocation_count + 1
+        source
+
+    me _release_image_source(source: i64):
+        # Pooled source buffers remain owned by the surface after the frame
+        # fence.  Transient (non-batched) sources retain the old release path.
+        if source <= 0 or self._image_source_is_pooled(source):
+            return
+        vulkan_sffi_free_buffer(source)
+
+    me _destroy_image_source_pool():
+        val pool_len = self.image_source_pool.len().to_i64()
+        var i: i64 = 0
+        while i < pool_len:
+            val source = self.image_source_pool[i]
+            if source > 0 and not vulkan_sffi_free_buffer(source):
+                vulkan_sffi_quarantine_dependencies(0, source, 0, 0)
+            i = i + 1
+        self.image_source_pool = []
+        self.image_source_pool_capacity = []
+        self.image_source_pool_key = []
+        self.image_source_pool_device_identity = 0
+        self.image_source_pool_session_generation = 0
+        self.image_source_pool_surface_identity = 0
+
     me _clear_pending_compute_state():
+        # Snapshot before zeroing: the count is only observable AFTER the frame
+        # has been flushed, which is exactly when this runs.
+        if self.frame_dispatch_count > 0:
+            self.last_frame_dispatch_count = self.frame_dispatch_count
+        self.frame_dispatch_count = 0
+        # Every rect-list slot is now behind the fence and may be reclaimed by
+        # the next frame's first batch.
+        self.rect_batch_slot = 0
         self.pending_compute_command = 0
-        self.pending_compute_pipelines = [0i64; 256]
-        self.pending_compute_descriptors = [0i64; 256]
-        self.pending_compute_sources = [0i64; 256]
+        # Zero the slots in place instead of dropping the tables: the capacity
+        # a frame grew is what the NEXT frame reuses, and the drawing spec's
+        # post-fence receipt reads it (`pending_compute_sources.len()`), so a
+        # reallocation here would erase the evidence that the batch existed.
+        var slot: i64 = 0
+        val slots = self.pending_compute_sources.len().to_i64()
+        while slot < slots:
+            self.pending_compute_pipelines[slot] = 0
+            self.pending_compute_descriptors[slot] = 0
+            self.pending_compute_sources[slot] = 0
+            slot = slot + 1
         self.pending_compute_count = 0
+        # The command buffer is gone, so no atlas slot is read by anything
+        # unsubmitted any more. This runs on EVERY flush return path, including
+        # the failure ones -- clearing the flags there too is the conservative
+        # direction: it can only make a later write look free when the
+        # dispatches that would have read it were discarded or quarantined.
+        var atlas_slot: i64 = 0
+        while atlas_slot < self.font_atlas_slot_referenced.len().to_i64():
+            self.font_atlas_slot_referenced[atlas_slot] = false
+            atlas_slot = atlas_slot + 1
+
+    me _font_atlas_slot_index(owner: text) -> i64:
+        """Index of the device atlas slot holding `owner`'s pixels, or -1."""
+        if owner == "":
+            return -1
+        var i: i64 = 0
+        while i < self.font_atlas_slot_owners.len().to_i64():
+            if self.font_atlas_slot_owners[i] == owner and self.font_atlas_slot_handles[i] != 0:
+                return i
+            i = i + 1
+        -1
+
+    me _font_atlas_spare_slot_index() -> i64:
+        """A slot index a relocating write may take without flushing.
+
+        Returns -2 when the table has room for a NEW slot, a valid index when
+        an existing unreferenced slot can be recycled, and -1 when neither is
+        possible (the caller must then flush).
+        """
+        if self.font_atlas_slot_handles.len().to_i64() < vulkan_font_atlas_slot_depth():
+            return -2
+        var i: i64 = 0
+        while i < self.font_atlas_slot_referenced.len().to_i64():
+            if not self.font_atlas_slot_referenced[i] and self.font_atlas_slot_handles[i] != 0:
+                return i
+            i = i + 1
+        -1
+
+    me _font_atlas_bind_slot(index: i64) -> bool:
+        """Make slot `index` the one subsequent descriptors bind."""
+        if index < 0 or index >= self.font_atlas_slot_handles.len().to_i64():
+            return false
+        if self.font_atlas_slot_handles[index] == 0:
+            return false
+        self.d_font_atlas = self.font_atlas_slot_handles[index]
+        self.font_atlas_active_slot = index
+        true
+
+    me _font_atlas_mark_slot_referenced():
+        """Record that a dispatch reading the active slot is now in the buffer."""
+        val index = self.font_atlas_active_slot
+        if index >= 0 and index < self.font_atlas_slot_referenced.len().to_i64():
+            self.font_atlas_slot_referenced[index] = true
+
+    me _font_atlas_release_slots():
+        """Free every device atlas slot. Used when the atlas DIMENSIONS move."""
+        # A parked upload names one of the buffers freed below: discard it, do
+        # NOT drain it. Draining would copy into a doomed buffer and, worse,
+        # copy an atlas of the OLD dimensions.
+        self.font_atlas_deferred_buffer = 0
+        self.font_atlas_deferred_slot = -1
+        self.font_atlas_deferred_pixels = []
+        for handle in self.font_atlas_slot_handles:
+            if handle != 0:
+                vulkan_sffi_free_buffer(handle)
+        self.font_atlas_slot_handles = []
+        self.font_atlas_slot_owners = []
+        self.font_atlas_slot_sequences = []
+        self.font_atlas_slot_referenced = []
+        self.font_atlas_active_slot = -1
+        self.d_font_atlas = 0
+
+    me discard_stale_pending_compute() -> bool:
+        """Drop a pending compute batch left over from a PREVIOUS frame.
+
+        A command-buffer handle is valid only until it is submitted. Every
+        readback/present path flushes first (`engine.spl` read_pixels arm), and
+        the flush clears the pending batch on every return path -- so pending
+        state that is still present when a NEW frame starts on a reused engine
+        is provably a ghost of a batch that was already submitted, fenced and
+        whose descriptors were already released. The handle it names is dead:
+        on the interpreter Vulkan runtime the command-buffer slot has been set
+        to `None` (`interpreter_extern/gpu.rs`), so the next
+        `rt_vulkan_bind_pipeline` on it returns 0 and poisons the frame.
+
+        Nothing is released here on purpose -- releasing again would be a
+        double free of handles the flush already reclaimed. Only the ghost
+        bookkeeping is zeroed. Returns true when a ghost was actually dropped.
+        """
+        if self.pending_compute_command <= 0 and self.pending_compute_count <= 0:
+            return false
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("stale-pending-dropped cmd={self.pending_compute_command} pending_n={self.pending_compute_count}")
+        self._clear_pending_compute_state()
+        true
 
     me _release_pending_compute_descriptors() -> bool:
         var released = true
         var i: i64 = 0
         while i < self.pending_compute_count:
-            if not vulkan_sffi_destroy_descriptor_set(self.pending_compute_descriptors[i]):
-                vulkan_sffi_quarantine_dependencies(
-                    self.pending_compute_descriptors[i], 0, 0, 0)
+            val descriptor = self.pending_compute_descriptors[i]
+            # Pooled image-composite descriptors outlive the frame fence exactly
+            # like the font lane's `font_descriptor_pool`: completion makes them
+            # rebindable, shutdown (not every frame) owns their destruction.
+            if (not self._image_descriptor_is_pooled(descriptor) and
+                not vulkan_sffi_destroy_descriptor_set(descriptor)):
+                vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
                 released = false
             val source = self.pending_compute_sources[i]
-            if source > 0 and not vulkan_sffi_free_buffer(source):
+            if (source > 0 and not self._image_source_is_pooled(source) and
+                not vulkan_sffi_free_buffer(source)):
                 vulkan_sffi_quarantine_dependencies(0, source, 0, 0)
                 released = false
             i = i + 1
@@ -188,11 +815,24 @@ impl VulkanBackend:
     me _quarantine_pending_compute_descriptors():
         var i: i64 = 0
         while i < self.pending_compute_count:
+            val source = self.pending_compute_sources[i]
+            val descriptor = self.pending_compute_descriptors[i]
+            # A pooled image descriptor is ALSO reached by the pool sweep below,
+            # so passing it here too would quarantine one handle twice and reap
+            # a second destroy of an already-destroyed set. Same reasoning as
+            # the pooled-source guard on the next argument.
             vulkan_sffi_quarantine_dependencies(
-                self.pending_compute_descriptors[i], self.pending_compute_sources[i], 0, 0)
+                if self._image_descriptor_is_pooled(descriptor): 0 else descriptor,
+                if self._image_source_is_pooled(source): 0 else source,
+                0, 0)
             i = i + 1
         # Any member of the reusable pool may have been referenced by the
         # unknown command. Quarantine every member once and discard the pool.
+        for source in self.image_source_pool:
+            if source > 0:
+                vulkan_sffi_quarantine_dependencies(0, source, 0, 0)
+        for descriptor in self.image_descriptor_pool:
+            vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
         for descriptor in self.font_descriptor_pool:
             vulkan_sffi_quarantine_dependencies(descriptor, 0, 0, 0)
         for params in self.font_params_pool:
@@ -200,15 +840,106 @@ impl VulkanBackend:
         self.pending_font_descriptors = []
         self.pending_font_params = []
         self.pending_font_glyph_count = 0
+        self.image_descriptor_pool = []
         self.font_descriptor_pool = []
         self.font_params_pool = []
         self.font_params_pool_capacity = []
+        self.image_source_pool = []
+        self.image_source_pool_capacity = []
+        self.image_source_pool_key = []
+        self.image_source_pool_device_identity = 0
+        self.image_source_pool_session_generation = 0
+        self.image_source_pool_surface_identity = 0
+
+    me _flush_pending_compute_at(site: text) -> i64:
+        """`_flush_pending_compute` that NAMES its caller in the order trace.
+
+        Every submit this backend performs comes from exactly one
+        `_flush_pending_compute`, so `submits_per_frame` is a count of these
+        calls. Attributing a frame's submits to code required knowing WHICH
+        call site produced each one; the untagged entry point reports
+        `untagged`, which is how the two font-lane sites
+        (`backend_vulkan_font.spl:1112,1182`, owned elsewhere) are told apart
+        from this file's sites without editing that file.
+
+        The engine's two pre-readback flushes (`engine.spl` `read_pixels` /
+        `read_pixels_with_source`) used to reach the untagged entry point and
+        were therefore mis-read as font-lane submits; they now tag themselves
+        `engine.read_pixels` / `engine.read_pixels_with_source`
+        (`doc/08_tracking/bug/vulkan_engine_untagged_frame_flush_2026-09-12.md`).
+        """
+        self.pending_flush_site = site
+        self._flush_pending_compute()
+
+    me font_atlas_drain_deferred_upload() -> bool:
+        """Perform the parked atlas copy, if any. True unless the copy FAILED.
+
+        Called immediately before every submit (and before any write aimed at a
+        different slot), which is what makes parking safe: the copy always lands
+        before the queue sees a command that reads the buffer. Nothing parked is
+        success, not a skip -- there is no upload owed.
+
+        A failed copy leaves the slot holding unknown bytes, so the caller-side
+        bookkeeping poisons exactly that slot (never the whole table): an owner
+        cleared to `""` with sequence -1 can satisfy neither the reuse nor the
+        in-place rule, so the next run for it rewrites in full.
+        """
+        val buffer = self.font_atlas_deferred_buffer
+        if buffer == 0:
+            return true
+        val pixels = self.font_atlas_deferred_pixels
+        val slot = self.font_atlas_deferred_slot
+        self.font_atlas_deferred_buffer = 0
+        self.font_atlas_deferred_slot = -1
+        self.font_atlas_deferred_pixels = []
+        val _t_up = vulkan_timing_now_us()
+        val ok = vulkan_sffi_copy_to_buffer_u32(buffer, pixels, 0)
+        vulkan_timing_add(VK_T_FONT_ATLAS_UPLOAD, _t_up)
+        self.font_atlas_deferred_uploads = self.font_atlas_deferred_uploads + 1
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("font-atlas-drain buffer={buffer} slot={slot} words={pixels.len()} rc={ok}")
+        if not ok:
+            if slot >= 0 and slot < self.font_atlas_slot_owners.len().to_i64():
+                self.font_atlas_slot_owners[slot] = ""
+                self.font_atlas_slot_sequences[slot] = -1
+            self.font_atlas_generation = -1
+            self.font_atlas_owner_identity = ""
+            self.font_atlas_payload_sha256 = ""
+            self.font_atlas_host_identity = ""
+            self.font_atlas_host_valid = false
+            self.font_atlas_host_owner_sequence = -1
+            self.mark_cpu_fallback("atlas-deferred-upload-failed")
+        ok
 
     me _flush_pending_compute() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
+        # The parked atlas copy must land BEFORE the submit this flush performs,
+        # and before the early `cmd <= 0` return too: a flush with no command
+        # buffer still ends a frame, and an upload owed across that boundary
+        # would be written after a slot table that already claims it resident.
+        self.font_atlas_drain_deferred_upload()
+        self.midframe_flush_count = self.midframe_flush_count + 1
+        # Move the armed site into the record and DISARM, so an untagged flush
+        # (the two font-lane sites, which this fix does not own) reports
+        # `untagged` instead of inheriting the previous caller's name and
+        # mis-attributing a submit to innocent code.
+        self.last_flush_site = self.pending_flush_site
+        self.pending_flush_site = "untagged"
+        # Captured BEFORE the impl runs: it ends in `_clear_pending_compute_state`,
+        # so reading these after the call always prints 0 and the trace could not
+        # tell a font-lane flush (`font_n>0`) from any other untagged one.
+        val traced_pending = self.pending_compute_count
+        val traced_font = self.pending_font_descriptors.len()
+        val _t_flush = vulkan_timing_now_us()
         val flush_rc = self._flush_pending_compute_impl()
+        vulkan_timing_add(VK_T_FLUSH, _t_flush)
         if vulkan_order_trace_enabled():
-            vulkan_order_trace("flush rc={flush_rc} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown}")
+            # The three atlas-slot counters ride this line so the trace can
+            # attribute a submit to the font lane WITHOUT guessing: `forced` is
+            # the only way a slot decision can produce one, so `forced=0` across
+            # a frame proves every flush in it came from somewhere else. They
+            # would otherwise be write-only state, which the repo forbids.
+            vulkan_order_trace("flush site={self.last_flush_site} rc={flush_rc} pending_n={traced_pending} font_n={traced_font} dirty={self.dirty} cpu_fallback={self.cpu_fallback_used} completion_unknown={self.completion_unknown} atlas_hits={self.font_atlas_slot_hits} atlas_inplace={self.font_atlas_slot_inplace_writes} atlas_forced={self.font_atlas_slot_forced_flushes}")
         flush_rc
 
     me _flush_pending_compute_impl() -> i64:
@@ -216,7 +947,12 @@ impl VulkanBackend:
         if cmd <= 0:
             return 1
         val has_font_work = self.pending_font_descriptors.len() > 0
-        if not vulkan_sffi_end_compute(cmd):
+        val _t_end = vulkan_timing_now_us()
+        val _ended = vulkan_sffi_end_compute(cmd)
+        vulkan_timing_add(VK_T_SFFI_END, _t_end)
+        if not _ended:
+            if vulkan_order_trace_enabled():
+                vulkan_order_trace("flush-fail stage=end_compute cmd={cmd} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()} err={vulkan_sffi_last_error()}")
             val discarded = vulkan_sffi_discard_command(cmd)
             if not discarded:
                 val first_desc = if self.pending_compute_count > 0:
@@ -233,7 +969,11 @@ impl VulkanBackend:
             self._clear_pending_compute_state()
             return 0
 
+        val _t_submit = vulkan_timing_now_us()
         val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+        vulkan_timing_add(VK_T_SFFI_SUBMIT, _t_submit)
+        if fence <= 0 and vulkan_order_trace_enabled():
+            vulkan_order_trace("flush-fail stage=submit_and_wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
         if fence < 0:
             if not vulkan_sffi_wait_idle():
                 self._quarantine_pending_compute_descriptors()
@@ -253,7 +993,11 @@ impl VulkanBackend:
             self.font_frame_submission_count = self.font_frame_submission_count + 1
             self.font_frame_fence_count = self.font_frame_fence_count + 1
 
+        val _t_wf = vulkan_timing_now_us()
         val completion_waited = vulkan_sffi_wait_fence(fence, 0)
+        vulkan_timing_add(VK_T_SFFI_WAIT_FENCE, _t_wf)
+        if not completion_waited and vulkan_order_trace_enabled():
+            vulkan_order_trace("flush-fail stage=wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count}")
         if not completion_waited and not vulkan_sffi_wait_idle():
             self._quarantine_pending_compute_descriptors()
             self._clear_pending_compute_state()
@@ -272,12 +1016,32 @@ impl VulkanBackend:
         if (self.d_framebuffer <= 0 or pipe <= 0 or push_data.len() == 0 or
             gx <= 0 or gy <= 0 or gz <= 0):
             return 0
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("enqueue-entry pipe={pipe} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count}")
+        # Per-op attribution (see `vulkan_timing_table`): every SFFI crossing on
+        # this path is timed separately, because "one dispatch" here is really
+        # begin + reap + descriptor + bind_pipeline + bind_descriptors +
+        # push_constants + dispatch, and the funnel total alone cannot say which
+        # of the seven is the cost.
+        val _t_enqueue = vulkan_timing_now_us()
         if self.pending_compute_command <= 0:
-            if (not vulkan_sffi_reap_dependency_quarantine() or
-                not vulkan_sffi_fence_submission_supported()):
+            val _t_reap = vulkan_timing_now_us()
+            val _reaped = vulkan_sffi_reap_dependency_quarantine()
+            vulkan_timing_add(VK_T_SFFI_REAP, _t_reap)
+            if not _reaped:
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("enqueue-fail stage=reap_dependency_quarantine pipe={pipe}")
                 return 0
+            if not vulkan_sffi_fence_submission_supported():
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("enqueue-fail stage=fence_submission_supported pipe={pipe}")
+                return 0
+            val _t_begin = vulkan_timing_now_us()
             self.pending_compute_command = vulkan_sffi_begin_compute()
+            vulkan_timing_add(VK_T_SFFI_BEGIN, _t_begin)
             if self.pending_compute_command <= 0:
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("enqueue-fail stage=begin_compute pipe={pipe} rc={self.pending_compute_command}")
                 return 0
 
         var desc: i64 = 0
@@ -287,71 +1051,505 @@ impl VulkanBackend:
                 desc = self.pending_compute_descriptors[i]
             i = i + 1
         if desc <= 0:
+            val _t_desc = vulkan_timing_now_us()
             desc = vulkan_sffi_create_descriptor_set(pipe)
-            if desc <= 0 or not vulkan_sffi_bind_buffer(
-                    desc, 0, self.d_framebuffer):
+            val _desc_bound = desc > 0 and vulkan_sffi_bind_buffer(
+                desc, 0, self.d_framebuffer)
+            vulkan_timing_add(VK_T_SFFI_DESC, _t_desc)
+            if not _desc_bound:
+                if vulkan_order_trace_enabled():
+                    vulkan_order_trace("enqueue-fail stage=descriptor pipe={pipe} desc={desc} fb={self.d_framebuffer}")
                 if desc > 0:
                     if not vulkan_sffi_destroy_descriptor_set(desc):
                         vulkan_sffi_quarantine_dependencies(
                             desc, 0, 0, 0)
-                val flushed = self._flush_pending_compute()
+                val flushed = self._flush_pending_compute_at("_enqueue_framebuffer_compute")
                 return if flushed < 0: -1 else: 0
-            if self.pending_compute_count >= self.pending_compute_descriptors.len():
-                # The bounded dependency table is full.
-                # Mirror the bind-failure path: flush and let the caller take
-                # the checked CPU fallback for this primitive.
-                if not vulkan_sffi_destroy_descriptor_set(desc):
-                    vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
-                val cache_flushed = self._flush_pending_compute()
-                return if cache_flushed < 0: -1 else: 0
+            self._ensure_pending_compute_slot()
             self.pending_compute_pipelines[self.pending_compute_count] = pipe
             self.pending_compute_descriptors[self.pending_compute_count] = desc
             self.pending_compute_sources[self.pending_compute_count] = 0
             self.pending_compute_count = self.pending_compute_count + 1
         val cmd = self.pending_compute_command
-        val ready = (
-            vulkan_sffi_bind_pipeline(cmd, pipe) and
-            vulkan_sffi_bind_descriptors(cmd, desc) and
-            vulkan_sffi_push_constants(cmd, pipe, push_data) and
-            vulkan_sffi_dispatch(cmd, gx, gy, gz))
+        val _t_bp = vulkan_timing_now_us()
+        val bound_pipeline = vulkan_sffi_bind_pipeline(cmd, pipe)
+        vulkan_timing_add(VK_T_SFFI_BIND_PIPE, _t_bp)
+        val _t_bd = vulkan_timing_now_us()
+        val bound_descriptors = bound_pipeline and vulkan_sffi_bind_descriptors(cmd, desc)
+        vulkan_timing_add(VK_T_SFFI_BIND_DESC, _t_bd)
+        val _t_pc = vulkan_timing_now_us()
+        val pushed = bound_descriptors and vulkan_sffi_push_constants(cmd, pipe, push_data)
+        vulkan_timing_add(VK_T_SFFI_PUSH, _t_pc)
+        val _t_dp = vulkan_timing_now_us()
+        val ready = pushed and vulkan_sffi_dispatch(cmd, gx, gy, gz)
+        vulkan_timing_add(VK_T_SFFI_DISPATCH, _t_dp)
         if not ready:
-            val flushed = self._flush_pending_compute()
+            if vulkan_order_trace_enabled():
+                vulkan_order_trace("enqueue-fail stage=bind_chain pipe={pipe} desc={desc} cmd={cmd} bind_pipeline={bound_pipeline} bind_desc={bound_descriptors} push={pushed} err={vulkan_sffi_last_error()}")
+            # Measured on Apple M4/MoltenVK, and NOT recoverable at this layer:
+            # `bind_pipeline` -- the FIRST link, so nothing downstream is even
+            # attempted -- fails on the frame's SECOND dispatch through an
+            # already-open command buffer (`began_here` is false; the clear
+            # already recorded into it). Re-opening the buffer was implemented
+            # and measured: it never fires, because the failure is never on a
+            # buffer this call opened. Re-recording the frame is impossible here
+            # since the backend does not retain the primitives it already
+            # enqueued, so the frame's earlier dispatches are lost either way
+            # and an honest CPU fallback for THIS frame is the best available
+            # outcome. What must not happen -- and no longer does -- is the
+            # failure outliving the frame.
+            val flushed = self._flush_pending_compute_at("_enqueue_framebuffer_compute")
+            vulkan_timing_add(VK_T_ENQUEUE, _t_enqueue)
             return if flushed < 0: -1 else: 0
+        self.frame_dispatch_count = self.frame_dispatch_count + 1
+        vulkan_timing_add(VK_T_ENQUEUE, _t_enqueue)
         1
+
+    me _resolve_framebuffer_descriptor(pipe: i64) -> i64:
+        """Descriptor set for `pipe` bound to the framebuffer, dedup'd per batch.
+
+        Extracted from `_enqueue_framebuffer_compute` so the rect-batch lane can
+        resolve it ONCE for N rects instead of re-running the scan and the
+        bind chain per rect. Returns <= 0 when the set could not be created or
+        bound; the caller owns the flush/fallback decision.
+        """
+        var i: i64 = 0
+        while i < self.pending_compute_count:
+            if self.pending_compute_pipelines[i] == pipe:
+                return self.pending_compute_descriptors[i]
+            i = i + 1
+        val desc = vulkan_sffi_create_descriptor_set(pipe)
+        if desc <= 0 or not vulkan_sffi_bind_buffer(desc, 0, self.d_framebuffer):
+            if desc > 0:
+                if not vulkan_sffi_destroy_descriptor_set(desc):
+                    vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
+            return 0
+        self._ensure_pending_compute_slot()
+        self.pending_compute_pipelines[self.pending_compute_count] = pipe
+        self.pending_compute_descriptors[self.pending_compute_count] = desc
+        self.pending_compute_sources[self.pending_compute_count] = 0
+        self.pending_compute_count = self.pending_compute_count + 1
+        desc
+
+    me _enqueue_rect_batch(pipe: i64, rects: [i32], colors: [u32]) -> i64:
+        """Enqueue N opaque rect dispatches with ONE interpreter transit.
+
+        # Frozen packed layout (do not reorder; mirrors the packed-glyph
+        # discipline in backend_vulkan_font.spl:103)
+        #   rects  : 4 i32 per rect, [x0,y0,w0,h0, x1,y1,w1,h1, ...]
+        #   colors : 1 u32 per rect; colors[k] paints rects[4k..4k+4]
+        #   invariant: rects.len() == colors.len() * 4
+        # Painter order is the array order: rect k is dispatched before k+1
+        # into the SAME command buffer, so the GPU executes them in order.
+        #
+        # Why this exists (measured 2026-09-11, macOS/M4, interpreter lane):
+        # one `Engine2D.draw_rect_filled` cost 509 us of interpreter time --
+        # 342 us packing, 97 us in the 4-SFFI enqueue, 23 us in the facade --
+        # for a dispatch the GPU enqueues in ~24 us. This lane keeps the
+        # per-rect work to an in-place push-constant rewrite plus the two
+        # SFFI calls that genuinely vary per rect (push_constants, dispatch);
+        # bind_pipeline and bind_descriptors are hoisted out of the loop
+        # because command-buffer bindings persist until rebound.
+        #
+        # Returns the number of rects enqueued, or -1 on an unrecoverable
+        # failure. A short return means the caller must replay the REMAINING
+        # rects (index >= return value) through the single-rect path, which
+        # preserves painter order because everything before it is already
+        # recorded in the command buffer.
+        """
+        val count = colors.len().to_i64()
+        if self.d_framebuffer <= 0 or pipe <= 0 or count <= 0:
+            return 0
+        if rects.len().to_i64() != count * 4:
+            return 0
+        if self.pending_compute_command <= 0:
+            if (not vulkan_sffi_reap_dependency_quarantine() or
+                not vulkan_sffi_fence_submission_supported()):
+                return 0
+            val _t_begin = vulkan_timing_now_us()
+            self.pending_compute_command = vulkan_sffi_begin_compute()
+            vulkan_timing_add(VK_T_SFFI_BEGIN, _t_begin)
+            if self.pending_compute_command <= 0:
+                return 0
+        val desc = self._resolve_framebuffer_descriptor(pipe)
+        if desc <= 0:
+            val flushed = self._flush_pending_compute_at("_enqueue_rect_batch")
+            return if flushed < 0: -1 else: 0
+        val cmd = self.pending_compute_command
+        if not vulkan_sffi_bind_pipeline(cmd, pipe) or not vulkan_sffi_bind_descriptors(cmd, desc):
+            val flushed = self._flush_pending_compute_at("_enqueue_rect_batch")
+            return if flushed < 0: -1 else: 0
+        # One reusable push-constant staging buffer for the whole batch: the
+        # runtime copies these bytes at record time (vkCmdPushConstants takes
+        # them by value), so rewriting it in place between dispatches is safe.
+        var pc_buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+        # Only the first FIVE words (x, y, w, h, colour -- offsets 0..19) vary
+        # per rect. Framebuffer size and clip (offsets 20..47) are frame state,
+        # so they are written ONCE here instead of 28 bytes re-written per
+        # rect. Measured 2026-09-11: rewriting the whole 48-byte block per rect
+        # cost 111 us/rect; the interpreter charges ~1.5 us per array store, so
+        # the hoist is the difference between 48 and 20 stores per rect.
+        _write_rect_pc_into(pc_buf, 0, 0, 0, 0, 0, 0u32, self.w, self.h,
+                            self.clip_x, self.clip_y, self.clip_w, self.clip_h,
+                            self.clip_enabled)
+        var k: i64 = 0
+        while k < count:
+            val base = k * 4
+            val rw = rects[base + 2]
+            val rh = rects[base + 3]
+            if rw > 0 and rh > 0:
+                # Per-rect push-constant words (offsets 0..19), written inline
+                # rather than called because at ~7 us per interpreter `me`/fn
+                # transit the call itself is ~10% of this loop body.
+                val vx = (rects[base] as u32) as i64
+                pc_buf[0] = (vx & 255) as u8
+                pc_buf[1] = ((vx >> 8) & 255) as u8
+                pc_buf[2] = ((vx >> 16) & 255) as u8
+                pc_buf[3] = ((vx >> 24) & 255) as u8
+                val vy = (rects[base + 1] as u32) as i64
+                pc_buf[4] = (vy & 255) as u8
+                pc_buf[5] = ((vy >> 8) & 255) as u8
+                pc_buf[6] = ((vy >> 16) & 255) as u8
+                pc_buf[7] = ((vy >> 24) & 255) as u8
+                val vw = (rw as u32) as i64
+                pc_buf[8] = (vw & 255) as u8
+                pc_buf[9] = ((vw >> 8) & 255) as u8
+                pc_buf[10] = ((vw >> 16) & 255) as u8
+                pc_buf[11] = ((vw >> 24) & 255) as u8
+                val vh = (rh as u32) as i64
+                pc_buf[12] = (vh & 255) as u8
+                pc_buf[13] = ((vh >> 8) & 255) as u8
+                pc_buf[14] = ((vh >> 16) & 255) as u8
+                pc_buf[15] = ((vh >> 24) & 255) as u8
+                val vc = colors[k] as i64
+                pc_buf[16] = (vc & 255) as u8
+                pc_buf[17] = ((vc >> 8) & 255) as u8
+                pc_buf[18] = ((vc >> 16) & 255) as u8
+                pc_buf[19] = ((vc >> 24) & 255) as u8
+                val gx = (rw as i64 + 15) / 16
+                val gy = (rh as i64 + 15) / 16
+                if (not vulkan_sffi_push_constants(cmd, pipe, pc_buf) or
+                    not vulkan_sffi_dispatch(cmd, gx, gy, 1)):
+                    val flushed = self._flush_pending_compute_at("_enqueue_rect_batch")
+                    return if flushed < 0: -1 else: k
+                self.frame_dispatch_count = self.frame_dispatch_count + 1
+                # Per-rect fallback lane: each rect costs its own dispatch.
+                self.rect_list_device_dispatch_count = self.rect_list_device_dispatch_count + 1
+            k = k + 1
+        # One trace line for the whole batch. The single-rect path emits one per
+        # dispatch; without this the batch lane is INVISIBLE to
+        # SIMPLE_VK_ORDER_TRACE=1, and that probe exists precisely because
+        # mutation ordering was misdiagnosed twice.
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("rect-batch pipe={pipe} n={count} desc={desc} cmd={cmd} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
+        count
+
+    me _free_rect_batch_pool():
+        """Release every rect-list buffer and descriptor this surface owns.
+
+        Only safe once no command referencing them can still be pending, which
+        is why the only caller is the surface teardown path.
+        """
+        var i: i64 = 0
+        while i < self.rect_batch_descriptors.len().to_i64():
+            val d = self.rect_batch_descriptors[i]
+            if d > 0 and not vulkan_sffi_destroy_descriptor_set(d):
+                vulkan_sffi_quarantine_dependencies(d, 0, 0, 0)
+            i = i + 1
+        i = 0
+        while i < self.rect_batch_buffers.len().to_i64():
+            val b = self.rect_batch_buffers[i]
+            if b > 0: vulkan_sffi_free_buffer(b)
+            i = i + 1
+        self.rect_batch_buffers = []
+        self.rect_batch_capacities = []
+        self.rect_batch_descriptors = []
+        self.rect_batch_slot = 0
+
+    me _rect_batch_slot_ready(slot: i64, byte_count: i64, pipe: i64) -> bool:
+        """Ensure pool slot `slot` owns a buffer of at least `byte_count` bytes.
+
+        Grows by REPLACING the slot's buffer, which is safe only because a slot
+        is claimed at most once per frame and every earlier frame that used it
+        was fence-waited by `_flush_pending_compute` before the slot was reset.
+        A buffer that is still referenced by an unsubmitted command is never
+        reached here.
+        """
+        while self.rect_batch_buffers.len().to_i64() <= slot:
+            self.rect_batch_buffers.push(0)
+            self.rect_batch_capacities.push(0)
+            self.rect_batch_descriptors.push(0)
+        if self.rect_batch_capacities[slot] < byte_count:
+            val old = self.rect_batch_buffers[slot]
+            if old > 0: vulkan_sffi_free_buffer(old)
+            # Round up so a frame whose rect count creeps upward does not
+            # reallocate every frame; this is the "grow, never per-frame alloc"
+            # rule the lane exists for.
+            var want = RECT_BATCH_MIN_BYTES
+            while want < byte_count: want = want * 2
+            val fresh = vulkan_sffi_alloc_buffer(want, RECT_BATCH_STORAGE_USAGE)
+            if fresh <= 0:
+                self.rect_batch_buffers[slot] = 0
+                self.rect_batch_capacities[slot] = 0
+                return false
+            self.rect_batch_buffers[slot] = fresh
+            self.rect_batch_capacities[slot] = want
+            # The descriptor names the OLD buffer; it must be rebuilt.
+            val stale = self.rect_batch_descriptors[slot]
+            if stale > 0 and not vulkan_sffi_destroy_descriptor_set(stale):
+                vulkan_sffi_quarantine_dependencies(stale, 0, 0, 0)
+            self.rect_batch_descriptors[slot] = 0
+        if self.rect_batch_descriptors[slot] <= 0:
+            val desc = vulkan_sffi_create_descriptor_set(pipe)
+            if desc <= 0: return false
+            self.rect_batch_descriptors[slot] = desc
+        # Binding 0 is the framebuffer, binding 1 the rect list. Both are
+        # re-bound every frame because a resize replaces d_framebuffer.
+        if (not vulkan_sffi_bind_buffer(self.rect_batch_descriptors[slot], 0, self.d_framebuffer) or
+            not vulkan_sffi_bind_buffer(self.rect_batch_descriptors[slot], 1,
+                                        self.rect_batch_buffers[slot])):
+            return false
+        true
+
+    me _enqueue_rect_batch_gpu(rects: [i32], colors: [u32]) -> i64:
+        """Record ONE compute dispatch that paints every rect in the list.
+
+        The rect list is uploaded to a GPU storage buffer (binding 1) and the
+        shader walks it per pixel, so the interpreter pays for one
+        push_constants + one dispatch for the WHOLE batch instead of two SFFI
+        calls per rect. See `shaders/rect_batch.comp` for the frozen layout.
+
+        Returns the number of rects recorded (== count) on success, 0 when the
+        lane declined (caller falls back to the per-rect loop, painter order
+        intact because nothing was recorded), or -1 when the frame is
+        unrecoverable.
+        """
+        val count = colors.len().to_i64()
+        if self.pipe_rect_batch <= 0 or self.d_framebuffer <= 0 or count <= 0:
+            return 0
+        if rects.len().to_i64() != count * 4:
+            return 0
+
+        # Bounding box over the rects that actually paint. A degenerate rect is
+        # skipped exactly as the host batch lane skips it, and the shader skips
+        # it again, so the two agree.
+        var bx0: i64 = 2147483647
+        var by0: i64 = 2147483647
+        var bx1: i64 = -2147483648
+        var by1: i64 = -2147483648
+        var live: i64 = 0
+        var k: i64 = 0
+        while k < count:
+            val base = k * 4
+            val rw = rects[base + 2] as i64
+            val rh = rects[base + 3] as i64
+            if rw > 0 and rh > 0:
+                val rx = rects[base] as i64
+                val ry = rects[base + 1] as i64
+                if rx < bx0: bx0 = rx
+                if ry < by0: by0 = ry
+                if rx + rw > bx1: bx1 = rx + rw
+                if ry + rh > by1: by1 = ry + rh
+                live = live + 1
+            k = k + 1
+        if live == 0:
+            # Nothing paints. Report the whole list as handled: the single-rect
+            # path would paint nothing either, and replaying it would only
+            # re-derive that.
+            return count
+        # Clamp the bounding box to the framebuffer, and to the clip when one is
+        # active, so the dispatch grid is the smallest that can still paint every
+        # pixel the N singles would. The shader re-applies both tests per pixel;
+        # this only sizes the grid.
+        if bx0 < 0: bx0 = 0
+        if by0 < 0: by0 = 0
+        if bx1 > self.w as i64: bx1 = self.w as i64
+        if by1 > self.h as i64: by1 = self.h as i64
+        if self.clip_enabled:
+            val cx0 = self.clip_x as i64
+            val cy0 = self.clip_y as i64
+            val cx1 = cx0 + (self.clip_w as i64)
+            val cy1 = cy0 + (self.clip_h as i64)
+            if bx0 < cx0: bx0 = cx0
+            if by0 < cy0: by0 = cy0
+            if bx1 > cx1: bx1 = cx1
+            if by1 > cy1: by1 = cy1
+        val bw = bx1 - bx0
+        val bh = by1 - by0
+        if bw <= 0 or bh <= 0:
+            # Every rect is fully outside the framebuffer or the clip. Same
+            # reasoning as `live == 0`.
+            return count
+
+        if self.pending_compute_command <= 0:
+            if (not vulkan_sffi_reap_dependency_quarantine() or
+                not vulkan_sffi_fence_submission_supported()):
+                return 0
+            val _t_begin = vulkan_timing_now_us()
+            self.pending_compute_command = vulkan_sffi_begin_compute()
+            vulkan_timing_add(VK_T_SFFI_BEGIN, _t_begin)
+            if self.pending_compute_command <= 0:
+                return 0
+
+        val slot = self.rect_batch_slot
+        val payload_bytes = count * RECT_BATCH_WORDS_PER_RECT * 4
+        if not self._rect_batch_slot_ready(slot, payload_bytes, self.pipe_rect_batch):
+            return 0
+
+        # Pack the frozen 5-word-per-rect payload.
+        #
+        # FASTER when it runs: pack it as WORDS and hand the words over as
+        # words. The typed upload (`vulkan_sffi_copy_to_buffer_u32`) widens
+        # each element to four little-endian bytes on the runtime side, so
+        # this loop costs 5 interpreter array stores per rect instead of 20 --
+        # for a 64-rect batch, 320 stores instead of 1280. It is OPT-IN
+        # (`SIMPLE_VK_RECT_UPLOAD=u32`), not the default: see
+        # `_VULKAN_RECT_UPLOAD_U32_REQUESTED` above for why. The byte payload
+        # below is the default and the fallback: its bytes are identical, only
+        # its host cost is four times as high, and it is what runs whenever
+        # the typed lane was not requested, declines (AOT/native array ABI),
+        # or `SIMPLE_VK_RECT_UPLOAD=bytes` is set explicitly (accepted as a
+        # synonym for the default, for symmetry with the old flag name).
+        #
+        # CORRECTION to the earlier caveat here (re-measured 2026-09-11): the
+        # upload is NOT a second queue submit in the interpreter lane. That lane
+        # is `vulkan_dlopen` (interpreter_extern/gpu.rs), whose buffers are
+        # HOST_VISIBLE|HOST_COHERENT and persistently mapped, so
+        # `rt_vulkan_copy_to_buffer` is a memcpy plus a flush -- zero submits.
+        # The blocking `submit_transfer_command` the old comment described is
+        # the ash `simple-runtime` lane, which the interpreter never calls. Host
+        # packing, not a transfer submit, was the real cost.
+        val target_buffer = self.rect_batch_buffers[slot]
+        var uploaded = false
+        if _VULKAN_RECT_UPLOAD_U32_REQUESTED:
+            var words: [u32] = [0u32; count * RECT_BATCH_WORDS_PER_RECT]
+            var w: i64 = 0
+            k = 0
+            while k < count:
+                val base = k * 4
+                words[w] = rects[base] as u32
+                words[w + 1] = rects[base + 1] as u32
+                words[w + 2] = rects[base + 2] as u32
+                words[w + 3] = rects[base + 3] as u32
+                words[w + 4] = colors[k]
+                w = w + RECT_BATCH_WORDS_PER_RECT
+                k = k + 1
+            uploaded = vulkan_sffi_copy_to_buffer_u32(target_buffer, words, 0)
+            _vulkan_rect_upload_last_mode = "u32"
+            _vulkan_rect_upload_last_reason = "typed-requested"
+            if not uploaded:
+                _vulkan_rect_upload_last_reason = "typed-declined"
+
+        if not uploaded:
+            if not _VULKAN_RECT_UPLOAD_U32_REQUESTED:
+                _vulkan_rect_upload_last_reason = "typed-not-requested"
+            _vulkan_rect_upload_last_mode = "bytes"
+            var payload: [u8] = [0u8; payload_bytes]
+            var off: i64 = 0
+            k = 0
+            while k < count:
+                val base = k * 4
+                val vx = (rects[base] as u32) as i64
+                payload[off] = (vx & 255) as u8
+                payload[off + 1] = ((vx >> 8) & 255) as u8
+                payload[off + 2] = ((vx >> 16) & 255) as u8
+                payload[off + 3] = ((vx >> 24) & 255) as u8
+                val vy = (rects[base + 1] as u32) as i64
+                payload[off + 4] = (vy & 255) as u8
+                payload[off + 5] = ((vy >> 8) & 255) as u8
+                payload[off + 6] = ((vy >> 16) & 255) as u8
+                payload[off + 7] = ((vy >> 24) & 255) as u8
+                val vw = (rects[base + 2] as u32) as i64
+                payload[off + 8] = (vw & 255) as u8
+                payload[off + 9] = ((vw >> 8) & 255) as u8
+                payload[off + 10] = ((vw >> 16) & 255) as u8
+                payload[off + 11] = ((vw >> 24) & 255) as u8
+                val vh = (rects[base + 3] as u32) as i64
+                payload[off + 12] = (vh & 255) as u8
+                payload[off + 13] = ((vh >> 8) & 255) as u8
+                payload[off + 14] = ((vh >> 16) & 255) as u8
+                payload[off + 15] = ((vh >> 24) & 255) as u8
+                val vc = colors[k] as i64
+                payload[off + 16] = (vc & 255) as u8
+                payload[off + 17] = ((vc >> 8) & 255) as u8
+                payload[off + 18] = ((vc >> 16) & 255) as u8
+                payload[off + 19] = ((vc >> 24) & 255) as u8
+                off = off + 20
+                k = k + 1
+            uploaded = vulkan_sffi_copy_to_buffer(target_buffer, payload, 0)
+
+        if not uploaded:
+            return 0
+
+        val pc = _pack_rect_batch_pc(
+            bx0.to_i32(), by0.to_i32(), bw.to_i32(), bh.to_i32(), count.to_i32(),
+            self.w, self.h, self.clip_x, self.clip_y, self.clip_w, self.clip_h,
+            self.clip_enabled)
+        val cmd = self.pending_compute_command
+        val desc = self.rect_batch_descriptors[slot]
+        if (not vulkan_sffi_bind_pipeline(cmd, self.pipe_rect_batch) or
+            not vulkan_sffi_bind_descriptors(cmd, desc) or
+            not vulkan_sffi_push_constants(cmd, self.pipe_rect_batch, pc) or
+            not vulkan_sffi_dispatch(cmd, (bw + 15) / 16, (bh + 15) / 16, 1)):
+            val flushed = self._flush_pending_compute_at("_enqueue_rect_batch_gpu")
+            return if flushed < 0: -1 else: 0
+        # The slot is now referenced by an unsubmitted dispatch: burn it for the
+        # rest of the frame.
+        self.rect_batch_slot = slot + 1
+        self.frame_dispatch_count = self.frame_dispatch_count + 1
+        # One device dispatch covered the whole rect list.
+        self.rect_list_device_dispatch_count = self.rect_list_device_dispatch_count + 1
+        # A later `_enqueue_framebuffer_compute` on another pipeline rebinds the
+        # pipeline and descriptors itself, so leaving them bound here is safe.
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("rect-batch-gpu pipe={self.pipe_rect_batch} n={count} slot={slot} bbox={bx0},{by0},{bw},{bh} desc={desc} cmd={cmd} clip_on={self.clip_enabled}")
+        count
 
     me _enqueue_image_composite(pipe: i64, d_src: i64, push_data: [u8],
                                 gx: i64, gy: i64, gz: i64) -> i64:
         """Consume one uploaded source and retain it through the frame fence."""
         if (self.d_framebuffer <= 0 or pipe <= 0 or d_src <= 0 or
             push_data.len() == 0 or gx <= 0 or gy <= 0 or gz <= 0):
-            if d_src > 0:
-                vulkan_sffi_free_buffer(d_src)
+            self._release_image_source(d_src)
             return 0
-        if self.pending_compute_count >= self.pending_compute_descriptors.len():
-            val full_status = self._flush_pending_compute()
-            if full_status <= 0:
-                vulkan_sffi_free_buffer(d_src)
-                return full_status
         if self.pending_compute_command <= 0:
             if (not vulkan_sffi_reap_dependency_quarantine() or
                 not vulkan_sffi_fence_submission_supported()):
-                vulkan_sffi_free_buffer(d_src)
+                self._release_image_source(d_src)
                 return 0
+            val _t_begin = vulkan_timing_now_us()
             self.pending_compute_command = vulkan_sffi_begin_compute()
+            vulkan_timing_add(VK_T_SFFI_BEGIN, _t_begin)
             if self.pending_compute_command <= 0:
-                vulkan_sffi_free_buffer(d_src)
+                self._release_image_source(d_src)
                 return 0
-        val desc = vulkan_sffi_create_descriptor_set(pipe)
+        # Reuse a warm descriptor set by position within the batch, mirroring the
+        # font lane (`font_descriptor_pool`, backend_vulkan_font.spl:846-861).
+        # Position `k` is claimed at most once per batch and every earlier batch
+        # that used it was submitted AND fence-waited by `_flush_pending_compute`,
+        # so re-binding it here cannot touch a set live in an unsubmitted command.
+        # `rt_vulkan_create_descriptor_set` builds a whole VkDescriptorPool per
+        # set (vulkan_graphics_runtime_compute.rs:19-70), so this removes one pool
+        # creation per composited image rather than merely one allocation.
+        val pool_index = self._pending_image_composite_count()
+        val pooled = self.frame_batching_enabled and pool_index < self.image_descriptor_pool.len().to_i64()
+        val desc = if pooled:
+            self.image_descriptor_pool[pool_index]
+        else:
+            vulkan_sffi_create_descriptor_set(pipe)
         if (desc <= 0 or not vulkan_sffi_bind_buffer(desc, 0, self.d_framebuffer) or
             not vulkan_sffi_bind_buffer(desc, 1, d_src)):
-            if desc > 0 and not vulkan_sffi_destroy_descriptor_set(desc):
+            if desc > 0 and not pooled and not vulkan_sffi_destroy_descriptor_set(desc):
                 vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
-            vulkan_sffi_free_buffer(d_src)
-            val bind_flush = self._flush_pending_compute()
+            self._release_image_source(d_src)
+            val bind_flush = self._flush_pending_compute_at("_enqueue_image_composite")
             return if bind_flush < 0: -1 else: 0
         val cmd = self.pending_compute_command
         # Register dependencies before recording: if any command operation
         # fails, the common flush/discard path still owns their lifetime.
+        if self.frame_batching_enabled and not pooled:
+            self.image_descriptor_pool.push(desc)
+        self._ensure_pending_compute_slot()
         self.pending_compute_pipelines[self.pending_compute_count] = pipe
         self.pending_compute_descriptors[self.pending_compute_count] = desc
         self.pending_compute_sources[self.pending_compute_count] = d_src
@@ -362,12 +1560,19 @@ impl VulkanBackend:
             vulkan_sffi_push_constants(cmd, pipe, push_data) and
             vulkan_sffi_dispatch(cmd, gx, gy, gz))
         if not ready:
-            val dispatch_flush = self._flush_pending_compute()
+            val dispatch_flush = self._flush_pending_compute_at("_enqueue_image_composite")
             return if dispatch_flush < 0: -1 else: 0
         1
 
     me _flush_for_host_fallback(reason: text) -> bool:
-        val status = self._flush_pending_compute()
+        # The reason rides the trace tag: this is the ONE site that can turn a
+        # one-submit frame into two (it submits the batch so the host can read
+        # the surface back mid-frame), and `_flush_for_host_fallback` alone did
+        # not say WHICH host round-trip did it
+        # (`doc/08_tracking/bug/vulkan_engine_untagged_frame_flush_2026-09-12.md`).
+        # This lane arrived at the same need independently and took the
+        # upstream form: it tags every flush, not only a traced one.
+        val status = self._flush_pending_compute_at("_flush_for_host_fallback:{reason}")
         if status == 1:
             return true
         self.mark_cpu_fallback(reason)
@@ -376,12 +1581,73 @@ impl VulkanBackend:
             return false
         status == VK_DISPATCH_COMPLETED_INELIGIBLE
 
-    me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64, reason: text) -> i64:
+        # Captured BEFORE the enqueue: a retry is only safe when this dispatch
+        # had no already-recorded siblings to lose. Post-readback that is
+        # always the case (the readback's own flush cleared the batch).
+        val pending_before = self.pending_compute_count
+        # DEGENERATE ARGUMENTS ARE NOT A TRANSIENT FAILURE. `_enqueue_framebuffer_compute`
+        # rejects zero workgroups / empty push constants / a dead framebuffer
+        # with a bare 0 and no trace, and the `dispatched == 0` arm below used
+        # to read that as the measured M4 bind-chain flake: it flushed the whole
+        # pending batch (an extra SUBMIT), retried with the SAME invalid
+        # arguments, failed identically, and latched the CPU fallback. The
+        # retry is provably futile because nothing about these arguments can
+        # change between the two calls. Reject here instead: no flush, no retry,
+        # and a named trace so the primitive is still attributable.
+        if (pipe <= 0 or self.d_framebuffer <= 0 or push_data.len() == 0 or
+            gx <= 0 or gy <= 0 or gz <= 0):
+            if vulkan_order_trace_enabled():
+                vulkan_order_trace("dispatch-reject pipe={pipe} fb={self.d_framebuffer} push={push_data.len()} groups={gx},{gy},{gz} reason={reason}")
+            self.mark_cpu_fallback(reason)
+            return 0
+        # Every framebuffer dispatch funnels through here, so this is the one
+        # place damage accounting cannot be forgotten: a primitive that named
+        # its destination rect folds it into the frame union, and one that did
+        # not marks the whole surface. See `hint_damage`.
+        self.consume_damage_hint()
         var dispatched = if self.frame_batching_enabled:
             self._enqueue_framebuffer_compute(pipe, push_data, gx, gy, gz)
         else:
             vulkan_dispatch_framebuffer_compute_checked(
                 self.d_framebuffer, pipe, push_data, gx, gy, gz)
+        var resync_recovered = false
+        val resync_eligible = dispatched < 0 and
+            self.frame_batching_enabled and self.initialized and self.d_framebuffer > 0
+        if resync_eligible:
+            # A -1 means the enqueue's own recovery flush could not even discard
+            # the command buffer it had just begun. That used to latch the CPU
+            # fallback for the backend's whole lifetime on the FIRST occurrence,
+            # with no retry -- the `== 0` arm below never applied. On a healthy
+            # device this is recoverable: prove idle, drain what the quarantine
+            # will give up, drop the wedged batch state, and record the dispatch
+            # again. Only a device that will not even go idle is genuinely lost.
+            if vulkan_sffi_wait_idle():
+                val reaped = vulkan_sffi_reap_dependency_quarantine()
+                self._clear_pending_compute_state()
+                resync_recovered = true
+                # Only retry when this dispatch had no already-recorded siblings.
+                # With siblings, the recovery flush already destroyed the batch,
+                # so re-recording THIS primitive alone would produce a frame
+                # missing the others while reporting success -- strictly worse
+                # than the fallback. In that case the resync above still runs
+                # (it is what unwedges the session for the NEXT frame) but this
+                # frame is left to fail over honestly.
+                if pending_before == 0:
+                    val retried = self._enqueue_framebuffer_compute(pipe, push_data, gx, gy, gz)
+                    if vulkan_order_trace_enabled():
+                        vulkan_order_trace("dispatch-resync pipe={pipe} reaped={reaped} rc={retried}")
+                    if retried > 0:
+                        # The retry recorded cleanly, so completion is NOT
+                        # unknown: the wedged command was discarded, never
+                        # submitted. Leaving completion_unknown set here is what
+                        # made the next readback return zero pixels.
+                        self.completion_unknown = false
+                    dispatched = retried
+                elif vulkan_order_trace_enabled():
+                    vulkan_order_trace("dispatch-resync pipe={pipe} reaped={reaped} siblings_lost={pending_before} no-retry")
+            elif vulkan_order_trace_enabled():
+                vulkan_order_trace("dispatch-resync pipe={pipe} wait_idle=false device-lost")
         if dispatched == 0 and self.frame_batching_enabled and self.initialized and self.d_framebuffer > 0:
             # Hardening (2026-08-10 full-page-render sweep): long batched
             # sessions occasionally fail one dispatch in the bind chain after
@@ -390,7 +1656,7 @@ impl VulkanBackend:
             # retry ONCE on a fresh command buffer before latching the CPU
             # fallback -- a transient chain failure must not demote the whole
             # lane, but a persistent one still must.
-            val flushed = self._flush_pending_compute()
+            val flushed = self._flush_pending_compute_at("_dispatch_framebuffer_checked")
             if flushed >= 0:
                 if vulkan_order_trace_enabled():
                     vulkan_order_trace("dispatch-retry pipe={pipe} after flush rc={flushed}")
@@ -402,18 +1668,51 @@ impl VulkanBackend:
         # healthy frame in every other receipt -- see the run-lane truncation
         # bug's "What is still open".
         if vulkan_order_trace_enabled():
-            vulkan_order_trace("dispatch pipe={pipe} batched={self.frame_batching_enabled} rc={dispatched} fb={self.d_framebuffer} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
+            vulkan_order_trace("dispatch pipe={pipe} batched={self.frame_batching_enabled} rc={dispatched} fb={self.d_framebuffer} pending_cmd={self.pending_compute_command} pending_n={self.pending_compute_count} resynced={resync_recovered} clip_on={self.clip_enabled} clip={self.clip_x},{self.clip_y},{self.clip_w},{self.clip_h}")
         if dispatched > 0:
             self.dirty = true
             self.mark_device_content_changed()
         else:
-            self.mark_cpu_fallback("framebuffer-dispatch-failed")
-            if dispatched < 0:
+            self.mark_cpu_fallback(reason)
+            if dispatched < 0 and not resync_recovered:
                 self.completion_unknown = true
+            elif dispatched < 0:
+                # Resynced: device-idle was PROVEN and the wedged command was
+                # discarded without ever being submitted, so completion is known
+                # -- it did not happen. `completion_unknown` would make
+                # `read_pixels_with_source` bail at entry and hand back a
+                # ZERO-LENGTH readback, which is what got mislabelled
+                # `pixel-mismatch`. The frame is still demoted to the CPU
+                # fallback above; it just returns its pixels instead of nothing.
+                self.dirty = true
             elif self.initialized and self.d_framebuffer > 0:
                 # Status 0 may follow a completed mutation whose cleanup
                 # evidence failed. Refresh device bytes, but never promote it.
                 self.dirty = true
+        # Order-independent, and deliberately the LAST word on the flag: any
+        # path above (including `_flush_for_host_fallback`, which sets it from
+        # its own status) may have raised `completion_unknown` after the resync
+        # already proved device-idle and discarded the unsubmitted command.
+        # Completion is then KNOWN -- it did not happen -- and leaving the flag
+        # raised makes `read_pixels_with_source` bail at entry and return a
+        # ZERO-LENGTH readback. The CPU-fallback demotion above still stands.
+        if resync_recovered and self.completion_unknown:
+            self.completion_unknown = false
+        if resync_recovered and dispatched < 0:
+            # DOWNGRADE -1 -> 0 for the caller. The two codes differ only in
+            # whether completion is KNOWN: -1 means "a command may have been
+            # submitted and we cannot say whether it ran", 0 means "it did not
+            # run". After a resync we have proven device-idle and discarded the
+            # command unsubmitted, so 0 is the truthful code. This must be done
+            # to the RETURN VALUE, not just to `self`: every caller
+            # (`clear`, `draw_rect`, `draw_rect_filled`, the rounded-rect and
+            # gradient lanes -- backend_vulkan.spl:877-1043) independently
+            # re-applies `if dispatched < 0: self.completion_unknown = true`,
+            # so clearing the field here alone is undone a few lines later in
+            # the caller and the readback still comes back zero-length.
+            dispatched = 0
+            if vulkan_order_trace_enabled():
+                vulkan_order_trace("dispatch-resync-downgraded pipe={pipe} -1->0")
         dispatched
 
     me _gpu_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
@@ -425,7 +1724,7 @@ impl VulkanBackend:
         """
         if not self.initialized:
             return
-        val pending_status = self._flush_pending_compute()
+        val pending_status = self._flush_pending_compute_at("_gpu_draw_text_fallback")
         if pending_status <= 0:
             if pending_status < 0:
                 self.completion_unknown = true
@@ -503,13 +1802,43 @@ fn _pack_clear_pc(color: u32, fb_w: i32, fb_h: i32) -> [u8]:
     buf
 
 fn _pack_rect_pc(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
-    """Push constants for rect kernels."""
+    """Push constants for rect kernels.
+
+    HOT PATH (measured 2026-09-11, macOS/M4, interpreter lane): the previous
+    body -- 12 `_pack_*_le(mut buf, ..) -> buf` calls, each of which also made
+    4 tiny cast-helper calls -- cost **342 us per call**, 67% of the 509 us
+    that one `Engine2D.draw_rect_filled` spent in the interpreter, versus a
+    9 us floor for a bare `me` call. Every byte is written inline here: no
+    sub-calls, and no `mut buf` pass-and-return, which the interpreter
+    realises as a fresh 64-byte array per step. Layout is UNCHANGED and stays
+    byte-identical to the GLSL rect kernels' push-constant block -- 12 i32/u32
+    little-endian words at offsets 0,4,..,44. Do not "simplify" this back into
+    the helper calls; see
+    doc/08_tracking/bug/vulkan_draw_rect_interpreter_overhead_2026-09-11.md.
+    """
     var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
-    buf = _pack_i32_le(buf, 0, x)
-    buf = _pack_i32_le(buf, 4, y)
-    buf = _pack_i32_le(buf, 8, w)
-    buf = _pack_i32_le(buf, 12, h)
-    buf = _pack_u32_le(buf, 16, color)
+    _write_rect_pc_into(buf, 0, x, y, w, h, color, fb_w, fb_h, clip_x, clip_y, clip_w, clip_h, clip_enabled)
+    buf
+
+fn _pack_rect_batch_pc(bx: i32, by: i32, bw: i32, bh: i32, n: i32,
+                       fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32,
+                       clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
+    """Pack the frozen 48-byte batched-rect push-constant block.
+
+    Word order is FROZEN and must match `shaders/rect_batch.comp`:
+      bx, by, bw, bh, n, fb_w, fb_h, clip_x, clip_y, clip_w, clip_h,
+      clip_enabled.
+    Unlike the per-rect block this is built ONCE per batch, not once per rect,
+    so it uses the shared `_pack_i32_le` helper rather than inline stores --
+    twelve helper calls per BATCH is noise, where twelve per RECT was 67% of
+    the single-rect call (see `_pack_rect_pc`).
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, bx)
+    buf = _pack_i32_le(buf, 4, by)
+    buf = _pack_i32_le(buf, 8, bw)
+    buf = _pack_i32_le(buf, 12, bh)
+    buf = _pack_i32_le(buf, 16, n)
     buf = _pack_i32_le(buf, 20, fb_w)
     buf = _pack_i32_le(buf, 24, fb_h)
     buf = _pack_i32_le(buf, 28, clip_x)
@@ -518,6 +1847,75 @@ fn _pack_rect_pc(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i3
     buf = _pack_i32_le(buf, 40, clip_h)
     buf = _pack_i32_le(buf, 44, _bool_to_i32(clip_enabled))
     buf
+
+fn _write_rect_pc_into(mut buf: [u8], base: i64, x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool):
+    """Write the frozen 48-byte rect push-constant block at `base` in `buf`.
+
+    Shared by the single-rect packer above and the batch lane, so the two can
+    never drift. Writes are inline (no per-word helper call) for the reason
+    documented on `_pack_rect_pc`.
+    """
+    val vx = (x as u32) as i64
+    buf[base] = (vx & 255) as u8
+    buf[base + 1] = ((vx >> 8) & 255) as u8
+    buf[base + 2] = ((vx >> 16) & 255) as u8
+    buf[base + 3] = ((vx >> 24) & 255) as u8
+    val vy = (y as u32) as i64
+    buf[base + 4] = (vy & 255) as u8
+    buf[base + 5] = ((vy >> 8) & 255) as u8
+    buf[base + 6] = ((vy >> 16) & 255) as u8
+    buf[base + 7] = ((vy >> 24) & 255) as u8
+    val vw = (w as u32) as i64
+    buf[base + 8] = (vw & 255) as u8
+    buf[base + 9] = ((vw >> 8) & 255) as u8
+    buf[base + 10] = ((vw >> 16) & 255) as u8
+    buf[base + 11] = ((vw >> 24) & 255) as u8
+    val vh = (h as u32) as i64
+    buf[base + 12] = (vh & 255) as u8
+    buf[base + 13] = ((vh >> 8) & 255) as u8
+    buf[base + 14] = ((vh >> 16) & 255) as u8
+    buf[base + 15] = ((vh >> 24) & 255) as u8
+    val vc = color as i64
+    buf[base + 16] = (vc & 255) as u8
+    buf[base + 17] = ((vc >> 8) & 255) as u8
+    buf[base + 18] = ((vc >> 16) & 255) as u8
+    buf[base + 19] = ((vc >> 24) & 255) as u8
+    val vfw = (fb_w as u32) as i64
+    buf[base + 20] = (vfw & 255) as u8
+    buf[base + 21] = ((vfw >> 8) & 255) as u8
+    buf[base + 22] = ((vfw >> 16) & 255) as u8
+    buf[base + 23] = ((vfw >> 24) & 255) as u8
+    val vfh = (fb_h as u32) as i64
+    buf[base + 24] = (vfh & 255) as u8
+    buf[base + 25] = ((vfh >> 8) & 255) as u8
+    buf[base + 26] = ((vfh >> 16) & 255) as u8
+    buf[base + 27] = ((vfh >> 24) & 255) as u8
+    val vcx = (clip_x as u32) as i64
+    buf[base + 28] = (vcx & 255) as u8
+    buf[base + 29] = ((vcx >> 8) & 255) as u8
+    buf[base + 30] = ((vcx >> 16) & 255) as u8
+    buf[base + 31] = ((vcx >> 24) & 255) as u8
+    val vcy = (clip_y as u32) as i64
+    buf[base + 32] = (vcy & 255) as u8
+    buf[base + 33] = ((vcy >> 8) & 255) as u8
+    buf[base + 34] = ((vcy >> 16) & 255) as u8
+    buf[base + 35] = ((vcy >> 24) & 255) as u8
+    val vcw = (clip_w as u32) as i64
+    buf[base + 36] = (vcw & 255) as u8
+    buf[base + 37] = ((vcw >> 8) & 255) as u8
+    buf[base + 38] = ((vcw >> 16) & 255) as u8
+    buf[base + 39] = ((vcw >> 24) & 255) as u8
+    val vch = (clip_h as u32) as i64
+    buf[base + 40] = (vch & 255) as u8
+    buf[base + 41] = ((vch >> 8) & 255) as u8
+    buf[base + 42] = ((vch >> 16) & 255) as u8
+    buf[base + 43] = ((vch >> 24) & 255) as u8
+    val ce = if clip_enabled: 1
+        else: 0
+    buf[base + 44] = ce as u8
+    buf[base + 45] = 0u8
+    buf[base + 46] = 0u8
+    buf[base + 47] = 0u8
 
 fn _pack_line_pc(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:
     """Push constants for line kernel."""
@@ -634,6 +2032,51 @@ fn _pack_image_composite_pc(x: i32, y: i32, w: i32, h: i32, fb_w: i32, fb_h: i32
     buf = _pack_i32_le(buf, 56, src_h)
     buf
 
+fn _pack_blur_rect_pc(rx: i32, ry: i32, rw: i32, rh: i32,
+                      fb_w: i32, fb_h: i32, radius: i32) -> [u8]:
+    """Push constants for the device box-blur kernel (28 bytes used).
+
+    FROZEN: the field order is shaders/blur_rect.comp's PushConstants block.
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, rx)
+    buf = _pack_i32_le(buf, 4, ry)
+    buf = _pack_i32_le(buf, 8, rw)
+    buf = _pack_i32_le(buf, 12, rh)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, radius)
+    buf
+
+fn _pack_glass_material_pc(fb_w: i32, fb_h: i32, rx: i32, ry: i32, rw: i32, rh: i32,
+                           corner_radius: i32, blur_radius: i32,
+                           saturation_milli: i32, surface_alpha_milli: i32,
+                           surface_color: u32, gradient_from: u32, gradient_to: u32,
+                           gradient_enabled: bool, gradient_layered: bool) -> [u8]:
+    """Push constants for the device glass material kernel (60 bytes used).
+
+    FROZEN: the field order is shaders/glass_material.comp's PushConstants
+    block. A reorder here silently paints the wrong material rather than
+    failing, so the spec pins the byte offsets.
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, fb_w)
+    buf = _pack_i32_le(buf, 4, fb_h)
+    buf = _pack_i32_le(buf, 8, rx)
+    buf = _pack_i32_le(buf, 12, ry)
+    buf = _pack_i32_le(buf, 16, rw)
+    buf = _pack_i32_le(buf, 20, rh)
+    buf = _pack_i32_le(buf, 24, corner_radius)
+    buf = _pack_i32_le(buf, 28, blur_radius)
+    buf = _pack_i32_le(buf, 32, saturation_milli)
+    buf = _pack_i32_le(buf, 36, surface_alpha_milli)
+    buf = _pack_u32_le(buf, 40, surface_color)
+    buf = _pack_u32_le(buf, 44, gradient_from)
+    buf = _pack_u32_le(buf, 48, gradient_to)
+    buf = _pack_i32_le(buf, 52, _bool_to_i32(gradient_enabled))
+    buf = _pack_i32_le(buf, 56, _bool_to_i32(gradient_layered))
+    buf
+
 # ============================================================================
 # Byte / Pixel Conversion
 # ============================================================================
@@ -667,3 +2110,170 @@ fn _bytes_to_pixel_array(bytes: [u8], count: i32) -> [u32]:
         pixels[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
         i = i + 1
     pixels
+
+# ---------------------------------------------------------------------------
+# Font-atlas mirror continuity (2026-09-12)
+# ---------------------------------------------------------------------------
+# Free function so the decision is testable without a Vulkan device.
+#
+# `atlas_generation` is ONE global counter shared by every atlas owner, so on a
+# page where two font identities interleave an owner's own steps are never
+# contiguous in it and the `host_gen + 1` rule can never hold -- that is the
+# whole of the 8 full 1,048,576-pixel repacks measured at 900x760
+# (doc/08_tracking/bug/vulkan_font_atlas_shared_mirror_repacks_2026-09-12.md).
+# When the producer publishes a per-owner sequence, continuity is tested on
+# THAT instead, with three outcomes:
+#
+#   0 = full repack        -- the mirror cannot be trusted for this batch
+#   1 = incremental repack -- apply this batch's dirty cells to the mirror
+#   2 = mirror is already truth -- this owner added no cells since the mirror
+#                                 was taken, so nothing needs repacking at all
+#
+# Outcome 2 is not an optimisation of 1: a returning owner whose glyphs are all
+# cached emits NO dirty cells, so its sequence does not move, and under a plain
+# `+1` rule that is a full repack of an atlas the mirror already matches.
+val VK_FONT_MIRROR_FULL: i64 = 0
+val VK_FONT_MIRROR_INCREMENTAL: i64 = 1
+val VK_FONT_MIRROR_ALREADY_TRUTH: i64 = 2
+
+fn vulkan_font_mirror_continuity(mirror_coherent: bool, owner_identity: text,
+                                 host_identity: text, bytes_match: bool,
+                                 host_generation: i64, batch_generation: i64,
+                                 host_owner_sequence: i64, batch_owner_sequence: i64,
+                                 dirty_cells: i64) -> i64:
+    if not mirror_coherent or owner_identity == "" or host_identity != owner_identity or not bytes_match:
+        return VK_FONT_MIRROR_FULL
+    if batch_owner_sequence >= 0 and host_owner_sequence >= 0:
+        # Per-owner sequence published by the producer.
+        if batch_owner_sequence == host_owner_sequence and dirty_cells == 0:
+            return VK_FONT_MIRROR_ALREADY_TRUTH
+        if batch_owner_sequence == host_owner_sequence + 1 and dirty_cells > 0:
+            return VK_FONT_MIRROR_INCREMENTAL
+        return VK_FONT_MIRROR_FULL
+    # No per-owner sequence: fall back to the global-generation rule. A gap
+    # there can mean a dirty batch for this owner that never reached this
+    # backend, whose cells the mirror would then be missing, so only an exact
+    # +1 is safe.
+    if host_generation >= 0 and batch_generation == host_generation + 1 and dirty_cells > 0:
+        return VK_FONT_MIRROR_INCREMENTAL
+    VK_FONT_MIRROR_FULL
+
+# ---------------------------------------------------------------------------
+# Per-owner device atlas slots (F32)
+# ---------------------------------------------------------------------------
+
+# How many device atlas buffers this backend will hold at once. A page with two
+# font owners needs two; the cap exists so a pathological page cannot allocate
+# one 4 MiB buffer per face. When the table is full an unreferenced slot is
+# recycled, and only when even that is impossible does a flush happen.
+#
+# Raised 4 -> 8 (2026-09-12). An "owner" is not a font FILE: it folds the point
+# SIZE into its identity, so css-layout.html presents five owners from two
+# families (16/19/24 px plus a second family), exhausted the table, and took a
+# `FLUSH_THEN_WRITE` -- a whole extra SUBMIT -- once per frame. Eight slots is
+# 32 MiB of device atlas at the fixed 1024x1024 size, still bounded, and covers
+# every page in the web catalog. A page that exceeds even this still degrades
+# correctly: the forced flush is a named, counted outcome
+# (`font_atlas_slot_forced_flushes`), not a correctness hazard.
+val VULKAN_FONT_ATLAS_SLOT_MAX: i64 = 8
+
+fn vulkan_font_atlas_slot_sabotage() -> bool:
+    """SABOTAGE CONTROL: `SIMPLE_VK_FONT_ATLAS_SABOTAGE=same-slot`.
+
+    Forces every run onto slot 0 AND onto the no-write outcome, so owner B's
+    dispatch reads whatever owner A left in that buffer. Both halves are needed:
+    merely pointing every owner at slot 0 is absorbed by the plan (it sees a
+    sequence mismatch and takes a fresh slot), which was measured -- all eight
+    showcase PPMs stayed byte-identical -- so a weaker sabotage proves nothing.
+
+    Exists so the guard this design rests on can be shown to FIRE, not merely to
+    be present: a check that has never failed is a check nobody has tested.
+    Never set in production runs.
+    """
+    (env_get("SIMPLE_VK_FONT_ATLAS_SABOTAGE") ?? "") == "same-slot"
+
+fn vulkan_font_atlas_slot_depth() -> i64:
+    """Live slot depth, so before/after evidence comes from ONE binary.
+
+    MEASUREMENT CONTROL: `SIMPLE_VK_FONT_ATLAS_SLOTS=1` collapses the table to a
+    single slot, which reproduces the pre-F32 behaviour exactly -- one device
+    atlas shared by every owner, so any owner switch finds the sole slot
+    referenced with no spare and takes `FLUSH_THEN_WRITE`. A before/after pair
+    captured this way cannot be contaminated by a rebuild or a tree difference.
+    Values outside 1..VULKAN_FONT_ATLAS_SLOT_MAX are ignored rather than
+    honoured, so a typo degrades to the default instead of to one slot.
+    """
+    val raw = env_get("SIMPLE_VK_FONT_ATLAS_SLOTS") ?? ""
+    if raw == "":
+        return VULKAN_FONT_ATLAS_SLOT_MAX
+    # Literal comparison rather than a parse: the legal range is 1..8, and a
+    # string compare cannot disagree with a parser about what "01" or "4 " mean.
+    if raw == "1": return 1
+    if raw == "2": return 2
+    if raw == "3": return 3
+    if raw == "4": return 4
+    if raw == "5": return 5
+    if raw == "6": return 6
+    if raw == "7": return 7
+    if raw == "8": return 8
+    VULKAN_FONT_ATLAS_SLOT_MAX
+
+# The device already holds exactly these bytes: bind and record, no host write,
+# no flush.
+val VK_FONT_SLOT_REUSE_NO_WRITE: i64 = 0
+# Write this owner's slot where it stands. Safe without a flush because every
+# byte a recorded dispatch reads keeps its value (incremental append), or
+# because nothing recorded reads this slot at all.
+val VK_FONT_SLOT_WRITE_IN_PLACE: i64 = 1
+# Write a slot no recorded dispatch references (a newly allocated one, or a
+# recycled unreferenced one). Never a hazard.
+val VK_FONT_SLOT_WRITE_FRESH: i64 = 2
+# The only remaining case: a relocating write into a slot a recorded dispatch
+# reads, with no spare slot to take it. This is the genuine hazard and the one
+# flush the lane still owes.
+val VK_FONT_SLOT_FLUSH_THEN_WRITE: i64 = 3
+
+fn vulkan_font_atlas_slot_plan(slot_found: bool, slot_sequence: i64,
+                               host_sequence_before: i64, batch_sequence: i64,
+                               slot_referenced: bool, continuity: i64,
+                               free_slot_available: bool) -> i64:
+    """Decide what a font run must do to the device atlas, device-free.
+
+    Split out of the composite so the submit-count invariant is testable
+    without a Vulkan device. Every branch is fail-closed: an unknown sequence
+    (-1, the value used when the producer publishes none) matches nothing and
+    therefore never takes a no-write or in-place path.
+
+    The two cheap outcomes rest on facts F16/F24 established, not on hope:
+
+      * `REUSE_NO_WRITE` needs the slot to hold this same owner at this exact
+        published sequence. The producer bumps `atlas_owner_sequence` on every
+        mutation and re-seeds it off a globally monotone counter after a wipe
+        (so a wiped atlas can never present a sequence a stale slot still
+        holds). Equal sequence therefore means equal bytes.
+
+      * `WRITE_IN_PLACE` on an INCREMENTAL batch needs the slot to hold exactly
+        the sequence the mirror was at BEFORE this batch was folded in
+        (`host_sequence_before`), with the batch at +1. The dirty rects then
+        name the only cells that differ, and those cells are new, so no
+        recorded dispatch reads them. Every other cell is written back with the
+        value it already had.
+
+    A FULL repack may relocate cells, so it takes a slot nothing references --
+    a fresh one when available, otherwise a flush.
+    """
+    if not slot_found:
+        # A slot this owner does not have yet cannot be read by anything
+        # already recorded, so allocating or recycling one is always free.
+        return if free_slot_available: VK_FONT_SLOT_WRITE_FRESH else: VK_FONT_SLOT_FLUSH_THEN_WRITE
+    if batch_sequence >= 0 and slot_sequence >= 0 and slot_sequence == batch_sequence:
+        return VK_FONT_SLOT_REUSE_NO_WRITE
+    if (continuity == VK_FONT_MIRROR_INCREMENTAL and batch_sequence >= 0 and
+        host_sequence_before >= 0 and slot_sequence >= 0 and
+        slot_sequence == host_sequence_before and batch_sequence == host_sequence_before + 1):
+        return VK_FONT_SLOT_WRITE_IN_PLACE
+    if not slot_referenced:
+        return VK_FONT_SLOT_WRITE_IN_PLACE
+    if free_slot_available:
+        return VK_FONT_SLOT_WRITE_FRESH
+    VK_FONT_SLOT_FLUSH_THEN_WRITE

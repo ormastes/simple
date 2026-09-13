@@ -1,4 +1,5 @@
 # Seed `.?` bool-lowering crashes the CUDA arm of engine2d backend resolution
+**Status:** OPEN (unverified 2026-09-12)
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** seed lowering of `.?` / engine2d CUDA probe
 
@@ -28,3 +29,6 @@ probe render round-trip result instead of an existence check.
 
 The lowering defect itself remains open (family bug); the resolution path no
 longer depends on it.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

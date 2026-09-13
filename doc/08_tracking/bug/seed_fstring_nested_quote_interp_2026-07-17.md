@@ -1,4 +1,5 @@
 # Seed f-string lexer REGRESSION: nested string literal inside interpolation breaks (2026-07-17)
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 **Found by:** release sanity, stage1 retry with freshly built seed
 (`src/compiler_rust/target/bootstrap/simple`).
@@ -43,3 +44,6 @@ line numbers, which cost real time — diagnostics gap worth fixing alongside.
 ## Status (2026-07-18)
 
 FIXED+PUSHED at 310bcdf1131 (strings.rs lexer fix) + 7a27c446582 (.spl hoists revert). Regression tests: 25/25 + 19/19 + 4/4 passed.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,5 +1,7 @@
 # `test/unit/` is a rotting legacy mirror of `test/01_unit/` — and BOTH run
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-04
 Base measured: origin `main` @ `44bf140626b313d9b51f647c493ad0336133d45d`
 
@@ -165,3 +167,14 @@ A smaller interim step, if deletion is too aggressive: add `test/unit/` to the
 discovery skip list in `test_runner_files.spl:360-395` (which already excludes
 `/fuzz/`, `/deploy/`, `/security/`, etc.). That stops the false verdicts and
 halves unit-tier runtime without deleting anything.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still a large repo-wide test-tree deduplication project (874+ diverging
+paths), governed separately by `check-test-tree-divergence.shs` and its
+baseline per `.claude/rules/vcs.md` — not a shard-scale fix. No change made.
+Leaving OPEN.

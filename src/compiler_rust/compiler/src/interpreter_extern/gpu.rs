@@ -275,8 +275,7 @@ mod cuda_dlopen {
     type CuInit = unsafe extern "C" fn(u32) -> i32;
     type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
     type CuDeviceGetUuid = unsafe extern "C" fn(*mut CudaUuid, i32) -> i32;
-    type CuDeviceGetName =
-        unsafe extern "C" fn(*mut std::os::raw::c_char, i32, i32) -> i32;
+    type CuDeviceGetName = unsafe extern "C" fn(*mut std::os::raw::c_char, i32, i32) -> i32;
     type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
     type CuCtxSetCurrent = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxGetCurrent = unsafe extern "C" fn(*mut *mut c_void) -> i32;
@@ -301,8 +300,7 @@ mod cuda_dlopen {
     type CuDeviceGetCount = unsafe extern "C" fn(*mut i32) -> i32;
     type CuModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> i32;
     type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
-    type CuModuleGetFunction =
-        unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const std::os::raw::c_char) -> i32;
+    type CuModuleGetFunction = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const std::os::raw::c_char) -> i32;
     type CuLaunchKernel = unsafe extern "C" fn(
         *mut c_void,
         u32,
@@ -542,8 +540,8 @@ use simple_runtime::metal_graphics_runtime::{
     rt_metal_draw_indexed, rt_metal_draw_primitives, rt_metal_end_compute_encoder, rt_metal_end_render_pass,
     rt_metal_free_buffer, rt_metal_free_texture, rt_metal_get_last_error, rt_metal_init, rt_metal_is_available,
     rt_metal_run_blit_frame, rt_metal_run_compute_frame, rt_metal_set_buffer, rt_metal_set_bytes, rt_metal_set_scissor,
-    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed,
-    rt_metal_buffer_upload_raw, rt_metal_buffer_download_raw, rt_metal_set_bytes_raw,
+    rt_metal_set_viewport, rt_metal_present, rt_metal_wait_completed, rt_metal_buffer_upload_raw,
+    rt_metal_buffer_download_raw, rt_metal_set_bytes_raw,
 };
 
 pub(super) fn arg_i64(args: &[Value], index: usize, name: &str, expected: usize) -> Result<i64, CompileError> {
@@ -4460,6 +4458,86 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(false))
 }
 
+/// `rt_vulkan_copy_to_buffer_u32(handle: i64, words: [u32], offset: i64) -> bool`
+///
+/// Typed sibling of `rt_vulkan_copy_to_buffer`: the payload is a WORD array and
+/// each element becomes four little-endian bytes. The byte entry point marshals
+/// through `strict_owned_bytes`/`arg_bytes_ptr`, which truncate every element to
+/// one byte, so a caller with `u32` data has to explode each word into four
+/// host array stores before it can upload -- 20 interpreter stores per rect for
+/// the Engine2D rect batch, which is the single largest O(N) interpreter term
+/// left in that lane. With this entry point the same batch is 5 stores per rect
+/// and the widening happens here, in Rust, over the whole array at once.
+///
+/// Element range is `-2^31 ..= u32::MAX`: a signed value is taken as its
+/// two's-complement `u32`, so a packed rect can carry a negative x/y without
+/// the caller casting. Anything outside that range is an error rather than a
+/// silent truncation -- silent truncation is exactly the defect this replaces.
+pub fn rt_vulkan_copy_to_buffer_u32_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_copy_to_buffer_u32", 3)? as usize;
+    let words = strict_i64_values(args, 1, "rt_vulkan_copy_to_buffer_u32", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_copy_to_buffer_u32", 3)?;
+    if handle == 0 || offset < 0 {
+        return Ok(Value::Bool(false));
+    }
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for word in &words {
+        let widened = if *word < 0 {
+            if *word < i64::from(i32::MIN) {
+                return Err(CompileError::semantic(format!(
+                    "rt_vulkan_copy_to_buffer_u32 word {word} is out of bounds"
+                )));
+            }
+            (*word as i32) as u32
+        } else {
+            u32::try_from(*word).map_err(|_| {
+                CompileError::semantic(format!("rt_vulkan_copy_to_buffer_u32 word {word} is out of bounds"))
+            })?
+        };
+        bytes.extend_from_slice(&widened.to_le_bytes());
+    }
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Bool(false)),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::Bool(false));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::Bool(false)),
+    };
+    let offset_u = offset as u64;
+    let count_u = bytes.len() as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::Bool(false));
+    }
+    if bytes.is_empty() {
+        return Ok(Value::Bool(true));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::Bool(false));
+        }
+        let dst = std::slice::from_raw_parts_mut((buffer.mapped as *mut u8).add(offset_u as usize), bytes.len());
+        dst.copy_from_slice(&bytes);
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.flush_mapped_memory_ranges)(s.device, 1, &range);
+    }
+    Ok(Value::Bool(true))
+}
+
 /// `rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool`
 pub fn rt_vulkan_copy_to_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
     use vulkan_dlopen::*;
@@ -4670,6 +4748,131 @@ pub fn rt_vulkan_read_buffer_bytes_fn(args: &[Value]) -> Result<Value, CompileEr
         let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
         let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
         Ok(Value::byte_array(bytes.to_vec()))
+    }
+}
+
+/// `rt_vulkan_readback_u32_array(handle: i64, pixel_count: i64, offset: i64) -> [u32]`
+///
+/// Interpreter-legal bulk pixel readback. The natively-linked lane uses
+/// `rt_vulkan_readback_u32_checksum(dest, ...)`, which PASSES a runtime array
+/// and is therefore refused by `interpreter_extern/vulkan.rs`'s dispatch, so
+/// the interpreter arm of `vulkan_sffi_readback_u32_into` fell back to an
+/// interpreted byte->u32 unpack loop: 3.6 us/pixel, i.e. 99.6% of a 900x760
+/// web frame (doc/10_metrics/ui/web_render_frame_profile_macos_2026-09-12.md).
+///
+/// Shape is deliberately `rt_vulkan_read_buffer_bytes`'s: scalars in, array
+/// out -- the only shape this lane marshals. Returns an EMPTY array on any
+/// validation failure so the caller can fall back rather than consume partial
+/// pixels.
+pub fn rt_vulkan_readback_u32_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_readback_u32_array", 3)? as usize;
+    let pixel_count = arg_i64(args, 1, "rt_vulkan_readback_u32_array", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_readback_u32_array", 3)?;
+    if handle == 0 || pixel_count <= 0 || offset < 0 {
+        return Ok(Value::array(vec![]));
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return Ok(Value::array(vec![]));
+    };
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::array(vec![])),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::array(vec![]));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::array(vec![])),
+    };
+    let offset_u = offset as u64;
+    let count_u = byte_count as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::array(vec![]));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::array(vec![]));
+        }
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
+        let words: Vec<Value> = bytes
+            .chunks_exact(4)
+            .map(|c| Value::Int(i64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))))
+            .collect();
+        Ok(Value::array(words))
+    }
+}
+
+/// `rt_vulkan_readback_u32_array_checksum(handle, pixel_count, offset) -> i64`
+///
+/// The identity checksum that the natively-linked `rt_vulkan_readback_u32_checksum`
+/// returns, over the same bytes, without materialising an array. Kept as a
+/// separate scalar call so the formula stays byte-identical across lanes
+/// instead of being recomputed by an interpreted per-pixel fold. Returns -1 on
+/// any validation failure (a valid checksum is >= 0).
+pub fn rt_vulkan_readback_u32_array_checksum_fn(args: &[Value]) -> Result<Value, CompileError> {
+    use vulkan_dlopen::*;
+
+    let handle = arg_i64(args, 0, "rt_vulkan_readback_u32_array_checksum", 3)? as usize;
+    let pixel_count = arg_i64(args, 1, "rt_vulkan_readback_u32_array_checksum", 3)?;
+    let offset = arg_i64(args, 2, "rt_vulkan_readback_u32_array_checksum", 3)?;
+    if handle == 0 || pixel_count <= 0 || offset < 0 {
+        return Ok(Value::Int(-1));
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return Ok(Value::Int(-1));
+    };
+
+    let guard = VK_STATE.lock().unwrap();
+    let s = match guard.as_ref() {
+        Some(s) => s,
+        None => return Ok(Value::Int(-1)),
+    };
+    if handle > s.buffers.len() {
+        return Ok(Value::Int(-1));
+    }
+    let buffer = match s.buffers[handle - 1].as_ref() {
+        Some(buffer) => buffer,
+        None => return Ok(Value::Int(-1)),
+    };
+    let offset_u = offset as u64;
+    let count_u = byte_count as u64;
+    if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
+        return Ok(Value::Int(-1));
+    }
+
+    unsafe {
+        if buffer.mapped.is_null() {
+            return Ok(Value::Int(-1));
+        }
+        let range = vulkan_dlopen::VkMappedMemoryRange {
+            s_type: 6,
+            p_next: std::ptr::null(),
+            memory: buffer.memory,
+            offset: 0,
+            size: u64::MAX,
+        };
+        let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
+        let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
+        let mut checksum: i64 = 0;
+        for c in bytes.chunks_exact(4) {
+            let px = i64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+            checksum = (checksum + px) % 2_147_483_647;
+        }
+        Ok(Value::Int(checksum))
     }
 }
 

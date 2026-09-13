@@ -1315,9 +1315,28 @@ fn simple_match(
         if attr_end < attr_start:
             return false
         val node_base = base.substring(0, attr_start).trim()
-        val expr = base.substring(attr_start + 1, attr_end)
-        if not (base_selector_matches(node_base, tag, cls, class_words, id) and attr_selector_matches(attrs, expr)):
+        if not base_selector_matches(node_base, tag, cls, class_words, id):
             return false
+        # A compound selector may carry SEVERAL attribute groups
+        # ("[role=tabpanel][hidden]"); every one of them must match. Evaluating
+        # only the first group applied "[role=tabpanel][hidden]{display:none}"
+        # to the *visible* panel and blanked the page.
+        var group_start = attr_start
+        var group_count = 0
+        while group_start >= 0 and group_count < 32:  # cpu-lane-loop-ok: walks the bracket groups of ONE compound selector, capped at 32
+            group_count = group_count + 1
+            val rest = base.substring(group_start + 1, base.len())
+            val rel_end = text_index_of(rest, "]")
+            if rel_end < 0:
+                return false
+            if not attr_selector_matches(attrs, rest.substring(0, rel_end)):
+                return false
+            val tail = rest.substring(rel_end + 1, rest.len())
+            val next_rel = text_index_of(tail, "[")
+            if next_rel < 0:
+                group_start = 0 - 1
+            else:
+                group_start = group_start + 1 + rel_end + 1 + next_rel
     else:
         if not base_selector_matches(base, tag, cls, class_words, id):
             return false
@@ -2189,7 +2208,24 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
         i = i + 1
     merge_sorted_rule_lists_unique_count(lists, list_count)
 
+# Elements whose text child is metadata, not rendered content (HTML "metadata
+# content" plus the raw-text elements the tokenizer already treats specially at
+# :850). Their text is never laid out or painted, so it needs no font metrics.
+fn _html_metadata_text_container(tag: text) -> bool:
+    # `noscript` is deliberately NOT in this list: this engine runs no scripts,
+    # so a real browser in the same configuration RENDERS its content.
+    tag == "style" or tag == "script" or tag == "title" or tag == "head" or
+        tag == "meta" or tag == "link" or tag == "base" or tag == "template"
+
 fn selector_group_matches_node_parts(nodes: [HNode], ctx: SelectorContext, idx: i32, parts: [text]) -> bool:
+    if _wsc_armed():
+        val t0 = _wsc_now_us()
+        val matched = _selector_group_matches_node_parts_inner(nodes, ctx, idx, parts)
+        _wsc_add_selector(_wsc_now_us() - t0)
+        return matched
+    _selector_group_matches_node_parts_inner(nodes, ctx, idx, parts)
+
+fn _selector_group_matches_node_parts_inner(nodes: [HNode], ctx: SelectorContext, idx: i32, parts: [text]) -> bool:
     var right = parts.len() - 1
     while right >= 0 and parts[right] == "":  # cpu-lane-loop-ok: skips trailing empty parts of ONE selector group; bound is that group's part count
         right = right - 1
@@ -2823,9 +2859,23 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     # here is semantics-preserving. The probes themselves are untouched and stay
     # permanently available, per the log-retention policy; only the cost of
     # asking whether they are on moves out of the loop. Mirrors _phase_on above.
-    val _font_style_trace_on = env_get("SIMPLE_TRACE_FONT_STYLE") != nil
+    # env_get returns "" (not nil) when unset, so the previous `!= nil` test was
+    # ALWAYS true: this "default off" probe printed up to 7 lines per node on
+    # every render. Same gate idiom as _web_phase_trace_enabled.
+    val _font_style_trace_on = (env_get("SIMPLE_TRACE_FONT_STYLE") ?? "") == "1"
     val _phase_clock = default_frame_clock()
     val _phase_loop_start_us = _phase_clock.now_micros()
+    # Author-cascade memo, one pass wide. Entries are keyed on the inherited
+    # identity of the PARENT plus everything else the cascade call reads, so a
+    # pass never carries a style across two nodes whose inherited base differs.
+    # Reset here rather than at module load: the retained-render path runs this
+    # loop again after a CSS invalidation, and a stale entry from the previous
+    # stylesheet must not survive it.
+    web_style_cascade_memo_reset()
+    web_style_counters_arm()
+    var style_inherit_ids: [i32] = [-1; node_count]
+    var style_inherit_index: Dict<text, i32> = {}
+    var style_inherit_next: i32 = 0
     var i = 0
     while i < node_count:  # cpu-lane-loop-ok: THE per-node cascade loop; bound is the document node count and it runs once per style invalidation, not per paint frame (simple_web_layout_rerender_retained gates compute_styles_with_material behind dirty_stage == "css" and reuses prior styles on paint-only frames)
         # Budget guard (outer): stop resolving further nodes on expiry; nodes not
@@ -2840,6 +2890,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # from a hang.
         if _phase_on and (i % 10) == 0:
             print "[web-phase] style_progress i={i} of={node_count} elapsed_ms={(_phase_clock.now_micros() - _phase_loop_start_us) / 1000}"
+        var _wsc_t = if _wsc_armed(): _wsc_now_us() else: 0
         val nd = nodes[i]
         if trace_stages:
             print "[layout-trace] style_stage=node-start index={i} parent={nd.parent} tag={nd.tag}"
@@ -2903,12 +2954,17 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # (correctly, from real hmtx advances) at the wrong size, so a 16px
         # and a 24px box broke at the same character
         # (tools/layout_diff fixture 14_font_size_wrap).
+        if _wsc_armed():
+            _wsc_add_section(0, _wsc_now_us() - _wsc_t)
+            _wsc_t = _wsc_now_us()
         val candidates_raw: [i32] = if nd.tag == "#text":
             []
         else:
             style_rule_candidates(nd, rule_buckets)
         if trace_stages:
             print "[layout-trace] style_stage=candidates-ready index={i} count={candidates_raw.len()}"
+        if _wsc_armed():
+            _wsc_add_candidates(candidates_raw.len() as i64)
         var specificity_i = 0
         var selector_group_budget_count = 0
         while specificity_i < candidates_raw.len():  # cpu-lane-loop-ok: walks the bucketed candidate rules of ONE node computing each rule's matched specificity; bound is that node's candidate count, not the full rule set
@@ -2940,6 +2996,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         val candidates = _sort_candidates_by_specificity(candidates_raw, rule_specificities)
         if trace_stages:
             print "[layout-trace] style_stage=candidates-sorted index={i} count={candidates.len()}"
+        if _wsc_armed():
+            _wsc_add_section(1, _wsc_now_us() - _wsc_t)
+            _wsc_t = _wsc_now_us()
         var candidate_i = 0
         val candidate_count = candidates.len()
         var has_important_candidates = false
@@ -3047,9 +3106,34 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         )
 
         if combined_decls != "":
-            st = apply_decls_without_display_on_writing_mode(
-                st, combined_decls, em_base, logical_writing_mode
-            )
+            # Memo boundary. `st` here is a deterministic function of
+            # (parent inherited identity, tag, presentational decls), and the
+            # call itself additionally reads em_base, the resolved writing mode
+            # and the accumulated author declarations -- so those six inputs are
+            # the whole key. A hit is copied field-for-field OUT of the cache and
+            # a miss is copied field-for-field IN (web_style_cascade_memo_store),
+            # because everything below this point mutates `st` in place.
+            val memo_parent = if nd.parent >= 0: style_inherit_ids[nd.parent] else: -1
+            # A parent that has not been resolved yet has no identity, and -1
+            # would then mean two different things. Such a node bypasses the
+            # memo entirely rather than sharing an ambiguous key.
+            val memo_usable = nd.parent < 0 or memo_parent >= 0
+            val memo_key = if memo_usable:
+                "{memo_parent}\n{nd.tag}\n{em_base}\n{logical_writing_mode}\n" +
+                    "{pres_decls.len()}:{pres_decls}\n{combined_decls}"
+            else:
+                ""
+            var memo_applied = false
+            if memo_usable:
+                if val memo_hit = web_style_cascade_memo_lookup(memo_key):
+                    st.copy_from(memo_hit)
+                    memo_applied = true
+            if not memo_applied:
+                st = apply_decls_without_display_on_writing_mode(
+                    st, combined_decls, em_base, logical_writing_mode
+                )
+                if memo_usable:
+                    web_style_cascade_memo_store(memo_key, st)
         if inline_normal != "":
             val inline_empty_cells_decl = decl_get(
                 inline_normal, "empty-cells"
@@ -3111,6 +3195,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # (attr_value(...).trim().lower()) misroute/corrupt on this backend —
         # the char_code_at().to_i32() defect class. Bind each hop to a typed
         # local so every dispatch has a held text receiver.
+        if _wsc_armed():
+            _wsc_add_section(2, _wsc_now_us() - _wsc_t)
+            _wsc_t = _wsc_now_us()
         val wm_fallback_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-fallback")
         val wm_fallback_trimmed: text = wm_fallback_attr.trim()
         val wm_fallback: text = wm_fallback_trimmed.lower()
@@ -3164,15 +3251,33 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 wm_realized_layers != 0
             ):
                 print "[web-style-producer] wm-contract-unrealized index={i} bg={wm_realized_bg} gradient_from={wm_realized_gf} gradient_to={wm_realized_gt} layers_len={wm_realized_layers} wm_bg_len={wm_bg.len()}"
+        if _wsc_armed():
+            _wsc_add_section(3, _wsc_now_us() - _wsc_t)
+            _wsc_t = _wsc_now_us()
         if trace_stages:
             print "[layout-trace] style_stage=inline-ready index={i}"
         if empty_cells_hide and (nd.tag == "td" or nd.tag == "th") and not selector_ctx.has_content_child[i]:
             st = apply_decls(st, "background-color:transparent;background-image:none", em_base)
-        if vector_fonts and nd.tag == "#text":
+        # Metadata content (`<style>`, `<script>`, `<title>`, ...) is never
+        # painted, so resolving font metrics for its text child measures glyph
+        # advances for a string nobody ever draws. On the shared catalog page
+        # that one node is the whole 40 KB stylesheet, and this block measured
+        # at 5,989 ms of a 6,200 ms style stage -- 96%, against 159 ms for the
+        # entire author cascade. (The bug record filed this as the SECOND-rank
+        # cost behind apply_decls; the counters say the opposite, see
+        # doc/10_metrics/ui/web_style_cascade_after_memo_macos_2026-09-12.md.)
+        val metadata_parent = if nd.parent >= 0:
+            _html_metadata_text_container(nodes[nd.parent].tag)
+        else:
+            false
+        if vector_fonts and nd.tag == "#text" and not metadata_parent:
             val metric_text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
             if trace_stages:
                 print "[layout-trace] style_stage=metric-text-ready index={i} len={metric_text.len()}"
+            val _wsc_lt = if _wsc_armed(): _wsc_now_us() else: 0
             val language = _html_text_language(nodes, i, st)
+            if _wsc_armed():
+                _wsc_add_section(6, _wsc_now_us() - _wsc_lt)
             if trace_stages:
                 print "[layout-trace] style_stage=metric-language-ready index={i} language={language}"
             # Level-gated (default off, permanent per log-retention policy):
@@ -3185,7 +3290,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             # section 16 (web showcase vector-font-evidence follow-on).
             if _font_style_trace_on:
                 print "[font-style-trace] index={i} font_family={st.font_family} font_size={st.font_size} language={language} text={metric_text}"
+            val _wsc_rt = if _wsc_armed(): _wsc_now_us() else: 0
             val metrics = resolve_font_metrics_with_language(st.font_family, metric_text, st.font_size, language)
+            if _wsc_armed():
+                _wsc_add_section(7, _wsc_now_us() - _wsc_rt)
             if trace_stages:
                 print "[layout-trace] style_stage=metrics-ready index={i} valid={metrics.valid}"
             if metrics.valid:
@@ -3193,6 +3301,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 st.resolved_font_advances = metrics.advances
                 st.resolved_font_width = metrics.width
                 st.resolved_font_line_height = metrics.line_height
+        if _wsc_armed():
+            _wsc_add_section(4, _wsc_now_us() - _wsc_t)
+            _wsc_t = _wsc_now_us()
         # Material receipts are built from loop-local fields before the
         # freestanding-unsafe [Style] store/return boundary.
         val mat_bg: u32 = st.bg
@@ -3265,7 +3376,20 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             print "[web-style-producer] entry-rejected-detail index={i} channel={material_channel_ready} static={static_material} mode_ok={wm_mode_is_cpu} declared_opaque={declared_opaque} declared_argb={declared_argb} declared_attr_len={declared_bg_attr.len()} translucent={translucent_surface} opaque={opaque_surface} stops_valid={typed_stops_valid} backdrop_admitted={backdrop.admitted} backdrop={mat_backdrop}"
         if _font_style_trace_on:
             print "[font-inherit-trace] index={i} final_font_family={st.font_family} final_font_size={st.font_size}"
+        if _wsc_armed():
+            _wsc_add_section(5, _wsc_now_us() - _wsc_t)
         styles[i] = st
+        # Intern this node's inherited identity so its children can key the
+        # cascade memo on it. Interning (rather than carrying the digest text
+        # itself into every child key) keeps the key short and makes the
+        # equality test an integer compare.
+        val inherit_digest = st.inherited_digest()
+        if style_inherit_index.has(inherit_digest):
+            style_inherit_ids[i] = style_inherit_index[inherit_digest]
+        else:
+            style_inherit_index[inherit_digest] = style_inherit_next
+            style_inherit_ids[i] = style_inherit_next
+            style_inherit_next = style_inherit_next + 1
         if trace_stages:
             print "[layout-trace] style_stage=node-complete index={i}"
         i = i + 1

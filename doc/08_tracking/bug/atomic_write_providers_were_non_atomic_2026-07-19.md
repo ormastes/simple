@@ -1,6 +1,6 @@
 # atomic-write providers were non-atomic
 
-**Status:** PROVIDER REGRESSIONS PASS / STAGE 4 INTEGRATION PENDING
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 **Severity:** P1 — interrupted lint, formatter, runner, or doc writes could lose data
 
 ## Root cause
@@ -30,3 +30,6 @@ before the atomic rename, so formatting a source file does not silently chmod it
 - formatter `--write` routes through the canonical atomic provider in source:
   PASS
 - admitted Stage 4 lint/formatter integration: pending
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

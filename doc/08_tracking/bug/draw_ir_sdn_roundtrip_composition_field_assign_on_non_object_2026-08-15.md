@@ -47,3 +47,6 @@ Root cause was the interpreter's missing ClassInstance arm for nested field
 assignment (see interpreter_nested_field_assignment_broke_be_dom_cascade_2026-08-15.md).
 After the node_exec.rs fix, `draw_ir_runtime_queue_spec.spl` is 4/4 and
 `draw_ir_composition_damage_spec.spl` is 7/7.
+
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

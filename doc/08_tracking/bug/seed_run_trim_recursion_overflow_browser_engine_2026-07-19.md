@@ -1,7 +1,7 @@
 # Seed interpreter: stack overflow in 'trim' (recursion depth 1000) loading browser_engine module graph
 
 - **ID:** seed_run_trim_recursion_overflow_browser_engine_2026-07-19
-- **Status:** OPEN
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** medium (blocks `bin/simple run` on any program importing the
   browser_engine module graph; compounds the tracked test-runner init hang)
 - **Lane:** Rust bootstrap seed, hosted Linux (`bin/simple run`)
@@ -39,3 +39,6 @@ iterative or raise/eliminate the recursion — likely a pathological input in
 one of the large browser_engine sources (e.g. multi-thousand-entry literal
 arrays around simple_web_html_layout_renderer.spl:6959-7013). Preferred per
 repo policy: land the self-hosted redeploy and retire seed-lane usage here.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

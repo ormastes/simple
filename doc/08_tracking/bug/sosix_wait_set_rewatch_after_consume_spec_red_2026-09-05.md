@@ -1,4 +1,5 @@
 # `completion_wait_set_spec` red: re-watching a consumed generation accepts a duplicate notify
+**Status:** RESOLVED (2026-09-12, re-verified: bin/simple test test/01_unit/os/sosix/completion_wait_set_spec.spl -> 5 passed, 0 failed)
 
 Filed 2026-09-05. Status: CLOSED 2026-09-05. Pre-existing (reproduced BEFORE and AFTER the
 `os.sosix.core -> std.common.contracts.sosix` lift). Fixed in
@@ -31,3 +32,6 @@ either track consumed generations in a bounded set (must stay allocation-free
 after creation) or reject `watch` of a generation that was already consumed.
 Then the spec goes green without edits. Evidence: `bin/simple` is the Rust seed
 (`bin/release/aarch64-unknown-linux-gnu/simple`, 2026-09-04 14:46).
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/os/sosix/completion_wait_set_spec.spl` on the deployed seed; the spec now passes in full (5/5), so this record no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

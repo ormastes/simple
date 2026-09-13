@@ -1,5 +1,7 @@
 # Loader: interpreter cannot invoke a raw i64 code address (segment mapper positive control stays red)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-18. Lane: aspect-dynload.
 Binary: `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
 59645008, 2026-08-18 10:12:23.164167908 +0000 (identical before and after every run below).
@@ -127,3 +129,6 @@ legitimately RED because of this defect and must stay RED until it is fixed.
 * NOT blocked by this: the address-level acceptance spec
   `test/01_unit/compiler/loader/joinpoint_patchpoint_spec.spl`, which reads the
   patched pointer back out of the mapped page and passes 31/31 checks today.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

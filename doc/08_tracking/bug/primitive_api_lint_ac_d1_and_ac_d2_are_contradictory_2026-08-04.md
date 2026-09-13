@@ -111,3 +111,7 @@ means, and `primitive_api` is at `deny` level
 widened rule would immediately fail builds across the tree. Neither example was
 weakened; the contradiction is recorded so an owner can pick which reading
 wins.
+
+## Triage 2026-09-13
+
+Already marked ARCHITECTURAL-OPEN (a genuine spec/rule-design contradiction needing an owner to choose an AST/body-aware discriminator, not a code bug). No new evidence this pass. Leaving OPEN.

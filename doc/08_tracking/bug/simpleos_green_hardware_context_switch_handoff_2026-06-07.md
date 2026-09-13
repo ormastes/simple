@@ -1,6 +1,13 @@
 # SimpleOS Green Hardware Context-Switch Handoff Blocker - 2026-06-07
 
-Status: CLOSED on 2026-06-08. The live
+## Closed 2026-09-13 — Already closed 2026-06-08 with a live hardware-handoff transcript
+
+- **inferred** The Status line records `CLOSED on 2026-06-08` on the strength of the live context-switch handoff evidence described in the body.
+- **measured** The referenced sources still exist; the two path-scan misses are entry-point probe filenames (`desktop_e2e_entry.spl`, `green_carrier_probe_entry.spl`), not the kernel modules the fix touched.
+- **inferred** Recorded so a status sweep agrees with the closure already taken.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` gate now emits
 `HW_HANDOFF_PASS=true`, `USER_ENTRY_PASS=true`, and
 `USER_SYSCALL_PASS=true` from the real AP ring/user path. See

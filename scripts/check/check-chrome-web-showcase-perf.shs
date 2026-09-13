@@ -1,0 +1,374 @@
+#!/bin/sh
+# S3 — Chrome-backed web showcase perf check.
+#
+# Runs src/app/ui/chrome_showcase/main.spl once per Engine2D backend (cpu_simd, vulkan),
+# reads each run's key=value receipt, and prints the aggregate rows in the repo's
+# gui_web_2d_vulkan_* naming discipline (model: check-electron-vulkan-web-parity.shs —
+# one key=value per line, a single verdict line last on stdout).
+#
+# Fail-closed conventions, identical to the other check scripts:
+#   PASS — <n> tab(s) checked ...        exit 0
+#   FAIL — ...                           exit 1
+#   ERROR — nothing was checked (<why>)  exit 2
+# A run that examined ZERO tabs is ERROR, never a pass; a missing receipt is ERROR; a
+# receipt whose verdict is `failed`, or that is missing any required key, is FAIL.
+# `environment-blocked` is reported as a PASS of the infrastructure with the reason
+# carried in `_reason` and `_frame_source=stub-pattern` — it is never silently a pass of
+# Chrome rendering, because `_frame_source` says what was actually composited.
+#
+# --selftest runs first and is fatal (7 fixtures).
+# --renderdoc attempts a RenderDoc capture through scripts/tool/renderdoc-evidence.shs and
+# records renderdoc_status; a missing renderdoccmd is recorded, never silently skipped.
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+BACKENDS="cpu_simd vulkan"
+RENDERDOC=0
+PIXEL_DIFF=0
+SELFTEST_ONLY=0
+# Documented path where the Simple web renderer showcase writes its PPMs for the SAME
+# catalog. When it exists, the pixel-diff row is computed; otherwise it is `unavailable`.
+SIMPLE_PPM_DIR=${SIMPLE_WEB_SHOWCASE_PPM_DIR:-build/web_renderer_vulkan_4k_showcase_hardening/simple/ppm}
+
+usage() {
+    echo "Usage: sh scripts/check/check-chrome-web-showcase-perf.shs [--selftest] [--renderdoc] [--pixel-diff]"
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --renderdoc) RENDERDOC=1 ;;
+        --pixel-diff) PIXEL_DIFF=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown-argument:$arg)"; exit 2 ;;
+    esac
+done
+
+# ---- receipt reader -------------------------------------------------------------
+# Reads exactly one key. A duplicated key is a malformed receipt and is refused.
+receipt_field() {
+    _rf_file=$1; _rf_key=$2
+    _rf_count=$(grep -c "^${_rf_key}=" "$_rf_file" 2>/dev/null || echo 0)
+    [ "$_rf_count" = "1" ] || return 1
+    sed -n "s/^${_rf_key}=//p" "$_rf_file"
+}
+
+REQUIRED_KEYS="binary_path binary_size binary_mtime chrome_lib_sha256 backend_stage engine2d_backend_requested engine2d_backend_reported inventory_version catalog_sha256 viewport frame_source reason tabs wall_ms_total pixels_total verdict"
+
+# classify_receipt <file> -> echoes "<status> <detail>"; status in ok|blocked|fail|error
+classify_receipt() {
+    _cr_file=$1
+    if [ ! -f "$_cr_file" ]; then
+        echo "error missing-receipt"
+        return
+    fi
+    for _cr_key in $REQUIRED_KEYS; do
+        if ! receipt_field "$_cr_file" "$_cr_key" >/dev/null; then
+            echo "fail missing-or-duplicate-key:$_cr_key"
+            return
+        fi
+    done
+    _cr_tabs=$(receipt_field "$_cr_file" tabs)
+    case "$_cr_tabs" in
+        ''|*[!0-9]*) echo "fail non-numeric-tabs"; return ;;
+    esac
+    if [ "$_cr_tabs" -le 0 ]; then
+        echo "error zero-tabs"
+        return
+    fi
+    _cr_source=$(receipt_field "$_cr_file" frame_source)
+    if [ "$_cr_source" != "chrome" ] && [ "$_cr_source" != "stub-pattern" ]; then
+        echo "fail unknown-frame-source:$_cr_source"
+        return
+    fi
+    _cr_verdict=$(receipt_field "$_cr_file" verdict)
+    # A stub-pattern run can never be `passed`, whatever its own verdict line says.
+    # Otherwise hand-editing one key turns a synthetic test pattern into a claimed
+    # Chrome pass — the exact laundering frame_source exists to prevent.
+    if [ "$_cr_source" = "stub-pattern" ] && [ "$_cr_verdict" = "passed" ]; then
+        echo "fail stub-pattern-claims-passed"
+        return
+    fi
+    case "$_cr_verdict" in
+        passed) echo "ok passed" ;;
+        environment-blocked) echo "blocked $(receipt_field "$_cr_file" reason)" ;;
+        failed) echo "fail receipt-verdict-failed" ;;
+        could-not-complete-in-time) echo "fail timed-out" ;;
+        *) echo "fail unknown-verdict:$_cr_verdict" ;;
+    esac
+}
+
+# ---- selftest -------------------------------------------------------------------
+write_fixture_receipt() {
+    _wf_file=$1; _wf_verdict=$2; _wf_source=$3; _wf_tabs=$4
+    {
+        echo "binary_path=/x/simple"
+        echo "binary_size=1"
+        echo "binary_mtime=2"
+        echo "chrome_lib_sha256="
+        echo "backend_stage=blocked:no-cef-drop"
+        echo "engine2d_backend_requested=vulkan"
+        echo "engine2d_backend_reported=vulkan"
+        echo "inventory_version=web-renderable-feature-inventory-v1"
+        echo "catalog_sha256=deadbeef"
+        echo "viewport=320x180"
+        [ "$_wf_source" = "OMIT" ] || echo "frame_source=$_wf_source"
+        echo "reason=no-cef-drop"
+        echo "tabs=$_wf_tabs"
+        echo "wall_ms_total=100"
+        echo "pixels_total=460800"
+        echo "verdict=$_wf_verdict"
+    } > "$_wf_file"
+}
+
+selftest() {
+    _st_dir=$(mktemp -d) || { echo "ERROR — nothing was checked (selftest-mktemp-failed)"; exit 2; }
+    _st_fail=0
+    _st_n=0
+
+    # 1. good receipt -> ok
+    write_fixture_receipt "$_st_dir/a.env" passed chrome 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_receipt "$_st_dir/a.env")" in
+        ok*) : ;;
+        *) echo "selftest FAIL fixture=good-receipt got=$(classify_receipt "$_st_dir/a.env")"; _st_fail=1 ;;
+    esac
+
+    # 2. missing receipt -> error
+    _st_n=$((_st_n + 1))
+    case "$(classify_receipt "$_st_dir/absent.env")" in
+        error*) : ;;
+        *) echo "selftest FAIL fixture=missing-receipt"; _st_fail=1 ;;
+    esac
+
+    # 3. verdict=failed -> fail
+    write_fixture_receipt "$_st_dir/c.env" failed chrome 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_receipt "$_st_dir/c.env")" in
+        fail*) : ;;
+        *) echo "selftest FAIL fixture=verdict-failed"; _st_fail=1 ;;
+    esac
+
+    # 4. zero tabs -> error (never a pass)
+    write_fixture_receipt "$_st_dir/d.env" passed chrome 0
+    _st_n=$((_st_n + 1))
+    case "$(classify_receipt "$_st_dir/d.env")" in
+        error*) : ;;
+        *) echo "selftest FAIL fixture=zero-tabs"; _st_fail=1 ;;
+    esac
+
+    # 5. receipt with no frame_source -> fail (the sabotage shape: a stub frame must
+    #    never be readable as Chrome output just because the key went missing)
+    write_fixture_receipt "$_st_dir/e.env" passed OMIT 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_receipt "$_st_dir/e.env")" in
+        fail*) : ;;
+        *) echo "selftest FAIL fixture=missing-frame-source"; _st_fail=1 ;;
+    esac
+
+    # 6. environment-blocked stub run -> blocked, carrying its reason
+    write_fixture_receipt "$_st_dir/f.env" environment-blocked stub-pattern 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_receipt "$_st_dir/f.env")" in
+        blocked*) : ;;
+        *) echo "selftest FAIL fixture=environment-blocked"; _st_fail=1 ;;
+    esac
+
+    # 7. a stub-pattern run claiming verdict=passed -> fail, never ok. Fixture 1 uses
+    #    frame_source=chrome, so only this fixture exercises the laundering path.
+    write_fixture_receipt "$_st_dir/g.env" passed stub-pattern 8
+    _st_n=$((_st_n + 1))
+    case "$(classify_receipt "$_st_dir/g.env")" in
+        fail*) : ;;
+        *) echo "selftest FAIL fixture=stub-claims-passed got=$(classify_receipt "$_st_dir/g.env")"; _st_fail=1 ;;
+    esac
+
+    rm -rf "$_st_dir"
+    if [ "$_st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest-failed, $_st_n fixture(s) run)"
+        exit 2
+    fi
+    echo "selftest: $_st_n/$_st_n fixtures passed"
+}
+
+selftest
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 7 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+# ---- binary identity ------------------------------------------------------------
+# A detached worktree has no bin/release of its own — the deployed binary lives in the
+# main checkout. Probe both, in order, and record which one answered. Never fabricate one.
+BIN=${SIMPLE_SHOWCASE_BINARY:-}
+if [ -z "$BIN" ]; then
+    MAIN_ROOT=$(cd "$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)
+    for cand in \
+        "$ROOT/bin/release/aarch64-apple-darwin-macho/simple" \
+        "$ROOT/bin/simple" \
+        "${MAIN_ROOT:-/nonexistent}/bin/release/aarch64-apple-darwin-macho/simple" \
+        "${MAIN_ROOT:-/nonexistent}/bin/simple"; do
+        if [ -x "$cand" ]; then BIN=$cand; break; fi
+    done
+fi
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+    echo "chrome_web_showcase_status=error"
+    echo "chrome_web_showcase_reason=deployed-binary-not-executable:${BIN:-none}"
+    echo "ERROR — nothing was checked (deployed-binary-not-executable)"
+    exit 2
+fi
+BIN_SIZE=$(stat -f '%z' "$BIN" 2>/dev/null || stat -c '%s' "$BIN")
+BIN_MTIME=$(stat -f '%m' "$BIN" 2>/dev/null || stat -c '%Y' "$BIN")
+
+# ---- run each backend -----------------------------------------------------------
+TOTAL_TABS=0
+TOTAL_MS=0
+TOTAL_PX=0
+AGG_STATUS=ok
+AGG_REASON=
+AGG_SOURCE=
+AGG_REPORTED=
+
+for backend in $BACKENDS; do
+    out="$ROOT/build/chrome-showcase/$backend"
+    mkdir -p "$out"
+    SIMPLE_2D_BACKEND="$backend" \
+    SIMPLE_CHROME_SHOWCASE_OUT="$out" \
+    SIMPLE_SHOWCASE_BINARY="$BIN" \
+    SIMPLE_SHOWCASE_BINARY_SIZE="$BIN_SIZE" \
+    SIMPLE_SHOWCASE_BINARY_MTIME="$BIN_MTIME" \
+    SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+        "$BIN" run "$ROOT/src/app/ui/chrome_showcase/main.spl" >"$out/run.log" 2>&1
+    run_rc=$?
+    verdict_line=$(classify_receipt "$out/receipt.env")
+    status=${verdict_line%% *}
+    detail=${verdict_line#* }
+    echo "chrome_web_showcase_backend_${backend}_run_rc=$run_rc"
+    echo "chrome_web_showcase_backend_${backend}_status=$status"
+    echo "chrome_web_showcase_backend_${backend}_detail=$detail"
+    if [ "$status" = "error" ]; then
+        echo "chrome_web_showcase_status=error"
+        echo "chrome_web_showcase_reason=$backend:$detail"
+        echo "ERROR — nothing was checked ($backend:$detail)"
+        exit 2
+    fi
+    if [ "$status" = "fail" ]; then
+        AGG_STATUS=fail
+        AGG_REASON="$backend:$detail"
+    elif [ "$status" = "blocked" ] && [ "$AGG_STATUS" = "ok" ]; then
+        AGG_STATUS=blocked
+        AGG_REASON="$detail"
+    fi
+    tabs=$(receipt_field "$out/receipt.env" tabs)
+    ms=$(receipt_field "$out/receipt.env" wall_ms_total)
+    px=$(receipt_field "$out/receipt.env" pixels_total)
+    AGG_SOURCE=$(receipt_field "$out/receipt.env" frame_source)
+    reported=$(receipt_field "$out/receipt.env" engine2d_backend_reported)
+    AGG_REPORTED="${AGG_REPORTED}${AGG_REPORTED:+,}${backend}:${reported}"
+    echo "chrome_web_showcase_backend_${backend}_tabs=$tabs"
+    echo "chrome_web_showcase_backend_${backend}_wall_ms_total=$ms"
+    echo "chrome_web_showcase_backend_${backend}_reported=$reported"
+    TOTAL_TABS=$((TOTAL_TABS + tabs))
+    TOTAL_MS=$((TOTAL_MS + ms))
+    TOTAL_PX=$((TOTAL_PX + px))
+done
+
+# ---- pixel diff against the Simple web renderer showcase ------------------------
+DIFF_STATUS=unavailable
+DIFF_COUNT=unavailable
+if [ -d "$ROOT/$SIMPLE_PPM_DIR" ]; then
+    pairs=0
+    mismatches=0
+    for ppm in "$ROOT/build/chrome-showcase/vulkan"/*.ppm; do
+        [ -f "$ppm" ] || continue
+        peer="$ROOT/$SIMPLE_PPM_DIR/$(basename "$ppm")"
+        [ -f "$peer" ] || continue
+        pairs=$((pairs + 1))
+        # Count differing PIXELS, not differing files. `cmp -l` lists one line per
+        # differing BYTE; P6 carries 3 bytes per pixel, so a pixel whose R, G and B all
+        # differ would otherwise be counted three times. Dividing by 3 rounds toward a
+        # pixel count; it over-counts only when two differing bytes fall in one pixel,
+        # which is why the row is labelled `_mismatch_count` (pixels) and not `bytes`.
+        difbytes=$(cmp -l "$ppm" "$peer" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${difbytes:-0}" -gt 0 ]; then
+            mismatches=$((mismatches + (difbytes + 2) / 3))
+        fi
+    done
+    if [ "$pairs" -eq 0 ]; then
+        DIFF_STATUS=unavailable
+        DIFF_COUNT=no-matching-ppm-pairs
+    else
+        DIFF_COUNT=$mismatches
+        if [ "$mismatches" -eq 0 ]; then
+            DIFF_STATUS=identical
+        else
+            DIFF_STATUS=diverged
+        fi
+    fi
+fi
+
+# ---- Optional real pixel diff ---------------------------------------------------
+# The block above only counts frame-buffer mismatches between Simple backends; it
+# never looks at Chrome. --pixel-diff runs the real Chrome-vs-Simple catalog
+# comparison (scripts/check/check-chrome-catalog-pixel-diff.shs) so
+# chrome_vs_simple_pixel_diff_status stops reading "unavailable" on a host that
+# actually has Chrome.
+if [ "$PIXEL_DIFF" -eq 1 ]; then
+    pd_out=$(sh "$ROOT/scripts/check/check-chrome-catalog-pixel-diff.shs" \
+        --out "$ROOT/build/chrome-showcase/pixel-diff" 2>&1)
+    pd_rc=$?
+    printf '%s\n' "$pd_out" > "$ROOT/build/chrome-showcase/pixel-diff.log" 2>/dev/null
+    pd_verdict=$(printf '%s\n' "$pd_out" | tail -1)
+    case "$pd_verdict" in
+        PASS*)
+            DIFF_STATUS=chrome-compared
+            DIFF_COUNT=$(printf '%s\n' "$pd_verdict" | sed -n 's/.*worst=\([0-9.]*\).*/\1/p')
+            ;;
+        FAIL*) DIFF_STATUS=chrome-compare-failed ;;
+        *) DIFF_STATUS="chrome-compare-error:rc=$pd_rc" ;;
+    esac
+    printf '%s\n' "$pd_out" | grep '^page=' || true
+fi
+
+# ---- RenderDoc ------------------------------------------------------------------
+RDOC_STATUS=not-requested
+if [ "$RENDERDOC" -eq 1 ]; then
+    if command -v renderdoccmd >/dev/null 2>&1; then
+        sh "$ROOT/scripts/tool/renderdoc-evidence.shs" capture-simple >"$ROOT/build/chrome-showcase/renderdoc.log" 2>&1
+        rdoc_rc=$?
+        if [ "$rdoc_rc" -eq 0 ]; then
+            RDOC_STATUS=captured
+        else
+            RDOC_STATUS="failed:rc=$rdoc_rc"
+        fi
+    else
+        RDOC_STATUS=blocked:renderdoccmd-missing
+    fi
+fi
+
+MS_PER_PX=unavailable
+if [ "$TOTAL_PX" -gt 0 ]; then
+    MS_PER_PX=$(awk -v ms="$TOTAL_MS" -v px="$TOTAL_PX" 'BEGIN { printf "%.6f", ms / px }')
+fi
+
+echo "chrome_web_showcase_status=$AGG_STATUS"
+echo "chrome_web_showcase_reason=${AGG_REASON:-none}"
+echo "chrome_web_showcase_frame_source=${AGG_SOURCE:-unknown}"
+echo "chrome_web_showcase_backend_reported=$AGG_REPORTED"
+echo "chrome_web_showcase_tabs=$TOTAL_TABS"
+echo "chrome_web_showcase_wall_ms_total=$TOTAL_MS"
+echo "chrome_web_showcase_ms_per_px=$MS_PER_PX"
+echo "chrome_vs_simple_pixel_diff_status=$DIFF_STATUS"
+echo "chrome_vs_simple_pixel_mismatch_count=$DIFF_COUNT"
+echo "renderdoc_status=$RDOC_STATUS"
+
+if [ "$TOTAL_TABS" -le 0 ]; then
+    echo "ERROR — nothing was checked (zero tabs across all backends)"
+    exit 2
+fi
+if [ "$AGG_STATUS" = "fail" ]; then
+    echo "FAIL — $TOTAL_TABS tab(s) checked, $AGG_REASON"
+    exit 1
+fi
+echo "PASS — $TOTAL_TABS tab(s) checked across $(echo $BACKENDS | wc -w | tr -d ' ') backend(s), status=$AGG_STATUS frame_source=${AGG_SOURCE:-unknown} reason=${AGG_REASON:-none}"
+exit 0

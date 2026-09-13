@@ -1,5 +1,7 @@
 # Bug: `iso` use-after-move is invisible to the borrow checker when the second use is a call argument
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-07
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -111,3 +113,10 @@ bug's directly-measured scope.
 `test/01_unit/compiler/borrow/iso_use_after_move_e2e_spec.spl` — left in the
 repo with 3/4 cases green and the `print x` case genuinely red, per repo
 policy (never weaken a failing test to make it pass).
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+Reproduces on the deployed seed: `bin/simple test test/01_unit/compiler/borrow/iso_use_after_move_e2e_spec.spl --no-session-daemon` -> `4 total, 2 passed, 2 failed` (doc recorded 3/4 green + 1 genuine red; now 2/4 — still failing, exact split may have shifted with unrelated tree changes since filing, not re-diagnosed here). Fixing this needs a borrow-checker soundness change in `src/compiler/55.borrow/borrow_check/mod.spl`'s `record_move`/`record_use` handling for call arguments (per the doc's own next-step note: mirror the `Copy` arm's `record_use` call for the `iso`-move case), which is nontrivial NLL-adjacent compiler work beyond this pass's per-bug budget. Leaving OPEN, no code change made.

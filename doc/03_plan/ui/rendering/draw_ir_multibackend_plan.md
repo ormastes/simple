@@ -7,7 +7,13 @@
 Six phases. Each is **Sonnet-sized**, **independently landable**, ships an SSpec, and passes a
 **parity-vs-shared-oracle gate**: every backend's `read_pixels(scene)` must equal
 `SharedRaster.read_pixels(scene)` bit-for-bit (ARGB u32 exact). The oracle anchor test:
-`blend_over(0x01020304, 0x10203040) == 0x101F2F3F`. Phases P1-P2 are behavior-preserving refactors
+`blend_over(0x01020304, 0x10203040) == 0x101E2D3C`. (Corrected 2026-09-12: this anchor read
+`0x101F2F3F` until then, the *pre-unpremultiply* value. The frozen CPU `blend()` in
+`src/lib/**/engine2d/color.spl` composites in premultiplied space and unpremultiplies by the
+resulting `out_a`, which gives `0x101E2D3C`; Metal and the Vulkan device kernel both agree. A
+parity gate written against the old number would have been a gate against the CPU reference. See
+`doc/08_tracking/bug/vulkan_glsl_blend_formula_stale_vs_cpu_2026-09-12.md`.) Phases P1-P2 are
+behavior-preserving refactors
 (all existing backends still green); P3+ add capability incrementally. No branches — land each on
 `main`. Reuse `src/lib/gc_async_mut/gpu/engine2d/` (no numbered splits).
 
@@ -72,7 +78,7 @@ to a single `self.backend` call — every constructor already sets `backend`/`ba
 **Gate:** the bit-exact harness (a) passes first, before any core-op delegation switch; all ~14
 backends compile and pass the existing parity comparison unchanged; new SSpec
 `shared_raster_oracle_spec.spl` pins the blend/circle/triangle/gradient reference outputs
-(bit-exact anchors incl. `0x101F2F3F`); the naming-collision rename and dead-branch collapse leave
+(bit-exact anchors incl. `0x101E2D3C`); the naming-collision rename and dead-branch collapse leave
 all existing specs green; `compute_dispatch.spl`'s answers now agree with `Engine2D.probe_backend()`
 for every backend name (single source of truth).
 

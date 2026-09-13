@@ -1,0 +1,50 @@
+use app.lint.provider.rust.worker.{RustLintToolV1, RustLintWorkerConfigV1, run_rust_lint_worker}
+use os.tooling.rust_analyzer_worker.model.{RustAnalysisState}
+
+fn config(tool: RustLintToolV1) -> RustLintWorkerConfigV1:
+    RustLintWorkerConfigV1(
+        workspace_root: "test/fixtures/app/lint/rust_worker/workspace",
+        cargo_path: "test/fixtures/app/lint/rust_worker/bin/cargo",
+        rustc_path: "test/fixtures/app/lint/rust_worker/bin/rustc",
+        clippy_path: "test/fixtures/app/lint/rust_worker/bin/clippy-driver",
+        target: "aarch64-unknown-linux-gnu",
+        features: "demo",
+        timeout_ms: 5000,
+        maximum_output_bytes: 16384,
+        maximum_diagnostics: 8,
+        tool: tool
+    )
+
+describe "real Rust lint tool worker":
+    it "runs explicit Cargo metadata v1 and parses Clippy compiler JSON":
+        val receipt = run_rust_lint_worker(config(RustLintToolV1.Clippy), false)
+        expect(receipt.metadata_valid).to_equal(true)
+        expect(receipt.metadata_format_version).to_equal(1)
+        expect(receipt.result.state).to_equal(RustAnalysisState.Complete)
+        expect(receipt.result.diagnostics.len()).to_equal(1)
+        expect(receipt.result.diagnostics[0].code).to_equal("clippy::needless_return")
+        expect(receipt.result.identity.rustc_version).to_contain("rustc 1.90")
+        expect(receipt.command_fingerprint == "").to_equal(false)
+
+    it "supports Cargo check through the same structured stream":
+        val receipt = run_rust_lint_worker(config(RustLintToolV1.CargoCheck), false)
+        expect(receipt.result.state).to_equal(RustAnalysisState.Complete)
+        expect(receipt.result.diagnostics[0].code).to_equal("E0425")
+
+    it "reports malformed and non-JSON output as partial":
+        var cfg = config(RustLintToolV1.Clippy)
+        cfg.features = "malformed"
+        val receipt = run_rust_lint_worker(cfg, false)
+        expect(receipt.result.state).to_equal(RustAnalysisState.Partial)
+        expect(receipt.non_json_or_malformed_records).to_be_greater_than(0)
+
+    it "cancels before spawning the toolchain":
+        val receipt = run_rust_lint_worker(config(RustLintToolV1.Clippy), true)
+        expect(receipt.result.state).to_equal(RustAnalysisState.Cancelled)
+
+    it "marks bounded timeout as timed out":
+        var cfg = config(RustLintToolV1.Clippy)
+        cfg.features = "timeout"
+        cfg.timeout_ms = 100
+        val receipt = run_rust_lint_worker(cfg, false)
+        expect(receipt.result.state).to_equal(RustAnalysisState.TimedOut)

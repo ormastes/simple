@@ -24,13 +24,15 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, process_run, cwd}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_hash_sha256, env_get, process_run, cwd}
+use std.common.crypto.sha256.{sha256_text}
 use std.platform.{host_os, host_arch}
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
 
 use compiler.backend.linker.lld_sffi.{LldResult, lld_elf_link}
-use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker_path, linker_type_for_path, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler.backend.linker.mold.{find_requested_linker, requested_linker_override, linker_fuse_ld_name}
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
 use compiler.backend.linker.object_emitter.{assemble_code_units}
@@ -64,6 +66,7 @@ struct NativeLinkConfig:
     linker_abi: text = ""
     pie: bool
     debug: bool
+    strip_output: bool = false
     verbose: bool
     allow_duplicate_definitions: bool
     allow_cc_fallback: bool
@@ -79,6 +82,7 @@ impl NativeLinkConfig:
             runtime_path: "",
             pie: true,
             debug: false,
+            strip_output: false,
             verbose: false,
             allow_duplicate_definitions: true,
             allow_cc_fallback: true,
@@ -177,6 +181,36 @@ fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
 # Native Linking
 # ============================================================================
 
+pub fn link_status_text(site: text, payload: text) -> text:
+    """Normalize an "" == ok / message == failure status returned by a helper.
+
+    Two jobs, both forced by a real incident
+    (doc/08_tracking/bug/stage2_sanity_link_fails_with_nil_error_payload_2026-09-13.md):
+    the stage-2 NATIVE binary produced a status value that rendered as `nil`,
+    which is neither "" nor a message, so `status != ""` fired and the caller
+    returned `Err(nil)` — a link failure with no statement of what failed and
+    no print anywhere on the path.
+
+    Interpolation is the only reliable normalizer here: a nil renders as the
+    literal text "nil", which no legitimate status of these helpers ever is
+    (every failure message on this path starts with a word plus a quoted
+    subject). A `nil` therefore means "the return channel lost the value", and
+    the only value these helpers can lose on a success path is "" — so it is
+    reported LOUDLY, unconditionally, and then treated as the success it was.
+    A genuine failure still renders as its own message and still fails."""
+    val rendered = "{payload}"
+    if rendered == "nil":
+        print "[linker-wrapper] {site}: status lost in the native return channel (rendered nil); treating as ok"
+        return ""
+    rendered
+
+pub fn link_error_detail(site: text, payload: text) -> text:
+    """Site-named detail for an error payload that may itself be unusable."""
+    val rendered = "{payload}"
+    if rendered == "" or rendered == "nil":
+        return site + ": no error payload (native return channel produced " + rendered + ")"
+    site + ": " + rendered
+
 fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     val trace = linker_trace_enabled()
     if trace:
@@ -197,10 +231,12 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
     # ultimately materializes native objects and re-enters this linker; doing
     # the check here also prevents Windows MinGW/MSVC from bypassing it.
     val msvc_runtime = os == "windows" and not _is_mingw_env()
-    val provider_error = native_runtime_provider_selection_error_for_config_platform(
-        config, msvc_runtime)
+    val provider_error = link_status_text(
+        "native-runtime-provider-selection",
+        native_runtime_provider_selection_error_for_config_platform(config, msvc_runtime))
     if provider_error != "":
-        return Err(provider_error)
+        print "[linker-wrapper] native-runtime-provider-selection failed: {provider_error}"
+        return Err(link_error_detail("native-runtime-provider-selection", provider_error))
 
     # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
     val smf_inputs = filter_smf_inputs(object_files)
@@ -237,23 +273,42 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Try to find platform linker (mold > lld > ld)
     if trace:
         print "[LINKER] calling find_linker..."
-    val linker_result = find_linker()
+    val linker_result = find_linker_path()
     if trace:
         print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
     if linker_result.is_err():
+        # An explicit SIMPLE_LINKER request that cannot be resolved is a user
+        # error, not "no linker found" — falling back to cc would silently
+        # link with whatever the compiler driver defaults to (on a host where
+        # `ld` is mold, that is the very linker the user asked to avoid).
+        # Surface the alias-resolution error instead of swallowing it.
+        if requested_linker_override() != "":
+            print "[linker-wrapper] requested-linker-unresolved: {linker_result.unwrap_err()}"
+            return Err(link_error_detail("requested-linker-unresolved", linker_result.unwrap_err()))
         if not config.allow_cc_fallback:
             return Err("Direct native linker is required by the strict link profile")
         if trace:
             print "[LINKER] No direct linker found, falling back to cc"
         return link_native_cc(object_files, output, config)
 
-    val linker_info = linker_result.unwrap()
+    val linker_path = linker_result.unwrap()
     if trace:
         print "[LINKER] linker_info unwrapped"
-    val linker_path = linker_info[0]
+        # BARE, not interpolated with a literal prefix: an interpolation that
+        # contains a nil collapses the WHOLE string to an empty line, which is
+        # exactly how this site stayed unnamed through runs 6-10 (the
+        # `[linker-wrapper]` print below landed as a blank line and every grep
+        # for the tag reported "the print never ran"). A bare value localises.
+        print linker_path
+    val execution_linker_path = if os == "macos" or os == "darwin":
+        darwin_resolve_link_tool(linker_path)
+    else:
+        linker_path
+    if execution_linker_path == "":
+        return Err(darwin_link_tool_unresolved_error(linker_path))
     if trace:
         print "[LINKER] got linker_path={linker_path}"
-    val linker_type = linker_info[1]
+    val linker_type = linker_type_for_path(linker_path)
     if trace:
         print "[LINKER] got linker_type"
 
@@ -263,8 +318,12 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     val crt = find_crt_files(config.pie, config.verbose)
     if trace:
         print "[LINKER] crt.found={crt.found}"
-    if not crt.found:
-        if not config.allow_cc_fallback:
+    # Darwin links no crt1/crti/crtbegin objects and no -dynamic-linker — ld64
+    # takes its entry glue from libSystem — so a missing CRT set there is normal
+    # and must route to the compiler driver instead of failing the link profile.
+    val crt_required = native_link_uses_crt_objects(os)
+    if not crt.found or not crt_required:
+        if not config.allow_cc_fallback and crt_required:
             return Err("Direct native linker CRT discovery is required by the strict link profile")
         debug("linker", "CRT files not found, falling back to cc")
         if config.verbose:
@@ -293,7 +352,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-dynamic-linker")
         args.push(crt.dynamic_linker)
 
-    for flag in native_direct_platform_flags(os, linker_type.to_string()):
+    for flag in native_direct_platform_flags(os, linker_type.to_string(), config.strip_output):
         args.push(flag)
     if config.allow_duplicate_definitions:
         for flag in unresolved_symbol_flags_for_unix_linker(os):
@@ -342,35 +401,19 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Standard libraries (no -lgcc/-lgcc_s — clang provides compiler-rt)
     # On Linux/FreeBSD wrap optional libs with --as-needed so they are only
     # recorded in DT_NEEDED when actually referenced by the linked objects.
-    if os == "linux":
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-ldl")
-        args.push("--as-needed")
-        args.push("-lm")
-        args.push("-lSDL2")
-        args.push("--no-as-needed")
-    elif os == "macos":
-        # sdl2-compat installs into the Homebrew lib dir, which is not on the
-        # default linker search path — add it before -lSDL2 resolves.
-        # /opt/homebrew/lib covers Apple Silicon brew; /usr/local/lib covers
-        # Intel brew. Both are harmless no-ops when absent.
-        args.push("-L")
-        args.push("/opt/homebrew/lib")
-        args.push("-L")
-        args.push("/usr/local/lib")
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-lm")
-        args.push("-lSystem")
-        args.push("-lSDL2")
-    elif os == "freebsd":
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("--as-needed")
-        args.push("-lm")
-        args.push("-lSDL2")
-        args.push("--no-as-needed")
+    # Keyed on the TARGET, not the host shape: macOS ships no libc/libm/libpthread
+    # to link against (libSystem is all three), so a Linux-shaped list died with
+    # `ld: library 'c' not found`. See native_all_support.spl's table and
+    # doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md.
+    for flag in native_link_std_lib_args(os, "ld"):
+        args.push(flag)
+    # Linux omits -lSDL2 deliberately: src/runtime/runtime_sdl2.c binds every SDL
+    # entry point through dlopen/dlsym at first use, so the archive carries ZERO
+    # undefined SDL_* symbols and --as-needed would NOT rescue a host without the
+    # SDL2 dev package (ld.lld must still FIND libSDL2.so). A program that wants
+    # SDL2 linked statically still gets it via config.libraries.
+    # See doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
+    # macOS/FreeBSD add the Homebrew/pkg lib dirs where sdl2-compat installs.
 
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
     var native_support_inputs = object_files
@@ -410,7 +453,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         return Ok(output)
 
     # Execute linker
-    val exec_result = execute_linker(linker_path, args)
+    val exec_result = execute_linker(execution_linker_path, args)
     if exec_result.is_err():
         if not config.allow_cc_fallback:
             return Err("Strict direct native link failed: " + exec_result.unwrap_err())
@@ -422,6 +465,13 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if config.verbose:
         val size = linker_file_size(output)
         print "[linker-wrapper] Native binary: {output} ({size} bytes)"
+
+    val darwin_tool_error = link_status_text(
+        "darwin-link-tool-identity-direct",
+        publish_darwin_link_tool_identity(execution_linker_path))
+    if darwin_tool_error != "":
+        print "[linker-wrapper] darwin-link-tool-identity-direct failed: {darwin_tool_error}"
+        return Err(link_error_detail("darwin-link-tool-identity-direct", darwin_tool_error))
 
     Ok(output)
 
@@ -665,7 +715,9 @@ fn native_runtime_provider_selection_error_for(runtime_dir: text, runtime_bundle
         return "runtime bundle '" + runtime_bundle + "' cannot use runtime path 'none'"
     if native_runtime_archive_names(runtime_bundle, has_compiler, has_backfill, has_native_all).is_empty():
         return native_runtime_provider_selection_error(runtime_dir, runtime_bundle)
-    ""
+    # Explicit, not a bare tail expression: a bare `""` tail is the shape that
+    # reached a stage-2 native caller as `nil`.
+    return ""
 
 fn native_runtime_provider_selection_error_for_config(config: NativeLinkConfig) -> text:
     native_runtime_provider_selection_error_for_config_platform(config, false)
@@ -761,15 +813,227 @@ fn hosted_cross_cc_required(target: text, os: text, arch: text) -> bool:
     val plan = hosted_c_compiler_plan(target, os, arch)
     plan.requires_cross and plan.supported
 
-fn native_direct_platform_flags(os: text, linker_type: text) -> [text]:
+fn darwin_link_tool_basename(command: text) -> text:
+    val parts = command.split("/")
+    if parts.len() == 0: return command
+    parts[parts.len() - 1]
+
+pub fn darwin_link_tool_env_name(command: text) -> text:
+    """Name of the env var that pins the absolute path of this link tool.
+
+    Empty for a command this lane does not pin, which simply means the pinned
+    step is skipped and resolution continues with xcrun."""
+    val base = darwin_link_tool_basename(command)
+    if base == "ld" or base == "ld64": return "SIMPLE_DARWIN_LD"
+    if base == "cc" or base == "clang" or base == "gcc": return "SIMPLE_DARWIN_CLANG"
+    if base == "c++" or base == "clang++" or base == "g++": return "SIMPLE_DARWIN_CLANG"
+    ""
+
+pub fn darwin_link_tool_xcrun_name(command: text) -> text:
+    """Canonical Xcode tool name to hand to `xcrun --find`, or "" if unknown."""
+    val base = darwin_link_tool_basename(command)
+    if base == "ld" or base == "ld64": return "ld"
+    if base == "cc" or base == "clang" or base == "gcc": return "clang"
+    if base == "c++" or base == "clang++" or base == "g++": return "clang++"
+    ""
+
+pub fn darwin_link_tool_trail(command: text) -> text:
+    """The diagnostic trail: every resolution step that was attempted and failed.
+
+    Deliberately a plain `text` return, not the second half of a tuple. The
+    first version of this code returned `(resolved, trail)` and the stage-2
+    NATIVE binary turned the whole error payload into `nil`
+    (`LLVM native linking failed: Linking failed: nil`, measured 2026-09-13),
+    so the trail this exists to carry never reached the log. Filed as
+    doc/08_tracking/bug/native_tuple_return_of_texts_yields_nil_2026-09-13.md;
+    until that is fixed, nothing on this path returns a tuple."""
+    var tried = "path=" + command + "(absent)"
+    val env_name = darwin_link_tool_env_name(command)
+    if env_name != "":
+        val pinned = env_get(env_name) ?? ""
+        if pinned == "":
+            tried = tried + " " + env_name + "(unset)"
+        else:
+            tried = tried + " " + env_name + "=" + pinned + "(absent)"
+    val xcrun_name = darwin_link_tool_xcrun_name(command)
+    if xcrun_name != "":
+        if file_exists("/usr/bin/xcrun"):
+            tried = tried + " xcrun --find " + xcrun_name + "(failed)"
+        else:
+            tried = tried + " /usr/bin/xcrun(absent)"
+    tried + " which " + command + "(failed)"
+
+pub fn darwin_resolve_link_tool(command: text) -> text:
+    """Resolve a darwin link tool to an absolute path, or "" if nothing worked.
+
+    Order is deliberate and PATH-independence is the point. Until 2026-09-12
+    this was `/usr/bin/which <command>` and nothing else, so the whole native
+    link depended on the PATH the child happened to inherit, and a failure
+    produced the single opaque token `darwin-link-tool-unresolved` with no
+    statement of what had been attempted. Stage 2 sanity died exactly there --
+    and the sanity child's env dump (added the same day) then showed a FULL
+    PATH including /usr/bin, so PATH was never the problem: `which` itself does
+    not answer from inside the stage-2 native binary.
+
+      1. an absolute/relative path that already exists -- no subprocess at all;
+      2. the path pinned by the bootstrap lane at admission time
+         (SIMPLE_DARWIN_CLANG / SIMPLE_DARWIN_LD, resolved once with
+         `xcrun --find` and forwarded through the explicit env allowlist).
+         This step also needs no subprocess, which is why it is the one that
+         has to work when spawning does not;
+      3. `/usr/bin/xcrun --find <tool>` -- absolute interpreter, the documented
+         Xcode/CLT locator, which does not consult PATH for the tool;
+      4. `/usr/bin/which` LAST, only as a legacy fallback."""
+    if file_exists(command): return command
+    val env_name = darwin_link_tool_env_name(command)
+    if env_name != "":
+        val pinned = env_get(env_name) ?? ""
+        if pinned != "" and file_exists(pinned): return pinned
+    val xcrun_name = darwin_link_tool_xcrun_name(command)
+    if xcrun_name != "" and file_exists("/usr/bin/xcrun"):
+        val (xcrun_out, _, xcrun_code) = process_run("/usr/bin/xcrun", ["--find", xcrun_name])
+        val xcrun_path = xcrun_out.trim().split("\n")[0]
+        if xcrun_code == 0 and xcrun_path != "" and file_exists(xcrun_path):
+            return xcrun_path
+    val (stdout, _, code) = process_run("/usr/bin/which", [command])
+    val resolved = stdout.trim().split("\n")[0]
+    if code == 0 and resolved != "" and file_exists(resolved): return resolved
+    ""
+
+pub fn darwin_link_tool_unresolved_error(command: text) -> text:
+    """The error a caller returns when resolution failed, naming what was tried.
+
+    Also PRINTS the same line, because a returned error string is only as good
+    as the machinery that carries it: the first version of this fix returned a
+    perfectly-formed message that the caller logged as `nil`. A print cannot be
+    laundered by a return-value defect."""
+    val path_value = env_get("PATH") ?? ""
+    # Literal line FIRST, then every value BARE on its own line. Measured
+    # 2026-09-13 on the rejected macOS Stage 2 binary: the previous single
+    # `print "[linker-wrapper] {message}"` emitted an EMPTY line, because an
+    # interpolation carrying a nil collapses in full -- so the tag itself
+    # disappeared and greps for `[linker-wrapper]` concluded the print had
+    # never run. Same reasoning as `_collect_failure` in
+    # driver_aot_native_output.spl.
+    print "[linker-wrapper] darwin-link-tool-unresolved -- command, trail and PATH follow"
+    print command
+    print darwin_link_tool_trail(command)
+    print path_value
+    val message = "darwin-link-tool-unresolved: command=" + command +
+        " tried=[" + darwin_link_tool_trail(command) + "] PATH=" + path_value
+    message
+
+fn publish_darwin_link_tool_identity(tool_path: text) -> text:
+    val os = host_os()
+    if os != "macos" and os != "darwin": return ""
+    val resolved = darwin_resolve_link_tool(tool_path)
+    if resolved == "": return darwin_link_tool_unresolved_error(tool_path)
+    val artifact = file_hash_sha256(resolved)
+    if artifact.len() != 64: return "darwin-link-tool-digest-failed"
+    val behavior = sha256_text(
+        "simple-darwin-link-tool-behavior-v1|artifact=64:" + artifact +
+        "|policy=darwin-dead-strip-v1"
+    )
+    val identity = sha256_text(
+        "simple-darwin-link-tool-identity-v1|artifact=64:" + artifact +
+        "|behavior=64:" + behavior
+    )
+    val configured_cache_root = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+    val cache_root = if configured_cache_root == "":
+        "build/native_cache"
+    else:
+        configured_cache_root
+    if not file_write(
+        cache_root + "/native_link_tool_identity.receipt",
+        "simple-darwin-link-tool-identity-v1\npath=" + resolved +
+        "\nartifact=" + artifact + "\nbehavior=" + behavior +
+        "\nidentity=" + identity + "\npolicy=darwin-dead-strip-v1\n"
+    ):
+        return "darwin-link-tool-identity-write-failed"
+    # Explicit, not a bare tail expression — see native_runtime_provider_selection_error_for.
+    return ""
+
+pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: bool = false) -> [text]:
     if os == "linux" or os == "freebsd":
         var flags = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
             "-z", "relro", "-z", "now", "--gc-sections"]
         if linker_type == "mold" or linker_type == "lld": flags.push("--icf=all")
         elif linker_type == "gold": flags.push("--icf=safe")
+        if strip_output: flags.push("--strip-all")
         return flags
-    if os == "macos" or os == "darwin": return ["-dead_strip"]
+    if os == "macos" or os == "darwin":
+        var flags = ["-dead_strip"]
+        if strip_output:
+            flags.push("-S")
+            flags.push("-x")
+        return flags
     []
+
+pub fn darwin_sdk_path() -> text:
+    """The macOS SDK to link against, or "" when none can be resolved.
+
+    `xcrun --find clang` prefers the Xcode toolchain, whose DEFAULT SDK can be
+    absent on a host whose active developer dir is CommandLineTools — that clang
+    then fails the link with `ld: library 'System' not found`, which reads like a
+    missing library and is really a missing sysroot. Measured 2026-09-13 on this
+    host: bare `clang t.c -lSystem` fails, the same clang with `-isysroot
+    $(xcrun --show-sdk-path)` succeeds. SDKROOT wins when set, so a caller can
+    still pin a different SDK.
+    See doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md."""
+    val pinned = env_get("SDKROOT") ?? ""
+    if pinned != "" and file_exists(pinned): return pinned
+    if not file_exists("/usr/bin/xcrun"): return ""
+    val (out, _, code) = process_run("/usr/bin/xcrun", ["--show-sdk-path"])
+    if code != 0: return ""
+    val path = out.trim().split("\n")[0]
+    if path != "" and file_exists(path): return path
+    ""
+
+pub fn native_cc_platform_flags(os: text, strip_output: bool = false) -> [text]:
+    if os == "macos" or os == "darwin" or os == "Darwin":
+        var flags = ["-Wl,-dead_strip"]
+        val sdk = darwin_sdk_path()
+        if sdk != "":
+            flags.push("-isysroot")
+            flags.push(sdk)
+        if strip_output: flags.push("-Wl,-S,-x")
+        return flags
+    if os == "linux" or os == "Linux" or os == "freebsd" or os == "FreeBSD":
+        var flags = ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,--gc-sections"]
+        if strip_output: flags.push("-Wl,--strip-all")
+        return flags
+    []
+
+fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, text>:
+    """Resolve SIMPLE_LINKER into a -fuse-ld= flag for the cc fallback path.
+
+    Returns Ok("") when SIMPLE_LINKER is unset, which means "leave this arm's
+    existing behaviour alone". Alias resolution is delegated to
+    find_requested_linker so the accepted names (mold / lld / ld.lld /
+    lld-link / ld / gnu / bfd) stay defined in exactly one place; an
+    unsupported or unfindable value propagates its Err here just as it does on
+    the direct path.
+
+    Two arms cannot honour the request and say so instead of emitting a flag
+    that would do nothing or the wrong thing:
+      - macOS/darwin links with ld64. mold dropped Mach-O support and LLD's
+        Mach-O port is a different driver; -fuse-ld= here would either be
+        ignored or select a linker that cannot produce a Mach-O image.
+      - A hosted CROSS link runs the cross driver, but find_requested_linker
+        resolves HOST binaries (which mold / which ld.lld), so honouring the
+        request would point the cross driver at a host-native linker."""
+    val requested = requested_linker_override()
+    if requested == "":
+        return Ok("")
+    if os_name == "macos" or os_name == "darwin":
+        return Err("SIMPLE_LINKER={requested} is not supported on the macOS cc link path (ld64 has no -fuse-ld= equivalent for mold/lld); unset SIMPLE_LINKER or use the direct linker path")
+    if hosted_cross:
+        return Err("SIMPLE_LINKER={requested} is not supported for hosted cross links: the alias resolves a host linker, which the cross compiler driver cannot use")
+    val resolved = find_requested_linker(requested)
+    if resolved.is_err():
+        return Err(resolved.unwrap_err())
+    val resolved_path = resolved.unwrap()
+    Ok("-fuse-ld=" + linker_fuse_ld_name(linker_type_for_path(resolved_path)))
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # SimpleOS targets must NEVER reach this function. SimpleOS has no
@@ -788,9 +1052,12 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     if object_files.len() == 0:
         return Err("cc fallback requires at least one object file")
 
-    val provider_error = native_runtime_provider_selection_error_for_config(config)
+    val provider_error = link_status_text(
+        "cc-native-runtime-provider-selection",
+        native_runtime_provider_selection_error_for_config(config))
     if provider_error != "":
-        return Err(provider_error)
+        print "[linker-wrapper] cc-native-runtime-provider-selection failed: {provider_error}"
+        return Err(link_error_detail("cc-native-runtime-provider-selection", provider_error))
 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val os_name = host_os()
@@ -799,6 +1066,14 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     if not compiler_plan.supported:
         return Err("hosted C target '" + target + "' is unsupported on '" + arch_name + "-" + os_name + "'")
     val hosted_cross = compiler_plan.requires_cross
+    # Resolve the SIMPLE_LINKER preference before any arm builds its argv, so
+    # an unsupported value fails the link on every platform arm rather than
+    # only on the ones that can act on it.
+    val fuse_ld_result = cc_requested_fuse_ld_flag(os_name, hosted_cross)
+    if fuse_ld_result.is_err():
+        print "[linker-wrapper] cc-fuse-ld-selection failed: {fuse_ld_result.unwrap_err()}"
+        return Err(link_error_detail("cc-fuse-ld-selection", fuse_ld_result.unwrap_err()))
+    val requested_fuse_ld = fuse_ld_result.unwrap()
     var cc = env_get("SIMPLE_CC") ?? ""
     if cc == "":
         if hosted_cross:
@@ -807,6 +1082,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
                 return Err("required cross C compiler '" + compiler_plan.command + "' was not found")
         else:
             cc = "cc"
+    if os_name == "macos" or os_name == "darwin":
+        val cc_requested = cc
+        cc = darwin_resolve_link_tool(cc_requested)
+        if cc == "":
+            return Err(darwin_link_tool_unresolved_error(cc_requested))
 
     # Keep the fallback complete: native-build links user objects, runtime
     # objects, and a generated entry object. Truncating this list produces a
@@ -823,12 +1103,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(obj)
         val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
         # sdl2-compat lives in the Homebrew lib dir, which cc does not search
-        # by default — add it before -lSDL2 resolves.
-        args.push("-L")
-        args.push("/opt/homebrew/lib")
-        args.push("-L")
-        args.push("/usr/local/lib")
-        for flag in ["-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2"]:
+        # by default — the table adds it before -lSDL2 resolves. It passes no
+        # -lc/-lm/-lpthread (macOS has none of them: libSystem is the C library)
+        # and no -lSystem (the clang driver appends that itself, and ours was the
+        # "ignoring duplicate libraries: '-lSystem'" warning that preceded
+        # `ld: library 'c' not found`).
+        # doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md
+        for flag in native_link_std_lib_args(os_name, "cc-pre"):
             args.push(flag)
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
@@ -840,15 +1121,24 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
-        for flag in ["-Wl,-dead_strip", "-o", output]:
+        for flag in native_cc_platform_flags(os_name, config.strip_output):
+            args.push(flag)
+        for flag in ["-o", output]:
             args.push(flag)
         val (stdout, stderr, code) = process_run(cc, args)
         if code == 0:
+            val tool_error = link_status_text(
+                "darwin-link-tool-identity-cc", publish_darwin_link_tool_identity(cc))
+            if tool_error != "":
+                print "[linker-wrapper] darwin-link-tool-identity-cc failed: {tool_error}"
+                return Err(link_error_detail("darwin-link-tool-identity-cc", tool_error))
             return Ok(output)
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
     elif os_name == "freebsd":
         var args = native_retained_symbol_cc_args(config.retained_symbols, os_name)
+        if requested_fuse_ld != "":
+            args.push(requested_fuse_ld)
         for obj in cc_fallback_object_args(object_files):
             args.push(obj)
         if not config.pie:
@@ -856,12 +1146,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
             args.push(flag)
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-Wl,--as-needed")
-        args.push("-lm")
-        args.push("-lSDL2")
-        args.push("-Wl,--no-as-needed")
+        for flag in native_link_std_lib_args(os_name, "cc-pre"):
+            args.push(flag)
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
@@ -872,6 +1158,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
+        if config.strip_output:
+            args.push("-Wl,--strip-all")
         args.push("-o")
         args.push(output)
         val (stdout, stderr, code) = process_run(cc, args)
@@ -881,7 +1169,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("cc linking failed: {err_msg}")
     else:
         var args: [text] = []
-        if not hosted_cross:
+        # An explicit SIMPLE_LINKER request wins over this arm's historical
+        # default. With neither set, behaviour is byte-identical to before.
+        if requested_fuse_ld != "":
+            args.push(requested_fuse_ld)
+        elif not hosted_cross:
             args.push("-fuse-ld=lld")
         if not config.pie:
             args.push("-no-pie")
@@ -892,9 +1184,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
             args.push(flag)
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-ldl")
+        for flag in native_link_std_lib_args(os_name, "cc-pre"):
+            args.push(flag)
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
@@ -902,15 +1193,25 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
-        args.push("-Wl,--as-needed")
-        args.push("-lm")
-        if not hosted_cross:
-            args.push("-lSDL2")
-        args.push("-Wl,--no-as-needed")
+        for flag in native_link_std_lib_args(os_name, "cc-post"):
+            args.push(flag)
+        # -lSDL2 removed here for the same reason as the direct-lld Linux arm
+        # above: runtime_sdl2.c dlopens SDL at first use, the runtime archive has
+        # no undefined SDL_* symbols, and -Wl,--as-needed only gates DT_NEEDED --
+        # the linker still has to FIND libSDL2.so, so this was an unconditional
+        # link failure on any host without the SDL2 dev package. The
+        # `not hosted_cross` guard was not enough: the failure is on the NATIVE
+        # host lane. See
+        # doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
-        if not hosted_cross:
+        if config.strip_output:
+            args.push("-Wl,--strip-all")
+        # --icf is an lld/mold/gold extension; GNU bfd rejects it outright, so
+        # honouring SIMPLE_LINKER=ld/gnu/bfd here means dropping the flag
+        # rather than handing bfd an option that fails the link.
+        if not hosted_cross and requested_fuse_ld != "-fuse-ld=bfd":
             args.push("-Wl,--icf=safe")
         args.push("-o")
         args.push(output)
@@ -1005,6 +1306,8 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     # Size optimization: remove unreferenced data + fold identical COMDATs
     if not config.debug:
         extra.push("/OPT:REF,ICF")
+    if config.strip_output:
+        extra.push("/DEBUG:NONE")
     # Runtime library and compiled objects may define the same symbol.
     # Missing symbols remain fatal.
     if config.allow_duplicate_definitions:

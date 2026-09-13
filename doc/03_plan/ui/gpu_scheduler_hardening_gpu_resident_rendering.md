@@ -27,7 +27,7 @@ comment and a row in `doc/08_tracking/todo/todo_db.sdn`.
 | REQ-GPU-SCHED-PROFILE-001 | required profiles refuse with exact missing bits (epoch, islands, deferred queue) |
 | REQ-GPU-SCHED-PROOF-001 | `device_execution_proven` flips only at `gpu_finished` with qualifying evidence |
 | REQ-GPU-SCHED-EPOCH-001 | five separate generations, ring token/lease, four truth labels |
-| REQ-GPU-SCHED-RESIDENT-001/002 | N identical frames: 0 semantic rebuilds, 0 readbacks; evidence qualification bar |
+| REQ-GPU-SCHED-RESIDENT-001/002 | N identical frames: 0 semantic rebuilds, 0 framebuffer readbacks; one descriptor-backed scene-consumer dispatch per frame, one proof checksum attestation, and the evidence qualification bar |
 | REQ-GPU-SCHED-ISLAND-001 | declared subset admitted/refused/fallback per profile |
 | REQ-GPU-SCHED-PROVIDER-001 | three probes graded unavailable/routing_only/full; `d3d11-dxvk`, never d3d12 |
 | REQ-GPU-SCHED-AUTONOMY-001 | autonomy only for `device_initiated_experimental` on a `full` provider with DGC/ICB/work-graph bits |

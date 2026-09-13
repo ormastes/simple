@@ -1,0 +1,685 @@
+#!/bin/sh
+# measure-entry-closure.shs — produce an EntryClosureReceiptV1 for one entry point.
+#
+# WHY THIS EXISTS
+# ---------------
+# "Startup cost" for a Simple entry point is not the size of bin/simple: the seed
+# reads the stdlib and the application tree as SOURCE on every process start
+# (.claude/rules/commands.md: 82 .spl opens, 0 .smf for a trivial run). The thing
+# that actually grows is the IMPORT CLOSURE — how many distinct source files an
+# entry drags in before it does any work. Two independent effects inflate it and
+# have to be reported separately, because they have different fixes:
+#
+#   * alias SPELLINGS of one physical file (`src/app/x.spl` vs `./src/app/x.spl`
+#     vs an absolute path) were separate loader units, and the HIR lowerer and
+#     the interpreter each read the same file under their own spelling with no
+#     shared cache — a seed design item (L5-E);
+#   * genuinely EAGER imports: hub modules pulled in by an entry that uses a
+#     handful of leaf functions — fixed in pure Simple by importing leaf owners
+#     (L5-B/C/D/G).
+#
+# So the receipt carries all four numbers: `spl_opens` (syscalls), `unit_spellings`
+# (distinct path strings), `physical_files` (distinct realpaths) and the two byte
+# totals. Only the PHYSICAL pair is ratcheted (check-entry-closure-ratchet.shs) —
+# it is the one an import change is allowed to be judged on, and it is invariant
+# under the cross-lane caching work happening in parallel.
+#
+# METHOD (contract-fixed: "strace-openat-realpath")
+#   strace -f -e trace=openat -o <log> <argv>
+#   a unit is any openat of a path ending .spl that returned >= 0
+#   physical_files = distinct realpath of units
+#
+# EXECUTION LANE (`--lane`, contract amendment 2026-09-12)
+# `default` leaves SIMPLE_EXECUTION_MODE unset — the JIT-attempt lane, which
+# whole-module-compiles; `interpreter` exports SIMPLE_EXECUTION_MODE=interpreter.
+# The two lanes have DIFFERENT closures for the same entry, which is the whole
+# point of the amendment: L5-C found that a function-local `use` shrinks only the
+# interpreter lane while the default lane still pulls the module in. A closure
+# number without a lane is therefore ambiguous, so `lane` is recorded in the
+# receipt and the baselines are keyed by (entry_id, lane).
+#
+# COLD MEASUREMENT
+# A warm content cache suppresses .spl opens and would silently under-report the
+# closure. Two defences: the measured process runs with HOME pointed at a fresh
+# empty directory (hermetic; --keep-home opts out), and `spl_opens` is checked
+# against `physical_files` — a cold run must open each physical file at least
+# once, so spl_opens < physical_files is impossible and is reported as ERROR
+# rather than as a very good score.
+#
+# Counts are the contract. wall_ms_p50 / max_rss_kib are INFORMATIVE only: this
+# host is shared and loaded, so a wall number is never a gate (see
+# .claude/rules/commands.md on recording binary identity with every timing).
+#
+# Usage:
+#   sh scripts/perf/measure-entry-closure.shs <entry_id> [--binary <path>] [--out <sdn>]
+#                                             [--lane default|interpreter]
+#                                             [--samples <n>] [--lanes] [--keep-home]
+#                                             [--verify-cold]
+#   sh scripts/perf/measure-entry-closure.shs --list-entries
+#   sh scripts/perf/measure-entry-closure.shs --parse-log <log> [--parse-cwd <dir>]
+#   sh scripts/perf/measure-entry-closure.shs --selftest
+#
+# Verdict is the LAST line of stdout, following the repo convention:
+#   PASS  — <n> unit(s) checked, ...            exit 0
+#   ERROR — nothing was checked (<reason>)      exit 2
+# There is deliberately no FAIL: this is a producer, not a gate. A run that
+# observed 0 units for a non-native entry is ERROR, never a pass — absence of a
+# measurement is absence of evidence.
+#
+# Contract: doc/07_guide/perf/entry_closure_receipt_v1.md
+set -u
+
+SCHEMA='simple.entry-closure-receipt/v1'
+METHOD='strace-openat-realpath'
+US=$(printf '\342\220\237')   # U+241F SYMBOL FOR UNIT SEPARATOR (printable, so the SDN string stays printable)
+
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+
+err_exit() {
+    printf 'ERROR — nothing was checked (%s)\n' "$1"
+    exit 2
+}
+
+# ---------------------------------------------------------------------------
+# Entry table. `entry_id` is a stable slug from the frozen set in the contract;
+# a new id is added here AND as a row in config/perf/entry_closure_baselines.sdn
+# with a written reason. Nothing else may invent one.
+#
+# Each entry declares: argv after the binary (US-separated), a stdin file recipe,
+# whether zero .spl opens is legitimate (native CLI paths), and a timeout.
+# ---------------------------------------------------------------------------
+ENTRY_IDS='cli-version cli-help mcp-help mcp-info-call mcp-read-call lspmcp-help lspmcp-3frame query-help check-help lint-one-file test-one-spec'
+
+# Tracked fixtures. They are tracked, small and named here (not chosen at run
+# time) so a baseline recorded today is reproducible tomorrow.
+LINT_FIXTURE='src/lib/common/net/oid.spl'
+SPEC_FIXTURE='test/01_unit/app/examples_check_entry_args_spec.spl'
+
+MCP_INIT='{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"entry-closure","version":"1"}}}'
+MCP_INFO='{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"simple_info","arguments":{}}}'
+MCP_READ='{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"simple_read","arguments":{"path":"src/lib/common/net/oid.spl"}}}'
+MCP_LIST='{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
+MCP_LIST2='{"jsonrpc":"2.0","id":"3","method":"tools/list","params":{}}'
+
+# entry_argv <id> -> prints argv (one word per line). Empty output = unknown id.
+entry_argv() {
+    case $1 in
+        cli-version)   printf '%s\n' '--version' ;;
+        cli-help)      printf '%s\n' '--help' ;;
+        mcp-help)      printf '%s\n' 'run' 'src/app/mcp/main.spl' '--help' ;;
+        mcp-info-call) printf '%s\n' 'run' 'src/app/mcp/main.spl' ;;
+        mcp-read-call) printf '%s\n' 'run' 'src/app/mcp/main.spl' ;;
+        lspmcp-help)   printf '%s\n' 'run' 'src/app/simple_lsp_mcp/main.spl' '--help' ;;
+        lspmcp-3frame) printf '%s\n' 'run' 'src/app/simple_lsp_mcp/main.spl' ;;
+        query-help)    printf '%s\n' 'query' '--help' ;;
+        check-help)    printf '%s\n' 'check' '--help' ;;
+        lint-one-file) printf '%s\n' 'lint' "$LINT_FIXTURE" ;;
+        test-one-spec) printf '%s\n' 'test' "$SPEC_FIXTURE" ;;
+        *)             : ;;
+    esac
+}
+
+# entry_stdin <id> <file> -> writes the entry's stdin frames into <file>.
+entry_stdin() {
+    case $1 in
+        mcp-info-call) printf '%s\n%s\n' "$MCP_INIT" "$MCP_INFO" > "$2" ;;
+        mcp-read-call) printf '%s\n%s\n' "$MCP_INIT" "$MCP_READ" > "$2" ;;
+        lspmcp-3frame) printf '%s\n%s\n%s\n' "$MCP_INIT" "$MCP_LIST" "$MCP_LIST2" > "$2" ;;
+        *)             : > "$2" ;;
+    esac
+}
+
+# Native entries answer without reading any .spl; 0 opens is the correct answer
+# for them and must not be reported as a failed measurement.
+entry_native_ok() {
+    case $1 in cli-version|cli-help) echo 1 ;; *) echo 0 ;; esac
+}
+
+# Environment for the measured process. `env -u` is used rather than leaving the
+# variable alone, so an inherited SIMPLE_EXECUTION_MODE in the caller's shell
+# cannot silently turn a `default`-lane measurement into an interpreter one.
+lane_env() {
+    case $1 in
+        interpreter) printf '%s\n' 'SIMPLE_EXECUTION_MODE=interpreter' ;;
+        default)     : ;;
+        *)           return 1 ;;
+    esac
+}
+
+entry_timeout() {
+    case $1 in test-one-spec) echo 900 ;; mcp-info-call|mcp-read-call|lspmcp-3frame) echo 600 ;; *) echo 300 ;; esac
+}
+
+# ---------------------------------------------------------------------------
+# Log parsing. Split out from measurement so the selftest can feed synthetic
+# strace logs and never needs strace, a binary, or a real entry point.
+#
+# Emits one TAB-separated `spelling<TAB>realpath<TAB>size` row per DISTINCT
+# spelling, in sorted order. `spl_opens` (the syscall count) is written to
+# $PARSE_OPENS_FILE when that variable is set, because it is the one number that
+# is NOT recoverable from the deduplicated rows.
+# ---------------------------------------------------------------------------
+
+# Rejects a path strace truncated with `...` (default -s is small; we pass
+# -s 4096, but a log produced by hand or by an older strace could still be
+# truncated, and a truncated path would silently realpath to something else or
+# to nothing). Fail closed rather than measure a lie.
+parse_openat_log() {
+    _log=$1
+    _pcwd=$2
+    [ -f "$_log" ] || err_exit "strace log $_log does not exist"
+
+    # awk does the syscall-shape work: pid demux for `-f` interleaving, the
+    # unfinished/resumed split (the seed is threaded, so real logs carry it),
+    # and the `= -1 ENOENT` rejection. It emits the path still in strace's
+    # escaped form; the shell decodes octal escapes below, once per distinct
+    # spelling rather than once per syscall.
+    awk '
+        function first_quoted(s,   i, c, out, n) {
+            i = index(s, "\"")
+            if (i == 0) return ""
+            n = length(s)
+            out = ""
+            for (i = i + 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (c == "\\") { out = out substr(s, i, 2); i++; continue }
+                if (c == "\"") return out
+                out = out c
+            }
+            return ""
+        }
+        {
+            line = $0
+            pid = "single"
+            if (match(line, /^[0-9]+[ \t]+/)) {
+                pid = substr(line, 1, RLENGTH)
+                gsub(/[ \t]/, "", pid)
+                line = substr(line, RLENGTH + 1)
+            }
+            # strace may also prefix a timestamp; strip a leading numeric field
+            # that is followed by the syscall name rather than by "openat(".
+            if (line ~ /^<\.\.\. openat resumed>/) {
+                if (pid in pending) {
+                    if (line ~ /= -1/) { delete pending[pid]; next }
+                    if (line ~ /= [0-9]+/) print pending[pid]
+                    delete pending[pid]
+                }
+                next
+            }
+            if (line !~ /^openat\(/) next
+            p = first_quoted(line)
+            if (p == "") next
+            # strace marks a string it truncated by closing the quote and
+            # appending `...`. A truncated path usually no longer ends in
+            # `.spl`, so the extension filter below would DROP it silently and
+            # undercount. Flag it here instead and fail the whole parse.
+            if (index(line, "\"" p "\"...") > 0) { print "__TRUNCATED__" p; next }
+            if (line ~ /<unfinished \.\.\.>[ \t]*$/) { pending[pid] = p; next }
+            if (line ~ /= -1/) next
+            if (line !~ /= [0-9]+/) next
+            print p
+        }
+    ' "$_log" > "$_WORK/raw_openat" || :
+
+    if _trunc=$(grep -m1 "^__TRUNCATED__" "$_WORK/raw_openat" 2>/dev/null); then
+        err_exit "strace truncated a path (${_trunc#__TRUNCATED__}...); re-run with -s 4096"
+    fi
+    grep -e '\.spl$' "$_WORK/raw_openat" > "$_WORK/raw_spellings" || :
+
+    _opens=$(wc -l < "$_WORK/raw_spellings" | tr -d ' ')
+    [ -n "${PARSE_OPENS_FILE:-}" ] && printf '%s\n' "$_opens" > "$PARSE_OPENS_FILE"
+
+    sort -u "$_WORK/raw_spellings" > "$_WORK/spellings"
+
+    : > "$_WORK/units"
+    while IFS= read -r _esc; do
+        [ -n "$_esc" ] || continue
+        # strace writes non-printable and non-ASCII bytes as three-digit octal
+        # `\NNN`; POSIX printf %b wants `\0NNN`, so prepend the 0 before decoding.
+        _spelling=$(printf '%b' "$(printf '%s' "$_esc" | sed 's/\\\([0-7][0-7][0-7]\)/\\0\1/g')")
+        # A relative spelling is relative to the TRACEE's cwd, not ours.
+        case $_spelling in
+            /*) _abs=$_spelling ;;
+            *)  _abs=$_pcwd/$_spelling ;;
+        esac
+        _real=$(realpath -e -- "$_abs" 2>/dev/null) ||
+            err_exit "unit $_spelling does not resolve under $_pcwd"
+        _size=$(stat -c '%s' -- "$_real" 2>/dev/null) ||
+            err_exit "cannot size $_real"
+        printf '%s\t%s\t%s\n' "$_spelling" "$_real" "$_size" >> "$_WORK/units"
+    done < "$_WORK/spellings"
+}
+
+# ---------------------------------------------------------------------------
+# Lane attribution (optional, --lanes). SIMPLE_READ_TRACE=1 prints one
+# `[read] <file>:<line> <path>` line per source read (read_trace.rs). The
+# reader's own Rust source file is what discriminates the two lanes; there is no
+# lane field in the trace itself, so this classifies by reader path and reports
+# `unknown` for anything it does not recognise rather than guessing.
+# ---------------------------------------------------------------------------
+lane_of_path() {
+    _hir=0; _int=0
+    # Match on the SPELLING, not the realpath: read_trace.rs prints the path as
+    # it was opened, and most spellings in a real run are relative.
+    _readers=$(awk -v p=" $1" 'index($0, p) > 0 && $0 ~ /^\[read\] / {print $2}' "$_WORK/readtrace" 2>/dev/null)
+    case $_readers in *hir*) _hir=1 ;; esac
+    case $_readers in *interpreter*) _int=1 ;; esac
+    if [ "$_hir" = 1 ] && [ "$_int" = 1 ]; then echo 'hir+interp'
+    elif [ "$_hir" = 1 ]; then echo 'hir'
+    elif [ "$_int" = 1 ]; then echo 'interp'
+    else echo 'unknown'; fi
+}
+
+sdn_quote() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+
+# ---------------------------------------------------------------------------
+# Selftest. Nine fixtures, all synthetic strace logs against a fixture tree, so
+# the parser is exercised without strace, without a binary and without a real
+# entry point. Runs before every measurement and is fatal.
+# ---------------------------------------------------------------------------
+selftest() {
+    _t=$(mktemp -d) || err_exit "mktemp failed"
+    _fails=0
+    _ran=0
+    mkdir -p "$_t/tree/src/app" "$_t/tree/src/lib" "$_t/tree/real"
+    printf 'aaaa\n' > "$_t/tree/real/leaf.spl"                 # 5 bytes
+    printf 'bbbbbbbbbb\n' > "$_t/tree/src/app/main.spl"        # 11 bytes
+    ln -sf ../../real/leaf.spl "$_t/tree/src/lib/alias.spl"
+    _uni=$(printf 'uni\303\251.spl')   # the same bytes strace will print as octal
+    printf 'ccc\n' > "$_t/tree/src/app/$_uni"                 # 4 bytes, non-ASCII name
+
+    _assert() { # _assert <name> <expected> <actual>
+        _ran=$((_ran + 1))
+        if [ "$2" = "$3" ]; then
+            printf 'selftest ok   %s\n' "$1"
+        else
+            printf 'selftest FAIL %s: expected [%s] got [%s]\n' "$1" "$2" "$3"
+            _fails=$((_fails + 1))
+        fi
+    }
+
+    _run() { # _run <log> -> sets _OPENS,_SPELL,_PHYS,_BSPELL,_BPHYS
+        PARSE_OPENS_FILE=$_t/opens
+        parse_openat_log "$1" "$_t/tree" || return 1
+        _OPENS=$(cat "$_t/opens")
+        _SPELL=$(wc -l < "$_WORK/units" | tr -d ' ')
+        _PHYS=$(cut -f2 "$_WORK/units" | sort -u | wc -l | tr -d ' ')
+        _BSPELL=$(awk -F'\t' '{s+=$3} END{print s+0}' "$_WORK/units")
+        _BPHYS=$(sort -u -t"$(printf '\t')" -k2,2 "$_WORK/units" | awk -F'\t' '{s+=$3} END{print s+0}')
+    }
+
+    # 1. alias spellings of one physical file collapse to one physical unit.
+    cat > "$_t/f1.log" <<EOF
+100  openat(AT_FDCWD, "src/app/main.spl", O_RDONLY|O_CLOEXEC) = 3
+100  openat(AT_FDCWD, "./src/app/main.spl", O_RDONLY|O_CLOEXEC) = 3
+100  openat(AT_FDCWD, "$_t/tree/src/app/main.spl", O_RDONLY|O_CLOEXEC) = 4
+EOF
+    _run "$_t/f1.log"
+    _assert "alias spellings: opens" 3 "$_OPENS"
+    _assert "alias spellings: spellings" 3 "$_SPELL"
+    _assert "alias spellings: physical" 1 "$_PHYS"
+    _assert "alias spellings: spelling bytes" 33 "$_BSPELL"
+    _assert "alias spellings: physical bytes" 11 "$_BPHYS"
+
+    # 2. a failed openat is not a unit.
+    cat > "$_t/f2.log" <<EOF
+100  openat(AT_FDCWD, "src/app/main.spl", O_RDONLY|O_CLOEXEC) = 3
+100  openat(AT_FDCWD, "src/app/missing.spl", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+EOF
+    _run "$_t/f2.log"
+    _assert "ENOENT not counted: opens" 1 "$_OPENS"
+    _assert "ENOENT not counted: physical" 1 "$_PHYS"
+
+    # 3. a symlink spelling resolves to its target's realpath and size.
+    cat > "$_t/f3.log" <<EOF
+100  openat(AT_FDCWD, "src/lib/alias.spl", O_RDONLY|O_CLOEXEC) = 3
+100  openat(AT_FDCWD, "real/leaf.spl", O_RDONLY|O_CLOEXEC) = 3
+EOF
+    _run "$_t/f3.log"
+    _assert "symlink realpath: spellings" 2 "$_SPELL"
+    _assert "symlink realpath: physical" 1 "$_PHYS"
+    _assert "symlink realpath: physical bytes" 5 "$_BPHYS"
+
+    # 4. the unfinished/resumed split that `-f` produces on a threaded tracee:
+    #    path on the first line, return value on the second, matched by pid; a
+    #    resumed -1 is still rejected, and interleaving must not cross pids.
+    cat > "$_t/f4.log" <<EOF
+100  openat(AT_FDCWD, "src/app/main.spl", O_RDONLY|O_CLOEXEC <unfinished ...>
+101  openat(AT_FDCWD, "real/leaf.spl", O_RDONLY|O_CLOEXEC <unfinished ...>
+100  <... openat resumed>)              = 3
+102  openat(AT_FDCWD, "src/lib/alias.spl", O_RDONLY|O_CLOEXEC <unfinished ...>
+101  <... openat resumed>)              = 4
+102  <... openat resumed>)              = -1 ENOENT (No such file or directory)
+EOF
+    _run "$_t/f4.log"
+    _assert "unfinished/resumed: opens" 2 "$_OPENS"
+    _assert "unfinished/resumed: physical" 2 "$_PHYS"
+
+    # 5. non-ASCII paths arrive as three-digit octal and must decode.
+    cat > "$_t/f5.log" <<EOF
+100  openat(AT_FDCWD, "src/app/uni\\303\\251.spl", O_RDONLY|O_CLOEXEC) = 3
+EOF
+    _run "$_t/f5.log"
+    _assert "octal-escaped path: physical" 1 "$_PHYS"
+    _assert "octal-escaped path: physical bytes" 4 "$_BPHYS"
+
+    # 6. non-.spl opens are not units (the tracee opens hundreds of them).
+    cat > "$_t/f6.log" <<EOF
+100  openat(AT_FDCWD, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3
+100  openat(AT_FDCWD, "src/app/main.spl.bak", O_RDONLY|O_CLOEXEC) = 3
+100  openat(AT_FDCWD, "src/app/main.spl", O_RDONLY|O_CLOEXEC) = 3
+EOF
+    _run "$_t/f6.log"
+    _assert "non-spl ignored: opens" 1 "$_OPENS"
+
+    # 7. a large log stays exact (and cheap) — 2000 opens of 2 physical files.
+    : > "$_t/f7.log"
+    _i=0
+    while [ "$_i" -lt 1000 ]; do
+        printf '%s\n%s\n' \
+            '100  openat(AT_FDCWD, "src/app/main.spl", O_RDONLY|O_CLOEXEC) = 3' \
+            '100  openat(AT_FDCWD, "./real/leaf.spl", O_RDONLY|O_CLOEXEC) = 3' >> "$_t/f7.log"
+        _i=$((_i + 1))
+    done
+    _run "$_t/f7.log"
+    _assert "large log: opens" 2000 "$_OPENS"
+    _assert "large log: spellings" 2 "$_SPELL"
+    _assert "large log: physical" 2 "$_PHYS"
+
+    # 8. a log with zero .spl opens yields 0 units, so the caller is FORCED to
+    #    decide ERROR vs native-ok rather than reporting a vacuous pass.
+    printf '100  openat(AT_FDCWD, "/etc/hosts", O_RDONLY) = 3\n' > "$_t/f8.log"
+    _run "$_t/f8.log"
+    _assert "zero-open log: opens" 0 "$_OPENS"
+    _assert "zero-open log: spellings" 0 "$_SPELL"
+
+    # 9. a truncated path must ERROR, not resolve to something else. Run in a
+    #    subshell because parse_openat_log exits on this class.
+    printf '100  openat(AT_FDCWD, "src/app/ma"..., O_RDONLY) = 3\n' > "$_t/f9.log"
+    _out=$( ( PARSE_OPENS_FILE= ; parse_openat_log "$_t/f9.log" "$_t/tree" ) 2>&1; printf 'rc=%s' "$?" )
+    _ran=$((_ran + 1))
+    case $_out in
+        *'ERROR — nothing was checked'*truncated*rc=2*)
+            printf 'selftest ok   truncated path errors\n' ;;
+        *)  printf 'selftest FAIL truncated path errors: got [%s]\n' "$_out"
+            _fails=$((_fails + 1)) ;;
+    esac
+
+    # 10. an unrecognised lane must ERROR rather than silently measuring the
+    #     default lane — lane_env's reject path, which nothing else exercises.
+    _out=$( sh "$0" mcp-help --lane bogus --binary /bin/sh 2>&1; printf 'rc=%s' "$?" )
+    _ran=$((_ran + 1))
+    case $_out in
+        *'ERROR — nothing was checked (unknown lane bogus'*rc=2*)
+            printf 'selftest ok   unknown lane errors\n' ;;
+        *)  printf 'selftest FAIL unknown lane errors: got [%s]\n' "$(printf '%s' "$_out" | tail -1)"
+            _fails=$((_fails + 1)) ;;
+    esac
+
+    rm -rf "$_t"
+    if [ "$_fails" -ne 0 ]; then
+        printf 'FAIL — %s selftest assertion(s) checked, %s failed\n' "$_ran" "$_fails"
+        return 1
+    fi
+    printf 'selftest: %s assertion(s) checked, 0 failed\n' "$_ran"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+ENTRY=''
+BINARY=''
+OUT=''
+SAMPLES=3
+WANT_LANES=0
+LANE=default
+KEEP_HOME=0
+PARSE_LOG=''
+PARSE_CWD=$PWD
+MODE=measure
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --selftest)     MODE=selftest ;;
+        --list-entries) MODE=list ;;
+        --parse-log)    MODE=parse; PARSE_LOG=${2:-}; shift ;;
+        --parse-cwd)    PARSE_CWD=${2:-}; shift ;;
+        --binary)       BINARY=${2:-}; shift ;;
+        --out)          OUT=${2:-}; shift ;;
+        --samples)      SAMPLES=${2:-}; shift ;;
+        --lanes)        WANT_LANES=1 ;;
+        --lane)         LANE=${2:-}; shift
+                        case $LANE in default|interpreter) ;; *) err_exit "unknown lane $LANE (use default or interpreter)" ;; esac ;;
+        --keep-home)    KEEP_HOME=1 ;;
+        --verify-cold)  VERIFY_COLD=1 ;;
+        -*)             err_exit "unknown option $1" ;;
+        *)              [ -z "$ENTRY" ] || err_exit "more than one entry_id given"; ENTRY=$1 ;;
+    esac
+    shift
+done
+
+_WORK=$(mktemp -d) || err_exit "mktemp failed"
+trap 'rm -rf "$_WORK"' EXIT INT TERM
+
+if [ "$MODE" = list ]; then
+    for _e in $ENTRY_IDS; do printf '%s\n' "$_e"; done
+    printf 'PASS — %s entry id(s) listed\n' "$(printf '%s\n' $ENTRY_IDS | wc -l | tr -d ' ')"
+    exit 0
+fi
+
+if [ "$MODE" = selftest ]; then
+    selftest || exit 1
+    printf 'PASS — selftest only, no entry measured\n'
+    exit 0
+fi
+
+if [ "$MODE" = parse ]; then
+    selftest >/dev/null || { selftest; exit 1; }
+    [ -n "$PARSE_LOG" ] || err_exit "--parse-log needs a path"
+    PARSE_OPENS_FILE=$_WORK/opens
+    parse_openat_log "$PARSE_LOG" "$PARSE_CWD"
+    cat "$_WORK/units"
+    _n=$(wc -l < "$_WORK/units" | tr -d ' ')
+    [ "$_n" -gt 0 ] || err_exit "log $PARSE_LOG contained no .spl unit"
+    printf 'PASS — %s unit spelling(s) parsed from %s\n' "$_n" "$PARSE_LOG"
+    exit 0
+fi
+
+# --- measure -----------------------------------------------------------------
+selftest || exit 1
+
+[ -n "$ENTRY" ] || err_exit "no entry_id given (try --list-entries)"
+_ARGV_LINES=$(entry_argv "$ENTRY")
+[ -n "$_ARGV_LINES" ] || err_exit "unknown entry_id $ENTRY (try --list-entries)"
+
+lane_env "$LANE" > "$_WORK/laneenv" || err_exit "unknown lane $LANE (use default or interpreter)"
+
+command -v strace >/dev/null 2>&1 || err_exit "strace is not installed"
+command -v realpath >/dev/null 2>&1 || err_exit "realpath is not installed"
+
+if [ -z "$BINARY" ]; then BINARY=${SIMPLE_BIN:-}; fi
+if [ -z "$BINARY" ]; then BINARY=$ROOT/bin/simple; fi
+[ -x "$BINARY" ] || err_exit "no executable simple binary at $BINARY (pass --binary or set SIMPLE_BIN)"
+BINARY=$(realpath -e -- "$BINARY") || err_exit "cannot resolve binary path"
+
+# The measurement cwd is the repo root of THIS checkout: relative spellings in
+# the trace resolve against it, and a run from elsewhere would silently attribute
+# another worktree's source files to this tree's closure.
+cd "$ROOT" || err_exit "cannot cd to $ROOT"
+
+case $ENTRY in
+    lint-one-file) [ -f "$LINT_FIXTURE" ] || err_exit "lint fixture $LINT_FIXTURE is missing" ;;
+    test-one-spec) [ -f "$SPEC_FIXTURE" ] || err_exit "spec fixture $SPEC_FIXTURE is missing" ;;
+esac
+
+_oIFS=$IFS
+entry_stdin "$ENTRY" "$_WORK/stdin"
+_TIMEOUT=$(entry_timeout "$ENTRY")
+
+# `timeout` sits INSIDE strace so a server entry that never sees EOF is killed as
+# the tracee and the log is still complete up to that point; with timeout outside,
+# strace itself would be killed and the log could be truncated mid-line.
+# -s 4096 because strace's default string cap would truncate long paths, and a
+# truncated path is a wrong measurement, not a rounded one (parse fails closed).
+# The measured process runs in a hermetic environment: a fresh empty HOME (so no
+# warm per-user cache under ~/.simple can suppress a .spl open), SIMPLE_EXECUTION_MODE
+# forced to match the requested lane, and SIMPLE_READ_TRACE cleared so an
+# inherited value cannot add stderr work to the traced run. Measured 2026-09-12:
+# an empty HOME leaves the .spl spelling set byte-identical (178 both ways for
+# mcp-help) while removing 1,371 unrelated openat calls, so this changes what is
+# NOT measured, not what is.
+set --
+IFS='
+'
+for _a in $_ARGV_LINES; do set -- "$@" "$_a"; done
+IFS=$_oIFS
+
+mkdir -p "$_WORK/home"
+_ENVPFX="env -u SIMPLE_EXECUTION_MODE -u SIMPLE_READ_TRACE"
+[ "$KEEP_HOME" = 1 ] || _ENVPFX="$_ENVPFX HOME=$_WORK/home"
+while IFS= read -r _ev; do [ -n "$_ev" ] && _ENVPFX="$_ENVPFX $_ev"; done < "$_WORK/laneenv"
+
+strace -f -s 4096 -e trace=openat -o "$_WORK/trace.log" \
+    timeout "$_TIMEOUT" $_ENVPFX "$BINARY" "$@" \
+    < "$_WORK/stdin" > "$_WORK/stdout" 2> "$_WORK/stderr"
+_TRACE_RC=$?
+
+[ -f "$_WORK/trace.log" ] || err_exit "strace produced no log (rc=$_TRACE_RC)"
+
+# A killed tracee still leaves a COMPLETE log of everything it opened before it
+# died, so a timed-out run parses cleanly and yields a SMALLER closure — which
+# reads as an improvement and would be frozen as the baseline. Refuse it. Only
+# the kill signals are refused: a non-zero exit from the entry itself is fine and
+# is expected (mcp-info-call exits 1 on a pre-existing E1002), because the entry
+# still finished loading what it loads.
+case $_TRACE_RC in
+    124|137|152) err_exit "entry $ENTRY lane $LANE was killed after ${_TIMEOUT}s (rc=$_TRACE_RC) before finishing; a truncated run is not a closure" ;;
+esac
+
+PARSE_OPENS_FILE=$_WORK/opens
+parse_openat_log "$_WORK/trace.log" "$ROOT"
+
+SPL_OPENS=$(cat "$_WORK/opens")
+UNIT_SPELLINGS=$(wc -l < "$_WORK/units" | tr -d ' ')
+sort -u -t"$(printf '\t')" -k2,2 "$_WORK/units" > "$_WORK/physical"
+PHYSICAL_FILES=$(wc -l < "$_WORK/physical" | tr -d ' ')
+SOURCE_BYTES_SPELLINGS=$(awk -F'\t' '{s+=$3} END{print s+0}' "$_WORK/units")
+SOURCE_BYTES_PHYSICAL=$(awk -F'\t' '{s+=$3} END{print s+0}' "$_WORK/physical")
+
+if [ "$SPL_OPENS" -eq 0 ] && [ "$(entry_native_ok "$ENTRY")" != 1 ]; then
+    err_exit "entry $ENTRY opened no .spl file (rc=$_TRACE_RC); a non-native entry that reads nothing is not a measurement"
+fi
+
+# Internal consistency, NOT a warm-cache detector. The lane brief proposed
+# "detect the warm-cache case by an opens count below physical_files"; with this
+# method that is unreachable by construction — every physical file is the
+# realpath of at least one counted open, so spl_opens >= unit_spellings >=
+# physical_files always holds and the check could never fire. Shipping it as the
+# cache defence would have been a vacuous gate. It is kept only for what it CAN
+# catch: a parser bug that made the three counts disagree.
+#
+# A warm content cache does not show up as fewer OPENS, it shows up as fewer
+# PHYSICAL FILES — which reads as an improvement and would sail through the
+# ratchet. The two real defences are therefore: the hermetic empty HOME above,
+# and --verify-cold below.
+if [ "$SPL_OPENS" -lt "$PHYSICAL_FILES" ] || [ "$UNIT_SPELLINGS" -lt "$PHYSICAL_FILES" ]; then
+    err_exit "internal inconsistency for $ENTRY: spl_opens=$SPL_OPENS unit_spellings=$UNIT_SPELLINGS physical_files=$PHYSICAL_FILES (opens >= spellings >= physical must hold)"
+fi
+
+# --verify-cold: trace the entry a SECOND time in the same hermetic environment
+# and require an identical physical set. This is the detector that actually
+# works. If anything the first run warmed (a per-user content cache, a generated
+# .smf, a resolver memo on disk) suppressed source reads, the second run resolves
+# fewer physical files and the two sets differ. Costs one extra traced run, so it
+# is opt-in and used when RECORDING a baseline rather than on every check.
+if [ "${VERIFY_COLD:-0}" = 1 ]; then
+    strace -f -s 4096 -e trace=openat -o "$_WORK/trace2.log" \
+        timeout "$_TIMEOUT" $_ENVPFX "$BINARY" "$@" \
+        < "$_WORK/stdin" > /dev/null 2>/dev/null
+    cp "$_WORK/physical" "$_WORK/physical.first"
+    cp "$_WORK/units" "$_WORK/units.first"
+    PARSE_OPENS_FILE=$_WORK/opens2
+    parse_openat_log "$_WORK/trace2.log" "$ROOT"
+    sort -u -t"$(printf '\t')" -k2,2 "$_WORK/units" | cut -f2 > "$_WORK/phys2"
+    cut -f2 "$_WORK/physical.first" > "$_WORK/phys1"
+    if ! cmp -s "$_WORK/phys1" "$_WORK/phys2"; then
+        err_exit "entry $ENTRY is not cold-stable: a second identical run resolved $(wc -l < "$_WORK/phys2" | tr -d ' ') physical files against $(wc -l < "$_WORK/phys1" | tr -d ' ') in the first, so something the first run warmed is suppressing source reads"
+    fi
+    # Restore BOTH: the second parse overwrote units, and emit_sdn reads it, so
+    # leaving run 2's rows under run 1's header would make the receipt disagree
+    # with itself.
+    cp "$_WORK/physical.first" "$_WORK/physical"
+    cp "$_WORK/units.first" "$_WORK/units"
+fi
+
+# Optional lane attribution. One extra untraced run; off by default because on a
+# slow entry it doubles the cost for a field that is informative, not ratcheted.
+if [ "$WANT_LANES" = 1 ]; then
+    timeout "$_TIMEOUT" $_ENVPFX SIMPLE_READ_TRACE=1 "$BINARY" "$@" \
+        < "$_WORK/stdin" > /dev/null 2> "$_WORK/readtrace" || :
+    grep '^\[read\] ' "$_WORK/readtrace" > "$_WORK/readtrace.f" 2>/dev/null || :
+    mv -f "$_WORK/readtrace.f" "$_WORK/readtrace" 2>/dev/null || : > "$_WORK/readtrace"
+else
+    : > "$_WORK/readtrace"
+fi
+
+# Informative timing. Untraced (strace multiplies syscall cost), median of
+# $SAMPLES, with max RSS from GNU time when this host has it.
+: > "$_WORK/walls"
+MAX_RSS=0
+if [ "$SAMPLES" -gt 0 ] && [ -x /usr/bin/time ]; then
+    _i=0
+    while [ "$_i" -lt "$SAMPLES" ]; do
+        /usr/bin/time -f '%e %M' -o "$_WORK/t" \
+            timeout "$_TIMEOUT" $_ENVPFX "$BINARY" "$@" < "$_WORK/stdin" >/dev/null 2>/dev/null || :
+        if [ -s "$_WORK/t" ]; then
+            awk '{printf "%d\n", $1 * 1000}' "$_WORK/t" >> "$_WORK/walls"
+            _r=$(awk '{print $2+0}' "$_WORK/t")
+            [ "$_r" -gt "$MAX_RSS" ] && MAX_RSS=$_r
+        fi
+        _i=$((_i + 1))
+    done
+fi
+WALL_SAMPLES=$(wc -l < "$_WORK/walls" | tr -d ' ')
+if [ "$WALL_SAMPLES" -gt 0 ]; then
+    WALL_MS_P50=$(sort -n "$_WORK/walls" | sed -n "$(((WALL_SAMPLES + 1) / 2))p")
+else
+    WALL_MS_P50=0
+fi
+
+BINARY_SHA256=$(sha256sum "$BINARY" | awk '{print $1}')
+BINARY_SIZE=$(stat -c '%s' "$BINARY")
+BINARY_MTIME=$(date -u -d "@$(stat -c '%Y' "$BINARY")" '+%Y-%m-%dT%H:%M:%SZ')
+MEASURED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+HOST_ARCH=$(uname -m)
+HOST_LOAD1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)
+ARGV_JOINED=$(printf '%s' "$_ARGV_LINES" | tr '\n' "$US")
+
+emit_sdn() {
+    printf 'entry_closure_receipt |schema, entry_id, argv, cwd, binary_path, binary_sha256, binary_size, binary_mtime_utc, method, spl_opens, unit_spellings, physical_files, source_bytes_spellings, source_bytes_physical, wall_ms_p50, wall_samples, max_rss_kib, measured_at_utc, host_arch, host_load1, lane|\n'
+    printf '    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s\n' \
+        "$(sdn_quote "$SCHEMA")" "$ENTRY" "$(sdn_quote "$ARGV_JOINED")" "$(sdn_quote "$ROOT")" \
+        "$(sdn_quote "$BINARY")" "$BINARY_SHA256" "$BINARY_SIZE" "$BINARY_MTIME" \
+        "$(sdn_quote "$METHOD")" "$SPL_OPENS" "$UNIT_SPELLINGS" "$PHYSICAL_FILES" \
+        "$SOURCE_BYTES_SPELLINGS" "$SOURCE_BYTES_PHYSICAL" "$WALL_MS_P50" "$WALL_SAMPLES" \
+        "$MAX_RSS" "$MEASURED_AT" "$(sdn_quote "$HOST_ARCH")" "$HOST_LOAD1" "$(sdn_quote "$LANE")"
+    printf 'units |entry_id, spelling, realpath, size, lanes|\n'
+    while IFS="$(printf '\t')" read -r _sp _rp _sz; do
+        [ -n "$_sp" ] || continue
+        if [ "$WANT_LANES" = 1 ]; then _ln=$(lane_of_path "$_sp"); else _ln=unknown; fi
+        printf '    %s, %s, %s, %s, %s\n' "$ENTRY" "$(sdn_quote "$_sp")" "$(sdn_quote "$_rp")" "$_sz" "$(sdn_quote "$_ln")"
+    done < "$_WORK/units"
+}
+
+if [ -n "$OUT" ]; then
+    emit_sdn > "$OUT" || err_exit "cannot write $OUT"
+    printf 'receipt: %s\n' "$OUT"
+else
+    emit_sdn
+fi
+
+printf 'PASS — %s unit spelling(s) checked for %s lane=%s: spl_opens=%s unit_spellings=%s physical_files=%s source_bytes_spellings=%s source_bytes_physical=%s (binary %s, rc=%s)\n' \
+    "$UNIT_SPELLINGS" "$ENTRY" "$LANE" "$SPL_OPENS" "$UNIT_SPELLINGS" "$PHYSICAL_FILES" \
+    "$SOURCE_BYTES_SPELLINGS" "$SOURCE_BYTES_PHYSICAL" "$BINARY_SHA256" "$_TRACE_RC"
+exit 0

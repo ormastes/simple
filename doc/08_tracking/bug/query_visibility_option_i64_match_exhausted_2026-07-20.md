@@ -1,4 +1,5 @@
 # query_visibility / lsp_query CLIs crash: `Option<i64>` match exhausted on a raw i64
+**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/02_integration/app/query_visibility_surfaces_spec.spl -> 0 passed, 6 failed, still reproduces)
 
 **Date:** 2026-07-20
 **Component:** identifier/char-boundary resolution helper shared by
@@ -85,3 +86,32 @@ not `.?`) was not root-caused further; out of scope for this triage pass
 
 Left the 3 spec files unmodified — they are correct as written and
 correctly detect this defect; nothing to fix on the test side.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/02_integration/app/query_visibility_surfaces_spec.spl` on the deployed seed; 6 of 6 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-12 — not reproducible
+
+Binary: `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` sha256 `3d120a6f`
+
+```
+SIMPLE_RUST_SEED_WARNING=0 bin/simple run src/app/cli/query_visibility.spl symbols \
+  src/compiler/10.frontend/testdata/visibility_query_fixture.spl
+```
+
+Exits 0 and emits well-formed JSON for all five fixture symbols (`peer_api`,
+`parent_api`, `package_api`, `friend_api`, `hidden_api`, each with a populated
+`simpleVisibility` block) — no `match expression exhausted` error.
+
+The helper the record blamed,
+`src/app/cli/_QueryVisibility/symbol_resolution.spl:105-125`, no longer
+match-unwraps an `Option<i64>`: it scans `chars[idx]` with plain `i64` bounds
+tests (`if idx >= 0 and idx < chars.len() and ...`), so there is no `Some(idx)` /
+`Nil` match left to exhaust.
+
+Note: the `--requester src/compiler/35.semantics/testdata/visibility_query_fixture.spl`
+argument in the original repro cannot be reproduced verbatim — that file does not
+exist in the tree. The `symbols` subcommand without it is sufficient to show the
+crash is gone.
+
+- Status: CLOSED (2026-09-12) — not reproducible on 3d120a6f

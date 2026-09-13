@@ -1,5 +1,7 @@
 # Stage 4 tooling matrix receipts were not resumable
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Claimed by `/root/lib_root_triage` for the scoped Phase 4 bootstrap recovery
@@ -180,3 +182,7 @@ source-drift, and receipt/log/command/marker tamper cases.  They remain
 unexecuted until the final reviewer returns `PASS_FOR_TEST`; passing that
 fixture would still authorize only the next scoped review, not a real Stage 4
 matrix run.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

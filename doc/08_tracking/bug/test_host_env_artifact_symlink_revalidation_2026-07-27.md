@@ -1,5 +1,7 @@
 # Test-host artifact symlink revalidation
 
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
 `test_host_env` re-hashes retained RenderDoc and framebuffer artifacts through
 `file_exists`/`file_hash_sha256`, which follow symlinks. Replacing a previously
 valid artifact with a symlink to identical bytes can therefore preserve a PASS
@@ -35,3 +37,7 @@ open/fstat/hash-on-fd operation.
   layout-opaque platform bridge: POSIX `lstat`/`S_ISREG` and a Windows
   reparse-aware equivalent. Do not guess `struct stat` layouts, depend on the
   hosted runtime, or treat `fopen` as proof.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

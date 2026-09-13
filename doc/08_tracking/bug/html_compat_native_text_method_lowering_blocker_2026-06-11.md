@@ -1,5 +1,18 @@
 # html_compat native text method lowering blocker
 
+## Closed 2026-09-13 — stale by host; the named blocker is resolved in-entry
+
+- **inferred** The entry's only repro is pinned to a dead Linux checkout:
+  `SIMPLE_LIB=src /home/ormastes/dev/pub/simple/bin/simple compile ... --native`. That
+  absolute path does not exist on any current host, so the recipe cannot be re-run.
+- **inferred** The entry itself states the blocker "is resolved for `substring` in this
+  slice" (seed LLVM builtin-method path → `rt_slice`; pure-Simple MIR mirrors typed
+  `text.substring`/`text.slice`), and carries two `status=pass` evidence rows.
+- **measured** The probe source survives (`src/app/wm_compare/html_compat_geometry_probe_native_full_smoke.spl`),
+  but the native lane is not exercisable here: `native-build` fails on this Windows host
+  with `SCV-E-SNAPSHOT: snapshot-cache-root-not-owned` before codegen.
+
+
 Date: 2026-06-11
 
 ## Summary

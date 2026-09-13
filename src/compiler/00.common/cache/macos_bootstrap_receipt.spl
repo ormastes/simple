@@ -1,0 +1,145 @@
+# codex-impl: portable macOS bootstrap evidence contract.
+
+use std.common.crypto.sha256.{sha256_text}
+
+const MACOS_BOOTSTRAP_RECEIPT_SCHEMA_V1 = "simple-macos-bootstrap-receipt-v1"
+
+enum MacosBootstrapPhaseV1:
+    Phase2
+    Phase3
+
+impl MacosBootstrapPhaseV1:
+    fn name() -> text:
+        match self:
+            MacosBootstrapPhaseV1.Phase2: "phase2"
+            MacosBootstrapPhaseV1.Phase3: "phase3"
+
+fn macos_bootstrap_hash256_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f')):
+            return false
+    true
+
+fn macos_bootstrap_frame_v1(name: text, value: text) -> text:
+    name.len().to_text() + ":" + name + value.len().to_text() + ":" + value
+
+struct MacosBootstrapReceiptV1:
+    schema_version: text
+    run_id: text
+    phase: MacosBootstrapPhaseV1
+    target_triple: text
+    host_architecture: text
+    artifact_architecture: text
+    source_revision_sha256: text
+    parent_compiler_sha256: text
+    provider_receipt_sha256: text
+    runtime_bundle_sha256: text
+    sdk_identity_sha256: text
+    command_sha256: text
+    artifact_sha256: text
+    wall_time_ms: i64
+    cpu_time_ms: i64
+    peak_rss_bytes: i64
+    retained_rss_bytes: i64
+    planned_modules: i64
+    compiled_modules: i64
+    cached_modules: i64
+    failed_modules: i64
+    source_reads: i64
+    critical_path_ms: i64
+    native_start_passed: bool
+    focused_compile_passed: bool
+    receiver_provider_contracts_passed: bool
+    results_line_seen: bool
+    rust_seed_artifact_substituted: bool
+
+impl MacosBootstrapReceiptV1:
+    fn validation_errors() -> [text]:
+        var errors: [text] = []
+        if self.schema_version != MACOS_BOOTSTRAP_RECEIPT_SCHEMA_V1:
+            errors.push("schema-version-mismatch")
+        if self.run_id == "" or self.run_id.contains("\n"):
+            errors.push("invalid-run-id")
+        val expected_target = if self.artifact_architecture == "aarch64":
+            "aarch64-apple-darwin"
+        else if self.artifact_architecture == "x86_64":
+            "x86_64-apple-darwin"
+        else:
+            ""
+        if expected_target == "":
+            errors.push("unsupported-artifact-architecture")
+        else if self.target_triple != expected_target:
+            errors.push("target-architecture-mismatch")
+        if self.host_architecture != self.artifact_architecture:
+            errors.push("non-native-execution")
+        for digest in [
+            self.source_revision_sha256, self.parent_compiler_sha256,
+            self.provider_receipt_sha256, self.runtime_bundle_sha256,
+            self.sdk_identity_sha256, self.command_sha256, self.artifact_sha256
+        ]:
+            if not macos_bootstrap_hash256_v1(digest):
+                errors.push("invalid-sha256")
+        if (self.wall_time_ms < 0 or self.cpu_time_ms < 0
+                or self.peak_rss_bytes < 0 or self.retained_rss_bytes < 0
+                or self.planned_modules < 0 or self.compiled_modules < 0
+                or self.cached_modules < 0 or self.failed_modules < 0
+                or self.source_reads < 0 or self.critical_path_ms < 0):
+            errors.push("negative-counter")
+        if self.compiled_modules + self.cached_modules + self.failed_modules != self.planned_modules:
+            errors.push("module-count-mismatch")
+        if self.retained_rss_bytes > self.peak_rss_bytes:
+            errors.push("retained-rss-exceeds-peak")
+        if not self.native_start_passed:
+            errors.push("native-start-missing")
+        if not self.focused_compile_passed:
+            errors.push("focused-compile-missing")
+        if not self.receiver_provider_contracts_passed:
+            errors.push("receiver-provider-contracts-missing")
+        if not self.results_line_seen:
+            errors.push("results-line-missing")
+        if self.rust_seed_artifact_substituted:
+            errors.push("rust-seed-artifact-substitution")
+        errors
+
+    fn is_admissible() -> bool:
+        self.validation_errors().len() == 0
+
+    fn canonical_text() -> text:
+        var fields: [text] = []
+        fields.push(macos_bootstrap_frame_v1("schema_version", self.schema_version))
+        fields.push(macos_bootstrap_frame_v1("run_id", self.run_id))
+        fields.push(macos_bootstrap_frame_v1("phase", self.phase.name()))
+        fields.push(macos_bootstrap_frame_v1("target_triple", self.target_triple))
+        fields.push(macos_bootstrap_frame_v1("host_architecture", self.host_architecture))
+        fields.push(macos_bootstrap_frame_v1("artifact_architecture", self.artifact_architecture))
+        fields.push(macos_bootstrap_frame_v1("source_revision_sha256", self.source_revision_sha256))
+        fields.push(macos_bootstrap_frame_v1("parent_compiler_sha256", self.parent_compiler_sha256))
+        fields.push(macos_bootstrap_frame_v1("provider_receipt_sha256", self.provider_receipt_sha256))
+        fields.push(macos_bootstrap_frame_v1("runtime_bundle_sha256", self.runtime_bundle_sha256))
+        fields.push(macos_bootstrap_frame_v1("sdk_identity_sha256", self.sdk_identity_sha256))
+        fields.push(macos_bootstrap_frame_v1("command_sha256", self.command_sha256))
+        fields.push(macos_bootstrap_frame_v1("artifact_sha256", self.artifact_sha256))
+        fields.push(macos_bootstrap_frame_v1("wall_time_ms", self.wall_time_ms.to_text()))
+        fields.push(macos_bootstrap_frame_v1("cpu_time_ms", self.cpu_time_ms.to_text()))
+        fields.push(macos_bootstrap_frame_v1("peak_rss_bytes", self.peak_rss_bytes.to_text()))
+        fields.push(macos_bootstrap_frame_v1("retained_rss_bytes", self.retained_rss_bytes.to_text()))
+        fields.push(macos_bootstrap_frame_v1("planned_modules", self.planned_modules.to_text()))
+        fields.push(macos_bootstrap_frame_v1("compiled_modules", self.compiled_modules.to_text()))
+        fields.push(macos_bootstrap_frame_v1("cached_modules", self.cached_modules.to_text()))
+        fields.push(macos_bootstrap_frame_v1("failed_modules", self.failed_modules.to_text()))
+        fields.push(macos_bootstrap_frame_v1("source_reads", self.source_reads.to_text()))
+        fields.push(macos_bootstrap_frame_v1("critical_path_ms", self.critical_path_ms.to_text()))
+        fields.push(macos_bootstrap_frame_v1("native_start_passed", self.native_start_passed.to_text()))
+        fields.push(macos_bootstrap_frame_v1("focused_compile_passed", self.focused_compile_passed.to_text()))
+        fields.push(macos_bootstrap_frame_v1("receiver_provider_contracts_passed", self.receiver_provider_contracts_passed.to_text()))
+        fields.push(macos_bootstrap_frame_v1("results_line_seen", self.results_line_seen.to_text()))
+        fields.push(macos_bootstrap_frame_v1("rust_seed_artifact_substituted", self.rust_seed_artifact_substituted.to_text()))
+        fields.join("")
+
+    fn digest() -> text:
+        sha256_text(self.canonical_text())
+
+export MACOS_BOOTSTRAP_RECEIPT_SCHEMA_V1, MacosBootstrapPhaseV1,
+    MacosBootstrapReceiptV1, macos_bootstrap_hash256_v1

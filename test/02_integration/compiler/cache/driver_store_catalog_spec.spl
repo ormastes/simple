@@ -21,6 +21,7 @@ use common.cache_host_authority_v1 (cache_host_open_root_v1)
 use common.cache_daemon_host_authority_v1.{cache_host_authenticate_peer_v1,
     cache_host_acquire_exclusive_lock_v1, cache_host_boot_identity_v1,
     cache_host_advance_writer_epoch_v1, cache_host_publish_readiness_v1}
+extern fn rt_file_read_text(path: text) -> text
 
 fn digest(ch: text) -> text:
     ch.repeat(64)
@@ -40,7 +41,7 @@ describe "action-root journal recovery":
         step("Stop recovery at the first corrupt record")
         val journal = ActionRootJournalV1.empty(2)
         journal.append(digest("a"), "file_ast", digest("b"), digest("c")).unwrap()
-        val corrupt = journal.bytes.slice(0, journal.bytes.len() - 2) + "0\n"
+        val corrupt = journal.bytes.slice(0, journal.bytes.len() - 2) + "0\\n"
         val recovered = recover_action_root_journal_v1(corrupt, 2)
         expect(recovered.records.len()).to_equal(0)
         expect(recovered.quarantined_tail).to_equal(true)
@@ -48,10 +49,14 @@ describe "action-root journal recovery":
 describe "two-generation checkpoint selection":
     it "falls back to the prior valid generation after a torn newest slot":
         step("Select the highest checksum-valid superblock slot")
-        val journal = "record-one\n"
+        val journal = "record-one\\n"
         val superblock = CheckpointSuperblockV1.empty()
-        val first = superblock.publish(journal, digest("a"))
-        val second = superblock.publish(journal, digest("b"))
+        val first_result = superblock.publish(journal, digest("a"))
+        expect(first_result.is_ok()).to_equal(true)
+        val first = first_result.unwrap()
+        val second_result = superblock.publish(journal, digest("b"))
+        expect(second_result.is_ok()).to_equal(true)
+        val second = second_result.unwrap()
         superblock.slot_b = Some(CheckpointSlotV1(generation: second.generation,
             journal_bytes: second.journal_bytes, journal_digest: second.journal_digest,
             catalog_digest: second.catalog_digest, checksum: digest("0")))
@@ -98,6 +103,15 @@ describe "rebuildable catalog and private writer authority":
             journal, catalog, digest("a"), "file_ast", digest("b"), digest("c"))
         expect(result.is_err()).to_equal(true)
         expect(journal.bytes).to_equal("")
+
+    it "retains and revalidates writer receipts before each mutation":
+        step("Keep epoch revocation authoritative after admission")
+        val source = rt_file_read_text("src/compiler/80.driver/cache/gateway/cache_writer_v1.spl") ?? ""
+        expect(source.contains("peer: AuthenticatedPeerReceiptV1")).to_equal(true)
+        expect(source.contains("readiness: CacheReadinessReceiptV1")).to_equal(true)
+        expect(source.contains("readiness_nonce: [u8]")).to_equal(true)
+        expect(source.contains("epoch: DurableWriterEpochV1")).to_equal(true)
+        expect(source.contains("cache_host_validate_readiness_v1(self.peer")).to_equal(true)
 
 describe "generation-first cache gateway":
     it "never promotes a catalog row to a hit without anchored CAS bytes":

@@ -1,0 +1,94 @@
+# Test-only recovery defect probes for the canonical executable-mapping owner.
+# Each case drives the production state transition API; no production code is
+# changed here.  The expected values freeze the ownership invariants called out
+# by the L4 recovery review.
+
+use std.spec.*
+use compiler.loader.loader.exec_mapping_cleanup_v1.{
+    ExecCleanupNativeOutcomeKindV1,
+    exec_cleanup_state_v1,
+    exec_cleanup_completion_mailbox_v1,
+    exec_cleanup_reserve_v1,
+    exec_cleanup_begin_construct_v1,
+    exec_cleanup_construct_dispatch_v1,
+    exec_cleanup_release_dispatch_v1,
+    exec_cleanup_arm_native_dispatch_v1,
+    exec_cleanup_publish_native_outcome_v1,
+    exec_cleanup_drain_native_outcomes_v1,
+    exec_cleanup_retry_at_map_entry_v1,
+    exec_cleanup_bind_failure_v1,
+    exec_cleanup_check_v1}
+
+fn reserved(mapping_id: text = "canonical-map") -> any:
+    exec_cleanup_reserve_v1(exec_cleanup_state_v1(), mapping_id, 4096)
+
+describe "canonical executable mapping cleanup recovery defects v1":
+    it "retains the canonical mapping_id through the close permit":
+        step("reserve and bind one canonical mapping")
+        val reservation = reserved("canonical-map-id")
+        val bound = exec_cleanup_begin_construct_v1(
+            reservation.state, reservation.token, 4096)
+        val dispatch = exec_cleanup_construct_dispatch_v1(bound)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, dispatch)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            mailbox, dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.ConstructFailed)).to_equal(true)
+        val failed = exec_cleanup_drain_native_outcomes_v1(bound.state, mailbox)
+        expect(failed.dispatch.ticket.mapping_id).to_equal("canonical-map-id")
+        expect(failed.dispatch.transition.permit.mapping_id).to_equal("canonical-map-id")
+
+    it "rejects a release outcome against a construction action":
+        step("arm construction and submit the incompatible release outcome")
+        val reservation = reserved("action-match")
+        val bound = exec_cleanup_begin_construct_v1(
+            reservation.state, reservation.token, 4096)
+        val dispatch = exec_cleanup_construct_dispatch_v1(bound)
+        val mailbox = exec_cleanup_completion_mailbox_v1()
+        expect(exec_cleanup_arm_native_dispatch_v1(mailbox, dispatch)).to_equal(true)
+        expect(exec_cleanup_publish_native_outcome_v1(
+            mailbox, dispatch.ticket,
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseSucceeded)).to_equal(false)
+
+    it "does not manufacture a permit for an unarmed retry":
+        step("leave a construction action unarmed and inspect retry admission")
+        val reservation = reserved("permitless-retry")
+        val bound = exec_cleanup_begin_construct_v1(
+            reservation.state, reservation.token, 4096)
+        val retry = exec_cleanup_retry_at_map_entry_v1(bound.state, [])
+        expect(retry.reason).to_equal("retry-drain-empty")
+        expect(retry.permit_present).to_equal(false)
+
+    it "keeps the action generation above its zero sentinel":
+        step("bind a mapping and inspect the issued outcome generation")
+        val reservation = reserved("generation-sentinel")
+        val bound = exec_cleanup_begin_construct_v1(
+            reservation.state, reservation.token, 4096)
+        expect(exec_cleanup_check_v1(bound.state)).to_equal(true)
+        expect(bound.state.slots[0].outcome_action_generation).to_be_greater_than(0)
+        expect(bound.state.slots[0].outcome_action_generation).to_be_less_than(
+            bound.state.next_action_generation)
+
+    it "recovers an unarmed pending construction without dispatching a free":
+        step("verify an unarmed pending construction remains owned")
+        val reservation = reserved("pending-unarmed")
+        val bound = exec_cleanup_begin_construct_v1(
+            reservation.state, reservation.token, 4096)
+        val dispatch = exec_cleanup_construct_dispatch_v1(bound)
+        expect(dispatch.ticket_present).to_equal(true)
+        expect(bound.state.reserved_bytes).to_equal(4096)
+        val retry = exec_cleanup_retry_at_map_entry_v1(bound.state, [bound.token])
+        expect(retry.reason).to_equal("retry-drain-empty")
+        expect(retry.state.reserved_bytes).to_equal(4096)
+
+    it "publishes an explicit free backlog after construction bind failure":
+        step("retain the real address and extent for the explicit free backlog")
+        val reservation = reserved("free-backlog")
+        val failed = exec_cleanup_bind_failure_v1(
+            reservation.state, reservation.token, 4096)
+        expect(failed.ticket_present).to_equal(true)
+        expect(failed.ticket.mapping_id).to_equal("free-backlog")
+        expect(failed.ticket.address).to_equal(4096)
+        expect(failed.ticket.extent).to_equal(4096)
+        expect(failed.operation).to_equal(
+            ExecCleanupNativeOutcomeKindV1.NativeReleaseFailed)

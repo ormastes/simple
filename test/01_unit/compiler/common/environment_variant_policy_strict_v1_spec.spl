@@ -1,0 +1,66 @@
+use std.spec.*
+use compiler.common.structural_contracts.environment_variant_policy_v1.*
+use compiler.common.structural_contracts.offload_profile.{OffloadMode}
+
+fn layer(prefer: text = "", require_value: text = "", cpu: text = "",
+         offload: text = "", fallback: text = "") -> EnvironmentVariantPolicyLayerV1:
+    EnvironmentVariantPolicyLayerV1(parser_prefer: prefer, parser_require: require_value,
+        host_cpu_max: cpu, frontend_offload: offload, frontend_fallback: fallback)
+
+fn admin(provider: text = "", cpu: text = "", offload: text = "", fallback: text = "") -> EnvironmentVariantAdminRestrictionsV1:
+    EnvironmentVariantAdminRestrictionsV1(parser_provider: provider, host_cpu_max: cpu,
+        frontend_offload_max: offload, frontend_fallback: fallback)
+
+fn inputs(cli: EnvironmentVariantPolicyLayerV1 = layer(), env: EnvironmentVariantPolicyLayerV1 = layer(),
+          project: EnvironmentVariantPolicyLayerV1 = layer(), user: EnvironmentVariantPolicyLayerV1 = layer(),
+          restrictions: EnvironmentVariantAdminRestrictionsV1 = admin()) -> EnvironmentVariantPolicyInputsV1:
+    EnvironmentVariantPolicyInputsV1(cli: cli, env: env, project: project,
+        user: user, admin: restrictions)
+
+describe "strict environment variant policy V1":
+    it "resolves every adjacent precedence pair independently":
+        val cli_env = environment_variant_policy_resolve_v1(inputs(
+            cli: layer(cpu: "x86-64-v2"), env: layer(cpu: "x86-64-v3"))).unwrap()
+        val env_project = environment_variant_policy_resolve_v1(inputs(
+            env: layer(cpu: "x86-64-v2"), project: layer(cpu: "x86-64-v3"))).unwrap()
+        val project_user = environment_variant_policy_resolve_v1(inputs(
+            project: layer(cpu: "x86-64-v2"), user: layer(cpu: "x86-64-v3"))).unwrap()
+        expect(cli_env.host_cpu_source).to_equal("cli")
+        expect(env_project.host_cpu_source).to_equal("env")
+        expect(project_user.host_cpu_source).to_equal("project")
+
+    it "turns an administrator provider restriction into a hard effective predicate":
+        val decision = environment_variant_policy_resolve_v1(inputs(
+            cli: layer(prefer: "auto"), restrictions: admin(provider: "scalar"))).unwrap()
+        expect(decision.parser_prefer).to_equal(EnvironmentVariantParserProviderV1.Scalar)
+        expect(decision.parser_require).to_equal(EnvironmentVariantParserRequirementV1.Scalar)
+        expect(decision.parser_require_source).to_equal("admin")
+
+    it "rejects required selections and invalid tiers that conflict with restrictions":
+        expect(environment_variant_policy_resolve_v1(inputs(
+            cli: layer(require_value: "simd"), restrictions: admin(provider: "scalar"))).is_err()).to_equal(true)
+        expect(environment_variant_policy_resolve_v1(inputs(
+            cli: layer(cpu: "x86-64-v5"))).is_err()).to_equal(true)
+
+    it "applies administrator CPU limits only as a ceiling":
+        val tightened = environment_variant_policy_resolve_v1(inputs(
+            cli: layer(cpu: "x86-64-v4"), restrictions: admin(cpu: "x86-64-v2"))).unwrap()
+        val retained = environment_variant_policy_resolve_v1(inputs(
+            cli: layer(cpu: "x86-64-v1"), restrictions: admin(cpu: "x86-64-v3"))).unwrap()
+        expect(tightened.host_cpu_max).to_equal(EnvironmentVariantHostCpuMaxV1.X86_64V2)
+        expect(tightened.host_cpu_source).to_equal("admin")
+        expect(retained.host_cpu_max).to_equal(EnvironmentVariantHostCpuMaxV1.X86_64V1)
+        expect(retained.host_cpu_source).to_equal("cli")
+
+    it "tightens frontend offload without broadening and rejects a hard conflict":
+        val tightened = environment_variant_policy_resolve_v1(inputs(
+            cli: layer(offload: "resident"), restrictions: admin(offload: "on"))).unwrap()
+        val retained = environment_variant_policy_resolve_v1(inputs(
+            cli: layer(offload: "off"), restrictions: admin(offload: "resident"))).unwrap()
+        expect(tightened.frontend_offload).to_equal(OffloadMode.HybridVectorGpu)
+        expect(tightened.frontend_offload_source).to_equal("admin")
+        expect(retained.frontend_offload).to_equal(OffloadMode.CpuReference)
+        expect(retained.frontend_offload_source).to_equal("cli")
+        expect(environment_variant_policy_resolve_v1(inputs(
+            cli: layer(offload: "resident", fallback: "require-requested"),
+            restrictions: admin(offload: "on"))).is_err()).to_equal(true)

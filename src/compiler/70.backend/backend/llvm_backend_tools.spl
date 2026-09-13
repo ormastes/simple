@@ -13,7 +13,7 @@ use compiler.mir_opt.mod.{OptLevel}
 use compiler.interp.interpreter.llvm.tools.*
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists,
-    file_is_regular_no_follow, file_size_raw}
+    file_is_regular_no_follow, file_size_raw, file_read_text}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_sync_mut.path.{dirname}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
@@ -275,8 +275,34 @@ fn llvm_object_stage_fail(
     message: text, status: i64
 ) -> i64:
     var final_message = message
-    if not dir_remove(stage_dir, true):
+    # Preserve the IR the diagnostic NAMES, unconditionally, beside the
+    # caller-owned diagnostic file -- BEFORE the staging directory is removed
+    # below. SIMPLE_LLVM_KEEP_STAGE=1 keeps the staging directory, but the
+    # staging lives UNDER the caller's probe directory (e.g.
+    # check-bootstrap-stage2-struct-receiver.shs), which removes itself on exit
+    # -- so an llc rejection like "module.ll:114:3: multiple definition of local
+    # value named 'l22'" still named a file that no longer existed by the time
+    # anyone read the message. `diagnostic_path` is caller-owned and survives
+    # that teardown, so the copy goes there.
+    # See doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md (run 23).
+    var kept_ir_note = ""
+    if diagnostic_path != "":
+        val staged_ir = stage_dir + "/module.ll"
+        if file_exists(staged_ir):
+            val ir_text = file_read_text(staged_ir)
+            if ir_text != "":
+                val kept_ir = "{diagnostic_path}.module.ll"
+                if file_write(kept_ir, ir_text):
+                    kept_ir_note = "; IR kept at {kept_ir}"
+    # SIMPLE_LLVM_KEEP_STAGE=1 preserves module.ll/module.o for diagnosis. The
+    # staging directory is otherwise removed on failure, which makes an llc
+    # rejection ("module.ll:109:3: ...") unreadable: the file it names is gone
+    # by the time the message is printed.
+    if (rt_env_get("SIMPLE_LLVM_KEEP_STAGE") ?? "") == "1":
+        final_message = "{message}; staging kept at {stage_dir}"
+    elif not dir_remove(stage_dir, true):
         final_message = "{message}; private staging cleanup failed"
+    final_message = final_message + kept_ir_note
     backend_aot_write_diagnostic(diagnostic_path, final_message)
     if status == 0: 1 else: status
 
@@ -297,7 +323,14 @@ pub fn compile_ir_to_object_path(
         case nil: ()
     val parent = dirname(obj_path)
     val stage_dir = rt_secure_temp_dir(parent, "simple-llvm-aot")
-    if stage_dir == "":
+    # `.len() <= 0`, not `== ""`: rt_secure_temp_dir signals failure with an
+    # empty/nil text, and a NIL compares UNEQUAL to "" (the trap documented at
+    # driver_aot_native_output.spl:2333). With the old guard a failed creation
+    # flowed on as a nil stage_dir, every derived path became nil, and the
+    # eventual diagnostic interpolated that nil into an EMPTY message -- so the
+    # write reported success and left a zero-byte file, which is exactly the
+    # "diagnostic file empty" that made this failure unexplainable.
+    if stage_dir.len() <= 0:
         backend_aot_write_diagnostic(
             diagnostic_path, "secure temporary directory creation failed")
         return 1
@@ -395,6 +428,29 @@ pub fn compile_ir_to_object_path(
     if not elf_magic and not macho_magic and not coff_magic:
         return llvm_object_stage_fail(stage_dir, diagnostic_path,
             "llc produced object without recognized magic", 1)
+    # Clear a destination left behind by an EARLIER build in this cache scope.
+    #
+    # `obj_path` is `"{output_base}.{module}.o"` -- keyed by cache scope and
+    # module name, never by source content -- so a second native-build of the
+    # same module into the same scope finds its own previous output sitting
+    # there. `rt_file_publish_noreplace` answers 0 for that (EEXIST), and the
+    # arm below turns the 0 into the hard failure "AOT object destination
+    # already exists". MEASURED 2026-09-13 (lane BOOT-6) on the Stage-2
+    # candidate `67786227817bf45f...`: two positional builds of hello_world
+    # sharing one HOME fail on the SECOND one in either order --
+    # `SIMPLE_BOOTSTRAP=0` then `=1` fails the `=1` pass, `=1` then `=0` fails
+    # the `=0` pass -- which is the whole of the Stage-2 sanity blocker. The
+    # object staged above was verified (exists, regular, non-empty, recognized
+    # object magic) and was produced from the CURRENT MIR, so it is the
+    # authoritative content for this destination; anything already there is
+    # either stale output from an earlier source revision or an equivalent
+    # object from a concurrent build of the same inputs.
+    #
+    # The publish itself stays no-replace on purpose. Clearing first is not the
+    # same as clobbering: a publisher that wins the window between these two
+    # calls still makes this one fail closed rather than being overwritten.
+    if file_exists(obj_path):
+        file_delete(obj_path)
     val publish_status = rt_file_publish_noreplace(staged_obj_path, obj_path)
     if publish_status == 1:
         # Publication is the commit point. Once the canonical destination is

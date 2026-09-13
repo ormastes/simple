@@ -1,7 +1,7 @@
 # Phase-profile tracing breaks every rv32 firmware build: `rt_heap_registry_count` missing from the seed
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Severity:** high (blocks **all** `fw_rv32` firmware builds on pristine
   sources — the scripts enable the triggering flag unconditionally)
 - **Area:** `src/compiler/80.driver/driver_log_helpers.spl:9,45`
@@ -92,3 +92,6 @@ the firmware scripts, so it fails builds nobody asked to profile.
 ## Related
 
 - `doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md`
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

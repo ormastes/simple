@@ -1,0 +1,162 @@
+use std.common.crypto.sha256.{sha256_text}
+use std.io.{file_lock, file_unlock}
+use compiler.driver.action_graph.build_action_v1.{BuildActionV1, build_action_digest_v1, build_action_pool_name_v1, build_action_pool_parse_v1, build_action_validate_v1}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+extern fn rt_file_write(path: text, content: text) -> bool
+extern fn rt_file_rename(from_path: text, to_path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_fsync(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+val BUILD_GRAPH_SCHEMA_V1: text = "simple-build-action-graph-v1"
+val BUILD_GRAPH_MAX_BYTES_V1: i64 = 64 * 1024 * 1024
+
+struct PersistedBuildGraphV1:
+    generation: text
+    parent_generation: text
+    snapshot_revision: text
+    actions: [BuildActionV1]
+
+fn persisted_graph_validate_v1(graph: PersistedBuildGraphV1) -> text:
+    if graph.generation == "" or graph.snapshot_revision == "":
+        return "graph-identity-missing"
+    var ids: [text] = []
+    for action in graph.actions:
+        if build_action_validate_v1(action) != "ok":
+            return "action-invalid:{action.action_id}"
+        if action.snapshot_revision != graph.snapshot_revision:
+            return "snapshot-mismatch:{action.action_id}"
+        if ids.contains(action.action_id):
+            return "duplicate-action:{action.action_id}"
+        ids = ids.push(action.action_id)
+    for action in graph.actions:
+        for edge in action.dynamic_edges:
+            if not ids.contains(edge):
+                return "edge-missing:{action.action_id}:{edge}"
+    "ok"
+
+fn persisted_graph_digest_v1(graph: PersistedBuildGraphV1) -> text:
+    if persisted_graph_validate_v1(graph) != "ok":
+        return ""
+    var rows: [text] = []
+    for action in graph.actions:
+        rows = rows.push("{action.action_id}|{build_action_digest_v1(action)}")
+    sha256_text([
+        BUILD_GRAPH_SCHEMA_V1, graph.parent_generation,
+        graph.snapshot_revision, rows.sorted().join("\n"),
+    ].join("|"))
+
+fn persisted_graph_encode_v1(graph: PersistedBuildGraphV1) -> text:
+    val digest = persisted_graph_digest_v1(graph)
+    if digest == "" or digest != graph.generation:
+        return ""
+    var rows = [
+        BUILD_GRAPH_SCHEMA_V1,
+        "generation={graph.generation}",
+        "parent={graph.parent_generation}",
+        "snapshot={graph.snapshot_revision}",
+    ]
+    for action in graph.actions:
+        rows = rows.push([
+            "action={action.action_id}", action.command_identity,
+            build_action_pool_name_v1(action.pool), action.priority.to_text(),
+            action.snapshot_revision, action.memory_budget_bytes.to_text(),
+            action.restat_identity, action.inputs.sorted().join(","),
+            action.dynamic_edges.sorted().join(","),
+            action.outputs.sorted().join(","), build_action_digest_v1(action),
+        ].join("|"))
+    rows.join("\n")
+
+fn persisted_graph_list_decode_v1(value: text) -> [text]:
+    if value == "":
+        return []
+    value.split(",")
+
+fn persisted_graph_decode_v1(content: text) -> Result<PersistedBuildGraphV1, text>:
+    if content.len() <= 0 or content.len() > BUILD_GRAPH_MAX_BYTES_V1:
+        return Err("graph-size-invalid")
+    val lines = content.split("\n")
+    if lines.len() < 4 or lines[0] != BUILD_GRAPH_SCHEMA_V1 or not lines[1].starts_with("generation=") or not lines[2].starts_with("parent=") or not lines[3].starts_with("snapshot="):
+        return Err("graph-schema-invalid")
+    val generation = lines[1].substring(11)
+    val parent = lines[2].substring(7)
+    val snapshot = lines[3].substring(9)
+    var actions: [BuildActionV1] = []
+    var index = 4
+    while index < lines.len():
+        val fields = lines[index].split("|")
+        if fields.len() != 11 or not fields[0].starts_with("action="):
+            return Err("action-row-invalid")
+        val pool = build_action_pool_parse_v1(fields[2])
+        val priority = fields[3].to_i64()
+        val memory = fields[5].to_i64()
+        if pool == nil or priority == nil or memory == nil:
+            return Err("action-row-invalid")
+        val action = BuildActionV1(
+            fields[0].substring(7), fields[1],
+            persisted_graph_list_decode_v1(fields[7]),
+            persisted_graph_list_decode_v1(fields[8]),
+            persisted_graph_list_decode_v1(fields[9]), pool!, priority!,
+            fields[4], memory!, fields[6])
+        if build_action_digest_v1(action) != fields[10]:
+            return Err("action-digest-mismatch")
+        actions = actions.push(action)
+        index = index + 1
+    val graph = PersistedBuildGraphV1(generation, parent, snapshot, actions)
+    if persisted_graph_digest_v1(graph) != generation:
+        return Err("graph-digest-mismatch")
+    Ok(graph)
+
+fn persisted_graph_load_current_v1(root: text) -> Result<PersistedBuildGraphV1, text>:
+    val current = rt_file_read_regular_no_follow_bounded("{root}/CURRENT", 256)
+    if current == nil or current! == "" or current!.contains("/"):
+        return Err("current-invalid")
+    val content = rt_file_read_regular_no_follow_bounded(
+        "{root}/generations/{current!}.graph", BUILD_GRAPH_MAX_BYTES_V1)
+    if content == nil:
+        return Err("generation-missing")
+    val graph = persisted_graph_decode_v1(content!)?
+    if graph.generation != current!:
+        return Err("current-generation-mismatch")
+    Ok(graph)
+
+fn persisted_graph_publish_v1(root: text, graph: PersistedBuildGraphV1) -> text:
+    val encoded = persisted_graph_encode_v1(graph)
+    if root == "" or encoded == "":
+        return "graph-invalid"
+    if not rt_dir_create_all("{root}/generations"):
+        return "storage-unavailable"
+    val lock = file_lock("{root}/publication.lock", 5)
+    if lock < 0:
+        return "publication-lock-unavailable"
+    val current = rt_file_read_regular_no_follow_bounded("{root}/CURRENT", 256) ?? ""
+    if current != graph.parent_generation:
+        val _unlocked = file_unlock(lock)
+        return "parent-generation-changed"
+    val generation_path = "{root}/generations/{graph.generation}.graph"
+    val staged_path = "{generation_path}.tmp.{rt_getpid()}"
+    if rt_file_exists(generation_path):
+        val existing = rt_file_read_regular_no_follow_bounded(generation_path, BUILD_GRAPH_MAX_BYTES_V1)
+        val _unlocked = file_unlock(lock)
+        if existing != nil and existing! == encoded:
+            return "ok"
+        return "generation-conflict"
+    if not rt_file_write(staged_path, encoded) or not rt_file_fsync(staged_path) or not rt_file_rename(staged_path, generation_path):
+        rt_file_delete(staged_path)
+        val _unlocked = file_unlock(lock)
+        return "generation-write-failed"
+    val current_stage = "{root}/CURRENT.tmp.{rt_getpid()}"
+    if not rt_file_write(current_stage, graph.generation) or not rt_file_fsync(current_stage) or not rt_file_rename(current_stage, "{root}/CURRENT") or not rt_file_fsync(root):
+        rt_file_delete(current_stage)
+        val _unlocked = file_unlock(lock)
+        return "current-write-failed"
+    val _unlocked = file_unlock(lock)
+    "ok"
+
+export PersistedBuildGraphV1
+export persisted_graph_validate_v1, persisted_graph_digest_v1
+export persisted_graph_encode_v1, persisted_graph_decode_v1
+export persisted_graph_load_current_v1, persisted_graph_publish_v1

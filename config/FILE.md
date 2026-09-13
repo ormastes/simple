@@ -8,6 +8,7 @@ Configuration files for build, test, packaging, and tooling.
 |---|---|
 | `api` | API group registry (`api_registry.sdn`) — one schema for every callable API surface |
 | `bootstrap.sdn` | Bootstrap configuration |
+| `cef` | CEF (Chromium Embedded Framework) binary-distribution pin (`cef_pin.sdn`) — version + per-platform archive digests for the Chrome render dynlib |
 | `critical_files.sdn` | Critical file guard configuration |
 | `critical_mode.sdn` | Mission-critical mode: dynamic-acquire lint severity + gpu.backend manifest pin |
 | `di.sdn` | Dependency injection configuration |
@@ -18,6 +19,7 @@ Configuration files for build, test, packaging, and tooling.
 | `log_opt` | Toolchain build-log optimizer plugin descriptors |
 | `mcp` | MCP server configurations |
 | `packaging` | Packaging configurations |
+| `perf` | Entry-point import-closure baselines (`entry_closure_baselines.sdn`) frozen by check-entry-closure-ratchet.shs |
 | `process.sdn` | Process configuration |
 | `README_DOCKER.md` | Docker readme |
 | `resources` | Resource files |

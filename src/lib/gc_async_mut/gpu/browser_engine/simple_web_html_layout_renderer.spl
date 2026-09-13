@@ -2,6 +2,9 @@
 
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_layout.*
+use std.nogc_sync_mut.text_layout.font_renderer.{
+    font_measure_probe_report, resolved_font_front_memo_hits,
+    resolved_font_front_memo_misses}
 
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
@@ -91,6 +94,30 @@ pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32,
             if field == "h": return h.to_string()
             if field == "margin_t": return styles[i].margin_t.to_string()
             if field == "margin_b": return styles[i].margin_b.to_string()
+            # Paint-side width of the FIRST line of this element's first text
+            # child, computed exactly the way paint() computes it: through the
+            # shared per-byte advance table (`style_run_byte_advances`). Its
+            # whole point is that it must equal the element's LAYOUT box width
+            # `w` above -- layout sizing the run one way while paint stepped
+            # glyphs another is the `forms-media` pixel regression recorded in
+            # doc/08_tracking/bug/web_forms_media_pixel_regression_layout_paint_advance_disagree_2026-09-12.md.
+            if field == "paint_line_w":
+                var t = child_index.first_child[i]
+                while t >= 0:
+                    if nodes[t].tag == "#text":
+                        val tst = styles[t]
+                        val ttxt = if tst.white_space_nowrap: nodes[t].text_data else: nodes[t].text_trimmed
+                        val tstarts = boxes.wrap_starts[t]
+                        val tends = boxes.wrap_ends[t]
+                        if tstarts.len() > 0:
+                            return style_text_line_advance_width_with(
+                                style_run_byte_advances(tst, ttxt), ttxt,
+                                tstarts[0], tends[0],
+                                style_text_advance(tst), style_space_advance(tst)
+                            ).to_string()
+                        return "0"
+                    t = child_index.next_sibling[t]
+                return ""
         i = i + 1
     ""
 
@@ -1485,7 +1512,7 @@ fn _simple_web_layout_compose_retained(
     )
     val (commands, command_owner_nodes) = _html_draw_ir_commands(
         nodes, styles, boxes, width, height, vector_fonts,
-        input_hit_build.target_keys, overlay, visible_nodes, images
+        input_hit_build.target_keys, overlay, visible_nodes, images, clip_cache
     )
     val canvas_color = _web_canvas_background(
         nodes, styles, argb(255, 255, 255)
@@ -1822,6 +1849,12 @@ fn _simple_web_layout_compose_document(
         cpu_material_nodes, solid_material_nodes)
     if _phase_on:
         print "[web-phase] phase=style_end elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
+        # Cascade- and font-memo effectiveness, same level gate as the phase
+        # boundaries: a regression shows up here as a collapsed hit count long
+        # before it shows up as wall-clock on someone else's machine.
+        print "[web-phase] style_memo hits={web_style_cascade_memo_hits()} misses={web_style_cascade_memo_misses()} font_hits={resolved_font_front_memo_hits()} font_misses={resolved_font_front_memo_misses()}"
+        print "[web-phase] style_counters {web_style_counters_report()}"
+        print "[web-phase] font_measure {font_measure_probe_report()}"
     var styles = base_styles
     val animation_registry = _simple_web_extract_keyframes(html)
     var animation_schedule = _SimpleWebAnimationSchedule(

@@ -1,0 +1,402 @@
+# codex-impl
+# Coordinator-owned physical closure preparation for the strict three-payload
+# frontend profile.  This module never opens paths, reads reverse references,
+# or creates a fourth combined payload.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.common.cache_contract.physical_tld_v1.{
+    TldPayloadRoleV1, TldSectionRefV1, PhysicalTldHeaderV1,
+    three_payload_contract_digest_valid_v1, physical_tld_header_valid_v1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    SemanticScopeAttemptLiveRequestV1
+}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ThreePayloadSemanticRefV2, ClosureCoverageRootV1, ThreePayloadClosureSealV2,
+    ThreePayloadFallbackV1, ThreePayloadSemanticBinding, closure_coverage_dimension_v1,
+    three_payload_closure_seal_valid_v2, three_payload_closure_seal_digest_v2
+}
+use compiler.frontend.cache_artifact.physical_tld_codec_v1.{
+    PhysicalTldDecodeBoundsV1, decode_physical_tld_index_v1
+}
+use compiler.frontend.cache_artifact.three_payload_semantic_closure.{
+    ThreePayloadSemanticBindBounds, ThreePayloadSemanticView
+}
+
+pub struct ThreePayloadSnapshotV2:
+    snapshot_digest: text
+    source_digest: text
+    source_bytes: [u8]
+
+pub struct ThreePayloadParentGenerationV2:
+    generation_digest: text
+    prior_tld_digest: text?
+    prior_tld_bytes: [u8]?
+    prior_tld_header: PhysicalTldHeaderV1?
+
+pub struct ThreePayloadModuleClosureV2:
+    module_id: text
+    init_tld_digest: text
+    init_tld_bytes: [u8]
+    init_tld_header: PhysicalTldHeaderV1
+    semantic_refs: [ThreePayloadSemanticRefV2]
+    coverage_roots: [ClosureCoverageRootV1]
+
+pub struct ThreePayloadVerifiedObjectsV2:
+    compiler_semantics_digest: text
+    consumed_inputs_digest: text
+    verified_semantic_object_digests: [text]
+
+# Strict additive adapter input.  The legacy digest list above remains only a
+# compatibility model and is not exposed as authority by this path.
+pub struct ThreePayloadVerifiedSemanticBindingsV2:
+    compiler_semantics_digest: text
+    consumed_inputs_digest: text
+    bindings: [ThreePayloadSemanticBinding]
+    bind_bounds: ThreePayloadSemanticBindBounds
+
+pub struct ThreePayloadPackBoundsV2:
+    max_sections: i64
+    max_payload_bytes: i64
+    max_decode_bytes: i64
+
+# Driver-private by ownership convention.  It is public only so the adjacent
+# worker port can consume the opaque preparation result without redeclaring it.
+pub struct PreparedThreePayloadV2:
+    seal: ThreePayloadClosureSealV2
+    seal_digest: text
+    source_bytes: [u8]
+    prior_tld_bytes: [u8]?
+    prior_tld_header: PhysicalTldHeaderV1?
+    init_tld_bytes: [u8]
+    init_tld_header: PhysicalTldHeaderV1
+    verified_semantic_object_digests: [text]
+
+pub struct PreparedThreePayloadBoundV2:
+    prepared: PreparedThreePayloadV2
+    semantic_view: ThreePayloadSemanticView
+
+fn _digest_present_v2(value: text) -> bool:
+    three_payload_contract_digest_valid_v1(value)
+
+fn _bytes_digest_v2(value: [u8]) -> text:
+    sha256_u8_hex(value)
+
+fn _object_verified_v2(digest: text, verified: [text]) -> bool:
+    verified.index_of(digest) >= 0
+
+fn _coverage_complete_v2(roots: [ClosureCoverageRootV1]) -> bool:
+    if roots.len() != 9: return false
+    var index = 0
+    for root in roots:
+        if root.dimension != closure_coverage_dimension_v1(index) or
+                not _digest_present_v2(root.root_digest): return false
+        # Conservative requires a separate bounded complete-domain receipt,
+        # which this packer does not accept yet.
+        match root.coverage:
+            case Complete: pass
+            case Conservative: return false
+            case Unknown: return false
+        index = index + 1
+    true
+
+fn _section_equal_v2(left: TldSectionRefV1, right: TldSectionRefV1) -> bool:
+    left.role == right.role and left.section_index == right.section_index and
+        left.kind == right.kind and left.semantic_object_digest == right.semantic_object_digest and
+        left.offset == right.offset and left.stored_bytes == right.stored_bytes and
+        left.decoded_bytes == right.decoded_bytes and left.encoding_profile == right.encoding_profile
+
+fn _section_owned_v2(section: TldSectionRefV1, parent: ThreePayloadParentGenerationV2,
+                     module: ThreePayloadModuleClosureV2) -> bool:
+    if section.section_index < 0 or section.offset < 0 or section.stored_bytes < 0 or
+            section.decoded_bytes < 0 or section.encoding_profile == "" or
+            not _digest_present_v2(section.semantic_object_digest):
+        return false
+    match section.role:
+        case PriorModuleTld:
+            match parent.prior_tld_header:
+                case Some(header):
+                    section.section_index < header.sections.len() and
+                        _section_equal_v2(header.sections[section.section_index], section)
+                case nil: false
+        case PackageInitTld:
+            section.section_index < module.init_tld_header.sections.len() and
+                _section_equal_v2(module.init_tld_header.sections[section.section_index], section)
+
+fn _semantic_ref_valid_v2(reference: ThreePayloadSemanticRefV2,
+                          parent: ThreePayloadParentGenerationV2,
+                          module: ThreePayloadModuleClosureV2,
+                          verified: ThreePayloadVerifiedObjectsV2) -> bool:
+    if reference.stable_entity_id == "" or
+            not _digest_present_v2(reference.callable_signature_digest) or
+            not _digest_present_v2(reference.effect_digest) or
+            not _digest_present_v2(reference.body_or_object_digest) or
+            not _digest_present_v2(reference.selection_contract_digest) or
+            not _object_verified_v2(reference.body_or_object_digest,
+                verified.verified_semantic_object_digests):
+        return false
+    match reference.kind:
+        case MacroExpansion:
+            match reference.embedded:
+                case Some(section): _section_owned_v2(section, parent, module)
+                case nil: false
+        case GenericBody:
+            match reference.embedded:
+                case Some(section): _section_owned_v2(section, parent, module)
+                case nil: false
+        case TraitDefaultBody:
+            match reference.embedded:
+                case Some(section): _section_owned_v2(section, parent, module)
+                case nil: false
+        case TraitCallable: reference.embedded.is_none()
+        case AspectCallable: reference.embedded.is_none()
+
+fn _header_valid_v2(header: PhysicalTldHeaderV1, expected_role: TldPayloadRoleV1,
+                    bytes: [u8], expected_digest: text,
+                    bounds: ThreePayloadPackBoundsV2) -> bool:
+    val decoded = decode_physical_tld_index_v1(bytes, PhysicalTldDecodeBoundsV1(
+        max_index_bytes: bounds.max_payload_bytes, max_sections: bounds.max_sections,
+        max_decoded_bytes: bounds.max_decode_bytes))
+    val from_bytes = match decoded:
+        case Ok(value): value
+        case Err(_): return false
+    if not physical_tld_header_valid_v1(header) or header.role != expected_role or
+            not _digest_present_v2(header.semantic_record_digest) or
+            not _digest_present_v2(header.section_table_digest) or
+            header.payload_bytes < 0 or
+            header.payload_bytes > bounds.max_payload_bytes or
+            header.sections.len() > bounds.max_sections or
+            _bytes_digest_v2(bytes) != expected_digest:
+        return false
+    if from_bytes.schema != header.schema or from_bytes.role != header.role or
+            from_bytes.semantic_record_digest != header.semantic_record_digest or
+            from_bytes.section_table_digest != header.section_table_digest or
+            from_bytes.payload_bytes != header.payload_bytes or
+            from_bytes.sections.len() != header.sections.len(): return false
+    var decoded_index = 0
+    for section in from_bytes.sections:
+        if not _section_equal_v2(section, header.sections[decoded_index]): return false
+        decoded_index = decoded_index + 1
+    for section in header.sections:
+        if section.role != expected_role or section.section_index < 0 or
+                section.section_index >= header.sections.len() or section.offset < 0 or
+                section.stored_bytes < 0 or section.decoded_bytes < 0 or
+                section.offset + section.stored_bytes > bytes.len() or
+                section.decoded_bytes > bounds.max_decode_bytes:
+            return false
+    true
+
+fn _prepared_aggregate_totals_exact_v2(prepared: PreparedThreePayloadV2) -> bool:
+    if prepared.seal.payload_bytes < 0 or prepared.seal.section_count < 0:
+        return false
+    val source_bytes = prepared.source_bytes.len()
+    val init_bytes = prepared.init_tld_bytes.len()
+    val init_sections = prepared.init_tld_header.sections.len()
+    if source_bytes > prepared.seal.payload_bytes:
+        return false
+    var remaining_bytes = prepared.seal.payload_bytes - source_bytes
+    var prior_sections: i64 = 0
+    match prepared.prior_tld_bytes:
+        case Some(bytes):
+            if bytes.len() > remaining_bytes: return false
+            remaining_bytes = remaining_bytes - bytes.len()
+            match prepared.prior_tld_header:
+                case Some(header): prior_sections = header.sections.len()
+                case nil: return false
+        case nil:
+            if prepared.prior_tld_header.is_some(): return false
+    if init_bytes != remaining_bytes or init_sections > prepared.seal.section_count:
+        return false
+    prior_sections == prepared.seal.section_count - init_sections
+
+pub fn verify_prepared_three_payload_v2(prepared: PreparedThreePayloadV2) -> bool:
+    if prepared.seal_digest != three_payload_closure_seal_digest_v2(prepared.seal) or
+            _bytes_digest_v2(prepared.source_bytes) != prepared.seal.source_digest:
+        return false
+    if not _prepared_aggregate_totals_exact_v2(prepared) or
+            not three_payload_closure_seal_valid_v2(prepared.seal) or
+            not _coverage_complete_v2(prepared.seal.coverage_roots):
+        return false
+    val bounds = ThreePayloadPackBoundsV2(max_sections: prepared.seal.section_count,
+        max_payload_bytes: prepared.seal.payload_bytes,
+        max_decode_bytes: prepared.seal.max_decode_bytes)
+    if not _header_valid_v2(prepared.init_tld_header, TldPayloadRoleV1.PackageInitTld,
+            prepared.init_tld_bytes, prepared.seal.init_tld_digest, bounds): return false
+    val prior_ok = match prepared.prior_tld_bytes:
+            case Some(bytes):
+                match prepared.seal.prior_tld_digest:
+                    case Some(digest):
+                        match prepared.prior_tld_header:
+                            case Some(header): _header_valid_v2(header,
+                                TldPayloadRoleV1.PriorModuleTld, bytes, digest, bounds)
+                            case nil: false
+                    case nil: false
+            case nil: prepared.seal.prior_tld_digest.is_none() and
+                prepared.prior_tld_header.is_none()
+    if not prior_ok: return false
+    val parent = ThreePayloadParentGenerationV2(
+        generation_digest: prepared.seal.input_generation_digest,
+        prior_tld_digest: prepared.seal.prior_tld_digest,
+        prior_tld_bytes: prepared.prior_tld_bytes,
+        prior_tld_header: prepared.prior_tld_header)
+    val module = ThreePayloadModuleClosureV2(module_id: "verified",
+        init_tld_digest: prepared.seal.init_tld_digest,
+        init_tld_bytes: prepared.init_tld_bytes, init_tld_header: prepared.init_tld_header,
+        semantic_refs: prepared.seal.semantic_refs, coverage_roots: prepared.seal.coverage_roots)
+    val verified = ThreePayloadVerifiedObjectsV2(
+        compiler_semantics_digest: prepared.seal.compiler_semantics_digest,
+        consumed_inputs_digest: prepared.seal.consumed_inputs_digest,
+        verified_semantic_object_digests: prepared.verified_semantic_object_digests)
+    for reference in prepared.seal.semantic_refs:
+        if not _semantic_ref_valid_v2(reference, parent, module, verified): return false
+    true
+
+# Existing prepared-attempt owner validation.  The copied request must match a
+# fully reverified physical preparation, including the source bytes and both
+# TLD containers; a closure-seal DTO alone is insufficient.
+pub fn prepared_attempt_validate_live_v1(
+    request: SemanticScopeAttemptLiveRequestV1,
+    prepared: PreparedThreePayloadV2,
+) -> bool:
+    if not verify_prepared_three_payload_v2(prepared): return false
+    val identity = request.identity
+    if (identity.generation < 0 or identity.cancellation_epoch < 0 or
+            not _digest_present_v2(identity.writer_instance_digest) or
+            not _digest_present_v2(identity.manifest_digest) or
+            not _digest_present_v2(identity.pin_snapshot_digest) or
+            not _digest_present_v2(identity.generation_closure_digest) or
+            not _digest_present_v2(identity.binding_digest) or
+            not _digest_present_v2(identity.query_domain_digest) or
+            not _digest_present_v2(identity.semantic_rules_digest)):
+        return false
+    request.attempt_seal_digest == prepared.seal_digest and
+        request.source_content_digest == prepared.seal.source_digest and
+        request.snapshot_semantic_digest == prepared.seal.snapshot_digest and
+        identity.manifest_digest == prepared.seal.input_generation_digest
+
+pub fn seal_three_payload_closure_v2(
+    snapshot: ThreePayloadSnapshotV2,
+    parent_generation: ThreePayloadParentGenerationV2,
+    module: ThreePayloadModuleClosureV2,
+    verified_objects: ThreePayloadVerifiedObjectsV2,
+    bounds: ThreePayloadPackBoundsV2,
+) -> Result<PreparedThreePayloadV2, ThreePayloadFallbackV1>:
+    if bounds.max_sections <= 0 or bounds.max_payload_bytes <= 0 or bounds.max_decode_bytes <= 0:
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    if (not _digest_present_v2(snapshot.snapshot_digest) or
+            not _digest_present_v2(snapshot.source_digest) or
+            _bytes_digest_v2(snapshot.source_bytes) != snapshot.source_digest or
+            not _digest_present_v2(parent_generation.generation_digest) or
+            not _digest_present_v2(verified_objects.compiler_semantics_digest) or
+            not _digest_present_v2(verified_objects.consumed_inputs_digest)):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if not _coverage_complete_v2(module.coverage_roots):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    if not _header_valid_v2(module.init_tld_header, TldPayloadRoleV1.PackageInitTld,
+            module.init_tld_bytes, module.init_tld_digest, bounds):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+
+    var prior_sections = 0
+    match parent_generation.prior_tld_bytes:
+        case Some(prior_bytes):
+            val prior_digest = match parent_generation.prior_tld_digest:
+                case Some(value): value
+                case nil: return Err(ThreePayloadFallbackV1.CorruptPayload)
+            val prior_header = match parent_generation.prior_tld_header:
+                case Some(value): value
+                case nil: return Err(ThreePayloadFallbackV1.CorruptPayload)
+            if not _header_valid_v2(prior_header, TldPayloadRoleV1.PriorModuleTld,
+                    prior_bytes, prior_digest, bounds):
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+            prior_sections = prior_header.sections.len()
+        case nil:
+            if parent_generation.prior_tld_digest.is_some() or
+                    parent_generation.prior_tld_header.is_some():
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+
+    for reference in module.semantic_refs:
+        if not _semantic_ref_valid_v2(reference, parent_generation, module, verified_objects):
+            return Err(ThreePayloadFallbackV1.ExternalBodyRequired)
+
+    val section_count = prior_sections + module.init_tld_header.sections.len()
+    val payload_bytes = snapshot.source_bytes.len() + module.init_tld_bytes.len() +
+        (match parent_generation.prior_tld_bytes:
+            case Some(bytes): bytes.len()
+            case nil: 0)
+    if section_count > bounds.max_sections or payload_bytes > bounds.max_payload_bytes:
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    val effective_max_decode = if bounds.max_decode_bytes < payload_bytes: bounds.max_decode_bytes else: payload_bytes
+    val seal = ThreePayloadClosureSealV2(schema: 2,
+        input_generation_digest: parent_generation.generation_digest,
+        snapshot_digest: snapshot.snapshot_digest, source_digest: snapshot.source_digest,
+        prior_tld_digest: parent_generation.prior_tld_digest,
+        init_tld_digest: module.init_tld_digest,
+        compiler_semantics_digest: verified_objects.compiler_semantics_digest,
+        consumed_inputs_digest: verified_objects.consumed_inputs_digest,
+        semantic_refs: module.semantic_refs, coverage_roots: module.coverage_roots,
+        section_count: section_count, payload_bytes: payload_bytes,
+        max_decode_bytes: effective_max_decode)
+    if not three_payload_closure_seal_valid_v2(seal):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    Ok(PreparedThreePayloadV2(seal: seal,
+        seal_digest: three_payload_closure_seal_digest_v2(seal),
+        source_bytes: snapshot.source_bytes,
+        prior_tld_bytes: parent_generation.prior_tld_bytes,
+        prior_tld_header: parent_generation.prior_tld_header,
+        init_tld_bytes: module.init_tld_bytes, init_tld_header: module.init_tld_header,
+        verified_semantic_object_digests: verified_objects.verified_semantic_object_digests))
+
+# Preflights the combined physical owners before any TLD body decoder can
+# allocate section slices.  Exact typed-body authority is intentionally absent,
+# so this port remains a typed fail-closed adapter rather than minting trust
+# from caller-provided binding DTOs.
+pub fn seal_three_payload_bound_closure_v2(
+    snapshot: ThreePayloadSnapshotV2,
+    parent_generation: ThreePayloadParentGenerationV2,
+    module: ThreePayloadModuleClosureV2,
+    verified_bindings: ThreePayloadVerifiedSemanticBindingsV2,
+    bounds: ThreePayloadPackBoundsV2,
+) -> Result<PreparedThreePayloadBoundV2, ThreePayloadFallbackV1>:
+    val bind_bounds = verified_bindings.bind_bounds
+    if bounds.max_sections < 0 or bounds.max_payload_bytes < 0 or
+            bounds.max_decode_bytes < 0 or bind_bounds.max_bindings < 0 or
+            bind_bounds.max_sections < 0 or bind_bounds.max_retained_bytes < 0 or
+            bind_bounds.max_decoded_bytes < 0 or
+            verified_bindings.bindings.len() > bind_bounds.max_bindings:
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    if module.module_id != bind_bounds.expected_module_id or
+            module.module_id != bind_bounds.presented_module_id or
+            parent_generation.generation_digest != bind_bounds.expected_input_generation_digest:
+        return Err(ThreePayloadFallbackV1.ScopeGenerationMismatch)
+    var section_count = module.init_tld_header.sections.len()
+    var wire_bytes = snapshot.source_bytes.len() + module.init_tld_bytes.len()
+    var decoded_bytes = module.init_tld_header.payload_bytes
+    if decoded_bytes < 0: return Err(ThreePayloadFallbackV1.CorruptPayload)
+    match parent_generation.prior_tld_bytes:
+        case Some(bytes):
+            val header = match parent_generation.prior_tld_header:
+                case Some(value): value
+                case nil: return Err(ThreePayloadFallbackV1.CorruptPayload)
+            if header.payload_bytes < 0: return Err(ThreePayloadFallbackV1.CorruptPayload)
+            if bytes.len() > bounds.max_payload_bytes - wire_bytes or
+                    header.payload_bytes > bounds.max_decode_bytes - decoded_bytes:
+                return Err(ThreePayloadFallbackV1.BoundsExceeded)
+            wire_bytes = wire_bytes + bytes.len()
+            decoded_bytes = decoded_bytes + header.payload_bytes
+            section_count = section_count + header.sections.len()
+        case nil:
+            if parent_generation.prior_tld_header.is_some():
+                return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if wire_bytes > bounds.max_payload_bytes or
+            wire_bytes > bind_bounds.max_retained_bytes or
+            decoded_bytes > bounds.max_decode_bytes or
+            decoded_bytes > bind_bounds.max_decoded_bytes or
+            section_count > bounds.max_sections or
+            section_count > bind_bounds.max_sections:
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    # Existing public verified-view DTOs are evidence values, not unforgeable
+    # CAS-owner capabilities.  Until that owner port is supplied, preparation
+    # cannot lawfully return a bypassable semantic view.
+    Err(ThreePayloadFallbackV1.AuthorityUnavailable)

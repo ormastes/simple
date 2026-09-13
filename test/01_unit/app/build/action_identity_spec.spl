@@ -1,5 +1,5 @@
 # Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-APP
+# @req REQ-SSPEC-APP MBH-REQ-002 MBH-REQ-004 MBH-REQ-009
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 # Purpose and audience: executable specification evidence for the owning engineering team.
@@ -59,13 +59,22 @@ fn _setup_identity() -> NativeActionInputIdentityV1:
         dependency_digest, closure_digest, tool_behavior, "binary"
     )
     NativeActionInputIdentityV1(
-        NATIVE_ACTION_INPUT_PRODUCER_V1, "//app:main", "native-build",
-        "src/main.spl", "build/tools/simple", tool_artifact, tool_behavior,
-        producer_abi, target_identity, "release", dependency_digest,
-        closure_digest, key, []
+        producer: NATIVE_ACTION_INPUT_PRODUCER_V1, target: "//app:main",
+        action: "native-build", entry: "src/main.spl",
+        tool_path: "build/tools/simple", tool_artifact_digest: tool_artifact,
+        tool_behavior_digest: tool_behavior, producer_abi_digest: producer_abi,
+        target_identity_digest: target_identity, profile: "release",
+        dependency_manifest_digest: dependency_digest,
+        imported_closure_digest: closure_digest,
+        target_triple: "x86_64-unknown-linux-gnu", architecture: "x86_64",
+        deployment_target: "none", sdk_identity: "none", backend: "llvm",
+        optimization: "release-o2", object_format: "elf",
+        linker_policy: "elf-hardened-v1", runtime_provider_receipt: "none",
+        action_key: key, errors: []
     )
 
 describe "independent current native action identity":
+    # MBH-NFR-001: canonical current inputs produce deterministic identities.
     # @manual scenario evidence
     it "binds current tool manifest imported closure and expected action key":
         # @req REQ-SSPEC-APP
@@ -108,6 +117,21 @@ describe "independent current native action identity":
         expect(loaded.action_key).to_equal(identity.action_key)
 
 describe "aggregate action identity":
+    it "length-frames variable action-key fields":
+        step("Distinguish tuples that collide under delimiter concatenation")
+        val dependency = sha256_text("dependency")
+        val closure = sha256_text("closure")
+        val tool = sha256_text("tool")
+        val first = target_action_key_v1(
+            "x|action=y", "z", "native", "llvm", "namespace",
+            dependency, closure, tool, "binary"
+        )
+        val second = target_action_key_v1(
+            "x", "y|action=z", "native", "llvm", "namespace",
+            dependency, closure, tool, "binary"
+        )
+        expect(first == second).to_equal(false)
+
     it "binds product producer tool and dependency manifest canonically":
         # @req REQ-SSPEC-APP
         step("binds product producer tool and dependency manifest canonically")
@@ -122,3 +146,8 @@ describe "aggregate action identity":
         expect(body).to_contain("target=//product:p1")
         expect(body).to_contain("dependency-manifest=" + dependencies)
         expect(digest_is_sha256(digest)).to_be(true)
+        expect(aggregate_action_identity_digest_v1(
+            "x\nproduct=y", "z", "llvm", tool, dependencies
+        ) == aggregate_action_identity_digest_v1(
+            "x", "y\nproduct=z", "llvm", tool, dependencies
+        )).to_equal(false)

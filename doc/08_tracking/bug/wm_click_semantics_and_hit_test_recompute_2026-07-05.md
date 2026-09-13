@@ -1,6 +1,8 @@
 # WM click semantics fire on down, hit-test recomputed repeatedly without caching
 
 ## Status
+
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 Open.
 
 ## Severity
@@ -30,3 +32,7 @@ Users cannot cancel close/drag actions by dragging the pointer away (UX inconsis
 
 ## Next Step
 B1: Fire close/drag actions on release-inside; track pressed-state across down/up; cancel if pointer leaves button. B2: Add `not win.minimized` guard to `wm_lifecycle_pointer_move`. S3: Cache computed layout keyed on widget-tree revision; reuse across `set_pressed`/`dispatch_click` in the same event; skip hover hit-test if tree has not changed since the previous move event.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

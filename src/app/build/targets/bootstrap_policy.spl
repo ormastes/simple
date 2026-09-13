@@ -7,6 +7,12 @@ val BOOTSTRAP_RECEIPT_SCHEMA_V1 = "simple-bootstrap-receipt-v1"
 val BOOTSTRAP_RECEIPT_PRODUCER_V1 = "simple-build-planner-v1"
 val BOOTSTRAP_STAGE4_TARGET_V1 = "//bootstrap:stage4"
 
+# v2 admission targets: unlike v1 (any "//bootstrap:" or "//release:" prefix),
+# v2 authorizes exactly these two exact targets -- see
+# `bootstrap_authorization_receipt_v2` below.
+val BOOTSTRAP_STAGE3_TARGET_V2 = "//bootstrap:stage3"
+val BOOTSTRAP_STAGE4_TARGET_V2 = "//bootstrap:stage4"
+
 fn bootstrap_reason_from_name(name: text) -> BootstrapReason:
     match name:
         case "seed-missing": BootstrapReason.SeedMissing
@@ -52,3 +58,67 @@ fn bootstrap_authorization_error_v1(receipt: text, target: text) -> text:
     if receipt.trim() != bootstrap_authorization_receipt_v1(target, reason):
         return "bootstrap-policy-error: non-canonical-receipt"
     ""
+
+fn bootstrap_sha256_is_canonical_v2(sha: text) -> bool:
+    """A canonical admission hash: exactly 64 lowercase hex characters.
+    Used to gate `bootstrap_authorization_receipt_v2` -- callers
+    (`app.build.bootstrap_receipt_planner`) always imported this name but it
+    was never defined here, undefined `_bootstrap_sha256_is_canonical_v2` at
+    the Stage-4 macOS final link (2026-09-07)."""
+    if sha.len() != 64:
+        return false
+    var i = 0
+    while i < sha.len():
+        val c = sha.char_at(i)
+        val is_digit = c >= "0" and c <= "9"
+        val is_lower_hex = c >= "a" and c <= "f"
+        if not is_digit and not is_lower_hex:
+            return false
+        i = i + 1
+    true
+
+fn _bootstrap_stage_reason_allowed_v2(target: text, reason: BootstrapReason) -> bool:
+    """Per-target reason scoping for v2 admission. Stage 3 (seed-hosted
+    rebuild) is authorized only by the seed itself being inadequate; Stage 4
+    (self-hosted relink) is authorized only by an ABI/interface/format break
+    or a convergence/diversity check -- never by a seed defect, which Stage 4
+    cannot fix. `//release:*` (v1's other authorized prefix) has no v2
+    target at all; that path stays on v1 only."""
+    if target == BOOTSTRAP_STAGE3_TARGET_V2:
+        return reason == BootstrapReason.SeedMissing or
+            reason == BootstrapReason.SeedCorrupt or
+            reason == BootstrapReason.SeedTargetUnsupported or
+            reason == BootstrapReason.SeedCannotParseRequiredLanguageFeature or
+            reason == BootstrapReason.SeedCannotLowerRequiredCompilerFeature
+    if target == BOOTSTRAP_STAGE4_TARGET_V2:
+        return reason == BootstrapReason.BootstrapRuntimeAbiMajorChanged or
+            reason == BootstrapReason.BootstrapArtifactFormatMajorChanged or
+            reason == BootstrapReason.BootstrapCoreInterfaceMajorChanged or
+            reason == BootstrapReason.SelfHostConvergenceCheck or
+            reason == BootstrapReason.DiverseDoubleCompilation
+    false
+
+fn bootstrap_authorization_receipt_v2(target: text, reason: BootstrapReason,
+        parent_compiler_sha256: text, runtime_snapshot_sha256: text,
+        planner_source_closure_sha256: text, planner_sha256: text) -> text:
+    """v2 admission: same v1-schema receipt string as `bootstrap_authorization_receipt_v1`,
+    but gated on (a) an exact Stage 3/Stage 4 target (not any `//bootstrap:`/
+    `//release:` prefix), (b) a reason valid for THAT stage (see
+    `_bootstrap_stage_reason_allowed_v2`), and (c) all four admission hashes
+    being canonical 64-lowercase-hex SHA-256 digests. The output format is
+    unchanged from v1 -- v2 only tightens who may obtain a receipt, it does
+    not embed the hashes into the receipt text itself. Callers
+    (`app.build.bootstrap_receipt_planner`) always imported this name but it
+    was never defined here, undefined `_bootstrap_authorization_receipt_v2`
+    at the Stage-4 macOS final link (2026-09-07)."""
+    if not bootstrap_sha256_is_canonical_v2(parent_compiler_sha256):
+        return ""
+    if not bootstrap_sha256_is_canonical_v2(runtime_snapshot_sha256):
+        return ""
+    if not bootstrap_sha256_is_canonical_v2(planner_source_closure_sha256):
+        return ""
+    if not bootstrap_sha256_is_canonical_v2(planner_sha256):
+        return ""
+    if not _bootstrap_stage_reason_allowed_v2(target, reason):
+        return ""
+    bootstrap_authorization_receipt_v1(target, reason)

@@ -3,7 +3,7 @@
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 - **Filed:** 2026-08-06
-- Status: OPEN (P1)
+- Status: CLOSED (2026-09-12) — not reproducible on seed sha256 `3d120a6f`
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   localized to a specific function in the out-of-scope Rust seed (see "Not yet done" → now done,
   below); every reachable pure-Simple candidate interpreter was checked and does not share this
@@ -382,3 +382,25 @@ cannot move in either direction without someone being told.
   oracle, the probe, has been executed directly and does work. Do not treat the
   spec as passing until someone has seen a `Results: N total, N passed` line
   from it.
+
+## Triage 2026-09-12
+Rule B: ran `bin/simple test test/01_unit/compiler/interpreter/aliased_param_writeback_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-12
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/compiler/interpreter/aliased_param_writeback_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/compiler/interpreter/aliased_param_writeback_spec.spl outcome=OK declared>=4 executed=4 passed=4 failed=0 skipped=0 dropped=0
+```
+
+Every example in the spec this record names as its reproduction passes. Scope
+of the claim, stated plainly: the re-check exercised **that spec only**, on the
+**deployed seed** on **aarch64**. It did not re-measure any other lane (native
+LLVM / self-hosted binary / other architecture), and it did not audit whether
+the spec's assertions still cover the original symptom as tightly as when the
+record was written. If a residual lane is known to be uncovered, reopen with
+the lane named rather than relying on this line.

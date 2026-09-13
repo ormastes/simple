@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)"
+COMMON_CHECKOUT="${SPIPE_HOME:-$ROOT/.spipe/spipe}"
+SETUP="$COMMON_CHECKOUT/scripts/setup-local-knowledge.sh"
+BOOTSTRAP="$ROOT/scripts/setup-spipe-local.shs"
+FIXTURE="$(mktemp -d)"
+trap 'rm -rf "$FIXTURE"' EXIT
+
+git init -q "$FIXTURE/common"
+git -C "$FIXTURE/common" config user.name "SPipe Test"
+git -C "$FIXTURE/common" config user.email "spipe-test@example.invalid"
+mkdir -p "$FIXTURE/common/scripts"
+cp "$SETUP" "$FIXTURE/common/scripts/"
+printf '%s\n' '{"name":"@simple-lang/spipe"}' > "$FIXTURE/common/package.json"
+git -C "$FIXTURE/common" add scripts
+git -C "$FIXTURE/common" add package.json
+git -C "$FIXTURE/common" commit -qm fixture
+
+GIT_ALLOW_PROTOCOL=file sh "$SETUP" --mode user \
+  --destination "$FIXTURE/user/.spipe" --common-url "$FIXTURE/common" \
+  --organization example-org --project personal-project --yes >/dev/null
+test "$(git -C "$FIXTURE/user/.spipe" ls-files --stage -- .spipe | awk '{print $1}')" = 160000
+grep -Fqx 'local/' "$FIXTURE/user/.spipe/.gitignore"
+grep -Fq 'organization:example-org|' "$FIXTURE/user/.spipe/local/scopes.sdn"
+
+git init -q "$FIXTURE/project"
+git -C "$FIXTURE/project" config user.name "SPipe Test"
+git -C "$FIXTURE/project" config user.email "spipe-test@example.invalid"
+mkdir -p "$FIXTURE/project/scripts" "$FIXTURE/project/.spipe"
+cp "$BOOTSTRAP" "$FIXTURE/project/scripts/"
+git -C "$FIXTURE/project" add .
+git -C "$FIXTURE/project" commit -qm fixture
+GIT_ALLOW_PROTOCOL=file git clone -q "$FIXTURE/project" "$FIXTURE/clone"
+SPIPE_HOME="$FIXTURE/common" XDG_CONFIG_HOME="$FIXTURE/config" GIT_ALLOW_PROTOCOL=file \
+  sh "$FIXTURE/clone/scripts/setup-spipe-local.shs" --project cloned-project --yes >/dev/null
+test "$(readlink "$FIXTURE/clone/.spipe/common")" = "$FIXTURE/common"
+grep -Fq 'project:cloned-project|' "$FIXTURE/config/spipe/scopes.sdn"
+
+echo "STATUS: PASS spipe-local-knowledge-setup"

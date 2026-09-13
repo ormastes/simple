@@ -1,4 +1,5 @@
 # Bootstrap dynamic receiver free-function theft (2026-08-15)
+**Status:** OPEN (unverified 2026-09-12)
 
 ## Symptom
 
@@ -24,3 +25,6 @@ The exact library filter ran one test and passed. Retained evidence:
 `build/native_probe/stage4-dynamic-receiver-free-theft-focused-lib.log` and
 `.status` (exit 0). Earlier package-wide exact-filter attempts that selected
 zero tests are diagnostic-only and are not counted as verification.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

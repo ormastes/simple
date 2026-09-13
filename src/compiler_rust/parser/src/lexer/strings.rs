@@ -132,10 +132,7 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // Second "
                     self.advance(); // Third "
                     if let Some(suffix) = self.scan_string_unit_suffix() {
-                        return TokenKind::Error(format!(
-                            "_{} does not support triple-quoted strings",
-                            suffix
-                        ));
+                        return TokenKind::Error(format!("_{} does not support triple-quoted strings", suffix));
                     }
                     return TokenKind::String(value);
                 } else {
@@ -202,10 +199,7 @@ impl<'a> super::Lexer<'a> {
                             parts.push(FStringToken::Literal(literal_text));
                         }
                         if let Some(suffix) = self.scan_string_unit_suffix() {
-                            return TokenKind::Error(format!(
-                                "_{} does not support triple-quoted strings",
-                                suffix
-                            ));
+                            return TokenKind::Error(format!("_{} does not support triple-quoted strings", suffix));
                         }
                         return TokenKind::FString(parts);
                     } else {
@@ -230,10 +224,7 @@ impl<'a> super::Lexer<'a> {
                     // than leaving a misleading trailing identifier token.
                     if let Some(suffix) = self.scan_string_unit_suffix() {
                         if has_interpolation {
-                            return TokenKind::Error(format!(
-                                "_{} does not support interpolated strings",
-                                suffix
-                            ));
+                            return TokenKind::Error(format!("_{} does not support interpolated strings", suffix));
                         }
                         // Simple string with unit suffix: "127.0.0.1"_ip
                         return TokenKind::TypedString(literal_text, suffix);

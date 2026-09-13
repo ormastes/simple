@@ -1,5 +1,7 @@
 # guard_wiring_optout.txt carries a family of FALSE exemptions, several hiding RED gates
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-06
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -664,3 +666,10 @@ One further note for whoever owns the CI job: `require_report_key` uses `rg`
 (ripgrep). If a runner lacks it the gate fails loudly (`rg` exits 127, the
 negated test adds a failure) rather than silently passing, so this is a visible
 red, not a new fail-open.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+This is a 671-line CI/guard-wiring infra investigation, not a unit-spec-TDD-fixable bug: several exemption removals already landed in prior passes, and the remaining open items each need an infra owner decision (whether a contract gate should also assert its subject's exit code, per the "Compare check-llm-runtime-vllm-host-env-contract.shs" note). No new content to add this pass given the shard's remaining size; leaving OPEN as previously triaged.

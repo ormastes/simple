@@ -474,3 +474,10 @@ wrong in both directions, and a "0% false positives" claim derived by
 re-running a *similar* regex is not independent — pass 1's re-index used the
 same prefix assumption and so inherited the same blind spot. Confirming a
 census against a second copy of its own model confirms nothing.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still a large repo-governance backlog (orphaned-guard count, dangling extern
+references) — a measurement/census document with two owned backlogs, not a
+single localized code defect fixable in a shard pass. No change made.
+Leaving OPEN.

@@ -1,0 +1,34 @@
+# Control for the call-boundary-safe prefix lookup/prefill dispatch shape.
+
+use std.gc_async_mut.slang.core.page_manager.{KvPageManager, KvRequestId, KvPrefixId, KvPageError}
+
+var CONTROL_MANAGER = KvPageManager.create(17u64, 4, 64, 4, 1, 2, 4, 256).unwrap()
+
+fn create_request_and_page() -> Result<KvRequestId, text>:
+    val request = CONTROL_MANAGER.create_request("scope-a").unwrap()
+    val page = CONTROL_MANAGER.reserve_page("scope-a", 101u64).unwrap()
+    if CONTROL_MANAGER.update_writable(page, 2, 19u64).is_err():
+        return Err("page update failed")
+    if CONTROL_MANAGER.seal_page(page).is_err():
+        return Err("page seal failed")
+    if CONTROL_MANAGER.attach_sealed(request, page).is_err():
+        return Err("page attach failed")
+    Ok(request)
+
+fn dispatch(prefix_result: Result<KvPrefixId, KvPageError>) -> Result<KvRequestId, text>:
+    match prefix_result:
+        Err(_): create_request_and_page()
+        Ok(_): Err("unexpected prefix hit")
+
+fn main() -> i64:
+    val prefix_result = CONTROL_MANAGER.find_prefix("scope-a", 7u64, [1, 2])
+    val request = match dispatch(prefix_result):
+        Err(message):
+            print "FAIL dispatch " + message
+            return 1
+        Ok(value): value
+    if CONTROL_MANAGER.request_page_count(request).is_err():
+        print "FAIL dispatch_lost_mutation"
+        return 1
+    print "PASS request_handle_dispatch_control"
+    0

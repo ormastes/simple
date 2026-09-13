@@ -1,0 +1,55 @@
+# Source-contract evidence only. Live device acceptance and admitted CLI
+# execution remain separate gates; this file cannot establish GPU throughput.
+# @req REQ-VKASYNC-003 REQ-VKASYNC-004 REQ-VKASYNC-005 REQ-VKASYNC-007
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+
+describe "Vulkan async session ownership boundary":
+    it "pins a resolvable fence during bounded pressure observation":
+        step("Inspect the runtime fence lease retained outside the global registry")
+        val owner = file_read("src/compiler_rust/runtime/src/vulkan_graphics_runtime_async_owner.rs")
+        val core = file_read("src/compiler_rust/runtime/src/vulkan_graphics_runtime_core.rs")
+        expect(core).to_contain("pub fence: Arc<Fence>")
+        expect(owner).to_contain("s.fence.clone()")
+        expect(owner).to_contain("fence.wait(timeout_ns)")
+        expect(owner.contains("let wait_result = submission.fence.wait")).to_equal(false)
+
+    it "keeps recovery explicit and distinguishes quarantine from completion":
+        step("Inspect one recovery wait and retained device-generation quarantine")
+        val recovery = file_read("src/compiler_rust/runtime/src/vulkan_graphics_runtime_async_recovery.rs")
+        val offer = file_read("src/compiler_rust/runtime/src/vulkan_graphics_runtime_async_offer.rs")
+        val observe = file_read("src/compiler_rust/runtime/src/vulkan_graphics_runtime_async_observe.rs")
+        expect(recovery).to_contain("device.wait_idle()")
+        expect(recovery).to_contain("state.device_generation_quarantined = true")
+        expect(recovery).to_contain("return ASYNC_QUARANTINED")
+        expect(offer.contains("wait_idle")).to_equal(false)
+        expect(observe.contains("wait_idle")).to_equal(false)
+
+    it "binds copied telemetry words to one snapshot token":
+        step("Inspect immutable snapshot reads and explicit stale-token rejection")
+        val telemetry = file_read("src/compiler_rust/runtime/src/vulkan_graphics_runtime_async_telemetry.rs")
+        expect(telemetry).to_contain("owner.snapshot_token == snapshot")
+        expect(telemetry).to_contain("TELEMETRY_WORDS")
+        expect(telemetry).to_contain("words[24] = 0")
+        expect(telemetry).to_contain("latency.percentile(95)")
+
+    it "admits async capability separately from the core provider ABI":
+        step("Inspect optional complete-extension admission for Vulkan provider v1")
+        val loader = file_read("src/runtime/runtime_dynload.c")
+        expect(loader).to_contain("simple_vulkan_async_v1")
+        expect(loader).to_contain("if (!rt_vulkan_async_session_supported()) return 0")
+        expect(loader).to_contain("abi() != SIMPLE_GPU_PROVIDER_ABI_V1")
+
+    it "keeps every async forward visible to the dual-lane ABI audit":
+        step("Inspect explicit C forwards and their fail-closed sentinels")
+        val loader = file_read("src/runtime/runtime_dynload.c")
+        for name in [
+            "acquire", "command", "submit", "poll", "retire", "receipt",
+            "cancel", "close", "capacity", "in_flight", "published_sequence",
+            "recover", "abandon_device", "snapshot", "snapshot_word"
+        ]:
+            expect(loader).to_contain("int64_t rt_vulkan_async_session_" + name + "(")
+        expect(loader).to_contain("return fn ? fn(session) : -1;")
+        expect(loader).to_contain("return fn ? fn(session, sequence) : 0;")
+        expect(loader).to_contain("return fn ? fn(session, snapshot, index) : -1;")

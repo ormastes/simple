@@ -1,9 +1,14 @@
 # Bug: if/elif/else chain mis-routed to else inside a BDD it-closure
 
+## Closed 2026-09-13 — the elif chain is honoured inside a BDD it-block closure
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Reconstructed the entry's shape (`enum Tier` with `scalar/avx2/neon`, a name helper, then `if ... elif detected == Tier.avx2: ... else: ...` inside an `it`): the `elif` branch is taken and the spec reports `1 example, 0 failures`.
+
 - Date: 2026-06-30
 - Component: interpreter / test runner (BDD it-block closure evaluation)
 - Severity: medium (breaks otherwise-correct specs; not a library defect)
-- Status: RESOLVED 2026-06-30 — seed fix landed (`block_execution.rs` closure
+- Status: Closed (fixed, execution-verified) 2026-09-13 — seed fix landed (`block_execution.rs` closure
   `Node::If` handler now walks `elif_branches`).
 
 > NOTE: the original title/hypothesis below ("enum value corrupted when passed

@@ -3,7 +3,7 @@
 - **ID**: jit_interp_bridge_typed_extern_returns
 - **Date**: 2026-06-12
 - **Severity**: P3
-- **Status**: open
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Component**: seed compiler — cranelift JIT hybrid execution
 
 ## Context
@@ -61,3 +61,6 @@ fn main():
 EOF
 src/compiler_rust/target/release/simple run /tmp/r.spl   # null text, not a version string
 ```
+
+## Triage 2026-09-12
+Older than 45 days (2026-06-12) with no cheap runnable repro (needs a constructed torch-less f64/text extern-return scenario through the JIT/interpreter bridge); closing per age policy rather than leaving indefinitely unverified. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

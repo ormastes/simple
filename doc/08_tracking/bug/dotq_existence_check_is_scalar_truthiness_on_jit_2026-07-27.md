@@ -3,7 +3,12 @@
 - **Filed:** 2026-07-27
 - **Lane:** NILQ
 - **Severity:** High (silent wrong-branch; no diagnostic)
-- **Status:** Open — root cause is in a compiler tree, NOT patched by this lane
+- **Status:** OPEN (2026-09-13) — reopened per this record's own instruction: a fresh
+  repro against the current seed exists for the empty-collection row, filed as
+  `dotq_on_empty_collection_reads_present_2026-09-13.md` (it diverges a `while coll.?:`
+  drain loop and was the Stage-2 admission blocker, bootstrap site 9). The other rows of
+  the truth table below are still un-re-verified; this reopen does not vouch for them.
+  (Was: CLOSED-STALE 2026-09-12: not re-verifiable from the record; reopen with a fresh repro.)
 - **Engines affected:** JIT / native default engine only. The interpreter is correct.
 
 ## Specification
@@ -140,3 +145,6 @@ readings. The spec must be tightened *and* the engines made to agree.
 ## Containment landed by lane NILQ
 
 See `doc/08_tracking/bug/dotq_zero_test_hazard_call_sites_2026-07-27.md`.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

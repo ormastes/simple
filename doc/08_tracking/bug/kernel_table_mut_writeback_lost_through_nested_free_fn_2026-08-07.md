@@ -1,5 +1,7 @@
 # CpuKernelTable `mut` write-back lost through nested free fn / self.field (interpreter)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - **Date:** 2026-08-07
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -109,3 +111,13 @@ already-fixed-pending-rebuild-verification, not as executed-green.
 The production restructure in `src/lib/gc_async_mut/gpu/engine2d/backend_software.spl`
 was left in place — it is correct code either way, and unwinding it is not this
 lane's call.
+
+## Triage 2026-09-12
+No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Root cause is Rust interpreter argument write-back (`function_exec.rs`), out
+of scope for `src/lib`; workaround already in production in
+`backend_software.spl` per the notes above, unchanged at `f26970e9d93`. No
+code change. Leaving OPEN.

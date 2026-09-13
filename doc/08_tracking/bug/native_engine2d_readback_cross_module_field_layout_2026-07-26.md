@@ -1,5 +1,7 @@
 # Native Engine2DReadback Cross-Module Field Layout
 
+**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
+
 ## Status
 
 Source fixed; deployment and live Vulkan readback remain open under TODO 580.
@@ -98,3 +100,7 @@ An explicit historical runtime directory also introduced unresolved
 `spl_*`/filesystem/process dependencies but did not admit
 `libsimple_native_all.a`; using that removed fallback is forbidden. No new
 driver, `73`, `84`, or Vulkan receipt was produced.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

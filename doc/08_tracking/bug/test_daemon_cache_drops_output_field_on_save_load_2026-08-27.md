@@ -1,5 +1,7 @@
 # TestDaemon cache drops the `output` field across save/load
 
+**Status:** OPEN (unverified 2026-09-12)
+
 - Date: 2026-08-27
 - Found via: sspec modernization residual wave, batch resid7_part_00
 - Reproducing spec: `test/01_unit/app/test_daemon/test_daemon_cache_module_spec.spl`
@@ -32,3 +34,7 @@ load. Bump `TEST_RESULT_CACHE_VERSION` so old caches invalidate.
 Neighbor to add when fixing: a spec asserting an output containing `|` and
 newlines survives the round-trip (the delimiter-collision case), per the
 "every fix ships two specs" rule.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

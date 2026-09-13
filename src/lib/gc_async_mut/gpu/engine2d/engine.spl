@@ -38,7 +38,10 @@ use std.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
 use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
-use std.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanFrameReceipt, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanFrameReceipt, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_accepted_compute_submits, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_rect_upload_last_mode, vulkan_rect_upload_last_reason,
+    vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
+    vulkan_image_pack_counts, vulkan_image_pack_counts_reset}
 use std.gpu.engine2d.backend_vulkan_font
 use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
 use std.gpu.engine2d.helpers_text.{text_aa_blit_buffer}
@@ -82,7 +85,12 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
     Engine2dGlassMaterialConfig,
     engine2d_glass_execution_metal,
+    engine2d_glass_execution_vulkan,
     engine2d_glass_execution_unavailable
+}
+use std.gc_async_mut.gpu.engine2d.vulkan_context_admission.{
+    VulkanDrawIrAdmission, vulkan_context_admit,
+    vulkan_context_admission_without_backend
 }
 
 # ============================================================================
@@ -316,6 +324,26 @@ class Engine2D with DrawIrRenderTarget:
     last_font_execution_target: text = ""
     last_font_plan_admitted: bool = false
     last_font_size_is_100: bool = false
+    # Acceptance item 4 of
+    # doc/08_tracking/bug/macos_vulkan_2d_vector_font_empty_batch_native_fault_2026-07-26.md:
+    # an empty or degenerate text batch must never reach a backend dispatch.
+    # These counters are the structural oracle for that -- skipped batches are
+    # counted, and every backend batch call increments the dispatch counter.
+    font_batches_skipped_empty: i64 = 0
+    font_backend_dispatches: i64 = 0
+    last_font_skip_reason: text = ""
+
+    fn vulkan_async_admission(capacity: i64 = 3) -> VulkanDrawIrAdmission:
+        """Query async admission for this exact live Vulkan surface.
+
+        This is a production consumer-side gate.  It never creates a second
+        session and never accepts caller-supplied identity.  Until the native
+        provider exports checked context binding, callers must retain the
+        returned unavailable result and use the existing synchronous route.
+        """
+        if val Some(vulkan) = self.vulkan_backend:
+            return vulkan_context_admit(vulkan, capacity)
+        vulkan_context_admission_without_backend(capacity)
 
     me fonts() -> FontRenderer:
         # Do not obtain FontRenderer through an aggregate-return owner helper:
@@ -358,6 +386,12 @@ class Engine2D with DrawIrRenderTarget:
 
     fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
     fn font_execution_target() -> text: self.last_font_execution_target
+
+    # `me`, not `fn`: a `fn` that reads `self` is the nil-receiver trap the
+    # bug record above documents on the native lane.
+    me font_batches_skipped_empty_count() -> i64: self.font_batches_skipped_empty
+    me font_backend_dispatch_count() -> i64: self.font_backend_dispatches
+    me font_skip_reason() -> text: self.last_font_skip_reason
 
     me install_vulkan_font_spirv(spirv_bytes: [u8]) -> bool:
         """Install one bounded precompiled font compositor on a real Vulkan engine."""
@@ -1309,10 +1343,82 @@ class Engine2D with DrawIrRenderTarget:
             return vulkan.session.driver_identity
         ""
 
+    fn vulkan_last_frame_dispatch_count() -> i64:
+        """Compute dispatches recorded into the last FLUSHED Vulkan frame.
+
+        This is the observable that distinguishes the GPU rect-batch lane (one
+        dispatch for N rects) from the host batch lane (N dispatches, one
+        interpreter transit). Read it AFTER the frame is finalized; the live
+        counter is reset as part of the flush.
+        """
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan.last_frame_dispatch_count
+        0
+
+    fn vulkan_rect_batch_fallback_reason() -> text:
+        """Empty when the batched-rect pipeline is installed; the reason otherwise."""
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan.rect_batch_error
+        "no-vulkan-target"
+
+    fn vulkan_accepted_compute_submit_count() -> i64:
+        """Queue submissions the Vulkan lane has had ACCEPTED so far.
+
+        `vulkan_submission_generation` only advances, so a frame that opened two
+        queue submissions is indistinguishable from one that opened a single
+        submission when the generation is the only thing sampled. This counts
+        the submissions themselves, which is what "one submit per frame"
+        actually claims -- read it before and after a frame and take the delta.
+        """
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan_accepted_compute_submits(vulkan)
+        0
+
     fn vulkan_submission_generation() -> i64:
         if val Some(vulkan) = self._vulkan_primitive_target():
             return vulkan_submitted_generation(vulkan)
         0
+
+    fn vulkan_rect_upload_evidence() -> text:
+        """`"<mode> reason=<reason>"` for the LAST batched rect-list upload,
+        e.g. `"bytes reason=typed-not-requested"` on a binary an old process
+        left alone (default, and the only safe default -- see
+        `_VULKAN_RECT_UPLOAD_U32_REQUESTED` in backend_vulkan_helpers.spl) or
+        `"u32 reason=typed-requested"` when `SIMPLE_VK_RECT_UPLOAD=u32` was
+        set and the typed lane accepted. `"unset reason=no-upload-yet"` before
+        any rect batch has uploaded.
+        """
+        "{vulkan_rect_upload_last_mode()} reason={vulkan_rect_upload_last_reason()}"
+
+    fn vulkan_image_upload_evidence() -> text:
+        """`"<mode> reason=<reason>"` for the LAST image-composite upload.
+
+        The image twin of `vulkan_rect_upload_evidence`, and for the same
+        reason: the typed `[u32]` lane and the packed byte lane must produce
+        byte-identical device memory, so pixels cannot witness which one ran.
+        `"u32 reason=typed-requested"` only when `SIMPLE_VK_IMAGE_UPLOAD=u32`
+        was set and the runtime accepted the words; `"bytes reason=..."`
+        otherwise, naming whether the typed lane was not requested or declined.
+        """
+        "{vulkan_image_upload_last_mode()} reason={vulkan_image_upload_last_reason()}"
+
+    fn vulkan_image_pack_evidence() -> text:
+        """`"packs=<n> byte_fallbacks=<n> scratch_resizes=<n>"` for the byte
+        image-upload lane, process-wide.
+
+        The oracle for the exact-size staging array: a byte-lane composite must
+        walk its image EXACTLY ONCE, so `byte_fallbacks` stays 0 no matter what
+        sizes precede it. Under the old high-water scratch a smaller image after
+        a larger one made `vulkan_sffi_copy_to_buffer_prefix` decline and packed
+        the image a second time, which this counter names directly -- pixels
+        cannot witness it, because the second pack produces identical bytes.
+        """
+        vulkan_image_pack_counts()
+
+    fn vulkan_image_pack_evidence_reset():
+        """Zero the byte-lane pack counters so one example can count its own
+        composites rather than every composite the process has ever done."""
+        vulkan_image_pack_counts_reset()
 
     me cancel_vulkan_present_source(framebuffer: i64, receipt: i64) -> bool:
         if val Some(vulkan) = self._vulkan_primitive_target():
@@ -1345,6 +1451,29 @@ class Engine2D with DrawIrRenderTarget:
             if applied:
                 return engine2d_glass_execution_metal(handle, identity)
             if not metal.initialized:
+                return engine2d_glass_execution_unavailable(
+                    "device-glass-state-unknown")
+            return engine2d_glass_execution_unavailable(reason)
+        if val Some(vulkan) = self.vulkan_backend:
+            val identity = vulkan.session.device
+            if identity <= 0 or vulkan.d_framebuffer <= 0:
+                self.vulkan_backend = Some(vulkan)
+                return engine2d_glass_execution_unavailable(
+                    "vulkan-device-identity-unavailable")
+            val applied = vulkan.draw_ir_apply_glass_material_device(config)
+            val handle = vulkan.d_framebuffer
+            val reason = vulkan.last_error
+            if not applied:
+                # The host twin is about to read the whole framebuffer back,
+                # blur on the CPU and upload the rect again. That round trip
+                # used to happen SILENTLY (cpu_fallback_count stayed 0 while it
+                # ran); record it so an audit can see the boundary crossing.
+                vulkan.mark_cpu_fallback("glass-device-unavailable")
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            if applied:
+                return engine2d_glass_execution_vulkan(handle, identity)
+            if not vulkan.initialized:
                 return engine2d_glass_execution_unavailable(
                     "device-glass-state-unknown")
             return engine2d_glass_execution_unavailable(reason)
@@ -1408,6 +1537,51 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = vulkan
         else:
             self.backend.draw_rect_filled(x, y, w, h, color)
+
+    me draw_rect_list_filled(rects: [i32], colors: [u32]):
+        """Draw N filled rects in ONE call. Packed, frozen layout:
+        rects[4k..4k+4] = x,y,w,h of rect k; colors[k] = its colour.
+
+        Pixel-identical to calling `draw_rect_filled` once per rect, in array
+        order. It exists because that per-call transit costs ~509 us of
+        interpreter time on the Vulkan lane for ~24 us of GPU enqueue
+        (doc/10_metrics/ui/vk2d_bench_frame_time_attribution_macos_2026-09-11.md),
+        and this routes the whole list through the facade once.
+        """
+        val count = colors.len().to_i64()
+        if count <= 0: return
+        if rects.len().to_i64() != count * 4: return
+        # Only the Vulkan lane implements a real batch; every other backend
+        # dispatches immediately per primitive, so for them the batch IS the
+        # loop and there is nothing to win by adding a method to each one.
+        #
+        # The three preconditions mirror `draw_rect_filled`'s router EXACTLY
+        # (virtio -> baremetal -> cuda -> vulkan). Testing vulkan first here
+        # would let an engine with, say, a virtio surface attached alongside an
+        # initialized Vulkan backend paint the batch on a different backend than
+        # the single-rect path, and no pixel test would catch it because each
+        # lane is internally consistent.
+        if val Some(vg) = self.virtio_gpu_backend:
+            self._draw_rect_list_loop(rects, colors, count)
+        elif val Some(bm) = self.baremetal_backend:
+            self._draw_rect_list_loop(rects, colors, count)
+        elif self.selected_backend_name == "cuda":
+            self._draw_rect_list_loop(rects, colors, count)
+        elif val Some(vulkan) = self._vulkan_primitive_target():
+            vulkan.draw_rect_list_filled(rects, colors)
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+        else:
+            self._draw_rect_list_loop(rects, colors, count)
+
+    me _draw_rect_list_loop(rects: [i32], colors: [u32], count: i64):
+        """Unpack the batch into single calls, for every non-Vulkan lane."""
+        var k: i64 = 0
+        while k < count:
+            val base = k * 4
+            self.draw_rect_filled(rects[base], rects[base + 1], rects[base + 2],
+                                  rects[base + 3], colors[k])
+            k = k + 1
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         """Draw a line between two points."""
@@ -1587,6 +1761,15 @@ class Engine2D with DrawIrRenderTarget:
     me _draw_font_batch_staged(x: i32, y: i32, plan: [text]) -> bool:
         if self.font_owner.active.len() == 0:
             return false
+        # The renderer already refused this payload with a typed reason; do
+        # not rebuild a zero-length batch just to hand it to a backend.
+        val staged_reject = self.font_owner.active[0].staged_reject_reason
+        if staged_reject != "":
+            self.font_batches_skipped_empty = self.font_batches_skipped_empty + 1
+            self.last_font_skip_reason = staged_reject
+            self.last_font_execution_attempts = ["nothing-to-draw:" + staged_reject]
+            self.last_font_execution_target = ""
+            return false
         var atlas: [u32] = []
         if not self.font_owner.active[0].staged_atlas_empty:
             atlas = self.font_owner.active[0].atlas_pixels
@@ -1602,6 +1785,7 @@ class Engine2D with DrawIrRenderTarget:
             atlas_generation: self.font_owner.active[0].staged_atlas_generation,
             dirty_rects: self.font_owner.active[0].staged_dirty_rects,
             atlas_owner_generation: self.font_owner.active[0].staged_atlas_owner_generation,
+            atlas_owner_sequence: self.font_owner.active[0].staged_atlas_owner_sequence,
             render_config_identity: self.font_owner.active[0].staged_render_config_identity,
             execution_target: self.font_owner.active[0].staged_execution_target,
             execution_policy: self.font_owner.active[0].staged_execution_policy
@@ -1659,6 +1843,23 @@ class Engine2D with DrawIrRenderTarget:
             print("[vec-text-probe] consumer valid={batch.valid} material_supported={material_ok} n_quads={n_quads} atlas_len={batch.atlas_pixels.len()} first_w={first_w} first_h={first_h} first_ax={first_ax} first_ay={first_ay} first_cov_nz={nz} color_a={first_color_a}")
         if not material_ok or plan.len() == 0:
             return false
+        # Fail-CLOSED on a degenerate batch (acceptance item 4). Counted
+        # inline rather than through a zero-arg FontRenderBatch method: see
+        # the receiver-materialization note at the top of this function.
+        var drawable_quads: i64 = 0
+        var scan_i: i64 = 0
+        while scan_i < n_quads_total:
+            if batch.quads[scan_i].width > 0 and batch.quads[scan_i].height > 0:
+                drawable_quads = drawable_quads + 1
+            scan_i = scan_i + 1
+        if drawable_quads == 0:
+            val skip_reason = if n_quads_total == 0: "empty-quads" else: "zero-area-quads"
+            self.font_batches_skipped_empty = self.font_batches_skipped_empty + 1
+            self.last_font_skip_reason = skip_reason
+            self.last_font_execution_attempts = ["nothing-to-draw:" + skip_reason]
+            self.last_font_execution_target = ""
+            return false
+        self.last_font_skip_reason = ""
         var quad_index: i64 = 0
         var attempts: [text] = []
         var winner = ""
@@ -1675,6 +1876,7 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push("cuda:unavailable")
                 else:
                     val cuda = active
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = cuda.draw_font_batch(x, y, batch)
                     self.cuda_backend = cuda
                     if self.selected_backend_name == "cuda":
@@ -1684,6 +1886,7 @@ class Engine2D with DrawIrRenderTarget:
                     if quad_index == batch.quads.len(): winner = "cuda"
             elif target == "metal":
                 if val Some(metal) = self.metal_backend:
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = metal.draw_font_batch(x, y, batch)
                     self.metal_backend = Some(metal)
                     if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
@@ -1697,6 +1900,7 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push("opencl:unavailable")
                 else:
                     val opencl = active
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = opencl.draw_font_batch(x, y, batch)
                     self.opencl_backend = opencl
                     if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
@@ -1716,6 +1920,7 @@ class Engine2D with DrawIrRenderTarget:
                     # var (not val): evidence.fallback_pixels is cleared below;
                     # W1006 mut-capability failure here silently killed
                     # whole-program JIT (2026-07-18).
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     var evidence = vulkan.composite_font_batch(x, y, batch)
                     self.last_vulkan_font_evidence = evidence
                     self.vulkan_backend = Some(vulkan)
@@ -1751,6 +1956,7 @@ class Engine2D with DrawIrRenderTarget:
                     attempts.push("rocm:unavailable")
                 else:
                     val rocm = active
+                    self.font_backend_dispatches = self.font_backend_dispatches + 1
                     quad_index = rocm.draw_font_batch(x, y, batch)
                     self.rocm_backend = rocm
                     if rocm.initialized:
@@ -1761,6 +1967,7 @@ class Engine2D with DrawIrRenderTarget:
             elif target == "cpu":
                 val cpu_simd_requested = self.selected_backend_name == "cpu_simd" and active_arch_text() == "x86_64"
                 val native_hits_before = engine2d_simd_native_hits()
+                self.font_backend_dispatches = self.font_backend_dispatches + 1
                 quad_index = self._draw_font_batch_cpu_suffix(x, y, batch, quad_index)
                 val cpu_simd = cpu_simd_requested and engine2d_simd_native_hits() > native_hits_before
                 if cpu_simd:
@@ -1888,6 +2095,18 @@ class Engine2D with DrawIrRenderTarget:
             execution_policy: FontExecutionPolicy.Suggested
         )
         self.draw_text_configured(x, y, text_val, color, config)
+
+    me mark_cpu_fallback_reason(reason: text):
+        """Record a CPU-boundary crossing on the Vulkan backend, if one is live.
+
+        Draw IR needs to record a fallback (e.g. a text run whose resolved
+        advances arrived in an arity the staging loop cannot consume) without
+        reaching into `vulkan_backend` itself. A no-op when no Vulkan backend
+        is attached -- the CPU lanes have no counter to bump.
+        """
+        if val Some(vulkan) = self.vulkan_backend:
+            vulkan.mark_cpu_fallback(reason)
+            self.vulkan_backend = Some(vulkan)
 
     me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
         """Draw producer-resolved text through the selected vector face."""
@@ -2947,6 +3166,20 @@ class Engine2D with DrawIrRenderTarget:
         else:
             self.backend.present()
 
+    me vulkan_discard_stale_pending_compute() -> bool:
+        """Drop a previous frame's ghost compute batch before reusing this engine.
+
+        Pooled engines resume from a value that can predate the flush which
+        cleared the batch, so the first dispatch of the next frame binds an
+        already-submitted (dead) command buffer and the whole frame is demoted
+        to the CPU fallback. See `discard_stale_pending_compute`."""
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            val dropped = vulkan.discard_stale_pending_compute()
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return dropped
+        false
+
     me submit_batch() -> bool:
         """Flush any backend-buffered draw calls for this frame into one
         fenced submission. No-op (returns true) on backends that dispatch
@@ -2995,7 +3228,7 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = cuda
             return pixels
         elif val Some(vulkan) = self._vulkan_primitive_target():
-            val pending_status = vulkan._flush_pending_compute()
+            val pending_status = vulkan._flush_pending_compute_at("engine.read_pixels")
             if pending_status < 0:
                 vulkan.mark_completion_unknown()
             elif pending_status != 1:
@@ -3027,7 +3260,7 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = cuda
             readback
         elif val Some(vulkan) = self._vulkan_primitive_target():
-            val pending_status = vulkan._flush_pending_compute()
+            val pending_status = vulkan._flush_pending_compute_at("engine.read_pixels_with_source")
             if pending_status < 0:
                 vulkan.mark_completion_unknown()
             elif pending_status != 1:

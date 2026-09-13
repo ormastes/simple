@@ -150,6 +150,167 @@ fn _serialize_row(values: [DbValue]) -> text:
         i = i + 1
     result
 
+# Disk-v2 rows are length-framed per cell. The outer record codec escapes the
+# resulting row once more, so delimiter/control bytes inside Text cannot become
+# cells or records during recovery.
+fn _pdb_v2_escape(value: text) -> text:
+    var out = value.replace("%", "%25")
+    out = out.replace("|", "%7C")
+    out = out.replace("\t", "%09")
+    out = out.replace("\r", "%0D")
+    out.replace("\n", "%0A")
+
+fn _pdb_v2_unescape(value: text) -> text?:
+    if value.contains("|") or value.contains("\t") or value.contains("\r") or value.contains("\n"):
+        return nil
+    var out = ""
+    var i: i32 = 0
+    while i < value.len() as i32:
+        val ch = value.slice(i, i + 1)
+        if ch != "%":
+            out = out + ch
+            i = i + 1
+            continue
+        if i + 3 > value.len() as i32:
+            return nil
+        val escape = value.slice(i, i + 3)
+        if escape == "%25": out = out + "%"
+        elif escape == "%7C": out = out + "|"
+        elif escape == "%09": out = out + "\t"
+        elif escape == "%0D": out = out + "\r"
+        elif escape == "%0A": out = out + "\n"
+        else: return nil
+        i = i + 3
+    Some(out)
+
+fn _serialize_row_v2(values: [DbValue]) -> text:
+    var result = ""
+    for value in values:
+        var kind = "N"
+        var payload = ""
+        match value:
+            DbValue.Integer(inner):
+                kind = "I"
+                payload = inner.to_text()
+            DbValue.Real(inner):
+                kind = "R"
+                payload = inner.to_text()
+            DbValue.Text(inner):
+                kind = "T"
+                payload = inner
+            DbValue.Null:
+                pass
+            DbValue.Bool(inner):
+                kind = "B"
+                payload = if inner: "1" else: "0"
+            DbValue.Blob(inner):
+                # Preserve the existing v1 Blob persistence contract: only
+                # length was stored and reopen produced an empty Blob.
+                kind = "X"
+                payload = inner.len().to_text()
+        result = result + kind + payload.len().to_text() + ":" + payload
+    result
+
+fn _pdb_v2_decimal_length(value: text) -> i32?:
+    if value == "": return nil
+    if value.len() > 1 and value.starts_with("0"): return nil
+    var i: i32 = 0
+    while i < value.len() as i32:
+        val code = value.char_code_at(i)
+        if code < 48 or code > 57: return nil
+        i = i + 1
+    val parsed = value.to_int()
+    match parsed:
+        case Some(length):
+            if length < 0 or length > 2147483647: nil
+            else: Some(length as i32)
+        case nil: nil
+
+fn _deserialize_row_v2(data: text) -> [DbValue]?:
+    var result: [DbValue] = []
+    var cursor: i32 = 0
+    while cursor < data.len() as i32:
+        val kind = data.slice(cursor, cursor + 1)
+        cursor = cursor + 1
+        val length_start = cursor
+        while cursor < data.len() as i32 and data.slice(cursor, cursor + 1) != ":":
+            cursor = cursor + 1
+        if cursor >= data.len() as i32: return nil
+        val length = _pdb_v2_decimal_length(data.slice(length_start, cursor))
+        if length.is_none(): return nil
+        cursor = cursor + 1
+        val payload_length = length.unwrap()
+        if payload_length > data.len() as i32 - cursor: return nil
+        val payload = data.slice(cursor, cursor + payload_length)
+        cursor = cursor + payload_length
+        if kind == "I":
+            if not _is_numeric_text(payload): return nil
+            result.push(DbValue.Integer(value: payload.to_int() ?? 0))
+        elif kind == "R":
+            match payload.to_float():
+                case Some(value): result.push(DbValue.Real(value: value))
+                case nil: return nil
+        elif kind == "T":
+            result.push(DbValue.Text(value: payload))
+        elif kind == "N":
+            if payload != "": return nil
+            result.push(DbValue.Null)
+        elif kind == "B":
+            if payload != "0" and payload != "1": return nil
+            result.push(DbValue.Bool(value: payload == "1"))
+        elif kind == "X":
+            if not _is_numeric_text(payload): return nil
+            result.push(DbValue.Blob(value: []))
+        else:
+            return nil
+    Some(result)
+
+# V3 accepts only the exact spelling emitted by _serialize_row_v2. This is
+# separate from v2 compatibility because Blob cells intentionally retain the
+# historical length-only representation and cannot be round-tripped through
+# the decoded empty Blob value.
+fn _pdb_v3_row_encoding_is_canonical(data: text) -> bool:
+    var cursor: i32 = 0
+    while cursor < data.len() as i32:
+        val kind = data.slice(cursor, cursor + 1)
+        cursor = cursor + 1
+        val length_start = cursor
+        while cursor < data.len() as i32 and data.slice(cursor, cursor + 1) != ":":
+            cursor = cursor + 1
+        if cursor >= data.len() as i32:
+            return false
+        val length = _pdb_v2_decimal_length(data.slice(length_start, cursor))
+        if length.is_none():
+            return false
+        cursor = cursor + 1
+        val payload_length = length.unwrap()
+        if payload_length > data.len() as i32 - cursor:
+            return false
+        val payload = data.slice(cursor, cursor + payload_length)
+        cursor = cursor + payload_length
+        if kind == "I":
+            val parsed = payload.to_int()
+            if parsed.is_none() or parsed.unwrap().to_text() != payload:
+                return false
+        elif kind == "R":
+            val parsed = payload.to_float()
+            if parsed.is_none() or parsed.unwrap().to_text() != payload:
+                return false
+        elif kind == "T":
+            pass
+        elif kind == "N":
+            if payload != "":
+                return false
+        elif kind == "B":
+            if payload != "0" and payload != "1":
+                return false
+        elif kind == "X":
+            if _pdb_v2_decimal_length(payload).is_none():
+                return false
+        else:
+            return false
+    true
+
 fn _deserialize_row(data: text) -> [DbValue]:
     val parts = data.split("\t")
     var result: [DbValue] = []
@@ -1679,6 +1840,12 @@ fn _parse_alter_table(sql: text) -> [text]:
     var col_type = "TEXT"
     if parts.len() >= 5:
         col_type = parts[4].to_upper()
+    # This compact ALTER path supports only ADD COLUMN <name> [type].
+    # Reject rather than silently discarding PRIMARY KEY, NOT NULL, DEFAULT,
+    # or any other trailing declaration that schema introspection would then
+    # misreport.
+    if parts.len() > 5:
+        return []
     var result: [text] = []
     result.push(tbl_name)
     result.push(col_name)

@@ -1,6 +1,12 @@
 # SimpleOS Green Final QEMU Refresh Blocker - 2026-06-14
 
-Status: CLOSED on 2026-06-14.
+## Closed 2026-09-13 — Confirmed closed; also stale by host
+
+- **inferred**: the entry closed itself on 2026-06-14 after rebasing the second workspace on `main@origin`; nothing was left outstanding then and nothing has been added since.
+- **inferred**: it is additionally stale by host. Both workspaces it names, `/tmp/simple-pherallel-continue-jj` and `/tmp/simple-pherallel-loop-jj`, are ephemeral Linux paths that do not exist here, and its command line invokes `src/compiler_rust/target/debug/simple`, which is not built on this host.
+- **inferred**: re-running it would need `SIMPLEOS_GREEN_CARRIER_QEMU_HW_HANDOFF_LIVE=1` against a live QEMU SimpleOS lane — unavailable on Windows — so no fresh `HW_HANDOFF_PASS` / `USER_ENTRY_PASS` / `USER_SYSCALL_PASS` evidence can be produced or is needed.
+
+Status: CLOSED on 2026-06-14; re-confirmed closed 2026-09-13 (also stale by host).
 
 ## Summary
 

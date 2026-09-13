@@ -1,5 +1,7 @@
 # SimpleOS-WM freestanding kernel link now blocked by 4 NEW unbaselined fabricated symbols (2026-07-31)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 OPEN. This is a **different, earlier** blocker than the two previously
@@ -112,3 +114,7 @@ implement real freestanding bodies for the GPU-identity pair (or prove they
 are dead code on this entry and can be pruned). Only after the kernel links
 again can the two previously recorded blockers (vtable trap — believed fixed
 by `f2f64a137bd`; font-metrics hang — unresolved) be re-tested end to end.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

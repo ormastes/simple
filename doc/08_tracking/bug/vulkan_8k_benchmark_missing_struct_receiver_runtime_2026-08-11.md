@@ -1,5 +1,7 @@
 # Vulkan 8K benchmark blocked by missing struct-receiver runtime symbol
 
+**Status:** OPEN (unverified 2026-09-12)
+
 Date: 2026-08-11
 
 ## Reproduction
@@ -50,3 +52,7 @@ prevents an honest 8K p50/p95 claim for that path as well.
    `VULKAN_8K_RETAINED` result.
 4. Receipt identifies device type/driver and does not promote llvmpipe to
    physical-GPU evidence.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

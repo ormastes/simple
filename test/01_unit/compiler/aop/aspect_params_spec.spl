@@ -1,0 +1,87 @@
+# @req KPM-REQ-002 KPM-REQ-005 KPM-REQ-009
+use std.spec.*
+use app.io.aspect_params_env.{aspect_params_from_env, aspect_params_from_values}
+use compiler.common.driver_core_types.{CompileOptions, CompileMode, OutputFormat}
+use common.plugin.aspect_params.{
+    ASPECT_CUTOVER_DUAL_EXT_V1,
+    ASPECT_PARAM_LOG_CALLS,
+    ASPECT_PARAM_LOG_ASSIGNMENTS,
+    ASPECT_PARAM_COMPILE_LOG_LEVEL,
+    AspectParamsV1,
+    aspect_coverage_cutover_state_v1,
+    aspect_coverage_cutover_policy_v1
+}
+use common.plugin.iface_id.{ParamExt}
+
+extern fn rt_env_set(key: text, value: text) -> bool
+
+describe "AspectParamsV1 environment boundary":
+    it "reads environment exactly once at the app boundary into typed parameters":
+        rt_env_set("SIMPLE_AOP_LOG_CALLS", "true")
+        rt_env_set("SIMPLE_AOP_LOG_ASSIGNMENTS", "")
+        rt_env_set("SIMPLE_AOP_COMPILE_LOG_LEVEL", "warn")
+        val params = aspect_params_from_env()
+        rt_env_set("SIMPLE_AOP_LOG_CALLS", "")
+        rt_env_set("SIMPLE_AOP_COMPILE_LOG_LEVEL", "")
+        rt_env_set("SIMPLE_AOP_COMPILE_LOG_LEVEL", "")
+        expect(params.log_calls).to_equal(true)
+        expect(params.log_assignments).to_equal(false)
+        expect(params.compile_log_level).to_equal(3)
+        expect(params.has(ASPECT_PARAM_LOG_CALLS)).to_equal(true)
+        expect(params.has(ASPECT_PARAM_LOG_ASSIGNMENTS)).to_equal(true)
+        print("KPM_PHASE2_ENV_BOUNDARY_RECEIPT=PASS")
+    it "decodes values and marks only explicitly supplied ordinals present":
+        val params = aspect_params_from_values(Some("true"), nil, Some("warn"), nil, nil, nil)
+        expect(params.log_calls).to_equal(true)
+        expect(params.log_assignments).to_equal(false)
+        expect(params.compile_log_level).to_equal(3)
+        expect(params.has(ASPECT_PARAM_LOG_CALLS)).to_equal(true)
+        expect(params.has(ASPECT_PARAM_LOG_ASSIGNMENTS)).to_equal(false)
+        expect(params.has(ASPECT_PARAM_COMPILE_LOG_LEVEL)).to_equal(true)
+
+    it "keeps every presence bit clear for absent values":
+        val params = aspect_params_from_values(nil, nil, nil, nil, nil, nil)
+        expect(params.hdr.present).to_equal(0)
+
+    it "selects atomic APK-only and rejects the legacy dual extension":
+        var params = AspectParamsV1.defaults()
+        expect(aspect_coverage_cutover_state_v1(params)).to_equal("atomic-apk-only")
+        params.ext.push(ParamExt(ASPECT_CUTOVER_DUAL_EXT_V1, 1, [],
+            "sha256:simple.instrumentation.cutover.v1"))
+        expect(aspect_coverage_cutover_state_v1(params)).to_equal("rejected")
+        expect(aspect_coverage_cutover_policy_v1("atomic-apk-only").ok.unwrap()).to_equal("atomic-apk-only")
+        expect(aspect_coverage_cutover_policy_v1("").ok.unwrap()).to_equal("atomic-apk-only")
+        expect(aspect_coverage_cutover_policy_v1("dual").err.unwrap()).to_contain("rejected `dual`")
+
+    it "keeps direct CompileOptions constructors source-compatible":
+        val options = CompileOptions(
+            mode: CompileMode.Jit,
+            input_files: [],
+            output_file: nil,
+            output_format: OutputFormat.Native,
+            optimize: false,
+            opt_level: nil,
+            release: false,
+            debug_info: true,
+            verbose: false,
+            log_level: 4,
+            profile: "dev",
+            no_borrow_check: false,
+            backend: "auto",
+            interpreter_mode: "optimized",
+            gc_off: false,
+            smf_output_mode: "code_only",
+            low_memory: false,
+            debug_trace_level: "",
+            allowed_families: [],
+            build_mode: "debug",
+            cli_mode_text: "",
+            bootstrap_input_count: 0,
+            bootstrap_input_0: "",
+            bootstrap_input_1: "",
+            bootstrap_input_2: "",
+            bootstrap_input_3: "",
+            bootstrap_input_4: "",
+            bootstrap_input_5: "",
+            riscv_gen2_target: "")
+        expect(options.aspect_params.hdr.present).to_equal(0)

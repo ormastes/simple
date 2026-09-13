@@ -66,15 +66,19 @@ async function runMcp(requests) {
 
 try {
   const cli = loadFixture("legacy_cli.json");
+  const packageVersion = JSON.parse(readFileSync(join(moduleRoot, "package.json"), "utf8")).version;
+  assert.equal(cli.version.stdout, `${packageVersion}\n`, "legacy CLI fixture must track the package release version");
   runCli(cli.help);
   runCli(cli.version);
   const info = runCli(cli.info)
     .replaceAll(moduleRoot, "<MODULE_ROOT>")
+    .replaceAll("\\", "/")
     .trimEnd()
     .split("\n");
   assert.deepEqual(info, cli.info.normalizedStdout);
 
   const mcp = loadFixture("legacy_mcp.json");
+  assert.equal(mcp.serverInfo.version, packageVersion, "legacy MCP fixture must track the package release version");
   const responses = await runMcp(mcp.requests);
   assert.equal(responses.length, mcp.responseCount, "notifications must remain silent");
 

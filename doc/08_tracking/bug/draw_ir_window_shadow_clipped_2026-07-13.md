@@ -1,6 +1,6 @@
 # Draw IR window shadow is clipped and overwritten
 
-Status: open (TODO 554)
+Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 ## Observed
 
@@ -21,3 +21,6 @@ verify identical local CPU and checked host-device output.
 - A pixel outside the window body but inside the declared shadow is visible.
 - Window/body/content hit and clip bounds remain unchanged.
 - CPU and checked Vulkan composition remain exact for focused and unfocused windows.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

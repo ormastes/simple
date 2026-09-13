@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd -P)
+bridge="$root/src/compiler/80.driver/action_graph/artifact_service_bridge.spl"
+work=$(mktemp -d "${TMPDIR:-/tmp}/artifact-service-bridge-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+test -f "$bridge"
+
+python3 - "$bridge" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+
+claim = source.index("var claimed = artifact_service_claim_v1(")
+restore = source.index("claimed.entries = restored", claim)
+commit_start = source.index("fn demand_artifact_commit_v1(")
+commit_end = source.index("fn demand_artifact_cancel_v1(", commit_start)
+commit = source[commit_start:commit_end]
+coordinator_publish = commit.index("staged_execution.coordinator = Some(staged_coordinator)")
+execution_publish = commit.index("route.execution = staged_execution", coordinator_publish)
+service_publish = commit.index("route.service = staged_service", execution_publish)
+authority = commit.index("if not artifact_service_result_is_authoritative_v1(")
+
+assert claim < restore
+assert authority < coordinator_publish < execution_publish < service_publish
+assert "val claimed = artifact_service_claim_v1(" not in source
+assert "fn demand_artifact_claim_owned_v1(" in source
+assert "fn demand_artifact_commit_owned_v1(" in source
+PY
+
+cp "$bridge" "$work/bridge.spl"
+python3 - "$work/bridge.spl" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+source = source.replace(
+    "var claimed = artifact_service_claim_v1(",
+    "val claimed = artifact_service_claim_v1(",
+    1,
+)
+path.write_text(source)
+PY
+
+if python3 - "$work/bridge.spl" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+claim = source.index("val claimed = artifact_service_claim_v1(")
+assignment = source.index("claimed.entries = restored", claim)
+if assignment > claim:
+    raise SystemExit(1)
+PY
+then
+    echo 'mutation unexpectedly accepted immutable claimed binding' >&2
+    exit 1
+fi
+
+printf '%s\n' 'ARTIFACT_SERVICE_BRIDGE_OWNERSHIP_CONTRACT_PASS'

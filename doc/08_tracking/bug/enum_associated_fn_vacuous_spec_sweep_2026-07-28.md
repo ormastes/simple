@@ -1,4 +1,5 @@
 # Sweep: how many specs pass vacuously because of the JIT enum-associated-fn hijack?
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **Date:** 2026-07-28
 - **Kind:** measurement (no specs were rewritten)
@@ -303,3 +304,6 @@ would be work aimed at a defect they do not have.
   the two files that are `M` in the working tree (`src/lib/common/sdn/value.spl`,
   `src/compiler/00.common/config.spl`) were re-inspected afterwards and still
   carry the parallel session's Dict-pitfall fixes, not mutation text.
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

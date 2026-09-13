@@ -1,5 +1,7 @@
 # `CompileResult.CodegenError` construction called unresolved `Array.first()`, crashing the compiler (`call 0`) on every fatal MIR-lowering error — source-fixed, binary verification blocked by a separate pre-existing native-build instability
 
+**Status:** RESOLVED (per record's own account; not independently re-verified 2026-09-12)
+
 - **Date:** 2026-08-06
 - **Severity:** high — every native-build invocation that hits a fatal MIR
   lowering error (which includes the common `Option<Trait>.unwrap().method()`
@@ -652,3 +654,6 @@ wrong value under exit 0. The doc's own title already says "source-fixed".
 Recommend CLOSE. The C4 TSV evidence column ("const-0/unresolved placeholder path
 still present at line 3133") is stale — the path is present but is now preceded
 by rt_panic.
+
+## Triage 2026-09-12
+Body appears to state resolution; not independently re-run in this pass (rule D bulk pass). Older-than-45-days threshold does not apply (record is newer than 2026-07-29). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

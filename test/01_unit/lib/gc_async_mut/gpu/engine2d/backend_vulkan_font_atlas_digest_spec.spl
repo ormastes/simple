@@ -1,0 +1,129 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer landing the O(1) atlas payload token, the
+digest half of
+`doc/08_tracking/bug/vulkan_font_composite_atlas_walks_2026-09-12.md`.
+
+`font_atlas_payload_sha256` used to fold all 1,048,576 pixels of a fixed 4 MB
+atlas on every dirty upload -- **37,650 ms across 21 calls of a 259,523 ms
+900x760 frame, 53% of `font_composite`** -- to produce a token that nothing in
+the tree reads for a decision. Every consumer asserts its SHAPE or compares it
+across samples; the re-upload decision is made by
+`(atlas_generation, owner_identity)`. The default token now folds that pair.
+
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ <simple> run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_atlas_digest_spec.spl`
+
+No GPU, no env flags. The digest is a pure function of its arguments, so a
+device requirement would only make this file skippable on the hosts that most
+need it -- and the property under test (does the token move when the atlas
+moves?) is answerable without ever touching a device.
+
+## Compatibility and limitations
+This file pins the IDENTITY token only. It does not and cannot check that the
+generation counter is itself a sound description of the atlas -- that is the
+upload cache's existing contract, exercised by
+`SIMPLE_VK_FONT_SELFCHECK=1` and by `backend_vulkan_font_spec.spl`. What is
+checked here is narrower and exact: given that pair, the token is well-formed,
+stable, and injective in each input separately.
+
+`SIMPLE_VK_FONT_DIGEST=payload` restores the full pixel walk in the product; it
+changes which function the call site picks, not either function's behaviour, so
+it is out of scope here.
+
+## Verification guidance and troubleshooting
+Each input gets its OWN example rather than one combined "different inputs give
+different tokens" check, because a fold that silently dropped `generation` would
+still pass a combined check on the strength of the owner lane alone. That is the
+exact sabotage: remove `generation` from the lane fold and only the generation
+example goes red.
+
+A failure reporting a 64-character token that simply never changes usually means
+the lane fold was reduced to the geometry lanes, which are shared by every
+atlas of the same size.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_font_composite_atlas_walks_2026-09-12.md
+# @manual_section: vulkan_font_atlas_identity_digest
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl 2%
+# @tag: unit, gpu, engine2d, vulkan, font, perf
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_atlas_identity_digest}
+
+val OWNER: text = "sha256=a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da;axes=wght=100"
+val OTHER_OWNER: text = "sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100"
+val W: i32 = 1024i32
+val H: i32 = 1024i32
+val N: i64 = 1048576
+
+fn token(owner: text, generation: i64) -> text:
+    vulkan_font_atlas_identity_digest(owner, generation, W, H, N)
+
+fn is_lower_hex(s: text) -> bool:
+    """The tree's own predicate, copied rather than re-invented.
+
+    Byte-for-byte the loop `macos_gpu_2d_live_harness.spl:119` applies to this
+    same field, so a token that passes here passes there.
+    """
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < s.len():
+        if not allowed.contains(s[i].to_text()):
+            return false
+        i = i + 1
+    true
+
+describe "The atlas identity token is a well-formed sha256 that moves with the atlas":
+
+    it "is exactly 64 characters":
+        # SHAPE. `native_gpu_font_readback_spec.spl` asserts
+        # `evidence.atlas_payload_sha256.len() == 64` and the live-harness
+        # contract asserts `lower_hex_sha256_valid`. Both must keep holding, so
+        # the replacement had to keep the `sha256_u8_hex` envelope rather than
+        # emit a shorter token.
+        expect(token(OWNER, 7).len().to_i64()).to_equal(64)
+
+    it "is lowercase hexadecimal throughout":
+        # SHAPE, the other half. A 64-character token that contained an upper
+        # case digit would satisfy the length check and fail the tree's
+        # `lower_hex_sha256_valid` predicate at runtime.
+        expect(is_lower_hex(token(OWNER, 7))).to_equal(true)
+
+    it "is identical for identical inputs":
+        # STABILITY. `shared_multilingual_gpu_fonts_perf_spec.spl` fails a run
+        # when the token moves between samples of an UNCHANGED atlas, so an
+        # unstable token would show up as a spurious atlas-churn failure far
+        # from here.
+        expect(token(OWNER, 7)).to_equal(token(OWNER, 7))
+
+    it "moves when the GENERATION moves":
+        # THE LOAD-BEARING LANE, and the sabotage target. The generation is the
+        # whole reason this token can be O(1): it is what the upload cache
+        # already trusts to mean "the atlas content changed". A fold that
+        # dropped it would produce one token for every version of an owner's
+        # atlas, and the evidence would silently stop describing anything.
+        expect(token(OWNER, 7) == token(OWNER, 8)).to_equal(false)
+
+    it "moves when the OWNER moves":
+        # The second real input. This page alternates between exactly these two
+        # font identities 8 times in one frame, so two owners colliding at the
+        # same generation is not hypothetical here.
+        expect(token(OWNER, 7) == token(OTHER_OWNER, 7)).to_equal(false)
+
+    it "moves when the atlas DIMENSIONS move":
+        # Geometry is folded in its own lanes. `dims_changed=1` in the measured
+        # frame, so a resized atlas at the same generation is reachable.
+        val small = vulkan_font_atlas_identity_digest(OWNER, 7, 512i32, 512i32, 262144)
+        expect(token(OWNER, 7) == small).to_equal(false)
+
+    it "distinguishes a generation change from an owner change":
+        # A fold that mixed both inputs into ONE lane could satisfy both
+        # "moves with generation" and "moves with owner" while mapping the pair
+        # (owner_b, gen_7) and (owner_a, gen_8) to the same token. Three
+        # distinct tokens is the property that excludes it.
+        val base = token(OWNER, 7)
+        val by_gen = token(OWNER, 8)
+        val by_owner = token(OTHER_OWNER, 7)
+        expect(base != by_gen and base != by_owner and by_gen != by_owner).to_equal(true)

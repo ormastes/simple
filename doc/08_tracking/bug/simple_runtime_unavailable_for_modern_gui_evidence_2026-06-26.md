@@ -1,5 +1,10 @@
 # Simple Runtime Unavailable for Modern GUI Evidence
 
+## Closed 2026-09-13 — stale: describes a broken checkout state, not a defect; that checkout is gone
+- **measured** (this checkout, Windows): `bin/simple --version` succeeds (`Simple Language v1.0.0-rc.1`, Rust seed) and `bin/simple run` executes programs in ~0.5s — the entry's `bin/simple is missing` premise does not hold here.
+- **inferred**: every observation is pinned to a dead Linux checkout — `bin/release/x86_64-unknown-linux-gnu/simple` (a path that does not exist in this tree) and a `bin/simple_native` that exited 139. Those artifacts are per-checkout build products, not tracked source.
+- **inferred**: the underlying "no self-hosted binary deployed" concern is real and tracked elsewhere (CLAUDE.md and .claude/rules/commands.md both record that `bin/simple` is the seed); this entry adds only the dead host's symptoms.
+
 Date: 2026-06-26
 
 ## Summary

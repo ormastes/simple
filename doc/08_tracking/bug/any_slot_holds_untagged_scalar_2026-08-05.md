@@ -172,3 +172,7 @@ alone via the interpreter-vs-JIT split) and a scoped fix in
   through `BoxInt`, which by the tag argument above produces a tagged int, not
   a bool. An enum payload holding a bool should render `"true"`, not `"1"`.
   Not fixed here — it needs its own repro and arm.
+
+## Triage 2026-09-13
+
+Confirmed the two remaining consumer-side sites are unchanged: `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`'s Binary-op lowering still only boxes the other operand for the nil-comparison special case (no general `is_runtime_value_local`-vs-literal boxing rule), and `method_calls_literals.spl`'s `is_text_conversion` arm still decides rendering purely from `local_mir_type_of(receiver)`, which is the erased `I64` for a boxed `Any` local. The doc's own assessment stands: this is "a new kind of check" needing its own careful design, not a small surgical port -- risking a regression across all `Any`-typed JIT codegen if rushed. Leaving OPEN, no code change made this pass.

@@ -1,5 +1,7 @@
 # Stage 4 test database time owner
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Source fixed; exact Phase 4 verification pending a fresh bounded session.
@@ -29,3 +31,7 @@ The database extension now imports `rt_timestamp_now` from the physical
 Start a fresh maximum-three-cycle x86 Phase 4 continuation with the preserved
 cache. Do not run a fourth cycle in the exhausted session. Essential-tool and
 post-x86 platform admission remain gated on an exact candidate.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

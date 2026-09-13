@@ -33,7 +33,8 @@ The release gate also runs `sh scripts/check/check-no-direct-rt.shs --critical`
 as a lane: any forbidden direct `rt_*(...)` call site outside the sanctioned
 providers (`scripts/check/no_direct_rt_allowlist.txt`) fails the release with
 `release_blockers=no_direct_rt`. Unlike the mandatory pre-push gate (which
-passes `--roots src` to preserve its existing baseline-ratchet scope), this
+passes `--roots src --rev <tip> --baseline-rev <base>` to reject only
+branch-added debt in the exact committed outgoing range), this
 lane uses the DEFAULT `--roots` (`src,examples,tools,scripts,test`) and
 `--critical` mode, which has no baseline grace — a single forbidden site
 blocks. When this lane is red its name is appended to the reported

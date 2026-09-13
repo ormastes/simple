@@ -1,5 +1,7 @@
 # Workspace diagnostics nested-process overhead
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Open. Static process-topology evidence only; execution measurement was not run
@@ -45,3 +47,7 @@ Zero per-file subprocesses; unchanged file/diagnostic order, duplicates,
 clean-file omission, lint-profile behavior, totals, JSON bytes, and exit status;
 no trace stdout; no cross-file state contamination; peak RSS no more than 10%
 above baseline.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

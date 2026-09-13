@@ -1,5 +1,7 @@
 # zstd and brotli encoders are container writers only — they never compress
 
+**Status:** OPEN (unverified 2026-09-12)
+
 **Status (2026-08-17, revised): zstd FIXED — `zstd_compress_frame` now emits
 real Huffman-coded Compressed_Blocks. brotli STILL-OPEN.**
 
@@ -199,3 +201,24 @@ rather than faked.
 Until the encoders are implemented, `supported_encodings()` legitimately lists
 zstd and br — the dispatcher will simply never select them for a body they
 cannot shrink.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Triage 2026-09-13
+
+Confirmed via file inspection: `src/lib/nogc_sync_mut/compression/brotli/encoder.spl`
+still gates `_try_encode_literal_only`/`_try_encode_lz77` to <=4 distinct
+bytes / a 7-literal prefix, exactly as last documented; no complex
+prefix-code writer exists. This is a genuine multi-week feature gap
+(canonical code-length-coded prefix codes for brotli; FSE sequence
+coding + 4-stream literals for zstd), not a bug fixable within this
+lane's per-item budget. Runner smoke-check
+(bin/simple test test/01_unit/lib/common/text_advanced_levenshtein_spec.spl,
+base a6450c9d6f5, seed 3d120a6f9ab5704b) confirms the test runner itself
+works from this worktree (7/7 passed), so the "not verified" note about
+the runner hanging is unrelated to this lane's environment. Leaving
+OPEN as a capability gap, not attempting the brotli/zstd encoder
+implementation here.
+

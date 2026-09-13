@@ -1,5 +1,7 @@
 # Stage-3 self-host imported-type resolution cascade (2026-08-21)
 
+**Status:** OPEN (unverified 2026-09-12)
+
 ## Status
 
 Fix committed locally; bootstrap re-verification pending in a fresh session.
@@ -39,3 +41,7 @@ ever sees sources with an empty parser cache. A lifecycle regression exercises
 the production dispatcher with the readiness flag deliberately reset. Rerun
 Stage 3 once in a fresh bounded verification session; do not patch 197
 consumers individually or accept a seed fallback.
+
+## Triage 2026-09-12
+
+Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

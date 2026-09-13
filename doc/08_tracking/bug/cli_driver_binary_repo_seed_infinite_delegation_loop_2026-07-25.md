@@ -1,7 +1,7 @@
 # Bug: `bin/simple run` infinite delegation loop — blocks ALL execution
 
 **Date:** 2026-07-25
-**Status:** BLOCKER — discovered while verifying the host-WM headless capture
+**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 lane (`doc/08_tracking/bug/wm_showcase_no_headless_lane_2026-07-25.md`); files
 as its own defect because it blocks every `bin/simple run`/`bin/simple lint`
 invocation on this host, not just the headless-lane work.
@@ -102,3 +102,6 @@ incident pattern precisely.
 Add the same `_cli_is_current_exe(repo_seed)` guard already used on the other
 two branches of `_cli_driver_binary()`, then re-verify with the linear-scaling
 repro above (bytes vs. timeout should stop growing once the guard fires).
+
+## Triage 2026-09-12
+Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -1,4 +1,5 @@
 # Front-end parse costs seconds per file; string-interpolation expansion is superlinear
+**Status:** OPEN (unverified 2026-09-12)
 
 - **Date:** 2026-08-21
 - **Area:** `src/compiler/10.frontend/**` (self-hosted front end)
@@ -226,3 +227,6 @@ guard.
    pin a wall-clock bound cannot be: it distinguishes avoidable work from a
    slow host, and it is the counter that proved
    `expand_string_interpolations` innocent and the placeholder passes guilty.
+
+## Triage 2026-09-12
+Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

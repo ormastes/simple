@@ -1,0 +1,56 @@
+#!/bin/sh
+# Path selection only: no Cargo/compiler invocation or existing-cache mutation.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+case "$(uname -s)" in
+  MSYS*|MINGW*|CYGWIN*) ;;
+  *) echo 'ERROR: actual Windows path conversion required' >&2; exit 2 ;;
+esac
+. "$root/scripts/bootstrap/bootstrap-authority-wiring.shs"
+fail() { echo "FAIL: $1" >&2; exit 1; }
+fp_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+fp_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+legacy="$root/build/p1-combined-verify/rust-authority-$fp_a"
+target=$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")
+[ "$target" = "$root/build/c/$fp_a" ] || fail 'cache left repo/build or lost full fingerprint'
+[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")" ] || fail 'retry changes cache'
+[ "$target" = "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$root/build/other-log-root/rust-authority-$fp_a")" ] || fail 'log-root change discards cache'
+[ "$target" != "$(bootstrap_authority_rust_cargo_target "$root" windows "$fp_b" "$root/build/other/rust-authority-$fp_b")" ] || fail 'changed inputs share cache'
+[ "$(bootstrap_authority_rust_cargo_target "$root" linux "$fp_a" "$legacy")" = "$legacy/target" ] || fail 'non-Windows cache moved'
+[ "$target" = "$(CARGO_TARGET_DIR=C:/ambient-untrusted-cache bootstrap_authority_rust_cargo_target "$root" windows "$fp_a" "$legacy")" ] || fail 'ambient Cargo target overrides authority'
+space_repo='C:/work/checkout with spaces'
+space_target=$(bootstrap_authority_rust_cargo_target "$space_repo" windows "$fp_a" "$legacy")
+[ "$space_target" = "$space_repo/build/c/$fp_a" ] || fail 'space-containing checkout split'
+if bootstrap_authority_rust_cargo_target "$root" windows ../escape "$legacy" >/dev/null 2>&1; then
+  fail 'unsafe fingerprint admitted'
+fi
+
+# Actual failing checkout spelling and cc-rs libmimalloc-sys nesting, including
+# the target triple, Cargo crate hash and object-source hash. No paths created.
+fixture_repo=C:/Users/ormas/dev/simple-combined-integration
+fixture_legacy="$fixture_repo/build/p1-combined-verify/rust-authority-$fp_a"
+fixture_target=$(bootstrap_authority_rust_cargo_target "$fixture_repo" windows "$fp_a" "$fixture_legacy")
+suffix=/x86_64-pc-windows-msvc/bootstrap/build/libmimalloc-sys-74092f04eda43372/out/077ae3504b1c7768-static.o
+old_object=$(cygpath -am "$fixture_legacy/target$suffix")
+new_object=$(cygpath -am "$fixture_target$suffix")
+native_target=$(cygpath -am "$fixture_target")
+[ "${#old_object}" -ge 260 ] || fail 'fixture does not reproduce original long output'
+[ "${#new_object}" -le 240 ] || fail 'libmimalloc-sys output still exceeds conservative budget'
+[ "$((${#native_target} + 120))" -le 240 ] || fail 'target lacks reserved cc-rs suffix budget'
+
+# Exercise exact prefix boundary and one byte over; long checkout roots fail
+# before launching Cargo instead of repeating the cryptic MSVC C1083 failure.
+boundary_repo=C:/
+while [ "${#boundary_repo}" -lt 47 ]; do boundary_repo="${boundary_repo}x"; done
+boundary_target=$(bootstrap_authority_rust_cargo_target "$boundary_repo" windows "$fp_a" "$legacy")
+[ "${#boundary_target}" -eq 120 ] || fail '120-byte boundary changed'
+if bootstrap_authority_rust_cargo_target "${boundary_repo}x" windows "$fp_a" "$legacy" >/dev/null 2>&1; then
+  fail 'over-budget checkout admitted'
+fi
+configured_native=$(cygpath -am "$target")
+configured_object="$configured_native$suffix"
+[ "${#configured_object}" -le 240 ] || fail 'configured checkout exceeds object budget'
+printf 'PASS: Windows Cargo path budget; original_object=%s new_object=%s prefix=%s reserved_max=%s configured_object=%s\n' \
+  "${#old_object}" "${#new_object}" "${#native_target}" \
+  "$((${#native_target} + 120))" "${#configured_object}"
+printf 'configured_target=%s\n' "$configured_native"

@@ -18,7 +18,7 @@ use crate::interpreter::{
     flatten_owner_mangled_name, normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
     FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
-use crate::stdlib_variant::stdlib_root_candidates;
+use crate::stdlib_variant::stdlib_root_candidates_present;
 use crate::CompileError as _;
 
 fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) -> PathBuf {
@@ -494,7 +494,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             continue;
         }
 
-        for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
+        for stdlib_root in stdlib_root_candidates_present(&stdlib_candidate) {
             if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
                 let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
                 if p_exists(&compat_init) && p_is_file(&compat_init) {
@@ -959,7 +959,7 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
         };
 
         eprintln!("{}: {}", level_str, hint.message);
-        eprintln!("  --> {}:{}:{}", path.display(), hint.span.line, hint.span.column);
+        eprintln!("  --> {}:{}:{}", crate::display_path::display_path(path), hint.span.line, hint.span.column);
 
         // Show source line with caret
         if let Some(line) = hint.span.line.checked_sub(1).and_then(|i| source_lines.get(i)) {
@@ -2034,7 +2034,7 @@ pub fn collect_direct_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>,
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
@@ -2086,7 +2086,7 @@ fn collect_imported_module_paths_internal(
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
@@ -2278,7 +2278,7 @@ fn load_module_with_imports_internal(
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
 
     // Display error hints (warnings, etc.) from parser

@@ -1,6 +1,6 @@
 # Struct/class param mutation semantics — decision doc (task #35)
 
-- **Status:** OPEN — decision needed before implementing a fix
+- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 - **Discovered:** 2026-07-03 (task #35 investigation)
 - **Area:** language semantics — value vs reference passing for `struct`/`class` params; divergence between interpreter and JIT/compiled backend
 - **Severity:** High — silently corrupts any builder/accumulator/mock pattern that mutates an argument (hal_smp IPI mock counters, DOM decoration in `simple_browser_page.spl`)
@@ -158,3 +158,7 @@ requires changes outside this task's scope (`src/compiler_rust/**` /
 compiler HIR lowering), which needs a stage4/seed rebuild + deploy cycle to
 verify end-to-end — explicitly out of scope for this pass per task
 instructions.
+
+## Triage 2026-09-12
+
+Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

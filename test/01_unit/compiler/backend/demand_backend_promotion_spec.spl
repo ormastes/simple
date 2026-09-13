@@ -1,0 +1,111 @@
+use app.spipe.testing.*
+use compiler.driver.backend.demand_backend_plan.*
+use compiler.driver.backend.native_promotion_queue.*
+use std.common.crypto.sha256.{sha256_text}
+
+fn promotion_identity() -> DemandBackendIdentityV1:
+    DemandBackendIdentityV1(
+        snapshot_revision: "scv-7",
+        snapshot_tree_digest: sha256_text("tree"),
+        snapshot_inventory_digest: sha256_text("inventory"),
+        semantic_digest: sha256_text("semantic"),
+        target_triple: "aarch64-apple-darwin-macho",
+        variant_digest: sha256_text("debug-atomic-apk"),
+        platform: PrecompiledPlatformIdentityV1(
+            runtime_action_digest: sha256_text("runtime-action"),
+            runtime_abi_digest: sha256_text("runtime-abi"),
+            std_action_digest: sha256_text("std-action"),
+            std_abi_digest: sha256_text("std-abi")))
+
+fn foreground_budget(cancelled: bool) -> ForegroundBackendBudgetV1:
+    ForegroundBackendBudgetV1(100, 268435456, 3000, cancelled)
+
+fn promotion_request(identity: DemandBackendIdentityV1) -> NativePromotionRequestV1:
+    val plan = demand_backend_plan_v1(identity, foreground_budget(false), true, true, false)
+    NativePromotionRequestV1(
+        plan.promotion_action_digest, identity,
+        demand_backend_identity_digest_v1(identity), 7, 10, 134217728, false)
+
+describe "demand backend baseline and LLVM promotion":
+    it "returns a Cranelift baseline without waiting for LLVM":
+        val plan = demand_backend_plan_v1(
+            promotion_identity(), foreground_budget(false), true, true, false)
+        expect(plan.valid).to_equal(true)
+        expect(plan.baseline_backend).to_equal(DemandBaselineBackendV1.Cranelift)
+        expect(plan.return_without_promotion).to_equal(true)
+        expect(plan.enqueue_llvm_promotion).to_equal(true)
+
+    it "uses bytecode when Cranelift is incompatible":
+        val plan = demand_backend_plan_v1(
+            promotion_identity(), foreground_budget(false), true, false, false)
+        expect(plan.valid).to_equal(true)
+        expect(plan.baseline_backend).to_equal(DemandBaselineBackendV1.Bytecode)
+
+    it "binds runtime and standard library precompiled identities":
+        val accepted = demand_backend_identity_digest_v1(promotion_identity())
+        val original = promotion_identity()
+        val changed = DemandBackendIdentityV1(
+            snapshot_revision: original.snapshot_revision,
+            snapshot_tree_digest: original.snapshot_tree_digest,
+            snapshot_inventory_digest: original.snapshot_inventory_digest,
+            semantic_digest: original.semantic_digest,
+            target_triple: original.target_triple,
+            variant_digest: original.variant_digest,
+            platform: PrecompiledPlatformIdentityV1(
+                runtime_action_digest: original.platform.runtime_action_digest,
+                runtime_abi_digest: original.platform.runtime_abi_digest,
+                std_action_digest: original.platform.std_action_digest,
+                std_abi_digest: sha256_text("changed-std-abi")))
+        expect(accepted == "").to_equal(false)
+        expect(demand_backend_identity_digest_v1(changed) == accepted).to_equal(false)
+
+    it "rejects cancelled foreground work before baseline or promotion":
+        val plan = demand_backend_plan_v1(
+            promotion_identity(), foreground_budget(true), true, true, false)
+        expect(plan.valid).to_equal(false)
+        expect(plan.reason).to_equal("foreground-cancelled")
+        expect(plan.enqueue_llvm_promotion).to_equal(false)
+
+    it "does not let background promotion compete with foreground priority":
+        val request = promotion_request(promotion_identity())
+        val queued = native_promotion_enqueue_v1(NativePromotionQueueV1([]), request)
+        val deferred = native_promotion_claim_v1(queued, 536870912, 100, false)
+        expect(deferred.entries[0].state).to_equal(NativePromotionStateV1.Queued)
+        expect(deferred.entries[0].reason).to_equal("foreground-priority")
+
+        val budget_deferred = native_promotion_claim_v1(queued, 1024, -1, false)
+        expect(budget_deferred.entries[0].state).to_equal(NativePromotionStateV1.Queued)
+
+        val cancelled = native_promotion_claim_v1(queued, 536870912, -1, true)
+        expect(cancelled.entries[0].state).to_equal(NativePromotionStateV1.Cancelled)
+
+    it "publishes a compatible LLVM artifact for the next build only":
+        val identity = promotion_identity()
+        val request = promotion_request(identity)
+        val queued = native_promotion_enqueue_v1(NativePromotionQueueV1([]), request)
+        val running = native_promotion_claim_v1(queued, 536870912, -1, false)
+        val completed = native_promotion_complete_v1(running, NativePromotionResultV1(
+            request.action_digest, request.identity_digest,
+            sha256_text("llvm-native"), 7, true))
+        expect(native_promotion_artifact_for_build_v1(
+            completed, request.identity_digest, 7)).to_be_nil()
+        expect(native_promotion_artifact_for_build_v1(
+            completed, request.identity_digest, 8)).to_equal(Some(sha256_text("llvm-native")))
+
+    it "isolates background failure and identity mismatch":
+        val identity = promotion_identity()
+        val request = promotion_request(identity)
+        val queued = native_promotion_enqueue_v1(NativePromotionQueueV1([]), request)
+        val running = native_promotion_claim_v1(queued, 536870912, -1, false)
+        val failed = native_promotion_complete_v1(running, NativePromotionResultV1(
+            request.action_digest, request.identity_digest, "", 8, false))
+        expect(failed.entries[0].state).to_equal(NativePromotionStateV1.Failed)
+        expect(native_promotion_artifact_for_build_v1(
+            failed, request.identity_digest, 9)).to_be_nil()
+
+        val mismatch = native_promotion_complete_v1(running, NativePromotionResultV1(
+            request.action_digest, sha256_text("wrong-identity"),
+            sha256_text("llvm-native"), 8, true))
+        expect(mismatch.entries[0].state).to_equal(NativePromotionStateV1.Rejected)
+        expect(native_promotion_artifact_for_build_v1(
+            mismatch, request.identity_digest, 9)).to_be_nil()

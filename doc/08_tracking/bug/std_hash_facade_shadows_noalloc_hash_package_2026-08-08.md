@@ -50,3 +50,29 @@ only signal is a non-fatal warning at the call site.
 Add the four noalloc symbols to the `src/lib/hash.spl` re-export list, and add a
 spec that imports both `Hash` and `fnv1a_hash_i64` from `std.hash` so the
 shadowing cannot regress silently.
+
+## Re-check 2026-09-12
+
+- Status: RESOLVED (2026-09-12) — c845453a1af, spec `test/01_unit/lib/std_hash_facade_spec.spl`
+- Binary: `bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`
+
+The source half had already landed: `src/lib/hash.spl` carries
+`export use nogc_async_mut_noalloc.hash.mod.{fnv1a_hash_bytes, fnv1a_hash_i64,
+crc32_byte, crc32_bytes}`. The half this record asked for — "add a spec that
+imports both `Hash` and `fnv1a_hash_i64` from `std.hash` so the shadowing cannot
+regress silently" — was still missing: `std_hash_facade_spec.spl` asserted only
+the trait half and carried a comment saying the four function assertions were
+"deliberately NOT landed yet".
+
+Three examples added asserting all four shadowed symbols through `use std.hash`.
+Non-vacuity: each asserts both `h != 0` and that two different inputs hash
+differently, so an inert stub returning a constant fails.
+
+Discrimination proof (the re-export line commented out in `src/lib/hash.spl`,
+then restored):
+
+```
+RED   SPEC FILE VERDICT: test/01_unit/lib/std_hash_facade_spec.spl outcome=ERROR declared>=8 executed=8 passed=5 failed=3 skipped=0 dropped=0
+        ✗ semantic: function `fnv1a_hash_i64` not found
+GREEN SPEC FILE VERDICT: test/01_unit/lib/std_hash_facade_spec.spl outcome=OK    declared>=8 executed=8 passed=8 failed=0 skipped=0 dropped=0
+```

@@ -1,7 +1,7 @@
 # Bootstrap Stage 3 self-host fails — stage2 `bootstrap_main` binary can only emit a seed-wrapper, not real native code
 
 - **Id:** bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17
-- **Status:** Open
+- **Status:** OPEN (reopened 2026-09-12 — an earlier same-day closure was based on only 1 of the 3 named specs, and that one is a source-contract spec; see Correction below)
 - **Severity:** P2 — **NEEDS REVISIT (2026-06-21):** the parenthetical below
   claims "the seed-built artifacts are valid," but that assumption is now
   contradicted. A fresh `--pure-simple` Stage 4 binary **SIGSEGVs on every
@@ -330,3 +330,56 @@ staged artifact; argv read through `rt_cli_get_args` rather than a same-named
 import). Ablation-verified: neutralising the native_build_main.spl guard takes
 that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
 
+## Triage 2026-09-12
+Rule B: re-ran `bin/simple test test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+
+## Re-check 2026-09-12
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
+`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
+  test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl --no-session-daemon
+SPEC FILE VERDICT: test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl outcome=OK declared>=11 executed=11 passed=11 failed=0 skipped=0 dropped=0
+```
+
+Every example in the spec this record names as its reproduction passes. Scope
+of the claim, stated plainly: the re-check exercised **that spec only**, on the
+**deployed seed** on **aarch64**. It did not re-measure any other lane (native
+LLVM / self-hosted binary / other architecture), and it did not audit whether
+the spec's assertions still cover the original symptom as tightly as when the
+record was written. If a residual lane is known to be uncovered, reopen with
+the lane named rather than relying on this line.
+
+
+## Correction 2026-09-12 — REOPENED, the earlier same-day closure was wrong
+
+Same error as above in kind: the closure rested on **one** of the three specs
+this record names, and it was the one that passes.
+
+```
+test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl -> OK 11/11
+test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl
+  ✗ rejects a native-build worker that exits 0 without an output binary
+  ✗ rejects a compiler driver Success that wrote no artifact
+  ✗ reads argv through the runtime extern, never through a same-named import
+      assert_false failed: got true
+  -> ERROR declared>=3 executed=3 passed=0 failed=3
+test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl
+  -> ERROR declared>=3 executed=3 passed=1 failed=2
+```
+
+Five of the six examples across those two specs fail — including the
+`bootstrap_seed_fallback_policy` spec, which is the one that actually tests the
+fallback behaviour this record is about, rather than a source-shape contract.
+
+There is also a scoping point the first pass got wrong and this record should
+state plainly: `native_build_bootstrap_lane_contract_spec.spl` is a *source
+contract* spec. A green source contract is not evidence about lane behaviour —
+the same distinction `bootstrap_planner_v1_unbound_authorization_2026-08-14`
+makes when it says "structural validity is not authority". Passing it does not
+close a bootstrap-lane bug.
+
+Status returned to OPEN.

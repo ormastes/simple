@@ -109,3 +109,9 @@ sufficient — no new evidence of any Phase 5 SA-3/SA-4 work having landed since
 2026-08-04. Characterization is confirmed accurate and unchanged: this is
 genuine unbuilt design-owned feature work, correctly ARCHITECTURAL/OPEN, not a
 defect. No code change made. Status stays OPEN.
+
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still genuine unbuilt design-owned feature work (Phase 5 RTL MDSOC reorg), not
+a defect — a whole reorg phase, not a shard-scale fix. No change made.
+Leaving OPEN.

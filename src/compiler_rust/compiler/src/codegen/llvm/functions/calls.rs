@@ -95,6 +95,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_dict_values"
         | "rt_is_none"
         | "rt_is_some"
+        | "rt_is_present"
         | "rt_enum_payload" => Some(1),
         "rt_string_starts_with"
         | "rt_string_ends_with"
@@ -2076,7 +2077,9 @@ impl LlvmBackend {
             "ends_with" => Some("rt_string_ends_with"),
             "contains" => Some("rt_contains"),
             "split" => Some("rt_string_split"),
-            "trim" => Some("rt_string_trim"),
+            // "strip"/"trimmed" synonyms for "trim" — see interpreter_method/
+            // string.rs; missing here left bare `.strip()` unresolved.
+            "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
             "trim_start" => Some("rt_string_trim_start"),
             "trim_end" => Some("rt_string_trim_end"),
             "replace" => Some("rt_string_replace"),
@@ -2104,7 +2107,22 @@ impl LlvmBackend {
             "set" => Some("rt_index_set"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
-            "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+            // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+            // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+            // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+            // the representation `rt_is_some`/`rt_is_none` already accept) is not
+            // one -- so every `.unwrap()` on a flat optional silently produced nil
+            // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+            // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+            // implements the flat-nullable convention ("not a boxed enum: return
+            // the value unchanged") and traps only on a genuine None/Err.
+            // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+            // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+            // exported err-trap twin, and routing it through the Ok-trap helper
+            // would abort on the very receiver it exists to read.
+            "unwrap" => Some("rt_unwrap_or_trap"),
+            "unwrap_or" => Some("rt_unwrap_or_value"),
+            "unwrap_err" => Some("rt_enum_payload"),
             _ => None,
         }
         .or(exact_string_bytes_runtime)
@@ -2253,7 +2271,10 @@ impl LlvmBackend {
                 "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
                 "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
                 "is_whitespace" => Some("rt_string_is_whitespace"),
-                "trim" => Some("rt_string_trim"),
+                // "strip"/"trimmed" synonyms for "trim" — the qualified
+                // (`str.strip`) path had no entry, leaving the Stage-4 macOS
+                // final link with undefined `_str.strip` (2026-09-07).
+                "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
                 "trim_start" => Some("rt_string_trim_start"),
                 "trim_end" => Some("rt_string_trim_end"),
                 "repeat" => Some("lib__common__string_core__str_repeat"),
@@ -2284,7 +2305,22 @@ impl LlvmBackend {
                 "set" => Some("rt_index_set"),
                 "keys" => Some("rt_dict_keys"),
                 "values" => Some("rt_dict_values"),
-                "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+                // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+                // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+                // the representation `rt_is_some`/`rt_is_none` already accept) is not
+                // one -- so every `.unwrap()` on a flat optional silently produced nil
+                // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+                // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+                // implements the flat-nullable convention ("not a boxed enum: return
+                // the value unchanged") and traps only on a genuine None/Err.
+                // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+                // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+                // exported err-trap twin, and routing it through the Ok-trap helper
+                // would abort on the very receiver it exists to read.
+                "unwrap" => Some("rt_unwrap_or_trap"),
+                "unwrap_or" => Some("rt_unwrap_or_value"),
+                "unwrap_err" => Some("rt_enum_payload"),
                 "is_none" => Some("rt_is_none"),
                 "is_some" => Some("rt_is_some"),
                 "is_ok" | "is_err" => Some("rt_enum_check_variant"),
@@ -2361,6 +2397,7 @@ impl LlvmBackend {
                                 | "rt_contains"
                                 | "rt_is_none"
                                 | "rt_is_some"
+                                | "rt_is_present"
                                 | "rt_enum_check_discriminant"
                                 | "rt_enum_check_variant"
                         );
@@ -2403,9 +2440,13 @@ impl LlvmBackend {
 
         if let Some(method_name) = direct_method_name {
             if matches!(method_name, "unwrap" | "unwrap_err") && args.len() == 1 {
-                let rt_func = module.get_function("rt_enum_payload").unwrap_or_else(|| {
+                // See the redirect table above: `rt_enum_payload` returns NIL
+                // for a FLAT nullable, so `.unwrap()` must go to
+                // `rt_unwrap_or_trap`. `unwrap_err` keeps the raw reader.
+                let helper = if method_name == "unwrap" { "rt_unwrap_or_trap" } else { "rt_enum_payload" };
+                let rt_func = module.get_function(helper).unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                    module.add_function("rt_enum_payload", fn_type, None)
+                    module.add_function(helper, fn_type, None)
                 });
                 let recv = self.get_vreg(&args[0], vreg_map)?;
                 let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
@@ -2615,7 +2656,20 @@ impl LlvmBackend {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         args.iter().map(|_| i64_type.into()).collect();
                     let fn_type = i64_type.fn_type(&param_types, false);
-                    module.add_function(&resolved_dotted, fn_type, None)
+                    // Declare using `resolved_name` (the already-correct,
+                    // fully-mangled cross-module symbol), NOT `resolved_dotted`.
+                    // Every prior lookup in this chain already tried the dotted
+                    // spelling and failed to find it IN-MODULE (expected: the
+                    // real definition lives in a different LLVM module/.o and
+                    // must be an extern declaration) -- reaching here means "no
+                    // RUNTIME_FUNCS spec matched", not "the dotted spelling was
+                    // ever confirmed correct". Blindly declaring `resolved_dotted`
+                    // corrupted any real symbol that merely CONTAINS "_dot_" as
+                    // ordinary text (e.g. `cosine_from_dot_and_magnitudes` ->
+                    // `cosine_from.and_magnitudes`), producing an undefined
+                    // symbol at the Stage-4 macOS final link (2026-09-07) even
+                    // though the correct name was available the whole time.
+                    module.add_function(resolved_name, fn_type, None)
                 }
             });
 

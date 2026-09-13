@@ -1,7 +1,7 @@
 # `gc_module_loader_spec` asserts `src/lib/gc_sync_mut` does not exist — it does, with 867 files
 
 - **Filed:** 2026-08-17
-- **Status:** **OPEN (P2)** — REOPENED 2026-08-21: the claimed spec rewrite is absent. `test/feature/lib/gc_parity/gc_module_loader_spec.spl:71` still reads `expect(_has_gc_sync_mut_source_dir()).to_equal(false)`, and neither of the two replacement examples described in "Resolution" (`>100` modules, `src/std` mirror-sync) exists in the file. The Resolution below describes work that was never landed.
+- **Status:** RESOLVED (2026-09-13) — see commit in receipt, spec `test/feature/lib/gc_parity/gc_module_loader_spec.spl`. The 2026-08-21 reopen was correct (the rewrite really was absent); it is now actually landed: `_has_gc_sync_mut_source_dir` is gone, replaced by `_spl_file_count(dir)` (-1 for a missing dir) and the two examples described below ("exposes gc_sync_mut as a realized variant family", "mirrors gc_sync_mut into the std resolution root"), asserting `>100` `.spl` files under `src/lib/gc_sync_mut` and an identical count under `src/std/gc_sync_mut`. RED verified first (1 of 2 examples failing, matching the reopen note exactly), then GREEN after the rewrite: `3 total, 3 passed, 0 failed`.
 - ~~Status re-verified 2026-08-17 by source inspection (triage shard 01).~~ That re-verification was itself wrong: it inspected the record, not the spec file.
 - **Severity:** medium (1 RED example; the spec is an architecture gate)
 - **Spec:** `test/feature/lib/gc_parity/gc_module_loader_spec.spl`
