@@ -7,8 +7,18 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{RiscvTargetContract, riscv_linux_target_contract, riscv_baremetal_target_contract}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract_portable_numeric, riscv_baremetal_target_contract_portable_numeric}
 use compiler.backend.portable_numeric_capabilities.{portable_numeric_default_plan_for_target}
-use std.platform.{get_host_os}
-use std.io_runtime.{host_arch, env_get_opt}
+# Was: std.platform.{get_host_os} (nogc_sync_mut.platform), whose get_host_os()
+# delegates to the misdetecting std.nogc_sync_mut.env.platform.detect_os() --
+# the same root cause already fixed (io_compat.spl, runtime_compiler.spl,
+# native_linking.spl, mir_target_context_provider.spl) elsewhere in this
+# session. This is the function that ACTUALLY drives the LLVM target triple
+# for a plain (CodegenTarget.Host) native build: LlvmTargetTriple.
+# from_target_with_mode()'s hosted branch reads get_host_os() and falls
+# through to the ELF/Linux triple (case _: "linux") on any non-"windows"
+# reading, which is why the AOT hello_world_positional object kept coming
+# out ELF (LNK1107) even after the MirTargetContext-level fix. Use
+# std.io_runtime.host_os() instead, proven correct in this exact harness.
+use std.io_runtime.{host_arch, host_os, env_get_opt}
 
 fn llvm_riscv64_hard_float_requested() -> bool:
     """True when the explicit target selects the RV64GC/LP64D profile."""
@@ -137,20 +147,20 @@ impl LlvmTargetTriple:
                     LlvmTargetTriple(arch: detected, vendor: vendor, os: os, env: env)
         else:
             # Hosted: Detect OS dynamically
-            val host_os = get_host_os()
+            val detected_host_os = host_os()
 
             # Map host OS to LLVM triple components (os, vendor, env)
-            val os_result = match host_os:
+            val os_result = match detected_host_os:
                 case "linux": "linux"
                 case "freebsd": "freebsd"
                 case "macos": "darwin"
                 case "windows": "windows"
                 case _: "linux"
-            val vendor_result = match host_os:
+            val vendor_result = match detected_host_os:
                 case "macos": "apple"
                 case "windows": "pc"
                 case _: "unknown"
-            val env_result = match host_os:
+            val env_result = match detected_host_os:
                 case "freebsd": nil
                 case "macos": nil
                 case "windows": Some("msvc")
