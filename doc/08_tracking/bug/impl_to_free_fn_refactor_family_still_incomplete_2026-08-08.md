@@ -642,3 +642,7 @@ survivor list saved alongside this triage.
 - `src/compiler/90.tools/verify/project_gen.spl:dir_create_all`
 - `src/compiler/95.interp/execir.spl:operand_reg`
 - `src/compiler/99.loader/module_resolver/resolution.spl:dir_list`
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Already re-measured (2026-08-17: 25 oracle hits, 12 real refactor damage) with clear scoping; fixing the remaining 12 zero-definition sites needs a fresh oracle re-run plus per-site call-shape verification across src/compiler/, beyond this lane's per-bug budget. No change made.
