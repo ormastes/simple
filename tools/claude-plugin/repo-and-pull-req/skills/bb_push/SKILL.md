@@ -1,3 +1,8 @@
+---
+name: bb_push
+description: "Bitbucket Push Skill"
+---
+
 # Bitbucket Push Skill
 
 Push a committed change to Bitbucket and open a Pull Request via the

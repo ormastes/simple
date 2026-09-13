@@ -1,3 +1,8 @@
+---
+name: bb_pull_req_review
+description: "Bitbucket Pull Request Review Skill"
+---
+
 # Bitbucket Pull Request Review Skill
 
 Single-pass autonomous PR review for Bitbucket Cloud. Checks PR status,

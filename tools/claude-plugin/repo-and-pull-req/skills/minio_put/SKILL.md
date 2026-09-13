@@ -1,3 +1,8 @@
+---
+name: minio_put
+description: "MinIO Put Skill"
+---
+
 # MinIO Put Skill
 
 Upload a local file to MinIO via `mc cp --json`.

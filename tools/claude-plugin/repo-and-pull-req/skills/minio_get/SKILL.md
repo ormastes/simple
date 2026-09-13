@@ -1,3 +1,8 @@
+---
+name: minio_get
+description: "MinIO Get Skill"
+---
+
 # MinIO Get Skill
 
 Download an object from MinIO via `mc cp --json`.

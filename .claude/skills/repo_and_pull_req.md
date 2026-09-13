@@ -109,7 +109,7 @@ fi
 Read `tools/claude-plugin/repo-and-pull-req/skills/gh_setup/SKILL.md` and follow procedure.
 
 **`setup bb`:**
-Read `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_setup.md` and follow procedure (owned by Agent C).
+Read `tools/claude-plugin/repo-and-pull-req/skills/bb_setup/SKILL.md` and follow procedure (owned by Agent C).
 
 **`setup jira`:**
 Read `tools/claude-plugin/repo-and-pull-req/skills/jira_setup/SKILL.md` and follow procedure.
@@ -120,7 +120,7 @@ Read `tools/claude-plugin/repo-and-pull-req/skills/jira_setup/SKILL.md` and foll
    - `bb`: `itf bb status` (or equivalent) — if fails, redirect to `setup bb`
 2. Read and follow:
    - `gh`: `tools/claude-plugin/repo-and-pull-req/skills/gh_push/SKILL.md`
-   - `bb`: `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_push.md`
+   - `bb`: `tools/claude-plugin/repo-and-pull-req/skills/bb_push/SKILL.md`
 3. Pass `--level=$LEVEL` through to the post-create review trigger.
 4. If Jira configured (`bin/jira auth status` succeeds):
    Also read and follow `tools/claude-plugin/repo-and-pull-req/skills/jira_push/SKILL.md`
@@ -139,7 +139,7 @@ Run `wiki gh`. If Jira configured, also run `wiki jira`.
 1. Set env: `PR_NUMBER=$SUBCOMMAND`, `CLI_LEVEL=$LEVEL`, `CLI_TARGET=$TARGET`.
 2. Route by target:
    - `gh`: read and follow `tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md` (which itself branches on `$CLI_LEVEL`).
-   - `bb`: read and follow `tools/claude-plugin/repo-and-pull-req/skills/bb/bb_pull_req_review.md` (Agent C).
+   - `bb`: read and follow `tools/claude-plugin/repo-and-pull-req/skills/bb_pull_req_review/SKILL.md` (Agent C).
    - `jira`: read and follow `tools/claude-plugin/repo-and-pull-req/skills/jira_pull_req_review/SKILL.md` (L1 only — already validated above).
 3. If Jira is also linked AND target ≠ jira: additionally follow
    `skills/jira/jira_pull_req_review.md` for ticket comment exchange
