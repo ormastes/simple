@@ -1,0 +1,90 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+
+"""simd_scroll_region — overlap parity after routing rows through simd_blit_row
+
+simd_scroll_region used to run its own per-pixel `col` loop, making it the only
+kernel in simd_kernels.spl that never reached SIMD despite its name. It now
+moves each row with simd_blit_row (the same kernel simd_blit_rect uses).
+
+A scroll is an in-place, self-overlapping move, so the risk the change
+introduces is aliasing — not lane arithmetic. These examples pin the result
+against _scalar_scroll_region for scroll distances that overlap heavily
+(delta_y = 1 on a tall region), for both directions, and for a sub-rect that
+does not start at x = 0 so a stride bug cannot hide behind x = 0.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.gpu.engine2d.simd_kernels.{simd_scroll_region, _scalar_scroll_region}
+
+fn ramp_buffer(n: i64) -> [u32]:
+    var b: [u32] = []
+    var i: i64 = 0
+    while i < n:
+        b.push((i * 7 + 11).to_u32())
+        i = i + 1
+    b
+
+fn buffers_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i.to_i32()] != b[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+fn scroll_pair_matches(stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64) -> bool:
+    val n = stride * (y + h + 4)
+    var simd_buf = ramp_buffer(n)
+    var scalar_buf = ramp_buffer(n)
+    simd_scroll_region(simd_buf, stride, x, y, w, h, delta_y)
+    _scalar_scroll_region(scalar_buf, stride, x, y, w, h, delta_y)
+    buffers_equal(simd_buf, scalar_buf)
+
+describe "simd_scroll_region overlap parity with the scalar twin":
+    it "matches scalar for a one-row scroll up (maximum overlap)":
+        step("delta_y = -1 makes every copied row overlap the previous one")
+        assert_equal(scroll_pair_matches(16, 0, 0, 16, 12, -1), true)
+
+    it "matches scalar for a one-row scroll down (maximum overlap, reverse order)":
+        step("scroll down must iterate bottom-to-top or it eats its own source")
+        assert_equal(scroll_pair_matches(16, 0, 0, 16, 12, 1), true)
+
+    it "matches scalar for a sub-rect that does not start at x = 0":
+        step("a stride bug cannot hide behind x = 0")
+        assert_equal(scroll_pair_matches(32, 5, 3, 20, 10, -2), true)
+        assert_equal(scroll_pair_matches(32, 5, 3, 20, 10, 2), true)
+
+    it "matches scalar for multi-row scrolls in both directions":
+        step("distances larger than one row still alias within the region")
+        assert_equal(scroll_pair_matches(24, 2, 1, 18, 14, -5), true)
+        assert_equal(scroll_pair_matches(24, 2, 1, 18, 14, 5), true)
+
+    it "matches scalar when the scroll distance exceeds the region height":
+        step("rows_to_copy <= 0 must leave the buffer untouched on both paths")
+        assert_equal(scroll_pair_matches(16, 0, 0, 16, 4, 9), true)
+        assert_equal(scroll_pair_matches(16, 0, 0, 16, 4, -9), true)
+
+    it "leaves pixels outside the scrolled rect untouched":
+        step("the row kernel must not write past w")
+        val stride = 16
+        val n = stride * 12
+        var buf = ramp_buffer(n)
+        val before = ramp_buffer(n)
+        simd_scroll_region(buf, stride, 4, 2, 6, 8, -1)
+        var untouched = true
+        var row: i64 = 0
+        while row < 12:
+            var col: i64 = 0
+            while col < stride:
+                val inside = row >= 2 and row < 10 and col >= 4 and col < 10
+                if not inside:
+                    val idx = (row * stride + col).to_i32()
+                    if buf[idx] != before[idx]:
+                        untouched = false
+                col = col + 1
+            row = row + 1
+        assert_equal(untouched, true)

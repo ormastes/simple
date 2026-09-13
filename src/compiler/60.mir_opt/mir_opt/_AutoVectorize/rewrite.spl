@@ -35,6 +35,8 @@ use compiler.mir_opt.mir_opt.auto_vectorize.*
 use compiler.mir.mir_data (MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId)
 use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
 use compiler.backend.feature_caps (x86_caps_from_target, preferred_lane_count_x86)
+use compiler.mir_opt.mir_opt.auto_vectorize_target (auto_vectorize_target_level)
+use compiler.mir_opt.mir_opt.auto_vectorize_receipt (SimdReqEvidence, check_simd_requirement)
 use compiler.frontend.parser_types (Attribute)
 
 # Shared types (cycle-free base module)
@@ -77,7 +79,19 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
     for sym in module.functions.keys():
         val func = module.functions[sym]
         var cur_func = func
-        for block in cur_func.blocks:
+        # Evidence for the @must(simd)/@prefer(avx512) receipt (N1-followup:
+        # the tag used to be parsed and then dropped on the floor).
+        var func_vectorized = false
+        var func_lane_bits = 0
+        # A reduction / matrix kernel that was RECOGNISED but is log-only in N1
+        # is not the same failure as a loop nothing matched. Saying
+        # "loop-not-vectorized" for it sends the reader hunting for a pattern
+        # bug that is not there.
+        var func_recognised_only = false
+        # @simd(disable) is a refusal, not a hint: skip pattern matching and
+        # rewriting entirely for this function.
+        val blocks_to_scan = if cur_func.simd_disabled: [] else: cur_func.blocks
+        for block in blocks_to_scan:
             # Try elementwise pattern — rewrite if accepted
             val ew = mir_pattern_match_elementwise_loop(block)
             if ew.?:
@@ -115,17 +129,47 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
                 if rewritten.blocks.len() != cur_func.blocks.len():
                     cur_func = rewritten
                     module_modified = true
+                    func_vectorized = true
+                    val lane_bits = r.chunk_width * _element_bits(r.element_type)
+                    if lane_bits > func_lane_bits:
+                        func_lane_bits = lane_bits
 
             # Try reduction pattern — log only (no rewrite in N1)
             val red = mir_pattern_match_reduction(block, cur_func.has_fast_math)
             if red.?:
                 val r = red.unwrap()
                 _log_recipe(cur_func.name, r)
+                func_recognised_only = true
 
             val matrix = mir_pattern_match_matrix_kernel(block, cur_func.has_fast_math)
             if matrix.?:
                 val r = matrix.unwrap()
                 _log_recipe(cur_func.name, r)
+                func_recognised_only = true
+
+        # Enforce the SIMD optimization requirement now that we know what the
+        # pass actually achieved for this function.
+        val outcome = check_simd_requirement(
+            cur_func.simd_req_level,
+            cur_func.simd_req_backend,
+            SimdReqEvidence(
+                vectorized:      func_vectorized,
+                lane_width_bits: func_lane_bits,
+                avx512_admitted: auto_vectorize_target_level() == "x86_64-v4",
+                recognised_only: func_recognised_only))
+        # Reported, not panicked. `pipeline_optimize` returns a bare MirModule
+        # with no Result channel, so a panic here would abort the whole compiler
+        # process (natively: rt_panic) with no span and no error code. Until the
+        # optimizer pipeline can carry a diagnostic, an unmissable stderr line is
+        # the honest maximum — see the "not yet fatal" note in
+        # doc/08_tracking/bug/auto_vectorize_pass_is_analysis_only_2026-09-13.md.
+        match outcome.verdict:
+            case Error:
+                print("error[SIMD-REQ-001] {cur_func.name}: {outcome.reason}")
+            case Warn:
+                print("warning[SIMD-REQ-001] {cur_func.name}: {outcome.reason}")
+            case _:
+                ()
 
         if module_modified:
             var new_functions = new_module.functions
@@ -508,3 +552,15 @@ fn has_fast_math(fn_attrs: [Attribute]) -> bool:
 # Main pass
 
 # Re-exports from sub-modules
+
+fn _element_bits(element_type: text) -> i64:
+    """Bit width of one vector lane element; 0 for an unrecognised type."""
+    if element_type == "f32" or element_type == "i32" or element_type == "u32":
+        return 32
+    if element_type == "f64" or element_type == "i64" or element_type == "u64":
+        return 64
+    if element_type == "i16" or element_type == "u16":
+        return 16
+    if element_type == "i8" or element_type == "u8":
+        return 8
+    0

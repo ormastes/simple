@@ -666,16 +666,21 @@ pub fn simd_scroll_region(mut buf: any, stride: i64, x: i64, y: i64, w: i64, h: 
     if rows_to_copy <= 0:
         return
 
+    # Each row is moved with simd_blit_row, the same kernel simd_blit_rect uses.
+    # This function used to run its own per-pixel `col` loop, which made it the
+    # only kernel in this file that never reached SIMD despite its name.
+    # Overlap is safe on two counts: the row ORDER below keeps a row from being
+    # read after it is overwritten, and src/dst within one row are `abs_dy *
+    # stride` apart (>= stride > w for any valid region) so they never alias.
+    # simd_blit_row additionally documents memmove-style snapshot semantics for
+    # dst == src.
     if delta_y < 0:
         # Scroll up: copy rows upward (src row > dst row — iterate top to bottom)
         var row: i64 = 0
         while row < rows_to_copy:
             val dst_off = (y + row) * stride + x
             val src_off = (y + row + abs_dy) * stride + x
-            var col: i64 = 0
-            while col < w:
-                buf[(dst_off + col).to_i32()] = buf[(src_off + col).to_i32()]
-                col = col + 1
+            simd_blit_row(buf, dst_off, buf, src_off, w)
             row = row + 1
     else:
         # Scroll down: copy rows downward (dst row > src row — iterate bottom to top)
@@ -683,10 +688,7 @@ pub fn simd_scroll_region(mut buf: any, stride: i64, x: i64, y: i64, w: i64, h: 
         while row >= 0:
             val dst_off = (y + row + abs_dy) * stride + x
             val src_off = (y + row) * stride + x
-            var col: i64 = 0
-            while col < w:
-                buf[(dst_off + col).to_i32()] = buf[(src_off + col).to_i32()]
-                col = col + 1
+            simd_blit_row(buf, dst_off, buf, src_off, w)
             row = row - 1
 
 fn scroll_region(mut buf: any, stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64):
