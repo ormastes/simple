@@ -54,7 +54,11 @@ PLATFORM_TRIPLE=$(simple_release_platform_dir "${PLATFORM_TRIPLE}") || {
 
 release_dir="${repo_root}/bin/release/${PLATFORM_TRIPLE}"
 
-if [ ! -x "${release_dir}/simple" ]; then
+# Windows release artifacts are named `<prog>.exe`, so this probe never matched
+# there: setup.shs exited 0 at the "run bootstrap first" line and NEVER reached
+# the MCP wrapper generation below. A fix to a generated wrapper therefore could
+# not be deployed on Windows at all. Accept either spelling.
+if [ ! -x "${release_dir}/simple" ] && [ ! -x "${release_dir}/simple.exe" ]; then
   echo "setup: ${release_dir}/simple not found — run bootstrap first" >&2
   exit 0
 fi
@@ -65,19 +69,31 @@ cd "${repo_root}/bin"
 # the source tree. Keep one copied resolver beside every generated wrapper.
 cp "${repo_root}/scripts/lib/host-executable.shs" .simple-host-executable.shs
 
-ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
+# Deploy the stable bin/ entrypoints only where an UNSUFFIXED native artifact
+# exists — i.e. everywhere except Windows. This is deliberate and narrow:
+# `bin/simple.exe` is a tracked artifact owned by the Windows bootstrap lane,
+# and platform-detect.shs derives the Windows ABI from MSYSTEM, which Git Bash
+# always sets to MINGW64 -> `gnu`, while the tracked artifacts in this repo are
+# `msvc`. Relinking from here therefore replaced the tracked msvc binary with a
+# stale gnu one (measured 2026-09-13: bin/simple.exe 16,347,136 -> 28,291,570
+# bytes). Wrapper generation below is the part Windows actually needs from this
+# script and is unaffected by the skip. The ABI-selection mismatch itself is a
+# separate defect and is NOT fixed here.
+if [ -x "release/${PLATFORM_TRIPLE}/simple" ]; then
+  ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
 
-if [ -x "release/${PLATFORM_TRIPLE}/simple_seed" ]; then
-  ln -sf "release/${PLATFORM_TRIPLE}/simple_seed" simple_seed
-else
-  rm -f simple_seed
-fi
-
-for b in simple_ui_backend; do
-  if [ -x "release/${PLATFORM_TRIPLE}/${b}" ]; then
-    ln -sf "release/${PLATFORM_TRIPLE}/${b}" "${b}"
+  if [ -x "release/${PLATFORM_TRIPLE}/simple_seed" ]; then
+    ln -sf "release/${PLATFORM_TRIPLE}/simple_seed" simple_seed
+  else
+    rm -f simple_seed
   fi
-done
+
+  for b in simple_ui_backend; do
+    if [ -x "release/${PLATFORM_TRIPLE}/${b}" ]; then
+      ln -sf "release/${PLATFORM_TRIPLE}/${b}" "${b}"
+    fi
+  done
+fi
 
 rm -f simple_mcp_server
 cat > simple_mcp_server <<'EOF'
@@ -107,6 +123,11 @@ script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
 repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
 . "${script_dir}/.simple-host-executable.shs"
 host_family=$(simple_host_family)
+# Host-resolved release directory + executable suffix. The candidate list below
+# used to be entirely hardcoded, so a host triple absent from that list (any
+# aarch64 Windows box, any freebsd-elf box) had no candidate at all.
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-$(simple_default_platform_triple)}"
+exe_suffix="$(simple_exe_suffix "${host_family}")"
 log_dir="${repo_root}/.simple/logs"
 mkdir -p "${log_dir}"
 
@@ -254,6 +275,7 @@ if [ -n "${SIMPLE_MCP_NATIVE:-}" ]; then
   fi
 else
   for candidate in \
+    "${script_dir}/release/${platform_dir}/simple_mcp_server${exe_suffix}" \
     "${script_dir}/release/aarch64-apple-darwin/simple_mcp_server" \
     "${script_dir}/release/aarch64-apple-darwin-macho/simple_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/simple_mcp_server" \
@@ -318,10 +340,15 @@ if [ "${script_dir}" = "$0" ]; then
   script_dir="."
 fi
 script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
-platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
 repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
 . "${script_dir}/.simple-host-executable.shs"
 host_family=$(simple_host_family)
+# Resolve the HOST triple. This used to be a hardcoded
+# `x86_64-unknown-linux-gnu` default, so on Windows the `${platform_dir}`
+# candidate below named a directory that does not exist and the diagnostic
+# printed a Linux triple on a Windows box.
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-$(simple_default_platform_triple)}"
+exe_suffix="$(simple_exe_suffix "${host_family}")"
 log_dir="${repo_root}/.simple/logs"
 mkdir -p "${log_dir}"
 
@@ -443,7 +470,7 @@ else
   for candidate in \
     "${script_dir}/release/aarch64-apple-darwin/simple_lsp_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server" \
+    "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server${exe_suffix}" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/simple_lsp_mcp_server" \
     "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server" \
     "${script_dir}/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe" \
@@ -506,7 +533,9 @@ if [ "${script_dir}" = "$0" ]; then
   script_dir="."
 fi
 script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
-platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+. "${script_dir}/.simple-host-executable.shs"
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-$(simple_default_platform_triple)}"
+exe_suffix="$(simple_exe_suffix)"
 repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
 log_dir="${repo_root}/.simple/logs"
 mkdir -p "${log_dir}"
@@ -539,7 +568,7 @@ else
   for candidate in \
     "${script_dir}/release/aarch64-apple-darwin/t32_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/t32_mcp_server" \
-    "${script_dir}/release/${platform_dir}/t32_mcp_server" \
+    "${script_dir}/release/${platform_dir}/t32_mcp_server${exe_suffix}" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/t32_mcp_server" \
     "${script_dir}/release/linux-x86_64/t32_mcp_server"
   do
@@ -594,7 +623,9 @@ if [ "${script_dir}" = "$0" ]; then
   script_dir="."
 fi
 script_dir="$(CDPATH= cd "${script_dir}" && pwd)"
-platform_dir="${SIMPLE_PLATFORM_TRIPLE:-x86_64-unknown-linux-gnu}"
+. "${script_dir}/.simple-host-executable.shs"
+platform_dir="${SIMPLE_PLATFORM_TRIPLE:-$(simple_default_platform_triple)}"
+exe_suffix="$(simple_exe_suffix)"
 repo_root="$(CDPATH= cd "${script_dir}/.." && pwd)"
 log_dir="${repo_root}/.simple/logs"
 mkdir -p "${log_dir}"
@@ -627,7 +658,7 @@ else
   for candidate in \
     "${script_dir}/release/aarch64-apple-darwin/t32_lsp_mcp_server" \
     "${script_dir}/release/x86_64-apple-darwin/t32_lsp_mcp_server" \
-    "${script_dir}/release/${platform_dir}/t32_lsp_mcp_server" \
+    "${script_dir}/release/${platform_dir}/t32_lsp_mcp_server${exe_suffix}" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/t32_lsp_mcp_server" \
     "${script_dir}/release/linux-x86_64/t32_lsp_mcp_server"
   do

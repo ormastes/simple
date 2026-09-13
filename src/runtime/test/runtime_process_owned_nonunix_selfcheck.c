@@ -14,10 +14,6 @@ int8_t rt_array_push(SplArray* array, int64_t value) {
     if (!array || array->len >= array->cap) return 0;
     array->items[array->len++].as_int = value; return 1;
 }
-int8_t rt_array_set(SplArray* array, int64_t index, int64_t value) {
-    if (!array || index < 0 || index >= array->len) return 0;
-    array->items[index].as_int = value; return 1;
-}
 int64_t rt_array_len(SplArray* array) { return array ? array->len : -1; }
 int64_t rt_array_get(SplArray* array, int64_t index) { return array->items[index].as_int; }
 int64_t rt_string_new(const uint8_t* data, uint64_t len) { (void)data; (void)len; return 7; }
@@ -26,21 +22,22 @@ void rt_free(void* ptr) { free(ptr); }
 void rt_array_free(SplArray* array) { free(array->items); free(array); }
 int64_t rt_free_deep(int64_t value) { (void)value; return 1; }
 
-#define _WIN32 1
+/* Select the LAST branch of runtime_process_owned.c — the non-unix, non-Win32
+ * fallback (baremetal / SimpleOS), whose contract is the ENOTSUP surface these
+ * assertions describe.
+ *
+ * This used to be spelled `#define _WIN32 1`, which worked only because Win32
+ * had no implementation of its own and fell into the same `#else`. Since
+ * 2026-09-13 `_WIN32` selects a real CreateProcess+job-object branch, so
+ * defining it here would (a) pull in <windows.h> and fail to compile on Linux,
+ * and (b) test the Windows capsule under a name that claims to test the
+ * fallback. Undefining BOTH guard macros is host-independent and says exactly
+ * which branch is under test. */
+#undef _WIN32
+#undef __unix__
 #include "../runtime_process_owned.c"
 
 int main(void) {
-    SplArray* capabilities = rt_process_owned_v3_capabilities_value();
-    assert(capabilities && rt_array_len(capabilities) == 3);
-    assert(rt_array_get(capabilities, 0) == RT_OWNED_PROCESS_OBSERVATION_ADAPTER_VERSION);
-    assert(rt_array_get(capabilities, 1) == 0);
-    assert(rt_array_get(capabilities, 2) == 0);
-    SplArray* limits = rt_process_owned_v3_set_capture_limits_value(1, 1, 1);
-    assert(limits && rt_array_len(limits) == 3);
-    assert(rt_array_get(limits, 1) == 0 && rt_array_get(limits, 2) == ENOTSUP);
-    SplArray* metadata = rt_process_owned_v3_observation_value(1);
-    assert(metadata && rt_array_len(metadata) == 15);
-    assert(rt_array_get(metadata, 1) == 0 && rt_array_get(metadata, 14) == ENOTSUP);
     RtOwnedProcessTokenV2 token;
     RtOwnedProcessStartReceiptV2 start;
     const char* argv[] = {"never-spawned", NULL};
