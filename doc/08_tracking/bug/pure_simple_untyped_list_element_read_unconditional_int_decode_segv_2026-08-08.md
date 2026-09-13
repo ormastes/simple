@@ -152,3 +152,27 @@ doc.
 
 ## Triage 2026-09-12
 Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-13 — guard now fully green, both lanes
+
+Ran `sh scripts/check/check-untyped-list-element-shift.shs` on
+`bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
+(symlinked from the shared main worktree), sha256 `3d120a6f9ab5`:
+
+```
+PASS — interpreter reference lane correct: typed=[5,7], list-param=[5,7]
+PASS — 4 value(s) checked, untyped ': list' param element read correct on the JIT lane:
+       list=[5,7], typed [i64] control=[5,7] (both expected 5,7)
+```
+
+No `KNOWN-OPEN` line this time — the 2026-08-17 triage recorded a
+`KNOWN-OPEN list0=40 list1=56` for the seed/JIT lane (tracked by the sibling
+`untyped_list_element_read_seed_rootcause_2026-07-30.md`); that appears to
+be fixed now too. Flagging on that sibling record rather than closing it
+here, since this doc's own scope is the pure-Simple SIGSEGV-on-non-int-content
+half, which is UNCHANGED and still open (this guard only exercises the
+int-content case; the heterogeneous-content SIGSEGV repro from this doc's
+own body was never added to the tree as a fenced check, and still needs the
+runtime-tag-dispatch/monomorphization capability this doc describes as
+out of scope for a single pass). Left OPEN for the SIGSEGV half; no code
+change attempted.
