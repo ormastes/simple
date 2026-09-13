@@ -151,3 +151,86 @@ Two candidate causes, neither verified:
 Discriminate by printing `self.units.keys().len()` and an iteration counter from
 `topological_order`, or by checking whether `pop()` shrinks natively in a fixture
 built by the run-21 candidate (which builds now that site 8 is fixed).
+
+## RESOLVED 2026-09-13 — and BOTH candidate causes above were wrong
+
+Root cause: **`.?` on an empty array evaluates TRUE under native codegen**, so
+the `while stack.?:` DFS loop in `topological_order` never terminated. Full
+evidence, a 10-line standalone reproduction, and the blast radius are in
+`native_codegen_dotq_true_on_empty_array_2026-09-13.md`. The compiler defect is
+still OPEN; only this call site is routed around it (`while stack.len() > 0`).
+
+Both causes this record proposed are disproven by instrumented output from a
+Stage-2 candidate on the real graph:
+
+- **Cause 1, "`pop()` does not shrink natively" — FALSE.** Every probe line
+  reports `stack_after_pop` one less than `stack.len()` at the loop head. `pop()`
+  shrinks correctly.
+- **Cause 2, "quadratic-or-worse work over a very large graph" — FALSE, and the
+  premise was wrong.** `units.keys().len()=2`, and both units report
+  `deps.len()=0`. V=2, E=0. The correct walk is four iterations. No algorithmic
+  property of any topological sort is reachable at that size, so the task-level
+  plan to rewrite this to Kahn's algorithm was dropped: a Kahn loop written
+  `while ready.?:` would have spun identically.
+
+The route log's own `total=2` said this all along and was read as 886.
+
+### Before / after, same fixture, same runtime authority
+
+| | `native_compile` entry | outcome |
+|---|---|---|
+| before | `elapsed_ms=3747` | no further progress line; killed at 100 s / 180 s (status 124) |
+| after | `elapsed_ms=3764` | `state=failed` at `elapsed_ms=3983` — **219 ms**, both units attempted |
+
+The walk that never returned now returns, and the build reaches and reports on
+every unit. Site 9 is closed.
+
+### Site-8 verdict for macOS, which this unblocks
+
+`stage2_stage3_route_segv_mir_json_shadow_witness_2026-09-13.md` could not be
+confirmed on macOS while this site was live, because `serialize_mir_function`
+runs downstream of `topological_order` and was never reached (see the correction
+appended to that record). With this fix the route runs MIR serialization and
+reaches LLVM IR emission and `llc`: **no SEGV, `serialize_mir_function` absent,
+status 1 not 139.** Main's `driver_types.spl` fix holds under aarch64 macOS
+codegen. That verdict now rests on a route that actually executed the code path.
+
+### Successor: site 10
+
+The route still fails, on two NEW and unrelated defects, both downstream of
+everything above and both in `native_compile` of the 2 units:
+
+1. **`llc` rejects the emitted IR — duplicate local value name.**
+   `AOT compile error in compiler.common.module_path_naming: llc failed (exit 1)`
+   / `module.ll:109:3: error: multiple definition of local value named 'l14'` /
+   `%l14 = getelementptr i8, ptr %l25, i64 0  ; copy`. The pure-Simple LLVM
+   emitter reuses a local name within one function.
+2. **Capsule identity computed over empty content.**
+   `native-capsule-source-mutated:...stage2_module_path_naming:
+   capsule-identity=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+   disk-identity=404569fc...`. `e3b0c442...b855` is the SHA-256 of the EMPTY
+   string, so the capsule side hashed nothing and the mismatch is a false
+   positive against a file that was never mutated.
+
+Not fixed here.
+
+### Divergence-delta escape record (required by `.claude/rules/vcs.md`)
+
+PR #768 landed on a `check-test-tree-divergence-delta` PASS over a pre-existing
+red. Verdict: `PASS — 3218 pre-existing offender(s), 0 introduced by this range`;
+base verdict `FAIL — 3946 diverged vs 965 baselined (3084 new, 103
+fixed-but-still-baselined); 32 mirror-only (31 unallowlisted, 0 stale-allowlist)`.
+Offender list saved by the helper to
+`/var/folders/94/j3lc49d93bx148gqls5kx5d40000gn/T//test_tree_divergence_preexisting.txt`
+(host-local temp; regenerate with
+`sh scripts/check/check-test-tree-divergence-delta.shs <BASE> <NEW>`). The range
+touches no mirror pair: its only test file is the new
+`test/01_unit/compiler/driver/build_graph_topological_order_terminates_spec.spl`.
+
+### Open risk, not closed by PR #768
+
+No census was run for other `while <arr>.?:` / `if <arr>.?:` sites in the
+bootstrap closure. Site 10 is therefore **not** provably the only remaining
+obstacle to Stage-2 admission — another call site could hit the same `.?` defect.
+That census belongs to the compiler-fix lane; until it exists, treat "site 10 is
+the last blocker" as unverified.

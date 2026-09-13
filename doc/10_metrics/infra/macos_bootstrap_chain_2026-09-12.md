@@ -824,3 +824,67 @@ preserved: `.simple/storage/build/bootstrap-run21/stage2-rejected/aarch64-apple-
 139,328,040 bytes, sha256
 `e1ab37e7ba2caa3e587390c9d0d581b14ca4c93023e4cafe14abe28e5ee0c17f` (mode 400 —
 copy out and `chmod +x` before a witness run).
+
+## Run 22 (2026-09-13) — site 9 root-caused and fixed; site 8 confirmed on macOS; site 10 filed
+
+Worked by transcript replay against `origin/main` @ `f26970e9d93` (PR #765), not
+a full lane: 8.5 min per candidate against ~25 min, per run 20's note that this
+is the right instrument for a "was my change causal?" question. Three builds
+were spent (instrumented, then fixed) plus two 2-second native fixtures.
+
+**The prescribed diagnosis was wrong, and the route log said so.** Site 9 was
+being treated as a complexity problem in `BuildGraph.topological_order` — an
+O(V·E)/O(V²) walk over the 886-unit closure, to be rewritten as Kahn's
+algorithm. The route log reports `native_compile ... total=2`. The graph has
+**two** units, and instrumentation shows both with **zero** dependencies: V=2,
+E=0, correct walk = 4 iterations. No topological-sort algorithm is
+distinguishable at that size. The Kahn rewrite was dropped; a Kahn loop written
+`while ready.?:` would have failed identically.
+
+**Root cause: `.?` on an empty array evaluates TRUE under native codegen.** The
+DFS guard `while stack.?:` entered its body with `stack.len()==0`, popped nil,
+and settled into a 2-cycle appending nil to `order` forever. Reproduced
+standalone in 10 lines compiled by the same runtime authority — a never-popped
+empty `[i64]`, a never-popped empty `[(i64,bool)]`, an array drained by `pop()`,
+and a plain `if a.?:` all take the wrong branch while `.len()` reports 0 in the
+same binary. Filed as
+`doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md`
+(compiler defect OPEN; only this call site routed around it, via
+`while stack.len() > 0`). That record also explains the Linux lane's monotonic
+RSS growth, which run 21 had left as an unexplained difference from the macOS
+flat/falling curve: `visited[nil]=true` does not make `visited.has(nil)` true,
+so `order` gains a nil every two iterations without bound. Same defect, both
+lanes — the Linux signature MATCHES, but no Linux fixture was run, so "this also
+unblocks Linux BOOT-8" is a PREDICTION, not a measurement.
+
+Before / after, same fixture and runtime authority:
+
+| | `native_compile` entry | outcome |
+|---|---|---|
+| before | `elapsed_ms=3747` | frozen; killed at 100 s and at 180 s (status 124) |
+| after | `elapsed_ms=3764` | `state=failed` at `elapsed_ms=3983` — **219 ms**, both units attempted |
+
+**Site 8 on macOS: CONFIRMED FIXED, and run 21's confirmation is withdrawn.**
+Run 21 read "status 139 -> 124, `serialize_mir_function` absent" as the macOS
+confirmation. That inference was unsound: `serialize_mir_function` runs
+downstream of `topological_order`, so the 124 meant the code path was never
+reached. (Both lanes made the same inference; a correction is appended to
+`stage2_stage3_route_segv_mir_json_shadow_witness_2026-09-13.md`.) With site 9
+fixed, the route runs MIR serialization and reaches LLVM IR emission and `llc` —
+**no SEGV, `serialize_mir_function` absent, status 1.** Main's `driver_types.spl`
+fix holds under aarch64 macOS codegen, now on evidence from a route that
+actually executed it.
+
+**Site 10, the new blocker**, two unrelated defects in `native_compile` of the
+same 2 units: (1) the pure-Simple LLVM emitter reuses a local name —
+`llc failed (exit 1)` / `module.ll:109:3: multiple definition of local value
+named 'l14'`; (2) capsule identity is computed over empty content —
+`capsule-identity=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+is the SHA-256 of the empty string, making `native-capsule-source-mutated` a
+false positive. Recorded in the site-9 record.
+
+Stages reached: no virgin-root lane run in this entry — Stage 2 cannot be
+admitted while site 10 is open, and the transcript replay is the stronger and
+cheaper evidence for the fix. **Nothing deployed.** Candidates (scratchpad, not
+preserved as lane artifacts): instrumented and fixed Stage-2 binaries, each
+`886 compiled, 0 cached, 0 failed`, 136,078 KB, ~450 s.

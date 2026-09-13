@@ -4719,6 +4719,29 @@ int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
 }
 
+/* Presence predicate for the postfix `.?` operator -- the C twin of the Rust
+ * runtime's rt_is_present (compiler_rust/runtime/src/value/objects.rs) and of
+ * rt_is_present in src/runtime/simple_core/core_string.spl.
+ *
+ * `.?` is absent for nil/None AND for an EMPTY array, dict or string; every
+ * other value (including 0, false, tuples, closures and structs) is present.
+ * That is exactly the tree-walk interpreter's Expr::ExistsCheck arm. Using
+ * rt_is_some here instead made a natively compiled `while arr.?:` loop forever
+ * on an empty-but-allocated array while `.len()` read 0 in the same binary --
+ * doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md */
+int8_t rt_is_present(int64_t value) {
+    if (rt_is_none(value)) return 0;
+    int64_t payload = rt_unwrap_or_self(value);
+    if (payload == rt_core_nil()) return 0;
+    RtCoreString* s = rt_core_as_string(payload);
+    if (s) return s->len > 0;
+    RtCoreArray* a = rt_core_as_registered_array(payload);
+    if (a) return a->len > 0;
+    RtCoreDict* d = rt_core_as_dict(payload);
+    if (d) return rt_dict_len(payload) > 0;
+    return 1;
+}
+
 /* Repeat a string `count` times.
  *
  * Mirrors the tree-walking interpreter (interpreter_method/string.rs, arm
