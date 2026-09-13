@@ -1,0 +1,262 @@
+# Purpose: executable evidence for the bounded SimpleOS release-evidence value contract.
+# @codex-impl
+# @req REQ-SIMPLEOS-RELEASE-EVIDENCE-MANIFEST-V1
+
+use std.spec.*
+use std.spec.step
+use std.common.contracts.execution.simpleos_release_evidence_manifest_v1.{
+    SimpleOsReleaseMachineBackendV1, SimpleOsReleaseWorkflowKindV1,
+    SimpleOsReleaseEvidenceErrorV1, SimpleOsReleaseTimedReceiptV1,
+    SimpleOsReleaseCandidateEvidenceV1, SimpleOsReleaseDerivedStateEvidenceV1,
+    SimpleOsReleaseFirmwareEvidenceV1, SimpleOsReleaseLaunchEvidenceV1,
+    SimpleOsReleaseSosixFilesystemEvidenceV1,
+    SimpleOsReleaseGuestWorkflowEvidenceV1,
+    SimpleOsReleasePersistenceEvidenceV1, SimpleOsReleaseToolchainEvidenceV1,
+    SimpleOsReleaseConsumptionV1, SimpleOsReleaseEvidenceManifestV1,
+    SimpleOsReleaseEvidenceAdmissionContextV1,
+    SIMPLEOS_RELEASE_EVIDENCE_MANIFEST_V1_SCHEMA,
+    simpleos_release_execution_binding_digest_v1,
+    simpleos_release_evidence_validate_v1,
+    simpleos_release_evidence_canonical_v1,
+    simpleos_release_evidence_digest_v1
+}
+
+fn release_hash(marker: text) -> text:
+    "000000000000000000000000000000000000000000000000000000000000000" + marker
+
+fn release_execution_binding() -> text:
+    "edfb7403d6c1a8e139e1a436a776571f379b81889f42d328a1821e2f7d6fc57c"
+
+fn repeated_release_text(count: i64) -> text:
+    var pieces: [text] = []
+    var i = 0
+    while i < count:
+        pieces.push("x")
+        i = i + 1
+    pieces.join("")
+
+fn timed(receipt_id: text, marker: text, observed: u64) -> SimpleOsReleaseTimedReceiptV1:
+    SimpleOsReleaseTimedReceiptV1(
+        receipt_id: receipt_id, receipt_digest: release_hash(marker),
+        execution_binding_digest: release_execution_binding(),
+        observed_at_unix_ms: observed, duration_ms: 10u64,
+        succeeded: true, diagnostic_only: false)
+
+fn workflow(
+    kind: SimpleOsReleaseWorkflowKindV1,
+    receipt_id: text,
+    marker: text,
+    observed: u64,
+    input_digest: text,
+    artifact_digest: text
+) -> SimpleOsReleaseGuestWorkflowEvidenceV1:
+    SimpleOsReleaseGuestWorkflowEvidenceV1(
+        kind: kind, timed: timed(receipt_id, marker, observed),
+        guest_toolchain_receipt_digest: release_hash("c"),
+        compiler_digest: release_hash("b"),
+        input_source_digest: input_digest,
+        produced_artifact_digest: artifact_digest,
+        stdout_digest: release_hash("d"), exit_code: 0,
+        executed_in_guest: true)
+
+fn valid_release_manifest() -> SimpleOsReleaseEvidenceManifestV1:
+    val source_digest = release_hash("1")
+    val artifact_digest = release_hash("2")
+    SimpleOsReleaseEvidenceManifestV1(
+        schema_version: SIMPLEOS_RELEASE_EVIDENCE_MANIFEST_V1_SCHEMA,
+        target_id: "x86_64-unknown-simpleos", profile_id: "dev",
+        candidate: SimpleOsReleaseCandidateEvidenceV1(
+            image_manifest_digest: release_hash("3"),
+            candidate_bytes_digest: release_hash("4"),
+            candidate_byte_length: 4096u64, immutable_candidate: true),
+        derived_state: SimpleOsReleaseDerivedStateEvidenceV1(
+            state_id: "state-1", base_candidate_bytes_digest: release_hash("4"),
+            initial_state_digest: release_hash("5"),
+            final_state_digest: release_hash("6"),
+            writable_overlay_digest: release_hash("7"), derived_only: true),
+        firmware: SimpleOsReleaseFirmwareEvidenceV1(
+            firmware_id: "ovmf-2026", firmware_digest: release_hash("8")),
+        launch: SimpleOsReleaseLaunchEvidenceV1(
+            backend: SimpleOsReleaseMachineBackendV1.Qemu,
+            sealed_plan_digest: release_hash("9"),
+            source_spec_digest: release_hash("a"), admitted: true),
+        boot: timed("boot-1", "e", 1050u64),
+        sosix_filesystem: SimpleOsReleaseSosixFilesystemEvidenceV1(
+            timed: timed("sosix-fs-1", "f", 1100u64),
+            contract_version: "sosix-v1", result_digest: release_hash("9")),
+        version: workflow(
+            SimpleOsReleaseWorkflowKindV1.Version, "version-1", "1", 1150u64,
+            source_digest, release_hash("d")),
+        run: workflow(
+            SimpleOsReleaseWorkflowKindV1.Run, "run-1", "2", 1200u64,
+            source_digest, release_hash("e")),
+        build: workflow(
+            SimpleOsReleaseWorkflowKindV1.Build, "build-1", "3", 1250u64,
+            source_digest, artifact_digest),
+        native_execute: workflow(
+            SimpleOsReleaseWorkflowKindV1.NativeExecute, "native-1", "4", 1300u64,
+            artifact_digest, artifact_digest),
+        persistence: SimpleOsReleasePersistenceEvidenceV1(
+            marker_id: "release-marker", marker_value_digest: release_hash("5"),
+            write_receipt: timed("marker-write-1", "5", 1500u64),
+            reboot_receipt: timed("reboot-1", "6", 1600u64),
+            read_receipt: timed("marker-read-1", "7", 1700u64),
+            write_state_id: "state-1", write_state_digest: release_hash("6"),
+            reboot_state_id: "state-1", reboot_state_digest: release_hash("6"),
+            read_state_id: "state-1", read_state_digest: release_hash("6"),
+            observed_marker_digest: release_hash("5"), same_derived_state: true),
+        toolchain: SimpleOsReleaseToolchainEvidenceV1(
+            toolchain_id: "simple-stage4", toolchain_manifest_digest: release_hash("a"),
+            compiler_id: "simple-selfhost", compiler_digest: release_hash("b"),
+            compiler_provenance_digest: release_hash("c"),
+            self_hosted_simple: true, rust_seed: false),
+        started_at_unix_ms: 1000u64, finished_at_unix_ms: 2000u64,
+        total_duration_ms: 1000u64, diagnostic_only: false,
+        consumption: SimpleOsReleaseConsumptionV1(
+            evidence_id: "evidence-1", nonce: "nonce-1", sequence: 7u64,
+            previous_evidence_digest: release_hash("d"),
+            issued_at_unix_ms: 2000u64, expires_at_unix_ms: 3000u64,
+            consumed_at_unix_ms: 2100u64, consumed_once: true))
+
+fn valid_release_context() -> SimpleOsReleaseEvidenceAdmissionContextV1:
+    SimpleOsReleaseEvidenceAdmissionContextV1(
+        expected_target_id: "x86_64-unknown-simpleos",
+        expected_candidate_bytes_digest: release_hash("4"),
+        expected_evidence_id: "evidence-1", expected_nonce: "nonce-1",
+        expected_sequence: 7u64,
+        expected_previous_evidence_digest: release_hash("d"),
+        expected_execution_binding_digest: release_execution_binding(),
+        now_unix_ms: 2200u64, nonce_already_consumed: false)
+
+fn release_digest(manifest: SimpleOsReleaseEvidenceManifestV1) -> text:
+    match simpleos_release_evidence_digest_v1(manifest, valid_release_context()):
+        case Ok(digest): digest
+        case Err(_):
+            expect(false).to_equal(true)
+            ""
+
+describe "SimpleOsReleaseEvidenceManifestV1":
+    it "admits a complete immutable candidate and derived persistence chain":
+        step("Validate the complete release evidence chain")
+        expect(simpleos_release_evidence_validate_v1(
+            valid_release_manifest(), valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.None)
+
+    it "pins canonical bytes and SHA-256 with an independent vector":
+        step("Compare deterministic bytes and digest with a standalone oracle")
+        val manifest = valid_release_manifest()
+        val canonical = match simpleos_release_evidence_canonical_v1(
+            manifest, valid_release_context()):
+            case Ok(value): value
+            case Err(_): "invalid"
+        # Oracle generated by a standalone JavaScript length-prefix encoder and
+        # node:crypto SHA-256, without importing Simple production code.
+        expect(canonical.len()).to_equal(4405)
+        expect(release_digest(manifest)).to_equal(
+            "03af06f0bce218e4935782ed43ac4f581b91086429bfff243399dab9a43b2e74")
+
+    it "rejects candidate mutation and derived-state substitution":
+        step("Change immutable and writable identities independently")
+        var candidate_changed = valid_release_manifest()
+        candidate_changed.candidate.candidate_bytes_digest = release_hash("5")
+        expect(simpleos_release_evidence_validate_v1(
+            candidate_changed, valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.InvalidCandidate)
+        var state_changed = valid_release_manifest()
+        state_changed.persistence.reboot_state_id = "state-2"
+        expect(simpleos_release_evidence_validate_v1(
+            state_changed, valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.PersistenceStateMismatch)
+
+    it "accepts bounded identity text and the full u64 candidate size domain":
+        step("Exercise exact scalar and unsigned-size boundaries")
+        var boundary = valid_release_manifest()
+        boundary.firmware.firmware_id = repeated_release_text(256)
+        boundary.candidate.candidate_byte_length = 18446744073709551615u64
+        var boundary_context = valid_release_context()
+        boundary_context.expected_execution_binding_digest =
+            simpleos_release_execution_binding_digest_v1(
+                boundary.target_id, boundary.profile_id, boundary.candidate,
+                boundary.derived_state, boundary.firmware, boundary.launch)
+        boundary.boot.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        boundary.sosix_filesystem.timed.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        boundary.version.timed.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        boundary.run.timed.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        boundary.build.timed.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        boundary.native_execute.timed.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        boundary.persistence.write_receipt.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        boundary.persistence.reboot_receipt.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        boundary.persistence.read_receipt.execution_binding_digest =
+            boundary_context.expected_execution_binding_digest
+        expect(simpleos_release_evidence_validate_v1(
+            boundary, boundary_context)).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.None)
+        boundary.firmware.firmware_id = repeated_release_text(257)
+        expect(simpleos_release_evidence_validate_v1(
+            boundary, boundary_context)).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.InvalidFirmware)
+
+    it "rejects incomplete, diagnostic-only, and host-executed workflows":
+        step("Fail closed when execution evidence is not release evidence")
+        var diagnostic = valid_release_manifest()
+        diagnostic.diagnostic_only = true
+        expect(simpleos_release_evidence_validate_v1(
+            diagnostic, valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.DiagnosticOnlyEvidence)
+        var host_run = valid_release_manifest()
+        host_run.run.executed_in_guest = false
+        expect(simpleos_release_evidence_validate_v1(
+            host_run, valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.InvalidGuestWorkflow)
+
+    it "rejects workflow substitution and broken build-to-execute identity":
+        step("Bind each workflow kind and the produced native artifact")
+        var wrong_kind = valid_release_manifest()
+        wrong_kind.run.kind = SimpleOsReleaseWorkflowKindV1.Build
+        expect(simpleos_release_evidence_validate_v1(
+            wrong_kind, valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.WorkflowKindMismatch)
+        var wrong_artifact = valid_release_manifest()
+        wrong_artifact.native_execute.input_source_digest = release_hash("3")
+        expect(simpleos_release_evidence_validate_v1(
+            wrong_artifact, valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.WorkflowChainMismatch)
+
+    it "rejects replayed, expired, and mismatched consumption contexts":
+        step("Consume exactly one expected nonce in the ledger window")
+        var replay = valid_release_context()
+        replay.nonce_already_consumed = true
+        expect(simpleos_release_evidence_validate_v1(
+            valid_release_manifest(), replay)).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.ReplayDetected)
+        var expired = valid_release_context()
+        expired.now_unix_ms = 3001u64
+        expect(simpleos_release_evidence_validate_v1(
+            valid_release_manifest(), expired)).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.ConsumeContextMismatch)
+        var mismatch = valid_release_context()
+        mismatch.expected_sequence = 8u64
+        expect(simpleos_release_evidence_validate_v1(
+            valid_release_manifest(), mismatch)).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.ConsumeContextMismatch)
+
+    it "rejects Rust-seed claims and non-monotonic persistence receipts":
+        step("Require self-hosted provenance and a write-reboot-read order")
+        var seed = valid_release_manifest()
+        seed.toolchain.rust_seed = true
+        expect(simpleos_release_evidence_validate_v1(
+            seed, valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.InvalidToolchain)
+        var reordered = valid_release_manifest()
+        reordered.persistence.reboot_receipt.observed_at_unix_ms = 1400u64
+        expect(simpleos_release_evidence_validate_v1(
+            reordered, valid_release_context())).to_equal(
+                SimpleOsReleaseEvidenceErrorV1.InvalidTimeRange)
