@@ -1395,6 +1395,9 @@ int64_t     rt_unix_socket_connect(const char* path);
 int64_t     rt_fd_write(int64_t fd, const char* data, int64_t len);
 const char* rt_fd_read_until(int64_t fd, uint8_t stop_byte, int64_t max);
 bool        rt_fd_close(int64_t fd);
+/* Descriptor-authoritative identity/extent snapshot; see runtime_fd_stat_v1.h. */
+int64_t     rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr,
+                                   int64_t out_bytes);
 
 /* ===== Legacy epoll/socket FFI (event_loop.spl) ===== */
 

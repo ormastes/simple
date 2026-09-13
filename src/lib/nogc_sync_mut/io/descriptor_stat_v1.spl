@@ -1,0 +1,51 @@
+"""Owned SFFI facade for one descriptor-authoritative metadata snapshot."""
+
+use std.common.contracts.sosix.descriptor_stat_v1.{
+    DESCRIPTOR_STAT_BYTES_V1, DescriptorNodeKindV1, DescriptorFileIdentityV1,
+    DescriptorFileStatV1
+}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64}
+
+@unsafe(reason: "borrowed descriptor plus exact caller-owned 80-byte output buffer", capabilities: [ffi, raw_ptr])
+extern fn rt_fd_stat_snapshot_v1(descriptor: i64, out_addr: i64, out_bytes: i64) -> i64
+
+fn _descriptor_stat_word_v1(buffer: i64, index: i64) -> u64:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_read_i64(buffer, index * 8) as u64
+
+pub fn descriptor_stat_snapshot_v1(descriptor: i64) -> Result<DescriptorFileStatV1, i64>:
+    if descriptor < 0:
+        return Err(-9)
+    val buffer = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_alloc(DESCRIPTOR_STAT_BYTES_V1)
+    if buffer == 0:
+        return Err(-12)
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_fd_stat_snapshot_v1(descriptor, buffer, DESCRIPTOR_STAT_BYTES_V1)
+    if status != 0:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_free(buffer)
+        return Err(status)
+    val kind_code = _descriptor_stat_word_v1(buffer, 9)
+    val kind = if kind_code == 1u64:
+        DescriptorNodeKindV1.Regular
+    elif kind_code == 2u64:
+        DescriptorNodeKindV1.Directory
+    else:
+        DescriptorNodeKindV1.Other
+    val result = DescriptorFileStatV1(
+        identity: DescriptorFileIdentityV1(
+            filesystem_id: _descriptor_stat_word_v1(buffer, 0),
+            object_id_low: _descriptor_stat_word_v1(buffer, 1),
+            object_id_high: _descriptor_stat_word_v1(buffer, 2)),
+        size: _descriptor_stat_word_v1(buffer, 3),
+        allocated_bytes: _descriptor_stat_word_v1(buffer, 4),
+        mode: _descriptor_stat_word_v1(buffer, 5),
+        link_count: _descriptor_stat_word_v1(buffer, 6),
+        modified_time_ns: _descriptor_stat_word_v1(buffer, 7),
+        change_time_ns: _descriptor_stat_word_v1(buffer, 8), kind: kind)
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_free(buffer)
+    Ok(result)
+
+export descriptor_stat_snapshot_v1

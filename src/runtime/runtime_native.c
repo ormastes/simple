@@ -19,6 +19,7 @@
  * runtime.c + platform headers. We must NOT include platform/platform.h
  * here to avoid duplicate symbol definitions. */
 #include "runtime.h"
+#include "runtime_fd_stat_v1.h"
 #include "runtime_simd_dispatch.h"
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
@@ -10980,6 +10981,12 @@ int64_t rt_fd_pwrite(int32_t fd, const uint8_t* buffer, int64_t len, int64_t off
     if (!buffer || len < 0 || offset < 0) return -EINVAL;
     ssize_t n = rt_file_write_at_fd(fd, buffer, (size_t)len, offset);
     return n < 0 ? -(int64_t)(errno ? errno : EIO) : (int64_t)n;
+}
+
+int64_t rt_fd_stat_snapshot_v1(int64_t descriptor, int64_t out_addr, int64_t out_bytes) {
+    if (out_addr <= 0) return -EINVAL;
+    return rt_fd_stat_snapshot_v1_impl(
+        descriptor, (uint64_t*)(uintptr_t)out_addr, out_bytes);
 }
 
 /* SFFI_LEGACY_UNSAFE: mixed static/heap ownership. Kept only for binary
