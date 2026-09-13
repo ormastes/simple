@@ -57,6 +57,11 @@ use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contrac
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(old_path: text, new_path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
+extern fn rt_dir_remove(path: text, recursive: bool) -> bool
+extern fn rt_path_dirname(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_dir_create_all(path: text) -> bool
@@ -179,7 +184,8 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val arch_label = arch_display_name(target.arch)
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
     val cached_build_matches = _last_successful_build_entry == target.entry and _last_successful_build_output == target.output and _last_successful_build_backend == backend_name and _last_successful_build_target == target.target_triple
-    if cached_build_matches and rt_file_exists(target.output):
+    if (cached_build_matches and rt_file_exists(target.output) and
+        (not _needs_elf32_wrap(target) or _elf32_multiboot_artifact_valid(target.output))):
         print "[build][{arch_label}] phase=native-build cached output={target.output}"
         return true
     val build_marker = if _is_riscv64_live_helper_target(target): _ssh_live_build_marker_value(backend) else: ""
@@ -248,6 +254,12 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         return false
+    if not _ensure_elf32_multiboot_wrapper(target, objcopy_prefix):
+        _write_bootstrap_result(target, false, false, backend_name)
+        print "[build][{arch_label}] phase=multiboot-wrap FAILED output={target.output}"
+        _cleanup_generated_build_helpers(build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        return false
     if build_marker != "":
         print "[build][{arch_label}] phase=artifact OK marker={build_marker}"
     _write_bootstrap_result(target, true, false, backend_name)
@@ -303,7 +315,58 @@ fn _native_build_cache_hit(target: OsTarget, expected_stamp: text, simple_bin: t
         return false
     if rt_file_read_text(stamp_path) != expected_stamp:
         return false
+    if _needs_elf32_wrap(target) and not _elf32_multiboot_artifact_valid(target.output):
+        return false
     not _native_build_inputs_newer_than_output(target, simple_bin)
+
+pub fn elf32_multiboot_header_valid(bytes: [u8]) -> bool:
+    """Accept the ELF32/little-endian/EM_386 envelope required by x86 QEMU multiboot loading."""
+    (bytes.len() >= 20 and
+        bytes[0] == 0x7fu8 and bytes[1] == 0x45u8 and
+        bytes[2] == 0x4cu8 and bytes[3] == 0x46u8 and
+        bytes[4] == 1u8 and bytes[5] == 1u8 and
+        bytes[18] == 3u8 and bytes[19] == 0u8)
+
+fn _elf32_multiboot_artifact_valid(path: text) -> bool:
+    elf32_multiboot_header_valid(rt_file_read_bytes(path) ?? [])
+
+fn _ensure_elf32_multiboot_wrapper(target: OsTarget, objcopy_prefix: text) -> bool:
+    """Atomically publish the ELF32 envelope used by x86_64 Multiboot1 code.
+
+    Native compilation intentionally emits ELF64/EM_X86_64. QEMU's x86
+    `-kernel` Multiboot loader admits an ELF32/EM_386 envelope, while the
+    payload still enters the kernel's 32-bit transition stub and then executes
+    x86_64 code. Keep this boot-format adaptation in the runner rather than
+    changing target identity or relying on compiler-specific environment state.
+    """
+    if not _needs_elf32_wrap(target):
+        return true
+    if _elf32_multiboot_artifact_valid(target.output):
+        return true
+    if objcopy_prefix == "":
+        return false
+    var output_parent = rt_path_dirname(target.output)
+    if output_parent == "": output_parent = "."
+    val stage_dir = rt_secure_temp_dir(output_parent, "simpleos-elf32-wrap")
+    if stage_dir == "":
+        return false
+    val staged = stage_dir + "/kernel.elf"
+    val objcopy = objcopy_prefix + "/llvm-objcopy"
+    val (_stdout, stderr, exit_code) = rt_process_run_timeout(
+        objcopy, ["-O", "elf32-i386", target.output, staged], 30000)
+    if exit_code != 0 or not _elf32_multiboot_artifact_valid(staged):
+        if stderr != "": print "[build] llvm-objcopy stderr: {stderr}"
+        if rt_file_exists(staged): rt_file_delete(staged)
+        rt_dir_remove(stage_dir, false)
+        return false
+    # POSIX rename publishes over the old sibling atomically. Hosts without
+    # replace-existing rename support fail here while retaining the original.
+    if not rt_file_rename(staged, target.output):
+        rt_file_delete(staged)
+        rt_dir_remove(stage_dir, false)
+        return false
+    rt_dir_remove(stage_dir, false)
+    true
 
 fn _objcopy_path_prefix() -> text:
     # macOS Homebrew locations

@@ -58,6 +58,7 @@ use os.qemu_runner.{
     qemu_scenario_protection_serial_accepts_hardening,
     qemu_scenario_protection_serial_reason,
     _simpleos_log_config_source,
+    elf32_multiboot_header_valid,
     QemuScenario,
     OsTarget,
     qemu_run_options_debug_gui
@@ -75,6 +76,13 @@ extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_exit(code: i32) -> void
+
+fn elf_header(class_byte: u8, data_byte: u8, machine_low: u8, machine_high: u8) -> [u8]:
+    [
+        0x7fu8, 0x45u8, 0x4cu8, 0x46u8, class_byte, data_byte,
+        1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+        2u8, 0u8, machine_low, machine_high
+    ]
 
 fn scenario_name_or_missing(name: text) -> text:
     val scenario = get_scenario(name)
@@ -225,6 +233,14 @@ fn expect_tool_app_validation_reference(cmd: text, app_name: text, marker: text,
     expect(cmd).to_contain("mtype -i \"{img_path}\" ::/SYS/APPS/{app_name}.smf 2>/dev/null | grep -a -q 'SMF'")
 
 describe "Qemu runner serial routing":
+    it "admits only the ELF32 EM_386 envelope required by the x86_64 direct Multiboot lane":
+        # @req REQ-QEMU-RUNNER-X64-MULTIBOOT-WRAP-001
+        step("Validate the x86 direct-kernel wrapper without changing its x86_64 target identity")
+        expect(elf32_multiboot_header_valid(elf_header(1u8, 1u8, 3u8, 0u8))).to_equal(true)
+        expect(elf32_multiboot_header_valid(elf_header(2u8, 1u8, 62u8, 0u8))).to_equal(false)
+        expect(elf32_multiboot_header_valid(elf_header(1u8, 2u8, 3u8, 0u8))).to_equal(false)
+        expect(elf32_multiboot_header_valid([0x7fu8, 0x45u8, 0x4cu8])).to_equal(false)
+
     it "does not accept non-x86 QEMU exit code 1 as success":
         # @req REQ-QEMU-RUNNER-EXIT-GATE-001
         step("Offer QEMU exit code 1 to the non-x86 targets and require rejection")
