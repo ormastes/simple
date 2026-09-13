@@ -1,6 +1,17 @@
 # `bin/simple test` cannot see module-global mutation performed inside a called function
 
-**Status:** OPEN (unverified 2026-09-12)
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple`
+  (sha256 `3d120a6f9ab5…`), interpreter execution mode. Ran this doc's exact
+  repro verbatim as `bin/simple test <file>`: both `it` blocks now PASS
+  (`SPEC FILE VERDICT: ... outcome=OK declared>=2 executed=2 passed=2 failed=0`).
+  Module-global mutation performed inside a called `fn` (both the plain `i64`
+  and the `Dict` bracket-assign case) is now visible to the assertion in the
+  same `it` block. Whatever intervening fix (module-global snapshot/dispatch
+  change in the spec harness or interpreter between 2026-08-07 and now)
+  resolved this was not isolated as part of this re-check; if it regresses,
+  the repro below reproduces it in under a second.
+
+**Status (historical):** OPEN (unverified 2026-09-12)
 
 ## Status: OPEN, not root-caused (found incidentally, out of scope to fix here)
 
