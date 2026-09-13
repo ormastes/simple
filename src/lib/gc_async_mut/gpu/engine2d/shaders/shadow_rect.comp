@@ -1,0 +1,77 @@
+#version 450
+// Device box-shadow kernel — the exact integer twin of emu_draw_shadow_rect()
+// in src/lib/gc_async_mut/gpu/engine2d/backend_emu_adv.spl.
+//
+// binding 0 = framebuffer uint[], index = y * fb_w + x (READ ONLY here)
+// binding 1 = output uint[], mw * mh words at offset 0 (index = py * mw + px),
+//             followed by the two 1-D coverage profiles the host uploaded:
+//               [prof_off .. prof_off+mw)        = prof_x
+//               [prof_off+mw .. prof_off+mw+mh)  = prof_y
+//             The two regions are disjoint, so a thread never reads a word
+//             another thread writes and no barrier is required.
+// push constants (44 bytes): mx, my, mw, mh, fb_w, fb_h, sr, sg, sb,
+//                            shadow_a, prof_off
+// dispatch: 2D, ceil(mw/16) x ceil(mh/16) workgroups of 16x16
+//
+// WHY THE PROFILES COME FROM THE HOST and the kernel is not three passes of
+// blur_rect.comp: emu_draw_shadow_rect's coverage field is SEPARABLE —
+// cov = ((prof_x[px] * prof_y[py]) / 255 * shadow_a) / 255 — where each profile
+// is _emu_box_blur_1d applied three times to a 1-D step, with ONE truncating
+// integer division per pass per sample. Running a 2-D box blur three times
+// instead divides by (2r+1)^2 per pass and truncates on a different quantity,
+// so it is NOT the same integer field. The profiles are O(mw + mh) host work
+// (two 1-D arrays, no pixel loop) and are uploaded into the tail of the same
+// buffer the kernel writes, which keeps the whole frame GPU-resident: no
+// readback, no host pixel loop, and the dispatch is recorded into the frame's
+// single command buffer.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Framebuffer { uint data[]; } fb;
+layout(set = 0, binding = 1) buffer ShadowOut { uint data[]; } dst;
+
+layout(push_constant) uniform PushConstants {
+    int mx;
+    int my;
+    int mw;
+    int mh;
+    int fb_w;
+    int fb_h;
+    int sr;
+    int sg;
+    int sb;
+    int shadow_a;
+    int prof_off;
+} pc;
+
+void main() {
+    int px = int(gl_GlobalInvocationID.x);
+    int py = int(gl_GlobalInvocationID.y);
+    if (px >= pc.mw || py >= pc.mh) return;
+
+    int fx = pc.mx + px;
+    int fy = pc.my + py;
+    // The host twin leaves `dst` at 0 for a sample outside the framebuffer.
+    uint dstv = 0u;
+    if (fx >= 0 && fx < pc.fb_w && fy >= 0 && fy < pc.fb_h) {
+        dstv = fb.data[uint(fy * pc.fb_w + fx)];
+    }
+
+    int cov_x = int(dst.data[uint(pc.prof_off + px)]);
+    int cov_y = int(dst.data[uint(pc.prof_off + pc.mw + py)]);
+    // Same expression, same left-to-right truncating divisions as the twin.
+    int cov = ((cov_x * cov_y) / 255 * pc.shadow_a) / 255;
+
+    uint outv = dstv;
+    if (cov > 0) {
+        int dr = int((dstv >> 16u) & 255u);
+        int dg = int((dstv >> 8u) & 255u);
+        int db = int(dstv & 255u);
+        int rr = (pc.sr * cov + dr * (255 - cov)) / 255;
+        int rg = (pc.sg * cov + dg * (255 - cov)) / 255;
+        int rb = (pc.sb * cov + db * (255 - cov)) / 255;
+        // The twin packs RGB only and leaves alpha at 0; mirror that exactly
+        // rather than "fixing" it here, or the two lanes diverge.
+        outv = (uint(rr) << 16u) | (uint(rg) << 8u) | uint(rb);
+    }
+    dst.data[uint(py * pc.mw + px)] = outv;
+}

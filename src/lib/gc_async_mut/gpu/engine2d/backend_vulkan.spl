@@ -33,7 +33,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_circle_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
-    _pack_glass_material_pc, _pack_blur_rect_pc,
+    _pack_glass_material_pc, _pack_blur_rect_pc, _pack_shadow_rect_pc,
     vulkan_dispatch_region_kernel_checked,
     _pixels_to_bytes, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
@@ -53,7 +53,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_rect_blend, emu_draw_image_blend,
     emu_draw_image_scaled, emu_draw_image_scaled_blend,
     emu_draw_triangle_outline,
-    emu_draw_blur_rect, emu_draw_shadow_rect,
+    emu_draw_blur_rect, emu_draw_shadow_rect, _emu_shadow_profile,
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
@@ -2913,25 +2913,158 @@ impl RenderBackend for VulkanBackend:
         self.mark_cpu_fallback("glass-device-unavailable")
         emu_draw_blur_rect(self, x, y, w, h, radius)
 
+    me _draw_shadow_rect_device(x: i32, y: i32, w: i32, h: i32, offset_x: i32,
+                                offset_y: i32, blur_r: i32, color: u32) -> bool:
+        """GPU-resident box shadow: one recorded dispatch, no readback.
+
+        `emu_draw_shadow_rect`'s coverage field is SEPARABLE --
+        `cov = ((prof_x[px] * prof_y[py]) / 255 * shadow_a) / 255` -- where each
+        profile is `_emu_box_blur_1d` run three times over a 1-D step, one
+        truncating division per pass per sample. That is why this is NOT three
+        passes of `blur_rect.comp` over a 2-D coverage image: a 2-D box blur
+        divides by (2r+1)^2 per pass and truncates on a different quantity, so
+        it would be a different integer field and break the twin.
+
+        Instead the two profiles are built HOST-side by the very same
+        `_emu_shadow_profile` the twin calls -- O(mw + mh) work, two 1-D arrays,
+        no pixel loop -- uploaded into the TAIL of the kernel's own output
+        buffer, and one dispatch does the per-pixel coverage blend against
+        framebuffer content. Before this, every shadowed rect cost a
+        full-surface `read_pixels()` plus a re-upload (readbacks 1 -> 2 per
+        shadowed page), which is exactly the boundary crossing this lane exists
+        to avoid.
+
+        Fail-closed: every `false` return leaves the framebuffer untouched, so
+        the caller falls through to the host twin and paints identical pixels.
+        """
+        if self.completion_unknown or not self.initialized or self.d_framebuffer <= 0:
+            return false
+        if self.pipe_blit <= 0 or self.session.pipe_shadow_rect <= 0:
+            return false
+        if self.mask_buf.len() > 0:
+            return false
+        # Mirror emu_draw_shadow_rect()'s guards exactly, including the
+        # blur_r <= 0 hard-rect branch which it serves itself.
+        if w <= 0 or h <= 0 or blur_r <= 0:
+            return false
+        val sx = x + offset_x
+        val sy = y + offset_y
+        var shadow_a = ((color >> 24) & 0xFFu32) as i32
+        if shadow_a == 0:
+            shadow_a = 255
+        val pad = 2 * blur_r
+        val mx = sx - pad
+        val my = sy - pad
+        val mw = w + 2 * pad
+        val mh = h + 2 * pad
+        if mw <= 0 or mh <= 0:
+            return false
+        val pixel_count = _i64(mw) * _i64(mh)
+        if pixel_count <= 0 or pixel_count > 4294967295 or pixel_count > 9223372036854775807 / 4:
+            return false
+        val prof_words = _i64(mw) + _i64(mh)
+        val total_words = pixel_count + prof_words
+        val out_bytes = total_words * 4
+
+        var d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0 and self._image_source_pool_is_fully_pending():
+            val retried = self._flush_pending_compute_at("shadow-device-retry")
+            if retried < 0:
+                self.completion_unknown = true
+                return false
+            if retried > 0:
+                d_out = self._acquire_image_source(out_bytes)
+        if d_out <= 0:
+            return false
+
+        # The SAME profile builder the host twin uses, so the coverage field is
+        # identical by construction rather than by re-derivation.
+        val br = if blur_r / 2 < 1: 1 else: blur_r / 2
+        val prof_x = _emu_shadow_profile(mw, pad, w, br)
+        val prof_y = _emu_shadow_profile(mh, pad, h, br)
+        var profs: [u32] = [0u32; mw + mh]
+        var pi = 0
+        while pi < mw:  # cpu-lane-loop-ok: 1-D profile, one iteration per column
+            profs[pi] = prof_x[pi] as u32
+            pi = pi + 1
+        var qi = 0
+        while qi < mh:  # cpu-lane-loop-ok: 1-D profile, one iteration per row
+            profs[mw + qi] = prof_y[qi] as u32
+            qi = qi + 1
+        # Uploaded at the byte offset just past the pixel region. The kernel
+        # reads these words and writes only [0, mw*mh), so the two regions are
+        # disjoint and need no barrier.
+        val prof_byte_off = pixel_count * 4
+        var uploaded = vulkan_sffi_copy_to_buffer_u32(d_out, profs, prof_byte_off)
+        if not uploaded:
+            # Typed lane declined on this array ABI; the byte path is
+            # behaviour-preserving, only slower (and tiny here: mw + mh words).
+            val prof_bytes = _pixels_to_bytes(profs, prof_words)
+            uploaded = prof_bytes.len().to_i64() == prof_words * 4 and
+                vulkan_sffi_copy_to_buffer(d_out, prof_bytes, prof_byte_off)
+        if not uploaded:
+            self._release_image_source(d_out)
+            return false
+
+        val sr = ((color >> 16) & 0xFFu32) as i32
+        val sg = ((color >> 8) & 0xFFu32) as i32
+        val sb = (color & 0xFFu32) as i32
+        val pc = _pack_shadow_rect_pc(mx, my, mw, mh, self.w, self.h,
+            sr, sg, sb, shadow_a, (pixel_count as i32))
+        val gx = (_i64(mw) + 15) / 16
+        val gy = (_i64(mh) + 15) / 16
+        # Same frozen 2-binding descriptor layout as blur_rect.comp /
+        # glass_material.comp / _glsl_blit (0 = framebuffer, 1 = source), which
+        # is what lets the warm blit descriptor pool serve this pipeline.
+        # RECORDED, not submitted: `rt_vulkan_dispatch` emits a full memory
+        # barrier after every dispatch, so sampling framebuffer content an
+        # earlier dispatch in this command buffer produced is safe without a
+        # flush -- and a flush here would trade the readback for a submit.
+        val produced = if self.frame_batching_enabled:
+            self._enqueue_image_composite(
+                self.session.pipe_shadow_rect, d_out, pc, gx, gy, 1)
+        else:
+            vulkan_dispatch_region_kernel_checked(
+                self.d_framebuffer, self.session.pipe_shadow_rect, d_out, pc, gx, gy, 1)
+        if vulkan_order_trace_enabled():
+            vulkan_order_trace("shadow-device x={mx} y={my} w={mw} h={mh} r={blur_r} rc={produced} fb={self.d_framebuffer}")
+        if produced <= 0:
+            if not self.frame_batching_enabled:
+                self._release_image_source(d_out)
+            if produced < 0:
+                self.completion_unknown = true
+            return false
+
+        # Same tail as an ordinary image upload -- exactly what the twin's
+        # `core.draw_image(mx, my, mw, mh, outp)` does: same clip, same damage,
+        # same dirty bookkeeping. The composite reads mw*mh words from offset 0
+        # and never touches the profile tail.
+        val composited = self._finish_image_composite(
+            d_out, mx, my, mw, mh, mw, mh, 1000, VK_IMAGE_COMPOSITE_COPY)
+        if composited <= 0:
+            if composited < 0:
+                self.completion_unknown = true
+            return false
+        true
+
     me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
         if self.completion_unknown: return
         if w <= 0 or h <= 0:
             return
-        # TWIN PARITY: every other backend (software/cpu, metal's mirror,
-        # opengl, webgpu, intel, baremetal) renders a box-shadow through
-        # `emu_draw_shadow_rect`, which builds a separable coverage profile
-        # over a region padded by 2*blur_r and blends each pixel at its own
-        # falloff. Vulkan used to paint a FLAT alpha rect padded by only
-        # blur_r and then blur it, which is a different formula: it darkened
-        # the whole shadow band uniformly and gave the CPU<->Vulkan web
-        # showcase twins a 29.33% pixel divergence at 160x90 (worst channel
-        # delta 37) on every catalog page that has a shadowed card. Painting
-        # the shared formula costs one host readback per shadow, exactly as
-        # `draw_blur_rect` above already does; a device kernel for the
-        # coverage profile would have to reproduce `_emu_shadow_profile`
-        # exactly before it could replace this.
+        # TWIN PARITY: every backend renders a box-shadow through the
+        # `emu_draw_shadow_rect` formula -- a separable coverage profile over a
+        # region padded by 2*blur_r, blended at each pixel's own falloff.
+        # Vulkan paints that same formula ON THE DEVICE (see
+        # `_draw_shadow_rect_device`): the host builds only the two 1-D
+        # profiles, and one recorded dispatch does the pixels. The host twin
+        # below stays as the fail-closed fallback for when the device kernel
+        # declines -- and it is the readback-and-reupload path, so it records a
+        # cpu fallback rather than crossing the boundary silently.
+        if self._draw_shadow_rect_device(x, y, w, h, offset_x, offset_y, blur_r, color):
+            return
         if not self._flush_for_host_fallback("shadow-rect-host-readback"):
             return
+        self.mark_cpu_fallback("shadow-device-unavailable")
         emu_draw_shadow_rect(self, x, y, w, h, offset_x, offset_y, blur_r, color)
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):

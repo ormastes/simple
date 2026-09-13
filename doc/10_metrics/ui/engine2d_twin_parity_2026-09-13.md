@@ -104,7 +104,55 @@ diverge.
   property that discriminates it from any flat-band approximation -- coverage
   falls off monotonically outward. It needs no GPU.
 
-## Cost this fix accepts
+## SUPERSEDED (same day): the readback is gone, the formula is unchanged
+
+The cost section below described the state between the twin fix and this one.
+`draw_shadow_rect` on the Vulkan lane is now GPU-resident
+(`backend_vulkan.spl:2926 _draw_shadow_rect_device`, kernel
+`shaders/shadow_rect.comp`): no readback, no re-upload, one recorded dispatch
+inside the frame's single command buffer.
+
+Why it is NOT three passes of `blur_rect.comp`: `emu_draw_shadow_rect`'s
+coverage field is SEPARABLE -- `cov = ((prof_x[px]*prof_y[py])/255*shadow_a)/255`
+-- and each profile is `_emu_box_blur_1d` run three times over a 1-D step with
+one truncating division per pass per sample. A 2-D box blur divides by
+(2r+1)^2 per pass and truncates on a different quantity, so three 2-D passes
+would be a different integer field. Instead the host calls the very same
+`_emu_shadow_profile` the twin calls -- O(mw+mh), two 1-D arrays, no pixel loop
+-- and uploads the profiles into the TAIL of the kernel's own output buffer
+(disjoint from the written region, so no barrier). Byte-exactness is therefore
+by construction, not by re-derivation.
+
+| boundary audit `--matrix` | before (origin/main 0c52e34bb4d) | after |
+|---|---|---|
+| overview@900x760 | FAIL readbacks_per_frame=2, submits_per_frame=2 | PASS readbacks<=1, submits<=1 |
+| css-layout@900x760 | FAIL readbacks_per_frame=3, submits_per_frame=3 | PASS readbacks<=1, submits<=1 |
+| overview@3840x2160 | PASS | PASS |
+| css-layout@3840x2160 | PASS | PASS |
+| gate verdict | `FAIL — 4 matrix cell(s) audited, 2 violated a GPU-boundary invariant` | `PASS — 4 matrix cell(s) audited (overview + css-layout at 900x760 and 3840x2160), 0 violations` |
+
+So `main` was RED on this gate for the two 900x760 cells: the counter was never
+blind, the extra readback was measured exactly as the cost section predicted.
+Evidence the device kernel fires rather than declining: the overview cell log
+carries the `shadow-device` order trace with `cpu_fallback_count=0` and
+`readbacks=1`. The host twin remains as the fail-closed fallback and now marks
+`shadow-device-unavailable` when it is taken, so a silent regression to the
+readback path is visible.
+
+`catalog_vulkan_twin_spec.spl` 3/3 with `mismatch: 0, max_delta: 0`;
+`engine2d_shadow_rect_twin_formula_spec.spl` 3/3.
+
+The 900x760 `css-layout` 30-pixel residual below is NOT the shadow path and
+never was: at the time it was measured the Vulkan lane painted shadows by
+calling the CPU twin's own function, so the shadow pixels were identical by
+construction. It stays open against another op class.
+
+Metal is unchanged and still routes `draw_shadow_rect` to its CPU mirror
+(`backend_metal.spl:2378`) -- a different architecture with no device kernel
+for this op at all. The formula stays shared; no Metal device evidence exists
+on this host, so it is recorded as untested rather than claimed.
+
+## Cost this fix accepts (SUPERSEDED — see above)
 
 One extra full-surface host readback per shadowed page on the Vulkan lane
 (`overview` at 160x90: `readbacks=1 -> 2`, `image=0 -> 1`). This is the same
