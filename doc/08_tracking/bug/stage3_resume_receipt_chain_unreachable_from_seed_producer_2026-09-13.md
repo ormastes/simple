@@ -1,6 +1,21 @@
 # Site 20: Stage 3 unreachable — the receipt chain has no entry point from a rust-seed Stage 2 (macOS, 2026-09-13)
 
-- Status: OPEN (2026-09-13) — **instance of an already-OPEN root defect**, `bootstrap_admission_v2_circular_and_cannot_express_imported_parent_2026-08-18.md` ("nothing in the repo ever WRITES the two receipts the gate reads"). Kept for the macOS run-35 evidence; the root defect is tracked there, not here.
+- Status: RESOLVED (2026-09-13, macOS lane F74 r2). The premise below ("only a
+  non-seed producer can publish") was already stale when this was filed: the
+  Stage-2 admission receipt AND both parent receipts are written by the
+  trust-root lane itself (`bootstrap-from-scratch.sh:3188`, `:3226`). The one
+  real gap was that nothing invoked the LAST producer,
+  `scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs`. It is now
+  invoked from that same trust-root block, immediately after the parent
+  receipts are published, under the new
+  `--produce-stage3-receipt=<typed-reason>` flag: the operator still types the
+  reason (never defaulted, never invented), the producer still re-verifies the
+  whole parent authority itself and refuses on any mismatch, and the run fails
+  closed with no receipt on any producer failure. Pinned by
+  `scripts/check/check-bootstrap-stage3-receipt-autowire.shs`
+  (`PASS — 11 check(s) run, 0 failed`, and FAILs on both a literal reason and a
+  removed refusal). Original status line follows.
+- Status (original): OPEN (2026-09-13) — **instance of an already-OPEN root defect**, `bootstrap_admission_v2_circular_and_cannot_express_imported_parent_2026-08-18.md` ("nothing in the repo ever WRITES the two receipts the gate reads"). Kept for the macOS run-35 evidence; the root defect is tracked there, not here.
 - Area: bootstrap Stage 2 -> Stage 3 handoff; planner admission v2 receipt chain
 - Found by: macOS lane F73 run 35, worktree `agent-a73a6f3780a2bd75b`, tip
   `60c78b96789` (carries PR #903, the site-19 fix)
