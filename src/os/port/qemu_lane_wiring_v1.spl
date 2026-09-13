@@ -1,0 +1,145 @@
+# Bounded projection of catalog-owned lane options into typed QEMU policy.
+
+use os.port.simpleos_multiplatform_build.{
+    SimpleOsLaneContract, SimpleOsMachineTargetProjection
+}
+
+pub enum QemuLaneFirmwareArgV1:
+    Omit
+    Default
+    None
+
+pub enum QemuLaneDisplayArgV1:
+    Omit
+    VgaStd
+
+pub enum QemuLaneBlockDeviceV1:
+    None
+    VirtioBlockDevice
+
+pub class QemuLaneWiringV1:
+    _valid: bool
+    _lane_name: text
+    _firmware_arg: QemuLaneFirmwareArgV1
+    _repeat_firmware_arg: bool
+    _debug_exit: bool
+    _display_arg: QemuLaneDisplayArgV1
+    _initrd_path: text
+    _virtio_mmio_modern: bool
+    _raw_drive_path: text
+    _raw_drive_id: text
+    _block_device: QemuLaneBlockDeviceV1
+    _semihosting_native: bool
+
+impl QemuLaneWiringV1:
+    pub fn valid() -> bool: self._valid
+    pub fn lane_name() -> text: self._lane_name
+    pub fn firmware_arg() -> QemuLaneFirmwareArgV1: self._firmware_arg
+    pub fn repeats_firmware_arg() -> bool: self._repeat_firmware_arg
+    pub fn debug_exit() -> bool: self._debug_exit
+    pub fn display_arg() -> QemuLaneDisplayArgV1: self._display_arg
+    pub fn initrd_path() -> text: self._initrd_path
+    pub fn raw_drive_path() -> text: self._raw_drive_path
+    pub fn raw_drive_id() -> text: self._raw_drive_id
+
+fn _qemu_empty_lane_wiring_v1() -> QemuLaneWiringV1:
+    QemuLaneWiringV1(
+        _valid: true, _lane_name: "", _firmware_arg: QemuLaneFirmwareArgV1.Omit,
+        _repeat_firmware_arg: false, _debug_exit: false,
+        _display_arg: QemuLaneDisplayArgV1.Omit, _initrd_path: "",
+        _virtio_mmio_modern: false, _raw_drive_path: "", _raw_drive_id: "",
+        _block_device: QemuLaneBlockDeviceV1.None, _semihosting_native: false)
+
+fn _qemu_invalid_lane_wiring_v1(lane_name: text) -> QemuLaneWiringV1:
+    var result = _qemu_empty_lane_wiring_v1()
+    result._valid = false
+    result._lane_name = lane_name
+    result
+
+fn _qemu_lane_firmware_arg_v1(value: text) -> QemuLaneFirmwareArgV1?:
+    match value:
+        case "": QemuLaneFirmwareArgV1.Omit
+        case "default": QemuLaneFirmwareArgV1.Default
+        case "none": QemuLaneFirmwareArgV1.None
+        case _: nil
+
+fn _qemu_expected_drive_v1(target: SimpleOsMachineTargetProjection) -> (text, text):
+    match target.canonical_name:
+        case "aarch64-simpleos" | "armv7-simpleos": (target.disk_image_output, "armdisk")
+        case "riscv64gc-simpleos" | "riscv32imac-simpleos": (target.disk_image_output, "rvdisk")
+        case _: ("", "")
+
+pub fn qemu_lane_wiring_from_catalog_v1(
+    target: SimpleOsMachineTargetProjection,
+    lane: SimpleOsLaneContract
+) -> QemuLaneWiringV1:
+    """Parse only the catalog's bounded QEMU lane vocabulary; reject every unknown token."""
+    if not target.has_qemu_lane(lane.name):
+        return _qemu_invalid_lane_wiring_v1(lane.name)
+    val catalog_lane = target.qemu_lane_or_smoke(lane.name)
+    if (lane.firmware_contract != catalog_lane.firmware_contract or
+        lane.image_layout != catalog_lane.image_layout or lane.output != catalog_lane.output or
+        lane.qemu_memory != catalog_lane.qemu_memory or lane.qemu_bios != catalog_lane.qemu_bios or
+        lane.qemu_extra != catalog_lane.qemu_extra or lane.media_path_hint != catalog_lane.media_path_hint):
+        return _qemu_invalid_lane_wiring_v1(lane.name)
+    val firmware_arg = _qemu_lane_firmware_arg_v1(lane.qemu_bios)
+    if firmware_arg == nil:
+        return _qemu_invalid_lane_wiring_v1(lane.name)
+    var result = _qemu_empty_lane_wiring_v1()
+    result._lane_name = lane.name
+    result._firmware_arg = firmware_arg.unwrap()
+    var index = 0
+    while index < lane.qemu_extra.len():
+        val option = lane.qemu_extra[index]
+        if index + 1 >= lane.qemu_extra.len():
+            return _qemu_invalid_lane_wiring_v1(lane.name)
+        val value = lane.qemu_extra[index + 1]
+        if option == "-bios":
+            if ((value == "default" and result._firmware_arg != QemuLaneFirmwareArgV1.Default) or
+                (value == "none" and result._firmware_arg != QemuLaneFirmwareArgV1.None) or
+                (value != "default" and value != "none") or result._repeat_firmware_arg):
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._repeat_firmware_arg = true
+        elif option == "-device" and value == "isa-debug-exit,iobase=0xf4,iosize=0x04":
+            if result._debug_exit:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._debug_exit = true
+        elif option == "-vga" and value == "std":
+            if result._display_arg != QemuLaneDisplayArgV1.Omit:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._display_arg = QemuLaneDisplayArgV1.VgaStd
+        elif option == "-initrd":
+            if result._initrd_path != "" or value != target.disk_image_output:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._initrd_path = value
+        elif option == "-global" and value == "virtio-mmio.force-legacy=false":
+            if result._virtio_mmio_modern:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._virtio_mmio_modern = true
+        elif option == "-drive":
+            val (expected_path, expected_id) = _qemu_expected_drive_v1(target)
+            val expected = "file={expected_path},if=none,id={expected_id},format=raw"
+            if (expected_path == "" or result._raw_drive_path != "" or value != expected):
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._raw_drive_path = expected_path
+            result._raw_drive_id = expected_id
+        elif option == "-device" and value.starts_with("virtio-blk-device,drive="):
+            if (result._raw_drive_id == "" or
+                value != "virtio-blk-device,drive={result._raw_drive_id}" or
+                result._block_device != QemuLaneBlockDeviceV1.None):
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._block_device = QemuLaneBlockDeviceV1.VirtioBlockDevice
+        elif option == "-semihosting-config" and value == "enable=on,target=native":
+            if result._semihosting_native:
+                return _qemu_invalid_lane_wiring_v1(lane.name)
+            result._semihosting_native = true
+        else:
+            return _qemu_invalid_lane_wiring_v1(lane.name)
+        index = index + 2
+    if ((result._raw_drive_path == "") !=
+        (result._block_device == QemuLaneBlockDeviceV1.None)):
+        return _qemu_invalid_lane_wiring_v1(lane.name)
+    result
+
+export QemuLaneFirmwareArgV1, QemuLaneDisplayArgV1, QemuLaneBlockDeviceV1
+export QemuLaneWiringV1, qemu_lane_wiring_from_catalog_v1, _qemu_empty_lane_wiring_v1

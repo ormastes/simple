@@ -7,7 +7,13 @@
 
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.structural.digest.hash256.{hash256_hex_valid}
-use os.port.simpleos_multiplatform_build.{SimpleOsMachineTargetProjection}
+use os.port.simpleos_multiplatform_build.{
+    SimpleOsLaneContract, SimpleOsMachineTargetProjection
+}
+use os.port.qemu_lane_wiring_v1.{
+    QemuLaneFirmwareArgV1, QemuLaneDisplayArgV1, QemuLaneBlockDeviceV1,
+    QemuLaneWiringV1, qemu_lane_wiring_from_catalog_v1, _qemu_empty_lane_wiring_v1
+}
 
 pub enum QemuMachineImageKindV1:
     Kernel
@@ -58,6 +64,7 @@ pub enum QemuMachinePlanErrorV1:
     InvalidCpu
     InvalidMemory
     InvalidCpuCount
+    InvalidLaneProjection
     InvalidHostResolution
     DuplicateAccelerator
     AcceleratorUnavailable
@@ -86,6 +93,7 @@ pub class QemuMachineSpecV1:
     _network: QemuNetworkKindV1
     _console: QemuConsoleKindV1
     _accelerator: QemuAcceleratorRequestV1
+    _lane_wiring: QemuLaneWiringV1
 
 pub struct QemuHostResolutionV1:
     # Migration seam: host adapters translate the existing
@@ -244,6 +252,22 @@ fn _qemu_console_kind_text_v1(value: QemuConsoleKindV1) -> text:
         case QemuConsoleKindV1.None: "none"
         case QemuConsoleKindV1.SerialStdio: "serial-stdio"
 
+fn _qemu_lane_firmware_arg_text_v1(value: QemuLaneFirmwareArgV1) -> text:
+    match value:
+        case QemuLaneFirmwareArgV1.Omit: "omit"
+        case QemuLaneFirmwareArgV1.Default: "default"
+        case QemuLaneFirmwareArgV1.None: "none"
+
+fn _qemu_lane_display_arg_text_v1(value: QemuLaneDisplayArgV1) -> text:
+    match value:
+        case QemuLaneDisplayArgV1.Omit: "omit"
+        case QemuLaneDisplayArgV1.VgaStd: "vga-std"
+
+fn _qemu_lane_block_device_text_v1(value: QemuLaneBlockDeviceV1) -> text:
+    match value:
+        case QemuLaneBlockDeviceV1.None: "none"
+        case QemuLaneBlockDeviceV1.VirtioBlockDevice: "virtio-block-device"
+
 fn _qemu_plan_error_text_v1(value: QemuMachinePlanErrorV1) -> text:
     match value:
         case QemuMachinePlanErrorV1.None: "none"
@@ -255,6 +279,7 @@ fn _qemu_plan_error_text_v1(value: QemuMachinePlanErrorV1) -> text:
         case QemuMachinePlanErrorV1.InvalidCpu: "invalid-cpu"
         case QemuMachinePlanErrorV1.InvalidMemory: "invalid-memory"
         case QemuMachinePlanErrorV1.InvalidCpuCount: "invalid-cpu-count"
+        case QemuMachinePlanErrorV1.InvalidLaneProjection: "invalid-lane-projection"
         case QemuMachinePlanErrorV1.InvalidHostResolution: "invalid-host-resolution"
         case QemuMachinePlanErrorV1.DuplicateAccelerator: "duplicate-accelerator"
         case QemuMachinePlanErrorV1.AcceleratorUnavailable: "accelerator-unavailable"
@@ -329,7 +354,37 @@ pub fn qemu_machine_spec_from_projection_v1(
         _display: display,
         _network: network,
         _console: console,
-        _accelerator: accelerator)
+        _accelerator: accelerator,
+        _lane_wiring: _qemu_empty_lane_wiring_v1())
+
+pub fn qemu_machine_spec_from_lane_v1(
+    target: SimpleOsMachineTargetProjection,
+    lane: SimpleOsLaneContract,
+    image_digest: text,
+    memory_mib: u64,
+    accelerator: QemuAcceleratorRequestV1
+) -> QemuMachineSpecV1:
+    """Project one catalog lane into structured, non-injectable QEMU policy."""
+    val wiring = qemu_lane_wiring_from_catalog_v1(target, lane)
+    QemuMachineSpecV1(
+        _schema_version: QEMU_MACHINE_SPEC_V1_SCHEMA,
+        _target_id: target.canonical_name,
+        _target_triple: target.native_target,
+        _image_path: lane.output,
+        _image_digest: image_digest,
+        _image_kind: QemuMachineImageKindV1.Kernel,
+        _firmware_kind: QemuFirmwareKindV1.None,
+        _firmware_id: "",
+        _machine: target.qemu_machine,
+        _cpu: target.qemu_cpu,
+        _memory_mib: memory_mib,
+        _cpu_count: 1u16,
+        _storage: QemuStorageKindV1.None,
+        _display: QemuDisplayKindV1.None,
+        _network: QemuNetworkKindV1.None,
+        _console: QemuConsoleKindV1.SerialStdio,
+        _accelerator: accelerator,
+        _lane_wiring: wiring)
 
 pub fn qemu_machine_spec_validate_v1(spec: QemuMachineSpecV1) -> QemuMachinePlanErrorV1:
     if spec._schema_version != QEMU_MACHINE_SPEC_V1_SCHEMA:
@@ -352,6 +407,8 @@ pub fn qemu_machine_spec_validate_v1(spec: QemuMachineSpecV1) -> QemuMachinePlan
         return QemuMachinePlanErrorV1.InvalidMemory
     if spec._cpu_count < 1u16 or spec._cpu_count > 4096u16:
         return QemuMachinePlanErrorV1.InvalidCpuCount
+    if not spec._lane_wiring._valid:
+        return QemuMachinePlanErrorV1.InvalidLaneProjection
     if spec._image_kind == QemuMachineImageKindV1.Kernel and spec._storage != QemuStorageKindV1.None:
         return QemuMachinePlanErrorV1.InvalidImage
     if spec._image_kind == QemuMachineImageKindV1.RawDisk and spec._storage == QemuStorageKindV1.None:
@@ -379,6 +436,19 @@ fn _qemu_machine_spec_canonical_build_v1(spec: QemuMachineSpecV1) -> text:
     writer.append(_qemu_console_kind_text_v1(spec._console))
     writer.append(_qemu_accelerator_request_text_v1(spec._accelerator.kind))
     writer.append(_qemu_accelerator_text_v1(spec._accelerator.accelerator))
+    if spec._lane_wiring._lane_name != "":
+        writer.append("catalog-lane-v1")
+        writer.append(spec._lane_wiring._lane_name)
+        writer.append(_qemu_lane_firmware_arg_text_v1(spec._lane_wiring._firmware_arg))
+        writer.append(if spec._lane_wiring._repeat_firmware_arg: "1" else: "0")
+        writer.append(if spec._lane_wiring._debug_exit: "1" else: "0")
+        writer.append(_qemu_lane_display_arg_text_v1(spec._lane_wiring._display_arg))
+        writer.append(spec._lane_wiring._initrd_path)
+        writer.append(if spec._lane_wiring._virtio_mmio_modern: "1" else: "0")
+        writer.append(spec._lane_wiring._raw_drive_path)
+        writer.append(spec._lane_wiring._raw_drive_id)
+        writer.append(_qemu_lane_block_device_text_v1(spec._lane_wiring._block_device))
+        writer.append(if spec._lane_wiring._semihosting_native: "1" else: "0")
     writer.finish()
 
 pub fn qemu_machine_spec_canonical_v1(spec: QemuMachineSpecV1) -> text:
@@ -504,6 +574,70 @@ fn _qemu_launch_argv_v1(
         argv.push("none")
     argv
 
+fn _qemu_lane_firmware_value_v1(value: QemuLaneFirmwareArgV1) -> text:
+    match value:
+        case QemuLaneFirmwareArgV1.Omit: ""
+        case QemuLaneFirmwareArgV1.Default: "default"
+        case QemuLaneFirmwareArgV1.None: "none"
+
+fn _qemu_lane_parity_argv_v1(spec: QemuMachineSpecV1) -> [text]:
+    """Render the established default runner argv from structured lane policy."""
+    var argv: [text] = []
+    if spec._target_id == "x86_64-simpleos":
+        argv.push("-no-user-config")
+        argv.push("-monitor")
+        argv.push("none")
+        argv.push("-net")
+        argv.push("none")
+    argv.push("-machine")
+    argv.push(spec._machine)
+    argv.push("-cpu")
+    argv.push(spec._cpu)
+    argv.push("-m")
+    val memory_text = if spec._memory_mib % 1024u64 == 0u64:
+        "{spec._memory_mib / 1024u64}G"
+    else:
+        "{spec._memory_mib}M"
+    argv.push(memory_text)
+    argv.push("-serial")
+    argv.push("stdio")
+    argv.push("-display")
+    argv.push("none")
+    argv.push("-no-reboot")
+    val firmware = _qemu_lane_firmware_value_v1(spec._lane_wiring._firmware_arg)
+    if firmware != "":
+        argv.push("-bios")
+        argv.push(firmware)
+    argv.push("-kernel")
+    argv.push(spec._image_path)
+    if spec._lane_wiring._repeat_firmware_arg:
+        argv.push("-bios")
+        argv.push(firmware)
+    if spec._lane_wiring._virtio_mmio_modern:
+        argv.push("-global")
+        argv.push("virtio-mmio.force-legacy=false")
+    if spec._lane_wiring._initrd_path != "":
+        argv.push("-initrd")
+        argv.push(spec._lane_wiring._initrd_path)
+    if spec._lane_wiring._raw_drive_path != "":
+        argv.push("-drive")
+        argv.push(
+            "file={spec._lane_wiring._raw_drive_path},if=none," +
+            "id={spec._lane_wiring._raw_drive_id},format=raw")
+    if spec._lane_wiring._block_device == QemuLaneBlockDeviceV1.VirtioBlockDevice:
+        argv.push("-device")
+        argv.push("virtio-blk-device,drive={spec._lane_wiring._raw_drive_id}")
+    if spec._lane_wiring._semihosting_native:
+        argv.push("-semihosting-config")
+        argv.push("enable=on,target=native")
+    if spec._lane_wiring._debug_exit:
+        argv.push("-device")
+        argv.push("isa-debug-exit,iobase=0xf4,iosize=0x04")
+    if spec._lane_wiring._display_arg == QemuLaneDisplayArgV1.VgaStd:
+        argv.push("-vga")
+        argv.push("std")
+    argv
+
 fn _qemu_rejected_plan_v1(
     spec: QemuMachineSpecV1,
     error: QemuMachinePlanErrorV1
@@ -532,6 +666,8 @@ pub fn qemu_launch_plan_bind_v1(
     val spec_error = qemu_machine_spec_validate_v1(spec)
     if spec_error != QemuMachinePlanErrorV1.None:
         return _qemu_rejected_plan_v1(spec, spec_error)
+    if spec._lane_wiring._lane_name != "":
+        return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.InvalidLaneProjection)
     val source_digest = qemu_machine_spec_digest_v1(spec)
     if source_digest.len() == 0:
         return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.CanonicalTooLarge)
@@ -567,8 +703,57 @@ pub fn qemu_launch_plan_bind_v1(
         _argv_digest: argv_digest,
         _seal_digest: seal_digest)
 
+pub fn qemu_launch_plan_bind_lane_parity_v1(
+    spec: QemuMachineSpecV1,
+    host: QemuHostResolutionV1
+) -> QemuLaunchPlanV1:
+    """Seal argv that is byte-for-byte compatible with the established runner."""
+    val spec_error = qemu_machine_spec_validate_v1(spec)
+    if spec_error != QemuMachinePlanErrorV1.None:
+        return _qemu_rejected_plan_v1(spec, spec_error)
+    if spec._lane_wiring._lane_name == "":
+        return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.InvalidLaneProjection)
+    val source_digest = qemu_machine_spec_digest_v1(spec)
+    if source_digest.len() == 0:
+        return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.CanonicalTooLarge)
+    val host_error = qemu_host_resolution_validate_v1(host, false)
+    if host_error != QemuMachinePlanErrorV1.None:
+        return _qemu_rejected_plan_v1(spec, host_error)
+    if (not _qemu_accelerator_available_v1(host.available_accelerators, QemuAcceleratorV1.Tcg) or
+        (spec._accelerator.kind == QemuAcceleratorRequestKindV1.Require and
+         spec._accelerator.accelerator != QemuAcceleratorV1.Tcg)):
+        return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.AcceleratorUnavailable)
+    # The established runner emits no `-accel`; its only honest sealed
+    # compatibility claim is the portable TCG execution path.
+    val accelerator = QemuAcceleratorV1.Tcg
+    val argv = _qemu_lane_parity_argv_v1(spec)
+    if argv.len() > QEMU_LAUNCH_PLAN_V1_MAX_ARGV:
+        return _qemu_rejected_plan_v1(spec, QemuMachinePlanErrorV1.ArgvTooLarge)
+    var argv_writer = _QemuCanonicalWriterV1(pieces: [])
+    for value in argv:
+        argv_writer.append(value)
+    val argv_digest = sha256_u8_hex(argv_writer.finish().bytes())
+    val seal_digest = _qemu_launch_seal_digest_v1(
+        QEMU_LAUNCH_PLAN_V1_SCHEMA, true, QemuMachinePlanErrorV1.None,
+        spec._target_id, source_digest, host.executable_path, "",
+        accelerator, argv_digest)
+    QemuLaunchPlanV1(
+        _schema_version: QEMU_LAUNCH_PLAN_V1_SCHEMA,
+        _admitted: true,
+        _error: QemuMachinePlanErrorV1.None,
+        _target_id: spec._target_id,
+        _source_spec_digest: source_digest,
+        _executable_path: host.executable_path,
+        _firmware_path: "",
+        _accelerator: accelerator,
+        _argv: argv,
+        _argv_digest: argv_digest,
+        _seal_digest: seal_digest)
+
 export QemuMachineImageKindV1, QemuFirmwareKindV1, QemuStorageKindV1
 export QemuDisplayKindV1, QemuNetworkKindV1, QemuConsoleKindV1
+export QemuLaneFirmwareArgV1, QemuLaneDisplayArgV1, QemuLaneBlockDeviceV1
+export QemuLaneWiringV1
 export QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuMachinePlanErrorV1
 export QemuAcceleratorRequestV1, QemuMachineSpecV1, QemuHostResolutionV1
 export QemuLaunchPlanV1
@@ -576,5 +761,7 @@ export QEMU_MACHINE_SPEC_V1_SCHEMA, QEMU_LAUNCH_PLAN_V1_SCHEMA
 export QEMU_MACHINE_SPEC_V1_MAX_TEXT_BYTES, QEMU_MACHINE_SPEC_V1_MAX_CANONICAL_BYTES
 export QEMU_LAUNCH_PLAN_V1_MAX_ARGV
 export qemu_machine_spec_from_projection_v1, qemu_machine_spec_validate_v1
+export qemu_lane_wiring_from_catalog_v1, qemu_machine_spec_from_lane_v1
 export qemu_machine_spec_canonical_v1, qemu_machine_spec_digest_v1
 export qemu_host_resolution_validate_v1, qemu_launch_plan_bind_v1
+export qemu_launch_plan_bind_lane_parity_v1

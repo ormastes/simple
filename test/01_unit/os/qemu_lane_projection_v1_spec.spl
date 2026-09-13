@@ -1,0 +1,123 @@
+"""Catalog lane projection and established-runner argv parity."""
+# codex-system-test
+# @req: REQ-SIMPLEOS-QEMU-LANE-PROJECTION-001
+
+use std.spec.{describe, it, expect, step}
+use os.kernel.arch.arch_context.{Architecture}
+use os.qemu_runner.{build_qemu_command, get_qemu_target}
+use os.port.simpleos_multiplatform_build.{simpleos_machine_target_projection}
+use os.port.qemu_machine_plan_v1.{
+    QemuAcceleratorV1, QemuAcceleratorRequestKindV1, QemuAcceleratorRequestV1,
+    QemuHostResolutionV1, QemuLaneFirmwareArgV1, QemuLaneDisplayArgV1,
+    QemuMachinePlanErrorV1,
+    qemu_lane_wiring_from_catalog_v1, qemu_machine_spec_from_lane_v1,
+    qemu_launch_plan_bind_v1, qemu_launch_plan_bind_lane_parity_v1
+}
+
+val HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn parity_argv(arch: Architecture, target_name: text) -> [text]:
+    val target = get_qemu_target(arch)
+    val platform = simpleos_machine_target_projection(target_name)
+    val lane = platform.default_qemu_lane()
+    val memory = int(lane.qemu_memory[:lane.qemu_memory.len() - 1]) as u64
+    val spec = qemu_machine_spec_from_lane_v1(
+        platform, lane, HASH_A, memory,
+        QemuAcceleratorRequestV1(
+            kind: QemuAcceleratorRequestKindV1.Auto,
+            accelerator: QemuAcceleratorV1.Tcg))
+    val legacy = build_qemu_command(target)
+    val plan = qemu_launch_plan_bind_lane_parity_v1(
+        spec,
+        QemuHostResolutionV1(
+            host_adapter_id: "parity-test",
+            executable_path: legacy[0],
+            firmware_path: "",
+            available_accelerators: [QemuAcceleratorV1.Tcg]))
+    expect(plan.admitted()).to_equal(true)
+    expect(plan.sealed_valid()).to_equal(true)
+    expect(plan.executable_path()).to_equal(legacy[0])
+    expect(plan.argv_copy()).to_equal(legacy[1:])
+    plan.argv_copy()
+
+describe "REQ-SIMPLEOS-QEMU-LANE-PROJECTION-001: bounded catalog wiring [importance=high; importance_weight=2]":
+    it "matches all six established default runner commands exactly":
+        step("Project and seal every default architecture lane")
+        val x64 = parity_argv(Architecture.X86_64, "x86_64")
+        val x32 = parity_argv(Architecture.X86, "x86_32")
+        val arm64 = parity_argv(Architecture.Arm64, "arm64")
+        val arm32 = parity_argv(Architecture.Arm32, "arm32")
+        val rv64 = parity_argv(Architecture.Riscv64, "riscv64")
+        val rv32 = parity_argv(Architecture.Riscv32, "riscv32")
+
+        step("Assert absolute required devices, sentinels, media, and display policy")
+        expect(x64).to_contain("isa-debug-exit,iobase=0xf4,iosize=0x04")
+        expect(x64[x64.len() - 2]).to_equal("-vga")
+        expect(x64[x64.len() - 1]).to_equal("std")
+        expect(x32[x32.len() - 2]).to_equal("-device")
+        expect(x32[x32.len() - 1]).to_equal("isa-debug-exit,iobase=0xf4,iosize=0x04")
+        expect(arm64).to_contain("file=build/os/fat32-arm64.img,if=none,id=armdisk,format=raw")
+        expect(arm64[arm64.len() - 2]).to_equal("-semihosting-config")
+        expect(arm64[arm64.len() - 1]).to_equal("enable=on,target=native")
+        expect(arm32).to_contain("file=build/os/fat32-arm32.img,if=none,id=armdisk,format=raw")
+        expect(rv64).to_contain("file=build/os/fat32-riscv64.img,if=none,id=rvdisk,format=raw")
+        expect(rv64).to_contain("default")
+        expect(rv32).to_contain("file=build/os/fat32-riscv32.img,if=none,id=rvdisk,format=raw")
+        expect(rv32).to_contain("none")
+
+    it "projects explicit structured facts and rejects an unknown catalog extra":
+        step("Read the x86 display/debug and RISC-V firmware facts without argv exposure")
+        val x64 = simpleos_machine_target_projection("x86_64")
+        val x64_wiring = qemu_lane_wiring_from_catalog_v1(x64, x64.default_qemu_lane())
+        expect(x64_wiring.valid()).to_equal(true)
+        expect(x64_wiring.debug_exit()).to_equal(true)
+        expect(x64_wiring.display_arg()).to_equal(QemuLaneDisplayArgV1.VgaStd)
+        val rv64 = simpleos_machine_target_projection("riscv64")
+        val rv64_wiring = qemu_lane_wiring_from_catalog_v1(rv64, rv64.default_qemu_lane())
+        expect(rv64_wiring.firmware_arg()).to_equal(QemuLaneFirmwareArgV1.Default)
+        expect(rv64_wiring.repeats_firmware_arg()).to_equal(true)
+        expect(rv64_wiring.raw_drive_id()).to_equal("rvdisk")
+
+        step("Fail closed when a lane carries an unrecognized QEMU option")
+        var injected = x64.default_qemu_lane()
+        injected.qemu_extra = ["-semihosting-config", "enable=on,target=native"]
+        expect(qemu_lane_wiring_from_catalog_v1(x64, injected).valid()).to_equal(false)
+
+    it "does not seal acceleration or discard lane wiring implicitly":
+        step("Build one valid lane-bearing specification")
+        val platform = simpleos_machine_target_projection("arm64")
+        val lane = platform.default_qemu_lane()
+        val required_kvm = qemu_machine_spec_from_lane_v1(
+            platform, lane, HASH_A, 384u64,
+            QemuAcceleratorRequestV1(
+                kind: QemuAcceleratorRequestKindV1.Require,
+                accelerator: QemuAcceleratorV1.Kvm))
+        val host = QemuHostResolutionV1(
+            host_adapter_id: "linux-test",
+            executable_path: "qemu-system-aarch64",
+            firmware_path: "",
+            available_accelerators: [QemuAcceleratorV1.Kvm, QemuAcceleratorV1.Tcg])
+
+        step("Reject a required accelerator absent from the established runner argv")
+        val parity = qemu_launch_plan_bind_lane_parity_v1(required_kvm, host)
+        expect(parity.admitted()).to_equal(false)
+        expect(parity.error()).to_equal(QemuMachinePlanErrorV1.AcceleratorUnavailable)
+
+        step("Reject the generic binder rather than silently dropping lane devices")
+        val generic = qemu_launch_plan_bind_v1(required_kvm, host)
+        expect(generic.admitted()).to_equal(false)
+        expect(generic.error()).to_equal(QemuMachinePlanErrorV1.InvalidLaneProjection)
+
+    it "represents the named x86_32 initrd lane but rejects the unmodeled NVMe lane":
+        step("Project the catalog-owned initrd path as a typed field")
+        val x32 = simpleos_machine_target_projection("x86_32")
+        val initrd_lane = x32.qemu_lane_or_smoke("x86_32-initrd-fat32-smf")
+        val initrd = qemu_lane_wiring_from_catalog_v1(x32, initrd_lane)
+        expect(initrd.valid()).to_equal(true)
+        expect(initrd.initrd_path()).to_equal("build/os/fat32-x86_32.img")
+        expect(initrd.debug_exit()).to_equal(true)
+
+        step("Keep richer NVMe wiring outside this bounded version fail closed")
+        val x64 = simpleos_machine_target_projection("x86_64")
+        val nvme_lane = x64.qemu_lane_or_smoke("x86_64-q35-nvme-fat32-smf")
+        expect(qemu_lane_wiring_from_catalog_v1(x64, nvme_lane).valid()).to_equal(false)
