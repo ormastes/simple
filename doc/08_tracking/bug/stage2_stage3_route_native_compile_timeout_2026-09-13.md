@@ -256,3 +256,23 @@ suite; the structural example is the assertion in that case.
 
 The gate's `STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS` was NOT raised and must not
 be: 180 s was reporting a real defect.
+
+## Site 9 fixed; the same loop then exposed site 10 (2026-09-13, BOOT-9)
+
+Run `build/bootstrap-boot9a` (09:06:58 -> 09:30:26, head `3fdf82ea1d2`) built a
+new candidate `ac5a205d9030bea6...` (152198144 B) whose `topological_order`
+carries no `rt_is_some` at all — the loop head is now a direct array-length
+read (`ldr x8,[x21,#8]; cmp x8,#0; b.le exit` at `0x381b358`), so site 9's
+dead exit branch is gone and the fix is proven IN the codegen that matters.
+
+The route still exited `124`, and the classification run says it is the same
+KIND of defect one step further in, not a slow build: VmRSS 40 MB -> 6.07 GB in
+121 s (`scratchpad/boot9/gdb10.rss`), three interrupts again all naming
+`BuildGraph.topological_order -> rt_tuple_new -> register_heap_ptr`. The cause
+is `val (node, expanded) = stack.pop().unwrap()`: `rt_array_pop` returns the
+element raw and `.unwrap()` lowers to `rt_enum_payload`, which nils a non-enum.
+Measured in the exact Stage-2-compiling lane and directly in the candidate —
+see `stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md`. Fixed by reading the
+top by index and truncating.
+
+The ceiling was still not raised.
