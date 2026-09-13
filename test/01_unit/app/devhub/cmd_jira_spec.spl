@@ -1,4 +1,5 @@
 # @cover src/app/devhub/cmd_jira.spl 60%
+# @cover src/app/devhub/cmd_auth.spl
 #
 # `itf jira update/comment/transition` (J2): fake-binary fixture spec.
 # Drives handle_jira() end-to-end against stub `acli`/`curl` scripts on PATH
@@ -13,11 +14,13 @@
 # have coverage via adapter_jira_curl_spec.spl's pure-function tests.
 
 use app.devhub.cmd_jira.{handle_jira}
+use app.devhub.cmd_auth.{handle_auth}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
@@ -27,16 +30,38 @@ val ARGV_LOG = "{FIXTURE_DIR}/argv.log"
 val FIXTURE_HOME = "build/test-itf-jira-fixture/home"
 
 
+fn is_windows() -> bool:
+    (rt_env_get("OS") ?? "").lower().contains("windows")
+
+
 fn shell_ok(cmd: text) -> bool:
     val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
     exit_code == 0
 
 
 fn install_fake_bin(name: text, script_body: text):
-    """Write build/test-itf-jira-fixture/<name> (chmod +x)."""
+    """Write build/test-itf-jira-fixture/<name>: a `.cmd` batch file on
+    Windows (resolved through PATHEXT), a chmod +x sh script elsewhere.
+    `script_body` is the sh body; the Windows body is picked by name."""
+    if is_windows():
+        val _write_cmd = rt_file_write_text("{FIXTURE_DIR}/{name}.cmd", _windows_fake_body(script_body))
+        return
     val path = "{FIXTURE_DIR}/{name}"
     val _write = rt_file_write_text(path, script_body)
     shell_ok("/bin/chmod +x \"{path}\"")
+
+
+fn _windows_fake_body(sh_body: text) -> text:
+    """Batch twin of a FAKE_* sh fake: log `%*` to ARGV_LOG, then emit the
+    same stdout/exit. The curl fake prints `\\r\\n204` with no trailing
+    newline (via `set /p`) so _split_response sees `204` as the last line."""
+    val log = ARGV_LOG.replace("/", "\\")
+    val head = "@echo off\r\n>>\"{log}\" echo %*\r\n"
+    if sh_body == FAKE_CURL_OK:
+        return head + "echo.\r\n<nul set /p \"=204\"\r\nexit /b 0\r\n"
+    if sh_body == FAKE_ACLI_FAIL:
+        return head + "echo unknown command: edit 1>&2\r\nexit /b 1\r\n"
+    head + "exit /b 0\r\n"
 
 
 fn write_fixture_config(jira_url: text, jira_email: text, jira_token: text):
@@ -60,14 +85,23 @@ fn run_jira_with_fixture(args: [text], override_home: bool) -> (i64, text):
     afterward. Returns (exit_code, argv_log_contents)."""
     val original_path = rt_env_get("PATH") ?? ""
     val original_home = rt_env_get("HOME") ?? ""
-    val _set_path = rt_env_set("PATH", "{FIXTURE_DIR}:{original_path}")
+    # Fake dir FIRST so the system curl/acli never answers.
+    val sep = if is_windows(): ";" else: ":"
+    val fake_dir = if is_windows(): FIXTURE_DIR.replace("/", "\\") else: FIXTURE_DIR
+    val _set_path = rt_env_set("PATH", "{fake_dir}{sep}{original_path}")
     if override_home:
         val _set_home = rt_env_set("HOME", FIXTURE_HOME)
-    val code = handle_jira(args)
+    # `login ...` goes to handle_auth (jira has no `login` verb), so auth
+    # cases reuse the same fake-acli PATH/HOME fixture.
+    val code = if args.len() > 0 and args[0] == "login": handle_auth(args) else: handle_jira(args)
     val _restore_path = rt_env_set("PATH", original_path)
     if override_home:
         val _restore_home = rt_env_set("HOME", original_home)
-    val log = rt_file_read_text(ARGV_LOG)
+    # Usage-error examples exit before any fake runs, so the log may not exist.
+    val raw_log = if rt_file_exists(ARGV_LOG): rt_file_read_text(ARGV_LOG) else: ""
+    # Batch `%*` keeps the quoting cmd.exe received: spaced args arrive
+    # wrapped in "..." and embedded quotes doubled. Normalize to argv text.
+    val log = if is_windows(): raw_log.replace("\"\"", "<DQ>").replace("\"", "").replace("<DQ>", "\"") else: raw_log
     (code, log)
 
 
@@ -151,6 +185,16 @@ describe "itf jira update/comment/transition (fake-binary fixture)":
             write_fixture_config("", "", "")
             val (code, _log) = run_jira_with_fixture(["update", "PROJ-1", "--summary", "New title"], true)
             expect(code).to_equal(1)
+
+    context "auth login --jira --acli with a jira token configured":
+
+        it "still runs `acli jira auth login --web`":
+            reset_fixture()
+            install_fake_bin("acli", FAKE_ACLI_OK)
+            write_fixture_config("https://fixture.atlassian.net", "fixture@example.com", "fixture-token")
+            val (code, log) = run_jira_with_fixture(["login", "--jira", "--acli"], true)
+            expect(code).to_equal(0)
+            expect(log.contains("jira auth login --web")).to_equal(true)
 
     context "usage errors":
 

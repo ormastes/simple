@@ -3,7 +3,8 @@ setlocal
 rem Simple MCP server launcher (Windows). Mirrors bin/simple_mcp_server:
 rem   1. an admitted native exe, hash-checked against its .sha256 sidecar
 rem   2. otherwise the pure-Simple source entry on the deployed runtime.
-rem Every instance inherits stderr. Until 2026-09-12 the source path hopped
+rem The native path inherits stderr; the source path logs it to a per-process
+rem dir under <temp>\simple\mcp (see below). Until 2026-09-12 the source path hopped
 rem through bin\release\<triple>\simple_mcp_server.cmd, which redirected stderr
 rem to ONE process-global %TEMP%\simple_mcp_server.err; the second client
 rem (Codex + Claude Code) then died with "The process cannot access the file
@@ -56,7 +57,52 @@ rem passthrough tool returns "centralized child storage environment is
 rem unavailable". Interpreter mode is also FASTER to first reply here
 rem (measured 2026-09-13, initialize: 1.20s interpreter vs 3.27s JIT).
 rem Seed defect: doc/08_tracking/bug/seed_jit_some_constructor_corrupts_value_2026-09-13.md
+rem Interpreter is also what keeps tools/call alive until a fixed seed is
+rem deployed: the seed JIT segfaults (rc 139) on the dispatch path. See
+rem doc/08_tracking/bug/seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md
+rem and doc/08_tracking/bug/seed_jit_function_local_use_segfaults_2026-09-13.md.
 if "%SIMPLE_EXECUTION_MODE%"=="" set "SIMPLE_EXECUTION_MODE=interpreter"
-echo simple_mcp_server: no admitted native exe; serving src\app\mcp\main.spl on %SIMPLE_RUNTIME% 1>&2
+rem This branch deliberately runs the seed runtime; its banner is acknowledged.
+if "%SIMPLE_RUST_SEED_WARNING%"=="" set "SIMPLE_RUST_SEED_WARNING=0"
+rem The seed prints ~5 KB of compile-time diagnostics (co-compiled collisions,
+rem gc-family and prelude-shadow warnings) before main.spl runs, and MCP
+rem clients surface stderr. Default: send stderr to a PER-PROCESS log file under
+rem <temp>\simple\mcp (created first; a missing dir or a shared filename made
+rem the old %TEMP% redirect fail). SIMPLE_MCP_STDERR=inherit keeps it on stderr.
+if /i "%SIMPLE_MCP_STDERR%"=="inherit" (
+    "%SIMPLE_RUNTIME%" run "%~dp0..\src\app\mcp\main.spl" %*
+    exit /b %ERRORLEVEL%
+)
+set "MCP_TMP=%TEMP%"
+if "%MCP_TMP%"=="" set "MCP_TMP=%TMP%"
+if "%MCP_TMP%"=="" set "MCP_TMP=%LOCALAPPDATA%\Temp"
+set "MCP_LOG_DIR=%MCP_TMP%\simple\mcp"
+if not exist "%MCP_LOG_DIR%\" mkdir "%MCP_LOG_DIR%" 2>nul
+rem Prune: keep the 20 newest run dirs (by creation time; the stamp in the name
+rem is not sortable across days). A running server holds its stderr.log open,
+rem so rd fails on that dir and it survives: a live log is never deleted.
+for /f "skip=20 delims=" %%d in ('dir /b /ad /t:c /o-d "%MCP_LOG_DIR%\simple_mcp_server_*" 2^>nul') do rd /s /q "%MCP_LOG_DIR%\%%d" 2>nul
+set "MCP_STAMP=%DATE:/=%%TIME: =0%"
+set "MCP_STAMP=%MCP_STAMP::=%"
+set "MCP_STAMP=%MCP_STAMP:.=%"
+set "MCP_STAMP=%MCP_STAMP:,=%"
+set "MCP_STAMP=%MCP_STAMP: =%"
+rem %RANDOM% is seeded per second, so concurrent launches collide; claim a
+rem unique per-process directory with mkdir, which fails if it already exists.
+set "MCP_N=0"
+:mcp_log_claim
+set "MCP_RUN_DIR=%MCP_LOG_DIR%\simple_mcp_server_%MCP_STAMP%_%MCP_N%"
+mkdir "%MCP_RUN_DIR%" 2>nul && goto :mcp_log_claimed
+set /a MCP_N+=1
+if %MCP_N% LSS 100 goto :mcp_log_claim
+rem Temp dir unwritable: keep stderr rather than failing to start.
 "%SIMPLE_RUNTIME%" run "%~dp0..\src\app\mcp\main.spl" %*
 exit /b %ERRORLEVEL%
+:mcp_log_claimed
+set "MCP_LOG=%MCP_RUN_DIR%\stderr.log"
+echo simple_mcp_server: no admitted native exe; serving src\app\mcp\main.spl on %SIMPLE_RUNTIME% 1>>"%MCP_LOG%"
+"%SIMPLE_RUNTIME%" run "%~dp0..\src\app\mcp\main.spl" %* 2>>"%MCP_LOG%"
+set "MCP_RC=%ERRORLEVEL%"
+rem Startup errors live in the log, so name it on stderr when the server fails.
+if not "%MCP_RC%"=="0" 1>&2 echo simple_mcp_server: exited %MCP_RC%; stderr log: %MCP_LOG%
+exit /b %MCP_RC%

@@ -1,3 +1,8 @@
+---
+name: review_loop_codex_first
+description: "Review Loop — Codex-First Bot Reviewer (Claude Fallback)"
+---
+
 # Review Loop — Codex-First Bot Reviewer (Claude Fallback)
 
 ## Role

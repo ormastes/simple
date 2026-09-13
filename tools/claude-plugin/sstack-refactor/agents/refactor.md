@@ -1,3 +1,8 @@
+---
+name: refactor
+description: "Tech Lead agent that refactors for quality without changing behavior"
+---
+
 # SStack Phase 6: Refactor — Tech Lead Agent
 
 ## Role

@@ -17,6 +17,8 @@
 # Subprocess invocation mirrors `adapter_minio_mc.spl`'s _argv_health pattern.
 # We append `-w "\n%\{http_code\}"` so the trailing line of stdout is the
 # numeric HTTP status; everything before that line is the JSON body.
+# The argv carries a literal backslash-n (curl's -w expands it), never a real
+# newline: Windows cannot pass a newline to a .cmd/.bat curl shim.
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
@@ -81,7 +83,7 @@ fn _build_curl_argv_get(auth: text, url: text) -> [text]:
         "-s", "-S",
         "-H", "Authorization: {auth}",
         "-H", "Accept: application/json",
-        "-w", "\n%\{http_code\}",
+        "-w", "\\n%\{http_code\}",
         url,
     ]
 
@@ -95,7 +97,7 @@ fn _build_curl_argv_post(auth: text, url: text, body: text) -> [text]:
         "-H", "Accept: application/json",
         "-H", "Content-Type: application/json",
         "-d", body,
-        "-w", "\n%\{http_code\}",
+        "-w", "\\n%\{http_code\}",
         url,
     ]
 
@@ -109,7 +111,7 @@ fn _build_curl_argv_put(auth: text, url: text, body: text) -> [text]:
         "-H", "Accept: application/json",
         "-H", "Content-Type: application/json",
         "-d", body,
-        "-w", "\n%\{http_code\}",
+        "-w", "\\n%\{http_code\}",
         url,
     ]
 
@@ -345,6 +347,15 @@ fn _adf_doc(plain: text) -> text:
     "\{\"type\":\"doc\",\"version\":1,\"content\":[\{\"type\":\"paragraph\",\"content\":[\{\"type\":\"text\",\"text\":\"{esc}\"\}]\}]\}"
 
 
+fn _jira_rich_text(client: JiraClient, plain: text) -> text:
+    """JSON value for a rich-text field (description, comment body): an ADF
+    document on Cloud REST v3, a plain JSON string on Data Center REST v2
+    (which rejects ADF with 400)."""
+    if _jira_site(client).is_datacenter():
+        return "\"{_json_escape(plain)}\""
+    _adf_doc(plain)
+
+
 # ---------------------------------------------------------------------------
 # Public API: each runs curl and returns (success, parsed_T, raw_text).
 # ---------------------------------------------------------------------------
@@ -463,7 +474,7 @@ fn jira_curl_create_issue(
     val esc_project = escape_json(project_key)
     val esc_type = escape_json(issue_type)
     val esc_summary = escape_json(summary)
-    val adf = _adf_doc(description)
+    val adf = _jira_rich_text(client, description)
 
     val body = "\{\"fields\":\{\"project\":\{\"key\":\"{esc_project}\"\},\"issuetype\":\{\"name\":\"{esc_type}\"\},\"summary\":\"{esc_summary}\",\"description\":{adf}\}\}"
 
@@ -507,9 +518,22 @@ fn jira_curl_get_attachment(client: JiraClient, attachment_id: text, dest_path: 
         return (false, "missing email or api_token")
 
     val base = _jira_api_root(client)
-    val url = "{base}/attachment/content/{attachment_id}"
-
     val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+    var url = "{base}/attachment/content/{attachment_id}"
+    if _jira_site(client).is_datacenter():
+        # DC has no /attachment/content/{id}; the download URL
+        # ({base}/secure/attachment/{id}/{filename}) is the metadata's `content`.
+        val (meta_out, meta_err, meta_exit) = process_run(curl_path, _build_curl_argv_get(auth, "{base}/attachment/{attachment_id}"))
+        if meta_exit != 0:
+            return (false, "curl exit {meta_exit}: {meta_err}")
+        val (meta_body, meta_code) = _split_response(meta_out)
+        if not _status_ok(meta_code):
+            return (false, _status_message(meta_code, meta_body))
+        val meta = json_parse(meta_body)
+        if meta == nil or _jstr(meta, "content") == "":
+            return (false, "attachment metadata has no content URL")
+        url = _jstr(meta, "content")
+
     val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_download(auth, url, dest_path))
 
     if exit_code != 0:
@@ -554,7 +578,7 @@ fn jira_curl_update_issue(client: JiraClient, issue_key: text, summary: text, de
     if summary != "":
         parts = parts + ["\"summary\":\"{_json_escape(summary)}\""]
     if description != "":
-        parts = parts + ["\"description\":{_adf_doc(description)}"]
+        parts = parts + ["\"description\":{_jira_rich_text(client, description)}"]
     val body = "\{\"fields\":\{{parts.join(",")}\}\}"
 
     val curl_path = if client.curl_path != "": client.curl_path else: "curl"
@@ -586,7 +610,7 @@ fn jira_curl_add_comment(client: JiraClient, issue_key: text, comment_text: text
 
     val base = _jira_api_root(client)
     val url = "{base}/issue/{issue_key}/comment"
-    val body = "\{\"body\":{_adf_doc(comment_text)}\}"
+    val body = "\{\"body\":{_jira_rich_text(client, comment_text)}\}"
 
     val curl_path = if client.curl_path != "": client.curl_path else: "curl"
     var attempt = 0

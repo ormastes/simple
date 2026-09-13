@@ -1425,6 +1425,14 @@ impl Lowerer {
                 | "is_alphabetic" | "is_alphanumeric" | "is_alnum" | "is_whitespace" => Some(TypeId::BOOL),
                 "concat" | "slice" | "substring" | "replace" | "trim" | "trim_start" | "trim_end" | "lower"
                 | "to_lower" | "upper" | "to_upper" => Some(TypeId::STRING),
+                // `sep.join(parts)` (receiver-string form) returns a String.
+                // Without this entry it fell through to the by-name
+                // `.join` suffix search in `lookup_method_return_type_inner`
+                // and was typed as an unrelated user method such as
+                // `Thread.join() -> i64?`, so `"/" + "/".join(xs)` failed
+                // lowering and dropped the whole module to the interpreter.
+                // doc/08_tracking/bug/seed_receiver_text_join_resolves_to_thread_join_optional_2026-09-13.md
+                "join" => Some(TypeId::STRING),
                 // `appended`/`prepended` (= `concat` with swapped operand
                 // order) return a fresh String — same shape as the
                 // `concat`/`slice` entry just above. See the MIR expansion
