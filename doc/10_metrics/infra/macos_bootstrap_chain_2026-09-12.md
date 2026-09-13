@@ -1363,3 +1363,213 @@ interpreter the guard was always correct, and
 does not pin it. What pins it today is the fixture loop above against a real
 staged-native candidate; the durable form would be a check that no `Ret` arm
 under `60.mir_opt` reaches for `.unwrap()`, which is not built here.
+
+## Run 27 — site 13 (cross-module symbol mangling) root-caused and fixed
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+root, worktree `agent-aee4c61a47998a6a9`, carrying the one-emitter fix below.
+
+### The reproducer is five seconds, and it needs the route's env, not bare `native-build`
+
+Run 25's rejected candidate
+(`0341655b1fa369d8f cb0f05ed5632a337988c5f608588600a75d394ca130e342`) reproduces
+site 13 in ~5 s, but ONLY through the positional Stage-3 route's environment.
+A bare `native-build` of the same fixture dies EARLIER and elsewhere —
+`MIR lowering transient scope failed ... bootstrap fn registry promotion failed`
+— because the route sets `SIMPLE_BOOTSTRAP=1` (+ `SIMPLE_STAGE3_STREAMING_SURFACES`,
+`SIMPLE_FRONTEND_CACHE=0`, `SIMPLE_NO_STUB_FALLBACK=1`,
+`SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct`, a `--runtime-path` and
+`--runtime-bundle core-c-bootstrap`), which selects the bootstrap-flat pipeline.
+Copy the env block out of `scripts/check/check-bootstrap-stage2-struct-receiver.shs:134-160`
+rather than inventing one; point `--cache-dir` at a directory you keep, since the
+probe script's own `trap ... EXIT` deletes the objects you need to `nm`.
+
+### Defining vs referencing spelling (measured)
+
+Both objects are produced by the SAME candidate, so this was never a
+seed-vs-pure-Simple disagreement:
+
+| side | `nm` |
+|---|---|
+| provider object `0-…` | `T _module_logical_name_from_path` (bare) |
+| consumer object `1-…` | `U _compiler.common.module_path_naming.module_logical_name_from_path` |
+
+The provider's two siblings are bare as well
+(`__module_path_naming_strip_numbered_dirs`, `__module_path_naming_text_index_of`),
+so it is the provider's rule, not a one-symbol slip.
+
+### The oracle, measured rather than assumed
+
+The Rust seed built from the same tree
+(`rust-authority-a0d82ed5…/target/aarch64-apple-darwin/bootstrap/simple`) compiles
+the identical fixture through the identical route with `rc=0` and defines
+`_compiler__common__module_path_naming__module_logical_name_from_path` — also
+module-qualified (`__` join, per `native_project/imports.rs:880`
+`sanitize_mangled(format!("{}__{}", sibling.prefix, name))`). Two further in-tree
+witnesses agree on the qualified-ness: every cross-module call site emits the
+dotted name (`_MirLoweringExpr/method_calls_literals.spl:3809` `symbol_to_operand`),
+and the flat bootstrap lowering path already emits non-entry defines as
+`{logical_module}.{fn}` (`_MirLowering/bootstrap_globals.spl:523-527`). The
+DEFINITION side is what deviates.
+
+### Fix — one emitter, ordered last
+
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` emitted each
+function as `self.llvm_function_symbol_name(fn_.name)` with the bare MIR name,
+and `_MirToLlvm/class_def.spl:184` `llvm_function_symbol_name` never adds a
+module prefix. `translate_module_with_entry_policy` now records
+`{module.name}.{fn}` for a NON-entry module's bare-named functions before any
+function is emitted — beside the existing `owned_name_has_local` /
+`export_symbol_names` pre-passes — and the selector consults it LAST, after
+`main`, `@export("C")`, `@global`, `--no-mangle` and the runtime-owned rules, so
+none of those contracts move. Because the `define` and every intra-module call
+both resolve through that one selector, the two sides can no longer drift apart.
+Entry modules, methods and statics (already owner-qualified, and excluded by the
+bare-name test) are untouched; Cranelift and the interpreter do not go through
+this emitter.
+
+Ownership note: the fix is in `70.backend`, not `50.mir` — MIR's names and the
+call-site registry were both correct; only the LLVM emitter's choice of emitted
+symbol was.
+
+### Regression coverage — automated, and it discriminates
+
+`test/01_unit/compiler/backend/llvm_cross_module_symbol_mangling_spec.spl`
+(4 cases) runs under the seed interpreter, so unlike run 25's fix this one IS
+pinned: with the selector lookup disabled it is **3 of 4 RED**, with it **4/4
+PASS**. Neighbours: `llvm_emitter_ssa_violation_guard_spec` 6/6,
+`backend_basic_spec` 3/3; `backend_api_spec` (4/5) and
+`backend_declaration_name_collision_spec` (2/3) fail identically on pristine
+`origin/main` — pre-existing.
+
+### Verdict, verbatim
+
+### Site 13 is FIXED end to end — the witness, not the absence of an error
+
+The lane's own receiver log, verbatim and complete
+(`stage3/aarch64-apple-darwin/stage2-receiver.log`):
+
+```
+Build complete: 1 compiled, 0 cached, 0 failed
+bootstrap_stage2_struct_receiver=PASS
+bootstrap_stage2_positional_stage3_route=PASS
+```
+
+The route is the exact step that failed to link in runs 24 and 25. Re-run
+standalone against the new candidate through the same 5-second reproducer, the
+provider object now DEFINES what the consumer references and the program runs:
+
+```
+$ nm -gU .../darwin_link_inputs/0-…
+0000000000000000 T _compiler.common.module_path_naming.module_logical_name_from_path
+
+$ .../rt27/guard
+app.cli.bootstrap_main
+compiler.driver.driver
+app.cli.main
+run_rc=0
+```
+
+Three lines, byte-for-byte the fixture's own `# EXPECT stdout`. Before the fix
+the same command on the same host ended in
+`ld: symbol(s) not found for architecture arm64`.
+
+**Scope of what this proves, stated honestly.** The emitter change was exercised
+on small closures only — the 2-module fixture, hello-world, `p2_add`,
+`stage2_mir_retention`, the struct-receiver probe. It was NOT exercised on the
+886-unit Stage-3 self-compile, which this run never reached. The reasoning that
+Stage 3 is unaffected (its `translate_module` sees `is_entry_module=true`, so the
+qualification map stays empty and the change is inert there) is sound but
+UNMEASURED. "Site 13 fixed end to end" does not mean "Stage 3 proven safe".
+
+### Verdict, verbatim — Stage 2 still NOT admitted, on a NEW blocker
+
+```
+  Stage 2: running bootstrap compiler sanity
+  Stage 2: proving struct receiver/runtime capability
+stage2-sanity-error: frontend-status role=p2_add failure=bounded-bytes
+stage2-sanity-error: sanity-receipt role=bootstrap0 failure=status-verification
+error: could not publish immutable Stage 2 admission receipt
+exit:  4
+FAIL — 1 check(s), stage stage2 failed (exit 4) with NO diagnostic text in any of 8 log(s)
+```
+
+Read the failure, not the word "failed": runs 24/25 died in the CANDIDATE
+(SIGABRT, then a link error); run 27's candidate passed every capability probe
+the gate asked of it — all four frontend probes report `raw_status=0` on both the
+`SIMPLE_BOOTSTRAP=0` and `=1` passes — and what failed is the gate's own
+VERIFICATION of its receipt.
+
+### Site 14, root-caused in the shell, not the compiler — and fixed here
+
+`scripts/check/lib/bootstrap-stage3/sanity.shs:297-298` compared the collector's
+`bytes_captured` against `"$(wc -c <"$log")"` as a **string**. BSD/macOS `wc`
+right-pads its count even from stdin:
+
+```
+$ printf '[%s]\n' "$(wc -c < /etc/hosts)"
+[     213]
+```
+
+so `[ "653" = "     653" ]` is false for EVERY probe on macOS while the numbers
+agree (`bytes_captured=653`, log 653 bytes). GNU `wc` does not pad, which is why
+this never fired on Linux, and this is the first macOS run to REACH that line —
+24 and 25 died in the candidate first. Fixed by normalising arithmetically
+(`$(( $(wc -c <…) ))`); the byte equality is unchanged and still fails closed on
+a truncated or substituted log. Filed as
+`doc/08_tracking/bug/stage2_sanity_receipt_bounded_bytes_authority_path_2026-09-13.md`.
+
+**A dead theory, recorded so it is not re-derived:** the first draft blamed
+`$CANDIDATE_FRONTEND_CAPTURE_PARENT` being a directory fd (`/dev/fd/6`) that
+macOS cannot traverse. `sanity.shs:241` hashes that SAME path earlier in the same
+loop iteration and passed, so the path resolves fine. The advisor caught this
+before it shipped.
+
+Stage 3 and the full CLI were never reached on this run, so there is no Stage-3
+artifact, no smoke-check result, no Stage-4 attempt, and nothing was deployed.
+Candidate preserved (not deployed):
+`.simple/storage/build/bootstrap/stage2/aarch64-apple-darwin/simple`,
+139,352,344 bytes, sha256
+`4ff156b78b97068ce722d0aef2496b645d60e3e7f27acf471e76dd4781b4982d`.
+
+### Also found: `main` cannot be checked out at all
+
+`df7ac9f6cc2` ("feat(simd): x86 AVX-512 backend, …") replaced every
+`.claude/commands/*.md` SYMLINK's target with the linked document's contents
+while leaving the tree mode at `120000`:
+
+```
+$ git ls-tree ae55a746719 .claude/commands/spipe.md
+120000 blob aad5653f…   # 18 bytes: "../skills/spipe.md"
+$ git ls-tree df7ac9f6cc2 .claude/commands/spipe.md
+120000 blob d94ce75c…   # 153,629 bytes: the full markdown document
+```
+
+Git then calls `symlink()` with a 150 KB target and gets `ENAMETOOLONG`, so no
+checkout of `main` succeeds — locally (which is why this lane's PR had to be
+replanted with `read-tree`/`commit-tree` instead of `git rebase`) or on CI, where
+the required `Code Idiom & Structural Ratchet Gates` check dies at checkout for
+EVERY open PR. Repair belongs to that lane: restore the 18-byte targets, or keep
+the content and set mode `100644`.
+
+### Divergence-delta escape record (required by `.claude/rules/vcs.md`)
+
+`check-test-tree-divergence-delta` PASS over a pre-existing red:
+`PASS — 3214 pre-existing offender(s), 0 introduced by this range`. Offender list
+saved by the helper to
+`/var/folders/94/j3lc49d93bx148gqls5kx5d40000gn/T//test_tree_divergence_preexisting.txt`
+(host-local temp; regenerate with the helper). This range's only test file is the
+new mangling spec, which has no mirror twin.
+
+Other guards, foreground, `timeout 900`: conflict-markers PASS (9 files),
+tree-size PASS (range base 137002 files), no-revert PASS (32 files, 0 reverts),
+guard-wiring PASS (1697 guards, 0 NEW unwired). No Rust or C touched, so the
+c-runtime / runtime-api / rt-dual gates do not apply to this range.
+
+### Coordination
+
+`doc/08_tracking/bug/stage2_cross_module_call_mangling_asymmetry_undefined_symbol_2026-09-13.md`
+was filed independently by the BOOT-12 lane in PR #795, which measured the same
+defect on Linux under `ld.lld` — that PR files the record, PR #800 carries the
+fix, and the two have no source overlap. PR #793 touches
+`60.mir_opt/var_reassign_ssa.spl` only.
