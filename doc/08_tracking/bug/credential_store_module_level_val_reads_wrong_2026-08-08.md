@@ -1,6 +1,18 @@
 # credential_kdf_cost returns the wrong value on a path that cannot — three implementations refuted
 
-Status: OPEN (P2)
+- Status: RESOLVED (2026-09-13) — fixed by 343a3f1fb28 (2026-08-25,
+  "fix(sffi): centralize credential entropy"). Root cause matched the doc's
+  own predicted third branch: `rt_env_get` returns NIL (not `""`) for an
+  unset var; `credential_kdf_cost()` now nil-guards the result before
+  `.trim()` (`src/lib/nogc_sync_mut/terminal/credential/store.spl:177`, see
+  its docstring "THE NIL GUARD IS LOAD-BEARING"). The unresolved
+  module-level-`val` theory is explicitly superseded in that same docstring.
+  Spec `test/01_unit/lib/terminal/credential_key_file_format_spec.spl` "F6 KDF
+  cost resolution / resolves the production cost of 10 by default" is GREEN
+  (12 examples, 0 failures) on `bin/release/aarch64-unknown-linux-gnu/simple`
+  (interpreter mode); its comment still read "KNOWN RED -- deliberately left
+  failing" despite passing, which is corrected in the same change as this
+  status update.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 - **Filed:** 2026-08-08
