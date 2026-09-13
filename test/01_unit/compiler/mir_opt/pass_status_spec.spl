@@ -38,26 +38,18 @@ describe "MIR pass operational status":
         expect(pass_status_allows_transform(pass_status(PassKind.CollectionOpt))).to_equal(false)
         expect(pass_expectation(PassKind.CollectionOpt)).to_equal(PassExpectation.NeverTransforms)
 
-    it "runs vectorization as an active transform gated by the alias oracle":
+    it "keeps vectorization analysis-only until the rewrite is safe on real MIR":
         step("Classify the vector pass")
-        step("Status changed 2026-09-13: AnalysisOnly -> Active, admitted by auto_vectorize_alias.spl")
-        expect(pass_status(PassKind.AutoVectorize)).to_equal(PassStatus.Active)
-        expect(pass_status_allows_transform(pass_status(PassKind.AutoVectorize))).to_equal(true)
+        step("It was Active for a few hours on 2026-09-13 and was reverted: the")
+        step("guard span is computed from a hard-coded f32 width, an unbounded")
+        step("guard falls through to the UNGUARDED rewrite, and header+N block")
+        step("ids collide on any CFG with a continuation block.")
+        expect(pass_status(PassKind.AutoVectorize)).to_equal(PassStatus.AnalysisOnly)
+        expect(pass_status_allows_transform(pass_status(PassKind.AutoVectorize))).to_equal(false)
 
-    it "binds the active vectorizer to a real positive and negative witness":
-        step("An active transform must name an input it DOES rewrite and one it does NOT")
-        step("otherwise `active` can quietly mean `runs and never fires`")
-        val w = pass_witness_contract(PassKind.AutoVectorize)
-        expect(w.?).to_be(true)
-        expect(w.unwrap().positive_id).to_equal("auto_vectorize/exact-alias-elementwise-add")
-        expect(w.unwrap().negative_id).to_equal("auto_vectorize/undecidable-distinct-bases")
-
-    it "invalidates every shared fact now that vectorization can rewrite MIR":
-        step("an Active pass may replace MIR, so no immutable fact survives it")
-        val facts = mir_pass_fact_preservation(PassKind.AutoVectorize)
-        expect(facts.cfg).to_equal(false)
-        expect(facts.dominators).to_equal(false)
-        expect(facts.def_use).to_equal(false)
+    it "advertises no executable witness while it is inactive":
+        step("the registry rejects an inactive pass that claims witnesses")
+        expect(pass_witness_contract(PassKind.AutoVectorize)).to_be_nil()
 
     it "keeps active identity and analysis routes out of transformation dispatch":
         step("Reject an active identity route")
