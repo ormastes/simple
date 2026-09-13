@@ -3,38 +3,16 @@
 #
 # Chrome side is produced by scripts/check/check-chrome-layout-geometry-diff.shs
 # (a <script> appended to a copy of the page emits GEOM| lines into a <pre>,
-# harvested with --headless=new --dump-dom). Simple side is the Draw IR emitted
-# by web_render_backend("pure_simple", w, h).render_html_to_draw_ir(html).
+# harvested with --headless=new --dump-dom). Simple side is the LAID-OUT
+# ELEMENT list from simple_web_layout_element_geometry_lines(html, w, h) -- one
+# row per element, paintless boxes included, so both sides enumerate the same
+# set (round 9; before that the Simple side read Draw IR COMMANDS and dropped
+# every box that painted nothing).
 #
 # Verdict is the LAST line of stdout. 0 elements compared is ERROR, never PASS.
-use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend}
-use common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_element_geometry_lines}
 use app.wm_compare_host.cli_util.{get_cli_args}
 use app.wm_compare_host.file_ops.{file_read_text, file_write}
-
-# Element tags the Simple layout tree does not materialise; the Chrome-side
-# walker skips exactly the same set so the ordinals line up.
-# Boxes that participate in the shared nth-path key scheme. The Chrome side is
-# a `document.querySelectorAll('*')` walk, so it sees ELEMENTS only — a box the
-# Simple renderer emits for something that is not an element must therefore be
-# excluded here, or the two sides number their children differently.
-#
-# `::marker` is exactly that case and it is not cosmetic: the pure-Simple
-# renderer emits a marker box as the FIRST child of every `<li>`, so Chrome's
-# `li > *:nth(0)` (the real first element) was being compared against Simple's
-# marker box, and every later sibling was off by one too. On the catalog's
-# feature-inventory pages that is ~100 `<li>` elements, each contributing 2-3
-# false mismatches, which is why the differ reported a `<code>` element as
-# 119 px too wide and 85 px too tall when the actual element differs by 5 px.
-# The marker boxes are still reported under "Simple-only boxes", so removing
-# them from the key scheme hides nothing.
-fn _layout_tag(tag: text) -> bool:
-    (
-        tag != "#text" and tag != "style" and tag != "script" and
-        tag != "title" and tag != "head" and tag != "meta" and
-        tag != "link" and tag != "base" and
-        not tag.starts_with("::")
-    )
 
 struct GeomBox:
     key: text
@@ -44,14 +22,6 @@ struct GeomBox:
     w: i32
     h: i32
     features: text
-
-fn _style_value(command: DrawIrCommand, key: text) -> text:
-    var i = 0
-    while i < command.computed_style.len():
-        if command.computed_style[i].key == key:
-            return command.computed_style[i].value
-        i = i + 1
-    ""
 
 fn _to_i32(raw: text) -> i32:
     if raw == "":
@@ -108,125 +78,38 @@ pub fn parse_chrome_geom(dump: text) -> [GeomBox]:
 
 # --- Simple side -----------------------------------------------------------
 
-fn _seen(ids: [text], id: text) -> bool:
-    var i = 0
-    while i < ids.len():
-        if ids[i] == id:
-            return true
-        i = i + 1
-    false
-
-fn _index_of_id(ids: [text], id: text) -> i32:
-    var i = 0
-    while i < ids.len():
-        if ids[i] == id:
-            return i
-        i = i + 1
-    -1
-
-fn _path_key(ids: [text], parents: [text], ordinals: [i32], body_id: text, start: i32) -> text:
-    if body_id == "":
-        return ""
-    if ids[start] == body_id:
-        return "path:"
-    var parts: [i32] = []
-    var current = start
-    var guard = 0
-    while current >= 0 and ids[current] != body_id and guard < 256:
-        parts.push(ordinals[current])
-        current = _index_of_id(ids, parents[current])
-        guard = guard + 1
-    if current < 0:
-        return ""
-    if ids[current] != body_id:
-        return ""
-    var path = "path:"
-    var p = parts.len() - 1
-    while p >= 0:
-        if p < parts.len() - 1:
-            path = path + "/"
-        path = path + parts[p].to_string()
-        p = p - 1
-    path
-
-val FEATURE_KEYS = [
-    "display", "position", "float", "flex-direction", "flex-wrap",
-    "justify-content", "align-items", "margin-left", "margin-top",
-    "padding-left", "padding-top", "border-left-width", "border-top-width",
-    "line-height", "font-size", "text-align", "vertical-align",
-    "white-space", "overflow", "box-sizing", "grid-template-columns"
-]
-
-fn _feature_text(c: DrawIrCommand) -> text:
-    var out = ""
-    var i = 0
-    while i < FEATURE_KEYS.len():
-        if out != "":
-            out = out + ";"
-        out = out + FEATURE_KEYS[i] + "=" + _style_value(c, FEATURE_KEYS[i])
-        i = i + 1
-    out
-
 # Rebuilds the nth-path key from the Draw IR parent chain. Draw IR carries
 # component_id/parent_id plus a `tag` computed-style prop, which is enough to
 # recover the element tree without touching the renderer internals.
 pub fn simple_geom_boxes(html: text, width: i32, height: i32) -> [GeomBox]:
+    """Enumerates the LAID-OUT ELEMENTS, not the Draw IR commands.
+
+    Until round 9 this walked `render_html_to_draw_ir(...)`'s command list, so a
+    box that paints nothing produced no command and entered no list, while
+    Chrome's side keeps every element (`document.body.querySelectorAll('*')`).
+    Measured on the eight catalog pages that asymmetry was worth exactly ONE
+    row; the 236 elements the differ could not compare were the `<li>` desync,
+    and that turned out to be a TREE-CONSTRUCTION defect fixed in
+    html_tree_builder.spl — see
+    doc/08_tracking/bug/web_geometry_differ_li_reparented_desyncs_nth_paths_2026-09-13.md.
+
+    The renderer now hands over one row per layout element, keyed by its own
+    canonical nth-path function, so the Simple side cannot silently compare a
+    subset of what Chrome reports: `missing_in_simple` is 0 on all 8 pages."""
     var out: [GeomBox] = []
     if html == "":
         return out
-    val composition = web_render_backend("pure_simple", width, height).render_html_to_draw_ir(html)
-    if composition.batches.len() == 0:
-        return out
-    var ids: [text] = []
-    var parents: [text] = []
-    var tags: [text] = []
-    var xs: [i32] = []
-    var ys: [i32] = []
-    var ws: [i32] = []
-    var hs: [i32] = []
-    var feats: [text] = []
-    var b = 0
-    while b < composition.batches.len():
-        val commands = composition.batches[b].commands
-        var i = 0
-        while i < commands.len():
-            val c = commands[i]
-            val tag = _style_value(c, "tag")
-            if tag != "" and _layout_tag(tag) and not _seen(ids, c.component_id):
-                ids.push(c.component_id)
-                parents.push(c.parent_id)
-                tags.push(tag)
-                xs.push(c.x)
-                ys.push(c.y)
-                ws.push(c.width)
-                hs.push(c.height)
-                feats.push(_feature_text(c))
-            i = i + 1
-        b = b + 1
-    var ordinals: [i32] = []
-    var n = 0
-    while n < ids.len():
-        var ordinal = 0
-        var m = 0
-        while m < n:
-            if parents[m] == parents[n]:
-                ordinal = ordinal + 1
-            m = m + 1
-        ordinals.push(ordinal)
-        n = n + 1
-    var body_id = ""
-    var t = 0
-    while t < tags.len():
-        if tags[t] == "body" and body_id == "":
-            body_id = ids[t]
-        t = t + 1
-    var k = 0
-    while k < ids.len():
-        val key = _path_key(ids, parents, ordinals, body_id, k)
-        if key != "":
-            out.push(GeomBox(key: key, tag: tags[k], x: xs[k], y: ys[k],
-                             w: ws[k], h: hs[k], features: feats[k]))
-        k = k + 1
+    val lines = simple_web_layout_element_geometry_lines(html, width, height)
+    var i = 0
+    while i < lines.len():
+        val parts = lines[i].split("|")
+        if parts.len() >= 7 and parts[0] == "GEOM":
+            out.push(GeomBox(
+                key: parts[1], tag: parts[2],
+                x: _to_i32(parts[3]), y: _to_i32(parts[4]),
+                w: _to_i32(parts[5]), h: _to_i32(parts[6]),
+                features: ""))
+        i = i + 1
     out
 
 # --- Diff ------------------------------------------------------------------

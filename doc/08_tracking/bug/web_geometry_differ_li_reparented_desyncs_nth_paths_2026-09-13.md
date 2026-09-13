@@ -93,3 +93,35 @@ key scheme at once, so it wants its own lane with a before/after on all eight
 pages. Until then the `html` and `css-layout` reports stay desynced after the
 first paintless intermediate ancestor, and their absolute mismatch counts are
 inflated by it.
+
+## RESOLVED — round 9 (2026-09-13): it was TREE CONSTRUCTION, not differ enumeration
+
+Round 8's root cause ("the Simple side enumerates Draw IR COMMANDS, so a
+paintless `<ul>` emits no row and every later ordinal shifts") is **retracted by
+measurement**. Enumerating laid-out ELEMENTS instead of commands was implemented
+first and, on the `html` catalog page, moved `compared` from 253 to **254** — one
+row. The other 177 were still missing.
+
+Dumping both key sets showed the shape: Chrome had `path:0/0/4/2/45/...`, Simple
+had `path:0/0/4/11/...` — Simple's tree is one level FLATTER, with `<li>`
+elements as SIBLINGS of the `<ul>` instead of children. The divergence starts at
+the `html:li` feature example,
+`<li>...<div class="feature-example"><ul><li>List item</li></ul></div>...</li>`.
+
+`HtmlTreeBuilder`'s implicit-close used an unscoped `stack.find_tag("li")`,
+which matched the OUTER `<li>` straight through the inner `<ul>`;
+`close_through("li")` then popped the inner `ul`, the `div` AND the outer `li`,
+so the inner `</ul>` closed the OUTER list and every remaining `<li>` on the
+page escaped it. HTML5 "in body" for an `li`/`dd`/`dt` start tag walks the
+open-element stack DOWN and **aborts at a special element that is not
+`address`, `div` or `p`** — an inner `ul` is exactly such a barrier.
+
+Fix: `find_tag_in_list_item_scope` + `_html_special_elem` / `_li_scope_barrier`,
+used for `li`, `dt` and `dd`. Spec
+`test/01_unit/browser_engine/li_nested_list_scope_spec.spl` (5 ACs; 3 go RED
+under sabotage to the unscoped finder).
+
+Measured, 8 catalog pages, `GEOM_DIFF_HEIGHT=20000`, one tree / one binary /
+one Chrome per side: `missing_in_simple` **236 -> 0**, i.e. every page now
+compares 100% of the elements Chrome reports. Detail:
+`doc/10_metrics/ui/web_chrome_parity_round9_2026-09-13.md`.

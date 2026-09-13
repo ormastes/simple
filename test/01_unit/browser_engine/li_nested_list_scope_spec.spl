@@ -1,0 +1,87 @@
+# HTML5 "in body" <li> start-tag scope rule.
+#
+# The implicit-close search for an open <li> walks DOWN the open-element stack
+# and ABORTS at a special element that is not `address`, `div` or `p`. An inner
+# <ul>/<ol> is exactly such a barrier, so a list nested inside a list item does
+# not close its host.
+#
+# Before round 9 the builder used an unscoped `find_tag("li")`, matched the
+# outer <li> straight through the inner <ul>, and `close_through` then popped
+# the inner ul, the wrapping div AND the outer li. The inner `</ul>` therefore
+# closed the OUTER list, and every remaining <li> on the page became a SIBLING
+# of the list instead of a child. Measured on examples/06_io/ui/web_catalog/
+# html.html: 177 of 431 element nth-paths disagreed with Chrome's; afterwards
+# 0 did. See doc/08_tracking/bug/
+# web_geometry_differ_li_reparented_desyncs_nth_paths_2026-09-13.md.
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_get_children
+}
+
+fn _find_nested(node: BeDomNode, tag: text) -> BeDomNode:
+    val children = be_dom_get_children(node)
+    var i = 0
+    while i < children.len():
+        val child = children[i]
+        if be_dom_get_tag(child) == tag:
+            return child
+        val nested = _find_nested(child, tag)
+        if be_dom_get_tag(nested) == tag:
+            return nested
+        i = i + 1
+    node
+
+fn _child_tags(node: BeDomNode) -> text:
+    val children = be_dom_get_children(node)
+    var out = ""
+    var i = 0
+    while i < children.len():
+        if out != "":
+            out = out + ","
+        out = out + be_dom_get_tag(children[i])
+        i = i + 1
+    out
+
+describe "HtmlTreeBuilder <li> implicit-close scope":
+    it "keeps every <li> of an outer list inside that list when one item nests a list":
+        val doc = html_tree_builder_build(
+            "<ul><li>a<div><ul><li>inner</li></ul></div></li>" +
+            "<li>b</li><li>c</li></ul>"
+        )
+        val outer = _find_nested(doc, "ul")
+        expect(_child_tags(outer)).to_equal("li,li,li")
+
+    it "does not reparent the nested list out of its host list item":
+        val doc = html_tree_builder_build(
+            "<ul><li>a<div><ul><li>inner</li></ul></div></li><li>b</li></ul>"
+        )
+        val outer = _find_nested(doc, "ul")
+        val host = be_dom_get_children(outer)[0]
+        expect(be_dom_get_tag(host)).to_equal("li")
+        expect(_child_tags(host)).to_equal("#text,div")
+        val inner_ul = _find_nested(_find_nested(host, "div"), "ul")
+        expect(_child_tags(_find_nested(host, "div"))).to_equal("ul")
+        # Sabotaged (unscoped find_tag), close_through pops the inner ul before
+        # its item is inserted, so this comes back EMPTY.
+        expect(_child_tags(inner_ul)).to_equal("li")
+
+    it "still closes a sibling <li> through a bare <div>, which is NOT a barrier":
+        # The exception half of the rule: address/div/p are walked THROUGH. A
+        # barrier list that simply held every special element would break this.
+        val doc = html_tree_builder_build("<ul><li>a<div>x<li>b</ul>")
+        val outer = _find_nested(doc, "ul")
+        expect(_child_tags(outer)).to_equal("li,li")
+
+    it "still closes a plain sibling <li> with no wrapper at all":
+        val doc = html_tree_builder_build("<ul><li>a<li>b<li>c</ul>")
+        expect(_child_tags(_find_nested(doc, "ul"))).to_equal("li,li,li")
+
+    it "applies the same scope rule to a nested definition list":
+        # Generalization probe: dt/dd take the same scoped finder, and had no
+        # coverage of their own.
+        val doc = html_tree_builder_build(
+            "<dl><dt>a<div><dl><dt>inner</dt></dl></div></dt><dd>b</dd></dl>"
+        )
+        expect(_child_tags(_find_nested(doc, "dl"))).to_equal("dt,dd")
