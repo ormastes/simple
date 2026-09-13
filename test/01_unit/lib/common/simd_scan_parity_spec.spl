@@ -7,6 +7,7 @@
 
 use std.spec.step
 use std.spec.{describe, it, assert_equal}
+use std.common.string_core.{text_to_bytes}
 use std.common.simd_scan.{
     simd_find_byte, scalar_find_byte, _fixedvec_find_byte,
     simd_bytes_equal, scalar_bytes_equal, _fixedvec_bytes_equal
@@ -96,3 +97,27 @@ describe "FixedVec kernels are NOT lane-consistent — do not dispatch to them":
         step("asserting either value here would encode a lane artifact, so only the scalar oracle is pinned")
         val b = buf_with_needle(64, 5)
         assert_equal(scalar_find_byte(b, 0, NEEDLE), 5)
+
+describe "native span kernels accept both byte representations":
+    it "scans a text-derived ByteArray identically to a pushed [u8]":
+        step("HTTP buffers arrive as ByteArray (unboxed); DB spans as pushed [u8]")
+        step("the kernel takes ByteArray directly, skipping the O(n) unpack — so both must agree")
+        val marker: u8 = 90u8
+        var line = ""
+        var i: i64 = 0
+        while i < 64:
+            if i == 20:
+                line = line + "Z"
+            else:
+                line = line + "A"
+            i = i + 1
+        val from_text = text_to_bytes(line)
+        assert_equal(from_text.len(), 64)
+        assert_equal(simd_find_byte(from_text, 0, marker), 20)
+        assert_equal(simd_find_byte(from_text, 21, marker), -1)
+
+    it "compares a ByteArray span against itself and against a shifted span":
+        step("equality must hold for the unboxed representation too")
+        val a = text_to_bytes("GET /index.html HTTP/1.1 Host: example.com")
+        assert_equal(simd_bytes_equal(a, 0, a, 0, a.len()), true)
+        assert_equal(simd_bytes_equal(a, 0, a, 1, a.len() - 1), false)

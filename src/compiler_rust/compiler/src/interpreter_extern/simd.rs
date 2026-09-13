@@ -2700,3 +2700,120 @@ pub fn rt_db_bitmap_andnot_u32(args: &[Value]) -> Result<Value, CompileError> {
     db_bitmap_andnot_dispatch(&mut out, &lhs, &rhs, rhs_words);
     Ok(pack_u32_array(out))
 }
+
+// ---------------------------------------------------------------------------
+// Byte-span scan kernels (HTTP request parsing, DB span compare).
+//
+// `simd_find_byte` / `simd_bytes_equal` in src/lib/common/simd_scan.spl back
+// the HTTP request-line and header scan (http_core.spl:_crlf_from) and the DB
+// span compare (db/accel.spl:byte_span_equals). Their FixedVec implementation
+// is both wrong and ~25x slower than scalar (see
+// doc/08_tracking/bug/fixedvec_splat_boxing_mismatch_breaks_simd_scan_2026-09-13.md),
+// so the public entry points currently run the scalar oracle.
+//
+// These kernels are the native alternative: the whole scan happens in one call
+// instead of one interpreted step per byte. Same tiering discipline as the
+// other kernels here — one source loop, three `#[target_feature]` emissions,
+// so the tier changes speed and never results.
+//
+// NOTE the cost model: the interpreter stores arrays as Vec<Value>, so the
+// unpack is O(n) boxed reads before the scan. Whether that pays for itself is
+// an empirical question per call site, not an assumption — measure before
+// routing a hot path through these.
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn find_byte_scalar(hay: &[u8], needle: u8) -> i64 {
+    match hay.iter().position(|&b| b == needle) {
+        Some(i) => i as i64,
+        None => -1,
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+unsafe fn find_byte_avx512(hay: &[u8], needle: u8) -> i64 { find_byte_scalar(hay, needle) }
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_byte_avx2(hay: &[u8], needle: u8) -> i64 { find_byte_scalar(hay, needle) }
+
+fn find_byte_dispatch(hay: &[u8], needle: u8) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512f") {
+            // SAFETY: guarded by the runtime feature probe above.
+            return unsafe { find_byte_avx512(hay, needle) };
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the runtime feature probe above.
+            return unsafe { find_byte_avx2(hay, needle) };
+        }
+    }
+    find_byte_scalar(hay, needle)
+}
+
+fn unpack_u8_array(name: &str, value: &Value) -> Result<Vec<u8>, CompileError> {
+    let items = match value {
+        // ByteArray/FrozenByteArray are already unboxed bytes — the common
+        // representation for real HTTP buffers and file reads. Taking them
+        // directly skips the O(n) boxed-read unpack entirely, so these kernels
+        // are at their fastest on exactly the buffers that matter.
+        Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => return Ok(bytes.to_vec()),
+        Value::Array(items) => items,
+        Value::FrozenArray(items) => items,
+        other => {
+            return Err(CompileError::runtime(format!(
+                "{name}: expected [u8] array, got {:?}",
+                other
+            )))
+        }
+    };
+    items
+        .iter()
+        .map(|item| require_u64_value(name, item).map(|v| v as u8))
+        .collect()
+}
+
+/// First index of `needle` at or after `start`, or -1. Returns -1 for an
+/// out-of-range start rather than erroring, matching the Simple oracle's
+/// span-validation contract.
+pub fn rt_simd_find_byte_span(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_simd_find_byte_span expects 3 arguments (bytes, start, needle)".to_string(),
+        ));
+    }
+    let bytes = unpack_u8_array("rt_simd_find_byte_span(bytes)", &args[0])?;
+    let start_raw = require_u64_value("rt_simd_find_byte_span(start)", &args[1])? as i64;
+    let needle = require_u64_value("rt_simd_find_byte_span(needle)", &args[2])? as u8;
+    if start_raw < 0 || start_raw as usize >= bytes.len() {
+        return Ok(Value::Int(-1));
+    }
+    let start = start_raw as usize;
+    let found = find_byte_dispatch(&bytes[start..], needle);
+    Ok(Value::Int(if found < 0 { -1 } else { start as i64 + found }))
+}
+
+/// Span equality. False for any out-of-range span, matching the oracle.
+pub fn rt_simd_bytes_equal_span(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_simd_bytes_equal_span expects 5 arguments (lhs, lhs_start, rhs, rhs_start, len)"
+                .to_string(),
+        ));
+    }
+    let lhs = unpack_u8_array("rt_simd_bytes_equal_span(lhs)", &args[0])?;
+    let lhs_start = require_u64_value("rt_simd_bytes_equal_span(lhs_start)", &args[1])? as i64;
+    let rhs = unpack_u8_array("rt_simd_bytes_equal_span(rhs)", &args[2])?;
+    let rhs_start = require_u64_value("rt_simd_bytes_equal_span(rhs_start)", &args[3])? as i64;
+    let len = require_u64_value("rt_simd_bytes_equal_span(len)", &args[4])? as i64;
+    if lhs_start < 0 || rhs_start < 0 || len < 0 {
+        return Ok(Value::Bool(false));
+    }
+    let (ls, rs, n) = (lhs_start as usize, rhs_start as usize, len as usize);
+    if ls + n > lhs.len() || rs + n > rhs.len() {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(lhs[ls..ls + n] == rhs[rs..rs + n]))
+}
