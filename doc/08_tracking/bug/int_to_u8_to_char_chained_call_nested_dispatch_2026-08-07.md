@@ -1,6 +1,5 @@
 # `(i64).to_u8().to_char()` chained call fails in nested-call dispatch context
 Status: RESOLVED (2026-09-13) -- call-site fix confirmed present + regression-locked; underlying seed nested-call dispatcher gap stays OPEN-architectural
-Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-07, U4.2 coverage-closure unit (WM/GUI/web system-test
 coverage plan, `doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md`)
