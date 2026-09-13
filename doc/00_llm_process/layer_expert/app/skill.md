@@ -21,6 +21,11 @@ Maintain process knowledge for the `app` layer: owned source, architecture links
 - [Specs](../../06_spec/)
 - [debug_profile feature wiki](../../feature_expert/debug_profile/skill.md) — `src/app/cli_debug/` evidence bundle writer + reader (`simple debug write` / `inspect`); CLI acceptance is hand-verified only, see `todo_db.sdn` row 0
 
+## Landmines
+
+- **`e274cd33719` ("merge all share-history worktree branches into main") is a stale-snapshot clobber that deleted live, still-imported code across many `src/app` lanes** (2026-09-06). Known repaired: `src/app/llm_dashboard/data/types.spl` (104-line stub -> 383 lines, 30 exports incl. `LLMStatus`, `631209209f1`) and the llm_caret spec preambles (`2796fe9a93c`); ~27 more llm_dashboard files are still regressed. For any "symbol not found" that obviously ought to exist, run `git show e274cd33719^:<file>` FIRST and restore rather than re-implement.
+- A smoke test that shells to `bin/simple run` is a false green on this repo: `bin/simple` is the bootstrap seed with no `run`, and `| cat` swallows the exit status. Use `SIMPLE_BINARY` with the bootstrap seed as default, capture stderr, read `$?` directly — model: `test/03_system/tools/llm_dashboard_tui_smoke.spl`.
+
 ## Update Rule
 
 When project work changes this layer's public contract, source ownership, tests, architecture, or verification requirements, update this skill with current links and handoff notes.

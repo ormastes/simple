@@ -34,3 +34,73 @@ describe "SPipe deterministic knowledge routing process":
             ["src/os/kernel/main.spl"], features, routes)
         expect(selected.reason).to_equal("mdsoc-only-route-required:src/os/kernel/main.spl")
         expect(selected.knowledge_paths.len()).to_equal(0)
+
+    it "should route 2D and web rendering work to the GPU evidence knowledge":
+        step("Read the rendering feature routes")
+        val registry = file_read("doc/00_llm_process/knowledge_registry.sdn")
+        for feature_id in [
+            "simple_2d_web_renderer_gpu_optimization",
+            "web_renderer_vulkan_4k_showcase_hardening",
+            "chromium_web_renderer_primitive_differential"
+        ]:
+            expect(registry).to_contain("feature_id: " + feature_id)
+        expect(registry).to_contain(
+            "prefix: src/lib/gc_async_mut/gpu/engine2d")
+        expect(registry).to_contain(
+            "prefix: src/lib/gc_async_mut/gpu/browser_engine")
+        expect(registry).to_contain(
+            "expert_path: doc/00_llm_process/feature_expert/gpu_offload_check/skill.md")
+
+        step("Exercise exact feature and longest source-prefix selection")
+        val rendering_features = [
+            KnowledgeFeatureRoute(feature_id: "simple_2d_web_renderer_gpu_optimization",
+                group_id: "rendering_ui", group_path: "rendering-group",
+                expert_path: "gpu-offload-expert"),
+            KnowledgeFeatureRoute(feature_id: "web_renderer_vulkan_4k_showcase_hardening",
+                group_id: "rendering_ui", group_path: "rendering-group",
+                expert_path: "gpu-offload-expert"),
+            KnowledgeFeatureRoute(feature_id: "chromium_web_renderer_primitive_differential",
+                group_id: "rendering_ui", group_path: "rendering-group",
+                expert_path: "gpu-offload-expert")]
+        val rendering_layers = [
+            KnowledgeLayerRoute(prefix: "src/lib", group_id: "runtime_memory_io",
+                group_path: "lib-layer", expert_path: "",
+                architecture_profile: "mdsoc_plus"),
+            KnowledgeLayerRoute(prefix: "src/lib/gc_async_mut/gpu/engine2d",
+                group_id: "rendering_ui", group_path: "rendering-group",
+                expert_path: "gpu-offload-expert", architecture_profile: "mdsoc_plus"),
+            KnowledgeLayerRoute(prefix: "src/lib/gc_async_mut/gpu/browser_engine",
+                group_id: "rendering_ui", group_path: "rendering-group",
+                expert_path: "gpu-offload-expert", architecture_profile: "mdsoc_plus")]
+        val engine2d = select_implementation_knowledge("1",
+            "simple_2d_web_renderer_gpu_optimization",
+            ["src/lib/gc_async_mut/gpu/engine2d/surface.spl"],
+            rendering_features, rendering_layers)
+        val browser = select_implementation_knowledge("1",
+            "chromium_web_renderer_primitive_differential",
+            ["src/lib/gc_async_mut/gpu/browser_engine/session.spl"],
+            rendering_features, rendering_layers)
+        expect(engine2d.reason).to_equal("ok")
+        expect(engine2d.path_selections[0].matched_prefix).to_equal(
+            "src/lib/gc_async_mut/gpu/engine2d")
+        expect(engine2d.knowledge_paths).to_contain("gpu-offload-expert")
+        expect(browser.path_selections[0].matched_prefix).to_equal(
+            "src/lib/gc_async_mut/gpu/browser_engine")
+
+        step("Keep sibling names outside the renderer source-prefix boundary")
+        val sibling = select_implementation_knowledge("1",
+            "web_renderer_vulkan_4k_showcase_hardening",
+            ["src/lib/gc_async_mut/gpu/engine2d_extra/main.spl"],
+            rendering_features, rendering_layers)
+        expect(sibling.reason).to_equal("ok")
+        expect(sibling.path_selections[0].matched_prefix).to_equal("src/lib")
+
+        step("Verify the selected knowledge carries the residency and parity gates")
+        val group = file_read("doc/00_llm_process/feature_group/rendering_ui/skill.md")
+        val expert = file_read(
+            "doc/00_llm_process/feature_expert/gpu_offload_check/skill.md")
+        expect(group).to_contain("persistently mapped staging ring")
+        expect(group).to_contain("queue-family/queue identity")
+        expect(group).to_contain("non-admitted")
+        expect(expert).to_contain("nonblocking fence/timeline poll")
+        expect(expert).to_contain("Missing canonical Chrome library or runner")

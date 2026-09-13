@@ -1,7 +1,7 @@
 use std.spec
 use common.spec.differential_trace.{NormalizedTrace}
 use std.nogc_sync_mut.test.differential_conformance.{GpuEnvironmentProfile}
-use std.nogc_sync_mut.gpu.chromium_reference_oracle_sffi.{ChromiumOraclePrimitiveFixture}
+use std.nogc_sync_mut.gpu.chromium_reference_oracle_sffi.{ChromiumOraclePrimitiveFixture, chromium_oracle_fixture_json}
 use test.helpers.web_chromium_reference_oracle.{chromium_oracle_normalize_trace, chromium_oracle_scalar_fields_valid, normalize_simple_primitive_trace, assert_chromium_primitive_trace}
 
 fn profile() -> GpuEnvironmentProfile:
@@ -16,7 +16,11 @@ fn profile() -> GpuEnvironmentProfile:
 
 fn fixture() -> ChromiumOraclePrimitiveFixture:
     ChromiumOraclePrimitiveFixture(
-        fixture_id: "primitive-rect", viewport_width: 16, viewport_height: 8,
+        fixture_id: "primitive-rect", electron_version: "42.5.0",
+        chrome_version: "148.0.7778.271",
+        broker_sha256: "1111111111111111111111111111111111111111111111111111111111111111",
+        electron_lock_sha256: "2222222222222222222222222222222222222222222222222222222222222222",
+        viewport_width: 16, viewport_height: 8,
         device_scale_milli: 1000, font_identity: "fixture-font", font_digest: "font-digest",
         image_digest: "", image_width: 0, image_height: 0, html_css: "<div></div>",
         event_script: "[]", requested_primitives: ["background", "border", "keyboard", "pointer", "rect", "resize", "scroll", "text"],
@@ -39,6 +43,24 @@ describe "Chromium primitive normalized trace converter":
         expect(chromium_oracle_scalar_fields_valid("key=handle%3D42")).to_equal(false)
         val fallback = trace_json().replace("\"fallback_used\":false", "\"fallback_used\":true")
         expect(chromium_oracle_normalize_trace(fixture(), fallback, profile()) == nil).to_equal(true)
+
+    it "rejects an unpinned browser or zero manifest digest":
+        var wrong_version = fixture()
+        wrong_version.chrome_version = "latest"
+        expect(chromium_oracle_normalize_trace(wrong_version, trace_json(), profile()) == nil).to_equal(true)
+        var zero_digest = fixture()
+        zero_digest.broker_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+        expect(chromium_oracle_normalize_trace(zero_digest, trace_json(), profile()) == nil).to_equal(true)
+
+    it "serializes every pin and escapes packaged fixture content":
+        var pinned = fixture()
+        pinned.html_css = "<div data-x=\"a&b\"></div>"
+        val encoded = chromium_oracle_fixture_json(
+            pinned, "run-1", "chrome-web-oracle", "host-web")
+        expect(encoded != nil).to_equal(true)
+        expect(encoded.?.contains("\"electron_version\":\"42.5.0\"")).to_equal(true)
+        expect(encoded.?.contains("\"chrome_version\":\"148.0.7778.271\"")).to_equal(true)
+        expect(encoded.?.contains("\\\"a&b\\\"")).to_equal(true)
 
     it "rejects CPU pixel mutations even when semantic trace identity matches":
         val normalized = chromium_oracle_normalize_trace(fixture(), trace_json(), profile()).?

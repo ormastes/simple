@@ -124,3 +124,22 @@ to a bare string from Simple, and a `#` comment carrying a colon became a
 real dict key. Both fixed in `src/lib/common/sdn/parser.spl`, pinned by
 `test/01_unit/common/sdn_named_table_spec.spl`. Reader:
 `src/lib/common/api_registry.spl`.
+## rt_* dual-lane ratchet landmines (2026-09-06)
+- `scripts/check/check-rt-dual-implementation-ratchet.shs` (push-blocking,
+  baseline `scripts/check/rt_dual_implementation_baseline.txt`) freezes the
+  set of `rt_*` symbols that have only one of the two lanes (Rust
+  `src/compiler_rust/runtime/src/**` vs C `src/runtime/*.c`). It is a
+  different gate from `check-dual-run-shadow.shs` (C/Simple twin).
+- **The C lane is matched PER LINE via `rt_NAME(...) {`** (`:87`). A C
+  signature that wraps across lines is invisible to it: `rt_mem_snapshot_record`
+  is defined at `src/runtime/runtime.c:2078` with a wrapped signature and
+  therefore sits in the baseline (`:1076`) as `rust-only`. **New C definitions
+  must use a single-line signature** or the ratchet will not credit them.
+- `SPL_HOSTED_UNAVAILABLE_WEAK` is `#undef`'d at `src/runtime/runtime_native.c:675`;
+  a definition placed after that point must be strong, not weak.
+- `2da5aa6ef2f` added the missing lane for four symbols:
+  `rt_phase_profile_record` (C, `runtime.c`), `rt_to_int_dynamic` (Rust,
+  `value_ops.rs`), `rt_vulkan_copy_u32_slots` (C, real slot copy),
+  `rt_vulkan_readback_u32_checksum` (C, unavailable-fallback arm). This is
+  lane parity for symbols that already exist, not license to add C — pure
+  Simple first still applies (`../../layer_expert/runtime/skill.md`).
