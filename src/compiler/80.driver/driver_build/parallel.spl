@@ -295,13 +295,26 @@ impl BuildGraph:
             # and as a 150 s no-answer on the seed interpreter for a 3-unit
             # graph. `len() > 0` is the emptiness test that holds on both lanes.
             while stack.len() > 0:
+                # Read the top by INDEX and truncate; do not pop-and-unwrap.
+                # `rt_array_pop` returns the element RAW (never a `Some` enum,
+                # runtime/src/value/collections.rs:1752), while `.unwrap()`
+                # lowers to `rt_enum_payload`, which answers nil for anything
+                # that is not an Enum heap object (objects.rs:519). Measured in
+                # the exact lane that compiles Stage 2 (the bootstrap's
+                # LLVM-capable Rust seed, `--backend llvm`): `val (n, f) =
+                # a.pop().unwrap()` on `[(i64, bool)]` yields nil for BOTH
+                # fields, while the index-read form below yields the real
+                # elements. With nil fields nothing is ever marked visited, so
+                # the DFS re-expands forever — the same unbounded allocation
+                # site 9 showed, one defect further in.
+                # See stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md.
                 # NOTE: `val entry = if val popped = stack.pop(): popped else: break`
-                # mis-evaluates to nil in the seed interpreter — an if-expression
-                # whose else arm diverges (break) returns nil even when the value
-                # arm is taken (only when the condition is an `if val` binding).
-                # The `len() > 0` guard already ensures the stack is non-empty,
-                # so unwrap directly.
-                val (node, expanded) = stack.pop().unwrap()
+                # mis-evaluates to nil in the seed interpreter too — an
+                # if-expression whose else arm diverges (break) returns nil even
+                # when the value arm is taken.
+                val top_index = stack.len() - 1
+                val (node, expanded) = stack[top_index]
+                stack = stack[:top_index]
                 if expanded:
                     order = order.push(node)
                     continue
