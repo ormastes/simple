@@ -287,3 +287,7 @@ requirement.
    `test/system/compiler/native_backend_e2e_system_spec.spl`), confirm it
    fails on the pre-fix binary and passes on the post-fix binary, then
    sabotage-check by reverting and confirming the crash returns.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: already root-caused, not fixed; the record's own status says the precise blocker needs a compiler-level trait-object dispatch fix. No change made.

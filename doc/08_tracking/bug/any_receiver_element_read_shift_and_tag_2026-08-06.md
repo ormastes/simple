@@ -118,3 +118,30 @@ the read correctly is the codegen lane's job.
   of scope under the no-mass-sweeps constraint.
 
 Status left OPEN (P1) deliberately.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane) — the generic defect reproduces GREEN now, CLOSED
+
+Ran this record's own exact reproduction (`bin/simple run`, the same 5-form
+probe from the top of this file, unmodified) against `a6450c9d6f5`:
+
+```
+raw=289427552 u32=289427552 i64=289427552 cast=289427552 via_arr=289427552
+shift_raw=17 shift_u32=17 shift_arr=17
+```
+
+Every form now yields the correct `289427552` (`0x11405060`) and every shift
+yields the correct `17` — no tag leakage, no float-shift artifact. This
+directly answers the open "What this worker could NOT prove" question above:
+the generic defect (not just the `simd_kernels.spl` mitigation) is gone.
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, sha256
+prefix `3d120a6f`). Note this run used `bin/simple run` (default engine on
+this seed), not an explicit interpret/JIT split — if a regression in only one
+engine is suspected in future, re-run with `SIMPLE_EXECUTION_MODE=jit`
+explicitly to isolate it, per this file's own note that a spec body runs
+interpreted and can hide a JIT-only defect.
+
+Also re-ran with `SIMPLE_EXECUTION_MODE=jit` explicitly set, per this file's
+own caution that interpret mode can hide a JIT-only defect — identical
+correct output. Both engines confirmed fixed.
+
+Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`.

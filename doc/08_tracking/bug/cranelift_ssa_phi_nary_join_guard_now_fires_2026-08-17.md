@@ -237,3 +237,19 @@ Recommended re-scope: retitle this record from "guard now fires" to "N-ary
 `__simple_ssa_phi` fallback unimplemented; guard path leaks an unset
 `value_map` entry", and treat the `cranelift_trap` change as the actionable
 piece.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Confirmed this lane cannot add a genuine RED spec either, for the same reason
+the 2026-08-17 verification gave: the guard at
+`cranelift_codegen_adapter.spl:717-730` lives inside `translate_instruction`'s
+`Intrinsic` arm, which requires a live Cranelift `ctx`/`cl_module` FFI handle
+constructed by the real JIT pipeline — there is no unit-level seam to call
+this arm directly with a synthetic `args`/`slot_map`, and no source in the
+tree is known to emit an N-ary `__simple_ssa_phi` (the one candidate,
+`sugar_plugin_spec.spl`, was proven by the 2026-08-17 execution check to be a
+misdiagnosis). Per this repo's TDD rule (failing spec first), a mechanical
+`return` -> `eprint + cranelift_trap + continuation block` edit with no way to
+observe it fail first, then pass, is not landed here. Left OPEN as scoped by
+the prior triage: "N-ary fallback unimplemented; guard path leaks an unset
+value_map entry" is the accurate remaining description.

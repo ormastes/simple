@@ -195,3 +195,7 @@ so no false green is possible.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/01_unit/os/kernel/loader/x86_64_fs_exec_spawn_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs an in-guest QEMU boot to prove fork() reachability on the ring-3 FS-exec path. No change made.

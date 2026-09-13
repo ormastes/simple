@@ -98,3 +98,7 @@ None available. Per the launcher's unit list, T1-T20 minus {landed:
 T3,T4,T5,T6,T8,T9,T10,T11,T13,T14} minus {forbidden collision: T1,T2 (held),
 T12,T18,T19,T20 (other agents), T16,T17,T7 (Rust-seed edits forbidden)} leaves
 only T15. This report is the full deliverable for this session.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Already an honest BLOCKED record (dead target pass, no HIR-lowering site exists to wire into); scoped down to a characterization spec already. No change made.

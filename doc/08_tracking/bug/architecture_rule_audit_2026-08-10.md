@@ -144,3 +144,7 @@ files — referenced by `scripts/check/lib/portable-process-lock.shs`,
 `scripts/bootstrap/bootstrap-from-scratch.sh`, so deleting them is not the fix;
 a POSIX-sh reimplementation of hardlink locking / session exec is required.
 Not attempted this session (out of the silent-wrong-result scope of this lane).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: affected file is a Perl script (scripts/check/lib/portable-hardlink-lock.pl), not .spl/.shs, and the audit itself spans 910 files across 388 commits. No change made.

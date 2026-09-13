@@ -46,3 +46,7 @@ checksum `14177648258271307651`, and max RSS 486812 KiB.  Its 20-frame p50/p95
 were 185865702/193681044 ns.  This confirms the wrapper still functions after
 physical-mode hardening and independently confirms that Xvfb is far outside
 the 12.5 ms budget; it is not a physical-display result.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: physical 8K display + Vulkan container campaign gate, needs hardware/GPU evidence not available here. No change made.
