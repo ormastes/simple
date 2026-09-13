@@ -1,0 +1,89 @@
+# Trust-preserving DBFS-backed NVFS artifact producer for the manifest
+# composer. Public callers supply source bytes and artifact descriptions, but
+# never inclusion booleans or reusable evidence claims.
+
+use std.common.contracts.execution.simpleos_image_manifest_v1.{
+    SimpleOsImageArtifactV1
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.port.nvfs_image.{
+    NvfsImageArtifactSeedV1,
+    NvfsImageArtifactEvidenceV1,
+    NvfsImageMaterializationReceiptV1,
+    build_nvfs_rootfs_artifact_image_v1
+}
+use os.installer.simpleos_image_manifest_composer_v1.{
+    SimpleOsVerifiedArtifactInputV1
+}
+
+fn _simpleos_nvfs_artifact_matches_v1(
+    artifact: SimpleOsImageArtifactV1,
+    source: NvfsImageArtifactSeedV1,
+    evidence: NvfsImageArtifactEvidenceV1,
+    materialization: NvfsImageMaterializationReceiptV1
+) -> bool:
+    artifact.image_path == source.image_path and
+        artifact.digest == evidence.source_digest and
+        source.source_path == evidence.source_path and
+        source.image_path == evidence.image_path and
+        (source.data.len() as u64) == evidence.source_byte_length and
+        evidence.source_digest == evidence.persisted_digest and
+        evidence.source_byte_length == evidence.persisted_byte_length and
+        evidence.materialized_root_digest == materialization.root_digest and
+        evidence.materialized_root_byte_length == materialization.root_byte_length
+
+pub fn simpleos_nvfs_artifacts_build_and_project_v1(
+    size_sectors: u64,
+    sources: [NvfsImageArtifactSeedV1],
+    artifacts: [SimpleOsImageArtifactV1],
+    output_path: text,
+    mut output: [SimpleOsVerifiedArtifactInputV1]
+) -> Result<NvfsImageMaterializationReceiptV1, text>:
+    """Materialize and append verified composer inputs as one transaction.
+
+    The projection consumes evidence created internally by actual source-byte
+    writes and persisted-only NVFS readback. No public function accepts a
+    caller-constructed evidence value and turns it into verified input.
+    `source_path` is a logical build-source label; `data` is the authoritative
+    source content hashed by this operation.
+    """
+    if output.len() != 0:
+        return Err("SimpleOS NVFS verified artifact output buffer must be empty")
+    if sources.len() == 0 or sources.len() != artifacts.len():
+        return Err("SimpleOS NVFS artifact sources and descriptions must align")
+    var preflight_index = 0
+    while preflight_index < sources.len():
+        if artifacts[preflight_index].image_path != sources[preflight_index].image_path or
+            artifacts[preflight_index].digest != sha256_u8_hex(
+                sources[preflight_index].data):
+            return Err("SimpleOS NVFS artifact preflight mismatch at index " +
+                preflight_index.to_text())
+        preflight_index = preflight_index + 1
+    var evidence: [NvfsImageArtifactEvidenceV1] = []
+    val built = build_nvfs_rootfs_artifact_image_v1(
+        size_sectors, sources, output_path, evidence)
+    if built.is_err():
+        return Err(built.unwrap_err())
+    val materialization = built.unwrap()
+    var index = 0
+    while index < sources.len():
+        if not _simpleos_nvfs_artifact_matches_v1(
+            artifacts[index], sources[index], evidence[index], materialization):
+            return Err("SimpleOS NVFS artifact projection mismatch at index " +
+                index.to_text())
+        index = index + 1
+    index = 0
+    while index < sources.len():
+        val item = evidence[index]
+        output.push(SimpleOsVerifiedArtifactInputV1(
+            artifact: artifacts[index],
+            source_path: item.source_path,
+            source_digest: item.source_digest,
+            source_byte_length: item.source_byte_length,
+            identity_verified: true,
+            included_in_materialized_root: true,
+            materialized_root_digest: item.materialized_root_digest))
+        index = index + 1
+    Ok(materialization)
+
+export simpleos_nvfs_artifacts_build_and_project_v1

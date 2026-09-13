@@ -1,0 +1,161 @@
+# Builder-to-manifest evidence for one DBFS-backed NVFS artifact.
+# @codex-impl
+# @req REQ-SIMPLEOS-NVFS-ARTIFACT-INCLUSION-V1
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_delete, file_read_bytes, getpid}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_image_manifest_v1.{
+    SimpleOsImageArtifactRoleV1, SimpleOsImageArtifactV1
+}
+use os.port.nvfs_image.{
+    NvfsImageConfig, NvfsImageSeed, _nvfs_image_mem_device,
+    NvfsImageArtifactSeedV1,
+    NvfsImageArtifactEvidenceV1,
+    NvfsImageMaterializationReceiptV1,
+    _nvfs_image_artifact_readback_v1,
+    build_nvfs_rootfs_artifact_image_v1
+}
+use os.installer.simpleos_image_manifest_composer_v1.{
+    SimpleOsVerifiedArtifactInputV1
+}
+use os.installer.nvfs_artifact_manifest_projection_v1.*
+
+val KERNEL_BYTES: [u8] = [
+    107u8, 101u8, 114u8, 110u8, 101u8, 108u8, 45u8, 118u8, 49u8]
+val KERNEL_SHA256: text =
+    "e535284b6f32cd691e98d2491929fa8280e183d7540f0983feacaec8ce6da61f"
+
+fn kernel_seed() -> NvfsImageArtifactSeedV1:
+    NvfsImageArtifactSeedV1(
+        source_path: "build/kernel/simpleos-kernel.elf",
+        image_path: "/boot/kernel.elf",
+        data: KERNEL_BYTES)
+
+fn kernel_artifact() -> SimpleOsImageArtifactV1:
+    SimpleOsImageArtifactV1(
+        artifact_id: "kernel.simpleos",
+        role: SimpleOsImageArtifactRoleV1.Kernel,
+        image_path: "/boot/kernel.elf",
+        digest: KERNEL_SHA256,
+        required: true,
+        baseline: true)
+
+fn output_path() -> text:
+    "/tmp/simple_nvfs_artifact_evidence_v1_" + getpid().to_text() + ".img"
+
+fn materialize(
+    mut evidence: [NvfsImageArtifactEvidenceV1]
+) -> NvfsImageMaterializationReceiptV1:
+    val path = output_path()
+    val _ = file_delete(path)
+    build_nvfs_rootfs_artifact_image_v1(
+        256u64, [kernel_seed()], path, evidence).unwrap()
+
+describe "NVFS artifact inclusion evidence v1":
+    it "derives source, persisted readback, and exact materialized root identities":
+        step("materialize source bytes and collect fresh-driver readback evidence")
+        var evidence: [NvfsImageArtifactEvidenceV1] = []
+        val materialization = materialize(evidence)
+        expect(evidence.len()).to_equal(1)
+        expect(evidence[0].source_path).to_equal(
+            "build/kernel/simpleos-kernel.elf")
+        expect(evidence[0].image_path).to_equal("/boot/kernel.elf")
+        expect(evidence[0].source_digest).to_equal(KERNEL_SHA256)
+        expect(evidence[0].source_byte_length).to_equal(9u64)
+        expect(evidence[0].persisted_digest).to_equal(KERNEL_SHA256)
+        expect(evidence[0].persisted_byte_length).to_equal(9u64)
+
+        step("bind evidence to the exact raw bytes written as the root image")
+        val image_bytes = file_read_bytes(materialization.output_path)
+        expect(materialization.root_byte_length).to_equal(131072u64)
+        expect(materialization.root_digest).to_equal(sha256_u8_hex(image_bytes))
+        expect(evidence[0].materialized_root_digest).to_equal(
+            materialization.root_digest)
+        expect(evidence[0].materialized_root_byte_length).to_equal(131072u64)
+        val _ = file_delete(materialization.output_path)
+
+    it "projects only evidence created inside the materialization operation":
+        step("build and project one artifact without accepting caller proof flags")
+        var output: [SimpleOsVerifiedArtifactInputV1] = []
+        val materialization = simpleos_nvfs_artifacts_build_and_project_v1(
+            256u64, [kernel_seed()], [kernel_artifact()], output_path(), output).unwrap()
+        expect(output.len()).to_equal(1)
+        expect(output[0].source_digest).to_equal(KERNEL_SHA256)
+        expect(output[0].materialized_root_digest).to_equal(materialization.root_digest)
+        val _ = file_delete(materialization.output_path)
+
+    it "fails closed for mismatched artifacts and reused output buffers":
+        step("reject an artifact digest not derived from source bytes")
+        var changed_artifact = kernel_artifact()
+        changed_artifact.digest = "1" * 64
+        var output: [SimpleOsVerifiedArtifactInputV1] = []
+        val mismatched = simpleos_nvfs_artifacts_build_and_project_v1(
+            256u64, [kernel_seed()], [changed_artifact], output_path(), output)
+        expect(mismatched.is_err()).to_equal(true)
+        expect(output.len()).to_equal(0)
+
+        step("reject reuse of a nonempty caller-owned output buffer")
+        output.push(SimpleOsVerifiedArtifactInputV1(
+            artifact: kernel_artifact(), source_path: "stale",
+            source_digest: KERNEL_SHA256, source_byte_length: 9u64,
+            identity_verified: false, included_in_materialized_root: false,
+            materialized_root_digest: "2" * 64))
+        expect(simpleos_nvfs_artifacts_build_and_project_v1(
+            256u64, [kernel_seed()], [kernel_artifact()], output_path(),
+            output).is_err()).to_equal(true)
+        val _ = file_delete(output_path())
+
+    it "rejects missing and trailing persisted bytes despite compatibility cache state":
+        step("prime the compatibility cache with the expected artifact path")
+        val primed = _nvfs_image_mem_device(NvfsImageConfig(
+            size_sectors: 256u64,
+            seeds: [NvfsImageSeed(name: "/boot/kernel.elf", data: KERNEL_BYTES)]))
+        expect(primed.is_ok()).to_equal(true)
+
+        step("refuse a device where that path is absent instead of reconstructing it")
+        val missing = _nvfs_image_mem_device(NvfsImageConfig(
+            size_sectors: 256u64, seeds: [])).unwrap()
+        expect(_nvfs_image_artifact_readback_v1(
+            missing, [kernel_seed()]).is_err()).to_equal(true)
+
+        step("refuse a persisted file with the expected prefix plus trailing bytes")
+        var longer: [u8] = [
+            107u8, 101u8, 114u8, 110u8, 101u8,
+            108u8, 45u8, 118u8, 49u8]
+        longer.push(0u8)
+        val trailing = _nvfs_image_mem_device(NvfsImageConfig(
+            size_sectors: 256u64,
+            seeds: [NvfsImageSeed(name: "/boot/kernel.elf", data: longer)])).unwrap()
+        expect(_nvfs_image_artifact_readback_v1(
+            trailing, [kernel_seed()]).is_err()).to_equal(true)
+
+        step("refuse same-length persisted content with a different digest")
+        val corrupted = _nvfs_image_mem_device(NvfsImageConfig(
+            size_sectors: 256u64,
+            seeds: [NvfsImageSeed(
+                name: "/boot/kernel.elf",
+                data: [107u8, 101u8, 114u8, 110u8, 101u8,
+                    108u8, 45u8, 118u8, 50u8])])).unwrap()
+        expect(_nvfs_image_artifact_readback_v1(
+            corrupted, [kernel_seed()]).is_err()).to_equal(true)
+
+    it "rejects duplicate and invalid artifact seed identities before writing":
+        val path = output_path()
+        val _ = file_delete(path)
+        var evidence: [NvfsImageArtifactEvidenceV1] = []
+        val duplicate = build_nvfs_rootfs_artifact_image_v1(
+            256u64, [kernel_seed(), kernel_seed()], path, evidence)
+        expect(duplicate.is_err()).to_equal(true)
+        expect(evidence.len()).to_equal(0)
+
+        var invalid = kernel_seed()
+        invalid.image_path = "boot/kernel.elf"
+        expect(build_nvfs_rootfs_artifact_image_v1(
+            256u64, [invalid], path, evidence).is_err()).to_equal(true)
+        expect(evidence.len()).to_equal(0)
+        val _ = file_delete(path)
+
+fn main():
+    return ()

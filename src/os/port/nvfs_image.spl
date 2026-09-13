@@ -28,6 +28,23 @@ pub struct NvfsImageConfig:
     size_sectors: u64
     seeds: [NvfsImageSeed]
 
+pub struct NvfsImageArtifactSeedV1:
+    """One manifest artifact source and its destination inside the root."""
+    source_path: text
+    image_path: text
+    data: [u8]
+
+pub struct NvfsImageArtifactEvidenceV1:
+    """Byte-derived inclusion facts emitted only after image materialization."""
+    source_path: text
+    image_path: text
+    source_digest: text
+    source_byte_length: u64
+    persisted_digest: text
+    persisted_byte_length: u64
+    materialized_root_digest: text
+    materialized_root_byte_length: u64
+
 val NVFS_IMAGE_PROVIDER: text = "nvfs-dbfs-backed-v1"
 val NVFS_IMAGE_SECTOR_SIZE: u32 = 512u32
 val NVFS_IMAGE_FIRST_ARENA_LBA: i64 = 4
@@ -66,6 +83,77 @@ fn _nvfs_image_valid_path(path: text) -> bool:
     if path.contains(".."):
         return false
     true
+
+fn _nvfs_image_valid_source_path(path: text) -> bool:
+    if path == "" or path.len() > 4096:
+        return false
+    var i = 0
+    while i < path.len():
+        if path.char_code_at(i) < 32:
+            return false
+        i = i + 1
+    true
+
+fn _nvfs_image_artifact_seeds_valid_v1(seeds: [NvfsImageArtifactSeedV1]) -> bool:
+    var i = 0
+    while i < seeds.len():
+        val seed = seeds[i]
+        if not _nvfs_image_valid_source_path(seed.source_path) or
+            not _nvfs_image_valid_path(seed.image_path) or seed.data.len() == 0:
+            return false
+        var prior = 0
+        while prior < i:
+            if seeds[prior].source_path == seed.source_path or
+                seeds[prior].image_path == seed.image_path:
+                return false
+            prior = prior + 1
+        i = i + 1
+    true
+
+fn _nvfs_image_zero_bytes_v1(length: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < length:
+        out.push(0u8)
+        i = i + 1
+    out
+
+pub fn _nvfs_image_artifact_readback_v1(
+    dev: MemBlockDevice, seeds: [NvfsImageArtifactSeedV1]
+) -> Result<[text], text>:
+    val arena_blocks = (dev.sector_count() as i64) - NVFS_IMAGE_FIRST_ARENA_LBA
+    val opened = NvfsPosixDriver.new_on_device(
+        NVFS_IMAGE_PROVIDER, dev, NVFS_IMAGE_FIRST_ARENA_LBA, arena_blocks)
+    if opened.is_err():
+        return Err("nvfs artifact evidence provider reopen failed")
+    val driver = opened.unwrap()
+    val mounted = driver.mount(MountOptions.read_only())
+    if mounted.is_err():
+        return Err("nvfs artifact evidence provider mount failed")
+    var persisted_digests: [text] = []
+    for seed in seeds:
+        val persisted_stat = driver.stat_persisted_path_v1(Path(raw: seed.image_path))
+        if persisted_stat.is_err() or
+            persisted_stat.unwrap().size != seed.data.len() as i64:
+            return Err("nvfs artifact evidence persisted size mismatch: " + seed.image_path)
+        val opened_file = driver.open_persisted_read_only_v1(
+            Path(raw: seed.image_path))
+        if opened_file.is_err():
+            return Err("nvfs artifact evidence readback open failed: " + seed.image_path)
+        val handle = opened_file.unwrap()
+        var readback = _nvfs_image_zero_bytes_v1(seed.data.len())
+        val read_result = driver.pread(handle, 0, readback)
+        val close_result = driver.close_handle(handle)
+        if read_result.is_err() or read_result.unwrap() != seed.data.len() as i64:
+            return Err("nvfs artifact evidence readback length mismatch: " + seed.image_path)
+        if close_result.is_err():
+            return Err("nvfs artifact evidence readback close failed: " + seed.image_path)
+        val source_digest = sha256_u8_hex(seed.data)
+        val persisted_digest = sha256_u8_hex(readback)
+        if persisted_digest != source_digest:
+            return Err("nvfs artifact evidence readback digest mismatch: " + seed.image_path)
+        persisted_digests.push(persisted_digest)
+    Ok(persisted_digests)
 
 fn _nvfs_image_seed_driver(
     driver: NvfsPosixDriver, seeds: [NvfsImageSeed]
@@ -160,6 +248,70 @@ pub fn build_nvfs_rootfs_image_with_receipt_v1(
         return Err(wrote.unwrap_err())
     if not wrote.unwrap():
         return Err("nvfs image write did not complete")
+    Ok(NvfsImageMaterializationReceiptV1(
+        output_path: output_path,
+        provider_id: NVFS_IMAGE_PROVIDER,
+        carrier_format_id: NVFS_IMAGE_CARRIER_FORMAT_V1,
+        carrier_digest: identity.digest,
+        carrier_byte_length: identity.byte_length,
+        root_digest: identity.digest,
+        root_byte_length: identity.byte_length,
+        bytes_verified_before_write: true,
+        write_completed: true))
+
+pub fn build_nvfs_rootfs_artifact_image_v1(
+    size_sectors: u64,
+    seeds: [NvfsImageArtifactSeedV1],
+    output_path: text,
+    mut evidence: [NvfsImageArtifactEvidenceV1]
+) -> Result<NvfsImageMaterializationReceiptV1, text>:
+    """Build an image and append byte/readback/root evidence to an empty buffer.
+
+    The returned value stays small. Artifact evidence is caller-owned and is
+    appended only after all files were read back through a freshly opened
+    `NvfsPosixDriver`, the final root bytes were hashed, and host output
+    completed.
+    """
+    if evidence.len() != 0:
+        return Err("nvfs artifact evidence output buffer must be empty")
+    if output_path == "":
+        return Err("nvfs image output path is empty")
+    if not _nvfs_image_artifact_seeds_valid_v1(seeds):
+        return Err("nvfs artifact seeds are invalid or duplicated")
+    var plain_seeds: [NvfsImageSeed] = []
+    for seed in seeds:
+        plain_seeds.push(NvfsImageSeed(name: seed.image_path, data: seed.data))
+    val dev_result = _nvfs_image_mem_device(NvfsImageConfig(
+        size_sectors: size_sectors, seeds: plain_seeds))
+    if dev_result.is_err():
+        return Err(dev_result.unwrap_err())
+    val dev = dev_result.unwrap()
+    val readback_result = _nvfs_image_artifact_readback_v1(dev, seeds)
+    if readback_result.is_err():
+        return Err(readback_result.unwrap_err())
+    val persisted_digests = readback_result.unwrap()
+    val identity_result = _nvfs_image_byte_identity_v1(dev)
+    if identity_result.is_err():
+        return Err(identity_result.unwrap_err())
+    val identity = identity_result.unwrap()
+    val wrote = dev.write_to_file(output_path)
+    if wrote.is_err():
+        return Err(wrote.unwrap_err())
+    if not wrote.unwrap():
+        return Err("nvfs image write did not complete")
+    var index = 0
+    while index < seeds.len():
+        val seed = seeds[index]
+        evidence.push(NvfsImageArtifactEvidenceV1(
+            source_path: seed.source_path,
+            image_path: seed.image_path,
+            source_digest: sha256_u8_hex(seed.data),
+            source_byte_length: seed.data.len() as u64,
+            persisted_digest: persisted_digests[index],
+            persisted_byte_length: seed.data.len() as u64,
+            materialized_root_digest: identity.digest,
+            materialized_root_byte_length: identity.byte_length))
+        index = index + 1
     Ok(NvfsImageMaterializationReceiptV1(
         output_path: output_path,
         provider_id: NVFS_IMAGE_PROVIDER,
