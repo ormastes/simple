@@ -1,7 +1,9 @@
 # Where the 2,950 ns of an interpreted class-method call actually goes
 
-- Status: OPEN (2026-09-13) — two components fixed, the largest one measured and
-  left alone; see "Not fixed" below.
+- Status: OPEN (2026-09-13) — two components fixed by PERF-7, the largest one
+  measured and left alone; see "Not fixed" below. The caller-frame-width term is
+  now **RESOLVED** (PERF-9) — see the section at the end of "The per-call cost
+  grows with the CALLER's frame width".
 - Lane: PERF-7 (interpreter per-call cost), worktree `/home/yoon/dev/simple-perf-7`,
   base `origin/main` d522cc98da2.
 - Binaries: BASE `simple.base` sha256 `6903816380d27188...`; ablation PROBE
@@ -103,6 +105,29 @@ depends on the caller's frame width**, and the corpus's `main` is far narrower
 than a real `src/lib/common` function. For real stdlib callers (10-30 locals)
 this term is 300-1,000 ns per iteration, and it is invisible to any fixture with
 a narrow caller.
+
+### RESOLVED 2026-09-13 (PERF-9) — the guess above was right, and it is now counted
+
+PERF-9 added `PUBLISH_GLOBALS_{CALLS,SCANNED,NONLOCAL,PUBLISHED}` and measured
+the two passes this section names. On the base seed at n = 2,000,000, `m4`
+scanned **3 overlay entries per call** and `m5` **23** — a difference of exactly
+20, the twenty extra caller locals one for one — while across BOTH entire runs
+**one** entry survived the `is_local` filter and **none** was ever published.
+So the call-side term is `publish_and_repoint`, it is O(caller frame width), and
+on these fixtures every one of those 46,000,026 string hashes was wasted.
+
+`CowEnv` now carries `nonlocal_overlay`, a lazily allocated SUPERSET of the
+overlay keys the frame does not declare local; five call-path walks iterate it
+instead of the overlay, and both fixtures now report SCANNED = 1 for the whole
+run. Interleaved child-CPU A/B, 6 reps: `m5_wide_caller` −10.3% median, and the
+width term (wide − narrow) 599 ms → 0 ms. Pinned by COUNT in
+`test/05_perf/interp/call_entry_publish_scan_spec.spl`.
+
+Full isolation, the superset's maintenance points, its audit gate and the
+honest reading of the small constant it costs a NARROW caller:
+`interpreter_call_entry_publish_scans_the_whole_caller_frame_2026-09-13.md`.
+The other two components this record leaves open — `owner_scope` memoisation
+and a specialised owned-call kernel — are untouched.
 
 The obvious question this raises is whether the publish pass can be restricted to
 names the frame actually WROTE. `CowEnv` already tracks `dirty_names` and the

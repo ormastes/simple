@@ -381,6 +381,13 @@ pub fn exec_function_with_self_return_values(
     crate::perf_counters::bump(&crate::perf_counters::MECALL_STRING_ALLOCS, 2);
     publish_and_repoint(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
+    // Declare the receiver local BEFORE binding it. `execute_function_body`
+    // already marks every declared parameter local ahead of its insert, and
+    // for `fn m(self)` it marks this very name a moment later; doing it here
+    // too costs nothing and keeps the receiver out of the frame's
+    // publishable-name set, which otherwise allocates a `String` and a hash
+    // table per call for a name that can never be a module global.
+    local_env.mark_local("self");
     local_env.insert(
         "self".into(),
         Value::Object {
@@ -431,10 +438,23 @@ pub fn exec_function_with_self_return_values(
         for (param, arg) in non_self_params.zip(arg_exprs.iter()) {
             let param = match &arg.name {
                 Some(name) => match func.params.iter().find(|p| &p.name == name) {
+                    // A variadic parameter holds a Tuple of the TAIL, not the
+                    // caller's container; writing it back would replace the
+                    // caller's variable with that tuple.
+                    Some(p) if p.variadic => continue,
                     Some(p) => p,
                     None => continue,
                 },
-                None => param,
+                None => {
+                    // Past the variadic slot the positional zip above no longer
+                    // pairs a parameter with the argument that filled it, so no
+                    // later write-back can be attributed. Same stop the
+                    // expression-binder write-back takes (function_exec.rs).
+                    if param.variadic {
+                        break;
+                    }
+                    param
+                }
             };
             if let simple_parser::ast::Expr::Identifier(var_name) = &arg.value {
                 // Decide on a BORROW, then clone only the value that is

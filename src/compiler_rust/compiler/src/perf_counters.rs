@@ -166,6 +166,23 @@ counters!(
     // the parameter list and the routed-value slots. The write-back's vector is
     // gone in both cases — it is an iterator now.
     MECALL_CONTAINER_ALLOCS,
+    // call-entry publish of a frame's global aliases
+    // (interpreter_call/core/function_exec.rs::publish_live_bound_globals,
+    // reached from `publish_and_repoint` on EVERY call out of a frame).
+    //
+    // These make the caller-frame-width term of the per-call cost countable.
+    // PERF-7 measured the cost of a method call growing by ~650 ns for 20
+    // extra locals in the CALLER and could not isolate the mechanism
+    // (doc/08_tracking/bug/interpreter_per_call_cost_grows_with_caller_frame_width_2026-09-13.md).
+    // SCANNED is the overlay entries this scan visits per call — if it tracks
+    // the caller's width, the scan is the mechanism. NONLOCAL is the entries
+    // that survive the `is_local`/`is_refreshed_global` filter and therefore
+    // cost a `global_binding` resolution; PUBLISHED is the entries actually
+    // written to the global store, i.e. the work the scan exists to do.
+    PUBLISH_GLOBALS_CALLS,
+    PUBLISH_GLOBALS_SCANNED,
+    PUBLISH_GLOBALS_NONLOCAL,
+    PUBLISH_GLOBALS_PUBLISHED,
 );
 
 #[inline(always)]
