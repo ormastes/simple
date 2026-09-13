@@ -226,3 +226,8 @@ Specs added:
 `src/lib/common/image/ppm_decode.spl:137` is listed as class 1a but is not
 defective: its `header` is a locally built `"P6\n{width} {height}\n255\n"`,
 always ASCII, so byte length and codepoint count coincide by construction.
+
+## Triage 2026-09-13
+Reconfirmed: 2 sites already fixed and landed per this record; 2 systemic
+root causes are filed as living outside src/lib (compiler/runtime level),
+correctly not patched here. Left as-is, no code change attempted.
