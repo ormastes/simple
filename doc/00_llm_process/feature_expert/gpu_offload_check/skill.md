@@ -514,6 +514,51 @@ lineage: a hardcoded status string looked like a real verdict until someone
 read the computation behind it — the same trap this section's boundary-audit
 gate is designed to avoid by reading real vk-timing buckets, never a name.
 
+## In-process showcase specs (2026-09-13)
+
+`test/02_integration/ui/web_showcase/` holds six sspec scenarios that check
+the showcase catalog's renderer without the shell gates' build artifacts:
+CPU determinism across all 8 tabs, the Vulkan twin (no silent
+`cpu_fallback`), the GPU boundary counters per page, tab A->B->A reuse, a
+single 4K frame, and the Chrome dynlib loader. They read the same counters
+the boundary audit does, via `audit_field` over
+`web_vulkan_lane_census_line()` and `web_route_stage_drain()`.
+
+**Runner trap measured while authoring these (2026-09-13):
+`SIMPLE_TIMEOUT_SECONDS=0` does NOT mean "no timeout".**
+`parse_env_timeout_secs` returns 0 for it and `client_default_timeout_secs`
+(`src/app/test_runner_new/timeout_budget.spl:58-64`) then falls back to
+`CLIENT_DEFAULT_TIMEOUT_SECS = 900`. A showcase spec that needs more than 900 s
+— which these do whenever two run concurrently, since one 320x180 Vulkan frame
+costs ~9-30 s and a CPU frame ~23-60 s — is killed at 900 s and relaunched,
+so it never reaches a verdict and merely looks slow. Pass an explicit
+`--timeout <secs>` instead, and run them one at a time. All six carry
+`@tag: ... slow` for the same reason.
+
+Three limits worth knowing before extending them:
+
+- **`host_pixel_iterations` is unavailable in-process, and the census's own
+  `submits=` is not a substitute.** The audit emits `host_pixel_iterations`
+  only when `timing_armed` (`log.contains("vk-timing bucket")`), armed by
+  `SIMPLE_VK_TIMING=1` before process start; a spec cannot arm itself. And
+  `gpu_boundary_audit.spl:154-156` records that the census `submits=` /
+  `fences=` fields read **0 against 112 real dispatches**, because the pooled
+  slot a probe reaches is not always the instance that drew — so asserting
+  them passes whatever happened. What IS usable in-process is
+  `web_route_stage_drain()`'s `host_paint_pixels`, incremented at
+  `simple_web_html_engine2d_presenter.spl:652` on the upload-bound
+  host-painted fallback: the pass-through term the Vulkan counters cannot
+  see. The boundary spec asserts that, not `submits`.
+- **No budget exists for two things the brief for this work assumed did.**
+  There is no CPU-to-Vulkan pixel budget (`pixel_diff.spl`'s `TOLERANCE=8` is
+  a per-channel delta, and `DiffResult.ok` is well-formedness only), and no
+  4K frame-time budget (the receipt gate pins geometry/schema only). Both are
+  filed: `web_cpu_vulkan_twin_pixel_divergence_unbudgeted_2026-09-13.md`
+  (measured 29.33% mismatch, max_delta 37) and
+  `web_showcase_4k_frame_time_unbudgeted_2026-09-13.md` (4K vulkan 177 s, and
+  cost is NOT monotonic in pixel count — 160x90 measured slower than
+  320x180, so no per-pixel budget transfers between sizes).
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,
