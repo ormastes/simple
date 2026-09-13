@@ -2081,7 +2081,13 @@ impl Lowerer {
             let inner_hir = self.lower_expr(inner, ctx)?;
             return Ok(HirExpr {
                 kind: HirExprKind::BuiltinCall {
-                    name: "rt_is_some".to_string(),
+                    // `rt_is_present`, NOT `rt_is_some`: `.?` is absent for an
+                    // empty array/dict/string too, exactly as the interpreter's
+                    // `Expr::ExistsCheck` arm decides it. `rt_is_some` made
+                    // `while arr.?:` loop forever on a drained array under
+                    // native codegen —
+                    // doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+                    name: "rt_is_present".to_string(),
                     args: vec![inner_hir],
                 },
                 ty: TypeId::BOOL,
@@ -2218,7 +2224,7 @@ impl Lowerer {
                     HirExprKind::If { condition, .. } => matches!(
                         &condition.kind,
                         HirExprKind::BuiltinCall { name, args }
-                            if name == "rt_is_some"
+                            if name == "rt_is_present"
                                 && matches!(
                                     args.first().map(|a| &a.kind),
                                     Some(HirExprKind::Local(idx)) if idx == local_idx
@@ -2235,7 +2241,8 @@ impl Lowerer {
                         },
                     );
                     expr.kind = HirExprKind::BuiltinCall {
-                        name: "rt_is_some".to_string(),
+                        // Same presence rule as `lower_condition` — see there.
+                        name: "rt_is_present".to_string(),
                         args: vec![subject],
                     };
                     expr.ty = TypeId::BOOL;
@@ -2362,7 +2369,10 @@ impl Lowerer {
 
         let condition = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_is_some".to_string(),
+                // Presence, not mere non-nil: an empty array/dict/string makes
+                // `.?` yield nil in value position too, matching the
+                // interpreter. See `lower_condition`.
+                name: "rt_is_present".to_string(),
                 args: vec![HirExpr {
                     kind: HirExprKind::Local(subject_idx),
                     ty: subject_ty,
