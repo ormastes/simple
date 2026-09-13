@@ -139,7 +139,8 @@ fn _login_jira(args: [text]) -> i64:
     """Configure Jira authentication.
 
     Usage:
-      itf auth login --jira                                 # delegate to acli --web
+      itf auth login --jira                                 # delegate to acli --web (skipped when a token exists)
+      itf auth login --jira --acli                          # acli --web even when a token exists
       itf auth login --jira --url URL --user EMAIL --token TOKEN  # also wire
         the curl fallback (adapter_jira_curl) that acli lacks update/comment/
         transition verbs for; --url/--user/--token save jira.url, jira.email,
@@ -196,22 +197,19 @@ fn _login_jira(args: [text]) -> i64:
         return 0
 
     val config = load_config()
-    if check_jira_auth(config):
-        print_success("Jira token already configured; using REST directly (no acli login).")
+    # A configured token means REST, so no login — unless --acli explicitly
+    # asks to (re)run the acli browser login anyway (e.g. Cloud acli session).
+    if check_jira_auth(config) and not _has_flag(args, "--acli"):
+        print_success("Jira token already configured; using REST directly (no acli login). Use --acli to run the acli login anyway.")
         return 0
     val acli = config.jira_acli_path
 
-    # Check if acli is available
-    val (_, _, which_code) = process_run("which", [acli])
-    if which_code != 0:
-        print_error("acli not found at '{acli}'. Install Atlassian CLI or set jira.acli_path in config.")
-        return 1
-
-    # Delegate auth to acli
+    # Delegate auth to acli. No `which` preflight: it is absent on native
+    # Windows and misses .cmd shims; a missing acli fails the call itself.
     print "Delegating to acli for Jira authentication..."
     val (_, stderr, code) = process_run(acli, ["jira", "auth", "login", "--web"])
     if code != 0:
-        print_error("acli auth failed: {stderr}")
+        print_error("acli auth failed (acli_path '{acli}'; install Atlassian CLI or set jira.acli_path): {stderr}")
         return 1
 
     print_success("Jira authentication configured via acli.")
@@ -309,6 +307,7 @@ fn _print_auth_help():
     print "  itf auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT"
     print "  itf auth login --jira --url https://company.atlassian.net --user email --token API_TOKEN"
     print "  itf auth login --jira            # acli --web login, only when no jira token is configured"
+    print "  itf auth login --jira --acli     # run the acli --web login even when a jira token exists"
     print ""
     print "Flags:"
     print "  --confluence   Target Confluence"
@@ -318,3 +317,4 @@ fn _print_auth_help():
     print "  --token TOKEN  API token (Cloud) or personal access token (Data Center)"
     print "  --deployment D cloud (default) | datacenter"
     print "  --auth A       basic (default) | bearer"
+    print "  --acli         Jira: force the acli --web login even if a token is configured"

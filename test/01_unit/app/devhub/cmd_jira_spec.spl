@@ -1,4 +1,5 @@
 # @cover src/app/devhub/cmd_jira.spl 60%
+# @cover src/app/devhub/cmd_auth.spl
 #
 # `itf jira update/comment/transition` (J2): fake-binary fixture spec.
 # Drives handle_jira() end-to-end against stub `acli`/`curl` scripts on PATH
@@ -13,6 +14,7 @@
 # have coverage via adapter_jira_curl_spec.spl's pure-function tests.
 
 use app.devhub.cmd_jira.{handle_jira}
+use app.devhub.cmd_auth.{handle_auth}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -89,7 +91,9 @@ fn run_jira_with_fixture(args: [text], override_home: bool) -> (i64, text):
     val _set_path = rt_env_set("PATH", "{fake_dir}{sep}{original_path}")
     if override_home:
         val _set_home = rt_env_set("HOME", FIXTURE_HOME)
-    val code = handle_jira(args)
+    # `login ...` goes to handle_auth (jira has no `login` verb), so auth
+    # cases reuse the same fake-acli PATH/HOME fixture.
+    val code = if args.len() > 0 and args[0] == "login": handle_auth(args) else: handle_jira(args)
     val _restore_path = rt_env_set("PATH", original_path)
     if override_home:
         val _restore_home = rt_env_set("HOME", original_home)
@@ -181,6 +185,16 @@ describe "itf jira update/comment/transition (fake-binary fixture)":
             write_fixture_config("", "", "")
             val (code, _log) = run_jira_with_fixture(["update", "PROJ-1", "--summary", "New title"], true)
             expect(code).to_equal(1)
+
+    context "auth login --jira --acli with a jira token configured":
+
+        it "still runs `acli jira auth login --web`":
+            reset_fixture()
+            install_fake_bin("acli", FAKE_ACLI_OK)
+            write_fixture_config("https://fixture.atlassian.net", "fixture@example.com", "fixture-token")
+            val (code, log) = run_jira_with_fixture(["login", "--jira", "--acli"], true)
+            expect(code).to_equal(0)
+            expect(log.contains("jira auth login --web")).to_equal(true)
 
     context "usage errors":
 

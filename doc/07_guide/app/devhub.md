@@ -54,6 +54,7 @@ devhub auth login --jira --url https://jira.corp:8443/jira --deployment datacent
 # Jira Cloud: basic auth, email + API token
 devhub auth login --jira --url https://company.atlassian.net --user you@co.com --token API_TOKEN
 devhub auth login --jira                                              # acli --web login; skipped when a jira token is already configured
+devhub auth login --jira --acli                                       # force the acli --web login even when a jira token exists
 devhub auth status
 devhub auth logout --confluence
 ```
