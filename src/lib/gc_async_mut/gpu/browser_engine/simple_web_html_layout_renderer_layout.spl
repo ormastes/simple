@@ -480,7 +480,7 @@ fn resolved_text_range_width(st: Style, start: i32, endv: i32) -> i32:
 # array whenever the measured metrics do not describe this exact string
 # (no resolved face, or an arity mismatch) so both sides fall back to the flat
 # estimate TOGETHER rather than one side at a time.
-fn style_run_byte_advances(st: Style, s: text) -> [i32]:
+fn _lay_style_run_byte_advances_inner(st: Style, s: text) -> [i32]:
     var out: [i32] = []
     if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
         return out
@@ -684,7 +684,7 @@ fn style_with_width(st: Style, width_px: i32) -> Style:
     out.scrollbar_width_none = st.scrollbar_width_none
     out
 
-fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
+fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
     if widths[i] >= 0:
         return IntrinsicWidthResult(width: widths[i], widths: widths)
     var out_widths = widths
@@ -725,7 +725,7 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
 # nothing but its own padding. This walks EVERY in-flow child — inline children
 # accumulate along the current line, each block child starts a new one — and the
 # widest line wins, which is the max-content rule.
-fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
     var inline_run = 0
     var widest = 0
     var c = child_index.first_child[i]
@@ -765,7 +765,7 @@ fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: Htm
 # `flex-basis: content` needs (widest line over every in-flow child, inline
 # children accumulating along the line), so it delegates rather than growing a
 # second copy that would drift from it.
-fn table_cell_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+fn _lay_table_cell_max_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
     val w = flex_item_max_content_width(nodes, styles, child_index, cell)
     if w < 1: 1 else: w
 
@@ -793,7 +793,7 @@ fn _table_text_min_content_width(txt: text, cst: Style) -> i32:
 # Min-content width of a table CELL — the other half of CSS 2.1 §17.5.2.2's
 # per-cell input. Without it a column has no floor, so a table that does not
 # fit its containing block has nothing to compress toward and simply overflows.
-fn table_cell_min_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+fn _lay_table_cell_min_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
     var widest = 0
     var c = child_index.first_child[cell]
     while c >= 0:  # cpu-lane-loop-ok: one pass over this cell's children during table column sizing
@@ -823,7 +823,7 @@ fn table_cell_min_content_width(nodes: [HNode], styles: [Style], child_index: Ht
 # auto-width item wrapped onto a line of its own. The NON-wrapping branch of the
 # same layout already measured its items; only the wrap branch did not. See
 # doc/08_tracking/bug/web_flex_wrap_auto_width_item_fills_line_2026-09-12.md.
-fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
+fn _lay_flex_wrap_auto_base_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
     if cst.flex_basis_px > 0 or cst.width_px != 0 or cst.flex_grow != 0:
         return caller_base_w
     val max_content = flex_item_max_content_width(nodes, styles, child_index, item)
@@ -842,7 +842,7 @@ fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlC
 # `<div>&mdash;</div>` where Chrome reports 24, and the same for any run
 # containing a single accented letter. That inflated every catalog `<li>` whose
 # text carries an `&mdash;`.
-fn style_measured_run_advance(txt: text, txt_len: i32, st: Style) -> i32:
+fn _lay_style_measured_run_advance_inner(txt: text, txt_len: i32, st: Style) -> i32:
     if st.resolved_font_width > 0 and st.resolved_font_advances.len() == text_codepoints(txt).len():
         return st.resolved_font_width
     style_text_line_advance_width(txt, 0, txt_len, st, style_text_advance(st), style_space_advance(st))
@@ -862,11 +862,19 @@ fn resolved_space_advance(st: Style, measured_cps: [i64]) -> i32:
         i = i + 1
     style_space_advance(st)
 
-fn inline_text_advance_width(node: HNode, st: Style) -> i32:
+fn _lay_inline_text_advance_width_inner(node: HNode, st: Style) -> i32:
     if node.tag != "#text":
         return 0
     val raw = node.text_data
+    # `lay_cps` (round 13): this decode runs on EVERY call, including the ones
+    # that then return `st.resolved_font_width` in O(1) from the arity check
+    # below -- so if the inline bucket is dominated by it, the repeat is the
+    # decode, not the measurement. Timed to decide that from data rather than
+    # from code reading; default-off like every counter here.
+    val _cps_t0 = if _wsc_on: _wsc_now_us() else: 0
     val cps = text_codepoints(raw)
+    if _wsc_on:
+        _wlay_add(9, _wsc_now_us() - _cps_t0, 1)
     # `resolved_font_advances` carries ONE advance per codepoint (see
     # font_renderer.measure_text_advances), so the arity check is against the
     # codepoint count. Comparing it against `raw.len()` matched only by
@@ -988,7 +996,7 @@ fn text_line_needs_paint_width(st: Style, line_i: i32, line_count: i32) -> bool:
         return not st.direction_rtl
     false
 
-fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
+fn _lay_ellipsize_text_for_width_inner(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
     if max_width <= 0:
         return ""
     val full_width = style_text_line_advance_width(txt, start, endv, st, advance, space_advance)
@@ -1065,7 +1073,7 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, n
         return LineWrapRanges(starts: [0; 1], ends: [0; 1])
     LineWrapRanges(starts: starts, ends: ends)
 
-fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
+fn _lay_compute_wrap_ranges_inner(txt: text, cpl: i32) -> LineWrapRanges:
     val txt_len = txt.len()
     if txt_len == 0:
         return LineWrapRanges(starts: [0; 1], ends: [0; 1])
@@ -1089,7 +1097,7 @@ fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
         line = line + 1
     LineWrapRanges(starts: starts, ends: ends)
 
-fn compute_style_wrap_ranges(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
     if st.resolved_font_identity == "" or st.resolved_font_advances.len() != txt.len() or max_width <= 0:
         return compute_wrap_ranges(txt, fallback_cpl)
     var starts: [i32] = []
@@ -1467,7 +1475,7 @@ fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containi
 # Grid SS11.5 "Resolving Flexible Track Sizes", simplified: no min-content
 # clamping and no `minmax()` support (see
 # doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md).
-fn grid_track_sizes(raw: text, available_w: i32, gap: i32) -> [i32]:
+fn _lay_grid_track_sizes_inner(raw: text, available_w: i32, gap: i32) -> [i32]:
     var tokens: [text] = []
     var is_fr: [bool] = []
     var fixed_sum = 0
@@ -3594,3 +3602,116 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     out_bh[i] = h
     val placed = relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
     LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b, leading_margin_t: leading_margin_t)
+
+# ---------------------------------------------------------------------------
+# Layout-stage leaf timers (2026-09-13, round 13).
+#
+# Round 12 §4 recorded that the `layout()` window had NO timers at all and was
+# the largest unattributed mass in the cold pipeline. These wrappers are the
+# whole instrument: each delegates to the untouched `_lay_*_inner` body, so
+# behaviour is unchanged, and charges its INCLUSIVE wall time to one bucket of
+# `web_layout_counters_report()` only while `SIMPLE_WEB_STYLE_COUNTERS=1` is
+# armed. When it is not armed the wrapper is a straight tail call and reads no
+# clock, matching the default-off discipline of every counter in this engine.
+#
+# Nesting is real and is NOT subtracted, exactly as `sec_resolve` nests inside
+# `sec_metrics`: `lay_wrap` contains the fallback `compute_wrap_ranges`,
+# `lay_intrinsic` contains its own recursion over a subtree, and the flex and
+# table buckets call the measure leaves. Read the buckets as "time under this
+# helper", never as a partition that must sum to the layout window.
+
+fn style_run_byte_advances(st: Style, s: text) -> [i32]:
+    if not _wsc_on:
+        return _lay_style_run_byte_advances_inner(st, s)
+    val t0 = _wsc_now_us()
+    val out = _lay_style_run_byte_advances_inner(st, s)
+    _wlay_add(0, _wsc_now_us() - t0, 1)
+    out
+
+fn style_measured_run_advance(txt: text, txt_len: i32, st: Style) -> i32:
+    if not _wsc_on:
+        return _lay_style_measured_run_advance_inner(txt, txt_len, st)
+    val t0 = _wsc_now_us()
+    val out = _lay_style_measured_run_advance_inner(txt, txt_len, st)
+    _wlay_add(0, _wsc_now_us() - t0, 1)
+    out
+
+fn inline_text_advance_width(node: HNode, st: Style) -> i32:
+    if not _wsc_on:
+        return _lay_inline_text_advance_width_inner(node, st)
+    val t0 = _wsc_now_us()
+    val out = _lay_inline_text_advance_width_inner(node, st)
+    _wlay_add(1, _wsc_now_us() - t0, 1)
+    out
+
+fn compute_style_wrap_ranges(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    if not _wsc_on:
+        return _lay_compute_style_wrap_ranges_inner(txt, max_width, st, fallback_cpl)
+    val t0 = _wsc_now_us()
+    val out = _lay_compute_style_wrap_ranges_inner(txt, max_width, st, fallback_cpl)
+    _wlay_add(2, _wsc_now_us() - t0, 1)
+    out
+
+fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
+    if not _wsc_on:
+        return _lay_compute_wrap_ranges_inner(txt, cpl)
+    val t0 = _wsc_now_us()
+    val out = _lay_compute_wrap_ranges_inner(txt, cpl)
+    _wlay_add(2, _wsc_now_us() - t0, 1)
+    out
+
+fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
+    if not _wsc_on:
+        return _lay_intrinsic_text_width_inner(nodes, styles, child_index, i, widths)
+    val t0 = _wsc_now_us()
+    val out = _lay_intrinsic_text_width_inner(nodes, styles, child_index, i, widths)
+    _wlay_add(3, _wsc_now_us() - t0, 1)
+    out
+
+fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+    if not _wsc_on:
+        return _lay_flex_item_max_content_width_inner(nodes, styles, child_index, i)
+    val t0 = _wsc_now_us()
+    val out = _lay_flex_item_max_content_width_inner(nodes, styles, child_index, i)
+    _wlay_add(4, _wsc_now_us() - t0, 1)
+    out
+
+fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
+    if not _wsc_on:
+        return _lay_flex_wrap_auto_base_width_inner(nodes, styles, child_index, item, cst, iw, caller_base_w)
+    val t0 = _wsc_now_us()
+    val out = _lay_flex_wrap_auto_base_width_inner(nodes, styles, child_index, item, cst, iw, caller_base_w)
+    _wlay_add(4, _wsc_now_us() - t0, 1)
+    out
+
+fn table_cell_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+    if not _wsc_on:
+        return _lay_table_cell_max_content_width_inner(nodes, styles, child_index, cell)
+    val t0 = _wsc_now_us()
+    val out = _lay_table_cell_max_content_width_inner(nodes, styles, child_index, cell)
+    _wlay_add(5, _wsc_now_us() - t0, 1)
+    out
+
+fn table_cell_min_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+    if not _wsc_on:
+        return _lay_table_cell_min_content_width_inner(nodes, styles, child_index, cell)
+    val t0 = _wsc_now_us()
+    val out = _lay_table_cell_min_content_width_inner(nodes, styles, child_index, cell)
+    _wlay_add(5, _wsc_now_us() - t0, 1)
+    out
+
+fn grid_track_sizes(raw: text, available_w: i32, gap: i32) -> [i32]:
+    if not _wsc_on:
+        return _lay_grid_track_sizes_inner(raw, available_w, gap)
+    val t0 = _wsc_now_us()
+    val out = _lay_grid_track_sizes_inner(raw, available_w, gap)
+    _wlay_add(6, _wsc_now_us() - t0, 1)
+    out
+
+fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
+    if not _wsc_on:
+        return _lay_ellipsize_text_for_width_inner(txt, start, endv, max_width, st, advance, space_advance)
+    val t0 = _wsc_now_us()
+    val out = _lay_ellipsize_text_for_width_inner(txt, start, endv, max_width, st, advance, space_advance)
+    _wlay_add(7, _wsc_now_us() - t0, 1)
+    out

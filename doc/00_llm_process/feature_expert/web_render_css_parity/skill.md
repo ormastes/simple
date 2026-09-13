@@ -426,3 +426,42 @@ fractionally to 77. A face swap cannot fix that; the contained fix is to emit
 `round(cum[i+1]) − round(cum[i])` from milli-px advances inside
 `measure_text_advances`. Measurements:
 `doc/10_metrics/ui/web_chrome_parity_round11_2026-09-13.md`.
+## Round 13 (2026-09-13) — batched glyph advances, and the first layout profile
+
+`sfnt_glyph_advance_into` re-parsed the sfnt offset table plus three
+`find_table` directory scans **per glyph** (228 calls, ~1.09 ms each). It is
+replaced on the hot path by `sfnt_blob_glyph_advances_into`, which does that
+setup once for a whole glyph-id array, and by an `_advw` warm table in
+`font_renderer.spl` keyed `(loaded-face identity, font_size)` — the same key
+granularity the per-glyph path uses, because an advance is size-dependent.
+Measured 228/228 batch hits, `gadv_sfnt` 351 ms -> 0, `gadv_batch` ~27 ms.
+**The exactness argument is structural, not empirical**: the batch reproduces
+every guard of the per-glyph function, including `_hmtx`'s left-side-bearing
+bounds test that neither function reads — drop it and the batch would answer a
+number where the per-glyph path answered "fail", changing glyph positions.
+Oracle: `test/01_unit/lib/common/encoding/sfnt_batch_glyph_advances_equivalence_spec.spl`
+(sabotage-checked).
+
+`layout()` now has timers for the first time — `web_layout_counters_report()`,
+nine buckets, same `SIMPLE_WEB_STYLE_COUNTERS=1` gate. **They are INCLUSIVE and
+are not a partition**: `lay_cps` nests inside `lay_inline`; wrap/flex/table
+contain `lay_measure`.
+
+**The landmine this round added to the index:** `inline_text_advance_width`
+spends 60% of its time in one `text_codepoints` decode, which *looks* exactly
+like a repeat-computation. It is not — a two-entry exact memo measured **3 hits
+/ 1,454 misses** on the real catalog. Do not "obviously" cache it; the 1,457
+calls are 1,454 distinct strings. The real fix is to avoid building the array
+when only its LENGTH is used, which needs a malformed-UTF-8 equivalence fixture
+first. Measurements: `doc/10_metrics/ui/web_perf_round13_2026-09-13.md`.
+
+**Round 13 addendum — the landmine the round itself stepped on.** The parity
+lane's sub-pixel change gave `sfnt_glyph_advance_into` TWO advance fields:
+`meta[2]` (rounded pixels) and `meta[18]` (milli-pixels), and the renderer's
+index lane prefers `meta[18]`. They are rounded INDEPENDENTLY from the
+unrounded scale, so `meta[18] / 1000 != meta[2]`. A batch replacement that
+carried only `meta[2]` passed a `meta[2]`-only equivalence spec, reported zero
+mismatches under a live per-call probe, and still moved all eight catalog
+digests — because it was right about the field nobody reads. **If you touch an
+advance path, check BOTH fields; a one-lane oracle for a two-lane function is
+not an oracle.** Only the Draw IR digest gate caught it.
