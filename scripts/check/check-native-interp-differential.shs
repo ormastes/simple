@@ -1,0 +1,327 @@
+#!/bin/sh
+# check-native-interp-differential.shs — native-vs-interpreter differential census.
+#
+# WHY THIS EXISTS
+# ---------------
+# The macOS bootstrap chain (doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md,
+# runs 1-24) has been peeling ONE native-codegen defect per ~1-hour run, each of the
+# same shape: "the Rust seed's native pipeline computes a different value than the
+# interpreter for the same Simple source". Filed instances so far include
+#   doc/08_tracking/bug/native_optional_unwrap_field_index_by_name_collision_2026-09-12.md
+#   doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md
+#   doc/08_tracking/bug/unwrap_still_rebinds_to_poll_unwrap_at_closure_scale_2026-09-13.md
+#   doc/08_tracking/bug/dict_struct_key_identity_keyed_copied_key_misses_2026-09-13.md
+#   doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+#   doc/08_tracking/bug/result_bound_text_payload_lost_in_stage2_native_codegen_2026-09-13.md
+# Finding them one at a time costs a bootstrap run each. This guard finds the whole
+# CLASS at once: it runs the same spec file twice — once on the seed interpreter and
+# once as a seed-native-built binary in the Stage-2 `--mode dynload` configuration —
+# and diffs the per-example verdicts.
+#
+# The oracle is the interpreter. A spec that is RED on BOTH lanes is not a divergence
+# (it is an ordinary product bug); a spec whose per-example verdicts DIFFER is. A spec
+# that fails to native-build is a divergence of class `build-failed`, never a skip:
+# "it did not build" is exactly the failure mode this lane is chartered to surface.
+#
+# SPLIT OF RESPONSIBILITY
+#   this .shs  — process work: curate specs, run both lanes, capture transcripts + rc
+#   .spl driver (src/app/test/native_interp_differential.spl)
+#              — pure logic: parse transcripts, diff, classify, emit .sdn/.md/verdict
+# The split is what makes --selftest cheap: fixtures feed the driver canned transcripts.
+#
+# EXIT-STATUS DISCIPLINE
+# Every subprocess status is read into a variable on the line IMMEDIATELY after the
+# invocation, never through a pipe — a pipeline's $? is the LAST command's status and
+# that has produced false greens in this repo before.
+#
+# ON SIMPLE_ALLOW_UNRESOLVED_RUNTIME
+# The spec harness (std.nogc_sync_mut.spec) transitively declares five process/mmap
+# externs — rt_exec, rt_execute_native, rt_get_host_target_code, rt_mmap,
+# rt_process_run_with_limits — that live in the RUST runtime crate
+# (src/compiler_rust/runtime/src/value/sffi/{env_process,security_runtime}.rs) and can
+# therefore never be defined by the CoreCBootstrap lane's C-only archive. Every
+# spec native-build hits the fail-closed unresolved-symbol preflight
+# (pipeline/native_project/stubs.rs) on those five and only those five.
+# We do NOT blanket-bypass. The build is attempted CLOSED first; only if it fails with
+# the preflight AND the named unresolved set is a subset of the inert allowlist below
+# is it retried with SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1, and the retry is RECORDED in
+# the row (`bypass=`). Any other unresolved symbol is class `build-failed`. A bypassed
+# binary carries a NULL GOT slot per allowlisted name, so a spec that actually calls
+# one SEGVs — that shows up as class `crash`, which is reported, not hidden.
+#
+# Usage:
+#   sh scripts/check/check-native-interp-differential.shs [--specs-file F] [--limit N]
+#                                                         [--out-dir D] [--selftest]
+# Verdict (always the LAST line of stdout):
+#   PASS  — <n> spec(s) compared, 0 divergent            exit 0
+#   FAIL  — <n> spec(s) compared, <k> divergent ...      exit 1
+#   ERROR — nothing was checked (<reason>)               exit 2
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+INERT_UNRESOLVED="rtexec rtexecutenative rtgethosttargetcode rtmmap rtprocessrunwithlimits"
+
+SPEC_TIMEOUT=${SIMPLE_NID_TIMEOUT:-600}
+# The native RUN gets its own, shorter cap. The #771 `.?`-on-empty-array shape spins a
+# loop forever rather than failing, and one 600 s stall per such spec is exactly how a
+# 60-spec census dies unfinished. A run that hits this cap is rc=124, class `crash`.
+RUN_TIMEOUT=${SIMPLE_NID_RUN_TIMEOUT:-120}
+# Backend is PINNED, never defaulted: a census that does not record which backend
+# lowered the code cannot be compared against the bootstrap chain's own runs. Neither
+# seed on this host carries the `llvm` cargo feature — `--backend llvm` is refused
+# outright ("not available in this build") — so the LLVM-lowering half of the chain's
+# defect family (#746) is out of this harness's reach until an llvm-featured seed
+# exists. Stated rather than papered over.
+BACKEND=${SIMPLE_NID_BACKEND:-cranelift}
+LIMIT=0
+SPECS_FILE=""
+OUT_DIR=""
+SELFTEST=0
+SEED=${SIMPLE_NID_SEED:-}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --specs-file) SPECS_FILE=$2; shift 2 ;;
+    --limit) LIMIT=$2; shift 2 ;;
+    --out-dir) OUT_DIR=$2; shift 2 ;;
+    --selftest) SELFTEST=1; shift ;;
+    --seed) SEED=$2; shift 2 ;;
+    *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+  esac
+done
+
+# ---- seed discovery -------------------------------------------------------
+# Prefer the newest seed that is executable. Identity is RECORDED in the report; a
+# differential census that does not name its seed is not reproducible.
+nid_find_seed() {
+  best=""; best_mtime=0
+  # Search this tree first, then the tree this worktree was cut from — a worktree's own
+  # build/ is usually empty. An absolute home path hardcoded here would ERROR on every
+  # other host, so it is derived. --seed / SIMPLE_NID_SEED always wins over discovery.
+  _common=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  _main_root=${_common%/.git}
+  for cand in "$repo_root"/build/cargo-*/release/simple \
+              "$repo_root"/src/compiler_rust/target/*/simple \
+              "$_main_root"/build/cargo-*/release/simple; do
+    [ -x "$cand" ] || continue
+    m=$(stat -f '%m' "$cand" 2>/dev/null || stat -c '%Y' "$cand" 2>/dev/null || echo 0)
+    if [ "${m:-0}" -gt "$best_mtime" ]; then best=$cand; best_mtime=$m; fi
+  done
+  [ -n "$best" ] && printf '%s\n' "$best"
+}
+
+# ---- curation -------------------------------------------------------------
+# Pure-logic specs only: nothing that needs a GPU, a device, a network peer, or a
+# child process. Grepping for the absence of those tokens is a coarse filter and is
+# meant to be — a device-touching spec that slips through shows up as a lane-symmetric
+# failure (red on BOTH sides), which is not a divergence and is dropped by the driver.
+#
+# The two roots are stride-sampled and INTERLEAVED rather than concatenated and
+# sorted. A plain `sort | head -N` is not a sample: it returns the alphabetically
+# first N paths, which on this tree is 60 consecutive `compiler/50.mir/hwir_*`
+# specs — one directory, one feature, and a census that says nothing about the
+# rest. Striding across each root spreads the sample over directories.
+nid_curate_root() {
+  find "$1" -name '*_spec.spl' -type f 2>/dev/null | sort | while IFS= read -r f; do
+      lines=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
+      [ "${lines:-0}" -ge 20 ] || continue
+      [ "${lines:-0}" -le 140 ] || continue
+      if grep -qiE 'gpu|vulkan|metal|cuda|torch|process_run|shell|http|socket|tcp|listen|renderdoc|egl|wgpu|device' "$f"; then
+        continue
+      fi
+      printf '%s\n' "$f"
+    done | awk -v s="$2" 'NR % s == 1'
+}
+
+nid_curate() {
+  nid_curate_root test/01_unit/lib/common "${NID_STRIDE_LIB:-9}"
+  nid_curate_root test/01_unit/compiler "${NID_STRIDE_COMPILER:-23}"
+}
+
+nid_slug() { printf '%s\n' "$1" | tr '/.' '__'; }
+
+# ---- one spec, both lanes -------------------------------------------------
+nid_run_one() {
+  spec=$1; slug=$2; work=$3
+  interp_log="$work/$slug.interp.txt"
+  build_log="$work/$slug.build.txt"
+  native_log="$work/$slug.native.txt"
+  bin_out="$work/$slug.bin"
+  bypass=""
+
+  SIMPLE_EXECUTION_MODE=interpreter RUST_LOG=error \
+    timeout "$SPEC_TIMEOUT" "$SEED" run "$spec" >"$interp_log" 2>&1
+  interp_rc=$?
+
+  SIMPLE_NATIVE_BUILD_RUST=1 RUST_LOG=error \
+    timeout "$SPEC_TIMEOUT" "$SEED" native-build \
+      --source src/lib --source src/compiler --source src/app --source test \
+      --entry-closure --mode dynload --threads 1 --backend "$BACKEND" \
+      --cache-dir "$work/cache" \
+      --entry "$spec" -o "$bin_out" >"$build_log" 2>&1
+  build_rc=$?
+
+  if [ "$build_rc" -ne 0 ] && grep -q 'runtime symbol(s) referenced by generated code have no definition' "$build_log"; then
+    unres=$(sed -n 's/.*no definition in any linked object, runtime archive, or system library: //p' "$build_log" \
+            | head -1 | tr ',' ' ' | tr -s ' ')
+    inert=1
+    for s in $unres; do
+      key=$(printf '%s' "$s" | tr -d ' _')
+      case " $INERT_UNRESOLVED " in
+        *" $key "*) ;;
+        *) inert=0 ;;
+      esac
+    done
+    if [ "$inert" = 1 ] && [ -n "$unres" ]; then
+      bypass=$(printf '%s' "$unres" | tr ' ' '+')
+      SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1 RUST_LOG=error \
+        timeout "$SPEC_TIMEOUT" "$SEED" native-build \
+          --source src/lib --source src/compiler --source src/app --source test \
+          --entry-closure --mode dynload --threads 1 --backend "$BACKEND" \
+          --cache-dir "$work/cache" \
+          --entry "$spec" -o "$bin_out" >"$build_log" 2>&1
+      build_rc=$?
+    fi
+  fi
+
+  native_rc=-1
+  if [ "$build_rc" -eq 0 ] && [ -x "$bin_out" ]; then
+    timeout "$RUN_TIMEOUT" "$bin_out" >"$native_log" 2>&1
+    native_rc=$?
+    # Keep the artifact when the run did NOT come back clean: it is the only thing a
+    # `crash` row can be triaged with (`lldb -b -o run -o 'bt 3' -- <bin>`), and the
+    # faulting pc is what separates a bypass NULL-GOT slot (pc 0x0 — a runtime-lane
+    # gap, not codegen) from genuinely bad generated code.
+    if [ "$native_rc" -eq 0 ]; then rm -f "$bin_out"; fi
+  else
+    : >"$native_log"
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$spec" "$interp_rc" "$build_rc" "$native_rc" "${bypass:-none}" "$slug"
+}
+
+# ---- selftest -------------------------------------------------------------
+# Three fixtures, all driven through the REAL driver on canned transcripts, because a
+# fixture built on a LIVE defect goes green the day someone fixes it and turns this
+# guard's own selftest red. Repo convention: must-FAIL fixtures are permanently broken
+# by construction, never a live bug.
+nid_selftest() {
+  st=$(mktemp -d "${TMPDIR:-/tmp}/nid-selftest.XXXXXX") || return 1
+  fixtures=0; bad=0
+
+  # fixture 1: identical lanes -> NOT divergent
+  printf 'ok\n  \342\234\223 alpha\n  \342\234\223 beta\n\n2 examples, 0 failures\n' > "$st/f1.interp.txt"
+  printf 'ok\n  alpha pass\n  beta pass\n\n2 examples, 0 failures\n' > "$st/f1.native.txt"
+  : > "$st/f1.build.txt"
+  printf 'fx/one_spec.spl\t0\t0\t0\tnone\tf1\n' > "$st/manifest.tsv"
+  fixtures=$((fixtures + 1))
+
+  # fixture 2: native-only failure in the shape of the `.?`-on-empty-array defect
+  # (doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md).
+  # The native transcript carries NO failure detail, because the real native spec
+  # runner emits none — a fixture with an invented detail line would let a
+  # classifier that reads only transcript text look like it works when it cannot.
+  # Classification therefore has to come off the spec SOURCE, which this fixture
+  # supplies as a real file. Canned source, not a live bug: a fixture built on a
+  # live defect turns this selftest red the day someone fixes it.
+  mkdir -p "$st/fx"
+  printf 'describe "dotq":\n    it "empty array is falsy":\n        val a: [i64] = []\n        if a.?:\n            expect(false).to_equal(true)\n' > "$st/fx/two_spec.spl"
+  printf 'ok\n  \342\234\223 empty array is falsy\n\n1 examples, 0 failures\n' > "$st/f2.interp.txt"
+  printf 'ok\n  empty array is falsy fail\n\n1 examples, 1 failures\n' > "$st/f2.native.txt"
+  : > "$st/f2.build.txt"
+  printf '%s/fx/two_spec.spl\t0\t0\t1\tnone\tf2\n' "$st" >> "$st/manifest.tsv"
+  fixtures=$((fixtures + 1))
+
+  # fixture 3: build failure -> divergence of class build-failed, NOT a skip
+  printf 'ok\n  \342\234\223 gamma\n\n1 examples, 0 failures\n' > "$st/f3.interp.txt"
+  : > "$st/f3.native.txt"
+  printf 'Build failed: native-build aborted: 1 file(s) failed to compile\n' > "$st/f3.build.txt"
+  printf 'fx/three_spec.spl\t0\t1\t-1\tnone\tf3\n' >> "$st/manifest.tsv"
+  fixtures=$((fixtures + 1))
+
+  out=$("$SEED" run src/app/test/native_interp_differential.spl --work "$st" --report-dir "$st" --selftest 2>&1)
+  drv_rc=$?
+  verdict=$(printf '%s\n' "$out" | tail -1)
+
+  case "$verdict" in
+    FAIL*) ;;
+    *) echo "  selftest: expected a FAIL verdict from the 3-fixture set, got: $verdict" >&2; bad=$((bad + 1)) ;;
+  esac
+  [ "$drv_rc" = 1 ] || { echo "  selftest: expected driver exit 1, got $drv_rc" >&2; bad=$((bad + 1)); }
+  printf '%s\n' "$out" | grep -q 'build-failed' || { echo "  selftest: fixture 3 not classed build-failed" >&2; bad=$((bad + 1)); }
+  printf '%s\n' "$out" | grep -q 'truthiness' || { echo "  selftest: fixture 2 not classed truthiness" >&2; bad=$((bad + 1)); }
+  if printf '%s\n' "$out" | grep -q 'one_spec'; then
+    echo "  selftest: fixture 1 (identical lanes) was reported divergent" >&2; bad=$((bad + 1))
+  fi
+
+  rm -rf "$st"
+  echo "  selftest: $fixtures fixture(s), $bad failure(s)"
+  [ "$bad" = 0 ]
+}
+
+# ---- main -----------------------------------------------------------------
+[ -n "$SEED" ] || SEED=$(nid_find_seed)
+if [ -z "${SEED:-}" ] || [ ! -x "$SEED" ]; then
+  echo "ERROR — nothing was checked (no executable Rust seed under build/cargo-*/release/simple)"
+  exit 2
+fi
+seed_sha=$(shasum -a 256 "$SEED" 2>/dev/null | cut -c1-16)
+echo "seed: $SEED (sha256 ${seed_sha:-unknown}...)"
+
+if ! nid_selftest; then
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+if [ "$SELFTEST" = 1 ]; then
+  echo "PASS — 3 fixture(s) checked, 0 spec(s) compared (--selftest)"
+  exit 0
+fi
+
+if [ -n "$OUT_DIR" ]; then
+  work=$OUT_DIR; mkdir -p "$work"
+else
+  work=$(mktemp -d "${TMPDIR:-/tmp}/nid.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+fi
+
+if [ -n "$SPECS_FILE" ]; then
+  [ -f "$SPECS_FILE" ] || { echo "ERROR — nothing was checked (specs file not found: $SPECS_FILE)"; exit 2; }
+  specs=$(grep -v '^#' "$SPECS_FILE" | grep -v '^[[:space:]]*$')
+else
+  specs=$(nid_curate)
+fi
+if [ "$LIMIT" != 0 ]; then
+  specs=$(printf '%s\n' "$specs" | head -"$LIMIT")
+fi
+
+n=$(printf '%s\n' "$specs" | grep -c .)
+if [ "${n:-0}" -eq 0 ]; then
+  echo "ERROR — nothing was checked (curated spec set is empty)"
+  exit 2
+fi
+echo "comparing $n spec(s), timeout ${SPEC_TIMEOUT}s each, work dir $work"
+
+: > "$work/manifest.tsv"
+i=0
+for spec in $specs; do
+  [ -n "$spec" ] || continue
+  [ -f "$spec" ] || continue
+  i=$((i + 1))
+  slug=$(nid_slug "$spec")
+  echo "  [$i/$n] $spec" >&2
+  nid_run_one "$spec" "$slug" "$work" >> "$work/manifest.tsv"
+done
+
+rows=$(grep -c . "$work/manifest.tsv" 2>/dev/null || echo 0)
+if [ "${rows:-0}" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 specs produced a manifest row)"
+  exit 2
+fi
+
+report_dir=${SIMPLE_NID_REPORT_DIR:-$work}
+"$SEED" run src/app/test/native_interp_differential.spl \
+  --work "$work" --report-dir "$report_dir" --seed-id "${SEED}#${seed_sha}"
+exit $?
