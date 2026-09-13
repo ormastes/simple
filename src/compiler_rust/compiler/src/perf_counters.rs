@@ -96,6 +96,23 @@ counters!(
     // doc/08_tracking/bug/interpreter_while_loop_fast_path_shape_cliff_2026-09-12.md.
     // Now a matched loop reports the iterations it accelerated.
     WHILE_INLINE_INT_ITERS,
+    // block-scope shadow bookkeeping (interpreter/block_exec.rs:
+    // capture_node_scope_shadows / restore_block_scope_shadows). Every
+    // execution of a block that directly declares a `var`/`val`/`const`/
+    // `static` pays this, which for a loop body means once per iteration --
+    // measured, on child USER CPU time, at ~250 ns/iteration on top of the same
+    // body with the temporary hoisted out of the loop, i.e. about 20% of a
+    // ~1,170 ns generic iteration. (Wall clock on the measuring host does not
+    // survive its own control; see
+    // doc/08_tracking/bug/perf_wall_clock_ratio_unmeasurable_on_loaded_host_2026-09-13.md.)
+    // NAMES counts names captured; OWNER_WRITES and
+    // OWNER_PROBES count the module-global-store accesses that only a name
+    // aliasing a module global needs. They are the observable that makes the
+    // per-name bookkeeping countable from a spec instead of asserted, and they
+    // fail a spec closed when the block-scope path is not entered at all.
+    BLOCK_SHADOW_NAMES,
+    BLOCK_SHADOW_OWNER_WRITES,
+    BLOCK_SHADOW_OWNER_PROBES,
     // retention bounds on the loader memos (module_cache, bounded_cache).
     // EVICTIONS counts entries dropped to stay under the limit; PINNED_SKIPS
     // counts enforcement passes that could free nothing because every
