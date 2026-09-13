@@ -1,6 +1,6 @@
 # Module-level glyph raster cache: `[text]` array-element read is corrupt under native/JIT — lookup never hits its own store
 
-**Status:** OPEN (unverified 2026-09-12)
+**Status:** CLOSED (2026-09-13) -- not reproducible; the T11 root-caused repro spec is now green
 
 - **Date:** 2026-08-06
 - **Lane:** hosted `bin/simple run` (Cranelift JIT), font rendering
@@ -235,3 +235,26 @@ representable as small integers without a lookup step of its own).
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-13 (BUGFIX-10 fanout)
+
+Re-ran the T11 root-caused, sabotage-comparable repro spec on the deployed
+seed:
+
+```
+$ bin/simple test test/01_unit/language/text_array_index_readback_spec.spl
+SPEC FILE VERDICT: ... declared>=3 executed=3 passed=3 failed=0 skipped=0 dropped=0
+Results: 3 total, 3 passed, 0 failed
+```
+
+3/3 PASS — including "push via a free function is visible to the caller
+(`[text]`)" and the `[i64]` analog, both of which were the two RED examples
+this doc's T11 section left deliberately failing. The
+free-function-push-to-module-global write-back loss on the interpreter lane
+no longer reproduces. Not independently re-tested: the original never-landed
+glyph-raster-cache diff itself (reverted out of the tree per this doc's
+Recommendation, so there is nothing to re-test there) and the JIT lane
+(already documented as unaffected).
+
+- Status: CLOSED (2026-09-13) — not reproducible on `f26970e9d93`; T11's
+  repro spec is green (3/3).
