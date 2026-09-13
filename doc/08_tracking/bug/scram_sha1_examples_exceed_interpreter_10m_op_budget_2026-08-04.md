@@ -91,3 +91,14 @@ Three candidate fixes, none safe to pick from a measurement lane:
 The third is the one that matters: until the JIT list-return corruption is
 fixed, deliberately-expensive KDFs can only be exercised on the slow engine,
 where they do not fit the budget.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Re-ran `bin/simple test test/01_unit/os/crypto/scram_sha1_rfc5802_spec.spl`
+with a 60s bound: it did not complete in that window (consistent with the
+op-budget symptom this bug describes; not extended to a full measurement
+run here). None of the three candidate fixes this doc lists (raise/disable
+EXECUTION_LIMIT, cheapen the interpreter's HMAC-SHA-1 inner loop, or fix the
+separate JIT list-return corruption blocking the native engine) is safe to
+pick unilaterally from a bugfix lane, per the record's own reasoning. Left
+OPEN, unchanged.
