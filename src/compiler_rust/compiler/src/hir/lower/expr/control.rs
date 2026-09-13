@@ -2137,7 +2137,9 @@ impl Lowerer {
         // CANONICAL SEMANTICS (decided, not silently picked): `if x:` on an
         // optional/reference-typed `x` means PRESENCE — "x is not nil" — the
         // same meaning `x.?` already carries in condition position two dozen
-        // lines above, and the same predicate (`rt_is_some`) implements both.
+        // lines above. NOTE: they are no longer the SAME predicate -- a bare `.?`
+        // uses `rt_is_present` (nil/None or an empty array/dict/string is absent)
+        // while this tagged-slot wrap keeps `rt_is_some` (not the nil sentinel).
         // This deliberately does NOT adopt `RuntimeValue::truthy`'s
         // emptiness-aware rule; see the residual note below.
         //
@@ -2187,8 +2189,8 @@ impl Lowerer {
     /// whole browser-engine module to the interpreter.
     ///
     /// Recognizes exactly the shape `lower_exists_check` emits —
-    /// `LetIn { value, body: If { condition: rt_is_some(Local(idx)), .. } }` —
-    /// and replaces it with `rt_is_some(value)`, dropping the now-unused
+    /// `LetIn { value, body: If { condition: rt_is_present(Local(idx)), .. } }` —
+    /// and replaces it with `rt_is_present(value)`, dropping the now-unused
     /// binding. Recurses through `and`/`or`/`not` so
     /// `fn f() -> bool: a.? and b.?` is covered too.
     pub(crate) fn coerce_exists_value_to_bool_in_place(expr: &mut HirExpr) {
