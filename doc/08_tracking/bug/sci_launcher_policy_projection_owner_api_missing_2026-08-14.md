@@ -61,3 +61,14 @@ partial replacement. Full atomicity is unblocked by an owner API such as
 `launcher_replace_catalog_v1(validated_records)` that either commits all index
 and registry changes or preserves the previous catalog, plus an injected
 commit-failure test proving rollback.
+
+## Triage 2026-09-13
+
+This is a feature-gap request (typed scoped-capability projection API,
+a new launcher_registry owner API for atomic association replacement,
+plus focused tests) rather than a localized bug — three separate
+pieces of new API surface across os/kernel and os/services/launcher.
+Exceeds this lane's per-item budget as a single fix; not attempted.
+Confirmed files are not fenced, but scope is a multi-part design task.
+Leaving OPEN.
+
