@@ -12,6 +12,25 @@ creating a **Repository Access Token** (Bearer auth).
 
 If origin is not Bitbucket, abort and route to `gh_setup` instead.
 
+## Bitbucket Server / Data Center (8.19)
+
+For a self-hosted server, the Cloud steps below do not apply. Instead:
+1. In Bitbucket, go to **Profile → Manage account → HTTP access tokens** and create a token with repository write.
+2. Configure `~/.config/itf/config.sdn`:
+   ```
+   bitbucket:
+       url: https://host:222          # custom port / context path ok
+       deployment: datacenter         # inferred for any non-bitbucket.org URL
+       auth: bearer
+       project: PROJ
+       user: jdoe                     # optional; used for participant approve
+   token_env:
+       bitbucket: BB_TOKEN            # or bitbucket: token: ... in auth.sdn
+   ```
+3. Verify with `bin/itf bb pr list --repo <slug>`. Requests go to `https://host:222/rest/api/1.0` using `Authorization: Bearer`.
+
+Full details: `doc/07_guide/app/devhub.md` § `bb`.
+
 ## Procedure
 
 ### Step 1 — Mint a Repository Access Token
