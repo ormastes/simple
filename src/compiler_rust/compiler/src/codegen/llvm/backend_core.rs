@@ -2010,10 +2010,20 @@ mod default_x86_64_cpu_tests {
     fn host_targeting_widens_exactly_when_the_host_admits_avx512() {
         // The decision must track the real capability probe, not a guess.
         with_forced(None, || {
-            let expected_wide = cfg!(target_arch = "x86_64")
-                && std::is_x86_feature_detected!("avx512f")
+            // `cfg!` is a VALUE, not a compilation gate: on aarch64 the
+            // `is_x86_feature_detected!` arms still had to compile and the
+            // macro rejects the target outright ("This macro cannot be used
+            // on the current target"), so the whole `simple-compiler` lib
+            // TEST target failed to build on every non-x86 host -- no Rust
+            // unit test in this crate could run on an arm64 macOS box. A real
+            // `#[cfg]` on the binding keeps the x86_64 probe byte-identical
+            // and gives other architectures the only answer they can have.
+            #[cfg(target_arch = "x86_64")]
+            let expected_wide = std::is_x86_feature_detected!("avx512f")
                 && std::is_x86_feature_detected!("avx512vl")
                 && std::is_x86_feature_detected!("avx512bw");
+            #[cfg(not(target_arch = "x86_64"))]
+            let expected_wide = false;
             let got = default_x86_64_cpu_name("x86_64-unknown-linux-gnu");
             assert_eq!(got == "x86-64-v4", expected_wide, "got {got}");
         });
