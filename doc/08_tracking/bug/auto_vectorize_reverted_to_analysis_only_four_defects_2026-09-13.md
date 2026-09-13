@@ -327,3 +327,76 @@ none. `pass_status_spec.spl` is 12/12, including
 `simd_lowering.spl` still knows only three f32x4 names. That does not block the
 interpreter path this record is about, but it means the NATIVE backend cannot
 yet consume what the pass emits; tracked separately.
+
+## D8 — the pass emitted AVX-512-shaped MIR that the AVX-512 selector REJECTED
+
+Found immediately after the Active flip, by asking the question every earlier
+check stopped one step short of: does the function this pass actually produces
+reach real AVX-512 instruction selection?
+
+It did not. Fed to `x86_plan_avx512_fixed` — the real admission
+`isel_x86_64.spl:184` uses — the rewritten function came back:
+
+    ok=false  reason=avx512-load-splat-gather-shape-mismatch  shapes=0
+    simd_insts=4  locals=4
+
+Four SIMD instructions emitted, **zero** vector locals declared, so zero shapes
+planned and the whole function refused. On the native path the pass produced no
+AVX-512 at all.
+
+The cause is D4's fix applied to only half the problem.
+`x86_plan_avx512_fixed` (`x86_64_avx512_isel.spl:53-59`) derives every vector
+shape from `func.locals` declared types and from nothing else: inference
+propagates only across copies and mask ops, and `MirSimdLoad` carries its vector
+type but is **checked against** the shape rather than seeding it. D4 appended
+the alias-guard temporaries to `func.locals`; the vector body's temporaries —
+the two loaded slices, the result, the index, the exit flag and the three slice
+addresses — were never declared at all.
+
+Fixed with `vector_loop_locals(ctx, base_block_id)` in
+`auto_vectorize_codegen.spl`, called at the splice next to the existing
+guard-local append. The three vector values are declared with the real vector
+MirType (`Vec16f` / `Vec16i` / `Vec8d`); the index, guard flag and addresses as
+I64. It returns an empty list when the element/lane pair has no vector type,
+matching the empty vector body emitted in that case.
+
+After: `ok=true`, `reason=avx512-frame-values-planned`, `shapes=3`, `locals=12`,
+for f32x16, i32x16 and f64x8 alike.
+
+### Why nothing caught this
+
+Every check in place stopped at the MIR. The pass emitted `MirSimdLoad` /
+`MirSimdBinop` / `MirSimdStore` with correct vector types, the differential test
+proved the INTERPRETER executed them and produced byte-identical results, and
+the AVX-512 backend specs proved the selector admits well-formed vector MIR.
+Each was true. The join was not, and nothing tested the join.
+
+This is the same shape as D5 and D6 one level further out: D5 was "the emitted
+instructions have no implementation", D6 was "the emitted loop does not
+terminate", and D8 is "the emitted function is refused by the selector it was
+built for". Each was invisible until something downstream was actually asked to
+consume the output.
+
+### The chain spec
+
+`test/01_unit/compiler/mir_opt/auto_vectorize_avx512_chain_spec.spl`, 6/6. It
+builds a plain scalar `out[i] = a[i] + b[i]` loop, runs the real rewrite, and
+hands the result to the real admission — no hand-written vector MIR anywhere.
+
+  * a control that the pass really did rewrite, so an admission verdict is not
+    being read off an untransformed function;
+  * admission for f32x16, i32x16 and f64x8, each asserting the exact success
+    reason rather than just a boolean;
+  * a direct pin that three vector-typed locals are declared, naming the cause
+    rather than only the symptom; and
+  * a negative control — a 4-lane recipe must NOT be admitted as AVX-512, so
+    the positive examples say something about width.
+
+### Correction to an earlier note
+
+This record previously said `simd_lowering.spl` knowing only three `f32x4`
+names was what blocked the native backend. That was wrong. `simd_lowering.spl`
+is the legacy string-named-intrinsic lane and is not on this path at all: the
+native x86_64 selector consumes `MirSimdLoad`/`MirSimdBinop`/`MirSimdStore`
+directly (`isel_x86_64.spl:368-375`, `x86_64_avx512_isel.spl:91-135`). The real
+blocker was D8, and it is fixed.

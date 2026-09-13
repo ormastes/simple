@@ -5,7 +5,7 @@
 
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirBlock}
-use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
+use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind, MirLocal, LocalKind}
 use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo}
 use compiler.mir_opt.mir_opt.simd_opt_metadata.{plugin_hook_vectorize_event}
 # `Span` is used in DECLARATION position here (`span: Span?` parameter at
@@ -701,6 +701,46 @@ fn _vec_block_instructions(body: [MirInst], inc_inst: MirInst, guard_inst: MirIn
         out.push(i)
     out.push(inc_inst)
     out.push(guard_inst)
+    out
+
+fn vector_loop_locals(ctx: VectorizeContext, base_block_id: i64) -> [MirLocal]:
+    """Declare every local `create_vector_loop_block` writes, WITH its type.
+
+    This is not bookkeeping. `x86_plan_avx512_fixed`
+    (x86_64_avx512_isel.spl:53-59) derives every vector shape from
+    `func.locals` declared types and from nothing else — inference only
+    propagates across copies and mask ops, and `MirSimdLoad` carries its
+    vector type but is CHECKED against the shape rather than seeding it. So a
+    vector temporary that is absent from `func.locals` has no shape, and the
+    AVX-512 selector rejects the whole function with
+    `avx512-load-splat-gather-shape-mismatch`.
+
+    Measured before this existed: the rewrite emitted 4 SIMD instructions and
+    declared 0 vector locals, so the pass produced NO AVX-512 on the native
+    path however correct its MIR was. Every check in place at the time stopped
+    at the MIR and could not see it.
+
+    Returns an empty list when the element/lane combination has no vector
+    MirType — the vector body is empty in that case, so there is nothing to
+    declare.
+    """
+    val vt_opt = vector_mir_type(ctx.element_type, ctx.vector_width)
+    if not vt_opt.?:
+        return []
+    val vt = vt_opt.unwrap()
+    var out: [MirLocal] = []
+    # The three vector values: the two loaded slices and the result.
+    for id in [base_block_id + 201, base_block_id + 202, base_block_id + 203]:
+        out.push(MirLocal(id: LocalId(id: id), name: nil, type_: vt,
+            kind: LocalKind.Temp, is_ghost: false))
+    # Induction index, exit-guard flag, and the three slice addresses are
+    # scalar. They are declared for the same reason: an undeclared local has
+    # no type entry for any consumer, not just the AVX-512 planner.
+    for id in [base_block_id + 200, base_block_id + 205,
+               base_block_id + 210, base_block_id + 211, base_block_id + 212]:
+        out.push(MirLocal(id: LocalId(id: id), name: nil,
+            type_: MirType(kind: MirTypeKind.I64),
+            kind: LocalKind.Temp, is_ghost: false))
     out
 
 fn create_vector_loop_block(

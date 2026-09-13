@@ -47,7 +47,7 @@ use compiler.mir_opt.mir_opt.auto_vectorize_types (VectorLoopInfo, ArrayAccess)
 use compiler.mir_opt.mir_opt.auto_vectorize_analysis (DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only)
 use compiler.mir_opt.mir_opt.auto_vectorize_validate (VectorizabilityResult, check_vectorizability, get_vectorizable_type)
 use compiler.mir_opt.mir_opt.auto_vectorize_cost (CostEstimate, estimate_vectorization_cost, should_vectorize_loop)
-use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, element_size_bytes)
+use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, element_size_bytes, vector_loop_locals)
 
 # ============================================================================
 # Main Auto-Vectorization Pass
@@ -539,12 +539,21 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     if guard_usable:
         new_blocks.push(create_scalar_version_block(body_blocks_for_peel[0], scalar_id))
 
+    # The vector loop's own temporaries must be declared too, WITH their
+    # vector types. The guard temporaries were given this treatment (D4) and
+    # the vector body's were not, which left the AVX-512 selector unable to
+    # shape a single one of them: it reads `func.locals` and nothing else, so
+    # it rejected every auto-vectorized function with
+    # `avx512-load-splat-gather-shape-mismatch`. The pass therefore emitted no
+    # AVX-512 at all on the native path — see the chain spec, which feeds this
+    # function's real output to the real admission.
     var spliced = MirFunction.with_blocks(func, new_blocks)
-    if guard_locals.len() > 0:
-        var all_locals = spliced.locals
-        for gl in guard_locals:
-            all_locals.push(gl)
-        spliced.locals = all_locals
+    var all_locals = spliced.locals
+    for gl in guard_locals:
+        all_locals.push(gl)
+    for vl in vector_loop_locals(ctx, recipe.header_block.id):
+        all_locals.push(vl)
+    spliced.locals = all_locals
     spliced
 
 fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
