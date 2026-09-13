@@ -81,6 +81,79 @@ static void absent(int root, const char* path) {
     assert(fstatat(root, path, &value, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
 }
 
+static void copy_carrier_and_hash(int64_t value, uint8_t* bytes, size_t length,
+                                  uint8_t digest[32]) {
+    assert(!rt_is_none(value) && rt_is_some(value));
+    assert(rt_array_bytes_validate(value) == (int64_t)length);
+    assert(rt_array_bytes_copy_checked(value, bytes, (int64_t)length) == (int64_t)length);
+    int64_t hash = rt_tls13_sha256(value);
+    assert(!rt_is_none(hash) && rt_array_bytes_validate(hash) == 32);
+    assert(rt_array_bytes_copy_checked(hash, digest, 32) == 32);
+    rt_array_free((SplArray*)(uintptr_t)hash);
+}
+
+/* Provider transport only. These bytes are deterministic arbitrary data, not
+ * an NVFS image. No image builder, manifest owner, CLI, guest, or digest
+ * admission policy is invoked by this check. */
+static void provider_carrier_transport(const char* directory, int test_root) {
+    const size_t length = 131072;
+    uint8_t* expected = (uint8_t*)malloc(length);
+    uint8_t* observed = (uint8_t*)malloc(length);
+    uint8_t original_hash[32], reread_hash[32], changed_hash[32];
+    assert(expected && observed);
+    for (size_t i = 0; i < length; ++i)
+        expected[i] = (uint8_t)(((i * 37U) ^ (i >> 8U) ^ (i >> 16U)) & 255U);
+    int64_t carrier = bytes_value(expected, length);
+    copy_carrier_and_hash(carrier, observed, length, original_hash);
+    assert(memcmp(expected, observed, length) == 0);
+    int64_t first_root = acquire(directory);
+    assert(first_root > 0);
+    assert(publish(first_root, "carrier.bin", carrier, (int64_t)length) == 0);
+    rt_array_free((SplArray*)(uintptr_t)carrier);
+    assert(rt_hosted_safe_artifact_root_close_v1(first_root));
+
+    int64_t reopened_root = acquire(directory);
+    assert(reopened_root > 0 && reopened_root != first_root);
+    expect_none(read_artifact(first_root, "carrier.bin", (int64_t)length));
+    expect_none(read_artifact(reopened_root, "carrier.bin", (int64_t)length - 1));
+    int64_t reread = read_artifact(reopened_root, "carrier.bin", (int64_t)length);
+    copy_carrier_and_hash(reread, observed, length, reread_hash);
+    assert(memcmp(expected, observed, length) == 0);
+    assert(memcmp(original_hash, reread_hash, sizeof(original_hash)) == 0);
+    rt_array_free((SplArray*)(uintptr_t)reread);
+
+    /* A completed same-length rewrite is a new stable file snapshot. The
+     * provider must return its changed bytes; the manifest/image owner must
+     * compare its expected digest and reject a substituted carrier. */
+    int fd = openat(test_root, "carrier.bin", O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
+    assert(fd >= 0);
+    const size_t offsets[] = {0, 65535, 131071};
+    for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
+        size_t offset = offsets[i];
+        expected[offset] ^= 0xa5;
+        assert(pwrite(fd, expected + offset, 1, (off_t)offset) == 1);
+    }
+    assert(fsync(fd) == 0 && close(fd) == 0);
+    int64_t changed = read_artifact(reopened_root, "carrier.bin", (int64_t)length);
+    copy_carrier_and_hash(changed, observed, length, changed_hash);
+    assert(memcmp(expected, observed, length) == 0);
+    assert(memcmp(original_hash, changed_hash, sizeof(original_hash)) != 0);
+    rt_array_free((SplArray*)(uintptr_t)changed);
+
+    assert(renameat(test_root, "carrier.bin", test_root, "carrier-preserved.bin") == 0);
+    assert(symlinkat("carrier-preserved.bin", test_root, "carrier.bin") == 0);
+    expect_none(read_artifact(reopened_root, "carrier.bin", (int64_t)length));
+    assert(rt_hosted_safe_artifact_root_close_v1(reopened_root));
+    assert(unlinkat(test_root, "carrier.bin", 0) == 0);
+    assert(unlinkat(test_root, "carrier-preserved.bin", 0) == 0);
+    free(expected);
+    free(observed);
+
+    printf("PASS: provider-only carrier bytes=131072 close/reacquire=exact sha256=");
+    for (size_t i = 0; i < sizeof(original_hash); ++i) printf("%02x", original_hash[i]);
+    puts(" symlink=nil same-length-mutation=changed-stable-bytes NVFS/CLI=not-qualified");
+}
+
 typedef struct PublishTask { int64_t root, bytes, result; } PublishTask;
 static void* concurrent_publish(void* raw) {
     PublishTask* task = (PublishTask*)raw;
@@ -214,6 +287,8 @@ int main(void) {
     assert(pthread_join(threads[0], NULL) == 0 && pthread_join(threads[1], NULL) == 0);
     assert((first.result == 0 && second.result == -2) || (first.result == -2 && second.result == 0));
     expect_bytes(read_artifact(root, "race", 32), payload, sizeof(payload));
+
+    provider_carrier_transport(directory, test_root);
 
     int64_t handles[31];
     for (unsigned int i = 0; i < 31; ++i) { handles[i] = acquire(directory); assert(handles[i] > 0); }

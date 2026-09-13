@@ -80,6 +80,29 @@ superseded by the corrected selfchecks. Native Simple execution remains
 **MissingEvidence**; this correction does not replace the pending admitted
 self-hosted compiler/facade execution gate.
 
+### Bounded provider-only carrier transport, 2026-09-14
+
+The native selfcheck now publishes a deterministic **131072-byte** `SplArray`,
+closes the retained root, acquires a new root token, and rereads the published
+file. It asserts the exact byte count, equality of every byte, and SHA-256
+equality through the runtime byte-array hashing ABI. The old root token and a
+131071-byte read bound both reject the carrier with canonical nil.
+
+The check then completes and syncs a same-length mutation at offsets 0, 65535,
+and 131071. A subsequent read must return the exact changed stable bytes and a
+different digest. Digest mismatch rejection belongs to the image/manifest owner;
+this provider does not know the expected artifact digest. Finally, substituting
+a symlink at the carrier pathname must return canonical nil.
+
+PASS in the single native selfcheck run after this addition. Original and
+post-reacquisition SHA-256:
+`ca5b6ca81c39b4f56508e4f58d3f6614febc3617338ec7c85d7e14c8f61dda13`.
+The check also passed the same-length mutation and symlink-substitution cases.
+
+This is **provider-only transport evidence** using arbitrary deterministic
+bytes. It does not instantiate or validate NVFS, run the verified composition
+owner, execute the Simple CLI, boot a guest, or qualify any release image.
+
 ## Limits and remaining work
 
 This is native boundary evidence, not compiler-in-SimpleOS or release evidence.
