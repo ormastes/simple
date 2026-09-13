@@ -11,6 +11,7 @@ They do not prove storage behavior, firmware boot, or compiler-in-guest executio
 # requirements: doc/02_requirements/feature/simple_platform_unification.md
 use std.spec.{describe, it, expect}
 use std.spec.step
+use app.io.mod.{file_read}
 use os.fs_wrapper_artifact.{fs_wrapper_symbol_admission, fs_wrapper_requires_artifact_admission}
 
 val FS_ENTRY = "examples/09_embedded/simple_os/arch/x86_64/fs_test_entry.spl"
@@ -74,6 +75,26 @@ describe "filesystem wrapper ELF symbol admission":
         expect(admission.reason).to_equal("undefined-symbol")
         expect(admission.symbol).to_equal("missing_provider")
 
+    it "rejects nine-field versioned undefined references":
+        step("Parse version suffixes and optional version indices without dropping undefined rows")
+        val symbols = strong_fs_symbols() + "14: 00000000 0 FUNC GLOBAL DEFAULT UND missing_provider@SOSIX_1 (2)\n"
+        val admission = fs_wrapper_symbol_admission(FS_ENTRY, symbols)
+        expect(admission.reason).to_equal("undefined-symbol")
+        expect(admission.symbol).to_equal("missing_provider")
+        for binding in ["GLOBAL", "WEAK"]:
+            val row = "9: 08000700 128 FUNC GLOBAL DEFAULT 1 simpleos_nvme_init"
+            val replacement = "9: 00000000 0 FUNC {binding} DEFAULT UND simpleos_nvme_init@SOSIX_1 (2)"
+            val required = fs_wrapper_symbol_admission(FS_ENTRY, strong_fs_symbols().replace(row, replacement))
+            expect(required.reason).to_equal("undefined-symbol")
+            expect(required.symbol).to_equal("simpleos_nvme_init")
+
+    it "normalizes versioned definitions without hiding weak required bindings":
+        step("Match required dependencies through GNU and LLVM versioned-name rendering")
+        val symbols = strong_fs_symbols().replace("simpleos_nvme_init\n", "simpleos_nvme_init@@SOSIX_1 (2)\n")
+        expect(fs_wrapper_symbol_admission(FS_ENTRY, symbols).reason).to_equal("ready")
+        val weak = symbols.replace("128 FUNC GLOBAL", "128 FUNC WEAK")
+        expect(fs_wrapper_symbol_admission(FS_ENTRY, weak).reason).to_equal("required-symbol-not-strong")
+
     it "rejects zero addresses and non-section bindings":
         step("Reject null, absolute, common, undefined, or malformed required definitions")
         for address in ["00000000", "not-hex"]:
@@ -116,3 +137,27 @@ describe "filesystem wrapper ELF symbol admission":
         expect(fs_wrapper_requires_artifact_admission(TOOLCHAIN_ENTRY)).to_equal(true)
         expect(fs_wrapper_requires_artifact_admission("examples/other.spl")).to_equal(false)
         expect(fs_wrapper_symbol_admission("examples/other.spl", strong_fs_symbols()).reason).to_equal("unsupported-entry")
+
+describe "filesystem admission at named-scenario launch boundaries":
+    it "checks the resolved kernel before named run and test launch":
+        step("Require admission in the two named-scenario execution functions")
+        val source = file_read("src/os/_QemuRunner/scenario_exec.spl")
+        for name in ["_run_scenario_impl", "test_scenario"]:
+            val function_tail = source.split("fn {name}(")[1]
+            val body = function_tail.split("\nfn ")[0]
+            expect(body).to_contain("val target = _resolved_runtime_scenario_target(scenario)")
+            expect(body).to_contain("val kernel_path = scenario_kernel_path(scenario, target)")
+            expect(body).to_contain("rt_process_run_timeout(qemu_bin")
+            val before_spawn = body.split("rt_process_run_timeout(qemu_bin")[0]
+            expect(before_spawn).to_contain("if not fs_wrapper_artifact_admitted(target.entry, kernel_path): return false")
+            val before_dispatch = body.split("val (stdout, stderr, exit_code) =")[0]
+            expect(before_dispatch).to_contain("if not fs_wrapper_artifact_admitted(target.entry, kernel_path): return false")
+
+    it "checks test_os before its direct QEMU launch":
+        step("Require the architecture test driver to inspect the kernel it launches")
+        val source = file_read("src/os/_QemuRunner/scenario_catalog.spl")
+        val function_tail = source.split("fn test_os(")[1]
+        val body = function_tail.split("\nfn ")[0]
+        expect(body).to_contain("rt_process_run_timeout(qemu_bin")
+        val before_spawn = body.split("rt_process_run_timeout(qemu_bin")[0]
+        expect(before_spawn).to_contain("if not fs_wrapper_artifact_admitted(target.entry, target.output): return false")

@@ -52,9 +52,13 @@ produce QEMU acceptance evidence.
 
 `x64-nvme-fat32` and the toolchain VFS wrapper inspect the actual ELF symbol
 table before accepting a fresh build, either build cache, or a direct QEMU run.
+The named-scenario run/test functions inspect the resolved kernel path, and
+`test_os` checks its target output before its separate launch path.
 The check uses `llvm-readelf` or `readelf`; unavailable tools, stripped required
 symbols, strong undefined references, and required weak/null/non-section
 definitions fail with `phase=artifact-admission` and a reason/symbol diagnostic.
+Versioned readelf names and optional version-index columns are checked too;
+required undefined imports fail regardless of weak or strong binding.
 The generated `_stubs_freestanding.c` object is rejected explicitly. Legitimate
 unrelated weak syscall defaults remain allowed; zero-sized strong entry aliases
 remain valid. `SIMPLE_ALLOW_FREESTANDING_STUBS=1` cannot bypass this admission.

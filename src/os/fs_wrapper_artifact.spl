@@ -70,12 +70,15 @@ pub fn fs_wrapper_symbol_admission(entry: text, symbols: text) -> FsWrapperArtif
     var found: {text: bool} = {}
     for line in symbols.split("\n"):
         val fields = _fs_symbol_fields(line.trim())
-        if fields.len() != 8: continue
+        if fields.len() < 8: continue
         if not fields[0].ends_with(":"): continue
-        val symbol = fields[7]
+        # readelf may append a version index as a ninth field, and render the
+        # name as symbol@VERSION or symbol@@VERSION. Neither presentation may
+        # hide an undefined or weak required dependency.
+        val symbol = fields[7].split("@")[0]
         if fields[3] == "FILE" and symbol == "_stubs_freestanding.c":
             return FsWrapperArtifactAdmission(false, "generated-freestanding-stubs", symbol)
-        if fields[4] == "GLOBAL" and fields[6] == "UND":
+        if fields[6] == "UND" and (fields[4] == "GLOBAL" or required.contains(symbol)):
             return FsWrapperArtifactAdmission(false, "undefined-symbol", symbol)
         if not required.contains(symbol): continue
         if fields[4] != "GLOBAL":
@@ -100,3 +103,11 @@ pub fn inspect_fs_wrapper_artifact(entry: text, artifact: text) -> FsWrapperArti
         if status == 0:
             return fs_wrapper_symbol_admission(entry, stdout)
     FsWrapperArtifactAdmission(false, "symbol-inspection-failed", "")
+
+pub fn fs_wrapper_artifact_admitted(entry: text, artifact: text) -> bool:
+    """Gate a resolved launch artifact; targets outside the wrapper contract pass through."""
+    if not fs_wrapper_requires_artifact_admission(entry): return true
+    val admission = inspect_fs_wrapper_artifact(entry, artifact)
+    if not admission.admitted:
+        print "[build] phase=artifact-admission FAILED reason={admission.reason} symbol={admission.symbol} output={artifact}"
+    admission.admitted
