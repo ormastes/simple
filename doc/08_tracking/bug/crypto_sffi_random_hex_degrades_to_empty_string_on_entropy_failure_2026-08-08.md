@@ -3,7 +3,7 @@
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 - **Date:** 2026-08-08
-- Status: OPEN (P2)
+- Status: RESOLVED (2026-09-13) — see Re-check below.
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
 - **Severity:** Medium (fail-open on a rare path, but the failure is silent and lands in a salt)
 - **Component:** `src/lib/nogc_sync_mut/io/crypto_sffi.spl`
@@ -99,3 +99,15 @@ no longer contains `rt_random_hex(length) ?? ""`. Line 366 now reads
 states "FAILS CLOSED. This used to be `rt_random_hex(length) ?? ""`, which turned a
 ..." — i.e. the fail-open degradation is gone and the doc block records it.
 Closing.
+
+## Re-check 2026-09-13 (BUGFIX-11)
+
+Confirmed on the deployed seed
+(`/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`,
+50,093,192 B, 2026-09-06 09:59): `random_hex`/`random_salt` in
+`src/lib/nogc_sync_mut/io/crypto_sffi.spl` now return `text?` and route
+through `checked_entropy_hex` -> `entropy_hex_valid_for`, with no `?? ""`
+anywhere in the file. `bin/simple test
+test/01_unit/lib/nogc_sync_mut/io/crypto_sffi_entropy_fail_closed_spec.spl`
+-> `10 examples, 0 failures`, `PASS`. Status header updated from `OPEN (P2)`
+to `RESOLVED (2026-09-13)`; no further code change needed.
