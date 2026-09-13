@@ -65,16 +65,23 @@ on both, same `acc`).
 | 2 | OK 23/0 | OK 23/0 |
 | 3 | **ERROR 22/1** | ERROR 21/2 |
 
-`while_loop_shape_parity_spec.spl` is worse: it disagrees with ITSELF across
-environments on the same seed. The base seed scored **7/7 in directory mode and
-0/7 standalone, three times**; the candidate scored 6/1 in directory mode and
-7/7 twice plus 6/1 once standalone. Under the runner its child reported
-`shape_slow_right` at 6,835,637 us with the `WHILE_INLINE_INT_ITERS` row absent,
-against 27,657 us with the row at 2,000,000 for the same fixture and the same
-binary run directly -- a 227x disagreement that is a property of the
-environment, not of either seed.
+**CORRECTION, same day.** `while_loop_shape_parity_spec.spl` does NOT belong in this
+record. Its anomalous child -- `shape_slow_right` at 6,835,637 us with the
+`interp-perf-counters:` header PRESENT but the `WHILE_INLINE_INT_ITERS` row ABSENT -- is
+not noise, and it is not either pinned seed. It is the fingerprint of a PRE-PERF-3 binary,
+and that was measured rather than inferred: the hand-linked deployed seed (Sep 6) gives
+8,627,802 us, header present, row absent -- 3 for 3; `simple.base` gives 27,657 us with the
+row at 2,000,000 -- 0 for 3. `bin/simple` is the ONLY entry in `simple_binary()`'s fallback
+chain that exists in a fresh worktree, and the test runner **drops `SIMPLE_PERF_SELF_BIN`
+in DIRECTORY mode while propagating it in single-file mode** (measured with an env-probe
+spec run both ways), so a directory run silently measures whatever `bin/simple` points at.
+A 0/7 under those conditions is the fail-closed gate WORKING -- correctly refusing a binary
+that has no such counter -- not a spec that cannot measure. Filed separately as
+`perf_spec_binary_resolution_falls_through_to_deployed_seed_2026-09-13.md`. The exact
+mode/verdict pattern PERF-6 observed is not fully explained by the propagation difference
+alone and was not chased further.
 
-Every failing example in both specs is a ratio pin
-(`stays within 3x`, `linear pin`). **No semantics example failed on either seed
-in any run.** The conclusion is not that one seed regressed; it is that these
-two specs do not measure a seed at all on this host.
+Only the `component_scaling` evidence above belongs to this record: it fails on BOTH seeds
+and resolves no binary, so no fallback can explain it. Every failing example in both specs
+is a ratio pin (`stays within 3x`, `linear pin`); **no semantics example failed on either
+seed in any run.**
