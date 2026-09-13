@@ -108,3 +108,56 @@ Step 1 of the closure order recorded above (a static bold candidate list, or
 `fvar` instancing in the TTF loader) is therefore still the blocker, and it is
 still in files this lane does not own. Adding the weight argument first would
 still change no advance. Left OPEN deliberately; not worked around.
+
+## Round 8 (2026-09-13, macOS) — the blocker is NOT a missing bold face; it is a validator that rejects every non-normal weight
+
+Round 7 recorded this as blocked on "only one static bold face in the tree
+(`UnifrakturCook-Bold.ttf`) and Linux-only font paths". Both halves of that are
+now superseded by direct measurement on this host:
+
+1. **A real regular/bold pair from one family exists and is readable.**
+   `/System/Library/Fonts/Supplemental/Arial.ttf` (773,236 bytes) and
+   `/System/Library/Fonts/Supplemental/Arial Bold.ttf` (750,984 bytes) are both
+   plain TTFs — no `.ttc` collection parsing needed, no `fvar` instancing
+   needed. The Linux twin is `DejaVuSans.ttf` / `DejaVuSans-Bold.ttf`, already
+   the shape the candidate lists use. So "no bold face available" is false.
+
+2. **The weight field the brief points at is declared and then rejected.**
+   `src/lib/nogc_sync_mut/text_layout/font_types.spl:150`, inside
+   `font_render_config_valid`:
+
+   ```
+   if font_render_config_normalize(config.weight) != "normal":
+       return false
+   ```
+
+   A `FontRenderConfig` carrying `weight: "bold"` is therefore *invalid*, and
+   `resolve_font_metrics_configured` (`font_renderer.spl`) returns
+   `invalid-font-config` before any face is looked at. The weight axis is
+   plumbed as far as the identity/cache key
+   (`font_types.spl:123` folds `weight=` into the identity, so the metric cache
+   is already weight-safe and will NOT collide bold with regular) and then
+   fenced off one line later. This is the actual first thing that has to change,
+   and it is a one-line change in a file this lane can touch — not the
+   "candidate list / `fvar` instancing in files this lane does not own" that
+   round 7 concluded.
+
+**Closure order, corrected:**
+
+1. Admit `weight: "bold"` (and the numeric 700 spelling) in
+   `font_render_config_valid` — the identity already distinguishes it.
+2. Give the candidate resolution a bold list: a bold sibling of
+   `browser_sans_font_candidates` / `..._serif_...` / `..._mono_...`
+   (`font_provider.spl:68-88`) carrying the Arial-Bold / DejaVu-Bold pair above,
+   selected when the config's weight is bold.
+3. Call it from `simple_web_html_layout_renderer_core.spl:~3360`, where
+   `resolve_font_metrics_with_language(st.font_family, ...)` currently ignores
+   `st.bold` (the `Style` already carries `bold`), so a `<strong>`/`<b>` run
+   measures with bold advances.
+4. Spec: the same word measured through both paths, bold strictly wider, with
+   the face's real delta recorded; then the geometry differ on the `<strong>` /
+   `<b>` lines of the `html` catalog page.
+
+Step 1 is verified by reading; steps 2-4 were NOT attempted in round 8 (the
+round's budget went to CSS 2.1 §17 automatic table layout). The record stays
+OPEN, but the blocking reason recorded in round 7 is retracted.
