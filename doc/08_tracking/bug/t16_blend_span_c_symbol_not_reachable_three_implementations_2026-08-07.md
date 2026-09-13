@@ -340,3 +340,14 @@ touched.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+The primary shard file (`src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs`)
+is Rust-seed territory — out of scope for a pure-Simple bugfix lane. The
+remaining ".spl" residual (self-hosted LLVM backend registration) requires
+editing `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`,
+which is FENCED (`scratchpad/egl_offlimits_v2.txt`) in this wave, and the
+record itself says it cannot be verified without a working Stage 3
+self-host, separately tracked as blocked. Leaving OPEN; recorded as
+fenced+blocked, not attempted.
