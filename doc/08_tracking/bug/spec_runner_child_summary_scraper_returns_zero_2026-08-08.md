@@ -1,6 +1,25 @@
 # `parse_child_example_summary` returns has_summary=0 on every run — a silently dead scraper (2026-08-08)
 
-**Status:** OPEN (unverified 2026-09-12)
+- Status: CLOSED (2026-09-13) — not reproducible on
+  `bin/release/aarch64-unknown-linux-gnu/simple` (interpreter mode). Ran the
+  doc's own specified repro verbatim:
+  `SIMPLE_TEST_RUNNER_DEBUG=1 bin/simple test test/01_unit/lib/nogc_async_mut/generator_take_returns_values_spec.spl`,
+  a 4-example GREEN spec, and read the debug line:
+  `test-runner debug: code=0 assert_ran=false has_evidence=0 ev_p=0 ev_f=0
+  real_p=4 real_f=0 has_sum=1 sum_p=4 sum_f=0 has_v=1 v_e=4 v_p=4 v_f=0 v_d=0
+  trunc=false` — `has_sum=1` and `sum_p=4` correctly match the real 4-passed
+  count, so `extract_number_before`/`parse_child_example_summary`
+  (`src/app/test_runner_new/test_runner_single.spl:429,581`) is not dead. Did
+  not add a dedicated isolated unit spec for the two functions directly:
+  neither is `export`ed from this file (checked: zero `export`/`pub` lines in
+  the file), so an external `use`-based spec cannot import them without a
+  wider refactor out of scope here; the live debug-line evidence above is the
+  exact discrimination proof the "Fix bar" section below asked for
+  (has_summary flips to 1, sum_p tracks the real passed count), captured
+  end-to-end through the real `bin/simple test` path rather than in isolation.
+  If this regresses, the repro command above reproduces it in one run.
+
+**Status (historical):** OPEN (unverified 2026-09-12)
 
 ## Status
 

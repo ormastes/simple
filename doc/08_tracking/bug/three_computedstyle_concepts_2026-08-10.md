@@ -1,5 +1,12 @@
 # Three unrelated `ComputedStyle` concepts (2026-08-10)
 
+## Triage 2026-09-13
+Not a bug requiring a fix -- an architecture-debt tracker ("do NOT add a
+fourth"). Confirmed still accurate: no merge has happened, all three
+ComputedStyle-concept files still exist at their named paths. No action
+needed; left OPEN as a design-debt record.
+
+
 **Status:** OPEN — filed, not merged. Do NOT add a fourth.
 
 Companion to `three_layoutbox_variants_2026-08-10.md`. While landing

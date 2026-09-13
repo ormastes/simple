@@ -1,5 +1,17 @@
 # core-C capsule gate is opted out of guard wiring on a false rationale
 
+- Status: RESOLVED (2026-09-13) — `scripts/check/guard_wiring_optout.txt` no
+  longer lists `build-core-c-bootstrap-runtime-capsule.shs`
+  (`grep -n build-core-c-bootstrap-runtime-capsule scripts/check/guard_wiring_optout.txt`
+  is now empty), and `sh scripts/check/check-guard-wiring.shs` PASSes:
+  `guard_wiring_ok=true`, `guard_unwired_new=0` — so the gate is no longer
+  both RED-and-invisible. Whichever change removed the optout line and wired
+  the gate into a caller was not isolated by sha in this pass; if the
+  optout entry reappears, `check-guard-wiring.shs`'s `guard_unwired_new`
+  counter is the fast tripwire.
+
+**Status (historical):**
+
 - **Date:** 2026-08-06
 - Status: OPEN (P3)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
