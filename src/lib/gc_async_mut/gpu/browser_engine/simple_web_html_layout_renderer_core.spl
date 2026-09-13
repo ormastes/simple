@@ -3001,6 +3001,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             _wsc_add_candidates(candidates_raw.len() as i64)
         var specificity_i = 0
         var selector_group_budget_count = 0
+        val _sb_t0 = if _wsc_armed(): _wsc_now_us() else: 0
         while specificity_i < candidates_raw.len():  # cpu-lane-loop-ok: walks the bucketed candidate rules of ONE node computing each rule's matched specificity; bound is that node's candidate count, not the full rule set
             val specificity_rule = candidates_raw[specificity_i]
             val specificity_groups = rules.group_parts[specificity_rule]
@@ -3027,7 +3028,12 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 break
             rule_specificities[specificity_rule] = matched_specificity
             specificity_i = specificity_i + 1
+        if _wsc_armed():
+            _wsc_add_sub(0, _wsc_now_us() - _sb_t0)
+        val _sb_t1 = if _wsc_armed(): _wsc_now_us() else: 0
         val candidates = _sort_candidates_by_specificity(candidates_raw, rule_specificities)
+        if _wsc_armed():
+            _wsc_add_sub(1, _wsc_now_us() - _sb_t1)
         if trace_stages:
             print "[layout-trace] style_stage=candidates-sorted index={i} count={candidates.len()}"
         if _wsc_armed():
@@ -3058,6 +3064,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # this node's ENTIRE author cascade, including the rules that
         # legitimately passed. Trimming keeps the cascade winners.
         var combined_decls = ""
+        val _sb_t2 = if _wsc_armed(): _wsc_now_us() else: 0
         while candidate_i < candidate_count:  # cpu-lane-loop-ok: walks ONE node's specificity-sorted candidate rules accumulating their normal decls into a single string, so apply_decls (the 70-90% per-node cost center) is called once per node instead of once per rule; budget-sampled every 256 candidates
             # Budget guard (inner): this is the apply_decls call site loop where a
             # single node can match thousands of rules (the hostile case). Sample
@@ -3081,7 +3088,13 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 if rules.important_decls[r] != "":
                     has_important_candidates = true
             candidate_i = candidate_i + 1
+        if _wsc_armed():
+            _wsc_add_sub(2, _wsc_now_us() - _sb_t2)
+        val _sb_t3 = if _wsc_armed(): _wsc_now_us() else: 0
         combined_decls = _merged_decls_within_quota(combined_decls)
+        if _wsc_armed():
+            _wsc_add_sub(3, _wsc_now_us() - _sb_t3)
+        val _sb_t4 = if _wsc_armed(): _wsc_now_us() else: 0
         if trace_stages:
             print "[layout-trace] style_stage=inline-input index={i} len={nd.style_attr.len()}"
         var inline_normal = ""
@@ -3139,6 +3152,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             combined_important_decls, inline_important
         )
 
+        if _wsc_armed():
+            _wsc_add_sub(4, _wsc_now_us() - _sb_t4)
         if combined_decls != "":
             # Memo boundary. `st` here is a deterministic function of
             # (parent inherited identity, tag, presentational decls), and the
@@ -3147,6 +3162,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             # the whole key. A hit is copied field-for-field OUT of the cache and
             # a miss is copied field-for-field IN (web_style_cascade_memo_store),
             # because everything below this point mutates `st` in place.
+            val _sb_t5 = if _wsc_armed(): _wsc_now_us() else: 0
             val memo_parent = if nd.parent >= 0: style_inherit_ids[nd.parent] else: -1
             # A parent that has not been resolved yet has no identity, and -1
             # would then mean two different things. Such a node bypasses the
@@ -3162,12 +3178,18 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 if val memo_hit = web_style_cascade_memo_lookup(memo_key):
                     st.copy_from(memo_hit)
                     memo_applied = true
+            if _wsc_armed():
+                _wsc_add_sub(5, _wsc_now_us() - _sb_t5)
             if not memo_applied:
+                val _sb_t6 = if _wsc_armed(): _wsc_now_us() else: 0
                 st = apply_decls_without_display_on_writing_mode(
                     st, combined_decls, em_base, logical_writing_mode
                 )
                 if memo_usable:
                     web_style_cascade_memo_store(memo_key, st)
+                if _wsc_armed():
+                    _wsc_add_sub(6, _wsc_now_us() - _sb_t6)
+        val _sb_t7 = if _wsc_armed(): _wsc_now_us() else: 0
         if inline_normal != "":
             val inline_empty_cells_decl = decl_get(
                 inline_normal, "empty-cells"
@@ -3221,6 +3243,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # tries to display it; invalid-context uses retain generic semantics.
         if nd.tag == "selectedcontent" and is_valid_selectedcontent_context(nodes, child_index, i):
             st = apply_decls(st, "display:none", em_base)
+        if _wsc_armed():
+            _wsc_add_sub(7, _wsc_now_us() - _sb_t7)
         # The shared WM supplies the package's named solid material for the
         # legacy fallback mode. A producer may opt into the CPU-composited
         # material contract only with the exact mode value, preserving the
