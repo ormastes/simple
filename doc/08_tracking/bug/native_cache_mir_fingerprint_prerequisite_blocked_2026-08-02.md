@@ -35,3 +35,8 @@ Serialization overhead cannot be honestly measured until the complete serializer
 exists. The current incomplete serializer is rejected as a benchmark target.
 Cache-hit delta remains zero and correctness is unchanged.
 
+
+## Triage 2026-09-13
+Reconfirmed: BLOCKED, claimed and audited by pure_parser_close per this
+record. Not this lane's claim to resolve. Left as-is, no code change
+attempted.
