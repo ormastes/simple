@@ -186,3 +186,30 @@ file**) reads the owner projection / `ctx.sources[].content` the same way, and
 (:1761) only decides cache reuse, so a released content degrades to a cache
 MISS (`source-mutated-since-parse` witness reason), not a hard failure. The
 duplicate definition is worth its own record.
+
+## CLOSED by bootstrap measurement (2026-09-13, BOOT-12)
+
+- **Status:** CLOSED (2026-09-13).
+
+Canonical `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+--backend=llvm --mode=dynload --jobs=10 --stop-after-stage2
+--output=build/bootstrap-boot12a`, fresh output root, detached under `setsid
+nohup`, 11:53:33 → 12:26:54 (**33m21s**, rc=1), tree `e94bc3822ca`. Stage-2
+candidate produced: sha256 `d49850e28673657d80be…`, 152285712 B (pin
+`scratchpad/boot12/pin/cand.boot12a.stage2`).
+
+In `stage3/aarch64-unknown-linux-gnu/stage2-receiver.log`:
+`grep -c native-capsule-source-mutated` = **0** (BOOT-10's same log: 2 units, both
+this) and `grep -c frozen-identity-absent` = **0**, so the fix did not merely
+move the failure into its own fail-closed branch.
+
+On the rebuilt candidate with `SIMPLE_STAGE3_STREAMING_SURFACES=1`, the 4-line
+fixture that used to fail now **links**: `[f1new1] route_status=0`, 0 mutated
+lines, `phase=link state=succeeded … succeeded=1`.
+
+Stage 2 is still NOT admitted, for a different and newly-exposed reason —
+`ld.lld: error: undefined symbol:
+compiler.common.module_path_naming.module_logical_name_from_path`, filed as
+`stage2_cross_module_call_mangling_asymmetry_undefined_symbol_2026-09-13.md`
+(site 13). That defect was masked by this one: capsule collection is upstream of
+linking, so no run had reached the link step for this closure before.
