@@ -504,11 +504,25 @@ impl HirLowering:
     me surface_index_for_name(name: text) -> i64:
         """Resolve against retained registry authority.
 
-        The registry's construction Dict dies with the transient surface arena.
-        Build this lowerer-owned scalar index only after teardown, then retain
-        it for the import-resolution hot path."""
-        if not self.surface_index_by_name_built:
-            self.build_surface_index_by_name()
-        if not self.surface_index_by_name.contains_key(name):
-            return -1
-        self.surface_index_by_name[name]
+        Bug bootstrap_s3_missing_importing_module_surface_2026-09-14: the
+        `{text: i64}` cache built by `build_surface_index_by_name` and read
+        here via `contains_key`/bracket-read is the SAME class of native-only
+        Dict defect BOOT-20 found for `imported_enum_owners` (a `{text: text}`
+        class field) -- except here the failure mode is a false `contains_key`
+        miss on an entry that WAS inserted, not a corrupted value read on a
+        hit. Reproduced on the real Stage-3 closure: ~190 of 832 modules'
+        OWN import-resolution surface lookup missed under the pinned Stage-2
+        native candidate even though `phase2:surface` had committed and
+        released a surface for every one of them (832/832), and the miss rate
+        did not correlate with path/name shape (both the primary and the
+        de-numbered fallback key missed for genuine hits, e.g.
+        `src/std/platform.spl`). Go straight to the Dict-free linear scan
+        over the retained `ordered_names`/`ordered_indices` arrays instead of
+        consulting the per-instance Dict cache at all -- correctness over the
+        O(1) cache, since a cache that can silently misreport `contains_key`
+        cannot be trusted to also misreport in the SAFE direction only.
+        `build_surface_index_by_name`/`surface_index_by_name*` fields are
+        left in place (module_surface_index_alignment/allocation-guard specs
+        and hir_package_dependency_scan_memo_spec's cache-miss-fallback
+        example still exercise them directly), but no longer consulted here."""
+        hir_module_surface_index(self.module_surfaces, name)
