@@ -41,22 +41,23 @@ fn build_registry(name: text) -> ModuleSurfacesByName:
     registry
 
 describe "module surface registry graph promotion reports a named reason":
-    # CONTRACT CHANGE, 2026-09-13 (`db127a8e8c4`): the per-field check is no
-    # longer "the FIRST promote returned true". An already-persistent field
-    # answers false from the first promote and that is not an error, so the
-    # post-condition is the sibling's: a SECOND promote reports true only for a
-    # value STILL owned by the dying scope, and THAT is the failure.
+    # CONTRACT CHANGE, 2026-09-13 (site 19): there is NO per-field verdict, and
+    # `db127a8e8c4`'s attempt to invent one is reverted. That commit required a
+    # SECOND `rt_transient_heap_promote` to answer false, on a premise
+    # `460aa9781cc` had already measured false with gdb nine hours earlier. A
+    # repeat promote answers false only for a plain transient heap STRING, whose
+    # RT_CORE_STRING_FLAG_TRANSIENT the C runtime clears (runtime_native.c:2474);
+    # every field in the 24-field loop is an ARRAY, which only has its
+    # transient_scope_id zeroed (:2493) while `rt_core_transient_classify` (:2362)
+    # consults neither -- so a repeat promote of a registered array answers TRUE
+    # forever and the post-condition was red by construction. macOS run 34
+    # measured exactly that: `field composite_names of surface[0]`.
     #
-    # The Rust seed's interpreter stubs `rt_transient_heap_promote` to answer
-    # true unconditionally, so under the seed the second promote ALWAYS reports
-    # true and the post-condition therefore always names a field. That is a
-    # property of the stub, not of the graph: measured on origin/main before
-    # this spec was repaired, `module_surfaces_promote` already answered
-    # `false` here for the same reason. Asserting `reason == ""` under the seed
-    # would be asserting the stub, not the contract, so these two examples now
-    # assert what IS decidable under the seed -- that the reason is
-    # self-identifying, and that the bool wrapper agrees with it exactly.
-    it "names the offending field rather than answering an unnamed failure":
+    # The promotes are the work and remain. Fail-closed coverage lives where a
+    # verdict is decidable: the freshly built registry root carrier below, and
+    # `module_surfaces_retained_alignment_error`, which the driver runs AFTER
+    # `_sffi_transient_array_scope_end()`.
+    it "answers a named reason or none, never an unnamed failure":
         # @req REQ-SSPEC-COMPILER
         step("promote a finished registry inside a paused transient scope")
         val began = rt_transient_array_scope_begin()
@@ -68,7 +69,7 @@ describe "module surface registry graph promotion reports a named reason":
         expect(paused).to_equal(true)
         expect(ended).to_equal(true)
         # oracle: whatever the verdict, it is never an unnamed bare failure
-        expect(reason == "" or reason.contains("of surface[")).to_be_true()
+        expect(reason == "" or reason.contains("registry root carrier")).to_be_true()
         expect(reason == "" or reason.contains("scope sentinel promote=")).to_be_true()
 
     it "keeps the bool wrapper agreeing with the reason":
@@ -96,9 +97,10 @@ describe "module surface registry graph promotion reports a named reason":
     # `reason=""` under the seed while the real C runtime returns false. The two
     # examples above therefore assert the success contract only. The sabotage is
     # asserted against the SOURCE contract instead, which is what fails closed
-    # if anyone restores a bare boolean: the failure routes must name the field,
-    # the surface and the scope sentinel, and the driver must carry that text
-    # into its error.
+    # if anyone restores a bare boolean: the surviving failure route must name
+    # the carrier and the scope sentinel, the driver must carry that text into
+    # its error, and no route may resurrect the repeat-promote post-condition
+    # that `460aa9781cc` measured unsound and `db127a8e8c4` reinstated.
     it "keeps every promotion failure route self-identifying":
         # @req REQ-SSPEC-COMPILER
         step("no promotion failure route may answer a bare false")
@@ -106,10 +108,13 @@ describe "module surface registry graph promotion reports a named reason":
         expect(registry.len() > 4000).to_be_true()
         expect(registry).to_contain("fn module_surfaces_promote_reason(")
         expect(registry).to_contain("fn module_surface_promote_scope_sentinel(")
-        expect(registry).to_contain("of surface[")
-        expect(registry).to_contain("logical=")
         expect(registry).to_contain("scope sentinel promote=")
         expect(registry).to_contain("return \"registry root carrier")
+        # No per-field verdict may return: `rt_transient_heap_promote` answers
+        # true for a registered array on every call, so a field-level failure
+        # label can only ever be false.
+        expect(registry.contains("fn module_surface_promote_field(")).to_be_false()
+        expect(registry.contains("if field_failure != \"\":")).to_be_false()
         # The 24-operand `not promote(a) or not promote(b) or ...` chain is gone:
         # it could only answer an unnamed false, and the Rust-seed aarch64
         # backend has mis-lowered long boolean chains in this file's neighbours.
