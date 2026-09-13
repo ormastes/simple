@@ -1134,16 +1134,25 @@ Three findings, in order of weight:
    `test/01_unit/compiler/backend/llvm_emitter_ssa_violation_guard_spec.spl`).
    Any future probe of this site must run in the native lane; a green seed run
    proves nothing about it.
-3. **`text.substring` and `text.index_of` diverge in the native lane, measured.**
-   The violation line above reads `llvm-emitter-ssa-violation::%l50 = ...` — an
-   EMPTY function name, and a value "name" that is the whole instruction text.
-   Both come from `substring(0, idx)` returning the entire string natively. The
-   duplicate was still caught (the two definitions were byte-identical), but a
-   duplicate whose two definitions differed on the right-hand side would have
-   been MISSED. The guard now extracts both the function name and the value name
-   with `split`, which yields the bare token on both lanes. This is worth a
-   record of its own: a `substring` that ignores its end index is not a
-   diagnostics bug, it is a text-primitive miscompile in the Stage-2 candidate.
+3. **A text-primitive divergence in the native lane, and the honest reading of
+   it.** The violation line above is `llvm-emitter-ssa-violation::%l50 = ...` —
+   an EMPTY function name, and a value "name" that is the whole instruction
+   text. The obvious story ("`substring` ignores its end index") does NOT fit:
+   if `substring(0, n)` always returned the whole string, the `define`-line path
+   (`rest = substring(at+1, len)`, then `rest.substring(0, paren)`) would have
+   produced the whole line, not "". **One fault explains both symptoms:
+   `index_of` returning a not-found sentinel that is `>= 0`** (e.g. the string
+   length). Then `eq = len` clears the `eq < 0` test and `substring(0, len)` is
+   the whole line; and `at = len` makes `rest = substring(len+1, len) = ""`, so
+   the function name is empty. The repo already carries a record for this
+   primitive: `.claude/memory/bug_index_of_brace_needle.md`. `substring` itself
+   is **unconfirmed** and should not be chased first.
+   Consequence for the guard: the duplicate was still caught (the two
+   definitions were byte-identical), but one whose definitions differed on the
+   right-hand side would have been MISSED. Both extractions now use `split`,
+   which is a different primitive — **assumed, not measured**, to be sound
+   natively; if it also diverges the seen-key is no worse than the whole-line
+   key it replaces.
 
 ### Correction to run 23's recommendation #1
 
@@ -1160,6 +1169,29 @@ Stop looking in `_MirToLlvm/**`: the emitter is now provably fail-closed on this
 class. The open question is why a `Ret`/`If`/`Switch` operand payload reads as
 nil inside the Stage-2 candidate for these three functions and not under the
 seed. Dump the refused terminators from the native lane (the reject log already
-names the functions, so the scope is three functions in one file), and treat a
-`substring` that ignores its end index as a candidate common cause rather than a
-separate cosmetic issue.
+names the functions, so the scope is three functions in one file), and treat the
+`index_of` sentinel divergence above (`bug_index_of_brace_needle.md`) as a
+candidate common cause rather than a separate cosmetic issue — a search
+primitive that answers "found" when it did not is exactly the shape that would
+leave an operand payload reading as nil.
+
+Rejected candidate preserved, not deployed:
+`.simple/storage/build/bootstrap/stage2-rejected/aarch64-apple-darwin/simple`,
+139,350,072 bytes, sha256
+`c7e536c1c5b743cd7b845a9596e6a3b7914decca1894b99a80c12badf08cbaa3` (mode 400 —
+copy out and `chmod +x` before any use). Stage 3 and the full CLI were never
+reached, so there is no Stage-3 artifact and no smoke-check result for this run.
+
+### Divergence-delta escape record (required by `.claude/rules/vcs.md`)
+
+`check-test-tree-divergence-delta` PASS over a pre-existing red:
+`PASS — 3219 pre-existing offender(s), 0 introduced by this range`; base verdict
+`FAIL — 3947 diverged vs 965 baselined (3085 new, 103 fixed-but-still-baselined);
+32 mirror-only (31 unallowlisted, 0 stale-allowlist)`. Offender list saved by the
+helper to `/var/folders/94/j3lc49d93bx148gqls5kx5d40000gn/T//test_tree_divergence_preexisting.txt`
+(host-local temp; regenerate with the helper). The range's only test file is the
+new SSA-guard spec, which has no mirror twin.
+
+Other guards, foreground, `timeout 900`: conflict-markers PASS (4 files),
+tree-size PASS (range base 136961 files), no-revert PASS (4 files, 0 reverts),
+guard-wiring PASS (1697 guards, 0 NEW unwired).
