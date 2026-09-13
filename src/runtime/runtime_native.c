@@ -13960,12 +13960,27 @@ int64_t rt_time_now_unix(void) {
 }
 
 int64_t rt_time_now_unix_micros(void) {
+#if defined(_WIN32)
+    /* Same cause as rt_time_now_ns: `clock_gettime` becomes the unresolved
+       `clock_gettime64` and is stubbed, so this returned -1 and rt_time_ms
+       with it. GetSystemTimeAsFileTime is 100 ns ticks since 1601-01-01;
+       11644473600 seconds separate that epoch from the Unix one. */
+    FILETIME ft;
+    ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    /* 100 ns ticks -> microseconds, then rebase onto the Unix epoch. */
+    int64_t unix_micros = (int64_t)(u.QuadPart / 10ULL) - 11644473600000000LL;
+    return unix_micros < 0 ? -1 : unix_micros;
+#else
     struct timespec ts = {0, 0};
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
     if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000LL) return -1;
     if ((int64_t)ts.tv_sec == INT64_MAX / 1000000LL &&
         ts.tv_nsec / 1000 > INT64_MAX % 1000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
+#endif
 }
 
 int64_t rt_time_ms(void) {
@@ -13978,12 +13993,33 @@ int64_t rt_entropy_hardware_ready(void) {
 }
 
 int64_t rt_time_now_ns(void) {
+#if defined(_WIN32)
+    /* MinGW maps `clock_gettime` onto `clock_gettime64`, which is NOT in the
+       import set this runtime links against — the native linker reports it as
+       unresolved and substitutes a generated stub, so every call failed and
+       this function returned -1. Measured: rt_time_now_micros/nanos/ms all
+       answered -1 in a native binary while the program around them ran fine,
+       which silently reports ZERO elapsed time to any in-binary benchmark.
+       QueryPerformanceCounter is the monotonic clock Windows actually
+       provides, and it is always available. */
+    LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0) return -1;
+    if (!QueryPerformanceCounter(&counter) || counter.QuadPart < 0) return -1;
+    /* Split to keep the nanosecond scaling exact without overflowing: whole
+       seconds first, then the sub-second remainder. */
+    int64_t secs = (int64_t)(counter.QuadPart / freq.QuadPart);
+    int64_t rem  = (int64_t)(counter.QuadPart % freq.QuadPart);
+    if (secs > INT64_MAX / 1000000000LL) return -1;
+    return secs * 1000000000LL + (rem * 1000000000LL) / (int64_t)freq.QuadPart;
+#else
     struct timespec ts = {0, 0};
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
     if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000000LL) return -1;
     if ((int64_t)ts.tv_sec == INT64_MAX / 1000000000LL &&
         ts.tv_nsec > INT64_MAX % 1000000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
 }
 
 int64_t rt_time_now_nanos(void) {

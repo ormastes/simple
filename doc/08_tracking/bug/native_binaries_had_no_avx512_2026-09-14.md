@@ -235,3 +235,55 @@ Absence of a device is reported as a skip with a reason, never as agreement.
 Writing it found a real bug in my own dispatch: `clear` is a 1D dispatch with
 `local_size_x=256`, and a 2D 8x8 dispatch covered exactly half the buffer —
 2048 of 4096 pixels differing, which is what a half-covered buffer looks like.
+
+## "Reasoned, not tested" was wrong — testing it found a real bug
+
+The previous section left the shadow kernel's `/256` as an arithmetic shift
+(floor) where C division truncates, argued safe because both results are <= 0
+for negative coverage and both paths then skip. Testing the negative domain
+gave **84 mismatches**, so the argument was wrong — and for a reason neither
+half of it mentioned.
+
+`engine2d_unbox_pixel` truncates **unsigned**: `(uint32_t)((uint64_t)v >> 3)`.
+A `[i32]` coverage of `-1` therefore arrives in the C kernel as `4294967295`
+and blends at full strength, while the Simple twin reads `(colcov[i]).to_i64()`
+as `-1` and skips the pixel. A genuine divergence between the two
+implementations, in the representation rather than in the arithmetic.
+
+Fixed by sign-extending the low 32 bits in all three paths — the AVX-512 lanes
+(`slli 32` then `srai 32`), the lane kernel's scalar tail, and the plain C
+fallback — so both sides see the same number. With that, floor and truncate
+genuinely do agree, because every negative value now reaches the `<= 0` skip on
+both sides.
+
+`2760 values checked in a native binary, 0 mismatches, 90 zmm`, negative
+coverage included.
+
+The lesson is the one this record keeps repeating: an argument about output is
+a testable claim, and the cheap test is worth more than the careful reasoning.
+
+## The native clocks are fixed
+
+`rt_time_now_ns` and `rt_time_now_unix_micros` both called `clock_gettime`,
+which MinGW maps onto `clock_gettime64` — a symbol this runtime does not link.
+The native linker reported it unresolved and substituted a generated stub, so
+every call failed and every clock returned -1. Any in-binary benchmark silently
+measured zero elapsed time.
+
+Windows branches added: `QueryPerformanceCounter` for the monotonic clock
+(seconds and sub-second remainder scaled separately so the nanosecond
+conversion cannot overflow) and `GetSystemTimeAsFileTime` for the wall clock,
+rebased from the 1601 epoch. Verified: the monotonic clock advances 71 ms
+across a busy loop that takes 71 ms, and the wall clock agrees with the host's
+`date +%s` to within the sub-second digits it does not print.
+
+### The shadow number, re-measured with the fixed clock
+
+    20000 rows x 600 px = 12M shadow pixels, in-binary timing
+    scalar  660006 / 590886 / 595254 us
+    kernel   94925 /  95560 / 105220 us
+    pixel_diffs = 0 on every run
+
+**6.2x**, which independently corroborates the 5.8x obtained earlier by
+external process timing with startup subtracted. Two unrelated methods, the
+same answer.
