@@ -236,10 +236,12 @@ fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32
     _adv_overflow_val[_adv_overflow_cursor] = advance
     _adv_overflow_cursor = (_adv_overflow_cursor + 1) % _ADV_OVERFLOW_CAP
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, LayoutGlyph, SubpixelGlyphBitmap}
+use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
-    browser_font_candidates_for_family
+    browser_font_candidates_for_family,
+    browser_family_has_host_face
 }
 use std.nogc_sync_mut.text_layout.font_rasterizer.{
     _sffi_glyph_to_cached,
@@ -1322,7 +1324,19 @@ class FontRenderer:
         val installed = self._try_install_ttf(selected_rasterizer)
         if installed:
             self.selected_outline_blob = selected_blob
-        installed
+            return true
+        # The managed lane above answers `invalid()` for every path the pinned
+        # registry does not own, WITHOUT looking at the file — which is why a
+        # macOS system face was rejected in the same process that loaded a
+        # bundled asset. Fall through to the explicitly unmanaged lane, which
+        # keeps the same structural validation and handles `path#N` collection
+        # faces (Menlo.ttc, Helvetica.ttc).
+        val unmanaged = FontRasterizer.load_unmanaged(ttf_path)
+        val unmanaged_blob = unmanaged.selected_blob
+        val unmanaged_installed = self._try_install_ttf(unmanaged)
+        if unmanaged_installed:
+            self.selected_outline_blob = unmanaged_blob
+        unmanaged_installed
 
     me try_load_selected_bytes(ttf_path: text, blob: [u8]) -> bool:
         val rasterizer = FontRasterizer.load_selected_bytes(ttf_path, blob)
@@ -1332,6 +1346,16 @@ class FontRenderer:
         installed
 
     me try_load_registered_identity(identity: text) -> bool:
+        # An unmanaged identity names its own face spec, so it round-trips here
+        # rather than through the registry. Both paint consumers
+        # (engine2d `engine.spl`, `draw_ir_target_metal.spl`) re-resolve a face
+        # from the identity the LAYOUT recorded; without this they answer ""
+        # for a platform face and silently drop the run to the vector fallback,
+        # so the page would measure against Helvetica and be drawn with
+        # something else.
+        val unmanaged_spec: text = font_unmanaged_identity_face_spec(identity)
+        if unmanaged_spec != "":
+            return self.try_load_runtime_ttf(unmanaged_spec)
         # Path-based helper instead of `candidate.?.local_path`: Option-unwrap
         # field access faults on baremetal (cr2=0x0 class, 2026-07-18).
         val local_path: text = selected_font_asset_local_path_for_identity(identity)
@@ -3271,7 +3295,19 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     val codepoints = text_codepoints(content)
     val complex_script = _resolved_font_complex_script(codepoints)
     val category = _resolved_font_category(family)
-    val selected_candidate = if normalized_language != "und" and category != "":
+    # The coverage matrix picks a BUNDLED face with real coverage for a script,
+    # and for complex-script content that is exactly what must happen. For
+    # simple-script content whose family already resolves to a face the host
+    # provides — an explicit `@font-face` source, or a platform default — the
+    # override replaces the requested family with the matrix's witness family
+    # and the requested face is silently discarded. Measured on the catalog,
+    # which declares `lang="en"`: every `sans-serif` run came back on the
+    # bundled wght=100 Thin master instead of Helvetica, so the host face was
+    # live under `und` and dead on every real page. `browser_family_has_host_face`
+    # answers false on a host with no platform faces, leaving Linux and CI on
+    # exactly the path they had.
+    val host_face_preferred = complex_script == 0 and browser_family_has_host_face(family)
+    val selected_candidate = if normalized_language != "und" and category != "" and not host_face_preferred:
         selected_font_asset_for_language_category(normalized_language, category)
     else:
         nil
