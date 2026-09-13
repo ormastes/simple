@@ -47,7 +47,7 @@ use compiler.mir_opt.mir_opt.auto_vectorize_types (VectorLoopInfo, ArrayAccess)
 use compiler.mir_opt.mir_opt.auto_vectorize_analysis (DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only)
 use compiler.mir_opt.mir_opt.auto_vectorize_validate (VectorizabilityResult, check_vectorizability, get_vectorizable_type)
 use compiler.mir_opt.mir_opt.auto_vectorize_cost (CostEstimate, estimate_vectorization_cost, should_vectorize_loop)
-use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, element_size_bytes, vector_loop_locals, vector_mir_type, simd_binop_name)
+use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, create_remainder_guard_block, element_size_bytes, vector_loop_locals, vector_mir_type, simd_binop_name)
 
 # ============================================================================
 # Main Auto-Vectorization Pass
@@ -395,10 +395,14 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     val out_base = recipe.output_base.unwrap()
 
     # Build VectorizeContext from recipe
+    var max_block_id_for_ctx = recipe.header_block.id
+    for block in func.blocks:
+        if block.id.id > max_block_id_for_ctx:
+            max_block_id_for_ctx = block.id.id
     val ctx = VectorizeContext(
         vector_width: recipe.chunk_width,
         element_type: recipe.element_type,
-        next_local:   recipe.header_block.id
+        next_local:   max_block_id_for_ctx + 1
     )
 
     # Synthesize a VectorLoopInfo for alignment_check_block / peeling_block
@@ -500,11 +504,6 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     # Defect B fix: patch any predecessor block whose terminator targets the
     # original header_block.id to point to the new alignment-check block instead.
     val orig_header_id = recipe.header_block.id
-    # align_check takes the header's own id (ctx.next_local == header id), so
-    # this is that id — stated directly rather than read off a block that is
-    # now constructed further down, once the remainder block id is known.
-    val new_header_id  = orig_header_id
-
     # Loop versioning. When the alias oracle could not separate the bases
     # statically, the entry point becomes a runtime range check that branches
     # to an unmodified clone of the original loop whenever the spans partially
@@ -515,17 +514,26 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     for block in func.blocks:
         if block.id.id > max_block_id:
             max_block_id = block.id.id
-    # The splice also OCCUPIES header+0 (align_check) and header+2 (vec_loop),
-    # so the new ids must clear those as well as every existing block. On a
-    # single-block function header IS max_block_id, and taking max+1/max+2
-    # alone put the scalar clone on the vector loop's own id — the two blocks
-    # then shared an id and lookup, being first-match, silently resolved to
-    # whichever came first.
-    var reserved = max_block_id
-    if orig_header_id + 2 > reserved:
-        reserved = orig_header_id + 2
-    val guard_id  = reserved + 1
-    val scalar_id = reserved + 2
+    # EVERY new block is allocated above the highest existing id.
+    #
+    # align_check and vec_loop used to sit at header+0 and header+2, which
+    # assumes those slots are free. They are not: a lowered `while` produces
+    # cond at H, exit at H+1 and the continuation at H+2, so vec_loop landed
+    # ON the continuation. Both were emitted, the interpreter keyed blocks by
+    # id with last-write-wins, and the continuation came second — so the
+    # vector loop was overwritten and align_check jumped straight into the
+    # continuation. The loop silently never ran. Measured on a three-block
+    # function: ids [0, 1(align_check), 3(vec_loop), 3(continuation), 5].
+    val vec_base  = max_block_id + 1     # align_check
+    val guard_id  = max_block_id + 4
+    val scalar_id = max_block_id + 5
+    val rguard_id = max_block_id + 6     # re-tests i < n before the remainder
+
+    # align_check takes the header's own id (ctx.next_local == header id), so
+    # this is that id — stated directly rather than read off a block that is
+    # now constructed further down, once the remainder block id is known.
+    val new_header_id  = vec_base
+
 
     # The scalar clone is now ALWAYS built, because it is two things at once:
     # the alias-guard fallback it always was, and the remainder loop the
@@ -533,18 +541,30 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     # conflict — a run takes one entry or the other — and sharing one block
     # keeps a single copy of the scalar semantics instead of the old "peel"
     # block's separate, wrong one.
+    # Vector temporaries start above BOTH the existing locals and the guard
+    # temporaries. Basing them on `max local + 1` alone put them straight on
+    # top of the guard's own block, which reserves 8 slots per input base from
+    # that same point — the differential tests went red immediately, which is
+    # the one thing that makes a collision like this cheap to find.
+    var vtemp = 0
+    for lc in func.locals:
+        if lc.id.id >= vtemp:
+            vtemp = lc.id.id + 1
+    vtemp = vtemp + recipe.input_bases.len() * 8 + 3
     val align_block = create_alignment_check_block(
-        ctx, loop_info, lb.bound, lb.index, scalar_id)
+        ctx, loop_info, lb.bound, lb.index, vtemp, rguard_id)
     val vec_block   = create_vector_loop_block(
-        ctx, recipe.header_block.id, recipe.input_bases, out_base,
-        recipe.op_name, lb.bound, lb.index, scalar_id)
+        ctx, vec_base, recipe.input_bases, out_base,
+        recipe.op_name, lb.bound, lb.index, vtemp, rguard_id)
+    val rguard_block = create_remainder_guard_block(
+        rguard_id, lb.index, lb.bound, vtemp, scalar_id, exit_block_id)
 
     val elt = element_size_bytes(recipe.element_type)
-    val span_bytes = if recipe.trip_count > 0 and elt > 0: recipe.trip_count * elt else: 0
-    # A span of 0 means the element width is unknown, so the guard cannot be
-    # given a real bound. Emitting it anyway would produce a check that admits
-    # everything, which is worse than not vectorizing.
-    val guard_usable = emit_guard and span_bytes > 0 and body_blocks_for_peel.len() == 1
+    # The guard computes `span = bound * elt` itself, so a runtime bound is as
+    # usable as a constant one. Only the ELEMENT WIDTH must be known — an
+    # unknown width would make the check admit everything, which is worse than
+    # not vectorizing.
+    val guard_usable = emit_guard and elt > 0 and body_blocks_for_peel.len() == 1
 
     # D2: when a guard is REQUIRED but cannot be built, decline.
     #
@@ -584,7 +604,7 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
         # 8 slots per input base (6 used, 2 spare for the combining AND) —
         # matching create_alias_guard_block's stride.
         var t = first_temp
-        val temp_count = recipe.input_bases.len() * 8
+        val temp_count = recipe.input_bases.len() * 8 + 2
         var made = 0
         while made < temp_count:
             guard_locals.push(MirLocal(
@@ -595,13 +615,14 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
                 is_ghost: false))
             made = made + 1
         new_blocks.push(create_alias_guard_block(
-            guard_id, out_base, recipe.input_bases, span_bytes,
+            guard_id, out_base, recipe.input_bases, lb.bound, elt,
             new_header_id, scalar_id, first_temp))
 
     # Alignment-check at the header position, then the vector loop. There is
     # no peel block any more: the scalar clone below is the remainder.
     new_blocks.push(align_block)
     new_blocks.push(vec_block)
+    new_blocks.push(rguard_block)
 
     # Blocks after the original header (continuation / exit)
     for block in func.blocks:
@@ -622,7 +643,7 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     var all_locals = spliced.locals
     for gl in guard_locals:
         all_locals.push(gl)
-    for vl in vector_loop_locals(ctx, recipe.header_block.id):
+    for vl in vector_loop_locals(ctx, vtemp):
         all_locals.push(vl)
     spliced.locals = all_locals
     spliced
