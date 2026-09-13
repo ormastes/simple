@@ -89,3 +89,22 @@ cache key and `identity` (without that, bold and regular would share a cache
 entry and the first one measured would win); THEN (3) `st.bold` /
 `st.font_style_italic` passed at the `resolve_font_metrics_with_language` call
 site in `..._core.spl`. Step 1 is in files this lane does not own.
+
+## Round 7 (2026-09-13) — re-confirmed blocked, on a macOS host this time
+
+Round 7 was briefed to close this and did not, for the same reason round 5 gave,
+re-verified independently on macOS rather than taken on trust:
+
+- `assets/fonts` holds exactly ONE static bold face tree-wide,
+  `google-fonts/ofl/unifrakturcook/UnifrakturCook-Bold.ttf` (blackletter
+  display) — `find assets -iname "*Bold*"` returns that single path.
+- `browser_sans_font_candidates` / `browser_mono_font_candidates`
+  (`src/lib/nogc_sync_mut/text_layout/font_provider.spl:68-85`) list bundled
+  variable fonts plus `/usr/share/fonts/...` Linux regular faces. On macOS those
+  Linux paths do not exist at all, so the candidate set is the variable Noto
+  faces and nothing else.
+
+Step 1 of the closure order recorded above (a static bold candidate list, or
+`fvar` instancing in the TTF loader) is therefore still the blocker, and it is
+still in files this lane does not own. Adding the weight argument first would
+still change no advance. Left OPEN deliberately; not worked around.
