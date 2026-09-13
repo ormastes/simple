@@ -29,8 +29,19 @@ var _MCP_TRANSPORT_MODE = "framed"
 fn _mcp_error(scope: text, msg: text):
     stderr_write("[error] " + scope + ": " + msg + "\n")
     stderr_flush()
-use std.mcp_sdk.server.app.{app_extract_id, app_extract_str, app_extract_obj, mcp_server_init}
-use std.mcp_sdk.server.method_detect.{has_method}
+# Deliberately NO std.mcp_sdk import: it co-compiled a second jo1..jo4 /
+# extract_json_* / make_tool_error set (String-typed) beside main_lazy_json's,
+# and the seed resolves such collisions by arg-type or last-definition
+# fallback, so a call could run the wrong body. The request helpers below
+# reuse main_lazy_json's scanner instead.
+fn _mcp_method_is(msg: text, name: text) -> bool:
+    msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
+
+fn _mcp_request_obj(json: text, key: text) -> text:
+    val raw = extract_field_raw(json: json, key: key)
+    if raw.starts_with(LB()):
+        return raw
+    ""
 
 # Load split module implementations from sibling files.
 # Startup path (initialize / tools/list / --probe) needs only JSON helpers,
@@ -240,7 +251,7 @@ fn _mcp_initialize_result() -> text:
 
 # Extract JSON-RPC id from message, with sensible fallbacks.
 fn _mcp_extract_id(msg: text, method: text) -> text:
-    val parsed = app_extract_id(msg)
+    val parsed = extract_field_raw(json: msg, key: "id")
     if parsed != "" and parsed != "null":
         return parsed
     if method == "initialize":
@@ -353,10 +364,6 @@ fn main() -> i64:
             print progress
         return 0
 
-    # Initialize server metadata. Tool metadata and calls are routed through
-    # the static table below; native builds cannot safely register closure
-    # handlers into the generic SDK registry.
-    mcp_server_init(SERVER_NAME, SERVER_VERSION)
 
     # Serve loop — uses direct stdio framing to avoid native Optional transport
     # issues that can stop after the first framed request.
@@ -370,58 +377,58 @@ fn main() -> i64:
         # tools/list is handled locally so we return the full static-table tool list
         # without registry pagination (smoke check requires all tools in one response).
         var response = ""
-        if has_method(msg, "initialize"):
+        if _mcp_method_is(msg, "initialize"):
             val id = _mcp_extract_id(msg, "initialize")
             response = make_json_result(id, _mcp_initialize_result())
-        elif has_method(msg, "tools/call"):
+        elif _mcp_method_is(msg, "tools/call"):
             val id = _mcp_extract_id(msg, "tools/call")
-            val params = app_extract_obj(msg, "params")
+            val params = _mcp_request_obj(msg, "params")
             var tool_name = ""
             var args_raw = "{}"
             if params != "":
-                tool_name = app_extract_str(params, "name")
-                val extracted_args = app_extract_obj(params, "arguments")
+                tool_name = extract_field(json: params, key: "name")
+                val extracted_args = _mcp_request_obj(params, "arguments")
                 if extracted_args != "":
                     args_raw = extracted_args
             response = _mcp_dispatch_tool_lazy(id, tool_name, args_raw)
-        elif has_method(msg, "tools/list"):
+        elif _mcp_method_is(msg, "tools/list"):
             val id = _mcp_extract_id(msg, "tools/list")
             response = make_json_result(id, _mcp_tools_list_payload())
-        elif has_method(msg, "notifications/initialized") or (
-            has_method(msg, "notifications/cancelled")) or (
-            has_method(msg, "notifications/roots/list_changed")) or (
-            has_method(msg, "initialized")):
+        elif _mcp_method_is(msg, "notifications/initialized") or (
+            _mcp_method_is(msg, "notifications/cancelled")) or (
+            _mcp_method_is(msg, "notifications/roots/list_changed")) or (
+            _mcp_method_is(msg, "initialized")):
             response = ""
-        elif has_method(msg, "shutdown"):
+        elif _mcp_method_is(msg, "shutdown"):
             val id = _mcp_extract_id(msg, "shutdown")
             response = make_json_result(id, "null")
-        elif has_method(msg, "resources/list"):
+        elif _mcp_method_is(msg, "resources/list"):
             val id = _mcp_extract_id(msg, "resources/list")
             response = handle_resources_list(id)
-        elif has_method(msg, "resources/templates/list"):
+        elif _mcp_method_is(msg, "resources/templates/list"):
             val id = _mcp_extract_id(msg, "resources/templates/list")
             response = handle_resource_templates_list(id)
-        elif has_method(msg, "resources/read"):
+        elif _mcp_method_is(msg, "resources/read"):
             val id = _mcp_extract_id(msg, "resources/read")
             val uri = extract_nested(msg, "uri")
             response = handle_resources_read(id, uri)
-        elif has_method(msg, "prompts/list"):
+        elif _mcp_method_is(msg, "prompts/list"):
             val id = _mcp_extract_id(msg, "prompts/list")
             response = handle_prompts_list(id)
-        elif has_method(msg, "prompts/get"):
+        elif _mcp_method_is(msg, "prompts/get"):
             val id = _mcp_extract_id(msg, "prompts/get")
             val prompt_name = extract_nested(msg, "name")
             response = handle_prompts_get(id, prompt_name, msg)
-        elif has_method(msg, "completion/complete") or has_method(msg, "completions/complete"):
+        elif _mcp_method_is(msg, "completion/complete") or _mcp_method_is(msg, "completions/complete"):
             val id = _mcp_extract_id(msg, "completion/complete")
             response = handle_completion_req(id, msg)
-        elif has_method(msg, "logging/setLevel"):
+        elif _mcp_method_is(msg, "logging/setLevel"):
             val id = _mcp_extract_id(msg, "logging/setLevel")
             val level = extract_nested(msg, "level")
             if level != "":
                 MCP_LOG_LEVEL = level
             response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
-        elif has_method(msg, "roots/list"):
+        elif _mcp_method_is(msg, "roots/list"):
             val id = _mcp_extract_id(msg, "roots/list")
             val cwd = get_cwd()
             var root = LB()
@@ -429,7 +436,7 @@ fn main() -> i64:
             root = root + "," + jp("name", js("workspace"))
             root = root + RB()
             response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
-        elif has_method(msg, "ping"):
+        elif _mcp_method_is(msg, "ping"):
             val id = _mcp_extract_id(msg, "ping")
             response = make_json_result(id, LB() + RB())
         else:
