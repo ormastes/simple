@@ -74,3 +74,17 @@ read as native/JIT performance.
 ## Triage 2026-09-12
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+This is a benchmark-attribution issue, not a correctness bug (program
+already runs correctly via interpreter fallback), explicitly scoped as
+"compiler-layer defect... out of scope" by its own record. Root cause
+depends on two upstream defects: the cross-module-`bool`-field HIR lowering
+gap (`hir_lowering_bool_field_infer_imported_struct_2026-07-03.md`) and the
+`cuda_module_load_binary` unresolved-symbol registration gap — both
+compiler/runtime-layer, not X25519MLKEM768-specific. The named driver file
+(`src/app/test/x25519mlkem768_perf_bench.spl`) no longer exists in this
+tree (renamed or removed since 2026-08-05); did not chase down its
+replacement within budget. Left OPEN, unchanged; still not this lane's
+scope per the record's own framing.
