@@ -1,6 +1,6 @@
 # `.?` on an empty array evaluates TRUE under native codegen
 
-- Status: OPEN (2026-09-13) — the compiler defect is NOT fixed. One caller
+- Status: FIXED 2026-09-13 (see the FIXED section at the end of this file). Original triage below. One caller
   (`BuildGraph.topological_order`) has been routed around it; every other
   `x.?` on an array in natively-compiled code is still exposed.
 - Severity: **silent wrong control flow.** No diagnostic, no crash. A `while
@@ -148,3 +148,129 @@ limitation. It is NOT the `.?` defect above (that one is native-codegen-only;
 this one is the interpreter), and it is not fixed. The spec renders both sides to
 text to pin the ordering contract instead, with a comment saying why — the
 workaround is recorded here rather than silently normalized.
+
+## FIXED 2026-09-13 — `.?` now means presence, not "not the nil sentinel"
+
+Status above (OPEN) is superseded for the compiler defect itself. The
+call-site workaround in `BuildGraph.topological_order` is left in place and is
+now redundant, not load-bearing.
+
+### Root cause, one line
+
+`.?` (`Expr::ExistsCheck`) lowered to the runtime predicate **`rt_is_some`**,
+which is pure nil/None presence — an empty-but-allocated array is `Some`.
+`src/compiler_rust/compiler/src/hir/lower/expr/control.rs:2084` (condition
+position, `lower_condition`), `:2238` (`coerce_exists_value_to_bool_in_place`,
+the `-> bool` tail form) and `:2365` (`lower_exists_check`, value position) all
+named it. The backends were innocent: there is no `.?`-specific emitter — both
+LLVM and Cranelift just emit a MIR `Call` to whatever symbol the HIR names, so
+both were wrong identically. `.len()` stayed right because it never routed
+through that predicate.
+
+The interpreter never agreed: `compiler/src/interpreter/expr.rs:533-567`
+decides presence itself and returns `Value::Nil` when absent, and
+`interpreter_control.rs:172-188` (`is_condition_present`) branches on "not
+`Value::Nil`". The tree-walk rule, verbatim, after unwrapping any
+Option/Result layer:
+
+| receiver | `.?` |
+|---|---|
+| nil / `None` / `Err` | absent |
+| empty array, empty dict, empty string | **absent** |
+| `Set` with empty `items` | absent |
+| everything else — `0`, `false`, `0.0`, tuples, closures, structs | present |
+
+That last row is deliberate and must not be "simplified" into generic
+truthiness: doing so is the "0 is falsy" landmine
+(`seed_interp_option_match_falls_through_at_scale_2026-07-18.md`).
+
+### The fix
+
+A new runtime predicate `rt_is_present` implements exactly the table above, in
+all three runtimes that must stay twins:
+
+- `src/compiler_rust/runtime/src/value/objects.rs` (Rust runtime)
+- `src/runtime/runtime_native.c` + declaration in `src/runtime/runtime.h` (C)
+- `src/runtime/simple_core/core_string.spl` (pure-Simple core archive)
+
+and the three `.?` lowering sites now name it. `rt_is_some` is untouched and
+still backs the raw optional/pointer-slot probes at `control.rs:669` and
+`:2162`, which really do mean "not the nil sentinel".
+
+### Evidence — `test/04_smoke/dotq_empty_collection_presence_probe.spl`
+
+Five shapes (F61's four plus a non-empty control), self-checking, `PASS`/`FAIL`
+per line. Built by the seed's native pipeline,
+`native-build --target aarch64-apple-darwin --backend cranelift
+--runtime-bundle core-c-bootstrap --threads 1 --mode dynload`, same seed binary
+before and after the lowering change:
+
+```
+before (rt_is_some)                          after (rt_is_present)
+FAIL empty [i64] while a.?: 6 iterations     PASS empty [i64] while a.?: 0 iterations
+FAIL empty [(i64,bool)] while e.?: 6 iter    PASS empty [(i64,bool)] while e.?: 0 iterations
+FAIL one-elem drained by pop: 6 iterations   PASS one-elem [i64] drained by pop: 1 iteration
+FAIL if a.?: TAKEN on empty array            PASS if a.?: not taken on empty array
+PASS if g.?: taken on non-empty array        PASS if g.?: taken on non-empty array
+probe failures = 4                           probe failures = 0
+```
+
+The same file under the interpreter (`simple run`) prints the same five
+`PASS` lines — the engines now agree, which is the actual contract.
+
+**Backend coverage, stated honestly.** The measured native run is
+**Cranelift**; this host's seed is built without the `llvm` cargo feature
+(`error: native backend 'llvm' is not available in this build`), so the LLVM
+lane was not executed here. It is covered by construction rather than by
+measurement: there is no `.?`-specific emitter on either side, the symbol is
+declared once for both in `codegen/runtime_sffi.rs` and rooted once in
+`codegen/common_backend.rs`, and the LLVM arity/returns-bool tables in
+`codegen/llvm/functions/calls.rs` were updated in the same shape as
+`rt_is_some`. A run on an LLVM-featured build is still worth doing.
+
+Rust tests (sabotage → red → green verified on the first):
+
+- `runtime/src/value/object_tests.rs::dotq_presence_matches_interpreter_exists_check_rule (deliberately NOT named `rt_*`: the rt-dual-implementation ratchet reads `fn rt_*` as a runtime symbol and flags a test helper as a new single-lane symbol)`
+  — the full table, both directions, including the explicit assertion that
+  `rt_is_some` is the WRONG predicate for an empty array.
+- `codegen/instr/body.rs::build_vreg_types_stamps_rt_is_present_call_bool`
+  — Cranelift stamps the presence call BOOL (else the branch tests a raw
+  tagged word).
+- `codegen/common_backend.rs::option_presence_predicate_runtime_symbols_are_retained`
+  — `rt_is_present` is a codegen root, so neither lane leaves it undeclared.
+  Without it the link fails closed, which is what it did on the first attempt:
+  `1 runtime symbol(s) referenced by generated code have no definition ...
+  _rt_is_present`.
+
+### Census — where `.?` is used on a non-Optional receiver (for F62)
+
+`grep -rnE '(while|if) +<ident>\.\?:' src/compiler src/lib` → **24** sites, and
+on inspection **all 24 receivers are Optionals** (`op`, `ms`, `wc`, `id`, `os`,
+`ew`, `em`, `re`, `al`, `el`) — those were always correct, since for an Optional
+`rt_is_some` and `rt_is_present` agree.
+
+The array-receiver population is the `while` forms, which that regex misses
+when the condition is compound. Complete list — every one of these was silently
+non-terminating under native codegen and is correct now:
+
+- `src/compiler/90.tools/context_pack.spl:58` — `while to_process.?:`
+- `src/compiler/10.frontend/parser/test_analyzer.spl:170` — `while indent_stack.? and ...`
+- `src/compiler/10.frontend/parser/test_analyzer.spl:233` — `while group_stack.?:`
+- `src/compiler/80.driver/driver_build/parallel.spl:274-305` — the site-9
+  `topological_order` DFS, already routed around by hand; the `.len() > 0`
+  guard there can now go back to `.?` at leisure.
+
+The two `test_analyzer.spl` sites are in the **parser**, i.e. inside the
+bootstrap closure — they were exposed on exactly the lane F62 is running.
+The three `while current.?:` sites in `src/lib/*/gc.spl` walk an Optional node
+cursor, not an array, and were unaffected.
+
+### Not fixed here (separate, still OPEN)
+
+The three secondary divergences in the site-9 trace — `pop()` on an empty array
+unwrapping to `nil`, `visited[nil] = true` not making `has(nil)` true, and the
+value-position `{a.?}` interpolation shape (see
+`dotq_presence_operator_is_bare_unwrap_outside_argument_position_2026-09-12.md`,
+which is the same family and remains open). `.?` in value position does now
+yield nil for an empty collection, but the bare-unwrap-outside-argument-position
+defect that record describes is untouched.
