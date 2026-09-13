@@ -65,6 +65,16 @@ that page's `sec_resolve_ms` = 1405:
 85% of the bucket is accounted for. `measure` dominates, and it is only ever
 reached on a memo MISS — so the lever on it is the hit rate, not the loop.
 
+**Two clocks, stated rather than glossed:** the `_fr_probe_*` sub-timers read
+`rt_time_now_micros()` while the `sec_*` sections read
+`_web_budget_clock.now_micros()`. Each side is internally consistent, so the
+sub-bucket figures and the `sec_resolve` figures are each sound on their own,
+but the "85% accounted" ratio crosses the two and is therefore an estimate of
+coverage, not an exact decomposition. Nothing in the fixes or in the A/B result
+below depends on it — the A/B compares `sec_*` to `sec_*`, and each per-fix
+claim (`wcfg_ms`, `front_entries`/`front_misses`) is a single counter compared
+with itself.
+
 ## Fix 1 — `wcfg`: a per-node config rebuild in front of the memo
 
 `resolve_font_metrics_with_language` called
@@ -220,6 +230,16 @@ no parity claim is made from it here.
   `origin/main`: `be_dom_event_path_and_style_serialize_spec`,
   `style_animation_spec`, `simple_web_css_cascade_spec` — the same three rounds
   3 and 4 recorded, untouched by this change.
+- **`web_cold_pipeline_memo_spec` GREEN — 4 examples, 0 failures.** Run
+  separately because its name matches no `*style*`/`*cascade*`/`*inherit*` glob
+  and so was NOT in the 19 above, while being the spec that pins *this* memo:
+  it asserts absolute hit/miss oracles on
+  `resolved_font_front_memo_hits/misses`. It carries no oracle at the 512
+  boundary, so the cap raise does not disturb it. Checked for the same reason:
+  `scripts/check/check-perf-regression-tests.shs` pins no row on
+  `RESOLVED_FONT_FRONT_CACHE_LIMIT` or on the old per-node
+  `font_render_config_identity(` call site, so the umbrella is not made stale by
+  this change (its one `= 512` row is `HIR_CODEC_CHUNK_LINES`, unrelated).
 
 ## Left for round 6
 
