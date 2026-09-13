@@ -109,79 +109,71 @@ fn _i64_const(value: i64) -> MirOperand:
         MirConstValue.Int(value),
         MirType(kind: MirTypeKind.I64)))
 
-fn create_alignment_check_block(ctx: VectorizeContext, loop_info: VectorLoopInfo) -> MirBlock:
+fn create_alignment_check_block(
+    ctx: VectorizeContext,
+    loop_info: VectorLoopInfo,
+    bound_op: MirOperand,
+    index_local: LocalId,
+    remainder_block_id: i64
+) -> MirBlock:
     """
-    Create block that computes mismatch = (end - start) % chunk_width at runtime
-    and branches: if mismatch == 0 → vector loop (next_local+2); else → peeling block
-    (next_local+1).
+    Loop preheader: start the index, and take the vector path only if at least
+    one whole vector fits.
 
-    MIR shape produced:
       BB_align_check:
-        %range   = BinOp(Sub, end_value, start_value)       # trip count
-        %mismatch = BinOp(Rem, %range, chunk_width_const)   # remainder mod VF
-        %zero_const = Const(0)
-        %is_aligned = BinOp(Sub, %mismatch, %zero_const)    # 0 iff aligned
-        If(%is_aligned == 0 → BB_vector, BB_peel)
-        → represented as If(%mismatch, BB_peel, BB_vector)
-          (non-zero mismatch → peel; zero → vector)
+        %i    = start                       # seed the shared induction variable
+        %lim  = bound - chunk_width
+        %fits = %i <= %lim
+        If(%fits, BB_vec_loop, BB_remainder)
 
-    Block IDs used:
-      ctx.next_local+0 = this alignment-check block
-      ctx.next_local+1 = peeling block (sibling, created by create_peeling_block)
-      ctx.next_local+2 = vector loop entry (successor after peel or direct)
+    This used to compute `(end - start) % VF` from CONSTANTS and branch to a
+    "peel" block, which is why it could not serve a loop whose length is only
+    known at runtime. The remainder is no longer a special block — it is the
+    scalar clone — so the only question left here is whether the vector loop
+    should be entered at all. For a bound smaller than one vector the answer
+    is no and control goes straight to the scalar loop, which is also the
+    correct behaviour for an empty loop.
+
+    Seeding `%i` matters: the vector loop and the scalar remainder share this
+    one induction variable, and that sharing is what lets the remainder resume
+    from exactly where the vector loop stopped.
+
+    Block IDs:
+      ctx.next_local + 0 = this block
+      ctx.next_local + 2 = vector loop entry
     """
     val block_id = BlockId.new(ctx.next_local)
-    val peel_id  = BlockId.new(ctx.next_local + 1)
     val vec_id   = BlockId.new(ctx.next_local + 2)
 
-    # Locals for the alignment computation
-    val range_dest    = LocalId(id: ctx.next_local + 100)
-    val mismatch_dest = LocalId(id: ctx.next_local + 101)
+    val vf_op = _i64_const(ctx.vector_width)
+    val lim_dest  = LocalId(id: ctx.next_local + 207)
+    val fits_dest = LocalId(id: ctx.next_local + 208)
 
-    # Operands: loop bounds and chunk width come from VectorLoopInfo / VectorizeContext
-    val end_op   = _i64_const(loop_info.end_value)
-    val start_op = _i64_const(loop_info.start_value)
-    val vf_op    = _i64_const(ctx.vector_width)
-
-    # %range = end - start
-    val range_inst = MirInst(
-        kind: MirInstKind.BinOp(range_dest, MirBinOp.Sub, end_op, start_op),
-        span: nil
-    )
-    # %mismatch = %range % vector_width
-    val mismatch_inst = MirInst(
-        kind: MirInstKind.BinOp(mismatch_dest, MirBinOp.Rem,
-            MirOperand(kind: MirOperandKind.Copy(range_dest)), vf_op),
-        span: nil
-    )
-
-    # Terminator: If(%mismatch != 0) → peel, else → vector
-    # MirTerminator.If branches to then_ when cond is truthy (non-zero).
-    # mismatch is non-zero when alignment is needed → branch to peel.
-    val terminator = MirTerminator.If(
-        cond:  MirOperand(kind: MirOperandKind.Copy(mismatch_dest)),
-        then_: peel_id,
-        else_: vec_id
-    )
-
-    # The vector loop's induction local. It MUST be seeded here: the vector
-    # block reads it on its first instruction, and align_check is the only
-    # block that dominates both the vector entry and the peel fall-through.
-    # Without this the loop started from an undefined index.
-    val vi_init = MirInst(
-        kind: MirInstKind.Const(
-            LocalId(id: ctx.next_local + 200),
-            MirConstValue.Int(0),
+    val seed_inst = MirInst(
+        kind: MirInstKind.Const(index_local,
+            MirConstValue.Int(loop_info.start_value),
             MirType(kind: MirTypeKind.I64)),
+        span: nil
+    )
+    val lim_inst = MirInst(
+        kind: MirInstKind.BinOp(lim_dest, MirBinOp.Sub, bound_op, vf_op),
+        span: nil
+    )
+    val fits_inst = MirInst(
+        kind: MirInstKind.BinOp(fits_dest, MirBinOp.Le,
+            MirOperand(kind: MirOperandKind.Copy(index_local)),
+            MirOperand(kind: MirOperandKind.Copy(lim_dest))),
         span: nil
     )
 
     MirBlock(
         id:           block_id,
         label:        Some("align_check"),
-        instructions: [range_inst, mismatch_inst, vi_init],
-        terminator:   terminator
-    )
+        instructions: [seed_inst, lim_inst, fits_inst],
+        terminator:   MirTerminator.If(
+            cond:  MirOperand(kind: MirOperandKind.Copy(fits_dest)),
+            then_: vec_id,
+            else_: BlockId.new(remainder_block_id)))
 
 
 # ============================================================================
@@ -736,7 +728,8 @@ fn vector_loop_locals(ctx: VectorizeContext, base_block_id: i64) -> [MirLocal]:
     # Induction index, exit-guard flag, and the three slice addresses are
     # scalar. They are declared for the same reason: an undeclared local has
     # no type entry for any consumer, not just the AVX-512 planner.
-    for id in [base_block_id + 200, base_block_id + 205,
+    for id in [base_block_id + 205, base_block_id + 206,
+               base_block_id + 207, base_block_id + 208,
                base_block_id + 210, base_block_id + 211, base_block_id + 212]:
         out.push(MirLocal(id: LocalId(id: id), name: nil,
             type_: MirType(kind: MirTypeKind.I64),
@@ -749,33 +742,54 @@ fn create_vector_loop_block(
     input_bases: [LocalId],
     output_base: LocalId,
     op_name: text,
-    trip_count: i64,
-    exit_block_id: i64
+    bound_op: MirOperand,
+    index_local: LocalId,
+    remainder_block_id: i64
 ) -> MirBlock:
     """
     Create the SIMD vector-loop block for a supported elementwise pattern.
 
-    Emits (for chunk_width=4, element_type=i32):
+    Emits (for chunk_width=4, element_type=i32, index local %i):
+
       BB_vec_loop:
-        %va   = Intrinsic("simd_load_i32x4", [a_base, vi])
-        %vb   = Intrinsic("simd_load_i32x4", [b_base, vi])
-        %vres = Intrinsic("simd_<op>_i32x4", [%va, %vb])
-        Intrinsic("simd_store_i32x4", [out_base, vi, %vres])
-        %vi1  = BinOp(Add, %vi, chunk_width_const)    # vi += chunk_width
-        %cond = BinOp(Lt, %vi1, trip_count_const)     # exit guard
-        If(%cond, BB_vec_loop, BB_exit)               # back-edge or exit
+        %addr_a = GEP(a_base, %i)      %va   = MirSimdLoad(%addr_a, Vec4i)
+        %addr_b = GEP(b_base, %i)      %vb   = MirSimdLoad(%addr_b, Vec4i)
+        %vres   = MirSimdBinop(%va, %vb, "Add")
+        %addr_o = GEP(out_base, %i)    MirSimdStore(%vres, %addr_o)
+        %i      = %i + chunk_width               # advance by a whole vector
+        %lim    = bound - chunk_width            # last index a full chunk fits
+        %cond   = %i <= %lim
+        If(%cond, BB_vec_loop, BB_remainder)
+
+    Two things here are load-bearing and were not true before.
+
+    **The index is the loop's own induction variable**, not a private counter.
+    That is what lets the vector loop hand control to an unmodified clone of the
+    scalar body for whatever is left: the clone re-tests its own `i < n` and
+    finishes the tail from exactly where the vector loop stopped. A private
+    counter cannot do that, which is why the old code needed a "peel" block —
+    and that peel ran ONE iteration and branched to a block that did not exist
+    (D7), so remainder trip counts had to be refused outright.
+
+    **The bound is an OPERAND, not a constant.** A constant bound can only come
+    from a loop whose length is known at compile time. Real code — a request
+    body, a row set, a framebuffer sized at runtime — has a bound that is a
+    local, and passing `Copy(n)` here is the whole reason such loops can now be
+    vectorized at all. `%i <= bound - VF` is the standard "does another full
+    vector fit" test and is correct for both: for a constant bound it folds.
 
     Block IDs allocated:
       base_block_id + 2 = this vector-loop block (matches vec_id in alignment_check)
 
-    trip_count: total iteration count used to build the loop exit guard
-                (%vi1 < trip_count → continue; else → exit_block_id).
-    exit_block_id: block id to branch to when vi1 >= trip_count (epilogue or successor).
+    bound_op: the loop's upper bound. `_i64_const(n)` for a static trip count,
+              `Copy(local)` for a runtime one.
+    index_local: the loop induction variable, shared with the scalar remainder.
+    remainder_block_id: the scalar clone that finishes the tail.
     """
     val block_id = BlockId.new(base_block_id + 2)
 
-    # Locals for SIMD temporaries
-    val vi_local  = LocalId(id: base_block_id + 200)  # vector index (chunk-scaled)
+    # The induction variable IS the vector index — see the note above.
+    val vi_local  = index_local
     val va_local  = LocalId(id: base_block_id + 201)  # loaded vector a
     val vb_local  = LocalId(id: base_block_id + 202)  # loaded vector b
     val vres_local = LocalId(id: base_block_id + 203) # result vector
@@ -823,32 +837,47 @@ fn create_vector_loop_block(
         span: nil
     )
 
-    # %cond = vi < trip_count  (exit guard: continue if more iterations remain)
+    # %lim = bound - chunk_width; %cond = %i <= %lim.
+    #
+    # "Does another WHOLE vector fit" — not "are there iterations left". The
+    # difference is the entire correctness argument for a runtime bound: a
+    # `%i < n` test would enter the body with fewer than VF elements remaining
+    # and read past the end of all three arrays.
+    val vlim_local  = LocalId(id: base_block_id + 206)
     val vcond_local = LocalId(id: base_block_id + 205)
-    val tc_op = _i64_const(trip_count)
+    val lim_inst = MirInst(
+        kind: MirInstKind.BinOp(vlim_local, MirBinOp.Sub, bound_op, vf_op),
+        span: nil
+    )
     val guard_inst = MirInst(
         kind: MirInstKind.BinOp(
             vcond_local,
-            MirBinOp.Lt,
+            MirBinOp.Le,
             MirOperand(kind: MirOperandKind.Copy(vi_local)),
-            tc_op
+            MirOperand(kind: MirOperandKind.Copy(vlim_local))
         ),
         span: nil
     )
 
-    # Terminator: If(%cond) → back-edge (self), else → exit block.
-    # This replaces the former self-loop Goto which caused non-termination.
-    val exit_id = BlockId.new(exit_block_id)
+    # Back-edge while another full vector fits; otherwise the scalar clone
+    # finishes the tail from the index this loop stopped at.
     val terminator = MirTerminator.If(
         cond:  MirOperand(kind: MirOperandKind.Copy(vcond_local)),
         then_: block_id,
-        else_: exit_id
+        else_: BlockId.new(remainder_block_id)
     )
+
+    var insts: [MirInst] = []
+    for i in body:
+        insts.push(i)
+    insts.push(inc_inst)
+    insts.push(lim_inst)
+    insts.push(guard_inst)
 
     MirBlock(
         id:           block_id,
         label:        Some("vec_loop"),
-        instructions: _vec_block_instructions(body, inc_inst, guard_inst),
+        instructions: insts,
         terminator:   terminator
     )
 

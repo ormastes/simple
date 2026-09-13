@@ -99,6 +99,16 @@ fn make_jump_terminator() -> MirTerminator:
 # Fixture blocks
 # ============================================================================
 
+# Every real loop header tests its induction variable against a bound before
+# doing work, and the vectorizer now READS that test to learn where the array
+# ends. These fixtures had no such instruction — an abstract body with no loop
+# around it — so the pass correctly declines them. The bound here is a LOCAL,
+# not a constant, which is the shape real code has (a request body, a row set,
+# a framebuffer sized at runtime) and the shape the pass used to refuse.
+fn make_bound_cmp() -> MirInst:
+    MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+        make_copy_op(4), make_copy_op(40)))
+
 fn make_elementwise_block_add() -> MirBlock:
     """
     Simulates body of:  out[i] = a[i] + b[i]
@@ -110,6 +120,7 @@ fn make_elementwise_block_add() -> MirBlock:
       %i1  = Add(%i, 1)        # index increment — Const operand
     """
     val insts = [
+        make_bound_cmp(),                                            # %20 = %4 < %40
         make_load_inst(10, 1),                                       # %10 = Load(%1)
         make_load_inst(11, 2),                                       # %11 = Load(%2)
         make_binop_inst(12, MirBinOp.Add, 10, 11),                  # %12 = Add(%10,%11)
@@ -121,6 +132,7 @@ fn make_elementwise_block_add() -> MirBlock:
 fn make_elementwise_block_mul() -> MirBlock:
     """Simulates body of: out[i] = a[i] * b[i]"""
     val insts = [
+        make_bound_cmp(),
         make_load_inst(10, 1),
         make_load_inst(11, 2),
         make_binop_inst(12, MirBinOp.Mul, 10, 11),
@@ -132,6 +144,7 @@ fn make_elementwise_block_mul() -> MirBlock:
 fn make_elementwise_block_sub() -> MirBlock:
     """Simulates body of: out[i] = a[i] - b[i]"""
     val insts = [
+        make_bound_cmp(),
         make_load_inst(10, 1),
         make_load_inst(11, 2),
         make_binop_inst(12, MirBinOp.Sub, 10, 11),
@@ -681,14 +694,14 @@ describe "AutoVectorize W-cfg — create_alignment_check_block":
     it "produces a block with label align_check":
         val li  = make_test_loop_info()
         val ctx = make_test_vectorize_ctx()
-        val bb  = create_alignment_check_block(ctx, li)
+        val bb  = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 99)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("align_check")
 
     it "alignment-check terminator is If":
         val li  = make_test_loop_info()
         val ctx = make_test_vectorize_ctx()
-        val bb  = create_alignment_check_block(ctx, li)
+        val bb  = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 99)
         val is_if = match bb.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -878,7 +891,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
             end_value:     16,
             step:          1
         )
-        val align = create_alignment_check_block(ctx, li)
+        val align = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 99)
         val is_if = match align.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -887,14 +900,16 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
     it "vec_loop block for i32x4 recipe has label vec_loop":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
-            [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 4)
+            [make_local(10), make_local(11)], make_local(12), "add_elementwise",
+            make_int_const_op(16), make_local(4), 4)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("vec_loop")
 
     it "vec_loop block for i32x4 has >= 4 SIMD instructions":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
-            [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 4)
+            [make_local(10), make_local(11)], make_local(12), "add_elementwise",
+            make_int_const_op(16), make_local(4), 4)
         # load_a + load_b + simd_add + simd_store + vi_inc + guard = 6 instructions
         expect(bb.instructions.len() >= 4).to_equal(true)
 
@@ -931,7 +946,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add dynamic trip count (0..n)
             end_value:     0,
             step:          1
         )
-        val align = create_alignment_check_block(ctx, li)
+        val align = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 99)
         val is_if = match align.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -983,18 +998,24 @@ describe "AutoVectorize N1-rewrite — refuses trip count < chunk_width (0..3, V
         expect(result.blocks.len()).to_equal(func.blocks.len())
 
 # ============================================================================
-# N1 negative: dynamic (unknown) trip count → rewriter refuses (R4)
-# Rationale: vec_loop emits Goto(self) — non-terminating without Wave L3b
-# If-guard — and splice_vectorized_block does not patch predecessor edges.
+# N1 positive: a dynamic (runtime) trip count is VECTORIZED.
+#
+# This asserted the opposite until the loop bound became an operand. Refusing a
+# runtime length meant refusing essentially all real code — a request body, a
+# row set, a framebuffer sized at runtime — so the pass could be Active and
+# still never fire on anything a server runs. The guard is `i <= n - VF`, which
+# does not care whether `n` is a constant or a local, and whatever is left over
+# is finished by the scalar clone.
 # ============================================================================
 
-describe "AutoVectorize N1-rewrite — refuses dynamic trip count (trip_count=-1)":
-    it "trip-count=-1 (dynamic) returns function unchanged (same block count)":
+describe "AutoVectorize N1-rewrite — vectorizes a dynamic trip count (trip_count=-1)":
+    it "trip-count=-1 (runtime bound) is rewritten, not refused":
+        step("this is the case that decides whether real code is vectorized at all")
         val orig_block = make_elementwise_block_add()
         val func       = make_test_mir_function([orig_block], false)
         val recipe     = make_elementwise_add_recipe_dynamic_n()
         val result     = rewrite_elementwise_add(recipe, func)
-        expect(result.blocks.len()).to_equal(func.blocks.len())
+        expect(result.blocks.len() > func.blocks.len()).to_equal(true)
 
 # ============================================================================
 # N1 positive: misaligned trip count → rewriter now accepts (Wave L3b Defect C fix)
@@ -1006,8 +1027,8 @@ describe "AutoVectorize N1-rewrite — refuses dynamic trip count (trip_count=-1
 # one element and jumps to a block that does not exist, so what this pinned was
 # a miscompile. R4b now refuses it; see the trip-count sweep in the step-6
 # section for the execution evidence.
-describe "AutoVectorize N1-rewrite — declines a misaligned trip count (6 % 4 != 0)":
-    it "trip-count=6 misaligned with VF=4 is refused, not half-vectorized":
+describe "AutoVectorize N1-rewrite — vectorizes a misaligned trip count (6 % 4 != 0)":
+    it "trip-count=6 with VF=4 vectorizes the first chunk and leaves 2 to the remainder":
         val orig_block = make_elementwise_block_add()
         val func       = make_test_mir_function([orig_block], false)
         val recipe     = VectorRecipe(
@@ -1028,7 +1049,7 @@ describe "AutoVectorize N1-rewrite — declines a misaligned trip count (6 % 4 !
             induction_update: make_local(4)
         )
         val result = rewrite_elementwise_add(recipe, func)
-        expect(result.blocks.len()).to_equal(func.blocks.len())
+        expect(result.blocks.len() > func.blocks.len()).to_equal(true)
 
 # ============================================================================
 # N1 positive: divisible trip count (0..16, VF=4) → rewriter should rewrite
@@ -1081,18 +1102,18 @@ describe "AutoVectorize N1-rewrite — elementwise f32 add does not require fast
 describe "AutoVectorize N1-codegen — create_vector_loop_block":
     it "produces a block with label vec_loop":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", make_int_const_op(16), make_local(4), 103)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("vec_loop")
 
     it "vec_loop block contains >= 4 instructions (load_a, load_b, add, store, inc, guard)":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise", 16, 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise", make_int_const_op(16), make_local(4), 103)
         expect(bb.instructions.len() >= 4).to_equal(true)
 
     it "vec_loop block has If terminator (exit guard — not self-loop Goto)":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", 16, 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", make_int_const_op(16), make_local(4), 103)
         val is_if = match bb.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -1148,10 +1169,13 @@ describe "AutoVectorize width ladder — AVX-512 must not refuse what AVX2 accep
         val tiny = rewrite_elementwise_add(make_recipe_with_width(3, 16), func)
         expect(tiny.blocks.len() == func.blocks.len()).to_equal(true)
 
-    it "leaves a dynamic trip count alone rather than narrowing on no evidence":
+    it "vectorizes a dynamic trip count at the full planned width":
+        step("narrowing exists to fit a KNOWN trip count; with no trip count")
+        step("there is nothing to fit, so the planned width stands and the")
+        step("runtime guard decides how many chunks actually run")
         val func = make_test_mir_function([make_elementwise_block_add()], false)
         val dynamic = rewrite_elementwise_add(make_recipe_with_width(-1, 16), func)
-        expect(dynamic.blocks.len() == func.blocks.len()).to_equal(true)
+        expect(dynamic.blocks.len() > func.blocks.len()).to_equal(true)
 
 # ============================================================================
 # Active-pass witnesses (PassKind.AutoVectorize became Active 2026-09-13)
@@ -1672,12 +1696,131 @@ describe "step 6 — vectorized output equals scalar output when EXECUTED":
                 rewritten = rewritten + 1
         expect(rewritten).to_equal(4)
 
-    it "declines a remainder trip count rather than miscompiling it":
-        step("the refusal is the contract until a real peel exists")
-        var declined = 0
+    it "vectorizes a remainder trip count instead of declining it":
+        step("the old contract was refusal, because the peel block wrote one")
+        step("element and jumped to a block that did not exist. The tail now")
+        step("goes to an unmodified clone of the scalar body, so a remainder")
+        step("is just the scalar loop finishing — and the sweep above proves")
+        step("the results are identical for every one of these lengths.")
+        var rewritten = 0
         for n in [5, 6, 7, 9, 10, 11]:
             val before = diff_function(n).blocks.len()
             val after = rewrite_elementwise_add(diff_recipe(n), diff_function(n)).blocks.len()
-            if after == before:
-                declined = declined + 1
-        expect(declined).to_equal(6)
+            if after > before:
+                rewritten = rewritten + 1
+        expect(rewritten).to_equal(6)
+
+# ============================================================================
+# The case the whole pass exists for: a bound known only at RUNTIME.
+#
+# Server code does not loop to a constant. A request body, a row set, a
+# framebuffer sized at runtime all carry their length in a local, and until
+# the bound became an operand this pass declined every one of them — it could
+# be Active and still never fire on anything a server runs.
+#
+# These execute the rewritten function and compare it against the scalar one,
+# because a structural check cannot tell a correct runtime guard from one that
+# reads a vector past the end of the array.
+# ============================================================================
+
+val DIFF_N_LOCAL: i64 = 41
+
+fn dyn_entry_block(n: i64) -> MirBlock:
+    """Same seeding as the static fixture, plus the length in a LOCAL."""
+    var insts: [MirInst] = []
+    var i: i64 = 0
+    while i < n:
+        insts.push(diff_store(DIFF_A_BASE + i * 8, i + 1))
+        insts.push(diff_store(DIFF_B_BASE + i * 8, (i + 1) * 10))
+        insts.push(diff_store(DIFF_O_BASE + i * 8, 0))
+        i = i + 1
+    insts.push(diff_set_local(1, DIFF_A_BASE))
+    insts.push(diff_set_local(2, DIFF_B_BASE))
+    insts.push(diff_set_local(3, DIFF_O_BASE))
+    insts.push(diff_set_local(4, 0))
+    insts.push(diff_set_local(DIFF_N_LOCAL, n))
+    MirBlock(id: make_block_id(0), label: nil, instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn dyn_loop_block() -> MirBlock:
+    """`out[i] = a[i] + b[i]` guarded by `i < %41` — a runtime bound."""
+    val insts = [
+        MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_copy_op(DIFF_N_LOCAL))),
+        gep(30, 1, 4),
+        make_load_inst(10, 30),
+        gep(31, 2, 4),
+        make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, 3, 4),
+        make_store_inst(32, 12),
+        make_add_const_inst(4, 4)
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 9))
+
+fn dyn_function(n: i64) -> MirFunction:
+    make_test_mir_function([dyn_entry_block(n), dyn_loop_block(), diff_exit_block()], false)
+
+fn dyn_recipe() -> VectorRecipe:
+    """trip_count is -1: the length is NOT known to the compiler."""
+    VectorRecipe(
+        kind:             VectorRecipeKind.Elementwise,
+        header_block:     make_block_id(1),
+        induction_var:    make_local(4),
+        trip_count:       -1,
+        element_type:     "i32",
+        vector_width:     4,
+        op_name:          "add_elementwise",
+        note:             "runtime bound",
+        input_bases:      [make_local(1), make_local(2)],
+        output_base:      Some(make_local(3)),
+        accumulator:      nil,
+        chunk_width:      4,
+        index_locals:     [make_local(4)],
+        store_value:      nil,
+        induction_update: make_local(4))
+
+fn dyn_matches(n: i64) -> bool:
+    val scalar_out = run_and_read_output(dyn_function(n), n)
+    val vector_out = run_and_read_output(
+        rewrite_elementwise_add(dyn_recipe(), dyn_function(n)), n)
+    if scalar_out.len() != n or vector_out.len() != n:
+        return false
+    var i: i64 = 0
+    while i < n:
+        if scalar_out[i.to_i32()] != vector_out[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+describe "a RUNTIME loop bound vectorizes and stays correct":
+    it "runs the scalar control with a bound held in a local":
+        step("if the control does not run, a vector result proves nothing")
+        val got = run_and_read_output(dyn_function(8), 8)
+        expect(got.len()).to_equal(8)
+        var bad = 0
+        var i: i64 = 0
+        while i < 8:
+            if got[i.to_i32()] != (i + 1) + ((i + 1) * 10):
+                bad = bad + 1
+            i = i + 1
+        expect(bad).to_equal(0)
+
+    it "is actually rewritten despite the compiler not knowing the length":
+        step("trip_count is -1 here; this used to be an unconditional decline")
+        val before = dyn_function(8).blocks.len()
+        val after = rewrite_elementwise_add(dyn_recipe(), dyn_function(8)).blocks.len()
+        expect(after > before).to_equal(true)
+
+    it "produces identical memory for every runtime length":
+        step("lengths straddling the vector width in both directions, including")
+        step("ones shorter than a single vector, where the guard must send")
+        step("control straight to the scalar loop without reading anything")
+        var bad: [i64] = []
+        var n: i64 = 1
+        while n <= 20:
+            if not dyn_matches(n):
+                bad.push(n)
+            n = n + 1
+        expect(bad.len()).to_equal(0)
