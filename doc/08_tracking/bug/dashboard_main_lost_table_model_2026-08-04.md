@@ -128,3 +128,9 @@ recovery path; the decision to restore belongs to the owner of that lane.
 
 ## Triage 2026-09-12
 Rule B: re-ran `bin/simple test test/02_integration/app/dashboard_log_modes_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+Reconfirmed via source inspection: table-model symbols still absent from
+`src/app/dashboard/main.spl`. Respecting this record's explicit "Ownership
+warning" — the llm-caret lane owns this path and restoration must not be
+done unilaterally. Left as-is, no code change attempted.
