@@ -294,6 +294,22 @@ impl Lowerer {
                 kind: HirExprKind::Local(idx),
                 ty,
             })
+        } else if let Some((symbol, ty)) = self.resolve_flatten_owned_callable(name).and_then(|symbol| {
+            // Cross-module same-named free functions in a flattened unit are
+            // lowered under owner-exact symbols (`flatten_emitted_symbol`).
+            // Resolve by the CALLING function's owner before any bare-name
+            // lookup, which would otherwise pick whichever module's definition
+            // registered last. See
+            // `doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md`.
+            let ty = self
+                .named_callable_value_type(&symbol)
+                .or_else(|| self.globals.get(&symbol).copied())?;
+            Some((symbol, ty))
+        }) {
+            Ok(HirExpr {
+                kind: HirExprKind::Global(symbol),
+                ty,
+            })
         } else if let Some((source, ty)) = self.resolve_import_alias(name).map(str::to_string).and_then(|source| {
             // Selective-import alias (`use m.{f as g}`): module flattening merged
             // the imported symbol in under its ORIGINAL name, so `g` names
@@ -1406,6 +1422,14 @@ impl Lowerer {
                 | "is_alphabetic" | "is_alphanumeric" | "is_alnum" | "is_whitespace" => Some(TypeId::BOOL),
                 "concat" | "slice" | "substring" | "replace" | "trim" | "trim_start" | "trim_end" | "lower"
                 | "to_lower" | "upper" | "to_upper" => Some(TypeId::STRING),
+                // `sep.join(parts)` (receiver-string form) returns a String.
+                // Without this entry it fell through to the by-name
+                // `.join` suffix search in `lookup_method_return_type_inner`
+                // and was typed as an unrelated user method such as
+                // `Thread.join() -> i64?`, so `"/" + "/".join(xs)` failed
+                // lowering and dropped the whole module to the interpreter.
+                // doc/08_tracking/bug/seed_receiver_text_join_resolves_to_thread_join_optional_2026-09-13.md
+                "join" => Some(TypeId::STRING),
                 // `appended`/`prepended` (= `concat` with swapped operand
                 // order) return a fresh String — same shape as the
                 // `concat`/`slice` entry just above. See the MIR expansion
