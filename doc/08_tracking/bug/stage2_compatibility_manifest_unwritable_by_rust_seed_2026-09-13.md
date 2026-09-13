@@ -1,6 +1,7 @@
 # Site 16: the Stage-2 compatibility manifest can never be written on a seed-built Stage 2
 
-- **Status:** OPEN (2026-09-13) — needs an owner decision, NOT a one-line fix.
+- **Status:** RESOLVED (2026-09-13, PR #858) — see the RESOLVED section at the
+  end. The original text below is kept as the record of what was measured.
 - **Lane:** macOS `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`,
   worktree `agent-aee4c61a47998a6a9`, run 29 (carrying the site-13/14/15 fixes).
 - **Severity:** the Stage-2 blocker that succeeds site 15. Not caused by it —
@@ -104,8 +105,10 @@ Linux run on the default lane ever crossed it either.
 
 The gate is kept and scoped on a POSITIVE producer fact that the script already
 computes BEFORE Stage 2 runs (`bootstrap_stage2_parent_override`, set only after
-`admit-stage2-parent.shs` verified an admitted pure-Simple release, plus the
-`--pure-simple` flag) — never "the file is missing, so skip".
+`admit-stage2-parent.shs` verified an admitted pure-Simple release) — never
+"the file is missing, so skip". `--pure-simple` is deliberately NOT an input: it
+only forbids rebuilding the Rust seed (and conflicts with `--full-bootstrap` at
+`:707`), leaving `stage2_seed_absolute` on the Rust authority.
 
 - `scripts/check/lib/bootstrap-stage3/phase2-compat-manifest.shs` —
   `bootstrap_phase2_compat_producer_kind` and
