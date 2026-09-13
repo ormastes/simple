@@ -669,3 +669,7 @@ red, not a new fail-open.
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+
+This is a 671-line CI/guard-wiring infra investigation, not a unit-spec-TDD-fixable bug: several exemption removals already landed in prior passes, and the remaining open items each need an infra owner decision (whether a contract gate should also assert its subject's exit code, per the "Compare check-llm-runtime-vllm-host-env-contract.shs" note). No new content to add this pass given the shard's remaining size; leaving OPEN as previously triaged.
