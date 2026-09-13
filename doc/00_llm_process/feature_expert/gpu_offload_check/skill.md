@@ -522,3 +522,20 @@ for this feature, update this skill with the new links, current inventory
 numbers, and handoff notes BEFORE committing.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## 2026-09-13 — Chrome-vs-Simple GPU command counts
+
+- Gate: `scripts/check/check-renderdoc-chrome-vs-simple.shs` (selftest 4 fixtures,
+  fatal, runs on macOS; exits 2 `renderdoccmd not found` off the Linux lane).
+- Counter: `src/app/ui/renderdoc_metrics/main.spl` — draws/dispatches/submits/
+  readbacks/clears/pipeline switches per page + 4 invariants. `presents` is the
+  submit proxy, `copies` the readback proxy, upload bytes are `n/a` (not in
+  `renderdoc-events/v1`).
+- Fixtures: `test/fixtures/renderdoc/` (conforming PASS, violating FAIL, empty and
+  missing both ERROR).
+- Evidence + open findings: `doc/10_metrics/ui/renderdoc_chrome_vs_simple_2026-09-13.md`.
+  Still true: **no `.rdc` has ever been captured on any host**, Chrome has no measured
+  command counts, and `css-layout` shows 3 submits against a limit of 1.
+- Trap: the macOS seed aborts rc 138 (SIGBUS) on a cross-module call, which is why the
+  counter is one module and why `check-renderdoc-web-diff.shs --selftest` is ERROR
+  here — `doc/08_tracking/bug/renderdoc_seed_sigbus_cross_module_call_2026-09-13.md`.

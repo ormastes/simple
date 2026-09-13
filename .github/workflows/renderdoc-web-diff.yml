@@ -23,6 +23,9 @@ on:
       - 'examples/06_io/ui/web_catalog/**'
       - 'scripts/tool/renderdoc-*'
       - 'scripts/check/check-renderdoc-web-*'
+      - 'scripts/check/check-renderdoc-chrome-vs-simple.shs'
+      - 'src/app/ui/renderdoc_metrics/**'
+      - 'test/fixtures/renderdoc/**'
       - 'scripts/setup/setup-renderdoc-linux-lavapipe.shs'
       - '.github/workflows/renderdoc-web-diff.yml'
 
@@ -99,6 +102,43 @@ jobs:
       - name: Show receipt
         if: always()
         run: cat build/renderdoc/receipt.env || echo "no receipt produced"
+
+      # Per-page GPU-command comparison (draws / dispatches / submits / readbacks /
+      # pipeline switches) plus the four GPU-offload invariants. Distinct from the
+      # alignment differ above, which asks about ORDER, not COUNTS.
+      #
+      # `if: always()` on purpose: the selftest half needs no RenderDoc and no .rdc,
+      # so it must still run (and still be fatal) when the capture step above failed
+      # — that is the only half that has ever executed anywhere. On a runner without
+      # renderdoccmd the gate exits 2 ERROR rather than reporting a vacuous pass.
+      - name: Chrome-vs-Simple GPU command counts
+        id: cvs
+        if: always()
+        continue-on-error: true
+        run: |
+          set -eu
+          mkdir -p build/renderdoc
+          RDOC_CVS_PAGES="${{ github.event.inputs.pages || 'overview css-layout' }}" \
+            sh scripts/check/check-renderdoc-chrome-vs-simple.shs \
+            2>&1 | tee build/renderdoc/chrome-vs-simple.log
+
+      - name: Publish the per-page table as a step summary
+        if: always()
+        run: |
+          {
+            echo "## Chrome vs Simple — GPU command counts"
+            echo
+            if [ -s build/renderdoc/chrome-vs-simple/table.md ]; then
+              cat build/renderdoc/chrome-vs-simple/table.md
+            else
+              echo "_No per-page table produced._"
+            fi
+            echo
+            echo '```'
+            tail -20 build/renderdoc/chrome-vs-simple.log 2>/dev/null \
+              || echo "no log produced"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload captures, events, diff and receipt
         if: always()
