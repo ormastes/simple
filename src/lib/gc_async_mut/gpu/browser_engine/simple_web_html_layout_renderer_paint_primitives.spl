@@ -12,7 +12,7 @@ use common.ui.draw_ir.{
     draw_ir_rect_bounds,
     draw_ir_style_prop
 }
-use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, blit_rect}
+use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 
 fn glyph_scale(fs: i32) -> i32:
@@ -59,15 +59,7 @@ fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color:
         x1 = fbw
     if y1 > fbh:
         y1 = fbh
-    var py = y0
-    while py < y1:
-        val row = py * fbw
-        var px = x0
-        while px < x1:
-            out[row + px] = color
-            px = px + 1
-        py = py + 1
-    out
+    fb_fill_rows_const(out, fbw, x0, y0, x1, y1, color)
 class ClipRect:
     x0: i32
     y0: i32
@@ -116,12 +108,51 @@ fn fb_rect_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, c
         x1 = clip.x1
     if y1 > clip.y1:
         y1 = clip.y1
+    out = fb_fill_rows_const(out, fbw, x0, y0, x1, y1, color)
+    out
+
+# ============================================================================
+# Solid-fill row template
+#
+# `fb_rect_clip` and `fb_rect` are the busiest primitives in the renderer: every
+# solid background reaches one of them (via fb_style_background_opacity_clip ->
+# rounded -> corners -> radius 0 -> fb_rect_opacity_clip), as do all four
+# border sides, outlines, underlines and form controls — 23 call sites for
+# fb_rect_clip alone, over the whole viewport, overdrawn several times a frame.
+#
+# Both ran one INTERPRETED STORE PER PIXEL. A constant fill deliberately has no
+# span-kernel path (simd_kernels.spl:460-473 measured the extern round trip at
+# 7 ms vs 0 ms scalar — the ABI cannot mutate the caller's array, so the return
+# plus copy-back costs more than the stores it replaces). The cheap bulk
+# channel is `write_span`, so the shape that wins is: build ONE row natively,
+# then bulk-write it per row.
+# ============================================================================
+fn fb_fill_rows_const(fb: [u32], fbw: i32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> [u32]:
+    """Fill the already-clipped rect [x0,x1) x [y0,y1) with a constant colour."""
+    var out = fb
+    val w = x1 - x0
+    if w <= 0 or y1 <= y0:
+        return out
+    val row = engine2d_simd_fill_row_u32(w.to_i64(), color)
+    if row.len() != w:
+        # The native row builder is unavailable; fall back rather than write a
+        # short row, which would leave the tail of every line unpainted.
+        return _scalar_fill_rows_const(out, fbw, x0, y0, x1, y1, color)
     var py = y0
     while py < y1:
-        val row = py * fbw
+        out.write_span(row, (py * fbw + x0).to_i64(), 0, w.to_i64())
+        py = py + 1
+    out
+
+fn _scalar_fill_rows_const(fb: [u32], fbw: i32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> [u32]:
+    """Scalar reference path — identical output by construction."""
+    var out = fb
+    var py = y0
+    while py < y1:
+        val base = py * fbw
         var px = x0
         while px < x1:
-            out[row + px] = color
+            out[base + px] = color
             px = px + 1
         py = py + 1
     out
