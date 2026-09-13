@@ -70,3 +70,48 @@ Measured on **cranelift** only. Neither seed on this host carries the `llvm`
 cargo feature (`--backend llvm` is refused outright), so whether LLVM lowering
 shares the defect is untested. **Not fixed here** — F65 owns the seed; this
 lane's product is the harness and the census.
+
+## RESOLVED 2026-09-13 — root cause and fix
+
+The SEGV is gone; the spec's six examples all run natively and five of them now
+agree with the interpreter (the sixth is a separate, newly-visible defect, filed
+as `native_untyped_return_fn_drops_tail_value_2026-09-13.md`).
+
+**The receiver was not "null at entry" in the sense this record guessed — the
+call should never have reached `StringBuilder` at all.** Instrumentation
+(`SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1`, which this branch of codegen did not
+previously report on — see below) named it exactly:
+
+```
+[CODEGEN-ERASED-RECEIVER-BIND] in 'most_common_char' bare method 'void.len'(0 args)
+  receiver_ty=Some(TypeId(0)) bound by name-suffix alone to
+  'src__lib__common__string_builder__StringBuilder_dot_len' (1 candidate(s))
+```
+
+`if freqs.len() == 0` in `most_common_char` (`src/lib/common/text_advanced.spl`)
+has a receiver from an un-annotated function, so its static type is
+`TypeId::VOID`. Codegen stringifies the receiver type into the lookup name
+regardless, producing **`void.len`** — and every erasure policy in
+`codegen/instr/closures_structs.rs` keys on `!lookup_name.contains('.')` to mean
+"erased", so a dot-bearing `void.len` read as a genuinely type-qualified call.
+Two consequences, both fixed:
+
+1. The bare-builtin route (`bare_builtin_collection`) did not fire, so the call
+   was not lowered to the tag-dispatching `rt_len`.
+2. The cross-module resolution branch's three unqualified scans were gated only
+   on `!enum_helper`, so the first of them bound `len` to the lone linked
+   `StringBuilder.len` — which tail-calls `StringBuilder.to_text`, loading field
+   0 of a receiver that was never passed. Hence `ldr x28,[x8]` with x8 = 0.
+   `rt_string_new_literal` was indeed innocent, as recorded above.
+
+Fix (`codegen/instr/closures_structs.rs`): `strip_erased_receiver_qualifier`
+treats a `void.` qualifier as the erasure it is, applied at both policy sites;
+and the cross-module scans gain a `no_rebind` predicate covering the builtin
+collection idioms alongside the existing enum helpers. The cross-module branch
+also now reports its binds through the existing
+`SIMPLE_DEBUG_ERASED_RECEIVER_BIND` diagnostic — it never did, which is why this
+defect produced zero diagnostic lines while being the whole failure.
+
+**LLVM twin NOT fixed, named rather than hidden:** `mangle.rs`'s bare-`len`
+exclusion (~:980) is gated on `!has_type_qualifier`, so `void.len` slips past it
+identically. That file is owned by another lane; this record is the citation.
