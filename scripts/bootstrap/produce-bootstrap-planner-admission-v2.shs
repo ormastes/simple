@@ -34,6 +34,33 @@ export BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
 
+# The Stage-2 admission receipt records the ABI policy the bootstrap ran under,
+# and bootstrap_stage3_verify_stage2_admission_receipt re-derives it from the
+# AMBIENT SIMPLE_ABI_POLICY and requires the two to agree -- deliberately, so a
+# replay cannot admit a Stage 2 built under a different ABI. This producer is
+# invoked standalone, outside bootstrap-from-scratch.sh (which exports it at
+# :1222), so with nothing establishing it the verifier's `case` fell through to
+# `return 1` and every real admission was reported
+# `parent-stage2-admission-invalid` -- a receipt-shaped failure for an
+# environment-shaped cause. Derive it from the SAME canonical authority
+# bootstrap-from-scratch.sh reads (kernel_closure.sdn), never from an
+# unvalidated caller value: a pre-set policy that drifts from canonical is
+# refused rather than honoured.
+adm_abi_manifest="$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn"
+adm_abi_canonical=$(awk '$1 == "simple_abi_policy:" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }' \
+    "$adm_abi_manifest" 2>/dev/null) || {
+    echo "bootstrap-admission-error: canonical-abi-policy-unavailable" >&2
+    exit 64
+}
+if [ -n "${SIMPLE_ABI_POLICY:-}" ] &&
+   [ "${SIMPLE_ABI_POLICY}" != "$adm_abi_canonical" ]; then
+    echo "bootstrap-admission-error: abi-policy-drifts-from-canonical" >&2
+    exit 64
+fi
+SIMPLE_ABI_POLICY=$adm_abi_canonical
+export SIMPLE_ABI_POLICY
+
 adm_fail() {
     echo "bootstrap-admission-error: $1" >&2
     echo "bootstrap-admission-error: $1"
