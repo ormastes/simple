@@ -123,3 +123,15 @@ closure contract test exits 0; the three-cycle guard prevented another compile.
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Extensive multi-session investigation already on record (build-latency
+blocker closed, current blocker is unresolved built-in method symbols at
+link time plus generic-monomorphization gaps in native closure
+construction). Reproducing requires long native-build runs
+(`SIMPLE_TIMEOUT_SECONDS=120` bounded builds, previously timing out) on a
+shared, loaded host — not attempted here to avoid tying up host capacity
+for a row whose real blocker (native codegen link-time symbol resolution)
+is compiler-backend work exceeding a single row's budget regardless. Left
+OPEN, unchanged.
