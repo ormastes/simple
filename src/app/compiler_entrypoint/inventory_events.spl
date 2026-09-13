@@ -73,7 +73,9 @@ fn compiler_inventory_git_lines_v1(
     root: text, args: [text]
 ) -> text?:
     val (stdout, _stderr, status) = process_run_bounded(
-        "git", ["-C", root, "--no-optional-locks"] + args, 10000, 16 * 1024 * 1024)
+        # 10s was too short: cold-init `ls-files` over ~60k files takes ~23s on
+        # Windows and timed out, failing every refresh with git-event-refresh-failed.
+        "git", ["-C", root, "--no-optional-locks"] + args, 300000, 16 * 1024 * 1024)
     if status != 0: nil else: Some(stdout)
 
 fn compiler_inventory_git_head_v1(root: text) -> text:
@@ -199,7 +201,10 @@ fn compiler_inventory_refresh_v1(
 ) -> CompilerInventoryRefreshV1:
     val cursor = compiler_inventory_cursor_read_v1(cache_root)
     if not cursor.valid and not cold_init:
-        return compiler_inventory_invalid_v1("compile-event-journal-missing")
+        # Fail closed without event authority, but name the one-time opt-in
+        # so a fresh checkout is not left with an opaque reason.
+        return compiler_inventory_invalid_v1(
+            "compile-event-journal-missing (first build in this checkout: rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
     if cursor.valid:
         val current = compile_source_inventory_read_current_v1(cache_root)
         if (not current.valid or current.inventory == nil or

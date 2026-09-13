@@ -3,6 +3,8 @@
 use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query}
+use app.io.file_ops.{path_absolute}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
 
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists, file_delete}
@@ -720,6 +722,20 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         case Ok(value): value
         case Err(_):
             eprint "error: native-build could not create its internal policy handoff"
+            return 1
+    # The full CLI publishes the compile-source inventory through
+    # compiler_entrypoint_admit_v1 before native-build; this seed-run entry
+    # skipped it, so the worker's snapshot acquire always failed with
+    # snapshot-inventory-unavailable. Run the same refresh, same cold-init gate.
+    if (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") == "":
+        var scv_root = path_absolute(".").replace("\\", "/")
+        if scv_root.starts_with("//?/"):
+            scv_root = scv_root.substring(4)
+        val refresh = compiler_inventory_refresh_v1(
+            scv_root, scv_root + "/build/scv", ["src"],
+            (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1")
+        if not refresh.valid:
+            eprint "SCV-E-ADMISSION: " + refresh.reason
             return 1
     var worker_args = ["run", "src/app/cli/native_build_worker.spl"]
     val mode = env_get("SIMPLE_EXECUTION_MODE")
