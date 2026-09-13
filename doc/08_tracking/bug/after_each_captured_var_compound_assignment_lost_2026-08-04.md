@@ -1,6 +1,38 @@
 # BUG: a write inside `after_each` that reads the captured variable is lost; a constant write is not
 
-**Status:** OPEN
+## Triage 2026-09-13 — narrowed: the in-repo case is now fixed, the probe case still reproduces
+
+Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (interpreter mode).
+
+- **In-repo case FIXED.** `test/01_unit/std/feature_validation/testing_framework_spec.spl`
+  "Feature #184 - After Each Hooks" (now lines 160-178) declares
+  `cleanup_flag` at MODULE level (not inside the `describe` block) and both
+  examples now PASS: `SPEC FILE VERDICT: ... outcome=OK declared>=47
+  executed=47 passed=47 failed=0`. This is the same class this session
+  independently confirmed fixed in
+  `spec_harness_module_global_mutation_via_function_invisible_2026-08-07.md`
+  — module-level `var` mutation performed inside a called function (here, the
+  `after_each` hook) is now visible.
+- **Probe case STILL REPRODUCES.** Re-ran this doc's own probe (`describe`
+  block-scoped `var counter = 0`, captured by `after_each`, mutated with the
+  self-referencing `counter = counter + 1`) verbatim:
+  `expected 0 to equal 1` — identical to the original 2026-08-04 report. So
+  the discriminator is confirmed to be **declaration scope** (module-level
+  `var` vs. `describe`-block-scoped captured `var`), not constant-vs-
+  self-referencing-write as originally guessed — the `flag = true` /
+  `cleanup_flag = true` constant-write case now passes in BOTH scopes; only
+  `describe`-scoped closure-captured vars still lose a write on the path back
+  out of the hook, and only(as far as tested) for a self-referencing RHS.
+- **Not fixed here.** This is closure/capture write-back semantics in the
+  interpreter's `describe`/`it`/hook dispatch (not `src/lib/nogc_sync_mut/spec.spl`
+  alone — the capture mechanism is interpreter-level, matching
+  `.claude/rules/language.md`'s documented Runtime Limitation "Nested closure
+  capture - can READ outer vars, CANNOT MODIFY"). Fixing it correctly needs
+  the interpreter's closure environment model, which is a bigger and riskier
+  change than this lane's budget; left OPEN, repro re-confirmed and narrowed
+  above for whoever picks it up next.
+
+**Status:** OPEN (narrowed 2026-09-13 — module-level case fixed, describe-scope case remains)
 **Found:** 2026-08-04
 **Severity:** medium — spec hooks silently fail to accumulate state, so any
 `after_each`/`before_each` counter is stuck at its initial value. No error.
