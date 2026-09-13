@@ -49,3 +49,32 @@ attach. Launching under `gdb -batch` and interrupting works (a tracer must be an
 ancestor here), but yielded 9 usable leaf samples in ~2 minutes -- too lossy to
 attribute cost. There is no `valgrind` on this host and no process-CPU-time
 `rt_*` extern to let a fixture measure its own CPU time in-program.
+
+## Confirmed on the two landed ratio-pin specs
+
+PERF-6 ran both standalone, interleaved, on two seeds that measure IDENTICALLY
+when their fixtures are timed directly (`shape_slow_right.spl`: 27,657 us on the
+base seed and 29,071 us on the candidate, `WHILE_INLINE_INT_ITERS = 2,000,000`
+on both, same `acc`).
+
+`interpreter_component_scaling_spec.spl`, 3 runs per seed:
+
+| run | base | candidate |
+|---|---|---|
+| 1 | OK 23/0 | ERROR 20/3 |
+| 2 | OK 23/0 | OK 23/0 |
+| 3 | **ERROR 22/1** | ERROR 21/2 |
+
+`while_loop_shape_parity_spec.spl` is worse: it disagrees with ITSELF across
+environments on the same seed. The base seed scored **7/7 in directory mode and
+0/7 standalone, three times**; the candidate scored 6/1 in directory mode and
+7/7 twice plus 6/1 once standalone. Under the runner its child reported
+`shape_slow_right` at 6,835,637 us with the `WHILE_INLINE_INT_ITERS` row absent,
+against 27,657 us with the row at 2,000,000 for the same fixture and the same
+binary run directly -- a 227x disagreement that is a property of the
+environment, not of either seed.
+
+Every failing example in both specs is a ratio pin
+(`stays within 3x`, `linear pin`). **No semantics example failed on either seed
+in any run.** The conclusion is not that one seed regressed; it is that these
+two specs do not measure a seed at all on this host.
