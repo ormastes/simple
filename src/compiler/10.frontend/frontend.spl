@@ -7,6 +7,7 @@
 # (check/interpret/jit/aot) all consume exactly one parse pipeline.
 
 use compiler.frontend.parser_types.{ParserModule, DomainBlock}
+use compiler.core.frontend.{ParserProviderV1, parser_provider_v1_admit, parser_provider_v1_default}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
 use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_key}
@@ -98,7 +99,7 @@ fn frontend_extract_domain_blocks(source: text) -> ([DomainBlock], text):
 #
 # Every doubt is a MISS. A missing key (source not on disk), an absent entry, a
 # foreign scope, a torn blob: all fall through to a real parse.
-fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scope: bool) -> ParserModule:
+fn frontend_parse_or_restore_admitted(parse_source: text, file_path: text, streaming_scope: bool) -> ParserModule:
     val key = if frontend_parse_cache_enabled(): frontend_parse_cache_key(file_path) else: ""
     if key != "":
         val load_t0 = if frontend_cache_boundary_profile_enabled(): frontend_cache_boundary_profile_now() else: 0
@@ -123,6 +124,24 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
             print("PARSECACHE\tstore_ms={(store_t1 - store_t0) / 1000}\tbytes={captured_blob.len()}\tstored={stored}\tpath={file_path}")
         return fresh
     parse_and_build_module_scoped(parse_source, file_path, streaming_scope)
+
+pub fn frontend_parse_or_restore_for_provider(
+    provider: ParserProviderV1,
+    parse_source: text,
+    file_path: text,
+    streaming_scope: bool
+) -> Result<ParserModule, text>:
+    """Admit before cache lookup, restore, counters, capture, or parsing."""
+    val admission = parser_provider_v1_admit(provider)?
+    if admission.provider != ParserProviderV1.LegacyReference:
+        return Err("parser_provider_admission_invalid: " + admission.provider_id)
+    Ok(frontend_parse_or_restore_admitted(parse_source, file_path, streaming_scope))
+
+fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scope: bool) -> ParserModule:
+    match frontend_parse_or_restore_for_provider(
+        parser_provider_v1_default(), parse_source, file_path, streaming_scope):
+        case Ok(module): module
+        case Err(reason): panic("native frontend parser provider admission failed: {reason}")
 
 fn parse_full_frontend_with_scope(source: text, file_path: text, module_name: text, log: Logger, streaming_scope: bool) -> ParserModule:
     val preprocessed = preprocess_conditionals(source)

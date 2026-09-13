@@ -21,6 +21,10 @@ struct ParserProviderReceiptV1:
     parse_ok: bool
     fallback_reason: text
 
+struct ParserProviderAdmissionV1:
+    provider: ParserProviderV1
+    provider_id: text
+
 fn parser_provider_v1_name(provider: ParserProviderV1) -> text:
     match provider:
         case ParserProviderV1.LegacyReference: "parser.simple.legacy-reference"
@@ -31,6 +35,15 @@ fn parser_provider_v1_name(provider: ParserProviderV1) -> text:
 fn parser_provider_v1_default() -> ParserProviderV1:
     """Return the only frontend provider currently qualified for execution."""
     ParserProviderV1.LegacyReference
+
+fn parser_provider_v1_admit(provider: ParserProviderV1) -> Result<ParserProviderAdmissionV1, text>:
+    """Admit a provider before any parser-owned state may be mutated."""
+    if provider != ParserProviderV1.LegacyReference:
+        return Err("parser_provider_unqualified: " + parser_provider_v1_name(provider))
+    Ok(ParserProviderAdmissionV1(
+        provider: provider,
+        provider_id: parser_provider_v1_name(provider)
+    ))
 
 fn core_frontend_parse_legacy_reference(
     source: text,
@@ -67,14 +80,13 @@ fn parser_provider_v1_execute(
     preserve_error_state: bool
 ) -> Result<ParserProviderReceiptV1, text>:
     """Execute an admitted full-frontend provider without implicit fallback."""
-    if provider != ParserProviderV1.LegacyReference:
-        return Err("parser_provider_unqualified: " + parser_provider_v1_name(provider))
+    val admission = parser_provider_v1_admit(provider)?
 
     val parse_ok = core_frontend_parse_legacy_reference(
         source, path, append_mode, preserve_error_state)
     Ok(ParserProviderReceiptV1(
         provider: provider,
-        provider_id: parser_provider_v1_name(provider),
+        provider_id: admission.provider_id,
         executed: true,
         parse_ok: parse_ok,
         fallback_reason: ""
@@ -103,6 +115,6 @@ fn core_frontend_parse_isolated(source: text, path: text) -> bool:
     """Parse in isolated mode and restore prior parser error flag."""
     core_frontend_parse(source, path, false, true)
 
-export ParserProviderV1, ParserProviderReceiptV1
-export parser_provider_v1_name, parser_provider_v1_default, parser_provider_v1_execute
+export ParserProviderV1, ParserProviderAdmissionV1, ParserProviderReceiptV1
+export parser_provider_v1_name, parser_provider_v1_default, parser_provider_v1_admit, parser_provider_v1_execute
 export core_frontend_parse_legacy_reference

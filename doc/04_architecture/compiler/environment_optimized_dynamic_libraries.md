@@ -197,8 +197,14 @@ the future independently loaded `FrontendFacetV1`: it selects the existing
 facade implementation and emits an execution receipt without exporting AST/HIR
 layouts. It is the call-path seam used to preserve legacy behavior while later
 facets qualify; it does not introduce a second frontend ABI.
-Native `_FlatAstBridge/module_assembly.spl` remains an explicitly separate
-frontend route and is not claimed as migrated by this slice.
+Native `_FlatAstBridge/module_assembly.spl` now crosses the same
+`ParserProviderV1` admission authority before entering any trace scope or
+mutating lexer, parser, diagnostic, pool, transient-scope, or cache-capture
+state. The enclosing native frontend admits before cache key/load, pool restore,
+hit/miss accounting, or capture arming, so cache hits and misses cannot bypass
+provider authority. Its specialized flat-AST assembly remains a distinct execution adapter,
+not a second provider-selection authority: only `LegacyReference` is admitted,
+and canonical scalar, SIMD, and GPU candidates fail closed without fallback.
 
 ## Generated-code architecture
 

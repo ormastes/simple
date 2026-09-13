@@ -1,0 +1,149 @@
+"""Behavioral and source-route coverage for FlatAstBridge provider admission."""
+
+use std.io_runtime.{read_file_text}
+use std.spec.{describe, it, expect, fail, step}
+use compiler.core.frontend.{ParserProviderV1}
+use compiler.core.parser.{parser_error_count, parser_get_errors, parser_has_errors}
+use compiler.frontend.frontend.{frontend_parse_or_restore_for_provider}
+use compiler.frontend.frontend_parse_cache.{
+    frontend_parse_cache_hits,
+    frontend_parse_cache_misses,
+    frontend_parse_cache_note_hit,
+    frontend_parse_cache_note_miss,
+    frontend_parse_cache_stores
+}
+use compiler.frontend.flat_ast_bridge.{
+    flat_parse_module_body_calls,
+    parse_and_build_module_scoped,
+    parse_and_build_module_scoped_for_provider
+}
+
+val FLAT_PROVIDER_SOURCE = "fn flat_provider_probe() -> i64:\n    42\n"
+val FLAT_PROVIDER_INVALID_SOURCE = "fn flat_provider_broken(:\n"
+
+fn expect_flat_candidate_rejected(
+    provider: ParserProviderV1,
+    reason: text,
+    streaming_scope: bool
+):
+    val parse_calls_before = flat_parse_module_body_calls()
+    val diagnostics_before = parser_error_count()
+    val diagnostic_text_before = parser_get_errors()
+    val had_error_before = parser_has_errors()
+    val hits_before = frontend_parse_cache_hits()
+    val misses_before = frontend_parse_cache_misses()
+    val stores_before = frontend_parse_cache_stores()
+    match frontend_parse_or_restore_for_provider(
+        provider,
+        FLAT_PROVIDER_SOURCE,
+        "flat_provider_reject.spl",
+        streaming_scope
+    ):
+        case Ok(_): fail("unqualified FlatAstBridge parser provider executed")
+        case Err(actual): expect(actual).to_equal(reason)
+    expect(flat_parse_module_body_calls()).to_equal(parse_calls_before)
+    expect(parser_error_count()).to_equal(diagnostics_before)
+    expect(parser_get_errors()).to_equal(diagnostic_text_before)
+    expect(parser_has_errors()).to_equal(had_error_before)
+    expect(frontend_parse_cache_hits()).to_equal(hits_before)
+    expect(frontend_parse_cache_misses()).to_equal(misses_before)
+    expect(frontend_parse_cache_stores()).to_equal(stores_before)
+
+describe "FlatAstBridge ParserProviderV1 route":
+    it "keeps normal module assembly on the admitted legacy provider":
+        # @req REQ-008
+        val normal = parse_and_build_module_scoped(
+            FLAT_PROVIDER_SOURCE, "flat_provider_normal.spl", false)
+        match parse_and_build_module_scoped_for_provider(
+            ParserProviderV1.LegacyReference,
+            FLAT_PROVIDER_SOURCE,
+            "flat_provider_explicit.spl",
+            false
+        ):
+            case Ok(explicit):
+                expect(normal.functions.contains("flat_provider_probe")).to_equal(true)
+                expect(explicit.functions.contains("flat_provider_probe")).to_equal(true)
+                expect(explicit.functions.len()).to_equal(normal.functions.len())
+            case Err(reason): fail(reason)
+
+    it "rejects every candidate before parser or diagnostic mutation":
+        # @req REQ-009
+        val _seed_module = parse_and_build_module_scoped(
+            FLAT_PROVIDER_INVALID_SOURCE, "flat_provider_seed_invalid.spl", false)
+        expect(parser_error_count()).to_be_greater_than(0)
+        expect(parser_has_errors()).to_equal(true)
+        frontend_parse_cache_note_hit()
+        frontend_parse_cache_note_miss()
+        expect_flat_candidate_rejected(
+            ParserProviderV1.CanonicalScalarCandidate,
+            "parser_provider_unqualified: parser.simple.canonical-scalar",
+            false)
+        expect_flat_candidate_rejected(
+            ParserProviderV1.CanonicalScalarCandidate,
+            "parser_provider_unqualified: parser.simple.canonical-scalar",
+            true)
+        expect_flat_candidate_rejected(
+            ParserProviderV1.SimdCandidate,
+            "parser_provider_unqualified: parser.simple.simd",
+            false)
+        expect_flat_candidate_rejected(
+            ParserProviderV1.SimdCandidate,
+            "parser_provider_unqualified: parser.simple.simd",
+            true)
+        expect_flat_candidate_rejected(
+            ParserProviderV1.GpuCandidate,
+            "parser_provider_unqualified: parser.simple.gpu",
+            false)
+        expect_flat_candidate_rejected(
+            ParserProviderV1.GpuCandidate,
+            "parser_provider_unqualified: parser.simple.gpu",
+            true)
+
+    it "preserves invalid-source diagnostics through explicit legacy routing":
+        # @req REQ-008
+        val normal = parse_and_build_module_scoped(
+            FLAT_PROVIDER_INVALID_SOURCE, "flat_provider_invalid.spl", false)
+        val normal_errors = parser_get_errors()
+        val normal_had_error = parser_has_errors()
+        match parse_and_build_module_scoped_for_provider(
+            ParserProviderV1.LegacyReference,
+            FLAT_PROVIDER_INVALID_SOURCE,
+            "flat_provider_invalid.spl",
+            false
+        ):
+            case Ok(explicit):
+                expect(explicit.functions.len()).to_equal(normal.functions.len())
+                expect(parser_get_errors()).to_equal(normal_errors)
+                expect(parser_has_errors()).to_equal(normal_had_error)
+            case Err(reason): fail(reason)
+
+    it "routes the production entry through central admission before mutation":
+        # @req REQ-008
+        step("Inspect the native FlatAstBridge module assembly route")
+        val source = read_file_text(
+            "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+        val route = source.split(
+            "pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:")[1]
+        val admission_at = route.index_of("parser_provider_v1_admit(parser_provider_v1_default())")
+        val trace_at = route.index_of("frontend_compiler_trace_scope_enter()")
+        val reset_at = route.index_of("reset_all_pools()")
+        expect(admission_at).to_be_greater_than(-1)
+        expect(admission_at).to_be_less_than(trace_at)
+        expect(admission_at).to_be_less_than(reset_at)
+        expect(source).to_contain(
+            "val admission = parser_provider_v1_admit(provider)?")
+
+        step("Require admission ahead of the complete cache restore/capture route")
+        val frontend = read_file_text("src/compiler/10.frontend/frontend.spl")
+        val cache_route = frontend.split(
+            "pub fn frontend_parse_or_restore_for_provider(")[1]
+        val cache_admission_at = cache_route.index_of("parser_provider_v1_admit(provider)?")
+        val cache_delegate_at = cache_route.index_of("frontend_parse_or_restore_admitted(")
+        expect(cache_admission_at).to_be_greater_than(-1)
+        expect(cache_admission_at).to_be_less_than(cache_delegate_at)
+        val admitted_route = frontend.split(
+            "fn frontend_parse_or_restore_admitted(")[1].split(
+            "pub fn frontend_parse_or_restore_for_provider(")[0]
+        expect(admitted_route).to_contain("frontend_parse_cache_key(")
+        expect(admitted_route).to_contain("build_module_from_flat_pool_blob(")
+        expect(admitted_route).to_contain("flat_pool_capture_arm()")

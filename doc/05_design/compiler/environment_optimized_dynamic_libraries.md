@@ -108,8 +108,9 @@ independent-region work with safe tails/guard pages. Unsupported regions emit
 typed CPU work tags. GPU execution stages private output and emits actual device
 completion evidence before commit.
 
-The source-landed compiler adapter exposes `ParserProviderV1` and
-`ParserProviderReceiptV1` in `compiler.frontend.core.frontend`. The default
+The source-landed compiler adapter exposes `ParserProviderV1`,
+`ParserProviderAdmissionV1`, and `ParserProviderReceiptV1` in
+`compiler.frontend.core.frontend`. The default
 facade selects `LegacyReference`; the explicit execution entrypoint rejects
 canonical scalar, SIMD, and GPU candidates with
 `parser_provider_unqualified` before invoking the parser. The receipt names
@@ -117,6 +118,16 @@ only the provider actually executed. Focused differential coverage compares
 the retained direct legacy entrypoint with the default facade. Runtime
 qualification remains pending until an admitted self-hosted runner executes
 that coverage.
+
+The native FlatAstBridge module-assembly entry uses the same admission
+function before its existing parser setup and transformation sequence. A
+provider-explicit entry exists for qualification tests and later selection
+wiring; it rejects every unqualified candidate before observable parser or
+diagnostic mutation. The enclosing native frontend performs the same admission
+before cache lookup, restore, counter changes, or capture arming. The normal
+entry requests the central default and retains
+the legacy bridge's output, diagnostics, spans, interpolation, placeholder,
+collection-desugar, cache-capture, and transient-scope behavior.
 
 ### JIT/AOT/native artifacts
 
