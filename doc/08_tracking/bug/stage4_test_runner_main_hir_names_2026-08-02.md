@@ -1,6 +1,31 @@
 # Stage4 test-runner main HIR names
 
-**Status:** OPEN (unverified 2026-09-12)
+- Status: RESOLVED (2026-09-13) — the source-level fix described below was
+  already landed; only its regression spec,
+  `test/01_unit/app/test_runner_new/test_runner_main_hir_contract_spec.spl`,
+  was stale and RED (2 of 3 examples failing) for two unrelated reasons, both
+  fixed in this change, no source edit needed:
+  1. Its `to_contain('...{file_atomic_write}')`-style assertions used
+     DOUBLE-quoted string literals containing `{name}`. Double-quoted strings
+     in this language are interpolated by default (see
+     `doc/07_guide/quick_reference/syntax_quick_reference.md` § String
+     Interpolation), so `"...{file_atomic_write}"` silently became
+     `"...<fn:file_atomic_write>"` before comparison and could never match the
+     real, literal `{file_atomic_write}` import text. Switched to single-quoted
+     raw string literals, which this language does not interpolate.
+  2. The third example still asserted the OLD contract ("the library mirror
+     gets the same time/duration fixes applied"), but `4a4cfcf0bb4`
+     ("refactor(test-runner): consolidate divergent duplicate runner into a
+     facade") later deleted that second implementation entirely — the mirror
+     is now a one-line re-export facade, so `index_of` correctly returned -1
+     for both search strings on both sides of the `to_be_less_than` compare.
+     Rewrote the example to assert the current contract: the facade re-exports
+     the app copy and does not re-carry the old duplicated behaviours.
+  Verified: `SPEC FILE VERDICT: ... outcome=OK declared>=3 executed=3
+  passed=3 failed=0` on `bin/release/aarch64-unknown-linux-gnu/simple`,
+  interpreter mode.
+
+**Status (historical):** OPEN (unverified 2026-09-12)
 
 ## Reproduction
 

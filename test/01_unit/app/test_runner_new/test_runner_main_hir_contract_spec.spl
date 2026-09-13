@@ -24,9 +24,17 @@ describe "test runner main HIR contract":
         # @req REQ-SSPEC-APP
         step("imports time and atomic file helpers from concrete owners")
         val source = rt_file_read_text("src/app/test_runner_new/test_runner_main.spl") ?? ""
-        expect(source).to_contain("use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}")
-        expect(source).to_contain("use std.nogc_sync_mut.io.file_ops.{file_atomic_write}")
-        assert_false(source.contains("use std.io.{time_now_unix_micros}"))
+        # Single-quoted (raw) literals here on purpose: a double-quoted
+        # "...{file_atomic_write}..." string is INTERPOLATED by this language
+        # (see doc/07_guide/quick_reference/syntax_quick_reference.md, String
+        # Interpolation), so the braces never reach `to_contain` literally --
+        # the comparison string silently became
+        # "...io.file_ops.<fn:file_atomic_write>" and could never match the
+        # real `{file_atomic_write}` import in the source. That false RED was
+        # a bug in this spec, not in test_runner_main.spl.
+        expect(source).to_contain('use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}')
+        expect(source).to_contain('use std.nogc_sync_mut.io.file_ops.{file_atomic_write}')
+        assert_false(source.contains('use std.io.{time_now_unix_micros}'))
 
     it "keeps daemon duration visible to success and failure branches":
         # @req REQ-SSPEC-APP
@@ -37,12 +45,17 @@ describe "test runner main HIR contract":
         expect(duration).to_be_less_than(branch)
         expect(source).to_contain("monitor_timeout.to_int() ?? 0")
 
-    it "applies the same adjacent fixes to the library runner mirror":
+    it "no longer carries a divergent duplicate: the library runner mirror is a facade over the app copy":
         # @req REQ-SSPEC-APP
-        step("applies the same adjacent fixes to the library runner mirror")
+        step("no longer carries a divergent duplicate: the library runner mirror is a facade over the app copy")
+        # 4a4cfcf0bb4 ("refactor(test-runner): consolidate divergent duplicate
+        # runner into a facade") deleted the second, drifted implementation
+        # this spec used to assert time/duration fixes were mirrored into --
+        # there is no longer a second copy for those fixes to land in. The
+        # contract now is simply: this file re-exports the single
+        # implementation and does not resurrect its own copy of the fixed
+        # behaviours (time reads, atomic writes, daemon duration ordering).
         val source = rt_file_read_text("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl") ?? ""
-        expect(source).to_contain("use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}")
-        expect(source).to_contain("monitor_timeout.to_int() ?? 0")
-        val duration = source.index_of("val duration_ms = (time_now_unix_micros() - start_time) / 1000")
-        val branch = source.index_of("if daemon_result.status == TRESP_COMPLETED")
-        expect(duration).to_be_less_than(branch)
+        expect(source).to_contain('export use app.test_runner_new.test_runner_main.*')
+        assert_false(source.contains('val duration_ms = (time_now_unix_micros() - start_time) / 1000'))
+        assert_false(source.contains('if daemon_result.status == TRESP_COMPLETED'))
