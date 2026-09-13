@@ -94,3 +94,60 @@ pid>` from a second shell once RSS passes ~3 GB — gdb stops on the SIGINT and 
 first whether the allocation is another struct-copy shape: every `val` binding, field read and
 argument of a struct type allocates, so a copy inside a hot loop over modules or symbols would
 look exactly like this. See `dict_struct_key_identity_keyed_copied_key_misses_2026-09-13.md`.
+
+## Localized 2026-09-13 on macOS: `BuildGraph.topological_order`
+
+The "get a stack" step this record asks for was done on the macOS lane
+(`aarch64-apple-darwin`, chain run 21,
+`doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md`). macOS `sample` needs
+no ptrace permission and no gdb harness:
+
+```
+sample <pid> 3 -file sample1.txt
+```
+
+**Every sample is SELF time in
+`compiler__driver__driver_build__parallel__BuildGraph.topological_order`**
+(`src/compiler/80.driver/driver_build/parallel.spl:274-305`) — 1751 + 100 + 55 +
+50 + 41 + 40 + 35 + 24 + 13 + 12 + 11 + 11 + 9 + 2 + 1 samples spread across
+offsets +292…+536, **with no callees recorded at all**. Nothing from
+`driver_types.spl` or `mir_json.spl` appears, so this is not downstream of site 8.
+
+Candidate: `.simple/storage/build/bootstrap-run21/stage2-rejected/aarch64-apple-darwin/simple`,
+139,328,040 B, sha256 `e1ab37e7ba2caa3e587390c9d0d581b14ca4c93023e4cafe14abe28e5ee0c17f`
+(mode 400 — copy out and `chmod +x` first). Route entered `native_compile` at
+`elapsed_ms=3950`, `current=compiler.common.module_path_naming` — the same unit
+this record names on Linux.
+
+### The macOS RSS curve differs from the Linux one, and that matters
+
+Re-running the probe unbounded and sampling RSS (`ps -o rss=`) at 240 s / 360 s /
+480 s, with the route log checked at each point:
+
+| t | RSS | route log |
+|---|---|---|
+| 240 s | 12.3 GB | `elapsed_ms=3579` |
+| 360 s | 9.8 GB | `elapsed_ms=3579` |
+| 480 s | 9.4 GB | `elapsed_ms=3579` |
+
+Flat and then **falling** — not the monotonic ~1 GB/45 s growth measured on Linux.
+So on macOS the process is no longer allocating; it is burning CPU inside
+`topological_order` over a structure it has already built. Either the Linux
+reading is an earlier phase of the same defect (allocate a huge graph, then spin
+on it), or the two lanes are failing differently. Both readings are open.
+
+Two candidate causes, neither verified:
+
+1. **Non-terminating loop.** `while stack.?:` with `stack.pop().unwrap()`. If
+   `pop()` does not shrink the array in this native build, the loop never ends.
+   That function already carries a comment about a *different* seed-interpreter
+   divergence at this exact statement. A tight loop with no callees fits the
+   sample exactly, and fits the flat RSS.
+2. **Quadratic-or-worse work over a very large graph.** `order = order.push(node)`
+   and `stack = stack.push(...)` in the inner loop, plus a node being pushed once
+   per in-edge before it is visited. Inlined array ops also show as self time with
+   no callees, and this cause is what the 9-12 GB resident set predicts.
+
+Discriminate by printing `self.units.keys().len()` and an iteration counter from
+`topological_order`, or by checking whether `pop()` shrinks natively in a fixture
+built by the run-21 candidate (which builds now that site 8 is fixed).
