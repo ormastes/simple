@@ -155,3 +155,43 @@ soft-shadow paths are correct and reached; their kernels remain
 auto-vectorized rather than explicit-lane, so on a gcc link they are AVX2. The
 explicit-lane treatment given to the DB AND is owed to them next, and the gate
 above will show it the moment it lands.
+
+## Web rendering: explicit lanes for the glyph and shadow kernels
+
+The section above closed by saying the glyph and soft-shadow kernels were
+correct and reached but still auto-vectorized, so AVX2 on a gcc link. Both now
+have explicit lanes.
+
+Native binary zmm count, measured at each step: **0 -> 7 (DB) -> 45 (glyph)
+-> 88 (shadow)**, with `2460 values checked, 0 mismatches` holding throughout.
+
+**The `/255` had to stay exact.** `(x * 32897) >> 23` equals `x / 255` for every
+x in 0..65025, proven exhaustively over that range rather than argued — and
+65025 is the whole range `fg*a + d*(255-a)` can produce with fg, d <= 255. The
+shadow kernel needs both divisors and they are NOT interchangeable: `cov*alpha`
+divides by 255 while the blend divides by 256, so the blend keeps a shift and
+only the alpha term uses the constant. Borrowing one for the other shifts every
+shadow pixel.
+
+**`a == 0` (glyph) and `cov <= 0` (shadow) select the ORIGINAL slot back**
+rather than blending. Blending would give the right colour but force alpha to
+0xFF, while the scalar path returns the destination untouched — a difference
+that only appears on a non-opaque destination, which a parity test over opaque
+ramps would never catch.
+
+**AVX512DQ, not just F+BW.** `_mm512_mullo_epi64` is a DQ instruction; GCC
+caught it as `inlining failed ... target specific option mismatch` where clang
+accepted the F+BW attribute silently. The CPUID probe checks DQ too, so the
+lane path cannot run on a part that lacks it.
+
+### Known limit, stated rather than papered over
+
+The shadow kernel's `/256` on `cov*cov_y` is an arithmetic shift, which is
+floor, while C integer division truncates toward zero. They agree for
+non-negative values, and coverage is 0..256 by construction (`_phi256`), but a
+negative `colcov` would diverge. The probe exercises 0..256 only, so this is
+reasoned rather than tested.
+
+`glyph parity 6/6`, `soft-shadow parity 9/9`, `rounded interior 7/7`,
+`check-simd-kernels-vectorized 11/11`,
+`check-native-simd-kernels-real PASS — 2460 values, 88 zmm`.
