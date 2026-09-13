@@ -474,3 +474,7 @@ wrong in both directions, and a "0% false positives" claim derived by
 re-running a *similar* regex is not independent — pass 1's re-index used the
 same prefix assumption and so inherited the same blind spot. Confirming a
 census against a second copy of its own model confirms nothing.
+
+## Triage 2026-09-13
+Reconfirmed: two backlogs, both owned per this record; not a single
+fixable defect. Left as-is, no code change attempted.
