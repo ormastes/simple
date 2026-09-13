@@ -1,0 +1,87 @@
+# PERF-5 target 1: `daemon_lock_alive()` (src/app/test_runner_new/test_runner_client.spl)
+# shells out to `/bin/sh -c "pid=$(cat ...); kill -0 ...; tr ... | grep -q
+# light_daemon"` via `process_run_timeout` on every single call, even though
+# the question it answers -- "is this recorded PID alive, and is it really
+# the light daemon" -- needs zero process spawns in-process
+# (file_exists("/proc/<pid>") mirrors light_daemon.spl's own pid_is_live(),
+# and a plain /proc/<pid>/cmdline text read answers the identity check).
+#
+# `daemon_recorded_binary()` and `daemon_lock_alive()`
+# (test_runner_client.spl:699,700) run UNCONDITIONALLY before any bypass
+# decision is computed, so planting a LIGHT_LOCK naming a live-but-unrelated
+# pid deterministically exercises exactly those two call sites without
+# needing a real light-daemon lifecycle. A real daemon lifecycle is NOT
+# reachable from inside a nested spec on this runner: the outer runner pins
+# SIMPLE_TEST_BINARY/SIMPLE_BINARY for every nested `simple test` invocation
+# it spawns, which forces `binary_override_bypass = true` and skips
+# `ensure_daemon()` (and therefore call site :250 and the second
+# `daemon_recorded_binary()` call at :725) entirely -- confirmed 2026-09-13
+# by tracing a nested run and reading its own "binary-override: ..." message
+# (see RECEIPT_PERF_5.md).
+#
+# Baseline (measured 2026-09-13, worktree simple-perf-5, binary
+# bin/release/aarch64-unknown-linux-gnu/simple.perf5,
+# sha256 3d120a6f9ab5704b2225654e4f2773cdbdc787108bd21b67aab657ffe3da72ef):
+# with a planted lock, `simple test <1-example spec>` executes 4
+# `execve("/bin/sh", ...)` calls before the spec itself runs (2 shell-outs --
+# one per unconditional call site -- and `process_run_timeout` forks
+# `/bin/sh -c "exec timeout ..."`, which then execs a second `/bin/sh -c
+# "<probe>"`, doubling each shell-out to 2 raw execve).
+#
+# Fail-closed: an strace log this spec cannot read, or one recording zero
+# execve lines at all, must FAIL -- not silently pass as "0 sh spawns".
+
+use std.io_runtime.{file_exists, file_delete, file_write, dir_create_all, dir_remove_all, read_file_text, getpid}
+
+extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+
+val FIXTURE: text = "test/fixtures/concurrency/conc_a_spec.spl"
+val DAEMON_DIR: text = ".build/test_daemon_light"
+val LOCK_PATH: text = ".build/test_daemon_light/daemon.lock"
+val TRACE_LOG: text = "/tmp/perf5_daemon_lock_alive_shell_spawn.strace"
+
+# Plant a lock naming THIS process's own pid: guaranteed alive for the whole
+# traced child's lifetime, and guaranteed not to look like a light daemon in
+# /proc/<pid>/cmdline (so daemon_lock_alive()'s eventual boolean answer is
+# `false` both before and after the fix -- only the MECHANISM changes).
+fn plant_lock():
+    dir_remove_all(DAEMON_DIR)
+    dir_create_all(DAEMON_DIR)
+    file_write(LOCK_PATH, "{getpid()}")
+
+fn count_matches(log_path: text, needle: text) -> i64:
+    if not file_exists(log_path):
+        return -1
+    val content = read_file_text(log_path)
+    if content == "":
+        return -1
+    var count = 0
+    for line in content.split("\n"):
+        if line.contains(needle):
+            count = count + 1
+    count
+
+describe "daemon_lock_alive shell-spawn cost with a planted lock (PERF-5 target 1)":
+    it "produces a non-empty execve trace for a `simple test <spec>` run":
+        plant_lock()
+        file_delete(TRACE_LOG)
+        val trace_cmd = "strace -f -e trace=execve -o {TRACE_LOG} bin/simple test {FIXTURE} > /dev/null 2>&1"
+        val (_out, _err, _code) = rt_process_run_bounded("sh", ["-c", trace_cmd], 30000, 4000)
+        val total = count_matches(TRACE_LOG, "execve(")
+        print "[perf] total execve() calls = {total}"
+        # Fail-closed: a strace log this harness could not produce or read
+        # (missing strace, sandboxed ptrace, empty file) must not silently
+        # read as "zero /bin/sh spawns, PASS" below.
+        expect(total > 0).to_equal(true)
+
+    it "spawns no /bin/sh process checking the daemon lock (test_runner_client.spl:699,700)":
+        val sh_count = count_matches(TRACE_LOG, "execve(\"/bin/sh\"")
+        print "[perf] execve(\"/bin/sh\", ...) count = {sh_count}"
+        # Same non-vacuity contract as above, on the same trace: a log that
+        # could not be read must FAIL, never read as a clean 0.
+        expect(sh_count >= 0).to_equal(true)
+        # Pre-fix baseline measured above: 4. Any /bin/sh spawn on this path
+        # is daemon_lock_alive() (or a caller re-implementing its shell-out)
+        # regressing back to a per-call fork+exec+PATH-search; the budget is
+        # an exact zero, not a shrunk-but-nonzero number.
+        expect(sh_count <= 0).to_equal(true)
