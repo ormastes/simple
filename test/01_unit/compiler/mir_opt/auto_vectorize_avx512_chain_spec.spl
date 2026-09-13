@@ -137,6 +137,40 @@ fn dyn_function() -> MirFunction:
     f.locals = ls
     f
 
+# A lowered `while`: cond block holds the test, body holds the work. This is
+# what the compiler emits; every other fixture here is a single block.
+fn lowered_cond() -> MirBlock:
+    MirBlock(id: bid(1), label: Some("while_cond"),
+        instructions: [MirInst(kind: MirInstKind.BinOp(lid(20), MirBinOp.Lt, copy_op(4), copy_op(41)))],
+        terminator: MirTerminator.If(cond: copy_op(20), then_: bid(2), else_: bid(9)))
+
+fn lowered_body() -> MirBlock:
+    MirBlock(id: bid(2), label: Some("while_body"),
+        instructions: [
+            gep(30, 1, 4),
+            MirInst(kind: MirInstKind.Load(lid(10), copy_op(30))),
+            gep(31, 2, 4),
+            MirInst(kind: MirInstKind.Load(lid(11), copy_op(31))),
+            MirInst(kind: MirInstKind.BinOp(lid(12), MirBinOp.Add, copy_op(10), copy_op(11))),
+            gep(32, 3, 4),
+            MirInst(kind: MirInstKind.Store(copy_op(32), copy_op(12))),
+            MirInst(kind: MirInstKind.BinOp(lid(4), MirBinOp.Add, copy_op(4), int_op(1)))
+        ],
+        terminator: MirTerminator.Goto(target: bid(1)))
+
+fn lowered_while_function() -> MirFunction:
+    var f = scalar_function(16)
+    f.blocks = [scalar_entry(), lowered_cond(), lowered_body(), scalar_exit()]
+    var ls = f.locals
+    ls.push(local_of(41, MirTypeKind.I64))
+    f.locals = ls
+    f
+
+fn lowered_recipe(element: text, lanes: i64) -> VectorRecipe:
+    var r = recipe_for(element, lanes, -1)
+    r.header_block = bid(2)
+    r
+
 fn recipe_for(element: text, lanes: i64, trip: i64) -> VectorRecipe:
     VectorRecipe(
         kind:             VectorRecipeKind.Elementwise,
@@ -218,6 +252,18 @@ describe "the auto-vectorized function reaches real AVX-512 selection":
         step("anything a server runs.")
         val rewritten = rewrite_elementwise_add(recipe_for("f32", 16, -1), dyn_function())
         expect(rewritten.blocks.len() > dyn_function().blocks.len()).to_equal(true)
+        val plan = x86_plan_avx512_fixed(rewritten)
+        expect(plan.reason).to_equal("avx512-frame-values-planned")
+        expect(plan.ok).to_equal(true)
+
+    it "admits a LOWERED WHILE with a runtime bound — the real shape":
+        step("cond block holds the test, body holds the work, bound is a local.")
+        step("This is what the compiler emits. Every other example here is a")
+        step("single block carrying its own test, which the compiler never")
+        step("produces — so this is the one that says the chain works on real")
+        step("code rather than on fixtures.")
+        val rewritten = rewrite_elementwise_add(lowered_recipe("f32", 16), lowered_while_function())
+        expect(rewritten.blocks.len() > lowered_while_function().blocks.len()).to_equal(true)
         val plan = x86_plan_avx512_fixed(rewritten)
         expect(plan.reason).to_equal("avx512-frame-values-planned")
         expect(plan.ok).to_equal(true)

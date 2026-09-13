@@ -563,3 +563,121 @@ An earlier summary of this work said "only elementwise add is rewritten;
 sub/mul/div are matched and logged". That was wrong for sub and mul, right for
 div, and it was asserted from reading a stale docstring rather than from
 running anything. The tests above now settle it by execution.
+
+## Adversarial review (Fable) — four confirmed miscompiles, and a test that could not see one
+
+Requested review of the Active + runtime-bounds work. It found more than the
+tests did, and one finding is a criticism of the tests themselves.
+
+**D10 — every spliced block id could collide.** align_check sat at `header+0`
+and vec_loop at `header+2`, which assumes those slots are free. A lowered
+`while` puts cond at H, exit at H+1 and the **continuation at H+2**, so vec_loop
+landed on the continuation. Both were emitted; the interpreter keys blocks by
+id with last-write-wins and the continuation is pushed second, so the vector
+loop was overwritten and align_check jumped straight into the continuation —
+the loop silently never ran. Reproduced exactly: a three-block function gave
+`ids = [0, 1(align_check), 3(vec_loop), 3(continuation), 5]`. Every new block
+is now allocated above the highest existing id.
+
+**D11 — the remainder ran one iteration too many.** The scalar clone is a
+verbatim copy of the loop block, and a rotated loop computes its exit flag at
+the top and branches at the bottom, so merely ENTERING it executes the body
+once. With `n % VF == 0` the vector loop leaves `i == n` exactly, and the clone
+then read `a[n]`, `b[n]` and wrote `out[n]` — one past the end of all three
+arrays. A `remainder_guard` block now re-tests `i < bound` before handing over.
+
+**The tests could not have caught D11, and that is the point.** The
+differential fixtures compute their exit flag at the top and branch on it at
+the bottom, so their SCALAR control over-runs too — measured, `out[8] = -2` on
+a trip count of 8. Both sides over-ran, they agreed, and the comparison was
+blind to exactly the defect it existed to catch. A new do-while fixture
+computes the test at the bottom so the control stops at `n`, and seeds a
+canary one slot past the end; the vector side must leave it untouched for every
+trip count 4..20. That canary is what makes the comparison mean something.
+
+**D12 — the start index was invented.** align_check seeded `%i` from
+`loop_info.start_value`, which is the literal `0` at the call site and is not
+derived from the loop at all. `for i in 2..8` was rewritten to process `[0,8)`,
+writing two elements the original never touched. The seed is deleted: the
+induction variable already holds the loop's real starting value when control
+reaches the header, so the correct action is to leave it alone.
+
+**D13 — the runtime-bound feature was unreachable.** The alias guard's span was
+`trip_count * elt`, which is 0 for a runtime bound, so `guard_usable` went false
+and D2's "a required guard that cannot be built means decline" refused the loop.
+Every base reports origin -1, so any two DISTINCT locals need a guard — meaning
+every runtime-bound loop over two different arrays was declined. The feature
+worked only for `a[i] = a[i] op a[i]`. **The previous commit's claim that
+runtime bounds are vectorized was therefore true only in a case nobody
+writes.** The guard now computes `span = bound * elt` itself, which is as
+computable at runtime as at compile time.
+
+A collision I introduced while fixing D10 is worth recording too: rebasing the
+vector temporaries onto `max local + 1` put them on top of the guard's own
+temporaries, which reserve 8 slots per input base from that same point. The
+differential tests went red immediately — which is what they are for.
+
+`auto_vectorize_spec.spl` 112/112, chain 7/7, alias 15/15.
+
+### Not fixed, and honest about it
+
+`generate_prologue` (codegen.spl) still calls `create_alignment_check_block`
+with 2 arguments against a 6-parameter signature, and `create_peeling_block`
+still emits `Goto` to block ids the new layout does not contain. Both are
+reachable only through `try_vectorize_function`, which no live dispatch calls —
+the driver is `run_auto_vectorize`. It is dead code that should be deleted
+rather than repaired, and deleting it crosses module exports, so it is filed
+rather than done here.
+
+Also unresolved: on a REAL lowered loop the comparison lives in `while_cond`,
+a separate block from the matched body, so `_loop_bound` finds no test in the
+header and declines. The pass therefore still does not fire on ordinary lowered
+`while` loops — only on single-block loop bodies that carry their own test.
+That is the next thing to fix and it is the difference between this pass
+working on fixtures and working on the tree.
+
+## D14 — the pass fired on fixtures and on nothing the compiler emits
+
+The previous section closed by naming this as the difference between the pass
+working on fixtures and working on the tree. It is fixed.
+
+A lowered `while` does not keep its test in the body:
+
+    while_cond: %c = i < n; If(%c, while_body, while_exit)
+    while_body: ...; i += 1; Goto(while_cond)
+
+and the pattern matcher matches the **body**, which contains no comparison at
+all. `_loop_bound` searched only the header, found nothing, and declined — so
+every fixture in this file vectorized and every loop the compiler produces did
+not.
+
+`_loop_bound` now searches the header first, then any block that BRANCHES TO
+the header. The test is one edge away. Two supporting fixes were needed:
+blocks with an id ABOVE the header are now terminator-patched as well (a cond
+block sits after the body as often as before it, and an unpatched cond still
+branches to a header id that no longer exists).
+
+Control flow in the lowered case is worth stating because it looks wrong at
+first glance: the scalar clone ends in `Goto(while_cond)`, and while_cond has
+been patched to enter align_check. So each remainder iteration goes
+clone -> cond -> align_check -> (a whole vector does not fit) -> remainder_guard
+-> (i < n) -> clone. It terminates, and it is correct, because align_check and
+remainder_guard are both pure tests over the shared induction variable.
+
+### Evidence
+
+Four examples on a real two-block lowered `while` with the bound in a local:
+
+  * the scalar control runs and stops at `n` for 4, 7, 8, 13 — including the
+    canary one slot past the end, so the comparison is not vacuous;
+  * the rewrite fires despite the body containing no comparison;
+  * **identical memory for every runtime length 1..20**; and
+  * the canary survives the vector path for every length 4..20.
+
+And the chain closes on that shape: a lowered `while` with a runtime bound,
+fed to the real `x86_plan_avx512_fixed`, returns `ok=true,
+avx512-frame-values-planned`. That is the claim the whole effort was for — an
+ordinary loop, written normally, with a length known only at runtime, reaching
+real AVX-512 instruction selection with no source change.
+
+`auto_vectorize_spec.spl` 116/116, chain 8/8.

@@ -694,14 +694,14 @@ describe "AutoVectorize W-cfg — create_alignment_check_block":
     it "produces a block with label align_check":
         val li  = make_test_loop_info()
         val ctx = make_test_vectorize_ctx()
-        val bb  = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 99)
+        val bb  = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 500, 99)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("align_check")
 
     it "alignment-check terminator is If":
         val li  = make_test_loop_info()
         val ctx = make_test_vectorize_ctx()
-        val bb  = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 99)
+        val bb  = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 500, 99)
         val is_if = match bb.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -891,7 +891,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
             end_value:     16,
             step:          1
         )
-        val align = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 99)
+        val align = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 500, 99)
         val is_if = match align.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -901,7 +901,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
             [make_local(10), make_local(11)], make_local(12), "add_elementwise",
-            make_int_const_op(16), make_local(4), 4)
+            make_int_const_op(16), make_local(4), 500, 4)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("vec_loop")
 
@@ -909,7 +909,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
             [make_local(10), make_local(11)], make_local(12), "add_elementwise",
-            make_int_const_op(16), make_local(4), 4)
+            make_int_const_op(16), make_local(4), 500, 4)
         # load_a + load_b + simd_add + simd_store + vi_inc + guard = 6 instructions
         expect(bb.instructions.len() >= 4).to_equal(true)
 
@@ -946,7 +946,7 @@ describe "AutoVectorize N1-rewrite — elementwise-add dynamic trip count (0..n)
             end_value:     0,
             step:          1
         )
-        val align = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 99)
+        val align = create_alignment_check_block(ctx, li, make_int_const_op(16), make_local(4), 500, 99)
         val is_if = match align.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -1102,18 +1102,18 @@ describe "AutoVectorize N1-rewrite — elementwise f32 add does not require fast
 describe "AutoVectorize N1-codegen — create_vector_loop_block":
     it "produces a block with label vec_loop":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", make_int_const_op(16), make_local(4), 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", make_int_const_op(16), make_local(4), 500, 103)
         expect(bb.label.?).to_equal(true)
         expect(bb.label.unwrap()).to_equal("vec_loop")
 
     it "vec_loop block contains >= 4 instructions (load_a, load_b, add, store, inc, guard)":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise", make_int_const_op(16), make_local(4), 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise", make_int_const_op(16), make_local(4), 500, 103)
         expect(bb.instructions.len() >= 4).to_equal(true)
 
     it "vec_loop block has If terminator (exit guard — not self-loop Goto)":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", make_int_const_op(16), make_local(4), 103)
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise", make_int_const_op(16), make_local(4), 500, 103)
         val is_if = match bb.terminator:
             case If(cond, then_, else_): true
             case _: false
@@ -1268,16 +1268,18 @@ describe "runtime alias guard — loop versioning for undecidable bases":
                 scalar_len = b.instructions.len()
         expect(scalar_len).to_equal(orig.instructions.len())
 
-    it "computes six comparison instructions per input base":
+    it "computes six comparison instructions per input base, plus the span":
         step("diff, ==0, >=span, <=-span, and two ORs per base")
+        step("preceded by span = bound * elt and its negation, which are")
+        step("computed here rather than baked in so a RUNTIME bound works")
         val func = make_test_mir_function([make_elementwise_block_add()], false)
         val guarded = rewrite_elementwise_add_guarded(make_elementwise_add_recipe_for_rewrite(), func)
         var guard_insts = -1
         for b in guarded.blocks:
             if b.label.? and b.label.unwrap() == "alias_check":
                 guard_insts = b.instructions.len()
-        # two input bases: 6 + 6 + one BitAnd combining them
-        expect(guard_insts).to_equal(13)
+        # span + (-span), then two input bases: 6 + 6 + one BitAnd combining them
+        expect(guard_insts).to_equal(15)
 
     it "refuses to emit a guard it cannot bound":
         step("an unknown element width gives span 0, and a guard that admits everything")
@@ -1371,9 +1373,21 @@ describe "AutoVectorize end-to-end — the Active pass genuinely fires":
         val labels = pass_block_labels(gep_loop_block(1, 1, 1, 64))
         expect(labels.contains("alias_check")).to_equal(false)
 
-    it "still refuses a genuinely dynamic upper bound":
-        step("a local upper bound is not resolvable here and must stay refused")
-        expect(blocks_after_pass(gep_loop_block_dynamic(1, 2, 3))).to_equal(1)
+    it "vectorizes a genuinely dynamic upper bound through the driver":
+        step("this asserted a REFUSAL until the alias guard computed its span")
+        step("at runtime. Before that, `span = trip_count * elt` was 0 for a")
+        step("dynamic bound, the guard could not be built, and D2 then declined")
+        step("the loop — so every runtime-bound loop over two DISTINCT arrays")
+        step("was refused, which is essentially all of them. The feature was")
+        step("reachable only for `a[i] = a[i] op a[i]`.")
+        expect(blocks_after_pass(gep_loop_block_dynamic(1, 2, 3)) > 1).to_equal(true)
+
+    it "and guards that dynamic loop rather than vectorizing it blind":
+        step("distinct bases are statically undecidable, so the runtime range")
+        step("check must be present — not skipped because the span was awkward")
+        val labels = pass_block_labels(gep_loop_block_dynamic(1, 2, 3))
+        expect(labels.contains("alias_check")).to_equal(true)
+        expect(labels.contains("scalar_version")).to_equal(true)
 
 # ============================================================================
 # The four defects that sent AutoVectorize back to AnalysisOnly
@@ -1926,3 +1940,232 @@ describe "a recipe with no vector lowering is REFUSED, not half-emitted":
             # Either it declined (unchanged) or it emitted real vector work.
             val declined = f.blocks.len() == diff_function(8).blocks.len()
             expect(declined or simd > 0).to_equal(true)
+
+# ============================================================================
+# A fixture that can actually SEE an over-run.
+#
+# The differential fixtures above compute their exit flag at the TOP of the
+# block and branch on it at the BOTTOM, so entering at `i == n` executes the
+# body once more and writes `out[n]`. Their SCALAR control does the same, the
+# two agree, and the comparison is blind to exactly the defect it should catch
+# — the reviewer found this, no execution could have.
+#
+# This fixture computes the test at the BOTTOM, so the scalar loop is correct
+# and stops at `n`. Any extra iteration on the vector side now shows up as a
+# real disagreement, and the canary below catches a write past the end even if
+# both sides happened to agree.
+# ============================================================================
+
+val CANARY: i64 = 987654321
+
+fn dowhile_loop_block(n: i64) -> MirBlock:
+    """`do { out[i]=a[i]+b[i]; i+=1 } while (i < n)` — no over-run."""
+    val insts = [
+        gep(30, 1, 4), make_load_inst(10, 30),
+        gep(31, 2, 4), make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, 3, 4), make_store_inst(32, 12),
+        make_add_const_inst(4, 4),
+        MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_int_const_op(n)))
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 9))
+
+fn dowhile_entry(n: i64) -> MirBlock:
+    var insts: [MirInst] = []
+    var i: i64 = 0
+    while i < n:
+        insts.push(diff_store(DIFF_A_BASE + i * 8, i + 1))
+        insts.push(diff_store(DIFF_B_BASE + i * 8, (i + 1) * 10))
+        insts.push(diff_store(DIFF_O_BASE + i * 8, 0))
+        i = i + 1
+    # One slot PAST the end, seeded with a value neither loop should write.
+    insts.push(diff_store(DIFF_O_BASE + n * 8, CANARY))
+    insts.push(diff_set_local(1, DIFF_A_BASE))
+    insts.push(diff_set_local(2, DIFF_B_BASE))
+    insts.push(diff_set_local(3, DIFF_O_BASE))
+    insts.push(diff_set_local(4, 0))
+    MirBlock(id: make_block_id(0), label: nil, instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn dowhile_function(n: i64) -> MirFunction:
+    make_test_mir_function([dowhile_entry(n), dowhile_loop_block(n), diff_exit_block()], false)
+
+fn dowhile_canary(f: MirFunction, n: i64) -> i64:
+    """The value one past the end after running f, or -1 if it did not run."""
+    var interp = MirInterpreter.create()
+    val r = interp.execute_function(f)
+    if (r[1]).?:
+        return -1
+    interp.get_local(make_local(DIFF_O_BASE + n * 8))
+
+describe "the vector path never writes past the end of the arrays":
+    it "the scalar control itself stops at n":
+        step("if the control over-ran, the comparison below would be vacuous —")
+        step("which is exactly what made the earlier fixtures blind")
+        for n in [4, 8, 12, 16]:
+            expect(dowhile_canary(dowhile_function(n), n)).to_equal(CANARY)
+
+    it "the vectorized version also stops at n, for every trip count":
+        step("a whole number of vectors leaves i == n exactly, which is the")
+        step("case that used to enter the remainder and run one body too many")
+        var bad: [i64] = []
+        var n: i64 = 4
+        while n <= 20:
+            val rw = rewrite_elementwise_add(diff_recipe(n), dowhile_function(n))
+            if dowhile_canary(rw, n) != CANARY:
+                bad.push(n)
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+    it "and still computes every element correctly":
+        step("not writing past the end is worthless if it stopped early")
+        var bad: [i64] = []
+        var n: i64 = 4
+        while n <= 20:
+            val got = run_and_read_output(
+                rewrite_elementwise_add(diff_recipe(n), dowhile_function(n)), n)
+            if got.len() != n:
+                bad.push(n)
+            else:
+                var i: i64 = 0
+                while i < n:
+                    if got[i.to_i32()] != (i + 1) + ((i + 1) * 10):
+                        bad.push(n)
+                        i = n
+                    i = i + 1
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+    it "allocates every spliced block above the highest existing id":
+        step("align_check and vec_loop used to sit at header+0 and header+2,")
+        step("and a lowered while puts its continuation at header+2 — so the")
+        step("vector loop was overwritten and the loop silently never ran")
+        val entry = MirBlock(id: make_block_id(0), label: nil, instructions: [],
+            terminator: MirTerminator.Goto(target: make_block_id(1)))
+        val cont = MirBlock(id: make_block_id(3), label: Some("continuation"),
+            instructions: [], terminator: MirTerminator.Ret(value: nil))
+        val f = make_test_mir_function([entry, diff_loop_block(8), cont], false)
+        val rw = rewrite_elementwise_add(diff_recipe(8), f)
+        var seen: [i64] = []
+        var dupes = 0
+        for b in rw.blocks:
+            for prev in seen:
+                if prev == b.id.id:
+                    dupes = dupes + 1
+            seen.push(b.id.id)
+        expect(dupes).to_equal(0)
+
+# ============================================================================
+# The shape the COMPILER actually emits.
+#
+# Every fixture above is a single block carrying its own test. A lowered
+# `while` is not that: it emits
+#     while_cond: %c = i < n; If(%c, while_body, while_exit)
+#     while_body: ...; i += 1; Goto(while_cond)
+# and the pattern matcher matches the BODY, which contains no comparison at
+# all. Until the bound search followed the edge into the cond block, this pass
+# declined every loop the compiler produces — it worked on fixtures and on
+# nothing else.
+#
+# These execute that shape, with a runtime bound, and compare against the
+# scalar original.
+# ============================================================================
+
+fn lowered_cond_block(bound_local: i64) -> MirBlock:
+    """while_cond: %20 = %4 < %bound; If(%20, body, exit)"""
+    MirBlock(id: make_block_id(1), label: Some("while_cond"),
+        instructions: [MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_copy_op(bound_local)))],
+        terminator: make_if_terminator(20, 2, 9))
+
+fn lowered_body_block() -> MirBlock:
+    """while_body: out[i] = a[i] + b[i]; i += 1; Goto(while_cond)"""
+    val insts = [
+        gep(30, 1, 4), make_load_inst(10, 30),
+        gep(31, 2, 4), make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, 3, 4), make_store_inst(32, 12),
+        make_add_const_inst(4, 4)
+    ]
+    MirBlock(id: make_block_id(2), label: Some("while_body"), instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn lowered_entry(n: i64) -> MirBlock:
+    var insts: [MirInst] = []
+    var i: i64 = 0
+    while i < n:
+        insts.push(diff_store(DIFF_A_BASE + i * 8, i + 1))
+        insts.push(diff_store(DIFF_B_BASE + i * 8, (i + 1) * 10))
+        insts.push(diff_store(DIFF_O_BASE + i * 8, 0))
+        i = i + 1
+    insts.push(diff_store(DIFF_O_BASE + n * 8, CANARY))
+    insts.push(diff_set_local(1, DIFF_A_BASE))
+    insts.push(diff_set_local(2, DIFF_B_BASE))
+    insts.push(diff_set_local(3, DIFF_O_BASE))
+    insts.push(diff_set_local(4, 0))
+    insts.push(diff_set_local(DIFF_N_LOCAL, n))
+    MirBlock(id: make_block_id(0), label: nil, instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn lowered_function(n: i64) -> MirFunction:
+    make_test_mir_function(
+        [lowered_entry(n), lowered_cond_block(DIFF_N_LOCAL), lowered_body_block(), diff_exit_block()],
+        false)
+
+fn lowered_recipe() -> VectorRecipe:
+    """header_block is the BODY — what the pattern matcher reports."""
+    VectorRecipe(
+        kind: VectorRecipeKind.Elementwise, header_block: make_block_id(2),
+        induction_var: make_local(4), trip_count: -1, element_type: "i32",
+        vector_width: 4, op_name: "add_elementwise", note: "lowered while",
+        input_bases: [make_local(1), make_local(2)],
+        output_base: Some(make_local(3)), accumulator: nil, chunk_width: 4,
+        index_locals: [make_local(4)], store_value: nil, induction_update: make_local(4))
+
+describe "a lowered while loop — the shape the compiler really emits":
+    it "the scalar control runs and stops at n":
+        step("the cond block guards entry, so this must not touch the canary")
+        for n in [4, 7, 8, 13]:
+            val got = run_and_read_output(lowered_function(n), n)
+            expect(got.len()).to_equal(n)
+            expect(dowhile_canary(lowered_function(n), n)).to_equal(CANARY)
+
+    it "is rewritten even though its body contains no comparison":
+        step("the test is one edge away, in while_cond; looking only in the")
+        step("body declined every loop the compiler produces")
+        val before = lowered_function(16).blocks.len()
+        val after = rewrite_elementwise_add(lowered_recipe(), lowered_function(16)).blocks.len()
+        expect(after > before).to_equal(true)
+
+    it "produces identical memory for every runtime length":
+        step("this is the case that decides whether real code is vectorized")
+        var bad: [i64] = []
+        var n: i64 = 1
+        while n <= 20:
+            val scalar_out = run_and_read_output(lowered_function(n), n)
+            val vector_out = run_and_read_output(
+                rewrite_elementwise_add(lowered_recipe(), lowered_function(n)), n)
+            if scalar_out.len() != n or vector_out.len() != n:
+                bad.push(n)
+            else:
+                var i: i64 = 0
+                while i < n:
+                    if scalar_out[i.to_i32()] != vector_out[i.to_i32()]:
+                        bad.push(n)
+                        i = n
+                    i = i + 1
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+    it "never writes past the end":
+        step("the canary one slot beyond n must survive the vector path")
+        var bad: [i64] = []
+        var n: i64 = 4
+        while n <= 20:
+            val rw = rewrite_elementwise_add(lowered_recipe(), lowered_function(n))
+            if dowhile_canary(rw, n) != CANARY:
+                bad.push(n)
+            n = n + 1
+        expect(bad.len()).to_equal(0)
