@@ -5,6 +5,7 @@
 
 use app.devhub.config.{ItfConfig, load_config, save_config, load_auth_token, save_auth_token, config_dir}
 use app.devhub.auth.{check_confluence_auth, check_jira_auth}
+use app.devhub.atlassian_site.{ATLASSIAN_AUTH_BASIC, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth}
 use app.devhub.flags.{_extract_flag, _has_flag}
 use app.devhub.output.{print_error, print_success, print_info, should_use_color}
 use app.ui.render.ansi.{ansi_green, ansi_red, ansi_bold, ansi_reset}
@@ -128,20 +129,28 @@ fn _login_jira(args: [text]) -> i64:
     val url = _extract_flag(args, "--url", "")
     val user = _extract_flag(args, "--user", "")
     val token = _extract_flag(args, "--token", "")
+    val deployment = _extract_flag(args, "--deployment", "")
+    val auth = _extract_flag(args, "--auth", "")
 
     if url != "" or user != "" or token != "":
-        if url == "" or user == "" or token == "":
-            print_error("--url, --user, and --token must all be given together for the curl-fallback path")
+        if url == "" or token == "":
+            print_error("--url and --token are required for token (REST) auth")
+            return 1
+        if user == "" and atlassian_normalize_auth(auth, ATLASSIAN_AUTH_BASIC) != ATLASSIAN_AUTH_BEARER:
+            print_error("--user EMAIL is required with basic auth (use --auth bearer for a Data Center PAT)")
             return 1
         _ensure_config_dir()
         var config = load_config()
+        val new_deployment = if deployment != "": deployment else: config.jira_deployment
+        val new_auth = if auth != "": auth else: config.jira_auth
+        val new_email = if user != "": user else: config.jira_email
         config = ItfConfig(
             confluence_url: config.confluence_url,
             confluence_user: config.confluence_user,
             confluence_default_space: config.confluence_default_space,
             jira_url: url,
             jira_acli_path: config.jira_acli_path,
-            jira_email: user,
+            jira_email: new_email,
             default_output: config.default_output,
             color_mode: config.color_mode,
             editor_override: config.editor_override,
@@ -154,19 +163,25 @@ fn _login_jira(args: [text]) -> i64:
             bb_workspace: config.bb_workspace,
             bb_repo: config.bb_repo,
             token_envs: config.token_envs,
-            jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+            jira_deployment: new_deployment, jira_auth: new_auth,
             confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
             bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
             bb_auth: config.bb_auth, bb_user: config.bb_user
         )
         save_config(config)
         save_auth_token("jira", token)
-        print_success("Jira curl-fallback authentication configured.")
+        print_success("Jira REST token authentication configured (no acli login needed).")
         print_info("URL", url)
-        print_info("User", user)
+        print_info("Deployment", if new_deployment != "": new_deployment else: "cloud")
+        print_info("Auth", atlassian_normalize_auth(new_auth, ATLASSIAN_AUTH_BASIC))
+        if user != "":
+            print_info("User", user)
         return 0
 
     val config = load_config()
+    if check_jira_auth(config):
+        print_success("Jira token already configured; using REST directly (no acli login).")
+        return 0
     val acli = config.jira_acli_path
 
     # Check if acli is available
@@ -273,11 +288,15 @@ fn _print_auth_help():
     print ""
     print "Login examples:"
     print "  itf auth login --confluence --url https://company.atlassian.net/wiki --user email --token TOKEN"
-    print "  itf auth login --jira"
+    print "  itf auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT"
+    print "  itf auth login --jira --url https://company.atlassian.net --user email --token API_TOKEN"
+    print "  itf auth login --jira            # acli --web login, only when no jira token is configured"
     print ""
     print "Flags:"
     print "  --confluence   Target Confluence"
-    print "  --jira         Target Jira (delegates to acli)"
-    print "  --url URL      Provider URL"
-    print "  --user EMAIL   Email address"
-    print "  --token TOKEN  API token"
+    print "  --jira         Target Jira (REST with a token; acli login otherwise)"
+    print "  --url URL      Provider base URL (custom port/context path allowed)"
+    print "  --user EMAIL   Email/username (basic auth only)"
+    print "  --token TOKEN  API token (Cloud) or personal access token (Data Center)"
+    print "  --deployment D cloud (default) | datacenter"
+    print "  --auth A       basic (default) | bearer"

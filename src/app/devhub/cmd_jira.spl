@@ -4,10 +4,9 @@
 # Delegates to acli via adapter_jira
 
 use app.devhub.config.{ItfConfig, load_config, resolve_auth_token}
-use app.devhub.auth.{check_jira_auth, jira_auth_scheme}
-use app.devhub.atlassian_site.{ATLASSIAN_AUTH_BEARER}
+use app.devhub.auth.{check_jira_auth}
 use app.devhub.adapter_jira.{jira_view_issue, jira_search, jira_create_issue, jira_update_issue, jira_add_comment, jira_transition_issue, JiraIssue}
-use app.devhub.adapter_jira_curl.{JiraClient, jira_curl_update_issue, jira_curl_add_comment, jira_curl_list_transitions, jira_curl_transition_issue}
+use app.devhub.adapter_jira_curl.{JiraClient, jira_curl_view_issue, jira_curl_search, jira_curl_create_issue, jira_curl_update_issue, jira_curl_add_comment, jira_curl_list_transitions, jira_curl_transition_issue}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
 use app.devhub.output.{print_error, print_success, print_info, print_table_dynamic, colorize_state, relative_time, format_json_output, wants_json, should_use_color, set_no_pager}
 use app.ui.render.ansi.{ansi_bold, ansi_reset, ansi_dim, ansi_cyan}
@@ -53,7 +52,19 @@ fn _jira_view(args: [text]) -> i64:
         return 1
 
     val key = positionals[0]
-    val (success, issue, raw_json) = jira_view_issue(config, key)
+    var success = false
+    var issue = JiraIssue(key: "", summary: "", status: "", assignee: "", issue_type: "", priority: "", description: "", updated: "")
+    var raw_json = ""
+    if _jira_curl_configured(config):
+        val (ok, got, body) = jira_curl_view_issue(_jira_curl_client(config), key)
+        success = ok
+        issue = got
+        raw_json = body
+    else:
+        val (ok, got, body) = jira_view_issue(config, key)
+        success = ok
+        issue = got
+        raw_json = body
     if not success:
         print_error(raw_json)
         return 1
@@ -101,7 +112,7 @@ fn _jira_search(args: [text]) -> i64:
         if n > 0:
             limit = n
 
-    val (success, issues, raw_json) = jira_search(config, jql, fields, limit)
+    val (success, issues, raw_json) = jira_search_any(config, jql, fields, limit)
     if not success:
         print_error(raw_json)
         return 1
@@ -140,7 +151,20 @@ fn _jira_create(args: [text]) -> i64:
         print_error("--summary required.")
         return 1
 
-    val (success, key, raw) = jira_create_issue(config, project, summary, issue_type, description)
+    var success = false
+    var key = ""
+    var raw = ""
+    if _jira_curl_configured(config):
+        val rest_type = if issue_type != "": issue_type else: "Task"
+        val (ok, created, body) = jira_curl_create_issue(_jira_curl_client(config), project, rest_type, summary, description)
+        success = ok
+        key = created.key
+        raw = body
+    else:
+        val (ok, acli_key, acli_raw) = jira_create_issue(config, project, summary, issue_type, description)
+        success = ok
+        key = acli_key
+        raw = acli_raw
     if not success:
         print_error("failed to create issue: {raw}")
         return 1
@@ -153,13 +177,19 @@ fn _jira_create(args: [text]) -> i64:
     0
 
 
+fn jira_search_any(config: ItfConfig, jql: text, fields: text, limit: i64) -> (bool, [JiraIssue], text):
+    """JQL search: REST (DC /rest/api/2/search or Cloud /rest/api/3/search/jql)
+    when a jira token is configured, acli only otherwise."""
+    if _jira_curl_configured(config):
+        return jira_curl_search(_jira_curl_client(config), jql, fields, limit)
+    jira_search(config, jql, fields, limit)
+
+
 fn _jira_curl_configured(config: ItfConfig) -> bool:
     """True if the REST curl-fallback path (adapter_jira_curl) has enough
     config to run: jira.url plus a jira auth token, and jira.email unless
     `jira.auth: bearer` (a Data Center PAT needs no user)."""
-    if config.jira_url == "" or resolve_auth_token(config, "jira") == "":
-        return false
-    jira_auth_scheme(config) == ATLASSIAN_AUTH_BEARER or config.jira_email != ""
+    check_jira_auth(config)
 
 
 fn _jira_curl_client(config: ItfConfig) -> JiraClient:
@@ -196,20 +226,19 @@ fn _jira_update(args: [text]) -> i64:
         print_error("nothing to update: provide --summary and/or --description")
         return 1
 
-    val (acli_ok, acli_err) = jira_update_issue(config, key, summary, description)
-    if acli_ok:
-        print_success("Updated {key}")
-        return 0
-
     if _jira_curl_configured(config):
         val client = _jira_curl_client(config)
         val (ok, err) = jira_curl_update_issue(client, key, summary, description)
         if ok:
             print_success("Updated {key}")
             return 0
-        print_error("update failed (acli: {acli_err}; curl: {err})")
+        print_error("update failed: {err}")
         return 1
 
+    val (acli_ok, acli_err) = jira_update_issue(config, key, summary, description)
+    if acli_ok:
+        print_success("Updated {key}")
+        return 0
     print_error("update failed: {acli_err}")
     1
 
@@ -231,20 +260,19 @@ fn _jira_comment(args: [text]) -> i64:
         print_error("--body TEXT required")
         return 1
 
-    val (acli_ok, acli_err) = jira_add_comment(config, key, body)
-    if acli_ok:
-        print_success("Comment added to {key}")
-        return 0
-
     if _jira_curl_configured(config):
         val client = _jira_curl_client(config)
         val (ok, err) = jira_curl_add_comment(client, key, body)
         if ok:
             print_success("Comment added to {key}")
             return 0
-        print_error("comment failed (acli: {acli_err}; curl: {err})")
+        print_error("comment failed: {err}")
         return 1
 
+    val (acli_ok, acli_err) = jira_add_comment(config, key, body)
+    if acli_ok:
+        print_success("Comment added to {key}")
+        return 0
     print_error("comment failed: {acli_err}")
     1
 
@@ -274,12 +302,11 @@ fn _jira_transition(args: [text]) -> i64:
         print_error("a target status name or --id ID is required")
         return 1
 
-    val (acli_ok, acli_err) = jira_transition_issue(config, key, status_or_id)
-    if acli_ok:
-        print_success("Transitioned {key} -> {status_or_id}")
-        return 0
-
     if not _jira_curl_configured(config):
+        val (acli_ok, acli_err) = jira_transition_issue(config, key, status_or_id)
+        if acli_ok:
+            print_success("Transitioned {key} -> {status_or_id}")
+            return 0
         print_error("transition failed: {acli_err}")
         return 1
 
@@ -289,12 +316,12 @@ fn _jira_transition(args: [text]) -> i64:
         if ok:
             print_success("Transitioned {key} -> {explicit_id}")
             return 0
-        print_error("transition failed (acli: {acli_err}; curl: {err})")
+        print_error("transition failed: {err}")
         return 1
 
     val (list_ok, transitions, list_err) = jira_curl_list_transitions(client, key)
     if not list_ok:
-        print_error("transition failed (acli: {acli_err}; curl: could not list transitions: {list_err})")
+        print_error("transition failed: could not list transitions: {list_err}")
         return 1
     var resolved_id = ""
     val wanted = status_name.lower()
@@ -342,9 +369,18 @@ fn _print_jira_help():
     print "  --project P     Jira project key"
     print "  --type T        Issue type (Task, Bug, Story, etc.)"
     print ""
-    print "update/comment/transition try acli first, then fall back to the"
-    print "REST v3 curl path when jira.url + jira.email + a jira auth token"
-    print "are configured (itf auth login --jira --url U --user E --token T)."
+    print "When jira.url + a jira token are configured, every command calls the"
+    print "Jira REST API directly (no acli, no login). Otherwise acli is used."
+    print ""
+    print "Config (~/.config/itf/config.sdn):"
+    print "  jira:"
+    print "      url: https://jira.corp:8443/jira   # any base URL (port/context path ok)"
+    print "      deployment: datacenter             # datacenter (/rest/api/2) | cloud (/rest/api/3, default)"
+    print "      auth: bearer                       # bearer (DC PAT) | basic (email + token, default)"
+    print "      email: you@example.com             # required for basic only"
+    print "  token_env:"
+    print "      jira: JIRA_TOKEN                   # token from env var (or token_cmd / auth.sdn)"
+    print "  itf auth login --jira --url U --deployment datacenter --auth bearer --token T"
     print ""
     print "Examples:"
     print "  itf jira update PROJ-1 --summary \"New title\""
