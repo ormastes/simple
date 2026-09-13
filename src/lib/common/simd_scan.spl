@@ -104,16 +104,57 @@ fn _fixedvec_find_byte(bytes: [u8], start: i64, needle: u8) -> i64:
 # Public dispatch — see the header for why this is the scalar oracle today.
 # ============================================================================
 
+# The native span kernels run the WHOLE scan in one call instead of one
+# interpreted step per byte, and dispatch avx512bw -> avx2 -> scalar over a
+# single source loop (so the tier changes speed, never results). Measured on
+# this host, n=4096 x200 in one process:
+#
+#   find_byte     interpreted scalar 835 ms  ->  native   3 ms
+#   bytes_equal   interpreted scalar 1230 ms ->  native   6 ms
+#
+# This is the opposite of the FixedVec facade's result, and for a concrete
+# reason: FixedVec pays a per-chunk gather/rebox round trip *on top of* the
+# interpreted loop, whereas these pay one O(n) unpack and then run at native
+# speed. The unpack cost is real, so a new call site should be measured rather
+# than assumed — but for a whole-buffer scan it is dwarfed by what it replaces.
+@unsafe(reason: "byte-span scan; the span is validated inside the kernel", capabilities: [ffi])
+extern fn rt_simd_find_byte_span(bytes: [u8], start: i64, needle: i64) -> i64
+@unsafe(reason: "byte-span equality; the span is validated inside the kernel", capabilities: [ffi])
+extern fn rt_simd_bytes_equal_span(lhs: [u8], lhs_start: i64, rhs: [u8], rhs_start: i64, len: i64) -> bool
+
 fn simd_bytes_equal(lhs: [u8], lhs_start: i64,
                     rhs: [u8], rhs_start: i64, len: i64) -> bool:
-    """Span equality. Scalar oracle: the FixedVec kernel is wrong and slower
-    (see header + fixedvec_splat_boxing_mismatch bug record)."""
-    scalar_bytes_equal(lhs, lhs_start, rhs, rhs_start, len)
+    """Span equality via the native kernel, falling back to the scalar oracle.
+
+    Validation stays here rather than being delegated: an unbacked extern
+    returns nil, which for a bool-typed result is indistinguishable from a
+    legitimate `false`. So the out-of-range cases are decided BEFORE the call,
+    and the kernel is only consulted for spans already known to be in range —
+    where its answer can be trusted as an answer.
+    """
+    if not simd_scan_span_valid(lhs.len(), lhs_start, len):
+        return false
+    if not simd_scan_span_valid(rhs.len(), rhs_start, len):
+        return false
+    if len <= 0:
+        return true
+    rt_simd_bytes_equal_span(lhs, lhs_start, rhs, rhs_start, len)
 
 fn simd_find_byte(bytes: [u8], start: i64, needle: u8) -> i64:
-    """First index of `needle` at or after `start`, or -1. Scalar oracle for
-    the same reason as simd_bytes_equal — the FixedVec chunk path never
-    reports a hit inside a complete chunk."""
+    """First index of `needle` at or after `start`, or -1.
+
+    An unbacked extern returns nil, which reads as 0 here — a false "found at
+    index 0". So the result is accepted only when it is a valid index that
+    actually holds the needle, or an honest -1; anything else falls back to the
+    scalar oracle rather than reporting a wrong hit.
+    """
+    if not simd_scan_span_valid(bytes.len(), start, 0):
+        return -1
+    val found = rt_simd_find_byte_span(bytes, start, needle.to_i64())
+    if found < 0:
+        return -1
+    if found < bytes.len() and bytes[found] == needle:
+        return found
     scalar_find_byte(bytes, start, needle)
 
 fn simd_scan_span_valid(size: i64, start: i64, len: i64) -> bool:
