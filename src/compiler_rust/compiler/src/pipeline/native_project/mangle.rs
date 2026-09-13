@@ -212,6 +212,27 @@ fn enum_helper_owner_matches(candidate: &str, type_part: &str) -> bool {
     owner.eq_ignore_ascii_case(type_part)
 }
 
+/// True when `candidate` is the mangled spelling of `<type_part>.<method>`.
+///
+/// The suffix index holds BOTH spellings — `pkg__mod__Owner.method` and
+/// `pkg__mod__Owner_dot_method` — so an owner test that understands only one
+/// of them silently answers `false` and drops the caller into the very
+/// substring/lone-candidate arms this exists to avoid.
+pub(super) fn method_owner_matches(candidate: &str, type_part: &str) -> bool {
+    if type_part.is_empty() {
+        return false;
+    }
+    let owner_path = match candidate.rsplit_once('.') {
+        Some((owner, _)) => owner,
+        None => match candidate.rfind("_dot_") {
+            Some(idx) => &candidate[..idx],
+            None => return false,
+        },
+    };
+    let owner = owner_path.rsplit("__").next().unwrap_or(owner_path);
+    owner.eq_ignore_ascii_case(type_part)
+}
+
 /// Apply name mangling to a MIR module for the LLVM backend.
 pub(crate) fn mangle_mir(
     mir: &mut crate::mir::MirModule,
@@ -603,13 +624,32 @@ pub(crate) fn mangle_mir(
                             *func_name = resolved.clone();
                         } else if !is_enum_helper_method(func_name.as_str()) {
                             let method_part = func_name.as_str();
-                            let mut use_resolved = None;
+                            // Ambiguity is refusal, not a coin flip. This scan
+                            // used to take the FIRST `use_map` key ending in
+                            // `.<method>` and `break` -- an arbitrary,
+                            // HashMap-order pick among every same-named method
+                            // in the closure, made on a BARE name that carries
+                            // no receiver-type evidence at all. Six sibling
+                            // structs with a `store` (ints.spl) collapsed onto
+                            // one body this way. Bind only when the scan agrees.
+                            let mut hits: Vec<String> = Vec::new();
                             for (raw, mangled) in use_map.iter() {
-                                if raw.ends_with(&format!(".{}", method_part)) && raw.len() > method_part.len() + 1 {
-                                    use_resolved = Some(mangled.clone());
-                                    break;
+                                if raw.ends_with(&format!(".{}", method_part))
+                                    && raw.len() > method_part.len() + 1
+                                    && !hits.contains(mangled)
+                                {
+                                    hits.push(mangled.clone());
                                 }
                             }
+                            if hits.len() > 1 {
+                                eprintln!(
+                                    "warning: refusing to bind unqualified method `{}` -- {} same-named candidates ({})",
+                                    method_part,
+                                    hits.len(),
+                                    hits.join(", ")
+                                );
+                            }
+                            let use_resolved = if hits.len() == 1 { hits.pop() } else { None };
                             if let Some(resolved) = use_resolved {
                                 *func_name = resolved;
                             } else if let Some(resolved) = import_map.get(func_name.as_str()) {
@@ -789,9 +829,31 @@ fn resolve_call_target(
             return;
         }
         if let Some(candidates) = candidates {
+            // Exact owner match first; the substring test is a fallback and
+            // only binds when it is unambiguous.
+            //
+            // The lone-candidate arm is KEPT -- deliberately, and narrowly.
+            // With exactly one same-named method in the whole closure there is
+            // no choice to get wrong, and that case is load-bearing: a struct
+            // calling an INHERITED trait default reaches here as
+            // `Button.render` while the only emitted body is the trait's
+            // `Widget.render` (pinned by
+            // `qualified_enum_helpers_never_rebind_in_resolve_call_target`'s
+            // final assertion). What is removed is the arbitrary pick when the
+            // closure holds SEVERAL same-named methods and none is owned by the
+            // receiver -- `U16le.store` among six `ints.spl` siblings. One
+            // candidate is an absence of ambiguity; six is a coin flip.
+            let type_part_lower = type_part.to_lowercase();
             let best = candidates
                 .iter()
-                .find(|c| c.to_lowercase().contains(&type_part.to_lowercase()))
+                .find(|c| method_owner_matches(c, type_part))
+                .or_else(|| {
+                    let mut subs = candidates.iter().filter(|c| c.to_lowercase().contains(&type_part_lower));
+                    match (subs.next(), subs.next()) {
+                        (Some(only), None) => Some(only),
+                        _ => None,
+                    }
+                })
                 .or_else(|| {
                     if candidates.len() == 1 {
                         candidates.first()
@@ -1027,31 +1089,64 @@ fn resolve_method_call_static(
         }
         if let Some(candidates) = candidates {
             let best = if has_type_qualifier {
-                candidates.iter().find(|c| c.to_lowercase().contains(&type_part_lower))
+                // A qualified receiver names its owner EXACTLY. Prefer the
+                // candidate whose owner token equals `type_part`; only when no
+                // candidate owns the name outright does the historical
+                // substring test apply, and then only if it is unambiguous.
+                // Six sibling structs with a same-named `store` (ints.spl)
+                // make "first candidate containing the type name" a
+                // closure-order lottery.
+                candidates
+                    .iter()
+                    .find(|c| method_owner_matches(c, type_part))
+                    .or_else(|| {
+                        let mut subs = candidates.iter().filter(|c| c.to_lowercase().contains(&type_part_lower));
+                        match (subs.next(), subs.next()) {
+                            (Some(only), None) => Some(only),
+                            _ => None,
+                        }
+                    })
             } else {
-                let mut use_match: Option<&String> = None;
+                // BARE name: no receiver-type evidence. Collect every
+                // candidate the use/import scans reach and bind only when
+                // they agree on one -- taking the first HashMap hit picks an
+                // arbitrary same-named method and miscompiles the call.
+                let mut hits: Vec<&String> = Vec::new();
                 for (raw, mangled) in use_map.iter() {
                     if raw.ends_with(&format!(".{}", method)) {
                         if let Some(c) = candidates.iter().find(|c| *c == mangled) {
-                            use_match = Some(c);
-                            break;
+                            if !hits.contains(&c) {
+                                hits.push(c);
+                            }
                         }
                     }
                 }
-                if use_match.is_none() {
+                if hits.is_empty() {
                     for (raw, mangled) in import_map.iter() {
                         if raw.ends_with(&format!(".{}", method)) && raw != method {
                             if let Some(c) = candidates.iter().find(|c| *c == mangled) {
                                 let raw_type = raw.split('.').next().unwrap_or("");
-                                if use_map.contains_key(raw_type) {
-                                    use_match = Some(c);
-                                    break;
+                                if use_map.contains_key(raw_type) && !hits.contains(&c) {
+                                    hits.push(c);
                                 }
                             }
                         }
                     }
                 }
-                use_match
+                match hits.len() {
+                    0 => None,
+                    1 => Some(hits[0]),
+                    n => {
+                        eprintln!(
+                            "warning: refusing to bind unqualified method `{}` -- {} same-named candidates ({}); \
+                             the receiver type was erased before mangling, so no candidate can be chosen soundly",
+                            method,
+                            n,
+                            hits.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                        );
+                        None
+                    }
+                }
             };
             let best = best.or_else(|| {
                 // A qualified receiver is semantic type evidence.  Do not
@@ -1095,10 +1190,23 @@ fn resolve_method_call_static(
                 // is no candidate to rebind to. These names must reach
                 // codegen's builtin enum payload/discriminant lowering, which
                 // is what the bare-receiver guard above already relies on.
+                //
+                // The candidate must itself be an UNOWNED free function. That
+                // is the whole premise of this arm -- "a plain top-level
+                // `fn f(text, ...)` called via UFCS" -- and without the test
+                // the arm also swallows an owned `Type.method`, which is the
+                // exact rebind the arm above refuses:
+                // `test_llvm_mangle_does_not_rebind_qualified_method_to_unrelated_type`
+                // has `str.rfind` versus the lone candidate
+                // `core__traits__DoubleEndedIterator_dot_rfind`, an owned
+                // method of an unrelated type.
                 if has_type_qualifier
                     && matches!(type_part_lower.as_str(), "str" | "text" | "string")
                     && !is_enum_helper_method(method)
                     && candidates.len() == 1
+                    && candidates
+                        .first()
+                        .is_some_and(|c| !c.contains("_dot_") && !c.contains('.'))
                 {
                     candidates.first()
                 } else {
