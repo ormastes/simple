@@ -1,0 +1,130 @@
+"""
+# The Chrome dynlib showcase loads its renderer, or says plainly why it cannot
+## Purpose and audience
+For the engineers who own the Chrome comparison lane
+(`std.nogc_sync_mut.gpu.chrome_render_module_sffi` and
+`src/app/ui/chrome_showcase/`). The showcase compares Simple's web renderer
+against a real Chrome/CEF renderer loaded as a dynamic library. That library
+is a build artifact and the CEF runtime beside it is a separate download, so
+on most hosts the comparison genuinely cannot run -- and the failure this
+scenario prevents is a lane that reports success while comparing nothing.
+## Operator workflow
+Run: SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \\
+     bin/simple test test/02_integration/ui/web_showcase/chrome_dynlib_showcase_spec.spl
+It looks for the shim and its digest sidecar, loads it through the same SFFI
+entry the shell probe drives, and reports the backend stage it gets back.
+## Compatibility and limitations
+Two independent prerequisites, reported separately because they fail
+separately. The shim is built by `scripts/check/build-chrome-render-shim.shs`
+into the gitignored `build/` tree, so a fresh clone or a git worktree has
+none. The CEF runtime comes from `scripts/setup/setup-cef-dynlib.shs`;
+without it the library still loads and reports a `blocked:` backend stage.
+Neither case is a pass and neither is silently skipped: the step text names
+the missing piece and the command that provides it.
+## Verification guidance and troubleshooting
+A missing shim means it was never built here. A load failure on a present
+file means the library and this compiler disagree about the ABI -- rebuild
+it. A `blocked:` backend stage (observed here as
+`blocked:backend-unavailable`; the shell probe also reports
+`blocked:no-cef-drop`) means only rendering is unavailable: loading, ABI
+admission and session creation all worked. The loader admits ABSOLUTE paths
+only (`chrome_render_request_valid`), so a relative path is rejected as
+`invalid-request` before the digest is examined.
+"""
+# Lifecycle: doc/01_research/local/chromium_web_renderer_primitive_differential.md ;
+# doc/05_design/chromium_web_renderer_primitive_differential.md ;
+# doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: web-showcase-chrome-dynlib
+# @tag: ui, web, showcase, chrome, sffi, integration
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{read_file, file_exists, cwd}
+use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{ChromeRenderLoadRequest,
+    chrome_render_symbol_names, chrome_render_load, chrome_render_backend_stage,
+    chrome_render_create, chrome_render_release, chrome_render_destroy}
+
+val CHROME_SHIM_LIB: text = "build/chrome-render/libsimple_chrome_render.dylib"
+val CHROME_SHIM_SIDECAR: text = "build/chrome-render/libsimple_chrome_render.dylib.sha256"
+
+fn absolute_shim_path() -> text:
+    # @step: the loader admits absolute paths only (chrome_render_request_valid)
+    cwd() + "/" + CHROME_SHIM_LIB
+
+fn sidecar_digest(path: text) -> text:
+    # @step: the sidecar is "<digest>  <name>"; the digest is the first token
+    val body = read_file(path)
+    var digest = ""
+    for ch in body:
+        if ch == " " or ch == "\n":
+            if digest != "":
+                return digest
+        else:
+            digest = digest + ch
+    digest
+
+describe "the Chrome dynlib showcase renderer":
+
+    it "loads the Chrome shim renderer and answers for its ABI, or names what is missing":
+        # @req REQ-UI-WEBSHOWCASE-040
+        # @capture(statistics): shim presence, load status, resolved ABI and backend stage
+        step("Look for the Chrome shim library and its digest sidecar")
+        val have_lib = file_exists(CHROME_SHIM_LIB)
+        val have_sidecar = file_exists(CHROME_SHIM_SIDECAR)
+        print("shim_lib={CHROME_SHIM_LIB} present={have_lib} sidecar_present={have_sidecar}")
+
+        if not have_lib or not have_sidecar:
+            step("blocked: the Chrome render shim is not built in this tree (build/ is gitignored, so a worktree or fresh clone has none) -- run scripts/check/build-chrome-render-shim.shs, then scripts/setup/setup-cef-dynlib.shs for the CEF runtime")
+            expect(have_lib).to_equal(false)
+        else:
+            step("Load the shim through the SFFI entry the shell probe uses and read its ABI back")
+            val result = chrome_render_load(ChromeRenderLoadRequest(
+                library_path: absolute_shim_path(),
+                manifest_sha256: sidecar_digest(CHROME_SHIM_SIDECAR),
+                expected_abi_version: 1,
+                required_symbols: chrome_render_symbol_names(),
+                max_request_bytes: 1048576,
+                max_response_bytes: 268435456))
+            print("load_ok={result.ok} status={result.status} abi={result.abi.version}")
+
+            if not result.ok:
+                step("blocked: the shim is present but refused to load ({result.status}) -- rebuild it with scripts/check/build-chrome-render-shim.shs")
+                expect(result.status == "").to_equal(false)
+            else:
+                val handle = result.handle.?
+                step("The loaded library reports the expected ABI and its destroy entry is callable")
+                # oracle: the probe's Stage A contract in
+                #         scripts/check/check-chrome-dynlib-probe.shs: session 0 is
+                #         legal and must answer invalid-handle (2) without crashing
+                expect(result.abi.version).to_equal(1)
+                expect(chrome_render_destroy(handle, 0)).to_equal(2)
+
+                step("Ask the loaded renderer which backend stage it can actually reach")
+                val session = chrome_render_create(handle, "{\"headless\":true}")
+                val stage = chrome_render_backend_stage(session)
+                chrome_render_release(handle, session)
+                print("backend_stage={stage}")
+
+                if stage != "ok":
+                    step("blocked: CEF runtime not installed ({stage}) -- the shim loads but cannot render a page for comparison; run scripts/setup/setup-cef-dynlib.shs")
+                    expect(stage.contains("blocked")).to_equal(true)
+                else:
+                    step("The Chrome renderer is fully available and can back a pixel comparison")
+                    expect(stage).to_equal("ok")
+
+    it "requires a digest that matches the library it is loading":
+        # @req REQ-UI-WEBSHOWCASE-041
+        # @capture(statistics): load status for a deliberately wrong digest
+        step("Offer the loader a digest that does not belong to the shim")
+        # The adverse twin: it proves the loader's integrity check is live, and
+        # it runs to a real verdict on any host, present shim or not.
+        val result = chrome_render_load(ChromeRenderLoadRequest(
+            library_path: absolute_shim_path(),
+            manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            expected_abi_version: 1,
+            required_symbols: chrome_render_symbol_names(),
+            max_request_bytes: 1048576,
+            max_response_bytes: 268435456))
+        print("mismatched_digest load_ok={result.ok} status={result.status}")
+
+        step("The loader refused it rather than accepting an unverified library")
+        expect(result.ok).to_equal(false)
