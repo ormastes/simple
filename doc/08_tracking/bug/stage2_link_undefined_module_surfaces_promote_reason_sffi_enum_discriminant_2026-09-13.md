@@ -42,25 +42,54 @@ Only the one file differs between those two runs. The defect is on `origin/main`
 ## What the two names are
 
 Both are **pure-Simple compiler functions**, not runtime externs, so this is not
-the `rt_*` twin class that site 15 was:
+the `rt_*` twin class that site 15 was. Neither is an emission bug: in both cases
+the tree really does lack a reachable definition.
 
-- `module_surfaces_promote_reason` — re-exported at
-  `src/compiler/20.hir/hir_lowering/module_surface.spl:5` (an
-  `export use compiler.hir.hir_lowering.module_surface_registry.{...}` list) and
-  called at `src/compiler/80.driver/driver_source_pipeline_parsing.spl:585`.
-  The re-export is a pass-through; the definition lives in
-  `module_surface_registry`. The nearest main-side change to that file is
-  `6a49e75efe0` "diag(compiler): name the surface, field and scope in a phase-2
-  promotion failure" (2026-09-13 08:51:51) — a **suspect, not a proven cause**.
-- `_sffi_enum_discriminant` — an `@always_inline` one-liner wrapping
-  `rt_enum_discriminant`, defined identically in at least three files
-  (`50.mir/_MirLoweringExpr/expr_dispatch.spl:38`,
-  `50.mir/_MirLoweringExpr/switch_operators_calls.spl:43`,
-  `70.backend/backend/_MirToLlvm/core_codegen.spl:104`). An undefined reference to
-  an `@always_inline` helper means a CALL survived un-inlined while the definition
-  was elided as inline-only — a symbol-emission/inlining mismatch, not a missing
-  implementation.
+### `module_surfaces_promote_reason` — half-landed, then clobbered
 
+`grep -rn 'fn module_surfaces_promote_reason' src/` returns **0**. The name exists
+only as a re-export (`20.hir/hir_lowering/module_surface.spl:5`, an
+`export use compiler.hir.hir_lowering.module_surface_registry.{...}` list) and as
+an import + call (`80.driver/driver_source_pipeline_parsing.spl:33,585`). The
+owning module, `module_surface_registry.spl`, does not contain the name at all.
+
+It did. Counting occurrences of the name in that file per commit:
+
+| commit | date | occurrences |
+|---|---|---|
+| `460aa9781cc` | 09-13 07:53 | 0 |
+| `6a49e75efe0` "diag(compiler): name the surface, field and scope in a phase-2 promotion failure" | 09-13 08:51 | **3** |
+| `db127a8e8c4` "fix(hir): stop module surface promotion failing on an already-persistent field" | 09-13 15:48 | **0** |
+
+`6a49e75efe0` added the function (and `test/01_unit/compiler/hir/module_surface_promote_reason_spec.spl`,
+which is still in the tree). `db127a8e8c4` is a **single-file** commit that rewrote
+the same registry (+82/-102) and dropped it, while leaving the re-export, the
+caller and the spec behind. That is the stale-snapshot clobber pattern
+`.claude/rules/vcs.md` § "Sync must never clobber" describes: the second author
+snapshotted a registry that predated the first author's addition. The fix is to
+restore the function in `module_surface_registry.spl` (its content is recoverable
+from `git show 6a49e75efe0:...`), not to touch the caller.
+
+### `_sffi_enum_discriminant` — a private `@always_inline` helper called across a module boundary
+
+An `@always_inline` one-liner wrapping `rt_enum_discriminant`, defined — not `pub`
+— identically in `50.mir/_MirLoweringExpr/expr_dispatch.spl:38`,
+`50.mir/_MirLoweringExpr/switch_operators_calls.spl:43` and
+`70.backend/backend/_MirToLlvm/core_codegen.spl:104`.
+`50.mir/_MirLoweringExpr/method_calls_literals.spl` **calls it at :372-374 and
+defines it nowhere**; it reaches the name through
+`use compiler.mir._MirLoweringExpr.expr_dispatch.*` /
+`...switch_operators_calls.*` (lines 2-3), i.e. two wildcard imports that each
+supply an identical private symbol. A call that crosses a module boundary is not
+inlined, while the definition — being inline-only and private — is not emitted as
+a linkable symbol in its own module, so the reference dangles. The same shape is
+in `src/plugins/backend_vhdl/vhdl/vhdl_design_catalog.spl`.
+Candidate fixes: make one definition `pub` and import it by name, or give
+`method_calls_literals.spl` its own copy as its siblings have. `git log -1` on
+that file names `13ca132a222` "chore(sync): session work products 2026-09-13"
+(09-13 17:12) — another sync commit, so the same clobber class is a suspect here
+too, but that is NOT established: the file has never defined the helper in any of
+its last five commits.
 ## Reproduction
 
 ```
