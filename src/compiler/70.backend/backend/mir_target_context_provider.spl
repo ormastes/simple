@@ -2,8 +2,20 @@
 
 use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from, mir_target_context_normalize_arch}
 use compiler.backend.backend.llvm_capability.{LlvmCapabilityReport, get_llvm_capabilities}
-use std.platform.{host_arch, host_os}
-use std.io_runtime.{env_get_opt}
+# Was: std.platform.{host_arch, host_os} (nogc_sync_mut.platform), whose
+# host_os() delegates to std.nogc_sync_mut.env.platform.detect_os() -- the
+# same detector already shown (by a live trace in the win-native-link-cc fix)
+# to answer "not Windows" inside this exact Stage 2 bootstrap sanity harness,
+# on a real Windows host, while std.io_runtime.host_os() answers "windows"
+# correctly in the same process. Here that misdetection was worse than a
+# wrong linker-flag branch: backend_mir_target_context() feeds host_os()
+# straight into the MIR target context llc is invoked with, so a false
+# non-Windows reading made llc emit an ELF object (its own default target is
+# genuinely x86_64-pc-windows-msvc; only an explicit wrong triple overrides
+# it) that MSVC's link.exe then rejected as corrupt (LNK1107, "cannot read
+# at 0x3E8" -- 0x3E8 = 1000 = the exact byte length of that truncated ELF
+# .o). Use std.io_runtime.host_arch/host_os instead.
+use std.io_runtime.{env_get_opt, host_arch, host_os}
 
 fn backend_aot_simpleos_target_triple(target: text) -> text:
     val value = target.trim().lower()
