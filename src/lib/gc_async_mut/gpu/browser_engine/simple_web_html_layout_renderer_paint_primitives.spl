@@ -489,8 +489,36 @@ fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y
     var py = y0
     while py < y1:
         val row = py * fbw
+        # Split the row into [left corner cells][FLAT interior][right corner
+        # cells]. Only the corner cells need the per-pixel arc test; the
+        # interior is fully covered by definition, so it is one row-kernel
+        # call instead of a branchy per-pixel loop over most of the box.
+        #
+        # This is only sound because the interior now blends with
+        # `blend_opacity`, the same arithmetic the kernel uses. It previously
+        # used a /256 floor, and routing it here while the corner cells kept
+        # the other rounding would have made them disagree at the seam.
+        val l_rad = if tl > 0 and py < y + tl: tl
+                    elif bl > 0 and py >= y + h - bl: bl
+                    else: 0
+        val r_rad = if tr > 0 and py < y + tr: tr
+                    elif br > 0 and py >= y + h - br: br
+                    else: 0
+        var flat_lo = x + l_rad
+        var flat_hi = x + w - r_rad
+        if flat_lo < x0:
+            flat_lo = x0
+        if flat_hi > x1:
+            flat_hi = x1
+        if flat_hi > flat_lo and opacity_pct > 0:
+            out = fb_blend_const_row_opacity(out, row + flat_lo, flat_hi - flat_lo, color, opacity_pct)
         var px = x0
         while px < x1:
+            # Skip the span the row kernel just painted.
+            if flat_hi > flat_lo and px >= flat_lo and px < flat_hi:
+                px = flat_hi
+                if px >= x1:
+                    break
             # Analytic coverage (0..256) instead of a hard in/out test, so the
             # corner arc is anti-aliased: a pixel centred exactly on the arc
             # gets 1/2 coverage and the ramp is one pixel wide.
