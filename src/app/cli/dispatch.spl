@@ -16,6 +16,7 @@
 # Import from submodules
 use app.cli.dispatch.types.{CommandEntry}
 use app.cli.dispatch.table.{get_command_table, get_all_commands}
+use app.cli.tool_help.{tool_help_entry_for}
 use std.log.{error}
 
 use app.io.{cli_run_file}
@@ -62,6 +63,22 @@ fn dispatch_command(entry: CommandEntry, args: [text], gc_log: bool, gc_off: boo
     # Legacy flags are rejected through the fail-closed handler.
     if entry.should_use_rust(args):
         return dispatch_to_rust(entry.name, args, gc_log, gc_off)
+
+    # A `lint|fmt|fix|test` help request runs a thin help entry instead of the
+    # command's real entry: a real entry resolves its whole implementation
+    # closure before main() can reach a help branch, which cost 533 `.spl`
+    # opens for `lint --help` and 10,151 (and no help at all) for
+    # `test --help`. Same routing as the Rust seed driver's dispatch_command,
+    # same predicate owner (app.cli.tool_help), pinned by
+    # test/01_unit/app/cli/tool_help_route_spec.spl. See
+    # doc/08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md
+    val help_app = tool_help_entry_for(entry.name, args[1:args.len()])
+    if help_app != "":
+        match try_simple_app(help_app, args, gc_log, gc_off):
+            case Some(help_code):
+                return help_code
+            case nil:
+                pass
 
     # Try the Simple app implementation.
     if entry.has_simple_impl():
