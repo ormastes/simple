@@ -132,4 +132,40 @@ fn main():
                 i = i + 1
         n = n + 1
 
+    # --- soft-shadow with NEGATIVE coverage ---
+    #
+    # The lane kernel divides `cov*cov_y` by 256 with an arithmetic shift,
+    # which floors; C integer division truncates toward zero. They differ for
+    # negative products — floor(-200/256) = -1 versus -200/256 = 0 — so this
+    # was previously reasoned to be safe rather than tested. The argument is
+    # that BOTH results are <= 0 and both paths then skip the pixel, leaving
+    # the destination untouched. That is a claim about output, and output is
+    # testable, so it is tested here instead of argued.
+    n = 1
+    while n <= 24:
+        var dst: [u32] = []
+        var cov: [i32] = []
+        var i: i64 = 0
+        while i < n:
+            dst.push(0xFF000000u32 | ((i * 17 + 11) as u32))
+            # a spread of negative magnitudes, including ones whose product
+            # with cov_y lands just inside and just outside a 256 boundary
+            cov.push((0 - (1 + (i * 97) % 400)) as i32)
+            i = i + 1
+        val cy2: i64 = 200
+        val al2: i64 = 180
+        val got = rt_engine2d_blend_cov_span_u32(dst, 0, cov, n, cy2 * 1024 + al2, 0xFF3366CCu32)
+        if got.len() != n:
+            bad = bad + 1
+        else:
+            i = 0
+            while i < n:
+                checked = checked + 1
+                # every negative coverage must leave the destination verbatim
+                if got[i.to_i32()] != dst[i.to_i32()]:
+                    bad = bad + 1
+                    bad_cov = bad_cov + 1
+                i = i + 1
+        n = n + 1
+
     print("NATIVE-SIMD checked={checked} mismatches={bad} db={bad_db} mask={bad_mask} cov={bad_cov}")

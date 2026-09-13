@@ -2715,7 +2715,15 @@ static void blend_cov_span_avx512_lanes(int64_t* dst, const int64_t* colcov,
     for (; i + 8 <= n; i += 8) {
         __m512i v  = _mm512_loadu_si512((const void*)(dst + i));
         __m512i t  = _mm512_srli_epi64(v, 3);
-        __m512i cc = _mm512_srli_epi64(_mm512_loadu_si512((const void*)(colcov + i)), 3);
+        /* Coverage is [i32] and CAN be negative. `engine2d_unbox_pixel`
+           truncates UNSIGNED, so -1 would arrive as 4294967295 and blend at
+           full strength where the Simple twin skips the pixel — a real
+           divergence between the two implementations, found by testing the
+           negative domain rather than reasoning about it. Sign-extend the low
+           32 bits so both sides see the same number. */
+        __m512i cc = _mm512_srai_epi64(
+            _mm512_slli_epi64(_mm512_srli_epi64(
+                _mm512_loadu_si512((const void*)(colcov + i)), 3), 32), 32);
         __m512i cov = _mm512_srai_epi64(_mm512_mullo_epi64(cc, vcovy), 8);   /* /256 */
         /* a = min((cov*alpha)/255, 256) */
         __m512i a = _mm512_srli_epi64(
@@ -2739,7 +2747,7 @@ static void blend_cov_span_avx512_lanes(int64_t* dst, const int64_t* colcov,
             _mm512_mask_blend_epi64(keep, _mm512_slli_epi64(px, 3), v));
     }
     for (; i < n; i++) {
-        int64_t cov = ((int64_t)engine2d_unbox_pixel(colcov[i]) * cov_y) / 256;
+        int64_t cov = ((int64_t)(int32_t)engine2d_unbox_pixel(colcov[i]) * cov_y) / 256;
         if (cov <= 0) continue;
         int64_t a = (cov * alpha) / 255;
         if (a > 256) a = 256;
@@ -2788,7 +2796,8 @@ SplArray* rt_engine2d_blend_cov_span_u32(SplArray* dst, int64_t offset,
     for (int64_t i = 0; i < count; i++) {
         /* SplArray stores one tagged int64_t slot per element, so an [i32]
            must be read slot-wise and unboxed rather than as packed words. */
-        int64_t cc = (int64_t)engine2d_unbox_pixel(cov_data[i]);
+        /* signed: see the sign-extension note in the lane kernel above */
+        int64_t cc = (int64_t)(int32_t)engine2d_unbox_pixel(cov_data[i]);
         uint32_t d = engine2d_unbox_pixel(dst_data[offset + i]);
         int64_t cov = (cc * cov_y) / 256;
         if (cov <= 0) {
