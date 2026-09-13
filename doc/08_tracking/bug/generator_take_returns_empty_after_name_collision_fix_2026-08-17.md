@@ -1,8 +1,19 @@
 # `std.generator` take() returns an empty array (2026-08-17)
 
-Status: OPEN (P1)
+- Status: RESOLVED (interpreter path) 2026-09-13 — fixed by d7213eb6174 (2026-08-17,
+  "fix(src): land forward deltas from 20 spend-limit-killed sessions"), which
+  rewrote `iter_take` (was the identity function) and `iter_collect` (was a
+  stub returning bare `[]`) in `src/lib/common/iterator/{transform,reduce}.spl`.
+  Reproducing spec `test/01_unit/lib/nogc_async_mut/generator_take_returns_values_spec.spl`
+  already exists (landed in the same change) and is GREEN under
+  `SIMPLE_EXECUTION_MODE=interpreter`: `4 examples, 0 failures`.
+  **New finding, still OPEN:** the exact same repro below **segfaults** (core
+  dump) under the default JIT execution mode on this binary — see
+  `generator_take_default_jit_mode_segfault_2026-09-13.md`. So this record's
+  original P1 (silent empty array) is closed, but a worse P1 (native crash) was
+  uncovered in its place; do not read this file as "generator is fine now."
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
-**Status:** OPEN. Found while verifying the fix for
+**Status (historical):** OPEN. Found while verifying the fix for
 `generator_identifier_collides_with_builtin_construct_name_2026-08-11.md`.
 
 ## Relationship to the collision bug
