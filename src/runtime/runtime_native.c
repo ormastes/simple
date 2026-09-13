@@ -24,6 +24,10 @@
 #include "runtime_memory_guard.h"
 #include "runtime_startup_args.h"
 
+#define SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1 1
+#include "runtime_hosted_safe_artifact_v1.c"
+#undef SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
