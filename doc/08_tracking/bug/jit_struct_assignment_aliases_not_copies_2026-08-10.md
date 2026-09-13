@@ -225,3 +225,11 @@ direction from this bug — rather than closing outright.
 ### Could NOT prove
 - The AOT/native lane was not exercised separately (item 3 remains unmeasured).
 - Item 2 was not reproduced; it is outside this lane's subsystem.
+
+## Triage 2026-09-13
+Re-ran `test/03_system/language/value_semantics/probe/p2_nested_struct_field.spl`
+under both engines: identical output
+(`S2b o.inner.a=99.0 o2.inner.a=33.0`) on interpret and jit, confirming the
+deep-copy fix still holds. Residual item 2 (`m[1][0] = 9` divergence) not
+re-tested this pass (Rust-seed interpreter/JIT lvalue-lowering divergence,
+out of scope for a pure-Simple lane). Left OPEN for that residual item.

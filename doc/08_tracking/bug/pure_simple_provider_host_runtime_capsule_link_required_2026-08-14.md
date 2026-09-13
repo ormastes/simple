@@ -1,5 +1,11 @@
 # Pure Simple provider host proof needs an admitted runtime capsule link
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: needs an admitted runtime-capsule link
+manifest and a provider-integration gate rework in the bootstrap linker path,
+not a src/lib fix. Left OPEN.
+
+
 Status: open.
 
 The admitted Stage 2 compiler produced a 37 KB Pure Simple provider archive

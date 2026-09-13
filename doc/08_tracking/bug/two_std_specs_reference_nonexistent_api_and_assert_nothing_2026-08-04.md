@@ -114,6 +114,10 @@ Both need an owner decision that a test-repair lane cannot make:
 
 Neither may be resolved by `@skip`/`@ignore` or by deleting the assertions.
 
+## Triage 2026-09-13
+Reconfirmed: `bin/simple test test/01_unit/std/mock_simple_spec.spl` still
+fails identically (`semantic: variable Mock not found`). Architectural,
+blocked on an owner decision per this record. Left as-is, no code change.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Re-confirmed: no `class Mock` exists in `src/lib/` (only `MockFunction`/

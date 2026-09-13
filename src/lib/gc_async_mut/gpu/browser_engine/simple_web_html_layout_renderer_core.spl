@@ -2876,6 +2876,21 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     var style_inherit_ids: [i32] = [-1; node_count]
     var style_inherit_index: Dict<text, i32> = {}
     var style_inherit_next: i32 = 0
+    # Inherited `lang`, computed top-down ONCE per node instead of walked per
+    # #text node. `_html_text_language`'s ancestor loop is O(depth) and re-parses
+    # every ancestor's `attrs_raw` for a `lang` attribute on each text node it is
+    # asked about (511 ms on css-layout —
+    # doc/10_metrics/ui/web_document_pipeline_profile_macos_2026-09-12.md,
+    # defect 2). `lang` inherits, so the answer for a node is its own `lang` if
+    # it has one and its parent's answer otherwise — exactly what the upward walk
+    # computes, provided the parent was already visited. Document order gives
+    # `parent < i`; the one case it does not (`parent >= i`) is recorded per node
+    # and falls back to the original walk, so this is not an assumption the code
+    # merely hopes holds. The `font-language-override` branch is NOT cached: it
+    # depends on the node's computed style, so those nodes keep calling
+    # `_html_text_language` and get byte-identical answers.
+    var node_lang: [text] = [""; node_count]
+    var node_lang_exact: [bool] = [false; node_count]
     var i = 0
     while i < node_count:  # cpu-lane-loop-ok: THE per-node cascade loop; bound is the document node count and it runs once per style invalidation, not per paint frame (simple_web_layout_rerender_retained gates compute_styles_with_material behind dirty_stage == "css" and reuses prior styles on paint-only frames)
         # Budget guard (outer): stop resolving further nodes on expiry; nodes not
@@ -2892,6 +2907,19 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             print "[web-phase] style_progress i={i} of={node_count} elapsed_ms={(_phase_clock.now_micros() - _phase_loop_start_us) / 1000}"
         var _wsc_t = if _wsc_armed(): _wsc_now_us() else: 0
         val nd = nodes[i]
+        val _own_lang = attr_value(nd.attrs_raw, "lang").trim()
+        if _own_lang != "":
+            node_lang[i] = _own_lang
+            node_lang_exact[i] = true
+        else if nd.parent < 0:
+            node_lang[i] = "und"
+            node_lang_exact[i] = true
+        else if nd.parent < i.to_i64():
+            node_lang[i] = node_lang[nd.parent]
+            node_lang_exact[i] = node_lang_exact[nd.parent]
+        else:
+            node_lang[i] = "und"
+            node_lang_exact[i] = false
         if trace_stages:
             print "[layout-trace] style_stage=node-start index={i} parent={nd.parent} tag={nd.tag}"
         # Level-gated (default off, permanent per log-retention policy):
@@ -3275,7 +3303,12 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             if trace_stages:
                 print "[layout-trace] style_stage=metric-text-ready index={i} len={metric_text.len()}"
             val _wsc_lt = if _wsc_armed(): _wsc_now_us() else: 0
-            val language = _html_text_language(nodes, i, st)
+            val _lang_override = (st.font_language_override ?? "").trim()
+            val _lang_override_active = _lang_override != "" and _lang_override.lower() != "normal"
+            val language = if _lang_override_active or not node_lang_exact[i]:
+                _html_text_language(nodes, i, st)
+            else:
+                node_lang[i]
             if _wsc_armed():
                 _wsc_add_section(6, _wsc_now_us() - _wsc_lt)
             if trace_stages:

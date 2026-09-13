@@ -36,6 +36,10 @@ exists. The current incomplete serializer is rejected as a benchmark target.
 Cache-hit delta remains zero and correctness is unchanged.
 
 
+## Triage 2026-09-13
+Reconfirmed: BLOCKED, claimed and audited by pure_parser_close per this
+record. Not this lane's claim to resolve. Left as-is, no code change
+attempted.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Still BLOCKED, explicitly claimed/audited by another lane (`pure_parser_close`);

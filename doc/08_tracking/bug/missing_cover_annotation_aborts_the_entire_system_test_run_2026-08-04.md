@@ -202,6 +202,11 @@ the session brief: a run in which ZERO specs executed is reported through the
 normal result type. Verdict: LIVE, P1 retained.
 Not proven in this lane: that no outer caller downgrades the early return.
 
+## Triage 2026-09-13
+Reconfirmed: same gate defect referenced by sibling records (test runner
+aborts the whole system-test run on one un-annotated spec). Test-runner
+gate fix, shared with system_cover_gate_reports_791_legacy_feature_specs_as_failures_2026-08-04.
+Left OPEN, no code change attempted.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Still unchanged: the early-return-with-`files: []` shape is still present.

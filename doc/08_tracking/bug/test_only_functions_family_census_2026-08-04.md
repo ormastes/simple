@@ -493,6 +493,11 @@ test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 3598 filtered ou
 rewritten tests assert — the rewrite still observes real collector behaviour and is
 not vacuous. Sabotage reverted; suite back to `6 passed; 0 failed`.
 
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+This is a census/tracking document (P3), whose own status says individual
+class-(ii) items are meant to be filed/fixed per lane, not fixed in bulk
+here. No single actionable fix applies to this row. Left OPEN, unchanged.
 ## Triage 2026-09-13
 
 Census-only record ("individual class-(ii) items to be filed/fixed

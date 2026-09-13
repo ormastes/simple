@@ -87,6 +87,21 @@ no `use lib.` alias remains. So the *workaround* is what is in the tree — the
 `lib.`-alias resolution defect itself is unfixed and lives in the compiler's
 module resolver, not in this stdlib file. Not actionable from `src/lib/**`.
 
+## Re-check 2026-09-13
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared main worktree), sha256 `3d120a6f9ab5`, `Simple Language v1.0.0-rc.1`.
+
+Ran the named regression indicator directly:
+
+```
+bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_flex_grow_weighted_spec.spl
+-> 3 examples, 0 failures
+```
+
+Previously `3 examples, 3 failures`, all `_web_budget_clock` not found, per
+this record. Now fully green via the `lib.` import alias — the `lib.`/`std.`
+module-instance-duplication gap this record describes no longer reproduces
+for this spec. Closing as not reproducible.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Attempted to re-run the minimal repro on the deployed seed

@@ -488,4 +488,20 @@ the expression. Extending `OPTME001` to optional-typed fields whose payload has
 
 ## Triage 2026-09-13
 
+Re-ran the "Minimal reproducer" verbatim (`SIMPLE_EXECUTION_MODE=interpreter
+bin/simple run`, `bin/simple` = Rust seed
+`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`):
+
+```
+A n=0     (still wrong -- expected A n=2)
+B n=2     (still correct)
+```
+
+Unchanged from the filed symptom. This is an interpreter/runtime value-copy
+semantics defect on `T?`-typed bindings (the unwrap inside a `me` call appears
+to mutate a temporary rather than the underlying `Some` payload in place),
+not a `src/lib`/`src/app` logic bug — fixing it means changing how the
+interpreter represents/copies `Optional<Class>` payloads across a mutating
+method call, which is core language-runtime work well outside a single-file,
+<45-minute pure-Simple change. Left OPEN; no code change attempted here.
 The underlying language/runtime defect is a compiler-semantics change (silent discard of `me`-method mutation through an Option-typed binding) beyond this pass's budget. The suggested lint-only follow-up (extend `OPTME001` in `src/compiler/35.semantics/lint/option_me_call.spl` to also flag the optional-typed-FIELD shape, not just local bindings) was considered but not attempted this pass: `OPTME001` is a broadly-run lint rule and widening its pattern risks false positives across the whole tree without careful fixture coverage, which needs its own dedicated pass. Leaving OPEN, no code change made.

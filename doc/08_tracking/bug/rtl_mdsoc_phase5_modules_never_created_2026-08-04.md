@@ -110,6 +110,10 @@ sufficient — no new evidence of any Phase 5 SA-3/SA-4 work having landed since
 genuine unbuilt design-owned feature work, correctly ARCHITECTURAL/OPEN, not a
 defect. No code change made. Status stays OPEN.
 
+## Triage 2026-09-13
+Reconfirmed: Phase 5 RTL MDSOC reorg modules still never created per this
+record, 68 system examples affected. Large module-creation feature work,
+not a quick fix. Left OPEN, no code change attempted.
 ## Triage 2026-09-13 (BUGFIX-12 shard 22)
 
 Still genuine unbuilt design-owned feature work (Phase 5 RTL MDSOC reorg), not

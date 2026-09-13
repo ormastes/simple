@@ -203,3 +203,11 @@ this deployment cannot satisfy the self-hosted-tool requirement. The abnormal
 help/dispatch exits observed in the same smoke run are retained under
 `deployed_bin_simple_still_seed_2026-08-05.md` until command-specific logs can
 establish a common cause. The gate remains correct to reject the artifact.
+
+## Triage 2026-09-13
+Reconfirmed: `bin/simple --version` still identifies as the Rust bootstrap
+seed on this worktree (symlinked in from the shared main worktree, which is
+also still the seed). No self-hosted binary deployed. This is the same
+root-state referenced throughout many other records in this pass. Needs a
+full bootstrap run to deploy a self-hosted binary, out of a single-bug
+budget / this lane's no-bootstrap constraint. Left OPEN, no code change.

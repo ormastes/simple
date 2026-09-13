@@ -1,5 +1,12 @@
 # No general `.spl` → SVM-G path: DAP GPU attach is routing-only
 
+## Triage 2026-09-13
+Re-confirmed accurate: this is an architectural gap by the doc's own
+repeated self-assessment (2026-08-09 and earlier), not a defect with a
+contained fix -- a widen-and-wire vs. drop-the-expectation decision is still
+pending. No new evidence found. Left OPEN as characterized.
+
+
 **Status:** OPEN — architectural gap, not a defect in any landed stream
 
 **Re-confirmed 2026-08-09:** verified by reading this doc in full. It already

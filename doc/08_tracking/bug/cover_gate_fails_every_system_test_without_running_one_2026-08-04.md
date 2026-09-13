@@ -99,6 +99,13 @@ with coverage collection on. Until then, treat the 227 in
 `test/03_system/app` as **unmeasured**, not as 227 defects: the only honest
 current number for that directory comes from a `--no-cover-check` run.
 
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Already explicitly a "rollout/policy decision... not something a
+bug-triage session can resolve unilaterally" per the 2026-08-10
+re-verification. Fixing it means either fabricating coverage claims across
+thousands of files or weakening a gate the repo rules forbid weakening —
+neither available to this lane. Left OPEN, unchanged.
 ## Triage 2026-09-13
 
 Explicitly recorded as "a rollout/policy decision... not something a

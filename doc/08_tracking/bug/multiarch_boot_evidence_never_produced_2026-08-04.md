@@ -141,6 +141,13 @@ So the specs are honestly RED rather than vacuously green (a missing file makes
 `expect(file_exists(...)).to_equal(true)` fail), but they gate on a production
 path that was never built.
 
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Root cause is a missing product feature (`--arch` dispatch in
+`scripts/bootstrap/bootstrap-from-scratch.sh`) plus needing real QEMU boot
+runs across six architectures to produce `smoke_result.json` artifacts —
+substantial infra/feature work, not a bugfix-lane row, and this sandbox has
+no QEMU multi-arch boot harness set up. Left OPEN, unchanged.
 ## Triage 2026-09-13
 
 Requires real multi-arch QEMU boot artifacts

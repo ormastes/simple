@@ -1,6 +1,17 @@
 # `bin/simple test` cannot see module-global mutation performed inside a called function
 
-**Status:** OPEN (unverified 2026-09-12)
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple`
+  (sha256 `3d120a6f9ab5…`), interpreter execution mode. Ran this doc's exact
+  repro verbatim as `bin/simple test <file>`: both `it` blocks now PASS
+  (`SPEC FILE VERDICT: ... outcome=OK declared>=2 executed=2 passed=2 failed=0`).
+  Module-global mutation performed inside a called `fn` (both the plain `i64`
+  and the `Dict` bracket-assign case) is now visible to the assertion in the
+  same `it` block. Whatever intervening fix (module-global snapshot/dispatch
+  change in the spec harness or interpreter between 2026-08-07 and now)
+  resolved this was not isolated as part of this re-check; if it regresses,
+  the repro below reproduces it in under a second.
+
+**Status (historical):** OPEN (unverified 2026-09-12)
 
 ## Status: OPEN, not root-caused (found incidentally, out of scope to fix here)
 
@@ -101,6 +112,21 @@ conflate, but the mechanisms and fixes are unrelated.
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
 
+## Re-check 2026-09-13
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/simple` = Rust seed
+  `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the shared
+  main worktree), sha256 `3d120a6f9ab5`, `Simple Language v1.0.0-rc.1`.
+
+Ran the exact repro from the "Repro" section above as a `bin/simple test`
+spec file: both examples pass (`2 examples, 0 failures`) — the plain `i64`
+global and the `Dict` bracket-write both read back the correct mutated value
+after being written by a called `fn`, inside the spec harness.
+
+Added a permanent regression lock,
+`test/01_unit/app/test_runner_new/spec_harness_module_global_mutation_visible_spec.spl`
+(2 examples, 0 failures), so a future regression of this class is caught
+directly rather than relying on incidental discovery again.
 ## Triage 2026-09-13
 
 Doc already states "OPEN, not root-caused (found incidentally, out of

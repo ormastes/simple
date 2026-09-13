@@ -1,5 +1,12 @@
 # Host Vulkan reaches lavapipe, but every graphics entry point is a 0-returning stub without the `vulkan` cargo feature
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: shard file column is
+src/compiler_rust/runtime/Cargo.toml -- fix requires rebuilding the Rust seed
+with the `vulkan` cargo feature enabled, not a src/lib/src/app change. Left
+OPEN.
+
+
 **Date:** 2026-08-11
 Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
