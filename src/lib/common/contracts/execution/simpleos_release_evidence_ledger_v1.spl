@@ -1,0 +1,389 @@
+# Atomic single-owner ledger for admitted SimpleOS release evidence.
+#
+# The owner is the mutation boundary.  Callers provide a final manifest and an
+# exact claim against the current head; they do not provide the admission
+# clock.  A failed validation leaves owner state unchanged.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use std.common.contracts.execution.simpleos_release_evidence_manifest_v1.{
+    SimpleOsReleaseEvidenceManifestV1,
+    SimpleOsReleaseConsumptionV1,
+    SimpleOsReleaseEvidenceAdmissionContextV1,
+    SimpleOsReleaseEvidenceErrorV1,
+    simpleos_release_evidence_validate_v1,
+    simpleos_release_evidence_digest_v1
+}
+
+pub const SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_SCHEMA: u16 = 1u16
+pub const SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_MAX_ENTRIES: i64 = 128
+pub const SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS: text =
+    "202d7af19381c42c25a40f475f2d49d50761934c9e7e391c2674ced7c469ff53"
+
+pub enum SimpleOsReleaseEvidenceLedgerErrorV1:
+    None
+    InvalidLedger
+    InvalidClaim
+    InvalidManifest
+    ClockUnavailable
+    ClockRollback
+    StalePredecessor
+    StaleSequence
+    SequenceExhausted
+    ReplayDetected
+    ClaimExpired
+    ClaimNotYetValid
+    LedgerFull
+    OwnerNotInitialized
+    OwnerBusy
+    SerializationIndeterminate
+
+pub struct SimpleOsReleaseEvidenceClaimV1:
+    target_id: text
+    candidate_bytes_digest: text
+    evidence_id: text
+    nonce: text
+    expected_sequence: u64
+    expected_predecessor_digest: text
+    execution_binding_digest: text
+
+pub struct SimpleOsReleaseEvidenceLedgerEntryV1:
+    sequence: u64
+    predecessor_digest: text
+    claim_identity_digest: text
+    manifest_digest: text
+    transition_digest: text
+    target_id: text
+    candidate_bytes_digest: text
+    evidence_id: text
+    nonce: text
+    execution_binding_digest: text
+    committed_at_unix_ms: u64
+
+pub struct SimpleOsReleaseEvidenceLedgerV1:
+    schema_version: u16
+    head_sequence: u64
+    head_transition_digest: text
+    entries: [SimpleOsReleaseEvidenceLedgerEntryV1]
+
+pub struct SimpleOsReleaseEvidenceLedgerCommitV1:
+    ok: bool
+    error: SimpleOsReleaseEvidenceLedgerErrorV1
+    manifest_error: SimpleOsReleaseEvidenceErrorV1
+    ledger: SimpleOsReleaseEvidenceLedgerV1
+    claim_identity_digest: text
+    transition_digest: text
+    finalized_manifest: SimpleOsReleaseEvidenceManifestV1?
+
+class _SimpleOsReleaseLedgerWriterV1:
+    pieces: [text]
+
+impl _SimpleOsReleaseLedgerWriterV1:
+    me append(value: text):
+        self.pieces.push("{value.len()}:{value}")
+
+    fn finish() -> text:
+        self.pieces.join("")
+
+fn _release_ledger_digest_valid_v1(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+fn _release_ledger_identity_valid_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 256:
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 33 or code > 126:
+            return false
+        i = i + 1
+    true
+
+pub fn simpleos_release_evidence_ledger_genesis_v1()
+        -> SimpleOsReleaseEvidenceLedgerV1:
+    SimpleOsReleaseEvidenceLedgerV1(
+        schema_version: SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_SCHEMA,
+        head_sequence: 0u64,
+        head_transition_digest: SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS,
+        entries: [])
+
+pub fn simpleos_release_evidence_ledger_copy_v1(
+    ledger: SimpleOsReleaseEvidenceLedgerV1
+) -> SimpleOsReleaseEvidenceLedgerV1:
+    var entries: [SimpleOsReleaseEvidenceLedgerEntryV1] = []
+    for entry in ledger.entries:
+        entries.push(SimpleOsReleaseEvidenceLedgerEntryV1(
+            sequence: entry.sequence,
+            predecessor_digest: entry.predecessor_digest,
+            claim_identity_digest: entry.claim_identity_digest,
+            manifest_digest: entry.manifest_digest,
+            transition_digest: entry.transition_digest,
+            target_id: entry.target_id,
+            candidate_bytes_digest: entry.candidate_bytes_digest,
+            evidence_id: entry.evidence_id,
+            nonce: entry.nonce,
+            execution_binding_digest: entry.execution_binding_digest,
+            committed_at_unix_ms: entry.committed_at_unix_ms))
+    SimpleOsReleaseEvidenceLedgerV1(
+        schema_version: ledger.schema_version,
+        head_sequence: ledger.head_sequence,
+        head_transition_digest: ledger.head_transition_digest,
+        entries: entries)
+
+pub fn simpleos_release_evidence_claim_identity_digest_v1(
+    claim: SimpleOsReleaseEvidenceClaimV1,
+    manifest_digest: text
+) -> text:
+    var writer = _SimpleOsReleaseLedgerWriterV1(pieces: [])
+    writer.append("simpleos-release-evidence-claim-v1")
+    writer.append(claim.target_id)
+    writer.append(claim.candidate_bytes_digest)
+    writer.append(claim.evidence_id)
+    writer.append(claim.nonce)
+    writer.append(claim.expected_sequence.to_text())
+    writer.append(claim.expected_predecessor_digest)
+    writer.append(claim.execution_binding_digest)
+    writer.append(manifest_digest)
+    sha256_u8_hex(writer.finish().bytes())
+
+pub fn simpleos_release_evidence_transition_digest_v1(
+    sequence: u64,
+    predecessor_digest: text,
+    claim_identity_digest: text,
+    manifest_digest: text,
+    committed_at_unix_ms: u64
+) -> text:
+    var writer = _SimpleOsReleaseLedgerWriterV1(pieces: [])
+    writer.append("simpleos-release-evidence-ledger-transition-v1")
+    writer.append(sequence.to_text())
+    writer.append(predecessor_digest)
+    writer.append(claim_identity_digest)
+    writer.append(manifest_digest)
+    writer.append(committed_at_unix_ms.to_text())
+    sha256_u8_hex(writer.finish().bytes())
+
+pub fn simpleos_release_evidence_ledger_valid_v1(
+    ledger: SimpleOsReleaseEvidenceLedgerV1
+) -> bool:
+    if ledger.schema_version != SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_SCHEMA or
+       ledger.entries.len() > SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_MAX_ENTRIES:
+        return false
+    var expected_sequence = 0u64
+    var expected_predecessor = SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+    var previous_time = 0u64
+    var entry_index = 0
+    while entry_index < ledger.entries.len():
+        val entry = ledger.entries[entry_index]
+        if expected_sequence == 18446744073709551615u64:
+            return false
+        expected_sequence = expected_sequence + 1u64
+        if entry.sequence != expected_sequence or
+           entry.predecessor_digest != expected_predecessor or
+           not _release_ledger_digest_valid_v1(entry.claim_identity_digest) or
+           not _release_ledger_digest_valid_v1(entry.manifest_digest) or
+           not _release_ledger_identity_valid_v1(entry.target_id) or
+           not _release_ledger_digest_valid_v1(entry.candidate_bytes_digest) or
+           not _release_ledger_identity_valid_v1(entry.evidence_id) or
+           not _release_ledger_identity_valid_v1(entry.nonce) or
+           not _release_ledger_digest_valid_v1(entry.execution_binding_digest) or
+           entry.committed_at_unix_ms == 0u64 or
+           entry.committed_at_unix_ms < previous_time:
+            return false
+        val reconstructed_claim = SimpleOsReleaseEvidenceClaimV1(
+            target_id: entry.target_id,
+            candidate_bytes_digest: entry.candidate_bytes_digest,
+            evidence_id: entry.evidence_id,
+            nonce: entry.nonce,
+            expected_sequence: entry.sequence,
+            expected_predecessor_digest: entry.predecessor_digest,
+            execution_binding_digest: entry.execution_binding_digest)
+        if entry.claim_identity_digest !=
+           simpleos_release_evidence_claim_identity_digest_v1(
+               reconstructed_claim, entry.manifest_digest):
+            return false
+        val expected_transition = simpleos_release_evidence_transition_digest_v1(
+            entry.sequence, entry.predecessor_digest,
+            entry.claim_identity_digest, entry.manifest_digest,
+            entry.committed_at_unix_ms)
+        if entry.transition_digest != expected_transition:
+            return false
+        var earlier_index = 0
+        while earlier_index < entry_index:
+            val earlier = ledger.entries[earlier_index]
+            if earlier.nonce == entry.nonce or
+               earlier.evidence_id == entry.evidence_id:
+                return false
+            earlier_index = earlier_index + 1
+        expected_predecessor = entry.transition_digest
+        previous_time = entry.committed_at_unix_ms
+        entry_index = entry_index + 1
+    ledger.head_sequence == expected_sequence and
+        ledger.head_transition_digest == expected_predecessor
+
+fn _release_ledger_failure_v1(
+    ledger: SimpleOsReleaseEvidenceLedgerV1,
+    error: SimpleOsReleaseEvidenceLedgerErrorV1,
+    manifest_error: SimpleOsReleaseEvidenceErrorV1 = SimpleOsReleaseEvidenceErrorV1.None
+) -> SimpleOsReleaseEvidenceLedgerCommitV1:
+    SimpleOsReleaseEvidenceLedgerCommitV1(
+        ok: false, error: error, manifest_error: manifest_error,
+        ledger: simpleos_release_evidence_ledger_copy_v1(ledger),
+        claim_identity_digest: "", transition_digest: "",
+        finalized_manifest: nil)
+
+pub fn simpleos_release_evidence_ledger_transition_v1(
+    ledger: SimpleOsReleaseEvidenceLedgerV1,
+    claim: SimpleOsReleaseEvidenceClaimV1,
+    manifest: SimpleOsReleaseEvidenceManifestV1,
+    authoritative_now_unix_ms: u64
+) -> SimpleOsReleaseEvidenceLedgerCommitV1:
+    if not simpleos_release_evidence_ledger_valid_v1(ledger):
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.InvalidLedger)
+    if authoritative_now_unix_ms == 0u64:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.ClockUnavailable)
+    if ledger.entries.len() > 0 and
+       authoritative_now_unix_ms <
+           ledger.entries[ledger.entries.len() - 1].committed_at_unix_ms:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.ClockRollback)
+    if ledger.entries.len() >= SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_MAX_ENTRIES:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.LedgerFull)
+    if ledger.head_sequence == 18446744073709551615u64:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.SequenceExhausted)
+    if claim.expected_predecessor_digest != ledger.head_transition_digest:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.StalePredecessor)
+    if claim.expected_sequence != ledger.head_sequence + 1u64:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.StaleSequence)
+    if not _release_ledger_identity_valid_v1(claim.target_id) or
+       not _release_ledger_identity_valid_v1(claim.evidence_id) or
+       not _release_ledger_identity_valid_v1(claim.nonce) or
+       not _release_ledger_digest_valid_v1(claim.candidate_bytes_digest) or
+       not _release_ledger_digest_valid_v1(claim.execution_binding_digest):
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.InvalidClaim)
+    for entry in ledger.entries:
+        if entry.nonce == claim.nonce or entry.evidence_id == claim.evidence_id:
+            return _release_ledger_failure_v1(
+                ledger, SimpleOsReleaseEvidenceLedgerErrorV1.ReplayDetected)
+
+    val consumption = manifest.consumption
+    if consumption.evidence_id != claim.evidence_id or
+       consumption.nonce != claim.nonce or
+       consumption.sequence != claim.expected_sequence or
+       consumption.previous_evidence_digest != claim.expected_predecessor_digest:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.InvalidClaim)
+    if consumption.consumed_once or consumption.consumed_at_unix_ms != 0u64:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.InvalidClaim)
+    if authoritative_now_unix_ms < consumption.issued_at_unix_ms:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.ClaimNotYetValid)
+    if authoritative_now_unix_ms > consumption.expires_at_unix_ms:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.ClaimExpired)
+    val finalized_consumption = SimpleOsReleaseConsumptionV1(
+        evidence_id: consumption.evidence_id,
+        nonce: consumption.nonce,
+        sequence: consumption.sequence,
+        previous_evidence_digest: consumption.previous_evidence_digest,
+        issued_at_unix_ms: consumption.issued_at_unix_ms,
+        expires_at_unix_ms: consumption.expires_at_unix_ms,
+        consumed_at_unix_ms: authoritative_now_unix_ms,
+        consumed_once: true)
+    val finalized_manifest = SimpleOsReleaseEvidenceManifestV1(
+        schema_version: manifest.schema_version,
+        target_id: manifest.target_id,
+        profile_id: manifest.profile_id,
+        candidate: manifest.candidate,
+        derived_state: manifest.derived_state,
+        firmware: manifest.firmware,
+        launch: manifest.launch,
+        boot: manifest.boot,
+        sosix_filesystem: manifest.sosix_filesystem,
+        version: manifest.version,
+        run: manifest.run,
+        build: manifest.build,
+        native_execute: manifest.native_execute,
+        persistence: manifest.persistence,
+        toolchain: manifest.toolchain,
+        started_at_unix_ms: manifest.started_at_unix_ms,
+        finished_at_unix_ms: manifest.finished_at_unix_ms,
+        total_duration_ms: manifest.total_duration_ms,
+        diagnostic_only: manifest.diagnostic_only,
+        consumption: finalized_consumption)
+
+    val context = SimpleOsReleaseEvidenceAdmissionContextV1(
+        expected_target_id: claim.target_id,
+        expected_candidate_bytes_digest: claim.candidate_bytes_digest,
+        expected_evidence_id: claim.evidence_id,
+        expected_nonce: claim.nonce,
+        expected_sequence: claim.expected_sequence,
+        expected_previous_evidence_digest: claim.expected_predecessor_digest,
+        expected_execution_binding_digest: claim.execution_binding_digest,
+        now_unix_ms: authoritative_now_unix_ms,
+        nonce_already_consumed: false)
+    val validation = simpleos_release_evidence_validate_v1(
+        finalized_manifest, context)
+    if validation != SimpleOsReleaseEvidenceErrorV1.None:
+        return _release_ledger_failure_v1(
+            ledger, SimpleOsReleaseEvidenceLedgerErrorV1.InvalidManifest,
+            validation)
+    val manifest_digest = match simpleos_release_evidence_digest_v1(
+        finalized_manifest, context):
+        case Ok(value): value
+        case Err(error):
+            return _release_ledger_failure_v1(
+                ledger, SimpleOsReleaseEvidenceLedgerErrorV1.InvalidManifest,
+                error)
+    val claim_identity = simpleos_release_evidence_claim_identity_digest_v1(
+        claim, manifest_digest)
+    val transition_digest = simpleos_release_evidence_transition_digest_v1(
+        claim.expected_sequence, claim.expected_predecessor_digest,
+        claim_identity, manifest_digest, authoritative_now_unix_ms)
+    val entry = SimpleOsReleaseEvidenceLedgerEntryV1(
+        sequence: claim.expected_sequence,
+        predecessor_digest: claim.expected_predecessor_digest,
+        claim_identity_digest: claim_identity,
+        manifest_digest: manifest_digest,
+        transition_digest: transition_digest,
+        target_id: claim.target_id,
+        candidate_bytes_digest: claim.candidate_bytes_digest,
+        evidence_id: claim.evidence_id,
+        nonce: claim.nonce,
+        execution_binding_digest: claim.execution_binding_digest,
+        committed_at_unix_ms: authoritative_now_unix_ms)
+    var entries: [SimpleOsReleaseEvidenceLedgerEntryV1] = []
+    for existing in ledger.entries:
+        entries.push(existing)
+    entries.push(entry)
+    val next = SimpleOsReleaseEvidenceLedgerV1(
+        schema_version: SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_SCHEMA,
+        head_sequence: claim.expected_sequence,
+        head_transition_digest: transition_digest,
+        entries: entries)
+    SimpleOsReleaseEvidenceLedgerCommitV1(
+        ok: true, error: SimpleOsReleaseEvidenceLedgerErrorV1.None,
+        manifest_error: SimpleOsReleaseEvidenceErrorV1.None,
+        ledger: next, claim_identity_digest: claim_identity,
+        transition_digest: transition_digest,
+        finalized_manifest: Some(finalized_manifest))
+
+export SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_SCHEMA
+export SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_MAX_ENTRIES
+export SIMPLEOS_RELEASE_EVIDENCE_LEDGER_V1_GENESIS
+export SimpleOsReleaseEvidenceLedgerErrorV1
+export SimpleOsReleaseEvidenceClaimV1, SimpleOsReleaseEvidenceLedgerEntryV1
+export SimpleOsReleaseEvidenceLedgerV1, SimpleOsReleaseEvidenceLedgerCommitV1
+export simpleos_release_evidence_ledger_genesis_v1
+export simpleos_release_evidence_ledger_copy_v1
+export simpleos_release_evidence_claim_identity_digest_v1
+export simpleos_release_evidence_transition_digest_v1
+export simpleos_release_evidence_ledger_valid_v1
+export simpleos_release_evidence_ledger_transition_v1
