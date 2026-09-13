@@ -422,7 +422,7 @@ fn ssa_rewrite_term(term: MirTerminator, keys: [i64], values: [i64]) -> MirTermi
     match term:
         case Ret(value):
             if value.?:
-                val ret_value = value.unwrap()
+                val ret_value = value ?? ssa_unreachable_operand_fallback()
                 MirTerminator.Ret(Some(ssa_rewrite_operand(ret_value, keys, values)))
             else:
                 term
@@ -592,7 +592,7 @@ fn ssa_replace_term_operands_for_local(term: MirTerminator, original_id: i64, re
     match term:
         case Ret(value):
             if value.?:
-                val ret_value = value.unwrap()
+                val ret_value = value ?? ssa_unreachable_operand_fallback()
                 MirTerminator.Ret(Some(ssa_replace_operand_local(ret_value, original_id, replacement_id)))
             else:
                 term
@@ -882,6 +882,15 @@ fn ssa_instructions_supported_for_phi(blocks: [MirBlock]) -> bool:
                 return false
     true
 
+fn ssa_unreachable_operand_fallback() -> MirOperand:
+    """`??` fallback for an Option whose presence a `!= nil` / `.?` test already
+    established. Never selected at runtime; it exists only so the Ret arms can
+    avoid `.unwrap()`, which a bare `unwrap` published by another module
+    (Poll, FailSafeResult) steals on the staged-native lane and answers with
+    raw 0 (same STOLEN UNWRAP defect documented at
+    50.mir/mir_instruction_graph.spl:55 and at the `??` site below)."""
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
+
 fn ssa_operand_local_payload_valid(operand: MirOperand) -> bool:
     # Struct-backed operands can arrive as nil in the staged-native lane.
     # Matching a nil receiver still attempts to read its variant field, so
@@ -937,7 +946,14 @@ fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
 fn ssa_term_operand_payloads_valid(term: MirTerminator) -> bool:
     match term:
         case Ret(value):
-            if value != nil: ssa_operand_local_payload_valid(value.unwrap()) else: true
+            # `??` NOT `.unwrap()`: the stolen unwrap answers raw 0 here, which
+            # ssa_operand_local_payload_valid then rejects as absent -> EVERY
+            # value-returning function was refused with "invalid terminator
+            # operands" on the staged-native lane while void functions (whose
+            # Ret takes the else branch) passed. Void-vs-value was the whole
+            # signal; see the run-24 entry in
+            # doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md.
+            if value != nil: ssa_operand_local_payload_valid(value ?? ssa_unreachable_operand_fallback()) else: true
         case If(cond, _, _): ssa_operand_local_payload_valid(cond)
         case Switch(value, _, _): ssa_operand_local_payload_valid(value)
         case CallTerminator(_, func, args, _, _, _, _):
@@ -1335,7 +1351,7 @@ fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
     match term:
         case Ret(value):
             if value != nil:
-                result = ssa_operand_push_local(result, value.unwrap())
+                result = ssa_operand_push_local(result, value ?? ssa_unreachable_operand_fallback())
         case If(cond, _, _):
             result = ssa_operand_push_local(result, cond)
         case Switch(value, _, _):
@@ -1643,7 +1659,7 @@ fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [
     match term:
         case Ret(value):
             if value != nil:
-                val r = ssa_alloca_rewrite_operand(value.unwrap(), slot_keys, slot_values, next_temp)
+                val r = ssa_alloca_rewrite_operand(value ?? ssa_unreachable_operand_fallback(), slot_keys, slot_values, next_temp)
                 (r[1], MirTerminator.Ret(Some(r[0])), r[2])
             else:
                 ([], term, next_temp)
