@@ -61,3 +61,7 @@ at daemon start (pass `--no-session-daemon`); only the final
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Triage 2026-09-13
+
+This doc documents a measurement-trap / design limitation (the runner reports only the last failure per example) with clear workarounds already recorded ("count failing examples, not failure messages"; isolate assertions into separate `it` blocks) rather than proposing a specific code fix. Changing the runner's per-example failure-capture semantics would affect every spec in the repo and needs its own dedicated lane with a full regression pass, consistent with the sibling `spec_it_block_reads_stale_module_var_2026-08-04` doc's reasoning for a similar test-harness change. Leaving OPEN, no code change made this pass.
