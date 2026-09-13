@@ -88,3 +88,9 @@ freestanding-lane code).
 ## Triage 2026-09-12
 
 Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
+
+## Triage 2026-09-13
+Reconfirmed: freestanding x86_64-unknown-simpleos (Cranelift native build,
+OVMF boot) lane defect, needs QEMU/OVMF to re-verify. Not reproducible in
+this environment (no QEMU boot attempted this pass). Left OPEN, no code
+change attempted.
