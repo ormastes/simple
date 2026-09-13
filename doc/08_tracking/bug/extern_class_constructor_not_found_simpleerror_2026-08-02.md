@@ -85,3 +85,29 @@ all. Two shapes are possible and the tree does not say which is intended:
    real construction path and the 16 consumers need re-pointing at it.
 
 Do not close by deleting the imports: all 16 are live uses.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Re-ran the doc's own minimal repro verbatim on the deployed seed: still
+reproduces identically —
+
+```
+[jit-fallback] HIR lowering error: Unsupported feature: cannot infer field
+  type while lowering main: struct 'SimpleError' field 'message'
+error[E1002]: function `SimpleError` not found
+```
+
+One partial change since filing: the duplicate declaration at
+`src/lib/common/error/error.spl` no longer exists in this tree (only
+`src/lib/common/error.spl`'s `extern class SimpleError` remains), so the
+two-declarations angle mentioned in "What is NOT the cause" is now moot —
+but this was already ruled out as the cause back then, so it changes
+nothing about the actual defect. The error text
+("cannot infer field type while lowering ... struct '...' field ...") is
+emitted from the Rust seed's HIR lowering
+(`src/compiler_rust/compiler/src/hir/lower/expr/access.rs`,
+`module_pass.rs`), confirmed by grep — this is Rust-seed territory, out of
+scope for a pure-Simple bugfix lane, and the underlying question ("is
+`extern class` meant to be constructible from Simple at all?") remains the
+owner design decision this doc already correctly identifies. Left OPEN,
+unchanged.
