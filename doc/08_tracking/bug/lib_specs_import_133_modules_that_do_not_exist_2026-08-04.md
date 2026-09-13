@@ -158,3 +158,25 @@ not a defect with a code fix).
   and `doc/08_tracking/bug/c_parser_library_specced_but_never_implemented_2026-08-04.md`
   — the same failure mode under `test/01_unit/app/`, found independently the
   same day. The pattern is tree-wide, not a `lib/` quirk.
+
+## Re-check 2026-09-13 (BUGFIX-10 fanout) — named example spec now green
+
+Re-ran the doc's own named symptom example, the shard's assigned primary
+file for this row:
+
+```
+$ bin/simple test test/01_unit/lib/math/bignum/bignat_spec.spl
+SPEC FILE VERDICT: ... declared>=36 executed=36 passed=36 failed=0 skipped=0 dropped=0
+Results: 36 total, 36 passed, 0 failed
+```
+
+36/36 PASS — `std.math.bignum.limb` and friends now exist and resolve; this
+is no longer `Cannot resolve module` / `1 failed` understating a 36-example
+loss. At least this module family (`math.bignum.*`) has been implemented
+since 2026-08-04. The broader claim of "133 distinct missing modules across
+199 spec files" was NOT re-swept in full this pass (that census is itself a
+multi-hour undertaking per the record's own method section) — do not read
+this entry as closing the whole finding, only as confirming the specific
+named symptom example is resolved. Left OPEN for the remaining, unswept
+portion of the census; re-running the full census to get a current count is
+recommended follow-up, not attempted here.
