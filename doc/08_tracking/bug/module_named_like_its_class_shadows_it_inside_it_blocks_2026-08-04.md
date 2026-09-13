@@ -102,3 +102,10 @@ The alternative that *is* pure-`.spl` — renaming the six MDSOC `entity_view`
 module files so no basename equals its exported class — is a cross-tree rename
 of a public module path and needs an owner for the MDSOC layer, not a test-fix
 session.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Record already confirms this is Rust-side (bdd.rs name resolution) and its
+own pure-.spl alternative (renaming 6 MDSOC entity_view modules) is
+explicitly scoped as needing an MDSOC-layer owner, not a test-fix session.
+No change made.
