@@ -635,3 +635,49 @@ header and declines. The pass therefore still does not fire on ordinary lowered
 `while` loops — only on single-block loop bodies that carry their own test.
 That is the next thing to fix and it is the difference between this pass
 working on fixtures and working on the tree.
+
+## D14 — the pass fired on fixtures and on nothing the compiler emits
+
+The previous section closed by naming this as the difference between the pass
+working on fixtures and working on the tree. It is fixed.
+
+A lowered `while` does not keep its test in the body:
+
+    while_cond: %c = i < n; If(%c, while_body, while_exit)
+    while_body: ...; i += 1; Goto(while_cond)
+
+and the pattern matcher matches the **body**, which contains no comparison at
+all. `_loop_bound` searched only the header, found nothing, and declined — so
+every fixture in this file vectorized and every loop the compiler produces did
+not.
+
+`_loop_bound` now searches the header first, then any block that BRANCHES TO
+the header. The test is one edge away. Two supporting fixes were needed:
+blocks with an id ABOVE the header are now terminator-patched as well (a cond
+block sits after the body as often as before it, and an unpatched cond still
+branches to a header id that no longer exists).
+
+Control flow in the lowered case is worth stating because it looks wrong at
+first glance: the scalar clone ends in `Goto(while_cond)`, and while_cond has
+been patched to enter align_check. So each remainder iteration goes
+clone -> cond -> align_check -> (a whole vector does not fit) -> remainder_guard
+-> (i < n) -> clone. It terminates, and it is correct, because align_check and
+remainder_guard are both pure tests over the shared induction variable.
+
+### Evidence
+
+Four examples on a real two-block lowered `while` with the bound in a local:
+
+  * the scalar control runs and stops at `n` for 4, 7, 8, 13 — including the
+    canary one slot past the end, so the comparison is not vacuous;
+  * the rewrite fires despite the body containing no comparison;
+  * **identical memory for every runtime length 1..20**; and
+  * the canary survives the vector path for every length 4..20.
+
+And the chain closes on that shape: a lowered `while` with a runtime bound,
+fed to the real `x86_plan_avx512_fixed`, returns `ok=true,
+avx512-frame-values-planned`. That is the claim the whole effort was for — an
+ordinary loop, written normally, with a length known only at runtime, reaching
+real AVX-512 instruction selection with no source change.
+
+`auto_vectorize_spec.spl` 116/116, chain 8/8.
