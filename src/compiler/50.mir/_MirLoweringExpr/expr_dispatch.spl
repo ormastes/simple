@@ -1705,11 +1705,74 @@ impl MirLowering:
         if val found_type = return_type:
             self.remember_local_hir_type(local.id, found_type, 0, 0)
             match found_type.kind:
-                case HirTypeKind.Optional(_):
+                case HirTypeKind.Optional(optional_inner):
                     self.option_value_locals[local.id] = true
                     self.mark_runtime_value_local(local.id)
+                    # Optional payload provenance (BOOT-11). A callee declared
+                    # `-> T` gets T's layout key and a callee declared
+                    # `-> Result<T, E>` additionally gets the Ok payload's NAME
+                    # (bootstrap_fn_ret_ok_shape_register, module_lowering.spl
+                    # prescan). A callee declared `-> T?` gets NEITHER: that
+                    # prescan's match has Named/Array/Slice/Result arms and no
+                    # Optional arm, and trait_impl_lowering.spl's
+                    # method_return_struct_names sets "" for `case Optional(_)`.
+                    # So `bootstrap_fn_ret_shape_lookup` above leaves this local
+                    # with no struct_value_syms entry, `if val fp = <that call>`
+                    # ALIASES the same local (maybe_copy_struct_value returns nil
+                    # unless the local's MirType is Struct(...), which an
+                    # optional's never is), and `fp.size` then reaches
+                    # resolve_field_index with its name-keyed tier empty --
+                    # falling through to the numeric-SymbolId `field_map` tier,
+                    # which collides across modules in an entry-closure build,
+                    # and finally to a silent index 0. That is
+                    # `field=310824753:runtime=1080` in
+                    # stage2_capsule_receipt_size_canary_blocks_linux_admission
+                    # _2026-09-13.md and `920329169` in
+                    # native_optional_unwrap_field_index_by_name_collision
+                    # _2026-09-12.md.
+                    val optional_payload_name = self.optional_payload_struct_name(optional_inner)
+                    if optional_payload_name != "":
+                        if not self.struct_value_syms.contains(local.id):
+                            self.struct_value_syms[local.id] = optional_payload_name
                 case _:
                     ()
+
+    me optional_payload_struct_name(inner: HirType) -> text:
+        """Struct/class NAME carried by an `Optional<T>` return, or "".
+
+        Fails closed twice: the payload symbol must resolve to a Class/Struct,
+        and its bare name must already be a layout this lowering knows
+        (`struct_field_order`), which is exactly the table
+        `resolve_field_index`'s name-keyed tier reads. A name that fails either
+        test is discarded rather than guessed, so the worst case is the
+        pre-existing behaviour (no provenance), never a NEW wrong index.
+
+        The `Named(SymbolId)` this dereferences was captured in the DEFINING
+        module's own SymbolTable (the declared return type reaches here through
+        the name-keyed `bootstrap_fn_ret_hir_type_*` registry), so the id-space
+        hazard documented on `resolved_call_result_ok_shape` applies here too.
+        This is the same exposure the shipped `result_variant_payload_type`
+        consumer already carries for a Result payload
+        (switch_operators_calls.spl, the `known_rpt` branch); the
+        `struct_field_order` gate below is what keeps a collided id from
+        naming a layout that does not exist.
+        """
+        if inner == nil:
+            return ""
+        match inner.kind:
+            case HirTypeKind.Named(optional_payload_sym, _):
+                val raw_symbol = self.symbols.get_symbol_raw(optional_payload_sym.id)
+                if val optional_payload_symbol = raw_symbol:
+                    match optional_payload_symbol.kind:
+                        case Class | Struct:
+                            if not self.struct_field_order.contains(optional_payload_symbol.name):
+                                return ""
+                            return optional_payload_symbol.name
+                        case _:
+                            return ""
+            case _:
+                ()
+        ""
 
     me resolved_call_return_type(symbol: SymbolId) -> MirType:
         val hir_return_type = self.resolved_call_hir_return_type(symbol)

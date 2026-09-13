@@ -1,0 +1,94 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# Optional-return payload struct provenance (MIR call-result lane)
+
+Owning bugs:
+  doc/08_tracking/bug/native_optional_unwrap_field_index_by_name_collision_2026-09-12.md
+  doc/08_tracking/bug/stage2_capsule_receipt_size_canary_blocks_linux_admission_2026-09-13.md
+
+MEASURED ASYMMETRY. A callee declared `-> T` registers T's layout key
+(`bootstrap_fn_ret_shape_register`, module_lowering.spl prescan) and a callee
+declared `-> Result<T, E>` additionally registers the Ok payload's NAME
+(`bootstrap_fn_ret_ok_shape_register`). A callee declared `-> T?` registers
+NEITHER: the prescan's `match prescan_fn.return_type.kind` has `Named`,
+`Array`/`Slice` and `Result` arms and no `Optional` arm, and
+`method_return_struct_names` (trait_impl_lowering.spl:228-241) sets
+`ret_struct_name = ""` for `case Optional(_)`.
+
+So the call result of an Optional-of-struct-returning function carries no entry
+in `struct_value_syms`. `if val fp = <that call>` aliases the SAME local (see
+`maybe_copy_struct_value`: it returns nil unless the local's MirType is
+`Struct(...)`, which an optional's never is), so the field read
+`fp.size` reaches `resolve_field_index` with tier 1 empty and falls through to
+the numeric-SymbolId `field_map` tier, which collides across modules in an
+entry-closure build, and finally to a silent index 0. That is the
+`field=310824753:runtime=1080` canary and the `920329169` in the owning bug.
+
+This spec pins the recovery in `remember_call_hir_return`, the ONE MIR site that
+already receives the callee's name-keyed declared return type and is reached by
+every free-call, static-method and instance-method lowering path (7 call sites).
+
+Runtime proof is NOT available at this commit: `native-build` is red tree-wide
+(doc/08_tracking/bug/native_build_entry_closure_unknown_extern_rt_env_vars_2026-09-13.md)
+and the pinned Stage-2 candidate SIGSEGVs
+(doc/08_tracking/bug/stage2_candidate_segv_at_monomorphize_2026-09-13.md).
+The executable fixture is committed at
+test/fixtures/compiler/native_optional_payload_field/ and its interpreter oracle
+is asserted below, so the moment either blocker lifts the measurement is one
+command away.
+"""
+
+use std.spec.step
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "optional-return payload struct provenance":
+    # @manual scenario evidence
+    it "recovers the payload struct name on an Optional-returning call result":
+        # @req REQ-SSPEC-COMPILER
+        step("recovers the payload struct name on an Optional-returning call result")
+        val dispatch = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        expect(dispatch.len() > 0).to_equal(true)
+        # The recovery lives in the Optional arm of remember_call_hir_return.
+        expect(dispatch).to_contain("me remember_call_hir_return(local: LocalId, symbol: SymbolId):")
+        expect(dispatch).to_contain("case HirTypeKind.Optional(optional_inner):")
+        expect(dispatch).to_contain("val optional_payload_name = self.optional_payload_struct_name(optional_inner)")
+        expect(dispatch).to_contain("me optional_payload_struct_name(inner: HirType) -> text:")
+        # Fail closed: only a known struct/class layout is accepted, and an
+        # existing (better-sourced) provenance entry is never overwritten.
+        expect(dispatch).to_contain("if not self.struct_field_order.contains(optional_payload_symbol.name):")
+        expect(dispatch).to_contain("if not self.struct_value_syms.contains(local.id):")
+
+    it "keeps the asymmetry it closes documented at the producing prescan":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the asymmetry it closes documented at the producing prescan")
+        val module_lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        expect(module_lowering.len() > 0).to_equal(true)
+        # The prescan registers a Result Ok-payload NAME but has no Optional arm;
+        # if that changes, this spec's premise must be re-read.
+        expect(module_lowering).to_contain("bootstrap_fn_ret_ok_shape_register(")
+        expect(module_lowering.contains("case Optional(prescan_optional_inner)")).to_equal(false)
+
+    it "keeps the executable cross-module fixture and its interpreter oracle":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps the executable cross-module fixture and its interpreter oracle")
+        val entry = rt_file_read_text("test/fixtures/compiler/native_optional_payload_field/main.spl") ?? ""
+        val provider = rt_file_read_text("test/fixtures/compiler/native_optional_payload_field/fpmod.spl") ?? ""
+        val decoy = rt_file_read_text("test/fixtures/compiler/native_optional_payload_field/other.spl") ?? ""
+        expect(entry.len() > 0).to_equal(true)
+        expect(provider.len() > 0).to_equal(true)
+        expect(decoy.len() > 0).to_equal(true)
+        expect(provider).to_contain("pub fn make_fp(p: text, n: i64) -> FileFingerprint?:")
+        expect(entry).to_contain("if val fp = opt:")
+        # Written without a brace pair: a `{...}` inside a text literal here
+        # would be INTERPOLATED by this spec, not compared.
+        expect(entry).to_contain("optbind.size=")
+        expect(entry).to_contain("fp.content_hash")
+        # The decoy's FIRST field is also `size`, so a by-name / colliding
+        # index resolves to offset 0 instead of FileFingerprint's offset 24.
+        expect(decoy).to_contain("pub struct TypeLayout:")
+        expect(decoy.split("size: i64").len() - 1).to_equal(1)  # oracle: 1 — one `size` field, at index 0

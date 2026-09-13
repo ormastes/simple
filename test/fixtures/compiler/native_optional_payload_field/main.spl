@@ -1,0 +1,42 @@
+# BOOT-11 fixture (reader module): read an i64 and a text field through an
+# Optional-bound and a Result-bound payload that crossed a module boundary.
+# Owning bugs:
+#   doc/08_tracking/bug/native_optional_unwrap_field_index_by_name_collision_2026-09-12.md
+#   doc/08_tracking/bug/result_bound_text_payload_lost_in_stage2_native_codegen_2026-09-13.md
+# EXPECT stdout (every line, in order):
+#   tl.size=7
+#   optbind.size=1080
+#   optbind.hash=deadbeef
+#   resbind.size=1080
+#   resbind.hash=deadbeef
+#   textbind.len=37
+use fpmod.{FileFingerprint, make_fp, make_fp_result, read_msg}
+use other.{TypeLayout}
+
+fn main():
+    val tl = TypeLayout(size: 7, align: 8, name: "t")
+    print("tl.size={tl.size}")
+    # Contest the bare-keyed `Optional::Some` / `Result::Ok` payload-struct
+    # slots with a DIFFERENT struct than the ones matched below, so a
+    # last-writer-wins global map cannot accidentally be right.
+    val tlo = Some(tl)
+    val tlr: Result<TypeLayout, text> = Ok(tl)
+    if tlo.? and tlr.?:
+        ()
+    val opt = make_fp("obj.o", 1080)
+    if val fp = opt:
+        print("optbind.size={fp.size}")
+        print("optbind.hash={fp.content_hash}")
+    val res = make_fp_result("obj.o", 1080)
+    match res:
+        case Ok(rfp):
+            print("resbind.size={rfp.size}")
+            print("resbind.hash={rfp.content_hash}")
+        case Err(e):
+            print("resbind.err")
+    val tr = read_msg("AOT object destination already exists")
+    match tr:
+        case Ok(message):
+            print("textbind.len={message.len()}")
+        case Err(te):
+            print("textbind.err")
