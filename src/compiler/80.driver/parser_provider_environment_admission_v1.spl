@@ -1,0 +1,113 @@
+# codex-impl
+# Parser/provider admission from the canonical immutable execution snapshot.
+#
+# Target code-generation facts are validated independently and are never used
+# as host execution capabilities. GPU is an orthogonal execution domain; this
+# host adapter has no GPU inventory and therefore cannot admit GPU providers.
+
+use compiler.driver.host_environment_snapshot_v1.{
+    COMPILER_HOST_SNAPSHOT_ADAPTER_SCHEMA_V1, CompilerHostEnvironmentSnapshotV1
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    ENV_VARIANT_MAX_FEATURE_WORDS_V1, EnvironmentArenaRangeV1,
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1,
+    VariantDependencyV1, VariantDescriptorV1,
+    environment_snapshot_validate_v1, variant_descriptor_validate_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.admission.{
+    ENV_ADMISSION_OK_V1, variant_eligibility_reason_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.{
+    TargetCodegenProfileV1, target_codegen_profile_validate_v1
+}
+
+pub const PARSER_PROVIDER_ENVIRONMENT_ADMISSION_SCHEMA_V1: u16 = 1u16
+
+pub enum ParserProviderExecutionDomainV1:
+    Cpu
+    Gpu
+
+pub enum ParserProviderEnvironmentAdmissionErrorV1:
+    InvalidEnvironmentAuthority
+    InvalidTargetProfile
+    InvalidProviderFeatureArena
+    ExecutionDomainMismatch
+
+pub struct ParserProviderEnvironmentAdmissionReceiptV1:
+    schema_version: u16
+    execution_domain: ParserProviderExecutionDomainV1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    target_profile_identity: EnvironmentDigest256V1
+    target_identity: EnvironmentDigest256V1
+    target_architecture: u16
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    admission_reason_code: u32
+    admitted: bool
+    gpu_inventory_present: bool
+
+fn _rebase_provider_range_v1(
+    value: EnvironmentArenaRangeV1, base: u32, provider_count: u32
+) -> Result<EnvironmentArenaRangeV1, ParserProviderEnvironmentAdmissionErrorV1>:
+    if value.offset > provider_count or value.count > provider_count - value.offset or
+       value.offset > 4294967295u32 - base:
+        return Err(ParserProviderEnvironmentAdmissionErrorV1.InvalidProviderFeatureArena)
+    Ok(EnvironmentArenaRangeV1(offset: base + value.offset, count: value.count))
+
+pub fn parser_provider_admit_from_host_environment_v1(
+    authority: CompilerHostEnvironmentSnapshotV1,
+    target_profile: TargetCodegenProfileV1,
+    target_feature_words: [u64],
+    execution_domain: ParserProviderExecutionDomainV1,
+    descriptor: VariantDescriptorV1,
+    provider_feature_words: [u64],
+    dependencies: [VariantDependencyV1]
+) -> Result<ParserProviderEnvironmentAdmissionReceiptV1,
+            ParserProviderEnvironmentAdmissionErrorV1>:
+    if authority.schema_version != COMPILER_HOST_SNAPSHOT_ADAPTER_SCHEMA_V1 or
+       environment_snapshot_validate_v1(
+           authority.snapshot, authority.feature_words, []) != Ok(()) or
+       authority.snapshot.gpu_devices.count != 0u32:
+        return Err(ParserProviderEnvironmentAdmissionErrorV1.InvalidEnvironmentAuthority)
+    if target_codegen_profile_validate_v1(target_profile, target_feature_words) != Ok(()):
+        return Err(ParserProviderEnvironmentAdmissionErrorV1.InvalidTargetProfile)
+    val base = authority.feature_words.len() as u32
+    if provider_feature_words.len() > ENV_VARIANT_MAX_FEATURE_WORDS_V1 as i64 or
+       base > ENV_VARIANT_MAX_FEATURE_WORDS_V1 * 3u32 - provider_feature_words.len() as u32:
+        return Err(ParserProviderEnvironmentAdmissionErrorV1.InvalidProviderFeatureArena)
+    var candidate = descriptor
+    candidate.required_cpu_features = EnvironmentFeatureSetV1(
+        architecture: descriptor.required_cpu_features.architecture,
+        words: _rebase_provider_range_v1(descriptor.required_cpu_features.words,
+            base, provider_feature_words.len() as u32)?)
+    candidate.required_os_state_words = _rebase_provider_range_v1(
+        descriptor.required_os_state_words, base, provider_feature_words.len() as u32)?
+    candidate.required_device_features = _rebase_provider_range_v1(
+        descriptor.required_device_features, base, provider_feature_words.len() as u32)?
+    var shared_feature_words: [u64] = []
+    for word in authority.feature_words: shared_feature_words.append(word)
+    for word in provider_feature_words: shared_feature_words.append(word)
+    if variant_descriptor_validate_v1(candidate, 1048576u32,
+            shared_feature_words.len() as u32, dependencies.len() as u32,
+            dependencies) != Ok(()):
+        return Err(ParserProviderEnvironmentAdmissionErrorV1.InvalidProviderFeatureArena)
+    val provider_is_gpu = candidate.required_device_api != 0u32
+    if (execution_domain == ParserProviderExecutionDomainV1.Cpu and provider_is_gpu) or
+       (execution_domain == ParserProviderExecutionDomainV1.Gpu and not provider_is_gpu):
+        return Err(ParserProviderEnvironmentAdmissionErrorV1.ExecutionDomainMismatch)
+    val reason = variant_eligibility_reason_v1(
+        authority.snapshot, candidate, shared_feature_words, dependencies, [])
+    Ok(ParserProviderEnvironmentAdmissionReceiptV1(
+        schema_version: PARSER_PROVIDER_ENVIRONMENT_ADMISSION_SCHEMA_V1,
+        execution_domain: execution_domain,
+        environment_identity: authority.snapshot.snapshot_identity,
+        environment_generation: authority.snapshot.snapshot_generation,
+        target_profile_identity: target_profile.profile_identity,
+        target_identity: target_profile.target_identity,
+        target_architecture: target_profile.target_architecture,
+        provider_identity: descriptor.provider_identity,
+        variant_identity: descriptor.variant_identity,
+        admission_reason_code: reason,
+        admitted: reason == ENV_ADMISSION_OK_V1,
+        gpu_inventory_present: false))

@@ -1,0 +1,113 @@
+# Deterministic policy projection for environment-variant admission.
+#
+# Policy only ranks candidates that the admission capsule has already proved
+# eligible.  It never widens feature authority, architecture, trust, or
+# placement permissions.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1, EnvironmentSnapshotV1,
+    VariantDescriptorV1
+}
+
+pub const ENV_POLICY_PREFER_V1: u16 = 1u16
+pub const ENV_POLICY_REQUIRE_V1: u16 = 2u16
+pub const ENV_POLICY_MAX_V1: u16 = 3u16
+
+pub const ENV_POLICY_OK_V1: u32 = 0u32
+pub const ENV_POLICY_INVALID_MODE_V1: u32 = 1u32
+pub const ENV_POLICY_REQUIRED_MISSING_V1: u32 = 2u32
+pub const ENV_POLICY_MAX_EXCEEDED_V1: u32 = 3u32
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _feature_ceiling_contains_v1(
+    required: EnvironmentFeatureSetV1, ceiling: EnvironmentFeatureSetV1,
+    words: [u64]
+) -> bool:
+    if required.words.count == 0u32:
+        return true
+    if required.architecture != ceiling.architecture or
+       required.words.count != ceiling.words.count:
+        return false
+    if required.words.offset > words.len() as u32 or
+       ceiling.words.offset > words.len() as u32 or
+       required.words.count > words.len() as u32 - required.words.offset or
+       ceiling.words.count > words.len() as u32 - ceiling.words.offset:
+        return false
+    var i: u32 = 0u32
+    while i < required.words.count:
+        val requested = words[(required.words.offset + i) as i64]
+        val allowed = words[(ceiling.words.offset + i) as i64]
+        if requested & allowed != requested:
+            return false
+        i = i + 1u32
+    true
+
+pub fn variant_policy_mode_valid_v1(mode: u16) -> bool:
+    mode == ENV_POLICY_PREFER_V1 or mode == ENV_POLICY_REQUIRE_V1 or mode == ENV_POLICY_MAX_V1
+
+pub fn variant_policy_allows_v1(
+    mode: u16, descriptor: VariantDescriptorV1, snapshot: EnvironmentSnapshotV1,
+    preferred_variant: EnvironmentDigest256V1, max_architecture: u16,
+    max_startup_budget_us: u64, max_placement: u16,
+    max_feature_ceiling: EnvironmentFeatureSetV1, feature_words: [u64]
+) -> bool:
+    if not variant_policy_mode_valid_v1(mode):
+        return false
+    # Architecture is an identity, never an ordinal.  A max policy may cap
+    # placement/budget, but it cannot turn another architecture into a match.
+    if descriptor.target_architecture != snapshot.execution_architecture:
+        return false
+    if max_architecture != 0u16 and max_architecture != snapshot.execution_architecture:
+        return false
+    if mode == ENV_POLICY_REQUIRE_V1:
+        _digest_declared_v1(preferred_variant) and _digest_equal_v1(descriptor.variant_identity, preferred_variant)
+    elif mode == ENV_POLICY_MAX_V1:
+        (max_startup_budget_us == 0u64 or descriptor.startup_budget_us <= max_startup_budget_us) and
+            (max_placement == 0u16 or descriptor.placement <= max_placement) and
+            max_feature_ceiling.architecture == snapshot.execution_architecture and
+            _feature_ceiling_contains_v1(descriptor.required_cpu_features, max_feature_ceiling, feature_words)
+    else:
+        true
+
+pub fn variant_policy_reason_v1(
+    mode: u16, descriptor: VariantDescriptorV1, snapshot: EnvironmentSnapshotV1,
+    preferred_variant: EnvironmentDigest256V1, max_architecture: u16,
+    max_startup_budget_us: u64, max_placement: u16,
+    max_feature_ceiling: EnvironmentFeatureSetV1, feature_words: [u64]
+) -> u32:
+    if not variant_policy_mode_valid_v1(mode):
+        return ENV_POLICY_INVALID_MODE_V1
+    if mode == ENV_POLICY_REQUIRE_V1 and
+       (not _digest_declared_v1(preferred_variant) or
+        not _digest_equal_v1(descriptor.variant_identity, preferred_variant)):
+        return ENV_POLICY_REQUIRED_MISSING_V1
+    if descriptor.target_architecture != snapshot.execution_architecture or
+       (max_architecture != 0u16 and max_architecture != snapshot.execution_architecture) or
+       (mode == ENV_POLICY_MAX_V1 and max_startup_budget_us != 0u64 and
+        descriptor.startup_budget_us > max_startup_budget_us) or
+       (mode == ENV_POLICY_MAX_V1 and max_placement != 0u16 and descriptor.placement > max_placement) or
+       (mode == ENV_POLICY_MAX_V1 and
+        (max_feature_ceiling.architecture != snapshot.execution_architecture or
+         not _feature_ceiling_contains_v1(descriptor.required_cpu_features, max_feature_ceiling, feature_words))):
+        return ENV_POLICY_MAX_EXCEEDED_V1
+    ENV_POLICY_OK_V1
+
+pub fn variant_policy_rank_v1(
+    mode: u16, descriptor: VariantDescriptorV1,
+    preferred_variant: EnvironmentDigest256V1
+) -> i64:
+    # Lower is better.  The digest suffix is a deterministic tie-breaker; it
+    # is not an authority or a capability score.
+    if mode == ENV_POLICY_REQUIRE_V1 and _digest_equal_v1(descriptor.variant_identity, preferred_variant):
+        return 0
+    if mode == ENV_POLICY_PREFER_V1 and _digest_declared_v1(preferred_variant) and
+       _digest_equal_v1(descriptor.variant_identity, preferred_variant):
+        return 0
+    val budget = if descriptor.startup_budget_us > 1000000u64: 1000000 else descriptor.startup_budget_us as i64
+    1000000 + budget + (descriptor.placement as i64 * 100000) + (descriptor.variant_identity.w0 % 997u64) as i64

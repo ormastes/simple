@@ -1,0 +1,136 @@
+# codex-impl
+# Baseline-safe compiler host EnvironmentSnapshotV1 adapter.
+#
+# Platform/ABI identities and policy are supplied by their existing authority.
+# This adapter performs no environment reads and never initializes a GPU.  The
+# live probe deliberately exposes only x86-64 baseline and AArch64 NEON because
+# the current narrow runtime probes do not establish complete x86 v2/v3/v4,
+# per-thread SVE, or RISC-V vector execution-state contracts.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    ENV_VARIANT_SCHEMA_V1, ENV_ARCH_X86_64_V1, ENV_ARCH_AARCH64_V1,
+    ENV_VECTOR_NONE_V1, ENV_VECTOR_FIXED_V1, EnvironmentDigest256V1,
+    EnvironmentArenaRangeV1, EnvironmentFeatureSetV1, EnvironmentSnapshotV1,
+    environment_snapshot_validate_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.{
+    environment_feature_registry_validate_v1
+}
+
+pub const COMPILER_HOST_SNAPSHOT_ADAPTER_SCHEMA_V1: u16 = 1u16
+
+pub enum CompilerHostSnapshotErrorV1:
+    InvalidAuthority
+    UnsupportedArchitecture
+    InvalidFeatureAuthority
+    InvalidSnapshot
+
+pub struct CompilerHostPlatformAuthorityV1:
+    execution_architecture: u16
+    os_id: u32
+    abi_id: u32
+    object_format_id: u32
+    endian_id: u16
+    pointer_width_bits: u16
+    snapshot_identity: EnvironmentDigest256V1
+    snapshot_generation: u64
+    execution_domain_identity: EnvironmentDigest256V1
+    loader_permission_bits: u64
+    allowed_effect_bits: u64
+    numerical_contract_id: u32
+    resource_layout_digest: EnvironmentDigest256V1
+
+pub struct CompilerHostVectorFactsV1:
+    hardware_feature_bits: u64
+    os_usable_feature_bits: u64
+    policy_allowed_feature_bits: u64
+    vector_state_mode: u16
+    vector_length_bits: u32
+
+pub struct CompilerHostEnvironmentSnapshotV1:
+    schema_version: u16
+    snapshot: EnvironmentSnapshotV1
+    feature_words: [u64]
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _authority_valid_v1(authority: CompilerHostPlatformAuthorityV1) -> bool:
+    authority.os_id != 0u32 and authority.abi_id != 0u32 and
+        authority.object_format_id != 0u32 and
+        (authority.endian_id == 1u16 or authority.endian_id == 2u16) and
+        (authority.pointer_width_bits == 32u16 or authority.pointer_width_bits == 64u16) and
+        _digest_declared_v1(authority.snapshot_identity) and
+        authority.snapshot_generation > 0u64 and
+        _digest_declared_v1(authority.execution_domain_identity) and
+        authority.numerical_contract_id != 0u32 and
+        _digest_declared_v1(authority.resource_layout_digest)
+
+pub fn compiler_host_environment_snapshot_from_facts_v1(
+    authority: CompilerHostPlatformAuthorityV1, facts: CompilerHostVectorFactsV1
+) -> Result<CompilerHostEnvironmentSnapshotV1, CompilerHostSnapshotErrorV1>:
+    if not _authority_valid_v1(authority):
+        return Err(CompilerHostSnapshotErrorV1.InvalidAuthority)
+    if authority.execution_architecture != ENV_ARCH_X86_64_V1 and
+       authority.execution_architecture != ENV_ARCH_AARCH64_V1:
+        return Err(CompilerHostSnapshotErrorV1.UnsupportedArchitecture)
+    if facts.os_usable_feature_bits & facts.hardware_feature_bits != facts.os_usable_feature_bits or
+       facts.policy_allowed_feature_bits & facts.os_usable_feature_bits != facts.policy_allowed_feature_bits:
+        return Err(CompilerHostSnapshotErrorV1.InvalidFeatureAuthority)
+    val words = [facts.hardware_feature_bits, facts.os_usable_feature_bits,
+                 facts.policy_allowed_feature_bits]
+    val snapshot = EnvironmentSnapshotV1(
+        descriptor_size: 232u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        execution_architecture: authority.execution_architecture,
+        os_id: authority.os_id, abi_id: authority.abi_id,
+        object_format_id: authority.object_format_id, endian_id: authority.endian_id,
+        pointer_width_bits: authority.pointer_width_bits,
+        snapshot_identity: authority.snapshot_identity,
+        snapshot_generation: authority.snapshot_generation,
+        execution_domain_identity: authority.execution_domain_identity,
+        hardware_features: EnvironmentFeatureSetV1(
+            architecture: authority.execution_architecture,
+            words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32)),
+        os_usable_features: EnvironmentFeatureSetV1(
+            architecture: authority.execution_architecture,
+            words: EnvironmentArenaRangeV1(offset: 1u32, count: 1u32)),
+        policy_allowed_features: EnvironmentFeatureSetV1(
+            architecture: authority.execution_architecture,
+            words: EnvironmentArenaRangeV1(offset: 2u32, count: 1u32)),
+        vector_state_mode: facts.vector_state_mode,
+        vector_length_bits: facts.vector_length_bits,
+        loader_permission_bits: authority.loader_permission_bits,
+        allowed_effect_bits: authority.allowed_effect_bits,
+        numerical_contract_id: authority.numerical_contract_id,
+        resource_layout_digest: authority.resource_layout_digest,
+        gpu_devices: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+    if environment_snapshot_validate_v1(snapshot, words, []) != Ok(()) or
+       environment_feature_registry_validate_v1(snapshot.hardware_features, words) != Ok(()) or
+       environment_feature_registry_validate_v1(snapshot.os_usable_features, words) != Ok(()) or
+       environment_feature_registry_validate_v1(snapshot.policy_allowed_features, words) != Ok(()):
+        return Err(CompilerHostSnapshotErrorV1.InvalidSnapshot)
+    Ok(CompilerHostEnvironmentSnapshotV1(
+        schema_version: COMPILER_HOST_SNAPSHOT_ADAPTER_SCHEMA_V1,
+        snapshot: snapshot, feature_words: words))
+
+pub fn compiler_host_environment_snapshot_baseline_v1(
+    authority: CompilerHostPlatformAuthorityV1
+) -> Result<CompilerHostEnvironmentSnapshotV1, CompilerHostSnapshotErrorV1>:
+    # SSE2 is mandatory for x86-64 and ASIMD/NEON is mandatory for AArch64.
+    # The architecture authority therefore proves the baseline bit without a
+    # weaker SSE1 probe or optional device initialization.
+    var baseline_usable = true
+    if authority.execution_architecture == ENV_ARCH_X86_64_V1:
+        baseline_usable = true
+    elif authority.execution_architecture == ENV_ARCH_AARCH64_V1:
+        baseline_usable = true
+    else:
+        return Err(CompilerHostSnapshotErrorV1.UnsupportedArchitecture)
+    val bits: u64 = if baseline_usable: 1u64 else 0u64
+    val mode: u16 = if baseline_usable: ENV_VECTOR_FIXED_V1 else ENV_VECTOR_NONE_V1
+    val width: u32 = if baseline_usable: 128u32 else 0u32
+    compiler_host_environment_snapshot_from_facts_v1(
+        authority, CompilerHostVectorFactsV1(
+            hardware_feature_bits: bits, os_usable_feature_bits: bits,
+            policy_allowed_feature_bits: bits,
+            vector_state_mode: mode, vector_length_bits: width))

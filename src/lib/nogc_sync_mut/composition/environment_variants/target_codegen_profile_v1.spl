@@ -1,0 +1,452 @@
+# Host/target-separated code-generation evidence contract.
+#
+# This capsule is deliberately inert.  It does not inspect the host, invoke a
+# compiler, load an artifact, or infer execution from a target flag.  Callers
+# provide bounded feature words and explicit evidence at each boundary.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentArenaRangeV1, EnvironmentFeatureSetV1,
+    ENV_VARIANT_MAX_FEATURE_WORDS_V1, ENV_ARCH_X86_64_V1,
+    ENV_ARCH_AARCH64_V1, ENV_ARCH_RISCV64_V1, ENV_ARCH_WASM32_V1
+}
+
+pub const TARGET_CODEGEN_PROFILE_SCHEMA_V1: u16 = 1u16
+pub const TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1: u32 = 128u32
+pub const TARGET_CODEGEN_MAX_FEATURE_WORDS_V1: u32 = 64u32
+pub const TARGET_CODEGEN_MAX_EMITTED_INSTRUCTIONS_V1: u64 = 4294967295u64
+pub const TARGET_CODEGEN_MAX_INVOCATIONS_V1: u64 = 1048576u64
+
+pub enum TargetCodegenProfileErrorV1:
+    UnsupportedSchema
+    DescriptorTooShort
+    InvalidTargetArchitecture
+    InvalidTargetAbi
+    InvalidTargetIdentity
+    InvalidBackendIdentity
+    InvalidFeatureSet
+    FeatureWordCapacityExceeded
+    BackendRejected
+    MissingBackendEvidence
+    BackendFeaturesNotAccepted
+    StrictFeaturesNotAccepted
+    MissingArtifactEvidence
+    ArtifactFeaturesNotAccepted
+    StrictFeaturesNotDeclared
+    MissingEmissionEvidence
+    EmittedFeaturesNotDeclared
+    InvalidEmissionCount
+    MissingSelectionEvidence
+    MissingSelectionIdentity
+    MissingExecutionEvidence
+    MissingExecutionIdentity
+    ExecutionNotSelected
+    ExecutionIdentityMismatch
+    ExecutedFeaturesNotEmitted
+    InvalidInvocationCount
+    ReceiptIdentityMismatch
+    InvalidReceipt
+
+pub struct TargetCodegenProfileV1:
+    descriptor_size: u32
+    schema_version: u16
+    profile_identity: EnvironmentDigest256V1
+    target_identity: EnvironmentDigest256V1
+    target_architecture: u16
+    target_abi_id: u32
+    target_object_format_id: u32
+    target_endian_id: u16
+    target_pointer_width_bits: u16
+    requested_features: EnvironmentFeatureSetV1
+    strict_requested_features: bool
+    backend_identity: EnvironmentDigest256V1
+    semantic_identity: EnvironmentDigest256V1
+    numerical_contract_id: u32
+
+pub struct TargetCodegenBackendAcceptanceV1:
+    backend_identity: EnvironmentDigest256V1
+    accepted: bool
+    accepted_features: EnvironmentFeatureSetV1
+    acceptance_evidence: EnvironmentDigest256V1
+
+pub struct TargetCodegenArtifactDeclarationV1:
+    artifact_identity: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
+    declared_features: EnvironmentFeatureSetV1
+    declaration_evidence: EnvironmentDigest256V1
+
+pub struct TargetCodegenEmissionEvidenceV1:
+    emitted_features: EnvironmentFeatureSetV1
+    emission_evidence: EnvironmentDigest256V1
+    emitted_instruction_count: u64
+
+pub struct TargetCodegenSelectionEvidenceV1:
+    selected_implementation_identity: EnvironmentDigest256V1
+    selection_evidence: EnvironmentDigest256V1
+
+pub struct TargetCodegenExecutionEvidenceV1:
+    executed_implementation_identity: EnvironmentDigest256V1
+    executed_features: EnvironmentFeatureSetV1
+    execution_evidence: EnvironmentDigest256V1
+    invocation_count: u64
+
+pub struct TargetCodegenReceiptV1:
+    descriptor_size: u32
+    schema_version: u16
+    profile_identity: EnvironmentDigest256V1
+    target_identity: EnvironmentDigest256V1
+    target_architecture: u16
+    strict_requested_features: bool
+    requested_features: EnvironmentFeatureSetV1
+    backend_accepted: bool
+    backend_identity: EnvironmentDigest256V1
+    backend_accepted_features: EnvironmentFeatureSetV1
+    backend_acceptance_evidence: EnvironmentDigest256V1
+    artifact_declared: bool
+    artifact_identity: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
+    artifact_declared_features: EnvironmentFeatureSetV1
+    artifact_declaration_evidence: EnvironmentDigest256V1
+    emitted_evidence_present: bool
+    emitted_features: EnvironmentFeatureSetV1
+    emitted_evidence: EnvironmentDigest256V1
+    emitted_instruction_count: u64
+    selected_identity_present: bool
+    selected_implementation_identity: EnvironmentDigest256V1
+    selection_evidence: EnvironmentDigest256V1
+    executed_identity_present: bool
+    executed_implementation_identity: EnvironmentDigest256V1
+    executed_features: EnvironmentFeatureSetV1
+    execution_evidence: EnvironmentDigest256V1
+    invocation_count: u64
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or
+        value.w2 != 0u64 or value.w3 != 0u64
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and
+        left.w2 == right.w2 and left.w3 == right.w3
+
+fn _architecture_valid_v1(value: u16) -> bool:
+    value == ENV_ARCH_X86_64_V1 or value == ENV_ARCH_AARCH64_V1 or
+        value == ENV_ARCH_RISCV64_V1 or value == ENV_ARCH_WASM32_V1
+
+fn _range_valid_v1(value: EnvironmentArenaRangeV1, words: [u64]) -> bool:
+    if value.count > TARGET_CODEGEN_MAX_FEATURE_WORDS_V1 or
+       value.count > ENV_VARIANT_MAX_FEATURE_WORDS_V1 or
+       value.offset > words.len() as u32:
+        return false
+    value.count <= words.len() as u32 - value.offset
+
+fn _feature_set_valid_v1(
+    value: EnvironmentFeatureSetV1, architecture: u16, words: [u64]
+) -> bool:
+    value.architecture == architecture and _range_valid_v1(value.words, words)
+
+fn _empty_features_v1(architecture: u16) -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(
+        architecture: architecture,
+        words: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+
+fn _features_subset_v1(
+    subset: EnvironmentFeatureSetV1, superset: EnvironmentFeatureSetV1,
+    words: [u64]
+) -> bool:
+    if subset.architecture != superset.architecture or
+       subset.words.count != superset.words.count or
+       not _range_valid_v1(subset.words, words) or
+       not _range_valid_v1(superset.words, words):
+        return false
+    var i: u32 = 0u32
+    while i < subset.words.count:
+        val child = words[(subset.words.offset + i) as i64]
+        val parent = words[(superset.words.offset + i) as i64]
+        if child & parent != child:
+            return false
+        i = i + 1u32
+    true
+
+pub fn target_codegen_profile_validate_v1(
+    profile: TargetCodegenProfileV1, feature_words: [u64]
+) -> Result<(), TargetCodegenProfileErrorV1>:
+    if profile.schema_version != TARGET_CODEGEN_PROFILE_SCHEMA_V1:
+        return Err(TargetCodegenProfileErrorV1.UnsupportedSchema)
+    if profile.descriptor_size < TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1:
+        return Err(TargetCodegenProfileErrorV1.DescriptorTooShort)
+    if not _architecture_valid_v1(profile.target_architecture):
+        return Err(TargetCodegenProfileErrorV1.InvalidTargetArchitecture)
+    if profile.target_abi_id == 0u32 or profile.target_object_format_id == 0u32 or
+       (profile.target_endian_id != 1u16 and profile.target_endian_id != 2u16) or
+       (profile.target_pointer_width_bits != 32u16 and profile.target_pointer_width_bits != 64u16):
+        return Err(TargetCodegenProfileErrorV1.InvalidTargetAbi)
+    if not _digest_declared_v1(profile.profile_identity) or
+       not _digest_declared_v1(profile.target_identity) or
+       not _digest_declared_v1(profile.backend_identity) or
+       not _digest_declared_v1(profile.semantic_identity) or
+       profile.numerical_contract_id == 0u32:
+        return Err(TargetCodegenProfileErrorV1.InvalidTargetIdentity)
+    if feature_words.len() > TARGET_CODEGEN_MAX_FEATURE_WORDS_V1 as i64:
+        return Err(TargetCodegenProfileErrorV1.FeatureWordCapacityExceeded)
+    if not _feature_set_valid_v1(profile.requested_features,
+        profile.target_architecture, feature_words):
+        return Err(TargetCodegenProfileErrorV1.InvalidFeatureSet)
+    Ok(())
+
+pub fn target_codegen_features_subset_v1(
+    subset: EnvironmentFeatureSetV1, superset: EnvironmentFeatureSetV1,
+    feature_words: [u64]
+) -> bool:
+    _features_subset_v1(subset, superset, feature_words)
+
+fn _receipt_identity_matches_profile_v1(
+    receipt: TargetCodegenReceiptV1, profile: TargetCodegenProfileV1
+) -> bool:
+    _digest_equal_v1(receipt.profile_identity, profile.profile_identity) and
+    _digest_equal_v1(receipt.target_identity, profile.target_identity) and
+    receipt.target_architecture == profile.target_architecture and
+    receipt.strict_requested_features == profile.strict_requested_features and
+    receipt.requested_features == profile.requested_features
+
+pub fn target_codegen_receipt_create_v1(
+    profile: TargetCodegenProfileV1, feature_words: [u64]
+) -> Result<TargetCodegenReceiptV1, TargetCodegenProfileErrorV1>:
+    val checked = target_codegen_profile_validate_v1(profile, feature_words)
+    if checked != Ok(()): return Err(checked.unwrap_err())
+    val empty = _empty_features_v1(profile.target_architecture)
+    Ok(TargetCodegenReceiptV1(
+        descriptor_size: TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1,
+        schema_version: TARGET_CODEGEN_PROFILE_SCHEMA_V1,
+        profile_identity: profile.profile_identity,
+        target_identity: profile.target_identity,
+        target_architecture: profile.target_architecture,
+        strict_requested_features: profile.strict_requested_features,
+        requested_features: profile.requested_features,
+        backend_accepted: false,
+        backend_identity: profile.backend_identity,
+        backend_accepted_features: empty,
+        backend_acceptance_evidence: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        artifact_declared: false,
+        artifact_identity: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        artifact_digest: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        artifact_declared_features: empty,
+        artifact_declaration_evidence: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        emitted_evidence_present: false,
+        emitted_features: empty,
+        emitted_evidence: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        emitted_instruction_count: 0u64,
+        selected_identity_present: false,
+        selected_implementation_identity: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        selection_evidence: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        executed_identity_present: false,
+        executed_implementation_identity: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        executed_features: empty,
+        execution_evidence: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64),
+        invocation_count: 0u64))
+
+pub fn target_codegen_receipt_validate_v1(
+    profile: TargetCodegenProfileV1, receipt: TargetCodegenReceiptV1,
+    feature_words: [u64]
+) -> Result<(), TargetCodegenProfileErrorV1>:
+    val profile_check = target_codegen_profile_validate_v1(profile, feature_words)
+    if profile_check != Ok(()): return Err(profile_check.unwrap_err())
+    if receipt.schema_version != TARGET_CODEGEN_PROFILE_SCHEMA_V1 or
+       receipt.descriptor_size < TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1:
+        return Err(TargetCodegenProfileErrorV1.InvalidReceipt)
+    if not _receipt_identity_matches_profile_v1(receipt, profile):
+        return Err(TargetCodegenProfileErrorV1.ReceiptIdentityMismatch)
+    if not _feature_set_valid_v1(receipt.backend_accepted_features,
+        profile.target_architecture, feature_words) or
+       not _feature_set_valid_v1(receipt.artifact_declared_features,
+        profile.target_architecture, feature_words) or
+       not _feature_set_valid_v1(receipt.emitted_features,
+        profile.target_architecture, feature_words) or
+       not _feature_set_valid_v1(receipt.executed_features,
+        profile.target_architecture, feature_words):
+        return Err(TargetCodegenProfileErrorV1.InvalidFeatureSet)
+    if receipt.backend_accepted:
+        if not _digest_declared_v1(receipt.backend_acceptance_evidence):
+            return Err(TargetCodegenProfileErrorV1.MissingBackendEvidence)
+        if not _features_subset_v1(receipt.requested_features,
+            receipt.backend_accepted_features, feature_words):
+            if receipt.strict_requested_features:
+                return Err(TargetCodegenProfileErrorV1.StrictFeaturesNotAccepted)
+            return Err(TargetCodegenProfileErrorV1.BackendFeaturesNotAccepted)
+    if receipt.artifact_declared:
+        if not receipt.backend_accepted or
+           not _digest_declared_v1(receipt.artifact_identity) or
+           not _digest_declared_v1(receipt.artifact_digest) or
+           not _digest_declared_v1(receipt.artifact_declaration_evidence):
+            return Err(TargetCodegenProfileErrorV1.MissingArtifactEvidence)
+        if not _features_subset_v1(receipt.artifact_declared_features,
+            receipt.backend_accepted_features, feature_words):
+            return Err(TargetCodegenProfileErrorV1.ArtifactFeaturesNotAccepted)
+        if receipt.strict_requested_features and not _features_subset_v1(
+            receipt.requested_features, receipt.artifact_declared_features, feature_words):
+            return Err(TargetCodegenProfileErrorV1.StrictFeaturesNotDeclared)
+    if receipt.emitted_evidence_present:
+        if not receipt.artifact_declared or
+           not _digest_declared_v1(receipt.emitted_evidence) or
+           receipt.emitted_instruction_count > TARGET_CODEGEN_MAX_EMITTED_INSTRUCTIONS_V1 or
+           not _features_subset_v1(receipt.emitted_features,
+               receipt.artifact_declared_features, feature_words):
+            return Err(TargetCodegenProfileErrorV1.MissingEmissionEvidence)
+    if receipt.selected_identity_present:
+        if not receipt.artifact_declared or
+           not _digest_declared_v1(receipt.selected_implementation_identity) or
+           not _digest_declared_v1(receipt.selection_evidence):
+            return Err(TargetCodegenProfileErrorV1.MissingSelectionEvidence)
+    if receipt.executed_identity_present:
+        if not receipt.selected_identity_present:
+            return Err(TargetCodegenProfileErrorV1.ExecutionNotSelected)
+        if not receipt.emitted_evidence_present or
+           not _digest_declared_v1(receipt.executed_implementation_identity) or
+           not _digest_declared_v1(receipt.execution_evidence):
+            return Err(TargetCodegenProfileErrorV1.MissingExecutionEvidence)
+        if not _digest_equal_v1(receipt.executed_implementation_identity,
+            receipt.selected_implementation_identity):
+            return Err(TargetCodegenProfileErrorV1.ExecutionIdentityMismatch)
+        if receipt.invocation_count == 0u64 or
+           receipt.invocation_count > TARGET_CODEGEN_MAX_INVOCATIONS_V1:
+            return Err(TargetCodegenProfileErrorV1.InvalidInvocationCount)
+        if not _features_subset_v1(receipt.executed_features,
+            receipt.emitted_features, feature_words):
+            return Err(TargetCodegenProfileErrorV1.ExecutedFeaturesNotEmitted)
+    Ok(())
+
+pub fn target_codegen_receipt_record_backend_v1(
+    profile: TargetCodegenProfileV1, receipt: TargetCodegenReceiptV1,
+    evidence: TargetCodegenBackendAcceptanceV1, feature_words: [u64]
+) -> Result<TargetCodegenReceiptV1, TargetCodegenProfileErrorV1>:
+    val profile_check = target_codegen_profile_validate_v1(profile, feature_words)
+    if profile_check != Ok(()): return Err(profile_check.unwrap_err())
+    if not _receipt_identity_matches_profile_v1(receipt, profile):
+        return Err(TargetCodegenProfileErrorV1.ReceiptIdentityMismatch)
+    if not _digest_equal_v1(evidence.backend_identity, profile.backend_identity):
+        return Err(TargetCodegenProfileErrorV1.InvalidBackendIdentity)
+    if not evidence.accepted:
+        if profile.strict_requested_features:
+            return Err(TargetCodegenProfileErrorV1.StrictFeaturesNotAccepted)
+        return Err(TargetCodegenProfileErrorV1.BackendRejected)
+    if not _digest_declared_v1(evidence.acceptance_evidence):
+        return Err(TargetCodegenProfileErrorV1.MissingBackendEvidence)
+    if not _features_subset_v1(profile.requested_features,
+        evidence.accepted_features, feature_words):
+        if profile.strict_requested_features:
+            return Err(TargetCodegenProfileErrorV1.StrictFeaturesNotAccepted)
+        return Err(TargetCodegenProfileErrorV1.BackendFeaturesNotAccepted)
+    receipt.backend_accepted = true
+    receipt.backend_identity = evidence.backend_identity
+    receipt.backend_accepted_features = evidence.accepted_features
+    receipt.backend_acceptance_evidence = evidence.acceptance_evidence
+    Ok(receipt)
+
+pub fn target_codegen_receipt_record_artifact_v1(
+    profile: TargetCodegenProfileV1, receipt: TargetCodegenReceiptV1,
+    evidence: TargetCodegenArtifactDeclarationV1, feature_words: [u64]
+) -> Result<TargetCodegenReceiptV1, TargetCodegenProfileErrorV1>:
+    val profile_check = target_codegen_profile_validate_v1(profile, feature_words)
+    if profile_check != Ok(()): return Err(profile_check.unwrap_err())
+    if not _receipt_identity_matches_profile_v1(receipt, profile):
+        return Err(TargetCodegenProfileErrorV1.ReceiptIdentityMismatch)
+    if not receipt.backend_accepted:
+        return Err(TargetCodegenProfileErrorV1.BackendRejected)
+    if not _digest_declared_v1(evidence.artifact_identity) or
+       not _digest_declared_v1(evidence.artifact_digest) or
+       not _digest_declared_v1(evidence.declaration_evidence):
+        return Err(TargetCodegenProfileErrorV1.MissingArtifactEvidence)
+    if not _features_subset_v1(evidence.declared_features,
+        receipt.backend_accepted_features, feature_words):
+        return Err(TargetCodegenProfileErrorV1.ArtifactFeaturesNotAccepted)
+    if profile.strict_requested_features and not _features_subset_v1(
+        profile.requested_features, evidence.declared_features, feature_words):
+        return Err(TargetCodegenProfileErrorV1.StrictFeaturesNotDeclared)
+    receipt.artifact_declared = true
+    receipt.artifact_identity = evidence.artifact_identity
+    receipt.artifact_digest = evidence.artifact_digest
+    receipt.artifact_declared_features = evidence.declared_features
+    receipt.artifact_declaration_evidence = evidence.declaration_evidence
+    Ok(receipt)
+
+pub fn target_codegen_receipt_record_emission_v1(
+    profile: TargetCodegenProfileV1, receipt: TargetCodegenReceiptV1,
+    evidence: TargetCodegenEmissionEvidenceV1, feature_words: [u64]
+) -> Result<TargetCodegenReceiptV1, TargetCodegenProfileErrorV1>:
+    val profile_check = target_codegen_profile_validate_v1(profile, feature_words)
+    if profile_check != Ok(()): return Err(profile_check.unwrap_err())
+    if not _receipt_identity_matches_profile_v1(receipt, profile):
+        return Err(TargetCodegenProfileErrorV1.ReceiptIdentityMismatch)
+    if not receipt.artifact_declared:
+        return Err(TargetCodegenProfileErrorV1.MissingArtifactEvidence)
+    if not _digest_declared_v1(evidence.emission_evidence) or
+       evidence.emitted_instruction_count > TARGET_CODEGEN_MAX_EMITTED_INSTRUCTIONS_V1 or
+       not _features_subset_v1(evidence.emitted_features,
+           receipt.artifact_declared_features, feature_words):
+        return Err(TargetCodegenProfileErrorV1.MissingEmissionEvidence)
+    receipt.emitted_evidence_present = true
+    receipt.emitted_features = evidence.emitted_features
+    receipt.emitted_evidence = evidence.emission_evidence
+    receipt.emitted_instruction_count = evidence.emitted_instruction_count
+    Ok(receipt)
+
+pub fn target_codegen_receipt_record_selection_v1(
+    profile: TargetCodegenProfileV1, receipt: TargetCodegenReceiptV1,
+    evidence: TargetCodegenSelectionEvidenceV1
+) -> Result<TargetCodegenReceiptV1, TargetCodegenProfileErrorV1>:
+    if not _receipt_identity_matches_profile_v1(receipt, profile):
+        return Err(TargetCodegenProfileErrorV1.ReceiptIdentityMismatch)
+    if not receipt.artifact_declared:
+        return Err(TargetCodegenProfileErrorV1.MissingArtifactEvidence)
+    if not _digest_declared_v1(evidence.selected_implementation_identity) or
+       not _digest_declared_v1(evidence.selection_evidence):
+        return Err(TargetCodegenProfileErrorV1.MissingSelectionEvidence)
+    receipt.selected_identity_present = true
+    receipt.selected_implementation_identity = evidence.selected_implementation_identity
+    receipt.selection_evidence = evidence.selection_evidence
+    Ok(receipt)
+
+pub fn target_codegen_receipt_record_execution_v1(
+    profile: TargetCodegenProfileV1, receipt: TargetCodegenReceiptV1,
+    evidence: TargetCodegenExecutionEvidenceV1, feature_words: [u64]
+) -> Result<TargetCodegenReceiptV1, TargetCodegenProfileErrorV1>:
+    val profile_check = target_codegen_profile_validate_v1(profile, feature_words)
+    if profile_check != Ok(()): return Err(profile_check.unwrap_err())
+    if not _receipt_identity_matches_profile_v1(receipt, profile):
+        return Err(TargetCodegenProfileErrorV1.ReceiptIdentityMismatch)
+    if not receipt.selected_identity_present:
+        return Err(TargetCodegenProfileErrorV1.ExecutionNotSelected)
+    if not receipt.emitted_evidence_present or
+       not _digest_declared_v1(evidence.executed_implementation_identity) or
+       not _digest_declared_v1(evidence.execution_evidence):
+        return Err(TargetCodegenProfileErrorV1.MissingExecutionEvidence)
+    if not _digest_equal_v1(evidence.executed_implementation_identity,
+        receipt.selected_implementation_identity):
+        return Err(TargetCodegenProfileErrorV1.ExecutionIdentityMismatch)
+    if evidence.invocation_count == 0u64 or
+       evidence.invocation_count > TARGET_CODEGEN_MAX_INVOCATIONS_V1:
+        return Err(TargetCodegenProfileErrorV1.InvalidInvocationCount)
+    if not _features_subset_v1(evidence.executed_features,
+        receipt.emitted_features, feature_words):
+        return Err(TargetCodegenProfileErrorV1.ExecutedFeaturesNotEmitted)
+    receipt.executed_identity_present = true
+    receipt.executed_implementation_identity = evidence.executed_implementation_identity
+    receipt.executed_features = evidence.executed_features
+    receipt.execution_evidence = evidence.execution_evidence
+    receipt.invocation_count = evidence.invocation_count
+    Ok(receipt)
+
+pub fn target_codegen_receipt_finalize_v1(
+    profile: TargetCodegenProfileV1, receipt: TargetCodegenReceiptV1,
+    feature_words: [u64]
+) -> Result<(), TargetCodegenProfileErrorV1>:
+    val checked = target_codegen_receipt_validate_v1(profile, receipt, feature_words)
+    if checked != Ok(()): return checked
+    if profile.strict_requested_features and
+       (not receipt.backend_accepted or not receipt.artifact_declared):
+        if not receipt.backend_accepted:
+            return Err(TargetCodegenProfileErrorV1.StrictFeaturesNotAccepted)
+        return Err(TargetCodegenProfileErrorV1.StrictFeaturesNotDeclared)
+    if not receipt.selected_identity_present:
+        return Err(TargetCodegenProfileErrorV1.MissingSelectionIdentity)
+    if not receipt.executed_identity_present:
+        return Err(TargetCodegenProfileErrorV1.MissingExecutionIdentity)
+    Ok(())
