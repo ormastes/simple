@@ -46,10 +46,12 @@ fails, because the retained IR names the same function two different ways:
 | consumer | `declare i64 @compiler.common.module_path_naming.module_logical_name_from_path(...)` |
 
 The definition is emitted **bare**; the reference is emitted **module-qualified**.
-`ld.lld` is right: nothing defines the qualified name. Note a SECOND disagreement
-on the same line — the consumer declares the return as `i64 (...)` varargs while
-the definition returns `ptr` — so even a name fix must make the declared
-signature agree, or the call will misread the result.
+`ld.lld` is right: nothing defines the qualified name. Note a SECOND, lesser disagreement: the
+consumer's `declare` gives the return as `i64 (...)` varargs while the definition
+returns `ptr`. The **name** is the blocker — llc accepted this IR and both objects
+were produced, and under opaque pointers each `call` carries its own type, so the
+prototype is decorative here and no miscompile from it was measured. It should
+still be made consistent when the name is fixed.
 
 The provider's other two functions are emitted bare as well
 (`@_module_path_naming_strip_numbered_dirs`, `@_module_path_naming_text_index_of`),
@@ -65,3 +67,11 @@ emission and linking, so no `--stop-after-stage2` run has reached the link step
 for this closure before. The same fixture under the previous candidate
 (`ba3c25f30d76c9a8…`) exits at `native-capsule-source-mutated` with no linker
 line at all.
+
+## Capsule collection ADMITTED the released module before this fired
+
+In the same `gatefx1` run, `phase=native_cache … done=2 total=2 succeeded=2 failed=0` covers
+`src/compiler/common/module_path_naming.spl` — a real closure module whose `SourceFile.content` had
+been released in phase 3 — so its capsule identity was recovered and accepted, not merely absent.
+That is the positive evidence that site 12's recovery works on a real module, beyond the absence of
+`native-capsule-source-mutated` lines.
