@@ -3278,7 +3278,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
           if [ -n "${produce_stage3_receipt_reason}" ]; then
             stage3_planner_receipt="${output_dir}/stage3-planner-admission.receipt"
             rm -f "${stage3_planner_receipt}"
-            if ! sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
+            # The producer allowlists its --bootstrap-output to <repo>/build/**
+            # or to the root named by SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT.
+            # Centralized storage puts this run's output outside <repo>/build,
+            # so without this the producer refuses its own lane's directory with
+            # bootstrap-output-outside-allowlisted-root. The value passed is not
+            # a caller-chosen path: it is exactly ${output_dir}, the directory
+            # this script already selected, created and locked, so the allowlist
+            # is narrowed to this run's own output and nothing else. An
+            # explicitly configured root still wins.
+            if ! env "SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-${output_dir}}" \
+              sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
               "--target=//bootstrap:stage3" \
               "--reason=${produce_stage3_receipt_reason}" \
               "--parent-compiler=${stage2_bin}" \
