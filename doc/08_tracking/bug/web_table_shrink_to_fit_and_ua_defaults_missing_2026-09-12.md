@@ -73,3 +73,30 @@ Both gaps together, in one change, with a fresh 8-page pixel table: the UA
 `border-spacing: 2px` default; shrink-to-fit at the `display == "table"` sizing
 site; `th` bold + centred; row height from max cell content. The probe's
 acceptance figure is `table#t1` 119 x 30 (+/-1 px), with `d1`/`d2` side by side.
+
+## Round 8 (2026-09-13) — automatic column sizing landed; catalog probes deferred
+
+CSS 2.1 §17.5.2.2 automatic column distribution is now implemented once, as a
+pure function, and consumed by both table lanes:
+
+- `src/lib/gc_async_mut/gpu/browser_engine/layout_table.spl:203`
+  `table_distribute_auto_columns(col_min, col_max, available)`.
+- `layout_table.spl:378` `layout_table(node, ctx)` — the M14 spec-facing lane,
+  which previously did not exist at all (`table_layout_spec` was 0/7 because the
+  symbol it imports was absent, not because the numbers were wrong).
+- `simple_web_html_layout_renderer_layout.spl:1129`
+  `table_cell_max_content_width`, replacing the `return []` bail that sent every
+  table whose cells state no `width` out of the automatic path and into an equal
+  split, and the `1` px placeholder for auto cells.
+
+`test/01_unit/browser_engine/table_layout_spec.spl` is 9/9 (7 original + 2 that
+actually discriminate content sizing from an equal split; a sabotage of the
+distributor reddens exactly those 2).
+
+**Still open from this record:** `rowspan`, `border-collapse` winner widths,
+percentage column widths, and the catalog-page table probes. The probes were
+deliberately NOT added: they change the catalog pages, which invalidates the
+committed Chrome reference geometry, and Chrome's own capture times out on the
+macOS host used for round 8 — so the reference could not be regenerated
+honestly in the same round. Adding probes must be paired with a fresh reference
+capture on a host where Chrome completes.

@@ -51,3 +51,45 @@ side is wrong — Chrome's walker is the oracle, so the Draw IR parentage is the
 likelier defect. Until then, prefer the PIXEL differ
 (`check-chrome-catalog-pixel-diff.shs`) for ranking pages, and use the
 geometry differ only for the boxes above the first desync.
+
+## Round 8 (2026-09-13) — candidate (ii) established by construction; candidate (i) is not the cause
+
+Round 7 left two candidates and established neither. Reading
+`src/app/ui/chrome_showcase/layout_geometry_diff.spl:185-215` settles it without
+needing another render:
+
+The Simple side's node list is built **only from Draw IR COMMANDS** —
+
+```
+while i < commands.len():
+    val c = commands[i]
+    val tag = _style_value(c, "tag")
+    if tag != "" and _layout_tag(tag) and not _seen(ids, c.component_id):
+        ids.push(c.component_id)
+        parents.push(c.parent_id)
+```
+
+so an element that emits no command at all never enters `ids`. A `<ul>` with no
+background, border or marker of its own paints nothing, therefore emits nothing,
+therefore is **absent from the Simple side's element list** — while the Chrome
+side walks the DOM and includes it (same `_layout_tag` predicate, but over
+elements, not over paint). The `<li>`'s recorded `parent_id` then names a node
+the list does not contain, and the path resolves against the nearest ancestor
+that IS present: the enclosing `<section>`. That is exactly the reported
+symptom.
+
+This is candidate **(ii)**, and it is a property of the differ's own list
+construction rather than a guess. Candidate (i) — "the parsed tree really does
+give the `<li>` the `<section>` as parent" — is correspondingly NOT the cause:
+the emitter copies `nodes[i].parent` faithfully
+(`..._paint_layout.spl:3117-3125`, as round 7 already established), and the
+parent it copies is the `<ul>`; the id simply has no row on the Simple side.
+
+**Not fixed in round 8.** The fix is a change of kind, not a patch: the Simple
+side must enumerate LAID-OUT ELEMENTS (the layout tree), not painted commands,
+so that paintless ancestors keep their ordinal slot — the same basis the Chrome
+walker already uses. Doing that inside the differ risks changing every page's
+key scheme at once, so it wants its own lane with a before/after on all eight
+pages. Until then the `html` and `css-layout` reports stay desynced after the
+first paintless intermediate ancestor, and their absolute mismatch counts are
+inflated by it.
