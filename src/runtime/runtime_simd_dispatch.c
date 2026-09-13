@@ -2325,6 +2325,26 @@ static int db_bitmap_span(SplArray* array, int64_t limit, int64_t* out_n) {
 /* CPUID leaf 7 sub-leaf 0: EBX bit 16 = AVX512F, bit 30 = AVX512BW. The file
    has no existing avx512 feature predicate — only the OS-state probe — so this
    supplies the CPUID half that must accompany it. */
+/* DQ as well as F and BW: `_mm512_mullo_epi64` is an AVX512DQ instruction, and
+   probing only F+BW would run it on a CPU that has neither. DQ ships with BW on
+   every part that has either (Skylake-X and later), so this costs no coverage. */
+static bool blend_mask_cpu_has_avx512bw(void) {
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx512f") != 0
+        && __builtin_cpu_supports("avx512bw") != 0
+        && __builtin_cpu_supports("avx512dq") != 0;
+#elif defined(_MSC_VER)
+    int regs[4];
+    __cpuidex(regs, 7, 0);
+    return ((uint32_t)regs[1] & (1U << 16)) != 0
+        && ((uint32_t)regs[1] & (1U << 30)) != 0
+        && ((uint32_t)regs[1] & (1U << 17)) != 0;
+#else
+    return false;
+#endif
+}
+
 static bool db_bitmap_cpu_has_avx512f(void) {
 #if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     __builtin_cpu_init();
@@ -2518,6 +2538,74 @@ int64_t rt_simd_bytes_equal_span(SplArray* lhs, int64_t lhs_start,
  * Returns ONLY the blended span, matching the Rust bridge's ABI — returning
  * the whole destination would make the cost O(rows x buffer).
  * ------------------------------------------------------------------------- */
+/* AVX-512 glyph mask blend, explicit lanes.
+ *
+ * The attributed-copy idiom gives GCC nothing (see
+ * doc/08_tracking/bug/native_binaries_had_no_avx512_2026-09-14.md), and text is
+ * the highest-volume path in the renderer after solid fills, so this one is
+ * written out.
+ *
+ * A [u32] is one tagged int64 slot per element, so eight pixels fill a zmm as
+ * 64-bit lanes and every channel computation has room without widening.
+ *
+ * `/255` must be EXACT, not approximated: `(x * 32897) >> 23` equals `x / 255`
+ * for every x in 0..65025, which is the entire range `fg*a + d*(255-a)` can
+ * produce with fg, d <= 255. Proven exhaustively over that range rather than
+ * argued.
+ *
+ * `a == 0` is selected back to the ORIGINAL slot rather than blended. The
+ * blend would give the right colour but would also force alpha to 0xFF, while
+ * the scalar path returns `dst` untouched — a difference that only shows on a
+ * non-opaque destination, which is exactly the kind of edge a parity test over
+ * opaque ramps would miss.
+ */
+#if defined(__x86_64__) || defined(_M_X64)
+__attribute__((target("avx512f,avx512bw,avx512dq")))
+static void blend_mask_span_avx512_lanes(int64_t* dst, const uint8_t* mask,
+                                         int64_t n, uint32_t color) {
+    const __m512i c255   = _mm512_set1_epi64(255);
+    const __m512i cff    = _mm512_set1_epi64(0xFF);
+    const __m512i cmagic = _mm512_set1_epi64(32897);
+    const __m512i copaque= _mm512_set1_epi64((long long)0xFF000000ULL);
+    const __m512i fr = _mm512_set1_epi64((color >> 16) & 0xFF);
+    const __m512i fg = _mm512_set1_epi64((color >> 8) & 0xFF);
+    const __m512i fb = _mm512_set1_epi64(color & 0xFF);
+    int64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m512i v = _mm512_loadu_si512((const void*)(dst + i));
+        __m512i t = _mm512_srli_epi64(v, 3);                     /* unbox */
+        __m512i a = _mm512_cvtepu8_epi64(_mm_loadl_epi64((const __m128i*)(mask + i)));
+        __m512i inv = _mm512_sub_epi64(c255, a);
+        __m512i dr = _mm512_and_si512(_mm512_srli_epi64(t, 16), cff);
+        __m512i dg = _mm512_and_si512(_mm512_srli_epi64(t, 8), cff);
+        __m512i db = _mm512_and_si512(t, cff);
+        __m512i nr = _mm512_srli_epi64(_mm512_mullo_epi64(
+            _mm512_add_epi64(_mm512_mullo_epi64(fr, a), _mm512_mullo_epi64(dr, inv)), cmagic), 23);
+        __m512i ng = _mm512_srli_epi64(_mm512_mullo_epi64(
+            _mm512_add_epi64(_mm512_mullo_epi64(fg, a), _mm512_mullo_epi64(dg, inv)), cmagic), 23);
+        __m512i nb = _mm512_srli_epi64(_mm512_mullo_epi64(
+            _mm512_add_epi64(_mm512_mullo_epi64(fb, a), _mm512_mullo_epi64(db, inv)), cmagic), 23);
+        __m512i px = _mm512_or_si512(copaque,
+            _mm512_or_si512(_mm512_slli_epi64(nr, 16),
+                _mm512_or_si512(_mm512_slli_epi64(ng, 8), nb)));
+        __m512i boxed = _mm512_slli_epi64(px, 3);
+        /* a == 0 keeps the destination slot verbatim, alpha included. */
+        __mmask8 keep = _mm512_cmpeq_epi64_mask(a, _mm512_setzero_si512());
+        _mm512_storeu_si512((void*)(dst + i), _mm512_mask_blend_epi64(keep, boxed, v));
+    }
+    for (; i < n; i++) {
+        uint32_t av = mask[i];
+        if (av == 0) continue;
+        uint32_t d = engine2d_unbox_pixel(dst[i]);
+        uint32_t iv = 255u - av;
+        uint32_t r = (((color >> 16) & 255u) * av + ((d >> 16) & 255u) * iv) / 255u;
+        uint32_t g = (((color >> 8) & 255u) * av + ((d >> 8) & 255u) * iv) / 255u;
+        uint32_t b = ((color & 255u) * av + (d & 255u) * iv) / 255u;
+        dst[i] = engine2d_box_pixel(0xff000000u | (r << 16) | (g << 8) | b);
+    }
+}
+#endif
+
 SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
                                           SplArray* mask, int64_t mask_offset,
                                           int64_t count, int64_t color) {
@@ -2535,6 +2623,10 @@ SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
     if (!o) return NULL;
 
     uint32_t s = (uint32_t)(uint64_t)color;
+    /* Seed the result span with the destination so an in-place lane kernel can
+       work on `o` directly. The scalar loop below overwrites every element, so
+       this costs one memcpy only on the path that needs it. */
+    for (int64_t i = 0; i < count; i++) o[i] = dst_data[offset + i];
     uint32_t fg_r = (s >> 16) & 255u;
     uint32_t fg_g = (s >> 8) & 255u;
     uint32_t fg_b = s & 255u;
@@ -2547,6 +2639,17 @@ SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
        assuming. */
     const int mask_packed = rt_array_is_byte_packed(mask);
     const uint8_t* mask_bytes = (const uint8_t*)(uintptr_t)rt_array_data_ptr(mask);
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Explicit-lane path needs the packed mask; the boxed representation falls
+       through to the scalar loop below, which is the interpreter's shape and
+       already has the Rust twin's AVX-512 behind it. */
+    if (mask_packed && mask_bytes && blend_mask_cpu_has_avx512bw()
+        && rt_x86_avx512_os_state_usable()) {
+        /* `out` is a fresh copy of the destination span; blend in place. */
+        blend_mask_span_avx512_lanes(o, mask_bytes + mask_offset, count, s);
+        return out;
+    }
+#endif
     for (int64_t i = 0; i < count; i++) {
         uint32_t a = mask_packed
             ? (uint32_t)mask_bytes[mask_offset + i]
@@ -2578,6 +2681,79 @@ SplArray* rt_engine2d_blend_mask_span_u32(SplArray* dst, int64_t offset,
  * Returns ONLY the blended span, matching the Rust bridge's ABI — returning
  * the whole destination would make the cost O(rows x buffer).
  * ------------------------------------------------------------------------- */
+/* AVX-512 soft box-shadow coverage blend, explicit lanes.
+ *
+ * Same reasoning as the glyph kernel: the attributed-copy idiom gives GCC
+ * nothing, and a shadow halo covers far more pixels than the box it surrounds.
+ *
+ * Two divisions, and they are NOT the same one. `cov*cov_y` and `cov*alpha`
+ * divide by 256 and 255 respectively; the blend divides by 256. `/256` is a
+ * shift, `/255` uses the exact `(x * 32897) >> 23` (verified exhaustively over
+ * 0..65025, which covers `cov*alpha` with cov <= 256 and alpha <= 255, and
+ * `s*a + d*(256-a)` with a <= 256 giving at most 255*256 = 65280 — so the
+ * blend's /256 must stay a shift rather than borrow the /255 constant).
+ *
+ * `cov <= 0` keeps the destination slot verbatim, matching the scalar path's
+ * early `continue` rather than blending with a == 0.
+ */
+#if defined(__x86_64__) || defined(_M_X64)
+__attribute__((target("avx512f,avx512bw,avx512dq")))
+static void blend_cov_span_avx512_lanes(int64_t* dst, const int64_t* colcov,
+                                        int64_t n, int64_t cov_y, int64_t alpha,
+                                        uint32_t color) {
+    const __m512i cff     = _mm512_set1_epi64(0xFF);
+    const __m512i c256    = _mm512_set1_epi64(256);
+    const __m512i cmagic  = _mm512_set1_epi64(32897);
+    const __m512i copaque = _mm512_set1_epi64((long long)0xFF000000ULL);
+    const __m512i vcovy   = _mm512_set1_epi64(cov_y);
+    const __m512i valpha  = _mm512_set1_epi64(alpha);
+    const __m512i zero    = _mm512_setzero_si512();
+    const __m512i sr = _mm512_set1_epi64((color >> 16) & 0xFF);
+    const __m512i sg = _mm512_set1_epi64((color >> 8) & 0xFF);
+    const __m512i sb = _mm512_set1_epi64(color & 0xFF);
+    int64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m512i v  = _mm512_loadu_si512((const void*)(dst + i));
+        __m512i t  = _mm512_srli_epi64(v, 3);
+        __m512i cc = _mm512_srli_epi64(_mm512_loadu_si512((const void*)(colcov + i)), 3);
+        __m512i cov = _mm512_srai_epi64(_mm512_mullo_epi64(cc, vcovy), 8);   /* /256 */
+        /* a = min((cov*alpha)/255, 256) */
+        __m512i a = _mm512_srli_epi64(
+            _mm512_mullo_epi64(_mm512_mullo_epi64(cov, valpha), cmagic), 23);
+        a = _mm512_min_epi64(a, c256);
+        __m512i inv = _mm512_sub_epi64(c256, a);
+        __m512i dr = _mm512_and_si512(_mm512_srli_epi64(t, 16), cff);
+        __m512i dg = _mm512_and_si512(_mm512_srli_epi64(t, 8), cff);
+        __m512i db = _mm512_and_si512(t, cff);
+        __m512i nr = _mm512_srli_epi64(_mm512_add_epi64(
+            _mm512_mullo_epi64(sr, a), _mm512_mullo_epi64(dr, inv)), 8);
+        __m512i ng = _mm512_srli_epi64(_mm512_add_epi64(
+            _mm512_mullo_epi64(sg, a), _mm512_mullo_epi64(dg, inv)), 8);
+        __m512i nb = _mm512_srli_epi64(_mm512_add_epi64(
+            _mm512_mullo_epi64(sb, a), _mm512_mullo_epi64(db, inv)), 8);
+        __m512i px = _mm512_or_si512(copaque,
+            _mm512_or_si512(_mm512_slli_epi64(nr, 16),
+                _mm512_or_si512(_mm512_slli_epi64(ng, 8), nb)));
+        __mmask8 keep = _mm512_cmple_epi64_mask(cov, zero);
+        _mm512_storeu_si512((void*)(dst + i),
+            _mm512_mask_blend_epi64(keep, _mm512_slli_epi64(px, 3), v));
+    }
+    for (; i < n; i++) {
+        int64_t cov = ((int64_t)engine2d_unbox_pixel(colcov[i]) * cov_y) / 256;
+        if (cov <= 0) continue;
+        int64_t a = (cov * alpha) / 255;
+        if (a > 256) a = 256;
+        int64_t iv = 256 - a;
+        uint32_t d = engine2d_unbox_pixel(dst[i]);
+        int64_t r = ((int64_t)((color >> 16) & 255u) * a + (int64_t)((d >> 16) & 255u) * iv) / 256;
+        int64_t g = ((int64_t)((color >> 8) & 255u) * a + (int64_t)((d >> 8) & 255u) * iv) / 256;
+        int64_t b = ((int64_t)(color & 255u) * a + (int64_t)(d & 255u) * iv) / 256;
+        dst[i] = engine2d_box_pixel(0xff000000u | ((uint32_t)r << 16)
+                                    | ((uint32_t)g << 8) | (uint32_t)b);
+    }
+}
+#endif
+
 SplArray* rt_engine2d_blend_cov_span_u32(SplArray* dst, int64_t offset,
                                          SplArray* colcov, int64_t count,
                                          int64_t cov_y_and_alpha, int64_t color) {
@@ -2596,6 +2772,14 @@ SplArray* rt_engine2d_blend_cov_span_u32(SplArray* dst, int64_t offset,
 
     int64_t cov_y = cov_y_and_alpha / 1024;
     int64_t alpha = cov_y_and_alpha % 1024;
+#if defined(__x86_64__) || defined(_M_X64)
+    if (blend_mask_cpu_has_avx512bw() && rt_x86_avx512_os_state_usable()) {
+        for (int64_t i = 0; i < count; i++) o[i] = dst_data[offset + i];
+        blend_cov_span_avx512_lanes(o, cov_data, count, cov_y, alpha,
+                                    (uint32_t)(uint64_t)color);
+        return out;
+    }
+#endif
     uint32_t s = (uint32_t)(uint64_t)color;
     int64_t sr = (int64_t)((s >> 16) & 255u);
     int64_t sg = (int64_t)((s >> 8) & 255u);
