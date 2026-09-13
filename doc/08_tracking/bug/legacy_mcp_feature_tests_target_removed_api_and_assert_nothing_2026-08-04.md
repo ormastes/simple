@@ -160,3 +160,33 @@ blocks, each carrying a real assertion, none of them trivially true:
 Recommend closing. (Not runtime-confirmed from this lane — see the parent
 reports Unproven list — but the two specific defects the doc names are
 verifiably absent from current content.)
+
+## Triage 2026-09-13 (BUGFIX-11)
+
+Runtime-confirmed on the deployed seed
+(`/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`,
+50,093,192 B, 2026-09-06 09:59):
+
+```
+$ bin/simple test test/03_system/feature/lib/mcp/bootstrap_e2e_test.spl --no-cache --no-cover-check
+error: semantic: Cannot resolve module: app.mcp.session
+SPEC FILE VERDICT: ... outcome=ERROR declared>=1 executed=0 passed=0 failed=1 ... reason=unresolved-module
+FAIL test/03_system/feature/lib/mcp/bootstrap_e2e_test.spl
+```
+
+Matches the doc's original symptom exactly — `app.mcp.session`/`McpState`
+still do not exist anywhere under `src/app/mcp/` or
+`src/lib/nogc_sync_mut/mcp/`. Left OPEN rather than deleting the stale test
+files myself: `test/03_system/feature/lib/mcp/` has 7 similarly-shaped
+legacy smoke tests (`bootstrap_import_test.spl`,
+`bootstrap_functions_test.spl`, `bootstrap_protocol_test.spl`,
+`handler_function_test.spl`, `handler_import_test.spl`,
+`schema_simple_test.spl`, `simple_import_test.spl` alongside the
+`_e2e_test.spl` this doc names) and deleting a batch of test files against a
+removed API is a policy call ("NEVER skip failing tests without approval")
+that needs an explicit go-ahead, not a blind delete from a bug-fix lane.
+Fix direction unchanged: delete the legacy `_test.spl` files that target the
+removed `app.mcp.session`/`McpState` API (their `*_spec.spl` /
+`working_check*.spl` siblings in the same directory appear to be the live
+replacements) once an owner confirms none of the 7 still has a reachable
+non-stale counterpart.
