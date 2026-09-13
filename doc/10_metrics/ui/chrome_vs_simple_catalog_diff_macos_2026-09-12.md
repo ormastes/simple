@@ -635,3 +635,91 @@ Record: `doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_20
 `draw_ir_em_dash_text_ink_spec` 2/2, `paint_layout_advance_parity_spec` 2/2,
 `inline_run_advance_and_break_boxes_spec` 5/5,
 `font_advance_codepoint_arity_spec` 9/9.
+
+## Round 6B — 2026-09-13 (last-child bottom-margin collapse-through)
+
+CSS 2.2 §8.3.1: a block with no bottom padding, bottom border, height clamp or
+overflow BFC has no bottom edge between itself and its last in-flow child, so
+that child's bottom margin collapses THROUGH it. The renderer added it to the
+block's content height instead. New `LayoutResult.trailing_margin_b` carries
+the escaped margin up so the parent re-emits it between the block and the next
+sibling (`block_bottom_margin_collapses_through`,
+`simple_web_html_layout_renderer_layout.spl`).
+
+**Method.** Chrome references re-captured fresh into `build/perf/r6b_after`
+(full pass, 8 pages) and copied to `build/perf/r6b_before`; both Simple sides
+then re-rendered with `--simple-only` against those SAME references, so the two
+columns differ only by the layout file. `SIMPLE_BIN=` is mandatory in a
+worktree. Layout file identity, `stat -f '%z %m'`: BEFORE (origin/main content)
+`180444 1789275769`, AFTER `183763 1789276885`. Each pass ~35 min, one page at a
+time, nothing else CPU-heavy alongside.
+
+| page | round 6 (published) | 6B before | 6B after | delta |
+|---|---|---|---|---|
+| html | 17.11 | 17.11 | **16.88** | **-0.23** |
+| animation | 15.63 | 15.63 | 15.63 | 0.00 |
+| css-paint | 10.50 | 10.50 | 10.50 | 0.00 |
+| css-layout | 10.29 | 10.29 | 10.29 | 0.00 |
+| forms-media | 8.11 | 8.11 | 8.11 | 0.00 |
+| overview | 3.89 | 3.89 | 3.89 | 0.00 |
+| evidence | 2.26 | 2.26 | 2.26 | 0.00 |
+| tab-bar | 1.14 | 1.14 | 1.14 | 0.00 |
+
+Verdicts as printed: before `PASS — 8 page(s) compared, worst=17.11`, after
+`PASS — 8 page(s) compared, worst=16.88`. No page regressed; no page rendered
+zero pixels. The before column reproducing round 6's published figures to the
+hundredth on independently re-captured references is also the evidence that
+Chrome is stable across recaptures on this host.
+
+**Targets NOT met, stated plainly.** The round-6 brief asked for html ≤ 12,
+animation ≤ 10, css-paint ≤ 8. One 16-px-per-block rule moved html by 0.23 and
+the other seven pages by nothing. That is the honest size of this lever: the
+catalog's residual mismatch is dominated by text antialiasing and by defects
+that are filed and NOT fixed here — the symmetric TOP-margin case
+(`web_first_child_top_margin_never_collapses_through_2026-09-13.md`, worth
+another 16 px on the same blocks and the next real lever), bold advances
+(blocked on `font_renderer.spl`, another lane), and table shrink-to-fit /
+`border-spacing`.
+
+**Where the fix IS visible: the geometry differ.** Same page, same invocation
+(`GEOM_DIFF_HEIGHT=20000 GEOM_DIFF_PAGES=html`), before -> after:
+
+| metric | before | after |
+|---|---|---|
+| mismatched | 247 | **176** |
+| root mismatches | 223 | **134** |
+| `path:0` (`main`) `dh` | 376 | **72** |
+| `path:0/0/1` (`article`) `dh` | 16 | gone |
+| `path:0/0/2` (`dl`) / `0/0/3` (`p`) `dy` | 17 | gone |
+
+The block-flow cascade that put every later block 17 px low is closed. Pixel
+percentage moves less than box geometry because the page's remaining ink
+difference is text rasterisation, not box placement.
+
+**Caveat on the differ's own numbers:** `html` still reports 178 missing / 179
+Simple-only, unchanged, because the Simple side attributes `<li>` boxes to the
+`<section>` rather than the `<ul>`, desyncing every ordinal after
+`path:0/0/4/3`. That is one structural divergence cascading, not hundreds of
+defects, and it is why "what ranks next on html" could not be answered from
+this report. Recorded:
+`doc/08_tracking/bug/web_geometry_differ_li_reparented_desyncs_nth_paths_2026-09-13.md`.
+
+### Specs (interpreter, `SIMPLE_2D_BACKEND=cpu_simd`)
+
+`li_last_child_margin_collapse_spec` 12/12 (every figure Chrome-derived),
+`margin_collapse_spec` 8/8, `inline_run_advance_and_break_boxes_spec` 5/5,
+`inline_content_area_half_leading_spec` 4/4, `layout_text_node_spec` 4/4,
+`paint_layout_advance_parity_spec` 2/2, `layout_paint_contract_pin_spec` 6/6.
+`table_layout_spec` is 0/7 — verified red on `origin/main` content too, i.e.
+pre-existing and untouched by this change.
+
+### Sabotage
+
+| sabotage | result |
+|---|---|
+| drop the `pad_b`/`border_b` guard | `12 examples, 2 failures` |
+| force the helper to `false` | `12 examples, 3 failures` |
+| drop the sibling re-emission (`prev_margin_b` ignores `child.trailing_margin_b`) | `12 examples, 2 failures` |
+| drop the flex/grid parent exclusion | `12 examples, 2 failures` (AC-9, AC-10) |
+| drop the self-collapsing fold | `12 examples, 1 failure` (AC-12) |
+| add an explicit `td`/`th` exclusion and remove it | `12 examples, 0 failures` BOTH ways — the branch was dead (`display: table-cell` already fails the display test) and was deleted rather than kept |
