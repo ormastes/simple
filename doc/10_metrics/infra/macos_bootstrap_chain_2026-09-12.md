@@ -1195,3 +1195,171 @@ new SSA-guard spec, which has no mirror twin.
 Other guards, foreground, `timeout 900`: conflict-markers PASS (4 files),
 tree-size PASS (range base 136961 files), no-revert PASS (4 files, 0 reverts),
 guard-wiring PASS (1697 guards, 0 NEW unwired).
+
+## Run 25 — site 10a root-caused: the STOLEN UNWRAP, not a text primitive
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+root, worktree `agent-a797b495fc872651f`, carrying the one-file fix below.
+
+### The reproducer is five seconds, not ninety minutes
+
+Run 24's rejected candidate
+(`c7e536c1c5b743cd7b845a9596e6a3b7914decca1894b99a80c12badf08cbaa3`) is a
+working compiler, and the failing lane step is a **two-module** native-build of
+`scripts/check/cert/redeploy_gate/fixtures/stage2_module_path_naming.spl`. Copied
+out and re-run directly it reproduces the abort in ~5 s, with the same three
+`[llvm-ssa] ... rejected: invalid terminator operands` lines. Every finding below
+came from that loop; no lane rebuild was needed to root-cause.
+
+Bisecting shapes against that candidate collapsed the problem immediately:
+
+```
+fn f_ret(a: i64) -> i64:
+    return a + 1
+
+fn main():
+    print(f_ret(1))
+```
+
+```
+[llvm-ssa] fn=f_ret alloca-transform rejected: invalid terminator operands
+```
+
+`main` — void — is **not** rejected. That is the whole signal: **every
+value-returning function in the tree was refused, and only value-returning
+functions.** The three `module_path_naming.spl` functions were simply the
+functions in the first unit the lane compiled; nothing about paths, `index_of`,
+loops or struct receivers was involved.
+
+### Root cause: `.unwrap()` on the staged-native lane answers raw 0
+
+`ssa_term_operand_payloads_valid`'s `Ret` arm
+(`src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl:940`) read its operand as
+`value.unwrap()`. The repo already documents what that does on this lane, in two
+places, both of which this site had missed:
+
+- `src/compiler/50.mir/mir_instruction_graph.spl:55` — *"`??`, NOT `.unwrap()` --
+  the STOLEN UNWRAP: a bare `unwrap` published by another module can steal every
+  `Option.unwrap` binding on this lane and return raw 0"*
+- `var_reassign_ssa.spl:1216`, in the same file — *"`??` NOT `.unwrap()`: a bare
+  `unwrap` published by another module (Poll, FailSafeResult) steals every
+  `Option.unwrap` binding on this lane and returns raw 0."*
+
+So `value.unwrap()` handed back raw 0; `ssa_operand_local_payload_valid`'s first
+line is `if operand == nil or operand == 0: return false`, correctly reading that
+as an absent payload; and `ssa_alloca_transform_blocks` refused the whole
+function. `Ret(None)` never reaches the unwrap — it takes the `else: true`
+branch — which is exactly why void functions passed and value-returning ones did
+not.
+
+Refusing the transform is what left those functions' multi-def locals unslotted,
+which is the duplicate `%l50` that run 24's emitter guard then aborted on. Site
+10a and the run-24 abort are one defect, not two.
+
+### The `index_of` sentinel hypothesis is REFUTED
+
+Run 24 proposed a native `index_of` returning a `>= 0` not-found sentinel as a
+plausible common cause. Measured this run, same probe under the seed interpreter
+and under a seed `native-build --mode=dynload` binary — **byte-identical, and
+correct on both**:
+
+```
+index_of found slash = 3          index_of notfound ZZ = -1
+index_of brace open = 5           index_of notfound brace needle = -1
+index_of found brace needle = 5   last_index_of found slash = 13
+last_index_of notfound ZZ = -1    contains found = true / notfound = false
+```
+
+Not-found is `-1` on both lanes, and brace-containing needles are found
+correctly. Two further notes so this is not re-opened on the old evidence:
+`module_path_naming.spl` never calls `text.index_of` at all (it hand-rolls
+`_module_path_naming_text_index_of` over `byte_at`); and the
+`bug_index_of_brace_needle` memo's `{app.mode}` needle is **string
+interpolation** in a `"..."` literal, not a brace passed to `index_of` — writing
+that needle literally in a probe fails at compile time with `variable
+'app' not found`, which is a different defect from the one the memo names.
+
+### Fix
+
+One file, `src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl`: the reject site
+plus the four sibling `Ret` sites on the same lane (rewrite, replace, collect,
+alloca-rewrite) move from `.unwrap()` to the file's own `??` idiom via a named
+`ssa_unreachable_operand_fallback()`. The four siblings are not cosmetic — once
+the transform is admitted they run, and each would have fed a raw-0 operand into
+the rewritten MIR. Presence is established by the `!= nil` / `.?` test above each
+site, so the fallback is unreachable by construction.
+
+Ownership note: the fix is in `60.mir_opt`, not `50.mir` — the defect was in the
+SSA guard, not the MIR builder, and the builder's terminators were correct all
+along.
+
+### Note recorded, not chased
+
+The run-24 candidate **SEGVs** (rc 139) while native-building any probe that puts
+a struct behind `?` inside an enum payload, and reports `unresolved method call:
+last_index_of` on a probe the seed compiles fine. Both are distinct from the
+defect above and are not fixed here.
+
+### Verdict, verbatim
+
+```
+error: stage2 failed the positional pure-Simple Stage-3 route (status 1)
+PASS — 1 check(s), stage stage2 failed (exit 3) and said why
+  warning: stage2 native-build failed (exit 3); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Read the status, not the word "failed": run 24 was **134** (SIGABRT, the SSA
+guard); run 25 is **1** (a linker error). The abort is gone, `stage2-receiver.log`
+carries **zero** `[llvm-ssa]` lines where run 24 carried six, the receiver probe
+reports `bootstrap_stage2_struct_receiver=PASS`, and both units of the route
+fixture now lower, codegen and emit objects. Independently confirmed at fixture
+level: the minimal `fn f_ret(a: i64) -> i64: return a + 1` program, which the
+run-24 candidate refused with 2 reject lines, builds on the run-25 candidate with
+`status=0` and `llvm_ssa_rejects=0`.
+
+Stage 3 and the full CLI were never reached, so there is no Stage-3 artifact, no
+smoke-check result, and nothing was deployed. Rejected candidate preserved:
+`.simple/storage/build/bootstrap/stage2-rejected/aarch64-apple-darwin/simple`,
+139,350,072 bytes, sha256
+`0341655b1fa369d8fcb0f05ed5632a337988c5f608588600a75d394ca130e342` (mode 400 —
+copy out and `chmod +x` before use).
+
+### Site 10c — the new first blocker (a different defect; do not re-file as 10a)
+
+```
+Undefined symbols for architecture arm64:
+  "_compiler.common.module_path_naming.module_logical_name_from_path", referenced from:
+      ___simple_main in 1-0b131fd108e7f872e3a2d6fbb4dbebeb3ede3aaaac563088e3442c7d4028b195
+```
+
+The CALLER emits a cross-module reference under the **dotted logical module
+name**, while the callee's object defines the symbol under some other spelling —
+a mangling mismatch at the cross-module call site, in the backend's symbol
+naming, not in MIR or the SSA transform. Note the irony worth recording: the
+symbol that fails to resolve is `module_logical_name_from_path` itself, the
+function whose whole job is deriving that dotted name. Both objects compiled and
+linked as objects; only the reference between them is unresolved.
+
+### Divergence-delta escape record (required by `.claude/rules/vcs.md`)
+
+`check-test-tree-divergence-delta` PASS over a pre-existing red:
+`PASS — 3219 pre-existing offender(s), 0 introduced by this range`; base verdict
+`FAIL — 3947 diverged vs 965 baselined (3085 new, 103 fixed-but-still-baselined);
+32 mirror-only (31 unallowlisted, 0 stale-allowlist)`. Offender list saved by the
+helper to `/var/folders/94/j3lc49d93bx148gqls5kx5d40000gn/T//test_tree_divergence_preexisting.txt`
+(host-local temp; regenerate with the helper). This range touches no test file.
+
+Other guards, foreground, `timeout 900`: conflict-markers PASS (1 file),
+tree-size PASS (range base 136963 files), no-revert PASS (1 file, 0 reverts),
+guard-wiring PASS (1697 guards, 0 NEW unwired).
+
+### Regression coverage — stated honestly
+
+There is **none automated**. The defect is native-lane-only: under the seed
+interpreter the guard was always correct, and
+`test/01_unit/compiler/backend/llvm_emitter_ssa_violation_guard_spec.spl` stays
+6/6 green both before and after the fix. A spec that cannot fail before the fix
+does not pin it. What pins it today is the fixture loop above against a real
+staged-native candidate; the durable form would be a check that no `Ret` arm
+under `60.mir_opt` reaches for `.unwrap()`, which is not built here.
