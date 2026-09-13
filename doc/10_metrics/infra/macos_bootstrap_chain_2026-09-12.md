@@ -1036,3 +1036,44 @@ new capsule-identity spec, which has no mirror twin.
 Other guards, foreground, `timeout 900`: conflict-markers PASS (5 files),
 tree-size PASS (range base 136957 files), no-revert PASS (5 files, 0 reverts),
 guard-wiring PASS (1697 guards, 0 NEW unwired).
+
+### Run 23 corrections (same day)
+
+Two things above are stated more strongly than the evidence supports, and one
+number is wrong. Correcting them here rather than editing the entry, so the
+reasoning stays auditable.
+
+- **"Not a `%t`/`%l` namespace collision" was argued from a docstring, which
+  this chain has been burned by before (run 16).** The sound argument is the
+  observed text: every operand in both reports is `%l<n>`
+  (`%l22 = add i64 %l35, 0`, `%l14 = getelementptr i8, ptr %l25, i64 0`) and no
+  `%t` appears in any reported line. That is what rules out the two namespaces
+  overlapping — not `fresh_local`'s comment about `%t`.
+- **`translate_copy` records no `defined_locals` receipt on its ordinary path.**
+  The entry cites `:1694`, `:1779`, `:2261`; of those, `1694` is
+  `translate_const`, `1779` is inside `translate_copy`'s `inttoptr` handle-unbox
+  branch (which returns early), and `2261` is `translate_call`. The ordinary
+  scalar/ptr/float copy tail sets `local_types` and `value_types` and never
+  `defined_locals[dest_id]`. So `translate_copy` cannot refuse a second
+  definition because it never asks.
+- **Stage 2 built `886 compiled, 0 cached, 0 failed`**
+  (`logs/aarch64-apple-darwin/stage2-native-build.log:3`). The
+  `done=1 total=2 … failed=1` counts quoted from the receiver log are the
+  two-unit STAGE-3 ROUTE PROBE, not the Stage 2 closure.
+- Rejected candidate preserved, not deployed:
+  `.simple/storage/build/bootstrap-run23/stage2-rejected/aarch64-apple-darwin/simple`,
+  139,349,256 bytes, sha256
+  `3b7b620a2e50ef8a0d875535ebf3478831f30d38d26136cc50799682d4945e36` (mode 400 —
+  copy out and `chmod +x` before any use).
+
+**Recommended first two moves for site 10a**, in this order, because together
+they make the next lane self-diagnosing instead of another evidence run:
+
+1. In `llvm_object_stage_fail`, copy `module.ll` to `"{diagnostic_path}.module.ll"`
+   before the staging directory goes away. `diagnostic_path` is caller-owned and
+   survives the struct-receiver gate's probe-directory teardown, which is what
+   swallowed the IR this run even with `SIMPLE_LLVM_KEEP_STAGE=1` working.
+2. Add a `defined_locals.contains_key(dest_id)` refusal at the top of
+   `translate_copy` — it converts the llc rejection into a compiler-side
+   diagnostic naming the MIR function and block, which is the information the
+   fix actually needs.
