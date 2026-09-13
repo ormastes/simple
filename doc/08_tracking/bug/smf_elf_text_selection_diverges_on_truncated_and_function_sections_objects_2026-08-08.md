@@ -1,6 +1,6 @@
 # SMF ELF: code/reloc section selection still diverges on truncated objects, and `-ffunction-sections` is made consistent rather than correct
 
-- **Status:** OPEN
+- **Status:** CLOSED (2026-09-13) -- not reproducible on f26970e9d93; all three items already fixed, see Re-check below
 - **Found:** 2026-08-08, adversarial review of `f13a082b3823` + `381cd611097f`
 - **File:** `src/compiler/80.driver/smf_elf_parser.spl`
 
