@@ -1,6 +1,6 @@
 # Site 20: Stage 3 unreachable — the receipt chain has no entry point from a rust-seed Stage 2 (macOS, 2026-09-13)
 
-- Status: OPEN (2026-09-13)
+- Status: OPEN (2026-09-13) — **instance of an already-OPEN root defect**, `bootstrap_admission_v2_circular_and_cannot_express_imported_parent_2026-08-18.md` ("nothing in the repo ever WRITES the two receipts the gate reads"). Kept for the macOS run-35 evidence; the root defect is tracked there, not here.
 - Area: bootstrap Stage 2 -> Stage 3 handoff; planner admission v2 receipt chain
 - Found by: macOS lane F73 run 35, worktree `agent-a73a6f3780a2bd75b`, tip
   `60c78b96789` (carries PR #903, the site-19 fix)
@@ -84,3 +84,42 @@ MINT the Stage-2 admission + provenance pair (the authority string is already
 accepted by `publish-stage2-parent-receipts.shs`, so the concept exists — what is
 missing is the producer), or document a supported bootstrap-from-seed lane that
 reaches Stage 3 without one. Until then macOS stops at an admitted Stage 2.
+
+## Correction (2026-09-13, same day): this is not a new defect
+
+`bootstrap_admission_v2_circular_and_cannot_express_imported_parent_2026-08-18.md`
+already records the root cause, OPEN since 2026-08-18, in its own words:
+
+> receipt needs stage2, stage2 needs a bootstrap run, the bootstrap run needs
+> the receipt. A tree that has never bootstrapped cannot bootstrap.
+> ... Nothing in the repo ever WRITES the two receipts the gate reads.
+
+Run 35 adds two things that record does not have, and nothing else:
+
+1. **It is reached from a SUCCESSFULLY admitted Stage 2, not a fresh tree.** The
+   08-18 record's cycle is stated for a tree with no `build/bootstrap/stage2/`.
+   Here Stage 2 exists, is admitted, and is byte-stable — and the chain still has
+   no entry, because the missing artifacts are the admission/provenance receipts,
+   which no producer writes, rather than the compiler.
+2. **A third route is refused, including the Stage-4 entry point.** Measured:
+
+   | route | rc |
+   |---|---|
+   | `bootstrap-from-scratch.sh --resume-stage3-from-admitted=<output>` | 64 |
+   | `bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --jobs=half` | 64 |
+   | `bootstrap-strategy.sh -- --full-bootstrap --mode=dynload --jobs=half` (with `SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE=1`) | 64 |
+
+   all with the identical `bootstrap-policy-error: reason-receipt-required`.
+   `bootstrap-strategy.sh` is a supervisor, not a producer — its own header says
+   "The existing engine remains the only producer/admission authority", and with
+   no `--bootstrap-receipt=` it `exec`s the engine unchanged (lines 92-98). So
+   the Stage-4 path is gated by the same missing receipt, not by a separate one.
+
+## Wording correction
+
+An earlier draft of this record said the Stage 2 verdict "states outright" that
+the seed producer may not publish. It over-read the line. `producer=rust-seed
+cannot publish the manifest; Stage 3 reuse disabled` is about the
+`phase2-compatibility.manifest`, which gates REUSING a prior Stage 3 output — it
+is context, not proof. The evidence for this record is the measured rc=64 on all
+three routes above.
