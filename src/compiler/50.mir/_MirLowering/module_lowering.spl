@@ -1151,6 +1151,32 @@ impl MirLowering:
                                             prescan_call_name, prescan_ok_symbol.name)
                                     case _: ()
                         case _: ()
+                case Optional(prescan_optional_inner):
+                    # Exact sibling of the Result arm above, and closed for the
+                    # same reason it was: this `match` had no Optional arm, so a
+                    # callee declared `-> T?` registered NO payload name at all.
+                    # The call result then reached MIR with no struct_value_syms
+                    # entry, `if val fp = <that call>` aliased the same local,
+                    # and `fp.size` fell through resolve_field_index's name-keyed
+                    # tier into the numeric-SymbolId field_map tier (which
+                    # collides across modules in an entry-closure build) and
+                    # finally to a silent index 0 -- reading `path`, a text
+                    # POINTER, as the i64 `size`. Resolved HERE, while
+                    # `module.symbols` is still the DEFINING module's own
+                    # self-consistent table, so no consumer has to dereference a
+                    # foreign per-module SymbolId. Bare name, matching the
+                    # spelling struct_value_syms consumers expect downstream --
+                    # NOT composite_layout_key's module-qualified form.
+                    match prescan_optional_inner.kind:
+                        case Named(prescan_optional_symbol_id, _):
+                            val prescan_optional_symbol = module.symbols.get_symbol_raw(prescan_optional_symbol_id.id)
+                            if prescan_optional_symbol != nil:
+                                match prescan_optional_symbol.kind:
+                                    case Class | Struct:
+                                        bootstrap_fn_ret_opt_shape_register(
+                                            prescan_call_name, prescan_optional_symbol.name)
+                                    case _: ()
+                        case _: ()
                 case _: ()
             bootstrap_fn_ret_shape_register(prescan_call_name, prescan_return_shape)
             # Trailing-default pad registry. Registered for EVERY function

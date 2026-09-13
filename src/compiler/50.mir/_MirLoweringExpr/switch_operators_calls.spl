@@ -1868,7 +1868,7 @@ impl MirLowering:
         nil
 
     me result_variant_payload_type(scrutinee: HirExpr, variant: text) -> HirType?:
-        """Recover the selected payload from an instantiated Result type."""
+        """Recover the selected payload from an instantiated Result/Optional type."""
         val scrutinee_type = self.enum_match_expr_type(scrutinee)
         if scrutinee_type != nil:
             val found_type = scrutinee_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
@@ -1878,6 +1878,19 @@ impl MirLowering:
                         return Some(ok_type)
                     if variant == "Err":
                         return Some(err_type)
+                case HirTypeKind.Optional(optional_payload_type):
+                    # `Optional<T>` is the exact sibling of `Result<T, E>` here
+                    # and had NO arm at all, so `case Some(x): x.field` was the
+                    # one payload shape with no type-directed path in front of
+                    # the bare-keyed `enum_payload_struct_names` global -- whose
+                    # "Optional::Some" slot is shared by EVERY `Some(...)` in
+                    # the whole compiled closure, last-lowered construction
+                    # wins. `enum_payload_value` only transforms U64/F64/F32
+                    # and returns the raw word for everything else, so adding
+                    # this arm changes nothing for struct payloads beyond
+                    # giving them their real provenance.
+                    if variant == "Some":
+                        return Some(optional_payload_type)
                 case HirTypeKind.Generic(_, _): ()
                 case HirTypeKind.Named(_, _): ()
                 case HirTypeKind.Error: ()
@@ -1895,13 +1908,29 @@ impl MirLowering:
         2026-08-09, 6th/7th layer). Mirrors enum_match_expr_type's MethodCall
         resolution chain, but ends at `resolved_call_result_ok_shape` (a NAME)
         instead of `resolved_call_hir_return_type` (a possibly-foreign-id-
-        bearing HirType)."""
-        if variant != "Ok":
+        bearing HirType).
+
+        `Some` is accepted alongside `Ok` and routes to the Optional sibling
+        registry (`bootstrap_fn_ret_opt_shape_*`, registered by the same
+        prescan); a FREE `Call` scrutinee is accepted alongside `MethodCall`,
+        resolving the callee symbol the way `enum_match_expr_type`'s own `Call`
+        arm does. Without those two, `case Some(x): x.field` and every free
+        function's payload fell back to the bare-keyed
+        `enum_payload_struct_names` global, whose `"{enum}::{variant}"` key is
+        shared by EVERY instantiation in the compiled closure -- last-lowered
+        construction wins (see the Mechanism #1 note at the single-payload bind
+        arm below)."""
+        if variant != "Ok" and variant != "Some":
             return nil
         match scrutinee.kind:
+            case Call(call_callee, _, _):
+                match call_callee.kind:
+                    case Var(call_symbol) | NamedVar(call_symbol, _):
+                        return self.resolved_call_payload_shape(call_symbol, variant)
+                    case _: ()
             case MethodCall(receiver, method, _, resolution):
                 if val method_id = resolution.get_symbol_id():
-                    return self.resolved_call_result_ok_shape(method_id)
+                    return self.resolved_call_payload_shape(method_id, variant)
                 val receiver_type = self.receiver_declared_type(receiver)
                 if receiver_type != nil:
                     val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: scrutinee.span)
@@ -1913,14 +1942,14 @@ impl MirLowering:
                     if struct_name != "":
                         val method_key = "{struct_name}::{method}"
                         if self.struct_method_syms != nil and self.struct_method_syms.has(method_key):
-                            return self.resolved_call_result_ok_shape(self.struct_method_syms[method_key])
+                            return self.resolved_call_payload_shape(self.struct_method_syms[method_key], variant)
                 val static_recv_sym: SymbolId? = match receiver.kind:
                     case Var(recv_sym): Some(recv_sym)
                     case NamedVar(recv_sym, _): Some(recv_sym)
                     case _: nil
                 if val recv_type_sym = static_recv_sym:
                     if val fallback_method_id = self.symbols.lookup_method_in_type(recv_type_sym, method):
-                        return self.resolved_call_result_ok_shape(fallback_method_id)
+                        return self.resolved_call_payload_shape(fallback_method_id, variant)
             case _: ()
         nil
 
