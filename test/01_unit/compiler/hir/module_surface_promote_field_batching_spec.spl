@@ -1,0 +1,153 @@
+# Linux S3-1 (BOOT-18, 2026-09-14): `module_surfaces_promote_reason` hung
+# indefinitely on the real 832-surface bootstrap_main.spl closure -- nlwp=1,
+# ~99% one core, RSS 37-48 GB, 45+ min CPU, zero forward progress -- while the
+# seed interpreter (which STUBS the `rt_transient_heap_promote` extern, per
+# da91f5dd299's own note, so it cannot exercise this cost at all) finished the
+# identical closure in 17 minutes. Two live `gdb -batch -ex run -ex bt`
+# captures on the natively-compiled Stage-2 candidate (15 min and 20 min into
+# a fresh repro each time) both stopped in the SAME place:
+#
+#   rt_transient_heap_promote -> TRANSIENT_HEAP_SCOPE.with(..) ->
+#   Vec<RuntimeValue>::retain(|object| !reachable_heap.contains(&object.0))
+#
+# `TransientHeapScope.objects` (src/compiler_rust/runtime/src/value/
+# collections.rs:30) is a `Vec<RuntimeValue>` holding EVERY transient
+# allocation tracked since the scope began -- source: doc/08_tracking/bug/
+# stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md. Every call to
+# `rt_transient_heap_promote` does a FULL linear `.retain()` scan over that
+# vector (collections.rs:2078), so its cost is O(N) where N is the (large,
+# real-scale) number of transient allocations still tracked -- not O(1). This
+# spec does not, and cannot, measure that native N or that native cost: the
+# seed interpreter stubs the extern (da91f5dd299), so no dynamic timing or
+# allocation-count assertion made under `bin/simple test` would discriminate
+# the real defect -- the existing sibling spec in this file
+# (module_surface_freeze_names_promote_guard_spec.spl) hits the identical
+# limit and is a pure source-structure pin for exactly that reason.
+#
+# What IS exactly countable, deterministically, with no timing involved: the
+# NUMBER OF rt_transient_heap_promote CALL SITES per surface.
+# `module_surface_promote_fields` made 24 individual calls and
+# `module_surface_promote_freeze_names` made 4 more -- 28 calls/surface, each
+# paying the O(N) scan, for a total of 28 * 832 = 23,296 scans on the real
+# closure. `module_surface_promote` (the existing, working per-file sibling a
+# few lines above in this same file) already proves the alternative shape is
+# safe: it collects many roots into ONE `[Any]` array and calls
+# `rt_transient_heap_promote` exactly ONCE, since the promote's own
+# reachability walk (`transient_heap_children`) already recurses into an
+# array's elements. Applying that shape to `module_surface_promote_fields`
+# (24 -> 1, the load-bearing cut -- see the gdb backtraces, both of which
+# stopped inside the 24-call chain, never the 4-call one) removes the
+# dominant share of the cost on its own: 24 -> 1 per surface, 19,968 -> 832
+# total.
+#
+# BOOT-19 (2026-09-14): `module_surface_promote_freeze_names` was briefly
+# batched the same way (4 -> 1) but that broke
+# `scripts/check/check-transient-scope-text-field-promotion.shs`, a static
+# push-gate ratchet (no baseline/allowlist) against the SIGSEGV in
+# doc/08_tracking/bug/stage3_module_surface_freeze_names_freed_value_struct_layouts_segv_2026-09-06.md;
+# it greps the committed source for the four literal
+# `rt_transient_heap_promote(surface.<field>)` call sites and cannot be edited
+# from this lane. The batching precedent is proven only for arrays of
+# ARRAYS, not for an array of scalar `text` values, and neither BOOT-18
+# Stage-3 run reached this phase at the real 832-surface scale (both stopped
+# earlier at the unrelated S3-2 HIR import-surface defect) to exercise it. So
+# `module_surface_promote_freeze_names` reverted to 4 direct calls, keeping
+# the gate's proven literal safety net. Total is therefore 1 + 4 = 5
+# calls/surface (4,160 total across the real closure) -- still 5.6x below the
+# pre-fix 28 (23,296 total), dominated almost entirely by the
+# `module_surface_promote_fields` cut.
+
+use std.spec
+use std.io.{file_read}
+
+val REGISTRY = "src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+
+fn extract_fn_body(source: text, fn_signature_prefix: text) -> text:
+    """Return the text from the first line matching `fn_signature_prefix`
+    up to (not including) the next top-level `fn `/`pub fn ` declaration.
+    Fails closed to "" (vacuous) if the signature is not found, which every
+    caller below must reject rather than silently pass."""
+    val start = source.find(fn_signature_prefix)
+    if start < 0:
+        return ""
+    val after_start = source.substring(start + fn_signature_prefix.len(), source.len())
+    # The next top-level declaration starts a new fn at column 0.
+    val next_pub = after_start.find("\npub fn ")
+    val next_priv = after_start.find("\nfn ")
+    var end_rel = after_start.len()
+    if next_pub >= 0 and next_pub < end_rel:
+        end_rel = next_pub
+    if next_priv >= 0 and next_priv < end_rel:
+        end_rel = next_priv
+    after_start.substring(0, end_rel)
+
+fn count_occurrences(haystack: text, needle: text) -> i64:
+    var count = 0
+    var search_from = 0
+    while true:
+        val found = haystack.substring(search_from, haystack.len()).find(needle)
+        if found < 0:
+            break
+        count = count + 1
+        search_from = search_from + found + needle.len()
+    count
+
+describe "module_surface_promote_fields/freeze_names call-count budget (Linux S3-1)":
+    it "fails closed if the registry source cannot be read at all":
+        val registry = file_read(REGISTRY)
+        # A vacuous empty read must not silently pass every check below.
+        expect(registry.len() > 4000).to_be_true()
+
+    it "module_surface_promote_fields makes at most 2 rt_transient_heap_promote calls, not 24":
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        val body = extract_fn_body(registry, "fn module_surface_promote_fields(")
+        expect(body.len() > 0).to_be_true()
+        val calls = count_occurrences(body, "rt_transient_heap_promote(")
+        # Budget, not a timing bound: 24 individual calls today (one per
+        # retained array field), each paying an O(N) native scan over the
+        # whole transient-scope tracking vector. The fix batches them into
+        # ONE call over a constructed [Any] array, mirroring the existing
+        # module_surface_promote()/roots pattern a few lines above.
+        expect(calls <= 2).to_be_true()
+        expect(calls > 0).to_be_true()
+
+    it "module_surface_promote_freeze_names keeps 4 direct rt_transient_heap_promote calls (gate-pinned, BOOT-19)":
+        # Deliberately NOT a batching budget: the push gate
+        # check-transient-scope-text-field-promotion.shs greps for these four
+        # literal call sites and cannot be edited from this lane, so this
+        # function stays unbatched. See the header note above.
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        val body = extract_fn_body(registry, "fn module_surface_promote_freeze_names(")
+        expect(body.len() > 0).to_be_true()
+        val calls = count_occurrences(body, "rt_transient_heap_promote(")
+        expect(calls).to_equal(4)
+        expect(body.contains("rt_transient_heap_promote(surface.logical_name)")).to_be_true()
+        expect(body.contains("rt_transient_heap_promote(surface.canonical_name)")).to_be_true()
+        expect(body.contains("rt_transient_heap_promote(surface.package_name)")).to_be_true()
+        expect(body.contains("rt_transient_heap_promote(surface.preferred_registry_name)")).to_be_true()
+
+    it "the per-surface registry loop still promotes every named field and freeze-name":
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        val fields_body = extract_fn_body(registry, "fn module_surface_promote_fields(")
+        val freeze_body = extract_fn_body(registry, "fn module_surface_promote_freeze_names(")
+        # Every original field name must still be REFERENCED somewhere in the
+        # batched body (as an array element, not necessarily as its own
+        # promote() argument) -- this is what stops the batch from silently
+        # dropping a field while still passing the call-count budget above.
+        for name in ["surface.composite_names", "surface.enum_names", "surface.trait_names",
+                     "surface.callable_names", "surface.type_alias_names", "surface.constant_names",
+                     "surface.composite_values", "surface.enum_values", "surface.trait_values",
+                     "surface.callable_values", "surface.type_alias_values", "surface.constant_values",
+                     "surface.import_target_indices", "surface.import_target_names",
+                     "surface.import_resolution_traces", "surface.import_item_offsets",
+                     "surface.import_item_names", "surface.import_item_aliases",
+                     "surface.import_item_has_alias", "surface.export_route_sources",
+                     "surface.export_route_locals", "surface.export_route_target_indices",
+                     "surface.export_route_target_names", "surface.export_route_is_glob"]:
+            expect(fields_body.contains(name)).to_be_true()
+        for name in ["surface.logical_name", "surface.canonical_name",
+                     "surface.package_name", "surface.preferred_registry_name"]:
+            expect(freeze_body.contains(name)).to_be_true()
