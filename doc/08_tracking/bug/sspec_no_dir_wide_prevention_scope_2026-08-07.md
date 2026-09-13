@@ -104,3 +104,8 @@ Nothing to reproduce: there is no code path to run, so no `Results:` line
 applies. Remains a design gap; the blocker is upstream of prevention-mock
 scope — the runner needs per-example persistence of module-level spec state
 before any file- or directory-wide scope can be honest rather than fail-open.
+
+## Triage 2026-09-13
+Reconfirmed: low-severity documentation/convention gap per this record
+(test runner has no per-directory config hook). Not a correctness bug;
+needs a runner feature addition. Left as-is, no code change attempted.
