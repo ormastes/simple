@@ -91,6 +91,13 @@ mechanical causes, all now closed:
   single "url + token (+ user unless bearer)" rule; `cmd_jira` goes REST-first
   on it and `cmd_tasks` searches through `jira_search_any`. DC v2 rich-text
   fields are plain strings (`_jira_rich_text`), not ADF.
+- **Bitbucket Server/DC is a different body and paging dialect, not just a URL.**
+  `bitbucket.url` was silently dropped by an argument shift in `config.spl`.
+  `adapter_bitbucket`'s http_client wrappers only built requests and never sent
+  them, so transport is now `curl`. DC needs `fromRef`/`toRef`,
+  `text`/`anchor`, `strategyId` with `?version=`, and `isLastPage`/`nextPageStart`
+  paging. `bitbucket_server_base` keeps port and context path, and
+  `bitbucket_resolve_deployment` treats non-bitbucket.org URLs as DC.
 - **`gh pr create --body` had nothing to map onto.** `bb_build_create_pr_body`
   took no description at all, so a PR body would have been silently discarded.
   Added additively (`*_full` / `*_with_body`) so no existing caller or spec

@@ -347,11 +347,41 @@ repository can satisfy its protected policy; enabling it merely queues the
 merge. `--no-verify` skips local Git hooks only; it does not satisfy or bypass
 GitHub checks.
 
-### `bb` (alias `b`) — Bitbucket Cloud
+### `bb` (alias `b`) — Bitbucket Cloud and Server / Data Center
 
-Real REST client (`adapter_bitbucket_curl.spl`), not a passthrough — requires
-`--workspace`/`BB_WORKSPACE`, `--repo`/`BB_REPO`, and a `bitbucket.token` in
-`auth.sdn`.
+Real REST client (`adapter_bitbucket.spl`, sending through `curl`), not a
+passthrough. It requires `--project`/`--workspace` (or `BB_PROJECT`/`BB_WORKSPACE`),
+`--repo`/`BB_REPO`, and a Bitbucket token. The token resolves from
+`[token_env]`, then `[token_cmd]`, then `auth.sdn`.
+
+**Server / Data Center (tested shape: 8.19).** Set `bitbucket.url` to your
+server. Port and context path are kept, and a trailing `/rest/api/1.0` is
+stripped. When `bitbucket.deployment` is unset, any URL that is not
+`bitbucket.org` is treated as Data Center. Requests go to
+`{url}/rest/api/1.0` with `Authorization: Bearer <HTTP access token>`.
+`--project` is the project key.
+
+```sdn
+# ~/.config/itf/config.sdn — Bitbucket Server/DC 8.19, Bearer PAT
+bitbucket:
+    url: https://host:222            # also ok: https://host:222/context
+    deployment: datacenter           # optional for non-bitbucket.org URLs
+    auth: bearer                     # default
+    project: PROJ
+    user: jdoe                       # optional; enables participant approve
+token_env:
+    bitbucket: BB_TOKEN
+```
+
+On Data Center:
+- `pr create` sends `fromRef`/`toRef`, and `--reviewer` takes user names.
+- `comment post` sends `text`, plus an `anchor` for inline comments.
+- `merge` reads the PR `version` and posts `strategyId`: `squash`→`squash`,
+  `fast_forward`→`ff-only`, anything else→`no-ff`.
+- `approve` uses `PUT .../participants/{bitbucket.user}`, falling back to the
+  deprecated `POST /approve` when no user is set.
+- `status` reads `/rest/build-status/1.0/commits/{sha}`.
+- Lists page with `isLastPage`/`nextPageStart`.
 
 | Verb | Flags |
 |---|---|
