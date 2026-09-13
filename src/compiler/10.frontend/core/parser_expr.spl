@@ -1315,6 +1315,23 @@ fn parse_postfix() -> i64:
             if pp_is_kw and member_kind != 6:
                 field_name = pp_kw_name
             parser_advance()
+            # Explicit type arguments on a MEMBER call: obj.method<T, U>(args).
+            #
+            # Without this the member path had no generic disambiguation at all,
+            # and the failure was worse than an error. `Box.empty<i64>()` parsed
+            # SILENTLY as the comparison chain `(Box.empty < i64) > ()` -- no
+            # diagnostic, wrong AST. Only a second type argument made it visible,
+            # as `unexpected token in expression: ','`, because a comma cannot
+            # appear in a comparison. That is why this surfaced as a parse error
+            # on `Future.pending<Result<T, text>>()` while single-argument calls
+            # appeared to work.
+            #
+            # try_skip_ident_generic_args is the same speculative skipper the
+            # bare-identifier path uses: it commits only when the closing `>` is
+            # followed by `.` or `(`, and backtracks transparently otherwise, so
+            # a genuine `a.b < c` comparison is unaffected.
+            if par_kind_get() == 82 or par_kind_get() == 86:
+                try_skip_ident_generic_args()
             # Check for method call: obj.method(args)
             var pp_after_member = par_kind_get()
             if pp_after_member == 140:
