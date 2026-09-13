@@ -226,3 +226,221 @@ scalar and compare outputs.
 `simd_lowering.spl` still knows only three f32x4 names, but that no longer
 blocks the interpreter path; it matters for the native backend, and is tracked
 separately.
+
+## Step 6 DONE — and it found two more defects
+
+The execution-level differential test now exists, runs, and passes. Writing it
+was not the hard part; making the emitted function *execute* was, and the first
+run did exactly what this record predicted no structural test could.
+
+**D6 — the vector loop never advanced its induction variable.** The first
+execution returned `InterpError::RuntimeError(Infinite loop detected)`.
+`create_vector_loop_block` computed
+
+    %vi1 = %vi + chunk_width          # a SEPARATE local
+    %cond = %vi1 < trip_count
+    If(%cond, vec_loop, exit)
+
+and never wrote `%vi`. Every iteration re-entered with the same index, so the
+back-edge was taken forever. `%vi` was also never initialised — no block seeded
+it. Fixed: the increment writes back into `%vi` itself, the guard reads `%vi`,
+and `align_check` (the only block dominating both the vector entry and the peel
+fall-through) seeds `%vi = 0`. `%vi1` is deleted.
+
+This is the defect that justifies the whole exercise. Four rounds of structural
+tests, five D-numbered fixes, and a correct alias oracle all sat on top of a
+loop that could not terminate — and nothing before this test could see it,
+because block shape was perfect.
+
+**D7 — a remainder trip count silently wrote one element.** With D6 fixed the
+8-element case passed, so the sweep was widened to trip counts 4..17. Trip 9
+failed with `undefined field 'instructions' ... on value of type 'nil'`. The
+peel path is doubly wrong:
+
+  * `create_peeling_block` emits exactly ONE cloned scalar iteration no matter
+    how many remain, then leaves the loop — for trip 9 that writes `out[0]` and
+    leaves elements 1..8 at their previous contents; and
+  * it terminates at a hard-coded `header + 3`, a block that does not exist on
+    any CFG with a real continuation. This is D3's assumption, removed from the
+    vector path in the earlier round but left in the peel path.
+
+The note in `rewrite.spl` claiming "Misaligned static trip counts are now
+handled by create_peeling_block ... Defect C is resolved" was false.
+
+Fixed by REFUSING it (`R4b`): `trip_count % chunk_width != 0` returns the
+function unchanged. Refusing costs remainder loops an optimization; not
+refusing miscompiles them. Lifting it requires a real peel that runs
+`trip % chunk` iterations and exits to the resolved exit block, plus an
+extension of the differential sweep to prove it.
+
+R4b then made the width ladder refuse trip 12 under a 16-lane plan (it narrowed
+to 8, and 12 % 8 != 0) — the exact "AVX-512 refuses what AVX2 accepts"
+regression the ladder exists to prevent, arriving by a new route. The ladder
+now narrows until the width both fits AND divides the trip count, so trip 12
+lands on 4 lanes and is accepted.
+
+### The tests
+
+`auto_vectorize_spec.spl` is 98/98. The step-6 section holds five examples:
+
+  * a scalar CONTROL that must run and produce the expected sums — without it
+    a vector failure proves nothing;
+  * byte-identical memory for the divisible case;
+  * a sweep over trip counts 4..17 asserting scalar and vector agree;
+  * a positive pin that trip counts 4/8/12/16 really are rewritten (block count
+    grows), so the sweep cannot pass vacuously by declining everything; and
+  * a negative pin that 5/6/7/9/10/11 are declined.
+
+One existing spec asserted the OPPOSITE of D7 — "accepts misaligned trip count
+(6 % 4 != 0) with peel body (Wave L3b)". What it pinned was the miscompile, so
+it is inverted, with the execution evidence named in place.
+
+## ACTIVE — 2026-09-13
+
+`PassKind.AutoVectorize` is `PassStatus.Active` and the witness pair
+(`auto_vectorize/exact-alias-elementwise-add` /
+`auto_vectorize/undecidable-distinct-bases`) is re-added alongside it, since the
+registry rejects an active pass with no witnesses just as it rejects an inactive
+one that claims them.
+
+**Admitted scope is deliberately narrow:** elementwise loops, static trip count
+that is a whole number of lanes, cleared by the alias oracle or by the emitted
+runtime range guard. Everything else declines. Widening means extending the
+differential sweep first.
+
+Measured consequence on the pass-registry specs, A/B on one tree with one
+binary: baseline (AnalysisOnly) 11 failures across three specs, Active 13 — the
+two new ones were the specs pinning the old status, now inverted.
+
+The flip also fixed two PRE-EXISTING reds in `pass_status_spec.spl`, for a
+reason worth recording: **AutoVectorize is the only Active pass in the entire
+registry.** "invalidates shared facts conservatively after any admitted
+transform" named `WriteCoalesce` as its transforming example, which is
+analysis-only, so the assertion had no force and was red; "binds every retained
+active transform to positive and negative witnesses" named `PatternIdiom`,
+which is Disabled and therefore correctly advertises nothing, so it threw on
+`unwrap`. Both rules needed an actually-active pass to point at and there was
+none. `pass_status_spec.spl` is 12/12, including
+`mir_pass_registry_integrity_errors()` and
+`pass_witness_registry_integrity_errors()` both empty.
+
+`simd_lowering.spl` still knows only three f32x4 names. That does not block the
+interpreter path this record is about, but it means the NATIVE backend cannot
+yet consume what the pass emits; tracked separately.
+
+## D8 — the pass emitted AVX-512-shaped MIR that the AVX-512 selector REJECTED
+
+Found immediately after the Active flip, by asking the question every earlier
+check stopped one step short of: does the function this pass actually produces
+reach real AVX-512 instruction selection?
+
+It did not. Fed to `x86_plan_avx512_fixed` — the real admission
+`isel_x86_64.spl:184` uses — the rewritten function came back:
+
+    ok=false  reason=avx512-load-splat-gather-shape-mismatch  shapes=0
+    simd_insts=4  locals=4
+
+Four SIMD instructions emitted, **zero** vector locals declared, so zero shapes
+planned and the whole function refused. On the native path the pass produced no
+AVX-512 at all.
+
+The cause is D4's fix applied to only half the problem.
+`x86_plan_avx512_fixed` (`x86_64_avx512_isel.spl:53-59`) derives every vector
+shape from `func.locals` declared types and from nothing else: inference
+propagates only across copies and mask ops, and `MirSimdLoad` carries its vector
+type but is **checked against** the shape rather than seeding it. D4 appended
+the alias-guard temporaries to `func.locals`; the vector body's temporaries —
+the two loaded slices, the result, the index, the exit flag and the three slice
+addresses — were never declared at all.
+
+Fixed with `vector_loop_locals(ctx, base_block_id)` in
+`auto_vectorize_codegen.spl`, called at the splice next to the existing
+guard-local append. The three vector values are declared with the real vector
+MirType (`Vec16f` / `Vec16i` / `Vec8d`); the index, guard flag and addresses as
+I64. It returns an empty list when the element/lane pair has no vector type,
+matching the empty vector body emitted in that case.
+
+After: `ok=true`, `reason=avx512-frame-values-planned`, `shapes=3`, `locals=12`,
+for f32x16, i32x16 and f64x8 alike.
+
+### Why nothing caught this
+
+Every check in place stopped at the MIR. The pass emitted `MirSimdLoad` /
+`MirSimdBinop` / `MirSimdStore` with correct vector types, the differential test
+proved the INTERPRETER executed them and produced byte-identical results, and
+the AVX-512 backend specs proved the selector admits well-formed vector MIR.
+Each was true. The join was not, and nothing tested the join.
+
+This is the same shape as D5 and D6 one level further out: D5 was "the emitted
+instructions have no implementation", D6 was "the emitted loop does not
+terminate", and D8 is "the emitted function is refused by the selector it was
+built for". Each was invisible until something downstream was actually asked to
+consume the output.
+
+### The chain spec
+
+`test/01_unit/compiler/mir_opt/auto_vectorize_avx512_chain_spec.spl`, 6/6. It
+builds a plain scalar `out[i] = a[i] + b[i]` loop, runs the real rewrite, and
+hands the result to the real admission — no hand-written vector MIR anywhere.
+
+  * a control that the pass really did rewrite, so an admission verdict is not
+    being read off an untransformed function;
+  * admission for f32x16, i32x16 and f64x8, each asserting the exact success
+    reason rather than just a boolean;
+  * a direct pin that three vector-typed locals are declared, naming the cause
+    rather than only the symptom; and
+  * a negative control — a 4-lane recipe must NOT be admitted as AVX-512, so
+    the positive examples say something about width.
+
+### Correction to an earlier note
+
+This record previously said `simd_lowering.spl` knowing only three `f32x4`
+names was what blocked the native backend. That was wrong. `simd_lowering.spl`
+is the legacy string-named-intrinsic lane and is not on this path at all: the
+native x86_64 selector consumes `MirSimdLoad`/`MirSimdBinop`/`MirSimdStore`
+directly (`isel_x86_64.spl:368-375`, `x86_64_avx512_isel.spl:91-135`). The real
+blocker was D8, and it is fixed.
+
+## What Active does and does not mean for the DB and web servers
+
+Recorded because "AutoVectorize is Active" invites a reading it does not
+support. The pass rewrites a loop only when ALL of these hold
+(`rewrite.spl:307-374`):
+
+  * the recipe kind is Elementwise and the op name contains "add" — sub, mul,
+    div and everything else are matched and logged, not rewritten;
+  * the trip count is a COMPILE-TIME CONSTANT. `is_simple_loop` sets
+    `end_value` only for constant-bounded loops; a dynamic bound leaves
+    `trip_count = -1` and R4 declines;
+  * that constant is a whole number of lanes (R4b, see D7);
+  * there are at least two input bases and an output base; and
+  * the alias oracle clears the bases, or the emitted runtime range guard does.
+
+Server code loops over runtime-length buffers — request bodies, row sets,
+framebuffers sized at runtime. Those have no constant trip count, so **R4
+declines them and the pass does nothing**. The honest answer to "are the DB
+server and the web server automatically AVX-512 optimized by this pass" is
+**no**, and no amount of the pass being Active changes that. What would change
+it is a SCEV/runtime-trip-count path, which R4's comment already names as the
+unblock condition.
+
+### Where their AVX-512 actually comes from
+
+Hand-written native kernels, dispatched by CPUID at runtime — not this pass:
+
+  * DB: `rt_db_bitmap_and_u32` / `_or_` / `_andnot_u32`
+    (`src/lib/nogc_sync_mut/db/accel.spl:180-223`);
+  * scanning: `rt_simd_find_byte_span`, `rt_simd_bytes_equal_span`
+    (`src/lib/common/simd_scan.spl:121-153`);
+  * web/2D: `rt_engine2d_blend_const_span_pct_u32`,
+    `rt_engine2d_blend_mask_span_u32`
+    (`simple_web_html_layout_renderer_paint_primitives.spl`,
+    `text_layout/font_rasterizer.spl`).
+
+That those really are AVX-512 — rather than a `#[target_feature]` attribute LLVM
+declined to act on — is checked by reading the binary, not by trusting the
+attribute: `scripts/check/check-simd-kernels-vectorized.shs`, measured
+`PASS — 9 kernel(s) checked, all vectorized`. That gate exists because three of
+five kernels once carried the AVX-512 attribute and contained zero zmm
+instructions, which no parity test can detect since a scalar kernel returns
+identical answers.

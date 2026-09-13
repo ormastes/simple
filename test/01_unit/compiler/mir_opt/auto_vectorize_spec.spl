@@ -1001,8 +1001,13 @@ describe "AutoVectorize N1-rewrite — refuses dynamic trip count (trip_count=-1
 # trip_count=6, chunk_width=4: 6 % 4 = 2 → peel block gets 2-iteration scalar clone
 # ============================================================================
 
-describe "AutoVectorize N1-rewrite — accepts misaligned trip count (6 % 4 != 0) with peel body (Wave L3b)":
-    it "trip-count=6 misaligned with VF=4 rewrites function (block count increases)":
+# This spec used to assert the OPPOSITE — that trip 6 with VF 4 is accepted
+# "with peel body (Wave L3b)". Running the rewrite showed the peel body writes
+# one element and jumps to a block that does not exist, so what this pinned was
+# a miscompile. R4b now refuses it; see the trip-count sweep in the step-6
+# section for the execution evidence.
+describe "AutoVectorize N1-rewrite — declines a misaligned trip count (6 % 4 != 0)":
+    it "trip-count=6 misaligned with VF=4 is refused, not half-vectorized":
         val orig_block = make_elementwise_block_add()
         val func       = make_test_mir_function([orig_block], false)
         val recipe     = VectorRecipe(
@@ -1023,8 +1028,7 @@ describe "AutoVectorize N1-rewrite — accepts misaligned trip count (6 % 4 != 0
             induction_update: make_local(4)
         )
         val result = rewrite_elementwise_add(recipe, func)
-        # Was 1 scalar block; now replaced with 3 new blocks (align + vec + peel).
-        expect(result.blocks.len() > func.blocks.len()).to_equal(true)
+        expect(result.blocks.len()).to_equal(func.blocks.len())
 
 # ============================================================================
 # N1 positive: divisible trip count (0..16, VF=4) → rewriter should rewrite
@@ -1511,3 +1515,169 @@ describe "D5 — the vector loop emits EXECUTABLE SIMD MIR":
         val c = simd_inst_counts(rewrite_elementwise_add(wide, func))
         expect(c[0] > 0).to_equal(true)
         expect(c[3]).to_equal(0)
+
+# ============================================================================
+# Step 6 — EXECUTION-LEVEL DIFFERENTIAL TEST
+#
+# Every other check in this file is structural: it inspects the shape of the
+# emitted blocks. This one runs both the scalar loop and the vectorized rewrite
+# in the MIR interpreter and compares the memory they produce. It is the only
+# check that can catch a rewrite which is correctly shaped and wrong.
+#
+# Memory model: the interpreter addresses memory as LOCALS by id — Load reads
+# the local whose id is the pointer's value, and GetElementPtr computes
+# base + index*8. `_execute_simd_load` reads base + i*8 for each lane, the SAME
+# stride, so the scalar and vector paths address identical storage. That
+# agreement is what makes this comparison meaningful rather than incidental.
+# ============================================================================
+
+val DIFF_A_BASE: i64 = 1000
+val DIFF_B_BASE: i64 = 2000
+val DIFF_O_BASE: i64 = 3000
+
+fn diff_store(addr: i64, value: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Store(make_int_const_op(addr), make_int_const_op(value)))
+
+fn diff_set_local(id: i64, value: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Const(make_local(id),
+        MirConstValue.Int(value), MirType(kind: MirTypeKind.I64)))
+
+fn diff_entry_block(n: i64) -> MirBlock:
+    """Seed a[], b[], out[] and the base/induction locals, then enter the loop."""
+    var insts: [MirInst] = []
+    var i: i64 = 0
+    while i < n:
+        insts.push(diff_store(DIFF_A_BASE + i * 8, i + 1))
+        insts.push(diff_store(DIFF_B_BASE + i * 8, (i + 1) * 10))
+        insts.push(diff_store(DIFF_O_BASE + i * 8, 0))
+        i = i + 1
+    insts.push(diff_set_local(1, DIFF_A_BASE))
+    insts.push(diff_set_local(2, DIFF_B_BASE))
+    insts.push(diff_set_local(3, DIFF_O_BASE))
+    insts.push(diff_set_local(4, 0))
+    MirBlock(id: make_block_id(0), label: nil, instructions: insts,
+        terminator: MirTerminator.Goto(target: make_block_id(1)))
+
+fn diff_loop_block(n: i64) -> MirBlock:
+    """out[i] = a[i] + b[i] for i in 0..n, addressed through GEPs."""
+    val insts = [
+        MirInst(kind: MirInstKind.BinOp(make_local(20), MirBinOp.Lt,
+            make_copy_op(4), make_int_const_op(n))),
+        gep(30, 1, 4),
+        make_load_inst(10, 30),
+        gep(31, 2, 4),
+        make_load_inst(11, 31),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        gep(32, 3, 4),
+        make_store_inst(32, 12),
+        make_add_const_inst(4, 4)
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 9))
+
+fn diff_exit_block() -> MirBlock:
+    MirBlock(id: make_block_id(9), label: nil, instructions: [],
+        terminator: MirTerminator.Ret(value: nil))
+
+fn diff_function(n: i64) -> MirFunction:
+    make_test_mir_function([diff_entry_block(n), diff_loop_block(n), diff_exit_block()], false)
+
+fn diff_recipe(n: i64) -> VectorRecipe:
+    VectorRecipe(
+        kind:             VectorRecipeKind.Elementwise,
+        header_block:     make_block_id(1),
+        induction_var:    make_local(4),
+        trip_count:       n,
+        element_type:     "i32",
+        vector_width:     4,
+        op_name:          "add_elementwise",
+        note:             "differential",
+        input_bases:      [make_local(1), make_local(2)],
+        output_base:      Some(make_local(3)),
+        accumulator:      nil,
+        chunk_width:      4,
+        index_locals:     [make_local(4)],
+        store_value:      nil,
+        induction_update: make_local(4))
+
+fn run_and_read_output(f: MirFunction, n: i64) -> [i64]:
+    """Execute f, then read out[0..n) back out of interpreter memory.
+
+    Returns an EMPTY array when the function does not execute, so a caller
+    comparing against the scalar control sees a length mismatch rather than a
+    vacuous pass.
+    """
+    var interp = MirInterpreter.create()
+    val r = interp.execute_function(f)
+    var got: [i64] = []
+    if (r[1]).?:
+        return got
+    var i: i64 = 0
+    while i < n:
+        got.push(interp.get_local(make_local(DIFF_O_BASE + i * 8)))
+        i = i + 1
+    got
+
+fn diff_matches(n: i64) -> bool:
+    """Scalar and vectorized executions of the same loop agree elementwise."""
+    val scalar_out = run_and_read_output(diff_function(n), n)
+    val vector_out = run_and_read_output(
+        rewrite_elementwise_add(diff_recipe(n), diff_function(n)), n)
+    if scalar_out.len() != n or vector_out.len() != n:
+        return false
+    var i: i64 = 0
+    while i < n:
+        if scalar_out[i.to_i32()] != vector_out[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+describe "step 6 — vectorized output equals scalar output when EXECUTED":
+    it "the scalar loop runs and produces the expected sums":
+        step("the control: if this does not run, a vector failure proves nothing")
+        val got = run_and_read_output(diff_function(8), 8)
+        expect(got.len()).to_equal(8)
+        var bad = 0
+        var i: i64 = 0
+        while i < 8:
+            if got[i.to_i32()] != (i + 1) + ((i + 1) * 10):
+                bad = bad + 1
+            i = i + 1
+        expect(bad).to_equal(0)
+
+    it "the vectorized rewrite produces byte-identical memory":
+        step("this is the check no structural test can substitute for")
+        expect(diff_matches(8)).to_equal(true)
+
+    it "agrees for every trip count, not just a multiple of the vector width":
+        step("a remainder trip count must either vectorize CORRECTLY or be")
+        step("declined; it must never write a partial result. Trip 9 used to")
+        step("write out[0] and leave elements 1..8 untouched.")
+        var bad: [i64] = []
+        var n: i64 = 4
+        while n <= 17:
+            if not diff_matches(n):
+                bad.push(n)
+            n = n + 1
+        expect(bad.len()).to_equal(0)
+
+    it "still actually rewrites the trip counts it accepts":
+        step("declining everything would satisfy the sweep above vacuously,")
+        step("so pin that a whole number of chunks really is transformed")
+        var rewritten = 0
+        for n in [4, 8, 12, 16]:
+            val before = diff_function(n).blocks.len()
+            val after = rewrite_elementwise_add(diff_recipe(n), diff_function(n)).blocks.len()
+            if after > before:
+                rewritten = rewritten + 1
+        expect(rewritten).to_equal(4)
+
+    it "declines a remainder trip count rather than miscompiling it":
+        step("the refusal is the contract until a real peel exists")
+        var declined = 0
+        for n in [5, 6, 7, 9, 10, 11]:
+            val before = diff_function(n).blocks.len()
+            val after = rewrite_elementwise_add(diff_recipe(n), diff_function(n)).blocks.len()
+            if after == before:
+                declined = declined + 1
+        expect(declined).to_equal(6)

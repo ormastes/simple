@@ -47,7 +47,7 @@ use compiler.mir_opt.mir_opt.auto_vectorize_types (VectorLoopInfo, ArrayAccess)
 use compiler.mir_opt.mir_opt.auto_vectorize_analysis (DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only)
 use compiler.mir_opt.mir_opt.auto_vectorize_validate (VectorizabilityResult, check_vectorizability, get_vectorizable_type)
 use compiler.mir_opt.mir_opt.auto_vectorize_cost (CostEstimate, estimate_vectorization_cost, should_vectorize_loop)
-use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, element_size_bytes)
+use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, element_size_bytes, vector_loop_locals)
 
 # ============================================================================
 # Main Auto-Vectorization Pass
@@ -352,9 +352,26 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     # Refuse until a SCEV/runtime-guard path is added in a follow-up wave.
     if recipe.trip_count < 0:
         return func
-    # Misaligned static trip counts (trip_count % chunk_width != 0) are now handled
-    # by create_peeling_block emitting a scalar body clone for the remainder.
-    # No longer refused here — Defect C (Wave L3b) is resolved.
+    # R4b: a trip count that is not a whole number of chunks is REFUSED.
+    #
+    # This was previously claimed resolved ("handled by create_peeling_block
+    # emitting a scalar body clone for the remainder"). It is not handled, and
+    # the execution-level differential test over trip counts 4..17 is what
+    # finally showed it. Two independent wrong answers:
+    #
+    #   * the peel block emits exactly ONE cloned iteration no matter how many
+    #     remain, then leaves the loop — so for trip 9 only out[0] is written
+    #     and elements 1..8 keep their old contents; and
+    #   * it terminates at a hard-coded `header + 3`, a block that does not
+    #     exist on any CFG with a real continuation (the same assumption D3
+    #     removed from the vector path but not from this one).
+    #
+    # Refusing costs the remainder loops an optimization. Not refusing miscompiles
+    # them. Lift this only together with a real peel that runs `trip % chunk`
+    # iterations and exits to the resolved exit block, and extend the
+    # differential sweep to prove it.
+    if recipe.trip_count % recipe.chunk_width != 0:
+        return func
 
     # R5: need an output base
     if not recipe.output_base.?:
@@ -522,12 +539,21 @@ fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_g
     if guard_usable:
         new_blocks.push(create_scalar_version_block(body_blocks_for_peel[0], scalar_id))
 
+    # The vector loop's own temporaries must be declared too, WITH their
+    # vector types. The guard temporaries were given this treatment (D4) and
+    # the vector body's were not, which left the AVX-512 selector unable to
+    # shape a single one of them: it reads `func.locals` and nothing else, so
+    # it rejected every auto-vectorized function with
+    # `avx512-load-splat-gather-shape-mismatch`. The pass therefore emitted no
+    # AVX-512 at all on the native path — see the chain spec, which feeds this
+    # function's real output to the real admission.
     var spliced = MirFunction.with_blocks(func, new_blocks)
-    if guard_locals.len() > 0:
-        var all_locals = spliced.locals
-        for gl in guard_locals:
-            all_locals.push(gl)
-        spliced.locals = all_locals
+    var all_locals = spliced.locals
+    for gl in guard_locals:
+        all_locals.push(gl)
+    for vl in vector_loop_locals(ctx, recipe.header_block.id):
+        all_locals.push(vl)
+    spliced.locals = all_locals
     spliced
 
 fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
@@ -743,8 +769,15 @@ fn _halve_lane_count(lanes: i64) -> i64:
 fn _narrow_recipe_to_trip_count(recipe: VectorRecipe) -> VectorRecipe:
     """
     Step the recipe's chunk width down 512 -> 256 -> 128 until it fits the
-    static trip count, so a wider planning level never vectorizes FEWER loops
-    than a narrower one.
+    static trip count AND divides it evenly, so a wider planning level never
+    vectorizes FEWER loops than a narrower one.
+
+    Divisibility is part of "fits": R4b refuses a trip count that is not a
+    whole number of chunks, so narrowing only until `trip >= width` leaves
+    shapes like trip 12 at 8 lanes — which R4b then refuses, even though the
+    same loop vectorizes cleanly at 4. That is exactly the AVX-512-refuses-
+    what-AVX2-accepts regression this ladder exists to prevent, arriving by a
+    different route.
 
     A dynamic trip count (-1) is left alone: there is nothing to fit against,
     and narrowing on no evidence would silently give up lanes.
@@ -752,7 +785,7 @@ fn _narrow_recipe_to_trip_count(recipe: VectorRecipe) -> VectorRecipe:
     if recipe.trip_count < 0:
         return recipe
     var width = recipe.chunk_width
-    while width > 4 and recipe.trip_count < width:
+    while width > 4 and (recipe.trip_count < width or recipe.trip_count % width != 0):
         width = _halve_lane_count(width)
     if width == recipe.chunk_width:
         return recipe

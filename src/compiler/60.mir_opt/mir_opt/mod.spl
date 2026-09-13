@@ -358,32 +358,32 @@ fn pass_status(kind: PassKind) -> PassStatus:
         case BodyOutlining:
             PassStatus.Skeleton
         case AutoVectorize:
-            # REVERTED to AnalysisOnly on 2026-09-13, hours after being flipped
-            # to Active, because an adversarial review found four defects that
-            # make the rewrite unsafe on real MIR. The alias oracle and the
-            # runtime guard are correct and stay; what is not yet correct is
-            # everything around them:
+            # ACTIVE as of 2026-09-13, after the execution-level differential
+            # test the tracking record named as the gate finally passed.
             #
-            #  * the guard's span is computed from `recipe.element_type`, which
-            #    `get_instruction_type` hard-codes to "f32" for every BinOp. So
-            #    span_bytes is always trip_count*4, half the truth for an f64
-            #    or i64 loop, and a partial overlap at exactly that distance
-            #    PASSES the guard — the one case it exists to reject.
-            #  * when a guard is required but cannot be bounded, the rewriter
-            #    falls through to the UNGUARDED rewrite instead of declining.
-            #  * block ids are assigned as header+1/+2/+3 while every original
-            #    block with a higher id is kept verbatim, so a real CFG gets
-            #    DUPLICATE ids and the vector path exits to a block that does
-            #    not exist. The single-block unit fixture cannot observe this.
-            #  * the guard's temporaries are never added to func.locals, so they
-            #    have no type entry and can collide with real locals.
+            # It is Active now, and was not at the previous attempt, because
+            # the rewrite is for the first time RUN rather than inspected. The
+            # four defects that forced the earlier revert (guessed element
+            # width, unguarded fall-through, colliding block ids, undeclared
+            # guard temporaries) are fixed, the emitted body is real
+            # MirSimdLoad/Binop/Store the interpreter executes, and running it
+            # against the scalar loop then exposed two more that no structural
+            # test could have:
             #
-            # Each of those is a wrong-answer-at-runtime risk, not a missed
-            # optimization. Active is the correct destination and the work to
-            # get back there is scoped in the tracking record; shipping it
-            # before these are fixed would be exactly the silent miscompilation
-            # the oracle was built to prevent.
-            PassStatus.AnalysisOnly
+            #  * the vector loop never advanced its induction variable — the
+            #    increment wrote a separate local — so it looped forever; and
+            #  * a trip count that is not a whole number of chunks wrote one
+            #    element through a one-iteration "peel" and jumped to a block
+            #    that does not exist. Those are now REFUSED (R4b) rather than
+            #    miscompiled, and the width ladder narrows to a divisor so an
+            #    AVX-512 plan still accepts everything an AVX2 plan does.
+            #
+            # The scope this is Active for is therefore deliberately narrow:
+            # elementwise loops with a static trip count that is a whole
+            # number of lanes, cleared by the alias oracle or by the runtime
+            # range guard. Widening it means extending the differential sweep
+            # first.
+            PassStatus.Active
         case TargetNarrowForm:
             PassStatus.Skeleton
         case PatternIdiom:
@@ -453,13 +453,15 @@ fn mir_pass_backend_outcome_name(outcome: MirPassBackendOutcome) -> text:
         case NotApplicable: "not-applicable"
 
 fn pass_witness_contract(kind: PassKind) -> PassWitnessContract?:
-    # AutoVectorize's witness pair was removed together with its Active status
-    # on 2026-09-13. The registry check is explicit that an INACTIVE pass must
-    # not advertise executable witnesses ("inactive pass must not advertise
-    # executable witnesses"), so leaving the contract behind while reverting
-    # the status is itself an integrity error. The identities that belong here
-    # when it goes Active again are recorded in the tracking record.
+    # Re-added with the Active flip. The registry check requires that an
+    # INACTIVE pass advertise no executable witnesses, so this pair and
+    # `pass_status` must move together in both directions.
     match kind:
+        case AutoVectorize:
+            Some(PassWitnessContract(
+                kind: PassKind.AutoVectorize,
+                positive_id: "auto_vectorize/exact-alias-elementwise-add",
+                negative_id: "auto_vectorize/undecidable-distinct-bases"))
         case _: nil
 
 fn pass_witness_registry_integrity_errors_for(

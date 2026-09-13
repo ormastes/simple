@@ -5,7 +5,7 @@
 
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirBlock}
-use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
+use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind, MirLocal, LocalKind}
 use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo}
 use compiler.mir_opt.mir_opt.simd_opt_metadata.{plugin_hook_vectorize_event}
 # `Span` is used in DECLARATION position here (`span: Span?` parameter at
@@ -164,10 +164,22 @@ fn create_alignment_check_block(ctx: VectorizeContext, loop_info: VectorLoopInfo
         else_: vec_id
     )
 
+    # The vector loop's induction local. It MUST be seeded here: the vector
+    # block reads it on its first instruction, and align_check is the only
+    # block that dominates both the vector entry and the peel fall-through.
+    # Without this the loop started from an undefined index.
+    val vi_init = MirInst(
+        kind: MirInstKind.Const(
+            LocalId(id: ctx.next_local + 200),
+            MirConstValue.Int(0),
+            MirType(kind: MirTypeKind.I64)),
+        span: nil
+    )
+
     MirBlock(
         id:           block_id,
         label:        Some("align_check"),
-        instructions: [range_inst, mismatch_inst],
+        instructions: [range_inst, mismatch_inst, vi_init],
         terminator:   terminator
     )
 
@@ -691,6 +703,46 @@ fn _vec_block_instructions(body: [MirInst], inc_inst: MirInst, guard_inst: MirIn
     out.push(guard_inst)
     out
 
+fn vector_loop_locals(ctx: VectorizeContext, base_block_id: i64) -> [MirLocal]:
+    """Declare every local `create_vector_loop_block` writes, WITH its type.
+
+    This is not bookkeeping. `x86_plan_avx512_fixed`
+    (x86_64_avx512_isel.spl:53-59) derives every vector shape from
+    `func.locals` declared types and from nothing else — inference only
+    propagates across copies and mask ops, and `MirSimdLoad` carries its
+    vector type but is CHECKED against the shape rather than seeding it. So a
+    vector temporary that is absent from `func.locals` has no shape, and the
+    AVX-512 selector rejects the whole function with
+    `avx512-load-splat-gather-shape-mismatch`.
+
+    Measured before this existed: the rewrite emitted 4 SIMD instructions and
+    declared 0 vector locals, so the pass produced NO AVX-512 on the native
+    path however correct its MIR was. Every check in place at the time stopped
+    at the MIR and could not see it.
+
+    Returns an empty list when the element/lane combination has no vector
+    MirType — the vector body is empty in that case, so there is nothing to
+    declare.
+    """
+    val vt_opt = vector_mir_type(ctx.element_type, ctx.vector_width)
+    if not vt_opt.?:
+        return []
+    val vt = vt_opt.unwrap()
+    var out: [MirLocal] = []
+    # The three vector values: the two loaded slices and the result.
+    for id in [base_block_id + 201, base_block_id + 202, base_block_id + 203]:
+        out.push(MirLocal(id: LocalId(id: id), name: nil, type_: vt,
+            kind: LocalKind.Temp, is_ghost: false))
+    # Induction index, exit-guard flag, and the three slice addresses are
+    # scalar. They are declared for the same reason: an undeclared local has
+    # no type entry for any consumer, not just the AVX-512 planner.
+    for id in [base_block_id + 200, base_block_id + 205,
+               base_block_id + 210, base_block_id + 211, base_block_id + 212]:
+        out.push(MirLocal(id: LocalId(id: id), name: nil,
+            type_: MirType(kind: MirTypeKind.I64),
+            kind: LocalKind.Temp, is_ghost: false))
+    out
+
 fn create_vector_loop_block(
     ctx: VectorizeContext,
     base_block_id: i64,
@@ -727,7 +779,6 @@ fn create_vector_loop_block(
     val va_local  = LocalId(id: base_block_id + 201)  # loaded vector a
     val vb_local  = LocalId(id: base_block_id + 202)  # loaded vector b
     val vres_local = LocalId(id: base_block_id + 203) # result vector
-    val vi1_local  = LocalId(id: base_block_id + 204) # updated vector index
 
     # Choose base arrays (default to sentinel locals if input_bases is short)
     val a_base = if input_bases.len() > 0: input_bases[0] else: LocalId(id: 0)
@@ -754,11 +805,17 @@ fn create_vector_loop_block(
         body.push(create_vector_addr(addr_o, output_base, vi_local))
         body.push(create_vector_store_typed(vres_local, addr_o))
 
-    # %vi1 = vi + chunk_width
+    # %vi = vi + chunk_width
+    #
+    # This writes back into the induction local itself. It previously wrote a
+    # SEPARATE local (`vi1`) and left `vi` untouched, so the back-edge below
+    # re-entered with the same index every time: an infinite loop, which is
+    # exactly what the execution-level differential test reported the first
+    # time this function was actually run.
     val vf_op = _i64_const(ctx.vector_width)
     val inc_inst = MirInst(
         kind: MirInstKind.BinOp(
-            vi1_local,
+            vi_local,
             MirBinOp.Add,
             MirOperand(kind: MirOperandKind.Copy(vi_local)),
             vf_op
@@ -766,14 +823,14 @@ fn create_vector_loop_block(
         span: nil
     )
 
-    # %cond = vi1 < trip_count  (exit guard: continue if more iterations remain)
+    # %cond = vi < trip_count  (exit guard: continue if more iterations remain)
     val vcond_local = LocalId(id: base_block_id + 205)
     val tc_op = _i64_const(trip_count)
     val guard_inst = MirInst(
         kind: MirInstKind.BinOp(
             vcond_local,
             MirBinOp.Lt,
-            MirOperand(kind: MirOperandKind.Copy(vi1_local)),
+            MirOperand(kind: MirOperandKind.Copy(vi_local)),
             tc_op
         ),
         span: nil
