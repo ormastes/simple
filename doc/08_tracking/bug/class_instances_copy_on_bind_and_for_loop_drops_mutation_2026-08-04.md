@@ -1,5 +1,73 @@
 # BUG: `class` instances copy on binding, and `for` loop mutation is discarded entirely
 
+## Re-measured 2026-09-13 — still OPEN. Now a clean LANE DIVERGENCE, and the affected-spec list is re-triaged
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`),
+Windows.
+
+### The language behaviour: JIT is correct, the interpreter is not
+
+The entry's own `probe_ref2.spl`, run verbatim inside `fn main()`:
+
+| checkpoint | what it tests | **JIT (default)** | **`SIMPLE_EXECUTION_MODE=interpret`** | contract |
+|---|---|---|---|---|
+| `P_before` | baseline | `xs0=0 c1=0` | `xs0=0 c1=0` | — |
+| `Q_after_loop` | `for c in xs: c.bump()` | `xs0=1 c1=1` ✓ | **`xs0=0 c1=0`** ✗ | 1 / 1 |
+| `R_after_index` | `xs[0].bump()` | `xs0=2 c1=2` ✓ | **`xs0=1 c1=0`** ✗ | 2 / 2 |
+| `S_alias` | `val a = c1; a.bump()` | `c1=3 a=3` ✓ | **`c1=0 a=1`** ✗ | 3 / 3 |
+
+The default JIT lane now honours `doc/07_guide/language/syntax.md:460`'s
+`class Person:  # Reference type` on all three checkpoints. The tree-walking
+interpreter still implements full value semantics and fails all three,
+including the headline `for`-loop symptom, with exit 0 and no diagnostic.
+
+So this is no longer "the language behaves as a value type" — it is a two-lane
+divergence with a known-good side, which gives any fix a reference
+implementation to match and a ready differential oracle.
+
+### The affected specs: re-run, and MOST of the 11 failures were something else
+
+**The spec harness runs the interpreter lane** — the bad one. Verified in-run
+with a `print "{not nil}"` probe inside an `it` (harness prints `true`; the JIT
+prints `false`). So these specs do exercise the defect.
+
+Re-ran all five named specs:
+
+| spec | before this pass | cause of remaining failures |
+|---|---|---|
+| `mock_spec.spl` | 4 total, **0 failed** | — |
+| `mock_phase3_spec.spl` | 31 total, **0 failed** | — |
+| `mock_phase4_spec.spl` | 24 total, **0 failed** | — |
+| `mock_phase5_spec.spl` | 28 total, 6 failed | **not this bug** — 6 × `semantic: unknown static method create on class MockFunction`; the class declares `static fn new`, never `create` (`src/lib/common/testing/mock/builder.spl:45`). A plain wrong method name in the spec. **Fixed in this pass** (`MockFunction.create(` -> `MockFunction.new(`, both the `test/01_unit/std/` and legacy `test/unit/std/` copies): now **28 total, 27 passed, 1 failed**. The pair was already divergent and stays divergent, so the test-tree divergence baseline is unaffected. |
+| `mock_phase6_spec.spl` | 59 total, 4 failed | consistent with this bug — `gets total calls across mocks` expected 3 got **0**, `gets total delay across mocks` expected 120 got **0**, `orchestrates multiple async services` expected 160 got **0**, `verifies all mocks called` got false: mutations to registered mocks are invisible through the registry. |
+
+That leaves at most **5** failures attributable to this defect, not 11 — **1
+verified plus 4 consistent-but-unverified**:
+
+- **Verified (1).** phase5's single survivor, `chains when with returns`.
+  `FluentExpectation.create(mockfn)` then
+  `fluent.when_called_with(["data"]).returns("result")` leaves
+  `mockfn.return_values.len()` at 0. The callee was checked rather than
+  assumed: `FluentExpectation` (`src/lib/nogc_async_mut/src/testing/mock/verification.spl:326`)
+  holds `mockfn: MockFunction` as a field, and `me returns(value)` at `:337`
+  really does call `self.mockfn.set_return_values([value])` on both its match
+  arms. So under reference semantics the caller's `mockfn` would see the write,
+  and under the interpreter's value semantics it does not — this is exactly the
+  `S_alias` checkpoint above, one object deep. It is a clean, small,
+  harness-runnable regression probe for this bug.
+- **Consistent but unverified (4).** phase6's four. Their shape — mutations to
+  registered mocks invisible through a registry, every aggregate reading 0 —
+  matches this defect, but no callee was inspected and no alternative cause was
+  ruled out. Do not count them as proven without doing for them what was done
+  for the phase5 survivor.
+
+### Severity
+
+Still high for the interpreter lane and therefore for the whole spec harness,
+but no longer a silent wrong answer on the default `simple run` path.
+
+Not fixed here — the interpreter is `src/compiler_rust/**`, off-limits during
+this pass (concurrent bootstrap).
 **Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** high — `doc/07_guide/language/syntax.md:460` documents `class` as a
@@ -134,6 +202,3 @@ correct against the documented reference-type contract; the runtime is not.
   fields it explicitly resets — it is a targeted workaround for one field, not
   a fix for the underlying copy-on-bind/for-loop mutation-drop defect
   documented here.
-
-## Triage 2026-09-12
-Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.

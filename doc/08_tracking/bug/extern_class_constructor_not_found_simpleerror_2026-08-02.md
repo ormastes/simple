@@ -1,5 +1,84 @@
 # `extern class` constructor is not callable — `SimpleError` fails with E1002
 
+## Closed 2026-09-13 — FIXED (one line in `src/lib/common/error.spl`), verified by running
+
+**Status: CLOSED (fixed).** Root cause isolated, fix applied, both lanes green.
+
+### Reproduced first
+
+The entry's own program, on the Rust seed `build/vt4/bootstrap/simple.exe`:
+
+```
+use std.error.{SimpleError, error}
+val e = error("boom")
+print "msg={e.message} code={e.code}"
+```
+
+failed identically on the default JIT lane **and** on
+`SIMPLE_EXECUTION_MODE=interpret`:
+`error[E1002]: function `SimpleError` not found`.
+
+### Root cause isolated to the `extern` keyword alone
+
+A/B on two otherwise byte-identical local modules — same fields, same
+constructor, same `export`, differing only in the declaration keyword:
+
+| declaration | result |
+|---|---|
+| `class SimpleError:` | `msg=boom code=0` — works |
+| `extern class SimpleError2:` | `E1002: function `SimpleError2` not found` |
+
+So it is not a link problem with *this* type, an import problem, or a
+declaration-visibility problem: `extern class` simply does not register a
+constructor. The entry's own diagnosis ("It is a LINK problem, not a missing
+declaration") was on the right track.
+
+### Why plain `class` is the correct fix here, not a workaround
+
+The docstring claimed `SimpleError` "is a builtin runtime type". It is not —
+searched and found **nothing** backing it:
+
+- no `SimpleError` anywhere in `src/runtime/**` C sources
+- no `SimpleError` in the frontend (`src/compiler/10.frontend/**`)
+
+and every use in `src/lib/**` (`nogc_async_mut/net/sffi.spl`,
+`nogc_sync_mut/net/*`, `gc_async_mut/net/*`, `play/cdp/client.spl`,
+`security/enforcement/capability.spl`) only ever *constructs* it from Simple
+code via `error(...)` and threads it through `Result<T, SimpleError>`. Nothing
+external ever supplies an instance, so there is no foreign representation for
+`extern` to be describing.
+
+### Fix
+
+`src/lib/common/error.spl:9` — `extern class SimpleError:` -> `class SimpleError:`.
+
+### Verified
+
+- The reported program now prints `msg=boom code=0` on **both** the default JIT
+  lane and `SIMPLE_EXECUTION_MODE=interpret`.
+- Consumer regression check: a program that imports
+  `std.nogc_async_mut.net.sffi` (the module declaring
+  `file_write_bytes(...) -> Result<(), SimpleError>`) alongside `std.error`,
+  builds an `Err(error("x"))` and `match`es it, prints `err=x code=0`. The
+  SFFI consumers still load and the `Result<(), SimpleError>` shape still
+  matches.
+
+### One correction to the report
+
+The entry says `SimpleError` is declared twice, at `src/lib/common/error.spl:9`
+and `src/lib/common/error/error.spl:15`. **The second file no longer exists.**
+There is exactly one declaration today, which is also why the fix is a single
+line.
+
+### Left open elsewhere
+
+The general defect — *`extern class` registers no constructor for any type* —
+is broader than `SimpleError` and is NOT fixed by this change; the A/B above is
+a clean minimal repro for whoever takes it. It was not fixed here because the
+constructor-registration path is in the seed (`src/compiler_rust/**`), which was
+off-limits during this pass (concurrent bootstrap).
+
+
 - **Status:** open
 - **Date:** 2026-08-02
 - **Found at:** `f3354f1924ab032503ae64f8761c8c067e76656b`
@@ -85,46 +164,3 @@ all. Two shapes are possible and the tree does not say which is intended:
    real construction path and the 16 consumers need re-pointing at it.
 
 Do not close by deleting the imports: all 16 are live uses.
-
-## Triage 2026-09-13 (BUGFIX-10 fanout)
-
-Re-ran the doc's own minimal repro verbatim on the deployed seed: still
-reproduces identically —
-
-```
-[jit-fallback] HIR lowering error: Unsupported feature: cannot infer field
-  type while lowering main: struct 'SimpleError' field 'message'
-error[E1002]: function `SimpleError` not found
-```
-
-One partial change since filing: the duplicate declaration at
-`src/lib/common/error/error.spl` no longer exists in this tree (only
-`src/lib/common/error.spl`'s `extern class SimpleError` remains), so the
-two-declarations angle mentioned in "What is NOT the cause" is now moot —
-but this was already ruled out as the cause back then, so it changes
-nothing about the actual defect. The error text
-("cannot infer field type while lowering ... struct '...' field ...") is
-emitted from the Rust seed's HIR lowering
-(`src/compiler_rust/compiler/src/hir/lower/expr/access.rs`,
-`module_pass.rs`), confirmed by grep — this is Rust-seed territory, out of
-scope for a pure-Simple bugfix lane, and the underlying question ("is
-`extern class` meant to be constructible from Simple at all?") remains the
-owner design decision this doc already correctly identifies. Left OPEN,
-unchanged.
-## Triage 2026-09-13
-
-Reproduced exactly as filed on base a6450c9d6f5 (seed sha256 prefix
-3d120a6f9ab5704b): `error[E1002]: function 'SimpleError' not found`,
-preceded by `HIR lowering error: Unsupported feature: cannot infer
-field type while lowering main: struct 'SimpleError' field 'message'`
-after JIT fallback to the interpreter -- both engines fail the same
-way, not just the JIT. The doc explicitly frames this as needing an
-owner decision (is extern class meant to be constructible from Simple
-at all, or does error() need a different construction path) before any
-fix, and the underlying HIR field-type-inference gap for extern class
-is very likely Rust-seed-side (this binary's JIT/HIR lowering).
-Deciding the design question and/or patching Rust seed HIR lowering
-is out of this lane's scope. Leaving OPEN, no attempt (per the doc's
-own "do not close by deleting the imports" and "do not fake a
-workaround" guidance).
-

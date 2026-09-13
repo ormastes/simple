@@ -1,38 +1,63 @@
 # BUG: a write inside `after_each` that reads the captured variable is lost; a constant write is not
 
-## Triage 2026-09-13 — narrowed: the in-repo case is now fixed, the probe case still reproduces
+## Re-measured 2026-09-13 — reproduces, but the TITLE IS WRONG: the constant write is lost too
 
-Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (interpreter mode).
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`),
+Windows, via `SIMPLE_BINARY=<abs> simple test <spec>`. The spec harness runs the
+**interpreter** lane here (verified in the same run with a `print "{not nil}"`
+probe, which prints `true`; the JIT prints `false` — see
+`not_over_nil_returns_false_in_run_engine_2026-08-04.md`).
 
-- **In-repo case FIXED.** `test/01_unit/std/feature_validation/testing_framework_spec.spl`
-  "Feature #184 - After Each Hooks" (now lines 160-178) declares
-  `cleanup_flag` at MODULE level (not inside the `describe` block) and both
-  examples now PASS: `SPEC FILE VERDICT: ... outcome=OK declared>=47
-  executed=47 passed=47 failed=0`. This is the same class this session
-  independently confirmed fixed in
-  `spec_harness_module_global_mutation_via_function_invisible_2026-08-07.md`
-  — module-level `var` mutation performed inside a called function (here, the
-  `after_each` hook) is now visible.
-- **Probe case STILL REPRODUCES.** Re-ran this doc's own probe (`describe`
-  block-scoped `var counter = 0`, captured by `after_each`, mutated with the
-  self-referencing `counter = counter + 1`) verbatim:
-  `expected 0 to equal 1` — identical to the original 2026-08-04 report. So
-  the discriminator is confirmed to be **declaration scope** (module-level
-  `var` vs. `describe`-block-scoped captured `var`), not constant-vs-
-  self-referencing-write as originally guessed — the `flag = true` /
-  `cleanup_flag = true` constant-write case now passes in BOTH scopes; only
-  `describe`-scoped closure-captured vars still lose a write on the path back
-  out of the hook, and only(as far as tested) for a self-referencing RHS.
-- **Not fixed here.** This is closure/capture write-back semantics in the
-  interpreter's `describe`/`it`/hook dispatch (not `src/lib/nogc_sync_mut/spec.spl`
-  alone — the capture mechanism is interpreter-level, matching
-  `.claude/rules/language.md`'s documented Runtime Limitation "Nested closure
-  capture - can READ outer vars, CANNOT MODIFY"). Fixing it correctly needs
-  the interpreter's closure environment model, which is a bigger and riskier
-  change than this lane's budget; left OPEN, repro re-confirmed and narrowed
-  above for whoever picks it up next.
+Probe: the entry's own hook, two warm-up examples so `after_each` fires twice,
+then the two captured values asserted in **separate** examples:
 
-**Status:** OPEN (narrowed 2026-09-13 — module-level case fixed, describe-scope case remains)
+```
+describe "closure capture probe":
+    var flag = false
+    var counter = 0
+    after_each:
+        flag = true                 # constant write
+        counter = counter + 1       # read-modify-write
+    it "warm1":   expect 1 to_equal 1
+    it "warm2":   expect 1 to_equal 1
+    it "flag":    expect flag to_equal true
+    it "counter": expect counter to_equal 2
+```
+
+```
+  ✓ warm1
+  ✓ warm2
+  ✗ flag        expected false to equal true
+  ✗ counter     expected 0 to equal 2
+Results: 5 total, 3 passed, 2 failed
+```
+
+**Both writes are lost.** The reported asymmetry — "a constant write is not
+[lost]" — does not hold: `flag` is still `false` after two hook firings.
+
+This correction matters because the asymmetry was the entry's main diagnostic
+clue and it is an artifact of how the original probe was read. Asserting `flag`
+and `counter` in the *same* `it` reports only one failure line, and it is the
+`counter` one; that reads as "flag passed" and it is not. Any future probe of
+this defect must assert each captured variable in its own example.
+
+With the asymmetry gone the defect is simpler than filed: **no** write performed
+inside an `after_each` hook is visible to the enclosing `describe` scope.
+
+Entry stays OPEN. Not fixed here — the hook/closure capture path is in the seed
+(`src/compiler_rust/**`), off-limits during this pass (concurrent bootstrap).
+
+**Possibly related, with a stated difference.**
+`top_level_array_index_assign_in_loop_silently_dropped_2026-08-25.md` (also
+re-characterised 2026-09-13) has the same outward shape: a body demonstrably
+runs while its writes to an enclosing scope vanish, silently, exit 0. Now that
+the asymmetry here is gone the two look *more* alike, not less. The remaining
+difference to check before assuming one mechanism: the module-scope defect
+discards the loop's control variable too (`i == 0` after `while i < 3`, yet the
+program terminates), i.e. the enclosing scope never sees any effect at all,
+whereas an `after_each` hook here is at least *invoked* the right number of
+times. Same family, plausibly; not proven identical.
+**Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** medium — spec hooks silently fail to accumulate state, so any
 `after_each`/`before_each` counter is stuck at its initial value. No error.
@@ -126,7 +151,3 @@ does not) by varying nesting and hook count one factor at a time.
 
 **Do not "fix" the spec** by deleting the `after_each` assertion — verifying
 that `after_each` actually runs is the entire point of that example.
-
-## Triage 2026-09-13
-
-The doc's own recommended next step is a careful bisection (constant vs. self-referencing write, nesting, hook count) of shared spec-harness capture semantics that every spec in the repo runs through -- high blast-radius, not appropriate to guess at within a single-bug budget. Leaving OPEN, no code change made; did not weaken the `after_each` assertion.

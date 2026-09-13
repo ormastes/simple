@@ -1,5 +1,70 @@
 # `not nil` yields `false` in the `run` engine but `true` under the test runner
 
+## REOPENED 2026-09-13 — the RESOLVED claim is wrong for the literal `not nil` case
+
+**Status: REOPENED (narrow).** The entry states all cases "now agree between
+`run` and the test runner". Measured today they do not: the very case the entry
+is titled after still diverges.
+
+Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`), one program,
+two lanes:
+
+| # | expression | JIT (default) | `SIMPLE_EXECUTION_MODE=interpret` | agree? |
+|---|---|---|---|---|
+| 1 | `not nil` (**literal**) | **`false`** | **`true`** | **NO** |
+| 2 | `not true` | `false` | `false` | yes |
+| 3 | `not false` | `true` | `true` | yes |
+| 4 | `e.?` where `e: i64? = nil` | `nil` | `nil` | yes |
+| 5 | `not e.?` | `true` | `true` | yes |
+| 6 | `not s.?` where `s: i64? = 42` | `false` | `false` | yes |
+| 7 | `not n` where `val n = nil` | `true` | `true` | yes |
+| 8 | `not 3` | `false` | `false` | yes |
+| 9 | `not 0` | `true` | `true` | yes |
+
+What the 2026-08-09 re-verification got right: rows 5, 6 and 7 are genuinely
+fixed. Row 7 in particular is the "previously-documented residual bare
+`val n = nil; not n` case" the re-verification called out, and it is now `true`
+on both lanes, as claimed.
+
+What it got wrong: **row 1**, `not` applied to the `nil` *literal* directly. On
+the JIT it is still `false`. Interpreting `not nil` as `false` means the literal
+`nil` is being treated as truthy — consistent with the `RT_NIL == 3` sentinel
+being non-zero and reaching a plain truthiness test, the same mechanism named in
+`bare_optional_in_condition_position_wrong_branch_2026-08-01.md` and
+`coalesce_raw_i64_sentinel_collision_2026-08-02.md` (both of which are genuinely
+fixed and were closed the same day). The fix evidently covered the paths where
+nil arrives through an optional-typed value but not the path where it is written
+as a bare literal.
+
+### Not an interpolation artifact — confirmed in three syntactic forms
+
+The table above reads `not nil` through `print "…={not nil}"`, and string
+interpolation is lexed separately in this compiler (proved elsewhere this
+session: `{on}` works where a bare `on` does not). So row 1 was re-run in three
+independent positions:
+
+| form | JIT | interpret |
+|---|---|---|
+| `val x = not nil` then `print x` | `false` | `true` |
+| `if not nil: print "T" else: print "F"` | `F` | `T` |
+| `print "interp={not nil}"` | `false` | `true` |
+
+All three diverge the same way, so the reopen stands as written. The
+`if not nil:` row is the consequential one: this is not just a printed value,
+it selects the wrong branch.
+
+Scope is now narrow and precise: **one operand form, one lane.** Severity is
+lower than originally filed — it can no longer make a whole optional-handling
+routine wrong — but it is still a silent wrong answer with no diagnostic, and it
+still lets a spec be green under one runner and red under the other, which was
+the original complaint.
+
+Suggested regression oracle: the nine rows above, asserted lane-for-lane.
+
+Not fixed here — the site is `src/compiler_rust/**`, off-limits during this pass
+(concurrent bootstrap).
+
+
 **Status:** RESOLVED — re-verified 2026-08-09. All cases (`not nil`, `not e.?`,
 `not Some(nil).?`, `not Some(42).?`, `not 3`, `not 0`) now agree between `run`
 and the test runner, INCLUDING the previously-documented residual bare

@@ -1,5 +1,48 @@
 # BUG: the `parse_*` text-method family silently strips the Option on JIT and native
 
+## Re-measured 2026-09-13 — BOTH silent-wrong-answer modes are GONE; only the representation divergence remains
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (Windows), same
+`SIMPLE_EXECUTION_MODE` knob. Program:
+
+```
+val a = "12".parse_int()
+val b = "abc".parse_int()
+val c = "3".parse_int() ?? -1
+print "p1={a} p2={b} p3={c}"
+```
+
+| | JIT (default) | interpret |
+|---|---|---|
+| `"12".parse_int()` | `12` | `Option::Some(12)` |
+| `"abc".parse_int()` | **`nil`** | `Option::None` |
+| `"3".parse_int() ?? -1` | **`3`** | `3` |
+
+Against the two failure modes this entry was filed on:
+
+- **"Absence → 0" — FIXED.** A failed parse now yields `nil` on the JIT, not `0`.
+  It is no longer indistinguishable from a successful parse of `"0"`.
+- **"Present 3 → absent" — FIXED.** `"3".parse_int() ?? -1` gives `3`, not `-1`.
+  This follows from the `??` sentinel fix recorded in
+  `coalesce_raw_i64_sentinel_collision_2026-08-02.md` (re-verified closed the
+  same day), which removed the `TAG_SPECIAL == 3` collision that made this the
+  "more dangerous and invisible" mode.
+
+**What is still true:** the JIT prints `12` / `nil` where the interpreter prints
+`Option::Some(12)` / `Option::None`. The Option wrapper is still stripped, so
+the two lanes still disagree on the *type* of the result and any code that
+pattern-matches the Option or calls a method on it will behave differently
+across lanes. That is a real cross-lane divergence and the staged migration
+below is still the right fix.
+
+**Severity should be downgraded**, though: this is no longer a silent wrong
+*value*, it is a wrong *representation* that presents as `nil` — which fails
+visibly at the next use — rather than as a plausible-looking `0`. Anyone
+scheduling the staged migration should reprice it accordingly.
+
+Native column not re-measured (no `compile --native` run in this pass).
+
+
 - **Status:** OPEN — measured, staged migration designed, stage 0 (measurement) landed
 - **Filed:** 2026-08-02
 - **Base sha measured:** `a788a2a3e5c68ef1736401428397b5bf950d3a67`

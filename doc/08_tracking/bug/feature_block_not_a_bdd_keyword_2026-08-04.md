@@ -1,5 +1,73 @@
 # `feature "..."` is not a BDD block keyword — 10 spec files are dead entry points, 300 `it` blocks never run
 
+## Re-verified 2026-09-13 — STILL OPEN, blast radius has GROWN, and the fix site is now located
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (sha256 `dc138d50276d…`),
+Windows. The entry's own command, unchanged behaviour:
+
+```
+$ SIMPLE_BINARY=<abs>/simple.exe simple test test/system/compiler/graph_utils_spec.spl
+SPEC FILE VERDICT: ... outcome=ERROR declared>=6 executed=0 passed=0 failed=0
+error[E1002]: function `feature` not found
+error: test-runner: no examples executed
+Results: 1 total, 0 passed, 1 failed
+```
+
+Note `declared>=6 executed=0` — the harness can see the six examples and runs
+none of them.
+
+### Blast radius re-counted: 12 files, 307 `it` blocks (was 10 / 300)
+
+`grep -rlE '^feature "' test --include=*_spec.spl`:
+
+```
+test/01_unit/compiler/bdd_feature_group_keyword_spec.spl
+test/01_unit/lib/std/parser/error_recovery_spec.spl
+test/03_system/compiler/graph_utils_spec.spl
+test/03_system/compiler/mir_types_spec.spl
+test/03_system/compiler/symbol_hash_spec.spl
+test/03_system/stdlib/math/tensor_broadcast_spec.spl
+test/05_perf/compiler/runtime_optional_provider_binary_size_spec.spl
+test/system/compiler/graph_utils_spec.spl
+test/system/compiler/mir_types_spec.spl
+test/system/compiler/symbol_hash_spec.spl
+test/system/math/tensor_broadcast_spec.spl
+test/unit/lib/std/parser/error_recovery_spec.spl
+```
+
+The first of those is `bdd_feature_group_keyword_spec.spl` — a regression spec
+for *this very defect*, which itself opens with `feature "..."` and therefore
+cannot run: like `graph_utils_spec.spl` above it executes zero of its examples
+and reports one synthetic failure. That is the honest state for an open bug's
+regression spec (it is red, not falsely green), but it means the spec proves
+nothing about the defect it guards until the keyword works.
+
+### Fix site: the Rust seed only. The pure-Simple side already agrees.
+
+- `src/compiler/10.frontend/parser/test_analyzer.spl:132` already declares
+  `val GROUP_FUNCTIONS = ["describe", "context", "feature", "scenario"]` — the
+  pure-Simple analyzer treats `feature` and `scenario` as group functions
+  today.
+- The seed hard-codes only two: `"describe" | "context"` at
+  `src/compiler_rust/compiler/src/interpreter_call/bdd.rs:631` (with
+  `let is_describe = name == "describe"` at `:683`) and again at
+  `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs:3241`.
+
+So this is a two-line-shaped fix in the seed, not a design question, and the
+divergence is seed-vs-pure-Simple rather than a missing feature.
+
+### Why it was NOT fixed in this pass, and why the spec-side workaround was declined
+
+`src/compiler_rust/**` was off-limits (a bootstrap was running; editing Rust
+sources aborts it). The alternative — rewriting `feature "..."` to
+`describe "..."` across the 12 files — was deliberately **not** done: it would
+switch 307 never-executed `it` blocks on at once, and there is no evidence about
+how many of them pass. Landing an unknown quantity of new red as a side effect
+of a keyword fix is worse than the current honest failure, and it would also
+silently retire the `bdd_feature_group_keyword_spec.spl` regression spec.
+Whoever fixes the seed should flip the spec files in the same change and triage
+the resulting failures.
+
 **Status:** OPEN
 **Found:** 2026-08-04
 
@@ -80,6 +148,3 @@ runs, so it was not attempted from this lane. It is a small change — add
 it to `BDD_KEYWORDS` — but it needs a lane that owns the seed rebuild, plus a
 SPipe-owner decision on whether `feature` is blessed vocabulary or the specs
 should be migrated instead.
-
-## Triage 2026-09-12
-Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn. Record postdates 2026-07-29, so it is left open rather than closed.
