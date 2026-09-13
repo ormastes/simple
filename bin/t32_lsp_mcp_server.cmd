@@ -9,10 +9,17 @@ if exist "%EXE%" (
     "%EXE%" %*
     exit /b %ERRORLEVEL%
 )
-set "SIMPLE_RUNTIME=%REL%\simple.exe"
-if not "%SIMPLE_BINARY%"=="" set "SIMPLE_RUNTIME=%SIMPLE_BINARY%"
+set "SEED=%~dp0..\src\compiler_rust\target"
+set "SIMPLE_RUNTIME=%SIMPLE_BINARY%"
+if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%REL%\simple.exe"
+if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%SEED%\release\simple.exe"
+if not exist "%SIMPLE_RUNTIME%" set "SIMPLE_RUNTIME=%SEED%\bootstrap\simple.exe"
 if not exist "%SIMPLE_RUNTIME%" (
-    echo error: no t32_lsp_mcp_server.exe and no runtime at %SIMPLE_RUNTIME% 1>&2
+    echo error: no t32_lsp_mcp_server.exe and no Simple runtime found. Tried: 1>&2
+    echo   %%SIMPLE_BINARY%%=%SIMPLE_BINARY% 1>&2
+    echo   %REL%\simple.exe 1>&2
+    echo   %SEED%\release\simple.exe 1>&2
+    echo   %SEED%\bootstrap\simple.exe 1>&2
     exit /b 127
 )
 set "TOOLS=%~dp0..\examples\10_tooling\trace32_tools"
