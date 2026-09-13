@@ -94,3 +94,24 @@ offsets.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Triage 2026-09-13
+
+Re-reviewed in the BUGFIX-10 fanout sweep. Confirmed still applicable by
+reading `src/lib/gc_async_mut/gpu_lane/vulkan_vm_executor.spl:191-224` and
+`build_svmg_arena` at line 90 on this worktree's checkout (base `f26970e9d93`):
+`build_svmg_arena` still allocates a fresh `_zero_bytes(ARENA_TOTAL_SIZE)` per
+call and `run_source` still uploads it unconditionally, so the clobber is
+real. Root-cause fix (`build_svmg_arena_persisting_data` with **absolute**
+offset addressing, per the corrected `vulkan_exec.spl` workaround) requires a
+real or simulated Vulkan device to validate SVM-G STORE/LOAD absolute
+addressing end-to-end — this sandbox has no GPU/Vulkan ICD available
+(`vulkaninfo`/device probe not attempted: no compositor/GPU session in this
+worktree), and the record's own history shows a same-day attempt already
+regressed silently on a relative-offset mistake. Exceeds the 45-minute
+same-session budget to validate safely without device access. Leaving OPEN;
+direction unchanged from the "Suggested real fix" section above (thread
+`last_data_off`-style absolute-offset carry into `vulkan_vm_executor.spl`
+itself, mirroring the corrected `vulkan_exec.spl` call-site logic, and add a
+device-backed regression spec alongside
+`test/02_integration/app/tools/notebook/vulkan_exec_spec.spl`).
