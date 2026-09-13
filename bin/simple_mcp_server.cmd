@@ -74,6 +74,10 @@ if "%MCP_TMP%"=="" set "MCP_TMP=%TMP%"
 if "%MCP_TMP%"=="" set "MCP_TMP=%LOCALAPPDATA%\Temp"
 set "MCP_LOG_DIR=%MCP_TMP%\simple\mcp"
 if not exist "%MCP_LOG_DIR%\" mkdir "%MCP_LOG_DIR%" 2>nul
+rem Prune: keep the 20 newest run dirs (by creation time; the stamp in the name
+rem is not sortable across days). A running server holds its stderr.log open,
+rem so rd fails on that dir and it survives: a live log is never deleted.
+for /f "skip=20 delims=" %%d in ('dir /b /ad /t:c /o-d "%MCP_LOG_DIR%\simple_mcp_server_*" 2^>nul') do rd /s /q "%MCP_LOG_DIR%\%%d" 2>nul
 set "MCP_STAMP=%DATE:/=%%TIME: =0%"
 set "MCP_STAMP=%MCP_STAMP::=%"
 set "MCP_STAMP=%MCP_STAMP:.=%"
@@ -94,4 +98,7 @@ exit /b %ERRORLEVEL%
 set "MCP_LOG=%MCP_RUN_DIR%\stderr.log"
 echo simple_mcp_server: no admitted native exe; serving src\app\mcp\main.spl on %SIMPLE_RUNTIME% 1>>"%MCP_LOG%"
 "%SIMPLE_RUNTIME%" run "%~dp0..\src\app\mcp\main.spl" %* 2>>"%MCP_LOG%"
-exit /b %ERRORLEVEL%
+set "MCP_RC=%ERRORLEVEL%"
+rem Startup errors live in the log, so name it on stderr when the server fails.
+if not "%MCP_RC%"=="0" 1>&2 echo simple_mcp_server: exited %MCP_RC%; stderr log: %MCP_LOG%
+exit /b %MCP_RC%

@@ -312,19 +312,42 @@ export RUST_LOG="${RUST_LOG:-error}"
 
 printf 'startup wrapper=simple_mcp_server mode=native native=%s cwd=%s\n' "${native}" "$(pwd)" >>"${log_dir}/simple_mcp_startup.log"
 native_exec="$(simple_native_exec_path "${native}" "${host_family}")"
-# MCP clients surface stderr, so it goes to a per-process log by default.
-# exec keeps this pid, so <pid> names the server itself and concurrent clients
-# never share a file. The directory is created first; if that fails, stderr is
-# inherited rather than failing to start. SIMPLE_MCP_STDERR=inherit opts out.
+# MCP clients surface stderr, so it goes to a per-process log by default:
+# ${TMPDIR:-/tmp}/simple/mcp/<wrapper pid>/stderr.log. The directory is created
+# first; if that fails, stderr is inherited rather than failing to start.
+# SIMPLE_MCP_STDERR=inherit opts out.
 if [ "${SIMPLE_MCP_STDERR:-}" = "inherit" ]; then
   exec "${native_exec}" "$@"
 fi
 mcp_tmp="${TMPDIR:-/tmp}"
-mcp_run_dir="${mcp_tmp%/}/simple/mcp/$$"
+mcp_base="${mcp_tmp%/}/simple/mcp"
+# Prune: keep the 20 newest run dirs. A dir is named by its wrapper pid, and the
+# wrapper stays alive for as long as its server does (see below), so a pid that
+# still answers kill -0 is skipped: a live server's log is never deleted.
+if [ -d "${mcp_base}" ]; then
+  ls -1t "${mcp_base}" 2>/dev/null | tail -n +21 | while IFS= read -r mcp_old; do
+    case "${mcp_old}" in ''|*[!0-9]*) continue ;; esac
+    if kill -0 "${mcp_old}" 2>/dev/null; then
+      continue
+    fi
+    rm -rf "${mcp_base:?}/${mcp_old}"
+  done
+fi
+mcp_run_dir="${mcp_base}/$$"
 if ! mkdir -p "${mcp_run_dir}" 2>/dev/null; then
   exec "${native_exec}" "$@"
 fi
-exec "${native_exec}" "$@" 2>>"${mcp_run_dir}/stderr.log"
+mcp_log="${mcp_run_dir}/stderr.log"
+# Foreground child, not exec: the wrapper must outlive the server to report a
+# non-zero exit. The child is not backgrounded, because a non-interactive `&`
+# would replace its stdin (the MCP request stream) with /dev/null. If a client
+# kills the wrapper, the server still sees EOF on stdin and exits.
+mcp_rc=0
+"${native_exec}" "$@" 2>>"${mcp_log}" || mcp_rc=$?
+if [ "${mcp_rc}" -ne 0 ]; then
+  printf 'simple_mcp_server: exited %s; stderr log: %s\n' "${mcp_rc}" "${mcp_log}" >&2
+fi
+exit "${mcp_rc}"
 EOF
 chmod +x simple_mcp_server
 
