@@ -175,3 +175,7 @@ confirmed live" verification methodology left an unguarded
 `eprint("MARKER_RT_IS_NONE_ARM_REACHED")` behind at `expr_dispatch.spl:2239`;
 that stray probe was removed in this lane and is now guarded by
 `test/01_unit/compiler/mir/mir_lowering_no_stray_debug_marker_spec.spl`.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: reproduction needs a native build (native codegen semantic parity defect), which per sibling native-build records in this shard needs a multi-GB/multi-thousand-second build out of budget for a shared host. No change made.
