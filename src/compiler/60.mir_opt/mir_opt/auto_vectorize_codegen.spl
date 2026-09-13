@@ -5,6 +5,7 @@
 
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirBlock}
+use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
 use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo}
 use compiler.mir_opt.mir_opt.simd_opt_metadata.{plugin_hook_vectorize_event}
 # `Span` is used in DECLARATION position here (`span: Span?` parameter at
@@ -91,6 +92,23 @@ fn generate_prologue(ctx: VectorizeContext, loop_info: VectorLoopInfo) -> [MirBl
 
     blocks
 
+
+# MirOperandKind.Const is Const(value: MirConstValue, type_: MirType).
+#
+# Every constant this file emitted was built as `Const("i64", "{n}")` — both
+# arguments the wrong TYPE and in the wrong ORDER, so the value was the text
+# "i64" and the type was the text "{n}". That is malformed MIR, and it is
+# strong evidence the pass has never been exercised end to end: the same
+# mistake sat in the unit-test fixture until 2026-09-13, which is exactly what
+# you would expect when nothing downstream ever consumed the output.
+#
+# This helper is the single correct constructor; nothing in this file should
+# build a Const any other way.
+fn _i64_const(value: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Int(value),
+        MirType(kind: MirTypeKind.I64)))
+
 fn create_alignment_check_block(ctx: VectorizeContext, loop_info: VectorLoopInfo) -> MirBlock:
     """
     Create block that computes mismatch = (end - start) % chunk_width at runtime
@@ -121,9 +139,9 @@ fn create_alignment_check_block(ctx: VectorizeContext, loop_info: VectorLoopInfo
     val mismatch_dest = LocalId(id: ctx.next_local + 101)
 
     # Operands: loop bounds and chunk width come from VectorLoopInfo / VectorizeContext
-    val end_op   = MirOperand(kind: MirOperandKind.Const("i64", "{loop_info.end_value}"))
-    val start_op = MirOperand(kind: MirOperandKind.Const("i64", "{loop_info.start_value}"))
-    val vf_op    = MirOperand(kind: MirOperandKind.Const("i64", "{ctx.vector_width}"))
+    val end_op   = _i64_const(loop_info.end_value)
+    val start_op = _i64_const(loop_info.start_value)
+    val vf_op    = _i64_const(ctx.vector_width)
 
     # %range = end - start
     val range_inst = MirInst(
@@ -566,7 +584,7 @@ fn create_vector_loop_block(
         span: nil
     )
     # %vi1 = vi + chunk_width
-    val vf_op = MirOperand(kind: MirOperandKind.Const("i64", "{ctx.vector_width}"))
+    val vf_op = _i64_const(ctx.vector_width)
     val inc_inst = MirInst(
         kind: MirInstKind.BinOp(
             vi1_local,
@@ -579,7 +597,7 @@ fn create_vector_loop_block(
 
     # %cond = vi1 < trip_count  (exit guard: continue if more iterations remain)
     val vcond_local = LocalId(id: base_block_id + 205)
-    val tc_op = MirOperand(kind: MirOperandKind.Const("i64", "{trip_count}"))
+    val tc_op = _i64_const(trip_count)
     val guard_inst = MirInst(
         kind: MirInstKind.BinOp(
             vcond_local,
