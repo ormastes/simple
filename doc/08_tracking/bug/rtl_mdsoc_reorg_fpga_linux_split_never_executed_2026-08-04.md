@@ -117,3 +117,7 @@ Sequenced follow-ups:
 3. Only then do the `debug_sidecar_json_order_spec` key-order assertions become
    meaningful; today its `check_msg` guard is the only thing keeping the failure
    readable.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: 94 permanently-red examples across a specced-but-unimplemented refactor programme, not a bounded bug fix. No change made.
