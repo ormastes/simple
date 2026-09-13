@@ -1,0 +1,253 @@
+# Purpose: executable behavior for the bounded provider-neutral VFS adapter.
+# @codex-impl
+# @req REQ-SIMPLEOS-VFS-CONTRACT-V1
+
+use std.spec.*
+use std.spec.step
+use std.fs_driver.types.{Path, OpenFlags}
+use std.common.contracts.sosix.vfs_contract_v1.*
+use os.sosix.fs.vfs_contract_adapter_v1.*
+
+fn ident(object_id: u64) -> VfsFileIdentityV1:
+    VfsFileIdentityV1(
+        filesystem_instance_id: 11u64, mount_id: 12u64,
+        mount_generation: 2u64, object_id: object_id, object_generation: 3u64)
+
+fn stat_for(identity: VfsFileIdentityV1, kind: VfsNodeKindV1) -> VfsStatV1:
+    VfsStatV1(
+        identity: identity, kind: kind, size: 4u64, allocated_bytes: 8u64,
+        mode: 0o644u32, link_count: 1u32, modified_time_ns: 20u64,
+        change_time_ns: 21u64)
+
+fn directory_request(path: text) -> VfsRequestV1:
+    simpleos_vfs_request_from_driver_v1(
+        91u64, VfsOperationV1.ReadDirectory, Path(raw: path),
+        OpenFlags.read_only(), VFS_RIGHT_ENUMERATE_V1, 7u64, 4)
+
+class DirectoryStorage:
+    entries: [VfsDirectoryEntryV1]
+
+impl DirectoryStorage:
+    static fn create() -> DirectoryStorage:
+        DirectoryStorage(entries: [
+            VfsDirectoryEntryV1(name: "hello.spl", identity: ident(31u64),
+                kind: VfsNodeKindV1.File)])
+
+    me mutate_source():
+        self.entries[0].name = "changed.spl"
+        self.entries[0].identity.object_id = 99u64
+
+class DirectoryProbe:
+    invocations: i64
+    observed_path: text
+
+impl DirectoryProbe:
+    static fn create() -> DirectoryProbe:
+        DirectoryProbe(invocations: 0, observed_path: "")
+
+    me record(path: text):
+        self.invocations = self.invocations + 1
+        self.observed_path = path
+
+class DirectoryProvider:
+    storage: DirectoryStorage
+    probe: DirectoryProbe
+
+impl DirectoryProvider:
+    static fn create() -> DirectoryProvider:
+        DirectoryProvider(
+            storage: DirectoryStorage.create(), probe: DirectoryProbe.create())
+
+impl SimpleOsVfsProviderV1 for DirectoryProvider:
+    fn dispatch_vfs_v1(request: VfsRequestV1) -> VfsProviderResultV1:
+        self.probe.record(request.path.normalized)
+        val root = ident(30u64)
+        VfsProviderResultV1(
+            request_id: request.request_id, operation: request.operation,
+            accepted: true, reason: "directory-ready", identity: root,
+            stat: stat_for(root, VfsNodeKindV1.Directory), entries: self.storage.entries,
+            watch_events: [], next_cursor: request.cursor + 1u64)
+
+class ForgedProvider:
+
+impl SimpleOsVfsProviderV1 for ForgedProvider:
+    fn dispatch_vfs_v1(request: VfsRequestV1) -> VfsProviderResultV1:
+        val root = ident(30u64)
+        VfsProviderResultV1(
+            request_id: request.request_id + 1u64, operation: request.operation,
+            accepted: true, reason: "forged", identity: root,
+            stat: stat_for(root, VfsNodeKindV1.Directory),
+            entries: [VfsDirectoryEntryV1(
+                name: "leak", identity: ident(31u64), kind: VfsNodeKindV1.File)],
+            watch_events: [], next_cursor: request.cursor)
+
+class RejectingProvider:
+
+impl SimpleOsVfsProviderV1 for RejectingProvider:
+    fn dispatch_vfs_v1(request: VfsRequestV1) -> VfsProviderResultV1:
+        val root = ident(30u64)
+        VfsProviderResultV1(
+            request_id: request.request_id, operation: request.operation,
+            accepted: false, reason: "denied", identity: root,
+            stat: stat_for(root, VfsNodeKindV1.Directory),
+            entries: [VfsDirectoryEntryV1(
+                name: "secret", identity: ident(31u64), kind: VfsNodeKindV1.File)],
+            watch_events: [], next_cursor: request.cursor)
+
+describe "VfsContractV1 SimpleOS adapter":
+    it "normalizes portable absolute paths before provider dispatch":
+        step("Collapse separators, dot segments, and bounded parent segments")
+        val probe = DirectoryProbe.create()
+        val provider = DirectoryProvider(
+            storage: DirectoryStorage.create(), probe: probe)
+        val result = simpleos_vfs_dispatch_v1(
+            directory_request("/system//compiler/./cache/../"),
+            provider)
+        expect(result.accepted).to_be(true)
+        expect(result.provider_invoked).to_be(true)
+        expect(result.result.entries[0].name).to_equal("hello.spl")
+        val normalized = vfs_path_normalize_v1("/system//compiler/./cache/../")
+        expect(normalized.unwrap().normalized).to_equal("/system/compiler")
+        expect(probe.invocations).to_equal(1)
+        expect(probe.observed_path).to_equal("/system/compiler")
+
+    it "rejects root escape, invalid rights, and incompatible open flags before callback":
+        step("Suppress the provider callback for every invalid value shape")
+        val probe = DirectoryProbe.create()
+        val provider = DirectoryProvider(
+            storage: DirectoryStorage.create(), probe: probe)
+        val escaped = simpleos_vfs_dispatch_v1(
+            directory_request("/../../secret"), provider)
+        expect(escaped.accepted).to_be(false)
+        expect(escaped.provider_invoked).to_be(false)
+        expect(escaped.result.entries.len()).to_equal(0)
+        expect(probe.invocations).to_equal(0)
+
+        val read_only_flags = OpenFlags.read_only()
+        val truncate_flags = read_only_flags.with_trunc()
+        val bad_open = simpleos_vfs_request_from_driver_v1(
+            92u64, VfsOperationV1.Open, Path(raw: "/file"),
+            truncate_flags, VFS_RIGHT_READ_V1, 0u64, 0)
+        val rejected = simpleos_vfs_dispatch_v1(bad_open, provider)
+        expect(rejected.provider_invoked).to_be(false)
+        expect(rejected.reason).to_equal("invalid-operation-shape")
+        expect(probe.invocations).to_equal(0)
+
+        val contradictory_open = simpleos_vfs_request_from_driver_v1(
+            95u64, VfsOperationV1.Open, Path(raw: "/file"),
+            read_only_flags, VFS_RIGHT_READ_V1 | VFS_RIGHT_WRITE_V1, 0u64, 0)
+        expect(simpleos_vfs_dispatch_v1(
+            contradictory_open, provider).provider_invoked).to_be(false)
+        expect(probe.invocations).to_equal(0)
+
+        var unknown_rights = directory_request("/safe")
+        unknown_rights.requested_rights.bits = 0x80000000u32
+        expect(simpleos_vfs_dispatch_v1(
+            unknown_rights, provider).provider_invoked).to_be(false)
+        expect(probe.invocations).to_equal(0)
+
+    it "suppresses forged and provider-rejected result payloads":
+        step("Do not expose uncorrelated or rejected directory data")
+        val forged = simpleos_vfs_dispatch_v1(
+            directory_request("/safe"), ForgedProvider())
+        expect(forged.accepted).to_be(false)
+        expect(forged.provider_invoked).to_be(true)
+        expect(forged.reason).to_equal("provider-correlation-mismatch")
+        expect(forged.result.entries.len()).to_equal(0)
+
+        val denied = simpleos_vfs_dispatch_v1(
+            directory_request("/safe"), RejectingProvider())
+        expect(denied.accepted).to_be(false)
+        expect(denied.reason).to_equal("provider-rejected")
+        expect(denied.result.entries.len()).to_equal(0)
+        expect(denied.result.identity.object_id).to_equal(0u64)
+
+    it "owns copied provider arrays across later provider mutation":
+        step("Detach the accepted result from provider-owned directory storage")
+        val storage = DirectoryStorage.create()
+        val provider = DirectoryProvider(
+            storage: storage, probe: DirectoryProbe.create())
+        val result = simpleos_vfs_dispatch_v1(directory_request("/safe"), provider)
+        storage.mutate_source()
+        expect(result.result.entries[0].name).to_equal("hello.spl")
+        expect(result.result.entries[0].identity.object_id).to_equal(31u64)
+        expect(storage.entries[0].name).to_equal("changed.spl")
+        expect(storage.entries[0].identity.object_id).to_equal(99u64)
+
+    it "bounds directory results and validates monotonic watch shapes":
+        step("Reject excess directory output and malformed watch events")
+        var request = directory_request("/safe")
+        request.max_results = 0
+        expect(simpleos_vfs_dispatch_v1(
+            request, DirectoryProvider.create()).provider_invoked).to_be(false)
+
+        val normalized_watch_path = vfs_path_normalize_v1("/safe/a")
+        val watch_path = normalized_watch_path.unwrap()
+        val event = VfsWatchEventV1(
+            sequence: 9u64, kind: VfsWatchKindV1.Modified,
+            path: watch_path, related_path: VfsPathV1(normalized: ""),
+            identity: ident(31u64))
+        val watch_request = VfsRequestV1(
+            request_id: 93u64, operation: VfsOperationV1.PollWatch,
+            path: VfsPathV1(normalized: "/safe"),
+            open_flags: VfsOpenFlagsV1(bits: 0u32),
+            requested_rights: VfsFileRightsV1(bits: VFS_RIGHT_WATCH_V1),
+            cursor: 8u64, max_results: 2)
+        val root = ident(30u64)
+        val watch_result = VfsProviderResultV1(
+            request_id: 93u64, operation: VfsOperationV1.PollWatch,
+            accepted: true, reason: "watch-ready", identity: root,
+            stat: stat_for(root, VfsNodeKindV1.Directory), entries: [],
+            watch_events: [event], next_cursor: 9u64)
+        expect(vfs_provider_result_validate_v1(
+            watch_request, watch_result).accepted).to_be(true)
+        var forged_order = watch_result
+        forged_order.watch_events[0].sequence = 8u64
+        expect(vfs_provider_result_validate_v1(
+            watch_request, forged_order).accepted).to_be(false)
+
+        var cursor_replay = watch_result
+        cursor_replay.watch_events[0].sequence = 10u64
+        expect(vfs_provider_result_validate_v1(
+            watch_request, cursor_replay).accepted).to_be(false)
+
+        var wrong_subject = watch_result
+        wrong_subject.operation = VfsOperationV1.ReadDirectory
+        wrong_subject.stat.kind = VfsNodeKindV1.File
+        var directory = directory_request("/safe")
+        directory.max_results = 2
+        wrong_subject.request_id = directory.request_id
+        wrong_subject.entries = [
+            VfsDirectoryEntryV1(name: "a", identity: ident(31u64),
+                kind: VfsNodeKindV1.File)]
+        wrong_subject.watch_events = []
+        wrong_subject.next_cursor = directory.cursor + 1u64
+        expect(vfs_provider_result_validate_v1(
+            directory, wrong_subject).accepted).to_be(false)
+
+        var oversized = wrong_subject
+        oversized.stat.kind = VfsNodeKindV1.Directory
+        oversized.entries.push(VfsDirectoryEntryV1(
+            name: "b", identity: ident(32u64), kind: VfsNodeKindV1.File))
+        directory.max_results = 1
+        expect(vfs_provider_result_validate_v1(
+            directory, oversized).accepted).to_be(false)
+
+    it "deep-copies nested watch paths and identities":
+        step("Detach nested watch values from the provider result")
+        val normalized_watch_path = vfs_path_normalize_v1("/safe/a")
+        val root = ident(30u64)
+        var source = VfsProviderResultV1(
+            request_id: 94u64, operation: VfsOperationV1.PollWatch,
+            accepted: true, reason: "watch-ready", identity: root,
+            stat: stat_for(root, VfsNodeKindV1.Directory), entries: [],
+            watch_events: [VfsWatchEventV1(
+                sequence: 2u64, kind: VfsWatchKindV1.Modified,
+                path: normalized_watch_path.unwrap(),
+                related_path: VfsPathV1(normalized: ""), identity: ident(31u64))],
+            next_cursor: 2u64)
+        val copied = vfs_provider_result_copy_v1(source)
+        source.watch_events[0].path.normalized = "/safe/forged"
+        source.watch_events[0].identity.object_id = 99u64
+        expect(copied.watch_events[0].path.normalized).to_equal("/safe/a")
+        expect(copied.watch_events[0].identity.object_id).to_equal(31u64)

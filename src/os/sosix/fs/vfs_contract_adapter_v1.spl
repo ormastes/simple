@@ -1,0 +1,49 @@
+"""SimpleOS SOSIX adapter for the provider-neutral VFS V1 value contract.
+
+The adapter owns validation/copy boundaries only. It neither calls the kernel
+ABI nor implements NVFS/storage behavior.
+"""
+
+use std.fs_driver.types.{Path, OpenFlags}
+use std.common.contracts.sosix.vfs_contract_v1.*
+
+pub trait SimpleOsVfsProviderV1:
+    fn dispatch_vfs_v1(request: VfsRequestV1) -> VfsProviderResultV1
+
+pub struct SimpleOsVfsAdapterResultV1:
+    accepted: bool
+    reason: text
+    provider_invoked: bool
+    result: VfsProviderResultV1
+
+pub fn simpleos_vfs_request_from_driver_v1(
+    request_id: u64, operation: VfsOperationV1, path: Path,
+    flags: OpenFlags, rights_bits: u32, cursor: u64, max_results: i64
+) -> VfsRequestV1:
+    VfsRequestV1(
+        request_id: request_id, operation: operation,
+        path: VfsPathV1(normalized: path.raw),
+        open_flags: VfsOpenFlagsV1(bits: flags.bits),
+        requested_rights: VfsFileRightsV1(bits: rights_bits),
+        cursor: cursor, max_results: max_results)
+
+pub fn simpleos_vfs_dispatch_v1(
+    request: VfsRequestV1, provider: SimpleOsVfsProviderV1
+) -> SimpleOsVfsAdapterResultV1:
+    val prepared = vfs_request_prepare_v1(request)
+    if not prepared.accepted:
+        return SimpleOsVfsAdapterResultV1(
+            accepted: false, reason: prepared.reason, provider_invoked: false,
+            result: vfs_provider_result_suppressed_v1(request, prepared.reason))
+    val provider_result = provider.dispatch_vfs_v1(prepared.request)
+    val checked = vfs_provider_result_validate_v1(prepared.request, provider_result)
+    if not checked.accepted:
+        return SimpleOsVfsAdapterResultV1(
+            accepted: false, reason: checked.reason, provider_invoked: true,
+            result: vfs_provider_result_suppressed_v1(prepared.request, checked.reason))
+    SimpleOsVfsAdapterResultV1(
+        accepted: true, reason: "accepted", provider_invoked: true,
+        result: vfs_provider_result_copy_v1(provider_result))
+
+export SimpleOsVfsProviderV1, SimpleOsVfsAdapterResultV1
+export simpleos_vfs_request_from_driver_v1, simpleos_vfs_dispatch_v1
