@@ -854,7 +854,8 @@ same binary. Filed as
 RSS growth, which run 21 had left as an unexplained difference from the macOS
 flat/falling curve: `visited[nil]=true` does not make `visited.has(nil)` true,
 so `order` gains a nil every two iterations without bound. Same defect, both
-lanes — this fix should unblock Linux BOOT-8 too.
+lanes — the Linux signature MATCHES, but no Linux fixture was run, so "this also
+unblocks Linux BOOT-8" is a PREDICTION, not a measurement.
 
 Before / after, same fixture and runtime authority:
 

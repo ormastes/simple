@@ -213,3 +213,24 @@ everything above and both in `native_compile` of the 2 units:
    positive against a file that was never mutated.
 
 Not fixed here.
+
+### Divergence-delta escape record (required by `.claude/rules/vcs.md`)
+
+PR #768 landed on a `check-test-tree-divergence-delta` PASS over a pre-existing
+red. Verdict: `PASS — 3218 pre-existing offender(s), 0 introduced by this range`;
+base verdict `FAIL — 3946 diverged vs 965 baselined (3084 new, 103
+fixed-but-still-baselined); 32 mirror-only (31 unallowlisted, 0 stale-allowlist)`.
+Offender list saved by the helper to
+`/var/folders/94/j3lc49d93bx148gqls5kx5d40000gn/T//test_tree_divergence_preexisting.txt`
+(host-local temp; regenerate with
+`sh scripts/check/check-test-tree-divergence-delta.shs <BASE> <NEW>`). The range
+touches no mirror pair: its only test file is the new
+`test/01_unit/compiler/driver/build_graph_topological_order_terminates_spec.spl`.
+
+### Open risk, not closed by PR #768
+
+No census was run for other `while <arr>.?:` / `if <arr>.?:` sites in the
+bootstrap closure. Site 10 is therefore **not** provably the only remaining
+obstacle to Stage-2 admission — another call site could hit the same `.?` defect.
+That census belongs to the compiler-fix lane; until it exists, treat "site 10 is
+the last blocker" as unverified.
