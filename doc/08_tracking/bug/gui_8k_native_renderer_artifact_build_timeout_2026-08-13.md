@@ -103,3 +103,7 @@ benchmarks before it is fixed would only re-derive the same blocker. Detail:
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: blocked on a native renderer artifact build (GUI/8K), heavy build not attempted on this shared host. No change made.

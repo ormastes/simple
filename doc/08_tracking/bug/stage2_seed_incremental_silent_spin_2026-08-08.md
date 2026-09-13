@@ -40,3 +40,7 @@ the seed builder.
 Without a fresh admissible Stage-2 compiler, the project cannot produce the
 self-hosted Stage-3/Stage-4 CLI required for measured 346-outcome ML-KEM
 coverage or provenance-bound CUDA/Vulkan/Metal full-operation runners.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a Stage-2 bootstrap run to reproduce/verify. No change made.
