@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=248
+ROW_FLOOR=279
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -886,6 +886,28 @@ must_contain     "LOCALUSEENUM node_exec publishes imported enums" \
 must_contain     "LOCALUSEENUM spec keeps the module-scope control fixture" \
     "$ROOT/test/01_unit/compiler/loader/function_local_use_enum_scope_spec.spl" \
     "entry_top_level_use.spl"
+
+# PERF-8 (2026-09-13): load_module_with_imports_internal's visited-based
+# de-dup only fired when flatten_imports was true, so a plain member import
+# of a package re-read that package's __init__.spl from disk once per
+# sibling submodule that imported it. Measured on `simple lint <2-line
+# file>`: fix/rules/impl_/__init__.spl opened 28 times.
+LOADERRS="$ROOT/src/compiler_rust/compiler/src/pipeline/module_loader.rs"
+LOADERCACHESPEC="$ROOT/test/05_perf/startup/lint_repeated_package_init_open_budget_spec.spl"
+must_contain     "PIPELINEMODLOADER source-text memo exists" \
+    "$LOADERRS" "static MODULE_SOURCE_TEXT_CACHE: RefCell<HashMap<PathBuf, Rc<str>>>"
+must_contain     "PIPELINEMODLOADER call site reads through the cache, not fs::read_to_string directly" \
+    "$LOADERRS" "let mut source = read_module_source_text_cached(&path)?;"
+must_contain     "PIPELINEMODLOADER cache is dropped at the clear_module_cache boundary" \
+    "$LOADERRS" "pub fn clear_module_source_text_cache()"
+must_contain     "PIPELINEMODLOADER wired into clear_module_cache()" \
+    "$ROOT/src/compiler_rust/compiler/src/module_cache.rs" "crate::pipeline::module_loader::clear_module_source_text_cache();"
+must_contain     "PIPELINEMODLOADER perf pin exists for the impl_/__init__.spl open budget" \
+    "$LOADERCACHESPEC" "IMPL_INIT_OPEN_CEILING"
+must_contain     "PIPELINEMODLOADER unit test proves the cache mechanism (not just presence)" \
+    "$LOADERRS" "fn module_source_text_is_read_from_disk_once_per_process"
+must_contain     "PIPELINEMODLOADER unit test proves flatten_imports=false revisits still return real content" \
+    "$LOADERRS" "fn unflattened_repeat_import_of_the_same_package_init_reads_disk_once"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then
