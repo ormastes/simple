@@ -90,3 +90,8 @@ produce on real single-buffer hardware.
 - `src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx` (Task B3 -- no device
   conformance spec exists yet; filed separately as a gap below)
 - `src/lib/common/svmg/ref_vm.spl` (Task D2)
+
+## Triage 2026-09-13
+Reconfirmed: documented divergence, not blocking, per this record. Needs a
+live Vulkan device to re-verify meaningfully; not attempted here. Left as
+open/documented, no code change attempted.
