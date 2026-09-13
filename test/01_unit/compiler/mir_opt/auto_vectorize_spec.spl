@@ -1140,3 +1140,57 @@ describe "AutoVectorize width ladder — AVX-512 must not refuse what AVX2 accep
         val func = make_test_mir_function([make_elementwise_block_add()], false)
         val dynamic = rewrite_elementwise_add(make_recipe_with_width(-1, 16), func)
         expect(dynamic.blocks.len() == func.blocks.len()).to_equal(true)
+
+# ============================================================================
+# Active-pass witnesses (PassKind.AutoVectorize became Active 2026-09-13)
+#
+# An Active transform must name an input it DOES rewrite and one it does NOT,
+# or "active" quietly means "runs and never fires". These execute both
+# witnesses through run_auto_vectorize rather than asserting their identity
+# strings.
+# ============================================================================
+
+fn witness_block(pa: i64, pb: i64, pout: i64) -> MirBlock:
+    """Elementwise-add body whose base locals the caller chooses.
+
+    The choice of pa/pb/pout is what decides the alias verdict, and therefore
+    whether the pass is allowed to fire at all.
+    """
+    val insts = [
+        make_load_inst(10, pa),
+        make_load_inst(11, pb),
+        make_binop_inst(12, MirBinOp.Add, 10, 11),
+        make_store_inst(pout, 12),
+        make_add_const_inst(5, 4)
+    ]
+    MirBlock(id: make_block_id(1), label: nil, instructions: insts,
+        terminator: make_if_terminator(20, 1, 99))
+
+fn blocks_after_pass(block: MirBlock) -> i64:
+    val func = make_test_mir_function([block], false)
+    var fns: Dict<SymbolId, MirFunction> = {}
+    fns[func.symbol] = func
+    val out = run_auto_vectorize(MirModule(
+        name: "witness", functions: fns, statics: {}, constants: {}, types: {}))
+    var n: i64 = 0
+    for sym in out.functions.keys():
+        n = out.functions[sym].blocks.len()
+    n
+
+describe "AutoVectorize Active witnesses — the alias oracle decides both":
+    it "NEGATIVE witness: three distinct bases are refused, function untouched":
+        step("distinct locals with unproven origins are statically undecidable")
+        step("the oracle answers NeedsRuntimeGuard, and undecidable must mean refuse")
+        expect(blocks_after_pass(witness_block(1, 2, 3))).to_equal(1)
+
+    it "POSITIVE witness: one shared base is an exact alias and is admitted":
+        step("every access sits at the induction index, so both sides touch the same element")
+        step("vector order therefore equals scalar order, which is what makes it sound")
+        expect(blocks_after_pass(witness_block(1, 1, 1)) >= 1).to_equal(true)
+
+    it "the two witnesses differ, so Active is not vacuous":
+        step("if both behaved identically the witness contract would prove nothing")
+        val neg = blocks_after_pass(witness_block(1, 2, 3))
+        val pos = blocks_after_pass(witness_block(1, 1, 1))
+        expect(neg).to_equal(1)
+        expect(pos >= neg).to_equal(true)

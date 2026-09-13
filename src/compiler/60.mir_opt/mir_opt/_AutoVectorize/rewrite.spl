@@ -37,6 +37,7 @@ use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
 use compiler.backend.feature_caps (x86_caps_from_target, preferred_lane_count_x86)
 use compiler.mir_opt.mir_opt.auto_vectorize_target (auto_vectorize_target_level)
 use compiler.mir_opt.mir_opt.auto_vectorize_receipt (SimdReqEvidence, check_simd_requirement)
+use compiler.mir_opt.mir_opt.auto_vectorize_alias (AliasBase, alias_base, decide_recipe_aliasing, alias_decision_permits_vectorization, alias_decision_requires_guard)
 use compiler.frontend.parser_types (Attribute)
 
 # Shared types (cycle-free base module)
@@ -126,7 +127,34 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
                 _log_recipe(cur_func.name, r)
                 val rewritten = rewrite_elementwise_add(r, cur_func)
                 # If block count changed, rewrite was applied
-                if rewritten.blocks.len() != cur_func.blocks.len():
+                # ALIAS ORACLE — pass-level policy, applied per recipe.
+                #
+                # The output may share an allocation with an input at an
+                # unknown offset, in which case vector order differs from
+                # scalar order and the rewrite is a miscompilation rather than
+                # an optimization. auto_vectorize_alias.spl explains why an
+                # EXACT alias is safe here and a partial one is not.
+                #
+                # MIR locals carry no allocation identity today, so every base
+                # reports origin -1 ("unproven"). The oracle therefore answers
+                # NeedsRuntimeGuard for any two DIFFERENT bases, and until that
+                # guard is emitted, undecidable must mean REFUSE. Guessing here
+                # is precisely the silent wrong answer the oracle exists to
+                # prevent.
+                # A recipe with no output base is refused by the rewriter's own
+                # R5 and has nothing to alias against, so do not unwrap it here.
+                var alias_ok = false
+                if r.output_base.?:
+                    var alias_ins: [AliasBase] = []
+                    for ib in r.input_bases:
+                        alias_ins.push(alias_base(ib.id, -1, true))
+                    val alias_decision = decide_recipe_aliasing(
+                        alias_base(r.output_base.unwrap().id, -1, true), alias_ins)
+                    alias_ok = alias_decision_permits_vectorization(alias_decision) and not alias_decision_requires_guard(alias_decision)
+                    if not alias_ok:
+                        _log_alias_refusal(cur_func.name, alias_decision.reason)
+
+                if alias_ok and rewritten.blocks.len() != cur_func.blocks.len():
                     cur_func = rewritten
                     module_modified = true
                     func_vectorized = true
@@ -300,6 +328,12 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
     # R5: need an output base
     if not recipe.output_base.?:
         return func
+
+    # NOTE: this function is a MECHANISM and applies no alias policy. The
+    # ALIAS ORACLE is applied by run_auto_vectorize, its only caller, so that
+    # unit tests can exercise the rewrite itself without the pass-level policy
+    # deciding for them. Do not call this directly from a new site without
+    # consulting auto_vectorize_alias.spl first.
 
     # R6: need at least 2 inputs
     if recipe.input_bases.len() < 2:
@@ -613,3 +647,11 @@ fn _narrow_recipe_to_trip_count(recipe: VectorRecipe) -> VectorRecipe:
         index_locals:     recipe.index_locals,
         store_value:      recipe.store_value,
         induction_update: recipe.induction_update)
+
+fn _log_alias_refusal(func_name: text, reason: text):
+    """Record why a recognised loop was not vectorized.
+
+    Silence here would be indistinguishable from "no pattern matched", which
+    is the wrong diagnosis to hand someone whose @must(simd) just failed.
+    """
+    print("[auto-vectorize] {func_name}: alias oracle declined — {reason}")
