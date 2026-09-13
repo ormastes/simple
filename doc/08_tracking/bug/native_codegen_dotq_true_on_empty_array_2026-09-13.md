@@ -218,6 +218,11 @@ probe failures = 4                           probe failures = 0
 The same file under the interpreter (`simple run`) prints the same five
 `PASS` lines — the engines now agree, which is the actual contract.
 
+**No LLVM-side unit test exists.** `codegen/llvm/**` is feature-gated and this
+host's seed has no `llvm` feature, so one could not be run here; the three tests
+below cover the runtime table, the Cranelift type stamping, and the shared
+declaration root, and that is the honest extent of it.
+
 **Backend coverage, stated honestly.** The measured native run is
 **Cranelift**; this host's seed is built without the `llvm` cargo feature
 (`error: native backend 'llvm' is not available in this build`), so the LLVM
@@ -244,10 +249,20 @@ Rust tests (sabotage → red → green verified on the first):
 
 ### Census — where `.?` is used on a non-Optional receiver (for F62)
 
-`grep -rnE '(while|if) +<ident>\.\?:' src/compiler src/lib` → **24** sites, and
-on inspection **all 24 receivers are Optionals** (`op`, `ms`, `wc`, `id`, `os`,
-`ew`, `em`, `re`, `al`, `el`) — those were always correct, since for an Optional
-`rt_is_some` and `rt_is_present` agree.
+`grep -rnE '(while|if) +<ident>\.\?:' src/compiler src/lib` → **24** sites,
+whose receivers read as Optionals **by variable name** (`op`, `ms`, `wc`, `id`,
+`os`, `ew`, `em`, `re`, `al`, `el`) — classified by name, not by chasing each
+declaration, so treat it as a strong indication rather than a proof. For an
+Optional with a non-empty (or non-collection) payload the two predicates agree,
+so those sites behaved the same before and after. Two were spot-checked against
+their declarations: `shb_hash.spl:90`'s `re` is a struct optional (unaffected),
+while `database/core.spl:320`'s `id` is a `text?` (`id ?? ""` on the next line)
+— so a row whose primary key is the EMPTY STRING is no longer indexed on the
+native lane. That is a real behavioural change and it is the intended one: the
+interpreter has always skipped it. They are **not** unconditionally
+unchanged: an `Optional<text>` holding `Some("")`, or an optional array holding
+`Some([])`, now reports absent where it used to report present — which is the
+correction, since that is what the interpreter has always answered.
 
 The array-receiver population is the `while` forms, which that regex misses
 when the condition is compound. Complete list — every one of these was silently
@@ -265,9 +280,27 @@ bootstrap closure — they were exposed on exactly the lane F62 is running.
 The three `while current.?:` sites in `src/lib/*/gc.spl` walk an Optional node
 cursor, not an array, and were unaffected.
 
+### Related records — read before flipping this back
+
+`existence_check_conflates_absent_with_empty_text_2026-08-10.md` argues the
+OPPOSITE direction (absent should not be conflated with empty text). This change
+pins `"".?` as **absent** on the native lane. That is not a re-litigation of that
+record: the rule here is "match the interpreter", and the interpreter has decided
+empty-string-is-absent since long before either record. If the language decides
+the other way, the change belongs in `interpreter/expr.rs` FIRST and in
+`rt_is_present` second — never in one engine alone, which is the whole defect
+this file is about. See also
+`dotq_presence_operator_is_bare_unwrap_outside_argument_position_2026-09-12.md`
+and `dotq_existence_check_is_scalar_truthiness_on_jit_2026-07-27.md`.
+
 ### Not fixed here (separate, still OPEN)
 
-The three secondary divergences in the site-9 trace — `pop()` on an empty array
+`Err(x).?` is still **present** natively while the interpreter says absent:
+`rt_is_present` unwraps via `rt_unwrap_or_self`, which only unwraps
+`OPTION_ENUM_ID`, so a `Result` never reaches the emptiness check. Pre-existing
+under `rt_is_some` too — not introduced here, not fixed here.
+
+Also: the three secondary divergences in the site-9 trace — `pop()` on an empty array
 unwrapping to `nil`, `visited[nil] = true` not making `has(nil)` true, and the
 value-position `{a.?}` interpolation shape (see
 `dotq_presence_operator_is_bare_unwrap_outside_argument_position_2026-09-12.md`,

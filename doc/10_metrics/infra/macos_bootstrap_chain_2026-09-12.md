@@ -888,3 +888,310 @@ admitted while site 10 is open, and the transcript replay is the stronger and
 cheaper evidence for the fix. **Nothing deployed.** Candidates (scratchpad, not
 preserved as lane artifacts): instrumented and fixed Stage-2 binaries, each
 `886 compiled, 0 cached, 0 failed`, 136,078 KB, ~450 s.
+
+## Run 23 (2026-09-13) — site 10b (capsule identity) FIXED end to end; 10a (duplicate local) is the sole blocker
+
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --output=.simple/storage/build/bootstrap-run23
+--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin evidence
+root, worktree `agent-aa73a2371df95b0f5`, base `origin/main` `a8c7ecfaaa1` plus
+this lane's fix, `/usr/bin` first on PATH with `~/.cargo/bin` present, no tracked
+file edited during the run.
+
+Stages reached: **Stage 1 admitted; Stage 2 built clean and NOT admitted; Stage 3
+not attempted; nothing deployed.** Verdict verbatim:
+
+```
+  Stage 2: running bootstrap compiler sanity
+  Stage 2: proving struct receiver/runtime capability
+error: Stage 2 struct receiver/runtime capability failed
+exit:  3
+  real log:  .../stage3/aarch64-apple-darwin/stage2-receiver.log
+    | error: stage2 failed the positional pure-Simple Stage-3 route (status 1)
+    | error: AOT compile error -- unit, reason and lengths follow on the next lines
+    | error:   unit (bare):
+    | error:   reason (bare):
+    | llc failed (exit 1): .../module.ll:114:3: error: multiple definition of local value named 'l22'
+    |   %l22 = add i64 %l35, 0  ; copy
+PASS — 1 check(s), stage stage2 failed (exit 3) and said why
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+### Site 10b — capsule identity over empty content: FIXED, and it was a source-level defect
+
+`native-capsule-source-mutated` and `capsule-identity=e3b0c442…b855` do not
+appear anywhere in this run. The route now reaches `native_compile` with capsule
+collection clean.
+
+Cause: `frozen_native_cache_source_identity_v1` (`80.driver/driver_types.spl`)
+hashed `SourceFile.content` at capsule-freeze time. Phase 3 runs
+`reclaim_source_contents` → `reclaim_streaming_source_contents_owner` →
+`evict_sources` **unconditionally** at
+`80.driver/driver_hir_pipeline_lowering.spl:501-506`, and all three free or blank
+that text; the same file already documented the fact at
+`driver_native_extern_decl_site` ("Source CONTENT may already be evicted"). So
+the digest was always taken over `""` — `e3b0c442…b855` is `sha256("")`. No
+miscompile is involved, which is worth stating because every earlier site in this
+chain (8, 9, the receipt size) was one.
+
+`driver_native_frozen_source_lookup` (`driver_aot_native_output.spl`) carried the
+SAME defect by a second route: it hashed `ctx.source_contents_owner`, which
+`reclaim_streaming_source_contents_owner` empties.
+
+Fix: `CompileContext.source_identities_owner` captures `sha256_text(content)` in
+the phase-1 owner-promotion loop while the content is live, memoised per physical
+path, never reclaimed (64 chars per source). Both lookups read that owner instead
+of re-hashing; the lookup's `source_contents` parameter becomes
+`source_identities`. `driver_native_capsule_identity_empty_v1` rejects `""` and
+the digest of empty content fail-closed, and the collection site reports
+`capsule-identity-empty` rather than a mutation.
+
+Also removed: a DUPLICATE `driver_native_module_source_identity` /
+`driver_native_disk_source_identity` pair at `driver_aot_native_output.spl:895-947`
+— a stale-snapshot artifact whose `ctx.sources`-based version shadowed the
+owner-array versions above.
+
+Spec: `test/01_unit/compiler/driver/native_capsule_source_identity_survives_eviction_spec.spl`,
+7 examples / 0 failures on the Rust seed.
+
+### Site 10a — `llc: multiple definition of local value named 'l22'`: OPEN, but now localized
+
+Not fixed here, and deliberately not guessed at. What this run establishes:
+
+- **The emitting site is `translate_copy`.** Run 22 reported
+  `%l14 = getelementptr i8, ptr %l25, i64 0  ; copy` (the ptr arm,
+  `_MirToLlvm/core_codegen.spl:1865`); run 23 reports
+  `%l22 = add i64 %l35, 0  ; copy` (the integer arm, `:1869`) at
+  `module.ll:114:3`. Different local, different type, same instruction kind — a
+  Copy whose destination local was already defined earlier in the same function.
+- **It is NOT a `%t`/`%l` namespace collision.** `LlvmIrBuilder.fresh_local()`
+  emits `%t{n}` from a module-monotonic counter, and its docstring records that
+  the distinct prefix exists precisely so it cannot collide with `%l{mir_id}`.
+  So this is two definitions of ONE MIR local id inside one function.
+- **`defined_locals` already knows.** `MirToLlvm.defined_locals` is maintained as
+  an emission receipt (`core_codegen.spl:1694`, `:1779`, `:2261`) and consulted
+  at `:743`, `:933`, `:1386` — but it is never used to REFUSE a second
+  definition. Whatever the right repair is (an SSA rename at emission, or fixing
+  the pass that should have renamed), that receipt is where the condition is
+  already observable.
+- **Hypothesis, recorded so the next run can kill it in one grep.** The failing
+  unit is `src/compiler/common/module_path_naming.spl`, whose
+  `module_logical_name_from_path` (`:61-93`) reassigns a single `var mod_path:
+  text` **seven times** — inside a `while`, across an `if`/`elif`, and after two
+  early-exit-shaped branches. That is exactly what `var_reassign_ssa`
+  (`60.mir_opt/mir_opt/var_reassign_ssa.spl`) exists to rename. When the IR is
+  finally captured, the FIRST `%l22 =` definition and whether it shares a basic
+  block with line 114 confirms or kills this immediately.
+
+**`SIMPLE_LLVM_KEEP_STAGE=1` (added by this change) works, and is still not
+enough.** `llvm_object_stage_fail` (`70.backend/backend/llvm_backend_tools.spl:273`)
+`dir_remove`s the staging directory before its message is printed, so the
+`module.ll` the diagnostic names was always already gone. With the flag the
+message now ends `; staging kept at <dir>` and it did — but
+`check-bootstrap-stage2-struct-receiver.shs` removes its own probe directory when
+it exits, and the staging lives underneath it. The next step is therefore to copy
+`module.ll` beside `diagnostic_path` (caller-owned, survives the probe teardown)
+rather than rely on the staging directory.
+
+### The 40-second witness: a replay-built candidate is NOT equivalent to a lane-built one
+
+A Stage-2 candidate was rebuilt by transcript replay from run 21's
+`stage2-command.transcript` against this tree (`886 compiled, 0 cached, 0 failed`,
+452.9s compile + 11.0s link, 136078 KB). Every witness route on it failed BEFORE
+`native_compile`:
+
+- the positional Stage-3 route, replicating the gate's second probe exactly (with
+  and without the stage-2 transcript env, warm and cold cache): `[ERROR] phase 1
+  FAILED` immediately after `phase1:load_sources:owner_copy:done n=2`, with
+  `SIMPLE_DUMP_COMPILE_ERRORS=1` printing no `[compile-error]` line — an error
+  counted on a path that does not go through `CompileContext.add_error`;
+- the gate script itself: its FIRST probe tries to rebuild the core-C runtime
+  archive in a fresh `HOME` and dies in `src/runtime/hosted_cocoa.c` (Objective-C
+  compiled as C, `@class` → `expected identifier or '('`);
+- the interpreted route (`<seed> run src/app/cli/bootstrap_main.spl native-build …`):
+  the Sep-13 seed cannot parse current source (`namespace` as an identifier at
+  `src/app/build/targets/action_identity.spl:364,368`) and dies at
+  `PLUG-E-K1-POLICY: bootstrap backend composition admission failed`.
+
+**The discriminator was run rather than assumed.** The same script, env and
+fixture pointed at run 21's PRESERVED lane-built candidate
+(`bootstrap-run21/stage2-rejected/aarch64-apple-darwin/simple`, copied out,
+`chmod +x`) passes phase 1 and reaches `phase=native_compile … total=2` at
+`elapsed_ms=4642` (then hangs in `topological_order`, expected — it predates the
+site-9 fix). So the witness ENV is correct and the phase-1 failure is a property
+of the REPLAY-BUILT candidate. Run 20's advice that transcript replay answers
+"was my change causal?" needs this caveat: on this host a replayed candidate is
+not yet a faithful substitute for a lane-built Stage 2, and no claim resting on
+one should be made without checking that it reaches the phase under test.
+
+### Divergence-delta escape record (required by `.claude/rules/vcs.md`)
+
+`check-test-tree-divergence-delta` PASS over a pre-existing red:
+`PASS — 3218 pre-existing offender(s), 0 introduced by this range`; base verdict
+`FAIL — 3946 diverged vs 965 baselined (3084 new, 103 fixed-but-still-baselined);
+32 mirror-only (31 unallowlisted, 0 stale-allowlist)`. Offender list saved by the
+helper to `/var/folders/94/j3lc49d93bx148gqls5kx5d40000gn/T//test_tree_divergence_preexisting.txt`
+(host-local temp; regenerate with the helper). The range's only test file is the
+new capsule-identity spec, which has no mirror twin.
+
+Other guards, foreground, `timeout 900`: conflict-markers PASS (5 files),
+tree-size PASS (range base 136957 files), no-revert PASS (5 files, 0 reverts),
+guard-wiring PASS (1697 guards, 0 NEW unwired).
+
+### Run 23 corrections (same day)
+
+Two things above are stated more strongly than the evidence supports, and one
+number is wrong. Correcting them here rather than editing the entry, so the
+reasoning stays auditable.
+
+- **"Not a `%t`/`%l` namespace collision" was argued from a docstring, which
+  this chain has been burned by before (run 16).** The sound argument is the
+  observed text: every operand in both reports is `%l<n>`
+  (`%l22 = add i64 %l35, 0`, `%l14 = getelementptr i8, ptr %l25, i64 0`) and no
+  `%t` appears in any reported line. That is what rules out the two namespaces
+  overlapping — not `fresh_local`'s comment about `%t`.
+- **`translate_copy` records no `defined_locals` receipt on its ordinary path.**
+  The entry cites `:1694`, `:1779`, `:2261`; of those, `1694` is
+  `translate_const`, `1779` is inside `translate_copy`'s `inttoptr` handle-unbox
+  branch (which returns early), and `2261` is `translate_call`. The ordinary
+  scalar/ptr/float copy tail sets `local_types` and `value_types` and never
+  `defined_locals[dest_id]`. So `translate_copy` cannot refuse a second
+  definition because it never asks.
+- **Stage 2 built `886 compiled, 0 cached, 0 failed`**
+  (`logs/aarch64-apple-darwin/stage2-native-build.log:3`). The
+  `done=1 total=2 … failed=1` counts quoted from the receiver log are the
+  two-unit STAGE-3 ROUTE PROBE, not the Stage 2 closure.
+- Rejected candidate preserved, not deployed:
+  `.simple/storage/build/bootstrap-run23/stage2-rejected/aarch64-apple-darwin/simple`,
+  139,349,256 bytes, sha256
+  `3b7b620a2e50ef8a0d875535ebf3478831f30d38d26136cc50799682d4945e36` (mode 400 —
+  copy out and `chmod +x` before any use).
+
+**Recommended first two moves for site 10a**, in this order, because together
+they make the next lane self-diagnosing instead of another evidence run:
+
+1. In `llvm_object_stage_fail`, copy `module.ll` to `"{diagnostic_path}.module.ll"`
+   before the staging directory goes away. `diagnostic_path` is caller-owned and
+   survives the struct-receiver gate's probe-directory teardown, which is what
+   swallowed the IR this run even with `SIMPLE_LLVM_KEEP_STAGE=1` working.
+2. Add a `defined_locals.contains_key(dest_id)` refusal at the top of
+   `translate_copy` — it converts the llc rejection into a compiler-side
+   diagnostic naming the MIR function and block, which is the information the
+   fix actually needs.
+
+## Run 24 — the guard fires, and it names the reason: `invalid terminator operands`
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+root, worktree `agent-a341b458ad89118a2`, carrying PR #784 (the fail-closed SSA
+guard + the alloca-transform reject log + the `module.ll` keep). Seed rebuilt
+(2m53s), Stage 1 admitted, Stage 2 built **clean**:
+`Build complete: 886 compiled, 0 cached, 0 failed` / `418.7s compile + 10.5s link
+= 429.3s total` / `136084 KB`
+(`logs/aarch64-apple-darwin/stage2-native-build.log`). Verdict, verbatim:
+
+```
+error: stage2 failed the positional pure-Simple Stage-3 route (status 134)
+PASS — 1 check(s), stage stage2 failed (exit 3) and said why
+  warning: stage2 native-build failed (exit 3); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+`status 134` is SIGABRT — the new guard, not llc. Stage 3 / full CLI were never
+reached, so there is no candidate to smoke-check and nothing was deployed.
+
+### What the lane now says that it could not say before
+
+From `stage3/aarch64-apple-darwin/stage2-receiver.log`, verbatim:
+
+```
+llvm-emitter-ssa-violation::%l50 = getelementptr i8, ptr %l3, i64 0  ; copy -- a value is defined twice in one function
+[llvm-ssa] fn=module_logical_name_from_path alloca-transform rejected: invalid terminator operands
+[llvm-ssa] fn=_module_path_naming_strip_numbered_dirs alloca-transform rejected: invalid terminator operands
+[llvm-ssa] fn=_module_path_naming_text_index_of alloca-transform rejected: invalid terminator operands
+```
+
+Three findings, in order of weight:
+
+1. **Run 23's hypothesis is CONFIRMED, and its mechanism is now named.**
+   `src/compiler/common/module_path_naming.spl` is the failing unit, and the
+   reason the emitter saw un-renamed multi-def locals is that
+   `ssa_alloca_transform_blocks` **refused all three of its functions** with
+   `invalid terminator operands`. That reject comes from
+   `ssa_term_operand_payloads_valid` -> `ssa_operand_local_payload_valid`
+   (`60.mir_opt/mir_opt/var_reassign_ssa.spl:885-947`), whose own comment says
+   why it exists: *"Struct-backed operands can arrive as nil in the staged-native
+   lane."* So the root cause is NOT that the transform is too narrow by design —
+   it is that a terminator operand's payload is **lost in transport inside the
+   native Stage-2 candidate**, the transform correctly refuses to decode a nil,
+   and the whole function then bypasses the only mechanism that would have made
+   it SSA. Same defect family as `var_reassign_ssa.spl:35` ("Returning MirInst +
+   [MirInst] through nested anonymous tuples can ... lose the defining
+   instruction and appended Store in a pure-Simple bootstrap binary").
+2. **The defect is native-lane-only, which is why no seed probe reproduced it.**
+   Under the Sep-5 seed interpreter, the same `module_path_naming.spl` lowers and
+   emits with **zero** duplicate `%l` definitions and **zero** rejects, as do a
+   `var` re-assigned in a loop, a copy of a copy, and a struct-receiver method
+   with a loop-carried accumulator (all four are now pinned in
+   `test/01_unit/compiler/backend/llvm_emitter_ssa_violation_guard_spec.spl`).
+   Any future probe of this site must run in the native lane; a green seed run
+   proves nothing about it.
+3. **A text-primitive divergence in the native lane, and the honest reading of
+   it.** The violation line above is `llvm-emitter-ssa-violation::%l50 = ...` —
+   an EMPTY function name, and a value "name" that is the whole instruction
+   text. The obvious story ("`substring` ignores its end index") does NOT fit:
+   if `substring(0, n)` always returned the whole string, the `define`-line path
+   (`rest = substring(at+1, len)`, then `rest.substring(0, paren)`) would have
+   produced the whole line, not "". **One fault explains both symptoms:
+   `index_of` returning a not-found sentinel that is `>= 0`** (e.g. the string
+   length). Then `eq = len` clears the `eq < 0` test and `substring(0, len)` is
+   the whole line; and `at = len` makes `rest = substring(len+1, len) = ""`, so
+   the function name is empty. The repo already carries a record for this
+   primitive: `.claude/memory/bug_index_of_brace_needle.md`. `substring` itself
+   is **unconfirmed** and should not be chased first.
+   Consequence for the guard: the duplicate was still caught (the two
+   definitions were byte-identical), but one whose definitions differed on the
+   right-hand side would have been MISSED. Both extractions now use `split`,
+   which is a different primitive — **assumed, not measured**, to be sound
+   natively; if it also diverges the seen-key is no worse than the whole-line
+   key it replaces.
+
+### Correction to run 23's recommendation #1
+
+`llvm_object_stage_fail` does now copy `module.ll` to
+`"{diagnostic_path}.module.ll"` before the staging teardown, and that is the
+right fix for every llc-side failure — but it does **not** help this one, and no
+`.module.ll` was produced this run. The guard aborts inside `translate_module`,
+before any IR file is written. The IR-keep is retained for the failure classes it
+does cover.
+
+### Next move for site 10b
+
+Stop looking in `_MirToLlvm/**`: the emitter is now provably fail-closed on this
+class. The open question is why a `Ret`/`If`/`Switch` operand payload reads as
+nil inside the Stage-2 candidate for these three functions and not under the
+seed. Dump the refused terminators from the native lane (the reject log already
+names the functions, so the scope is three functions in one file), and treat the
+`index_of` sentinel divergence above (`bug_index_of_brace_needle.md`) as a
+candidate common cause rather than a separate cosmetic issue — a search
+primitive that answers "found" when it did not is exactly the shape that would
+leave an operand payload reading as nil.
+
+Rejected candidate preserved, not deployed:
+`.simple/storage/build/bootstrap/stage2-rejected/aarch64-apple-darwin/simple`,
+139,350,072 bytes, sha256
+`c7e536c1c5b743cd7b845a9596e6a3b7914decca1894b99a80c12badf08cbaa3` (mode 400 —
+copy out and `chmod +x` before any use). Stage 3 and the full CLI were never
+reached, so there is no Stage-3 artifact and no smoke-check result for this run.
+
+### Divergence-delta escape record (required by `.claude/rules/vcs.md`)
+
+`check-test-tree-divergence-delta` PASS over a pre-existing red:
+`PASS — 3219 pre-existing offender(s), 0 introduced by this range`; base verdict
+`FAIL — 3947 diverged vs 965 baselined (3085 new, 103 fixed-but-still-baselined);
+32 mirror-only (31 unallowlisted, 0 stale-allowlist)`. Offender list saved by the
+helper to `/var/folders/94/j3lc49d93bx148gqls5kx5d40000gn/T//test_tree_divergence_preexisting.txt`
+(host-local temp; regenerate with the helper). The range's only test file is the
+new SSA-guard spec, which has no mirror twin.
+
+Other guards, foreground, `timeout 900`: conflict-markers PASS (4 files),
+tree-size PASS (range base 136961 files), no-revert PASS (4 files, 0 reverts),
+guard-wiring PASS (1697 guards, 0 NEW unwired).
