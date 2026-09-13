@@ -3210,19 +3210,20 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
           stage2_parent_dir=$(dirname -- "${stage2_bin}")
           stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
           stage2_parent_provenance="${stage2_parent_dir}/stage2-provenance.receipt"
-          # Bind the parent receipts to the IMMUTABLE ADMITTED copy, which is the
-          # candidate the admission receipt itself names (`candidate_path=`).
-          # Passing "${stage2_bin}" instead made
-          # publish-stage2-parent-receipts.shs fail its own
-          # `[ "$(field candidate_path)" = "$candidate" ]` precondition and, under
-          # `set -eu`, exit 1 with no message -- surfacing only as
-          # "could not publish producer-bound Stage 2 parent receipts". The two
-          # files are byte-identical (the admitted copy is `cp -p`'d from the
-          # build output and sha-verified above), so this changes what is NAMED,
-          # not what is bound. See doc/08_tracking/bug/
-          # stage2_parent_receipts_bound_to_preadmission_path_2026-09-13.md
+          # The publisher is fail-closed on the CANDIDATE PATH: it asserts
+          # `[ "$(field candidate_path)" = "$candidate" ]`, and the admission
+          # receipt above recorded `${stage2_admitted_absolute}`. Passing
+          # `${stage2_bin}` instead offered a byte-identical copy at a DIFFERENT
+          # path, the assertion exited under `set -eu`, the parent receipts were
+          # never written, and Stage 3 then refused with
+          # `parent-stage2-sanity-unavailable` on a Stage 2 that WAS admitted.
+          # Both sides must read the same variable -- see
+          # doc/08_tracking/bug/stage2_parent_receipt_publish_passes_wrong_candidate_path_2026-09-13.md
+          # and scripts/check/check-stage2-parent-receipt-candidate-binding.shs.
+          # The receipts still land beside ${stage2_bin} (stage2_parent_dir
+          # above); only the identity argument changes.
           sh "${repo_root}/scripts/bootstrap/publish-stage2-parent-receipts.shs" \
-            "$(absolute_path "${stage2_admitted_bin}")" \
+            "${stage2_admitted_absolute}" \
             "${stage2_admission_receipt_absolute}" \
             "$(absolute_path "${stage3_source_before}")" \
             "$(absolute_path "${runtime_admitted_snapshot}")" \
