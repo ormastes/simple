@@ -136,6 +136,34 @@ pub(crate) fn qualify_enum_runtime_names(
         Ok(name.to_string())
     };
 
+    // HIR lowering folds the enum-id argument of `rt_enum_check_variant` into
+    // a plain integer -- `enum_runtime_type_id(<bare type_registry name>)` --
+    // before this pass runs, while the matching `EnumUnit` / `EnumWith` ctor
+    // name is qualified HERE. Left alone, the constructor stamps
+    // hash("pkg.owner.Mixed") and the check expects hash("Mixed"): every arm
+    // of every typed enum `match` fails and control falls to the last arm
+    // (macOS Stage 2 site 18: `BackendKind.to_text()` returned the wrong arm, so
+    // the K1 backend-table validator refused the composition). Route the
+    // folded id back through the SAME `qualify` the ctor uses; ids 0 and 1 are
+    // the reserved Result/Option lanes and stay untouched.
+    let mut bare_enum_ids: std::collections::HashMap<u32, Option<String>> = std::collections::HashMap::new();
+    for bare in known_enums.iter().chain(local_enums.iter()) {
+        let id = crate::codegen::shared::enum_runtime_type_id(bare);
+        if id <= 1 {
+            continue;
+        }
+        match bare_enum_ids.entry(id) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Some(bare.clone()));
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if slot.get().as_deref() != Some(bare.as_str()) {
+                    slot.insert(None);
+                }
+            }
+        }
+    }
+
     for func in &mut mir.functions {
         for block in &mut func.blocks {
             for inst in &mut block.instructions {
@@ -157,6 +185,44 @@ pub(crate) fn qualify_enum_runtime_names(
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+        if !bare_enum_ids.is_empty() {
+            let mut const_ints: std::collections::HashMap<crate::mir::VReg, i64> = std::collections::HashMap::new();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let MirInst::ConstInt { dest, value } = inst {
+                        const_ints.insert(*dest, *value);
+                    }
+                }
+            }
+            let mut rewrites: std::collections::HashMap<crate::mir::VReg, i64> = std::collections::HashMap::new();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let MirInst::Call { target, args, .. } = inst else { continue };
+                    if target.name() != "rt_enum_check_variant" || args.len() != 3 {
+                        continue;
+                    }
+                    let Some(&folded) = const_ints.get(&args[1]) else { continue };
+                    let Ok(folded_id) = u32::try_from(folded) else { continue };
+                    let Some(Some(bare)) = bare_enum_ids.get(&folded_id) else { continue };
+                    let qualified = qualify(bare)?;
+                    let qualified_id = i64::from(crate::codegen::shared::enum_runtime_type_id(&qualified));
+                    if qualified_id != folded {
+                        rewrites.insert(args[1], qualified_id);
+                    }
+                }
+            }
+            if !rewrites.is_empty() {
+                for block in &mut func.blocks {
+                    for inst in &mut block.instructions {
+                        if let MirInst::ConstInt { dest, value } = inst {
+                            if let Some(new_value) = rewrites.get(dest) {
+                                *value = *new_value;
+                            }
+                        }
+                    }
                 }
             }
         }
