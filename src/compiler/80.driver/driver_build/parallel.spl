@@ -282,13 +282,25 @@ impl BuildGraph:
             if visited.has(id):
                 continue
             var stack: [(i64, bool)] = [(id, false)]
-            while stack.?:
+            # `.?` is NOT an emptiness test on a collection receiver: it lowers
+            # to `rt_is_some`, which answers true for ANY non-nil array, `[]`
+            # included, on the seed interpreter and on native codegen alike
+            # (dotq_existence_check_is_scalar_truthiness_on_jit_2026-07-27).
+            # The `.?` spelling therefore never exited: after the DFS drained,
+            # every iteration popped nil, re-pushed a `(nil, true)` tuple and
+            # grew `order`, so this function allocated without bound instead of
+            # returning — measured as the Stage-2 candidate's native_compile
+            # growing 4.58 GB -> 12.96 GB in ~5 min
+            # (stage2_stage3_route_native_compile_timeout_2026-09-13, site 9),
+            # and as a 150 s no-answer on the seed interpreter for a 3-unit
+            # graph. `len() > 0` is the emptiness test that holds on both lanes.
+            while stack.len() > 0:
                 # NOTE: `val entry = if val popped = stack.pop(): popped else: break`
                 # mis-evaluates to nil in the seed interpreter — an if-expression
                 # whose else arm diverges (break) returns nil even when the value
                 # arm is taken (only when the condition is an `if val` binding).
-                # The `while stack.?:` guard already ensures the stack is non-empty,
-                # so unwrap directly, matching the working sibling driver/parallel.spl.
+                # The `len() > 0` guard already ensures the stack is non-empty,
+                # so unwrap directly.
                 val (node, expanded) = stack.pop().unwrap()
                 if expanded:
                     order = order.push(node)

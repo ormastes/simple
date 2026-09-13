@@ -1,0 +1,67 @@
+"""
+# BuildGraph.topological_order Terminates
+
+Regression guard for bug
+`stage2_stage3_route_native_compile_timeout_2026-09-13` (site 9): the
+iterative DFS in `BuildGraph.topological_order`
+(`src/compiler/80.driver/driver_build/parallel.spl`) used `while stack.?:` as
+its emptiness test. `.?` on a COLLECTION receiver lowers to `rt_is_some`,
+which is true for any non-nil array -- `[]` included -- on both the seed
+interpreter and native codegen (bug
+`dotq_existence_check_is_scalar_truthiness_on_jit_2026-07-27`). The drain
+loop therefore never exited: once the stack was empty every iteration popped
+nil, re-pushed a `(nil, true)` tuple and grew `order`, so the function
+allocated without bound instead of returning.
+
+Measured, not inferred: the Stage-2 bootstrap candidate
+(sha256 `95763bffee64a74e...`) entered `native_compile` and grew VmRSS
+4.58 GB -> 12.96 GB in ~5 minutes with three gdb interrupts all naming
+`BuildGraph.topological_order -> rt_tuple_new -> register_heap_ptr`; the seed
+interpreter (sha256 `3d120a6f9ab5704b...`) on a 3-unit chain printed
+`units=3` and never printed the order, killed at 150 s.
+
+The second example deliberately re-reads the source and refuses to execute
+the loop if the divergent form is back: running a known-unbounded loop would
+hang a suite instead of failing it. The first example is the loud assertion
+in that case, so nothing is hidden -- the guard is fail-closed, never a skip.
+"""
+
+use compiler.driver.driver_build.parallel.{BuildGraph}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn parallel_source() -> text:
+    rt_file_read_text("src/compiler/80.driver/driver_build/parallel.spl") ?? ""
+
+describe "BuildGraph.topological_order":
+    it "does not use `.?` as the stack emptiness test":
+        val source = parallel_source()
+        # Fail closed on a vacuous read: the real file is far larger.
+        expect(source.len() > 2000).to_equal(true)
+        expect(source).to_contain("fn topological_order()")
+        expect(source).to_not_contain("while stack.?:")
+        expect(source).to_contain("while stack.len() > 0:")
+
+    it "returns every unit once, dependencies first, and terminates":
+        val source = parallel_source()
+        expect(source.len() > 2000).to_equal(true)
+        if source.index_of("while stack.?:") >= 0:
+            # The divergent form is back. Do not execute it.
+            expect("divergent while stack.?: present").to_equal("absent")
+        else:
+            var g = BuildGraph.empty()
+            val a = g.add_unit("a.spl", [])
+            val b = g.add_unit("b.spl", [a])
+            val c = g.add_unit("c.spl", [b])
+            expect(g.next_id).to_equal(3)
+            val order = g.topological_order()
+            expect(order.len()).to_equal(3)
+            # Render the order instead of comparing element by element: a
+            # bracket read hands back an optional here, so `expect(order[2])
+            # .to_equal(c)` fails as "expected 2 to equal 2" on values that
+            # are equal. The rendered text is exact and fails closed on an
+            # empty or short result.
+            var rendered = ""
+            for unit_id in order:
+                rendered = rendered + unit_id.to_text() + ","
+            expect(rendered).to_equal("{a},{b},{c},")
