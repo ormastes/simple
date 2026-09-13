@@ -733,5 +733,45 @@ struct MirError:
     fatal: bool
 
 # ============================================================================
+# Per-local marker-map removal (lane-portable)
+# ============================================================================
+#
+# `Dict.remove(k)` has DIFFERENT return values on the two lanes that run this
+# compiler: the seed interpreter returns a NEW dict without the key
+# (interpreter_method/collections.rs "remove" | "delete"), while the seed's
+# native codegen lowers `.remove` to `rt_collection_remove` -> `rt_dict_remove`,
+# which mutates in place and returns the REMOVED VALUE (or nil). So the idiom
+# `self.marks = self.marks.remove(id)` is correct interpreted and, natively,
+# replaces the whole marker map with `true`/nil on the first plain assignment
+# in a function. Every later `.contains(id)` then misses: measured on the
+# phase-2 (natively compiled Stage 2) lane, `str(t)` lost its
+# tagged_text_locals mark and was rendered through rt_raw_i64_to_string a
+# second time, printing the tagged string HANDLE (`2083130940001`) instead of
+# `3`; the same clobber blanked runtime_array_locals / option_value_locals /
+# nil_locals / runtime_dict_locals. A bare `self.marks.remove(id)` statement is
+# the mirror-image bug (in place natively, no-op interpreted). Rebuilding the
+# map without the key is the one form both lanes agree on; the contains_key
+# guard keeps the common (unmarked) case O(1). Bug record:
+# doc/08_tracking/bug/dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+
+fn marker_map_without(marks: Dict<i64, bool>, key: i64) -> Dict<i64, bool>:
+    if not marks.contains_key(key):
+        return marks
+    var kept: Dict<i64, bool> = {}
+    for k in marks.keys():
+        if k != key:
+            kept[k] = marks[k]
+    kept
+
+fn text_map_without(marks: Dict<i64, text>, key: i64) -> Dict<i64, text>:
+    if not marks.contains_key(key):
+        return marks
+    var kept: Dict<i64, text> = {}
+    for k in marks.keys():
+        if k != key:
+            kept[k] = marks[k]
+    kept
+
+# ============================================================================
 # Exports
 # ============================================================================
