@@ -14,7 +14,6 @@ use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
-use std.nogc_sync_mut.env.platform.{is_windows as platform_is_windows}
 
 extern fn rt_path_absolute(path: text) -> text?
 
@@ -22,12 +21,23 @@ extern fn rt_path_absolute(path: text) -> text?
 # Platform Helpers
 # ============================================================================
 
-# FAIL-OPEN FIX (2026-09-02): read ONLY `OS` and returned false when unset --
-# a silent "not Windows" under a stripped environment (where a bootstrap runs).
-# Delegate to the single resolver in std.nogc_sync_mut.env.platform, which
-# consults the in-process rt_platform_name() primitive first.
+# Was: delegate to std.nogc_sync_mut.env.platform.is_windows() (itself a
+# 2026-09-02 fail-open fix over a bare `OS` env-var read). That delegation was
+# ITSELF broken under this file's own execution context: traced live inside
+# the Stage 2 bootstrap sanity harness's in-process native-build (the
+# "hosted native link" path this file's find_c_compiler serves), host_os()
+# two lines above correctly answered "windows" while
+# nogc_sync_mut.env.platform.is_windows() answered false in the SAME call --
+# two independent OS-detection implementations disagreeing in one process.
+# That silent false routed every _find_c_compiler_windows candidate probe
+# through the POSIX branch (backend_shell_tuple's `/bin/sh -c`) instead of
+# `cmd.exe /c`, well upstream of that function's own (otherwise unconditional)
+# diagnostics -- which is why "No C compiler found" printed nothing about what
+# was tried. host_os() is already imported by this file and already proven
+# correct in this exact failing context by that same trace; compare against it
+# directly instead of trusting a second detector.
 fn _is_windows() -> bool:
-    platform_is_windows()
+    host_os() == "windows"
 
 fn _is_msvc_cc(cc: text) -> bool:
     val normalized = cc.lower().replace("\\", "/")
