@@ -1,7 +1,14 @@
 # unify_types: the occurs check is dead code, UNIFY_FAIL_OCCURS is unreachable
 
 - **Date:** 2026-08-02
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-09-13) — fixed by
+  `doc/08_tracking/bug/occurs_check_never_recurses_2026-08-17.md`, which this
+  doc's own "Fix required" section anticipated almost verbatim (reachable
+  occurs branch + recursion into composite structure). Verified green:
+  `test/01_unit/compiler/type_checker/occurs_check_structural_spec.spl`
+  `Results: 24 total, 24 passed, 0 failed`. This doc's header was never
+  updated when the 2026-08-17 fix landed; corrected here rather than left
+  to read as still-open.
 - **Severity:** HIGH — the type checker has no working guard against infinite
   types. The guard exists in source and can never fire.
 - **Found by:** de-vacuifying `type_inference_v2_spec.spl`, whose 70 examples
@@ -118,3 +125,20 @@ recreate the vacuity. The gap is tracked here instead.
 
 - `doc/08_tracking/bug/vacuous_spec_corpus_census_and_inert_assertion_forms_2026-08-02.md`
 - `doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md`
+
+## Re-check 2026-09-13 (BUGFIX-6 lane)
+
+Confirmed in current source: `occurs_check` (`type_inference.spl:96-97`) now
+delegates to `occurs_check_depth`, which recurses through every registered
+composite tag (array/option/isolated/exclusive/reference/pointer/atomic/weak
+wrappers, dict, result, tuple, union, and named struct/class/enum field
+tags), with an explicit `is_type_var(resolved)` leaf guard and a bounded
+depth (`OCCURS_MAX_DEPTH = 64`). `unify_types` calls it symmetrically for
+both `is_type_var(t1)` and `is_type_var(t2)` cases. This is exactly the fix
+this doc's own "Fix required" section 1-2 asked for. Item 3 ("add the
+UNIFY_FAIL_OCCURS example to type_inference_v2_spec.spl") was done as a
+dedicated new spec file instead
+(`test/01_unit/compiler/type_checker/occurs_check_structural_spec.spl`, 24
+examples) rather than editing the old placeholder-cleanup spec — same
+outcome, verified GREEN on base `a6450c9d6f5`, seed sha256 prefix
+`3d120a6f9ab5704b`: `Results: 24 total, 24 passed, 0 failed`.
