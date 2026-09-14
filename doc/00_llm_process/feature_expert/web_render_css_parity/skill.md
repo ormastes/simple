@@ -918,3 +918,29 @@ Round 22 measurements: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.m
   that the check path differs from prior rounds.
 
 Round 23 measurements: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`.
+
+## Round 24 — one defect, two top-ranked roots
+
+- **Rank on ATTRIBUTED Σ and the ranking changes under you.** The standing
+  "`<wbr>` ~1000" lead was stale the moment round 23 landed: that row is now
+  +24 over 4 rows, ~96 attributed. Re-derive the ranking from run A every
+  round; do not inherit last round's list.
+- **Pin the sign convention from a row whose two absolute values you know.**
+  `li` 86 is Chrome 48 / Simple 24 and prints `dh=+24`, so `dh = Chrome −
+  Simple` and a positive `dh` means Simple is SHORT. Round 23's prose has this
+  backwards in one sentence.
+- **Two differently-shaped symptoms on two pages were ONE defect.** An `<hr>`
+  demo box 8 px short on `html.html` and a 16 px page-wide shift on
+  `animation.html` were both "a block's bottom margin is dropped in front of an
+  anonymous inline run". Before opening two investigations, check whether the
+  lost distance equals the preceding block's `margin-bottom`.
+- **A root at the TOP of a page is worth far more than the same root two thirds
+  down.** Fixing the animation head removed 62 mismatches; fixing `<hr>` removed
+  zero, because its cascade rows only shrank from 6 to −2 and the differ's
+  threshold is 1 px. Predict count and Σ separately.
+- **Predict, then record the misses.** Round 24 predicted `forms-media`
+  unchanged; it improved 189 → 117, because the same defect sat in its `<form>`
+  and the ranking had only diagnosed the top two pages. Under-scoping a
+  diagnosis to the pages you ranked is the recurring miss.
+
+Round 24 measurements: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.md`.

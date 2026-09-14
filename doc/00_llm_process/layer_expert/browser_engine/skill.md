@@ -497,3 +497,15 @@ trying it again.
 Records: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`;
 `doc/08_tracking/bug/wbr_not_a_soft_break_opportunity_2026-09-14.md`;
 `doc/08_tracking/bug/sub_sup_line_box_strut_contradiction_2026-09-14.md`.
+
+Block-flow child loop (`simple_web_html_layout_renderer_layout.spl`, ~`:3555`
+onward): `prev_margin_b` carries the pending bottom margin of the previous
+in-flow BLOCK child and is collapsed against the next block's `margin-top`.
+Inline children do not participate in that collapse — they live in an anonymous
+block, which has no margins — so the pending margin must be FLUSHED into `cy`
+when an inline run opens (`:3629`), and `prev_margin_b` is separately zeroed
+after each inline child (`:3854`) so the block-after-inline direction collapses
+against 0. Removing either half breaks a different direction of the boundary;
+applying the flush to block siblings as well double-counts the collapse.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.md`.
