@@ -1,0 +1,130 @@
+"""
+A form control is a WIDGET box, not a block container: its height is its own
+content line plus its padding and border, and it never lays its children out as
+boxes in flow.
+
+Two independent defects, one branch:
+
+1. `<input>` took `style_line_h(st)` as its whole border-box height and charged
+   NO padding or border. `box-sizing` only reinterprets a SPECIFIED height, so
+   an auto-height control is content + padding + border under either value —
+   the author's `padding: 8px; border: 1px` was simply dropped. Against Chrome
+   152 on the catalog's forms-media page that is 15 where 33 belongs.
+
+2. `<select>` and `<textarea>` had no branch at all and fell through to the
+   generic BLOCK path, which recursed into their children. A `<select>` then
+   stacked its `<option>`s as real boxes and grew to 153 px tall; Chrome
+   reports every `<option>` as 0x0, because a select renders its options in a
+   popup and not in flow. The two `<option>` rows, the `<select>` row and the
+   `<label>` wrapping it were four root mismatches plus their inherited ladder.
+
+Chrome 152, `--headless=new --window-size=900,20000`, with the catalog's own
+author CSS (`*{box-sizing:border-box}`, `input,select,textarea,button{padding:
+8px;border:1px}`), harvested by `check-chrome-layout-geometry-diff.shs`:
+
+| control                    | Chrome | before   | after  |
+|----------------------------|--------|----------|--------|
+| `<input value="Simple">`   | 163x33 |   18x15  | 138x33 |
+| `<input type=checkbox>`    |  13x13 |   18x15  |  13x13 |
+| `<select>` + 2 options     |  73x35 |  18x153  |  73x33 |
+| `<textarea>`               | 195x48 |  120x33  | 138x48 |
+| `<option>`                 |   0x0  |    1x75  |   0x0  |
+| `<label>` wrapping the sel | 810x35 |  900x153 | 900x33 |
+
+SABOTAGE (run before landing): make `form_control_rows` return 1 instead of 2
+and the `<textarea>` row fails at 33 while every other row — including the
+`<input>` and `<select>` heights that share the same branch — still passes, so
+the rows term is doing real work and is not a constant that happened to fit.
+
+STATED RESIDUE, measured and deliberately not fixed here:
+
+- **Control WIDTHS stay narrow** (input 138 vs 163, textarea 138 vs 195). The
+  `size`/`cols` column count is right (20 by HTML default); the per-character
+  advance is not — this engine resolves ~6 px where Chrome's UA form font
+  (13.3333px) averages ~7.25. That is a font-metrics fidelity gap in the
+  advance table, not a layout gap, and is not papered over with a fudge factor.
+- **`<select>` height is 33 against Chrome's 35.** Chrome's select carries two
+  extra pixels that the other controls do not; the cause was not identified, so
+  it is recorded rather than guessed at.
+- **`<button>` is untouched.** It already had an inline-block branch giving the
+  correct 33 px height; only its width is 3 px narrow. A pre-existing failure
+  in `web_css_table_replaced_forms_spec` (`expected 19 to equal 21`) is that
+  button's CONTENT rect and is unrelated to this branch — it was red before
+  this change and is still red after it.
+- **Checkbox/radio vertical alignment.** The 13x13 box is right; where it sits
+  on a 24 px line box is baseline math this round did not read.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FORMS-002 — a form control's border-box height is its content line (rows x line height for textarea) plus its own padding and border, and a control never lays its children out as in-flow boxes.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}label{display:block;margin:8px 0}input,select,textarea,button{padding:8px;border:1px solid #94a3b8}</style></head><body><form>"
+
+fn probe(inner: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</form></body></html>", VW, VH, "x", prop)
+
+fn h_of(inner: text) -> text:
+    probe(inner, "h")
+
+fn box_of(inner: text) -> text:
+    probe(inner, "w") + "x" + probe(inner, "h")
+
+val SELECT: text = "<label>Choice <select id=\"x\"><option>Alpha</option><option>Beta</option></select></label>"
+
+describe "form controls are widget boxes, padding and border included":
+    it "AC-1: a text <input> is content + padding + border, Chrome's 33 px":
+        step("was 15 — the author's padding:8px and border:1px were dropped")
+        expect(h_of("<label>Name <input id=\"x\" value=\"Simple\"></label>")).to_equal("33")
+
+    it "AC-2: a <textarea> is rows x line + padding + border, Chrome's 48 px":
+        step("HTML default rows=2, so 2 x 15 + 16 + 2")
+        expect(h_of("<label>Notes <textarea id=\"x\">Editable text</textarea></label>")).to_equal("48")
+
+    it "AC-3: an explicit rows attribute drives the height":
+        step("rows=4 is 4 x 15 + 18 = 78 — the rows term, not a constant")
+        expect(h_of("<textarea id=\"x\" rows=\"4\">t</textarea>")).to_equal("78")
+
+    it "AC-4: <option> generates no in-flow box, exactly as Chrome reports":
+        step("a select renders its options in a popup; 1x75 was flow layout")
+        expect(box_of("<label>Choice <select><option id=\"x\">Alpha</option><option>Beta</option></select></label>")).to_equal("0x0")
+
+    it "AC-5: the <select> no longer stacks its options — 33, not 153":
+        step("the block path recursed into children; the widget branch returns first")
+        expect(h_of(SELECT)).to_equal("33")
+
+    it "AC-6: the <label> wrapping that select follows it back down":
+        step("the 118 px label error was entirely the select's stacked options")
+        expect(probe("<label id=\"x\">Choice <select><option>Alpha</option><option>Beta</option></select></label>", "h")).to_equal("33")
+
+    it "AC-7: checkbox and radio take the UA's fixed 13x13 glyph box":
+        step("Chrome ignores author padding on these two")
+        expect(box_of("<label><input id=\"x\" type=\"checkbox\" checked> Enabled</label>")).to_equal("13x13")
+
+    it "AC-8 (control): a radio matches the checkbox, same UA rule":
+        step("one row is an anecdote; both type values take the same branch")
+        expect(box_of("<label><input id=\"x\" type=\"radio\" checked> Light</label>")).to_equal("13x13")
+
+    it "AC-9 (control): an explicit CSS height still wins over the widget box":
+        step("a UA default that overrode an author's height would be a regression")
+        expect(h_of("<input id=\"x\" style=\"height:60px\" value=\"a\">")).to_equal("60")
+
+    it "AC-10 (control): <button> was already correct and must not move":
+        step("its inline-block branch is untouched by this change")
+        expect(h_of("<button id=\"x\" type=\"button\">Exercise controls</button>")).to_equal("33")
+
+    it "AC-11 (control): a plain <div> with the same padding is NOT a widget":
+        step("the branch must key on the control tags, not on padding")
+        expect(h_of("<div id=\"x\" style=\"padding:8px;border:1px solid #000\">text</div>")).to_equal("42")
+
+    it "AC-12: the select's width counts its widest option label":
+        step("option is display:block, so the inline-only intrinsic never saw it")
+        expect(probe(SELECT, "w")).to_equal("73")

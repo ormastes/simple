@@ -649,3 +649,62 @@ element is given the CONTAINER width, not its content width — `html`
 root rows on `html`, plus their inherited children.
 
 Round 17 measurements: `doc/10_metrics/ui/web_chrome_parity_round17_2026-09-14.md`.
+
+## Round 18 (2026-09-14) — the UA tables, not the layout algorithms
+
+Three items, and all three root causes were **missing UA-stylesheet knowledge**,
+not defective layout code. In every case the layout path that should have run
+was already correct and already tested; the element simply never reached it.
+That is the transferable lesson of this round.
+
+1. **Non-replaced inline width** (`html` root rows for `bdi bdo cite data del
+   dfn ins q s u`). The inline branch of `layout_with_style` already
+   shrink-wraps (`intrinsic_text_width`, which adds the element's own padding
+   and border) and already clamps the content area to the font height
+   (`inline_content_area_height`). Ten tags were simply absent from
+   `is_inline_tag` (`…_style.spl`), so they resolved to `display:block`, took
+   the container width (728 against Chrome's 86) and a line box's height. Fix:
+   twelve tags added to the UA table. **Derive that list from the measured
+   Chrome `display=inline` set of the catalog, not from the HTML spec** — one
+   `grep` over the harvested `*.geom.txt` gives it exactly.
+2. **Replaced default box** (`animation` `audio`/`video`/`canvas`). Only
+   `<iframe>` had the CSS 2.1 §10.3.2/§10.6.2 fallback; the rest had no sizing
+   branch. Generalised the iframe branch behind `replaced_default_box_w/h`
+   (300x150; `<audio controls>` 300x54 measured, not assumed).
+3. **Form controls are widgets** (`forms-media`). `<input>` charged NO padding
+   or border on its height (15 where 33 belongs — `box-sizing` reinterprets a
+   *specified* height, so an auto-height control is content+pad+border either
+   way), and `<select>`/`<textarea>` had no branch at all: the block path
+   recursed into a select's `<option>`s and stacked them 153 px tall, where
+   Chrome reports every option as 0x0.
+
+### Traps and method notes
+
+- **A failed sabotage is not a disproof until you check the sabotage applied.**
+  The first `is_inline_tag` sabotage looked like the premise was false — the
+  spec stayed 8/8. The `sed` pattern had simply not matched (the entry sits on
+  a continuation line). `grep -c SABOTAGED` before re-running, every time.
+- **Twins move together.** `layout.spl:_m14_is_inline_tag` is a second hardcoded
+  inline-tag list for the M14 public API. Widening only one of the two would
+  have left the twin architecture inconsistent; both carry the set now.
+- **A size fix can make a ladder worse and still be right.** Giving
+  `audio`/`video` their true 54/150 heights grew `animation`'s inherited `code`
+  ladder from `dy=30` (Run A) to `dy=126` (Run B), because Simple stacks these as BLOCK boxes
+  where Chrome puts them on one inline line box. Per-element geometry is now
+  correct; the ladder is the next defect, not a regression of this one. Report
+  both numbers rather than hiding either.
+- **`intrinsic_text_width` is inline-only.** For a `<select>` it never reaches
+  the `<option>` labels (option is `display:block`); `flex_item_max_content_width`
+  does, and already includes the element's own padding and border.
+
+### Next cluster, with the row that names it
+
+**Replaced elements are block-level here and inline-level in Chrome.** On
+`animation`, Chrome has `canvas` y=295 h=40, `audio` y=281 h=54, `video` y=185
+h=150 — three bottoms all at 335, i.e. one line box with the boxes on the
+baseline. Simple stacks them, so `dx`/`dy` stay wrong now that `dw`/`dh` are
+right (`audio dx=249`, `video dy=134`). Note `img` is not in `is_inline_tag`
+either, so the `grid_item_is_replaced` exclusion in the inline height clamp is
+currently unreachable — the machinery for this already exists and has never run.
+
+Round 18 measurements: `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`.

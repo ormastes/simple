@@ -606,6 +606,57 @@ fn grid_item_is_replaced(node: HNode) -> bool:
         tag == "video"
     )
 
+fn replaced_default_box_w(tag: text) -> i32:
+    """UA default BORDER-BOX width for a replaced element that has no intrinsic
+    media size, or 0 for a tag that is not sized this way.
+
+    CSS 2.1 §10.3.2 gives a replaced element with no intrinsic width and no
+    specified width a used width of 300px. Chrome's `<audio controls>` widget
+    is 300px wide by the same rule; its height is the widget default (below),
+    not the §10.6.2 fallback. `<img>` and `<input>` are deliberately absent:
+    they are sized from real intrinsic/UA metrics further down this function's
+    caller, and giving them a 300px default would be a regression.
+    """
+    if tag == "iframe" or tag == "video" or tag == "canvas" or tag == "embed" or tag == "object" or tag == "audio":
+        return 300
+    0
+
+fn replaced_default_box_h(tag: text) -> i32:
+    """UA default BORDER-BOX height matching `replaced_default_box_w`.
+
+    CSS 2.1 §10.6.2 fallback is 150px. `<audio controls>` is the one exception
+    measured against Chrome 152: the control strip is 54px tall.
+    """
+    if tag == "audio":
+        return 54
+    if replaced_default_box_w(tag) > 0:
+        return 150
+    0
+
+# Width Chrome's UA reserves for a <select>'s drop-down arrow, on top of the
+# widest option label. Derived against Chrome 152 on the catalog's forms-media
+# page: Chrome's select border box is 73 px there, and this engine's
+# max-content width for the same `<option>` set (label + the select's own
+# padding 16 and border 2) is 51, so the arrow region is 22.
+val SELECT_ARROW_WIDTH_PX: i32 = 22
+
+fn form_control_rows(node: HNode) -> i32:
+    """Visible text rows of a <textarea>: its `rows` attribute, else the HTML
+    default of 2 (HTML §4.10.11 — Chrome's textarea is two rows tall)."""
+    val attr_rows = parse_int(attr_value(node.attrs_raw, "rows"))
+    if attr_rows > 0:
+        return attr_rows
+    2
+
+fn form_control_cols(node: HNode) -> i32:
+    """Visible character columns of a text control: `size` for <input>, `cols`
+    for <textarea>, else the HTML default of 20 for both."""
+    val attr_name = if node.tag == "textarea": "cols" else: "size"
+    val attr_cols = parse_int(attr_value(node.attrs_raw, attr_name))
+    if attr_cols > 0:
+        return attr_cols
+    20
+
 fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i: i32) -> [i32]:
     val child_count = child_index.child_count[parent_i]
     if child_count <= 0:
@@ -1981,23 +2032,25 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             node_w = nowrap_intrinsic.width
     node_w = constrained_outer_width(node, st, node_w)
     out_bw[i] = node_w
-    if node.tag == "iframe":
-        # Replaced element (like img): fixed box from CSS width/height, else the
-        # width/height HTML attributes, else the browser default 300x150. The
-        # subtree is never laid out (returns without recursing into children).
+    if replaced_default_box_w(node.tag) > 0:
+        # Replaced element with no intrinsic media loaded: fixed box from CSS
+        # width/height, else the width/height HTML attributes, else the UA
+        # default for the tag (CSS 2.1 §10.3.2/§10.6.2 give 300x150; Chrome's
+        # `<audio controls>` widget default is 300x54). The subtree is never
+        # laid out (returns without recursing into children).
         if st.width_px == 0:
             val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
-            var iframe_w = if attr_w > 0: attr_w else: 300
-            iframe_w = constrained_outer_width(node, st, iframe_w)
-            out_bw[i] = iframe_w
-        val explicit_iframe_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
-        var iframe_h = explicit_iframe_h
+            var replaced_w = if attr_w > 0: attr_w else: replaced_default_box_w(node.tag)
+            replaced_w = constrained_outer_width(node, st, replaced_w)
+            out_bw[i] = replaced_w
+        val explicit_replaced_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        var replaced_h = explicit_replaced_h
         if st.height_px == 0:
             val attr_h = parse_int(attr_value(node.attrs_raw, "height"))
-            iframe_h = if attr_h > 0: attr_h else: 150
-        iframe_h = constrained_outer_height(node, st, iframe_h)
-        out_bh[i] = iframe_h
-        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, iframe_h)
+            replaced_h = if attr_h > 0: attr_h else: replaced_default_box_h(node.tag)
+        replaced_h = constrained_outer_height(node, st, replaced_h)
+        out_bh[i] = replaced_h
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, replaced_h)
     if node.tag == "#text":
         # white-space:pre/nowrap (st.white_space_nowrap, inherited from e.g. a
         # <pre> code block) preserves the raw text incl. leading indentation;
@@ -2042,7 +2095,47 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         val h = lines * style_line_h(st)
         out_bh[i] = h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
-    if node.tag == "img" or node.tag == "input":
+    if node.tag == "input" or node.tag == "select" or node.tag == "textarea":
+        # Form controls are WIDGETS, not block containers: the UA gives them a
+        # box from their own metrics and never lays their children out as boxes
+        # (Chrome reports every `<option>` as 0x0 — a `<select>` renders its
+        # options in a popup, not in flow). This branch returns before the
+        # child recursion for exactly that reason.
+        #
+        # Height is the content line plus the element's own padding and border.
+        # `box-sizing` only reinterprets a SPECIFIED height, so an auto-height
+        # control is content + padding + border either way; charging only the
+        # content line is what made every control 18 px short (and is the
+        # `expected 19 to equal 21` in web_css_table_replaced_forms_spec).
+        val input_type = attr_value(node.attrs_raw, "type")
+        if node.tag == "input" and (input_type == "checkbox" or input_type == "radio"):
+            # Chrome's UA sizes these two to a fixed 13x13 glyph box and
+            # ignores author padding on them.
+            out_bw[i] = constrained_outer_width(node, st, 13)
+            val check_h = constrained_outer_height(node, st, 13)
+            out_bh[i] = check_h
+            return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, check_h)
+        val control_line_h = style_line_h(st)
+        val control_rows = if node.tag == "textarea": form_control_rows(node) else: 1
+        val explicit_control_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        val auto_control_h = control_rows * control_line_h + st.pad_t + st.pad_b + border_y
+        val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_control_h else: auto_control_h)
+        out_bh[i] = h
+        if st.width_px == 0:
+            # Intrinsic width: `size` columns for <input>, `cols` for
+            # <textarea>, the widest <option> label for <select> — each in the
+            # control's own UA font, plus its padding and border.
+            val cols = form_control_cols(node)
+            var control_w = cols * style_char_w(st) + st.pad_l + st.pad_r + border_x
+            if node.tag == "select":
+                # `<option>` is display:block in the UA sheet, so
+                # `intrinsic_text_width` (inline-only) never reaches its label;
+                # the max-content walker does, and already adds the select's
+                # own padding and border.
+                control_w = flex_item_max_content_width(nodes, styles, child_index, i) + SELECT_ARROW_WIDTH_PX
+            out_bw[i] = constrained_outer_width(node, st, control_w)
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
+    if node.tag == "img":
         val explicit_node_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_node_h else: style_line_h(st))
         out_bh[i] = h
