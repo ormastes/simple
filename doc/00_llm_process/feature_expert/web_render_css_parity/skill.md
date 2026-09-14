@@ -546,3 +546,54 @@ Two traps for the next round:
 `paint_layout_advance_parity` (2/2, green) consume.
 
 Measurements: `doc/10_metrics/ui/web_chrome_parity_round13_2026-09-14.md`.
+
+## Round 16 (2026-09-14): the text API is BYTE/CODEPOINT mixed — check the index kind first
+
+`css-layout` and `css-paint` had not moved in nine rounds because the candidate
+list (flex/grid sizing, `gap`, `box-sizing`, percentage widths) was the wrong
+list. The whole cluster was ONE character: an `&mdash;`.
+
+Read this before touching any wrap, measure or paint loop:
+
+| call | indexed in |
+|---|---|
+| `text.len()`, `text.substring(a,b)`, `text.bytes()` | **BYTES** |
+| `text.char_code_at(i)`, `text.char_at(i)` | **CODEPOINTS** |
+| `resolved_font_advances` | one entry per **CODEPOINT** |
+| `style_run_byte_advances(st, s)` | one entry per **BYTE** (0 on continuation) |
+
+Every wrap offset in this renderer is a BYTE offset, because it is cut on with
+`substring`. Two live defects came from mixing the two, and both were invisible
+on ASCII:
+
+- an arity guard comparing `resolved_font_advances.len()` (codepoints) with
+  `txt.len()` (bytes) sent every non-ASCII run to the flat cells-per-line
+  estimate — 12 px/char against a real ~7.8, so it wrapped ~50 % too early;
+- `style_run_byte_advances` tried to spot UTF-8 continuation bytes with
+  `char_code_at`, which DECODES and never answers 128..191, so the helper
+  returned an empty table and was dead on exactly the runs it exists for.
+
+`css-paint` 516 → 9 mismatched; `css-layout`'s root `dy` maximum 697 → 169 px.
+
+Three traps this cost:
+- **A count can rise while geometry improves.** `css-layout` went 337 → 378
+  because the over-wide estimate had been compensating for a second defect in
+  the opposite direction. Report the `dy` histogram, not just the count.
+- **Fixing the guard alone changes nothing** — the helper behind it was also
+  broken. If a fix provably reaches the right code path and moves no pixels,
+  suspect its dependency, don't re-diagnose the symptom.
+- **Isolate by CHARACTER, not by element.** The first four fixtures blamed
+  `<code>`; swapping `—` for `xx` in the same run, with everything else held,
+  was what actually named it.
+
+Also measured and recorded rather than fixed: the `<body>` margin-collapse item
+carried into round 16 was **not real on these pages** — Chrome's own numbers
+have `body` at y=16 with the child flush to it, and every catalog page's `body`
+row is `dy=0`. Verify a handed-down premise against run A before editing.
+
+Next cluster, with fixture: a `#text` node starting at a non-zero pen x wraps
+against the FULL container width, so an inline `<code>`/`<span>` before it does
+not narrow the first line.
+
+Measurements: `doc/10_metrics/ui/web_chrome_parity_round16_2026-09-14.md`;
+record: `doc/08_tracking/bug/web_non_ascii_run_wrap_falls_back_to_flat_estimate_2026-09-14.md`.

@@ -1224,15 +1224,30 @@ fn fb_text_thin_scaled_clip_range_adv(fb: [u32], fbw: i32, fbh: i32, x: i32, y: 
     val glyph_h = 7 * scale
     if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
         return out
+    # `i` walks BYTES (that is what `by`, `start` and `endv` are indexed in),
+    # but `char_code_at` is CODEPOINT-indexed in this text API, so the glyph
+    # lookup needs its own cursor. Until the byte-advance table was fixed it
+    # was always empty on non-ASCII runs and this loop was unreachable for
+    # them, which is why the mix never showed: a continuation byte carries a 0
+    # advance and must draw nothing and consume no codepoint.
+    val sb = s.bytes()
     var i = start
+    var ci = 0
+    var k = 0
+    while k < start:
+        if sb[k] < 128 or sb[k] >= 192:
+            ci = ci + 1
+        k = k + 1
     var cx = x
     while i < endv:
         if cx >= fbw or cx >= clip.x1:
             return out
-        val code = s.char_code_at(i)
-        val gi = glyph_index_for_char_code(code)
-        if gi >= 0 and gi != 36:
-            out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+        if sb[i] < 128 or sb[i] >= 192:
+            val code = s.char_code_at(ci)
+            val gi = glyph_index_for_char_code(code)
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+            ci = ci + 1
         cx = cx + by[i]
         i = i + 1
     out
