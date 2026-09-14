@@ -129,6 +129,21 @@ recorded on that flag, and the collector has known decision-skips — see bug
 records `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md` and
 `coverage_probe_plan_skips_struct_method_decisions_2026-08-15.md`).
 
+- **Chrome layout-geometry differ** (`scripts/check/check-chrome-layout-geometry-diff.shs`
+  + `src/app/ui/chrome_showcase/layout_geometry_diff.spl`). **Trap, round 14
+  (2026-09-14):** the renderer's own wall-clock budget (`WEB_RENDER_BUDGET_MS`,
+  10 s) truncates the style pass under the interpreter — it broke at node 46 of
+  883 on `html.html` and every box came back `(0,0,0,0)`, which reads as "every
+  element mismatches". `SIMPLE_TIMEOUT_SECONDS` is the RUNNER's timeout and does
+  **not** disable it; the knob is `SIMPLE_WEB_RENDER_BUDGET_MS`, which the
+  harness now pins. The differ fails closed on
+  `simple_web_layout_last_render_degraded()`, so a truncated render can no
+  longer be reported as a comparison. Lifting the budget moved html from 430 to
+  329 mismatches. Records:
+  `doc/08_tracking/bug/web_render_budget_truncates_geometry_differ_layout_2026-09-14.md`
+  and the open follow-on
+  `web_layout_vertical_drift_accumulates_16px_per_construct_2026-09-14.md`
+  (all 136 root mismatches are dy-only; dx/dw/dh are mostly zero).
 - **Chrome counterpart provider**: `src/lib/nogc_sync_mut/spec/evidence/counterpart/chrome_dom_snapshot_provider.spl`
   — real Chrome over pure-Simple CDP at boundary `chrome.dom_snapshot@1`.
   Spec: `test/01_unit/infra/counterpart/chrome_counterpart_compare_spec.spl`.

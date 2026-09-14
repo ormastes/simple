@@ -37,6 +37,30 @@ cd "$ROOT_DIR"
 export SIMPLE_EXECUTION_MODE="${SIMPLE_EXECUTION_MODE:-interpreter}"
 export SIMPLE_TIMEOUT_SECONDS="${SIMPLE_TIMEOUT_SECONDS:-0}"
 
+# The web renderer's own WALL-CLOCK RENDER BUDGET, which is a different thing
+# from SIMPLE_TIMEOUT_SECONDS above and is NOT disabled by it (round 14,
+# 2026-09-14). WEB_RENDER_BUDGET_MS defaults to 10000 ms
+# (simple_web_html_layout_renderer_foundation.spl:151); under the interpreter
+# the per-node style pass is far slower than a frame deadline assumes, so the
+# style producer broke at node 46 of 883 on html.html:
+#
+#   [web-style-producer] budget-break at=46 of=883 now_us=10100089 deadline_us=10000000
+#
+# Every node past the break keeps renderer_default_style(), layout emits
+# nothing, and the Simple side comes back as 432 boxes of (0,0,0,0) -- the
+# SAME all-zero shape that round 13 attributed to the stale runner binary, so
+# fixing the binary did not cure it. Measured on the fresh runner: 430
+# mismatched (degenerate, every element "differs") with the budget armed, 329
+# mismatched with it lifted.
+#
+# Raising it HERE, in the measurement lane, is not the thing the foundation
+# comment forbids: that comment forbids raising the DEFAULT, which would hide
+# the interpreter-vs-budget perf defect from real renders. This differ is not a
+# frame; it is a correctness measurement, and a deadline-truncated layout is
+# not a layout. The differ additionally fails closed on a degraded render, so
+# an insufficient value here can never be read as a clean comparison.
+export SIMPLE_WEB_RENDER_BUDGET_MS="${SIMPLE_WEB_RENDER_BUDGET_MS:-1800000}"
+
 BUILD_DIR="${BUILD_DIR:-build/chrome_layout_geometry_diff}"
 WIDTH="${GEOM_DIFF_WIDTH:-900}"
 HEIGHT="${GEOM_DIFF_HEIGHT:-760}"
@@ -75,9 +99,28 @@ if [ "${1:-}" = "--selftest" ]; then
     out="$("$SIMPLE_BIN" run "$DIFFER" selftest 2>/dev/null | grep '^SELFTEST' || true)"
     echo "$out"
     case "$out" in
-        "SELFTEST PASS"*) echo "PASS — 5 fixture(s) checked, 0 failed"; exit 0 ;;
+        "SELFTEST PASS"*) : ;;
         *) echo "FAIL — differ selftest did not pass"; exit 1 ;;
     esac
+    # Sixth fixture, shell-level because the degrade latch is module-global and
+    # cannot be constructed in-process: with a deliberately tiny render budget
+    # the differ MUST refuse to compare rather than report a truncated layout.
+    # This is the guard that round 14 added; without a fixture it would be
+    # indistinguishable from dead code the day someone drops the env pin.
+    sab_geom="$BUILD_DIR/selftest_sabotage.geom.txt"
+    printf 'GEOM|path:|body|0|0|900|600|display=block\nGEOM|path:0|div|10|10|100|50|display=block\n' >"$sab_geom"
+    sab_out="$(SIMPLE_WEB_RENDER_BUDGET_MS=1 "$SIMPLE_BIN" run "$DIFFER" diff \
+        "$CATALOG_DIR/html.html" "$sab_geom" "$BUILD_DIR/selftest_sabotage" \
+        900 20000 2>/dev/null | tail -n 1)"
+    case "$sab_out" in
+        *"tripped its wall-clock render budget"*)
+            echo "selftest budget-truncation: PASS (degraded render refused)" ;;
+        *)
+            echo "selftest budget-truncation: FAIL (got: $sab_out)"
+            echo "FAIL — differ did not refuse a budget-truncated render"; exit 1 ;;
+    esac
+    echo "PASS — 6 fixture(s) checked, 0 failed"
+    exit 0
 fi
 
 [ -n "$CHROME" ] || err "no Chrome/Chromium found"
@@ -195,7 +238,18 @@ for page in $PAGES; do
     set -e
     rm -f "$probe"
     # Un-escape the <pre> text back to plain GEOM lines.
-    sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g' "$dom" \
+    # `--dump-dom` serialises the <pre> open tag and its FIRST line together on
+    # one line -- `</script><pre id="__geom__">GEOM|path:|body|...` -- so that
+    # row does not start with `GEOM|` and a bare grep dropped it. Anchor on the
+    # <pre> tag, not on the line start: the preceding `</script>` is part of the
+    # same line. The dropped row is always the FIRST one the walker
+    # emits, i.e. `<body>` itself -- the single row that would expose a UA body
+    # margin, a viewport-width error, or a differ origin bug. Every diff before
+    # 2026-09-14 therefore compared every element EXCEPT the one that matters
+    # most for a global offset, and reported it as `missing_in_chrome: 1
+    # path:(body)` -- a Simple-only box -- which reads like a Simple defect.
+    sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&amp;/\&/g' \
+        -e 's/^.*<pre id="__geom__">GEOM|/GEOM|/' "$dom" \
         | grep '^GEOM|' >"$geom" || true
     n_chrome="$(grep -c '^GEOM|' "$geom" 2>/dev/null || echo 0)"
     if [ "$n_chrome" -eq 0 ]; then

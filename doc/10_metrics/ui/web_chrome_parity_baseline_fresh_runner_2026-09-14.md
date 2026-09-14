@@ -77,6 +77,19 @@ absence of the other 7 pages' numbers as "no regression there" — round
 11-13's html/css-layout/css-paint/forms-media/animation totals remain void
 until each page is re-measured against this (or a later) fresh binary.
 
+**SUPERSEDED 2026-09-14 (round 14) — and the 431/430 html figure above is
+itself void.** The full 8-page re-baseline was run:
+`doc/10_metrics/ui/web_chrome_parity_round14_2026-09-14.md`. It also found that
+the fresh binary was not the only reason the numbers were bad. The renderer arms
+its OWN wall-clock budget (`WEB_RENDER_BUDGET_MS`, 10 s), which
+`SIMPLE_TIMEOUT_SECONDS=0` does not disable; on `html.html` it truncated the
+style pass at node 46 of 883, so the Simple side was again all-zero and "430 of
+431 mismatched" was a measurement of the deadline, not of CSS. With the budget
+lifted the same page reports **329**. See
+`doc/08_tracking/bug/web_render_budget_truncates_geometry_differ_layout_2026-09-14.md`.
+Two harness fixes landed with it: the budget is now pinned by the differ script,
+and the differ fails closed on a degraded render.
+
 ## Guard added
 
 `scripts/check/check-runner-binary-extern-freshness.shs` (advisory, push
