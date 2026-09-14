@@ -2,7 +2,7 @@
 
 **Generated:** 2026-05-19 11:58:31
 **Total Tests:** 859
-**Status:** ⚠️ 754 UNKNOWN; 105 verified passing
+**Status:** ⚠️ 753 UNKNOWN; 105 verified passing; 1 failing
 
 ## Summary
 
@@ -10,14 +10,15 @@
 |--------|-------|
 | Total | 859 |
 | Passed | 105 |
-| Failed | 0 |
+| Failed | 1 |
 | Skipped | 0 |
-| Other | 754 |
+| Other | 753 |
 
 ---
 
 ## 🔄 Recent Status Changes
 
+- test/02_integration/net/http_content_encoding_spec.spl: unknown -> failed (5/12 examples passed; 7 failed on 2026-09-14)
 - test/01_unit/compiler/async/async_desugar_integration_spec.spl
 - test/01_unit/compiler/async/async_frame_analysis_spec.spl
 - test/01_unit/compiler/async/async_integration_spec.spl
@@ -781,7 +782,7 @@
 | test/01_unit/compiler/async/poll_generator_spec.spl | failed | 2 | 1679.9705882352941 | 524.0 |
 | test/01_unit/compiler/async/state_enum_spec.spl | failed | 2 | 1098.3636363636363 | 591.0 |
 | test/01_unit/compiler/async/suspension_analysis_spec.spl | failed | 2 | 1933.878787878788 | 673.0 |
-| test/02_integration/net/http_content_encoding_spec.spl | unknown | 5 | 5168.011111111111 | 770.5 |
+| test/02_integration/net/http_content_encoding_spec.spl | failed | 5 | 5168.011111111111 | 770.5 |
 | test/01_unit/compiler/verify/baremetal_noalloc_constraints_spec.spl | unknown | 5 | 5168.011111111111 | 770.5 |
 | test/01_unit/compiler/verification/cache_correctness_spec.spl | unknown | 5 | 5168.011111111111 | 770.5 |
 | test/01_unit/compiler/verification/deterministic_emission_spec.spl | unknown | 2 | 2443.283582089552 | 650.0 |
