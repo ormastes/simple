@@ -111,11 +111,12 @@ impl MethodResolver:
         """Fill omitted trailing arguments of a direct function call with the
         callee's declared default values (G50 / M12 item 3b).
 
-        Only direct free-function calls `Var(sym)` whose signature lives in the
-        current module's function registry are handled; cross-module callees are
-        absent from `module_functions` so the call is returned unchanged (safe
-        no-op, never a spurious arity error). Named-argument calls are left
-        untouched because trailing positional fill would misalign them.
+        Only direct free-function calls `Var(sym)` whose closed signature lives
+        in the current module's function registry are handled. Cross-module,
+        computed, and foreign/variadic callees are absent from
+        `module_functions`, so they remain open rather than receiving a false
+        maximum. Named-argument calls are arity-checked but left unfilled because
+        trailing positional fill would misalign them.
 
         Limitation / deferred runtime-verification target: the lookup keys on the
         callee `Var` SymbolId matching the definition's `module.functions` key.
@@ -127,14 +128,33 @@ impl MethodResolver:
             case Var(sym):
                 if not self.module_functions.contains_key(sym):
                     return args
-                # Trailing positional fill is unsound across named args.
+                val func = self.module_functions[sym]
+                val params = func.params
+                var required = 0
+                for param in params:
+                    if not param.has_default:
+                        required = required + 1
+                if args.len() < required:
+                    self.add_error(
+                        "function '" + func.name + "' requires at least " + required.to_text()
+                            + " argument(s), but " + args.len().to_text() + " were provided",
+                        call_span
+                    )
+                    return args
+                if args.len() > params.len():
+                    self.add_error(
+                        "function '" + func.name + "' accepts at most " + params.len().to_text()
+                            + " argument(s), but " + args.len().to_text() + " were provided",
+                        call_span
+                    )
+                    return args
+                if args.len() == params.len():
+                    return args
+                # Count validation applies to named calls, but positional
+                # synthesis does not: their omitted slots are name-dependent.
                 for a in args:
                     if a.has_name:
                         return args
-                val func = self.module_functions[sym]
-                val params = func.params
-                if args.len() >= params.len():
-                    return args
                 var filled: [HirCallArg] = args
                 var i = args.len()
                 while i < params.len():
@@ -147,14 +167,10 @@ impl MethodResolver:
                             span: call_span
                         ))
                     else:
-                        # Arity-error half intentionally omitted (M12 3b). The lean
-                        # bridge currently hardcodes `has_default: false`
-                        # (_FlatAstBridge/convert_nodes.spl:571/682), so emitting a "too few
-                        # arguments" error here would FALSE-FIRE on every valid
-                        # omitted-default call. A missing param with no default also
-                        # cannot be filled positionally, so stop and leave the call
-                        # as-is (pre-existing behavior). Re-enable the arity error
-                        # only after the bridge captures has_default faithfully.
+                        # A non-trailing default declaration is malformed for
+                        # positional omission. Required-count validation above is
+                        # intentionally conservative; stop without fabricating a
+                        # value for the missing required slot.
                         return filled
                     i = i + 1
                 return filled
