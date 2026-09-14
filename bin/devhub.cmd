@@ -47,17 +47,10 @@ rem Keep the explicit shell override for installations that still want the
 rem POSIX wrapper. Mode validation above guarantees loading never probes or
 rem executes a shell/runtime, while this branch receives the original argv.
 if not "%DEVHUB_SH%"=="" (
+    setlocal DisableDelayedExpansion
     "%ComSpec%" /d /c call "%DEVHUB_SH%" "%SCRIPT_DIR%devhub" %*
     exit /b %ERRORLEVEL%
 )
-
-rem Reconstruct only when a wrapper control was consumed. For ordinary
-rem invocations without a control, %* is passed verbatim by cmd.exe.
-set "FORWARD_ARGS="
-if "%MODE_CONTROL%"=="0" set "FORWARD_ARGS=%*"
-if "%MODE_CONTROL%"=="1" call :collect_forward_args "%~1" "%~2" "%~3" "%~4" "%~5" "%~6" "%~7" "%~8" "%~9"
-
-:after_collect_forward_args
 
 set "HOST_ARCH=%PROCESSOR_ARCHITEW6432%"
 if "%HOST_ARCH%"=="" set "HOST_ARCH=%PROCESSOR_ARCHITECTURE%"
@@ -91,21 +84,18 @@ if not defined RUNTIME (
 )
 
 echo [devhub] mode=ordinary runtime=!RUNTIME! receipt=!RECEIPT! version=!VERSION! 1>&2
-if /I "!RUNTIME:~-4!"==".cmd" (
-    call "!RUNTIME!" run "%REPO_ROOT%\src\app\devhub\main.spl" !FORWARD_ARGS!
-) else if /I "!RUNTIME:~-4!"==".bat" (
-    call "!RUNTIME!" run "%REPO_ROOT%\src\app\devhub\main.spl" !FORWARD_ARGS!
+rem Disable delayed expansion at the process boundary: %* is the original
+rem argv, with no %1..%9 reconstruction, SHIFT, or CALL re-entry.
+set "RUNTIME_EXT=!RUNTIME:~-4!"
+setlocal DisableDelayedExpansion
+if /I "%RUNTIME_EXT%"==".cmd" (
+    call "%RUNTIME%" run "%REPO_ROOT%\src\app\devhub\main.spl" %*
+) else if /I "%RUNTIME_EXT%"==".bat" (
+    call "%RUNTIME%" run "%REPO_ROOT%\src\app\devhub\main.spl" %*
 ) else (
-    "!RUNTIME!" run "%REPO_ROOT%\src\app\devhub\main.spl" !FORWARD_ARGS!
+    "%RUNTIME%" run "%REPO_ROOT%\src\app\devhub\main.spl" %*
 )
 exit /b %ERRORLEVEL%
-
-:collect_forward_args
-if "%~1"=="" goto after_collect_forward_args
-set "FORWARD_ARG=%~1"
-set "FORWARD_ARGS=!FORWARD_ARGS! "!FORWARD_ARG!""
-shift
-goto collect_forward_args
 
 :try_runtime
 set "CANDIDATE=%~1"

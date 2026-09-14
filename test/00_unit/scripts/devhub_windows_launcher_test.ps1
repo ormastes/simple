@@ -34,7 +34,7 @@ exit /b 0
 
     function Invoke-DevHub([string[]] $Arguments) {
         $argText = ($Arguments | ForEach-Object {
-            if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+            '"' + ($_ -replace '"', '\"') + '"'
         }) -join ' '
         $psi = [Diagnostics.ProcessStartInfo]::new()
         $psi.FileName = $env:ComSpec
@@ -82,13 +82,50 @@ if "%~1"=="--help" (
     echo simple test
     exit /b 0
 )
-if "%~1"=="run" (
-    >"%DEVHUB_TEST_MARKER%" echo command=run
-    >>"%DEVHUB_TEST_MARKER%" echo arg1=%~3
-    >>"%DEVHUB_TEST_MARKER%" echo arg2=%~4
-    exit /b %DEVHUB_TEST_EXIT%
-)
+if "%~1"=="run" goto capture_run
 exit /b 2
+
+:capture_run
+    set "marker=%DEVHUB_TEST_MARKER%"
+    set "arg3=%~3"
+    set "arg4=%~4"
+    set "arg5=%~5"
+    set "arg6=%~6"
+    set "arg7=%~7"
+    set "arg8=%~8"
+    set "arg9=%~9"
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    shift
+    set "arg10=%~1"
+    set "arg11=%~2"
+    set "arg12=%~3"
+    set "arg13=%~4"
+    setlocal EnableDelayedExpansion
+    >"!marker!" echo invocation=1
+    >>"!marker!" echo arg3=!arg3!
+    >>"!marker!" echo arg4=!arg4!
+    >>"!marker!" echo arg5=!arg5!
+    >>"!marker!" echo arg6=!arg6!
+    >>"!marker!" echo arg7=!arg7!
+    >>"!marker!" echo arg8=!arg8!
+    >>"!marker!" echo arg9=!arg9!
+    >>"!marker!" echo arg10=!arg10!
+    >>"!marker!" echo arg11=!arg11!
+    >>"!marker!" echo arg12=!arg12!
+    >>"!marker!" echo arg13=!arg13!
+    exit /b %DEVHUB_TEST_EXIT%
 '@
     $hash = (Get-FileHash -LiteralPath $FakeRuntime -Algorithm SHA256).Hash.ToLowerInvariant()
     $env:SIMPLE_WINDOWS_ABI = 'msvc'
@@ -109,12 +146,15 @@ version_output=Simple v9.9.9-test
     Remove-Item Env:DEVHUB_SH -ErrorAction SilentlyContinue
     # Keep certutil available while intentionally excluding Git's sh.exe.
     $env:Path = $Temp + ';' + (Join-Path $env:SystemRoot 'System32')
-    $r = Invoke-DevHub @('--mode', 'ordinary', '--help')
+    $r = Invoke-DevHub @('--mode', 'ordinary', '--alpha', 'two words', 'a&b', 'bang!value', 'arg7', 'arg8', 'arg9', 'arg10', 'arg11', 'arg12', 'arg13')
     if ($r.ExitCode -ne 0) {
         throw "native dispatch failed: exit=$($r.ExitCode) out=$($r.Stdout) err=$($r.Stderr)"
     }
     $lines = Get-Content -LiteralPath $Marker
-    if ($lines[1] -ne 'arg1=--help') { throw "native argument forwarding failed: $($lines -join '; ')" }
+    if (($lines | Where-Object { $_ -eq 'invocation=1' }).Count -ne 1) { throw "native invocation count failed: $($lines -join '; ')" }
+    if ($lines[1] -ne 'arg3=--mode' -or $lines[2] -ne 'arg4=ordinary' -or $lines[3] -ne 'arg5=--alpha' -or $lines[4] -ne 'arg6=two words' -or $lines[5] -ne 'arg7=a&b' -or $lines[6] -ne 'arg8=bang!value' -or $lines[8] -ne 'arg10=arg13') {
+        throw "native argument forwarding failed: $($lines -join '; ')"
+    }
     $env:DEVHUB_TEST_EXIT = '41'
     $r = Invoke-DevHub @('check', 'value with spaces')
     if ($r.ExitCode -ne 41) { throw "native exit propagation failed: exit=$($r.ExitCode) err=$($r.Stderr)" }
