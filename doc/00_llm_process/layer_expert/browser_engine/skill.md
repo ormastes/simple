@@ -509,3 +509,21 @@ against 0. Removing either half breaks a different direction of the boundary;
 applying the flush to block siblings as well double-counts the collapse.
 
 Records: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.md`.
+
+`<wbr>` (same loop, `:3710`, RESOLVED round 25) is a zero-width SOFT break
+opportunity, and the DOM shape is what makes it tractable: the tag splits the
+text into separate `#text` siblings, so the opportunity is a node in the child
+list and needs no intra-run machinery — no change to
+`_lay_compute_style_wrap_ranges_inner` or to its
+`compute_style_wrap_ranges_float_band` twin. The arm sits AFTER the `<br>` arm
+and after round 24's `prev_margin_b` flush, so a `<wbr>`-opened run still gets
+the margin. Three things it must get right, each pinned by an AC:
+the element's own box is zero-sized at the pen (not 1 px — the generic inline
+path's `inline_w` floor is what made it invisible); the break is taken ONLY when
+`inline_x + first_word_advance_width(next) > iw`, because Chrome is greedy and
+passes over an opportunity whose following word still fits; and the width tested
+is the first WORD of the next run, not the whole run. A leading `<wbr>` at pen 0
+is guarded out (`inline_x > inline_start_x`) and therefore diverges from Chrome,
+which answers 48 there — recorded, not tuned for.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.

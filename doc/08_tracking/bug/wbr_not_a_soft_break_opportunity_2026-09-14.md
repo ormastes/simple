@@ -1,6 +1,16 @@
 # `<wbr>` is not a soft-break opportunity in the inline pen (2026-09-14)
 
-Status: OPEN. Found in round 23 of the web↔Chrome layout-geometry parity arc,
+Status: **RESOLVED round 25 (2026-09-14)** —
+`simple_web_html_layout_renderer_layout.spl:3710` adds the `<wbr>` arm and
+`:1378` the `first_word_advance_width` helper; spec
+`test/01_unit/browser_engine/wbr_soft_break_opportunity_spec.spl` 6/6, two
+orthogonal sabotage arms, evidence in
+`doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`. One residual is
+recorded there rather than fixed: a `<wbr>` at pen 0 is 48 in Chrome (it appears
+to open an empty first line) and 24 in Simple, which the arm's
+`inline_x > inline_start_x` guard excludes. No catalog page exercises it.
+
+Found in round 23 of the web↔Chrome layout-geometry parity arc,
 while fixing `overflow-wrap: normal` (PR for
 `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`).
 

@@ -1367,6 +1367,36 @@ fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fa
         start = skip_wrap_spaces(txt, endv)
     LineWrapRanges(starts: starts, ends: ends)
 
+# Advance of the FIRST unbreakable piece of a text run: everything up to the
+# first collapsible space, or the whole run when it has none. Used by the
+# `<wbr>` soft-break arm in the block loop, which may take a break opportunity
+# only when the piece that FOLLOWS it does not fit the line remainder. Using
+# the whole run's advance there instead would break at a `<wbr>` whose next
+# word still fits and only a later word does not — measured against Chrome,
+# `Long<wbr>Word<wbr>BreakHere` in an 80 px box is TWO lines, not three,
+# because Chrome is greedy and uses only the last opportunity that is needed.
+fn first_word_advance_width(node: HNode, st: Style) -> i32:
+    if node.tag != "#text":
+        return 0
+    val txt = node.text_trimmed
+    val n = txt.len()
+    if n == 0:
+        return 0
+    val by = style_run_byte_advances(st, txt)
+    if by.len() != n:
+        # No per-byte table for this style: fall back to the whole-run advance
+        # rather than guessing. That is wider, so it can only make the arm more
+        # conservative about breaking, never less.
+        return inline_text_advance_width(node, st)
+    val tb = txt.bytes()
+    val stop = word_end_byte(tb, 0, n)
+    var w = 0
+    var k = 0
+    while k < stop:  # cpu-lane-loop-ok: scans one word of one text run, bounded by that run's byte length
+        w = w + by[k]
+        k = k + 1
+    w
+
 # Byte offset one past the last byte of the word that starts at `start`, i.e.
 # the next ASCII space at or after `start`, or `n` when the run has none. Used
 # by the `overflow-wrap: normal` arm above, where a word that does not fit the
@@ -3674,6 +3704,51 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     inline_baseline_margin_ts = []
                     inline_baseline_margin_bs = []
                     prev_margin_b = 0
+                    child_count = child_count + 1
+                    c = child_index.next_sibling[c]
+                    continue
+                if cst.display == "inline" and nodes[c].tag == "wbr":
+                    # `<wbr>` is a zero-width SOFT break OPPORTUNITY, not a
+                    # forced break: HTML gives it no glyph and no advance, and
+                    # the line breaks there only when what follows does not fit
+                    # the remainder of the current line. It splits the DOM text
+                    # into separate `#text` siblings, so the opportunity lands
+                    # exactly at this node and needs no intra-run machinery.
+                    # Harvested from Chrome 152, 900 px, 16px/1.5, `<p>` boxes:
+                    #   width:80  LongWordBreakHere           -> 24 (one line,
+                    #             overflowing; overflow-wrap:normal forbids a cut)
+                    #   width:80  LongWord<wbr>BreakHere      -> 48 (breaks here)
+                    #   width:80  ab<wbr>cd                   -> 24 (fits, no break)
+                    #   width:400 LongWord<wbr>BreakHere      -> 24 (fits)
+                    #   width:80  Long<wbr>Word<wbr>BreakHere -> 48, NOT 72 —
+                    #             Chrome is greedy and takes only the
+                    #             opportunity it needs. Breaking at every `<wbr>`
+                    #             is the sabotage arm this condition exists to fail.
+                    # The element's own box is zero-sized, sitting at the pen.
+                    out_bx[c] = ix + inline_x
+                    out_by[c] = cy
+                    out_bw[c] = 0
+                    out_bh[c] = 0
+                    val wbr_next = child_index.next_sibling[c]
+                    if in_inline_run and inline_x > inline_start_x and wbr_next >= 0:
+                        val wbr_next_w = first_word_advance_width(nodes[wbr_next], styles[wbr_next])
+                        if wbr_next_w > 0 and inline_x + wbr_next_w > iw:
+                            val wbr_aligned = align_inline_line_baselines(
+                                child_index, st, nodes, inline_baseline_nodes,
+                                inline_baseline_margin_ts, inline_baseline_margin_bs,
+                                styles, cy,
+                                inline_line_h, out_bx, out_by, out_bh
+                            )
+                            out_bx = wbr_aligned.bx
+                            out_by = wbr_aligned.by
+                            cy = cy + wbr_aligned.height
+                            inline_x = inline_start_x
+                            inline_line_h = style_line_h(cst)
+                            inline_baseline_nodes = []
+                            inline_baseline_margin_ts = []
+                            inline_baseline_margin_bs = []
+                            out_bx[c] = ix + inline_x
+                            out_by[c] = cy
                     child_count = child_count + 1
                     c = child_index.next_sibling[c]
                     continue
