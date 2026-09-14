@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use std.scv.distributed_identity.{ActorIncarnation, EntityUid, SettledAlias, entity_ref_provisional, entity_ref_settled, entity_uid_validate, settled_alias_validate, entity_ref_canonical, entity_ref_revision_binding}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, SettledAlias, EntityRef, entity_ref_provisional, entity_ref_settled, entity_uid_validate, settled_alias_validate, entity_ref_validate, entity_ref_canonical, entity_ref_revision_binding}
 use std.scv.lifecycle.identity.{lifecycle_aliases, lifecycle_change_identity, lifecycle_revision_identity}
 
 describe "SCV distributed textual database identity":
@@ -39,3 +39,24 @@ describe "SCV distributed textual database identity":
         expect(binding).to_contain(revision.revision_id)
         expect(change.change_id).to_start_with("chg_")
         expect(revision.revision_id).to_start_with("rev_")
+
+    it "rejects empty and ambiguous references before canonical encoding":
+        val uid = EntityUid(database_namespace: "ffeeddccbbaa99887766554433221100", entity_kind: "bug", actor: ActorIncarnation(hex: "00112233445566778899aabbccddeeff"), counter: 1)
+        val alias = SettledAlias(database_namespace: "ffeeddccbbaa99887766554433221100", authority_epoch: 3, entity_kind: "bug", sequence: 42)
+        val empty = EntityRef(provisional: nil, settled: nil)
+        val ambiguous = EntityRef(provisional: Some(uid), settled: Some(alias))
+
+        expect(entity_ref_validate(empty).code).to_equal("SCVDB_ENTITY_REF_EMPTY")
+        expect(entity_ref_canonical(empty)).to_equal("")
+        expect(entity_ref_validate(ambiguous).code).to_equal("SCVDB_ENTITY_REF_AMBIGUOUS")
+        expect(entity_ref_canonical(ambiguous)).to_equal("")
+
+    it "rejects non-canonical namespace text and mismatched revision bindings":
+        val upper_namespace = EntityUid(database_namespace: "FFEEDDCCBBAA99887766554433221100", entity_kind: "bug", actor: ActorIncarnation(hex: "00112233445566778899aabbccddeeff"), counter: 1)
+        val change = lifecycle_change_identity("offline-seed", "Create bug", "scv", "stable intent")
+        val other_change = lifecycle_change_identity("other-seed", "Create test", "scv", "other intent")
+        val other_revision = lifecycle_revision_identity(other_change.change_id, "tree-2", [], "metadata", lifecycle_aliases("", "", "", []))
+        val alias = SettledAlias(database_namespace: "ffeeddccbbaa99887766554433221100", authority_epoch: 3, entity_kind: "bug", sequence: 42)
+
+        expect(entity_uid_validate(upper_namespace).code).to_equal("SCVDB_NAMESPACE")
+        expect(entity_ref_revision_binding(entity_ref_settled(alias), change, other_revision)).to_equal("")
