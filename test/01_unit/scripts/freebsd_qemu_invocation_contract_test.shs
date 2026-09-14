@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+script="$root/scripts/check/check-freebsd-bootstrap-qemu.shs"
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+
+grep -Fq 'QEMU_RUNTIME_DIR="${QEMU_RUNTIME_DIR:-${VM_DIR}}"' "$script" || fail 'QEMU runtime root missing'
+grep -Fq 'QEMU_CLOUDINIT_DIR:-${QEMU_RUNTIME_DIR}/cloudinit.tmp' "$script" || fail 'cloud-init path is not runtime-isolated'
+grep -Fq 'GUEST_BOOTSTRAP_OUTPUT_RELATIVE="build/bootstrap-freebsd-qemu"' "$script" || fail 'guest output path is not explicit'
+grep -Fq -- 'SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT}' "$script" || fail 'QEMU lane does not invoke the native self-host checker'
+grep -Fq -- 'sh scripts/check/check-freebsd-selfhost-ci.shs' "$script" || fail 'QEMU lane checker invocation missing'
+! grep -Fq -- 'bootstrap-from-scratch.sh --strategy=adhoc' "$script" || fail 'QEMU lane retains invalid direct adhoc bootstrap command'
+grep -Fq -- 'SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT}' "$script" || fail 'canonical QEMU checker output is not wired'
+grep -Fq -- "--include='/doc/04_architecture/compiler/plugin_arch/***'" "$script" || fail 'required architecture docs remain excluded'
+grep -Fq 'STAGE_BIN="${GUEST_BOOTSTRAP_OUTPUT}/stage3/x86_64-unknown-freebsd/simple"' "$script" || fail 'Stage 3 path does not follow explicit output'
+grep -Fq 'if ! $VM_SSH ' "$script" || fail 'QEMU bootstrap failure branch missing'
+grep -Fq 'copy_guest_bootstrap_logs' "$script" || fail 'QEMU failure logs are not retained'
+! grep -Fq 'FreeBSD x86_64 QEMU full bootstrap PASS' "$script" || fail 'QEMU claims an unscoped full bootstrap'
+grep -Fq 'FreeBSD x86_64 QEMU Stage 3 bootstrap PASS' "$script" || fail 'QEMU result is not Stage 3 scoped'
+
+printf 'freebsd_qemu_invocation_contract=true\n'
