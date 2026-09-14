@@ -13,6 +13,8 @@ $OldPath = $env:Path
 $OldMarker = $env:DEVHUB_TEST_MARKER
 $OldSimpleBinary = $env:SIMPLE_BINARY
 $OldFixtureMode = $env:SIMPLE_HOST_RESOLVER_FIXTURE_MODE
+$OldWindowsAbi = $env:SIMPLE_WINDOWS_ABI
+$OldTestExit = $env:DEVHUB_TEST_EXIT
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 function Write-LfFile([string] $Path, [string] $Content) {
     $normalized = $Content -replace "`r`n", "`n"
@@ -61,13 +63,73 @@ exit /b 0
     if ($lines[1] -ne 'arg1=--name' -or $lines[2] -ne 'arg2=value with spaces') {
         throw "argument forwarding failed: $($lines -join '; ')"
     }
+    Remove-Item -LiteralPath $Marker -Force
+    $r = Invoke-DevHub @('--mode', 'loading')
+    if ($r.ExitCode -ne 78 -or (Test-Path -LiteralPath $Marker)) {
+        throw "loading mode executed the shell override: exit=$($r.ExitCode) err=$($r.Stderr)"
+    }
 
-    # With no shell on PATH, the launcher must fail closed with status 127.
+    # Native Windows dispatch does not need sh.exe.  Use a fixture runtime so
+    # this also verifies argument boundaries and child exit propagation.
+    $FakeRuntime = Join-Path $Temp 'fake-simple.cmd'
+    Write-LfFile $FakeRuntime @'
+@echo off
+if "%~1"=="--version" (
+    echo Simple v9.9.9-test
+    exit /b 0
+)
+if "%~1"=="--help" (
+    echo simple test
+    exit /b 0
+)
+if "%~1"=="run" (
+    >"%DEVHUB_TEST_MARKER%" echo command=run
+    >>"%DEVHUB_TEST_MARKER%" echo arg1=%~3
+    >>"%DEVHUB_TEST_MARKER%" echo arg2=%~4
+    exit /b %DEVHUB_TEST_EXIT%
+)
+exit /b 2
+'@
+    $hash = (Get-FileHash -LiteralPath $FakeRuntime -Algorithm SHA256).Hash.ToLowerInvariant()
+    $env:SIMPLE_WINDOWS_ABI = 'msvc'
+    $hostArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    if ($hostArch -eq 'AMD64') { $hostArch = 'x86_64' }
+    if ($hostArch -eq 'ARM64') { $hostArch = 'aarch64' }
+    $env:DEVHUB_TEST_EXIT = '0'
+    Write-LfFile ($FakeRuntime + '.provenance.env') @"
+schema=simple-runtime-provenance-v1
+status=admitted
+implementation=pure-simple
+artifact_sha256=$hash
+target_triple=$hostArch-pc-windows-msvc
+version_output=Simple v9.9.9-test
+"@
+    $env:SIMPLE_BINARY = $FakeRuntime
+    $env:SIMPLE_HOST_RESOLVER_FIXTURE_MODE = '1'
     Remove-Item Env:DEVHUB_SH -ErrorAction SilentlyContinue
-    $env:Path = $Temp
+    # Keep certutil available while intentionally excluding Git's sh.exe.
+    $env:Path = $Temp + ';' + (Join-Path $env:SystemRoot 'System32')
+    $r = Invoke-DevHub @('--mode', 'ordinary', '--help')
+    if ($r.ExitCode -ne 0) {
+        throw "native dispatch failed: exit=$($r.ExitCode) out=$($r.Stdout) err=$($r.Stderr)"
+    }
+    $lines = Get-Content -LiteralPath $Marker
+    if ($lines[1] -ne 'arg1=--help') { throw "native argument forwarding failed: $($lines -join '; ')" }
+    $env:DEVHUB_TEST_EXIT = '41'
+    $r = Invoke-DevHub @('check', 'value with spaces')
+    if ($r.ExitCode -ne 41) { throw "native exit propagation failed: exit=$($r.ExitCode) err=$($r.Stderr)" }
+    Remove-Item Env:DEVHUB_TEST_EXIT -ErrorAction SilentlyContinue
+
+    # An absent or unadmitted artifact must fail closed without attempting to
+    # open it through a file association or another fallback.
+    $env:SIMPLE_BINARY = Join-Path $Temp 'missing-simple.exe'
+    Remove-Item -LiteralPath $Marker -Force -ErrorAction SilentlyContinue
     $r = Invoke-DevHub @('--help')
-    if ($r.ExitCode -ne 127 -or $r.Stderr -notmatch 'requires sh\.exe') {
-        throw "missing-shell contract failed: exit=$($r.ExitCode) stderr=$($r.Stderr)"
+    if ($r.ExitCode -ne 127 -or $r.Stderr -notmatch 'no Simple runtime found') {
+        throw "missing-artifact contract failed: exit=$($r.ExitCode) stderr=$($r.Stderr)"
+    }
+    if (Test-Path -LiteralPath $Marker) {
+        throw 'missing artifact was accidentally executed'
     }
 
     # Exercise real sh.exe discovery and the existing provenance-enforced
@@ -105,7 +167,9 @@ evidence=windows-launcher-test
 "@
         $env:SIMPLE_BINARY = $Runtime
         $env:SIMPLE_HOST_RESOLVER_FIXTURE_MODE = '1'
-        Remove-Item Env:DEVHUB_SH -ErrorAction SilentlyContinue
+        # Discovery is intentionally not implicit; exercise the POSIX wrapper
+        # through its explicit compatibility override.
+        $env:DEVHUB_SH = $sh
         $r = Invoke-DevHub @('--help')
         if ($r.ExitCode -ne 0 -or $r.Stdout -notmatch 'provenance-safe-dispatch') {
             throw "actual sh dispatch failed: exit=$($r.ExitCode) out=$($r.Stdout) err=$($r.Stderr)"
@@ -118,7 +182,9 @@ evidence=windows-launcher-test
     if ($null -eq $OldMarker) { Remove-Item Env:DEVHUB_TEST_MARKER -ErrorAction SilentlyContinue } else { $env:DEVHUB_TEST_MARKER = $OldMarker }
     if ($null -eq $OldSimpleBinary) { Remove-Item Env:SIMPLE_BINARY -ErrorAction SilentlyContinue } else { $env:SIMPLE_BINARY = $OldSimpleBinary }
     if ($null -eq $OldFixtureMode) { Remove-Item Env:SIMPLE_HOST_RESOLVER_FIXTURE_MODE -ErrorAction SilentlyContinue } else { $env:SIMPLE_HOST_RESOLVER_FIXTURE_MODE = $OldFixtureMode }
+    if ($null -eq $OldWindowsAbi) { Remove-Item Env:SIMPLE_WINDOWS_ABI -ErrorAction SilentlyContinue } else { $env:SIMPLE_WINDOWS_ABI = $OldWindowsAbi }
+    if ($null -eq $OldTestExit) { Remove-Item Env:DEVHUB_TEST_EXIT -ErrorAction SilentlyContinue } else { $env:DEVHUB_TEST_EXIT = $OldTestExit }
     Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Output 'PASS devhub-windows-launcher override=args missing-shell=127'
+Write-Output 'PASS devhub-windows-launcher override=args native=args+exit missing-artifact=127'
