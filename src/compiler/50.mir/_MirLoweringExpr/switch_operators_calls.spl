@@ -70,6 +70,31 @@ fn int_list_contains(xs: [i64], v: i64) -> bool:
         i = i + 1
     false
 
+fn option_payload_is_boxed(option_type: HirType) -> bool:
+    """True when `Optional(inner)`'s payload word is a heap handle, so the raw
+    nil sentinel (3) can never be a legal payload and None-ness is decidable
+    at RUNTIME rather than only from lowering provenance.
+
+    Scalar payloads (Int/Float/Bool/Char/Unit) are deliberately excluded: for
+    `i64?` the word 3 IS a valid payload, so only `nil_locals` can tell nil
+    from three and `ensure_option_handle` must keep guessing statically there.
+    Ptr/Ref are excluded too -- a raw address is not a managed handle and the
+    sentinel is not reserved in that space. Everything listed here is boxed by
+    the runtime, which is why `rt_is_none`'s own nil test is exact on them.
+    """
+    match option_type.kind:
+        case HirTypeKind.Optional(inner):
+            match inner.kind:
+                case HirTypeKind.Str: true
+                case HirTypeKind.Array(_, _): true
+                case HirTypeKind.Slice(_): true
+                case HirTypeKind.Dict(_, _): true
+                case HirTypeKind.Tuple(_): true
+                case HirTypeKind.Named(_, _): true
+                case HirTypeKind.DynTrait(_): true
+                case _: false
+        case _: false
+
 fn enum_variant_disc(names: [text], variant: text) -> i64:
     """Discriminant = index of `variant` in the enum's declared variant order."""
     var i = 0
@@ -498,14 +523,44 @@ impl MirLowering:
             self.mark_runtime_value_local(local.id)
             self.remember_local_hir_type(local.id, option_type, 2, 0)
             return local
-        # Nil and the valid raw i64 payload 3 share the same bits. Only the
-        # lowering provenance can distinguish them; never guess at runtime.
+        # Nil and the valid raw i64 payload 3 share the same bits, so for a
+        # SCALAR payload (i64?/bool?/f64?/char?) only the lowering provenance
+        # can distinguish them and `nil_locals` -- a compile-time set -- is the
+        # only available answer.
+        #
+        # For a BOXED payload (text/array/slice/dict/tuple/struct/class/dyn)
+        # the raw word 3 is unambiguously nil: no live heap handle of those
+        # kinds ever has that bit pattern. Deciding None-ness statically there
+        # is the root of the staged-native-ABI "Option None arrives as Some"
+        # class: a value whose absence is only knowable at RUNTIME -- a Dict
+        # bracket read that missed, a nilable returned from another function,
+        # a variable assigned nil on some other branch -- is NOT in
+        # `nil_locals`, so it was promoted with disc=0 (Some) around a nil
+        # payload. `.?`/`is_some` then read PRESENT while `unwrap()` yielded
+        # nil, and the first field read off the unwrapped value faulted at a
+        # small offset (EXC_BAD_ACCESS address=0x48 in PR #1001). The `nil`
+        # tail of `fn get_symbol_raw(raw) -> HirSymbol?` is in `nil_locals`;
+        # its sibling `return self.symbols[raw]` dict read is not, which is
+        # exactly the site that crashed. So for a boxed payload, select the
+        # discriminant from the payload word AT RUNTIME (`payload == nil` =>
+        # None=1, else Some=0) instead of guessing from provenance. The
+        # handle layout is unchanged (enum_id 1, Some=0/None=1), so this is
+        # ABI-compatible with every existing consumer, and the static path is
+        # retained verbatim for scalar payloads.
+        # doc/08_tracking/bug/option_none_promoted_to_some_by_static_nil_provenance_2026-09-14.md
         val disc = if self.nil_locals.has(local.id): 1 else: 0
+        val runtime_disc = disc == 0 and option_payload_is_boxed(option_type)
         var b = self.builder
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
-        val disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
-        b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
+        var disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        if runtime_disc:
+            # None=1 exactly when the payload word is the nil sentinel (3).
+            val nil_key = b.emit_const_int(3)
+            val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(nil_key), MirType.bool())
+            disc_local = b.emit_cast(mir_operand_copy(is_nil), MirType(kind: MirTypeKind.I32))
+        else:
+            b.emit_const(disc_local, MirConstValue.Int(disc), MirType(kind: MirTypeKind.I32))
         var payload_local = local
         if disc == 1:
             payload_local = b.emit_const_int(3)
