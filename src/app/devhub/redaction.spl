@@ -1,0 +1,89 @@
+# DevHub diagnostic secret redaction
+#
+# Keep this module pure so every verbose/logging boundary can apply the same
+# policy before text reaches stdout or stderr.
+
+
+fn redact_devhub_diagnostic(value: text) -> text:
+    """Mask secrets in headers, assignments, and URLs used by diagnostics."""
+    val url_safe = _redact_url_secrets(value)
+    if url_safe.contains("://"):
+        return url_safe
+    _redact_sensitive_assignment(url_safe)
+
+
+fn _sensitive_name(raw: text) -> bool:
+    val name = raw.trim().lower().replace("\"", "").replace("'", "")
+    if name == "authorization" or name == "cookie" or name == "set-cookie":
+        return true
+    if name == "token" or name == "key" or name == "secret" or name == "password":
+        return true
+    name.contains("-token") or name.contains("_token") or name.contains("apitoken") or
+        name.contains("api-token") or name.contains("api_token") or name.contains("-key") or
+        name.contains("_key") or name.contains("apikey") or name.contains("api-key") or
+        name.contains("api_key") or name.contains("-secret") or name.contains("_secret") or
+        name.contains("-password") or name.contains("_password")
+
+
+fn _assignment_name(prefix: text) -> text:
+    var name = prefix.trim()
+    if name.starts_with(">"):
+        name = name[1:].trim()
+    val query_parts = name.split("?")
+    name = query_parts[query_parts.len() - 1]
+    val amp_parts = name.split("&")
+    name = amp_parts[amp_parts.len() - 1]
+    val brace_parts = name.split("{")
+    name = brace_parts[brace_parts.len() - 1]
+    val comma_parts = name.split(",")
+    comma_parts[comma_parts.len() - 1].trim()
+
+
+fn _redact_sensitive_assignment(value: text) -> text:
+    var delimiter = value.find(":")
+    val equals = value.find("=")
+    if delimiter < 0 or (equals >= 0 and equals < delimiter):
+        delimiter = equals
+    if delimiter < 0:
+        return value
+    val prefix = value[:delimiter]
+    if not _sensitive_name(_assignment_name(prefix)):
+        return value[:delimiter + 1] + _redact_sensitive_assignment(value[delimiter + 1:])
+    var end = value.len()
+    val comma = value[delimiter + 1:].find(",")
+    if comma >= 0:
+        end = delimiter + 1 + comma
+    val newline = value[delimiter + 1:].find("\n")
+    if newline >= 0 and delimiter + 1 + newline < end:
+        end = delimiter + 1 + newline
+    val suffix = if end < value.len(): _redact_sensitive_assignment(value[end:]) else: ""
+    "{value[:delimiter + 1]} ***{suffix}"
+
+
+fn _redact_url_secrets(value: text) -> text:
+    var safe = value
+    val scheme = safe.find("://")
+    if scheme >= 0:
+        val after_scheme = scheme + 3
+        val at = safe[after_scheme:].find("@")
+        val slash = safe[after_scheme:].find("/")
+        if at >= 0 and (slash < 0 or at < slash):
+            val absolute_at = after_scheme + at
+            safe = safe[:after_scheme] + "***" + safe[absolute_at:]
+    val question = safe.find("?")
+    if question < 0:
+        return safe
+    val query_and_fragment = safe[question + 1:]
+    val fragments = query_and_fragment.split("#", 2)
+    val query = fragments[0]
+    var redacted_parts: [text] = []
+    for part in query.split("&"):
+        val equals = part.find("=")
+        if equals >= 0 and _sensitive_name(part[:equals]):
+            redacted_parts = redacted_parts + [part[:equals + 1] + "***"]
+        else:
+            redacted_parts = redacted_parts + [part]
+    var rebuilt = safe[:question + 1] + redacted_parts.join("&")
+    if fragments.len() > 1:
+        rebuilt = rebuilt + "#" + fragments[1]
+    rebuilt
