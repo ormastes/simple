@@ -387,6 +387,31 @@ face's OS/2 `avgCharWidth` (7.25) — real metrics DO resolve at 13 px (avg 6.57
 over an alnum sample), so the gap is a missing metrics FIELD, not a missing
 font. None of these is papered over with a fudge.
 
-Records: `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`;
+**Round 20 corrections to the paragraph above — two of its claims were wrong.**
+
+* *"a text control's `size` width … Chrome uses the face's OS/2 `avgCharWidth`
+  (7.25) … the gap is a missing metrics FIELD"* — **false**. `sfnt*.spl` parses
+  no OS/2 table at all, and more decisively, Simple resolves `sans-serif` to
+  **Helvetica**, whose `xAvgCharWidth` is 904/2048 = 0.4414 em = **5.89 px** at
+  13.33. No macOS face yields 7.25 (SFNS 7.73, SFNSRounded 7.65). Exposing the
+  field would move `size=20` from 138 to ~136 — *further* from Chrome's 163.
+  The gap is **font SELECTION** for form controls, not a missing field.
+* *"form controls are `inline` here and `inline-block` in Chrome"* — true, but
+  the baseline rule that flip is meant to enable needs **three arms**: text
+  `input` and `select` fill their line (h = the label's h, 33/35); `textarea`
+  leaves 7 px below (48 in a 55 line); checkbox/radio are 13 px boxes inside an
+  ordinary 24 px text line. One rule for all four puts checkbox on a 13 px line.
+
+**This layer now distinguishes "is a layout element" from "generates a box".**
+`_simple_web_layout_element` decides ORDINALS and must mirror the differ
+walker's `layoutEl` byte-for-byte (`wbr` is in it). `_simple_web_generates_no_box`
+decides GEOMETRY (`wbr` is out). Because the nth-path key comes from a DOM
+sibling walk and never from the emitted rows, suppressing a row cannot move any
+other element's path — round 19 believed the opposite and deferred a fix on it.
+`<audio>`/`<video>` fallback children and `<option>` in a closed `<select>` are
+still boxed here and are not by Chrome; they now surface as `extra_box` rows.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;
 `doc/08_tracking/bug/ifc_linebox_spec_imports_nonexistent_layout_inline_2026-09-14.md`.
