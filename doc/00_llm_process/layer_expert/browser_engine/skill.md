@@ -318,3 +318,46 @@ then reading each hit for what index space its bound comes from.
 
 Records: `doc/08_tracking/bug/web_non_ascii_run_wrap_falls_back_to_flat_estimate_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round17_2026-09-14.md`.
+
+## The UA stylesheet is a layer of this engine, and it is three hardcoded tables
+
+Round 18 (2026-09-14) fixed three unrelated-looking geometry clusters that all
+had the same shape: **the layout algorithm was right and the element never
+reached it**, because the UA-stylesheet knowledge that routes it lives in
+hardcoded tables that were incomplete.
+
+Where that knowledge lives, and what each table decides:
+
+| table | file | decides |
+|---|---|---|
+| `is_inline_tag` | `…_renderer_style.spl` | `display:inline` (applied at `…_declarations.spl:1269`) |
+| `_m14_is_inline_tag` | `layout.spl` | the same thing for the M14 public layout API — a **twin**, widen both |
+| per-tag UA branches | `…_declarations.spl` (~:1229-1420) | font, padding, border, `display` for headings, lists, form controls |
+| `replaced_default_box_w/h` | `…_renderer_layout.spl` | the §10.3.2/§10.6.2 fallback box for replaced elements |
+| the widget branch | `…_renderer_layout.spl` | `input`/`select`/`textarea` size and, critically, that they do NOT lay children out |
+
+Three rules this layer earned the hard way:
+
+1. **A missing tag reads as a layout bug.** `<bdi>` at 728 px looked like a
+   shrink-to-fit defect; the shrink-to-fit code was fine and had been for
+   rounds. Before reading a layout loop, print the element's resolved `display`
+   and compare it with Chrome's — one probe settles which layer owns the defect.
+2. **Populate these tables from measurement.** The catalog's harvested
+   `*.geom.txt` carry Chrome's own `display=` for every element; a `grep` over
+   them gives the real inline set. A list written from the HTML spec would have
+   included `ruby`/`rt` (Chrome: `display:ruby`, not `inline`) and would have
+   missed nothing useful.
+3. **Some elements must RETURN before the child recursion.** A `<select>` that
+   recurses stacks its `<option>`s as flow boxes and grows to 153 px; Chrome
+   reports every option as 0x0 because a select renders them in a popup. The
+   replaced branch and the widget branch are both "return before children"
+   branches, and that is the load-bearing part of each, not the size table.
+
+Known residue this layer still carries, measured rather than assumed: replaced
+elements are block-level here and inline-level in Chrome (so their `dx`/`dy`
+stay wrong even with correct `dw`/`dh`), and the UA form font's per-character
+advance resolves ~6 px where Chrome's 13.3333px system font averages ~7.25,
+which leaves every text control narrow. Neither is papered over with a fudge.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;
+`doc/08_tracking/bug/ifc_linebox_spec_imports_nonexistent_layout_inline_2026-09-14.md`.
