@@ -481,3 +481,70 @@ fn test_jit_f64_call_result_print() {
         captured
     );
 }
+
+// Regression coverage for:
+//   doc/08_tracking/bug/seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md
+//   doc/08_tracking/bug/seed_jit_function_local_use_segfaults_2026-09-13.md
+//
+// Root cause: on Windows, `dlsym_resolves` unconditionally returned `true`
+// ("Conservative on Windows: assume resolvable"), so `jit_import_resolves`
+// could never say a directly-called `Linkage::Import` was unresolvable and
+// `first_unresolved_import_called` never fired on that platform. A call to a
+// cross-module Simple function symbol that cranelift-jit itself cannot
+// resolve (no registered runtime symbol, no process/CRT export — exactly the
+// shape of an `app.*`-module function call, or a function reached only
+// through a function-local `use`) therefore finalized with a NULL GOT slot
+// and SIGSEGV'd on first call, with nothing printed to stderr. The fix makes
+// `dlsym_resolves` on Windows actually probe resolvability via
+// `GetProcAddress`, mirroring cranelift-jit's own Windows fallback resolver
+// (`cranelift-jit::backend::lookup_with_dlsym`), so the existing guard can
+// do its job on Windows exactly as it already does on Unix.
+#[cfg(windows)]
+#[test]
+fn dlsym_resolves_rejects_a_nonexistent_symbol_on_windows() {
+    assert!(
+        !super::dlsym_resolves("simple_seed_jit_bug_nonexistent_symbol_zzqq"),
+        "a symbol name that is not a registered runtime symbol and not a real \
+         process/CRT export must NOT be reported as resolvable, or the \
+         unresolved-import guard can never fire on Windows"
+    );
+    assert!(
+        super::dlsym_resolves("malloc"),
+        "a genuine C runtime export must still resolve, so the guard does not \
+         force unnecessary interpreter fallbacks for symbols that really link"
+    );
+}
+
+#[test]
+fn test_jit_unresolved_extern_call_refuses_to_finalize_instead_of_null_jumping() {
+    // End-to-end shape of both bug reports: a direct call to an extern whose
+    // name resolves to neither a registered runtime symbol nor a real
+    // process/CRT export. `compile_module` must refuse (Err) so the driver
+    // falls back to the interpreter, matching non-Windows and AOT behaviour —
+    // never finalize a NULL import and let the first call SIGSEGV.
+    simple_runtime::register_static_runtime_symbols();
+    let provider = static_provider();
+    assert!(provider
+        .get_symbol("simple_seed_jit_bug_nonexistent_symbol_zzqq")
+        .is_none());
+
+    let source = r#"
+@unsafe(reason: "test unresolved extern", capabilities: [ffi])
+extern fn simple_seed_jit_bug_nonexistent_symbol_zzqq(x: i64) -> i64
+
+fn caller() -> i64:
+    simple_seed_jit_bug_nonexistent_symbol_zzqq(1)
+"#;
+    let mut parser = Parser::new(source);
+    let ast = parser.parse().expect("parse unresolved-extern fixture");
+    let hir_module = hir::lower(&ast).expect("HIR lower unresolved-extern fixture");
+    let mir_module = lower_to_mir(&hir_module).expect("MIR lower unresolved-extern fixture");
+
+    let mut jit = JitCompiler::new_static().expect("create static JIT");
+    let result = jit.compile_module(&mir_module);
+    assert!(
+        result.is_err(),
+        "an extern call that would NULL-jump at finalize time must be refused here, \
+         not silently accepted and left to SIGSEGV on first call"
+    );
+}
