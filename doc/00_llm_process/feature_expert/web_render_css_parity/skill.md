@@ -770,3 +770,46 @@ unreachable — the machinery existed and had never run.
 
 Round 18 measurements: `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`.
 Round 19 measurements: `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`.
+
+### Round 20 — the `wbr`/Σ item above is CLOSED; two hand-off premises were FALSE
+
+**Boxless elements now compare as "no box" (`chrome_reports_no_box`,
+`layout_geometry_diff.spl:95`).** Chrome's all-zero rect means *no box*, not
+*position 0,0*. Rule: Chrome-boxless + Simple-boxless-or-absent = agreement;
+Chrome-boxless + Simple-real-box = one `extra_box` mismatch with **deltas
+zeroed**, so Σ weighs the defect, not coordinates Chrome never claimed. The
+reverse directions (Simple all-zero, or Simple absent, where Chrome has a real
+box) stay full-Σ mismatch / `missing_in_simple` — pinned by two control
+fixtures. Landed: 429 → 428, `html` Σ 12496 → **2533**, and 5 of 8 pages
+byte-identical.
+
+- **The boxless set is a CENSUS, not a tag list — and `<br>` is NOT in it.**
+  Five elements, three causes: `wbr` (html), two `<span>` fallback children of
+  `<audio>`/`<video>` (animation), two `<option>` in a closed `<select>`
+  (forms-media). Only `wbr` is boxless as a property of its tag. `<br>` has a
+  real Chrome rect — the round-19 guess "likely br, template, head children"
+  would have regressed it.
+- **Round 19's reason for deferring the layout half was FALSE.** "Emitting no
+  box shifts the differ's path ordinals" — it does not. The key comes from
+  `_simple_web_node_target_key` → `_simple_web_element_child_ordinal`, a DOM
+  sibling walk that never reads the emitted rows. Keep `wbr` in
+  `_simple_web_layout_element` (ordinals — Chrome's walker counts WBR too) and
+  exclude it in the NEW `_simple_web_generates_no_box` (geometry). Two
+  predicates, two jobs.
+- **Residual, stated:** `<wbr>` still advances the inline pen 1 px (Chrome: 0).
+  Sub-tolerance, so no catalog page sees it.
+- **Form-control baselines need THREE arms, not one.** `pad_t + border_t +
+  strut_baseline` describes text `input` and `select` (control fills the line:
+  h=33/35 = its label's h) and describes NEITHER `textarea` (48 in a 55 line —
+  7 px below) NOR checkbox/radio (13 px box inside a normal 24 px text line).
+  Applying one rule to all four would put checkbox on a 13 px line. Round 19's
+  `inline-block` trap still applies on top.
+- **The control-width gap is a FACE gap, not arithmetic — the OS/2 fix is
+  BACKWARDS.** Simple resolves `sans-serif` to **Helvetica**
+  (`xAvgCharWidth` 904/2048 = 0.4414 em → **5.89 px** @13.33); Chrome's 163 px
+  `size=20` implies **7.25**. No macOS face's `xAvgCharWidth` gives 7.25 (SFNS
+  7.73, SFNSRounded 7.65). Using the field would move 138 → ~136, *away* from
+  163, while adding an OS/2 parser (`sfnt*.spl` has none). Fix font SELECTION
+  for form controls first.
+
+Round 20 measurements: `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`.

@@ -96,7 +96,8 @@ pub fn simple_web_layout_element_geometry_lines(html: text, width: i32, height: 
     var out: [text] = []
     var i = 0
     while i < node_count:  # cpu-lane-loop-ok: one pass over the parsed node list emitting the differ's element rows; bound is node_count and this entry is tooling-only, not on any paint path
-        if _simple_web_layout_element(nodes[i]):
+        if _simple_web_layout_element(nodes[i]) and
+           not _simple_web_generates_no_box(nodes[i]):
             val key = _simple_web_node_target_key(nodes, child_index, i)
             if key != "":
                 out.push(
@@ -195,6 +196,38 @@ fn _simple_web_layout_element(node: HNode) -> bool:
         # claim to mirror that scheme byte-for-byte and did not.
         not node.tag.starts_with("::")
     )
+
+# An element that GENERATES NO BOX. Distinct from `_simple_web_layout_element`
+# above, and the distinction is load-bearing in both directions:
+#
+#   * `_simple_web_layout_element` decides what COUNTS FOR AN ORDINAL, and must
+#     keep matching the differ walker's `layoutEl` byte-for-byte. `<wbr>` IS a
+#     layout element there (the walker's SKIP set holds only STYLE/SCRIPT/TITLE/
+#     HEAD/META/LINK/BASE), so removing it from that predicate would shift the
+#     nth-path of every following sibling and desync the two sides -- exactly
+#     the `::marker` defect recorded above, replayed.
+#   * THIS predicate decides what HAS GEOMETRY. `<wbr>` is a zero-width BREAK
+#     OPPORTUNITY in the text (HTML  4.7.28: "does not represent anything ...
+#     represents an opportunity for the line to break"), not a box. Chrome
+#     agrees and reports it as the all-zero rect -- its way of saying there is
+#     no box to report.
+#
+# Because the key is computed from the DOM walk and not from the emitted rows,
+# dropping a row here CANNOT move any other element's path. Round 19 recorded
+# the opposite belief ("genuinely emitting no box shifts the differ's path
+# ordinals for every element after it") and deferred the fix on that basis;
+# that premise is FALSE, and the `wbr_boxless_geometry_spec` sibling-ordinal
+# assertion is what pins it.
+#
+# Scoped to `wbr` alone, on measurement rather than intuition. The round-20
+# census found five boxless elements in Chrome across the eight catalog pages,
+# but the other four are boxless for reasons that are NOT properties of their
+# tag -- two `<span>` fallback children of a replaced element, and two
+# `<option>` inside a closed `<select>` -- and belong to their own rules.
+# `<br>` is deliberately absent: Chrome gives it a REAL rect, so adding it here
+# on the "likely boxless" intuition would have been a regression.
+fn _simple_web_generates_no_box(node: HNode) -> bool:
+    node.tag == "wbr"
 
 fn _simple_web_element_child_ordinal(
     nodes: [HNode], child_index: HtmlChildIndex,

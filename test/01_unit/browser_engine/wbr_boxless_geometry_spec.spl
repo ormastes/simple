@@ -1,0 +1,121 @@
+"""
+`<wbr>` GENERATES NO BOX, and dropping its geometry row does not move anybody
+else's nth-path.
+
+HTML  4.7.28 says `<wbr>` "does not represent anything" — it "represents an
+opportunity for the line to break". It is a zero-width break opportunity in the
+text, not a box. Chrome agrees, and says so in the only way
+`getBoundingClientRect()` can: the all-zero rect. Measured by
+`scripts/check/check-chrome-layout-geometry-diff.shs` against Chrome 152 on the
+`html` catalog page (round 20, Run A):
+
+    Chrome  path:0/0/4/2/86/1/0/0 | wbr | x=0 | y=0 | w=0 | h=0
+
+Simple placed a real 1x1 box at its real position deep in the page, and the
+differ compared that against Chrome's convention:
+
+    diff    path:0/0/4/2/86/1/0/0 | wbr | dx=180 dy=9781 dw=1 dh=1
+
+That single row was **9963 of the `html` page's 12496 total Σ — 80%** — and had
+been inflating this series' headline percentages for at least two rounds (round
+19 § "Item 2"). None of it is layout error.
+
+WHY THIS WAS DEFERRED, AND WHY THE REASON WAS WRONG — round 19 recorded:
+"genuinely emitting no box shifts the differ's path ordinals for every element
+after it". That premise is FALSE and is the thing AC-3 exists to pin. The
+nth-path key is built by `_simple_web_node_target_key` ->
+`_simple_web_element_child_ordinal`, which walks the parsed DOM sibling chain
+and counts `_simple_web_layout_element` nodes. It never consults the emitted
+geometry rows. So `<wbr>` keeps its ordinal — it must, because the differ's
+Chrome-side walker counts WBR in its ordinals too (its SKIP set is only
+STYLE/SCRIPT/TITLE/HEAD/META/LINK/BASE) — while contributing no row.
+
+Two predicates, deliberately separate:
+  * `_simple_web_layout_element`  -> counts for an ORDINAL. `<wbr>` is in it.
+  * `_simple_web_generates_no_box` -> has GEOMETRY. `<wbr>` is excluded.
+
+SCOPED ON MEASUREMENT, NOT INTUITION. The round-20 census over all eight
+harvested `*.geom.txt` found FIVE boxless elements from THREE causes:
+`wbr` (html), two `<span>` fallback children of `<audio>`/`<video>` (animation),
+and two `<option>` inside a closed `<select>` (forms-media). Only the first is
+a property of the tag, so only the first is handled here; the other two are
+recorded as separate rules. **`<br>` is NOT boxless in Chrome** — it has a real
+rect — which is why AC-4 is a control rather than an extension.
+
+SABOTAGE (run, recorded in doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md):
+make `_simple_web_generates_no_box` return false for every tag and AC-1/AC-2
+must fail while AC-3 (ordinals) and AC-4 (`<br>` keeps its box) stay green —
+which separates "wbr emits no row" from "the row scheme still lines up".
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-BOXLESS-001 — an element that generates no box emits no geometry row, and its absence does not shift any sibling's nth-path.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_element_geometry_lines
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+
+fn geom_rows(inner: text) -> [text]:
+    simple_web_layout_element_geometry_lines(HEAD + inner + "</body></html>", VW, VH)
+
+# Returns the tag field of every emitted row, in order.
+fn row_tags(inner: text) -> [text]:
+    var out: [text] = []
+    val rows = geom_rows(inner)
+    var i = 0
+    while i < rows.len():
+        val parts = rows[i].split("|")
+        if parts.len() >= 3:
+            out.push(parts[2])
+        i = i + 1
+    out
+
+# Returns the key of the row whose tag matches, or "" when no row was emitted.
+fn key_of_tag(inner: text, tag: text) -> text:
+    val rows = geom_rows(inner)
+    var i = 0
+    while i < rows.len():
+        val parts = rows[i].split("|")
+        if parts.len() >= 3 and parts[2] == tag:
+            return parts[1]
+        i = i + 1
+    ""
+
+fn has_tag(inner: text, tag: text) -> bool:
+    key_of_tag(inner, tag) != ""
+
+describe "<wbr> generates no box":
+    it "AC-1: a <wbr> emits NO geometry row at all":
+        step("Chrome reports path:0/0/4/2/86/1/0/0 wbr as 0|0|0|0 -- no box to report")
+        expect(has_tag("<p>long<wbr>word</p>", "wbr")).to_equal(false)
+
+    it "AC-2: the <wbr>'s container and text siblings still emit their rows":
+        step("dropping the wbr row must not drop the subtree it sits in")
+        val tags = row_tags("<p>long<wbr>word</p>")
+        expect(tags.contains("p")).to_equal(true)
+        expect(tags.contains("wbr")).to_equal(false)
+
+    it "AC-3: a sibling AFTER the <wbr> keeps the nth-path it had WITH the wbr":
+        step("round 19 deferred this fix believing the ordinals would shift; they do not")
+        # `<b>` is the 2nd element child of the <p> in both documents. The key
+        # is computed from the DOM walk, so removing the wbr's ROW cannot move
+        # it -- and the wbr must still occupy ordinal 0 for the key to agree
+        # with Chrome's walker, which counts WBR.
+        val with_wbr = key_of_tag("<p><wbr><b>x</b></p>", "b")
+        val without_wbr = key_of_tag("<p><i>y</i><b>x</b></p>", "b")
+        expect(with_wbr).to_equal(without_wbr)
+        expect(with_wbr == "").to_equal(false)
+
+    it "AC-4: CONTROL -- <br> is NOT boxless and keeps its geometry row":
+        step("Chrome gives <br> a real rect; the census found no all-zero br row on any page")
+        expect(has_tag("<p>a<br>b</p>", "br")).to_equal(true)
+
+    it "AC-5: CONTROL -- an ordinary empty inline still emits its row":
+        step("the rule must be about <wbr>, not about emptiness")
+        expect(has_tag("<p>a<span></span>b</p>", "span")).to_equal(true)
