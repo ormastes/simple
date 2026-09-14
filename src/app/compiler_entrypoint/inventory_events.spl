@@ -1,9 +1,9 @@
 # Production bridge from Git/filesystem change journals to the compile-owned
 # source inventory. Git commands are read-only; all writes stay under build/scv.
 
-use app.io.mod.{dir_create, file_atomic_write, file_exists, file_read, process_run_bounded}
+use app.io.mod.{dir_create, file_atomic_write, file_exists, file_hash_sha256, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
-use std.scv.compile_source_inventory.{CompileSourceGitChangeV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_changes_v1, compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_git_event_with_digest_v1, compile_source_inventory_read_current_v1}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 
 struct CompilerInventoryRefreshV1:
@@ -82,24 +82,38 @@ fn compiler_inventory_git_head_v1(root: text) -> text:
     val output = compiler_inventory_git_lines_v1(root, ["rev-parse", "HEAD"])
     if output == nil: "" else: output!.trim()
 
-fn compiler_inventory_change_push_v1(
-    changes: [CompileSourceGitChangeV1], root: text, operation: text, path: text
-) -> [CompileSourceGitChangeV1]:
+fn compiler_inventory_event_push_v1(
+    events: [CompileSourceEventV1], root: text, operation: text, path: text
+) -> [CompileSourceEventV1]:
     val normalized = path.trim().replace("\\", "/")
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
-        return changes
+        return events
     if operation == "delete":
-        return changes.push(CompileSourceGitChangeV1("delete", normalized, ""))
+        return events.push(compile_source_inventory_git_event_v1(
+            "delete", normalized, ""))
     val absolute = root + "/" + normalized
     if not file_exists(absolute):
-        return changes.push(CompileSourceGitChangeV1("delete", normalized, ""))
-    changes.push(CompileSourceGitChangeV1("modify", normalized, file_read(absolute)))
+        return events.push(compile_source_inventory_git_event_v1(
+            "delete", normalized, ""))
+    val content = file_read(absolute)
+    # rt_file_hash_sha256 (via file_hash_sha256) hashes the file natively —
+    # orders of magnitude faster than the interpreted sha256_text fallback it
+    # replaces, and it is what turns this per-file step into an event
+    # (digests only) instead of a change record that would otherwise have to
+    # keep `content` alive in an outer array until every listed file has been
+    # processed. That retained-content array, not the git listing itself, was
+    # the dominant cost of cold init on a ~1.6 GB checkout (measured 21 GB
+    # RSS / 342 CPU-s before this change — see
+    # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md).
+    val digest_hint = file_hash_sha256(absolute)
+    events.push(compile_source_inventory_git_event_with_digest_v1(
+        operation, normalized, content, digest_hint))
 
 fn compiler_inventory_parse_name_status_v1(
-    root: text, output: text, changes: [CompileSourceGitChangeV1]
-) -> [CompileSourceGitChangeV1]:
-    var result = changes
+    root: text, output: text, events: [CompileSourceEventV1]
+) -> [CompileSourceEventV1]:
+    var result = events
     for line in output.split("\n"):
         if line.trim() == "":
             continue
@@ -109,13 +123,13 @@ fn compiler_inventory_parse_name_status_v1(
         val status = line[:separator]
         val path = line[separator + 1:]
         val operation = if status.starts_with("D"): "delete" else: "modify"
-        result = compiler_inventory_change_push_v1(result, root, operation, path)
+        result = compiler_inventory_event_push_v1(result, root, operation, path)
     result
 
-fn compiler_inventory_git_changes_v1(
+fn compiler_inventory_git_events_v1(
     root: text, previous_head: text, source_roots: [text], cold_init: bool
-) -> [CompileSourceGitChangeV1]?:
-    var changes: [CompileSourceGitChangeV1] = []
+) -> [CompileSourceEventV1]?:
+    var events: [CompileSourceEventV1] = []
     if cold_init:
         val listed = compiler_inventory_git_lines_v1(
             root, ["ls-files", "--cached", "--others", "--exclude-standard", "--"] + source_roots)
@@ -123,9 +137,9 @@ fn compiler_inventory_git_changes_v1(
             return nil
         for path in listed!.split("\n"):
             if path.trim() != "":
-                changes = compiler_inventory_change_push_v1(
-                    changes, root, "create", path)
-        return Some(changes)
+                events = compiler_inventory_event_push_v1(
+                    events, root, "create", path)
+        return Some(events)
     val head = compiler_inventory_git_head_v1(root)
     if head == "" or previous_head == "":
         return nil
@@ -135,7 +149,7 @@ fn compiler_inventory_git_changes_v1(
                 "--no-renames", previous_head, head, "--"] + source_roots)
         if committed == nil:
             return nil
-        changes = compiler_inventory_parse_name_status_v1(root, committed!, changes)
+        events = compiler_inventory_parse_name_status_v1(root, committed!, events)
     val working = compiler_inventory_git_lines_v1(
         root, ["-c", "core.quotePath=false", "diff", "--name-status",
             "--no-renames", "HEAD", "--"] + source_roots)
@@ -143,11 +157,11 @@ fn compiler_inventory_git_changes_v1(
         root, ["ls-files", "--others", "--exclude-standard", "--"] + source_roots)
     if working == nil or untracked == nil:
         return nil
-    changes = compiler_inventory_parse_name_status_v1(root, working!, changes)
+    events = compiler_inventory_parse_name_status_v1(root, working!, events)
     for path in untracked!.split("\n"):
         if path.trim() != "":
-            changes = compiler_inventory_change_push_v1(changes, root, "create", path)
-    Some(changes)
+            events = compiler_inventory_event_push_v1(events, root, "create", path)
+    Some(events)
 
 fn compiler_inventory_decode_v1(value: text) -> text:
     if value == "%empty":
@@ -214,11 +228,11 @@ fn compiler_inventory_refresh_v1(
     val head = compiler_inventory_git_head_v1(root)
     if head == "":
         return compiler_inventory_invalid_v1("git-event-source-unavailable")
-    val git_changes = compiler_inventory_git_changes_v1(
+    val git_events = compiler_inventory_git_events_v1(
         root, if cursor.valid: cursor.git_head else: head, source_roots, cold_init)
-    if git_changes == nil:
+    if git_events == nil:
         return compiler_inventory_invalid_v1("git-event-refresh-failed")
-    var inventory = compile_source_inventory_apply_git_changes_v1(cache_root, git_changes!)
+    var inventory = compile_source_inventory_apply_git_events_v1(cache_root, git_events!)
     if not inventory.valid:
         return compiler_inventory_invalid_v1("git-event-apply:" + inventory.reason)
     val journal_path = root + "/.scv/journal/events.log"
