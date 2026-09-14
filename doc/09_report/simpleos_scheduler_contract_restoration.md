@@ -42,3 +42,20 @@ Completed static checks:
 
 These checks establish source consistency only. They do not supply branch
 coverage, type checking, native execution, or generated-manual evidence.
+
+Review follow-up: source-contract specs now require paired lifecycle allocation
+in authenticated adoption and fork. Generic and slot-zero producers reserve
+only after successful mapping/entry validation; fork reserves only after COW
+root validity. These rejection paths no longer advance the allocator. An
+already-issued pair is never reused after later publication failure. The
+missing non-x86 owned-COW rollback is explicitly tracked in
+`doc/08_tracking/bug/scheduler_cow_identity_refusal_rollback.md`; shared parent
+tables are never freed using a fabricated root generation.
+
+Follow-up validation passed a bounded Node replay of the changed static
+source-order assertions: generic/bootstrap mapping and entry rejection precede
+paired reservation; failed COW roots precede reservation; authenticated
+lifecycle and CSpace binding precede publication. Working-tree source/artifact
+guards and whitespace checks also passed; the executable-spec count under
+`doc/06_spec` remains zero. This is explicitly static evidence, not an SSpec
+or native execution result.
