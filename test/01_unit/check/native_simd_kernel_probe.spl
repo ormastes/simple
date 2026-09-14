@@ -13,6 +13,12 @@
 # binary it builds.
 # @req REQ-SSPEC-LIB
 
+use std.nogc_sync_mut.db.accel.{
+    row_bitmap_and_words, _scalar_row_bitmap_and_words,
+    row_bitmap_or_words, _scalar_row_bitmap_or_words,
+    row_bitmap_andnot_words, _scalar_row_bitmap_andnot_words
+}
+
 @unsafe(reason: "native SIMD kernel probe", capabilities: [ffi])
 extern fn rt_db_bitmap_and_u32(lhs: [u32], rhs: [u32], limit: i64) -> [u32]
 @unsafe(reason: "native SIMD kernel probe", capabilities: [ffi])
@@ -165,6 +171,48 @@ fn main():
                 if got[i.to_i32()] != dst[i.to_i32()]:
                     bad = bad + 1
                     bad_cov = bad_cov + 1
+                i = i + 1
+        n = n + 1
+
+    # --- the DB LIBRARY's own public functions, not the raw externs ---
+    #
+    # `row_bitmap_and_words` and its siblings are what a query engine calls.
+    # Checking them rather than the extern is the difference between "the
+    # kernel is in the binary" and "the code a server runs reaches it": the
+    # library wraps every call in a length check and falls back to its scalar
+    # twin when the extern looks unbacked, which is exactly how a dead kernel
+    # stayed invisible for so long.
+    n = 1
+    while n <= 48:
+        var la: [u32] = []
+        var lb: [u32] = []
+        var i: i64 = 0
+        while i < n:
+            la.push(((i * 2654435761) % 4294967291) as u32)
+            lb.push(((i * 40503 + 12345) % 4294967291) as u32)
+            i = i + 1
+        val ka = row_bitmap_and_words(la, lb, n)
+        val sa = _scalar_row_bitmap_and_words(la, lb, n)
+        val ko = row_bitmap_or_words(la, lb, n, n, n)
+        val so = _scalar_row_bitmap_or_words(la, lb, n, n, n)
+        val kn = row_bitmap_andnot_words(la, lb, n, n)
+        val sn = _scalar_row_bitmap_andnot_words(la, lb, n, n)
+        if ka.len() != sa.len() or ko.len() != so.len() or kn.len() != sn.len():
+            bad = bad + 1
+            bad_db = bad_db + 1
+        else:
+            i = 0
+            while i < n:
+                checked = checked + 3
+                if ka[i.to_i32()] != sa[i.to_i32()]:
+                    bad = bad + 1
+                    bad_db = bad_db + 1
+                if ko[i.to_i32()] != so[i.to_i32()]:
+                    bad = bad + 1
+                    bad_db = bad_db + 1
+                if kn[i.to_i32()] != sn[i.to_i32()]:
+                    bad = bad + 1
+                    bad_db = bad_db + 1
                 i = i + 1
         n = n + 1
 

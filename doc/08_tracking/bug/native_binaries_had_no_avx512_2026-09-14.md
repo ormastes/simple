@@ -287,3 +287,51 @@ across a busy loop that takes 71 ms, and the wall clock agrees with the host's
 **6.2x**, which independently corroborates the 5.8x obtained earlier by
 external process timing with startup subtracted. Two unrelated methods, the
 same answer.
+
+## The DB LIBRARY path, not just the extern
+
+The gate previously called `rt_db_bitmap_and_u32` directly. That proves the
+kernel is in the binary; it does not prove the code a server runs reaches it.
+`accel.spl` wraps every call in a length check and silently falls back to its
+scalar twin when the extern looks unbacked — which is precisely how a dead
+kernel stayed invisible through three gates.
+
+The probe now calls `row_bitmap_and_words`, `row_bitmap_or_words` and
+`row_bitmap_andnot_words` — the library's public API, what a query engine calls
+— and compares each against its `_scalar_` twin. Natively:
+**6288 values checked, 0 mismatches, 90 zmm present.**
+
+That is the DB path accelerated end to end: library API -> extern -> CPUID
+dispatch -> AVX-512 lanes, with results identical to the scalar reference at
+every length 1..48.
+
+## Why there is still no fully-linked server executable
+
+Filed rather than fixed, with the diagnosis, because it is a native-lane
+infrastructure problem and not a SIMD one.
+
+Two independent blockers:
+
+1. **A codegen bug.** `src/lib/gc_async_mut/web/browser_session_runtime.spl`
+   fails to compile natively — `codegen: 1 function body/bodies failed to
+   compile: [BrowserDomEventExecutor.listener_indices_for_target_event]`. That
+   stops `src/app/browser/main.spl` outright.
+
+2. **An incomplete C source set.** The renderer module links against `rt_mmap`,
+   which IS implemented — in `platform/platform_win.h`, included only by
+   `runtime.c`, which is NOT in the native build's `runtime_inputs` list
+   (`pipeline/native_project/tools.rs`). That list's own comments record why:
+   adding `runtime.c` wholesale "collides on 53/69 symbols, same class as the
+   disproved runtime_native.c fix". The sanctioned pattern is a small
+   self-contained TU defining exactly the missing symbols, as
+   `runtime_core_io_exports.c` did for twelve of them.
+
+Note what this is NOT: the 23 symbols the linker first reported are mostly
+present in `runtime.c` already (`rt_get_args`, `rt_black_box`,
+`rt_time_now_seconds`, `rt_file_fsync`, `rt_atexit_install`,
+`rt_signal_install`). Only `rt_mmap` needed hunting, and it was found. This is a
+link-set curation problem with documented prior failures, not missing code.
+
+Neither blocker affects the AVX-512 result: whether the browser app links is
+orthogonal to whether the kernels a server calls are AVX-512, and the library
+check above answers that directly.
