@@ -5668,6 +5668,57 @@ fn test_build_import_map_records_primitive_return_types() {
 }
 
 #[test]
+fn test_duplicate_imported_functions_keep_selected_owner_return_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let int_path = lib_root.join("int_api.spl");
+    let text_path = lib_root.join("text_api.spl");
+    let caller_path = lib_root.join("caller.spl");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    std::fs::write(&int_path, "pub fn convert(value: i64) -> i64:\n    value + 1\n").unwrap();
+    std::fs::write(&text_path, "pub fn convert(value: i64) -> text:\n    \"wrong\"\n").unwrap();
+    std::fs::write(
+        &caller_path,
+        "use lib.int_api.convert\n\nfn answer() -> i64:\n    val result = convert(41)\n    result\n",
+    )
+    .unwrap();
+
+    let paths = [&int_path, &text_path, &caller_path];
+    let file_sources: Vec<_> = paths
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let imports = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    assert!(
+        imports.fn_return_types.get("convert").is_none(),
+        "the conflicting bare return type must remain fail-closed"
+    );
+
+    let caller_source = std::fs::read_to_string(&caller_path).unwrap();
+    let ast = simple_parser::Parser::new(&caller_source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+    let selected = use_map.get("convert").expect("selective import must resolve an owner");
+    assert_eq!(
+        imports.fn_return_types.get(selected),
+        Some(&simple_parser::Type::Simple("i64".to_string()))
+    );
+
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(imports.fn_return_types.clone()));
+    lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map));
+    let lowered = lowerer.lower_module(&ast).unwrap();
+    let answer = lowered
+        .functions
+        .iter()
+        .find(|function| function.name == "answer")
+        .unwrap();
+    let result = answer.locals.iter().find(|local| local.name == "result").unwrap();
+    assert_eq!(result.ty, crate::hir::TypeId::I64);
+}
+
+#[test]
 fn test_global_primitive_return_keeps_native_comparison_typed() {
     let source = "struct SwapTxn:\n    source_phys_addr: u64\n\nfn changed(txn: SwapTxn) -> bool:\n    val current = vmm_read_pte(0)\n    return current != txn.source_phys_addr\n";
     let ast = simple_parser::Parser::new(source).parse().unwrap();

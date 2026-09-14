@@ -382,12 +382,17 @@ pub(crate) fn build_import_map(
                         if !f.body.statements.is_empty() {
                             let mangled = format!("{}__{}", prefix, f.name);
                             fn_arities.insert(mangled.clone(), f.params.len());
-                            raw_to_mangled.entry(f.name.clone()).or_default().push(mangled);
+                            raw_to_mangled.entry(f.name.clone()).or_default().push(mangled.clone());
                             // Preserve every declared return type. The lowerer
                             // discards types it cannot resolve, and the collision
                             // handling below removes ambiguous bare function names.
                             let captured = f.return_type.clone();
                             if let Some(cap) = captured {
+                                // The owner-mangled symbol is the authoritative
+                                // identity once duplicate bare names exist. Keep
+                                // its return type even when the ambiguous bare
+                                // entry below is intentionally discarded.
+                                fn_return_types.insert(mangled, cap.clone());
                                 match fn_return_types.entry(f.name.clone()) {
                                     std::collections::hash_map::Entry::Occupied(mut e) => {
                                         if e.get() != &cap {

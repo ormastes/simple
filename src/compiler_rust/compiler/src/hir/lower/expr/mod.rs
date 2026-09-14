@@ -447,6 +447,20 @@ impl Lowerer {
             .copied()
             .or_else(|| self.globals.get(name).copied())
             .or_else(|| {
+                // Native-project import resolution maps a caller-local bare
+                // name to its exact owner-mangled symbol. Return-type lookup
+                // must follow that same mapping: the bare metadata is
+                // deliberately absent when duplicate definitions disagree.
+                self.qualified_import_functions.as_ref().and_then(|functions| {
+                    functions.get(name).and_then(|target| {
+                        self.method_return_types
+                            .get(target)
+                            .copied()
+                            .or_else(|| self.globals.get(target).copied())
+                    })
+                })
+            })
+            .or_else(|| {
                 self.resolve_function_alias(name).and_then(|target| {
                     self.method_return_types
                         .get(target)
