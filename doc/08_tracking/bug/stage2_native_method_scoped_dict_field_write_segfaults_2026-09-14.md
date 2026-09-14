@@ -99,3 +99,21 @@ it does not exercise this second defect.
 - `doc/07_guide/language/dict_native_pitfalls.md` — existing truth table of
   native Dict defects; neither this SEGV nor the sibling doc's text-value
   bracket-read garbage is yet listed there.
+
+## Correction and root cause (2026-09-14, lane F77)
+
+The title is too narrow: no dict is required. The same pinned Stage-2 candidate
+SEGVs (`native-build` rc **139**) on a nine-line program that declares a class
+with a method and no dict at all, while `fn main(): print("ok")` builds and runs
+(rc 0). Fixtures and the rc table: `dict_memo_contains_key_native_shapes_2026-09-14.md`.
+
+Crash site, identical for every failing fixture under lldb:
+`MirLowering.record_external_layout_reference + 204`, `ldr x0, [x26, #0x48]`,
+`EXC_BAD_ACCESS code=1 address=0x48` — a field read off a **nil** receiver.
+`src/compiler/50.mir/_MirLowering/module_lowering.spl:438` unwraps
+`self.symbols.get_symbol_raw(...)` and reads `info.defining_module` without the
+`info != nil` guard that `mir_struct_symbol_name` in the same file already
+applies and documents (`Option`'s nil case does not survive the staged native
+ABI; `.?` reads PRESENT for an absent symbol). Guard added; pinned by
+`test/01_unit/compiler/mir/external_layout_reference_nil_info_guard_source_spec.spl`.
+Clearing the rc-139 needs a rebuilt Stage-2 candidate, which lane F77 did not have.
