@@ -1,0 +1,45 @@
+"""Regression for stale module-global snapshots across receiver-less calls.
+
+The interpreter must resolve a module array through its authoritative global
+store when a class method reaches it through a top-level helper. Repeated calls
+to the allocator must likewise observe the latest array length.
+"""
+
+use std.spec.step
+
+var _freshness_flags: [bool] = []
+
+fn _freshness_alloc() -> i64:
+    val id = _freshness_flags.len()
+    _freshness_flags = _freshness_flags.push(false)
+    id
+
+fn _freshness_read(id: i64) -> bool:
+    _freshness_flags[id]
+
+class FreshnessThing:
+    id: i64
+
+impl FreshnessThing:
+    me mark():
+        _freshness_flags[self.id] = true
+
+    fn check() -> bool:
+        _freshness_read(self.id)
+
+describe "module array reads through a receiver-less helper":
+    it "observes the mutation and preserves allocation order":
+        step("allocate three distinct module-array slots")
+        var first = FreshnessThing(id: _freshness_alloc())
+        val second = FreshnessThing(id: _freshness_alloc())
+        val third = FreshnessThing(id: _freshness_alloc())
+
+        expect(first.id).to_equal(0)
+        expect(second.id).to_equal(1)
+        expect(third.id).to_equal(2)
+
+        step("read the live mutation through a free-function helper")
+        first.mark()
+        expect(first.check()).to_equal(true)
+        expect(second.check()).to_equal(false)
+        expect(third.check()).to_equal(false)
