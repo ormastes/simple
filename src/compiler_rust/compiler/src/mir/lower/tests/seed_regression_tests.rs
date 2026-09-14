@@ -399,3 +399,34 @@ fn or_suspend_keeps_eager_unconditional_evaluation() {
         "or~ must not allocate a short-circuit merge temp (eager path has no branch/merge)"
     );
 }
+
+/// `str(x!)` where `x: i64?` force-unwraps to a HIR-`ANY`-typed tagged
+/// RuntimeValue (see `lower_try` in hir/lower/expr/control.rs). `lower_cast_expr`
+/// only special-cased `is_native_scalar` sources for the to-STRING conversion,
+/// so an ANY-typed source fell through to a plain `MirInst::Cast` -- a value
+/// copy in codegen that reinterprets the tagged word as a raw STRING pointer,
+/// corrupting it (rt_string_concat then reads len=-1 and returns NIL).
+/// ANY must route through `emit_to_string` -> `rt_value_to_string`, exactly
+/// like every other tagged-value producer.
+/// See doc/08_tracking/bug/seed_jit_some_constructor_corrupts_value_2026-09-13.md
+#[test]
+fn str_of_force_unwrapped_nullable_scalar_routes_through_to_string() {
+    let mir = compile_to_mir(
+        "fn describe() -> text:\n    val x: i64? = 42\n    return str(x!)\n",
+    )
+    .expect("str(x!) on a nullable scalar must lower to MIR");
+    let func = mir.functions.iter().find(|f| f.name == "describe").expect("describe fn");
+
+    assert!(
+        has_call(func, "rt_value_to_string"),
+        "str(x!) on an ANY-typed force-unwrap must call rt_value_to_string, \
+         not fall through to a raw MirInst::Cast"
+    );
+    assert!(
+        func.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .all(|inst| !matches!(inst, MirInst::Cast { to_ty, .. } if *to_ty == TypeId::STRING)),
+        "an ANY-typed source must not lower str(...) to a bare value-copy Cast to STRING"
+    );
+}

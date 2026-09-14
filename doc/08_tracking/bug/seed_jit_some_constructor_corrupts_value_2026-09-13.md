@@ -1,7 +1,12 @@
 # Seed JIT: the explicit `Some(x)` optional constructor produces a corrupt value
 
 - **Filed:** 2026-09-13
-- **Status:** OPEN
+- **Status:** FIXED (pending seed redeploy) — see "Root cause and fix" below.
+  The `str(x!)` / display symptom (lines 1, 4, 5 of the repro table) is fixed.
+  The `==` comparison symptom (line 3, `o! == "hello"` false under JIT) goes
+  through a different code path (`BinOp::Eq` on `ANY`-typed operands, not
+  `lower_cast_expr`) and was **not** re-verified by this fix — re-check it
+  once a redeployed seed is available before closing this record outright.
 - **Severity:** high — silently wrong values, no crash, no diagnostic
 - **Host:** Windows 11, `bin/release/x86_64-pc-windows-msvc/simple.exe` (Rust bootstrap seed)
 - **Affects:** default execution mode (JIT). `SIMPLE_EXECUTION_MODE=interpreter` is correct.
@@ -71,8 +76,49 @@ The mitigation does not cover any other JIT consumer of `Some(...)`, which is
 most of the tree. The real fix belongs in the seed's JIT lowering of the
 optional constructor.
 
+## Root cause and fix
+
+`x!` (force-unwrap, `Expr::ForceUnwrap`) on a nullable scalar (`i64?`, `text?`,
+...) lowers via `lower_try` (`src/compiler_rust/compiler/src/hir/lower/expr/control.rs`),
+which deliberately types the result `ANY` — the runtime word is still a tagged
+`RuntimeValue`, not the raw scalar (see the comment there, and
+`jit_optional_i64_payload_reinterpreted_2026-08-17.md`).
+
+`str(x!)` / `text(x!)` then lowers through `lower_cast_expr`
+(`src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs:549`), which
+special-cases only `is_native_scalar(inner.ty)` sources for a real
+to-STRING conversion (`emit_to_string` -> `rt_value_to_string`); anything else
+falls through to a plain `MirInst::Cast`, a value-copy in codegen. An
+`ANY`-typed source is *not* a native scalar (it's a tagged word), so it fell
+through to the plain copy, which is exactly the "reinterprets a tagged
+RuntimeValue as a raw STRING pointer" corruption described in the comment
+directly above that `if` (`rt_string_concat` then reads len=-1 and returns
+NIL — matching `5 len=-1` in the repro table).
+
+Fix: also route `ANY`-typed sources through `emit_to_string`:
+
+```rust
+if target == TypeId::STRING && (Self::is_native_scalar(inner.ty) || inner.ty == TypeId::ANY) {
+    return self.emit_to_string(source_reg, inner.ty);
+}
+```
+
+`emit_to_string`'s existing `_ => reg` default (heap/tagged values are already
+`RuntimeValue`s) then calls `rt_value_to_string` directly on the ANY word,
+which is correct since `x!`'s ANY-typed result already *is* a tagged
+`RuntimeValue`.
+
+Regression test (MIR-lowering level, asserts the emitted MIR calls
+`rt_value_to_string` and contains no `MirInst::Cast { to_ty: STRING, .. }`):
+`src/compiler_rust/compiler/src/mir/lower/tests/seed_regression_tests.rs`,
+`str_of_force_unwrapped_nullable_scalar_routes_through_to_string`. Verified to
+fail without the fix and pass with it.
+
+Landed via PR (branch `work/seed-str-unwrap-any`); the fix ships to users once
+the seed binary is next redeployed from this source.
+
 ## Next step
 
-Locate the `Some` constructor lowering in the Cranelift/JIT path of
-`src/compiler_rust/` and compare it with the coercion path, which is correct.
-Add a regression spec once fixed.
+Re-verify the `==`-comparison symptom (line 3 of the repro table) against a
+redeployed seed — it was not touched by this fix and may be a separate defect
+in `BinOp::Eq` lowering for `ANY` operands.
