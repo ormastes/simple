@@ -297,7 +297,28 @@ jobs:
             pkg install -y curl bash
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
           run: |
+            set -eu
             . "$HOME/.cargo/env"
             cd src/compiler_rust
-            cargo build --profile bootstrap -p simple-driver
-            cargo test --workspace --lib
+            echo 'FreeBSD guest resource diagnostics (bounded)'
+            {
+              echo 'sysctl:'
+              sysctl -n hw.ncpu hw.physmem vm.swap_total 2>&1 || true
+              echo 'swapinfo:'
+              swapinfo -h 2>&1 || true
+            } | head -n 40
+
+            CARGO_BUILD_JOBS=1 cargo build --profile bootstrap -p simple-driver || {
+              cargo_status=$?
+              echo "FreeBSD cargo build failed (status=$cargo_status)" >&2
+              echo 'FreeBSD dmesg tail (last 80 lines)' >&2
+              dmesg 2>&1 | tail -n 80 || true
+              exit "$cargo_status"
+            }
+            CARGO_BUILD_JOBS=1 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --lib || {
+              cargo_status=$?
+              echo "FreeBSD cargo test failed (status=$cargo_status)" >&2
+              echo 'FreeBSD dmesg tail (last 80 lines)' >&2
+              dmesg 2>&1 | tail -n 80 || true
+              exit "$cargo_status"
+            }
