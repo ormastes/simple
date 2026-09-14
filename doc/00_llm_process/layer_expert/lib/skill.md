@@ -55,3 +55,25 @@ work in four PRs on 2026-09-06 without producing a single conflict. The
 detection recipe (`git diff origin/main..HEAD -- <shared meta file> |
 grep -c '^-[^-]'` must be `0`) and the caveats are on the
 [app layer expert](../app/skill.md) § Session update 2026-09-06.
+
+## Memo/cache keys must name every input (2026-09-14)
+
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl`
+carries a style-cascade memo whose comment asserts the computed style is "a
+deterministic function of (parent inherited identity, tag, presentational
+decls)" plus em_base, writing mode and the accumulated author declarations —
+"so those six inputs are the whole key". That claim is a maintenance contract,
+not a description: the moment a new UA rule read the ANCESTOR chain, the
+invariant broke and the cache served a stale style to the second node with the
+same tag. The failure was silent and partial — `ol`-in-`ul` worked, `ul`-in-`ul`
+did not — which is the worst shape to debug, because the fix looks half-applied
+rather than mis-cached.
+
+Rule for this layer: when adding an input to a memoised computation, add it to
+the key in the same edit, and pin it with a spec whose fixture actually
+activates the cache (here the memo only runs when some author rule matches, so
+a bare-UA fixture would have passed without the key change and guarded
+nothing). Sabotage the key term on its own and confirm the spec reds — a
+"simplification" of a cache key otherwise reads as a free cleanup.
+
+See `doc/08_tracking/bug/web_layout_vertical_drift_accumulates_16px_per_construct_2026-09-14.md`.

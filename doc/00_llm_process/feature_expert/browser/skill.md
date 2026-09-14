@@ -386,3 +386,46 @@ browser modules — that would violate its stated scope exclusion.
 - GUI viewport limit: `--open` is 64x36; a real page renders as its
   background fill there (text lays out off-frame). Glyph evidence needs a
   larger viewport through `browser_engine_pixels_at`.
+
+## Nested-list UA margins, and the cascade memo (2026-09-14, round 15)
+
+Chrome's `html.css` zeroes `margin-block-start`/`-end` on a list container
+(`dir`/`dl`/`menu`/`ol`/`ul`) that has a list-container ANCESTOR — the full 5x5
+descendant cross product, so `ul > li > ul` matches through the `li`. Simple
+had no such rule; every nested list carried 16 px Chrome does not give it and
+`html.html` drifted 16 px per occurrence (`html` 330 -> 230 mismatched once
+fixed). Implemented in `simple_web_html_layout_renderer_core.spl` as
+`list_container_tag()` / `has_list_container_ancestor()` right after
+`tag_defaults()` — the point where the ancestor chain is known and author
+declarations have not run yet, which is where a UA rule belongs.
+
+Two traps worth carrying forward:
+
+- **It hides behind margin collapsing.** When the nested list is the li's FIRST
+  in-flow child the spurious margin collapses through the li, so the geometry
+  is right for the wrong reason. Only an inline run before it (`<li><code>x
+  </code><ul>..</ul></li>`) exposes the bug — which is why the drift's first
+  step looked like an anonymous-block-box defect and sent round 14 after CSS
+  2.1 §9.2.1.1. The anonymous block was correct all along; `div`, bare text,
+  `span` and `p` in that position all match Chrome to the pixel.
+- **`memo_key` is keyed on `(parent inherit id, tag, em_base, writing mode,
+  pres_decls, combined_decls)` and its comment claims those are the WHOLE key.**
+  Any new style input that is not a function of those six must be added to the
+  key or it silently does nothing on the second node with the same tag. The
+  nested-list bit is ancestor-derived, so `ul`-in-`ul` (same tag, same
+  inherit-identity parent) copied the outer list's cached margin straight back
+  over the zeroing while `ol`-in-`ul` and `dl`-in-`ul` looked fixed. The memo
+  only runs when `combined_decls != ""`, i.e. when some author rule matches, so
+  a bare-UA fixture cannot reproduce it.
+
+Spec: `test/01_unit/browser_engine/nested_list_container_ua_margin_spec.spl`
+(8/8; three controls that must KEEP their 16 px; both defects sabotage-proven
+separately). Fixtures for bisecting this family live in
+`test/fixtures/browser/anon_*.html` and run through
+`GEOM_DIFF_PAGES=<path> sh scripts/check/check-chrome-layout-geometry-diff.shs`.
+
+Known-open neighbours found by the same fixtures: an outer `<ul>`'s top margin
+does not collapse out of `<body>` (Chrome y=0, Simple y=16 — neutralise it with
+`style="margin:0;padding:0"` when asserting absolute y), and `Style.font_size`
+is `i32` so Chrome's fractional `13.3333px` form-control size is lost, which is
+the real cause of the `tab-bar` flex-item width cluster.

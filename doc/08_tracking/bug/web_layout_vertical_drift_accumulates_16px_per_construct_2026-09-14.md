@@ -1,8 +1,99 @@
 # Vertical block flow drifts ~16 px per occurrence of one construct (2026-09-14)
 
-Status: **OPEN** — characterised with evidence, not yet fixed. Round 14, next
-root cause after the render-budget truncation
-(`web_render_budget_truncates_geometry_differ_layout_2026-09-14.md`).
+Status: **FIXED 2026-09-14 (round 15)**. Characterised in round 14 (below,
+retained unchanged); root-caused and fixed in round 15. Measured on one tree,
+one binary and one Chrome harvest, toggling only the fix:
+`html` 330 → **230** mismatched, every other catalog page byte-identical.
+
+## Round 15: what it actually was — and what it was NOT
+
+**The round-14 hypothesis in "Where the first step happens" below is WRONG and
+was ruled out by measurement, not by argument.** The anonymous block box CSS
+2.1 §9.2.1.1 requires around an inline run with a block sibling is implemented
+correctly and always was. Fixtures that prove it (`test/fixtures/browser/
+anon_block_box.html`, `anon_block_box2.html`, `anon_v0..v3.html`, each diffed
+against Chrome through `check-chrome-layout-geometry-diff.shs`):
+
+| fixture | Chrome | Simple | verdict |
+|---|---|---|---|
+| `<li><code/><div/></li>`            | div at li+18 | li+18 | MATCH |
+| `<li>text<div/></li>`               | div at li+18 | li+18 | MATCH |
+| `<div><span/><div/></div>`          | div at +18    | +18   | MATCH |
+| `<div><span/><ul>..</ul></div>`     | ul at +18+16  | same  | MATCH |
+| `<li><code/><p/></li>`              | p at li+18+16 | same  | MATCH |
+| `<li><code/><ul>..</ul></li>`       | ul at li+18   | li+35 | **16 px too low** |
+| `<li><code/><dl><dt/></dl></li>`    | dl at li+18   | li+35 | **16 px too low** |
+
+The line box is right in every row. Only a **list container** nested in a list
+is wrong, and it is wrong by exactly its own UA `margin-block-start`.
+
+### Root cause 1 — a missing UA rule
+
+Chrome's `html.css` carries a descendant block zeroing the block margins of
+`dir`/`dl`/`menu`/`ol`/`ul` that have a `dir`/`dl`/`menu`/`ol`/`ul` ANCESTOR
+(`ul ul, ul ol, ul dl, ol ul, dl dl, menu ul, …` — the full 5×5 cross product).
+Simple had no such rule, so every nested list carried a 16 px top margin Chrome
+does not give it, and 16 px of it also reappeared at the bottom.
+
+Verified against Chrome's own computed values rather than assumed: the `dl` in
+`<ul><li><code/><dl/></li></ul>` reports `margin-top=0px` in
+`getComputedStyle`, while the `ul` in `<div><span/><ul/></div>` reports 16 px.
+
+**Why it hid for so long, and why the drift looked like an anonymous-block
+bug:** when the nested list is the li's FIRST in-flow child its 16 px top margin
+collapses through the li anyway (see
+`first_child_top_margin_collapse_spec.spl`), so the geometry came out right for
+the wrong reason. An inline run before it removes that cover — and that is
+exactly the `<li><code>…</code><ul>…</ul></li>` shape all over `html.html`,
+which is why the first step landed at an inline→block boundary and pointed
+every investigation at the anonymous box.
+
+Fix: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl`
+— `list_container_tag()` / `has_list_container_ancestor()` (defined just above
+`compute_styles`), applied immediately after `tag_defaults(st, nd.tag)`, which
+is where the ancestor chain is known and still ahead of every author
+declaration, as a UA rule must be.
+
+### Root cause 2 — the style-cascade memo key omitted the new input
+
+With only fix 1, `ol`-in-`ul` and `dl`-in-`ul` went green while **`ul` inside
+`ul` stayed broken** — the one nesting the catalog page actually uses. The
+cascade memo (same file, `memo_key`) is keyed on
+`(parent inherit id, tag, em_base, writing mode, pres_decls, combined_decls)`
+and its comment asserts `st` is a deterministic function of those. The new UA
+bit reads the ANCESTOR chain, so two `<ul>`s with the same tag and the same
+inherit-identity parent can legitimately disagree about it: the nested `<ul>`
+hit the outer `<ul>`'s cached entry and copied the 16 px margin straight back
+over the zeroing. `{nested_list_ua}` is now part of the key.
+
+The memo is only active when `combined_decls != ""`, i.e. when some author rule
+matches — which is why a bare-UA fixture cannot expose root cause 2. The spec's
+fixture head carries `*{box-sizing:border-box}` for exactly that reason; do not
+"simplify" it away.
+
+### Spec
+
+`test/01_unit/browser_engine/nested_list_container_ua_margin_spec.spl`, 8/8.
+Five assertions on the rule (ul-in-ul, dl-in-ul, ul-in-ol, non-parent ancestor,
+the zeroed bottom margin) and three CONTROLS that must keep their 16 px (a
+`<ul>` with no list ancestor, and a `<p>` inside a list). Both halves are
+sabotage-proven independently: disabling the UA rule reds AC-1..5; removing
+only `{nested_list_ua}` from the memo key reds exactly AC-1/2/5 and leaves
+AC-3/4 green, which is the signature that would otherwise make a later key
+"simplification" look harmless.
+
+### Still open, surfaced by the same fixtures and deliberately not fixed here
+
+- **An outer `<ul>`'s top margin does not collapse out of `<body>`.** Chrome
+  puts `<ul>` at y=0 under `body{margin:0}`; Simple puts it at 16. Visible as
+  `body dy=8` on `anon_block_box.html` and as the reason every absolute-y
+  assertion in the new spec neutralises the outer list with
+  `style="margin:0;padding:0"`.
+- **The `dy=14` rows below** (vs 17) still suggest a second line-height in play
+  on `html`. Round 15 did not chase it.
+- The remaining `css-layout` / `css-paint` / `forms-media` / `animation`
+  block-flow clusters are a DIFFERENT cause: those pages contain no nested
+  lists and their numbers did not move at all under this fix.
 
 ## What the histogram says
 

@@ -3661,6 +3661,20 @@ fn _normalize_final_overflow_axes(
         normalized.overflow_scroll_y = false
     normalized
 
+# The five tags named on both sides of Chrome's nested-list UA rule.
+fn list_container_tag(tag: text) -> bool:
+    tag == "ul" or tag == "ol" or tag == "dl" or tag == "menu" or tag == "dir"
+
+# `ul ul` is a DESCENDANT combinator, so the <li> between the two lists must
+# not stop the walk -- the whole ancestor chain is searched, not the parent.
+fn has_list_container_ancestor(nodes: [HNode], i: i32) -> bool:
+    var cur = nodes[i].parent as i32
+    while cur >= 0:  # cpu-lane-loop-ok: ancestor chain, bounded by tree depth
+        if list_container_tag(nodes[cur].tag):
+            return true
+        cur = nodes[cur].parent as i32
+    false
+
 fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
     var material_entries_unused: [text] = ["", ""]
     var material_counts_unused: [i64] = [0, 0]
@@ -3812,6 +3826,23 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         if trace_stages:
             print "[layout-trace] style_stage=em-base-ready index={i} em={em_base}"
         st = tag_defaults(st, nd.tag)
+        # HTML UA stylesheet, the `dir dir, dir dl, ... ul ul` descendant block
+        # in Chrome's html.css: a list CONTAINER with a list-container ANCESTOR
+        # has zero block margins. tag_defaults() sees only the tag, so the rule
+        # is applied here, where the ancestor chain is known -- still ahead of
+        # every author declaration, which is where a UA rule belongs.
+        # Without it each nested list inside an <li> carries the UA 16 px that
+        # Chrome does not, and the block flow below drifts 16 px per occurrence
+        # (doc/08_tracking/bug/web_layout_vertical_drift_accumulates_16px_per_
+        # construct_2026-09-14.md). It hid while the nested list was the li's
+        # FIRST child, because the margin then collapsed through the li anyway;
+        # an inline run before it removes that cover.
+        val nested_list_ua = (
+            list_container_tag(nd.tag) and has_list_container_ancestor(nodes, i)
+        )
+        if nested_list_ua:
+            st.margin_t = 0
+            st.margin_b = 0
         val ua_display = st.display
         if trace_stages:
             print "[layout-trace] style_stage=tag-defaults-ready index={i} display={st.display}"
@@ -4005,7 +4036,14 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             # (parent inherited identity, tag, presentational decls), and the
             # call itself additionally reads em_base, the resolved writing mode
             # and the accumulated author declarations -- so those six inputs are
-            # the whole key. A hit is copied field-for-field OUT of the cache and
+            # the whole key -- plus `nested_list_ua`, which is NOT a function of
+            # the other five: it reads the ANCESTOR chain, so two <ul>s with the
+            # same tag and the same inherit-identity parent can legitimately
+            # disagree about it. Leaving it out let a nested <ul> copy an outer
+            # <ul>'s cached 16 px margin straight back over the UA zeroing, which
+            # is why `ul` inside `ul` was the one nesting that stayed broken
+            # while `ol`/`dl` combinations were already fixed.
+            # A hit is copied field-for-field OUT of the cache and
             # a miss is copied field-for-field IN (web_style_cascade_memo_store),
             # because everything below this point mutates `st` in place.
             val _sb_t5 = if _wsc_armed(): _wsc_now_us() else: 0
@@ -4015,7 +4053,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             # memo entirely rather than sharing an ambiguous key.
             val memo_usable = nd.parent < 0 or memo_parent >= 0
             val memo_key = if memo_usable:
-                "{memo_parent}\n{nd.tag}\n{em_base}\n{logical_writing_mode}\n" +
+                "{memo_parent}\n{nd.tag}\n{nested_list_ua}\n{em_base}\n" +
+                    "{logical_writing_mode}\n" +
                     "{pres_decls.len()}:{pres_decls}\n{combined_decls}"
             else:
                 ""
