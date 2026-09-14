@@ -616,7 +616,10 @@ fn emit_aggregate_block_copy<M: Module>(
     }
 
     let heap_tag = builder.ins().iconst(types::I64, 1);
-    builder.ins().bor(new_ptr, heap_tag)
+    let tagged_new_ptr = builder.ins().bor(new_ptr, heap_tag);
+    // Preserve nil and other non-heap values. The zero-filled allocation above
+    // is only the safe load target for an invalid source, not its replacement.
+    builder.ins().select(src_is_valid, tagged_new_ptr, src_tagged)
 }
 
 fn widen_struct_field_value(
