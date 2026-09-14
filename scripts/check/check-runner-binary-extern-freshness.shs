@@ -83,9 +83,44 @@ EOF
         *) echo "SELFTEST FAIL: stale case did not name the symbol: $out" >&2; exit 1 ;;
     esac
 
+    # Fixture 3: fresh checkout / worktree simulation -- a tracked file whose
+    # COMMIT is old but whose CHECKOUT mtime is "now" (touched, content
+    # unchanged, no local modification recorded in git status) must still
+    # PASS. This is the exact false-positive this fix closes: filesystem
+    # mtime alone would call this file "newer than the binary" on every
+    # fresh clone/worktree, independent of actual content age.
+    if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+        mkdir -p "$tmp/fresh/src/lib/x"
+        git init -q "$tmp/fresh"
+        cat > "$tmp/fresh/src/lib/x/f.spl" <<'EOF'
+extern fn rt_committed_old(a: i64) -> i64
+EOF
+        git -C "$tmp/fresh" add src/lib/x/f.spl
+        GIT_AUTHOR_DATE="2026-01-01T00:00:00" GIT_COMMITTER_DATE="2026-01-01T00:00:00" \
+            git -C "$tmp/fresh" -c user.email=t@t -c user.name=t commit -q -m init
+        # Simulate a fresh checkout: bump the file's fs mtime to "now"
+        # without touching its content or staging area.
+        touch "$tmp/fresh/src/lib/x/f.spl"
+        : > "$tmp/fresh/binary"
+        chmod +x "$tmp/fresh/binary"
+        touch -t 202601020000 "$tmp/fresh/binary"
+
+        _saved_root="$ROOT_DIR"
+        ROOT_DIR="$tmp/fresh"
+        out=$(scan "$tmp/fresh/binary" "$tmp/fresh/src/lib" "$tmp/fresh/baseline.txt") || {
+            ROOT_DIR="$_saved_root"
+            echo "SELFTEST FAIL: expected PASS on fresh-checkout mtime, got: $out" >&2; exit 1
+        }
+        ROOT_DIR="$_saved_root"
+        case "$out" in
+            "PASS — "*"0 newer than"*) ;;
+            *) echo "SELFTEST FAIL: fresh-checkout case did not PASS: $out" >&2; exit 1 ;;
+        esac
+    fi
+
     trap - EXIT
     rm -rf "$tmp"
-    echo "SELFTEST PASS — 2 fixture(s) checked"
+    echo "SELFTEST PASS — 3 fixture(s) checked"
 }
 
 # scan <binary> <lib-root> <baseline-file>
@@ -107,7 +142,24 @@ scan() {
     for f in $(find "$_lib_root" -name '*.spl' -type f 2>/dev/null); do
         _syms=$(grep -o 'extern fn rt_[A-Za-z0-9_]*' "$f" 2>/dev/null | sed 's/^extern fn //' || true)
         [ -z "$_syms" ] && continue
-        _f_mtime=$(stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null) || continue
+
+        # Prefer the COMMIT time of the file's last change over filesystem
+        # mtime: a fresh checkout/worktree gives every tracked file an mtime
+        # of "now" (checkout time), making every source look newer than a
+        # binary built minutes earlier -- a false positive independent of
+        # actual content age. Fall back to fs mtime only when the file is
+        # untracked or has uncommitted local modifications (git has no
+        # commit time to give us there, and the fs mtime is genuinely the
+        # freshest signal available in that case).
+        _f_mtime=""
+        if git -C "$ROOT_DIR" ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+            if [ -z "$(git -C "$ROOT_DIR" status --porcelain -- "$f" 2>/dev/null)" ]; then
+                _f_mtime=$(git -C "$ROOT_DIR" log -1 --format=%ct -- "$f" 2>/dev/null || true)
+            fi
+        fi
+        if [ -z "$_f_mtime" ]; then
+            _f_mtime=$(stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null) || continue
+        fi
         for s in $_syms; do
             _checked=$((_checked + 1))
             if [ "$_f_mtime" -gt "$_bin_mtime" ]; then
