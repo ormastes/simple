@@ -124,7 +124,78 @@ if self.materialized_payload_origins.contains_key(identity): return
 self.materialized_payload_origins[identity] = true
 ```
 
-## Which fix — this turns on one measurement
+## RESOLVED BY MEASUREMENT (run 42): the recursion is UNBOUNDED
+
+`build/f75logs/repro-lldb-4.log`. `sp` read at frames 12, 16, 20 and 24 — one
+full four-frame cycle apart each — plus the stack region:
+
+```
+frame #12  register_imported_symbol + 768   sp = 0x16f604450
+frame #16  register_imported_symbol + 768   sp = 0x16f6046c0
+frame #20  register_imported_symbol + 768   sp = 0x16f604930
+frame #24  register_imported_symbol + 768   sp = 0x16f604ba0
+[0x000000016f604000-0x000000016fe00000) rw-
+```
+
+- bytes per four-frame level: **624**, and perfectly uniform (624, 624, 624);
+- stack region 0x16f604000-0x16fe00000 = 8,372,224 bytes (7.98 MB), confirming
+  the 8 MB main stack, with the guard page immediately below 0x16f604000;
+- levels on the stack at the fault: (0x16fe00000 - 0x16f604450) / 624 =
+  **13,415**.
+
+The ceiling if the mark-on-entry guard were working is the number of DECLARED
+enums and type aliases in the entire tree, because
+`hir_payload_terminal_identity(module_name, item_name, item_kind)` is a pure
+function of that triple (verified: `module_lowering.spl:286-298`, no clock, no
+counter, no mutation) and the guard marks each identity once per module
+lowering, so no identity can appear twice on the stack:
+
+```
+enums          2,280   grep -rhE '^[[:space:]]*(pub )?enum [A-Za-z_]' src/{compiler,lib,app}
+type aliases     266   same, 'type '
+CEILING        2,546
+measured      13,415   = 5.3x the ceiling
+```
+
+**13,415 > 2,546 is arithmetic, not inference.** The tree cannot supply 13,415
+distinct identities, so identities MUST be repeating on the stack, so
+`self.materialized_payload_origins.contains_key(identity)` is answering **false
+for a key that was already set**. Hypothesis 1 ("finite but too deep") is dead:
+this is a genuine unbounded recursion, and flattening the walk to a worklist
+would convert a stack overflow into an infinite loop, not a fix.
+
+This is the **same class** the file's own comments already warn about twice: a
+Dict membership memo in this very file was silently disabled once before by
+`rt_dict_contains` under-reporting under native codegen
+(`module_reexport_materialization.spl:1073-1078`, and
+`stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md`). That is
+why the 2026-08-17 breaker on the sibling cycle is a plain `[text]` stack and
+deliberately **not** a Dict.
+
+### Fix
+
+Replace the Dict-membership cycle guard on this path with a `[text]`
+in-progress re-entrancy breaker, the same shape and for the same documented
+reason as `imported_type_methods_in_progress`, keyed on the input tuple of
+`register_materialized_payload_named_dependency_inner` —
+`(imported_mod_name, dependency)`. That tuple is the right key because `origin`
+(and therefore `payload_local_name` and the work performed) is a pure function
+of it, so declining a re-entrant call with the same tuple loses nothing: the
+in-flight outer call completes exactly the same work.
+
+Note the structural edge that keeps the chain alive and must be preserved, not
+removed: `register_materialized_payload_named_dependency_inner` calls
+`register_imported_symbol` **before** `if expanded: return` (`:530-538`). That
+is deliberate — "aliases in a cycle still need their local symbol even when the
+physical origin was seen" (`:529-534`) — so the fix must break re-entrancy, not
+reorder that call.
+
+Separately, the Dict under-reporting itself is a native-codegen/runtime defect
+and needs its own record; suppressing it here with a `[text]` breaker makes the
+compiler correct but leaves the underlying `contains_key` defect live for every
+other Dict memo in the tree.
+
+## Superseded: which fix — this turned on one measurement
 
 The guard above marks on ENTRY, so *if it is working*, every level of the
 observed recursion is a **distinct** enum identity and the depth is bounded by
@@ -164,6 +235,31 @@ record was written; its log is `build/f75logs/repro-lldb-3.log`.
 `module_reexport_materialization.spl:529-534` exists because an earlier
 simplification broke aliases in a cycle), each verification cycle costs ~22
 minutes, and shipping the wrong one would be a compiler regression.
+
+## Adjacent pre-existing RED found while fixing this (NOT caused by this lane)
+
+`test/01_unit/compiler/hir/imported_type_method_registration_memo_spec.spl` —
+the spec for the *sibling* breaker — asserts the absence of two strings that
+each occur exactly once in the current source at `origin/main`:
+
+```
+expect(registration).to_not_contain("self.imported_type_methods_in_progress_pop(reentry_key)")
+expect(lifecycle).to_not_contain("me imported_type_methods_in_progress_pop(")
+```
+
+```
+$ grep -c 'self.imported_type_methods_in_progress_pop(reentry_key)' .../module_reexport_materialization.spl   -> 1
+$ grep -c 'me imported_type_methods_in_progress_pop('              .../context_helpers.spl                    -> 1
+```
+
+So two of that spec's five assertions are false against the tree it describes.
+It reads as written against a draft of the 2026-08-17 fix that had no `pop`,
+then never updated when the shipped fix added one. Reported, not silently
+worked around, and deliberately NOT changed here: flipping another lane's
+assertions while landing an unrelated fix is how a spec stops describing
+anything. It needs its own change by whoever owns that breaker — the honest
+options are to correct the assertions to `to_contain` or to delete the two
+stale rows.
 
 ## There is no stack-size lever
 

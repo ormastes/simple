@@ -99,6 +99,24 @@ class HirLowering:
     # append-only array has no such fail-open mode, and the depth guarded is
     # type-reference nesting depth, which is small.
     imported_type_methods_in_progress: [text]
+    # Same shape, same reason, DIFFERENT cycle. `materialized_payload_origins`
+    # is a Dict memo marked on ENTRY, and it is NOT breaking its cycle: measured
+    # 2026-09-14 on the Stage 3 recompile of `compiler.driver.driver`, the stack
+    # carried 13,415 nested levels of
+    #   register_imported_symbol -> register_imported_symbol_inner
+    #     -> register_materialized_enum_payload_dependencies
+    #       -> register_materialized_payload_named_dependency -> (repeat)
+    # against a hard ceiling of 2,546 -- the total number of enums (2,280) and
+    # type aliases (266) DECLARED in the tree, which is the most distinct
+    # identities that guard can ever see, since
+    # `hir_payload_terminal_identity` is a pure function of
+    # (module_name, item_name, item_kind). 13,415 > 2,546 is arithmetic: keys
+    # that were set are reading back absent, exactly the `rt_dict_contains`
+    # under-reporting recorded in 20.hir/hir_types.spl and
+    # stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md.
+    # An append-only array scanned linearly has no such fail-open mode.
+    # doc/08_tracking/bug/stage3_hir_enum_payload_closure_stack_overflow_driver_2026-09-14.md
+    materialized_payload_in_progress: [text]
     # Nested-field-access support (native-build --entry path has no type
     # inference pass, so a `s.arr` Field expr otherwise gets `type_: nil` and
     # MIR defaults its result to i64 -- silently wrong for an array/struct
@@ -413,6 +431,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_reexport_root_memo_index: {text: i64} = {}
     val empty_reexport_root_memo_item: {text: text} = {}
     val empty_imported_type_methods_in_progress: [text] = []
+    val empty_materialized_payload_in_progress: [text] = []
     val empty_reexport_visit_surface_indices: [i64] = []
     val empty_reexport_visit_wanted: [text] = []
     val empty_reexport_visit_depths: [i64] = []
@@ -440,6 +459,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         materialized_payload_origins: empty_materialized_payload_origins,
         materialized_payload_bindings: empty_materialized_payload_bindings,
         imported_type_methods_in_progress: empty_imported_type_methods_in_progress,
+        materialized_payload_in_progress: empty_materialized_payload_in_progress,
         struct_field_types_by_name: empty_struct_field_types,
         local_struct_types: empty_local_struct_types,
         struct_field_order_by_name: empty_struct_field_order,
