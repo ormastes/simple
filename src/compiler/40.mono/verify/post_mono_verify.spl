@@ -173,10 +173,17 @@ class PostMonoVerifier:
     # not an aggregate-transport repair; a malformed value still reaches the
     # bounded wildcard receipt below.
     # ------------------------------------------------------------------
-    me walk_type(ty: HirType):
-        if ty == nil:
-            return
-        match ty.kind:
+    me walk_type_kind(kind: HirTypeKind):
+        """Walk one HIR type kind without transporting its enclosing HirType.
+
+        Stage-2 native ABI aggregate passing can zero the `kind` field of a
+        `HirType` argument (the MIR lowering owner keeps the same data local
+        for this reason).  Every caller therefore projects `.kind` while the
+        owning HIR aggregate is still local, and this dispatcher receives only
+        the enum required for the exhaustive check.  Do not add a successful
+        fallback here: unknown tags remain an E-MONO-031 receipt.
+        """
+        match kind:
             case HirTypeKind.Int(_, _): pass_do_nothing("monomorphic primitive")
             case HirTypeKind.Float(_): pass_do_nothing("monomorphic primitive")
             case HirTypeKind.Bool: pass_do_nothing("monomorphic primitive")
@@ -184,35 +191,42 @@ class PostMonoVerifier:
             case HirTypeKind.Str: pass_do_nothing("monomorphic primitive")
             case HirTypeKind.Unit: pass_do_nothing("monomorphic primitive")
             case HirTypeKind.Never: pass_do_nothing("monomorphic primitive")
-            case HirTypeKind.Tuple(elements): self.walk_types(elements)
-            case HirTypeKind.Array(element, _): self.walk_type(element)
-            case HirTypeKind.Slice(element): self.walk_type(element)
+            case HirTypeKind.Tuple(elements): self.walk_type_kinds(elements)
+            case HirTypeKind.Array(element, _):
+                if element != nil: self.walk_type_kind(element.kind)
+            case HirTypeKind.Slice(element):
+                if element != nil: self.walk_type_kind(element.kind)
             case HirTypeKind.Dict(key, value):
-                self.walk_type(key)
-                self.walk_type(value)
-            case HirTypeKind.Ref(inner, _): self.walk_type(inner)
-            case HirTypeKind.Ptr(inner, _): self.walk_type(inner)
-            case HirTypeKind.Optional(inner): self.walk_type(inner)
+                if key != nil: self.walk_type_kind(key.kind)
+                if value != nil: self.walk_type_kind(value.kind)
+            case HirTypeKind.Ref(inner, _):
+                if inner != nil: self.walk_type_kind(inner.kind)
+            case HirTypeKind.Ptr(inner, _):
+                if inner != nil: self.walk_type_kind(inner.kind)
+            case HirTypeKind.Optional(inner):
+                if inner != nil: self.walk_type_kind(inner.kind)
             case HirTypeKind.Result(ok, err):
-                self.walk_type(ok)
-                self.walk_type(err)
-            case HirTypeKind.Named(_, args): self.walk_types(args)
+                if ok != nil: self.walk_type_kind(ok.kind)
+                if err != nil: self.walk_type_kind(err.kind)
+            case HirTypeKind.Named(_, args): self.walk_type_kinds(args)
             case HirTypeKind.TypeParam(name, bounds):
                 self.hit_type_param(name)
-                self.walk_types(bounds)
-            case HirTypeKind.Union(members): self.walk_types(members)
+                self.walk_type_kinds(bounds)
+            case HirTypeKind.Union(members): self.walk_type_kinds(members)
             case HirTypeKind.DynTrait(_): pass_do_nothing("dyn trait is not a generic residue")
             case HirTypeKind.Function(params, ret, _):
-                self.walk_types(params)
-                self.walk_type(ret)
+                self.walk_type_kinds(params)
+                if ret != nil: self.walk_type_kind(ret.kind)
             case HirTypeKind.Projection(base, assoc_name):
                 self.hit_projection(assoc_name)
-                self.walk_type(base)
-            case HirTypeKind.Isolated(inner): self.walk_type(inner)
+                if base != nil: self.walk_type_kind(base.kind)
+            case HirTypeKind.Isolated(inner):
+                if inner != nil: self.walk_type_kind(inner.kind)
             case HirTypeKind.Infer(_, _): pass_do_nothing("inference variable is a typecheck concern")
             case HirTypeKind.Error: self.hit_error_type("type position")
             case HirTypeKind.Any: self.hit_any("type position")
-            case HirTypeKind.Tensor(element, _, _): self.walk_type(element)
+            case HirTypeKind.Tensor(element, _, _):
+                if element != nil: self.walk_type_kind(element.kind)
             case HirTypeKind.Layer(_, _): pass_do_nothing("layer dims carry no HirType")
             case _:
                 # The value reaching this arm is already malformed. Do not
@@ -236,17 +250,18 @@ class PostMonoVerifier:
                     print "[post-mono-type-transport] module_symbol={self.symbol}"
                 self.hit_unreachable("HirTypeKind", "walk_type")
 
-    me walk_types(tys: [HirType]):
+    me walk_type_kinds(tys: [HirType]):
         if tys == nil:
             return
         for t in tys:
             val tt: HirType = t
-            self.walk_type(tt)
+            if tt != nil:
+                self.walk_type_kind(tt.kind)
 
-    me type_param_count_of(ty: HirType) -> i64:
-        """Type params found in `ty`, measured as the delta this walk adds."""
+    me type_param_count_of(kind: HirTypeKind) -> i64:
+        """Type params found in `kind`, measured as the delta this walk adds."""
         val before = self.r.unresolved_type_param
-        self.walk_type(ty)
+        self.walk_type_kind(kind)
         self.r.unresolved_type_param - before
 
     # ------------------------------------------------------------------
@@ -263,7 +278,8 @@ class PostMonoVerifier:
         if expr == nil:
             return
         if expr.has_type_:
-            self.walk_type(expr.type_)
+            if expr.type_ != nil:
+                self.walk_type_kind(expr.type_.kind)
         match expr.kind:
             case HirExprKind.IntLit(_, _): pass_do_nothing("literal")
             case HirExprKind.FloatLit(_, _): pass_do_nothing("literal")
@@ -281,7 +297,8 @@ class PostMonoVerifier:
                 self.walk_expr(count)
             case HirExprKind.TupleLit(elements): self.walk_exprs(elements)
             case HirExprKind.DictLit(entries, key_type, value_type):
-                self.walk_type(key_type)
+                if key_type != nil:
+                    self.walk_type_kind(key_type.kind)
                 self.walk_opt_type(value_type)
                 self.walk_pairs(entries)
             case HirExprKind.SetLit(elements, elem_type):
@@ -313,20 +330,20 @@ class PostMonoVerifier:
                     if type_args.len() > 0:
                         self.r.generic_call = self.r.generic_call + 1
                         self.record("generic call", "call site still carries {type_args.len()} type argument(s)")
-                self.walk_types(type_args)
+                self.walk_type_kinds(type_args)
                 self.walk_expr(callee)
                 self.walk_call_args(args)
             case HirExprKind.MethodCall(receiver, method, args, _):
                 val rt: HirExpr = receiver
                 if rt != nil:
                     if rt.has_type_:
-                        if self.type_param_count_of(rt.type_) > 0:
+                        if rt.type_ != nil and self.type_param_count_of(rt.type_.kind) > 0:
                             self.r.generic_method = self.r.generic_method + 1
                             self.record("generic method", "method `{method}` dispatched on a receiver still typed by a type parameter")
                 self.walk_expr(receiver)
                 self.walk_call_args(args)
             case HirExprKind.StaticCall(type_, method, args, _):
-                if self.type_param_count_of(type_) > 0:
+                if type_ != nil and self.type_param_count_of(type_.kind) > 0:
                     self.r.generic_method = self.r.generic_method + 1
                     self.record("generic method", "static call `{method}` on a type still carrying a type parameter")
                 self.walk_call_args(args)
@@ -375,21 +392,23 @@ class PostMonoVerifier:
             case HirExprKind.Await(e): self.walk_expr(e)
             case HirExprKind.Yield(value): self.walk_opt_expr(value)
             case HirExprKind.StructLit(type_, fields):
-                if self.type_param_count_of(type_) > 0:
+                if type_ != nil and self.type_param_count_of(type_.kind) > 0:
                     self.r.generic_ctor = self.r.generic_ctor + 1
                     self.record("generic constructor", "struct literal constructs a type still carrying a type parameter")
                 self.walk_named_exprs(fields)
             case HirExprKind.EnumLit(type_, variant, payload):
-                if self.type_param_count_of(type_) > 0:
+                if type_ != nil and self.type_param_count_of(type_.kind) > 0:
                     self.r.generic_ctor = self.r.generic_ctor + 1
                     self.record("generic constructor", "enum literal `{variant}` constructs a type still carrying a type parameter")
                 self.walk_enum_payload(payload)
             case HirExprKind.Cast(e, target):
                 self.walk_expr(e)
-                self.walk_type(target)
+                if target != nil:
+                    self.walk_type_kind(target.kind)
             case HirExprKind.As(e, target):
                 self.walk_expr(e)
-                self.walk_type(target)
+                if target != nil:
+                    self.walk_type_kind(target.kind)
             case HirExprKind.Range(start, end, _, step):
                 self.walk_expr(start)
                 self.walk_expr(end)
@@ -426,7 +445,8 @@ class PostMonoVerifier:
         if pattern == nil:
             return
         if pattern.has_type_:
-            self.walk_type(pattern.type_)
+            if pattern.type_ != nil:
+                self.walk_type_kind(pattern.type_.kind)
         match pattern.kind:
             case HirPatternKind.Wildcard: pass_do_nothing("wildcard binds nothing")
             case HirPatternKind.Literal(value): self.walk_expr(value)
@@ -434,10 +454,12 @@ class PostMonoVerifier:
             case HirPatternKind.Tuple(elements): self.walk_patterns(elements)
             case HirPatternKind.Array(elements, _): self.walk_patterns(elements)
             case HirPatternKind.Struct(type_, fields):
-                self.walk_type(type_)
+                if type_ != nil:
+                    self.walk_type_kind(type_.kind)
                 self.walk_named_patterns(fields)
             case HirPatternKind.Enum(type_, _, payload):
-                self.walk_type(type_)
+                if type_ != nil:
+                    self.walk_type_kind(type_.kind)
                 self.walk_pattern_payload(payload)
             case HirPatternKind.Or(patterns): self.walk_patterns(patterns)
             case HirPatternKind.Range(start, end, _):
@@ -459,7 +481,8 @@ class PostMonoVerifier:
         match stmt.kind:
             case HirStmtKind.Expr(expr): self.walk_expr(expr)
             case HirStmtKind.Let(_, type_, init):
-                self.walk_type(type_)
+                if type_ != nil:
+                    self.walk_type_kind(type_.kind)
                 self.walk_expr(init)
             case HirStmtKind.Assign(target, _, value):
                 self.walk_expr(target)
@@ -484,7 +507,8 @@ class PostMonoVerifier:
         match ty:
             Some(t):
                 val tt: HirType = t
-                self.walk_type(tt)
+                if tt != nil:
+                    self.walk_type_kind(tt.kind)
             nil:
                 pass_do_nothing("absent type")
 
@@ -585,7 +609,8 @@ class PostMonoVerifier:
             return
         for p in params:
             val pt: HirParam = p
-            self.walk_type(pt.type_)
+            if pt.type_ != nil:
+                self.walk_type_kind(pt.type_.kind)
             if pt.has_default:
                 self.walk_expr(pt.default)
 
@@ -670,7 +695,8 @@ class PostMonoVerifier:
             if self.in_specialization:
                 self.check_mangling(f.name)
             self.walk_params(f.params)
-            self.walk_type(f.return_type)
+            if f.return_type != nil:
+                self.walk_type_kind(f.return_type.kind)
             self.walk_block(f.body)
         for key in module.structs.keys():
             val s: HirStruct = module.structs[key]
@@ -682,7 +708,8 @@ class PostMonoVerifier:
                 self.check_mangling(s.name)
             for fld in s.fields:
                 val ft: HirField = fld
-                self.walk_type(ft.type_)
+                if ft.type_ != nil:
+                    self.walk_type_kind(ft.type_.kind)
         for key in module.classes.keys():
             val c: HirClass = module.classes[key]
             self.enter(mname, c.name)
@@ -693,7 +720,8 @@ class PostMonoVerifier:
                 self.check_mangling(c.name)
             for fld in c.fields:
                 val ft2: HirField = fld
-                self.walk_type(ft2.type_)
+                if ft2.type_ != nil:
+                    self.walk_type_kind(ft2.type_.kind)
         for key in module.enums.keys():
             val e: HirEnum = module.enums[key]
             self.enter(mname, e.name)
