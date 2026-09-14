@@ -290,7 +290,31 @@ continuation bytes) plus `utf8_encoded_len` / `next_codepoint_start`
 UTF-8 classifier on `char_code_at` results — it cannot work, and round 16 found
 exactly that mistake sitting dead in the tree since round 12.
 
-Known remaining sites, named not fixed: `resolved_text_range_width` (ellipsize)
-and `fb_text_thin_scaled_clip_range` (the flat paint stepper).
+**Round 17 closed the whole residue — the census was larger than round 16's two
+named sites.** Grepping both layout files and `…_paint_primitives.spl` for the
+pattern (a BYTE offset reaching `char_code_at`/`char_at`, or `txt.len()` used as
+a loop bound over them) found **six** live sites, not two:
 
-Record: `doc/08_tracking/bug/web_non_ascii_run_wrap_falls_back_to_flat_estimate_2026-09-14.md`.
+| helper | old behaviour on non-ASCII |
+|---|---|
+| `text_line_advance_width` | one flat advance charged per BYTE |
+| `wrap_line_end` | a CHARACTER budget spent in bytes |
+| `_lay_ellipsize_text_for_width_inner` | measured one char, emitted another |
+| `_table_text_min_content_width` | read past the end, over-sized the column |
+| `reverse_text_for_paint` | counted down from the BYTE length |
+| `fb_text_sparse_range`, `fb_text_thin_scaled_clip_range` | wrong glyph, advance per byte |
+
+All six now step by codepoint and test bytes with `bytes()`.
+`resolved_text_range_width` is **gone**: the ellipsize loop was its only caller,
+and once that loop reads the per-byte advance table the function is dead — a
+mixed-index helper left lying around is a trap for the next reader, so it was
+deleted rather than kept.
+
+Lesson for this layer: when one instance of this mix is found, **census the
+whole layer in the same pass**. Round 16 named two sites from the two it had
+debugged; three of the six above were never mentioned and had been wrong just as
+long. The grep that finds them all is `char_code_at\|char_at(` over the layer,
+then reading each hit for what index space its bound comes from.
+
+Records: `doc/08_tracking/bug/web_non_ascii_run_wrap_falls_back_to_flat_estimate_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round17_2026-09-14.md`.

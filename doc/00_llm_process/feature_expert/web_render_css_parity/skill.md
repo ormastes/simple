@@ -591,9 +591,61 @@ carried into round 16 was **not real on these pages** — Chrome's own numbers
 have `body` at y=16 with the child flush to it, and every catalog page's `body`
 row is `dy=0`. Verify a handed-down premise against run A before editing.
 
-Next cluster, with fixture: a `#text` node starting at a non-zero pen x wraps
-against the FULL container width, so an inline `<code>`/`<span>` before it does
-not narrow the first line.
-
 Measurements: `doc/10_metrics/ui/web_chrome_parity_round16_2026-09-14.md`;
 record: `doc/08_tracking/bug/web_non_ascii_run_wrap_falls_back_to_flat_estimate_2026-09-14.md`.
+
+## 2026-09-14 (round 17) — the handed-down cause was wrong; it was ONE space
+
+Round 16 left "a `#text` node starting at a non-zero pen x wraps against the
+FULL container width" as the dominant `css-layout` cluster. **That premise is
+false, and this is the second round running in which a handed-down cause did not
+survive contact with a probe** (round 16 falsified the `<body>` collapse item the
+same way). The pen offset was already applied — an instrumented run of the real
+page prints
+
+```
+R17INL|iw=728|inline_x=96|inline_w=635|avail=632
+R17TEXT|node_w=632|full_adv=631|lines=1|txt=— partial; values=keyword-nu
+```
+
+`avail = iw − inline_x` is right there. The entire 24 px per `<li>` was the ONE
+collapsible space between `</code>` and the text, which `text_trimmed` removes
+unconditionally: ~4 px, deciding a 631 px run against a 632 px remainder.
+
+The measurement that named it — and the one to copy — is a **Chrome-side
+sabotage**: build the fixture three ways and let Chrome vote.
+
+| `<li>` content | Chrome | Simple before | after |
+|---|---|---|---|
+| `<code>align-self</code>` + SPACE + `— partial; …` | 88 | 64 | 88 |
+| same, space DELETED from the markup | **64** | 64 | 64 |
+| the text alone, i.e. the space at pen 0 | 64 | 64 | 64 |
+
+Row 2 is what proves it: delete the space and **Chrome itself** drops to 64. No
+amount of reasoning about advance precision or the `<code>` element can survive
+that. Row 3 is the control that stops the naive fix — at the start of a line the
+space IS dropped, so it must not be charged everywhere.
+
+Result: `css-layout` 378 → **5** mismatched. Fix is four lines in the inline
+formatting path (`…_layout.spl`, before the `avail_inline` clamp): if a `#text`
+child sits at a non-zero pen and its RAW `text_data` starts with white space,
+advance the pen by one `resolved_space_advance` first.
+
+Traps worth carrying forward:
+- **Make the fixture faithful before trusting it.** The first attempt gave
+  `<code>` a `sans-serif` family and no `<p>` child; it measured 0 mismatched and
+  would have "disproved" a real defect. The real page leaves `<code>` at the UA
+  monospace default (125 px, not 92).
+- **Instrument the REAL page, not a reduction.** One `print` of
+  `iw`/`inline_x`/`avail`/`lines` on `css-layout` answered in one run what four
+  fixtures had not.
+- **Let Chrome sabotage the hypothesis.** Change one character in the markup and
+  re-measure the ORACLE. If Chrome doesn't move, your mechanism is wrong.
+
+Next cluster, with the row that names it: a non-replaced `display:inline`
+element is given the CONTAINER width, not its content width — `html`
+`path:0/0/4/2/8/1/0` `<bdi>` is 86 px wide in Chrome and 728 in Simple
+(`dw=642`), with `dh=6` alongside (line box 24 vs content area 18). Ten such
+root rows on `html`, plus their inherited children.
+
+Round 17 measurements: `doc/10_metrics/ui/web_chrome_parity_round17_2026-09-14.md`.
