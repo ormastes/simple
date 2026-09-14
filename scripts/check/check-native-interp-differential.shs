@@ -136,9 +136,28 @@ nid_curate_root() {
     done | awk -v s="$2" 'NR % s == 1'
 }
 
+# Pinned rows are compared on EVERY run, never stride-sampled away. A spec that
+# was written to pin a specific native/interpreter divergence must not depend on
+# a stride offset to be looked at; the stride exists to sample the unknown, not
+# to decide whether a known regression is checked. A pinned path that no longer
+# exists is dropped silently here and cannot make the run vacuous, because the
+# caller still fails closed on an empty spec set. Duplicates against the stride
+# sample are removed below so a pinned spec is not built twice.
+NID_PINNED_FILE=${NID_PINNED_FILE:-config/check/native_interp_differential_pinned.txt}
+
+nid_curate_pinned() {
+  [ -f "$NID_PINNED_FILE" ] || return 0
+  grep -v '^#' "$NID_PINNED_FILE" 2>/dev/null | grep -v '^[[:space:]]*$' | while IFS= read -r f; do
+      [ -f "$f" ] && printf '%s\n' "$f"
+    done
+}
+
 nid_curate() {
-  nid_curate_root test/01_unit/lib/common "${NID_STRIDE_LIB:-9}"
-  nid_curate_root test/01_unit/compiler "${NID_STRIDE_COMPILER:-23}"
+  {
+    nid_curate_pinned
+    nid_curate_root test/01_unit/lib/common "${NID_STRIDE_LIB:-9}"
+    nid_curate_root test/01_unit/compiler "${NID_STRIDE_COMPILER:-23}"
+  } | awk '!seen[$0]++'
 }
 
 nid_slug() { printf '%s\n' "$1" | tr '/.' '__'; }
