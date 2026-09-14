@@ -129,3 +129,16 @@ Steps 3-4 cannot be performed from this macOS host; they are CI-side.
 
 `build/release-evidence/{support-check,candidate-check,promote-check}.log`
 and `candidate-check.json.log` (untracked; session-local).
+
+## Two honesty notes on the verdicts above
+
+- **`candidate-check` / `promote-check` were invoked with no arguments**, so their rejections are
+  *precondition* failures (no candidate manifest exists; no session is registered), not the support
+  contract refusing. They are quoted verbatim but must not be read as the discriminating verdict.
+  The discriminator is `support-check` + the zero successful `candidate.yml` runs.
+- **`support-check` contradicts itself and this is a checker defect.** For the same target,
+  `required_support[0].status` renders `"passed"` while `support_matrix[0].status` renders
+  `"blocked"`. No required-row receipt exists, and the guide says only an actually-executed
+  required row may say `passed` — so `required_support` is emitting `passed` from nothing. A
+  reader looking only at `required_support` would wrongly conclude the row is satisfied. Fix in
+  `src/app/release/support_policy.spl`.
