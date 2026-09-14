@@ -2,15 +2,15 @@
 
 **Generated:** 2026-05-19 11:58:31
 **Total Tests:** 859
-**Status:** ⚠️ 12328 FAILED
+**Status:** ⚠️ 754 UNKNOWN; 105 verified passing
 
 ## Summary
 
 | Metric | Count |
 |--------|-------|
 | Total | 859 |
-| Passed | 63 |
-| Failed | 42 |
+| Passed | 105 |
+| Failed | 0 |
 | Skipped | 0 |
 | Other | 754 |
 
@@ -1677,47 +1677,9 @@ Location: /home/ormastes/dev/pub/simple/test/sys/wm_compare/v1_v4_parity_spec.sp
 | test/01_unit/compiler/hir/module_surface_glob_export_origin_spec.spl | 1012.0 | 15202.333333333334 | 2 |
 | test/01_unit/compiler/hir/class_method_bodies_reachable_spec.spl | 2754.0 | 2754.0 | 2 |
 
-## Failed Tests
+## Current Failure Verification
 
-- test/01_unit/compiler/async/async_frame_analysis_spec.spl
-- test/01_unit/compiler/async/async_integration_spec.spl
-- test/01_unit/compiler/async/async_mir_interpreter_spec.spl
-- test/01_unit/compiler/async/async_mir_spec.spl
-- test/01_unit/compiler/async/async_state_machine_spec.spl
-- test/01_unit/compiler/async/poll_generator_spec.spl
-- test/01_unit/compiler/async/state_enum_spec.spl
-- test/01_unit/compiler/async/suspension_analysis_spec.spl
-- test/01_unit/compiler/verification/unified_attrs_spec.spl
-- test/feature/lib/std/compiler/lexer_ffi_test.spl
-- test/feature/lib/minimal_spec.spl
-- test/01_unit/lib/blink/style/user_agent_stylesheet_spec.spl
-- test/01_unit/lib/blink/inline_text_spec.spl
-- test/01_unit/lib/blink/style_shorthand_spec.spl
-- test/01_unit/lib/blink/html_tokenizer_spec.spl
-- test/01_unit/lib/blink/paint_chunk_spec.spl
-- test/01_unit/lib/blink/css_selector_spec.spl
-- test/01_unit/lib/blink/paint/invalidation_spec.spl
-- test/01_unit/lib/blink/paint/border_paint_spec.spl
-- test/01_unit/lib/blink/values_length_spec.spl
-- test/01_unit/lib/blink/style_at_rules_spec.spl
-- test/01_unit/compiler/bootstrap/vhdl_entity_shared_binding_contract_spec.spl
-- test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl
-- test/01_unit/lib/extended/memory_pool_unit_spec.spl
-- test/01_unit/lib/extended/qemu_user_integration_spec.spl
-- test/01_unit/lib/extended/gpu_pipeline_integration_spec.spl
-- test/01_unit/lib/extended/gpu_pipeline_unit_spec.spl
-- test/01_unit/lib/extended/memory_arena_integration_spec.spl
-- test/01_unit/lib/extended/qemu_user_unit_spec.spl
-- test/01_unit/lib/extended/qemu_device_integration_spec.spl
-- test/01_unit/lib/extended/cuda_event_unit_spec.spl
-- test/01_unit/lib/extended/gpu_render_integration_spec.spl
-- test/01_unit/compiler/hir/imported_callable_materialization_cardinality_spec.spl
-- test/01_unit/compiler/hir/seed_parity_container_and_self_types_spec.spl
-- test/01_unit/compiler/hir/resolve_import_symbols_spec.spl
-- test/01_unit/compiler/hir/impl_lowering_self_symbol_id_spec.spl
-- test/01_unit/compiler/hir/hir_bootstrap_source_regression_spec.spl
-- test/01_unit/compiler/hir/module_lowering_dict_keys_source_spec.spl
-- test/01_unit/compiler/hir/same_named_package_facade_reexport_spec.spl
-- test/01_unit/compiler/hir/hir_stmt_dispatch_source_spec.spl
-- test/01_unit/compiler/hir/field_index_guess_class_spec.spl
-- test/01_unit/compiler/hir/reexport_physical_cache_spec.spl
+The 42 failures preserved during the 2026-09-14 database reconstruction were
+re-executed once against the current interpreter. All 42 passed and are now
+recorded as `passed`; the 754 tests without current execution evidence remain
+`unknown` and are not counted as passing.
