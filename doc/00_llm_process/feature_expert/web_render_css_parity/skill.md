@@ -798,18 +798,35 @@ byte-identical.
   predicates, two jobs.
 - **Residual, stated:** `<wbr>` still advances the inline pen 1 px (Chrome: 0).
   Sub-tolerance, so no catalog page sees it.
-- **Form-control baselines need THREE arms, not one.** `pad_t + border_t +
-  strut_baseline` describes text `input` and `select` (control fills the line:
-  h=33/35 = its label's h) and describes NEITHER `textarea` (48 in a 55 line —
-  7 px below) NOR checkbox/radio (13 px box inside a normal 24 px text line).
-  Applying one rule to all four would put checkbox on a 13 px line. Round 19's
-  `inline-block` trap still applies on top.
-- **The control-width gap is a FACE gap, not arithmetic — the OS/2 fix is
-  BACKWARDS.** Simple resolves `sans-serif` to **Helvetica**
-  (`xAvgCharWidth` 904/2048 = 0.4414 em → **5.89 px** @13.33); Chrome's 163 px
-  `size=20` implies **7.25**. No macOS face's `xAvgCharWidth` gives 7.25 (SFNS
-  7.73, SFNSRounded 7.65). Using the field would move 138 → ~136, *away* from
-  163, while adding an OS/2 parser (`sfnt*.spl` has none). Fix font SELECTION
-  for form controls first.
+- **Form-control HEIGHTS are already correct** (round 21 measurement): `input
+  dh=0`, `textarea dh=0`, checkbox/radio already take the UA 13×13 box. Only
+  `select` is 2 px short. The "three height arms" hand-off was aimed at a
+  defect that is not there. What IS wrong is control POSITION (input `dy=6`,
+  button `dy=17`, output `dx=7 dy=24`) — and checkbox/radio are **not
+  vertically centred**: 4 px above / 4 px below on an 18 px inline box, which
+  is `margin: 3px 3px 3px 4px` + `vertical-align: baseline`. Do not hardcode a
+  centring offset; it fits one font size and no other.
+- **The control-width gap is NEITHER a face gap NOR an OS/2 gap — both stories
+  are dead.** Measured round 21: Chrome's computed `fontFamily` for a control
+  is literally **`Arial`** (not `-apple-system`, and `SFNSText.ttf` does not
+  exist on this host). **Arial's `xAvgCharWidth` is 904/2048 — the SAME as
+  Helvetica's**, because Arial is metric-compatible with Helvetica by design
+  (`measureText('0')` = 7.4135 in both). So Simple ALREADY loads a metrically
+  identical face. `xAvgCharWidth` is not the quantity either: it gives 5.885
+  where the measured slope is 7.0. **Add no OS/2 parser** — it would be unused
+  code computing a number Chrome does not use.
+- **The 7.25 was an artifact of dividing ONE width by its `size`**, which folds
+  Chrome's fixed font-derived INTERCEPT into the slope. Fit a LINE:
+  `input` content = `N*7 + 5`, `textarea` content = `N*8 + 17` (separate arms —
+  different UA fonts, and textarea reserves a ~15 px scrollbar gutter). Verified
+  content-box on two pages with different author padding. For `<input>` the
+  slope is **font-INDEPENDENT** (Arial/Times/SF Pro all 7.0 despite different
+  `'0'` advances); monospace controls DO track their `'0'` advance. Landed in
+  round 21 as four constants at `…_renderer_layout.spl:699-702`.
+- **Rank root rows by Σ before choosing a target.** Round 21's Σ sort found
+  `css-layout`'s single positioned `span` at **Σ 1467 (26% of the whole
+  catalog)** and `forms-media`'s `<p>` in a closed `<details>` at **Σ 864** —
+  41% of all catalog error in two rows, neither of which any brief had named.
 
 Round 20 measurements: `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`.
+Round 21 measurements: `doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`.

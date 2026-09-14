@@ -411,7 +411,21 @@ other element's path — round 19 believed the opposite and deferred a fix on it
 `<audio>`/`<video>` fallback children and `<option>` in a closed `<select>` are
 still boxed here and are not by Chrome; they now surface as `extra_box` rows.
 
-Records: `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`;
+## Form controls are widget boxes with their OWN width arithmetic
+
+The widget branch (`…_renderer_layout.spl`, `input`/`select`/`textarea`)
+returns before child recursion. Its intrinsic width is NOT `columns × text
+advance`: Chrome adds a fixed font-derived INTERCEPT, so `input` content =
+`size*7 + 5` and `textarea` content = `cols*8 + 17` — separate arms, because
+Chrome gives them different UA fonts and a textarea reserves a scrollbar
+gutter. **Never use `style_char_w` (the 6 px bitmap CELL the rasteriser draws
+into) as a column advance** — that was the round-21 defect, and it is a
+different quantity from both the text advance and any font's `xAvgCharWidth`.
+`<select>` does not use this path at all (max-content + `SELECT_ARROW_WIDTH_PX`).
+Control HEIGHTS are already Chrome-correct; the open gap is control POSITION.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;
 `doc/08_tracking/bug/ifc_linebox_spec_imports_nonexistent_layout_inline_2026-09-14.md`.

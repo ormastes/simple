@@ -670,6 +670,47 @@ fn replaced_default_box_h(tag: text) -> i32:
 # padding 16 and border 2) is 51, so the arrow region is 22.
 val SELECT_ARROW_WIDTH_PX: i32 = 22
 
+# Per-column advance and content-box intercept Chrome's UA uses to turn a text
+# control's `size`/`cols` attribute into an intrinsic CONTENT width. These are
+# NOT this engine's text metrics: `style_char_w` is the 6 px bitmap cell the
+# glyph rasteriser draws into, and using it here is what made every sized
+# control too narrow (measured: `<input size=20>` 138 px against Chrome's 163).
+#
+# A control's width is NOT `columns x text advance`. Chrome adds a fixed
+# font-derived intercept on top of the per-column term, so dividing a single
+# measured width by its `size` recovers neither number. Both were fitted
+# against Chrome 152 at the UA control font size (13.3333 px), on sizes
+# 1,2,3,4,5,6,10,20,40, on two independent pages (the catalog's forms-media,
+# whose author CSS adds 18 px of padding+border, and a bare page with the UA's
+# own 8 px) -- the CONTENT width agreed at 145 px on both, which is what makes
+# these content-box numbers rather than a fit to one page's padding:
+#
+#   <input size=N>     content = N * 7 + 5      exact on every size measured
+#   <textarea cols=N>  content = N * 8 + 17     exact at 10/20/30, 1 px at 40
+#
+# The two differ because Chrome gives them different UA fonts -- `input` is
+# proportional (Arial), `textarea` is monospace, whose '0' advance is 8.0253 --
+# and because a textarea reserves a ~15 px vertical scrollbar gutter, which is
+# the bulk of its larger intercept.
+#
+# Scaled by `glyph_scale` so a control at another font size stays consistent
+# with the rest of this engine's metrics; `glyph_scale` is 1 at the UA control
+# size, so the measured numbers above are reproduced exactly.
+val INPUT_COL_ADVANCE_PX: i32 = 7
+val INPUT_CONTENT_INTERCEPT_PX: i32 = 5
+val TEXTAREA_COL_ADVANCE_PX: i32 = 8
+val TEXTAREA_CONTENT_INTERCEPT_PX: i32 = 17
+
+fn form_control_intrinsic_content_w(node: HNode, st: Style, cols: i32) -> i32:
+    """Content-box width Chrome's UA gives a text control from its `size` /
+    `cols` attribute: a per-column advance plus a fixed font-derived
+    intercept. `<textarea>` and `<input>` carry different UA fonts and a
+    different intercept, so they are separate arms rather than one formula."""
+    val scale = glyph_scale(st.font_size)
+    if node.tag == "textarea":
+        return cols * TEXTAREA_COL_ADVANCE_PX * scale + TEXTAREA_CONTENT_INTERCEPT_PX * scale
+    cols * INPUT_COL_ADVANCE_PX * scale + INPUT_CONTENT_INTERCEPT_PX * scale
+
 fn form_control_rows(node: HNode) -> i32:
     """Visible text rows of a <textarea>: its `rows` attribute, else the HTML
     default of 2 (HTML §4.10.11 — Chrome's textarea is two rows tall)."""
@@ -2156,7 +2197,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             # <textarea>, the widest <option> label for <select> — each in the
             # control's own UA font, plus its padding and border.
             val cols = form_control_cols(node)
-            var control_w = cols * style_char_w(st) + st.pad_l + st.pad_r + border_x
+            var control_w = form_control_intrinsic_content_w(node, st, cols) + st.pad_l + st.pad_r + border_x
             if node.tag == "select":
                 # `<option>` is display:block in the UA sheet, so
                 # `intrinsic_text_width` (inline-only) never reaches its label;
