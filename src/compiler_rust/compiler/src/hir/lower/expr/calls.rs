@@ -212,8 +212,27 @@ impl Lowerer {
 
         // Regular function call
         let func_hir = Box::new(self.lower_expr(callee, ctx)?);
-        let ret_ty = self.call_return_type(callee, func_hir.ty);
-        let proven_nonescaping = matches!(callee, Expr::Identifier(name) if self.proven_nonescaping_functions.contains(name))
+        // Preserve the resolved symbol even before its body has been lowered:
+        // forward and recursive callees can still carry a scalar return type.
+        let ret_ty = match (&func_hir.kind, callee) {
+            (HirExprKind::Global(symbol), Expr::Identifier(_)) => {
+                self.call_return_type(&Expr::Identifier(symbol.clone()), func_hir.ty)
+            }
+            _ => self.call_return_type(callee, func_hir.ty),
+        };
+        // Check the RESOLVED symbol, not the bare callee name: in a flattened
+        // unit with a cross-module same-named collision, `func_hir.kind` may
+        // carry a different (owner-mangled) symbol than `callee`'s bare text,
+        // and `proven_nonescaping_functions`/other per-symbol sets below are
+        // keyed by the symbol `lower_function` actually emitted
+        // (`flatten_emitted_symbol`), not by the ambiguous bare name.
+        let resolved_callee_symbol = match (&func_hir.kind, callee) {
+            (HirExprKind::Global(symbol), Expr::Identifier(_)) => Some(symbol.as_str()),
+            (_, Expr::Identifier(name)) => Some(name.as_str()),
+            _ => None,
+        };
+        let proven_nonescaping = resolved_callee_symbol
+            .is_some_and(|symbol| self.proven_nonescaping_functions.contains(symbol))
             && !self.is_reference_type(ret_ty);
         let mut args_hir = if proven_nonescaping {
             self.lower_nonescaping_call_args(args, ctx)?

@@ -294,6 +294,27 @@ impl Lowerer {
                 kind: HirExprKind::Local(idx),
                 ty,
             })
+        } else if let Some((symbol, ty)) = self.resolve_flatten_owned_callable(name).and_then(|symbol| {
+            // Flattened unit, cross-module same-named free function: the bare
+            // name is ambiguous once flattening merges every module's
+            // functions into one namespace, so it must be resolved through
+            // the flatten-owner of the function CURRENTLY being lowered,
+            // never through whichever definition happened to keep the bare
+            // name. `resolve_flatten_owned_callable` already encodes the
+            // priority (own colliding definition, then a selective import's
+            // exact binding, then a colliding alias target) -- this is the
+            // one call site that must consult it, since it decides the
+            // symbol every call/reference to `name` actually resolves to.
+            // See doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md
+            let ty = self
+                .named_callable_value_type(&symbol)
+                .or_else(|| self.globals.get(&symbol).copied())?;
+            Some((symbol, ty))
+        }) {
+            Ok(HirExpr {
+                kind: HirExprKind::Global(symbol),
+                ty,
+            })
         } else if let Some((source, ty)) = self.resolve_import_alias(name).map(str::to_string).and_then(|source| {
             // Selective-import alias (`use m.{f as g}`): module flattening merged
             // the imported symbol in under its ORIGINAL name, so `g` names
