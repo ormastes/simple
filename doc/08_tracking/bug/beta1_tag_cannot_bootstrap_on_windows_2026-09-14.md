@@ -85,3 +85,53 @@ version 4 (needs >= 1.78).
   stopped at `could not write command transcript`; creating
   `<output>/stage3/<platform>/` by hand did not clear it, so `output_dir`
   resolves somewhere else. Unreached and undiagnosed.
+
+## Correction 2026-09-14: CI DID build a Windows binary from this tag
+
+The **Impact** line above says no pure-Simple Windows binary has ever been
+produced from this commit. That is wrong, and the evidence is the tag's own
+release run `34067963746`:
+
+| leg | result |
+|---|---|
+| linux-x86_64, linux-aarch64, linux-riscv64 | success |
+| windows-x86_64, windows-aarch64 | **success** |
+| freebsd-x86_64 | success |
+| darwin-arm64, darwin-x86_64, freebsd-x86 | failure |
+| SimpleOS x86_64 Kernel Build | failure |
+
+Seven `bootstrap-*` artifacts plus `installers` (116 MB) were produced and are
+still unexpired. So the tag is buildable on Windows *through the CI lane*. What
+is broken is the local `bootstrap-from-scratch.sh` lane on an MSYS host, which
+is exactly what the 0500 directory-mode root cause above describes. The scope of
+this record is that lane, not the tag as a whole.
+
+## Why the release has zero assets — it is NOT this bug
+
+`create-release` is gated `needs.whole-tests.result == 'success'`, and
+`whole-tests` is gated `needs.build-bootstrap.result == 'success'`. The matrix
+declares no `continue-on-error`, so the three failed legs made `build-bootstrap`
+fail, which **skipped** `whole-tests`, which **skipped** `create-release`.
+`Create GitHub Release` never failed — it never ran.
+
+The blocker for shipping beta 1 is therefore the darwin x2 + freebsd-x86 legs,
+not the Windows bootstrap defect. `origin/main`'s workflow is *stricter* (it
+additionally requires `build-installers` and `simpleos-build` to succeed), so
+re-cutting as beta.2 from main does not relax this gate.
+
+## WSL local-build lane: how far it actually gets
+
+The earlier note "cargo 1.75 against a lockfile that declares version 4 (needs
+>= 1.78)" understated the requirement and overstated the blocker.
+
+- cargo/rustc **1.82** are obtainable rootless on jammy: `apt-get download` into
+  a private `Dir::State::Lists`/`Dir::Cache`, then `dpkg-deb -x` into `$HOME`
+  (the same pattern used for the LLVM 23 deploy). Verified working.
+- 1.82 is still not enough. The vendored `jni-0.22.4` manifest requires
+  `edition2024`, stabilised in Rust **1.85**:
+  `feature 'edition2024' is required ... not stabilized in this version of Cargo`.
+- questing ships cargo 1.85.1, but its binaries link `GLIBC_2.38` while jammy
+  provides 2.35, so the rootless-extract trick does not carry across that gap.
+
+So the WSL lane needs a host glibc newer than Ubuntu 22.04's, or a rustup-style
+static toolchain — not merely a newer apt pocket.
