@@ -18,8 +18,18 @@ fail() {
 [ "$(uname -s 2>/dev/null || true)" = FreeBSD ] ||
     fail 'this checker is native-FreeBSD-only'
 
+# FreeBSD's llvm18 package intentionally keeps versioned tools outside the
+# default PATH.  Normalize that package layout here so every caller (QEMU and
+# CI) uses the same native self-host interface and fingerprints the real LLVM
+# authority rather than failing before compilation.
+if [ -d /usr/local/llvm18/bin ]; then
+    PATH="/usr/local/llvm18/bin:$PATH"
+    export PATH
+fi
+
 command -v timeout >/dev/null 2>&1 || fail 'GNU timeout is required (install coreutils)'
 command -v sha256sum >/dev/null 2>&1 || fail 'GNU sha256sum is required (install coreutils)'
+command -v llvm-config >/dev/null 2>&1 || fail 'llvm-config is required (install llvm18)'
 
 OUTPUT_DIR=${SIMPLE_FREEBSD_SELFHOST_OUTPUT:-$ROOT_DIR/build/bootstrap-freebsd-ci}
 case "$OUTPUT_DIR" in
@@ -44,6 +54,11 @@ case "$CHECK_TIMEOUT" in
     ''|*[!0-9]*) fail 'timeout must be a positive integer' ;;
 esac
 [ "$CHECK_TIMEOUT" -gt 0 ] || fail 'timeout must be a positive integer'
+BUILD_JOBS=${SIMPLE_FREEBSD_SELFHOST_JOBS:-1}
+case "$BUILD_JOBS" in
+    ''|*[!0-9]*) fail 'build jobs must be a positive integer' ;;
+esac
+[ "$BUILD_JOBS" -gt 0 ] || fail 'build jobs must be a positive integer'
 
 run_logged() {
     label=$1
@@ -65,7 +80,7 @@ stage2_log="$LOG_DIR/stage2-trust-root.log"
 set +e
 SIMPLE_NO_STUB_FALLBACK=1 timeout -k 15 "$CHECK_TIMEOUT" sh \
     "$ROOT_DIR/scripts/bootstrap/bootstrap-from-scratch.sh" \
-    --full-bootstrap --stop-after-stage2 --mode=dynload --no-mcp --jobs=1 \
+    --full-bootstrap --stop-after-stage2 --mode=dynload --no-mcp "--jobs=$BUILD_JOBS" \
     --output="$OUTPUT_DIR" \
     --produce-stage3-receipt=verify-landed-compiler-fix \
     >"$stage2_log" 2>&1
@@ -100,7 +115,8 @@ resume_receipt=$(printf '%s\n' "$resume_line" | sed -n \
 [ "$resume_receipt" = "$receipt" ] ||
     fail 'canonical resume receipt is not this run receipt'
 
-run_logged stage3-resume env SIMPLE_NO_STUB_FALLBACK=1 sh \
+run_logged stage3-resume env SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_NATIVE_BUILD_THREADS="$BUILD_JOBS" sh \
     "$ROOT_DIR/scripts/bootstrap/bootstrap-from-scratch.sh" \
     "--resume-stage3-from-admitted=$resume_output" \
     "--bootstrap-receipt=$resume_receipt"
@@ -164,7 +180,7 @@ mkdir -p "$smoke_dir"
 printf 'fn main():\n    print 6 * 7\n' >"$smoke_dir/main.spl"
 run_logged stage3-smoke env SIMPLE_NO_STUB_FALLBACK=1 \
     "$stage3_bin" native-build "$smoke_dir/main.spl" \
-    --backend cranelift --threads 1 --output "$smoke_dir/probe"
+    --backend cranelift --threads "$BUILD_JOBS" --output "$smoke_dir/probe"
 [ -x "$smoke_dir/probe" ] || fail 'Stage 3 smoke compiler produced no executable'
 smoke_result=$("$smoke_dir/probe") || fail 'Stage 3 smoke executable failed'
 [ "$smoke_result" = 42 ] || fail "Stage 3 smoke output was '$smoke_result', expected 42"

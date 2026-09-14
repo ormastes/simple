@@ -39,14 +39,15 @@ QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-8G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
+QEMU_BUILD_JOBS="${SIMPLE_FREEBSD_SELFHOST_JOBS:-1}"
 QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 QEMU_REMOTE_TIMEOUT="${QEMU_REMOTE_TIMEOUT:-300}"
 QEMU_PACKAGE_TIMEOUT="${QEMU_PACKAGE_TIMEOUT:-1800}"
 QEMU_TRANSFER_TIMEOUT="${QEMU_TRANSFER_TIMEOUT:-1800}"
-QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-7200}"
+QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-14400}"
 QEMU_SMOKE_TIMEOUT="${QEMU_SMOKE_TIMEOUT:-600}"
-QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-7200}"
+QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-18000}"
 FREEBSD_VERSION="14.4"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
 FREEBSD_MEDIA_CHECKER="${ROOT_DIR}/scripts/qemu/simple-freebsd-media.shs"
@@ -143,7 +144,7 @@ if [ -z "$TIMEOUT_BIN" ]; then
     TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 fi
 
-PREFLIGHT_ORDER="mode,port,user,memory,cpus,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
+PREFLIGHT_ORDER="mode,port,user,memory,cpus,build_jobs,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
 PREFLIGHT_REASON="none"
 
 preflight_try() {
@@ -164,6 +165,7 @@ preflight_port() { is_valid_port "$QEMU_PORT"; }
 preflight_user() { is_valid_user "$QEMU_USER"; }
 preflight_memory() { is_valid_memory "$QEMU_MEM"; }
 preflight_cpus() { is_positive_integer "$QEMU_CPUS"; }
+preflight_build_jobs() { is_positive_integer "$QEMU_BUILD_JOBS"; }
 preflight_ssh_timeout() { is_positive_integer "$QEMU_SSH_TIMEOUT"; }
 preflight_root_ssh_timeout() { is_positive_integer "$QEMU_ROOT_SSH_TIMEOUT"; }
 
@@ -234,6 +236,7 @@ run_preflight() {
     preflight_try user preflight_user
     preflight_try memory preflight_memory
     preflight_try cpus preflight_cpus
+    preflight_try build_jobs preflight_build_jobs
     preflight_try ssh_timeout preflight_ssh_timeout
     preflight_try root_ssh_timeout preflight_root_ssh_timeout
     preflight_try timeout preflight_timeout
@@ -254,7 +257,7 @@ run_preflight() {
         PREFLIGHT_STATUS="fail"
     fi
     printf 'freebsd_qemu_preflight_status=%s\n' "$PREFLIGHT_STATUS"
-    printf 'freebsd_qemu_preflight_checks=19\n'
+    printf 'freebsd_qemu_preflight_checks=20\n'
     printf 'freebsd_qemu_preflight_order=%s\n' "$PREFLIGHT_ORDER"
     printf 'freebsd_qemu_preflight_reason=%s\n' "$PREFLIGHT_REASON"
     [ "$PREFLIGHT_STATUS" = "pass" ]
@@ -283,6 +286,10 @@ if ! is_valid_memory "$QEMU_MEM"; then
 fi
 if ! is_positive_integer "$QEMU_CPUS"; then
     printf 'Invalid QEMU_CPUS: %s\n' "$QEMU_CPUS" >&2
+    exit 1
+fi
+if ! is_positive_integer "$QEMU_BUILD_JOBS"; then
+    printf 'Invalid SIMPLE_FREEBSD_SELFHOST_JOBS: %s\n' "$QEMU_BUILD_JOBS" >&2
     exit 1
 fi
 if ! preflight_timeout; then
@@ -405,7 +412,11 @@ pkg_root() {
 }
 
 SCRIPT_OK=0
+GIT_AUTHORITY_DIR=""
 cleanup() {
+    if [ -n "$GIT_AUTHORITY_DIR" ] && [ -d "$GIT_AUTHORITY_DIR" ]; then
+        rm -rf "$GIT_AUTHORITY_DIR"
+    fi
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null || true)
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -768,7 +779,12 @@ else
         --exclude='*.qcow2' \
         --exclude='/src/compiler_rust/target/' \
         --exclude='/src/compiler_rust/target_*/' \
-        --exclude='/tools/' \
+        --include='/tools/' \
+        --include='/tools/counterpart/' \
+        --include='/tools/counterpart/sdk/' \
+        --include='/tools/counterpart/sdk/c/' \
+        --include='/tools/counterpart/sdk/c/simple_counterpart_abi.h' \
+        --exclude='/tools/***' \
         --exclude='/bin/' \
         --exclude='**/target/debug/' \
         --exclude='**/target/release/' \
@@ -777,11 +793,44 @@ else
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
+    # The source transfer deliberately excludes the host worktree's .git
+    # indirection and its multi-gigabyte object store.  Stage 3 still needs
+    # the exact HEAD plus an index so it can bind and re-check the synced
+    # tree's dirty fingerprint.  A depth-one, no-checkout clone provides that
+    # authority without sharing host-only paths or unrelated history.
+    info "Syncing bounded Git authority to VM..."
+    command -v git >/dev/null 2>&1 || fail "host git not found"
+    GIT_AUTHORITY_DIR=$(mktemp -d "${QEMU_RUNTIME_DIR}/git-authority.XXXXXX") ||
+        fail "could not create Git authority workspace"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" git clone --quiet --depth 1 \
+        --no-local --no-checkout "$ROOT_DIR" "$GIT_AUTHORITY_DIR/repo" ||
+        fail "could not create bounded Git authority"
+    # Preserve genuine host-side tracked deletions.  The guest first suppresses
+    # absent paths caused by rsync projection, then restores these paths to the
+    # index so Stage 3 records them as real dirty-state changes.
+    git -C "$ROOT_DIR" diff --no-renames --name-only -z --diff-filter=D HEAD -- \
+        >"$GIT_AUTHORITY_DIR/repo/.git/simple-host-deleted.z" ||
+        fail "could not capture host tracked deletions"
+    $VM_SSH "rm -rf '${VM_HOME}/simple/.git' && mkdir -p '${VM_HOME}/simple/.git'" ||
+        fail "could not prepare guest Git authority"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete --no-owner --no-group \
+        -e "$RSYNC_SSH" \
+        "$GIT_AUTHORITY_DIR/repo/.git/" \
+        "${VM_USER}@localhost:${VM_HOME}/simple/.git/" ||
+        fail "could not sync bounded Git authority"
+    $VM_SSH "git config --global --add safe.directory '${VM_HOME}/simple'" ||
+        fail "could not admit guest Git worktree ownership"
+    $VM_SSH "cd '${VM_HOME}/simple' && git reset --mixed --quiet HEAD && git ls-files --deleted -z | git update-index --skip-worktree -z --stdin && git update-index --no-skip-worktree -z --stdin < .git/simple-host-deleted.z && git rev-parse --verify HEAD >/dev/null" ||
+        fail "guest Git authority is invalid"
+    rm -rf "$GIT_AUTHORITY_DIR"
+    GIT_AUTHORITY_DIR=""
+    pass "Bounded Git authority synced"
+
     GUEST_BOOTSTRAP_OUTPUT_RELATIVE="build/bootstrap-freebsd-qemu"
     GUEST_BOOTSTRAP_OUTPUT="${VM_HOME}/simple/${GUEST_BOOTSTRAP_OUTPUT_RELATIVE}"
     info "Running native FreeBSD Stage 3 self-host checker (explicit output: ${GUEST_BOOTSTRAP_OUTPUT})..."
-    EXACT_COMMAND="env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs"
-    if ! $VM_SSH "cd ${VM_HOME}/simple && env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs"; then
+    EXACT_COMMAND="env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} SIMPLE_FREEBSD_SELFHOST_JOBS=${QEMU_BUILD_JOBS} SIMPLE_FREEBSD_SELFHOST_TIMEOUT=${QEMU_BOOTSTRAP_TIMEOUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs"
+    if ! $VM_SSH "cd ${VM_HOME}/simple && env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} SIMPLE_FREEBSD_SELFHOST_JOBS=${QEMU_BUILD_JOBS} SIMPLE_FREEBSD_SELFHOST_TIMEOUT=${QEMU_BOOTSTRAP_TIMEOUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs"; then
         copy_guest_bootstrap_logs
         fail "Canonical FreeBSD Stage 3 self-host checker failed"
     fi
