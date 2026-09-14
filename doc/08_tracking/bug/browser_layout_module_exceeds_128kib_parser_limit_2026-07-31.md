@@ -86,3 +86,21 @@ completed. The sibling example ("keeps the original module as the public
 facade") passes, so the facade half of the plan landed and the actual split did
 not. Fixing this is a module-decomposition task on a 169 KiB file, past this
 lane's box.
+
+## Re-verification 2026-09-14 — four modules now exceed the limit
+
+Focused interpreter execution of the owning guard remains red: `2 total, 1
+passed, 1 failed`. Direct byte measurements of the live source are:
+
+| file | bytes | over 131,072 by |
+|---|---:|---:|
+| `_core.spl` | 222,967 | 91,895 |
+| `_layout.spl` | 222,450 | 91,378 |
+| `_paint_layout.spl` | 175,476 | 44,404 |
+| facade `.spl` | 136,007 | 4,935 |
+| `_decl_apply.spl` | 130,619 | under by 453 |
+
+This is no longer a one-file minimal split. A lossless repair must decompose
+four parser inputs and preserve their public facade/export relationships. The
+guard now also covers `_decl_apply.spl`, closing the omission recorded above;
+its 453-byte remaining margin makes that coverage immediately relevant.
