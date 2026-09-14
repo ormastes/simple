@@ -27,8 +27,51 @@ fn body_produces_value(body: &[HirStmt]) -> bool {
         }
     }
 
-    body.last().is_some_and(stmt_produces_value)
-        || body.iter().any(|stmt| matches!(stmt, HirStmt::Return(Some(_))))
+    body.last().is_some_and(stmt_produces_value) || body.iter().any(|stmt| matches!(stmt, HirStmt::Return(Some(_))))
+}
+
+fn is_numeric_type(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+            | TypeId::U64
+            | TypeId::F32
+            | TypeId::F64
+    )
+}
+
+impl Lowerer {
+    pub(crate) fn validate_declared_return_type(&self, expected: TypeId, found: TypeId) -> LowerResult<()> {
+        if expected == TypeId::ANY
+            || found == TypeId::ANY
+            || expected == found
+            || (is_numeric_type(expected) && is_numeric_type(found))
+        {
+            return Ok(());
+        }
+        Err(LowerError::TypeMismatch { expected, found })
+    }
+
+    fn validate_implicit_return_type(&self, body: &[HirStmt], expected: TypeId) -> LowerResult<()> {
+        match body.last() {
+            Some(HirStmt::Expr(expr)) => self.validate_declared_return_type(expected, expr.ty),
+            Some(HirStmt::If {
+                then_block,
+                else_block: Some(else_block),
+                ..
+            }) => {
+                self.validate_implicit_return_type(then_block, expected)?;
+                self.validate_implicit_return_type(else_block, expected)
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Returns true when a Block represents a stub body that auto-synthesis may replace.
@@ -745,6 +788,9 @@ impl Lowerer {
         // walks into those arms; see its doc comment for the measurement.
         if ctx.return_type == TypeId::BOOL {
             Lowerer::coerce_exists_tail_in_place(&mut body);
+        }
+        if declared_return_type.is_some() {
+            self.validate_implicit_return_type(&body, return_type)?;
         }
 
         // Detect suspension operators in function body for async/sync validation.

@@ -1035,7 +1035,9 @@ impl Lowerer {
                 }
                 acc
             }
-            Pattern::Enum { name, variant, payload, .. } => {
+            Pattern::Enum {
+                name, variant, payload, ..
+            } => {
                 // A struct/class spelling (`Point(x, y)`) also arrives as
                 // Pattern::Enum. Emitting a discriminant check for it would
                 // read an object pointer's enum header and never match — see
@@ -2354,7 +2356,7 @@ impl Lowerer {
     /// Non-bool return types are unaffected and lower normally, so
     /// `fn f() -> T?: x.?` still yields `T?` per spec.
     pub(crate) fn lower_bool_return_expr(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
-        if ctx.return_type == TypeId::BOOL {
+        if ctx.return_type == TypeId::BOOL && matches!(expr, Expr::ExistsCheck(_)) {
             return self.lower_condition(expr, ctx);
         }
         self.lower_expr(expr, ctx)
