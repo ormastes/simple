@@ -335,3 +335,31 @@ link-set curation problem with documented prior failures, not missing code.
 Neither blocker affects the AVX-512 result: whether the browser app links is
 orthogonal to whether the kernels a server calls are AVX-512, and the library
 check above answers that directly.
+
+## The web-server parse path: linked with AVX-512, but the binary SEGVs
+
+An HTTP server's SIMD hot path is CRLF scanning, and that chain IS wired:
+`http_core.spl:234` calls `simd_find_byte` -> `rt_simd_find_byte_span` ->
+AVX-512. Confirmed by building `chunked_body_end_scan` /
+`decode_chunked_bounded` into a native binary:
+
+  * builds clean (7 modules), no unresolved symbols, no stub flags needed;
+  * **90 zmm** present;
+  * `rt_simd_find_byte_span` linked.
+
+Then it **segfaults on run** (rc 139). Nothing SIMD-specific: the same native
+lane that cannot link the browser app cannot run this either, and it is the
+same class as the documented stage-binary SEGVs
+(`stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`).
+
+So for the web server the evidence stops one step short of the DB result: the
+AVX-512 scanner is demonstrably compiled into the binary and reachable from the
+HTTP parser, but the binary does not execute, so no parity run backs it. The DB
+library path has both (runs, 6288 values, 0 mismatches); this one has linkage
+and instructions only. Stated that way rather than rounded up.
+
+Filed as native-lane work, not SIMD work. The three blockers now on record for
+that lane are: a codegen failure
+(`BrowserDomEventExecutor.listener_indices_for_target_event`), an incomplete C
+source set (`rt_mmap` reachable only through `runtime.c`), and this runtime
+SEGV.
