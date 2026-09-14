@@ -15,7 +15,7 @@ use std.test_runner.test_level_detect.{test_level_of_path}
 use std.test_runner.mode_filter.{extract_directive_lines}
 
 use std.io_runtime.{read_file_text}
-use std.nogc_sync_mut.io.file_ops.{file_stat, file_size}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_size}
 use std.io_runtime.{time_now_unix_micros}
 
 # ============================================================================
@@ -107,16 +107,14 @@ fn manifest_incremental_update(old: TestManifest, dirs: [text]) -> TestManifest:
             if is_spec_file(f):
                 seen_paths[f] = true
                 val current_size = file_size(f)
-                val current_mtime = file_stat(f)
+                val current_mtime = file_modified_time(f)
 
                 # Check if file exists in old manifest with same size+mtime.
                 # O(1) index lookup — see the note on old_index above.
                 var reused = false
                 if old_index.contains_key(f):
                     val old_entry = old.entries[old_index[f]]
-                    if (old_entry.path != "" and
-                        old_entry.file_size == current_size and
-                        old_entry.file_mtime == current_mtime):
+                    if manifest_entry_fingerprint_matches(old_entry, current_size, current_mtime):
                         # Unchanged — reuse old entry
                         new_entries.push(old_entry)
                         reused = true
@@ -128,14 +126,12 @@ fn manifest_incremental_update(old: TestManifest, dirs: [text]) -> TestManifest:
             elif is_sdoctest_candidate(f):
                 seen_paths[f] = true
                 val current_size = file_size(f)
-                val current_mtime = file_stat(f)
+                val current_mtime = file_modified_time(f)
 
                 var sd_reused = false
                 if old_sd_index.contains_key(f):
                     val old_sd = old.sdoctest_entries[old_sd_index[f]]
-                    if (old_sd.path != "" and
-                        old_sd.file_size == current_size and
-                        old_sd.file_mtime == current_mtime):
+                    if sdoctest_fingerprint_matches(old_sd, current_size, current_mtime):
                         new_sd.push(old_sd)
                         sd_reused = true
                 if not sd_reused:
@@ -175,6 +171,14 @@ fn path_under_any(path: text, dirs: [text]) -> bool:
             return true
     false
 
+# A missing/error timestamp is never reusable. This deliberately converts
+# metadata-provider uncertainty into a rescan instead of a false cache hit.
+fn manifest_entry_fingerprint_matches(entry: TestManifestEntry, size: i64, mtime: i64) -> bool:
+    entry.path != "" and size >= 0 and mtime > 0 and entry.file_size == size and entry.file_mtime == mtime
+
+fn sdoctest_fingerprint_matches(entry: SdoctestManifestEntry, size: i64, mtime: i64) -> bool:
+    entry.path != "" and size >= 0 and mtime > 0 and entry.file_size == size and entry.file_mtime == mtime
+
 # ============================================================================
 # File Classification
 # ============================================================================
@@ -196,7 +200,7 @@ fn is_sdoctest_candidate(path: text) -> bool:
 
 fn scan_test_file(path: text) -> TestManifestEntry:
     val size = file_size(path)
-    val mtime = file_stat(path)
+    val mtime = file_modified_time(path)
     val content = read_file_text(path)
 
     TestManifestEntry(
@@ -223,7 +227,7 @@ fn scan_test_file(path: text) -> TestManifestEntry:
 
 fn scan_sdoctest_file(path: text) -> SdoctestManifestEntry:
     val size = file_size(path)
-    val mtime = file_stat(path)
+    val mtime = file_modified_time(path)
     val content = read_file_text(path)
     val blocks = count_sdoctest_blocks_for_path(path, content)
 
@@ -331,3 +335,5 @@ fn manifest_find_sdoctest_entry(manifest: TestManifest, path: text) -> SdoctestM
 # ============================================================================
 # Exports
 # ============================================================================
+
+export manifest_entry_fingerprint_matches, sdoctest_fingerprint_matches
