@@ -1,12 +1,13 @@
 # @cover src/app/devhub/config.spl 60%
 
-use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, load_config_for_target, confluence_target_from_args, resolve_auth_token, save_auth_token, load_auth_token}
+use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, load_config_for_target, confluence_target_from_args, resolve_auth_token, save_config, save_confluence_target, save_auth_token, load_auth_token}
 use app.devhub.errors.{ItfError}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_delete(path: text) -> bool
 
 # Fixture-HOME harness (same pattern as wiki_backend_routing_spec.spl /
@@ -126,6 +127,37 @@ describe "ITF configuration":
             expect(config.confluence_target).to_equal("beta")
             expect(config.confluence_url).to_equal("https://beta.example/wiki")
             expect(confluence_target_from_args(["list", "--host", "alpha"])).to_equal("alpha")
+
+        it "accepts equals selectors and rejects missing or conflicting selectors":
+            expect(confluence_target_from_args(["list", "--host=alpha"])).to_equal("alpha")
+            expect(confluence_target_from_args(["list", "--profile=beta"])).to_equal("beta")
+            expect(confluence_target_from_args(["list", "--host"])).to_equal("__invalid_confluence_selector__")
+            expect(confluence_target_from_args(["list", "--host=alpha", "--profile=beta"])).to_equal("__invalid_confluence_selector__")
+
+        it "target config and credential writes preserve sibling sections and repeated headers":
+            val dir = "{FIXTURE_HOME}/.config/itf"
+            val _mk = rt_dir_create_all(dir)
+            val config_body = "confluence:\n    default_target: alpha\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n    header: X-One: a\n    header: X-One: b\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    header: X-Beta: keep\n"
+            val auth_body = "confluence.alpha:\n    token: old-alpha\n\nconfluence.beta:\n    token: keep-beta\n\ncustom:\n    token: keep-custom\n"
+            val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
+            val _auth = rt_file_write_text("{dir}/auth.sdn", auth_body)
+            val original_home = rt_env_get("HOME") ?? ""
+            val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+            val _saved_legacy = save_config(load_config())
+            val selected = load_config_for_target("alpha")
+            val _saved_config = save_confluence_target(selected)
+            val _saved_auth = save_auth_token("confluence.alpha", "new-alpha")
+            val saved_config = rt_file_read_text("{dir}/config.sdn") ?? ""
+            val saved_auth = rt_file_read_text("{dir}/auth.sdn") ?? ""
+            val _restore_home = rt_env_set("HOME", original_home)
+            expect(saved_config).to_contain("default_target: alpha")
+            expect(saved_config).to_contain("confluence.beta:")
+            expect(saved_config).to_contain("header: X-Beta: keep")
+            expect(saved_config).to_contain("header: X-One: a")
+            expect(saved_config).to_contain("header: X-One: b")
+            expect(saved_auth).to_contain("token: \"new-alpha\"")
+            expect(saved_auth).to_contain("token: keep-beta")
+            expect(saved_auth).to_contain("custom:")
 
         it "uses configured default_target before file-order fallback":
             val body = "confluence:\n    default_target: beta\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n\nconfluence.beta:\n    url: https://beta.example/wiki\n"

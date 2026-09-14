@@ -7,8 +7,6 @@
 fn redact_devhub_diagnostic(value: text) -> text:
     """Mask secrets in headers, assignments, and URLs used by diagnostics."""
     val url_safe = _redact_url_secrets(value)
-    if url_safe.contains("://"):
-        return url_safe
     _redact_sensitive_assignment(url_safe)
 
 
@@ -47,17 +45,24 @@ fn _redact_sensitive_assignment(value: text) -> text:
     if delimiter < 0:
         return value
     val prefix = value[:delimiter]
-    if not _sensitive_name(_assignment_name(prefix)):
+    val assignment_name = _assignment_name(prefix)
+    if not _sensitive_name(assignment_name):
         return value[:delimiter + 1] + _redact_sensitive_assignment(value[delimiter + 1:])
     var end = value.len()
-    val comma = value[delimiter + 1:].find(",")
-    if comma >= 0:
-        end = delimiter + 1 + comma
+    val query_assignment = prefix.contains("?") or prefix.contains("&")
+    if query_assignment:
+        val amp = value[delimiter + 1:].find("&")
+        if amp >= 0 and delimiter + 1 + amp < end:
+            end = delimiter + 1 + amp
+        val fragment = value[delimiter + 1:].find("#")
+        if fragment >= 0 and delimiter + 1 + fragment < end:
+            end = delimiter + 1 + fragment
     val newline = value[delimiter + 1:].find("\n")
     if newline >= 0 and delimiter + 1 + newline < end:
         end = delimiter + 1 + newline
     val suffix = if end < value.len(): _redact_sensitive_assignment(value[end:]) else: ""
-    "{value[:delimiter + 1]} ***{suffix}"
+    val mask = if query_assignment: "***" else: " ***"
+    value[:delimiter + 1] + mask + suffix
 
 
 fn _redact_url_secrets(value: text) -> text:
@@ -73,7 +78,16 @@ fn _redact_url_secrets(value: text) -> text:
     val question = safe.find("?")
     if question < 0:
         return safe
-    val query_and_fragment = safe[question + 1:]
+    val after_question = safe[question + 1:]
+    var query_end = after_question.len()
+    val comma_end = after_question.find(",")
+    if comma_end >= 0:
+        query_end = comma_end
+    val space_end = after_question.find(" ")
+    if space_end >= 0 and space_end < query_end:
+        query_end = space_end
+    val query_and_fragment = after_question[:query_end]
+    val trailing = if query_end < after_question.len(): after_question[query_end:] else: ""
     val fragments = query_and_fragment.split("#", 2)
     val query = fragments[0]
     var redacted_parts: [text] = []
@@ -86,4 +100,4 @@ fn _redact_url_secrets(value: text) -> text:
     var rebuilt = safe[:question + 1] + redacted_parts.join("&")
     if fragments.len() > 1:
         rebuilt = rebuilt + "#" + fragments[1]
-    rebuilt
+    rebuilt + trailing
