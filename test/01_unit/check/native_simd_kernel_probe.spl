@@ -13,6 +13,7 @@
 # binary it builds.
 # @req REQ-SSPEC-LIB
 
+use std.common.simd_scan.{simd_find_byte, scalar_find_byte}
 use std.nogc_sync_mut.db.accel.{
     row_bitmap_and_words, _scalar_row_bitmap_and_words,
     row_bitmap_or_words, _scalar_row_bitmap_or_words,
@@ -216,4 +217,32 @@ fn main():
                 i = i + 1
         n = n + 1
 
-    print("NATIVE-SIMD checked={checked} mismatches={bad} db={bad_db} mask={bad_mask} cov={bad_cov}")
+    # --- the WEB SERVER's CRLF scanner ---
+    #
+    # `_crlf_from` (http_core.spl:234) -> `simd_find_byte` ->
+    # `rt_simd_find_byte_span` is how an HTTP server finds header boundaries in
+    # a received buffer. Natively this returned -1 for EVERY input — it read a
+    # packed [u8] as tagged int64 slots — so a natively built server could not
+    # locate a single CRLF, while the interpreter's Rust twin was correct and
+    # every gate stayed green.
+    var bad_scan: i64 = 0
+    n = 1
+    while n <= 200:
+        var sb: [u8] = []
+        var i: i64 = 0
+        while i < n:
+            if i % 17 == 16 or i == n - 2:
+                sb.push(13u8)
+            else:
+                sb.push((65 + (i % 26)) as u8)
+            i = i + 1
+        var from: i64 = 0
+        while from <= n:
+            checked = checked + 1
+            if simd_find_byte(sb, from, 13u8) != scalar_find_byte(sb, from, 13u8):
+                bad = bad + 1
+                bad_scan = bad_scan + 1
+            from = from + 7
+        n = n + 1
+
+    print("NATIVE-SIMD checked={checked} mismatches={bad} db={bad_db} mask={bad_mask} cov={bad_cov} scan={bad_scan}")

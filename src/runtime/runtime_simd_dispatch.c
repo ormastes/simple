@@ -2497,14 +2497,26 @@ int64_t rt_simd_find_byte_span(SplArray* bytes, int64_t start, int64_t needle) {
     if (!bytes || start < 0) return -1;
     int64_t len = rt_array_len(bytes);
     if (start >= len) return -1;
-    /* SplArray stores one int64_t slot per element (tagged), NOT packed bytes,
-       so a `[u8]` must be read slot-wise and unboxed — casting the data
-       pointer to uint8_t* reads three bytes of tag for every real byte. */
+    /* A [u8] has TWO representations and this kernel serves both: packed bytes
+       (RT_CORE_ARRAY_FLAG_BYTES) in the native runtime, one tagged int64 slot
+       per element when boxed. The comment that used to sit here asserted the
+       tagged form unconditionally, so in a NATIVE binary this read byte values
+       out of slot-sized strides and never matched anything — measured,
+       `simd_find_byte` returned -1 for every input while the interpreter's
+       Rust twin returned the correct offsets.
+       That is not a slow path or a fallback: `_crlf_from` (http_core.spl:234)
+       is how an HTTP server finds header boundaries, so a natively built
+       server could not locate a single CRLF. Resolve the representation from
+       the array instead of assuming it. */
+    const int packed = rt_array_is_byte_packed(bytes);
+    const uint8_t* bp = (const uint8_t*)(uintptr_t)rt_array_data_ptr(bytes);
     const int64_t* p = (const int64_t*)(uintptr_t)rt_array_data_ptr(bytes);
-    if (!p) return -1;
+    if (!bp || !p) return -1;
     uint32_t target = (uint32_t)(needle & 0xFF);
     for (int64_t i = start; i < len; i++) {
-        if ((engine2d_unbox_pixel(p[i]) & 0xFFu) == target) return i;
+        uint32_t v = packed ? (uint32_t)bp[i]
+                            : (engine2d_unbox_pixel(p[i]) & 0xFFu);
+        if (v == target) return i;
     }
     return -1;
 }
@@ -2514,14 +2526,21 @@ int64_t rt_simd_bytes_equal_span(SplArray* lhs, int64_t lhs_start,
     if (!lhs || !rhs || lhs_start < 0 || rhs_start < 0 || len < 0) return 0;
     if (lhs_start + len > rt_array_len(lhs)) return 0;
     if (rhs_start + len > rt_array_len(rhs)) return 0;
-    /* Slot-wise for the same reason as rt_simd_find_byte_span: memcmp over the
-       raw data pointer would compare tag bytes, not element values. */
+    /* Same two representations as rt_simd_find_byte_span, and each side is
+       resolved independently: nothing requires both arguments to be stored the
+       same way. */
+    const int lhs_packed = rt_array_is_byte_packed(lhs);
+    const int rhs_packed = rt_array_is_byte_packed(rhs);
+    const uint8_t* abp = (const uint8_t*)(uintptr_t)rt_array_data_ptr(lhs);
+    const uint8_t* bbp = (const uint8_t*)(uintptr_t)rt_array_data_ptr(rhs);
     const int64_t* a = (const int64_t*)(uintptr_t)rt_array_data_ptr(lhs);
     const int64_t* b = (const int64_t*)(uintptr_t)rt_array_data_ptr(rhs);
-    if (!a || !b) return 0;
+    if (!a || !b || !abp || !bbp) return 0;
     for (int64_t i = 0; i < len; i++) {
-        uint32_t av = engine2d_unbox_pixel(a[lhs_start + i]) & 0xFFu;
-        uint32_t bv = engine2d_unbox_pixel(b[rhs_start + i]) & 0xFFu;
+        uint32_t av = lhs_packed ? (uint32_t)abp[lhs_start + i]
+                                 : (engine2d_unbox_pixel(a[lhs_start + i]) & 0xFFu);
+        uint32_t bv = rhs_packed ? (uint32_t)bbp[rhs_start + i]
+                                 : (engine2d_unbox_pixel(b[rhs_start + i]) & 0xFFu);
         if (av != bv) return 0;
     }
     return 1;

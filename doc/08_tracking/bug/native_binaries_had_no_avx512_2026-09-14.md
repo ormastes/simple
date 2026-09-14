@@ -363,3 +363,41 @@ that lane are: a codegen failure
 (`BrowserDomEventExecutor.listener_indices_for_target_event`), an incomplete C
 source set (`rt_mmap` reachable only through `runtime.c`), and this runtime
 SEGV.
+
+## The web server could not find a single CRLF natively
+
+Chasing the SEGV above turned up something worse than the SEGV. Bisecting the
+crashing probe showed `chunked_body_end_scan` itself runs fine — so the scanner
+was reachable, and could be compared directly against its scalar twin:
+
+    NATIVE (before)                    INTERPRETER
+    from=0  simd=-1  scalar=5          from=0  simd=5   scalar=5
+    from=6  simd=-1  scalar=20         from=6  simd=20  scalar=20
+    from=24 simd=-1  scalar=38         from=24 simd=38  scalar=38
+
+`simd_find_byte` returned **-1 for every input** in a native binary. Over a
+sweep: 2930 mismatches out of 2986.
+
+Same root cause as the glyph mask blend, in a kernel I had not looked at:
+`rt_simd_find_byte_span` read a `[u8]` as tagged int64 slots. The comment above
+the loop asserted that representation outright — "SplArray stores one int64_t
+slot per element (tagged), NOT packed bytes" — which is true of the boxed
+runtime and false natively, where `[u8]` is `RT_CORE_ARRAY_FLAG_BYTES`.
+
+This is not a slow path or a missed optimization. `_crlf_from`
+(`http_core.spl:234`) is how an HTTP server finds header boundaries, so a
+natively built web server could not locate a single CRLF — while the
+interpreter's Rust twin was correct and every existing gate stayed green.
+
+`rt_simd_bytes_equal_span` had it too, and each side of that comparison is now
+resolved independently: nothing requires both arguments to share a
+representation.
+
+After: **2986 scan comparisons, 0 mismatches**, and the gate covers it —
+`PASS — 9274 value(s) checked in a native binary, 90 zmm present`.
+
+That makes three kernels found with the same defect (glyph mask, byte find,
+bytes equal) and one representational sibling (signed coverage). The pattern is
+worth naming: every one of them assumed a single element representation,
+compiled cleanly under both, and was verified only through the interpreter —
+which uses the other implementation entirely.
