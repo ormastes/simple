@@ -94,3 +94,49 @@ Remaining: in JIT, any handler family reached through
 Fix the seed JIT so p6, p13 and p9 exit 0. Then the function-local `use`s in
 `main_dispatch` can stay as they are, and the two hoists above may return to
 function-local if lazy loading is worth it.
+
+## Root cause — FIXED 2026-09-14
+
+Same root as `seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md`
+(confirmed, not just suspected): a function reached only through a
+function-local `use` still lowers to a direct call on a cross-module Simple
+function symbol. `src/compiler_rust/compiler/src/codegen/jit.rs`'s
+`dlsym_resolves` — the Windows half of the JIT's unresolved-import guard
+(`first_unresolved_import_called` -> `jit_import_resolves` ->
+`dlsym_resolves`) — unconditionally answered `true` on Windows, so the guard
+could never detect that `char_from_code` (p6), or any symbol reached the same
+way, resolves to neither a registered runtime symbol nor a real process/CRT
+export. `compile_module` finalized it anyway, cranelift-jit bound the import's
+GOT slot to NULL, and the first call SIGSEGVs with nothing on stderr.
+
+Fix: `dlsym_resolves` on Windows now genuinely probes via `GetProcAddress`
+(mirroring `cranelift-jit-0.116.1/src/backend.rs::lookup_with_dlsym`'s own
+Windows fallback: the running executable image, then `ucrtbase.dll`), instead
+of assuming every name resolves. Regression coverage: two new tests in
+`jit_tests.rs`, `dlsym_resolves_rejects_a_nonexistent_symbol_on_windows` and
+`test_jit_unresolved_extern_call_refuses_to_finalize_instead_of_null_jumping`.
+
+Re-ran this doc's p6 repro on the rebuilt binary
+(`C:/tool-jit/target/release/simple.exe`, sha256
+`e28df9022d3e97c13b6a55e7571195d8422e3df0733b03274fdbbb4a6792d263`):
+
+```
+SIMPLE_RUST_SEED_WARNING=0 simple.exe run repro_b_p6.spl
+[jit-fallback] unresolved external symbol 'char_from_code': whole module
+dropped to the interpreter (expect ~100-1000x slowdown). Set
+SIMPLE_JIT_STRICT=1 to turn this into a hard error.
+p6 before
+p6 after A              (rc=0)
+```
+
+Now loudly de-JITs instead of silently SIGSEGVing. The de-JIT is still
+correct-but-slow (interpreter fallback for the whole module), so the source-side
+avoidances in this doc (hoisting hot-path `use`s to module level) remain worth
+keeping where the measured interpreter-startup cost allows it — this fix
+removes the crash, not the fallback's performance cost. `bin/simple run
+src/app/mcp/main.spl` still needs an end-to-end `tools/call` re-check on this
+binary to confirm the crash class named in "Symptom" above is gone; not yet
+independently re-verified in this pass beyond the p6/p9-shape unit repro.
+
+**Status: FIXED** (crash), pending PR landing. Performance of the JIT
+fallback path for `main_dispatch` is a separate, pre-existing concern.
