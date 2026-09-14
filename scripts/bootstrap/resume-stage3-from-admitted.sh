@@ -609,6 +609,24 @@ case "${SIMPLE_STAGE3_MISSION_CRITICAL:-}" in
   1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
   *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
 esac
+# One-time SCV compile-event-journal cold init for the Stage 3 recompile.
+# OPT-IN, same shape as stage3_mc_env above.  The compiler's own admission
+# (src/app/compiler_entrypoint/inventory_events.spl:207) fails closed on a
+# checkout with no event cursor and PRESCRIBES
+# `SIMPLE_SCV_INVENTORY_COLD_INIT=1` -- but the Stage 3 child runs under
+# `env -i`, so an outer export never reached it and the prescribed remedy was
+# unreachable (2026-09-14, F74 Stage 3 runs 3 and 4: identical
+# `SCV-E-ADMISSION: compile-event-journal-missing` with the variable set).
+# This is an explicit, single-variable pass-through -- NOT a blanket env leak:
+# the value is validated to be exactly `1` and is baked into BOTH the args
+# hash and the transcribed invocation, so unset reproduces the pinned argv
+# byte-for-byte and an existing admission receipt is unaffected.
+stage3_cold_init_env=
+case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
+  '') ;;
+  1) stage3_cold_init_env="SIMPLE_SCV_INVENTORY_COLD_INIT=1" ;;
+  *) echo "error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1" >&2; exit 1 ;;
+esac
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -619,7 +637,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
-  ${stage3_mc_env} \
+  ${stage3_mc_env} ${stage3_cold_init_env} \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$progress" \
   "SIMPLE_COMPILER_PHASE_PROFILE=1" \
   "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$phase_profile" \
@@ -649,6 +667,7 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_FRONTEND_CACHE=0 \
   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_NATIVE_ARENA_DECLS=1 \
   SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_PACKAGE_INDEX_COLD_INIT=1 ${stage3_mc_env} \
+  ${stage3_cold_init_env} \
   SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
   SIMPLE_COMPILER_PHASE_PROFILE=1 \
   SIMPLE_COMPILER_PHASE_PROFILE_FILE="$phase_profile" \
