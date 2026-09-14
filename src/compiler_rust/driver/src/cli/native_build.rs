@@ -842,6 +842,108 @@ fn elf64_code_census(buf: &[u8]) -> Option<(usize, u64, bool)> {
     Some((func_syms, text_bytes, saw_symtab))
 }
 
+/// Counts bytes in executable/code sections of a PE/COFF image.
+///
+/// Linked PE files normally omit the COFF symbol table, so `STT_FUNC`-style
+/// counting is not available. The corresponding fail-closed invariant is that
+/// at least one section marked `IMAGE_SCN_CNT_CODE` or
+/// `IMAGE_SCN_MEM_EXECUTE` contains bytes. A recognised but malformed PE is
+/// reported as zero code rather than falling through to the generic
+/// non-empty-file acceptance path.
+fn pe_code_census(buf: &[u8]) -> Option<(usize, u64, bool)> {
+    if buf.get(0..2) != Some(b"MZ") {
+        return None;
+    }
+    let invalid = || Some((0, 0, true));
+    let pe_off = match rd_u32(buf, 0x3c) {
+        Some(v) => v as usize,
+        None => return invalid(),
+    };
+    if buf.get(pe_off..pe_off.saturating_add(4)) != Some(b"PE\0\0") {
+        return invalid();
+    }
+    let sections = match rd_u16(buf, pe_off + 6) {
+        Some(v) => v as usize,
+        None => return invalid(),
+    };
+    let symbol_table = match rd_u32(buf, pe_off + 12) {
+        Some(v) => v as usize,
+        None => return invalid(),
+    };
+    let symbol_count = match rd_u32(buf, pe_off + 16) {
+        Some(v) => v as usize,
+        None => return invalid(),
+    };
+    let optional_size = match rd_u16(buf, pe_off + 20) {
+        Some(v) => v as usize,
+        None => return invalid(),
+    };
+    let table = match pe_off.checked_add(24).and_then(|v| v.checked_add(optional_size)) {
+        Some(v) => v,
+        None => return invalid(),
+    };
+    let mut code_bytes = 0u64;
+    for index in 0..sections {
+        let off = match index.checked_mul(40).and_then(|v| table.checked_add(v)) {
+            Some(v) => v,
+            None => return invalid(),
+        };
+        let virtual_size = match rd_u32(buf, off + 8) {
+            Some(v) => v as u64,
+            None => return invalid(),
+        };
+        let raw_size = match rd_u32(buf, off + 16) {
+            Some(v) => v as u64,
+            None => return invalid(),
+        };
+        let characteristics = match rd_u32(buf, off + 36) {
+            Some(v) => v,
+            None => return invalid(),
+        };
+        const IMAGE_SCN_CNT_CODE: u32 = 0x0000_0020;
+        const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+        if characteristics & (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE) != 0 {
+            code_bytes = code_bytes.saturating_add(virtual_size.max(raw_size));
+        }
+    }
+    // A linked PE may retain a COFF symbol table. When it does, use its
+    // derived-function type exactly as ELF uses STT_FUNC; generated linker
+    // thunks can make `.text` non-empty even when the input defined no
+    // function, which is the false-green fixture this gate must reject.
+    let saw_symtab = symbol_table != 0 && symbol_count != 0;
+    let mut functions = 0usize;
+    if saw_symtab {
+        let mut index = 0usize;
+        while index < symbol_count {
+            let off = match index.checked_mul(18).and_then(|v| symbol_table.checked_add(v)) {
+                Some(v) => v,
+                None => return invalid(),
+            };
+            let section = match rd_u16(buf, off + 12) {
+                Some(v) => v,
+                None => return invalid(),
+            };
+            let symbol_type = match rd_u16(buf, off + 14) {
+                Some(v) => v,
+                None => return invalid(),
+            };
+            let aux = match buf.get(off + 17) {
+                Some(v) => *v as usize,
+                None => return invalid(),
+            };
+            // IMAGE_SYM_DTYPE_FUNCTION occupies the first derived-type field.
+            if section != 0 && symbol_type & 0x20 != 0 {
+                functions += 1;
+            }
+            index = match index.checked_add(1 + aux) {
+                Some(v) => v,
+                None => return invalid(),
+            };
+        }
+    }
+    Some((functions, code_bytes, saw_symtab))
+}
+
 /// Fail-closed check that a declared build artifact actually exists and is
 /// non-trivial. Never mutates or creates the artifact.
 /// `not_older_than`: when `Some(t)`, the artifact must have been written at
@@ -900,8 +1002,17 @@ pub(crate) fn verify_emitted_artifact(
             ))
         }
     };
+    if let Some((functions, code_bytes, saw_symtab)) = pe_code_census(&buf) {
+        if (saw_symtab && functions == 0) || code_bytes == 0 {
+            return ArtifactVerdict::Reject(format!(
+                "declared output '{}' is a PE/COFF image with {} defined function symbols and {} executable code bytes -- no function was emitted",
+                path.display(), functions, code_bytes
+            ));
+        }
+        return ArtifactVerdict::Ok;
+    }
     match elf64_code_census(&buf) {
-        // Not an ELF64 LE image (archive, wasm, mach-o, ELF32): the only claim
+        // Not a PE/COFF or ELF64 LE image (archive, wasm, mach-o, ELF32): the only claim
         // we can make is non-emptiness, already established above.
         None => ArtifactVerdict::Ok,
         Some((funcs, text_bytes, saw_symtab)) => {
@@ -964,15 +1075,16 @@ mod tests {
     }
 
     #[test]
-    fn accepts_real_binary_and_rejects_functionless_elf() {
+    fn accepts_real_binary_and_rejects_functionless_native_image() {
         let d = fixture_dir();
-        // Positive control: the test binary itself is a real ELF with
-        // functions, so no toolchain invocation is needed for this half.
+        // Positive control: the test binary itself is a real native image with
+        // executable code, so no toolchain invocation is needed for this half.
         let me = std::env::current_exe().unwrap();
         assert_eq!(verify_emitted_artifact(&me, None), ArtifactVerdict::Ok);
 
-        // Negative control: an ELF64 with a symtab and zero defined FUNC
-        // symbols -- the shape the incident produced.
+        // Negative control: a host-native ELF/PE image containing only data.
+        // ELF rejects its zero defined FUNC symbols; PE rejects its zero
+        // executable code bytes.
         let asm = d.join("nofunc.s");
         std::fs::write(&asm, ".section .data\n.globl datum\ndatum: .quad 42\n").unwrap();
         let obj = d.join("nofunc.o");
@@ -998,9 +1110,13 @@ mod tests {
         }
         match verify_emitted_artifact(&out, None) {
             ArtifactVerdict::Reject(why) => {
-                assert!(why.contains("FUNC"), "unexpected reason: {}", why)
+                assert!(
+                    why.contains("FUNC") || why.contains("executable code"),
+                    "unexpected reason: {}",
+                    why
+                )
             }
-            ArtifactVerdict::Ok => panic!("0-FUNC ELF was accepted -- the false green is back"),
+            ArtifactVerdict::Ok => panic!("functionless native image was accepted -- the false green is back"),
         }
     }
 
