@@ -680,6 +680,23 @@ fn driver_native_nonempty_failure_detail(detail: text) -> text:
         + "compile error' line above for the real reason); tracked in "
         + "doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md"
 
+# Decide what a scheduled native module unit that reached the end of the compile
+# phase with no object and no recorded failure should be reported AS.
+#
+# Returns "" when NOT_RUN is the truthful verdict (the compile phase did not
+# reach every unit it scheduled), else the failure detail to record -- the unit
+# WAS dispatched, so "never started (build ended first)" would be false
+# attribution. Split out of the post-process loop so the distinction is
+# specifiable on its own; the loop applies it, it does not re-derive it.
+pub fn driver_native_attempted_unit_failure_detail_v1(
+    attempted: i64, scheduled: i64, capsule_ok: bool, capsule_reason: text
+) -> text:
+    if attempted < scheduled:
+        return ""
+    driver_native_nonempty_failure_detail(
+        "compiled unit has no usable capsule result: "
+            + if capsule_ok: capsule_reason else: "capsule-unavailable:{capsule_reason}")
+
 fn driver_native_record_module_failure(outcomes: BuildOutcomeSet, unit_id: i64,
                                        name: text, detail: text):
     # Emit the detail HERE, at the moment it is known, in addition to storing
@@ -1886,12 +1903,21 @@ impl CompilerDriver:
                 frozen_module_witnesses, frozen_module_witness_reasons)
             if not capsules.ok:
                 return CompileResult.CodegenError(capsules.reason)
+            # How many of the scheduled units the compile phase actually
+            # ATTEMPTED. The post-process loop below needs this to tell
+            # "never started" apart from "started, produced an object, and
+            # then failed its capsule re-check" -- reporting the second as
+            # NOT_RUN is false attribution and cost a Stage-2 lane ~90 min
+            # per occurrence with nothing naming the real invariant. See
+            # doc/08_tracking/bug/stage2_receiver_probe_module_path_naming_not_run_2026-09-14.md
+            var module_units_attempted = 0
             if uncached_names.len() == 1:
                 val name = uncached_names[0]
                 val direct_result = _compile_frozen_module_capsule(capsules,
                     effective_backend, native_target, is_release,
                     driver_opt_level, provider_receipt_hash, backend_session,
                     name)
+                module_units_attempted = 1
                 match direct_result:
                     case Ok(obj_path):
                         val collect_error = driver_native_collect_capsule_result_v1(
@@ -1973,6 +1999,12 @@ impl CompilerDriver:
                     _1))
                 cache_miss_count = cache_miss_count + build_result.stats.completed
                     + build_result.stats.failed
+                # The builder's OWN ledger of what it dispatched. Every unit it
+                # completed or failed was attempted; anything short of
+                # `uncached_names.len()` is the only case in which a unit here
+                # can honestly be called NOT_RUN.
+                module_units_attempted = build_result.stats.completed
+                    + build_result.stats.failed
 
                 if not build_result.success:
                     # ParallelBuilder already accumulates EVERY unit's error; the
@@ -1997,7 +2029,17 @@ impl CompilerDriver:
             for name in uncached_names:
                 val capsule = frozen_native_capsule_batch_find_v1(capsules, name)
                 val obj_path = if capsule.ok: capsule.object_path else: ""
-                if capsule.ok and driver_native_capsule_result_valid_v1(capsule):
+                # Evaluate the receipt invariant EXACTLY ONCE per unit. Deciding
+                # with `..._valid_v1` and then re-deriving the reason with
+                # `..._reason_v1` reads the same mutable state twice: if it
+                # differs between the two reads -- the very instability this
+                # branch exists to report -- the recorded reason comes back
+                # empty and the diagnosis is lost again. One read, one verdict.
+                val capsule_reason = if capsule.ok:
+                    driver_native_capsule_result_reason_v1(capsule)
+                else:
+                    capsule.reason
+                if capsule.ok and capsule_reason == "":
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
                     if ctx.demand_scc_publication != nil:
@@ -2025,14 +2067,36 @@ impl CompilerDriver:
                     module_outcomes.record(
                         BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                 elif not module_outcomes.has_path(name):
-                    # No object and no already-recorded failure: this unit was
-                    # never actually attempted (a dependency skip, or the phase
-                    # ended first). NOT_RUN is stated explicitly — silent absence
-                    # is forbidden (R3). Nothing is pushed to object_files, so no
-                    # artifact is ever fabricated for it (R4).
+                    # No object and no already-recorded failure. Two DIFFERENT
+                    # things used to land here and both were reported as
+                    # NOT_RUN "never started (build ended first)":
+                    #
+                    #   (a) the compile phase genuinely never reached this unit;
+                    #   (b) the compile phase DID run it -- its own collection
+                    #       checkpoint accepted the capsule, `0 failed` -- and
+                    #       the re-check on this line then rejected it.
+                    #
+                    # (b) is not a scheduling outcome and saying "never started"
+                    # about it is false attribution: the Stage-2 receiver probe
+                    # resolved `llc` once per module (so both ran) and still
+                    # reported `1 ok, 1 not run`, with the ONE diagnosable fact
+                    # -- the capsule reason, already computed here -- discarded.
+                    # Distinguish them by the builder's own dispatch ledger and
+                    # fail closed NAMING the invariant in case (b). Nothing is
+                    # relaxed: both still fail the build, and nothing is pushed
+                    # to object_files, so no artifact is fabricated (R4).
                     module_unit_id = module_unit_id + 1
-                    module_outcomes.record(
-                        BuildUnitOutcome.not_run(module_unit_id, name))
+                    val attempted_detail =
+                        driver_native_attempted_unit_failure_detail_v1(
+                            module_units_attempted, uncached_names.len(),
+                            capsule.ok, capsule_reason)
+                    if attempted_detail != "":
+                        driver_native_record_module_failure(module_outcomes,
+                            module_unit_id, name, attempted_detail)
+                    else:
+                        # Stated explicitly — silent absence is forbidden (R3).
+                        module_outcomes.record(
+                            BuildUnitOutcome.not_run(module_unit_id, name))
             # Evict MIR for compiled modules in low-memory mode
             if low_memory:
                 for name in uncached_names:
