@@ -33,37 +33,41 @@ fn occurrence_count(haystack: text, needle: text) -> i64:
     count
 
 describe "Tiered JIT source predicate hoisting":
-    it "computes each shared predicate once inside the eligibility guard":
-        step("Read only the backend fact builder")
+    it "runs exactly one indexed source scan inside the eligibility guard [importance=critical; importance_weight=3]":
+        step("Read only the private scanner and fact builder")
         val source = file_read(TIERED_JIT_SOURCE)
-        val body = function_body(
-            source, "jit_hotspot_backend_plugin_facts(", "jit_hotspot_rebuild_choice(")
+        val scanner = function_body(
+            source, "_jit_hotspot_source_scan(", "_jit_hotspot_backend_plugin_fact_build(")
+        val build = function_body(
+            source, "_jit_hotspot_backend_plugin_fact_build(", "jit_hotspot_backend_plugin_facts(")
 
         step("Pin one computation and its placement after eligibility")
-        val guard = body.find("if profile.typed_mir and profile.safe_deopt:")
-        val loop = body.find("val has_loop =")
-        val indexed = body.find("val has_indexed_access =")
-        val advance = body.find("val advances_index =")
-        val first_fact = body.find("facts = facts.push(\"loop_preheader\")")
+        val guard = build.find("if profile.typed_mir and profile.safe_deopt:")
+        val scan = build.find("_jit_hotspot_source_scan(profile.source)")
         expect(guard).to_be_greater_than(-1)
-        expect(loop).to_be_greater_than(guard)
-        expect(indexed).to_be_greater_than(loop)
-        expect(advance).to_be_greater_than(indexed)
-        expect(first_fact).to_be_greater_than(advance)
-        expect(occurrence_count(body, "val has_loop =")).to_equal(1)
-        expect(occurrence_count(body, "val has_indexed_access =")).to_equal(1)
-        expect(occurrence_count(body, "val advances_index =")).to_equal(1)
+        expect(scan).to_be_greater_than(guard)
+        expect(occurrence_count(build, "_jit_hotspot_source_scan(profile.source)")).to_equal(1)
+        expect(occurrence_count(scanner, "while ")).to_equal(1)
+        expect(scanner.contains("source.contains(")).to_equal(false)
+        expect(build.contains("source.contains(")).to_equal(false)
 
-    it "routes shared consumers through internal variants":
-        step("Inspect the backend fact builder call sites")
+    it "routes the public fact adapter through the private build exactly once [importance=high; importance_weight=2]":
+        step("Inspect the public backend fact adapter")
         val source = file_read(TIERED_JIT_SOURCE)
         val body = function_body(
             source, "jit_hotspot_backend_plugin_facts(", "jit_hotspot_rebuild_choice(")
 
-        step("Require every shared consumer and exclude rescanning wrappers")
-        expect(occurrence_count(body, "_with_shared(")).to_equal(5)
-        expect(body.contains("jit_hotspot_source_has_small_fixed_trip_loop(profile.source)")).to_equal(false)
-        expect(body.contains("jit_hotspot_source_has_vectorization_candidate(profile.source)")).to_equal(false)
-        expect(body.contains("jit_hotspot_source_has_range_facts(profile.source)")).to_equal(false)
-        expect(body.contains("jit_hotspot_source_has_bounded_byte_scan(profile.source)")).to_equal(false)
-        expect(body.contains("jit_hotspot_source_has_checksum_reducer(profile.source)")).to_equal(false)
+        step("Require one private build call and a value-returned fact vector")
+        expect(occurrence_count(body, "_jit_hotspot_backend_plugin_fact_build(")).to_equal(1)
+        expect(body.contains(".facts")).to_equal(true)
+
+    it "does not retain the old rescanning helper family [importance=high; importance_weight=2]":
+        step("Inspect the complete tiered-JIT source region")
+        val source = file_read(TIERED_JIT_SOURCE)
+        step("Reject shared wrappers and direct source rescans")
+        expect(source.contains("_with_shared(")).to_equal(false)
+        expect(source.contains("fn jit_hotspot_source_has_bounded_byte_scan(")).to_equal(false)
+        expect(source.contains("fn jit_hotspot_source_has_checksum_reducer(")).to_equal(false)
+        expect(source.contains("fn jit_hotspot_source_has_small_fixed_trip_loop(")).to_equal(false)
+        expect(source.contains("fn jit_hotspot_source_has_vectorization_candidate(")).to_equal(false)
+        expect(source.contains("fn jit_hotspot_source_has_range_facts(")).to_equal(false)

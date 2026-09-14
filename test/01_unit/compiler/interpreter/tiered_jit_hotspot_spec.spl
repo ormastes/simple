@@ -23,7 +23,8 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_specialization_provider_from_analysis,
     jit_hotspot_specialization_provider_from_profile_analysis,
     jit_hotspot_consume_plan_with_provider,
-    jit_hotspot_compile_decision_allows_compile
+    jit_hotspot_compile_decision_allows_compile,
+    _jit_hotspot_backend_plugin_fact_build
 }
 use compiler.mir_opt.mir_opt.mod.{OptLevel, optimizationpipeline_backend_plan_for_budget}
 use compiler.mir_opt.general_patterns.{backend_optimization_plan_for_budget_with_facts}
@@ -198,6 +199,52 @@ fn hot_checksum_profile(call_count: i64) -> FunctionProfile:
 
 fn hotspot_config() -> TieredJitConfig:
     TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
+
+fn hot_profile_with_source(
+    call_count: i64,
+    source: text,
+    typed_mir: bool,
+    safe_deopt: bool
+) -> FunctionProfile:
+    FunctionProfile(
+        name: "hot_fixture",
+        call_count: call_count,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: source,
+        typed_mir: typed_mir,
+        safe_deopt: safe_deopt,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+
+fn expected_backend_plugin_facts(backend_name: text, lexical_facts: [text]) -> [text]:
+    var expected: [text] = [
+        "profile.hot_count",
+        "typed_mir",
+        "safe_deopt",
+        "borrow.reassign_safe"
+    ]
+    for fact in lexical_facts:
+        expected = expected.push(fact)
+    if backend_name == "llvm":
+        expected = expected.push("llvm_backend_available")
+    elif backend_name == "cranelift":
+        expected = expected.push("cranelift_backend_available")
+    expected
+
+fn expect_exact_plugin_facts(actual: [text], expected: [text]):
+    expect(actual).to_equal(expected)
+
+fn expect_exact_plugin_decisions(actual, expected_names: [text], expected_reasons: [text]):
+    expect(actual.len()).to_equal(expected_names.len())
+    expect(actual.len()).to_equal(expected_reasons.len())
+    var i: i64 = 0
+    while i < actual.len():
+        expect(actual[i].stable_name).to_equal(expected_names[i])
+        expect(actual[i].reason).to_equal(expected_reasons[i])
+        i = i + 1
 
 describe "Tiered JIT hotspot facts":
     it "does not emit profile.hot_count below threshold":
@@ -783,3 +830,124 @@ describe "Tiered JIT hotspot facts":
         expect(plan.eligible).to_equal(false)
         expect(decision.compile_source).to_equal(source)
         expect(jit_hotspot_compile_decision_allows_compile(decision)).to_equal(false)
+
+describe "Tiered JIT lexical fact goldens [importance=critical; importance_weight=3]":
+    it "keeps every derived predicate in the frozen HIR fact order [importance=critical; importance_weight=3]":
+        step("Build a hotspot profile with raw lexical candidate text")
+        val source = "fn full(buf: [i64], n: i64) -> i64: var i = 0; var checksum = 0; while i < 4: while i < n: if buf[i] == 0: checksum += buf[i] * 4; else: checksum += 0; i += 1; return checksum + helper(buf[i])"
+        val profile = hot_profile_with_source(256, source, true, true)
+
+        step("Derive plugin facts through the production planner")
+        val build = _jit_hotspot_backend_plugin_fact_build(profile, hotspot_config(), "cranelift")
+
+        step("Compare ordered facts and backend decisions with the pre-index golden")
+        expect_exact_plugin_facts(build.facts, expected_backend_plugin_facts("cranelift", [
+            "loop_preheader",
+            "loop_canonical",
+            "loop_trip_count",
+            "unroll_budget",
+            "predication_candidate",
+            "predicate_safe",
+            "vectorization_candidate",
+            "range_facts",
+            "strength_reduce_candidate",
+            "induction_safe",
+            "bounded_scan_terminates",
+            "checksum_associative"
+        ]))
+
+    it "recognizes every canonical literal family without changing fact order [importance=critical; importance_weight=3]":
+        step("Build a raw source fixture containing every canonical needle")
+        val source = "# * 2 * 4 * 8 * 16 + 1 += 1 += 2 += 4 += 8 += 16 << < 2 < 3 < 4 < 8 < 16 > >> ^= ^ - ? [ ] . .len = 0 while for break return return -1 if else select xor acc = checksum = x < n x < len x < length x < y x > y x == y x != y helper( callee( leaf( inline_target( hot_call("
+        val profile = hot_profile_with_source(256, source, true, true)
+
+        step("Derive one canonical fact vector through the production planner")
+        val build = _jit_hotspot_backend_plugin_fact_build(profile, hotspot_config(), "cranelift")
+
+        step("Compare every literal family's derived facts with the retained golden")
+        expect_exact_plugin_facts(build.facts, expected_backend_plugin_facts("cranelift", [
+            "loop_preheader",
+            "loop_canonical",
+            "loop_trip_count",
+            "unroll_budget",
+            "predication_candidate",
+            "predicate_safe",
+            "range_facts",
+            "strength_reduce_candidate",
+            "induction_safe",
+            "bounded_scan_terminates",
+            "checksum_associative"
+        ]))
+
+    it "preserves raw overlapping, repeated, Unicode, and NUL substrings [importance=high; importance_weight=2]":
+        step("Build a hotspot profile with overlapping raw needles")
+        val source = "# λ\u0000 while while [x] [x] += 1 += 1 return -1"
+        val profile = hot_profile_with_source(256, source, true, true)
+
+        step("Derive facts without lexing away comments or control bytes")
+        val build = _jit_hotspot_backend_plugin_fact_build(profile, hotspot_config(), "cranelift")
+
+        step("Compare raw-substring facts with the legacy semantic golden")
+        expect_exact_plugin_facts(build.facts, expected_backend_plugin_facts("cranelift", [
+            "loop_preheader",
+            "bounded_scan_terminates"
+        ]))
+
+    it "keeps existing fixed-trip, byte-scan, checksum, and direct-call fixtures equivalent [importance=high; importance_weight=2]":
+        step("Build the existing hotspot fixture profiles")
+        val fixed = _jit_hotspot_backend_plugin_fact_build(hot_fixed_trip_loop_profile(256), hotspot_config(), "cranelift")
+        val scan = _jit_hotspot_backend_plugin_fact_build(hot_byte_scan_profile(256), hotspot_config(), "cranelift")
+        val checksum = _jit_hotspot_backend_plugin_fact_build(hot_checksum_profile(256), hotspot_config(), "cranelift")
+        val direct = _jit_hotspot_backend_plugin_fact_build(hot_direct_call_profile(256), hotspot_config(), "cranelift")
+
+        step("Compare each fixture's complete ordered fact vector")
+        expect_exact_plugin_facts(fixed.facts, expected_backend_plugin_facts("cranelift", [
+            "loop_preheader", "loop_canonical", "loop_trip_count", "unroll_budget"
+        ]))
+        expect_exact_plugin_facts(scan.facts, expected_backend_plugin_facts("cranelift", [
+            "loop_preheader", "bounded_scan_terminates"
+        ]))
+        expect_exact_plugin_facts(checksum.facts, expected_backend_plugin_facts("cranelift", [
+            "loop_preheader", "bounded_scan_terminates", "checksum_associative"
+        ]))
+        expect_exact_plugin_facts(direct.facts, expected_backend_plugin_facts("cranelift", [
+            "profile.hot_call", "inline_budget"
+        ]))
+
+    it "keeps LLVM and Cranelift recommendation order and skip reasons stable [importance=critical; importance_weight=3]":
+        step("Build an eligible profile with every non-backend proof fact")
+        val source = "fn full(buf: [i64], n: i64) -> i64: var i = 0; var checksum = 0; while i < 4: while i < n: if buf[i] == 0: checksum += buf[i] * 4; else: checksum += 0; i += 1; return checksum + helper(buf[i])"
+        val vars = jit_var_optimization_facts(true, 2, true, true, true, true)
+        val profile = FunctionProfile(
+            name: "full_hotspot",
+            call_count: 256,
+            tier: JitTier.Interpreted,
+            compile_time_ms: 0.0,
+            source: source,
+            typed_mir: true,
+            safe_deopt: true,
+            hotspot_specialized_source: "",
+            hotspot_semantic_proof: false,
+            var_facts: vars
+        )
+
+        step("Compare Cranelift's ordered recommendations and skipped decisions")
+        val cranelift = jit_hotspot_optimization_plan(profile, hotspot_config(), true, true, "medium")
+        expect(cranelift.plugin_recommendations).to_equal([
+            "ssa-var-canon", "early-dead-code-prune", "cranelift-local-licm",
+            "simple-loop-unroll", "simple-strength-reduce", "bounds-check-elim",
+            "byte-scan-to-delimiter", "checksum-reducer", "simple-scalar-cleanup"
+        ])
+        expect_exact_plugin_decisions(cranelift.skipped_plugin_recommendations,
+            ["llvm-entry-alloca-shaping", "simple-auto-vectorize", "simple-hot-call-inline", "llvm-default-pipeline"],
+            ["llvm_frontend_alloca_promotion_shape", "cost budget exceeded", "cost budget exceeded", "llvm_default_pipeline_only"])
+
+        step("Compare LLVM's ordered recommendations and skipped decisions")
+        val llvm = jit_hotspot_optimization_plan(profile, hotspot_config(), true, true, "high")
+        expect(llvm.plugin_recommendations).to_equal([
+            "llvm-entry-alloca-shaping", "early-dead-code-prune", "bounds-check-elim",
+            "byte-scan-to-delimiter", "checksum-reducer", "llvm-default-pipeline"
+        ])
+        expect_exact_plugin_decisions(llvm.skipped_plugin_recommendations,
+            ["ssa-var-canon", "cranelift-local-licm", "simple-loop-unroll", "simple-strength-reduce", "simple-scalar-cleanup", "simple-auto-vectorize", "simple-hot-call-inline"],
+            ["llvm_backend_runs_mem2reg_sroa_pipeline", "llvm_default_pipeline_runs_loop_optimizations", "llvm_runs_loop_unroll_pipeline", "llvm_runs_scalar_strength_reduction", "llvm_runs_gvn_and_scalar_cleanup", "llvm_runs_vectorizer_pipeline", "llvm_runs_inliner_pipeline"])
