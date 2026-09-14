@@ -1,0 +1,43 @@
+# @cover src/app/devhub/redaction.spl 100%
+
+use std.spec.step
+
+use app.devhub.redaction.redact_devhub_diagnostic
+
+
+describe "DevHub diagnostic redaction":
+
+    it "masks colon and equals assignments case-insensitively":
+        step("Protect both SDN/config assignment forms")
+        expect(redact_devhub_diagnostic("token: abc123")).to_equal("token: ***")
+        expect(redact_devhub_diagnostic("PASSWORD=hunter2")).to_equal("PASSWORD= ***")
+        expect(redact_devhub_diagnostic("api_key = value")).to_equal("api_key = ***")
+
+    it "masks authorization cookies and custom sensitive headers":
+        step("Protect standard and conventionally named secret-bearing headers")
+        expect(redact_devhub_diagnostic("> Authorization: Bearer abc")).to_equal("> Authorization: ***")
+        expect(redact_devhub_diagnostic("Cookie: sid=abc")).to_equal("Cookie: ***")
+        expect(redact_devhub_diagnostic("X-Api-Key: abc")).to_equal("X-Api-Key: ***")
+        expect(redact_devhub_diagnostic("x-auth-token: abc")).to_equal("x-auth-token: ***")
+
+    it "masks URL userinfo and sensitive query values":
+        step("Remove credentials from verbose request URLs")
+        val raw = "GET https://alice:pw@example.com/api?token=abc&space=ENG&client_secret=def#part"
+        val safe = "GET https://***@example.com/api?token=***&space=ENG&client_secret=***#part"
+        expect(redact_devhub_diagnostic(raw)).to_equal(safe)
+
+    it "preserves ordinary text and non-sensitive headers":
+        step("Avoid masking prose merely containing key-like substrings")
+        expect(redact_devhub_diagnostic("monkey business is ordinary")).to_equal("monkey business is ordinary")
+        expect(redact_devhub_diagnostic("X-Classification: restricted")).to_equal("X-Classification: restricted")
+        expect(redact_devhub_diagnostic("https://example.com/api?space=ENG&limit=5")).to_equal("https://example.com/api?space=ENG&limit=5")
+
+    it "masks a JSON secret without discarding following ordinary fields":
+        step("Redact request bodies while retaining useful non-secret diagnostics")
+        expect(redact_devhub_diagnostic("{\"token\": \"abc\", \"space\": \"ENG\"}")).to_equal("{\"token\": ***, \"space\": \"ENG\"}")
+
+    it "masks every secret in a complete auth SDN document":
+        step("Continue past provider sections and accept either assignment separator")
+        val auth = "confluence:\n    token: first-secret\njira:\n    password=second-secret"
+        val safe = "confluence:\n    token: ***\njira:\n    password= ***"
+        expect(redact_devhub_diagnostic(auth)).to_equal(safe)

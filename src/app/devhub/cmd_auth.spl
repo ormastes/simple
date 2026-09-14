@@ -5,9 +5,9 @@
 
 use app.devhub.config.{ItfConfig, load_config, save_config, load_auth_token, save_auth_token, config_dir}
 use app.devhub.auth.{check_confluence_auth, check_jira_auth}
-use app.devhub.atlassian_site.{ATLASSIAN_AUTH_BASIC, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth}
+use app.devhub.atlassian_site.{ATLASSIAN_AUTH_BASIC, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_deployment_warning}
 use app.devhub.flags.{_extract_flag, _has_flag}
-use app.devhub.output.{print_error, print_success, print_info, should_use_color}
+use app.devhub.output.{print_error, print_success, print_info, print_warning, should_use_color}
 use app.ui.render.ansi.{ansi_green, ansi_red, ansi_bold, ansi_reset}
 use std.nogc_sync_mut.file_system.file_ops.{file_exists, file_write_text, file_read_text}
 use std.nogc_sync_mut.io.process_ops.{process_run}
@@ -90,6 +90,9 @@ fn _login_confluence(args: [text]) -> i64:
         confluence_url: url,
         confluence_user: new_user,
         confluence_default_space: config.confluence_default_space,
+        confluence_target: config.confluence_target,
+        confluence_gateway_url: config.confluence_gateway_url,
+        confluence_headers: config.confluence_headers,
         jira_url: config.jira_url,
         jira_acli_path: config.jira_acli_path,
         jira_email: config.jira_email,
@@ -166,6 +169,9 @@ fn _login_jira(args: [text]) -> i64:
             confluence_url: config.confluence_url,
             confluence_user: config.confluence_user,
             confluence_default_space: config.confluence_default_space,
+            confluence_target: config.confluence_target,
+            confluence_gateway_url: config.confluence_gateway_url,
+            confluence_headers: config.confluence_headers,
             jira_url: url,
             jira_acli_path: config.jira_acli_path,
             jira_email: new_email,
@@ -220,6 +226,7 @@ fn _auth_status(args: [text]) -> i64:
     """Show authentication status for all providers."""
     val config = load_config()
     val use_color = should_use_color()
+    val quiet = _has_flag(args, "--quiet") or _has_flag(args, "--silent")
 
     print "Authentication status:"
     print ""
@@ -240,6 +247,9 @@ fn _auth_status(args: [text]) -> i64:
     if conf_ok:
         print "    URL:  {config.confluence_url}"
         print "    User: {config.confluence_user}"
+        val warning = atlassian_deployment_warning("Confluence", config.confluence_url, config.confluence_deployment, quiet)
+        if warning != "":
+            print_warning(warning)
 
     print ""
 
@@ -259,6 +269,9 @@ fn _auth_status(args: [text]) -> i64:
     if jira_ok:
         print "    URL:  {config.jira_url}"
         print "    CLI:  {config.jira_acli_path}"
+        val warning = atlassian_deployment_warning("Jira", config.jira_url, config.jira_deployment, quiet)
+        if warning != "":
+            print_warning(warning)
 
     0
 
@@ -318,3 +331,4 @@ fn _print_auth_help():
     print "  --deployment D cloud (default) | datacenter"
     print "  --auth A       basic (default) | bearer"
     print "  --acli         Jira: force the acli --web login even if a token is configured"
+    print "  --quiet, --silent  Suppress deployment-shape warnings from auth status"
