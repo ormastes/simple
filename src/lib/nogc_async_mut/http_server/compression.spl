@@ -30,7 +30,7 @@ use std.common.compress.zstd.{zstd_compress_frame}
 use std.common.compress.lz4.{lz4_compress_frame}
 use std.common.compress.gzip.{gzip_compress}
 use std.common.compress.brotli.{brotli_compress}
-use std.common.compress.deflate.{deflate_compress_sync_flush}
+use std.nogc_sync_mut.compression.zlib.{zlib_compress}
 use std.http_server.types.{HttpRequestData, HttpResponseData, ServerConfig, Phase, PhaseResult}
 use std.nogc_async_mut.http.accept_encoding.{negotiate_encoding}
 use std.crypto.types.{crypto_text_to_bytes as text_to_bytes}
@@ -74,34 +74,14 @@ fn compress_response_for(resp: HttpResponseData, accept_header: text) -> HttpRes
     val body_bytes = _resp_body_as_bytes(resp)
     if body_bytes.len() < COMPRESSION_MIN_BODY_BYTES:
         return resp
-    # Walk the server preference order and take the FIRST mutually-acceptable
-    # codec that actually produces a smaller body. Trying only the single
-    # top-preference codec left a real interop hole: several encoders here are
-    # container writers that emit a stored/raw frame and therefore never shrink
-    # anything (zstd and brotli today — see
-    # doc/08_tracking/bug/zstd_brotli_encoders_are_stored_only_2026-08-17.md).
-    # A client offering "zstd, lz4" negotiated zstd, zstd came back LARGER than
-    # the input, the size guard correctly refused it, and the response was sent
-    # uncompressed even though lz4 was on offer and compresses the same body
-    # 300 -> 36 bytes. Preference order is unchanged: a codec that does shrink
-    # still wins over every codec below it.
-    var chosen: text = ""
-    var compressed: [u8] = []
-    for candidate in supported_encodings():
-        if chosen.len() == 0 and negotiate_encoding(accept_header, [candidate]).len() > 0:
-            val res = compress_response_body(body_bytes, candidate)
-            if res.is_ok():
-                val value = res.unwrap()
-                # Only use a compressed form that is actually smaller. Never
-                # emit a Content-Encoding header without compressed bytes.
-                if value.len() < body_bytes.len():
-                    chosen = candidate
-                    compressed = value
-    if chosen.len() == 0:
+    val chosen = negotiate_encoding(accept_header, supported_encodings())
+    val compressed_res = compress_response_body(body_bytes, chosen)
+    if compressed_res.is_err():
         return resp
-    val new_headers = _set_content_encoding_with_length(
-        _strip_content_length(resp.headers), chosen, compressed.len()
-    )
+    val compressed = compressed_res.unwrap()
+    if compressed.len() == 0:
+        return resp
+    val new_headers = _set_content_encoding(_strip_content_length(resp.headers), chosen)
     HttpResponseData(
         status: resp.status,
         reason: resp.reason,
@@ -204,6 +184,8 @@ fn _is_compressible_content_type(content_type: text) -> bool:
         return true
     if ct.starts_with("application/xhtml"):
         return true
+    if ct.starts_with("application/octet-stream"):
+        return true
     if ct.contains("svg"):
         return true
     false
@@ -223,16 +205,6 @@ fn _set_content_encoding(headers: [(text, text)], encoding: text) -> [(text, tex
         if h.0.lower() != "content-encoding":
             out.push(h)
     out.push(("Content-Encoding", encoding))
-    out
-
-fn _set_content_encoding_with_length(
-    headers: [(text, text)],
-    encoding: text,
-    compressed_len: i64
-) -> [(text, text)]:
-    """Set Content-Encoding and add updated Content-Length for compressed body."""
-    var out = _set_content_encoding(headers, encoding)
-    out.push(("Content-Length", "{compressed_len}"))
     out
 
 fn _resp_body_as_bytes(resp: HttpResponseData) -> [u8]:
@@ -266,12 +238,11 @@ fn compress_response_body(body: [u8], encoding: text) -> Result<[u8], text>:
             else:
                 Ok(compressed)
         "deflate":
-            val result = deflate_compress_sync_flush(body)
-            match result:
-                Ok(value):
-                    Ok(value)
-                Err(_e):
-                    Err("deflate_compress_sync_flush failed")
+            val compressed = zlib_compress(body)
+            if compressed.len() == 0 and body.len() > 0:
+                Err("zlib_compress returned empty output")
+            else:
+                Ok(compressed)
         "zstd":
             Ok(zstd_compress_frame(body, default_compression_options(CompressionCodec.zstd)))
         "lz4":
@@ -287,4 +258,4 @@ fn compress_response_body(body: [u8], encoding: text) -> Result<[u8], text>:
 # in server-preference order (strongest/most desirable first).
 # Used as input to `negotiate_encoding`.
 pub fn supported_encodings() -> [text]:
-    ["br", "gzip", "deflate", "zstd", "lz4"]
+    ["zstd", "lz4", "gzip", "deflate", "br"]
