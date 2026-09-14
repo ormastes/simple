@@ -220,3 +220,133 @@ correct order is: **version-bump PR to `1.0.1-beta.2` → merge → create the
 immutable `candidate/v1.0.1-beta.2/aNNN` ref at that commit → dispatch
 `candidate.yml` against that ref** with the real convergence-checkpoint inputs.
 Dispatching before the bump wastes a full trip through the queue.
+
+### G. The REAL blocker is one layer deeper, and it is owner-authority, not CI
+
+Section E answers "can a runner start?" (yes). But `candidate.yml`'s
+`qualify-linux` cannot be *legitimately* dispatched at all, because its five
+required `convergence_*` inputs describe an artifact that has never existed.
+
+**G.1 — the receipt producer has never run, not once.**
+The only workflow that builds `convergence-receipt.json` /
+`convergence-receipt.sha256` and uploads it as
+`convergence-receipt-<CANDIDATE_COMMIT>` is
+`.github/workflows/pr-admission.yml` (`name: Protected integration convergence
+admission`; artifact name computed at :76, receipt at ~:671, attested via
+`attest-build-provenance`). `candidate.yml:211` hard-requires
+`test "$RECEIPT_ARTIFACT" = "convergence-receipt-${COMMIT}"`.
+
+```
+gh api /repos/ormastes/simple/actions/workflows/pr-admission.yml/runs --jq .total_count
+-> 0
+```
+
+All five inputs derive from that non-existent run:
+`convergence_run_id` (no run id), `convergence_artifact` (shape known, no
+instance), `convergence_artifact_id` / `convergence_artifact_digest` (assigned
+by GitHub at upload; no upload occurred), `convergence_receipt_sha256`
+(computed inside the producer at :678, echoed only to `GITHUB_OUTPUT`, never
+persisted). No `convergence-receipt.json`/`.sha256` is checked into the tree.
+`candidate.yml` itself has 35 runs: 34 `failure`, 1 the queued probe — zero
+successes. The sibling `release-convergence-checkpoint.yml` is a *different*,
+read-only observer (`release-convergence-checkpoint-<run_id>`, not the receipt)
+and its last 50 scheduled runs through 2026-09-13 18:27Z are all
+`failure`/`cancelled`.
+
+**G.2 — the producer's own preconditions are absent.**
+`pr-admission.yml` is `workflow_dispatch`-only and requires `release_ref`
+(a protected maintenance line `release/X.Y`), `candidate_commit_sha`,
+`integration_pr_number` (an exact *merged* integration PR into that line), and
+`authority_class`.
+
+```
+gh api '/repos/ormastes/simple/branches?per_page=100' --jq '[.[].name]|map(select(startswith("release")))'
+-> []
+```
+
+No `release/*` branch exists, so there is no maintenance line and no merged
+integration PR into one. (The ruleset `spipe-vcs-v3-release-lines` already
+exists to protect such a branch once created.)
+
+**G.3 — the approval path is provably circular (the decisive finding).**
+`pr-admission.yml`'s job runs in
+`environment: ${{ inputs.authority_class == 'owner_attested_actions' &&
+'owner-convergence-admission' || 'protected-integration' }}`.
+
+```
+gh api /repos/ormastes/simple/environments --jq '[.environments[].name]'
+-> ["npm-release","protected-integration","release","self-review-admission"]
+
+gh api /repos/ormastes/simple/environments/protected-integration \
+  --jq '[.protection_rules[]|select(.type=="required_reviewers")|{prevent_self_review,reviewers:[.reviewers[].reviewer.login]}]'
+-> [{"prevent_self_review":true,"reviewers":["ormastes"]}]
+```
+
+- Default lane (`external_broker` → `protected-integration`): the sole required
+  reviewer is `ormastes`, who is also the sole repository owner, and
+  `prevent_self_review` is `true`. The owner therefore **cannot approve their
+  own dispatch**. The guide states this in its own words at
+  `doc/07_guide/infra/software_release.md:323-325`: *"The declared environment
+  reviewer is also the sole repository owner, so GitHub `prevent_self_review`
+  still makes the release-environment path circular."*
+- Fallback lane (`owner_attested_actions` → `owner-convergence-admission`): the
+  guide at :200-203 says that environment *"requires owner ID `2378857` and has
+  `prevent_self_review=false`"* — but **that environment does not exist on the
+  live repository** (see the 4-name list above). Only the source projection
+  `.github/owner-convergence-admission-environment.json` exists, and guide
+  :331-334 is explicit that *"The source projection is not live evidence until
+  the repository policy owner runs that command"*.
+
+So both lanes are closed: one is circular by GitHub's own self-review rule, and
+the one designed to break the circle has never been applied to the repository.
+
+## Unblock — required repository-owner actions (no agent can perform these)
+
+1. Configure the external policy DB secret, then run
+   `scripts/release/github-policy.shs apply-live --yes` as the repository policy
+   owner, and retain its post-apply receipt + projection digest. This is the
+   documented command (guide :326-334) that turns the `.github/*-environment.json`
+   projections into live configuration — including creating the
+   `owner-convergence-admission` environment with `prevent_self_review=false`
+   and owner ID `2378857`, which is what makes the fallback lane usable at all.
+2. Create the protected maintenance line `release/1.0` at the intended target
+   commit (the `spipe-vcs-v3-release-lines` ruleset already covers `release/*`),
+   and land the protected-integration PR into it, recording its exact merged PR
+   number and merge commit SHA.
+3. Dispatch `pr-admission.yml` with `release_ref=release/1.0`, that
+   `candidate_commit_sha` and `integration_pr_number`, and either
+   `authority_class=external_broker` (requires a second human reviewer distinct
+   from the dispatcher — impossible while `ormastes` is the sole owner) or, once
+   step 1 has created the environment, `authority_class=owner_attested_actions`
+   with `owner_attestation=NO-VERIFY:OWNER-PROOF` dispatched from trusted `main`,
+   together with the verifier-unavailability proof the receipt must retain.
+4. Approve the resulting environment deployment gate in the GitHub UI. **This
+   approval must not be performed programmatically by an agent via
+   `actions/runs/<id>/pending_deployments`** — it is the human control the whole
+   admission design rests on.
+
+Only after step 4 produces a *successful* `pr-admission.yml` run do the five
+`convergence_*` values exist, at which point the beta-2 flow can proceed in the
+order established in section F (version bump → merge → immutable candidate ref →
+`candidate.yml` dispatch → `candidate-check` → `promote-check` → `release.yml`).
+
+## Conclusion (supersedes the earlier conclusion above)
+
+Two distinct things were confounded and are now separated:
+
+- **Not a blocker:** the workflow file, Actions being enabled, hosted-runner
+  availability, or Actions minutes. Section D proves a hosted runner executed a
+  job successfully minutes before the probe; section E shows the probe's wait is
+  ordinary queue saturation (90 queued / 4 in progress) that drains on its own.
+- **The blocker:** the convergence-admission chain has never been established —
+  no `release/*` line, no integration PR into one, the receipt producer has zero
+  runs, and both of its approval environments are unusable (one circular under
+  `prevent_self_review`, the other not created on the live repository).
+
+Round 2 therefore made **no** version bump, created **no** candidate ref,
+dispatched **no** real candidate run, and cut **no** tag. `v1.0.1-beta.1` was
+not touched. `bin/simple run src/app/release/main.spl version-check` was run and
+reported `Release version-check: PASS` at `1.0.1-beta.1`, confirming the local
+release tooling is healthy and that the bump itself is a small, deferrable step
+once the chain above is open. Landing the version bump now would leave `main`
+claiming a version that can never be tagged, so it was deliberately not done.
