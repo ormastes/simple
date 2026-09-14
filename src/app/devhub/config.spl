@@ -4,8 +4,9 @@
 # Auth:   ~/.config/itf/auth.sdn
 
 use std.nogc_sync_mut.env.{env_get, env_has}
-use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_exists}
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.io.mod.{file_atomic_write}
 use std.json.{json_parse, json_object_get, json_serialize}
 use app.devhub.errors.{ItfError}
 
@@ -119,10 +120,12 @@ fn load_config_for_target(target: text) -> ItfConfig:
     legacy singleton configuration remains the final fallback."""
     val path = config_path()
     if not file_exists(path):
-        return ItfConfig.default()
+        val empty = ItfConfig.default()
+        return if target != "": _with_confluence_target(empty, target) else: empty
     val content = file_read_text(path)
     if content == nil:
-        return ItfConfig.default()
+        val empty = ItfConfig.default()
+        return if target != "": _with_confluence_target(empty, target) else: empty
     val entries = parse_sdn_sections(content)
     var selected = target
     if selected == "":
@@ -168,13 +171,32 @@ fn _clear_confluence_target(config: ItfConfig) -> ItfConfig:
 
 
 fn confluence_target_from_args(args: [text]) -> text:
-    """Return the `--host`/`--profile` selector; both names are aliases."""
+    """Return the `--host`/`--profile` selector. Invalid, missing, or
+    conflicting selectors return a fail-closed sentinel."""
+    var selected = ""
+    var seen = false
     var i: i64 = 0
     while i < args.len():
-        if (args[i] == "--host" or args[i] == "--profile") and i + 1 < args.len():
-            return args[i + 1]
+        var value = ""
+        var matched = false
+        if args[i] == "--host" or args[i] == "--profile":
+            matched = true
+            if i + 1 < args.len() and not args[i + 1].starts_with("--"):
+                value = args[i + 1]
+                i = i + 1
+        else if args[i].starts_with("--host="):
+            matched = true
+            value = args[i]["--host=".len():]
+        else if args[i].starts_with("--profile="):
+            matched = true
+            value = args[i]["--profile=".len():]
+        if matched:
+            if value == "" or seen:
+                return "__invalid_confluence_selector__"
+            selected = value
+            seen = true
         i = i + 1
-    ""
+    selected
 
 
 fn _with_confluence_target(config: ItfConfig, target: text) -> ItfConfig:
@@ -534,9 +556,51 @@ fn _sdn_kv(key: text, value: text) -> text:
     "    {key}: {value}\n"
 
 
+fn _without_sdn_section(content: text, section_name: text) -> text:
+    var out = ""
+    var skipping = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.ends_with(":") and not trimmed.contains(" "):
+            skipping = trimmed == "{section_name}:"
+        if not skipping:
+            out = out + line + "\n"
+    out
+
+
+fn _named_confluence_blocks(content: text) -> text:
+    var out = ""
+    var keeping = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.ends_with(":") and not trimmed.contains(" "):
+            keeping = trimmed.starts_with("confluence.")
+        if keeping:
+            out = out + line + "\n"
+    out
+
+
+fn save_confluence_target(config: ItfConfig) -> bool:
+    """Update only the selected named Confluence target, preserving siblings."""
+    if config.confluence_target == nil or config.confluence_target == "":
+        return save_config(config)
+    val path = config_path()
+    val existing = if file_exists(path): file_read_text(path) else: ""
+    var content = _without_sdn_section(existing, "confluence.{config.confluence_target}")
+    content = content + "\nconfluence.{config.confluence_target}:\n"
+    content = content + _sdn_kv("url", config.confluence_url) + _sdn_kv("user", config.confluence_user)
+    content = content + _sdn_kv("default_space", config.confluence_default_space)
+    content = content + _sdn_kv("deployment", config.confluence_deployment) + _sdn_kv("auth", config.confluence_auth)
+    content = content + _sdn_kv("gateway_url", config.confluence_gateway_url)
+    for header in config.confluence_headers:
+        content = content + _sdn_kv("header", header)
+    file_atomic_write(path, content)
+
+
 fn save_config(config: ItfConfig) -> bool:
     """Save config to SDN file."""
     val dir = config_dir()
+    val old_content = if file_exists(config_path()): file_read_text(config_path()) else: ""
     var content = "# ITF Configuration\n\nconfluence:\n    url: {config.confluence_url}\n    user: {config.confluence_user}\n    default_space: {config.confluence_default_space}\n\njira:\n    url: {config.jira_url}\n    acli_path: {config.jira_acli_path}\n    email: {config.jira_email}\n\nwiki:\n    default_backend: {config.wiki_default_backend}\n\ntasks:\n    default_backend: {config.tasks_default_backend}\n    jira_done_status: {config.tasks_jira_done_status}\n\noutput:\n    format: {config.default_output}\n    color: {config.color_mode}\n\neditor: {config.editor_override}\npager: {config.pager_override}\n"
     # Atlassian deployment-shape keys are appended only when set, so a config
     # that never used them round-trips byte-identically. (Section headers are
@@ -556,7 +620,20 @@ fn save_config(config: ItfConfig) -> bool:
         content = content + "\ntoken_cmd:\n"
         for pair in config.token_cmds:
             content = content + "    {pair.0}: {pair.1}\n"
-    file_write_text(config_path(), content)
+    if config.token_envs.len() > 0:
+        content = content + "\ntoken_env:\n"
+        for pair in config.token_envs:
+            content = content + "    {pair.0}: {pair.1}\n"
+    if config.git_default_backend != "":
+        content = content + "\ngit:\n" + _sdn_kv("default_backend", config.git_default_backend)
+    val bb_selection = _sdn_kv("workspace", config.bb_workspace) + _sdn_kv("repo", config.bb_repo)
+    if bb_selection != "":
+        content = content + "\nbitbucket:\n" + bb_selection
+    for entry in parse_sdn_sections(old_content):
+        if entry.0 == "confluence" and entry.1 == "default_target":
+            content = content + "\nconfluence:\n" + _sdn_kv("default_target", entry.2)
+    content = content + "\n" + _named_confluence_blocks(old_content)
+    file_atomic_write(config_path(), content)
 
 
 fn load_auth_token(provider: text) -> text:
@@ -599,13 +676,11 @@ fn save_auth_token(provider: text, token: text) -> bool:
     Known providers: confluence, jira, bitbucket, minio, outlook.
     """
     val path = auth_path()
-    val known = ["confluence", "jira", "bitbucket", "minio", "outlook"]
-    var content = "# ITF Auth Tokens (do not share)\n\n"
-    for p in known:
-        val tok = if p == provider: token else: load_auth_token(p)
-        if tok != "":
-            content = content + "{p}:\n    token: \"{tok}\"\n\n"
-    file_write_text(path, content)
+    val existing = if file_exists(path): file_read_text(path) else: "# ITF Auth Tokens (do not share)\n\n"
+    var content = _without_sdn_section(existing, provider)
+    if token != "":
+        content = content + "\n{provider}:\n    token: \"{token}\"\n"
+    file_atomic_write(path, content)
 
 
 fn _token_cmd_for(config: ItfConfig, provider: text) -> text:
