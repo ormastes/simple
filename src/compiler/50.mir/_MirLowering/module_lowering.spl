@@ -440,6 +440,20 @@ impl MirLowering:
         if not symbol_info.?:
             return
         val info = symbol_info.unwrap()
+        # `Option<SymbolInfo>`'s nil case does not survive the staged native
+        # ABI: `symbol_info.?` reads PRESENT for an absent symbol, so `unwrap()`
+        # hands back a nil `info` and the very next field read faults. Measured
+        # 2026-09-14 on the Stage-2 candidate (`aarch64-apple-darwin`, sha
+        # 80911c47f07cdb64...): EXC_BAD_ACCESS code=1 address=0x48 at
+        # `record_external_layout_reference + 204` (`ldr x0, [x26, #0x48]`) for
+        # EVERY program declaring a class with a method -- a nine-line
+        # `class Box: n: i64 / me get()` is enough, and hello-world builds fine.
+        # `mir_struct_symbol_name` below already applies exactly this guard and
+        # documents the same hazard (canonical-minted ids that
+        # `get_symbol_raw` knows nothing about); this call site simply never
+        # did. See doc/08_tracking/bug/stage2_native_method_scoped_dict_field_write_segfaults_2026-09-14.md
+        if info == nil:
+            return
         var owner = mir_layout_canonical_module_name(info.defining_module ?? "")
         var key = "{owner}::{info.name}"
         var owner_count = 0
