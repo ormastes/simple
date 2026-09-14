@@ -1198,16 +1198,33 @@ fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32,
     val glyph_h = 7 * scale
     if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
         return out
+    # `start`/`endv` are BYTE offsets — every caller derives them from the wrap
+    # ranges, which are byte-indexed — but `char_code_at` is CODEPOINT-indexed
+    # in this text API. This loop used one cursor for both, so on any run past
+    # its first non-ASCII codepoint it drew the wrong glyphs and walked off the
+    # end of the run. It needs its own codepoint cursor, exactly like the
+    # byte-advance twin `fb_text_thin_scaled_clip_range_adv` below: a
+    # continuation byte draws nothing and consumes no codepoint, and one flat
+    # advance is charged per CODEPOINT, not per byte.
+    val sb = s.bytes()
+    var ci = 0
+    var k = 0
+    while k < start:
+        if sb[k] < 128 or sb[k] >= 192:
+            ci = ci + 1
+        k = k + 1
     var i = start
     var cx = x
     while i < endv:
         if cx >= fbw or cx >= clip.x1:
             return out
-        val code = s.char_code_at(i)
-        val gi = glyph_index_for_char_code(code)
-        if gi >= 0 and gi != 36:
-            out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
-        cx = cx + if code == 32: space_advance else: advance
+        if sb[i] < 128 or sb[i] >= 192:
+            val code = s.char_code_at(ci)
+            val gi = glyph_index_for_char_code(code)
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+            cx = cx + if code == 32: space_advance else: advance
+            ci = ci + 1
         i = i + 1
     out
 
@@ -1270,12 +1287,22 @@ fn apply_text_transform_for_paint(value: text, transform: text) -> text:
         return out
     value
 
-fn reverse_text_for_paint(value: text) -> text:
+# Reverse by CODEPOINT. `value.len()` is a BYTE count while `char_at` is
+# CODEPOINT-indexed, so counting down from the byte length read past the end of
+# any non-ASCII string and dropped its real characters. Walk forward over the
+# bytes, prepending one whole codepoint at a time — which also guarantees no
+# multi-byte sequence is emitted back-to-front.
+pub fn reverse_text_for_paint(value: text) -> text:
+    val vb = value.bytes()
+    val n = value.len()
     var out = ""
-    var i = value.len()
-    while i > 0:
-        i = i - 1
-        out = out + value.char_at(i)
+    var i = 0
+    while i < n:
+        var j = i + 1
+        while j < n and vb[j] >= 128 and vb[j] < 192:
+            j = j + 1
+        out = value.substring(i, j) + out
+        i = j
     out
 
 fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, italic: bool) -> [u32]:
@@ -1300,16 +1327,29 @@ fn fb_text_sparse_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, 
     var out = fb
     if y >= fbh or y + 7 <= 0:
         return out
+    # Byte range, codepoint glyph lookup — the same mix as
+    # `fb_text_thin_scaled_clip_range`, and fixed the same way: a separate
+    # codepoint cursor, one glyph and one advance per CODEPOINT, nothing at all
+    # on a UTF-8 continuation byte.
+    val sb = s.bytes()
+    var ci = 0
+    var k = 0
+    while k < start:
+        if sb[k] < 128 or sb[k] >= 192:
+            ci = ci + 1
+        k = k + 1
     var i = start
     var cx = x
     while i < endv:
         if cx >= fbw:
             return out
-        if cx < fbw:
-            val gi = glyph_index_for_char_code(s.char_code_at(i))
+        if sb[i] < 128 or sb[i] >= 192:
+            val code = s.char_code_at(ci)
+            val gi = glyph_index_for_char_code(code)
             if gi >= 0 and gi != 36:
                 out = fb_glyph_sparse(out, fbw, fbh, cx, y, gi, color, italic)
-        cx = cx + if s.char_code_at(i) == 32: space_advance else: advance
+            cx = cx + if code == 32: space_advance else: advance
+            ci = ci + 1
         i = i + 1
     out
 

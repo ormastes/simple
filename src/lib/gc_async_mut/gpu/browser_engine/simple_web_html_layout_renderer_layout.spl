@@ -449,16 +449,6 @@ fn style_line_h(st: Style) -> i32:
         return st.resolved_font_line_height
     line_h(st.font_size)
 
-fn resolved_text_range_width(st: Style, start: i32, endv: i32) -> i32:
-    if st.resolved_font_identity == "" or start < 0 or endv > st.resolved_font_advances.len():
-        return -1
-    var width = 0
-    var i = start
-    while i < endv:
-        width = width + st.resolved_font_advances[i]
-        i = i + 1
-    width
-
 # --- ONE advance table, shared by layout and paint -------------------------
 #
 # Round 4 made LAYOUT size an inline run from the resolved per-glyph metrics
@@ -812,16 +802,23 @@ fn _table_text_min_content_width(txt: text, cst: Style) -> i32:
     val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
     var longest = 0
     var cur = 0
+    # `txt.len()` is a BYTE count and `char_at` is CODEPOINT-indexed, so the
+    # old single cursor read past the end of a non-ASCII cell and counted each
+    # multi-byte character several times, over-sizing the column. `cur` counts
+    # CHARACTERS (it is multiplied by a per-glyph width below), so step by
+    # codepoint and test the word break on the BYTE.
+    val tb = txt.bytes()
+    val nb = txt.len()
     var i = 0
-    while i < txt.len():  # cpu-lane-loop-ok: one pass over a cell's text during table column sizing, not on any paint path
-        val ch = txt.char_at(i)
-        if ch == " " or ch == "\t" or ch == "\n":
+    while i < nb:  # cpu-lane-loop-ok: one pass over a cell's text during table column sizing, not on any paint path
+        val b = tb[i]
+        if b == 32 or b == 9 or b == 10:
             cur = 0
         else:
             cur = cur + 1
             if cur > longest:
                 longest = cur
-        i = i + 1
+        i = next_codepoint_start(txt, i)
     longest * ink_w
 
 # Min-content width of a table CELL — the other half of CSS 2.1 §17.5.2.2's
@@ -869,7 +866,7 @@ fn _lay_flex_wrap_auto_base_width_inner(nodes: [HNode], styles: [Style], child_i
 #
 # `resolved_font_advances` carries one advance per CODEPOINT; `txt_len` and
 # every wrap offset in this renderer are BYTE indices. On any non-ASCII run the
-# two disagree, so `resolved_text_range_width` bails to -1 and the flat
+# two disagree, so the old per-codepoint range helper bailed out and the flat
 # per-character estimate was compared against a `node_w` that had already been
 # sized from the REAL measured width. A one-glyph em dash therefore "overflowed"
 # its own box and wrapped to one line per BYTE: measured h=72 (3 lines) for
@@ -883,6 +880,16 @@ fn _lay_style_measured_run_advance_inner(txt: text, txt_len: i32, st: Style) -> 
 
 fn codepoint_is_space(ch: i64) -> bool:
     ch == 32 or ch == 9 or ch == 10 or ch == 13
+
+# True when normal white-space processing would collapse a leading run of
+# white space in this raw text node. BYTE-indexed on purpose: every ASCII
+# white-space byte is its own codepoint, and no UTF-8 continuation byte can
+# equal one, so reading the first byte is exact and needs no decode.
+pub fn text_starts_with_collapsible_space(raw: text) -> bool:
+    if raw.len() == 0:
+        return false
+    val b = raw.bytes()[0]
+    b == 32 or b == 9 or b == 10 or b == 13
 
 # Advance of ONE space in the face the resolved metrics were measured with.
 # Prefer a real space advance out of the measured array; only when the measured
@@ -966,20 +973,28 @@ fn text_ink_y_offset(fs: i32) -> i32:
 fn text_ink_x_offset(fs: i32) -> i32:
     1
 
-fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
+# `off` and the returned offset are BYTE indices, but `cpl` is a CHARACTER
+# budget (cells per line). Adding the two — and then probing with the
+# CODEPOINT-indexed `char_code_at` — meant a non-ASCII run both got a short
+# line (each multi-byte codepoint spent 2-3 of its character budget) and broke
+# at the wrong place. Spend the budget one CODEPOINT at a time, and test for a
+# space on the BYTE, which is exact: no continuation byte can equal 32.
+pub fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
     val n = txt.len()
-    var limit = off + cpl
-    if limit >= n:
-        return n
+    val tb = txt.bytes()
     var last_space = -1
     var i = off
-    while i < limit:
-        if txt.char_code_at(i) == 32:
+    var taken = 0
+    while i < n and taken < cpl:
+        if tb[i] == 32:
             last_space = i
-        i = i + 1
+        i = next_codepoint_start(txt, i)
+        taken = taken + 1
+    if i >= n:
+        return n
     if last_space > off:
         return last_space
-    limit
+    i
 
 # `skip_wrap_spaces` now lives in ..._foundation.spl (reached here through the
 # export chain). It was defined HERE but also called from ..._style.spl, which
@@ -989,11 +1004,18 @@ fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
 # "Unknown variable: skip_wrap_spaces while lowering parse_font_shorthand_family"
 # and silently ran interpreted (~1000x slower).
 
-fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+# `start`/`endv` are BYTE offsets; `char_code_at` is CODEPOINT-indexed. Read
+# with one cursor this charged one flat advance per BYTE, so a 3-byte em dash
+# cost three glyph widths, and it read the wrong character to decide "is this a
+# space". Walk the bytes and charge once per CODEPOINT — i.e. on a lead byte,
+# never on a UTF-8 continuation byte (128..191).
+pub fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+    val tb = txt.bytes()
     var width = 0
     var i = start
     while i < endv:
-        width = width + if txt.char_code_at(i) == 32: space_advance else: advance
+        if tb[i] < 128 or tb[i] >= 192:
+            width = width + if tb[i] == 32: space_advance else: advance
         i = i + 1
     width
 
@@ -1041,17 +1063,30 @@ fn _lay_ellipsize_text_for_width_inner(txt: text, start: i32, endv: i32, max_wid
     if max_width <= ellipsis_w:
         return ellipsis
     val content_limit = max_width - ellipsis_w
+    # `start`/`endv` are BYTE offsets (they are cut on with `substring` just
+    # above), so every step of this loop must be byte-indexed too. It used to
+    # mix three index spaces at once: `resolved_text_range_width(st, i, i+1)`
+    # indexed the per-CODEPOINT advance array with a byte offset, and
+    # `char_code_at(i)` / `char_at(i)` are CODEPOINT-indexed in this text API.
+    # On any run past its first non-ASCII codepoint all three disagreed, so an
+    # ellipsized run was measured with one character's advance and built from a
+    # different character. `style_run_byte_advances` is the per-BYTE table that
+    # answers this exactly (the codepoint's advance on its lead byte, 0 on every
+    # continuation byte), which also makes a cut inside a codepoint impossible.
+    val by = style_run_byte_advances(st, txt)
+    val use_by = by.len() == txt.len()
+    val tb = txt.bytes()
     var out = ""
     var used = 0
     var i = start
     while i < endv:
-        val resolved_char_w = resolved_text_range_width(st, i, i + 1)
-        val char_w = if resolved_char_w >= 0: resolved_char_w elif txt.char_code_at(i) == 32: space_advance else: advance
+        val nexti = next_codepoint_start(txt, i)
+        val char_w = if use_by: by[i] elif tb[i] == 32: space_advance else: advance
         if used + char_w > content_limit:
             break
-        out = out + txt.char_at(i)
+        out = out + txt.substring(i, nexti)
         used = used + char_w
-        i = i + 1
+        i = nexti
     out + ellipsis
 
 # --- Left-float exclusion band (bug browser_engine_float_no_inline_wrap_
@@ -3384,6 +3419,26 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 # Short inline pieces (intrinsic <= available) are unaffected.
                 # white-space:nowrap remains intrinsic width unless the parent
                 # requested text-overflow:ellipsis, which needs a bounded box.
+                # White-space collapsing keeps ONE space between an inline
+                # sibling and a following text run on the SAME line; only a
+                # space at the START OF A LINE is dropped (CSS 2.1 §16.6.1).
+                # `text_trimmed` trims unconditionally, so a `#text` placed at a
+                # non-zero pen lost the space that separates it from the
+                # `<code>`/`<span>` before it — measured on the catalog `<li>`s:
+                # `<code>align-self</code> — partial; …` is 88 px in Chrome and
+                # 64 in Simple, while the same markup with the space DELETED is
+                # 64 in Chrome too, and the same text at pen 0 is 64 in both.
+                # The missing ~4 px let a 631 px run sit inside a 632 px gap
+                # that Chrome wraps, costing one line box per such `<li>`.
+                if (
+                    nodes[c].tag == "#text" and
+                    not cst.white_space_nowrap and
+                    inline_x > inline_start_x and
+                    text_starts_with_collapsible_space(nodes[c].text_data)
+                ):
+                    inline_x = inline_x + resolved_space_advance(
+                        cst, text_codepoints(nodes[c].text_trimmed)
+                    )
                 if nodes[c].tag == "#text" and (not cst.white_space_nowrap or cst.text_overflow_ellipsis):
                     val avail_inline = iw - inline_x
                     if avail_inline > 0 and inline_w > avail_inline:
