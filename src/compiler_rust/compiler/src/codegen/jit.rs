@@ -712,12 +712,43 @@ fn dlsym_resolves(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn dlsym_resolves(_name: &str) -> bool {
-    // Conservative on Windows: assume resolvable so the guard never forces an
-    // unnecessary interpreter fallback. The cross-module NULL-jump this guards
-    // is observed on the System V/ELF JIT path; Windows uses a different
-    // (GetProcAddress-based) resolver and is out of scope for this guard.
-    true
+fn dlsym_resolves(name: &str) -> bool {
+    // Mirror cranelift-jit's own Windows fallback resolver exactly
+    // (vendor `cranelift-jit-0.116.1/src/backend.rs::lookup_with_dlsym`):
+    // `GetProcAddress` against the running executable image, then against
+    // `ucrtbase.dll`. Blindly returning `true` here (the previous behaviour)
+    // meant `first_unresolved_import_called` could never detect an
+    // unresolvable cross-module Simple symbol on Windows: cranelift-jit
+    // itself would fail the SAME lookup, bind the GOT slot to NULL, and the
+    // first call through it SIGSEGVs with nothing on stderr — this is the
+    // root cause of `seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md`
+    // and `seed_jit_function_local_use_segfaults_2026-09-13.md`: both
+    // repros reach a cross-module Simple function symbol that resolves to
+    // neither a registered runtime symbol nor a process/CRT export, so the
+    // guard must say `false` and let `compile_module` de-JIT to the
+    // interpreter instead of finalizing a NULL import.
+    use windows_sys::Win32::Foundation::HMODULE;
+    use windows_sys::Win32::System::LibraryLoader;
+
+    let Ok(c_name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    let c_name_ptr = c_name.as_ptr();
+
+    unsafe {
+        let handles: [*mut core::ffi::c_void; 2] = [
+            // The running executable image itself.
+            std::ptr::null_mut(),
+            // The local C runtime, exactly as cranelift-jit tries it.
+            LibraryLoader::GetModuleHandleA(b"ucrtbase.dll\0".as_ptr()) as *mut core::ffi::c_void,
+        ];
+        for handle in &handles {
+            if LibraryLoader::GetProcAddress(*handle as HMODULE, c_name_ptr.cast()).is_some() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
