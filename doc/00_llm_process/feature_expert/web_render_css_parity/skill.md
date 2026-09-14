@@ -944,3 +944,40 @@ Round 23 measurements: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.m
   diagnosis to the pages you ranked is the recurring miss.
 
 Round 24 measurements: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.md`.
+
+## Round 25 — `<wbr>`, and the value of a prediction that MISSES
+
+- **Pin the Σ DEFINITION before ranking, not after.** Σ in every round of this
+  series is `|dx|+|dy|+|dw|+|dh|` summed over `inherited: false` rows ONLY.
+  Summing all rows on this baseline gives 3223 against the reported 1258 — a
+  2.6× discrepancy that would silently invalidate every before/after table.
+  Resolve it against a small page's own `.geometry_diff.md` root table
+  (`css-layout`: 9 + 8 + 1 = 18) before touching any code.
+- **The biggest root is not always the one to take.** `<sub>`/`<sup>` is ~380
+  attributed here, three times the next root, and is filed as a measured
+  contradiction. Rank by attributed Σ, then take the largest ACTIONABLE row and
+  say in writing which rows you skipped and why.
+- **A prediction that misses is worth more than one that hits.**
+  `Long<wbr>Word<wbr>BreakHere` in an 80 px box was predicted 72 and measured
+  **48**: Chrome's line breaker is GREEDY, taking only the opportunity it needs,
+  so the first `<wbr>` is passed over. The eager implementation would have
+  matched the catalog's single `li` 86 perfectly and been wrong. Always harvest a
+  MULTI-opportunity case, not only the one the catalog shows you.
+- **Measure the first WORD, not the whole run.** A soft-break arm that tests the
+  following run's full advance breaks at opportunities Chrome passes over. The
+  helper is `first_word_advance_width` — everything up to the first collapsible
+  space.
+- **Two sabotage arms must fail DIFFERENT AC sets.** Disabling the arm fails
+  AC-1/AC-2; inverting the fit test fails AC-2/AC-4/AC-5. Same failing set from
+  both arms means one of them is not testing what you think.
+- **A `<br>` `dx` row is not a `<br>` placement bug.** Simple already places
+  `<br>` at `ix + inline_x`, which is Chrome's rule, so css-paint's `dx`
+  49/24/8 says the PEN is short at those points — a text-advance
+  under-measurement on the preceding runs. Discriminate the `<br>` rect from the
+  following run's rect in the fixture before editing anything.
+- **`strong`/`b` `dw` deficits look like ONE root: bold metrics.** `overview` is
+  29 of 34 Σ this shape (a `strong` 6 px narrow, then four siblings each `dx`
+  +6 behind it); `html` shows `strong` +9 and `b` +4. `<q>` +10 is a different
+  root in the same rows — Chrome's UA quotation marks, which Simple never emits.
+
+Round 25 measurements: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.
