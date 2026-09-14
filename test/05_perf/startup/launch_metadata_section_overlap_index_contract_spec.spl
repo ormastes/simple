@@ -1,0 +1,75 @@
+# @tag: perf, startup, launch-metadata, section-index
+# The counters are intentionally module-private. This contract reads the
+# owning source region and the executable behavior matrix, so production keeps
+# its public retained-result ABI free of diagnostic telemetry.
+
+use std.spec.{describe, it, expect}
+use app.io.mod.{file_read_text}
+
+fn source_region(source: text) -> text:
+    val start = source.index_of("struct _LaunchMetadataSectionSpanV1")
+    val end = source.index_of("pub fn parse_launch_metadata_from_smf_bytes")
+    if start < 0 or end <= start:
+        return ""
+    source.substring(start, end)
+
+describe "Launch metadata section-index operation contract [importance=critical; importance_weight=3]":
+    describe "LM-P01: one indexed validation pass [importance=critical; importance_weight=3]":
+        it "should return value-owned counters for decoded rows, indexed spans, sorting, and adjacent checks [importance=critical; importance_weight=3]":
+            step("Read the owning launch-metadata section-validation region")
+            val source = file_read_text("src/app/startup/launch_metadata.spl")
+            val region = source_region(source)
+            expect(region).to_contain("_LaunchMetadataSectionValidationCountersV1")
+            expect(region).to_contain("section_rows_decoded")
+            expect(region).to_contain("positive_spans_indexed")
+            expect(region).to_contain("sort_input_spans")
+            expect(region).to_contain("adjacent_span_checks")
+            expect(region).to_contain("_retained_smf_section_validation_v1")
+
+        it "should replace the quadratic pairwise overlap loop with sorted adjacent spans [importance=critical; importance_weight=3]":
+            step("Inspect the private validation source region for the sorted-span sweep")
+            val region = source_region(file_read_text("src/app/startup/launch_metadata.spl"))
+            val has_sort = region.contains("spans.sort()") or
+                region.contains("array_sort_by(spans")
+            expect(has_sort).to_equal(true)
+            expect(region).to_contain("adjacent_span_checks = adjacent_span_checks + 1")
+            expect(region.contains("section_starts")).to_equal(false)
+            expect(region.contains("section_ends")).to_equal(false)
+            expect(region.contains("while previous < section_starts.len()")).to_equal(false)
+
+        it "should enforce the adjacent-check bound without counting sort comparisons [importance=critical; importance_weight=3]":
+            step("Inspect the operation-bound wording and counter increments")
+            val region = source_region(file_read_text("src/app/startup/launch_metadata.spl"))
+            val has_adjacent_guard = region.contains("spans.len()") and
+                region.contains("while")
+            val has_previous_end_check = region.contains("previous.end")
+            val has_counter_increment = region.contains("adjacent_span_checks")
+            expect(has_adjacent_guard).to_equal(true)
+            expect(has_previous_end_check).to_equal(true)
+            expect(has_counter_increment).to_equal(true)
+
+    describe "LM-P02: deterministic wide-table evidence [importance=high; importance_weight=2]":
+        it "should retain executable wide-table fixtures at 64 and 256 rows [importance=high; importance_weight=2]":
+            step("Read the behavior oracle and verify the first wide-table cardinalities")
+            val behavior = file_read_text(
+                "test/01_unit/app/startup/launch_metadata_section_index_spec.spl")
+            expect(behavior).to_contain("wide_valid_fixture(64)")
+            expect(behavior).to_contain("wide_valid_fixture(256)")
+
+        it "should retain executable wide-table fixtures at 1024 and 4096 rows [importance=high; importance_weight=2]":
+            step("Verify the larger cardinalities are real fixture calls")
+            val behavior = file_read_text(
+                "test/01_unit/app/startup/launch_metadata_section_index_spec.spl")
+            expect(behavior).to_contain("wide_valid_fixture(1024)")
+            expect(behavior).to_contain("wide_valid_fixture(4096)")
+            expect(behavior).to_contain("launch_metadata_absent")
+
+        it "should compare the retained metadata through a byte-exact oracle rather than a timing claim [importance=high; importance_weight=2]":
+            step("Inspect the behavior oracle's exact serialized payload assertion")
+            val behavior = file_read_text(
+                "test/01_unit/app/startup/launch_metadata_section_index_spec.spl")
+            expect(behavior).to_contain("render_launch_metadata_sidecar(result.metadata)).to_equal(")
+            expect(behavior).to_contain("launch_metadata_section_overlap")
+            expect(behavior).to_contain("launch_metadata_section_duplicate")
+            expect(behavior.contains("time_now")).to_equal(false)
+            expect(behavior.contains("sleep(")).to_equal(false)
