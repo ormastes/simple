@@ -1,0 +1,121 @@
+"""
+Executable HIR type transport regression.
+
+Each declared HirTypeKind is encoded and decoded through the generated HIR
+codec, then installed in a lowered function and walked by post_mono_verify.
+The assertion is specifically `unreachable_variant == 0`: TypeParam,
+Projection, Infer, Error, and Any may have their own documented invariant
+diagnostics, but no valid producer tag may disappear into the transport
+wildcard.  This is pure in-process evidence and makes no Rust-seed PASS claim.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{
+    HirModule, HirType, HirTypeKind, SymbolId, DimExpr, DimExprKind, DeviceType
+}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_dec_hir_type}
+use compiler.verify.post_mono_verify.{post_mono_verify}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+val FIXTURE = "hirtype_signature_transport_minimal.spl"
+val FIXTURE_SOURCE = "fn carry_type(value: i64) -> i64:\n    value\n"
+
+fn span() -> Span:
+    Span.empty()
+
+fn scalar() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: span())
+
+fn text_type() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: span())
+
+fn dim() -> DimExpr:
+    DimExpr(kind: DimExprKind.Literal(1), span: span())
+
+fn discriminant(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+fn samples() -> [HirType]:
+    [
+        HirType(kind: HirTypeKind.Int(64, true), span: span()),
+        HirType(kind: HirTypeKind.Float(64), span: span()),
+        HirType(kind: HirTypeKind.Bool, span: span()),
+        HirType(kind: HirTypeKind.Char, span: span()),
+        text_type(),
+        HirType(kind: HirTypeKind.Unit, span: span()),
+        HirType(kind: HirTypeKind.Tuple([scalar()]), span: span()),
+        HirType(kind: HirTypeKind.Array(scalar(), nil), span: span()),
+        HirType(kind: HirTypeKind.Slice(scalar()), span: span()),
+        HirType(kind: HirTypeKind.Dict(scalar(), text_type()), span: span()),
+        HirType(kind: HirTypeKind.Ref(scalar(), false), span: span()),
+        HirType(kind: HirTypeKind.Ptr(scalar(), false), span: span()),
+        HirType(kind: HirTypeKind.Optional(scalar()), span: span()),
+        HirType(kind: HirTypeKind.Result(scalar(), text_type()), span: span()),
+        HirType(kind: HirTypeKind.Named(SymbolId(id: 7), []), span: span()),
+        HirType(kind: HirTypeKind.TypeParam("T", []), span: span()),
+        HirType(kind: HirTypeKind.Union([scalar(), text_type()]), span: span()),
+        HirType(kind: HirTypeKind.DynTrait(SymbolId(id: 8)), span: span()),
+        HirType(kind: HirTypeKind.Function([scalar()], text_type(), []), span: span()),
+        HirType(kind: HirTypeKind.Projection(scalar(), "Item"), span: span()),
+        HirType(kind: HirTypeKind.Isolated(scalar()), span: span()),
+        HirType(kind: HirTypeKind.Infer(1, 0), span: span()),
+        HirType(kind: HirTypeKind.Error, span: span()),
+        HirType(kind: HirTypeKind.Never, span: span()),
+        HirType(kind: HirTypeKind.Any, span: span()),
+        HirType(kind: HirTypeKind.Tensor(scalar(), [dim()], Some(DeviceType.CPU)), span: span()),
+        HirType(kind: HirTypeKind.Layer([dim()], [dim()]), span: span())
+    ]
+
+fn roundtrip(type_: HirType) -> HirType:
+    var writer = HirCodecWriter.create()
+    hc_enc_hir_type(writer, type_)
+    expect(writer.ok).to_equal(true)
+    val decoded = hc_dec_hir_type(FlatPoolReader.new(writer.finish()))
+    expect(decoded != nil).to_equal(true)
+    decoded
+
+fn lowered_fixture() -> HirModule:
+    val parsed = parse_full_frontend(
+        FIXTURE_SOURCE, FIXTURE, "hirtype_signature_transport_minimal", Logger(level: 0))
+    var lowering = HirLowering.with_filename(FIXTURE)
+    lowering.lower_module(parsed)
+
+fn with_transport_type(module: HirModule, type_: HirType) -> HirModule:
+    for symbol in module.functions.keys():
+        var function_ = module.functions[symbol]
+        if function_.name == "carry_type":
+            function_.return_type = type_
+            var params = function_.params
+            if params.len() == 1:
+                var first = params[0]
+                first.type_ = type_
+                params[0] = first
+                function_.params = params
+            module.functions[symbol] = function_
+    module
+
+describe "HIR type transport through post-mono verification [importance=critical; importance_weight=3]":
+    it "round-trips every producer variant and reaches the named verifier arm":
+        step("Encode/decode every HirTypeKind tag before post-mono verification")
+        val all_types = samples()
+        expect(all_types.len()).to_equal(27)
+        var i = 0
+        while i < all_types.len():
+            val original = all_types[i]
+            val decoded = roundtrip(original)
+            expect(decoded.kind != nil).to_equal(true)
+            expect(discriminant(decoded.kind)).to_equal(discriminant(original.kind))
+            val module = with_transport_type(lowered_fixture(), decoded)
+            val report = post_mono_verify(module)
+            expect(report.unreachable_variant).to_equal(0)
+            i = i + 1

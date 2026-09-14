@@ -1,0 +1,98 @@
+"""
+Source-level completeness contract for the closed HirTypeKind boundary.
+
+The Stage 2 failure was observed after HIR publication, when a later consumer
+received a malformed/missing type kind.  This test deliberately checks the
+producer's complete tag universe against every named consumer that can hide
+such a loss.  The source contract is independent of the Rust seed: it checks
+the checked-in pure-Simple sources and transition tables only.
+"""
+
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+use compiler.common.transition.transition_table.{parse_transition_table}
+use compiler.common.transition.validator.{
+    validate_transition_table, coverage_report_is_clean
+}
+
+val HIR_TYPE_SOURCE = "src/compiler/20.hir/hir_types.spl"
+val HIR_CODEC_SOURCE = "src/compiler/20.hir/generated/hir_codec.spl"
+val POST_MONO_SOURCE = "src/compiler/40.mono/verify/post_mono_verify.spl"
+val MIR_SOURCE = "src/compiler/50.mir/_MirLowering/function_lowering.spl"
+val HIR_TO_MIR_TABLE = "spec/compiler_schema/transitions/hir_type_to_mir_type.sdn"
+val MIR_TO_C_TABLE = "spec/compiler_schema/transitions/mir_type_to_c_backend.sdn"
+val PLUGIN_ADAPTER = "src/compiler/70.backend/backend_plugin/builtin_adapter.spl"
+
+# Frozen producer order is also the generated HIR wire tag order (0..26).
+# Updating the enum requires updating this list and the source contract in the
+# same review, rather than allowing a new tag to fall into a wildcard.
+val HIR_VARIANTS = [
+    "Int", "Float", "Bool", "Char", "Str", "Unit", "Tuple", "Array",
+    "Slice", "Dict", "Ref", "Ptr", "Optional", "Result", "Named",
+    "TypeParam", "Union", "DynTrait", "Function", "Projection", "Isolated",
+    "Infer", "Error", "Never", "Any", "Tensor", "Layer"
+]
+
+fn source(path: text) -> text:
+    if not file_exists(path):
+        fail("required source missing: {path}")
+        return ""
+    file_read(path)
+
+fn section(source_text: text, start: text, finish: text) -> text:
+    val begin = source_text.index_of(start)
+    val end = source_text.index_of(finish)
+    if begin < 0 or end <= begin:
+        fail("source section missing: {start} -> {finish}")
+        return ""
+    source_text.substring(begin, end)
+
+describe "HIR type transport completeness [importance=critical; importance_weight=3]":
+    it "keeps the producer inventory and generated HIR tags total":
+        val producer = source(HIR_TYPE_SOURCE)
+        val codec = source(HIR_CODEC_SOURCE)
+        val encoder = section(codec, "fn hc_enc_hir_type_kind", "fn hc_dec_hir_type_kind")
+        val decoder = section(codec, "fn hc_dec_hir_type_kind", "fn hc_enc_hir_type_param")
+        expect(HIR_VARIANTS.len()).to_equal(27)
+        for variant in HIR_VARIANTS:
+            expect(producer).to_contain("\n    {variant}")
+            expect(encoder).to_contain("case HirTypeKind.{variant}")
+            expect(decoder).to_contain("return HirTypeKind.{variant}")
+        var tag = 0
+        for variant in HIR_VARIANTS:
+            expect(encoder).to_contain("case HirTypeKind.{variant}")
+            expect(encoder).to_contain("w.put_i64({tag})")
+            expect(decoder).to_contain("if tag == {tag}")
+            tag = tag + 1
+
+    it "names every producer variant in post-mono verification and MIR lowering":
+        val verifier = source(POST_MONO_SOURCE)
+        val walker = section(verifier, "me walk_type(ty: HirType):", "me walk_types(")
+        val mir = source(MIR_SOURCE)
+        val lower_type = section(mir, "me lower_type(type_: HirType)", "me unreachable_hir_type_kind")
+        for variant in HIR_VARIANTS:
+            expect(walker).to_contain("case HirTypeKind.{variant}")
+            expect(lower_type).to_contain("case HirTypeKind.{variant}")
+        # A wildcard is retained only as the seed-required fail-closed trap.
+        expect(walker).to_contain("self.hit_unreachable(\"HirTypeKind\", \"walk_type\")")
+        expect(lower_type).to_contain("self.unreachable_hir_type_kind(type_)")
+
+    it "keeps the HIR-to-MIR and MIR-to-codegen tables closed":
+        val hir_to_mir = parse_transition_table(source(HIR_TO_MIR_TABLE))
+        val mir_to_c = parse_transition_table(source(MIR_TO_C_TABLE))
+        val hir_report = validate_transition_table(hir_to_mir)
+        val mir_report = validate_transition_table(mir_to_c)
+        expect(hir_report.errors.len()).to_equal(0)
+        expect(mir_report.errors.len()).to_equal(0)
+        expect(hir_report.missing.len()).to_equal(0)
+        expect(mir_report.missing.len()).to_equal(0)
+        expect(coverage_report_is_clean(hir_report)).to_equal(true)
+        expect(coverage_report_is_clean(mir_report)).to_equal(true)
+
+    it "keeps backend/plugin extensions on the MIR boundary":
+        val adapter = source(PLUGIN_ADAPTER)
+        expect(adapter).to_contain("module: MirModule")
+        expect(adapter).to_contain("self.codegen.compile_module(module)")
+        expect(adapter).to_contain("compile_module_with_backend_target_cpu_storage_bindings")
+        # Raw HIR kinds must not cross the versioned backend extension seam.
+        expect(adapter.contains("HirTypeKind")).to_equal(false)
