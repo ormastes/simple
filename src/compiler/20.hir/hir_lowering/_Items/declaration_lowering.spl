@@ -393,15 +393,20 @@ impl HirLowering:
         if fn_.has_return_type:
             val declared_ret = self.lower_type(fn_.return_type)
             if self.ambient_bootstrap_enabled():
-                # NARROW (deliberate): in bootstrap mode only Str declared
-                # returns take priority for now. Widening every declared type
-                # (arrays/structs/dicts) immediately broke consumers tuned to
-                # the uniform-i64 convention (`get_args()` -> Array-typed local
-                # made `a.len()` lower to the raw receiver -> strlen SIGSEGV,
-                # W92). Widen type-by-type with repro coverage; ceiling noted
-                # in native_call_return_type_loss 2026-07-23.
+                # NARROW (deliberate): in bootstrap mode scalar declarations
+                # whose ABI has an established direct MIR representation take
+                # priority. Arrays/structs/dicts remain on the legacy fallback:
+                # widening every declared type immediately broke consumers tuned
+                # to the uniform-i64 convention (`get_args()` -> Array-typed
+                # local made `a.len()` lower to the raw receiver -> strlen
+                # SIGSEGV, W92). `bool` is a scalar i1 throughout HIR, MIR and
+                # LLVM, so erasing it here was not a compatibility boundary: it
+                # published imported `-> bool` helpers as i64, then later call
+                # lowering could not retain the actual return slot. Preserve it
+                # alongside `text`; expand other shapes only with dedicated ABI
+                # evidence. See native_imported_bool_return_void_2026-09-14.
                 match declared_ret.kind:
-                    case HirTypeKind.Str:
+                    case HirTypeKind.Str | HirTypeKind.Bool:
                         return_type = declared_ret
                     case _:
                         return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
