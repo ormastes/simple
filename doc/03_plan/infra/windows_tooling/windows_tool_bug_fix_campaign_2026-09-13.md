@@ -37,9 +37,9 @@ breakdown inside it is `(reported, not independently verified line-by-line)`.
 | SCV inventory native-hash + streamed cold-init events | `work/scv-inventory-native-hash` | #992 (open) | `OPEN`, `mergeStateStatus=BLOCKED`, head sha `0504f659b70` |
 | correct beta1 release blocker to the CI matrix gate (relates to `beta1_tag_cannot_bootstrap_on_windows`) | `work/beta1-release-gate-record` | #989 (open) | `OPEN`, `mergeStateStatus=BLOCKED`, head sha `fe463f74da9` |
 | Windows bootstrap stage2 + seed deploy (third blocker being fixed) | — | none found | No branch on `origin` and no open/closed PR located — **unverified**, reported by the task brief only |
-| salvage follow-up: `native-build` `split_whitespace`/inventory refresh, builtin-receiver method fallback, maybe selective-import resolver | `work/tool-bug-fix-followup` | none found | `git ls-remote --heads origin` has no matching ref — **local-only or not yet pushed, unverified** |
-| seed JIT Windows segfault (app.\*/function-local use) | `work/seed-jit-windows-segfault` | none found | No matching remote ref — **unverified** (a local worktree carries this branch name, unpushed) |
-| lowering error file location | `work/seed-lowering-error-location` | none found | No matching remote ref — **unverified** |
+| salvage follow-up: `native-build` `split_whitespace`/inventory refresh, builtin-receiver method fallback, maybe selective-import resolver | `work/tool-bug-fix-followup` | #996 (open) | Absent from `origin` at this doc's initial 06:23Z check (**local-only or not yet pushed** at that time); pushed and opened as #996 afterward — re-verified `git ls-remote` at 08:2xZ, head sha `fea032b36a9` |
+| seed JIT Windows segfault (app.\*/function-local use) | `work/seed-jit-windows-segfault` | #994 (open) | Absent from `origin` at this doc's initial 06:23Z check; pushed and opened as #994 afterward — re-verified `git ls-remote` at 08:2xZ, head sha `c079d81fa50` |
+| lowering error file location | `work/seed-lowering-error-location` | none found | No matching remote ref as of 08:2xZ re-check — **unverified** |
 
 `#942` clobbering `#938` (from the task brief) could not be confirmed by PR
 title alone — #938 is titled "fix(runtime): every span-returning SIMD kernel
@@ -90,9 +90,11 @@ Other reported-but-unverified state:
 
 1. Land #990, #991, #992, #989 (all currently `BLOCKED` per `mergeStateStatus`
    — re-check required-check status before assuming they are close).
-2. Locate or re-create the branches for the seed JIT Windows segfault fix,
-   the lowering-error-location fix, and the `work/tool-bug-fix-followup`
-   salvage work — none currently exist on `origin`.
+2. Land #994 (`work/seed-jit-windows-segfault`) and #996
+   (`work/tool-bug-fix-followup`) — both pushed and opened after this doc's
+   initial check, now tracked above. Locate or re-create only the
+   lowering-error-location branch (`work/seed-lowering-error-location`),
+   which still has no matching ref on `origin`.
 3. Confirm/deny "Windows bootstrap stage2 + seed deploy" has an active
    branch; if it is only local to another worktree, get it pushed so it is
    tracked here.
