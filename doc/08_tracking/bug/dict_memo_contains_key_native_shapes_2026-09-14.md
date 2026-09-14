@@ -174,3 +174,37 @@ suspect construct — a plain `[text]` stack, not a class-field dict — and it 
 cheap. It is not redundant on any evidence gathered here, and would only become
 so once a native lane demonstrates that the two class-field gates read back
 correctly.
+
+## Two notes for whoever picks this up
+
+**The candidate tested here is NOT the binary #987 measured.** The Stage-2
+candidate available in this checkout dies in MIR lowering on any
+`class ... me ...`, and `HirLowering` is exactly that — so this binary cannot
+reach HIR lowering of `compiler.driver.driver` at all, let alone build a
+13,415-frame stack there. The build #987 measured got far past MIR lowering of
+many units and is not present in this checkout. Do not read the rc-139 table as
+an account of #987's crash; they are two different binaries and two different
+failures. The corollary for the breaker still holds: a `[text]` in-progress
+stack is the right shape regardless.
+
+**The unguarded-unwrap twins: there are none left in `50.mir`.** Scanned
+`get_symbol_raw` across `src/compiler/50.mir/**` — 12 other call sites, every
+one of them using the safe binding (`if val found = ...`) or `match` form.
+`record_external_layout_reference` was the single site that unwrapped and then
+read a field. The hazard is file-agnostic, so the same scan is worth repeating
+in `20.hir` and `70.backend`; it was not done here (out of lane).
+
+**Available partial verification, not run.** The seed interpreter executes the
+pure-Simple compiler, so
+`SIMPLE_EXECUTION_MODE=interpreter <seed> run src/app/cli/bootstrap_main.spl
+native-build m4.spl ...` exercises the patched method. That proves the guard is
+a no-op on the correct path (interpreter `Option` is sound) — it cannot prove
+the native ABI case. Clearing the rc-139 still needs a rebuilt Stage-2
+candidate.
+
+**Not run, and vacuous here:** `cargo test -p simple-compiler --lib` (no Rust
+changed, so the 35 pre-existing macOS reds are unchanged by construction) and a
+`cargo-f77` seed rebuild (nothing in `src/compiler_rust` moved). The native lane
+of `check-native-interp-differential.shs` is likewise unmeasured: the seed's
+`--mode=dynload` build of the spec did not complete in 25 minutes on this host.
+The six rows are GREEN on the interpreter oracle and **deferred** natively.
