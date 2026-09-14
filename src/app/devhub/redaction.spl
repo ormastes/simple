@@ -34,7 +34,13 @@ fn _assignment_name(prefix: text) -> text:
     val brace_parts = name.split("{")
     name = brace_parts[brace_parts.len() - 1]
     val comma_parts = name.split(",")
-    comma_parts[comma_parts.len() - 1].trim()
+    name = comma_parts[comma_parts.len() - 1].trim()
+    val words = name.replace("\r", " ").replace("\n", " ").replace("\t", " ").split(" ")
+    var last_word = ""
+    for word in words:
+        if word.trim() != "":
+            last_word = word.trim()
+    last_word
 
 
 fn _redact_sensitive_assignment(value: text) -> text:
@@ -57,6 +63,12 @@ fn _redact_sensitive_assignment(value: text) -> text:
         val fragment = value[delimiter + 1:].find("#")
         if fragment >= 0 and delimiter + 1 + fragment < end:
             end = delimiter + 1 + fragment
+        val comma = value[delimiter + 1:].find(",")
+        if comma >= 0 and delimiter + 1 + comma < end:
+            end = delimiter + 1 + comma
+        val space = value[delimiter + 1:].find(" ")
+        if space >= 0 and delimiter + 1 + space < end:
+            end = delimiter + 1 + space
     val newline = value[delimiter + 1:].find("\n")
     if newline >= 0 and delimiter + 1 + newline < end:
         end = delimiter + 1 + newline
@@ -65,22 +77,43 @@ fn _redact_sensitive_assignment(value: text) -> text:
     value[:delimiter + 1] + mask + suffix
 
 
-fn _redact_url_secrets(value: text) -> text:
-    var safe = value
-    val scheme = safe.find("://")
+fn _min_url_boundary(current: i64, candidate: i64) -> i64:
+    if candidate >= 0 and candidate < current:
+        return candidate
+    current
+
+
+fn _redact_url_userinfo(value: text) -> text:
+    val scheme = value.find("://")
     if scheme >= 0:
         val after_scheme = scheme + 3
-        val at = safe[after_scheme:].find("@")
-        val slash = safe[after_scheme:].find("/")
-        if at >= 0 and (slash < 0 or at < slash):
-            val absolute_at = after_scheme + at
-            safe = safe[:after_scheme] + "***" + safe[absolute_at:]
+        val rest = value[after_scheme:]
+        var authority_end = rest.len()
+        authority_end = _min_url_boundary(authority_end, rest.find("/"))
+        authority_end = _min_url_boundary(authority_end, rest.find("?"))
+        authority_end = _min_url_boundary(authority_end, rest.find("#"))
+        authority_end = _min_url_boundary(authority_end, rest.find(" "))
+        authority_end = _min_url_boundary(authority_end, rest.find("\r"))
+        authority_end = _min_url_boundary(authority_end, rest.find("\n"))
+        authority_end = _min_url_boundary(authority_end, rest.find("\t"))
+        authority_end = _min_url_boundary(authority_end, rest.find("]"))
+        authority_end = _min_url_boundary(authority_end, rest.find("}"))
+        authority_end = _min_url_boundary(authority_end, rest.find("\""))
+        val at = rest.find("@")
+        if at >= 0 and at < authority_end:
+            return value[:after_scheme] + "***" + _redact_url_userinfo(rest[at:])
+        return value[:after_scheme] + _redact_url_userinfo(rest)
+    value
+
+
+fn _redact_url_secrets(value: text) -> text:
+    val safe = _redact_url_userinfo(value)
     val question = safe.find("?")
     if question < 0:
         return safe
     val after_question = safe[question + 1:]
     var query_end = after_question.len()
-    val comma_end = after_question.find(",")
+    val comma_end = after_question.find(", ")
     if comma_end >= 0:
         query_end = comma_end
     val space_end = after_question.find(" ")
@@ -100,4 +133,4 @@ fn _redact_url_secrets(value: text) -> text:
     var rebuilt = safe[:question + 1] + redacted_parts.join("&")
     if fragments.len() > 1:
         rebuilt = rebuilt + "#" + fragments[1]
-    rebuilt + trailing
+    rebuilt + _redact_url_secrets(trailing)

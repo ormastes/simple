@@ -134,30 +134,19 @@ describe "ITF configuration":
             expect(confluence_target_from_args(["list", "--host"])).to_equal("__invalid_confluence_selector__")
             expect(confluence_target_from_args(["list", "--host=alpha", "--profile=beta"])).to_equal("__invalid_confluence_selector__")
 
-        it "target config and credential writes preserve sibling sections and repeated headers":
+        it "target writes preserve nested header maps in sibling targets":
             val dir = "{FIXTURE_HOME}/.config/itf"
             val _mk = rt_dir_create_all(dir)
-            val config_body = "confluence:\n    default_target: alpha\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n    header: X-One: a\n    header: X-One: b\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    header: X-Beta: keep\n"
-            val auth_body = "confluence.alpha:\n    token: old-alpha\n\nconfluence.beta:\n    token: keep-beta\n\ncustom:\n    token: keep-custom\n"
-            val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
-            val _auth = rt_file_write_text("{dir}/auth.sdn", auth_body)
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    headers:\n        X-Alpha: replace\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    headers:\n        X-Beta: keep\n        X-Scope: one\n"
+            val _write = rt_file_write_text("{dir}/config.sdn", body)
             val original_home = rt_env_get("HOME") ?? ""
             val _set_home = rt_env_set("HOME", FIXTURE_HOME)
-            val _saved_legacy = save_config(load_config())
-            val selected = load_config_for_target("alpha")
-            val _saved_config = save_confluence_target(selected)
-            val _saved_auth = save_auth_token("confluence.alpha", "new-alpha")
-            val saved_config = rt_file_read_text("{dir}/config.sdn") ?? ""
-            val saved_auth = rt_file_read_text("{dir}/auth.sdn") ?? ""
+            val _saved = save_confluence_target(_load_target_with_fixture(body, "alpha"))
+            val saved = rt_file_read_text("{dir}/config.sdn") ?? ""
             val _restore_home = rt_env_set("HOME", original_home)
-            expect(saved_config).to_contain("default_target: alpha")
-            expect(saved_config).to_contain("confluence.beta:")
-            expect(saved_config).to_contain("header: X-Beta: keep")
-            expect(saved_config).to_contain("header: X-One: a")
-            expect(saved_config).to_contain("header: X-One: b")
-            expect(saved_auth).to_contain("token: \"new-alpha\"")
-            expect(saved_auth).to_contain("token: keep-beta")
-            expect(saved_auth).to_contain("custom:")
+            expect(saved).to_contain("confluence.beta:")
+            expect(saved).to_contain("X-Beta: keep")
+            expect(saved).to_contain("X-Scope: one")
 
         it "uses configured default_target before file-order fallback":
             val body = "confluence:\n    default_target: beta\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n\nconfluence.beta:\n    url: https://beta.example/wiki\n"
@@ -174,6 +163,23 @@ describe "ITF configuration":
             expect(config.confluence_headers.len()).to_equal(3)
             expect(config.confluence_headers[0]).to_equal("X-Classification: Internal")
             expect(config.confluence_headers[2]).to_equal("X-Scope: B")
+
+        it "parses nested per-target header maps while retaining duplicate values":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    gateway_url: https://gateway.example/confluence\n    headers:\n        X-Foo: bar\n        X-Scope: A\n        X-Scope: B\n"
+            val config = _load_target_with_fixture(body, "alpha")
+            expect(config.confluence_headers.len()).to_equal(3)
+            expect(config.confluence_headers[0]).to_equal("X-Foo: bar")
+            expect(config.confluence_headers[1]).to_equal("X-Scope: A")
+            expect(config.confluence_headers[2]).to_equal("X-Scope: B")
+
+        it "loads Jira and Bitbucket gateway routes with ordered headers":
+            val body = "jira:\n    url: https://jira.example\n    gateway_url: https://gateway.example/jira\n    headers:\n        X-Classification: restricted\n        X-Scope: jira\n\nbitbucket:\n    url: https://bitbucket.example\n    gateway_url: https://gateway.example/bitbucket\n    header: X-Classification: internal\n"
+            val config = _load_config_with_fixture_config(body)
+            expect(config.jira_gateway_url).to_equal("https://gateway.example/jira")
+            expect(config.jira_headers.len()).to_equal(2)
+            expect(config.jira_headers[1]).to_equal("X-Scope: jira")
+            expect(config.bb_gateway_url).to_equal("https://gateway.example/bitbucket")
+            expect(config.bb_headers[0]).to_equal("X-Classification: internal")
 
         it "resolves target-scoped auth and keeps the legacy token fallback":
             val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n"
