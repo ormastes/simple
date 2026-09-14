@@ -236,6 +236,66 @@ record was written; its log is `build/f75logs/repro-lldb-3.log`.
 simplification broke aliases in a cycle), each verification cycle costs ~22
 minutes, and shipping the wrong one would be a compiler regression.
 
+## CORRECTION (2026-09-14, after F77): the MECHANISM above is over-claimed
+
+The paragraphs above conclude "keys that were set are reading back absent",
+i.e. `rt_dict_contains` under-reporting. **That inference is not established,
+and this record over-claimed it.** Two findings from F77 (PRs #1001/#1002)
+force the correction:
+
+1. F77 could **not reproduce** `rt_dict_contains` under-reporting on the seed
+   interpreter across 6 shapes (all green). The native half is deferred, so
+   under-reporting is neither confirmed nor refuted — it is simply unproven,
+   and this record cited it as though it were established.
+2. There is a **second gate on this cycle** that the analysis above never
+   mentions: `module_import_registration.spl:363`,
+   `if materialize_enum and not self.imported_enums.contains_key(local_name)`,
+   which is what decides whether `register_materialized_enum_payload_dependencies`
+   is called at all. It is keyed on `local_name`, and `local_name` is **not**
+   stable for a given enum: `register_materialized_payload_named_dependency_inner`
+   passes either the short `dependency` or the qualified
+   `"{origin.module_name}::{origin.item_name}"` depending on
+   `claimed_short_name`.
+
+And a hole in the ceiling argument itself, found while writing this correction:
+the 2,546 ceiling assumes `origin.module_name` is always the DECLARING module,
+so that each enum yields exactly one identity. That was never verified. If
+`resolve_materialized_enum_payload_origin` (or `hir_pkg_canonical_module_name`,
+which has a facade special case) can yield different module names for the same
+enum depending on the requesting owner, the identity space is
+(module × item × kind) rather than one-per-declaration, the ceiling is far
+larger than 2,546, and the observed depth no longer implies a failing lookup.
+
+### What IS still proven
+
+The depth measurement stands on its own: **13,415 nested levels of the same
+four frames, 624 bytes each, uniform** — 7.98 MB of stack consumed by one
+cycle. That is unbounded in practice and vastly beyond any plausible legitimate
+closure depth, whatever the mechanism. The cycle was not being broken.
+
+### Why the fix is unaffected
+
+The `[text]` in-progress breaker is correct under **either** mechanism, which
+is why it was the right shape to pick even before this correction:
+
+- it is keyed on `(imported_mod_name, dependency)` — this method's own INPUT
+  tuple — so it does not depend on `origin`, on canonicalisation, or on
+  `local_name` being stable;
+- it is a **linear scan over an append-only array**, so it cannot fail open the
+  way a Dict membership test might.
+
+It bounds the recursion whether the cause is a failing lookup, proliferating
+identities, or the `local_name`-keyed gate at `:363` missing. No change to the
+fix is warranted by this correction; only the narrative needed it.
+
+### What to do about the mechanism
+
+Do **not** cite this record as evidence of `rt_dict_contains` under-reporting.
+Naming the true mechanism needs: (a) F77's deferred native-side Dict probe, and
+(b) an instrumented Stage 3 that prints the identity and `local_name` at each
+level, to see whether they repeat or proliferate. Until then the mechanism is
+open and the fix is a bound, not an explanation.
+
 ## Adjacent pre-existing RED found while fixing this (NOT caused by this lane)
 
 `test/01_unit/compiler/hir/imported_type_method_registration_memo_spec.spl` —
