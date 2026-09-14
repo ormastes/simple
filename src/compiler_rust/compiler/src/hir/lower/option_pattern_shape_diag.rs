@@ -1,4 +1,4 @@
-//! Warn-only shape check (DEFAULT OFF) for `Option`/`Result` patterns lowered
+//! Shape check for `Option`/`Result` patterns lowered
 //! against a scrutinee whose static type can never be one.
 //!
 //! Bug:
@@ -38,21 +38,10 @@
 //! is deliberately NOT reported -- an under-report is correct here, a false
 //! positive is not.
 //!
-//! ## Default OFF
-//!
-//! Promotion to a hard error must be staged: the tree carries ~2,746
-//! Option-shaped and ~4,211 Result-shaped pattern sites across 620 owned files.
-//! Enable with `SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1` (the same switch the
-//! interpreter check uses, so one run instruments both engines) to measure the
-//! true fallout before any promotion. Do NOT make this quieter -- the silence is
-//! the bug.
+//! Only statically definite non-Option/non-Result primitive scrutinees are
+//! rejected. Unknown, generic, aggregate, and enum types remain untouched.
 
 use crate::hir::types::HirType;
-
-/// Is the default-off `SIMPLE_DIAG_OPTION_PATTERN_SHAPE` gate on?
-fn gate_on() -> bool {
-    std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() == Ok("1")
-}
 
 /// Static name for the subject type, or `None` when the type is one this check
 /// deliberately stays silent about.
@@ -110,32 +99,27 @@ impl DiagLocation<'_> {
     }
 }
 
-/// Report an `Option`/`Result` pattern lowered against a scrutinee whose static
-/// type can never be one. Warn-only and default off; see the module docs.
+/// Reject an `Option`/`Result` pattern lowered against a scrutinee whose static
+/// type can never be one.
 ///
 /// `subject_ty` is the resolved `HirType` of the scrutinee, or `None` when the
 /// lowerer could not resolve it (in which case nothing is reported).
-pub(crate) fn report_if_never_option(
+pub(crate) fn reject_if_never_option(
     variant: &str,
     subject_ty: Option<&HirType>,
     form: &str,
     location: DiagLocation<'_>,
-) {
+) -> Result<(), String> {
     if !matches!(variant, "Some" | "None" | "Ok" | "Err") {
-        return;
+        return Ok(());
     }
-    if !gate_on() {
-        return;
-    }
-    let Some(ty) = subject_ty else { return };
+    let Some(ty) = subject_ty else { return Ok(()) };
     let Some(kind) = never_option_type_name(ty) else {
-        return;
+        return Ok(());
     };
     let at = location.render();
-    eprintln!(
-        "warning[option-pattern-shape]: {at}: `{variant}(...)` pattern ({form}) tested against a \
-         scrutinee statically typed `{kind}`, which is never an Option/Result; this pattern \
-         can never legitimately match and the default (JIT) engine answers it silently by \
-         taking the arm and binding a corrupt value"
-    );
+    Err(format!(
+        "{at}: `{variant}(...)` pattern ({form}) requires an Option/Result scrutinee, \
+         but the scrutinee is statically typed `{kind}`"
+    ))
 }

@@ -2830,12 +2830,12 @@ impl Lowerer {
                 Ok(self.named_struct_pattern_condition(&subject_ref, &name, &fields, ctx))
             }
             Pattern::Enum { name: _, variant, .. } => {
-                // Warn-only, DEFAULT OFF. This is the statement-form half of the
+                // This is the statement-form half of the
                 // JIT's pattern decision -- proved by instrumentation to be the
                 // only site reached for `match x: case Some(v)` and for
                 // `if val Some(v) = x`. See
                 // hir/lower/option_pattern_shape_diag.rs.
-                crate::hir::lower::option_pattern_shape_diag::report_if_never_option(
+                crate::hir::lower::option_pattern_shape_diag::reject_if_never_option(
                     variant,
                     self.module.types.get(subject_ty),
                     "statement form",
@@ -2845,7 +2845,8 @@ impl Lowerer {
                         line: self.current_pattern_span.map(|(line, _)| line),
                         column: self.current_pattern_span.map(|(_, column)| column),
                     },
-                );
+                )
+                .map_err(crate::hir::LowerError::Unsupported)?;
                 // Does the subject's own enum type declare this variant name?
                 // Decided BEFORE the `Some`/`None` fast paths: a user-defined
                 // enum may name its variants `Some`/`None`, and `rt_is_some` is
