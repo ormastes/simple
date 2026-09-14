@@ -553,10 +553,20 @@ if [ "${bootstrap_stage2_trust_root}" -eq 0 ]; then
   # produced a receipt that its own next step refused as
   # planner-admission-v2-unbound. Bind the verify to THIS run's own resume
   # output root and nothing wider; an operator-supplied value always wins.
-  if [ -n "${resume_stage3_output}" ] &&
+  # Stage 4 is the exact twin of the Stage 3 case above and was left unbound by
+  # PR #955: bootstrap-strategy.sh:693 drives --resume-stage4-from-admitted
+  # through this SAME bootstrap_planner_v2_verify call, and
+  # resume-stage4-from-admitted.sh repeats the //bootstrap:stage4 verification,
+  # so a lane on a private storage root reached Stage 4 and was refused as
+  # planner-admission-v2-unbound for the identical reason. Bind it the same way,
+  # to THIS run's own resume output root and nothing wider.
+  bootstrap_resume_output_arg=${resume_stage3_output}
+  [ -n "${bootstrap_resume_output_arg}" ] ||
+    bootstrap_resume_output_arg=${resume_stage4_output}
+  if [ -n "${bootstrap_resume_output_arg}" ] &&
      [ -z "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ]; then
     bootstrap_resume_output_root=$(
-      CDPATH= cd -- "${resume_stage3_output}" 2>/dev/null && pwd -P
+      CDPATH= cd -- "${bootstrap_resume_output_arg}" 2>/dev/null && pwd -P
     ) || bootstrap_resume_output_root=
     [ -n "${bootstrap_resume_output_root}" ] &&
       [ "${bootstrap_resume_output_root}" != / ] || {
