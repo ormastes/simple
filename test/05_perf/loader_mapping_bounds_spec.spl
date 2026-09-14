@@ -1,0 +1,237 @@
+"""P4 loader mapping bounds and lifetime acceptance contract.
+
+This packet is intentionally fail-fast until P3 admits the finite production
+constructors and leases from the export/mapping design.  The source checks are
+not a substitute for the eventual production-owner execution evidence: they
+make a missing seam explicit, while preserving the exact scenarios that must
+be run once the owners land.
+"""
+
+# codex-system-test
+# @tag: perf, loader, smf, dynlib, lifetime, cache, fail-closed
+# @evidence-display: links
+# @req P4-A01 P4-A02 P4-A03 P4-A04 P4-A05 P4-A06 P4-A07
+# Run: bin/simple test test/05_perf/loader_mapping_bounds_spec.spl --mode=interpreter
+
+use std.io.{file_read}
+use std.spec.{describe, it, expect, step, fail}
+
+val SMF_CACHE = "src/compiler/99.loader/loader/smf_cache.spl"
+val JIT = "src/compiler/99.loader/loader/jit_instantiator.spl"
+val MAPPER = "src/compiler/99.loader/loader/object_mapper.spl"
+val MODULE_LOADER = "src/compiler/99.loader/loader/module_loader.spl"
+val COMPAT_SMF_CACHE = "src/compiler/99.loader/smf_cache.spl"
+
+fn require_p3_token(path: text, token: text, seam: text):
+    val source = file_read(path)
+    if source.contains(token):
+        expect(source).to_contain(token)
+    else:
+        fail("MissingEvidence: P3 has not admitted " + seam +
+            " in " + path + " (required token: " + token + ")")
+        return
+
+fn require_p3_tokens(path: text, tokens: [text], seam: text):
+    val source = file_read(path)
+    for token in tokens:
+        if source.contains(token):
+            expect(source).to_contain(token)
+        else:
+            fail("MissingEvidence: P3 has not admitted " + seam +
+                " in " + path + " (required token: " + token + ")")
+            return
+
+describe "P4 loader mapping bounds [importance=critical; importance_weight=3]":
+    describe "P4-A01: separate entry and byte capacity [importance=critical; importance_weight=3]":
+        it "should refuse a request over either finite capacity without admitting a partial reservation [importance=critical; importance_weight=3]":
+            step("Prepare finite retained-entry, retained-payload, and owned-mapping limits")
+            require_p3_tokens(SMF_CACHE, [
+                "LoaderCacheLimits",
+                "retained_entries",
+                "retained_payload_bytes",
+                "owned_mapping_entries",
+                "owned_mapping_bytes",
+                "with_limits",
+            ], "separate entry and byte capacity")
+            step("Require a residency result that exposes both dimensions")
+            require_p3_tokens(SMF_CACHE, [
+                "LoaderCacheResidency",
+                "retained_entries",
+                "retained_payload_bytes",
+                "owned_mapping_entries",
+                "owned_mapping_bytes",
+            ], "entry and byte residency accounting")
+
+        it "should admit an exact fit and reject a second entry beyond the two-entry limit [importance=critical; importance_weight=3]":
+            step("Acquire two entries whose payload exactly fits the independent limits")
+            require_p3_token(SMF_CACHE, "acquire(path", "explicit SMF acquisition")
+            require_p3_token(SMF_CACHE, "reserved_entries", "entry reservation accounting")
+            step("Require the next entry to fail before mapper allocation")
+            require_p3_token(SMF_CACHE, "admission_refusals", "bounded admission refusal")
+
+    describe "P4-A02: overflow and allocation ordering [importance=critical; importance_weight=3]":
+        it "should reject oversized and arithmetic-overflow requests before native allocation [importance=critical; importance_weight=3]":
+            step("Validate subtraction-safe finite limit checks")
+            require_p3_tokens(SMF_CACHE, [
+                "request <= limit - owned - reserved",
+                "overflow",
+                "admission_refusals",
+            ], "overflow-safe mapping reservation")
+            step("Prove refusal occurs before the mmap owner is called")
+            require_p3_tokens(SMF_CACHE, [
+                "exec_mapping_map_rx",
+                "before mapping",
+                "refuse",
+            ], "pre-allocation overflow refusal")
+
+        it "should preserve the existing semantic error order before a budget refusal [importance=critical; importance_weight=3]":
+            step("Check the JIT failure precedence remains stable")
+            require_p3_tokens(JIT, [
+                "JIT disabled",
+                "depth",
+                "cache hit",
+                "cycle",
+                "compile failure",
+                "mapping failure",
+                "publication",
+            ], "JIT semantic failure ordering")
+            expect(file_read(JIT)).to_contain("CompilationError")
+
+    describe "P4-A03: active and legacy pin ownership [importance=critical; importance_weight=3]":
+        it "should keep an actively leased mapping resident when pressure evicts unpinned entries [importance=critical; importance_weight=3]":
+            step("Acquire an explicit lease and apply cache pressure")
+            require_p3_tokens(SMF_CACHE, [
+                "LoaderResourceLease",
+                "acquire(path",
+                "release(lease",
+                "active_leases",
+                "retired_entries",
+            ], "active mapping lease lifetime")
+            step("Require pressure eviction to skip pinned records")
+            require_p3_tokens(SMF_CACHE, [
+                "legacy_pinned_entries",
+                "all victims are pinned",
+                "admission_refusals",
+            ], "non-eviction of active pins")
+
+        it "should treat repeated raw get calls as one idempotent legacy pin until the caller boundary [importance=critical; importance_weight=3]":
+            step("Classify the compatibility get API as an implicit pin")
+            require_p3_tokens(SMF_CACHE, [
+                "fn get(path",
+                "legacy",
+                "implicit",
+                "legacy_pinned_entries",
+            ], "legacy implicit pin")
+            step("Require explicit drop/clear to be the legacy lifetime boundary")
+            require_p3_tokens(SMF_CACHE, [
+                "evict(path",
+                "clear()",
+                "pin idempotently",
+            ], "legacy pin release boundary")
+
+    describe "P4-A04: generation and reload [importance=critical; importance_weight=3]":
+        it "should retain an old leased generation while publishing a fresh generation after eviction [importance=critical; importance_weight=3]":
+            step("Evict the reusable generation and reload the same path")
+            require_p3_tokens(SMF_CACHE, [
+                "resource generation",
+                "monotonic token",
+                "Refresh publishes a new generation",
+                "retains old leased generations",
+            ], "reload generation ownership")
+            step("Require stale releases to leave the fresh mapping accounted")
+            require_p3_tokens(SMF_CACHE, [
+                "stale",
+                "double",
+                "foreign",
+                "never decrement another resource",
+            ], "stale lease rejection")
+
+        it "should make zero retention non-reusable without killing a usable current lease [importance=critical; importance_weight=3]":
+            step("Set retained-entry and retained-byte retention to zero")
+            require_p3_tokens(SMF_CACHE, [
+                "zero retention",
+                "no reusable entry",
+                "returned lease",
+            ], "zero-retention lease behavior")
+            step("Require the live-resource ceiling to remain hard")
+            require_p3_tokens(SMF_CACHE, [
+                "owned_mapping_entries",
+                "owned_mapping_bytes",
+                "zero hard mapping ceiling",
+            ], "zero-retention live mapping ceiling")
+
+    describe "P4-A05: failed release retention [importance=critical; importance_weight=3]":
+        it "should retain failed releases and their bytes for retry instead of claiming eviction [importance=critical; importance_weight=3]":
+            step("Force a native release failure through the production owner")
+            require_p3_tokens(SMF_CACHE, [
+                "release_failures",
+                "failed release",
+                "retained",
+                "retry",
+            ], "failed-release retention")
+            step("Require failed cleanup to preserve resident counters")
+            require_p3_tokens(SMF_CACHE, [
+                "owned_mapping_bytes",
+                "retired_entries",
+                "does not claim eviction",
+            ], "failed-release accounting")
+
+        it "should preserve the primary update or compile error while recording cleanup failure separately [importance=critical; importance_weight=3]":
+            step("Complete publication and then fail the optional SMF update")
+            require_p3_tokens(JIT, [
+                "UpdateFailed",
+                "successful mapping/cache publication",
+                "secondary cleanup evidence",
+            ], "post-publication update failure")
+            expect(file_read(JIT)).to_contain("CompilationError")
+
+    describe "P4-A06: shared object mapper lifetime [importance=critical; importance_weight=3]":
+        it "should account actual mapped extents and keep callable addresses alive through the owner lease [importance=critical; importance_weight=3]":
+            step("Acquire executable storage through the shared mapper")
+            require_p3_tokens(MAPPER, [
+                "actual extent",
+                "mapped_bytes",
+                "LoaderResourceLease",
+                "lookup(symbol",
+            ], "object-mapper extent and lease ownership")
+            step("Require address release only after the final owner lease")
+            require_p3_tokens(MAPPER, [
+                "active_leases",
+                "unmap_symbol(symbol",
+                "release(lease",
+            ], "callable-address lifetime")
+
+        it "should reject stale or foreign mapper releases without decrementing totals [importance=critical; importance_weight=3]":
+            step("Submit stale, duplicate, and foreign lease tokens")
+            require_p3_tokens(MAPPER, [
+                "stale",
+                "double",
+                "foreign",
+                "owned_mapping_bytes",
+            ], "mapper release receipt validation")
+            expect(file_read(MAPPER)).to_contain("SharedExecMapper")
+
+    describe "P4-A07: dual import route classification [importance=high; importance_weight=2]":
+        it "should classify provider-backed and direct-file imports as separate loader routes [importance=high; importance_weight=2]":
+            step("Inspect both production import routes")
+            val source = file_read(MODULE_LOADER)
+            expect(source).to_contain("Prefer shared object provider")
+            expect(source).to_contain("provider.get_module_bytes(path)")
+            expect(source).to_contain("Fallback to direct file reader")
+            expect(source).to_contain("SmfReaderImpl.open(path)")
+            step("Require route identity to remain part of the receipt")
+            require_p3_tokens(MODULE_LOADER, [
+                "provider-backed",
+                "direct file",
+                "route",
+                "receipt",
+            ], "dual import route receipt classification")
+
+        it "should keep the compatibility surface from claiming native mapping admission [importance=high; importance_weight=2]":
+            step("Inspect the compatibility SMF surface separately from the loader owner")
+            val compatibility = file_read(COMPAT_SMF_CACHE)
+            expect(compatibility).to_contain("Compatibility")
+            expect(compatibility).to_contain("SmfCache")
+            expect(file_read(MAPPER)).to_contain("SharedExecMapper")
+            step("Require native receipts to be issued only by the loader subtree")
+            require_p3_token(SMF_CACHE, "native", "native loader receipt classification")
