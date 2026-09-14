@@ -1940,3 +1940,94 @@ checkout — see `doc/08_tracking/bug/stage3_coordinator_route_cold_init_unreach
 
 Logs preserved: `build/f74logs/stage3-run2-native-build.log` (run 36),
 `build/f74logs/stage3-run5-native-build.log` (run 38).
+
+## Runs 39-41 (2026-09-14, F75) — the Stage 3 SEGV is a STACK OVERFLOW, and the recursion is named
+
+Runs 39-41 are not chain runs. They are three lldb replays of run 38's own
+`stage3-command.transcript`, byte-for-byte except for cache/output/evidence
+paths, done because the chain could not advance until the SEGV had a cause.
+Each costs ~22 minutes and reproduces deterministically.
+
+**Run 39 — crash class.** `build/f75logs/repro-lldb.log:12077-12085`:
+
+```
+Process 12291 stopped
+* thread #1, queue = 'com.apple.main-thread',
+  stop reason = EXC_BAD_ACCESS (code=2, address=0x16f603ff0)
+  frame #0: simple`core::hash::sip::Hasher::write
+  ->  0x1008bea38 <+0>:  stp  x26, x25, [sp, #-0x50]!
+      sp = 0x000000016f604040
+```
+
+A **write** fault one word below `sp`, on the **first instruction of a function
+prologue**, on the **main thread** — the stack guard page. This is a stack
+overflow. It rules out the seed-codegen miscompile branch (which would fault
+`code=1` at a small address) and the `rt_transient_heap_promote` runtime branch
+(which would put an `rt_*` symbol at frame #0 as the cause rather than as the
+next callee that needed a frame).
+
+**Trap worth recording: `lldb --batch -o run -o 'bt N'` silently drops the
+backtrace.** Run 39 printed the stop banner and exited with no frames at all.
+The working form is lldb's crash-command list, `-k 'thread backtrace -c N'`,
+and `-c` is mandatory — an unbounded `bt` on a stack this deep never returns.
+
+**Run 40 — the recursion.** `build/f75logs/repro-lldb-2.log:12075-12238` shows
+an exact four-symbol unit repeating for all 151 captured frames:
+
+```
+register_imported_symbol
+  -> register_imported_symbol_inner                        (+1772 = module_import_registration.spl:367)
+     -> register_materialized_enum_payload_dependencies    (module_reexport_materialization.spl:564)
+        -> register_materialized_payload_named_dependency(_inner)   (:485/:491)
+           -> register_imported_symbol                     (:537, materialize_enum = true)
+```
+
+This is **not** the cycle fixed on 2026-08-17 — that one ran through
+`register_imported_type_methods`, whose breaker sits on no edge of this cycle.
+And `register_imported_symbol`'s `registered_import_memo` is by its own comment
+deliberately **not** a re-entrancy breaker ("A key is recorded only AFTER the
+body returns"). The only guard on this cycle is the mark-on-entry in
+`register_materialized_enum_payload_dependencies`.
+
+**Run 41 — depth, to choose the fix.** If that mark-on-entry guard works, every
+level is a distinct enum identity and depth is bounded by the enums reachable
+from `driver.spl` — the tree declares 2,280. 8 MB / 2,280 is ~3.6 KB per
+four-frame level, which these multi-KB functions can plausibly use, so
+"finite but too deep" and "guard not taking effect" both fit the frames.
+Depth ≈ 2,000-2,500 means the walk must be flattened to a worklist; depth far
+beyond 2,280 means the Dict memo is not taking effect and the fix is a `[text]`
+in-progress breaker, the same shape (and for the same documented
+`rt_dict_contains` reason) as `imported_type_methods_in_progress`.
+Full analysis, both candidate fixes, and why guessing between them is not
+acceptable:
+`doc/08_tracking/bug/stage3_hir_enum_payload_closure_stack_overflow_driver_2026-09-14.md`.
+
+**No stack-size lever exists.** `--compile-stack-mib` is passed on the Stage 2
+argv and has zero consumers in product code (`grep -rn stack_mib src` is empty;
+it appears only in four shell scripts), and the Stage 3 argv omits it entirely.
+
+**Harness fixes landed this round (neither unblocks the SEGV):**
+
+- **#976** — the Stage 3 child runs under `env -i`, so the
+  `SIMPLE_SCV_INVENTORY_COLD_INIT=1` remedy that the compiler's own
+  `SCV-E-ADMISSION: compile-event-journal-missing` prescribes could never reach
+  it; runs 36 and 37 failed identically with the variable exported. It is now an
+  explicit, validated, opt-in single-variable pass-through baked into both the
+  args digest and the transcript, gated by
+  `check-bootstrap-stage3-scv-cold-init-passthrough.shs`. The coordinator
+  (threads > 1) route is usable on a cold checkout again.
+- **#977** — the Stage 4 twin of #955 was unbound: the same
+  `bootstrap_planner_v2_verify` call serves `--resume-stage4-from-admitted`, so
+  any lane on a private storage root would have been refused at Stage 4 exactly
+  as Stage 3 was. Measured before/after on the real script,
+  `planner-admission-v2-unbound` -> `resume-output-root-unresolvable`, i.e. the
+  binding block was being skipped entirely. `check-bootstrap-stage3-receipt-autowire.shs`
+  widened to 19 checks including a new executing Stage-4 row.
+- Filed, not fixed:
+  `doc/08_tracking/bug/stage3_declared_fallback_route_read_by_nothing_2026-09-14.md`
+  — every Stage 3 receipt records `fallback_route=direct`, and
+  `SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE` is read by nothing under `src/`.
+
+**Stage 3 remains BLOCKED. Stage 4 was never attempted. `bin/release/` is
+untouched, nothing was deployed, and no Stage 3 or Stage 4 artifact sha exists
+to cite.**
