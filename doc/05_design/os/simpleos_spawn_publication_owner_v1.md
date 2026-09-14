@@ -47,12 +47,20 @@ A full task table rejects even for parent PID 0. The bytes path now uses
 the common VM-registration call instead of omitting it. Priority, capability
 pouch and parent are passed unchanged to that existing common owner.
 
-Fork likewise validates the returned COW root before paired identity
-reservation. The non-x86 shallow COW provider has no owned rollback receipt
-for a valid root followed by identity refusal; it shares parent tables and
-cannot use the generic subtree destructor. That explicit prerequisite is
-tracked in `doc/08_tracking/bug/scheduler_cow_identity_refusal_rollback.md`.
-The x86 provider still returns unavailable before changing parent mappings.
+Fork validates the parent root and free task slot, then reserves its paired
+identity **before** invoking COW. The non-x86 shallow COW provider can change
+parent permissions and shares parent page tables without an owned rollback
+receipt. Allocator refusal after that mutation would leak a candidate root and
+leave the parent changed; the generic subtree destructor would destroy shared
+tables. Early reservation therefore ensures identity refusal causes no COW
+mutation. A later unavailable/synthetic COW result burns the issued pair
+without publishing a task. No identity is rolled back or reused.
+
+This is deliberately different from mapping a new independent AddressSpace,
+whose existing retirement owner can receive a candidate on identity refusal.
+Moving COW identity reservation later remains blocked by
+`doc/08_tracking/bug/scheduler_cow_identity_refusal_rollback.md`. The x86
+provider still returns unavailable before changing parent mappings.
 
 ## Ownership and the unavailable publication API
 

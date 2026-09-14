@@ -24,12 +24,15 @@ qualified by this manual.
 
 ## REQ-SCHED-ROOT-002 — fork publication
 
-1. Inspect the parent-root rejection before the COW provider call. Verify a
-   synthetic parent cannot reach cloning or task identity allocation.
-2. Inspect the returned COW root before identity allocation. Verify failure and
-   synthetic results cannot reach paired task/lifecycle reservation, Ready
-   construction or VM registry publication. Store both coordinates from the
-   accepted pair; the old ID-only allocator is not accepted.
+1. Inspect parent-root and task-slot rejection before identity reservation.
+   An unavailable/synthetic parent or full table cannot consume a pair or
+   invoke the COW provider.
+2. Reserve one paired task/lifecycle identity before COW. Allocator refusal
+   must return before the provider can allocate a shallow root or alter parent
+   permissions. A later COW failure permanently consumes that issued pair,
+   but cannot reach Ready construction or VM registry publication. Store both
+   coordinates from the accepted pair; the old ID-only allocator and generic
+   subtree destruction are not accepted.
 3. Inspect the accepted-root flow into both publication records. Verify the
    child's returned root is retained consistently, with no parent-sentinel
    copying path.
@@ -58,11 +61,12 @@ does not execute these owners. The test plan lists required physical fault
 injection and the existing base constructor mismatch that prevents assuming
 compiled readiness from this repair.
 
-The non-x86 shallow COW provider lacks an owned rollback receipt. A valid raw
-COW root followed by identity-allocation refusal therefore has no safe subtree
-destruction path; its shared parent tables must not be freed. This is a tracked
-MissingEvidence prerequisite in
-`doc/08_tracking/bug/scheduler_cow_identity_refusal_rollback.md`, not a completed
-rollback claim. The x86 COW provider remains fail-closed before allocation.
+The non-x86 shallow COW provider lacks an owned rollback receipt. Reserving
+identity before invoking COW prevents identity refusal from stranding a newly
+allocated root or mutated parent tables. Reordering that reservation after COW
+remains blocked by the MissingEvidence prerequisite in
+`doc/08_tracking/bug/scheduler_cow_identity_refusal_rollback.md`. The x86 COW
+provider remains fail-closed before physical allocation; attempted COW after
+successful identity reservation can still consume a pair.
 
 </details>

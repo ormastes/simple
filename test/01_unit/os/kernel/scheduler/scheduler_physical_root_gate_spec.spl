@@ -129,27 +129,33 @@ describe "REQ-SPAWN-PREP-002 operation-owned child preparation [source-contract]
 
 describe "REQ-SCHED-ROOT-002 fork publication [source-contract]":
     it "should reject an unavailable or synthetic parent before cloning":
-        step("Inspect the parent-root rejection before the COW provider call")
-        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
-        val body = _scheduler_source_function(source, "sched_clone_task_impl")
-        val before_clone = body.split("    val child_as = vmm_cow_clone_pages(parent.address_space)")
-        expect(before_clone.len()).to_equal(2)
-        expect(before_clone[0]).to_contain("if parent.address_space == 0 or parent.address_space == 1:\n        return (TaskId(id: 0), tasks, -1)")
-        expect(before_clone[0].count("scheduler_next_task_id_take()")).to_equal(0)
-        expect(before_clone[0].count("scheduler_next_task_lifecycle_identity_take_v1()")).to_equal(0)
-
-    it "should reject a failed or synthetic child root before taking a task identity":
-        step("Inspect the returned COW root before identity allocation")
+        step("Inspect parent and slot rejection before any identity or COW mutation")
         val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
         val body = _scheduler_source_function(source, "sched_clone_task_impl")
         val before_identity = body.split("    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()")
         expect(before_identity.len()).to_equal(2)
-        expect(before_identity[0]).to_contain("if child_as == 0 or child_as == 1:\n        return (TaskId(id: 0), tasks, -1)")
-        expect(before_identity[0].count("state: TaskState.Ready")).to_equal(0)
-        expect(before_identity[0].count("register_task_vmspace(")).to_equal(0)
+        expect(before_identity[0]).to_contain("if parent.address_space == 0 or parent.address_space == 1:\n        return (TaskId(id: 0), tasks, -1)")
+        expect(before_identity[0]).to_contain("if child_slot < 0:\n        return (TaskId(id: 0), tasks, -1)")
+        expect(before_identity[0].count("vmm_cow_clone_pages(")).to_equal(0)
+
+    it "should reserve identity before COW because the shallow clone has no safe rollback":
+        step("Inspect allocator refusal before the COW provider can alter parent tables")
+        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val body = _scheduler_source_function(source, "sched_clone_task_impl")
+        val before_clone = body.split("    val child_as = vmm_cow_clone_pages(parent.address_space)")
+        expect(before_clone.len()).to_equal(2)
+        expect(before_clone[0]).to_contain("val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()")
+        expect(before_clone[0]).to_contain("if maybe_identity == nil:\n        return (TaskId(id: 0), tasks, -1)")
+        expect(before_clone[1].count("scheduler_next_task_lifecycle_identity_take_v1()")).to_equal(0)
+        val before_task = body.split("    val child = TaskControlBlock(")
+        expect(before_task.len()).to_equal(2)
+        expect(before_task[0]).to_contain("if child_as == 0 or child_as == 1:\n        return (TaskId(id: 0), tasks, -1)")
+        expect(before_task[0].count("register_task_vmspace(")).to_equal(0)
         expect(body).to_contain("val child_id = TaskId(id: identity.task_id)")
         expect(body).to_contain("lifecycle_generation: identity.lifecycle_generation")
+        expect(body.count("scheduler_next_task_lifecycle_identity_take_v1()")).to_equal(1)
         expect(body.count("scheduler_next_task_id_take()")).to_equal(0)
+        expect(body.count("destroy_user_address_space(")).to_equal(0)
 
     it "should use the accepted child root for the task and VM registry":
         step("Inspect the accepted-root flow into both publication records")
