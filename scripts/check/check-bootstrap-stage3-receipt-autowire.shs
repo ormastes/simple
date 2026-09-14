@@ -129,9 +129,17 @@ check_grep "the resume output root binding is not fail-closed" \
 # The bound value must come only from the operator's own resume argument -- a
 # wider root (a storage root, a home directory) would re-open the hole #929
 # closed on the producing side.
+# Widened 2026-09-14: the SAME verify call serves the Stage 4 resume
+# (bootstrap-strategy.sh drives --resume-stage4-from-admitted through it and
+# bootstrap_receipt_target defaults to //bootstrap:stage4), and that twin was
+# left unbound by PR #955. The binding now selects whichever resume argument
+# this run actually carries, so require the selector to be built from EXACTLY
+# those two operator arguments and from nothing wider.
 checks=$((checks + 1))
-if ! grep -q 'cd -- "\${resume_stage3_output}"' "$script"; then
-    note_fail "the bound root is not derived from the resume output argument"
+if ! grep -q 'bootstrap_resume_output_arg=\${resume_stage3_output}' "$script" ||
+   ! grep -q 'bootstrap_resume_output_arg=\${resume_stage4_output}' "$script" ||
+   ! grep -q 'cd -- "\${bootstrap_resume_output_arg}"' "$script"; then
+    note_fail "the bound root is not derived from the stage3/stage4 resume output arguments"
 fi
 # It must be placed BEFORE the verify it exists to bind.
 bind_line=$(grep -n 'bootstrap_resume_output_root=\$(' "$script" | head -1 | cut -d: -f1)
@@ -168,6 +176,18 @@ else
     case "$bind_out" in
         *resume-output-root-unresolvable*) ;;
         *) note_fail "an unresolvable resume output root was not refused by the binding block: $(printf '%s' "$bind_out" | tail -1)" ;;
+    esac
+    # Stage 4 twin: the same block must be reached and fail closed for a
+    # --resume-stage4-from-admitted run. Without this row the Stage 4 binding
+    # could be deleted again and only the static grep above would notice.
+    checks=$((checks + 1))
+    bind4_out=$(cd "$root" && SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT= sh "$script" \
+        --resume-stage4-from-admitted="$bind_fixture/absent" \
+        --bootstrap-receipt="$bind_fixture/receipt" \
+        --validate-bootstrap-receipt 2>&1)
+    case "$bind4_out" in
+        *resume-output-root-unresolvable*) ;;
+        *) note_fail "an unresolvable STAGE 4 resume output root was not refused by the binding block: $(printf '%s' "$bind4_out" | tail -1)" ;;
     esac
     rm -rf "$bind_fixture"
 fi
