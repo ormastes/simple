@@ -975,6 +975,29 @@ impl Lowerer {
         // Search pre-registered methods for ".method" suffix
         // Sort matches by name length (shortest = most specific) for deterministic resolution
         let suffix = format!(".{}", method);
+        // A receiver of known BUILTIN type may only borrow a registered return
+        // type from a method on that same builtin (e.g. `impl text` registers
+        // `text.foo`). Otherwise an unrelated user method with the same name won:
+        // `"/".join(xs)` was typed as `Thread.join() -> i64?`, so `"/" + ...`
+        // failed lowering and the whole module dropped to the interpreter.
+        // doc/08_tracking/bug/seed_receiver_text_join_resolves_to_thread_join_optional_2026-09-13.md
+        let builtin_owners: Option<&[&str]> = match self.module.types.get(recv_ty) {
+            Some(HirType::String) => Some(&["text", "String", "str", "string"]),
+            Some(HirType::Array { .. }) => Some(&["Array", "List", "array"]),
+            Some(HirType::Dict { .. }) => Some(&["Dict", "dict", "Map"]),
+            Some(HirType::Tuple(_)) | Some(HirType::LabeledTuple(_)) => Some(&["Tuple"]),
+            Some(HirType::Bool) => Some(&["bool", "Bool"]),
+            Some(HirType::Char) => Some(&["char", "Char"]),
+            Some(HirType::Int { .. }) => Some(&["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "int", "Int"]),
+            Some(HirType::Float { .. }) => Some(&["f32", "f64", "float", "Float"]),
+            _ => None,
+        };
+        let owner_applies = |name: &str| match builtin_owners {
+            None => true,
+            Some(owners) => name
+                .rsplit_once('.')
+                .is_some_and(|(owner, _)| owners.contains(&owner)),
+        };
         // Trait names intentionally alias to ANY in HIR because calls use a
         // runtime vtable.  A module that imports only the trait therefore has
         // no `ConcreteType.method` entry in `method_return_types`; the trait
@@ -1021,7 +1044,7 @@ impl Lowerer {
         for (_, &rt) in self
             .method_return_types
             .iter()
-            .filter(|(name, _)| name.ends_with(&suffix))
+            .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
         {
             match seen_ret {
                 None => seen_ret = Some(rt),
@@ -1046,7 +1069,7 @@ impl Lowerer {
         if let Some((_, &ret_ty)) = self
             .method_return_types
             .iter()
-            .filter(|(name, _)| name.ends_with(&suffix))
+            .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
             .min_by_key(|(name, _)| name.len())
         {
             return ret_ty;
