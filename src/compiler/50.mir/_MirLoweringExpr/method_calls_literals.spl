@@ -3458,6 +3458,16 @@ impl MirLowering:
                             val fold_init_raw = self.lower_expr(args[0].value)
                             return self.lower_array_fold(unresolved_receiver_local, fold_init_raw, fold_lam_op)
 
+                    # Array `get`/`at` are builtin methods without resolver
+                    # symbols. Lower only the exact one-index Array shape;
+                    # other receivers and arities retain the loud unresolved
+                    # diagnostic below. The helper performs signed bounds
+                    # checks before reading and constructs a real Option<T>.
+                    if (method == "get" or method == "at") and args.len() == 1:
+                        val access_index_local = self.lower_expr(args[0].value)
+                        if val access_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, Some(access_index_local)):
+                            return access_result
+
                     # `.first()`/`.last()` have no MethodResolver entry either
                     # (same builtin-Array gap as push/map/filter/fold above),
                     # so they always reach this Unresolved arm and used to
@@ -3472,10 +3482,10 @@ impl MirLowering:
                     # `map`/`filter` above already do when their lambda arg
                     # doesn't match the liftable shape.
                     if method == "first" and args.len() == 0:
-                        if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false):
+                        if val first_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, false, nil):
                             return first_result
                     if method == "last" and args.len() == 0:
-                        if val last_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, true):
+                        if val last_result = self.lower_array_first_or_last(receiver, unresolved_receiver_local, true, nil):
                             return last_result
 
                 # Bug #149: `x.push(item)` never resolves via MethodResolver
@@ -4466,7 +4476,7 @@ impl MirLowering:
         self.builder = b_exit
         acc
 
-    me lower_array_first_or_last(receiver: HirExpr, arr: LocalId, want_last: bool) -> LocalId?:
+    me lower_array_first_or_last(receiver: HirExpr, arr: LocalId, want_last: bool, access_index: LocalId?) -> LocalId?:
         """Real MIR lowering for `Array.first()`/`.last()` on a runtime
         array, returning a genuine `Option<T>` handle -- mirrors
         `Option.map`'s some/none/merge shape immediately above (the
@@ -4557,7 +4567,7 @@ impl MirLowering:
         # mirrors why `Option.map` above only calls `ensure_option_handle`
         # when `map_value_type != nil` at all.
         val option_type = HirType(kind: HirTypeKind.Optional(elem_hir_type), span: receiver.span)
-        val name_prefix = if want_last: "last" else: "first"
+        val name_prefix = if access_index != nil: "get" else: if want_last: "last" else: "first"
 
         var b_len = self.builder
         val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
@@ -4566,20 +4576,31 @@ impl MirLowering:
 
         var b_split = self.builder
         val zero = b_split.emit_const_int(0)
-        val nonempty = b_split.emit_binop(MirBinOp.Gt, mir_operand_copy(len_local), mir_operand_copy(zero), MirType.bool())
+        var selected_index = zero
+        if val requested_index = access_index:
+            selected_index = requested_index
         val some_block = b_split.new_block(Some("{name_prefix}_some"))
         val none_block = b_split.new_block(Some("{name_prefix}_none"))
         val merge_block = b_split.new_block(Some("{name_prefix}_merge"))
         val result_local = b_split.new_temp(MirType.i64())
-        b_split.terminate_if(mir_operand_copy(nonempty), some_block, none_block)
+        if access_index != nil:
+            val upper_block = b_split.new_block(Some("get_upper"))
+            val nonnegative = b_split.emit_binop(MirBinOp.Ge, mir_operand_copy(selected_index), mir_operand_copy(zero), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(nonnegative), upper_block, none_block)
+            b_split.switch_to_block(upper_block)
+            val below_length = b_split.emit_binop(MirBinOp.Lt, mir_operand_copy(selected_index), mir_operand_copy(len_local), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(below_length), some_block, none_block)
+        else:
+            val nonempty = b_split.emit_binop(MirBinOp.Gt, mir_operand_copy(len_local), mir_operand_copy(zero), MirType.bool())
+            b_split.terminate_if(mir_operand_copy(nonempty), some_block, none_block)
         self.builder = b_split
 
         var b_some = self.builder
         b_some.switch_to_block(some_block)
         self.builder = b_some
         var b_idx = self.builder
-        var idx_local = b_idx.emit_const_int(0)
-        if want_last:
+        var idx_local = selected_index
+        if access_index == nil and want_last:
             val one = b_idx.emit_const_int(1)
             idx_local = b_idx.emit_binop(MirBinOp.Sub, mir_operand_copy(len_local), mir_operand_copy(one), MirType.i64())
         self.builder = b_idx
