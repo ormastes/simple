@@ -1,12 +1,25 @@
 # Seed JIT: the explicit `Some(x)` optional constructor produces a corrupt value
 
 - **Filed:** 2026-09-13
-- **Status:** FIXED (pending seed redeploy) — see "Root cause and fix" below.
-  The `str(x!)` / display symptom (lines 1, 4, 5 of the repro table) is fixed.
-  The `==` comparison symptom (line 3, `o! == "hello"` false under JIT) goes
-  through a different code path (`BinOp::Eq` on `ANY`-typed operands, not
-  `lower_cast_expr`) and was **not** re-verified by this fix — re-check it
-  once a redeployed seed is available before closing this record outright.
+- **Status:** PARTIALLY FIXED (pending seed redeploy AND full re-verification)
+  — see "Root cause and fix" below. One confirmed contributing defect is fixed:
+  `str(x)`/`text(x)` where `x` is an ANY-typed force-unwrap (e.g.
+  `str(Some(42)!)`, or any `str(y!)` on a nullable scalar) was silently
+  corrupted by `lower_cast_expr` falling through to a bare `MirInst::Cast`
+  instead of a real to-string conversion. This is verified **only at the MIR
+  level** (a lowering-stage regression test), not by rebuilding the seed and
+  re-running the repro table below — that re-run is still outstanding.
+  It does **not** explain the full repro: none of the repro's 5 print lines
+  actually calls `str()`/`text()` directly on the unwrapped value (line 1 and
+  4 are string concatenation, `+`; line 3 is `==`; line 5 is `str(o!.len())`,
+  where `.len()` on an already-corrupt word is what produces -1, not the
+  `str()` call itself). It also does not explain the reported asymmetry
+  between `Some(x)` (broken under JIT) and plain coercion `val c: text? = x`
+  (fine under JIT) — `x!`'s HIR type is `ANY` in both cases per `lower_try`,
+  so this fix is symmetric between them, meaning a **second, still-open**
+  defect likely lives in the `Some(...)` constructor's lowering itself, not in
+  `lower_cast_expr`. Re-run the full repro table on a redeployed seed before
+  closing this record.
 - **Severity:** high — silently wrong values, no crash, no diagnostic
 - **Host:** Windows 11, `bin/release/x86_64-pc-windows-msvc/simple.exe` (Rust bootstrap seed)
 - **Affects:** default execution mode (JIT). `SIMPLE_EXECUTION_MODE=interpreter` is correct.
@@ -92,8 +105,11 @@ falls through to a plain `MirInst::Cast`, a value-copy in codegen. An
 `ANY`-typed source is *not* a native scalar (it's a tagged word), so it fell
 through to the plain copy, which is exactly the "reinterprets a tagged
 RuntimeValue as a raw STRING pointer" corruption described in the comment
-directly above that `if` (`rt_string_concat` then reads len=-1 and returns
-NIL — matching `5 len=-1` in the repro table).
+directly above that `if` (`rt_string_concat` then reads a corrupted length
+and returns NIL). This exact `str(y!)` / `text(y!)` shape is confirmed
+corrupted independent of the specific repro table above (which exercises `+`
+concatenation and `.len()` on the unwrapped value, not a direct `str()`/`text()`
+call — see the Status note).
 
 Fix: also route `ANY`-typed sources through `emit_to_string`:
 
@@ -119,6 +135,19 @@ the seed binary is next redeployed from this source.
 
 ## Next step
 
-Re-verify the `==`-comparison symptom (line 3 of the repro table) against a
-redeployed seed — it was not touched by this fix and may be a separate defect
-in `BinOp::Eq` lowering for `ANY` operands.
+1. Rebuild the seed with this fix and re-run the full repro table above
+   end-to-end under default JIT. This PR verified the fix only at the MIR
+   level (a lowering-stage unit test), not by executing a rebuilt binary
+   against the repro.
+2. `x!` types `ANY` for both `Some(x)` and plain coercion (`val c: text? = x`),
+   so this fix is symmetric between them and does not by itself explain why
+   coercion already worked under JIT while `Some(...)` didn't. That points at
+   a second, separate defect in the `Some(...)` constructor's own lowering —
+   locate it in the Cranelift/JIT path of `src/compiler_rust/` and compare it
+   with the coercion path.
+3. Re-verify the `==`-comparison symptom (line 3 of the repro table) — it goes
+   through `BinOp::Eq` lowering for `ANY` operands, not `lower_cast_expr`, and
+   was not touched by this fix.
+
+Do not close this record until step 1 confirms the full original repro is
+clean on a redeployed seed.
