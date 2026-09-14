@@ -53,7 +53,7 @@ impl<'a> MirLowerer<'a> {
             // `enum_declares_variant` returns `None` whenever the head does not
             // positively resolve to a concrete enum, so the metadata-loss case
             // described below (registry lost `Effect`) stays permissive.
-            if self.enum_declares_variant(enum_name, variant) == Some(false)
+            if self.enum_declares_variant(enum_name, variant, expr_ty) == Some(false)
                 && !self.global_types.contains_key(name.as_str())
                 && !self.available_functions.contains(name.as_str())
             {
@@ -61,7 +61,7 @@ impl<'a> MirLowerer<'a> {
                     "unknown variant or method '{}' on enum {}{}",
                     variant,
                     enum_name,
-                    self.declared_variants_hint(enum_name)
+                    self.declared_variants_hint(enum_name, expr_ty)
                 )));
             }
 
