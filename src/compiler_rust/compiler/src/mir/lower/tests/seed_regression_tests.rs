@@ -411,11 +411,13 @@ fn or_suspend_keeps_eager_unconditional_evaluation() {
 /// See doc/08_tracking/bug/seed_jit_some_constructor_corrupts_value_2026-09-13.md
 #[test]
 fn str_of_force_unwrapped_nullable_scalar_routes_through_to_string() {
-    let mir = compile_to_mir(
-        "fn describe() -> text:\n    val x: i64? = 42\n    return str(x!)\n",
-    )
-    .expect("str(x!) on a nullable scalar must lower to MIR");
-    let func = mir.functions.iter().find(|f| f.name == "describe").expect("describe fn");
+    let mir = compile_to_mir("fn describe() -> text:\n    val x: i64? = 42\n    return str(x!)\n")
+        .expect("str(x!) on a nullable scalar must lower to MIR");
+    let func = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "describe")
+        .expect("describe fn");
 
     assert!(
         has_call(func, "rt_value_to_string"),

@@ -4,11 +4,15 @@
 - **Status:** PARTIALLY FIXED (pending seed redeploy AND full re-verification)
   — see "Root cause and fix" below. One confirmed contributing defect is fixed:
   `str(x)`/`text(x)` where `x` is an ANY-typed force-unwrap (e.g.
-  `str(Some(42)!)`, or any `str(y!)` on a nullable scalar) was silently
-  corrupted by `lower_cast_expr` falling through to a bare `MirInst::Cast`
-  instead of a real to-string conversion. This is verified **only at the MIR
-  level** (a lowering-stage regression test), not by rebuilding the seed and
-  re-running the repro table below — that re-run is still outstanding.
+  `val x: i64? = 42` then `str(x!)`, or any `str(y!)` on a declared nullable
+  scalar) was silently corrupted by `lower_cast_expr` falling through to a
+  bare `MirInst::Cast` instead of a real to-string conversion. This is
+  verified **only at the MIR level** (a lowering-stage regression test), not
+  by rebuilding the seed and re-running the repro table below — that re-run
+  is still outstanding. Note also that the verified shape is a *declared*
+  `T?` variable's `x!`; an inline `Some(42)!` may take a different
+  (enum-payload) lowering path in `lower_try` that this fix has not been
+  confirmed to touch.
   It does **not** explain the full repro: none of the repro's 5 print lines
   actually calls `str()`/`text()` directly on the unwrapped value (line 1 and
   4 are string concatenation, `+`; line 3 is `==`; line 5 is `str(o!.len())`,
