@@ -8,6 +8,29 @@ use crate::hir::types::{
     ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, HirStmt, LayoutAnchor, LayoutPhase, LocalVar, TypeId,
 };
 
+/// Whether an unannotated function body produces a value at its boundary.
+///
+/// Missing return annotations are gradual (`Any`), not `()`.  We still keep
+/// genuinely procedural bodies void so an omitted annotation on a setter or
+/// registration hook does not manufacture a value-returning ABI.
+fn body_produces_value(body: &[HirStmt]) -> bool {
+    fn stmt_produces_value(stmt: &HirStmt) -> bool {
+        match stmt {
+            HirStmt::Return(Some(_)) => true,
+            HirStmt::Expr(expr) => expr.ty != TypeId::VOID,
+            HirStmt::If {
+                then_block,
+                else_block: Some(else_block),
+                ..
+            } => body_produces_value(then_block) && body_produces_value(else_block),
+            _ => false,
+        }
+    }
+
+    body.last().is_some_and(stmt_produces_value)
+        || body.iter().any(|stmt| matches!(stmt, HirStmt::Return(Some(_))))
+}
+
 /// Returns true when a Block represents a stub body that auto-synthesis may replace.
 ///
 /// A body is a stub when it is:
@@ -588,7 +611,11 @@ impl Lowerer {
         // Parse concurrency mode from attributes
         let concurrency_mode = Self::parse_concurrency_mode(&f.attributes);
 
-        let return_type = self.resolve_type_opt(&f.return_type)?;
+        // An absent annotation is not an explicit unit return. Lower the body
+        // in a tagged-value context, then distinguish a value-producing body
+        // from a genuine procedure after its HIR is available.
+        let declared_return_type = f.return_type.as_ref().map(|ty| self.resolve_type(ty)).transpose()?;
+        let return_type = declared_return_type.unwrap_or(TypeId::ANY);
 
         // Determine if this is a method (has self parameter)
         let has_self = f.params.first().map(|p| p.name == "self").unwrap_or(false);
@@ -686,6 +713,14 @@ impl Lowerer {
         let effective_body: &ast::Block = driver_synthesized.as_ref().unwrap_or(&f.body);
 
         let mut body = self.lower_block(effective_body, &mut ctx)?;
+        let return_type = match declared_return_type {
+            Some(ty) => ty,
+            None if f.name == "main" => TypeId::VOID,
+            None if body_produces_value(&body) => TypeId::ANY,
+            None => TypeId::VOID,
+        };
+        ctx.return_type = return_type;
+        self.method_return_types.insert(func_name.clone(), return_type);
 
         // Implicit-return counterpart of the `Node::Return` bool coercion in
         // stmt_lowering: a function declared `-> bool` whose trailing

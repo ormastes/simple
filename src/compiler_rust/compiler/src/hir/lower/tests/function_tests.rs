@@ -75,3 +75,21 @@ fn snapshot_len() -> i64:
 "#;
     parse_and_lower(source).expect("declared extern return type must survive calls, coalescing, len, and iteration");
 }
+
+#[test]
+fn unannotated_value_function_uses_tagged_any_return_instead_of_void() {
+    let module = parse_and_lower(
+        "fn no_ret_type(data: [i64], index: i64):\n    data[index]\n\nfn caller() -> i64:\n    no_ret_type([7, 8, 9], 1)\n",
+    )
+    .expect("unannotated value function must lower");
+
+    let callee = module.functions.iter().find(|function| function.name == "no_ret_type").unwrap();
+    assert_eq!(callee.return_type, TypeId::ANY);
+    assert!(matches!(callee.body.last(), Some(HirStmt::Expr(expr)) if expr.ty == TypeId::I64));
+}
+
+#[test]
+fn unannotated_procedure_remains_void() {
+    let module = parse_and_lower("fn procedure():\n    val value = 1\n").expect("procedure must lower");
+    assert_eq!(module.functions[0].return_type, TypeId::VOID);
+}
