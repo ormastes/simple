@@ -1680,3 +1680,18 @@ fn erased_receiver_field_fallback_chooses_smallest_in_bounds_index() {
         "cross-module erased-receiver fallback must choose offset 0, not OOB offset 32"
     );
 }
+
+#[test]
+fn builtin_receiver_method_fallback_ignores_unrelated_user_class_methods() {
+    // `Widget.frob() -> i64?` must not type `frob` on a text or array receiver.
+    // Before the owner filter, both `+` expressions below were rejected as Add
+    // on an unwrapped optional, dropping the module to the interpreter.
+    let module = parse_and_lower(
+        "class Widget:\n    id: i64\n    fn frob() -> i64?:\n        nil\n\nfn on_text(s: text) -> i64:\n    val n = s.frob() + 1\n    return 0\n\nfn on_array(xs: [text]) -> i64:\n    val n = xs.frob() + 1\n    return 0\n",
+    );
+    assert!(
+        module.is_ok(),
+        "builtin receivers must not borrow Widget.frob's i64? return type: {:?}",
+        module.err()
+    );
+}
