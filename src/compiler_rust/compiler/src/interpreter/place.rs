@@ -106,6 +106,15 @@ pub(crate) fn resolve_place(
                 None => Ok(None),
             }
         }
+        Expr::TupleIndex { receiver, index } => {
+            match resolve_place(receiver, env, functions, classes, enums, impl_methods)? {
+                Some(mut place) => {
+                    place.projections.push(Projection::Index(Value::Int(*index as i64)));
+                    Ok(Some(place))
+                }
+                None => Ok(None),
+            }
+        }
         // `m!.n = 44`: `!` on an optional class/struct is the identity on the
         // value (it only narrows `T?` to `T`), so the unwrapped object is the
         // SAME place as the wrapped one and must be writable through. Without

@@ -492,7 +492,7 @@ pub(crate) fn try_place_mutation_in_place(
     // literals) is rejected without touching `env`.
     if !matches!(
         receiver,
-        Expr::FieldAccess { .. } | Expr::Index { .. } | Expr::ForceUnwrap(_)
+        Expr::FieldAccess { .. } | Expr::Index { .. } | Expr::TupleIndex { .. } | Expr::ForceUnwrap(_)
     ) {
         return Ok(None);
     }
@@ -2563,6 +2563,48 @@ mod cow_alias_mechanism_tests {
              buffers for {N} pushes",
             rows_seen.len()
         );
+    }
+
+    #[test]
+    fn dict_value_array_push_writes_back_through_the_key() {
+        let mut env = Env::new();
+        let mut entries = HashMap::new();
+        entries.insert("k".to_string(), Value::array(vec![Value::Int(1)]));
+        env.insert("d".to_string(), Value::Dict(Arc::new(entries)));
+        let call = push_call(Expr::Index {
+            receiver: Box::new(ident("d")),
+            index: Box::new(Expr::String("k".to_string())),
+        });
+
+        let (_, update) = run(&call, &mut env);
+        assert!(update.is_none(), "place mutation writes through directly");
+        let Value::Dict(entries) = env.get("d").expect("d") else {
+            panic!("expected dict")
+        };
+        assert_eq!(arr_len(entries.get("k").expect("k")), 2);
+    }
+
+    #[test]
+    fn indexed_tuple_field_array_push_writes_back_to_the_root() {
+        let mut env = Env::new();
+        env.insert(
+            "rows".to_string(),
+            Value::array(vec![Value::Tuple(vec![Value::Int(7), Value::array(vec![Value::Int(1)])])]),
+        );
+        let call = push_call(Expr::TupleIndex {
+            receiver: Box::new(index_expr(ident("rows"), 0)),
+            index: 1,
+        });
+
+        let (_, update) = run(&call, &mut env);
+        assert!(update.is_none(), "place mutation writes through directly");
+        let Value::Array(rows) = env.get("rows").expect("rows") else {
+            panic!("expected rows array")
+        };
+        let Value::Tuple(row) = &rows[0] else {
+            panic!("expected tuple row")
+        };
+        assert_eq!(arr_len(&row[1]), 2);
     }
 
     #[test]
