@@ -51,6 +51,18 @@ fn test_jit_add() {
 }
 
 #[test]
+fn local_rt_prefixed_function_body_wins_over_runtime_import() {
+    // Regression for codegen_rt_prefix_local_function_collision_sigsegv_2026-07-12:
+    // the runtime also exports rt_array_len_safe with a RuntimeValue ABI. A
+    // source-defined body with the same name must keep the ordinary Simple
+    // array ABI instead of routing its call through runtime SFFI marshalling.
+    let source = "fn rt_array_len_safe(values: [i64]) -> i64:\n    return values[0] + values.len()\n\nfn probe_local_rt_collision() -> i64:\n    return rt_array_len_safe([38, 1, 2, 3])\n";
+    let jit = jit_compile(source).expect("compile local rt_* collision");
+    let result = unsafe { jit.call_i64_void("probe_local_rt_collision").expect("call local body") };
+    assert_eq!(result, 42, "the local body and its Simple array ABI must win");
+}
+
+#[test]
 fn test_jit_char_code_at_tag_shift_repro() {
     // SEED-UNTAG repro: char_code_at result must survive raw (not tag-shifted).
     // Prediction: codepoints ≡ 0 mod 8 corrupt via a spurious UnboxInt (>>3).
