@@ -262,6 +262,24 @@ pub(crate) fn pattern_matches(
             variant,
             payload,
         } => {
+            // A `T?` function return is represented as Option::Some(T) by the
+            // tree-walk interpreter. Matching it directly with a payload enum
+            // pattern (`case T.Variant(...)`) must inspect T, not compare that
+            // pattern with the outer Option wrapper. Keep explicit Some/None
+            // patterns on the wrapper itself.
+            if !matches!(variant.as_str(), "Some" | "None") {
+                if let Value::Enum {
+                    enum_name: value_enum,
+                    variant: value_variant,
+                    payload: Some(value_payload),
+                } = value
+                {
+                    if value_enum == "Option" && value_variant == "Some" {
+                        return pattern_matches(pattern, value_payload.as_ref(), bindings, enums, classes);
+                    }
+                }
+            }
+
             // Warn-only shape check (DEFAULT OFF), for
             // doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
             //
@@ -667,6 +685,33 @@ mod tests {
         let mut parser = Parser::new(src);
         let module = parser.parse().expect("parse");
         evaluate_module(&module.items).expect("evaluate")
+    }
+
+    #[test]
+    fn optional_user_enum_return_matches_payload_variant_before_wildcard() {
+        let src = r#"
+enum Event:
+    Action(name: text)
+    Other
+
+fn event() -> Event?:
+    return Event.Action(name: "go")
+
+var exit_code = 1
+match event():
+    Event.Action(name):
+        if name == "go":
+            exit_code = 0
+    _:
+        exit_code = 2
+main = exit_code
+"#;
+
+        assert_eq!(
+            run(src),
+            0,
+            "Option<enum> must match the wrapped enum variant and bind its payload"
+        );
     }
 
     #[test]
