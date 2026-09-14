@@ -81,8 +81,14 @@ fn compile_source_inventory_strip_comments_v1(content: text) -> text:
         rows = rows.push(split_whitespace(trimmed).join(" "))
     rows.join("\n")
 
-fn compile_source_inventory_facet_text_v1(content: text, facet: text) -> text:
-    val canonical = compile_source_inventory_strip_comments_v1(content)
+# Facet text keyed off an ALREADY-canonicalized (comment/blank stripped) text.
+# `compile_source_inventory_facet_text_v1` below stripped comments itself on
+# every call, so one file paid for `strip_comments` 4 times (semantic, export,
+# initializer, provider) even though all four facets share the same canonical
+# text. This is the same canonicalization, just computed once and reused.
+fn compile_source_inventory_facet_rows_from_canonical_v1(
+    canonical: text, facet: text
+) -> text:
     if facet == "semantic":
         return canonical
     var rows: [text] = []
@@ -96,25 +102,54 @@ fn compile_source_inventory_facet_text_v1(content: text, facet: text) -> text:
             rows = rows.push(line)
     rows.join("\n")
 
-fn compile_source_inventory_event_from_content_v1(
-    source: text, operation: text, source_identity: text, content: text
+fn compile_source_inventory_facet_text_v1(content: text, facet: text) -> text:
+    compile_source_inventory_facet_rows_from_canonical_v1(
+        compile_source_inventory_strip_comments_v1(content), facet)
+
+fn compile_source_inventory_event_from_content_and_digest_v1(
+    source: text, operation: text, source_identity: text, content: text,
+    content_digest_hint: text
 ) -> CompileSourceEventV1:
     if operation == "delete":
         return CompileSourceEventV1(
             source, operation, source_identity, "", "", "", "", "", 0)
+    # A caller that already hashed the file natively (e.g. via the runtime's
+    # rt_file_hash_sha256, orders of magnitude faster than an interpreted
+    # sha256 over full file content) can pass that digest through instead of
+    # paying for a second, interpreted, full-content hash here. An invalid or
+    # absent hint falls back to the original in-process hash so behavior for
+    # in-memory content (tests, filesystem-watch events) is unchanged.
+    val content_digest = if compile_source_inventory_digest_valid_v1(content_digest_hint):
+        content_digest_hint
+    else:
+        sha256_text(content)
+    val canonical = compile_source_inventory_strip_comments_v1(content)
     CompileSourceEventV1(
-        source, operation, source_identity, sha256_text(content),
-        sha256_text(compile_source_inventory_facet_text_v1(content, "semantic")),
-        sha256_text(compile_source_inventory_facet_text_v1(content, "export")),
-        sha256_text(compile_source_inventory_facet_text_v1(content, "initializer")),
-        sha256_text(compile_source_inventory_facet_text_v1(content, "provider")),
+        source, operation, source_identity, content_digest,
+        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "semantic")),
+        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "export")),
+        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "initializer")),
+        sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "provider")),
         content.len())
+
+fn compile_source_inventory_event_from_content_v1(
+    source: text, operation: text, source_identity: text, content: text
+) -> CompileSourceEventV1:
+    compile_source_inventory_event_from_content_and_digest_v1(
+        source, operation, source_identity, content, "")
 
 fn compile_source_inventory_git_event_v1(
     operation: text, source_identity: text, content: text
 ) -> CompileSourceEventV1:
     compile_source_inventory_event_from_content_v1(
         "git", operation, source_identity, content)
+
+fn compile_source_inventory_git_event_with_digest_v1(
+    operation: text, source_identity: text, content: text,
+    content_digest_hint: text
+) -> CompileSourceEventV1:
+    compile_source_inventory_event_from_content_and_digest_v1(
+        "git", operation, source_identity, content, content_digest_hint)
 
 fn compile_source_inventory_filesystem_event_v1(
     operation: text, source_identity: text, content: text
@@ -154,6 +189,18 @@ fn compile_source_inventory_apply_git_changes_v1(
     for change in changes:
         events = events.push(compile_source_inventory_git_event_v1(
             change.operation, change.source_identity, change.content))
+    compile_source_inventory_apply_and_publish_v1(cache_root, events)
+
+# Same publish path as compile_source_inventory_apply_git_changes_v1 above,
+# for a caller (the git inventory bridge) that already reduced each file to
+# an event — digests only, no retained file content — instead of collecting
+# a `[CompileSourceGitChangeV1]` that holds every file's full text at once.
+# On a ~1.6 GB, ~60k-file cold-init walk that array was the dominant retained
+# allocation; producing events per-file as they are listed, rather than
+# batching raw content first, keeps only ~5 fixed-size digests per file live.
+fn compile_source_inventory_apply_git_events_v1(
+    cache_root: text, events: [CompileSourceEventV1]
+) -> CompileSourceInventoryReadV1:
     compile_source_inventory_apply_and_publish_v1(cache_root, events)
 
 fn compile_source_inventory_apply_filesystem_events_v1(
@@ -458,8 +505,10 @@ export CompileSourceInventoryV1, CompileSourceInventoryReadV1
 export CompileSourceInventoryChangeV1
 export compile_source_inventory_apply_event_v1
 export compile_source_inventory_git_event_v1
+export compile_source_inventory_git_event_with_digest_v1
 export compile_source_inventory_filesystem_event_v1
 export compile_source_inventory_apply_git_changes_v1
+export compile_source_inventory_apply_git_events_v1
 export compile_source_inventory_apply_filesystem_events_v1
 export compile_source_inventory_encode_v1, compile_source_inventory_decode_v1
 export compile_source_inventory_digest_v1
