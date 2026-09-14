@@ -316,3 +316,28 @@ Anything else means the deploy did not fix the defect — revert the four
 blobs (`git checkout -- bootstrap/`) rather than committing. Promote the
 guard from ADVISORY to MANDATORY in `.claude/rules/vcs.md` only after that
 PASS is observed.
+
+## UPDATE 2026-09-14 — re-measured; NOT resolved, but the shape changed
+
+`sh scripts/check/check-stage-binaries-runnable.shs` on `origin/main` at
+`1d641574585` (macOS arm64) reports:
+
+```
+FAIL — 9 invocation(s) executed across 3 binary(ies), 3 crashed/failed/wrong-arch:
+  bootstrap/stage1/aarch64-apple-darwin-macho/simple:native-build(fail,rc=1)
+  bootstrap/stage2/aarch64-apple-darwin-macho/simple:native-build(fail,rc=1)
+  bootstrap/stage3/aarch64-apple-darwin-macho/simple:native-build(fail,rc=1)
+  (1 foreign-triple scoped artifact skipped, not counted as passing:
+   bootstrap/stage3/x86_64-unknown-linux-gnu/simple:foreign-triple(elf-x86_64))
+```
+
+This is **not** the shape recorded above. The original record describes all four
+tracked binaries SEGVing (rc=139) on **both** commands. Now `compile` passes on
+all three darwin binaries and only `native-build` fails, with an ordinary
+non-zero exit (rc=1), not a signal; the linux artifact is correctly skipped as
+foreign-triple rather than counted.
+
+The record stays **OPEN**. The guard is still red, so the promotion to MANDATORY
+described in `.claude/rules/vcs.md` is still blocked, and the repair still needs
+a bootstrap redeploy — which is itself blocked, see
+`stage3_hir_segv_compiler_driver_unit2of833_2026-09-14.md`.

@@ -1900,3 +1900,43 @@ measurement, and the regression spec. Interpreter-vs-native is not a usable
 discriminator for this class at all: the seed's interpreter stubs the
 transient-scope externs, so the guard cannot fire there and an interpreter pass
 is vacuous.
+
+## Runs 36-38 (2026-09-14, F74 round 3) — Stage 3 reached, then SEGV; nothing deployed
+
+Seed: rebuilt by `--full-bootstrap` (3m50s); `git diff def2a9c30a1..origin/main --
+src/compiler_rust` was 6 files +313/-2, so the previous lane's "seed parity" claim
+did **not** hold for this range.
+
+| run | tree | stage | outcome |
+|---|---|---|---|
+| 36 | `def2a9c30a1` | Stage 3 resume, threads=1 | **FAIL** after 91 min — 12x `imported enum \`X\` has no declaration owner` (HIR lowering, `src/app/cli/bootstrap_main.spl`). Fixed on main by #952. |
+| 37 | `4f4d0e12832` | Stage 2 run 3 | **FAIL** — receiver probe `NOT_RUN: compiler.common.module_path_naming` |
+| 37 | `4f4d0e12832` | Stage 2 run 4 | **ADMITTED**, 4 min warm. sha256 `f7c5c68b96597b11932beef38d5ef3359e7022249375e3fb5b2e9e023ab860ae` |
+| 38 | `4f4d0e12832` | Stage 3, threads=5 (coordinator) | **FAIL** in 2 min — `SCV-E-ADMISSION: compile-event-journal-missing` (twice; its own remedy cannot reach the child under `env -i`) |
+| 38 | `4f4d0e12832` | Stage 3, threads=1 (direct) | **FAIL** after 23 min — SEGV (signal 11, rc=139) in the HIR phase at unit 2 of 833, `current=compiler.driver.driver` |
+
+**Stage 4 was never attempted. `bin/release/` is untouched. Nothing was deployed
+and no artifact sha can be cited for Stage 3 or Stage 4 — there is none.**
+
+Two positive results worth citing:
+
+- **#952 is effective.** On `4f4d0e12832` the build log's count of
+  `has no declaration owner` is **0** (was 12 on `def2a9c30a1`), and
+  `app.cli.bootstrap_main` lowers successfully. The chain advanced past that
+  defect into the SEGV above.
+- **#955 is proven end to end.** Run 38's resume set **no** manual
+  `SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT` and produced **zero**
+  `planner-admission-v2-unbound` refusals — an unassisted resume passed the
+  planner-admission gate and reached the build. That is the positive-path proof
+  a synthetic receipt cannot give (every failure inside `verify_bound` surfaces
+  as the same `unbound` line).
+
+Threads finding: `--threads 1` is a default, **not** a correctness requirement —
+`resume-stage3-from-admitted.sh:576-587` documents opt-in parallelism via
+`SIMPLE_NATIVE_BUILD_THREADS` (`full` = online CPUs). Changing the *default*
+would alter the "byte-for-byte pinned argv" contract and is a design decision,
+not wiring. The coordinator route it selects is currently unusable on a cold
+checkout — see `doc/08_tracking/bug/stage3_coordinator_route_cold_init_unreachable_under_env_i_2026-09-14.md`.
+
+Logs preserved: `build/f74logs/stage3-run2-native-build.log` (run 36),
+`build/f74logs/stage3-run5-native-build.log` (run 38).
