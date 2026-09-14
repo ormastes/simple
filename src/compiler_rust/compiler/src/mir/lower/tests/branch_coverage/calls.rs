@@ -413,6 +413,24 @@ fn primitive_to_text_method_call_is_builtin_qualified() {
 }
 
 #[test]
+fn char_to_text_uses_unicode_scalar_runtime_bridge() {
+    let mir = compile_to_mir("fn test() -> text:\n    return (123 as char).to_text()\n").unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, args, .. }
+            if target == &CallTarget::from_name("rt_char_from_code") && args.len() == 1
+    )));
+    assert!(
+        !has_inst(&mir, |i| matches!(
+            i,
+            MirInst::Call { target, .. }
+                if target == &CallTarget::from_name("rt_value_to_string")
+        )),
+        "a raw char must never be decoded as a tagged RuntimeValue"
+    );
+}
+
+#[test]
 fn chained_text_replace_rfind_keeps_string_receiver() {
     let mir = compile_to_mir(
         "fn parent_dir(path: text) -> i64:\n    val normalized = path.replace(\"\\\\\", \"/\")\n    return normalized.rfind(\"/\")\n",
