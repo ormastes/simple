@@ -2,14 +2,14 @@
 Executable HIR type transport regression.
 
 Each declared HirTypeKind is encoded and decoded through the generated HIR
-codec, then installed in a lowered function and walked by post_mono_verify.
-The assertion is specifically `unreachable_variant == 0`: TypeParam,
-Projection, Infer, Error, and Any may have their own documented invariant
-diagnostics, but no valid producer tag may disappear into the transport
-wildcard.  This is pure in-process evidence and makes no Rust-seed PASS claim.
+codec, then installed in a real fixture function.  The fixture is walked by
+post_mono_verify and lowered through the MIR backend so a transport test cannot
+pass by checking only an empty module or only the unreachable counter.  This
+is pure in-process evidence and makes no Rust-seed PASS claim.
 """
 
 use std.spec
+use std.io_runtime.{file_read, file_exists}
 use compiler.common.config.{Logger}
 use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -23,11 +23,11 @@ use compiler.hir.hir_types.{
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.hir.generated.hir_codec.{hc_enc_hir_type, hc_dec_hir_type}
 use compiler.verify.post_mono_verify.{post_mono_verify}
+use compiler.mir.mir_lowering.{MirLowering}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
 
-val FIXTURE = "hirtype_signature_transport_minimal.spl"
-val FIXTURE_SOURCE = "fn carry_type(value: i64) -> i64:\n    value\n"
+val FIXTURE = "test/fixtures/compiler/hirtype_signature_transport_minimal.spl"
 
 fn span() -> Span:
     Span.empty()
@@ -76,6 +76,18 @@ fn samples() -> [HirType]:
         HirType(kind: HirTypeKind.Layer([dim()], [dim()]), span: span())
     ]
 
+fn type_param_type() -> HirType:
+    HirType(kind: HirTypeKind.TypeParam("T", []), span: span())
+
+fn projection_type() -> HirType:
+    HirType(kind: HirTypeKind.Projection(scalar(), "Item"), span: span())
+
+fn nil_error_tuple_type() -> HirType:
+    HirType(kind: HirTypeKind.Tuple([nil, HirType(kind: HirTypeKind.Error, span: span())]), span: span())
+
+fn nested_transport_type() -> HirType:
+    HirType(kind: HirTypeKind.Tuple([type_param_type(), projection_type()]), span: span())
+
 fn roundtrip(type_: HirType) -> HirType:
     var writer = HirCodecWriter.create()
     hc_enc_hir_type(writer, type_)
@@ -85,15 +97,27 @@ fn roundtrip(type_: HirType) -> HirType:
     decoded
 
 fn lowered_fixture() -> HirModule:
+    if not file_exists(FIXTURE):
+        fail("required transport fixture missing: {FIXTURE}")
+        return nil
     val parsed = parse_full_frontend(
-        FIXTURE_SOURCE, FIXTURE, "hirtype_signature_transport_minimal", Logger(level: 0))
+        file_read(FIXTURE), FIXTURE, "hirtype_signature_transport_minimal", Logger(level: 0))
     var lowering = HirLowering.with_filename(FIXTURE)
     lowering.lower_module(parsed)
 
+fn carry_type_count(module: HirModule) -> i64:
+    var count = 0
+    for symbol in module.functions.keys():
+        if module.functions[symbol].name == "carry_type":
+            count = count + 1
+    count
+
 fn with_transport_type(module: HirModule, type_: HirType) -> HirModule:
+    var injected = 0
     for symbol in module.functions.keys():
         var function_ = module.functions[symbol]
         if function_.name == "carry_type":
+            injected = injected + 1
             function_.return_type = type_
             var params = function_.params
             if params.len() == 1:
@@ -102,11 +126,16 @@ fn with_transport_type(module: HirModule, type_: HirType) -> HirModule:
                 params[0] = first
                 function_.params = params
             module.functions[symbol] = function_
+    expect(injected).to_equal(1)
     module
 
 describe "HIR type transport through post-mono verification [importance=critical; importance_weight=3]":
     it "round-trips every producer variant and reaches the named verifier arm":
         step("Encode/decode every HirTypeKind tag before post-mono verification")
+        expect(file_exists(FIXTURE)).to_equal(true)
+        val fixture = lowered_fixture()
+        expect(carry_type_count(fixture)).to_be_greater_than(0)
+        expect(carry_type_count(fixture)).to_equal(1)
         val all_types = samples()
         expect(all_types.len()).to_equal(27)
         var i = 0
@@ -119,3 +148,51 @@ describe "HIR type transport through post-mono verification [importance=critical
             val report = post_mono_verify(module)
             expect(report.unreachable_variant).to_equal(0)
             i = i + 1
+
+    it "counts nested generic residues and preserves nil-before-error payload order":
+        val decoded = roundtrip(nil_error_tuple_type())
+        match decoded.kind:
+            case HirTypeKind.Tuple(elements):
+                expect(elements.len()).to_equal(2)
+                expect(elements[0] == nil).to_equal(true)
+                expect(elements[1] != nil).to_equal(true)
+                expect(discriminant(elements[1].kind)).to_equal(discriminant(HirTypeKind.Error))
+            case _:
+                fail("nil/error transport fixture did not decode as a tuple")
+        val nil_error_report = post_mono_verify(with_transport_type(lowered_fixture(), decoded))
+        expect(nil_error_report.unreachable_variant).to_equal(0)
+        expect(nil_error_report.error_from_substitution).to_equal(0)
+
+        val type_param_report = post_mono_verify(
+            with_transport_type(lowered_fixture(), roundtrip(type_param_type())))
+        expect(type_param_report.unresolved_type_param).to_equal(2)
+        expect(type_param_report.unresolved_projection).to_equal(0)
+        expect(type_param_report.violations.len()).to_equal(2)
+
+        val projection_report = post_mono_verify(
+            with_transport_type(lowered_fixture(), roundtrip(projection_type())))
+        expect(projection_report.unresolved_type_param).to_equal(0)
+        expect(projection_report.unresolved_projection).to_equal(2)
+        expect(projection_report.violations.len()).to_equal(2)
+
+        val nested_report = post_mono_verify(
+            with_transport_type(lowered_fixture(), roundtrip(nested_transport_type())))
+        expect(nested_report.unresolved_type_param).to_equal(2)
+        expect(nested_report.unresolved_projection).to_equal(2)
+        expect(nested_report.violations.len()).to_equal(4)
+
+    it "hands the transported fixture to the MIR backend traversal":
+        val module = with_transport_type(
+            lowered_fixture(),
+            roundtrip(HirType(kind: HirTypeKind.Tuple([scalar(), text_type()]), span: span())))
+        var backend_functions = 0
+        for symbol in module.functions.keys():
+            val function_ = module.functions[symbol]
+            if function_.name == "carry_type":
+                backend_functions = backend_functions + 1
+                var lowering = MirLowering.new(module.symbols)
+                val mir_function = lowering.lower_function(function_)
+                expect(mir_function.blocks.len()).to_be_greater_than(0)
+                expect(mir_function.signature.params.len()).to_equal(1)
+                expect(lowering.errors.len()).to_equal(0)
+        expect(backend_functions).to_equal(1)
