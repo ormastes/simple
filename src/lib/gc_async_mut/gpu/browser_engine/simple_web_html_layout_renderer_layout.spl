@@ -229,13 +229,42 @@ fn inline_line_strut_baseline_offset(st: Style) -> i32:
     val half_leading = (style_line_h(st) - st.font_size) / 2
     half_leading + style_baseline_offset(st)
 
-fn inline_line_baseline_ascent(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_t: i32, margin_b: i32, bh: [i32]) -> i32:
-    if st.display == "inline-block" and child_index.child_count[node_index] == 0:
+# CSS 2.1 §10.8.1: "the baseline of an inline, non-replaced element is the
+# baseline of its font; the baseline of an inline REPLACED element is the
+# bottom margin edge". An empty inline-block already followed the bottom-edge
+# rule (§10.8.1's "if it has no in-flow line boxes" clause) and the two cases
+# are the same arithmetic, so `bottom_edge_baseline` selects between them.
+# Round 19 added the replaced arm: it is what puts Chrome's canvas/svg/audio/
+# video on one shared baseline at y=335 on the `animation` catalog page instead
+# of hanging each one from the font strut.
+#
+# The rule is scoped to REPLACED MEDIA, not to every tag in
+# `grid_item_is_replaced`. Form controls are in that set too, and this engine
+# currently gives `input` and `select` `display:inline`, so an unscoped
+# predicate caught them — measured: it took `form_control_widget_box_spec`'s
+# `<label>Choice <select>…` from 33 px to 39. A form control's baseline is its
+# INNER TEXT baseline (Chrome reports these four as `inline-block` in the first
+# place, per the round-19 census), which the font strut already models, so they
+# keep the strut path until someone measures the inner-text case properly.
+fn replaced_media_bottom_edge_tag(tag: text) -> bool:
+    (
+        tag == "img" or tag == "svg" or tag == "video" or tag == "audio" or
+        tag == "canvas" or tag == "iframe" or tag == "embed" or
+        tag == "object"
+    )
+
+fn bottom_edge_baseline(child_index: HtmlChildIndex, node_index: i32, st: Style, replaced_media: bool) -> bool:
+    if replaced_media and st.display == "inline":
+        return true
+    st.display == "inline-block" and child_index.child_count[node_index] == 0
+
+fn inline_line_baseline_ascent(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_t: i32, margin_b: i32, bh: [i32], replaced: bool) -> i32:
+    if bottom_edge_baseline(child_index, node_index, st, replaced):
         return margin_t + bh[node_index] + margin_b
     inline_line_strut_baseline_offset(st)
 
-fn inline_line_baseline_offset(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_b: i32, bh: [i32]) -> i32:
-    if st.display == "inline-block" and child_index.child_count[node_index] == 0:
+fn inline_line_baseline_offset(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_b: i32, bh: [i32], replaced: bool) -> i32:
+    if bottom_edge_baseline(child_index, node_index, st, replaced):
         return bh[node_index] + margin_b
     inline_line_strut_baseline_offset(st)
 
@@ -255,13 +284,13 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
+        val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
         val node_ascent = inline_line_baseline_ascent(
             child_index, node_index, node_style,
-            margin_ts[baseline_i], margin_bs[baseline_i], bh
+            margin_ts[baseline_i], margin_bs[baseline_i], bh, node_replaced
         )
-        val node_descent = if (
-            node_style.display == "inline-block" and
-            child_index.child_count[node_index] == 0
+        val node_descent = if bottom_edge_baseline(
+            child_index, node_index, node_style, node_replaced
         ): 0 else: inline_line_baseline_descent(node_style)
         if node_ascent > ascent:
             ascent = node_ascent
@@ -276,7 +305,8 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val node_index = nodes[baseline_i]
         val node_baseline_offset = inline_line_baseline_offset(
             child_index, node_index, styles[node_index],
-            margin_bs[baseline_i], bh
+            margin_bs[baseline_i], bh,
+            replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
         )
         # An inline non-replaced box sits in the line box by HALF-LEADING: its
         # content area is centred, so its top is line_y + (line_h - content_h)/2
@@ -603,7 +633,7 @@ fn grid_item_is_replaced(node: HNode) -> bool:
         tag == "embed" or tag == "iframe" or tag == "img" or
         tag == "input" or tag == "meter" or tag == "object" or
         tag == "progress" or tag == "select" or tag == "textarea" or
-        tag == "video"
+        tag == "video" or tag == "svg"
     )
 
 fn replaced_default_box_w(tag: text) -> i32:
@@ -2136,8 +2166,32 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_bw[i] = constrained_outer_width(node, st, control_w)
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
     if node.tag == "img":
+        # `<img>` is a replaced element, so its WIDTH is its own (attribute or
+        # CSS), never the container's. Before round 19 this branch set only the
+        # height and left `out_bw[i]` at the block-path container width, which
+        # was invisible while `img` was block-level and full-width anyway — and
+        # becomes a line-wide box the moment it is routed inline. No UA default
+        # box is invented here: `replaced_default_box_w("img")` stays 0 because
+        # no page in the eight-page catalog carries an `<img>` to measure one
+        # against.
+        #
+        # Stated rather than glossed: a SIZELESS `<img>` does change behaviour.
+        # It used to take the block path's container width (810 px on the
+        # catalog's content column); routed inline with no attribute and no CSS
+        # it now takes the inline pen prediction, which for a childless
+        # replaced box is 1 px. Chrome gives a srcless, sizeless `<img>` a 0x0
+        # box, so the new value is the closer of the two — but it is a change,
+        # and it is unmeasured by this catalog, not verified by it.
+        if st.width_px == 0:
+            val img_attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+            if img_attr_w > 0:
+                out_bw[i] = constrained_outer_width(node, st, img_attr_w)
         val explicit_node_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
-        val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_node_h else: style_line_h(st))
+        var img_auto_h = style_line_h(st)
+        val img_attr_h = parse_int(attr_value(node.attrs_raw, "height"))
+        if img_attr_h > 0:
+            img_auto_h = img_attr_h
+        val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_node_h else: img_auto_h)
         out_bh[i] = h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
     if st.content_visibility_hidden:
@@ -3501,6 +3555,35 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     resolved_inline_style = style_with_width(
                         cst, percent_content_w
                     )
+                # A replaced box contributes its OWN width to the line, not the
+                # intrinsic width of an inline text walk that never reaches
+                # inside it (`intrinsic_text_width` returns 0 for a childless
+                # replaced element). Without this the pen prediction is 1 px,
+                # so the wrap check below can never fire for a replaced box and
+                # a row of them overflows the line silently. The box itself is
+                # still sized by `layout_with_style`; this only predicts it.
+                val inline_replaced = (
+                    cst.display == "inline" and grid_item_is_replaced(nodes[c])
+                )
+                if inline_replaced and cst.width_px == 0:
+                    val replaced_attr_w = parse_int(
+                        attr_value(nodes[c].attrs_raw, "width")
+                    )
+                    var predicted_w = if replaced_attr_w > 0:
+                        replaced_attr_w
+                    else:
+                        replaced_default_box_w(nodes[c].tag)
+                    predicted_w = constrained_outer_width(
+                        nodes[c], cst, predicted_w
+                    )
+                    if predicted_w > inline_w:
+                        inline_w = predicted_w
+                elif inline_replaced and cst.width_px > 0:
+                    val css_replaced_w = css_outer_width(
+                        nodes[c], cst, cst.width_px
+                    )
+                    if css_replaced_w > inline_w:
+                        inline_w = css_replaced_w
                 val text_advance_w = inline_text_advance_width(nodes[c], cst)
                 if text_advance_w > inline_w:
                     inline_w = text_advance_w
@@ -3554,8 +3637,11 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 val inline_outer_w = (
                     inline_margin_l + inline_w + inline_margin_r
                 )
+                # An inline REPLACED box is atomic exactly like an inline-block:
+                # it cannot be split across lines, so it wraps whole when it no
+                # longer fits the remainder of the current line.
                 if (
-                    inline_block and inline_x > 0 and
+                    (inline_block or inline_replaced) and inline_x > 0 and
                     inline_x + inline_outer_w > iw
                 ):
                     val aligned = align_inline_line_baselines(

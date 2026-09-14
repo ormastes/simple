@@ -353,11 +353,40 @@ Three rules this layer earned the hard way:
    replaced branch and the widget branch are both "return before children"
    branches, and that is the load-bearing part of each, not the size table.
 
-Known residue this layer still carries, measured rather than assumed: replaced
-elements are block-level here and inline-level in Chrome (so their `dx`/`dy`
-stay wrong even with correct `dw`/`dh`), and the UA form font's per-character
-advance resolves ~6 px where Chrome's 13.3333px system font averages ~7.25,
-which leaves every text control narrow. Neither is papered over with a fudge.
+4. **Baseline rules need a TIGHTER scope than `grid_item_is_replaced`** (round
+   19). That predicate covers form controls as well as media, and this engine
+   gives `input`/`select` `display:inline`, so scoping CSS 2.1 §10.8.1's
+   "inline replaced -> bottom margin edge" rule by it silently broke a
+   `<label>`+`<select>` height (33 -> 39) with only one spec in sixteen
+   noticing. Media aligns by bottom margin edge; a form control aligns by its
+   INNER TEXT baseline. Use `replaced_media_bottom_edge_tag`, and remember
+   Chrome reports `input`/`select`/`textarea`/`button` as `inline-block`.
+   **That wrong rule scored 82 fewer mismatches on the oracle** (forms-media
+   100 -> 18) and was still rejected: the input's 6 px error did not vanish, it
+   moved from the `input` row to the `label` row, same magnitude opposite sign.
+   The correct rule, derived from values already present, is
+   `control baseline offset = pad_t + border_t + strut_baseline(control font)`
+   → ascent 21, descent 12, line 33 — satisfying both the spec and the page.
+   If `input` is ever flipped to `inline-block` to match the census, the
+   existing `inline-block && child_count==0` arm hands it bottom-edge again;
+   the form-control arm must be tested first.
+5. **The geometry differ compares a boxless element against `0,0,0,0`.** Chrome
+   gives `<wbr>` (and anything else that generates no box) an all-zero rect, so
+   a correctly-placed `<wbr>` reads as a ~9,800 px error. One such row is 80% of
+   the `html` page's whole Σ. This is an instrument convention, not a layout
+   defect — fix it in the differ or report Σ both ways, never by making layout
+   emit `0,0,0,0`.
 
-Records: `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;
+Known residue this layer still carries, measured rather than assumed: a uniform
+16-18 px line-box offset on `animation` below the media line (what is left of
+round 19's fix); `<audio>`'s FALLBACK children are laid out here and by Chrome
+are not; form controls are `inline`-displayed here and `inline-block` in Chrome;
+and a text control's `size` width is measured on the 8 px bitmap cell
+(`char_w = 6*glyph_scale`, 6 px at the 13 px UA form font) where Chrome uses the
+face's OS/2 `avgCharWidth` (7.25) — real metrics DO resolve at 13 px (avg 6.57
+over an alnum sample), so the gap is a missing metrics FIELD, not a missing
+font. None of these is papered over with a fudge.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;
 `doc/08_tracking/bug/ifc_linebox_spec_imports_nonexistent_layout_inline_2026-09-14.md`.

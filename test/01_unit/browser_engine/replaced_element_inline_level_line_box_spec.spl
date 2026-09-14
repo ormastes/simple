@@ -1,0 +1,177 @@
+"""
+A replaced element is INLINE-LEVEL: it sits on a line box beside text and its
+BOTTOM MARGIN EDGE rests on that line's baseline (CSS 2.1 §10.8.1, "the
+baseline of an inline replaced element is the bottom margin edge").
+
+Round 18 gave `<audio>`, `<video>`, `<canvas>`, `<embed>`, `<object>` and
+`<iframe>` their correct UA default BOXES and left their POSITIONS wrong, and
+said so in its own "What is left" item 1: this renderer still laid them out as
+block-level, stacking them one per row. The measured oracle for that claim,
+harvested by `scripts/check/check-chrome-layout-geometry-diff.shs` from Chrome
+152 on the `animation` catalog page:
+
+    Chrome  path:0/0/2 | canvas | x= 45 | y=295 | 120 |  40 | display=inline
+    Chrome  path:0/0/3 | svg    | x=169 | y=295 | 120 |  40 | display=inline
+    Chrome  path:0/0/4 | audio  | x=294 | y=281 | 300 |  54 | display=inline
+    Chrome  path:0/0/5 | video  | x=594 | y=185 | 120 | 150 | display=inline
+
+All four bottom out at exactly 335 — one line box, four boxes of four
+different heights sitting on one baseline. Simple (Run A of round 19) gets
+every WIDTH and HEIGHT right and every POSITION wrong:
+
+    diff    path:0/0/2 | canvas | dx=  0 dy=110 dw=0 dh=0
+    diff    path:0/0/3 | svg    | dx=124 dy= 70 dw=0 dh=0
+    diff    path:0/0/4 | audio  | dx=249 dy= 16 dw=0 dh=0
+    diff    path:0/0/5 | video  | dx=549 dy=134 dw=0 dh=0
+
+and the whole rest of the page rides 126-128 px low behind them.
+
+The cause is a routing gap, not a layout-loop gap — the same shape as all three
+of round 18's items. `is_inline_tag` (the hardcoded UA `display` table at
+`simple_web_html_layout_renderer_style.spl`) carries no replaced tag at all, so
+each of these fell through to the BLOCK path. The machinery to place them
+correctly already existed and had never run: the inline height clamp in
+`layout_with_style` carries an explicit `grid_item_is_replaced` exclusion whose
+comment names `img`, and with no replaced tag ever reaching `display:inline`
+that exclusion was unreachable code.
+
+MEASURED, NOT ASSUMED — three premises were checked against the harvested
+Chrome geometry before any edit, and two of them came back different from what
+the round-18 hand-off predicted:
+
+  * `<input>`, `<select>`, `<textarea>` and `<button>` are `display:inline-BLOCK`
+    in Chrome, not `inline` (census over all eight `*.geom.txt`). They are
+    therefore NOT given `display:inline` here. `<input>` and `<select>` are in
+    fact `inline` in this engine today and that is a separate defect, recorded
+    in the round-19 metrics doc rather than fixed blind: an inline-block form
+    control aligns on its INNER TEXT baseline, not its bottom margin edge, so
+    flipping it would move it by its padding and border and needs its own
+    measurement.
+  * the eight-page catalog contains NO `<img>` and NO `<iframe>` at all, so no
+    Chrome row measures either one. `<img>` is still added to the inline table —
+    HTML's UA sheet is unambiguous and the exclusion comment already names it —
+    but it is asserted here only on what is unambiguous (it is inline-level, it
+    honours its `width`/`height` attributes on their own axes). No 300x150
+    default is invented for it: that number is not measured anywhere in this
+    catalog, and `replaced_default_box_w("img")` deliberately stays 0.
+
+SABOTAGE (run before landing, with `grep -c SABOTAGED` first — round 18's trap
+was a sed that silently did not apply): drop `tag == "canvas"` from
+`is_inline_tag` and AC-1/AC-2/AC-3 must fail while the `<span>`, `<div>` and
+`display:block`-override controls stay green; separately, make
+`inline_line_baseline_ascent` return the font strut for a replaced box instead
+of its bottom margin edge and AC-3 alone must fail, proving AC-3 measures the
+baseline rule and not merely "they are on one line".
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-REPLACED-003 — replaced elements are inline-level boxes that share a line box with text and align their bottom margin edge to the line's baseline.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    is_inline_tag
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.{
+    replaced_default_box_w, replaced_media_bottom_edge_tag
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}#wrap{width:810px;margin:0;padding:0}</style></head><body><div id=\"wrap\">"
+
+fn probe(inner: text, id: text, prop: text) -> i32:
+    val out = simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</div></body></html>", VW, VH, id, prop)
+    parse_int(out)
+
+# Two 120x40 canvases with NO whitespace between them, so the pen advance is
+# the first box's width exactly and nothing has to be allowed for a space.
+val TWO_BOXES: text = "<canvas id=\"a\" width=\"120\" height=\"40\"></canvas><canvas id=\"b\" width=\"120\" height=\"40\"></canvas>"
+
+describe "a replaced element is an inline-level box on the line":
+    it "AC-1: a canvas after text stays on the SAME line, not below it":
+        step("animation page: Chrome canvas x=45 (line start); Simple stacked it as a block")
+        val x = probe("<span id=\"t\">hi</span><canvas id=\"a\" width=\"120\" height=\"40\"></canvas>", "a", "x")
+        expect(x > 0).to_equal(true)
+
+    it "AC-2: two adjacent replaced boxes sit side by side on one line":
+        step("Chrome: canvas x=45 then svg x=169 then audio x=294 then video x=594")
+        val ax = probe(TWO_BOXES, "a", "x")
+        val aw = probe(TWO_BOXES, "a", "w")
+        val bx = probe(TWO_BOXES, "b", "x")
+        val ay = probe(TWO_BOXES, "a", "y")
+        val by = probe(TWO_BOXES, "b", "y")
+        expect(bx).to_equal(ax + aw)
+        expect(by).to_equal(ay)
+
+    it "AC-3: unequal-height replaced boxes share ONE baseline at their bottom edges":
+        step("Chrome bottoms: canvas 295+40, audio 281+54, video 185+150 = 335 for all three")
+        val inner = "<canvas id=\"a\" width=\"120\" height=\"40\"></canvas><video id=\"v\"></video>"
+        val a_bottom = probe(inner, "a", "y") + probe(inner, "a", "h")
+        val v_bottom = probe(inner, "v", "y") + probe(inner, "v", "h")
+        expect(a_bottom).to_equal(v_bottom)
+
+    it "AC-4: a tall replaced box grows the line box so the next block clears it":
+        step("a 150 px video must push the following <p> below 150, not below one 24 px line")
+        val inner = "<video id=\"v\"></video><p id=\"p\">after</p>"
+        val v_bottom = probe(inner, "v", "y") + probe(inner, "v", "h")
+        expect(probe(inner, "p", "y") >= v_bottom).to_equal(true)
+
+    it "AC-5 (control): display:block on the same element still stacks it":
+        step("a UA default that could not be overridden by author CSS would be a regression")
+        val inner = "<span id=\"t\">hi</span><canvas id=\"a\" style=\"display:block\" width=\"120\" height=\"40\"></canvas>"
+        expect(probe(inner, "a", "x")).to_equal(0)
+
+    it "AC-6 (control): <div> is untouched and remains a full-width block":
+        step("the inline table must not have widened to non-replaced block tags")
+        val inner = "<span id=\"t\">hi</span><div id=\"d\">x</div>"
+        expect(probe(inner, "d", "x")).to_equal(0)
+        expect(probe(inner, "d", "w")).to_equal(810)
+
+    it "AC-7 (control): <span> was already inline and does not move":
+        step("round 17/18 inline behaviour must be preserved exactly")
+        val inner = "<span id=\"s\">hi</span>"
+        expect(probe(inner, "s", "x")).to_equal(0)
+        expect(probe(inner, "s", "h")).to_equal(18)
+
+    it "AC-8: <img> is inline-level and honours width/height on their own axes":
+        step("no <img> exists in the catalog, so only the unambiguous part is asserted")
+        val inner = "<span id=\"t\">hi</span><img id=\"m\" width=\"120\" height=\"40\">"
+        expect(probe(inner, "m", "x") > 0).to_equal(true)
+        expect(probe(inner, "m", "w")).to_equal(120)
+        expect(probe(inner, "m", "h")).to_equal(40)
+
+    it "AC-9: every tag with a UA replaced default box is routed inline":
+        step("a replaced default box that is never reached from the inline path is unreachable code")
+        var missing = ""
+        for t in ["iframe", "video", "canvas", "embed", "object", "audio"]:
+            if replaced_default_box_w(t) > 0 and not is_inline_tag(t):
+                missing = missing + t + " "
+        expect(missing).to_equal("")
+
+    it "AC-11 (control): the bottom-edge baseline is scoped to replaced MEDIA":
+        step("<select>/<input> are in grid_item_is_replaced AND are display:inline in this")
+        step("engine, so an unscoped predicate caught them — measured: form_control_widget")
+        step("_box_spec AC-6 (<label>Choice <select>…) went 33 -> 39 px before this scoping.")
+        var leaked = ""
+        for t in ["input", "select", "textarea", "button", "progress", "meter"]:
+            if replaced_media_bottom_edge_tag(t):
+                leaked = leaked + t + " "
+        var missing = ""
+        for t in ["img", "svg", "video", "audio", "canvas", "iframe", "embed", "object"]:
+            if not replaced_media_bottom_edge_tag(t):
+                missing = missing + t + " "
+        expect(leaked).to_equal("")
+        expect(missing).to_equal("")
+
+    it "AC-10 (control): form controls are NOT given display:inline by this table":
+        step("Chrome reports input/select/textarea/button as inline-BLOCK; measured, not assumed")
+        var wrong = ""
+        for t in ["input", "select", "textarea", "button"]:
+            if is_inline_tag(t):
+                wrong = wrong + t + " "
+        expect(wrong).to_equal("")

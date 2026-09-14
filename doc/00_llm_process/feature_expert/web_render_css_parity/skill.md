@@ -697,14 +697,76 @@ That is the transferable lesson of this round.
   the `<option>` labels (option is `display:block`); `flex_item_max_content_width`
   does, and already includes the element's own padding and border.
 
-### Next cluster, with the row that names it
+### Round 19 — replaced MEDIA made inline-level (428 -> 429 count, animation Σ -86%)
+
+Round 18's "next cluster" (below, now CLOSED) was real. `is_inline_tag` carried
+no replaced tag at all, so every one fell through to the block path. Adding
+`img svg video audio canvas iframe embed object` to it and to the M14 twin,
+plus CSS 2.1 §10.8.1's bottom-margin-edge baseline, took `animation`'s Σ down
+86% (3405 -> 481; `video dx=549 -> 9`, the `code` ladder `dy=126 -> 18`). SEVEN
+of eight pages stayed **byte-identical**; the count went UP by one (a new row
+with an identified mechanism, item 3 of "what is left").
+
+**The headline number is deliberately not the best one produced.** An
+intermediate state scored **347** — `forms-media` 100 -> 18 — and was REJECTED
+as a compensating error; see the landmine below. Read
+`doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md` before quoting any
+round-19 figure.
+
+Landmines this round added to the index:
+
+- **A better oracle number is not automatically a better tree, and the oracle
+  cannot tell you.** Scoping the §10.8.1 bottom-edge rule by
+  `grid_item_is_replaced` reached form controls (that predicate contains them,
+  and this engine gives `input`/`select` `display:inline`) and moved 82
+  `forms-media` rows. It was two wrongs cancelling: across the runs the text
+  input's 6 px did not vanish, it MOVED from the `input` row to the `label` row,
+  same magnitude opposite sign. The oracle preferred it; a UNIT SPEC caught it
+  (`form_control_widget_box_spec` AC-6, 33 -> 39). **Run the neighbours before
+  believing a large win**, and ask what the rule physically claims: bottom-edge
+  puts the control's bottom on the baseline and still adds the strut descent,
+  where Chrome puts the control's INNER TEXT baseline there.
+- **A predicate's existing scope is not a licence to reuse it.**
+  `grid_item_is_replaced` reads like the right set for a replaced-element rule.
+  Use `replaced_media_bottom_edge_tag` for baseline questions.
+
+- **Check the hand-off's premises against the oracle BEFORE reading code.**
+  Three were checked, two were false. "`input` is `display:inline` in Chrome" is
+  wrong twice over — Chrome reports `input`/`select`/`textarea`/`button` as
+  **`inline-block`** (census: `awk -F'|' '{print $3, $8}' *.geom.txt`), and this
+  engine already gives `input`/`select` `display:inline`
+  (`…_declarations.spl:1394`), i.e. wrong the opposite way. And the eight-page
+  catalog has **no `<img>` and no `<iframe>`** to measure a default box against.
+  The census also turned up `svg` (display=inline, dx=124), which no brief named.
+- **`grid_item_is_replaced` is NOT the right scope for a baseline rule.** It
+  contains form controls, and because `select` is also `display:inline` here, an
+  unscoped "inline replaced -> bottom margin edge" predicate silently took
+  `form_control_widget_box_spec` AC-6 from 33 px to 39. Scope the §10.8.1 rule
+  to replaced MEDIA (`replaced_media_bottom_edge_tag`); a form control's
+  baseline is its inner text baseline.
+- **The Σ metric has been lying for at least two rounds.** ONE `<wbr>` root row
+  carries Σ=9963 of `html`'s 12496 — Chrome reports a boxless element as
+  `0,0,0,0`, so the differ compares a real position against a reporting
+  convention. `html`'s real Σ is 2533 and its real top cluster is `li` (49 of 77
+  root rows, root defect at `/39`, an `hr`-in-`div`). Report Σ with and without
+  `wbr`. Fixing it belongs in the differ, not in layout.
+- **Control widths are measured on the 8 px bitmap cell.**
+  `style_char_w -> char_w(fs) = 6 * glyph_scale(fs)`, `glyph_scale(13)=1`, so
+  `size=20` yields 6 px/char where Chrome's 13.33 px UA form font gives 7.25.
+  Real metrics DO resolve at 13 px (`resolve_font_metrics_with_language` -> avg
+  6.57 over an alnum sample), so the gap is not a missing font — Chrome uses the
+  face's OS/2 `avgCharWidth`, which this metrics surface does not expose. Expose
+  it; do not multiply the cell by a constant that happens to land on 163.
+
+### Previous cluster (round 18) — CLOSED by round 19
 
 **Replaced elements are block-level here and inline-level in Chrome.** On
 `animation`, Chrome has `canvas` y=295 h=40, `audio` y=281 h=54, `video` y=185
 h=150 — three bottoms all at 335, i.e. one line box with the boxes on the
-baseline. Simple stacks them, so `dx`/`dy` stay wrong now that `dw`/`dh` are
-right (`audio dx=249`, `video dy=134`). Note `img` is not in `is_inline_tag`
-either, so the `grid_item_is_replaced` exclusion in the inline height clamp is
-currently unreachable — the machinery for this already exists and has never run.
+baseline. Simple stacked them, so `dx`/`dy` stayed wrong once `dw`/`dh` were
+right (`audio dx=249`, `video dy=134`). `img` was not in `is_inline_tag`
+either, so the `grid_item_is_replaced` exclusion in the inline height clamp was
+unreachable — the machinery existed and had never run.
 
 Round 18 measurements: `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`.
+Round 19 measurements: `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`.
