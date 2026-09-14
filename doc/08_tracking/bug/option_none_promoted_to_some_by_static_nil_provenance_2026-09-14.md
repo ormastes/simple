@@ -156,3 +156,43 @@ the escape requires. The only mirror-tree path this range touches is
 `test/01_unit/compiler/option_none_runtime_discriminant_spec.spl`, a new spec
 with no twin on either side; the delta guard's own offender-list diff — not
 that observation — is the authority, and it reports zero introduced.
+
+## Open follow-up (post-#1004) — an incoming canonical None HANDLE
+
+The runtime test is `payload == 3`, which recognises the raw nil sentinel. It
+does **not** recognise a value that is already a canonical None *handle*
+(enum_id 1, disc 1): such a handle is a heap pointer, so `payload == 3` is
+false and it would be wrapped as `Some(<None-handle>)`.
+
+`ensure_option_handle`'s first statement already short-circuits any local in
+`option_value_locals`, so this only bites where an Option-typed value reaches
+the promotion **without** that marking — the `relay_struct` shape (`val inner =
+find_struct(k); return inner`) is the candidate, depending on whether
+Option-returning call results are added to `option_value_locals`. This was
+equally true before #1004 (the old static path wrapped the same value as Some),
+so it is a pre-existing gap rather than a regression, but it is the one way a
+relay case could still fail on F75's Stage 2 rebuild — **do not read such a
+failure as "the fix did not work"**; read it as this follow-up.
+
+The shape of the closing change, when someone takes it: make the runtime test
+three-way — `enum_id == 1` pass the handle through unchanged; else `payload ==
+3` means None; else Some — rather than the current two-way payload test. That
+needs an `rt_enum_id` call in the promotion path, so it is a measured change,
+not a one-liner.
+
+Also minor, same file: `disc_local`'s `new_temp` is a dead allocation on the
+`runtime_disc` branch (the cast produces its own local). Harmless, worth
+folding into the else branch next time this function is touched.
+
+## Verification performed on the landing itself
+
+- `check-native-interp-differential.shs --limit 1` exercises the new
+  `nid_curate_pinned` path (not `--specs-file`) and reports the pinned row
+  first: `PASS — 1 spec(s) compared, 0 divergent`.
+- `select_cast_instruction` (`70.backend/backend/mir_to_llvm_helpers.spl:60`)
+  maps `i1 -> i32` to `zext`, so the bool-to-i32 discriminant cast has a real
+  backend arm.
+- No Stage 1 binary exists on this host under the agent-ac40c7a12fcd24543
+  bootstrap storage, so the BEFORE state could not be executed through this
+  lowering at all. The root cause rests on code reading plus the interpreter
+  oracle; that is stated here rather than dressed up as a measurement.
