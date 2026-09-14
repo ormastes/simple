@@ -281,6 +281,55 @@ has soaked. Reaching the <20s kernel-rebuild goal additionally needs incremental
 **link** and cached entry-closure **discovery/import-map** — the two phases the
 object cache does not touch (they dominate kernel build wall time).
 
+## Is the lane actually dead? Resolve the PID before you say so (2026-09-14)
+
+**`pgrep -f 'bootstrap-from-scratch'` returning 0 does NOT mean the lane died.**
+The lane **execs into `scripts/bootstrap/resume-stage3-from-admitted.sh`**, so
+the running process has a different name and that pattern misses it. Two
+sessions made this exact mistake within an hour of each other on 2026-09-14, and
+one of them (this one) was one step from filing a fabricated "lane dies
+silently" harness bug against a process that was working normally.
+
+Resolve the real holder instead — the lock records it for you:
+
+```bash
+out=<the --resume-stage3-from-admitted output root>
+cat "$out.lock/pid"                     # the lane's own recorded pid
+ps -o pid,etime,time,rss,command -p "$(cat "$out.lock/pid")"
+pgrep -P <that pid>                     # walk the child chain to the worker
+ps -o pid,etime,time,rss -p <worker>    # CPU climbing + GB-scale RSS = alive
+```
+
+Measured on the run that was called dead: `31736 -> 38398 -> 38401`, worker at
+59 min elapsed, **53:48 CPU, 5.0 GB RSS**. Very much alive.
+
+**A second lane refusing to start is the lock WORKING, not a failure.** The
+refusal is printed, not silent:
+
+```
+mkdir: .../bootstrap.lock: File exists
+error: bootstrap output is locked: .../bootstrap.lock
+```
+
+If you see that, another lane owns the output root. Do not delete the lock
+without running the PID check above — `.simple/storage/build/bootstrap.lock` is
+not a stale-file problem by default, and removing a live one lets two lanes
+write one output root.
+
+**Do not mutate the tree or the output root under a running lane.** A
+native-build reads source from cwd, so a `git checkout`/rebase mid-run
+invalidates everything it reads afterwards; and a second Stage 2 into the same
+output root will replace `stage3/<triple>/stage2-admitted/simple` and
+`stage3-planner-admission.receipt` beneath the run using them (the running
+process keeps its open inode, so it survives — but its on-disk inputs no longer
+describe it, and its result is contaminated). One lane at a time, tree frozen
+for the duration.
+
+**Lane logs are fully buffered.** A 0-byte `logs/<triple>/stage3-native-build.log`
+on a live run means nothing has flushed yet, not that nothing happened. Confirm
+with `lsof -p <worker>` that it is the process's fd 1/2, and judge liveness from
+CPU/RSS rather than from log size.
+
 ## Bootstrap Commands
 ```bash
 # Full bootstrap (recommended):

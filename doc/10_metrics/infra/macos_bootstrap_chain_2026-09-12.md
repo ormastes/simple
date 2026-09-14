@@ -2031,3 +2031,91 @@ it appears only in four shell scripts), and the Stage 3 argv omits it entirely.
 **Stage 3 remains BLOCKED. Stage 4 was never attempted. `bin/release/` is
 untouched, nothing was deployed, and no Stage 3 or Stage 4 artifact sha exists
 to cite.**
+
+## Runs 42-45 (2026-09-14, F75) — the HIR breaker, and a misread that must not calcify
+
+### The fix, and the measurement that chose it
+
+Run 42 (`build/f75logs/repro-lldb-4.log`) settled the Stage 3 SEGV. `sp` read at
+frames 12/16/20/24 — one full cycle apart each — gives **624 bytes per
+four-frame level, uniform**, over a stack region `0x16f604000-0x16fe00000`
+(7.98 MB), i.e. **13,415 nested levels** of
+
+```
+register_imported_symbol -> register_imported_symbol_inner
+  -> register_materialized_enum_payload_dependencies
+    -> register_materialized_payload_named_dependency -> (repeat)
+```
+
+The cycle was not being broken. Fix (#987, `c56dd5004af`): a `[text]`
+in-progress re-entrancy breaker keyed on `(imported_mod_name, dependency)` —
+the method's own INPUT tuple, and a linear scan over an append-only array, so
+it holds whatever the underlying cause. Spec executed, sabotage -> red -> green.
+
+**The mechanism was over-claimed and is corrected** (#1003): the record first
+blamed `rt_dict_contains` under-reporting. F77 could not reproduce that on the
+interpreter (6 shapes green), there is a second gate on the cycle at
+`module_import_registration.spl:363` keyed on an unstable `local_name`, and the
+2,546 ceiling assumed `origin.module_name` is always the declaring module —
+never verified. The depth measurement stands; the mechanism is open. Do not
+cite that bug as evidence of a Dict defect.
+
+### The misread — and what #1007's record should say
+
+Runs 43-45 were reported as "Stage 3 dies silently with no verdict". **That was
+wrong, and the premise of PR #1007's record is wrong with it.** The lane
+**execs into `resume-stage3-from-admitted.sh`**, so `pgrep -f
+'bootstrap-from-scratch'` misses it and returns 0. The run was alive throughout:
+`31736 -> 38398 -> 38401`, worker at 59 min elapsed, **53:48 CPU, 5.0 GB RSS**.
+The two follow-up launches that looked like empty runs were the output lock
+**working**, and printing so:
+
+```
+mkdir: .../bootstrap.lock: File exists
+error: bootstrap output is locked: .../bootstrap.lock
+```
+
+So #1007's VERDICT-on-exit trap and `check-bootstrap-lane-verdict-line.shs` are
+worth keeping on their own merits — a lane that exits without a verdict line
+*should* be caught — but **the incident that motivated them was a lane misread
+by two sessions, not a harness fault.** The record should say that; leaving it
+as written would put a phantom defect in the tracker and credit the guard with
+catching something that never happened.
+
+The recipe that would have prevented it is now in `.claude/rules/bootstrap.md`:
+resolve `cat <out>.lock/pid`, `ps -p` it, walk `pgrep -P` to the worker, and
+judge liveness from CPU/RSS — never from a process-name grep, and never from log
+size (lane logs are fully buffered; a 0-byte `stage3-native-build.log` on a live
+run means nothing has flushed).
+
+### Two self-inflicted contaminations, recorded so the evidence is not over-read
+
+While run 1 was building, this lane (a) `git checkout`ed the worktree onto the
+F78 tip — a native-build reads source from cwd — and (b) launched a second
+Stage 2 into the **same output root**, replacing
+`stage3/<triple>/stage2-admitted/simple` (18:17) and
+`stage3-planner-admission.receipt` (18:19) beneath a run that started 17:24. The
+running process keeps its open inode and survived, but its on-disk inputs no
+longer describe it.
+
+Consequence, stated rather than glossed: **run 1 is contaminated.** It is
+evidence for exactly one thing — its Stage 2 was built from the branch carrying
+#987, and where the old crash was deterministic at ~23 min this run passed 59
+min with 53 min of CPU, so the breaker got past `compiler.driver.driver`. It is
+**not** a deployable artifact (pre-#1001/#1004) and must not be cited as the
+chain result.
+
+### Stage 2 twice admitted, first attempt each time
+
+Both Stage 2 lanes this round admitted on the **first** try, with the
+receiver-probe `NOT_RUN` flake absent and F76 not yet landed. That is luck, not
+a fix — do not read it as the flake being gone.
+
+**Still no deploy.** `bin/release/` is untouched and no Stage 3 or Stage 4
+artifact sha is claimed. The deploy gate is three conditions, all recorded
+before their results existed: Stage 3 reaching `done=2`; the F77 class probe
+(`class Box: n: i64` + a method, `native-build --mode=dynload`) returning rc 0
+rather than 139 under the Stage 3 binary; and the F78 spec
+`test/01_unit/compiler/option_none_runtime_discriminant_spec.spl` green under
+the same binary. Any failure is reported verbatim, and a MIR/Option frame is
+explicitly not grounds to revert #987.
