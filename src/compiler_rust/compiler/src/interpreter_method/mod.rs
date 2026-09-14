@@ -11,11 +11,57 @@ use super::{
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{format_f32_display, Env, Value};
-use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef, Type};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Preserve the declared primitive identity at trait-dispatch sites where the
+/// runtime `Value` representation is intentionally narrower than the language
+/// type system (`i8`..`i64` all use `Value::Int`). An explicit cast is the
+/// authoritative type at this expression boundary; unsigned values retain
+/// their width in `Value` itself.
+fn primitive_trait_type_names<'a>(receiver: &Expr, value: &Value) -> &'a [&'a str] {
+    if let Expr::Cast {
+        target_type: Type::Simple(name),
+        ..
+    } = receiver
+    {
+        match name.as_str() {
+            "i8" => return &["i8"],
+            "i16" => return &["i16"],
+            "i32" => return &["i32"],
+            "i64" => return &["i64", "int"],
+            "u8" => return &["u8"],
+            "u16" => return &["u16"],
+            "u32" => return &["u32"],
+            "u64" => return &["u64"],
+            "f32" => return &["f32", "float"],
+            "f64" => return &["f64", "float"],
+            _ => {}
+        }
+    }
+    match value {
+        Value::Str(_) | Value::StrBytes(_) => &["text", "str", "String"],
+        Value::Int(_) => &["i64", "int"],
+        Value::UInt { width: 8, .. } => &["u8"],
+        Value::UInt { width: 16, .. } => &["u16"],
+        Value::UInt { width: 32, .. } => &["u32"],
+        Value::UInt { .. } => &["u64"],
+        Value::Float(_) => &["f64", "float"],
+        Value::Float32(_) => &["f32", "float"],
+        Value::Bool(_) => &["bool"],
+        Value::Array(_)
+        | Value::ByteArray(_)
+        | Value::FrozenArray(_)
+        | Value::FrozenByteArray(_)
+        | Value::FixedSizeArray { .. } => &["array", "Array"],
+        Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],
+        Value::Tuple(_) => &["tuple", "Tuple"],
+        _ => &[],
+    }
+}
 
 /// Byte offset of the first byte >= 0x80, or `bytes.len()` when all-ASCII.
 /// Word-at-a-time so an all-ASCII document costs ~len/8 iterations.
@@ -1575,21 +1621,7 @@ pub(crate) fn evaluate_method_call(
     // for user-defined trait implementations on built-in types (e.g., `impl MyTrait for text:`).
     {
         // Map Value type to the possible type names used in `impl Trait for TypeName:`
-        let type_names: &[&str] = match &recv_val {
-            Value::Str(_) | Value::StrBytes(_) => &["text", "str", "String"],
-            Value::Int(_) => &["i64", "i32", "int"],
-            Value::Float(_) => &["f64", "float"],
-            Value::Float32(_) => &["f32", "float"],
-            Value::Bool(_) => &["bool"],
-            Value::Array(_)
-            | Value::ByteArray(_)
-            | Value::FrozenArray(_)
-            | Value::FrozenByteArray(_)
-            | Value::FixedSizeArray { .. } => &["array", "Array"],
-            Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],
-            Value::Tuple(_) => &["tuple", "Tuple"],
-            _ => &[],
-        };
+        let type_names = primitive_trait_type_names(receiver, &recv_val);
 
         if !type_names.is_empty() {
             // Search TRAIT_IMPLS for a method matching this type
@@ -2188,6 +2220,27 @@ pub(crate) fn evaluate_method_call_with_self_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primitive_trait_dispatch_keeps_explicit_integer_width() {
+        use crate::interpreter::evaluate_module;
+        use simple_parser::Parser;
+
+        let source = r#"
+trait Marker:
+    fn mark() -> i64
+impl Marker for i64:
+    fn mark() -> i64: 64
+impl Marker for i32:
+    fn mark() -> i64: 32
+impl Marker for u64:
+    fn mark() -> i64: 164
+main = (7 as i64).mark() * 10000 + (7 as i32).mark() * 100 + (7 as u64).mark()
+"#;
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse primitive trait dispatch");
+        assert_eq!(evaluate_module(&module.items).expect("evaluate primitive trait dispatch"), 643_364);
+    }
 
     // Regression test: me.field as a direct argument to a nested me fn call must
     // not produce "self not found". The bug was that the two typed-dict dispatch
