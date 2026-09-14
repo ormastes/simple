@@ -142,3 +142,81 @@ and `candidate-check.json.log` (untracked; session-local).
   required row may say `passed` — so `required_support` is emitting `passed` from nothing. A
   reader looking only at `required_support` would wrongly conclude the row is satisfied. Fix in
   `src/app/release/support_policy.spl`.
+
+---
+
+## Triage round 2 (2026-09-14) — re-landed from closed PR #966 plus new runner evidence
+
+PR #966 carried this triage but its branch was deleted before merge; the
+findings are re-landed here.
+
+### A. No workflow-file defect in `candidate.yml`
+The two historical candidate runs cited as evidence (`33056214368`,
+`33055941933`, both 2026-08-27) completed in 0s with `total_count: 0` jobs and
+`event: "push"` / `head_branch: "pr/sspec-maintain-80"`. But `candidate.yml`'s
+`on:` block — **both on `main` today and at that run's own `head_sha`
+`81ba95a454e4f46b083d4573a6eb30e0942a7f5c`** (fetched via
+`gh api contents/...?ref=<sha>`) — declares `workflow_dispatch` only, with no
+`push:` trigger. A `workflow_dispatch`-only workflow cannot be triggered by a
+push, so those runs do not reflect the file that ships today. No
+"workflow file issue" annotation exists to quote:
+`gh api commits/<sha>/check-runs` returns only 3 unrelated check-runs
+(`SPipe Self Review Admission` and its revalidate/invalidate siblings).
+
+### B. No account-level block
+- `gh api /repos/ormastes/simple --jq '{private,owner_type}'` →
+  `{"private":false,"owner_type":"User"}`
+- `gh api /repos/ormastes/simple/actions/permissions` →
+  `{"enabled":true,"allowed_actions":"all"}`
+- `gh api /user/settings/billing/actions` → 404 (that endpoint is for
+  hosted-runner billing on paid plans; a public repo on a User/free plan gets
+  unmetered `ubuntu-latest` minutes, so the 404 is not evidence of a block).
+
+### C. A live dispatch probe DOES create a real `qualify-linux` job
+`gh workflow run candidate.yml --ref main` with placeholder convergence inputs
+produced run
+`https://github.com/ormastes/simple/actions/runs/34791813627`
+(`event: workflow_dispatch`). `gh api actions/runs/34791813627/jobs` →
+`total_count: 1`, job `qualify-linux`, `labels: ["ubuntu-latest"]`,
+`status: "queued"`, `runner_name: ""`, `steps: 0`. It was left queued and not
+force-completed; it will fail its own input validation once scheduled, which is
+expected and harmless with placeholder inputs.
+
+### D. GitHub-hosted runners DO pick up this repo's jobs — verbatim evidence
+The decisive question of round 2 was whether any job in this repo has ever
+started on a GitHub-hosted runner. It has, minutes before the probe:
+
+```
+gh api /repos/ormastes/simple/actions/runs/34790945536/jobs
+{"completed_at":"2026-09-14T00:01:05Z","conclusion":"success",
+ "labels":["ubuntu-latest"],"name":"publish",
+ "runner_group_name":"GitHub Actions",
+ "runner_name":"GitHub Actions 1000436809",
+ "started_at":"2026-09-13T23:59:40Z","steps":8}
+```
+
+A real hosted runner (`GitHub Actions 1000436809`) was assigned, executed 8
+steps and succeeded. **The account-side hypothesis (Actions minutes exhausted,
+runners disabled for public repos, or a pending first-time-contributor
+approval) is therefore falsified** — none of those would allow that job to run.
+
+### E. The actual cause of the probe's wait: repo-side queue saturation
+```
+gh api '/repos/ormastes/simple/actions/runs?status=queued&per_page=1' --jq .total_count      -> 90
+gh api '/repos/ormastes/simple/actions/runs?status=in_progress&per_page=1' --jq .total_count ->  4
+```
+90 queued runs against 4 in progress. The probe is FIFO-queued behind that
+backlog, against the free-tier hosted-runner concurrency cap. This is a
+throughput condition that drains on its own, **not** an account-side block and
+**not** a condition the repository owner must act on to re-enable Actions.
+
+### F. Ordering correction for the beta-2 flow
+`candidate.yml`'s first step validates
+`candidate_ref` against
+`^candidate/v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?/a[0-9]{3}$`
+and then checks that ref out. A candidate qualified from today's `main` (still
+`1.0.1-beta.1` in `release/version.sdn`) therefore cannot serve `beta.2`. The
+correct order is: **version-bump PR to `1.0.1-beta.2` → merge → create the
+immutable `candidate/v1.0.1-beta.2/aNNN` ref at that commit → dispatch
+`candidate.yml` against that ref** with the real convergence-checkpoint inputs.
+Dispatching before the bump wastes a full trip through the queue.
