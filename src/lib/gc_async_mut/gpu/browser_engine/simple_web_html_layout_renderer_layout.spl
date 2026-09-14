@@ -488,22 +488,56 @@ fn _lay_style_run_byte_advances_inner(st: Style, s: text) -> [i32]:
     val adv = st.resolved_font_advances
     if adv.len() != cps.len() or adv.len() == 0:
         return out
-    val n = s.len()
+    # Expand codepoint -> bytes from the CODEPOINT VALUES, not by classifying
+    # `char_code_at` results as lead/continuation bytes. `char_code_at` decodes
+    # — it never answers a value in 128..191 — so the byte classifier could
+    # never recognise a continuation byte, over-ran `adv` on the first
+    # multi-byte codepoint and returned an EMPTY table. That made this whole
+    # helper dead on exactly the runs it exists for (any `&mdash;`, accent or
+    # `×`), silently sending both wrap and paint back to the flat estimate.
     var i = 0
-    var ci = 0
-    while i < n:
-        val b = s.char_code_at(i)
-        if b >= 128 and b < 192:
+    val cn = cps.len()
+    while i < cn:
+        out.push(adv[i])
+        var k = 1
+        val w = utf8_encoded_len(cps[i])
+        while k < w:
             out.push(0)
-        else:
-            if ci >= adv.len():
-                return []
-            out.push(adv[ci])
-            ci = ci + 1
+            k = k + 1
         i = i + 1
-    if ci != adv.len():
+    # Fail closed: if the expansion does not describe this exact string, both
+    # sides must fall back together rather than one at a time.
+    if out.len() != s.len():
         return []
     out
+
+# Number of UTF-8 bytes a codepoint occupies.
+pub fn utf8_encoded_len(cp: i64) -> i32:
+    if cp < 0x80:
+        return 1
+    if cp < 0x800:
+        return 2
+    if cp < 0x10000:
+        return 3
+    4
+
+# First byte offset strictly after `start` that begins a codepoint. Used by the
+# wrap loops for the degenerate "not even one glyph fits" step, so that forcing
+# progress never splits a multi-byte codepoint across two lines.
+#
+# Reads `s.bytes()`, like `skip_wrap_spaces`, and NOT `char_code_at`: this
+# renderer's text API is mixed — `len()` and `substring` are BYTE-indexed while
+# `char_code_at`/`char_at` are CODEPOINT-indexed — so a byte offset handed to
+# `char_code_at` silently reads the wrong character on any non-ASCII run.
+pub fn next_codepoint_start(s: text, start: i32) -> i32:
+    val n = s.len() as i32
+    val b = s.bytes()
+    var i = start + 1
+    while i < n:
+        if b[i] < 128 or b[i] >= 192:
+            return i
+        i = i + 1
+    n
 
 fn byte_advances_range_width(by: [i32], start: i32, endv: i32) -> i32:
     var width = 0
@@ -1037,7 +1071,13 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, n
     val n = txt.len()
     if n == 0:
         return LineWrapRanges(starts: [0; 1], ends: [0; 1])
-    val use_font = st.resolved_font_identity != "" and st.resolved_font_advances.len() == n and full_w > 0 and narrow_w > 0
+    # Byte-indexed advances, for the same reason as
+    # `_lay_compute_style_wrap_ranges_inner`: `n` is a BYTE count and
+    # `resolved_font_advances` is per CODEPOINT, so the old arity check sent
+    # every non-ASCII run to the flat cell-width fallback.
+    val by = style_run_byte_advances(st, txt)
+    val tb = txt.bytes()
+    val use_font = st.resolved_font_identity != "" and by.len() == n and full_w > 0 and narrow_w > 0
     val cw = style_char_w(st)
     var starts: [i32] = []
     var ends: [i32] = []
@@ -1049,13 +1089,13 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, n
         if use_font:
             var used = 0
             var last_space = -1
-            while endv < n and used + st.resolved_font_advances[endv] <= max_width:
-                used = used + st.resolved_font_advances[endv]
-                if txt.char_code_at(endv) == 32:
+            while endv < n and used + by[endv] <= max_width:
+                used = used + by[endv]
+                if tb[endv] == 32:
                     last_space = endv
                 endv = endv + 1
             if endv == start:
-                endv = start + 1
+                endv = next_codepoint_start(txt, start)
             elif endv < n and last_space > start:
                 endv = last_space
         else:
@@ -1097,24 +1137,50 @@ fn _lay_compute_wrap_ranges_inner(txt: text, cpl: i32) -> LineWrapRanges:
         line = line + 1
     LineWrapRanges(starts: starts, ends: ends)
 
+# `resolved_font_advances` carries ONE advance per CODEPOINT, while every wrap
+# offset in this renderer is a BYTE index. Comparing its length against
+# `txt.len()` (bytes) therefore matched only on pure-ASCII runs: a single em
+# dash, accented letter or `×` made the arity check fail and dropped the whole
+# wrap onto `compute_wrap_ranges`, the flat cells-per-line estimate
+# (`style_char_w` = 12 px at 16 px against a real ~7.8 px average). The
+# estimate is wide, so such a run wrapped one line too early and every
+# following box inherited the 24 px step — measured as the accumulating
+# vertical drift on `css-layout`/`css-paint`/`html`, all of whose catalog
+# `<li>`s carry an `&mdash;`.
+#
+# `style_run_byte_advances` is the table that already answers this correctly:
+# one advance per BYTE, carrying the codepoint's measured advance on its lead
+# byte and 0 on every UTF-8 continuation byte. Indexing it with the byte
+# offsets this loop already uses is exact, and a break can never land inside a
+# codepoint — a continuation byte adds 0 and therefore always fits.
 fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
-    if st.resolved_font_identity == "" or st.resolved_font_advances.len() != txt.len() or max_width <= 0:
+    # Cheap gates first: building `by` decodes the whole run, so it must not run
+    # for a style that cannot use it anyway.
+    if st.resolved_font_identity == "" or max_width <= 0:
+        return compute_wrap_ranges(txt, fallback_cpl)
+    val by = style_run_byte_advances(st, txt)
+    if by.len() != txt.len():
         return compute_wrap_ranges(txt, fallback_cpl)
     var starts: [i32] = []
     var ends: [i32] = []
     var start = 0
     val n = txt.len()
+    # BYTE-indexed space test. `char_code_at` is CODEPOINT-indexed in this text
+    # API while `endv` is a byte offset (it is cut on with `substring`), so on
+    # any run past its first non-ASCII codepoint the two disagree and the break
+    # landed some bytes away from the space it meant to break at.
+    val tb = txt.bytes()
     while start < n:
         var endv = start
         var used = 0
         var last_space = -1
-        while endv < n and used + st.resolved_font_advances[endv] <= max_width:
-            used = used + st.resolved_font_advances[endv]
-            if txt.char_code_at(endv) == 32:
+        while endv < n and used + by[endv] <= max_width:
+            used = used + by[endv]
+            if tb[endv] == 32:
                 last_space = endv
             endv = endv + 1
         if endv == start:
-            endv = start + 1
+            endv = next_codepoint_start(txt, start)
         elif endv < n and last_space > start:
             endv = last_space
         starts.push(start)

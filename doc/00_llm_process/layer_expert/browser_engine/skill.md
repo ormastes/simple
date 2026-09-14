@@ -274,3 +274,23 @@ pixel buffer down as data. Full isolation matrix:
   [browser feature expert](../../feature_expert/browser/skill.md).
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## 2026-09-14 — byte vs codepoint indexing is a layer-wide hazard
+
+The `text` primitives this layer builds on are **mixed**: `len()`, `substring()`
+and `bytes()` are BYTE-indexed; `char_code_at()` and `char_at()` are
+CODEPOINT-indexed. On ASCII the two coincide, so a confusion here passes every
+test until one `&mdash;`, accent or `×` appears.
+
+Wrap offsets, `wrap_starts`/`wrap_ends`, and everything downstream that cuts
+with `substring` are BYTE offsets. `resolved_font_advances` is per CODEPOINT.
+The bridge between them is `style_run_byte_advances` (one advance per byte, 0 on
+continuation bytes) plus `utf8_encoded_len` / `next_codepoint_start`
+(`simple_web_html_layout_renderer_layout.spl`). Use those; do not open-code a
+UTF-8 classifier on `char_code_at` results — it cannot work, and round 16 found
+exactly that mistake sitting dead in the tree since round 12.
+
+Known remaining sites, named not fixed: `resolved_text_range_width` (ellipsize)
+and `fb_text_thin_scaled_clip_range` (the flat paint stepper).
+
+Record: `doc/08_tracking/bug/web_non_ascii_run_wrap_falls_back_to_flat_estimate_2026-09-14.md`.
