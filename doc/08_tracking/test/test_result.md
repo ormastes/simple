@@ -1,17 +1,18 @@
 # Test Results
 
 **Generated:** 2026-05-19 11:58:31
-**Total Tests:** 120809
+**Total Tests:** 859
 **Status:** ⚠️ 12328 FAILED
 
 ## Summary
 
 | Metric | Count |
 |--------|-------|
-| Total | 892 |
+| Total | 859 |
 | Passed | 63 |
 | Failed | 42 |
 | Skipped | 0 |
+| Other | 754 |
 
 ---
 
