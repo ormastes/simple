@@ -18,7 +18,7 @@
 
 ## 🔄 Recent Status Changes
 
-- test/02_integration/net/http_content_encoding_spec.spl: failed → passed (12/12 using the admitted self-hosted interpreter on 2026-09-14; exact byte-array codec round trips verified)
+- test/02_integration/net/http_content_encoding_spec.spl: failed → passed (12/12 using the deployed Windows Rust bootstrap-seed interpreter on 2026-09-14; exact byte-array codec round trips verified; self-hosted rerun pending)
 - test/01_unit/compiler/async/async_desugar_integration_spec.spl
 - test/01_unit/compiler/async/async_frame_analysis_spec.spl
 - test/01_unit/compiler/async/async_integration_spec.spl
