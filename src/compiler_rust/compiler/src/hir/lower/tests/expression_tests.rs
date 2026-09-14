@@ -1443,9 +1443,7 @@ fn test_optional_static_return_keeps_struct_name_for_bound_field_index() {
                     }
                 }
                 HirStmt::If {
-                    then_block,
-                    else_block,
-                    ..
+                    then_block, else_block, ..
                 } => {
                     walk(then_block, seen);
                     if let Some(block) = else_block {
@@ -1549,9 +1547,76 @@ fn test_declared_type_struct_name_looks_through_payload_wrappers() {
     );
 
     // Types that name no single struct stay None — never a guess.
-    assert_eq!(
-        Lowerer::declared_type_struct_name(&Type::Tuple(vec![ff(), ff()])),
-        None
-    );
+    assert_eq!(Lowerer::declared_type_struct_name(&Type::Tuple(vec![ff(), ff()])), None);
     assert_eq!(Lowerer::declared_type_struct_name(&Type::Union(vec![ff()])), None);
+}
+
+/// A nominal receiver must never borrow a same-spelled field from an unrelated
+/// struct.  This used to succeed twice: first through `get_field_info`'s local
+/// best-field scan and then through `lower_field_access`'s equivalent fallback.
+#[test]
+fn nominal_receiver_rejects_field_owned_only_by_decoy() {
+    let source = concat!(
+        "struct Point:\n",
+        "    x: i64\n",
+        "\n",
+        "struct Decoy:\n",
+        "    x: i64\n",
+        "    phantom: i64\n",
+        "\n",
+        "fn probe(point: Point) -> i64:\n",
+        "    return point.phantom\n",
+    );
+
+    for lenient in [false, true] {
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse failed");
+        let mut lowerer = Lowerer::new();
+        lowerer.set_lenient_types(lenient);
+        let error = lowerer
+            .lower_module(&module)
+            .expect_err("Point.phantom must be rejected even though Decoy declares phantom");
+        let message = format!("{error:?}");
+        assert!(message.contains("Point"), "diagnostic must name Point: {message}");
+        assert!(message.contains("phantom"), "diagnostic must name phantom: {message}");
+    }
+}
+
+/// Explicitly dynamic receivers retain field lookup semantics.  Tightening
+/// nominal lookup must not turn `Any` into a closed structural type.
+#[test]
+fn any_receiver_retains_dynamic_field_lookup() {
+    let source = concat!(
+        "struct Decoy:\n",
+        "    x: i64\n",
+        "    phantom: i64\n",
+        "\n",
+        "fn probe(value: Any) -> i64:\n",
+        "    return value.phantom\n",
+    );
+
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+    let mut lowerer = Lowerer::new();
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer
+        .lower_module(&module)
+        .expect("Any.phantom remains a valid dynamic field access");
+    let probe = lowered
+        .functions
+        .iter()
+        .find(|function| function.name == "probe")
+        .unwrap();
+    let field_index = probe.body.iter().find_map(|statement| match statement {
+        HirStmt::Return(Some(HirExpr {
+            kind: HirExprKind::FieldAccess { field_index, .. },
+            ..
+        })) => Some(*field_index),
+        _ => None,
+    });
+    assert_eq!(
+        field_index,
+        Some(1),
+        "dynamic lookup must preserve Decoy.phantom's slot"
+    );
 }
