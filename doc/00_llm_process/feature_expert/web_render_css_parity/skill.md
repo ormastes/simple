@@ -828,5 +828,50 @@ byte-identical.
   catalog)** and `forms-media`'s `<p>` in a closed `<details>` at **Σ 864** —
   41% of all catalog error in two rows, neither of which any brief had named.
 
+- **`width:auto` on a `position:absolute` box is SHRINK-TO-FIT, not "fill the
+  containing block"** (CSS 2.1 §10.3.7). Filling is only for the case where BOTH
+  `left` and `right` are given. `absolute_outer_width` fell through to
+  `containing_w` and produced `w=810` against Chrome's 77 on the catalog's one
+  absolute box — and because `absolute_child_x` resolves `right` as
+  `padding_box − OUTER_WIDTH − right`, the wrong width also dragged x to 35
+  against 769. **One defect, two of the four deltas.** Fixed round 22 at
+  `…_renderer_layout.spl:1626`, reusing `flex_item_max_content_width` (the
+  measurement `<select>` already uses — no new surface). `available` for the
+  clamp is the padding box **minus whichever offset is specified**: Chrome
+  clamps an overflowing box to 890 in a 900 px block, not 900. Only an
+  overflowing fixture can see that, so measure it rather than assume it.
+- **`dy=0, dh=0` on a huge-Σ row means the feature IS implemented** and one arm
+  of the width/x resolution is missing. Read which deltas are ZERO before
+  concluding a feature is absent — that is what turned "absolute positioning is
+  broken" (three rounds of not looking) into a one-arm fix.
+- **Chrome's `getBoundingClientRect()` is NOT a truth oracle for "is this
+  rendered".** Blink force-lays-out a `content-visibility: hidden` subtree when
+  script measures a descendant, so a NOT-rendered element returns a fully
+  non-zero **phantom** rect where it would sit if rendered. `forms-media`'s
+  closed `<details>` reported `45,405,810,24` for its `<p>` — Σ 864, 15% of the
+  catalog — while the `<details>` was summary-height and the rect **overlapped
+  the following sibling** (the cheap tell: no real in-flow box can do that).
+  **Simple's zero-size box was correct**; the differ was wrong. Use
+  `el.checkVisibility()` as the ground truth — it is false for `display:none`
+  and content-visibility-hidden subtrees and stays **TRUE** for
+  `visibility:hidden` and `opacity:0`, which occupy layout and must keep being
+  compared. Round 22 emits `rendered=` per element in the walker and routes it
+  into the round-20 boxless arm. **Never drop rows from the walk** — the
+  nth-path key is an ordinal, so removing one shifts every later sibling.
+- **Count the blast radius before writing a layout fix.** `position=absolute`
+  occurs **once** in all 1583 catalog elements; one grep proved the shrink-to-fit
+  change could not regress the catalog and moved the burden of proof onto the
+  spec, where it belongs.
+- **`right: auto` is NOT honoured** (890 vs Chrome's 77) — a separate
+  offset-keyword parsing defect, filed
+  `doc/08_tracking/bug/absolute_right_auto_not_honoured_2026-09-14.md`, 0 Σ on
+  the catalog. Do not fold it into a width change: it would alter the
+  both-offsets stretch arm's `st.right_px >= 0` test.
+- **After round 22 the catalog's error is no longer concentrated.** `html` is
+  **76% of remaining Σ (2533 of 3312)** with its top row at only Σ 224 (8.8%).
+  Rank `html` by FEATURE CLUSTER, not by single row — the round-21 "find the one
+  big row" method is now exhausted.
+
 Round 20 measurements: `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`.
 Round 21 measurements: `doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`.
+Round 22 measurements: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`.

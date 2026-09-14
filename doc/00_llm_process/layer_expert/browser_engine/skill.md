@@ -424,7 +424,44 @@ different quantity from both the text advance and any font's `xAvgCharWidth`.
 `<select>` does not use this path at all (max-content + `SELECT_ARROW_WIDTH_PX`).
 Control HEIGHTS are already Chrome-correct; the open gap is control POSITION.
 
-Records: `doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`;
+## Out-of-flow (absolute) boxes — `…_renderer_layout.spl:1626-1700`
+
+`absolute_outer_width` has FOUR arms and their ORDER is load-bearing: both
+offsets given → stretch (`padding_box − left − right`); percentage width;
+explicit width; then `width:auto` → **shrink-to-fit** (round 22). The last one
+was missing and fell through to "fill the containing block", which is only
+correct for the first arm. It takes `nodes/styles/child_index/node_i` so it can
+call `flex_item_max_content_width` — the SAME max-content measurement `<select>`
+uses; do not add a second one. `available` for the clamp subtracts whichever of
+`left`/`right` is specified, which only an overflowing box can distinguish.
+
+`absolute_child_x` resolves `right` as `parent_x + border_l + padding_box_w −
+absolute_outer_width(…) − right_px`, so **any width error becomes an x error of
+the same magnitude**. When an absolute row shows a large `dx` AND a large `dw`
+with `dy = dh = 0`, suspect the width arm, not the positioning.
+
+Known gap: `right: auto` does not clear a `right` inherited from a class rule —
+filed `doc/08_tracking/bug/absolute_right_auto_not_honoured_2026-09-14.md`.
+Fixing it touches the stretch arm's `st.right_px >= 0` test, so it needs its own
+controls.
+
+## The geometry differ is an instrument, and it can be the defect
+
+`src/app/ui/chrome_showcase/layout_geometry_diff.spl` has two "Chrome draws
+nothing" predicates, and they are not interchangeable:
+`chrome_reports_no_box` (all four zero — `<wbr>`, `<br>`) and
+`chrome_reports_not_rendered` (the walker's `rendered=` flag, from
+`el.checkVisibility()`). The second exists because Chrome returns a **non-zero
+phantom rect** for an element inside a `content-visibility:hidden` subtree.
+Both feed one arm whose asymmetry must never be relaxed: Simple drawing a REAL
+box where Chrome draws none is still an `extra_box` mismatch. The Simple-side
+test differs per predicate — all-four-zero for boxless, `w==0 and h==0`
+(`simple_renders_nothing`) for not-rendered, because Simple gives a
+not-rendered element a flow origin with no extent. 12 selftest fixtures, three
+of them controls that stop the rule widening.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`;
+`doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;

@@ -1623,7 +1623,7 @@ fn constrained_outer_height(node: HNode, st: Style, candidate_height: i32) -> i3
         out = 1
     out
 
-fn absolute_outer_width(parent: Style, node: HNode, st: Style, containing_w: i32) -> i32:
+fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, node_i: i32, parent: Style, node: HNode, st: Style, containing_w: i32) -> i32:
     if st.width_px == 0 and st.left_px > 0 and st.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         var stretched = padding_box_w - st.left_px - st.right_px
@@ -1637,7 +1637,36 @@ fn absolute_outer_width(parent: Style, node: HNode, st: Style, containing_w: i32
     val explicit_node_w = css_outer_width(node, st, st.width_px)
     if st.width_px > 0:
         return constrained_outer_width(node, st, explicit_node_w)
-    constrained_outer_width(node, st, containing_w)
+    # CSS 2.1 10.3.7: `width: auto` on an absolutely positioned, non-replaced
+    # box is SHRINK-TO-FIT, not "fill the containing block". The stretch case is
+    # only reachable when BOTH `left` and `right` are given, and that arm is the
+    # first branch above. Falling through to the containing block made every
+    # `width:auto` absolute box as wide as its containing block, which then also
+    # dragged its x through the `right` formula in absolute_child_x (measured on
+    # the catalog's one absolute box: w 810 instead of 77, x 35 instead of 769).
+    #
+    # shrink-to-fit = min(max(preferred-minimum, available), preferred).
+    # `preferred` is the same max-content measurement <select> already uses for
+    # its intrinsic width, so no new measurement surface is introduced here.
+    #
+    # AVAILABLE is not the whole containing block: 10.3.7 takes it as the
+    # containing block MINUS whichever of left/right is specified, because that
+    # offset is already committed. Harvested from Chrome on a fixture where the
+    # content overflows (`right: 10px`, text far wider than the block): Chrome
+    # clamps to 890 in a 900 px block, not to 900. Only the overflow case can
+    # see this, which is why it is taken from a measurement rather than assumed.
+    val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+    var available = padding_box_w
+    if st.right_px >= 0:
+        available = available - st.right_px
+    if st.left_px > 0:
+        available = available - st.left_px
+    var shrink_to_fit = flex_item_max_content_width(nodes, styles, child_index, node_i)
+    if shrink_to_fit > available:
+        shrink_to_fit = available
+    if shrink_to_fit < 1:
+        shrink_to_fit = 1
+    constrained_outer_width(node, st, shrink_to_fit)
 
 fn absolute_outer_height(node: HNode, st: Style, containing_h: i32) -> i32:
     val border_y = st.border_t + st.border_b
@@ -1667,10 +1696,10 @@ fn resolve_vertical_margin_px(margin_px: i32, viewport_h: i32) -> i32:
         return viewport_h * ((0 - margin_px) - 1000) / 100
     margin_px
 
-fn absolute_child_x(parent_x: i32, parent: Style, child_node: HNode, child: Style, containing_w: i32) -> i32:
+fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, child_i: i32, parent_x: i32, parent: Style, child_node: HNode, child: Style, containing_w: i32) -> i32:
     if child.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
-        return parent_x + parent.border_l + padding_box_w - absolute_outer_width(parent, child_node, child, containing_w) - child.right_px
+        return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
     parent_x + parent.border_l + child.left_px
 
 fn absolute_child_y(parent_y: i32, parent: Style, child_node: HNode, child: Style, containing_h: i32) -> i32:
@@ -2879,9 +2908,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 val cst = styles[fc_wrap]
                 if cst.position_absolute:
                     val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
-                    val ax = absolute_child_x(x, st, nodes[fc_wrap], cst, iw)
+                    val ax = absolute_child_x(nodes, styles, child_index, fc_wrap, x, st, nodes[fc_wrap], cst, iw)
                     val ay = absolute_child_y(y, st, nodes[fc_wrap], cst, absolute_containing_h)
-                    val absolute_w = absolute_outer_width(st, nodes[fc_wrap], cst, iw)
+                    val absolute_w = absolute_outer_width(nodes, styles, child_index, fc_wrap, st, nodes[fc_wrap], cst, iw)
                     val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
                     val child = layout_with_style(nodes, styles, child_index, fc_wrap, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                     out_bx = child.bx
@@ -3120,9 +3149,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             val cst = styles[fc]
             if cst.position_absolute:
                 val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
-                val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
+                val ax = absolute_child_x(nodes, styles, child_index, fc, x, st, nodes[fc], cst, iw)
                 val ay = absolute_child_y(y, st, nodes[fc], cst, absolute_containing_h)
-                val absolute_w = absolute_outer_width(st, nodes[fc], cst, iw)
+                val absolute_w = absolute_outer_width(nodes, styles, child_index, fc, st, nodes[fc], cst, iw)
                 val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
                 val child = layout_with_style(nodes, styles, child_index, fc, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
@@ -3379,9 +3408,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             val cst = styles[flex_c]
             if cst.position_absolute:
                 val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
-                val ax = absolute_child_x(x, st, nodes[flex_c], cst, iw)
+                val ax = absolute_child_x(nodes, styles, child_index, flex_c, x, st, nodes[flex_c], cst, iw)
                 val ay = absolute_child_y(y, st, nodes[flex_c], cst, absolute_containing_h)
-                val absolute_w = absolute_outer_width(st, nodes[flex_c], cst, iw)
+                val absolute_w = absolute_outer_width(nodes, styles, child_index, flex_c, st, nodes[flex_c], cst, iw)
                 val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
                 val child = layout_with_style(nodes, styles, child_index, flex_c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
@@ -3483,9 +3512,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             continue
         if cst.position_absolute:
             val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
-            val ax = absolute_child_x(x, st, nodes[c], cst, iw)
+            val ax = absolute_child_x(nodes, styles, child_index, c, x, st, nodes[c], cst, iw)
             val ay = absolute_child_y(y, st, nodes[c], cst, absolute_containing_h)
-            val absolute_w = absolute_outer_width(st, nodes[c], cst, iw)
+            val absolute_w = absolute_outer_width(nodes, styles, child_index, c, st, nodes[c], cst, iw)
             val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
             val child = layout_with_style(nodes, styles, child_index, c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
             out_bx = child.bx

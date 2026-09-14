@@ -1,0 +1,143 @@
+"""
+`width: auto` on an absolutely positioned box is SHRINK-TO-FIT, not "fill the
+containing block".
+
+`absolute_outer_width` had three arms — both-offsets-given (stretch), a
+percentage width, and an explicit width — and then fell through to
+`constrained_outer_width(node, st, containing_w)`. That fallback made every
+`width:auto` absolutely positioned box as wide as its containing block, which
+CSS 2.1 10.3.7 reserves for the case where BOTH `left` and `right` are given
+(the first arm already handles that one).
+
+The damage was not confined to the width. `absolute_child_x` resolves a `right`
+offset as `parent_x + border + padding_box_w - OUTER_WIDTH - right`, so a width
+that is too large by 733 px drags x left by the same amount. On the catalog's
+one absolutely positioned element this was measured as:
+
+    Chrome   x=769 y=227 w=77 h=32
+    Simple   x=35  y=227 w=810 h=32     (dx 734, dw 733, dy 0, dh 0)
+
+dy and dh being exactly 0 is the diagnostic that mattered: `top: 10px` and the
+height were already right, so this was never "absolute positioning is
+unimplemented" — it was one missing arm in the width resolution. That single
+row carried Sigma 1467, which was 99% of `css-layout`'s error and 26% of the
+whole 8-page catalog's.
+
+Every number below is HARVESTED from Chrome 152 `--headless=new
+--window-size=900,20000` on the fixture this spec feeds the engine, not
+predicted:
+
+| case                                   | Chrome x,y,w,h  |
+|----------------------------------------|-----------------|
+| `right:10;top:10`, auto width          | 814,10,77,32    |
+| `left:10`, auto width                  | 10,80,77,32     |
+| explicit `width:300px`                 | 590,150,300,32  |
+| BOTH `left:10` and `right:10`          | 10,220,880,32   |
+| auto width, content wider than the block | 0,290,890,56  |
+| a STATIC span in the same block        | 133,353,37,18   |
+
+The fifth row is the one that fixed the clamp bound. Shrink-to-fit is
+`min(max(preferred-minimum, available), preferred)`, and `available` is the
+containing block MINUS whichever offset is specified — Chrome clamps an
+overflowing box to 890 in a 900 px block, not to 900, because the `right: 10px`
+is already committed. Clamping to the full containing block would have been
+invisible on the catalog (whose one absolute box does not overflow) and wrong
+everywhere else, so it was measured rather than assumed.
+
+TWO RESIDUES, stated rather than absorbed into a fitted constant:
+
+1. AC-1 lands **76 against Chrome's 77** — the same class of integer
+   text-advance residue `form_control_intrinsic_width_spec` records for
+   `<textarea cols=40>`. It is below the geometry differ's 1 px tolerance, which
+   is why the catalog row clears completely, and it is NOT papered over by
+   adding 1 to the intercept: the shrink-to-fit width is a max-content
+   measurement, and bending it here would mis-size every other box that uses the
+   same measurement. Note AC-1b: x comes out at Chrome's 814 EXACTLY, because
+   the `right` formula subtracts the width from the right edge and the residue
+   lands on the left edge, which is off-screen of the comparison.
+2. `right: auto` is NOT honoured. Written as
+   `style="right:auto;left:10px"` over a class that sets `right: 10px`, the
+   engine returns 890 (the `available` clamp) where Chrome returns 77. AC-2
+   therefore uses a box that never sets `right` at all, which exercises the same
+   shrink-to-fit path without the `auto` keyword. This is a SEPARATE defect in
+   offset-keyword parsing, not in the width arm this spec covers, and it is
+   filed rather than fixed here —
+   `doc/08_tracking/bug/absolute_right_auto_not_honoured_2026-09-14.md`.
+
+SABOTAGE (run before landing, each with `grep -c SABOTAGED` confirming the edit
+actually applied):
+
+* restoring the old fallback `constrained_outer_width(node, st, containing_w)`
+  fails AC-1/AC-2/AC-5 — AC-1 returns to the measured defect (x=35, w=810) —
+  while AC-3 (explicit width) and AC-4 (both offsets) stay green. That is the
+  proof this arm is the one that was missing and that it did not swallow the
+  arms above it.
+* clamping to `padding_box_w` instead of `available` fails ONLY AC-5, at 900
+  against Chrome's 890, with AC-1/2/3/4 green. That separates the clamp BOUND
+  from the shrink-to-fit rule itself: one shared bound could not have fitted
+  both the fitting and the overflowing case.
+
+The controls are the other half. AC-3 and AC-4 pin that the two arms ABOVE the
+new one still win, AC-6 pins that a static sibling in the same mixed-content
+block is untouched, and AC-7 pins the container itself — an absolute child is
+out of flow and must not change its parent's box.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LAYOUT-014 — an absolutely positioned box with `width: auto` resolves its width by shrink-to-fit against the containing block minus any specified offset, and only stretches when both `left` and `right` are given.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}.positioned{position:relative;min-height:70px;background:#e0f2fe}.badge{position:absolute;right:10px;top:10px;padding:4px 8px;border-radius:999px;color:white;background:#047857}</style></head><body>"
+
+fn probe(inner: text, id: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + "</body></html>", VW, VH, id, prop)
+
+# The catalog's own shape: a relative container with mixed content (text plus an
+# absolutely positioned span).
+val CATALOG: text = "<div class=\"positioned\" id=\"c\">Relative container <span class=\"badge\" id=\"a\">absolute</span></div>"
+
+describe "width:auto on an absolutely positioned box is shrink-to-fit":
+    it "AC-1: right:10 with auto width takes the content's width, not the block's":
+        step("Chrome 77; the pre-fix engine returned 810, the whole containing block")
+        step("STATED: 76, one px under Chrome — the text-advance residue, see the header")
+        expect(probe(CATALOG, "a", "w")).to_equal("76")
+
+    it "AC-1b: and the right offset then resolves x to Chrome's value exactly":
+        step("Chrome harvests 814; the wrong width had dragged this to 35")
+        expect(probe(CATALOG, "a", "x")).to_equal("814")
+
+    it "AC-2: a left offset with auto width shrink-to-fits to the same width":
+        step("which side is specified changes x, not the shrink-to-fit width")
+        step("Chrome harvests 10,10,77,32 for this box; same 1 px advance residue")
+        expect(probe("<div class=\"positioned\">Relative container <span id=\"a\" style=\"position:absolute;left:10px;top:10px;padding:4px 8px\">absolute</span></div>", "a", "w")).to_equal("76")
+
+    it "AC-3 (control): an explicit width still wins over shrink-to-fit":
+        step("the explicit-width arm sits above the new one and must keep winning")
+        expect(probe("<div class=\"positioned\">Relative container <span class=\"badge\" id=\"a\" style=\"width:300px\">absolute</span></div>", "a", "w")).to_equal("300")
+
+    it "AC-4 (control): BOTH left and right still STRETCH, per 10.3.7":
+        step("Chrome 880 = 900 - 10 - 10; this is the one case that does fill the block")
+        expect(probe("<div class=\"positioned\">Relative container <span class=\"badge\" id=\"a\" style=\"left:10px\">absolute</span></div>", "a", "w")).to_equal("880")
+
+    it "AC-5: content wider than the block clamps to the block MINUS the offset":
+        step("Chrome 890 in a 900 px block, because right:10px is already committed")
+        expect(probe("<div class=\"positioned\">Relative container <span class=\"badge\" id=\"a\">absolute absolute absolute absolute absolute absolute absolute absolute absolute absolute absolute absolute absolute absolute absolute</span></div>", "a", "w")).to_equal("890")
+
+    it "AC-6 (control): a STATIC span in the same mixed block is untouched":
+        step("the change is confined to the absolute arm; an inline sibling keeps its advance")
+        expect(probe("<div class=\"positioned\">Relative container <span id=\"a\">static</span></div>", "a", "w")).to_equal("37")
+
+    it "AC-7 (control): the container's own box does not move":
+        step("an absolutely positioned child is out of flow and cannot resize its parent")
+        expect(probe(CATALOG, "c", "w")).to_equal("900")
+
+    it "AC-8 (control): nor does the container's height":
+        step("min-height:70px still governs; Chrome 70")
+        expect(probe(CATALOG, "c", "h")).to_equal("70")
