@@ -466,3 +466,34 @@ Records: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;
 `doc/08_tracking/bug/ifc_linebox_spec_imports_nonexistent_layout_inline_2026-09-14.md`.
+
+## Line breaking (round 23, 2026-09-14)
+
+`Style` now carries `white_space_pre` alongside `white_space_nowrap`. They are
+NOT interchangeable: `nowrap` collapses newlines, `pre` preserves them as forced
+breaks. `white_space_pre` is set by the `<pre>` UA rule
+(`..._declarations.spl:1359`) and by `white-space: pre`
+(`..._decl_apply.spl:1415`); the `#text` branch of `..._layout.spl` takes the
+`pre` arm FIRST and splits via `compute_preserved_newline_ranges`, which also
+drops one newline after the start tag and opens no trailing empty line. Paint
+needs no parallel change — `..._paint_layout.spl:1015` already draws from
+`wrap_cache.starts/ends`.
+
+`_lay_compute_style_wrap_ranges_inner` no longer chops inside a word. Order of
+arms: space break first, then intra-word chop ONLY under
+`overflow-wrap: break-word`/`anywhere` or `word-break: break-all`, else the
+whole word via `word_end_byte`. A final `endv == start` guard keeps the loop
+finite when a single space exceeds `max_width`. The float-band copy
+(`compute_style_wrap_ranges_float_band`) still has the old behaviour and no
+catalog page exercises it.
+
+`align_inline_line_baselines` returns `line_height` untouched when its node list
+is EMPTY, and `vertical-align: sub`/`super` children are never added to it — so
+a block whose only child is a `<sub>` gets the child's height, not the line's.
+Seeding `inline_line_h` from the container is the obvious fix and is
+contradicted by Chrome under a NUMBER `line-height`; see the bug record before
+trying it again.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`;
+`doc/08_tracking/bug/wbr_not_a_soft_break_opportunity_2026-09-14.md`;
+`doc/08_tracking/bug/sub_sup_line_box_strut_contradiction_2026-09-14.md`.

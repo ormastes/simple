@@ -875,3 +875,46 @@ byte-identical.
 Round 20 measurements: `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`.
 Round 21 measurements: `doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`.
 Round 22 measurements: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`.
+
+## Round 23 (2026-09-14) — rank the ORIGINATING deltas, not the raw Σ
+
+- **Raw root-row Σ over-weights cascade.** Clustering round 23's baseline put
+  `html/block-flow/li` on top at Σ 1597 across 49 rows — almost all of it `dy`
+  inherited from a height error in an EARLIER sibling. Re-rank on
+  `|dx| + |dw| + |dh|` only (drop the pure-`dy` followers), then attribute each
+  shift to the rows downstream of it: `shift x downstream_root_rows`. That moved
+  the `<pre>` row (dh 24, 44 rows below it, ~1150 attributed) above the `<wbr>`
+  row (dh 168 but only 2 rows below it, ~1000). Check the arithmetic against
+  `<body>`'s own `dh` — the signed originating shifts must sum to it exactly.
+- **Σ can fall 42% with the mismatch COUNT unmoved, and that is not a failure.**
+  Shortening a cascade leaves every downstream row non-zero but small, and the
+  differ's threshold is 1 px. The count falls only when a cascade is removed.
+- **`white-space: pre` is not `nowrap`.** They had shared one `Style` flag;
+  `pre` PRESERVES newlines, `nowrap` COLLAPSES them. The discriminator is
+  `<div style="white-space:pre">A\nB</div>` — if it fails identically to
+  `<pre>`, the newline reaches layout and layout throws it away, so it is NOT a
+  missing UA rule. Two HTML rules must be harvested, not recalled: a newline
+  immediately after `<pre>` is dropped, and a trailing newline opens no line.
+- **`overflow-wrap: normal` forbids breaking inside a word.** A word wider than
+  the line overflows. The worst case is a run that STARTS mid-line, where
+  `max_width` is a pen remainder of a few pixels and the old `endv == start` arm
+  emitted one codepoint per line (9 lines for "BreakHere"). Keep intra-word
+  breaking reachable for `break-word`/`anywhere`/`break-all` — that control is
+  what makes the rule statable.
+- **`<wbr>` is boxless AND a break opportunity; only the first is implemented.**
+  The control that proves the fix must be tag-scoped: `LongWord<i></i>BreakHere`
+  is ONE line in both engines, so a run boundary alone is correctly not a break.
+  Filed `doc/08_tracking/bug/wbr_not_a_soft_break_opportunity_2026-09-14.md`.
+- **A fix that is right in two contexts and wrong in a third is a compensating
+  error — back it out.** Seeding the line box from the container's strut (CSS
+  2.1 10.8.1) fixes `<sub>` in the catalog and under no author CSS, and is
+  contradicted under `font: 16px/1.5`, where Chrome measures 20 for a div whose
+  strut would be 24. Round 23 reverted it rather than land the catalog green on
+  an unstatable rule:
+  `doc/08_tracking/bug/sub_sup_line_box_strut_contradiction_2026-09-14.md`.
+- **From a detached worktree the freshness gate fails closed** on a missing
+  `build/cargo-r2/release/simple`, and `simple test <dir>` additionally needs
+  `bin/simple` to exist. Symlink both to the main tree's artifact and RECORD
+  that the check path differs from prior rounds.
+
+Round 23 measurements: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`.
