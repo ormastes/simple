@@ -106,50 +106,37 @@ fn compile_source_inventory_facet_text_v1(content: text, facet: text) -> text:
     compile_source_inventory_facet_rows_from_canonical_v1(
         compile_source_inventory_strip_comments_v1(content), facet)
 
-fn compile_source_inventory_event_from_content_and_digest_v1(
-    source: text, operation: text, source_identity: text, content: text,
-    content_digest_hint: text
+# NOTE on hashing cost: `sha256_text` (used below, 4x per file) is already
+# runtime-native — src/lib/common/crypto/sha256.spl:211 calls the extern
+# `rt_tls13_sha256` and only falls back to an interpreted compression loop on
+# an invalid-length result. So a per-file "pass a natively-hashed digest in"
+# path would not skip interpreted hashing; it would just add a second,
+# redundant file read (fs::read via rt_file_hash_sha256, on top of the
+# content this function already has in hand) for no compute benefit. That
+# path was tried and removed here — see
+# doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md
+# for what IS still interpreted-only in this file (the comment/whitespace
+# canonicalization below) and the measurement this note is based on.
+fn compile_source_inventory_event_from_content_v1(
+    source: text, operation: text, source_identity: text, content: text
 ) -> CompileSourceEventV1:
     if operation == "delete":
         return CompileSourceEventV1(
             source, operation, source_identity, "", "", "", "", "", 0)
-    # A caller that already hashed the file natively (e.g. via the runtime's
-    # rt_file_hash_sha256, orders of magnitude faster than an interpreted
-    # sha256 over full file content) can pass that digest through instead of
-    # paying for a second, interpreted, full-content hash here. An invalid or
-    # absent hint falls back to the original in-process hash so behavior for
-    # in-memory content (tests, filesystem-watch events) is unchanged.
-    val content_digest = if compile_source_inventory_digest_valid_v1(content_digest_hint):
-        content_digest_hint
-    else:
-        sha256_text(content)
     val canonical = compile_source_inventory_strip_comments_v1(content)
     CompileSourceEventV1(
-        source, operation, source_identity, content_digest,
+        source, operation, source_identity, sha256_text(content),
         sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "semantic")),
         sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "export")),
         sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "initializer")),
         sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "provider")),
         content.len())
 
-fn compile_source_inventory_event_from_content_v1(
-    source: text, operation: text, source_identity: text, content: text
-) -> CompileSourceEventV1:
-    compile_source_inventory_event_from_content_and_digest_v1(
-        source, operation, source_identity, content, "")
-
 fn compile_source_inventory_git_event_v1(
     operation: text, source_identity: text, content: text
 ) -> CompileSourceEventV1:
     compile_source_inventory_event_from_content_v1(
         "git", operation, source_identity, content)
-
-fn compile_source_inventory_git_event_with_digest_v1(
-    operation: text, source_identity: text, content: text,
-    content_digest_hint: text
-) -> CompileSourceEventV1:
-    compile_source_inventory_event_from_content_and_digest_v1(
-        "git", operation, source_identity, content, content_digest_hint)
 
 fn compile_source_inventory_filesystem_event_v1(
     operation: text, source_identity: text, content: text
@@ -505,7 +492,6 @@ export CompileSourceInventoryV1, CompileSourceInventoryReadV1
 export CompileSourceInventoryChangeV1
 export compile_source_inventory_apply_event_v1
 export compile_source_inventory_git_event_v1
-export compile_source_inventory_git_event_with_digest_v1
 export compile_source_inventory_filesystem_event_v1
 export compile_source_inventory_apply_git_changes_v1
 export compile_source_inventory_apply_git_events_v1

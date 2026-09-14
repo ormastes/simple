@@ -1,9 +1,9 @@
 # Production bridge from Git/filesystem change journals to the compile-owned
 # source inventory. Git commands are read-only; all writes stay under build/scv.
 
-use app.io.mod.{dir_create, file_atomic_write, file_exists, file_hash_sha256, file_read, process_run_bounded}
+use app.io.mod.{dir_create, file_atomic_write, file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
-use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_git_event_with_digest_v1, compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_read_current_v1}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 
 struct CompilerInventoryRefreshV1:
@@ -96,19 +96,16 @@ fn compiler_inventory_event_push_v1(
     if not file_exists(absolute):
         return events.push(compile_source_inventory_git_event_v1(
             "delete", normalized, ""))
-    val content = file_read(absolute)
-    # rt_file_hash_sha256 (via file_hash_sha256) hashes the file natively —
-    # orders of magnitude faster than the interpreted sha256_text fallback it
-    # replaces, and it is what turns this per-file step into an event
-    # (digests only) instead of a change record that would otherwise have to
-    # keep `content` alive in an outer array until every listed file has been
-    # processed. That retained-content array, not the git listing itself, was
-    # the dominant cost of cold init on a ~1.6 GB checkout (measured 21 GB
-    # RSS / 342 CPU-s before this change — see
+    # Reducing straight to an event here (digests + byte_count only) rather
+    # than collecting a change record that keeps `content` alive is the
+    # point: the outer array below no longer has to retain every listed
+    # file's full text until the whole listing is done. That retained-content
+    # array, not the git listing itself, was the dominant cost of cold init
+    # on a ~1.6 GB checkout (measured 21 GB RSS / 342 CPU-s before this
+    # change — see
     # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md).
-    val digest_hint = file_hash_sha256(absolute)
-    events.push(compile_source_inventory_git_event_with_digest_v1(
-        operation, normalized, content, digest_hint))
+    events.push(compile_source_inventory_git_event_v1(
+        operation, normalized, file_read(absolute)))
 
 fn compiler_inventory_parse_name_status_v1(
     root: text, output: text, events: [CompileSourceEventV1]
