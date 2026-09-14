@@ -10,7 +10,10 @@
 # every box that painted nothing).
 #
 # Verdict is the LAST line of stdout. 0 elements compared is ERROR, never PASS.
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_element_geometry_lines}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_element_geometry_lines,
+    simple_web_layout_last_render_degraded,
+    simple_web_layout_last_render_degrade_reason}
 use app.wm_compare_host.cli_util.{get_cli_args}
 use app.wm_compare_host.file_ops.{file_read_text, file_write}
 
@@ -494,6 +497,24 @@ fn main():
     val dump = file_read_text(geom_path)
     val chrome = parse_chrome_geom(dump)
     val simple = simple_geom_boxes(html, width, height)
+    # A render that tripped its wall-clock budget is TRUNCATED, not laid out:
+    # every node past the break keeps renderer_default_style() and contributes
+    # a box that is wrong for a reason that has nothing to do with CSS. Reading
+    # such a run as a geometry comparison is exactly how round 13's numbers
+    # became void, so this is fail-closed rather than a warning. The break is
+    # total on html.html (node 46 of 883 => all-zero side) but need not be:
+    # a break at node 800 leaves a plausible-looking table that is still a
+    # measurement of the deadline, not of the layout.
+    if simple_web_layout_last_render_degraded():
+        print("chrome_boxes=" + chrome.len().to_string())
+        print("simple_boxes=" + simple.len().to_string())
+        print("ERROR — nothing was checked (the Simple render for " + html_path +
+              " tripped its wall-clock render budget (" +
+              simple_web_layout_last_render_degrade_reason() +
+              "); the layout is truncated, not slow. Raise " +
+              "SIMPLE_WEB_RENDER_BUDGET_MS — SIMPLE_TIMEOUT_SECONDS does NOT " +
+              "disable the render budget)")
+        return
     if all_boxes_degenerate(simple):
         print("chrome_boxes=" + chrome.len().to_string())
         print("simple_boxes=" + simple.len().to_string())
