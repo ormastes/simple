@@ -1,6 +1,6 @@
 # `print` drops its newline under native-build only
 
-**Status:** OPEN (P2)
+**Status:** FIXED in `35b22b6aedf` (original focused fix `8cef6333ac8`)
 **Filed:** 2026-08-17
 **Component:** native-build (AOT) `print` lowering
 **Class:** engine divergence — output differs from both other engines
@@ -70,3 +70,24 @@ Rust seed `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the
 shared main worktree), sha256 `3d120a6f9ab5`. Left OPEN; the native-build
 `rt_env_vars` breakage blocking this re-check is not filed separately here
 for time — flagged for whoever next touches native-build.
+
+## Resolution and re-verification 2026-09-14
+
+The focused fix is present in the current pure-Simple MIR lowerer:
+`print` routes to `rt_println`, while the deliberately non-newline internal
+`_cli_eprint` helper remains on `rt_print`. The fix originally landed as
+`8cef6333ac8` and is carried by the current history through `35b22b6aedf`.
+Its Stage-2 admission oracle observed three `print` calls as three lines after
+the change, directly covering the reported native-output failure.
+
+The repository also has a stronger byte-for-byte differential gate,
+`scripts/check/check-native-print-stdout-oracle.shs`, with four positive
+fixtures and a deliberately wrong negative control. A Windows re-run using
+the deployed seed (SHA-256
+`6094DCAE291AA984973CCD681F956E67A7A60543AB99F76A29313FBBFDEE96D1`)
+was blocked before artifact production by SCV inventory publication
+(`compile-event-journal-missing`, then
+`git-event-apply:inventory-publication-failed` on the prescribed cold-init
+retry). That is an admission/inventory failure, not a recurrence of newline
+loss. Implementation status is therefore fixed; refreshing the differential
+gate on the next admitted native candidate remains deployment verification.
