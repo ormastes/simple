@@ -90,7 +90,59 @@ done
 authority_sha256=$(shasum -a 256 \
   "$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn" | awk '{print $1}')
 grep -Fxq "policy_authority_sha256=$authority_sha256" "$work/pass.env"
-[ "$(stat -f '%Lp' "$work/pass.env" 2>/dev/null || stat -c '%a' "$work/pass.env")" = 444 ]
+[ "$(stat -c '%a' "$work/pass.env" 2>/dev/null || stat -f '%Lp' "$work/pass.env")" = 444 ]
+
+# Seed-built Stage 2 fallback: a stage2 log with zero closure-scan markers
+# (the Rust seed has no log_phase instrumentation) must still admit the
+# receipt when both transcripts declare identical --source roots and the
+# same --entry/--backend/--mode, and the receipt must record the fallback.
+write_transcript "$work/stage2.transcript" llvm
+write_transcript "$work/stage3.transcript" llvm
+printf '%s\n' "$combined_root" "$cranelift" "$interpreter" "$llvm" \
+  >"$work/stage3.log"
+printf '%s\n' \
+  'warning: refusing to bind unqualified method `read` -- 2 same-named candidates' \
+  >"$work/stage2.log.seed"
+sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+  llvm-cranelift one-binary llvm "$work/stage2.log.seed" "$work/stage3.log" \
+  "$work/stage2.transcript" "$work/stage3.transcript" "$work/fallback.env"
+grep -Fxq 'stage2_closure_trace=transcript-only' "$work/fallback.env"
+grep -Fxq 'stage3_closure_trace=log-scanned' "$work/fallback.env"
+grep -Fxq 'status=pass' "$work/fallback.env"
+
+# The fallback must reject transcripts that disagree on --source roots.
+write_transcript "$work/stage2-mismatch.transcript" llvm
+{
+  echo 'schema=simple-bootstrap-command-transcript-v2'
+  for entry in \
+    "SIMPLE_ABI_POLICY=v1" \
+    "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn" \
+    "SIMPLE_KERNEL_K1_POLICY=llvm-cranelift" \
+    "SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only" \
+    "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${SIMPLE_K1_COMPOSITION_SHA256_BEFORE}"; do
+    printf 'explicit-env:%s:%s\n' "${#entry}" "$entry"
+  done
+  for argument in simple native-build --backend llvm --mode one-binary \
+      --source "$composition_source" --source src/plugins/backend_wasm; do
+    printf 'argv:%s:%s\n' "${#argument}" "$argument"
+  done
+} >"$work/stage3-mismatch.transcript"
+if sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+    llvm-cranelift one-binary llvm "$work/stage2.log.seed" "$work/stage3.log" \
+    "$work/stage2-mismatch.transcript" "$work/stage3-mismatch.transcript" \
+    "$work/rejected-mismatch.env" >/dev/null 2>&1; then
+  echo 'FAIL — fallback admitted transcripts with different --source roots' >&2
+  exit 1
+fi
+[ ! -e "$work/rejected-mismatch.env" ]
+write_receipt() {
+  output=$1
+  stage2_transcript=${2:-$work/stage2.transcript}
+  stage3_transcript=${3:-$work/stage3.transcript}
+  sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+    llvm-cranelift one-binary llvm "$work/stage2.log" "$work/stage3.log" \
+    "$stage2_transcript" "$stage3_transcript" "$output"
+}
 
 if write_receipt "$work/pass.env" >/dev/null 2>&1; then
   echo 'FAIL — existing receipt was overwritten' >&2

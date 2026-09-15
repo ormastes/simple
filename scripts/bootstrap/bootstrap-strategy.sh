@@ -199,6 +199,10 @@ if [ -z "$memory_total" ] && [ -r /proc/meminfo ]; then
     memory_total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
 fi
 case "$memory_total" in ''|*[!0-9]*|0) memory_total=2048 ;; esac
+# Reservation used only for the engine-side critical_memory accounting
+# below; the qualifier itself intentionally runs WITHOUT a ulimit -v cap
+# (see run_qualifier) because mold's output-buffer reservation fails under
+# any finite RLIMIT_AS, and a virtual cap never bounded resident memory.
 qualification_memory=${SIMPLE_BOOTSTRAP_QUALIFICATION_MEMORY_MIB:-2048}
 memory_safety=${SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_SAFETY_MIB:-1024}
 critical_memory=${SIMPLE_BOOTSTRAP_CRITICAL_MEMORY_MIB:-}
@@ -328,9 +332,14 @@ engine_pid=$!
 
 run_qualifier() {
     (
-        if [ "$memory_enforcement" = ulimit-v ]; then
-            ulimit -v $((qualification_memory * 1024)) || exit 70
-        fi
+        # No ulimit -v here, deliberately: the broad Stage-2 gate links a
+        # native hello-world, and mold's multi-GiB output-buffer reservation
+        # fails under ANY finite RLIMIT_AS -- verified at caps from 2 GiB to
+        # 2 TiB, where the identical link succeeds with RLIMIT_AS unlimited.
+        # A virtual-address cap never bounded resident memory anyway (the
+        # qualifier's real footprint is a few hundred MiB), so it only broke
+        # the mandatory gate and got the engine TERM'd on every speculative
+        # run. Resident-memory protection remains the kill-monitor's job.
         SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
             /bin/sh "$qualifier" "$output" "$generation_dir" "$lease" \
             "$lease_sha" "$engine_done"
