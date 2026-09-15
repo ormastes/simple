@@ -118,8 +118,9 @@ awk '/^[[:space:]]*- class:/ { class_name=$3 } /^[[:space:]]*path:/ { print clas
 extract_paths() {
   input=$1
   destination=$2
+  extraction=${3:-required}
   raw=$destination.raw.$$
-  awk '
+  awk -v mode="$extraction" '
     {
       marker = "phase1:load_sources:closure:scan path="
       start = index($0, marker)
@@ -141,7 +142,7 @@ extract_paths() {
       count++
     }
     END {
-      if (malformed || count == 0) exit 1
+      if (malformed || (mode != "optional" && count == 0)) exit 1
     }
   ' "$input" >"$raw" || {
     rm -f "$raw"
@@ -152,8 +153,20 @@ extract_paths() {
   rm -f "$raw"
 }
 
-extract_paths "$stage2_log" "$stage2_paths"
-extract_paths "$stage3_log" "$stage3_paths"
+# Stage 2 is executed by the Rust seed, which has no log_phase
+# instrumentation: an authentic seed-built stage2 log contains zero
+# closure-scan markers, so content-level closure verification is impossible
+# for that stage. Extract it optionally; when no trace is present, Stage 2's
+# source closure is bound at the transcript level instead (see
+# verify_transcript_source_binding below), and Stage 3 -- built by the
+# self-hosted compiler with phase profiling -- still receives full
+# content-level closure verification over the same source roots.
+extract_paths "$stage2_log" "$stage2_paths" optional
+extract_paths "$stage3_log" "$stage3_paths" required
+stage2_closure_trace=log-scanned
+if [ ! -s "$stage2_paths" ]; then
+  stage2_closure_trace=transcript-only
+fi
 cat "$stage2_paths" "$stage3_paths" | LC_ALL=C sort -u >"$paths"
 
 classify_path() {
@@ -194,9 +207,67 @@ verify_stage_kernel_closure() {
   done <"$stage_paths_file"
 }
 
-verify_stage_kernel_closure Stage2 "$stage2_paths"
-verify_stage_kernel_closure Stage3 "$stage3_paths"
+transcript_argv_value_after() {
+  transcript=$1
+  option=$2
+  awk -v wanted="$option" '
+    /^argv:[0-9]+:/ {
+      declared=$0; sub(/^argv:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^argv:[0-9]+:/, "", payload)
+      if (length(payload) != declared) exit 2
+      if (waiting) { print payload; waiting=0; found++; next }
+      if (payload == wanted) waiting=1
+    }
+    END { if (waiting || found != 1) exit 1 }
+  ' "$transcript"
+}
 
+# Transcript-level fallback binding for a seed-built Stage 2 whose log
+# carries no closure-scan trace: both transcripts must declare identical
+# --source roots (order-sensitive) and the same --entry/--backend/--mode, so
+# Stage 2 is pinned to the same source closure that Stage 3 proves
+# content-level.
+transcript_sources() {
+  awk '
+    /^argv:[0-9]+:/ {
+      declared=$0; sub(/^argv:/, "", declared); sub(/:.*/, "", declared)
+      payload=$0; sub(/^argv:[0-9]+:/, "", payload)
+      if (length(payload) != declared) exit 2
+      if (previous == "--source") print payload
+      previous=payload
+    }
+  ' "$1"
+}
+
+verify_transcript_source_binding() {
+  stage2_sources=$(transcript_sources "$stage2_transcript") || {
+    echo "error: Stage2 command transcript is malformed" >&2
+    exit 1
+  }
+  stage3_sources=$(transcript_sources "$stage3_transcript") || {
+    echo "error: Stage3 command transcript is malformed" >&2
+    exit 1
+  }
+  [ -n "$stage2_sources" ] && [ "$stage2_sources" = "$stage3_sources" ] || {
+    echo "error: Stage2 closure trace is absent and the Stage2/Stage3 transcripts declare different --source roots" >&2
+    exit 1
+  }
+  for transcript_option in --entry --backend --mode; do
+    stage2_option_value=$(transcript_argv_value_after "$stage2_transcript" "$transcript_option" || true)
+    stage3_option_value=$(transcript_argv_value_after "$stage3_transcript" "$transcript_option" || true)
+    [ "$stage2_option_value" = "$stage3_option_value" ] || {
+      echo "error: Stage2 closure trace is absent and the Stage2/Stage3 transcripts disagree on $transcript_option" >&2
+      exit 1
+    }
+  done
+}
+
+if [ "$stage2_closure_trace" = log-scanned ]; then
+  verify_stage_kernel_closure Stage2 "$stage2_paths"
+else
+  verify_transcript_source_binding
+fi
+verify_stage_kernel_closure Stage3 "$stage3_paths"
 compatibility_path='src/compiler/80.driver/bootstrap_k1_selected.spl'
 selected_path='src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl'
 selected_file=$repo_root/$selected_path
@@ -222,21 +293,6 @@ transcript_explicit_env_value() {
       if (index(payload, wanted) == 1) { print substr(payload, length(wanted)+1); found++ }
     }
     END { if (found != 1) exit 1 }
-  ' "$transcript"
-}
-
-transcript_argv_value_after() {
-  transcript=$1
-  option=$2
-  awk -v wanted="$option" '
-    /^argv:[0-9]+:/ {
-      declared=$0; sub(/^argv:/, "", declared); sub(/:.*/, "", declared)
-      payload=$0; sub(/^argv:[0-9]+:/, "", payload)
-      if (length(payload) != declared) exit 2
-      if (waiting) { print payload; waiting=0; found++; next }
-      if (payload == wanted) waiting=1
-    }
-    END { if (waiting || found != 1) exit 1 }
   ' "$transcript"
 }
 
@@ -289,7 +345,9 @@ verify_stage_composition() {
   }
 }
 
-verify_stage_composition Stage2 "$stage2_paths"
+if [ "$stage2_closure_trace" = log-scanned ]; then
+  verify_stage_composition Stage2 "$stage2_paths"
+fi
 verify_stage_composition Stage3 "$stage3_paths"
 
 verify_stage_backend_closure() {
@@ -307,7 +365,9 @@ verify_stage_backend_closure() {
   fi
 }
 
-verify_stage_backend_closure Stage2 "$stage2_paths"
+if [ "$stage2_closure_trace" = log-scanned ]; then
+  verify_stage_backend_closure Stage2 "$stage2_paths"
+fi
 verify_stage_backend_closure Stage3 "$stage3_paths"
 llvm_paths=$(grep -Ei '/([^/]*llvm[^/]*)\.spl$|/([^/]*llvm[^/]*)/(mod|__init__)\.spl$' "$paths" || true)
 
@@ -331,6 +391,8 @@ llvm_paths=$(grep -Ei '/([^/]*llvm[^/]*)\.spl$|/([^/]*llvm[^/]*)/(mod|__init__)\
   echo 'policy_authority_path=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn'
   echo "policy_authority_sha256=$(shasum -a 256 "$closure_manifest" | awk '{print $1}')"
   echo "selected_composition_sha256=$selected_sha256"
+  echo "stage2_closure_trace=$stage2_closure_trace"
+  echo 'stage3_closure_trace=log-scanned'
   echo "stage2_log=$stage2_log"
   echo "stage2_log_sha256=$(shasum -a 256 "$stage2_log" | awk '{print $1}')"
   echo "stage2_transcript=$stage2_transcript"

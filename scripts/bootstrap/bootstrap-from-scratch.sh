@@ -1324,6 +1324,12 @@ case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
     ;;
 esac
 export SIMPLE_KERNEL_K1_POLICY
+# The stage-3 K1 composition receipt gate (write-k1-composition-receipt.shs)
+# parses `phase1:load_sources:closure:scan path=... imports=N content_len=N`
+# traces out of the stage2/stage3 native-build logs. Stage 2 runs the Rust
+# seed, which has no log_phase instrumentation and cannot emit those lines;
+# the receipt gate falls back to transcript-level source binding for Stage 2
+# and keeps content-level closure verification for Stage 3.
 k1_composition_source_args="--source ${k1_composition_root}"
 k1_composition_file="${k1_composition_root}/compiler/driver/bootstrap_k1_selected.spl"
 [ -f "${k1_composition_file}" ] && [ ! -L "${k1_composition_file}" ] || {
