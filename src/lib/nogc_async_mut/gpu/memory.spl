@@ -76,6 +76,46 @@ class GpuArray[T]:
                 self.host_buf = data
                 true
 
+    me upload_f32(data: [f32]) -> bool:
+        """Upload host f32 data; identical to upload()."""
+        self.upload(data)
+
+    me upload_f64(data: [f64]) -> bool:
+        """Upload host f64 data, narrowed to the array's f32 element type.
+
+        Values outside the f32 range lose precision; this mirrors the f32
+        storage of GpuArray on every backend.
+        """
+        var narrowed: [f32] = []
+        var i = 0
+        while i < data.len():
+            narrowed.push(data[i] as f32)
+            i = i + 1
+        self.upload(narrowed)
+
+    me upload_i32(data: [i32]) -> bool:
+        """Upload host i32 data, converted to the array's f32 element type."""
+        var converted: [f32] = []
+        var i = 0
+        while i < data.len():
+            converted.push(data[i] as f32)
+            i = i + 1
+        self.upload(converted)
+
+    me upload_i64(data: [i64]) -> bool:
+        """Upload host i64 data, converted to the array's f32 element type.
+
+        Values above 2^24 lose integer precision (f32 mantissa); upload the
+        raw 64-bit pattern via the torch bits path instead if exactness
+        matters.
+        """
+        var converted: [f32] = []
+        var i = 0
+        while i < data.len():
+            converted.push(data[i] as f32)
+            i = i + 1
+        self.upload(converted)
+
     fn download() -> [f32]:
         match self.backend:
             case GpuBackend.Cuda:
@@ -239,9 +279,10 @@ fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
             )
 
 fn gpu_alloc_upload[T](gpu: Gpu, data: [T]) -> GpuArray[T]:
-    # NOTE: upload() only handles [f32] data. For other types T, the
-    # upload call is a no-op and the array will be empty on GPU.
-    # TODO: add typed upload variants (upload_f64, upload_i32, etc.)
+    # NOTE: the generic upload() path only handles [f32] data.  For other
+    # element types use the typed variants GpuArray.upload_f64 / upload_i32 /
+    # upload_i64; a mismatched generic call is a no-op and the array stays
+    # empty on GPU.
     var arr = gpu_alloc(gpu, data.len())
     arr.upload(data)
     arr

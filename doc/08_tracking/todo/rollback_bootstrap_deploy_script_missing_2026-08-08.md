@@ -37,7 +37,8 @@ but no file of that name (or an equivalent under a renamed path) exists
 anywhere in the repo. `scripts/bootstrap/` has no rollback/deploy-restore
 script at all today.
 
-# TODO: [bootstrap][P2] Build `scripts/bootstrap/rollback-bootstrap-deploy.shs`
+# RESOLVED (kept for history; TODO satisfied):
+# [bootstrap][P2] Build `scripts/bootstrap/rollback-bootstrap-deploy.shs`
 Implement the Gate 5R rollback script: given `<canonical-triple>`, restore
 `bin/release/<canonical-triple>/simple` from the retained
 `bin/release/<canonical-triple>/simple.pre_deploy`, verify the restored
