@@ -295,12 +295,17 @@ impl Lowerer {
                 ty,
             })
         } else if let Some((symbol, ty)) = self.resolve_flatten_owned_callable(name).and_then(|symbol| {
-            // Cross-module same-named free functions in a flattened unit are
-            // lowered under owner-exact symbols (`flatten_emitted_symbol`).
-            // Resolve by the CALLING function's owner before any bare-name
-            // lookup, which would otherwise pick whichever module's definition
-            // registered last. See
-            // `doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md`.
+            // Flattened unit, cross-module same-named free function: the bare
+            // name is ambiguous once flattening merges every module's
+            // functions into one namespace, so it must be resolved through
+            // the flatten-owner of the function CURRENTLY being lowered,
+            // never through whichever definition happened to keep the bare
+            // name. `resolve_flatten_owned_callable` already encodes the
+            // priority (own colliding definition, then a selective import's
+            // exact binding, then a colliding alias target) -- this is the
+            // one call site that must consult it, since it decides the
+            // symbol every call/reference to `name` actually resolves to.
+            // See doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md
             let ty = self
                 .named_callable_value_type(&symbol)
                 .or_else(|| self.globals.get(&symbol).copied())?;
@@ -748,7 +753,26 @@ impl Lowerer {
                     .cloned();
                 if let Some(target) = resolved {
                     let args_hir = self.lower_call_args(args, ctx)?;
-                    let ret_ty = self.named_callable_return_type(method).unwrap_or(TypeId::ANY);
+                    // Look the return type up under the QUALIFIED name first.
+                    // `method_return_types` is keyed `Owner.method` for every
+                    // imported `impl` method (import_loader's `Node::Impl`
+                    // arm), so a bare `method` lookup misses it and answers
+                    // ANY. That ANY is the whole defect chain behind the
+                    // sibling-type method collapse: `U16le.of(0xBEEF)` typed
+                    // ANY, so the `.store(...)` it feeds could not be
+                    // qualified by MIR and lowered to a BARE `store`, which
+                    // every name-keyed resolver downstream binds to an
+                    // arbitrary same-named method in the link closure. All six
+                    // `ints.spl` types then ran ONE `store`/`to_span` body.
+                    // The bare lookup stays as the fallback -- a plain
+                    // qualified FREE function (`mod.func()`) has no
+                    // `mod.func` row and must keep resolving as before.
+                    // doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
+                    let ret_ty = self
+                        .named_callable_return_type(&qualified)
+                        .filter(|ty| *ty != TypeId::ANY)
+                        .or_else(|| self.named_callable_return_type(method))
+                        .unwrap_or(TypeId::ANY);
                     return Ok(HirExpr {
                         kind: HirExprKind::Call {
                             func: Box::new(HirExpr {
@@ -972,6 +996,29 @@ impl Lowerer {
         // Search pre-registered methods for ".method" suffix
         // Sort matches by name length (shortest = most specific) for deterministic resolution
         let suffix = format!(".{}", method);
+        // A receiver of known BUILTIN type may only borrow a registered return
+        // type from a method on that same builtin (e.g. `impl text` registers
+        // `text.foo`). Otherwise an unrelated user method with the same name won:
+        // `"/".join(xs)` was typed as `Thread.join() -> i64?`, so `"/" + ...`
+        // failed lowering and the whole module dropped to the interpreter.
+        // doc/08_tracking/bug/seed_receiver_text_join_resolves_to_thread_join_optional_2026-09-13.md
+        let builtin_owners: Option<&[&str]> = match self.module.types.get(recv_ty) {
+            Some(HirType::String) => Some(&["text", "String", "str", "string"]),
+            Some(HirType::Array { .. }) => Some(&["Array", "List", "array"]),
+            Some(HirType::Dict { .. }) => Some(&["Dict", "dict", "Map"]),
+            Some(HirType::Tuple(_)) | Some(HirType::LabeledTuple(_)) => Some(&["Tuple"]),
+            Some(HirType::Bool) => Some(&["bool", "Bool"]),
+            Some(HirType::Char) => Some(&["char", "Char"]),
+            Some(HirType::Int { .. }) => Some(&["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "int", "Int"]),
+            Some(HirType::Float { .. }) => Some(&["f32", "f64", "float", "Float"]),
+            _ => None,
+        };
+        let owner_applies = |name: &str| match builtin_owners {
+            None => true,
+            Some(owners) => name
+                .rsplit_once('.')
+                .is_some_and(|(owner, _)| owners.contains(&owner)),
+        };
         // Trait names intentionally alias to ANY in HIR because calls use a
         // runtime vtable.  A module that imports only the trait therefore has
         // no `ConcreteType.method` entry in `method_return_types`; the trait
@@ -1018,7 +1065,7 @@ impl Lowerer {
         for (_, &rt) in self
             .method_return_types
             .iter()
-            .filter(|(name, _)| name.ends_with(&suffix))
+            .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
         {
             match seen_ret {
                 None => seen_ret = Some(rt),
@@ -1043,7 +1090,7 @@ impl Lowerer {
         if let Some((_, &ret_ty)) = self
             .method_return_types
             .iter()
-            .filter(|(name, _)| name.ends_with(&suffix))
+            .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
             .min_by_key(|(name, _)| name.len())
         {
             return ret_ty;

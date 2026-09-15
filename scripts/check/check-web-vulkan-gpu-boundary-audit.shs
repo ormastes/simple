@@ -34,7 +34,7 @@
 # run uses, so a fixture cannot drift from production.
 #
 # Usage:
-#   sh scripts/check/check-web-vulkan-gpu-boundary-audit.shs [--selftest]
+#   sh scripts/check/check-web-vulkan-gpu-boundary-audit.shs [--selftest] [--matrix]
 #     [--page <html>] [--width N] [--height N] [--frames N]
 #     [--backend vulkan|cpu_simd] [--timeout SECONDS] [--out-dir DIR]
 #     [--upload-mode u32|bytes]
@@ -58,6 +58,19 @@ BACKEND=vulkan
 TIMEOUT=1200
 OUT_DIR="build/perf/gpu_audit"
 SELFTEST_ONLY=0
+MATRIX=0
+# The pages x sizes this gate must cover so a per-page regression cannot hide.
+# `overview` alone was the default until 2026-09-13, and `css-layout` — the
+# heaviest catalog page, 908 nodes, 550 backend draw ops, the only one with real
+# `image` ops — was never gated. A stale metrics record then claimed css-layout
+# did 3 submits per frame against the limit of 1 and nothing contradicted it for a
+# day, because no gate ever rendered that page. Both sizes are here for the same
+# reason: 4K is where a full-surface readback or a host pixel loop actually costs,
+# and a 900x760-only gate would pass while 4K regressed.
+MATRIX_CELLS="examples/06_io/ui/web_catalog/overview.html:900:760
+examples/06_io/ui/web_catalog/css-layout.html:900:760
+examples/06_io/ui/web_catalog/overview.html:3840:2160
+examples/06_io/ui/web_catalog/css-layout.html:3840:2160"
 CLASSIFY_ONLY=""
 # Typed (`u32`) vs packed-byte staging upload. It changes only HOW the bytes
 # cross the SFFI boundary, never how MANY uploads or submits a frame performs,
@@ -70,6 +83,7 @@ UPLOAD_MODE=u32
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) SELFTEST_ONLY=1 ;;
+        --matrix) MATRIX=1 ;;
         --page) PAGE="${2:-}"; shift ;;
         --width) WIDTH="${2:-}"; shift ;;
         --height) HEIGHT="${2:-}"; shift ;;
@@ -118,6 +132,48 @@ if [ "$st_rc" -ne 0 ]; then
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
     echo "PASS — selftest only, ${st_line#selftest: }"
+    exit 0
+fi
+
+# --- matrix mode: every gated page at every gated size ----------------------
+# Each cell is a full, independent render+classify through this same script, so a
+# cell cannot be counted as passing on anything but its own verdict line. A cell
+# that ERRORs is not a pass and not a skip: the matrix ERRORs with it.
+if [ "$MATRIX" -eq 1 ]; then
+    m_total=0
+    m_failed=0
+    m_errored=0
+    for cell in $MATRIX_CELLS; do
+        c_page=$(printf '%s' "$cell" | cut -d: -f1)
+        c_w=$(printf '%s' "$cell" | cut -d: -f2)
+        c_h=$(printf '%s' "$cell" | cut -d: -f3)
+        c_name=$(basename "$c_page" .html)
+        c_out="$OUT_DIR/matrix_${c_name}_${c_w}x${c_h}"
+        cell_log="$c_out/cell.stdout"
+        mkdir -p "$c_out"
+        SIMPLE_BIN="$SIMPLE_BIN" sh "$repo_root/scripts/check/check-web-vulkan-gpu-boundary-audit.shs" --page "$c_page" --width "$c_w" --height "$c_h" \
+            --timeout "$TIMEOUT" --backend "$BACKEND" --upload-mode "$UPLOAD_MODE" \
+            --out-dir "$c_out" > "$cell_log" 2>&1
+        c_rc=$?
+        m_total=$((m_total + 1))
+        c_verdict=$(tail -1 "$cell_log")
+        echo "matrix_cell ${c_name}@${c_w}x${c_h} rc=$c_rc $c_verdict"
+        if [ "$c_rc" -eq 1 ]; then m_failed=$((m_failed + 1)); fi
+        if [ "$c_rc" -ge 2 ]; then m_errored=$((m_errored + 1)); fi
+    done
+    if [ "$m_total" -eq 0 ]; then
+        echo "ERROR — nothing was checked (matrix has 0 cells)"
+        exit 2
+    fi
+    if [ "$m_errored" -gt 0 ]; then
+        echo "ERROR — nothing was checked ($m_errored of $m_total matrix cell(s) could not be measured)"
+        exit 2
+    fi
+    if [ "$m_failed" -gt 0 ]; then
+        echo "FAIL — $m_total matrix cell(s) audited, $m_failed violated a GPU-boundary invariant"
+        exit 1
+    fi
+    echo "PASS — $m_total matrix cell(s) audited (overview + css-layout at 900x760 and 3840x2160), 0 violations"
     exit 0
 fi
 

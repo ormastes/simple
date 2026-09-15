@@ -58,7 +58,10 @@ use app.devhub.adapter_bitbucket.{
     bb_build_dc_comment_body,
     bb_build_dc_merge_body,
     bb_dc_page_url,
-    bb_curl_argv
+    bb_curl_argv,
+    bb_curl_argv_with_headers,
+    bb_resolve_gateway_url,
+    _bb_gateway_argv
 }
 use std.common.json.{json_parse, json_object, json_string, json_boolean}
 use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
@@ -438,7 +441,6 @@ describe "bb_map_http_error":
         val e = bb_map_http_error(500, "boom", BB_OP_GENERAL)
         expect(e.kind).to_equal("api_error")
         expect(e.status_code).to_equal(500)  # oracle: 500 is the wire status for a provider-side failure
-
 
 # ============================================================================
 # Retry-After handling
@@ -918,3 +920,39 @@ describe "bb Server / Data Center URLs and auth":
         expect(bb_build_dc_comment_body("hi", "", -1)).to_equal("{\"text\": \"hi\"}")
         expect(bb_build_dc_merge_body("squash")).to_equal("{\"strategyId\": \"squash\"}")
         expect(bb_build_dc_merge_body("merge_commit")).to_equal("{\"strategyId\": \"no-ff\"}")
+
+
+describe "Bitbucket gateway routing and headers":
+    it "rewrites Cloud and Data Center primary API roots without changing resource paths":
+        val cloud = BbClient(token: "t", base_url: "https://api.bitbucket.org/2.0", deployment: "cloud", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket/", headers: [])
+        val dc = BbClient(token: "t", base_url: "https://bb.example", deployment: "datacenter", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: [])
+        expect(bb_resolve_gateway_url(cloud, "https://api.bitbucket.org/2.0/repositories/acme/widgets")).to_equal("https://gateway.example/bitbucket/repositories/acme/widgets")
+        expect(bb_resolve_gateway_url(dc, "https://bb.example/rest/api/1.0/projects/KEY/repos/widgets")).to_equal("https://gateway.example/bitbucket/projects/KEY/repos/widgets")
+
+    it "routes the Data Center build-status API through the gateway with configured headers":
+        val client = BbClient(token: "t", base_url: "https://bb.example/bitbucket", deployment: "datacenter", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: ["X-Classification: restricted", "X-Scope: team"])
+        val direct_url = "https://bb.example/bitbucket/rest/build-status/1.0/commits/deadbeef"
+        match _bb_gateway_argv(client, "GET", direct_url, ""):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(argv):
+                expect(argv.contains("Authorization: Bearer t")).to_equal(true)
+                expect(argv.contains("X-Classification: restricted")).to_equal(true)
+                expect(argv.contains("X-Scope: team")).to_equal(true)
+                expect(argv[argv.len() - 1]).to_equal("https://gateway.example/bitbucket/commits/deadbeef")
+
+    it "leaves unrelated direct URLs unchanged and without gateway headers":
+        val client = BbClient(token: "t", base_url: "https://bb.example", deployment: "datacenter", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: ["X-Classification: restricted"])
+        match _bb_gateway_argv(client, "GET", "https://other.example/resource", ""):
+            Err(message): expect(message).to_equal("")
+            Ok(argv):
+                expect(argv.contains("X-Classification: restricted")).to_equal(false)
+                expect(argv[argv.len() - 1]).to_equal("https://other.example/resource")
+
+    it "retains transport headers and repeated configured gateway headers for every verb":
+        for method in ["GET", "POST", "PUT", "DELETE"]:
+            val argv = bb_curl_argv_with_headers(method, "https://gateway.example/bitbucket/resource", "Bearer token", if method == "POST" or method == "PUT": "{}" else: "", ["X-Scope: one", "X-Scope: two"])
+            expect(argv.contains("Authorization: Bearer token")).to_equal(true)
+            expect(argv.contains("X-Scope: one")).to_equal(true)
+            expect(argv.contains("X-Scope: two")).to_equal(true)
+            expect(argv[argv.len() - 1]).to_equal("https://gateway.example/bitbucket/resource")

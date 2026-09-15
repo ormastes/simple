@@ -5,6 +5,14 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **DevHub multi-target provider gateways** — select named Confluence targets
+  with `--host`/`--profile`; route Confluence, Jira, and Bitbucket through
+  provider-specific gateway prefixes, including normal JiraClient-backed
+  commands and Bitbucket Data Center build-status requests in both transports;
+  preserve ordered nested/repeated gateway headers with fail-closed validation;
+  keep credentials separate in `auth.sdn`; warn on Confluence/Jira
+  URL/deployment mismatches with quiet/silent modes; and redact secrets from
+  verbose and adapter transport-error diagnostics.
 - **Authenticated unchanged native-build admission** — bind the complete
   normalized invocation, requested inputs, compiler/toolchain environment, and
   actual source closure to immutable content-addressed receipts; recursively

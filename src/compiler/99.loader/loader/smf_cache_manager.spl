@@ -53,7 +53,15 @@ fn smfcachemanager_ref_count_dec(self: SmfCacheManager, path: text):
     if new_count <= 0:
         # Last reference gone — evict the mmap.
         _ = self.cache.evict(path)
-        self.ref_counts = self.ref_counts.remove(path)
+        # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+        # natively (rt_dict_remove); assigning it back destroys the map on the
+        # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+        # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+        var _kept_self_ref_counts: Dict<text, i32> = {}
+        for _k in self.ref_counts.keys():
+            if _k != path:
+                _kept_self_ref_counts[_k] = self.ref_counts[_k]
+        self.ref_counts = _kept_self_ref_counts
         self.tracked_count = self.tracked_count - 1
     else:
         self.ref_counts[path] = new_count

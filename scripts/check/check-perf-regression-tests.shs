@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=248
+ROW_FLOOR=317
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -835,6 +835,83 @@ must_contain     "BLOCKSHADOW parity spec is non-vacuous on the counter row" \
     "$BLOCKPARITY" "expect(r.names > 0).to_equal(true)"
 must_contain     "BLOCKSHADOW parity spec keeps the module-global oracle" \
     "$BLOCKPARITY" "assert_semantics(binary, \"sem_global_shadow.spl\", \"sem_global_shadow\", 4, \"30:9\")"
+# --- PUBLISHGLOBALS: the call-entry global publish must not scan the caller frame
+# `publish_and_repoint` runs on EVERY call out of a frame and two of its three
+# steps used to walk the caller's whole overlay asking `is_local` -- two string
+# hashes per entry -- to discard almost all of them. Counted on the base seed at
+# n = 2,000,000: 3 entries scanned per call for a narrow caller, 23 for the same
+# call with 20 extra caller locals, with ONE entry surviving the filter and NONE
+# published across either whole run. That is PERF-7's unattributed
+# caller-frame-width term. These rows pin the `nonlocal_overlay` superset that
+# replaced the walk, its lazy `Option` (an ordinary frame must never construct
+# the set), every consumer that must keep using it instead of `overlay_entries`,
+# the audit oracle and its `SIMPLE_ENV_AUDIT` gate, the counters, and the spec's
+# count-based pin and anti-vacuity assertion. See
+# doc/08_tracking/bug/interpreter_call_entry_publish_scans_the_whole_caller_frame_2026-09-13.md.
+PUBVALUE="$ROOT/src/compiler_rust/compiler/src/value.rs"
+PUBFEXEC="$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs"
+PUBSPEC="$ROOT/test/05_perf/interp/call_entry_publish_scan_spec.spl"
+PUBTESTS="$ROOT/src/compiler_rust/compiler/src/value_tests_nonlocal_overlay.rs"
+must_contain     "PUBLISHGLOBALS the publishable-name superset exists" \
+    "$PUBVALUE" "nonlocal_overlay: Option<FrameSet<String>>,"
+must_contain     "PUBLISHGLOBALS the superset is lazily allocated" \
+    "$PUBVALUE" "self.nonlocal_overlay = Some(set);"
+must_contain     "PUBLISHGLOBALS every overlay-key insertion goes through one recorder" \
+    "$PUBVALUE" "fn note_overlay_key(&mut self, key: &str) {"
+must_contain     "PUBLISHGLOBALS the superset drives the publishable iterator" \
+    "$PUBVALUE" "pub fn nonlocal_overlay_entries(&self) -> impl Iterator<Item = (&String, &Value)> + '_ {"
+must_contain     "PUBLISHGLOBALS the invariant has its own oracle" \
+    "$PUBVALUE" "pub fn nonlocal_overlay_audit_misses(&self) -> Vec<String> {"
+must_contain     "PUBLISHGLOBALS drop_published_globals starts from the superset" \
+    "$PUBVALUE" "            .filter(|name| self.overlay.contains_key(name.as_str()))"
+# No must_not_contain on drop_published_globals' old walk: every line of it
+# that is genuinely gone is a fragment other functions still use, and these
+# matchers are line-oriented `grep -qF` (a multi-line needle is ORed line by
+# line, so it would fire on an unrelated `.keys()`). The positive row above
+# plus the spec's count pin carry that guarantee.
+must_contain     "PUBLISHGLOBALS the superset is dropped wholesale on clear" \
+    "$PUBVALUE" "        self.nonlocal_overlay = None;"
+must_contain     "PUBLISHGLOBALS the call-entry publish uses the superset" \
+    "$PUBFEXEC" "        .nonlocal_overlay_entries()"
+must_not_contain "PUBLISHGLOBALS the call-entry publish no longer walks the overlay" \
+    "$PUBFEXEC" "        .filter(|(name, _)| !env.is_local(name) && !env.is_refreshed_global(name))"
+must_contain     "PUBLISHGLOBALS the audit is gated and fail-closed" \
+    "$PUBFEXEC" "fn env_audit_enabled() -> bool {"
+must_contain     "PUBLISHGLOBALS the audit aborts on a missing name" \
+    "$PUBFEXEC" "CowEnv nonlocal_overlay superset is missing publishable overlay name(s): {missed:?}"
+must_contain     "PUBLISHGLOBALS the scan is counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "PUBLISH_GLOBALS_SCANNED"
+must_contain     "PUBLISHGLOBALS the publishes are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "PUBLISH_GLOBALS_PUBLISHED"
+must_contain     "PUBLISHGLOBALS the spec pins width-independence by COUNT" \
+    "$PUBSPEC" "expect(extra < CALL_N / 100).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec pins the narrow caller too" \
+    "$PUBSPEC" "expect(narrow.scanned < CALL_N / 100).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec is non-vacuous on the counter row" \
+    "$PUBSPEC" "expect(r.calls >= expect_iters).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec forbids an empty superset" \
+    "$PUBSPEC" "expect(r.published >= SEM_N).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec keeps the caller-global oracle" \
+    "$PUBSPEC" 'expect(r.acc).to_equal("200:200")'
+must_contain     "PUBLISHGLOBALS the invariant is unit-tested across mutation orderings" \
+    "$PUBTESTS" "fn nonlocal_overlay_superset_covers_every_mutation_ordering() {"
+must_contain     "PUBLISHGLOBALS the superset is proven equal to the walk it replaced" \
+    "$PUBTESTS" "fn nonlocal_overlay_entries_match_the_overlay_walk_it_replaced() {"
+# --- PERFSELFBIN: the perf-spec binary override must divert off the daemon ---
+# 2026-09-13 (PERF-7, fixed PERF-9). `SIMPLE_PERF_SELF_BIN` selects the
+# interpreter a perf spec measures, but it was absent from the test runner's
+# binary-override list, so a daemon-served run answered from the daemon's
+# FROZEN environment. A lane asked for the BASE seed, was served the CANDIDATE,
+# and recorded 10/10 green for a spec that is RED on base. The variable belongs
+# in exactly the list whose whole purpose is "any request naming one of these
+# takes the direct lane, where the child really does inherit it".
+# See doc/08_tracking/bug/perf_self_bin_override_served_from_frozen_daemon_env_2026-09-13.md.
+must_contain     "PERFSELFBIN the perf binary override is a daemon-bypass selector" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" '"SIMPLE_PERF_SELF_BIN"]'
+must_contain     "PERFSELFBIN the bypass list is still what the override check reads" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" "    for name in _binary_override_vars():"
+must_contain     "PERFSELFBIN a named override still diverts off the daemon" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" "    val binary_override_bypass = _has_binary_override()"
 # --- TOOLHELP: `lint|fmt|fix|test --help` must not load the implementation ---
 # 2026-09-13. A tool command's real entry resolved its whole implementation
 # closure before main() could reach its help branch: 533 `.spl` opens / 9.4 s
@@ -886,6 +963,75 @@ must_contain     "LOCALUSEENUM node_exec publishes imported enums" \
 must_contain     "LOCALUSEENUM spec keeps the module-scope control fixture" \
     "$ROOT/test/01_unit/compiler/loader/function_local_use_enum_scope_spec.spl" \
     "entry_top_level_use.spl"
+
+# --- 2026-09-13 (PERF-7): the owned-receiver method call resolved its method
+# TWICE. `obj.m(a, b)` on a class instance is the most frequent interpreted
+# shape in src/lib/common (21,601 call sites). Every one of the six owned-receiver
+# fast paths asked `object_method_exists` whether the class had the method —
+# probing the thread-local method-index cache — and then re-resolved the SAME
+# name inside `find_and_exec_method_with_self_owned_values`, because the bool
+# answer could not carry the resolution across the `env.remove` that takes the
+# receiver out of its slot. The class name was copied into an owned `String` for
+# the same reason. `resolve_object_method` returns the resolution itself (an
+# `Arc<ClassDef>` + index, or an `Arc<FunctionDef>`), which borrows nothing, so
+# one probe and no copy suffice. These rows pin the mechanism, the absence of
+# both retired helpers, the counters that make the ratio observable, and the
+# spec's count budget.
+MECALLEXEC="$ROOT/src/compiler_rust/compiler/src/interpreter_method/special/execution.rs"
+MECALLPAT="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+MECALLCALLS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/calls.rs"
+MECALLSPEC="$ROOT/test/05_perf/interp/owned_method_call_parity_spec.spl"
+must_contain     "MECALL single-probe resolver exists" \
+    "$MECALLEXEC" "pub fn resolve_object_method("
+must_contain     "MECALL resolution borrows nothing (survives the receiver move)" \
+    "$MECALLEXEC" "Class(Arc<ClassDef>, usize),"
+must_contain     "MECALL executor takes the resolution instead of a name" \
+    "$MECALLEXEC" "pub fn exec_resolved_method_with_self_owned_values("
+must_not_contain "MECALL the bool pre-check is gone" \
+    "$MECALLEXEC" "pub fn object_method_exists("
+must_not_contain "MECALL the re-resolving executor is gone" \
+    "$MECALLEXEC" "pub fn find_and_exec_method_with_self_owned_values("
+must_contain     "MECALL statement path resolves under the receiver borrow" \
+    "$MECALLPAT" "Some(resolve_object_method(classes, impl_methods, class, method))"
+must_not_contain "MECALL statement path no longer copies the class name to cross the borrow" \
+    "$MECALLPAT" "let class_name = class.clone();"
+must_contain     "MECALL expression path resolves once too" \
+    "$MECALLCALLS" "Some(Value::Object { class, .. }) => resolve_object_method(classes, impl_methods, class, method),"
+must_contain     "MECALL dispatches are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_CALLS"
+must_contain     "MECALL method-table probes are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_METHOD_LOOKUPS"
+must_contain     "MECALL per-call String allocations are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_STRING_ALLOCS"
+must_contain     "MECALL every method-table probe is counted, at the probe itself" \
+    "$MECALLEXEC" "crate::perf_counters::bump(&crate::perf_counters::MECALL_METHOD_LOOKUPS, 1);"
+must_contain     "MECALL parity spec pins one probe per dispatch" \
+    "$MECALLSPEC" "expect(r.lookups <= r.calls).to_equal(true)"
+must_contain     "MECALL parity spec pins the allocation budget" \
+    "$MECALLSPEC" "expect(r.strallocs <= r.calls * 3).to_equal(true)"
+must_contain     "MECALL parity spec is non-vacuous on the dispatch counter" \
+    "$MECALLSPEC" "expect(r.calls > 0).to_equal(true)"
+# PERF-8 (2026-09-13): load_module_with_imports_internal's visited-based
+# de-dup only fired when flatten_imports was true, so a plain member import
+# of a package re-read that package's __init__.spl from disk once per
+# sibling submodule that imported it. Measured on `simple lint <2-line
+# file>`: fix/rules/impl_/__init__.spl opened 28 times.
+LOADERRS="$ROOT/src/compiler_rust/compiler/src/pipeline/module_loader.rs"
+LOADERCACHESPEC="$ROOT/test/05_perf/startup/lint_repeated_package_init_open_budget_spec.spl"
+must_contain     "PIPELINEMODLOADER source-text memo exists" \
+    "$LOADERRS" "static MODULE_SOURCE_TEXT_CACHE: RefCell<HashMap<PathBuf, Rc<str>>>"
+must_contain     "PIPELINEMODLOADER call site reads through the cache, not fs::read_to_string directly" \
+    "$LOADERRS" "let mut source = read_module_source_text_cached(&path)?;"
+must_contain     "PIPELINEMODLOADER cache is dropped at the clear_module_cache boundary" \
+    "$LOADERRS" "pub fn clear_module_source_text_cache()"
+must_contain     "PIPELINEMODLOADER wired into clear_module_cache()" \
+    "$ROOT/src/compiler_rust/compiler/src/module_cache.rs" "crate::pipeline::module_loader::clear_module_source_text_cache();"
+must_contain     "PIPELINEMODLOADER perf pin exists for the impl_/__init__.spl open budget" \
+    "$LOADERCACHESPEC" "IMPL_INIT_OPEN_CEILING"
+must_contain     "PIPELINEMODLOADER unit test proves the cache mechanism (not just presence)" \
+    "$LOADERRS" "fn module_source_text_is_read_from_disk_once_per_process"
+must_contain     "PIPELINEMODLOADER unit test proves flatten_imports=false revisits still return real content" \
+    "$LOADERRS" "fn unflattened_repeat_import_of_the_same_package_init_reads_disk_once"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

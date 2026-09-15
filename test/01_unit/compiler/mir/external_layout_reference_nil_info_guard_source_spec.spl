@@ -1,0 +1,32 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "record_external_layout_reference nil-info guard":
+    # @manual scenario evidence
+    it "guards the unwrapped symbol info before reading any field":
+        # @req REQ-SSPEC-COMPILER
+        step("guards the unwrapped symbol info before reading any field")
+        # A Stage-2 native binary SEGVs (EXC_BAD_ACCESS code=1 address=0x48) in
+        # this method for EVERY program that declares a class with a method,
+        # because `Option<SymbolInfo>`'s nil case does not survive the staged
+        # native ABI: `symbol_info.?` reads PRESENT and `unwrap()` yields nil.
+        # The sibling `mir_struct_symbol_name` in the same file already applies
+        # this guard; pin that this call site keeps it too.
+        val module_source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+
+        expect(module_source).to_contain("me record_external_layout_reference(symbol: SymbolId):")
+        expect(module_source).to_contain("val info = symbol_info.unwrap()")
+        expect(module_source).to_contain("if info == nil:")
+        expect(module_source).to_contain("does not survive the staged native")
+        # The guard must precede the first field read of `info`.
+        val guard_at = module_source.index_of("if info == nil:")
+        val first_field_read_at = module_source.index_of("mir_layout_canonical_module_name(info.defining_module")
+        expect(guard_at > 0).to_equal(true)  # oracle: true — the guard exists
+        expect(first_field_read_at > guard_at).to_equal(true)  # oracle: true — guard precedes the field read
+        # The sibling site that already documented the hazard must keep its guard.
+        expect(module_source).to_contain("if info != nil and info.name != \"\": return info.name")

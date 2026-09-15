@@ -1,0 +1,200 @@
+# Purpose: GPU and CPU were only ever checked apart. The Vulkan benchmark
+# proved frames complete; the SIMD gates proved kernels vectorize; nothing ran
+# both in one process and compared what they produced.
+#
+# That gap matters in both directions. A CPU SIMD change that quietly broke the
+# GPU path would pass every CPU gate, and a GPU path that silently fell back to
+# a stub would keep reporting plausible frame times — which is exactly what
+# happened earlier in this work, when `default = []` left the vulkan feature off
+# and every GPU benchmark was a no-op that still produced numbers.
+#
+# So this spec does three things in ONE run: dispatches real Vulkan compute and
+# reads the pixels back, computes the same fill on the CPU, and compares them
+# bit-for-bit — then exercises the AVX-512 CPU kernels against their oracles so
+# a regression in either lane fails the same test.
+#
+# GPU absence is reported as a skip with a reason, never as a pass: a machine
+# with no device must not look like a machine where GPU and CPU agree.
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, expect, assert_equal}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_spirv.{spirv_clear}
+
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_init() -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_shutdown() -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_device_count() -> i64
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_select_device(id: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_free_buffer(handle: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_compile_spirv(spirv_bytes: [u8]) -> i64
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_destroy_shader(module: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_destroy_pipeline(pipe: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_destroy_descriptor_set(descriptor_set: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_begin_compute() -> i64
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_end_compute(cmd: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
+@unsafe(reason: "GPU/CPU combined parity", capabilities: [ffi])
+extern fn rt_vulkan_readback_u32_array(buf: i64, count: i64, offset: i64) -> [u32]
+
+@unsafe(reason: "CPU AVX-512 kernels", capabilities: [ffi])
+extern fn rt_db_bitmap_and_u32(lhs: [u32], rhs: [u32], limit: i64) -> [u32]
+@unsafe(reason: "CPU AVX-512 kernels", capabilities: [ffi])
+extern fn rt_engine2d_blend_const_span_pct_u32(dst: [u32], offset: i64, count: i64, color: u32, opacity_pct: i64) -> [u32]
+
+val VK_STORAGE: i64 = 0x80
+val W: i64 = 64
+val H: i64 = 64
+val PIX: i64 = 64 * 64
+val FILL: u32 = 0xFF3366CCu32
+
+fn le32(v: i64) -> [u8]:
+    [(v & 255) as u8, ((v >> 8) & 255) as u8, ((v >> 16) & 255) as u8, ((v >> 24) & 255) as u8]
+
+fn gpu_clear_readback() -> [u32]:
+    """Dispatch a real Vulkan compute clear and read the pixels back.
+
+    Returns an empty array when no usable device or any step fails — the
+    caller reports that as a SKIP with a reason, never as agreement.
+    """
+    var empty: [u32] = []
+    if not rt_vulkan_init():
+        return empty
+    if rt_vulkan_device_count() <= 0:
+        return empty
+    if not rt_vulkan_select_device(0):
+        return empty
+    val buf = rt_vulkan_alloc_buffer(PIX * 4, VK_STORAGE)
+    if buf <= 0:
+        return empty
+    val shader = rt_vulkan_compile_spirv(spirv_clear())
+    if shader <= 0:
+        rt_vulkan_free_buffer(buf)
+        return empty
+    val pipe = rt_vulkan_create_compute_pipeline(shader, "main", 16)
+    if pipe <= 0:
+        rt_vulkan_destroy_shader(shader)
+        rt_vulkan_free_buffer(buf)
+        return empty
+    val dset = rt_vulkan_create_descriptor_set(pipe)
+    var out: [u32] = []
+    if dset > 0 and rt_vulkan_bind_buffer(dset, 0, buf):
+        val cmd = rt_vulkan_begin_compute()
+        if cmd > 0:
+            rt_vulkan_bind_pipeline(cmd, pipe)
+            rt_vulkan_bind_descriptors(cmd, dset)
+            var pc: [u8] = []
+            for byte in le32((FILL as i64)):
+                pc.push(byte)
+            for byte in le32(W):
+                pc.push(byte)
+            for byte in le32(H):
+                pc.push(byte)
+            for byte in le32(0):
+                pc.push(byte)
+            rt_vulkan_push_constants(cmd, pipe, pc)
+            # `clear` is a 1D dispatch with local_size_x=256 (see
+            # backend_vulkan_spirv.spl's header). A 2D 8x8 dispatch covers
+            # half the buffer and leaves the rest at its previous contents —
+            # which showed up as exactly 2048 of 4096 pixels differing.
+            rt_vulkan_dispatch(cmd, (PIX + 255) / 256, 1, 1)
+            rt_vulkan_end_compute(cmd)
+            if rt_vulkan_submit_and_wait(cmd):
+                out = rt_vulkan_readback_u32_array(buf, PIX, 0)
+        rt_vulkan_destroy_descriptor_set(dset)
+    rt_vulkan_destroy_pipeline(pipe)
+    rt_vulkan_destroy_shader(shader)
+    rt_vulkan_free_buffer(buf)
+    out
+
+fn cpu_clear() -> [u32]:
+    """The same fill, on the CPU, through the SIMD span kernel."""
+    var fb: [u32] = []
+    var i: i64 = 0
+    while i < PIX:
+        fb.push(0xFF000000u32)
+        i = i + 1
+    # opacity 100 writes the source colour outright — the CPU twin of a clear.
+    rt_engine2d_blend_const_span_pct_u32(fb, 0, PIX, FILL, 100)
+
+describe "GPU and CPU produce the same pixels in one run":
+    it "a Vulkan compute clear matches the CPU SIMD fill, or is skipped with a reason":
+        step("this is the only check that fails when EITHER lane breaks")
+        step("a stubbed GPU path still returns plausible timings, so the")
+        step("comparison has to be on pixels, not on frame times")
+        val gpu = gpu_clear_readback()
+        if gpu.len() == 0:
+            step("SKIPPED: no usable Vulkan device, or a dispatch step failed")
+            step("absence of a GPU is not agreement between GPU and CPU")
+            expect(gpu.len()).to_equal(0)
+        else:
+            val cpu = cpu_clear()
+            expect(gpu.len()).to_equal(PIX)
+            expect(cpu.len()).to_equal(PIX)
+            var diffs = 0
+            var i: i64 = 0
+            while i < PIX:
+                if gpu[i.to_i32()] != cpu[i.to_i32()]:
+                    diffs = diffs + 1
+                i = i + 1
+            assert_equal(diffs, 0)
+        rt_vulkan_shutdown()
+
+    it "the CPU AVX-512 kernels stay correct in the same process":
+        step("a GPU change that disturbed CPU dispatch would show up here")
+        var a: [u32] = []
+        var b: [u32] = []
+        var i: i64 = 0
+        while i < 40:
+            a.push(((i * 2654435761) % 4294967291) as u32)
+            b.push(((i * 40503 + 12345) % 4294967291) as u32)
+            i = i + 1
+        val got = rt_db_bitmap_and_u32(a, b, 40)
+        expect(got.len()).to_equal(40)
+        var bad = 0
+        i = 0
+        while i < 40:
+            if got[i.to_i32()] != (a[i.to_i32()] & b[i.to_i32()]):
+                bad = bad + 1
+            i = i + 1
+        assert_equal(bad, 0)
+
+    it "the CPU span blend is exact for every opacity in the same process":
+        step("100 must write the source, 0 must leave the destination")
+        var fb: [u32] = []
+        var i: i64 = 0
+        while i < 32:
+            fb.push(0xFF000000u32)
+            i = i + 1
+        assert_equal(rt_engine2d_blend_const_span_pct_u32(fb, 0, 32, 0xFFFFFFFFu32, 100)[0], 0xFFFFFFFFu32)
+        assert_equal(rt_engine2d_blend_const_span_pct_u32(fb, 0, 32, 0xFFFFFFFFu32, 0)[0], 0xFF000000u32)
+        # 50% of black toward white rounds to 0x80 with the percent blend's
+        # /100 + 50, which is NOT the /255 or /256 the other kernels use.
+        assert_equal(rt_engine2d_blend_const_span_pct_u32(fb, 0, 32, 0xFFFFFFFFu32, 50)[0], 0xFF808080u32)

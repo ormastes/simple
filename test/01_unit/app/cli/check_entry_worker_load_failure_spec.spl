@@ -1,0 +1,43 @@
+# @cover src/app/cli/check_entry.spl 5%
+# @manual_section: check worker load-failure detection
+"""
+## Purpose and audience
+As a Simple developer running `simple check`, a stale deployed release binary
+must not turn into a parse error about the checker's own worker entry.
+`check_entry` retries on `bin/simple` when — and only when — the worker itself
+failed to load; a real finding about one of my files must never trigger that.
+## Operator workflow
+bin/simple test test/01_unit/app/cli/check_entry_worker_load_failure_spec.spl
+## Compatibility and limitations
+Pure predicate test: no process is spawned.
+"""
+# doc-path: doc/08_tracking/bug/simple_check_worker_resolves_stale_release_binary_2026-09-06.md
+
+use std.spec.{step}
+use std.spec.*
+use app.cli.check_entry.{worker_entry_load_failed}
+
+describe "check worker load-failure detection":
+
+    it "recognises the worker entry failing to compile":
+        # @req REQ-CHECK-WORKER-001
+        step("Feed the exact stderr a stale release binary produced on this tree")
+        # evidence(pinned oracle): verbatim stderr from
+        # bin/release/aarch64-apple-darwin/simple (2026-07-25) on 2026-09-06.
+        val stale = "error: compile failed: parse: in \"/Users/ormastes/simple/src/app/check/main.spl\": Unexpected token: expected expression, found Colon"
+        expect(worker_entry_load_failed(stale)).to_equal(true)
+
+    it "ignores a real finding about one of the checked files":
+        # @req REQ-CHECK-WORKER-002
+        step("Feed a diagnostic that names a target file, not the worker entry")
+        # evidence(pinned oracle): a target finding must never cause a retry --
+        # that would double every check run and could mask a real error.
+        val finding = "src/app/editor/commands.spl: parse: Unexpected token: expected expression, found Colon"
+        expect(worker_entry_load_failed(finding)).to_equal(false)
+
+    it "ignores stderr that merely names the worker entry without a compile failure":
+        # @req REQ-CHECK-WORKER-003
+        step("Both halves of the signature are required, not either one")
+        expect(worker_entry_load_failed("running src/app/check/main.spl")).to_equal(false)
+        expect(worker_entry_load_failed("error: compile failed: parse: in \"src/lib/x.spl\"")).to_equal(false)
+        expect(worker_entry_load_failed("")).to_equal(false)

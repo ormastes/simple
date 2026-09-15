@@ -11,7 +11,7 @@ detection gaps have been closed, and what's still open.
 ## Pipeline Links
 
 - [verify skill](../../../../.claude/skills/verify/SKILL.md)
-- [impl skill](../../../../.claude/skills/impl/IMPL.md)
+- [impl skill](../../../../.claude/skills/impl.md)
 
 ## Feature Links
 

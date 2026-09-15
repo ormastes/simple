@@ -129,17 +129,41 @@ mkdir "$scheduler_lock" 2>/dev/null || {
 }
 engine_pid=
 qualifier_pid=
+# VERDICT-on-exit contract: every run ends with exactly one `VERDICT — ` line
+# so a killed/died scheduler run is diagnosable from its log alone. See
+# doc/07_guide/tooling/bootstrap_options.md.
+bootstrap_strategy_verdict_written=0
+bootstrap_strategy_stage=init
+bootstrap_strategy_log=
+bootstrap_strategy_verdict() {
+    bootstrap_strategy_verdict_written=1
+    line="VERDICT — $1"
+    echo "$line" >&2
+    if [ -n "$bootstrap_strategy_log" ]; then
+        echo "$line" >>"$bootstrap_strategy_log" 2>/dev/null || true
+    fi
+}
 cleanup() {
+    status=$?
+    sig=${1:-none}
     [ -z "$qualifier_pid" ] || kill "$qualifier_pid" 2>/dev/null || true
     [ -z "$engine_pid" ] || kill "$engine_pid" 2>/dev/null || true
+    if [ "$bootstrap_strategy_verdict_written" -eq 0 ]; then
+        bootstrap_strategy_verdict "ABORTED: stage=${bootstrap_strategy_stage} exit=${status} signal=${sig} reason=${bootstrap_strategy_stage}"
+    fi
     rm -rf "$scheduler_lock"
 }
-trap cleanup EXIT HUP INT TERM
+trap 'cleanup none' EXIT
+trap 'cleanup HUP' HUP
+trap 'cleanup INT' INT
+trap 'cleanup TERM' TERM
 
 epoch=$(date -u +%Y%m%dT%H%M%SZ)
 generation="bootstrap-$epoch-$$"
 generation_dir="$output/scheduler/$generation"
 mkdir -p "$generation_dir/tasks" "$generation_dir/invalidations"
+bootstrap_strategy_log="$generation_dir/scheduler.log"
+bootstrap_strategy_stage=scheduling
 
 graph_sha=$(bootstrap_scheduler_hash_file "$graph_contract") || exit 2
 policy_sha=absent
@@ -884,3 +908,4 @@ if [ "$promotion_required" -eq 1 ]; then
 fi
 echo "bootstrap scheduler: PASS generation=$generation overlap=$overlap_observed schedule=$schedule_mode"
 echo "bootstrap scheduler receipt: $generation_dir/lineage-admission.env"
+bootstrap_strategy_verdict "ADMITTED: stage=complete exit=0 signal=none reason=generation-qualified"

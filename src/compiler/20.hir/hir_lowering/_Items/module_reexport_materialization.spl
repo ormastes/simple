@@ -483,10 +483,63 @@ impl HirLowering:
         true
 
     me register_materialized_payload_named_dependency(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, skipped: {text: bool}, import_span: Span):
-        """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off)."""
+        """Profile wrapper (SIMPLE_HIR_PHASE_PROFILE=1, default off), and the
+        RE-ENTRANCY BREAKER for the enum-payload closure cycle.
+
+        This method sits in a four-node cycle:
+          register_materialized_payload_named_dependency
+            -> register_imported_symbol                      (_inner :537)
+            -> register_imported_symbol_inner
+            -> register_materialized_enum_payload_dependencies
+            -> register_materialized_payload_named_dependency
+
+        That cycle is supposed to be broken by the mark-on-ENTRY Dict memo in
+        `register_materialized_enum_payload_dependencies`
+        (`materialized_payload_origins`). Measured 2026-09-14 on the Stage 3
+        recompile of `compiler.driver.driver`, it is NOT breaking it: the main
+        stack carried 13,415 nested levels of exactly these four frames (624
+        bytes/level, uniform, read from `sp` at frames 12/16/20/24) before
+        faulting on the guard page, against a hard ceiling of 2,546 -- the
+        total enums (2,280) plus type aliases (266) DECLARED in the tree, which
+        is the most distinct identities that memo can ever see because
+        `hir_payload_terminal_identity` is a pure function of
+        (module_name, item_name, item_kind). 13,415 > 2,546 is arithmetic, not
+        inference: keys that were set are reading back absent. Same
+        `rt_dict_contains` under-reporting that silently disabled a memo in this
+        file once before, which is why the sibling breaker
+        (`imported_type_methods_in_progress`) is a plain `[text]` stack too.
+
+        Keyed on `(imported_mod_name, dependency)` -- this method's own input
+        tuple -- because `origin`, and therefore `payload_local_name` and every
+        effect below, is a pure function of it. Declining a RE-ENTRANT call with
+        the same tuple loses nothing: the in-flight outer call completes the
+        identical work on the way back out.
+
+        Deliberately NOT fixed by moving the `register_imported_symbol` call
+        past `if expanded: return` in `_inner` (:530-538). That ordering is load
+        bearing -- "aliases in a cycle still need their local symbol even when
+        the physical origin was seen" -- so the cycle is broken here instead.
+
+        Field touched ONLY through the accessors declared next to the class in
+        hir_lowering/context_helpers.spl; a bare `self.<field>` read from this
+        `_Items/` file aborts native-build's semantic pass with "class
+        `HirLowering` has no field named ...".
+        doc/08_tracking/bug/stage3_hir_enum_payload_closure_stack_overflow_driver_2026-09-14.md
+        """
+        # Built by CONCATENATION, not interpolation, exactly like
+        # `registered_key` in register_imported_symbol. An interpolated literal
+        # is unquotable in a source-text spec (the spec runner interpolates it
+        # too, and the assertion dies with "variable `imported_mod_name` not
+        # found" instead of describing the source), so the guard that pins this
+        # breaker could not be written against it.
+        val reentry_key = imported_mod_name + "::" + dependency
+        if self.materialized_payload_in_progress_has(reentry_key):
+            return
+        self.materialized_payload_in_progress_push(reentry_key)
         val started = hir_phase_profile_now()
         self.register_materialized_payload_named_dependency_inner(imported_mod, imported_mod_name, dependency, skipped, import_span)
         hir_phase_profile_add(HIR_PROF_RIS_PAYLOAD, started)
+        self.materialized_payload_in_progress_pop(reentry_key)
 
     me register_materialized_payload_named_dependency_inner(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, skipped: {text: bool}, import_span: Span):
         if dependency == "" or skipped.contains_key(dependency): return

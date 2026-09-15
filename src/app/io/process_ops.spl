@@ -607,6 +607,41 @@ fn process_exists(pid: i64) -> bool:
         return false
     _process_exists_raw(pid)
 
+fn process_pid_exists(pid: i64) -> bool:
+    # Uniquely-named twin of process_exists, same semantics (kill(pid,0)).
+    #
+    # It exists because `process_exists` is NOT a unique name in this tree:
+    # src/lib/nogc_sync_mut/test_runner/test_db_validation.spl (and its
+    # src/app/test_runner_new twin) define `fn process_exists(pid: i64) -> bool`
+    # with an IDENTICAL signature that probes `/proc/<pid>` — Linux-only, and
+    # therefore always false on macOS. Any program that co-compiles both (every
+    # `*_spec.spl`, which pulls in std.spec -> test_runner) hits the
+    # `compiler_cross_module_private_symbol_collision` fallback: identical
+    # signatures give the resolver nothing to discriminate on, so call sites
+    # silently dispatch to the last definition. Measured 2026-09-05, macOS
+    # arm64: a live child reported `process_exists == false` inside a spec and
+    # `true` outside one.
+    #
+    # Callers that need the OS truth about an arbitrary pid — notably a PIPED
+    # child, which `process_is_running` cannot see at all — must use this name.
+    # Record: doc/08_tracking/bug/process_exists_proc_only_and_piped_pids_invisible_2026-09-05.md
+    #
+    # The extern behind it is worse than merely duplicated: its two backings
+    # DISAGREE. The C runtime (runtime_core_host_services.c:112) uses
+    # kill(pid,0); the Rust interpreter extern (interpreter_extern/file_io.rs)
+    # stats /proc/<pid>, which macOS does not have. So the same call on the same
+    # live pid answers true when the module JIT-compiles and false when it drops
+    # to the interpreter -- and a teardown assertion built on it is vacuously
+    # green. The `ps -p` fallback below is the OS itself answering on a host with
+    # no /proc; it runs only when the /proc lane says "absent", so a Linux host
+    # keeps the cheap path.
+    if pid <= 0:
+        return false
+    if _process_exists_raw(pid):
+        return true
+    val probe = process_run("/bin/ps", ["-p", pid.to_text()])
+    probe.2 == 0
+
 fn process_kill(pid: i64) -> bool:
     # Terminate a running process.
     if pid <= 1:

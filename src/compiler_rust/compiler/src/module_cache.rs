@@ -463,6 +463,7 @@ pub fn clear_module_cache() {
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
     clear_probe_source_cache();
     clear_parsed_source_cache();
+    crate::pipeline::module_loader::clear_module_source_text_cache();
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");
@@ -531,6 +532,7 @@ pub fn clear_module_cache_selective() {
     // test and IDE callers may edit, delete, or recreate files between runs.
     clear_probe_source_cache();
     clear_parsed_source_cache();
+    crate::pipeline::module_loader::clear_module_source_text_cache();
     // Reset module counter but don't clear PATH_KEY_CACHE (path normalization is stable)
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     // Keep path resolution cache (stable across tests)

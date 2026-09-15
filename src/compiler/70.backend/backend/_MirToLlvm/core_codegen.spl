@@ -509,7 +509,7 @@ impl MirTextCodegen for MirToLlvm:
                 # extern (including user-declared rt_* names missing from the
                 # static block) gets the normal auto-declare.
                 if not self.defined_func_names.has(unknown_name):
-                    self.builder.emit("declare i64 @{unknown_name}(...)")
+                    self.builder.emit(self.external_declare_line(unknown_name))
 
         val bootstrap_string_globals = if allow_bootstrap_shortcuts and self.bootstrap_mode_enabled():
             llvm_bootstrap_string_globals_text()
@@ -1445,6 +1445,39 @@ impl MirTextCodegen for MirToLlvm:
             return bootstrap_mir_function_return_unsigned_at(bootstrap_index)
         false
 
+    me external_declare_line(name: text) -> text:
+        """`declare <ret> @name(<params>)` for a callee this module does not
+        define. The return type is the one this module ALREADY remembered for
+        the same name and that its own `call` lines therefore use, so the two
+        cannot disagree; before this, every auto-declare said `i64 (...)` while
+        the call said `call ptr @...`, which is the second half of site 13.
+        Falls back to the old varargs shape only when the callee's parameter
+        types were never recorded -- a guessed prototype is worse than none."""
+        var ret_ty = self.lookup_function_return_type(name)
+        if ret_ty == "" or ret_ty == "nil":
+            ret_ty = "i64"
+        if ret_ty != "void":
+            ret_ty = self.valid_llvm_type(ret_ty)
+        val recorded = self.function_param_types.get(name)
+        if recorded.?:
+            val param_tys = recorded.unwrap()
+            if param_tys.len() > 0:
+                return "declare {ret_ty} @{name}({param_tys.join(\", \")})"
+        "declare {ret_ty} @{name}(...)"
+
+    me remember_external_call_signature(name: text, sig: MirSignature):
+        """Record a CALL site's view of a callee this module does not define, so
+        `external_declare_line` can emit a real prototype. Never overwrites a
+        signature already recorded (a local definition's own is authoritative),
+        and ignores an empty parameter list: `symbol_to_operand` degrades to
+        `params: []` when the callee's symbol carries no function type, and
+        recording that would turn every real argument into an arity mismatch."""
+        if name == "" or self.function_param_types.has(name):
+            return
+        if sig.params.len() == 0:
+            return
+        self.remember_function_param_types_from_signature(name, sig)
+
     me remember_function_param_types(name: text, param_tys: [text]):
         if name == "":
             return
@@ -2314,6 +2347,19 @@ impl MirTextCodegen for MirToLlvm:
         val declared_param_count = self.lookup_function_param_count(call_func_name)
         if declared_param_count >= 0 and declared_param_count != args.len():
             call_sig = "({arg_tys.join(\", \")}) "
+        elif declared_param_count >= 0:
+            # Same reconciliation for a TYPE mismatch, not just an arity one:
+            # now that an external callee gets a real (non-varargs) `declare`,
+            # a call whose argument types differ from it would be rejected by
+            # llc. The explicit function-type form keeps such a call valid.
+            var sig_i = 0
+            while sig_i < arg_tys.len():
+                val declared_ty = self.lookup_function_param_type(call_func_name, sig_i)
+                if declared_ty != "" and declared_ty != arg_tys[sig_i]:
+                    call_sig = "({arg_tys.join(\", \")}) "
+                    sig_i = arg_tys.len()
+                else:
+                    sig_i = sig_i + 1
         if has_dest:
                 val name = dest_name
                 var ret_ty = self.valid_llvm_type(self.get_local_type(dest_id))
@@ -2402,6 +2448,7 @@ impl MirTextCodegen for MirToLlvm:
                                 val resolved = self.llvm_function_symbol_name(name)
                                 val return_types: [MirType] = [signature.return_type]
                                 self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
+                                self.remember_external_call_signature(resolved, signature)
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
                             case _: self.translate_const_operand_at(operands, index)
@@ -2477,6 +2524,7 @@ impl MirTextCodegen for MirToLlvm:
                                 val resolved = self.llvm_function_symbol_name(name)
                                 if signature.return_type != nil:
                                     self.remember_function_return_type(resolved, self.llvm_type_text(signature.return_type))
+                                self.remember_external_call_signature(resolved, signature)
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
                             case _: self.translate_const_value(const_val)

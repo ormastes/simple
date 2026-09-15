@@ -142,7 +142,7 @@ Run `wiki gh`. If Jira configured, also run `wiki jira`.
    - `bb`: read and follow `tools/claude-plugin/repo-and-pull-req/skills/bb_pull_req_review/SKILL.md` (Agent C).
    - `jira`: read and follow `tools/claude-plugin/repo-and-pull-req/skills/jira_pull_req_review/SKILL.md` (L1 only — already validated above).
 3. If Jira is also linked AND target ≠ jira: additionally follow
-   `skills/jira/jira_pull_req_review.md` for ticket comment exchange
+   `skills/jira_pull_req_review/SKILL.md` for ticket comment exchange
    (does not affect L2/L3 merge gate).
 
 **`review loop <pr#>`:**

@@ -325,3 +325,659 @@ rather than the `<ul>`; the 247/79/492 mismatch counts are one structural
 divergence cascading, not hundreds of defects. Rank pages with the PIXEL
 differ and trust the geometry report only above the first desync.
 `doc/08_tracking/bug/web_geometry_differ_li_reparented_desyncs_nth_paths_2026-09-13.md`
+
+## Round 7 (2026-09-13) — the TOP half landed; the shape that made it possible
+
+The symmetric top-margin case above is now CLOSED, and it did **not** need the
+pre-pass the round-6 note predicted. `LayoutResult` gained `leading_margin_t`
+(the exact mirror of `trailing_margin_b`) and the block child loop does a
+**two-phase correction** with the `offset_layout_subtree` that was already in
+the file: place the child from its DECLARED margin-top, then re-offset the whole
+child subtree by the difference against its EFFECTIVE one,
+`collapse(declared, child.leading_margin_t)`. The effective value is only
+knowable after the child is laid out, which is exactly the objection — the
+answer is to move the box afterwards, not to measure it beforehand.
+
+Three things that cost a probe each, all now pinned as AC in
+`test/01_unit/browser_engine/first_child_top_margin_collapse_spec.spl`:
+- **`<li>` is the case the catalog actually exercises** (the feature-inventory
+  pages carry ~100 each) and it has a `::marker` as its FIRST node. Check that
+  the marker does not consume `child_count == 0` before the escape test, or the
+  fix silently does nothing on every list. AC-9.
+- **Out-of-flow first children** must not donate a margin to the block. AC-10.
+- **Nesting must yield ONE margin, not one per level** — the recursion is in
+  returning the escaped margin upward, not in adding it at each level. AC-8.
+
+The exclusion set was deliberately copied from
+`block_bottom_margin_collapses_through` INCLUDING the height clamps, even though
+CSS does let a top margin escape a fixed-height block. Widening it would move
+boxes the trailing half still holds; the remaining case is recorded, not guessed.
+
+**`::marker` bites the key scheme too, in a second place.** The 2026-09-12 fix
+corrected the geometry differ's `_layout_tag`; the renderer's own
+`_simple_web_layout_element` still counted markers, so every hit-test and
+animation target key inside an `<li>` was off by one ordinal. All three copies
+of the scheme (Chrome walker, differ, renderer) now exclude `::`-prefixed tags.
+If you touch one, grep for the other two.
+
+**6th measurement gotcha (macOS):** the PIXEL differ is impractically slow here
+— one `html` page did not finish rendering the Simple side in 20 minutes, and
+Chrome itself hits the 90 s screenshot alarm on every page. Budget the geometry
+differ instead, and never A/B across two trees: check the two
+`browser_engine/*.spl` files out at `HEAD~1` in the SAME worktree for the before
+side (`.claude/rules/testing.md` § Measurement traps).
+
+**Selector matching is pre-parsed now (round 9, 2026-09-13).** Every selector
+part is parsed ONCE into a `ParsedSel` record on `RuleBuckets.parsed_groups`,
+where `build_rule_buckets` runs; the per-node path
+(`simple_match_parsed` / `_pseudo_ctx_matches_parsed` /
+`selector_group_matches_node_parsed`) never touches selector TEXT. The text
+functions (`simple_match`, `_pseudo_ctx_matches`,
+`selector_group_matches_node_parts`) are retained and are exercised ONLY by the
+equivalence oracle — **if you change selector semantics you must change BOTH
+sides**, or
+`test/01_unit/browser_engine/web_selector_parsed_equivalence_spec.spl` fails.
+That spec is the contract: 177,949 comparisons over the 8 catalog pages plus an
+adversarial fixture, both paths, per node.
+
+**The trap that spec exists for:** the catalog stylesheets contain only **25
+distinct selectors**, so catalog-only coverage proves almost nothing about
+selector semantics. The adversarial fixture caught a real behaviour change on
+its first run — `:disabled` never matches in the text path on EITHER branch
+(both the `_is_interaction_state_pseudo` arm and the catch-all arm return
+false), so "fixing" it to match a disabled element is a semantic change, not a
+refactor. Add new selector shapes to the adversarial fixture, not to a catalog
+page. Measurements: `doc/10_metrics/ui/web_perf_round9_2026-09-13.md`.
+
+## Font faces: the generic families are resolved by the HOST (round 11)
+
+The catalog declares nothing but `font: 16px/1.5 sans-serif` plus the UA
+monospace for `<code>`, and `lang="en"`. Chrome therefore resolved those
+generics with the host's own defaults — on macOS **Helvetica** and **Menlo** —
+so any advance-width comparison against the bundled Noto faces is comparing two
+different typefaces. Ground truth at 16 px: Menlo `M` = 1233/2048 em =
+**9.633 px** (exactly Chrome's measured 9.63), Helvetica regular-to-bold
+`abcdefg` = **+4.4 px** (exactly Chrome's +4).
+
+Three traps, all of which cost a round each:
+
+1. **`FontRasterizer.load_selected` is a PATH ALLOWLIST, not a format check**
+   (`spl_fonts.spl`). A path with no entry in the pinned registry is refused
+   before the file is opened. Round 9 read that rejection as "macOS TTFs are
+   malformed"; nothing about the file was ever inspected. The unmanaged lane
+   beside it (`load_unmanaged`) is the way in — and it must REFUSE a
+   registry-owned path, or it becomes a bypass for asset-root enforcement.
+2. **`ttcf` is a real format gap.** `parse_offset_table` admits `1.0`, `OTTO`,
+   `true` and `typ1` — never `ttcf` — and Menlo/Helvetica ship only as
+   collections. A collection face's table offsets are absolute from the FILE
+   start, so slicing produces garbage; `sfnt_ttc_extract_face` repacks a face
+   into a standalone blob instead, which is why glyf/cmap/hmtx and the atlas
+   composite needed no change at all.
+3. **The language/category coverage matrix silently replaces the family.**
+   Under any `lang` other than `und` it substitutes its witness family and the
+   bundled lookup then answers with that asset ALONE — which discards both an
+   explicit `@font-face` source and the platform face. Face routing that works
+   under `und` can be completely dead on every real page. Always probe with the
+   page's actual `lang`.
+
+Also: `resolved_font_advances` is `[i32]`, one integer per codepoint, so a
+per-char 9.633 rounds to 10 and eight of them give 80 where Chrome accumulates
+fractionally to 77. A face swap cannot fix that; the contained fix is to emit
+`round(cum[i+1]) − round(cum[i])` from milli-px advances inside
+`measure_text_advances`. Measurements:
+`doc/10_metrics/ui/web_chrome_parity_round11_2026-09-13.md`.
+## Round 13 (2026-09-13) — batched glyph advances, and the first layout profile
+
+`sfnt_glyph_advance_into` re-parsed the sfnt offset table plus three
+`find_table` directory scans **per glyph** (228 calls, ~1.09 ms each). It is
+replaced on the hot path by `sfnt_blob_glyph_advances_into`, which does that
+setup once for a whole glyph-id array, and by an `_advw` warm table in
+`font_renderer.spl` keyed `(loaded-face identity, font_size)` — the same key
+granularity the per-glyph path uses, because an advance is size-dependent.
+Measured 228/228 batch hits, `gadv_sfnt` 351 ms -> 0, `gadv_batch` ~27 ms.
+**The exactness argument is structural, not empirical**: the batch reproduces
+every guard of the per-glyph function, including `_hmtx`'s left-side-bearing
+bounds test that neither function reads — drop it and the batch would answer a
+number where the per-glyph path answered "fail", changing glyph positions.
+Oracle: `test/01_unit/lib/common/encoding/sfnt_batch_glyph_advances_equivalence_spec.spl`
+(sabotage-checked).
+
+`layout()` now has timers for the first time — `web_layout_counters_report()`,
+nine buckets, same `SIMPLE_WEB_STYLE_COUNTERS=1` gate. **They are INCLUSIVE and
+are not a partition**: `lay_cps` nests inside `lay_inline`; wrap/flex/table
+contain `lay_measure`.
+
+**The landmine this round added to the index:** `inline_text_advance_width`
+spends 60% of its time in one `text_codepoints` decode, which *looks* exactly
+like a repeat-computation. It is not — a two-entry exact memo measured **3 hits
+/ 1,454 misses** on the real catalog. Do not "obviously" cache it; the 1,457
+calls are 1,454 distinct strings. The real fix is to avoid building the array
+when only its LENGTH is used, which needs a malformed-UTF-8 equivalence fixture
+first. Measurements: `doc/10_metrics/ui/web_perf_round13_2026-09-13.md`.
+
+**Round 13 addendum — the landmine the round itself stepped on.** The parity
+lane's sub-pixel change gave `sfnt_glyph_advance_into` TWO advance fields:
+`meta[2]` (rounded pixels) and `meta[18]` (milli-pixels), and the renderer's
+index lane prefers `meta[18]`. They are rounded INDEPENDENTLY from the
+unrounded scale, so `meta[18] / 1000 != meta[2]`. A batch replacement that
+carried only `meta[2]` passed a `meta[2]`-only equivalence spec, reported zero
+mismatches under a live per-call probe, and still moved all eight catalog
+digests — because it was right about the field nobody reads. **If you touch an
+advance path, check BOTH fields; a one-lane oracle for a two-lane function is
+not an oracle.** Only the Draw IR digest gate caught it.
+
+## Round 13 (2026-09-14): the differ was fail-open, and kerning was never read
+
+Two independent findings. Read both before trusting ANY compared/mismatched
+number recorded in rounds 11-13.
+
+### 1. The measurement lane could report a page it never laid out
+
+The runner binary (`build/cargo-r2/release/simple`, built Sep 12) predated
+commit `08770cc5025` (Sep 14), which added the extern
+`rt_engine2d_blend_cov_span_u32` — declaration in
+`simple_web_html_layout_renderer_paint_primitives.spl` AND registration in
+`interpreter_extern/simd.rs`, same commit. An unregistered extern answers
+**silent nil**, so the layout module emitted 432 boxes on `html` of which
+**432 were (0,0,0,0)** — every KEY still present, `missing_in_simple` 0, and
+the differ reporting 430 "mismatches" whose delta is **Chrome's own (x,y,w,h)
+verbatim**, because it is subtracting from zero.
+
+On the tree before that commit the same differ over the same Chrome harvest
+gives **html 329** with ordinary small deltas. **There was never a layout
+regression to bisect**; round 12's "host/Chrome variance" (html 338 vs 430,
+same commit) is the same artifact. Env vars were ruled OUT, not in — the
+all-zero count is identical with and without
+`SIMPLE_EXECUTION_MODE=interpreter` / `SIMPLE_TIMEOUT_SECONDS=0`.
+
+Fixed where it can be: the differ refuses to diff an all-zero Simple side
+(`all_boxes_degenerate`, fifth fatal selftest fixture, `--selftest` now
+`PASS — 5 fixture(s) checked`), and caught this live on first contact.
+Record: `doc/08_tracking/bug/web_html_page_zero_geometry_boxes_2026-09-13.md`.
+
+**Two lessons to carry.** (a) A differ that compares two element lists cannot
+tell "everything is wrong" from "one side never ran" — give any such tool a
+non-vacuity check on the side it does not own. (b) **Always check the runner
+binary's mtime against the tree you are measuring** before believing a parity
+number; `src/lib` is read as source every run, but the EXTERNS it declares are
+baked into the binary.
+
+### 2. `path:(body)` is benign — it is NOT a key desync
+
+Every page reports `missing in Chrome (Simple-only boxes): 1 — path:(body)`.
+Simple emits a box for `<body>` (key `path:`); Chrome's `--dump-dom` harvest
+carries no `|body|` row. Keys are matched by STRING, not by position, so one
+extra box cannot shift any nth-path. `overview` proves it: 18 compared, 5
+mismatched, every neighbour exact. Do not spend a round on it.
+
+### 3. Kerning: `kern` is now read on the unmanaged lane
+
+`FontRasterizer.load_unmanaged` builds the rasterizer with `kern_fp: 0`, so
+`horizontal_kern` answered **0 for every pair on every macOS system face**,
+while Chrome kerns by default. `sfnt_ttc_extract_face` copies every table when
+it repacks a collection face, so the data was in `selected_blob` the whole time
+and nothing read it.
+
+New: `src/lib/common/encoding/sfnt_kern.spl` — legacy `kern`, both header
+shapes (Apple 0x00010000 32-bit and MS 0x0000 16-bit), horizontal
+non-cross-stream **format 0** only, binary search on the `(left<<16)|right`
+key, values in MILLI-pixels so they fold into round 12's cumulative pen instead
+of being rounded per pair. Measured on this host:
+
+| face | table | `AV` | `To` |
+|---|---|---|---|
+| Helvetica.ttc#0 | `kern` 656 B, no GPOS | -151 units = **-1180** milli-px @16 | -227 = **-1773** |
+| Menlo.ttc#0 | no `kern`, no GPOS | 0 | 0 |
+
+**GPOS `PairPos` is deliberately NOT implemented** — neither face ships GPOS, so
+it would be dead code. A face that kerns only through GPOS answers 0 from here,
+exactly as before.
+
+Two traps for the next round:
+- **Do not assert "the pair at 2x size is 2x the value".** -151/2048 em is
+  -1179.6875 milli-px at 16 and -2359.375 at 32; rounding each exact product
+  gives -1180 and **-2359**, not -2360. Doubling a rounded number reintroduces
+  the sum-of-rounded-parts error round 12 removed.
+- **Kerning is ASCII-only** on this lane: the glyph-id table `_gid_lookup`
+  covers 32..126, so a non-ASCII pair gets no kern. Stated, not hidden.
+
+`render_text` still kerns at whole-pixel through `horizontal_kern`;
+`measure_text_advances` is the milli-px path and is what layout and
+`paint_layout_advance_parity` (2/2, green) consume.
+
+Measurements: `doc/10_metrics/ui/web_chrome_parity_round13_2026-09-14.md`.
+
+## Round 16 (2026-09-14): the text API is BYTE/CODEPOINT mixed — check the index kind first
+
+`css-layout` and `css-paint` had not moved in nine rounds because the candidate
+list (flex/grid sizing, `gap`, `box-sizing`, percentage widths) was the wrong
+list. The whole cluster was ONE character: an `&mdash;`.
+
+Read this before touching any wrap, measure or paint loop:
+
+| call | indexed in |
+|---|---|
+| `text.len()`, `text.substring(a,b)`, `text.bytes()` | **BYTES** |
+| `text.char_code_at(i)`, `text.char_at(i)` | **CODEPOINTS** |
+| `resolved_font_advances` | one entry per **CODEPOINT** |
+| `style_run_byte_advances(st, s)` | one entry per **BYTE** (0 on continuation) |
+
+Every wrap offset in this renderer is a BYTE offset, because it is cut on with
+`substring`. Two live defects came from mixing the two, and both were invisible
+on ASCII:
+
+- an arity guard comparing `resolved_font_advances.len()` (codepoints) with
+  `txt.len()` (bytes) sent every non-ASCII run to the flat cells-per-line
+  estimate — 12 px/char against a real ~7.8, so it wrapped ~50 % too early;
+- `style_run_byte_advances` tried to spot UTF-8 continuation bytes with
+  `char_code_at`, which DECODES and never answers 128..191, so the helper
+  returned an empty table and was dead on exactly the runs it exists for.
+
+`css-paint` 516 → 9 mismatched; `css-layout`'s root `dy` maximum 697 → 169 px.
+
+Three traps this cost:
+- **A count can rise while geometry improves.** `css-layout` went 337 → 378
+  because the over-wide estimate had been compensating for a second defect in
+  the opposite direction. Report the `dy` histogram, not just the count.
+- **Fixing the guard alone changes nothing** — the helper behind it was also
+  broken. If a fix provably reaches the right code path and moves no pixels,
+  suspect its dependency, don't re-diagnose the symptom.
+- **Isolate by CHARACTER, not by element.** The first four fixtures blamed
+  `<code>`; swapping `—` for `xx` in the same run, with everything else held,
+  was what actually named it.
+
+Also measured and recorded rather than fixed: the `<body>` margin-collapse item
+carried into round 16 was **not real on these pages** — Chrome's own numbers
+have `body` at y=16 with the child flush to it, and every catalog page's `body`
+row is `dy=0`. Verify a handed-down premise against run A before editing.
+
+Measurements: `doc/10_metrics/ui/web_chrome_parity_round16_2026-09-14.md`;
+record: `doc/08_tracking/bug/web_non_ascii_run_wrap_falls_back_to_flat_estimate_2026-09-14.md`.
+
+## 2026-09-14 (round 17) — the handed-down cause was wrong; it was ONE space
+
+Round 16 left "a `#text` node starting at a non-zero pen x wraps against the
+FULL container width" as the dominant `css-layout` cluster. **That premise is
+false, and this is the second round running in which a handed-down cause did not
+survive contact with a probe** (round 16 falsified the `<body>` collapse item the
+same way). The pen offset was already applied — an instrumented run of the real
+page prints
+
+```
+R17INL|iw=728|inline_x=96|inline_w=635|avail=632
+R17TEXT|node_w=632|full_adv=631|lines=1|txt=— partial; values=keyword-nu
+```
+
+`avail = iw − inline_x` is right there. The entire 24 px per `<li>` was the ONE
+collapsible space between `</code>` and the text, which `text_trimmed` removes
+unconditionally: ~4 px, deciding a 631 px run against a 632 px remainder.
+
+The measurement that named it — and the one to copy — is a **Chrome-side
+sabotage**: build the fixture three ways and let Chrome vote.
+
+| `<li>` content | Chrome | Simple before | after |
+|---|---|---|---|
+| `<code>align-self</code>` + SPACE + `— partial; …` | 88 | 64 | 88 |
+| same, space DELETED from the markup | **64** | 64 | 64 |
+| the text alone, i.e. the space at pen 0 | 64 | 64 | 64 |
+
+Row 2 is what proves it: delete the space and **Chrome itself** drops to 64. No
+amount of reasoning about advance precision or the `<code>` element can survive
+that. Row 3 is the control that stops the naive fix — at the start of a line the
+space IS dropped, so it must not be charged everywhere.
+
+Result: `css-layout` 378 → **5** mismatched. Fix is four lines in the inline
+formatting path (`…_layout.spl`, before the `avail_inline` clamp): if a `#text`
+child sits at a non-zero pen and its RAW `text_data` starts with white space,
+advance the pen by one `resolved_space_advance` first.
+
+Traps worth carrying forward:
+- **Make the fixture faithful before trusting it.** The first attempt gave
+  `<code>` a `sans-serif` family and no `<p>` child; it measured 0 mismatched and
+  would have "disproved" a real defect. The real page leaves `<code>` at the UA
+  monospace default (125 px, not 92).
+- **Instrument the REAL page, not a reduction.** One `print` of
+  `iw`/`inline_x`/`avail`/`lines` on `css-layout` answered in one run what four
+  fixtures had not.
+- **Let Chrome sabotage the hypothesis.** Change one character in the markup and
+  re-measure the ORACLE. If Chrome doesn't move, your mechanism is wrong.
+
+Next cluster, with the row that names it: a non-replaced `display:inline`
+element is given the CONTAINER width, not its content width — `html`
+`path:0/0/4/2/8/1/0` `<bdi>` is 86 px wide in Chrome and 728 in Simple
+(`dw=642`), with `dh=6` alongside (line box 24 vs content area 18). Ten such
+root rows on `html`, plus their inherited children.
+
+Round 17 measurements: `doc/10_metrics/ui/web_chrome_parity_round17_2026-09-14.md`.
+
+## Round 18 (2026-09-14) — the UA tables, not the layout algorithms
+
+Three items, and all three root causes were **missing UA-stylesheet knowledge**,
+not defective layout code. In every case the layout path that should have run
+was already correct and already tested; the element simply never reached it.
+That is the transferable lesson of this round.
+
+1. **Non-replaced inline width** (`html` root rows for `bdi bdo cite data del
+   dfn ins q s u`). The inline branch of `layout_with_style` already
+   shrink-wraps (`intrinsic_text_width`, which adds the element's own padding
+   and border) and already clamps the content area to the font height
+   (`inline_content_area_height`). Ten tags were simply absent from
+   `is_inline_tag` (`…_style.spl`), so they resolved to `display:block`, took
+   the container width (728 against Chrome's 86) and a line box's height. Fix:
+   twelve tags added to the UA table. **Derive that list from the measured
+   Chrome `display=inline` set of the catalog, not from the HTML spec** — one
+   `grep` over the harvested `*.geom.txt` gives it exactly.
+2. **Replaced default box** (`animation` `audio`/`video`/`canvas`). Only
+   `<iframe>` had the CSS 2.1 §10.3.2/§10.6.2 fallback; the rest had no sizing
+   branch. Generalised the iframe branch behind `replaced_default_box_w/h`
+   (300x150; `<audio controls>` 300x54 measured, not assumed).
+3. **Form controls are widgets** (`forms-media`). `<input>` charged NO padding
+   or border on its height (15 where 33 belongs — `box-sizing` reinterprets a
+   *specified* height, so an auto-height control is content+pad+border either
+   way), and `<select>`/`<textarea>` had no branch at all: the block path
+   recursed into a select's `<option>`s and stacked them 153 px tall, where
+   Chrome reports every option as 0x0.
+
+### Traps and method notes
+
+- **A failed sabotage is not a disproof until you check the sabotage applied.**
+  The first `is_inline_tag` sabotage looked like the premise was false — the
+  spec stayed 8/8. The `sed` pattern had simply not matched (the entry sits on
+  a continuation line). `grep -c SABOTAGED` before re-running, every time.
+- **Twins move together.** `layout.spl:_m14_is_inline_tag` is a second hardcoded
+  inline-tag list for the M14 public API. Widening only one of the two would
+  have left the twin architecture inconsistent; both carry the set now.
+- **A size fix can make a ladder worse and still be right.** Giving
+  `audio`/`video` their true 54/150 heights grew `animation`'s inherited `code`
+  ladder from `dy=30` (Run A) to `dy=126` (Run B), because Simple stacks these as BLOCK boxes
+  where Chrome puts them on one inline line box. Per-element geometry is now
+  correct; the ladder is the next defect, not a regression of this one. Report
+  both numbers rather than hiding either.
+- **`intrinsic_text_width` is inline-only.** For a `<select>` it never reaches
+  the `<option>` labels (option is `display:block`); `flex_item_max_content_width`
+  does, and already includes the element's own padding and border.
+
+### Round 19 — replaced MEDIA made inline-level (428 -> 429 count, animation Σ -86%)
+
+Round 18's "next cluster" (below, now CLOSED) was real. `is_inline_tag` carried
+no replaced tag at all, so every one fell through to the block path. Adding
+`img svg video audio canvas iframe embed object` to it and to the M14 twin,
+plus CSS 2.1 §10.8.1's bottom-margin-edge baseline, took `animation`'s Σ down
+86% (3405 -> 481; `video dx=549 -> 9`, the `code` ladder `dy=126 -> 18`). SEVEN
+of eight pages stayed **byte-identical**; the count went UP by one (a new row
+with an identified mechanism, item 3 of "what is left").
+
+**The headline number is deliberately not the best one produced.** An
+intermediate state scored **347** — `forms-media` 100 -> 18 — and was REJECTED
+as a compensating error; see the landmine below. Read
+`doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md` before quoting any
+round-19 figure.
+
+Landmines this round added to the index:
+
+- **A better oracle number is not automatically a better tree, and the oracle
+  cannot tell you.** Scoping the §10.8.1 bottom-edge rule by
+  `grid_item_is_replaced` reached form controls (that predicate contains them,
+  and this engine gives `input`/`select` `display:inline`) and moved 82
+  `forms-media` rows. It was two wrongs cancelling: across the runs the text
+  input's 6 px did not vanish, it MOVED from the `input` row to the `label` row,
+  same magnitude opposite sign. The oracle preferred it; a UNIT SPEC caught it
+  (`form_control_widget_box_spec` AC-6, 33 -> 39). **Run the neighbours before
+  believing a large win**, and ask what the rule physically claims: bottom-edge
+  puts the control's bottom on the baseline and still adds the strut descent,
+  where Chrome puts the control's INNER TEXT baseline there.
+- **A predicate's existing scope is not a licence to reuse it.**
+  `grid_item_is_replaced` reads like the right set for a replaced-element rule.
+  Use `replaced_media_bottom_edge_tag` for baseline questions.
+
+- **Check the hand-off's premises against the oracle BEFORE reading code.**
+  Three were checked, two were false. "`input` is `display:inline` in Chrome" is
+  wrong twice over — Chrome reports `input`/`select`/`textarea`/`button` as
+  **`inline-block`** (census: `awk -F'|' '{print $3, $8}' *.geom.txt`), and this
+  engine already gives `input`/`select` `display:inline`
+  (`…_declarations.spl:1394`), i.e. wrong the opposite way. And the eight-page
+  catalog has **no `<img>` and no `<iframe>`** to measure a default box against.
+  The census also turned up `svg` (display=inline, dx=124), which no brief named.
+- **`grid_item_is_replaced` is NOT the right scope for a baseline rule.** It
+  contains form controls, and because `select` is also `display:inline` here, an
+  unscoped "inline replaced -> bottom margin edge" predicate silently took
+  `form_control_widget_box_spec` AC-6 from 33 px to 39. Scope the §10.8.1 rule
+  to replaced MEDIA (`replaced_media_bottom_edge_tag`); a form control's
+  baseline is its inner text baseline.
+- **The Σ metric has been lying for at least two rounds.** ONE `<wbr>` root row
+  carries Σ=9963 of `html`'s 12496 — Chrome reports a boxless element as
+  `0,0,0,0`, so the differ compares a real position against a reporting
+  convention. `html`'s real Σ is 2533 and its real top cluster is `li` (49 of 77
+  root rows, root defect at `/39`, an `hr`-in-`div`). Report Σ with and without
+  `wbr`. Fixing it belongs in the differ, not in layout.
+- **Control widths are measured on the 8 px bitmap cell.**
+  `style_char_w -> char_w(fs) = 6 * glyph_scale(fs)`, `glyph_scale(13)=1`, so
+  `size=20` yields 6 px/char where Chrome's 13.33 px UA form font gives 7.25.
+  Real metrics DO resolve at 13 px (`resolve_font_metrics_with_language` -> avg
+  6.57 over an alnum sample), so the gap is not a missing font — Chrome uses the
+  face's OS/2 `avgCharWidth`, which this metrics surface does not expose. Expose
+  it; do not multiply the cell by a constant that happens to land on 163.
+
+### Previous cluster (round 18) — CLOSED by round 19
+
+**Replaced elements are block-level here and inline-level in Chrome.** On
+`animation`, Chrome has `canvas` y=295 h=40, `audio` y=281 h=54, `video` y=185
+h=150 — three bottoms all at 335, i.e. one line box with the boxes on the
+baseline. Simple stacked them, so `dx`/`dy` stayed wrong once `dw`/`dh` were
+right (`audio dx=249`, `video dy=134`). `img` was not in `is_inline_tag`
+either, so the `grid_item_is_replaced` exclusion in the inline height clamp was
+unreachable — the machinery existed and had never run.
+
+Round 18 measurements: `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`.
+Round 19 measurements: `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`.
+
+### Round 20 — the `wbr`/Σ item above is CLOSED; two hand-off premises were FALSE
+
+**Boxless elements now compare as "no box" (`chrome_reports_no_box`,
+`layout_geometry_diff.spl:95`).** Chrome's all-zero rect means *no box*, not
+*position 0,0*. Rule: Chrome-boxless + Simple-boxless-or-absent = agreement;
+Chrome-boxless + Simple-real-box = one `extra_box` mismatch with **deltas
+zeroed**, so Σ weighs the defect, not coordinates Chrome never claimed. The
+reverse directions (Simple all-zero, or Simple absent, where Chrome has a real
+box) stay full-Σ mismatch / `missing_in_simple` — pinned by two control
+fixtures. Landed: 429 → 428, `html` Σ 12496 → **2533**, and 5 of 8 pages
+byte-identical.
+
+- **The boxless set is a CENSUS, not a tag list — and `<br>` is NOT in it.**
+  Five elements, three causes: `wbr` (html), two `<span>` fallback children of
+  `<audio>`/`<video>` (animation), two `<option>` in a closed `<select>`
+  (forms-media). Only `wbr` is boxless as a property of its tag. `<br>` has a
+  real Chrome rect — the round-19 guess "likely br, template, head children"
+  would have regressed it.
+- **Round 19's reason for deferring the layout half was FALSE.** "Emitting no
+  box shifts the differ's path ordinals" — it does not. The key comes from
+  `_simple_web_node_target_key` → `_simple_web_element_child_ordinal`, a DOM
+  sibling walk that never reads the emitted rows. Keep `wbr` in
+  `_simple_web_layout_element` (ordinals — Chrome's walker counts WBR too) and
+  exclude it in the NEW `_simple_web_generates_no_box` (geometry). Two
+  predicates, two jobs.
+- **Residual, stated:** `<wbr>` still advances the inline pen 1 px (Chrome: 0).
+  Sub-tolerance, so no catalog page sees it.
+- **Form-control HEIGHTS are already correct** (round 21 measurement): `input
+  dh=0`, `textarea dh=0`, checkbox/radio already take the UA 13×13 box. Only
+  `select` is 2 px short. The "three height arms" hand-off was aimed at a
+  defect that is not there. What IS wrong is control POSITION (input `dy=6`,
+  button `dy=17`, output `dx=7 dy=24`) — and checkbox/radio are **not
+  vertically centred**: 4 px above / 4 px below on an 18 px inline box, which
+  is `margin: 3px 3px 3px 4px` + `vertical-align: baseline`. Do not hardcode a
+  centring offset; it fits one font size and no other.
+- **The control-width gap is NEITHER a face gap NOR an OS/2 gap — both stories
+  are dead.** Measured round 21: Chrome's computed `fontFamily` for a control
+  is literally **`Arial`** (not `-apple-system`, and `SFNSText.ttf` does not
+  exist on this host). **Arial's `xAvgCharWidth` is 904/2048 — the SAME as
+  Helvetica's**, because Arial is metric-compatible with Helvetica by design
+  (`measureText('0')` = 7.4135 in both). So Simple ALREADY loads a metrically
+  identical face. `xAvgCharWidth` is not the quantity either: it gives 5.885
+  where the measured slope is 7.0. **Add no OS/2 parser** — it would be unused
+  code computing a number Chrome does not use.
+- **The 7.25 was an artifact of dividing ONE width by its `size`**, which folds
+  Chrome's fixed font-derived INTERCEPT into the slope. Fit a LINE:
+  `input` content = `N*7 + 5`, `textarea` content = `N*8 + 17` (separate arms —
+  different UA fonts, and textarea reserves a ~15 px scrollbar gutter). Verified
+  content-box on two pages with different author padding. For `<input>` the
+  slope is **font-INDEPENDENT** (Arial/Times/SF Pro all 7.0 despite different
+  `'0'` advances); monospace controls DO track their `'0'` advance. Landed in
+  round 21 as four constants at `…_renderer_layout.spl:699-702`.
+- **Rank root rows by Σ before choosing a target.** Round 21's Σ sort found
+  `css-layout`'s single positioned `span` at **Σ 1467 (26% of the whole
+  catalog)** and `forms-media`'s `<p>` in a closed `<details>` at **Σ 864** —
+  41% of all catalog error in two rows, neither of which any brief had named.
+
+- **`width:auto` on a `position:absolute` box is SHRINK-TO-FIT, not "fill the
+  containing block"** (CSS 2.1 §10.3.7). Filling is only for the case where BOTH
+  `left` and `right` are given. `absolute_outer_width` fell through to
+  `containing_w` and produced `w=810` against Chrome's 77 on the catalog's one
+  absolute box — and because `absolute_child_x` resolves `right` as
+  `padding_box − OUTER_WIDTH − right`, the wrong width also dragged x to 35
+  against 769. **One defect, two of the four deltas.** Fixed round 22 at
+  `…_renderer_layout.spl:1626`, reusing `flex_item_max_content_width` (the
+  measurement `<select>` already uses — no new surface). `available` for the
+  clamp is the padding box **minus whichever offset is specified**: Chrome
+  clamps an overflowing box to 890 in a 900 px block, not 900. Only an
+  overflowing fixture can see that, so measure it rather than assume it.
+- **`dy=0, dh=0` on a huge-Σ row means the feature IS implemented** and one arm
+  of the width/x resolution is missing. Read which deltas are ZERO before
+  concluding a feature is absent — that is what turned "absolute positioning is
+  broken" (three rounds of not looking) into a one-arm fix.
+- **Chrome's `getBoundingClientRect()` is NOT a truth oracle for "is this
+  rendered".** Blink force-lays-out a `content-visibility: hidden` subtree when
+  script measures a descendant, so a NOT-rendered element returns a fully
+  non-zero **phantom** rect where it would sit if rendered. `forms-media`'s
+  closed `<details>` reported `45,405,810,24` for its `<p>` — Σ 864, 15% of the
+  catalog — while the `<details>` was summary-height and the rect **overlapped
+  the following sibling** (the cheap tell: no real in-flow box can do that).
+  **Simple's zero-size box was correct**; the differ was wrong. Use
+  `el.checkVisibility()` as the ground truth — it is false for `display:none`
+  and content-visibility-hidden subtrees and stays **TRUE** for
+  `visibility:hidden` and `opacity:0`, which occupy layout and must keep being
+  compared. Round 22 emits `rendered=` per element in the walker and routes it
+  into the round-20 boxless arm. **Never drop rows from the walk** — the
+  nth-path key is an ordinal, so removing one shifts every later sibling.
+- **Count the blast radius before writing a layout fix.** `position=absolute`
+  occurs **once** in all 1583 catalog elements; one grep proved the shrink-to-fit
+  change could not regress the catalog and moved the burden of proof onto the
+  spec, where it belongs.
+- **`right: auto` is NOT honoured** (890 vs Chrome's 77) — a separate
+  offset-keyword parsing defect, filed
+  `doc/08_tracking/bug/absolute_right_auto_not_honoured_2026-09-14.md`, 0 Σ on
+  the catalog. Do not fold it into a width change: it would alter the
+  both-offsets stretch arm's `st.right_px >= 0` test.
+- **After round 22 the catalog's error is no longer concentrated.** `html` is
+  **76% of remaining Σ (2533 of 3312)** with its top row at only Σ 224 (8.8%).
+  Rank `html` by FEATURE CLUSTER, not by single row — the round-21 "find the one
+  big row" method is now exhausted.
+
+Round 20 measurements: `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`.
+Round 21 measurements: `doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`.
+Round 22 measurements: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`.
+
+## Round 23 (2026-09-14) — rank the ORIGINATING deltas, not the raw Σ
+
+- **Raw root-row Σ over-weights cascade.** Clustering round 23's baseline put
+  `html/block-flow/li` on top at Σ 1597 across 49 rows — almost all of it `dy`
+  inherited from a height error in an EARLIER sibling. Re-rank on
+  `|dx| + |dw| + |dh|` only (drop the pure-`dy` followers), then attribute each
+  shift to the rows downstream of it: `shift x downstream_root_rows`. That moved
+  the `<pre>` row (dh 24, 44 rows below it, ~1150 attributed) above the `<wbr>`
+  row (dh 168 but only 2 rows below it, ~1000). Check the arithmetic against
+  `<body>`'s own `dh` — the signed originating shifts must sum to it exactly.
+- **Σ can fall 42% with the mismatch COUNT unmoved, and that is not a failure.**
+  Shortening a cascade leaves every downstream row non-zero but small, and the
+  differ's threshold is 1 px. The count falls only when a cascade is removed.
+- **`white-space: pre` is not `nowrap`.** They had shared one `Style` flag;
+  `pre` PRESERVES newlines, `nowrap` COLLAPSES them. The discriminator is
+  `<div style="white-space:pre">A\nB</div>` — if it fails identically to
+  `<pre>`, the newline reaches layout and layout throws it away, so it is NOT a
+  missing UA rule. Two HTML rules must be harvested, not recalled: a newline
+  immediately after `<pre>` is dropped, and a trailing newline opens no line.
+- **`overflow-wrap: normal` forbids breaking inside a word.** A word wider than
+  the line overflows. The worst case is a run that STARTS mid-line, where
+  `max_width` is a pen remainder of a few pixels and the old `endv == start` arm
+  emitted one codepoint per line (9 lines for "BreakHere"). Keep intra-word
+  breaking reachable for `break-word`/`anywhere`/`break-all` — that control is
+  what makes the rule statable.
+- **`<wbr>` is boxless AND a break opportunity; only the first is implemented.**
+  The control that proves the fix must be tag-scoped: `LongWord<i></i>BreakHere`
+  is ONE line in both engines, so a run boundary alone is correctly not a break.
+  Filed `doc/08_tracking/bug/wbr_not_a_soft_break_opportunity_2026-09-14.md`.
+- **A fix that is right in two contexts and wrong in a third is a compensating
+  error — back it out.** Seeding the line box from the container's strut (CSS
+  2.1 10.8.1) fixes `<sub>` in the catalog and under no author CSS, and is
+  contradicted under `font: 16px/1.5`, where Chrome measures 20 for a div whose
+  strut would be 24. Round 23 reverted it rather than land the catalog green on
+  an unstatable rule:
+  `doc/08_tracking/bug/sub_sup_line_box_strut_contradiction_2026-09-14.md`.
+- **From a detached worktree the freshness gate fails closed** on a missing
+  `build/cargo-r2/release/simple`, and `simple test <dir>` additionally needs
+  `bin/simple` to exist. Symlink both to the main tree's artifact and RECORD
+  that the check path differs from prior rounds.
+
+Round 23 measurements: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`.
+
+## Round 24 — one defect, two top-ranked roots
+
+- **Rank on ATTRIBUTED Σ and the ranking changes under you.** The standing
+  "`<wbr>` ~1000" lead was stale the moment round 23 landed: that row is now
+  +24 over 4 rows, ~96 attributed. Re-derive the ranking from run A every
+  round; do not inherit last round's list.
+- **Pin the sign convention from a row whose two absolute values you know.**
+  `li` 86 is Chrome 48 / Simple 24 and prints `dh=+24`, so `dh = Chrome −
+  Simple` and a positive `dh` means Simple is SHORT. Round 23's prose has this
+  backwards in one sentence.
+- **Two differently-shaped symptoms on two pages were ONE defect.** An `<hr>`
+  demo box 8 px short on `html.html` and a 16 px page-wide shift on
+  `animation.html` were both "a block's bottom margin is dropped in front of an
+  anonymous inline run". Before opening two investigations, check whether the
+  lost distance equals the preceding block's `margin-bottom`.
+- **A root at the TOP of a page is worth far more than the same root two thirds
+  down.** Fixing the animation head removed 62 mismatches; fixing `<hr>` removed
+  zero, because its cascade rows only shrank from 6 to −2 and the differ's
+  threshold is 1 px. Predict count and Σ separately.
+- **Predict, then record the misses.** Round 24 predicted `forms-media`
+  unchanged; it improved 189 → 117, because the same defect sat in its `<form>`
+  and the ranking had only diagnosed the top two pages. Under-scoping a
+  diagnosis to the pages you ranked is the recurring miss.
+
+Round 24 measurements: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.md`.
+
+## Round 25 — `<wbr>`, and the value of a prediction that MISSES
+
+- **Pin the Σ DEFINITION before ranking, not after.** Σ in every round of this
+  series is `|dx|+|dy|+|dw|+|dh|` summed over `inherited: false` rows ONLY.
+  Summing all rows on this baseline gives 3223 against the reported 1258 — a
+  2.6× discrepancy that would silently invalidate every before/after table.
+  Resolve it against a small page's own `.geometry_diff.md` root table
+  (`css-layout`: 9 + 8 + 1 = 18) before touching any code.
+- **The biggest root is not always the one to take.** `<sub>`/`<sup>` is ~380
+  attributed here, three times the next root, and is filed as a measured
+  contradiction. Rank by attributed Σ, then take the largest ACTIONABLE row and
+  say in writing which rows you skipped and why.
+- **A prediction that misses is worth more than one that hits.**
+  `Long<wbr>Word<wbr>BreakHere` in an 80 px box was predicted 72 and measured
+  **48**: Chrome's line breaker is GREEDY, taking only the opportunity it needs,
+  so the first `<wbr>` is passed over. The eager implementation would have
+  matched the catalog's single `li` 86 perfectly and been wrong. Always harvest a
+  MULTI-opportunity case, not only the one the catalog shows you.
+- **Measure the first WORD, not the whole run.** A soft-break arm that tests the
+  following run's full advance breaks at opportunities Chrome passes over. The
+  helper is `first_word_advance_width` — everything up to the first collapsible
+  space.
+- **Two sabotage arms must fail DIFFERENT AC sets.** Disabling the arm fails
+  AC-1/AC-2; inverting the fit test fails AC-2/AC-4/AC-5. Same failing set from
+  both arms means one of them is not testing what you think.
+- **A `<br>` `dx` row is not a `<br>` placement bug.** Simple already places
+  `<br>` at `ix + inline_x`, which is Chrome's rule, so css-paint's `dx`
+  49/24/8 says the PEN is short at those points — a text-advance
+  under-measurement on the preceding runs. Discriminate the `<br>` rect from the
+  following run's rect in the fixture before editing anything.
+- **`strong`/`b` `dw` deficits look like ONE root: bold metrics.** `overview` is
+  29 of 34 Σ this shape (a `strong` 6 px narrow, then four siblings each `dx`
+  +6 behind it); `html` shows `strong` +9 and `b` +4. `<q>` +10 is a different
+  root in the same rows — Chrome's UA quotation marks, which Simple never emits.
+
+Round 25 measurements: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.

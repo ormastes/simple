@@ -1716,9 +1716,28 @@ void spl_prefetch_start(const char* path) {
 
 void spl_prefetch_wait(void) {
     if (g_prefetch_pid > 0) {
-        int status;
-        waitpid(g_prefetch_pid, &status, 0);
+        int status = 0;
+        pid_t reaped = waitpid(g_prefetch_pid, &status, 0);
         g_prefetch_pid = 0;
+        /* Phase 3 fork() audit (doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md):
+         * this is the one fork() reaper in this file that used to discard
+         * `status` outright, so a prefetch child killed by SIGSEGV/SIGKILL was
+         * indistinguishable from a clean warm-up. The prefetch is advisory —
+         * a dead child must NOT fail the program — but it must not be silent
+         * either, or an OOM-killed or crashing child looks like success.
+         * Every other fork() site in the runtime (runtime_fork.c,
+         * runtime_process.c, runtime_process_owned.c, runtime_legacy_core.c,
+         * counterpart_worker_runtime.c) already threads WIFSIGNALED through. */
+        if (reaped > 0 && WIFSIGNALED(status)) {
+            char buf[128];
+            int len = snprintf(buf, sizeof(buf),
+                "[simple-runtime] prefetch child killed by signal %d (page warm-up incomplete)\n",
+                WTERMSIG(status));
+            if (len > 0) {
+                ssize_t ignored = write(STDERR_FILENO, buf, (size_t)len);
+                (void)ignored;
+            }
+        }
     }
 }
 
@@ -2778,9 +2797,35 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) ||
         !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
 #if defined(_WIN32)
+    /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
+     * underlying filesystem's real limit; the AOT native-build cache path
+     * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/simple-aot-diagnostic-<32-hex>/message.module.o)
+     * routinely exceeds it, failing with ERROR_PATH_NOT_FOUND (3). Prefer the
+     * wide, extended-length-prefixed call (rt_widen_long_path_rc, already
+     * used by the bounded reader above) so both endpoints can exceed
+     * MAX_PATH. Twin of the same fix in runtime_native.c. */
+    {
+        wchar_t* wide_staged = rt_widen_long_path_rc(staged);
+        wchar_t* wide_dest = wide_staged ? rt_widen_long_path_rc(destination) : NULL;
+        if (wide_staged && wide_dest) {
+            BOOL ok = MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH);
+            DWORD werror = ok ? 0 : GetLastError();
+            free(wide_staged); free(wide_dest);
+            if (ok) return 1;
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
+            return -1;
+        }
+        free(wide_staged); free(wide_dest);
+    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    DWORD error = GetLastError();
-    return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
+        return -1;
+    }
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
@@ -2956,15 +3001,45 @@ static void _spl_atexit_handler(void) {
  * Crash Signal Handler (SIGSEGV / SIGBUS)
  * ---------------------------------------------------------------- */
 #ifndef _WIN32
+/* Classify a fault from siginfo_t.si_code.
+ *
+ * Phase 5 of doc/03_plan/infra/audit/serial_sigsegv_and_test_hardening.md:
+ * si_addr alone cannot tell a wild-pointer dereference apart from a fault the
+ * process brought on itself by exhausting a resource, and the two need
+ * different operator responses (fix the pointer bug vs. raise the limit).
+ * Pure lookup, no allocation, no locking — safe to call from a signal handler. */
+static const char* _spl_fault_class(int signum, int sicode) {
+    if (sicode == SI_USER) return "delivered by kill() — not a genuine fault";
+#ifdef SI_KERNEL
+    if (sicode == SI_KERNEL) return "kernel-raised fault";
+#endif
+    if (signum == SIGSEGV) {
+        if (sicode == SEGV_MAPERR) return "address not mapped — wild/null pointer";
+        /* A guard page (stack overflow, or an mmap'd region past a limit) is
+         * mapped but not accessible, so a resource-limit violation lands here
+         * rather than on SEGV_MAPERR. */
+        if (sicode == SEGV_ACCERR) return "permission denied on a mapped page — guard page / memory-limit violation";
+#ifdef SEGV_BNDERR
+        if (sicode == SEGV_BNDERR) return "bounds-check violation";
+#endif
+        return "unclassified segmentation fault";
+    }
+    if (sicode == BUS_ADRALN) return "misaligned address";
+    if (sicode == BUS_ADRERR) return "nonexistent physical address";
+    if (sicode == BUS_OBJERR) return "object-specific hardware error";
+    return "unclassified bus error";
+}
+
 static void _spl_crash_handler(int signum, siginfo_t *info, void *ucontext) {
     (void)ucontext;
     const char *signame = (signum == SIGSEGV) ? "SIGSEGV" : "SIGBUS";
+    int sicode = info->si_code;
 
     /* Use write() not fprintf — async-signal-safe */
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
-        "\n[simple-runtime] Fatal: %s at address %p\n",
-        signame, info->si_addr);
+        "\n[simple-runtime] Fatal: %s at address %p (si_code=%d: %s)\n",
+        signame, info->si_addr, sicode, _spl_fault_class(signum, sicode));
     if (len > 0) write(STDERR_FILENO, buf, (size_t)len);
 
     /* Backtrace */

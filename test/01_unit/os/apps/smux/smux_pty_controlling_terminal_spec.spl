@@ -1,0 +1,95 @@
+"""
+## Purpose and audience
+Behavioral specification for the smux PTY lane: a pane spawned with
+`smux_pane_spawn_pty` gives its child a REAL controlling terminal, while the
+default pipe lane does not.
+
+The oracle is deliberately NOT "the extern returned something". It is a
+contrast: the SAME two shell commands are run through both lanes, and the
+expected outputs cannot be produced by an echo of the input.
+
+  `tty`       PTY -> a device path under /dev/    pipe -> "not a tty"
+  `stty size` PTY -> the pane's own rows/cols     pipe -> not a terminal
+
+Audience: IDE/terminal service maintainers.
+"""
+# @req: REQ-TEST-SMUX_PTY_CONTROLLING_TERMINAL-001
+use std.spec
+use os.apps.smux.api.{
+    smux_reset_for_test,
+    smux_create_session,
+    smux_list_windows,
+    smux_list_panes,
+    smux_resize,
+    smux_pane_spawn,
+    smux_pane_spawn_pty,
+    smux_pane_is_pty,
+    smux_pane_close_pty,
+    smux_close_pane,
+    smux_send_text,
+    smux_capture
+}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+
+# _await_capture — the service is non-blocking, so the wait loop lives here.
+fn _await_capture(sid: text, wid: text, pid: text, needle: text) -> text:
+    var i = 0
+    var seen = ""
+    while i < 60 and not seen.contains(needle):
+        thread_sleep_ms(50)
+        val cap = smux_capture(sid, wid, pid, 20)
+        if cap.is_ok():
+            seen = cap.unwrap().content
+        i = i + 1
+    return seen
+
+describe "smux PTY lane gives a pane a controlling terminal":
+
+    it "a PTY-backed child reports a tty device; the same command on a pipe reports none":
+        # @req: REQ-TEST-SMUX_PTY_CONTROLLING_TERMINAL-001
+        step("Verify: `tty` names a device under a PTY and says 'not a tty' on a pipe")
+        smux_reset_for_test()
+
+        # --- A. PTY lane ---
+        val sa = smux_create_session("ptylane")
+        val wa = smux_list_windows(sa.id)[0]
+        val pa = smux_list_panes(sa.id, wa.id)[0]
+        val spawned = smux_pane_spawn_pty(sa.id, wa.id, pa.id, "/bin/sh")
+        expect(spawned.is_ok()).to_equal(true)
+        expect(smux_pane_is_pty(sa.id, wa.id, pa.id).unwrap()).to_equal(true)
+        expect(smux_send_text(sa.id, wa.id, pa.id, "tty\n").is_ok()).to_equal(true)
+        val pty_seen = _await_capture(sa.id, wa.id, pa.id, "/dev/")
+        # A device path. A pipe can never produce one, and it is not in the input.
+        expect(pty_seen.contains("/dev/")).to_equal(true)
+        expect(pty_seen.contains("not a tty")).to_equal(false)
+        val _cp = smux_pane_close_pty(sa.id, wa.id, pa.id)
+
+        # --- B. pipe lane, same command ---
+        smux_reset_for_test()
+        val sb = smux_create_session("pipelane")
+        val wb = smux_list_windows(sb.id)[0]
+        val pb = smux_list_panes(sb.id, wb.id)[0]
+        expect(smux_pane_is_pty(sb.id, wb.id, pb.id).unwrap()).to_equal(false)
+        expect(smux_pane_spawn(sb.id, wb.id, pb.id, "/bin/sh", []).is_ok()).to_equal(true)
+        expect(smux_send_text(sb.id, wb.id, pb.id, "tty\n").is_ok()).to_equal(true)
+        val pipe_seen = _await_capture(sb.id, wb.id, pb.id, "not a tty")
+        expect(pipe_seen.contains("not a tty")).to_equal(true)
+        expect(pipe_seen.contains("/dev/")).to_equal(false)
+        val _c = smux_close_pane(sb.id, wb.id, pb.id)
+
+    it "the PTY child's terminal size is the pane geometry it was spawned with":
+        # @req: REQ-TEST-SMUX_PTY_CONTROLLING_TERMINAL-001
+        step("Verify: `stty size` inside the pane reports the rows/cols smux set")
+        smux_reset_for_test()
+        val s = smux_create_session("geom")
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        # Deliberately unusual geometry: no default could coincide with it.
+        expect(smux_resize(s.id, w.id, p.id, 97, 31).is_ok()).to_equal(true)
+        expect(smux_pane_spawn_pty(s.id, w.id, p.id, "/bin/sh").is_ok()).to_equal(true)
+        expect(smux_send_text(s.id, w.id, p.id, "stty size\n").is_ok()).to_equal(true)
+        val seen = _await_capture(s.id, w.id, p.id, "31 97")
+        # "31 97" is produced by the kernel from the winsize smux passed to
+        # openpty. It appears nowhere in the input line.
+        expect(seen.contains("31 97")).to_equal(true)
+        val _cp = smux_pane_close_pty(s.id, w.id, p.id)

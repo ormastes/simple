@@ -1,12 +1,13 @@
 # @cover src/app/devhub/config.spl 60%
 
-use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, save_auth_token, load_auth_token}
+use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, load_config_for_target, confluence_target_from_args, resolve_auth_token, save_config, save_confluence_target, save_auth_token, load_auth_token}
 use app.devhub.errors.{ItfError}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_delete(path: text) -> bool
 
 # Fixture-HOME harness (same pattern as wiki_backend_routing_spec.spl /
@@ -43,6 +44,30 @@ fn _auth_token_roundtrip(provider: text, token: text) -> text:
     val loaded = load_auth_token(provider)
     val _restore_home = rt_env_set("HOME", original_home)
     loaded
+
+
+fn _load_target_with_fixture(config_body: text, target: text) -> ItfConfig:
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _mk = rt_dir_create_all(dir)
+    val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    val config = load_config_for_target(target)
+    val _restore_home = rt_env_set("HOME", original_home)
+    config
+
+
+fn _resolve_target_token_with_fixture(config_body: text, auth_body: text, target: text) -> text:
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _mk = rt_dir_create_all(dir)
+    val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
+    val _auth = rt_file_write_text("{dir}/auth.sdn", auth_body)
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    val token = resolve_auth_token(load_config_for_target(target), "confluence")
+    val _clean_auth = rt_file_delete("{dir}/auth.sdn")
+    val _restore_home = rt_env_set("HOME", original_home)
+    token
 
 
 describe "ITF configuration":
@@ -94,6 +119,74 @@ describe "ITF configuration":
             val config = _load_config_with_fixture_config("token_cmd:\n    jira: op read op://vault/item/token\n")
             expect(config.token_cmds.len()).to_equal(1)
             expect(config.token_cmds[0].1).to_equal("op read op://vault/item/token")
+
+    context "named Confluence targets":
+        it "selects an explicit host and accepts profile as its CLI alias":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    user: alpha@example.com\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    user: beta@example.com\n"
+            val config = _load_target_with_fixture(body, confluence_target_from_args(["list", "--profile", "beta"]))
+            expect(config.confluence_target).to_equal("beta")
+            expect(config.confluence_url).to_equal("https://beta.example/wiki")
+            expect(confluence_target_from_args(["list", "--host", "alpha"])).to_equal("alpha")
+
+        it "accepts equals selectors and rejects missing or conflicting selectors":
+            expect(confluence_target_from_args(["list", "--host=alpha"])).to_equal("alpha")
+            expect(confluence_target_from_args(["list", "--profile=beta"])).to_equal("beta")
+            expect(confluence_target_from_args(["list", "--host"])).to_equal("__invalid_confluence_selector__")
+            expect(confluence_target_from_args(["list", "--host=alpha", "--profile=beta"])).to_equal("__invalid_confluence_selector__")
+
+        it "target writes preserve nested header maps in sibling targets":
+            val dir = "{FIXTURE_HOME}/.config/itf"
+            val _mk = rt_dir_create_all(dir)
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    headers:\n        X-Alpha: replace\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    headers:\n        X-Beta: keep\n        X-Scope: one\n"
+            val _write = rt_file_write_text("{dir}/config.sdn", body)
+            val original_home = rt_env_get("HOME") ?? ""
+            val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+            val _saved = save_confluence_target(_load_target_with_fixture(body, "alpha"))
+            val saved = rt_file_read_text("{dir}/config.sdn") ?? ""
+            val _restore_home = rt_env_set("HOME", original_home)
+            expect(saved).to_contain("confluence.beta:")
+            expect(saved).to_contain("X-Beta: keep")
+            expect(saved).to_contain("X-Scope: one")
+
+        it "uses configured default_target before file-order fallback":
+            val body = "confluence:\n    default_target: beta\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n\nconfluence.beta:\n    url: https://beta.example/wiki\n"
+            expect(_load_target_with_fixture(body, "").confluence_url).to_equal("https://beta.example/wiki")
+
+        it "uses the first named target when no default is configured":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n\nconfluence.beta:\n    url: https://beta.example/wiki\n"
+            expect(_load_target_with_fixture(body, "").confluence_target).to_equal("alpha")
+
+        it "loads gateway and repeated ordered headers only from the selected target":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    gateway_url: https://gateway.example/confluence\n    header: X-Classification: Internal\n    header: X-Scope: A\n    header: X-Scope: B\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    header: X-Classification: Public\n"
+            val config = _load_target_with_fixture(body, "alpha")
+            expect(config.confluence_gateway_url).to_equal("https://gateway.example/confluence")
+            expect(config.confluence_headers.len()).to_equal(3)
+            expect(config.confluence_headers[0]).to_equal("X-Classification: Internal")
+            expect(config.confluence_headers[2]).to_equal("X-Scope: B")
+
+        it "parses nested per-target header maps while retaining duplicate values":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    gateway_url: https://gateway.example/confluence\n    headers:\n        X-Foo: bar\n        X-Scope: A\n        X-Scope: B\n"
+            val config = _load_target_with_fixture(body, "alpha")
+            expect(config.confluence_headers.len()).to_equal(3)
+            expect(config.confluence_headers[0]).to_equal("X-Foo: bar")
+            expect(config.confluence_headers[1]).to_equal("X-Scope: A")
+            expect(config.confluence_headers[2]).to_equal("X-Scope: B")
+
+        it "loads Jira and Bitbucket gateway routes with ordered headers":
+            val body = "jira:\n    url: https://jira.example\n    gateway_url: https://gateway.example/jira\n    headers:\n        X-Classification: restricted\n        X-Scope: jira\n\nbitbucket:\n    url: https://bitbucket.example\n    gateway_url: https://gateway.example/bitbucket\n    header: X-Classification: internal\n"
+            val config = _load_config_with_fixture_config(body)
+            expect(config.jira_gateway_url).to_equal("https://gateway.example/jira")
+            expect(config.jira_headers.len()).to_equal(2)
+            expect(config.jira_headers[1]).to_equal("X-Scope: jira")
+            expect(config.bb_gateway_url).to_equal("https://gateway.example/bitbucket")
+            expect(config.bb_headers[0]).to_equal("X-Classification: internal")
+
+        it "resolves target-scoped auth and keeps the legacy token fallback":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n"
+            val scoped = _resolve_target_token_with_fixture(body, "confluence.alpha:\n    token: alpha-secret\n\nconfluence:\n    token: legacy-secret\n", "alpha")
+            val fallback = _resolve_target_token_with_fixture(body, "confluence:\n    token: legacy-secret\n", "alpha")
+            expect(scoped).to_equal("alpha-secret")
+            expect(fallback).to_equal("legacy-secret")
 
     context "load_auth_token colon-split (bug itf-config-colon-value-split)":
         it "a token value containing its own colon round-trips through save_auth_token/load_auth_token unchanged":

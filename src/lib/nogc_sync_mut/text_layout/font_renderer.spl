@@ -98,6 +98,71 @@ fn _gid_warm(identity: text, blob: [u8]) -> i32:
     _gid_vals[slot] = ids
     slot
 
+# Batched ASCII advance warm (2026-09-13, round 13), keyed by (loaded-face
+# identity, font_size) -- the SAME key granularity the per-glyph path already
+# uses, because an advance is `round(unscaled * size / unitsPerEm)` and is
+# therefore size-dependent. Round 12 §3a measured `sfnt_glyph_advance_into` at
+# 1.09 ms x 228 calls = 248 ms, essentially all of it the `parse_offset_table`
+# + three `find_table` setup re-run per glyph. `sfnt_blob_glyph_advances_into`
+# does that setup once for the whole ASCII range; its per-glyph arithmetic is
+# the same expression, so the values are identical by construction.
+#
+# A slot answers only with a POSITIVE advance; 0 (the batch could not answer,
+# exactly where the per-glyph call would also have failed) falls through to the
+# untouched per-glyph path, so no behaviour outside the hit is changed.
+val _ADVW_SLOTS: i32 = 8
+var _advw_identity: [text] = [""; 8]
+var _advw_size: [i32] = [0; 8]
+var _advw_vals: [[i64]] = [[0; 95]; 8]
+# The rounded pixel lane, kept alongside the milli lane because the two are
+# rounded INDEPENDENTLY from the unrounded scale (`meta[2]` and `meta[18]`) --
+# `milli / 1000` is not the same number and substituting it would move glyphs.
+var _advw_px: [[i64]] = [[0; 95]; 8]
+var _advw_cursor: i32 = 0
+
+fn _advw_slot(identity: text, size: i32) -> i32:
+    var i: i32 = 0
+    while i < _ADVW_SLOTS:  # cpu-lane-loop-ok: scans the 8 fixed advance buckets
+        if _advw_size[i] == size and _advw_identity[i] == identity:
+            return i
+        i = i + 1
+    -1
+
+# Warm one (face, size) pair's ASCII advances from a single blob parse. The
+# glyph ids come from the already-warmed `_gid_vals` slot, so no cmap work is
+# repeated here either. Returns the slot.
+fn _advw_warm(identity: text, size: i32, gid_slot: i32, blob: [u8]) -> i32:
+    if identity == "" or blob.len() == 0 or gid_slot < 0:
+        return -1
+    val existing = _advw_slot(identity, size)
+    if existing >= 0:
+        return existing
+    var advances: [i64] = [0; 95]
+    var advances_px: [i64] = [0; 95]
+    sfnt_blob_glyph_advances_into(blob, _gid_vals[gid_slot], size.to_i64(), advances, advances_px)
+    val slot = _advw_cursor
+    _advw_cursor = (_advw_cursor + 1) % _ADVW_SLOTS
+    _advw_identity[slot] = identity
+    _advw_size[slot] = size
+    _advw_vals[slot] = advances
+    _advw_px[slot] = advances_px
+    slot
+
+# Milli-pixel advance for an ASCII codepoint on a warmed (face, size) slot.
+# 0 means "this table cannot answer" -- the caller falls through to the
+# per-glyph path.
+fn _advw_lookup(slot: i32, codepoint: i32) -> i64:
+    if slot < 0 or codepoint < _ADV_ASCII_LO or codepoint > _ADV_ASCII_HI:
+        return 0
+    _advw_vals[slot][codepoint - _ADV_ASCII_LO]
+
+# The rounded pixel advance for the same entry (`meta[2]`), used only for the
+# `meta[18] <= 0` fallback the per-glyph lane applies.
+fn _advw_lookup_px(slot: i32, codepoint: i32) -> i64:
+    if slot < 0 or codepoint < _ADV_ASCII_LO or codepoint > _ADV_ASCII_HI:
+        return 0
+    _advw_px[slot][codepoint - _ADV_ASCII_LO]
+
 # Glyph id for an ASCII codepoint on a warmed face. Returns -1 when this table
 # cannot answer (non-ASCII, or the face was never warmed), which is NOT the
 # same as 0 -- 0 is the definitive "this face has no glyph for it".
@@ -186,6 +251,17 @@ fn _kern_cache_store_slot(slot: i32, left: i32, right: i32, kern: i32):
         return
     _kern_ascii_vals[slot * _KERN_SQUARE + (left - _ADV_ASCII_LO) * 95 + (right - _ADV_ASCII_LO)] = kern
 
+# Milli-pixels -> whole pixels, half-up, matching `_round_glyf_metric`'s rule
+# on the non-negative values an advance can take. The ONE place the conversion
+# happens, so the whole-pixel and fractional views can never round differently.
+fn _milli_px_to_px(milli: i32) -> i32:
+    if milli <= 0: return 0
+    (milli + 500) / 1000
+
+fn _milli_px_to_px_i64(milli: i64) -> i64:
+    if milli <= 0: return 0
+    (milli + 500) / 1000
+
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
         val slot = _adv_ascii_slot(identity, font_size)
@@ -236,10 +312,12 @@ fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32
     _adv_overflow_val[_adv_overflow_cursor] = advance
     _adv_overflow_cursor = (_adv_overflow_cursor + 1) % _ADV_OVERFLOW_CAP
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, LayoutGlyph, SubpixelGlyphBitmap}
+use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
-    browser_font_candidates_for_family
+    browser_font_candidates_for_family,
+    browser_family_has_host_face
 }
 use std.nogc_sync_mut.text_layout.font_rasterizer.{
     _sffi_glyph_to_cached,
@@ -263,8 +341,9 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
@@ -1322,7 +1401,19 @@ class FontRenderer:
         val installed = self._try_install_ttf(selected_rasterizer)
         if installed:
             self.selected_outline_blob = selected_blob
-        installed
+            return true
+        # The managed lane above answers `invalid()` for every path the pinned
+        # registry does not own, WITHOUT looking at the file — which is why a
+        # macOS system face was rejected in the same process that loaded a
+        # bundled asset. Fall through to the explicitly unmanaged lane, which
+        # keeps the same structural validation and handles `path#N` collection
+        # faces (Menlo.ttc, Helvetica.ttc).
+        val unmanaged = FontRasterizer.load_unmanaged(ttf_path)
+        val unmanaged_blob = unmanaged.selected_blob
+        val unmanaged_installed = self._try_install_ttf(unmanaged)
+        if unmanaged_installed:
+            self.selected_outline_blob = unmanaged_blob
+        unmanaged_installed
 
     me try_load_selected_bytes(ttf_path: text, blob: [u8]) -> bool:
         val rasterizer = FontRasterizer.load_selected_bytes(ttf_path, blob)
@@ -1332,6 +1423,16 @@ class FontRenderer:
         installed
 
     me try_load_registered_identity(identity: text) -> bool:
+        # An unmanaged identity names its own face spec, so it round-trips here
+        # rather than through the registry. Both paint consumers
+        # (engine2d `engine.spl`, `draw_ir_target_metal.spl`) re-resolve a face
+        # from the identity the LAYOUT recorded; without this they answer ""
+        # for a platform face and silently drop the run to the vector fallback,
+        # so the page would measure against Helvetica and be drawn with
+        # something else.
+        val unmanaged_spec: text = font_unmanaged_identity_face_spec(identity)
+        if unmanaged_spec != "":
+            return self.try_load_runtime_ttf(unmanaged_spec)
         # Path-based helper instead of `candidate.?.local_path`: Option-unwrap
         # field access faults on baremetal (cr2=0x0 class, 2026-07-18).
         val local_path: text = selected_font_asset_local_path_for_identity(identity)
@@ -1621,6 +1722,51 @@ class FontRenderer:
             return kern_value as i32
         0
 
+    # MILLI-pixel kerning (2026-09-14, round 13).
+    #
+    # Round 12 made the run pen a milli-pixel cumulative but left kerning a
+    # whole-pixel quantity entering it x1000, and named that as an open lane.
+    # This closes it, and closes a larger hole beside it: on the UNMANAGED
+    # (selected-blob) lane `horizontal_kern` answers 0 for every pair, because
+    # the only kerning source it knows is the foreign `rt_fonts_horizontal_kern`
+    # address that only the SFFI-dylib lane owns. Chrome kerns by default, so
+    # every Helvetica run carrying a kern pair measured WIDER here than in
+    # Chrome. `sfnt_ttc_extract_face` already repacks `kern` verbatim, so the
+    # data was present the whole time and simply never read.
+    #
+    # Order of sources, and why:
+    #   1. the foreign rasterizer, when it answers non-zero -- the managed lane
+    #      keeps EXACTLY the number it produced before, widened x1000, so this
+    #      change cannot move a face that was already kerning;
+    #   2. the face's own `kern` table, read in milli-pixels.
+    # (2) also runs when (1) answers 0, which is where a whole-pixel foreign
+    # kern rounded a real sub-pixel pair away -- the same under-measure round 12
+    # removed from advances, removed here from kerning.
+    me horizontal_kern_milli(left_codepoint: i32, right_codepoint: i32, font_size: i32) -> i32:
+        val foreign = self.horizontal_kern(left_codepoint, right_codepoint, font_size)
+        if foreign != 0:
+            return foreign * 1000
+        if font_size <= 0 or font_size > 512:
+            return 0
+        val blob = self.selected_outline_blob
+        if blob.len() == 0:
+            return 0
+        # Same face-identity source the advance lane uses (`_adv_identity` in
+        # `get_glyph_advance_milli`): the glyph-id table is keyed on it, so a
+        # face swap cannot serve a stale glyph id to the kern lookup.
+        val kern_rast = self.ttf_rasterizer
+        val identity: text = if kern_rast != nil: kern_rast.?.cache_identity() else: ""
+        if identity == "":
+            return 0
+        val gid_slot = _gid_warm(identity, blob)
+        if gid_slot < 0:
+            return 0
+        val left_gid = _gid_lookup(gid_slot, left_codepoint)
+        val right_gid = _gid_lookup(gid_slot, right_codepoint)
+        if left_gid <= 0 or right_gid <= 0:
+            return 0
+        sfnt_blob_kern_pair_milli_px(blob, left_gid, right_gid, font_size.to_i64()) as i32
+
     me horizontal_line_metric(font_size: i32, field: i32) -> i32:
         val rast = self.ttf_rasterizer
         if rast != nil:
@@ -1882,7 +2028,25 @@ class FontRenderer:
     # backend with no metrics-only entry point (the SFFI spl_fonts dylib,
     # whose `rt_fonts_glyph_metric` only reads a handle produced by a prior
     # rasterize call) falls back to the full get_glyph call unchanged.
+    # Whole-pixel advance. Kept as the public shape every existing caller reads;
+    # it is now the rounded form of the milli-pixel cascade below, so a face
+    # with whole-pixel advances answers exactly what it always did.
     me get_glyph_advance(codepoint: i32, font_size: i32) -> i32:
+        _milli_px_to_px(self.get_glyph_advance_milli(codepoint, font_size))
+
+    # MILLI-pixel advance (2026-09-13, round 12).
+    #
+    # This is the body `get_glyph_advance` used to have, with one change: every
+    # value it produces, caches and returns is scaled by 1000. Only the selected
+    # -blob lanes gain real precision -- they read `meta[18]`, the unrounded
+    # `hmtx` advance. Every other backend has no sub-pixel information to offer,
+    # so its existing INTEGER result is multiplied by 1000 rather than recomputed
+    # fractionally; that keeps those backends bit-for-bit what they were.
+    #
+    # The module advance cache now stores MILLI-pixels. Both of its readers are
+    # in this file (`get_glyph_advance` above and `measure_text_advances` below)
+    # and both were changed with it, so there is no unit mismatch to leak.
+    me get_glyph_advance_milli(codepoint: i32, font_size: i32) -> i32:
         if codepoint < 0 or codepoint > 1114111 or font_size <= 0 or font_size > 512:
             return 0
         val active_rasterizer = self.ttf_rasterizer
@@ -1906,11 +2070,13 @@ class FontRenderer:
         # pixel arrays) on EVERY measured character, including the ~96% that
         # the fast path answers without ever touching it -- measured as the
         # dominant residual term in measure_text_advances, far above kerning.
+        val _gi_t0 = _fr_probe_now()
         var cache = self.cache
         if active_rasterizer != nil:
             cache.sync_face_identity(active_rasterizer.cache_identity_generation(), _adv_identity)
         val cached = cache.lookup(codepoint, font_size)
         self.cache = cache
+        _fr_probe_add_gadv_inst(_fr_probe_now() - _gi_t0)
         # `if val Some(...)` narrowing — NOT `.unwrap()`: the runtime value's
         # Option wrapping depends on provenance (a fresh lookup wraps; the
         # cross-instance raster cache stores RAW CachedGlyph), so `.unwrap()`
@@ -1918,8 +2084,11 @@ class FontRenderer:
         # values. Pattern-match narrowing handles both. See doc/08_tracking/
         # bug/font_renderer_cached_glyph_unwrap_semantic_crash_2026-08-15.md.
         if val Some(cached_adv) = cached:
-            _adv_cache_store(_adv_identity, font_size, codepoint, cached_adv.advance)
-            return cached_adv.advance
+            # A rasterized CachedGlyph carries only a whole-pixel advance; x1000
+            # is the honest widening of it, not a fresh fractional measurement.
+            val _cached_milli = cached_adv.advance * 1000
+            _adv_cache_store(_adv_identity, font_size, codepoint, _cached_milli)
+            return _cached_milli
 
         # Selected-blob fast lane, ahead of `has_glyph`: on this backend
         # `has_glyph` IS `sfnt_blob_glyph_exists`, i.e. the same cmap parse the
@@ -1928,9 +2097,13 @@ class FontRenderer:
         # single parse, and a non-zero id is exactly what `has_glyph` reports
         # true for over the same blob. A `-1` (face not warmed, or non-ASCII)
         # falls through to the original path untouched.
+        val _gb_t0 = _fr_probe_now()
         val _blob = self.selected_outline_blob
+        _fr_probe_add_gadv_blob(_fr_probe_now() - _gb_t0)
         if _blob.len() > 0 and _adv_identity != "":
+            val _gw_t0 = _fr_probe_now()
             val _gid_s = _gid_warm(_adv_identity, _blob)
+            _fr_probe_add_gadv_warm(_fr_probe_now() - _gw_t0)
             val _gid = _gid_lookup(_gid_s, codepoint)
             # Only a POSITIVE id takes the fast lane. `0` (this face has no such
             # glyph) and `-1` (not answerable here) both fall through to the
@@ -1940,10 +2113,42 @@ class FontRenderer:
                 # Metrics-only, by glyph INDEX: skips the cmap entirely, and
                 # skips the `glyf` outline decode that `sfnt_measure_glyph_into`
                 # performs for ink extents this caller never reads.
+                # Batched (face, size) advance warm first: one blob parse for
+                # the whole ASCII range instead of one per glyph. A positive
+                # value is the same number the per-glyph call below produces
+                # (same `_hmtx` index arithmetic, same scale, same rounding);
+                # 0 means the batch could not answer and the per-glyph path
+                # runs unchanged.
+                val _aw_t0 = _fr_probe_now()
+                val _aw_slot = _advw_warm(_adv_identity, font_size, _gid_s, _blob)
+                val _aw_milli = _advw_lookup(_aw_slot, codepoint)
+                val _aw_px = _advw_lookup_px(_aw_slot, codepoint)
+                _fr_probe_add_gadv_batch(_fr_probe_now() - _aw_t0, _aw_px > 0)
+                # The per-glyph lane's own two-field rule, reproduced exactly:
+                # the milli field when the face offered one, otherwise the
+                # rounded pixel result widened. Its admission test is on the
+                # PIXEL field (`meta[2] > 0`), not the milli one.
+                if _aw_px > 0:
+                    val _adv_batched = if _aw_milli > 0:
+                        _aw_milli as i32
+                    else:
+                        (_aw_px as i32) * 1000
+                    _adv_cache_store(_adv_identity, font_size, codepoint, _adv_batched)
+                    return _adv_batched
                 var index_meta: [i64] = [0; 20]
+                val _sa_t0 = _fr_probe_now()
                 sfnt_glyph_advance_into(_blob, SFNT_GLYPH_SELECTOR_INDEX, _gid, font_size.to_i64(), index_meta)
+                _fr_probe_add_gadv_sfnt(_fr_probe_now() - _sa_t0)
                 if index_meta[7] == 310031 and index_meta[2] > 0:
-                    val _adv_index = index_meta[2] as i32
+                    # meta[18] is the unrounded `hmtx` advance in milli-pixels;
+                    # this is the ONE lane that has real sub-pixel information,
+                    # and it is the lane every catalog page's text takes. A face
+                    # whose advance is a whole number of pixels gives exactly
+                    # meta[2] * 1000 here, so nothing moves for it.
+                    val _adv_index = if index_meta[18] > 0:
+                        index_meta[18] as i32
+                    else:
+                        (index_meta[2] as i32) * 1000
                     _adv_cache_store(_adv_identity, font_size, codepoint, _adv_index)
                     return _adv_index
         val rast_has_glyph = active_rasterizer != nil and active_rasterizer.has_glyph(codepoint.to_i64())
@@ -1954,19 +2159,26 @@ class FontRenderer:
                 if direct_meta[7] == 310031:
                     val direct_width = direct_meta[0] as i32
                     val direct_advance_raw = direct_meta[2] as i32
-                    val _adv_direct = if direct_advance_raw > 0: direct_advance_raw else: direct_width + 1
+                    # Same two-field rule as the index lane: the milli field
+                    # when the blob offered one, otherwise the existing integer
+                    # result widened. `direct_width + 1` is an ink-extent
+                    # fallback with no sub-pixel meaning, so it is only widened.
+                    val _adv_direct = if direct_advance_raw > 0:
+                        if direct_meta[18] > 0: direct_meta[18] as i32 else: direct_advance_raw * 1000
+                    else:
+                        (direct_width + 1) * 1000
                     _adv_cache_store(_adv_identity, font_size, codepoint, _adv_direct)
                     return _adv_direct
             # SFFI dylib backend (or a measure failure on the selected blob):
             # no metrics-only entry point exists, fall back unchanged.
             val _rm_t0 = _fr_probe_now()
-            val _gfp_result = self.get_glyph(codepoint, font_size).advance
+            val _gfp_result = self.get_glyph(codepoint, font_size).advance * 1000
             _fr_probe_add_raster_metric(_fr_probe_now() - _rm_t0)
             _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result)
             return _gfp_result
 
         if self.has_ttf():
-            val _gfp_result2 = rt_font_glyph_advance(self.ttf_handle, codepoint.to_i64(), font_size.to_f64()).to_i32()
+            val _gfp_result2 = rt_font_glyph_advance(self.ttf_handle, codepoint.to_i64(), font_size.to_f64()).to_i32() * 1000
             _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result2)
             return _gfp_result2
         if self.use_vector:
@@ -1974,14 +2186,14 @@ class FontRenderer:
             if vector_cmds.len() > 0:
                 val glyph_w = vf_glyph_width(codepoint)
                 val pixel_w = glyph_w * font_size / 24
-                return pixel_w + 1
+                return (pixel_w + 1) * 1000
             if self.use_bitmap:
                 val scale = if font_size > 16: font_size / 16 else: 1
-                return 8 * scale
+                return 8 * scale * 1000
             return 0
         if self.use_bitmap:
             val scale = if font_size > 16: font_size / 16 else: 1
-            return 8 * scale
+            return 8 * scale * 1000
         0
 
     # Same single-aggregate-return shape as get_glyph above (was
@@ -2006,24 +2218,16 @@ class FontRenderer:
     # Measure text width using actual glyph advances
     # -----------------------------------------------------------------------
     me measure_text_width(content: text, font_size: i32) -> i32:
+        # Delegates to `measure_text_advances` rather than re-summing whole-pixel
+        # advances of its own (2026-09-13, round 12). It used to run a parallel
+        # loop that rounded every glyph independently, so after the fractional
+        # accumulation landed it would have answered 80 for a run the layout
+        # positioned across 77 px -- a line breaker measuring one width while
+        # paint drew another. One producer, one number. The run memo makes the
+        # shared call no more expensive than the loop it replaces.
         var total_w = 0
-        var prev_cp = -1
-        # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
-        var ci = 0
-        val content_cps = text_codepoints(content)
-        val content_len = content_cps.len()
-        while ci < content_len:
-            val cp = content_cps[ci] as i32
-            if prev_cp >= 0:
-                total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
-            val glyph_advance = self.get_glyph_advance(cp, font_size)
-            if glyph_advance > 0:
-                total_w = total_w + glyph_advance
-            else:
-                # Fallback: approximate
-                total_w = total_w + font_size * 55 / 100
-            prev_cp = cp
-            ci = ci + 1
+        for advance in self.measure_text_advances(content, font_size):
+            total_w = total_w + advance
         total_w
 
     me measure_text_advances(content: text, font_size: i32) -> [i32]:
@@ -2045,6 +2249,23 @@ class FontRenderer:
         # reallocated and copied the whole array once per character, which is
         # quadratic in the run length.
         var advances: [i32] = [0; content_len]
+        # Fractional accumulation (2026-09-13, round 12).
+        #
+        # `boundaries[i]` is the EXACT pen position, in milli-pixels, just
+        # before glyph `i`; `cumulative` is the running value and ends as the
+        # exact width of the whole run. The emitted array is then
+        # `round(boundaries[i+1]) - round(boundaries[i])`, so:
+        #   - the run total is round(exact total), not a sum of rounded parts
+        #     (eight Menlo `M` at 16 px: round(77.06) = 77, not 8 x 10 = 80);
+        #   - each glyph position is the integer snap of the exact pen, never
+        #     more than half a pixel off, which is what Skia does;
+        #   - a face whose advances are whole pixels reproduces the previous
+        #     array exactly, because every boundary is already an integer.
+        # The array itself stays `[i32]` whole pixels: the Draw IR -> Engine2D
+        # twins consume integer positions and that contract does not change.
+        # What changed is WHERE the rounding happens.
+        var boundaries: [i64] = [0; content_len + 1]
+        var cumulative: i64 = 0
         var prev_cp = -1
         var ci = 0
         # Slot resolved ONCE for the whole run. Every `self.<field>` read and
@@ -2057,28 +2278,52 @@ class FontRenderer:
         var slot = if _run_identity != "": _adv_ascii_slot(_run_identity, font_size) else: -1
         while ci < content_len:
             val cp = content_cps[ci] as i32
+            # Kerning is a MILLI-pixel quantity as of round 13
+            # (`horizontal_kern_milli`), so it enters the cumulative directly
+            # rather than x1000. It is attributed to the PRECEDING glyph
+            # exactly as before -- it lands in the run before `boundaries[ci]`
+            # is taken, so it widens (or, being usually negative, narrows)
+            # advances[ci - 1]. The kern square below therefore stores
+            # MILLI-pixels too; both of its readers are these four lines, and
+            # they changed together, so there is no mixed-unit path.
             if prev_cp >= 0:
                 val kern_memo = _kern_cache_lookup_slot(slot, prev_cp, cp)
                 if kern_memo != _KERN_EMPTY:
                     _fr_probe_add_kern(0, true)
-                    advances[ci - 1] = advances[ci - 1] + kern_memo
+                    cumulative = cumulative + (kern_memo as i64)
                 else:
-                    val kern_live = self.horizontal_kern(prev_cp, cp, font_size)
+                    val kern_live = self.horizontal_kern_milli(prev_cp, cp, font_size)
                     _kern_cache_store_slot(slot, prev_cp, cp, kern_live)
-                    advances[ci - 1] = advances[ci - 1] + kern_live
+                    cumulative = cumulative + (kern_live as i64)
+            boundaries[ci] = cumulative
+            # The slot cache stores MILLI-pixels (see `get_glyph_advance_milli`),
+            # so this is still exactly one lookup per character.
             val adv_memo = _adv_cache_lookup_slot(slot, cp)
             if adv_memo > 0:
                 _fr_probe_add_adv(true)
-                advances[ci] = adv_memo
+                cumulative = cumulative + (adv_memo as i64)
             else:
                 val _miss_t0 = _fr_probe_now()
-                val glyph_advance = self.get_glyph_advance(cp, font_size)
+                val glyph_advance = self.get_glyph_advance_milli(cp, font_size)
                 _fr_probe_add_adv_miss(_fr_probe_now() - _miss_t0)
-                advances[ci] = if glyph_advance > 0: glyph_advance else: font_size * 55 / 100
+                # The no-glyph fallback is the EXISTING integer estimate widened,
+                # never a fresh fractional one: it has no sub-pixel meaning.
+                cumulative = cumulative + (if glyph_advance > 0:
+                    glyph_advance as i64
+                else:
+                    ((font_size * 55 / 100) as i64) * 1000)
                 if _run_identity != "":
                     slot = _adv_ascii_slot(_run_identity, font_size)
             prev_cp = cp
             ci = ci + 1
+        boundaries[content_len] = cumulative
+        var bi = 0
+        var previous_px: i64 = 0
+        while bi < content_len:
+            val boundary_px = _milli_px_to_px_i64(boundaries[bi + 1])
+            advances[bi] = (boundary_px - previous_px) as i32
+            previous_px = boundary_px
+            bi = bi + 1
         if _run_identity != "" and content_len <= _RUN_MEMO_MAX_CHARS:
             _run_memo_store(_run_identity, font_size, content, advances)
         advances
@@ -3089,6 +3334,49 @@ fn _fr_probe_add_adv_miss(us: i64):
         _fr_adv_miss_calls = _fr_adv_miss_calls + 1
         _fr_adv_miss_us = _fr_adv_miss_us + us
 
+# Round 12 leaf split inside the get_glyph_advance MISS path: which of the
+# three stages the ~1.85 ms per miss actually buys.
+var _fr_gadv_inst_us: i64 = 0
+var _fr_gadv_inst_calls: i64 = 0
+var _fr_gadv_blob_us: i64 = 0
+var _fr_gadv_blob_calls: i64 = 0
+
+fn _fr_probe_add_gadv_inst(us: i64):
+    if _fr_probe_armed():
+        _fr_gadv_inst_calls = _fr_gadv_inst_calls + 1
+        _fr_gadv_inst_us = _fr_gadv_inst_us + us
+
+fn _fr_probe_add_gadv_blob(us: i64):
+    if _fr_probe_armed():
+        _fr_gadv_blob_calls = _fr_gadv_blob_calls + 1
+        _fr_gadv_blob_us = _fr_gadv_blob_us + us
+
+var _fr_gadv_warm_us: i64 = 0
+var _fr_gadv_warm_calls: i64 = 0
+var _fr_gadv_sfnt_us: i64 = 0
+var _fr_gadv_sfnt_calls: i64 = 0
+
+fn _fr_probe_add_gadv_warm(us: i64):
+    if _fr_probe_armed():
+        _fr_gadv_warm_calls = _fr_gadv_warm_calls + 1
+        _fr_gadv_warm_us = _fr_gadv_warm_us + us
+
+var _fr_gadv_batch_us: i64 = 0
+var _fr_gadv_batch_calls: i64 = 0
+var _fr_gadv_batch_hits: i64 = 0
+
+fn _fr_probe_add_gadv_batch(us: i64, hit: bool):
+    if _fr_probe_armed():
+        _fr_gadv_batch_calls = _fr_gadv_batch_calls + 1
+        if hit:
+            _fr_gadv_batch_hits = _fr_gadv_batch_hits + 1
+        _fr_gadv_batch_us = _fr_gadv_batch_us + us
+
+fn _fr_probe_add_gadv_sfnt(us: i64):
+    if _fr_probe_armed():
+        _fr_gadv_sfnt_calls = _fr_gadv_sfnt_calls + 1
+        _fr_gadv_sfnt_us = _fr_gadv_sfnt_us + us
+
 # Leaf split inside `_resolve_font_metrics_with_language_config_uncached`
 # (F22 defect 1). F22 attributed the 2450 ms residual by code reading; these
 # buckets measure it, so the next fix is chosen from data rather than from a
@@ -3100,6 +3388,40 @@ var _fr_face_us: i64 = 0
 var _fr_faceid_us: i64 = 0
 var _fr_lineh_us: i64 = 0
 var _fr_uncached_calls: i64 = 0
+# Front-memo wrapper split (round 5). The `_fr_probe_*` set above covers only
+# the UNCACHED path; everything the wrapper does before it decides hit-or-miss
+# was unmeasured, which is exactly where a per-node cost hides when the memo is
+# working. `wcfg` is the per-call config+identity build in
+# resolve_font_metrics_with_language, `wcache` the cacheable predicate, `wkey`
+# the front-key concatenation (which embeds the whole content string), `wlook`
+# the two Dict operations on that key, `wpush` the memo fill.
+var _fr_wcfg_us: i64 = 0
+var _fr_wcfg_calls: i64 = 0
+var _fr_wcache_us: i64 = 0
+var _fr_wkey_us: i64 = 0
+var _fr_wlook_us: i64 = 0
+var _fr_wpush_us: i64 = 0
+
+fn _fr_probe_add_wcfg(us: i64):
+    if _fr_probe_armed():
+        _fr_wcfg_us = _fr_wcfg_us + us
+        _fr_wcfg_calls = _fr_wcfg_calls + 1
+
+fn _fr_probe_add_wcache(us: i64):
+    if _fr_probe_armed():
+        _fr_wcache_us = _fr_wcache_us + us
+
+fn _fr_probe_add_wkey(us: i64):
+    if _fr_probe_armed():
+        _fr_wkey_us = _fr_wkey_us + us
+
+fn _fr_probe_add_wlook(us: i64):
+    if _fr_probe_armed():
+        _fr_wlook_us = _fr_wlook_us + us
+
+fn _fr_probe_add_wpush(us: i64):
+    if _fr_probe_armed():
+        _fr_wpush_us = _fr_wpush_us + us
 
 fn _fr_probe_add_cls(us: i64):
     if _fr_probe_armed():
@@ -3147,10 +3469,48 @@ pub fn font_measure_probe_report() -> text:
         " uncached_calls={_fr_uncached_calls} cls_ms={_fr_cls_us / 1000} key_ms={_fr_key_us / 1000}" +
         " lookup_ms={_fr_lookup_us / 1000} face_ms={_fr_face_us / 1000}" +
         " faceid_ms={_fr_faceid_us / 1000} lineh_ms={_fr_lineh_us / 1000}" +
+        " wcfg_calls={_fr_wcfg_calls} wcfg_ms={_fr_wcfg_us / 1000}" +
+        " wcache_ms={_fr_wcache_us / 1000} wkey_ms={_fr_wkey_us / 1000}" +
+        " wlook_ms={_fr_wlook_us / 1000} wpush_ms={_fr_wpush_us / 1000}" +
+        " front_entries={_resolved_font_front_values.len()}" +
         " front_hits={_resolved_font_front_hits} front_misses={_resolved_font_front_misses}" +
-        " id_hits={_resolved_font_metric_hits} id_misses={_resolved_font_metric_misses}"
+        " id_hits={_resolved_font_metric_hits} id_misses={_resolved_font_metric_misses}" +
+        " gadv_inst_calls={_fr_gadv_inst_calls} gadv_inst_ms={_fr_gadv_inst_us / 1000}" +
+        " gadv_blob_calls={_fr_gadv_blob_calls} gadv_blob_ms={_fr_gadv_blob_us / 1000}" +
+        " gadv_warm_calls={_fr_gadv_warm_calls} gadv_warm_ms={_fr_gadv_warm_us / 1000}" +
+        " gadv_sfnt_calls={_fr_gadv_sfnt_calls} gadv_sfnt_ms={_fr_gadv_sfnt_us / 1000}" +
+        " gadv_batch_calls={_fr_gadv_batch_calls} gadv_batch_hits={_fr_gadv_batch_hits}" +
+        " gadv_batch_ms={_fr_gadv_batch_us / 1000}"
 
-val RESOLVED_FONT_FRONT_CACHE_LIMIT: i64 = 512
+# Round 5: raised 512 -> 4096. Measured on the eight-page web catalog, the memo
+# SATURATED on page 4 of 8 (`front_entries` pinned at 512 from there on) and
+# every distinct string after that point took the full uncached path: across
+# pages 4-8 `front_misses` climbed 515 -> 661 while `front_hits` flatlined at
+# 945. The cap is a memory bound, not a correctness bound -- the key is exact
+# (family + size + language + length-prefixed render-config identity + the whole
+# content string), so a larger table can only turn a miss into a hit and can
+# never return a different answer. `push` on this array is amortised O(1) here
+# (measured: 0.03-0.04 ms per entry, flat from 15 to 512 entries), so the fill
+# cost stays linear rather than quadratic at the larger bound.
+# Round 5: the DEFAULT render-config identity is a pure function of the font
+# size -- `font_render_config_default_for_size` fills every other field with a
+# constant, and `font_render_config_identity` then runs ten
+# `font_render_config_normalize` calls and a twelve-part string concatenation
+# over those constants. It was rebuilt from scratch for every `#text` node, in
+# front of the memo, so even a memo HIT paid it. Keyed by `font_size` alone the
+# memo is exact: same size in, byte-identical identity string out. Sizes on a
+# page number in the dozens, so this table is bounded by the page's distinct
+# font sizes and needs no eviction.
+var _default_cfg_identity_by_size: Dict<i32, text> = {}
+
+fn _default_render_config_identity_for_size(font_size: i32) -> text:
+    if val cached = _default_cfg_identity_by_size.get(font_size):
+        return cached
+    val identity = font_render_config_identity(font_render_config_default_for_size(font_size))
+    _default_cfg_identity_by_size[font_size] = identity
+    identity
+
+val RESOLVED_FONT_FRONT_CACHE_LIMIT: i64 = 4096
 var _resolved_font_front_index: Dict<text, i64> = {}
 var _resolved_font_front_values: [ResolvedFontMetrics] = []
 var _resolved_font_front_hits: i64 = 0
@@ -3170,20 +3530,30 @@ fn _resolved_font_front_reset():
 
 fn _resolve_font_metrics_with_language_config(family: text, content: text, font_size: i32,
                                               language: text, render_config_identity: text) -> ResolvedFontMetrics:
-    if not _resolved_font_metrics_cacheable(family, content):
+    val _fr_wc0 = _fr_probe_now()
+    val _front_cacheable = _resolved_font_metrics_cacheable(family, content)
+    _fr_probe_add_wcache(_fr_probe_now() - _fr_wc0)
+    if not _front_cacheable:
         return _resolve_font_metrics_with_language_config_uncached(
             family, content, font_size, language, render_config_identity)
+    val _fr_wk0 = _fr_probe_now()
     val front_key = family + "\n" + font_size.to_string() + "\n" + language + "\n" +
         render_config_identity.len().to_string() + ":" + render_config_identity + "\n" + content
-    if _resolved_font_front_index.has(front_key):
+    _fr_probe_add_wkey(_fr_probe_now() - _fr_wk0)
+    val _fr_wl0 = _fr_probe_now()
+    val _front_present = _resolved_font_front_index.has(front_key)
+    _fr_probe_add_wlook(_fr_probe_now() - _fr_wl0)
+    if _front_present:
         _resolved_font_front_hits = _resolved_font_front_hits + 1
         return _resolved_font_front_values[_resolved_font_front_index[front_key]]
     _resolved_font_front_misses = _resolved_font_front_misses + 1
     val resolved = _resolve_font_metrics_with_language_config_uncached(
         family, content, font_size, language, render_config_identity)
+    val _fr_wp0 = _fr_probe_now()
     if resolved.valid and _resolved_font_front_values.len() < RESOLVED_FONT_FRONT_CACHE_LIMIT:
         _resolved_font_front_index[front_key] = _resolved_font_front_values.len()
         _resolved_font_front_values = _resolved_font_front_values.push(resolved)
+    _fr_probe_add_wpush(_fr_probe_now() - _fr_wp0)
     resolved
 
 fn _resolve_font_metrics_with_language_config_uncached(family: text, content: text, font_size: i32,
@@ -3195,7 +3565,19 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     val codepoints = text_codepoints(content)
     val complex_script = _resolved_font_complex_script(codepoints)
     val category = _resolved_font_category(family)
-    val selected_candidate = if normalized_language != "und" and category != "":
+    # The coverage matrix picks a BUNDLED face with real coverage for a script,
+    # and for complex-script content that is exactly what must happen. For
+    # simple-script content whose family already resolves to a face the host
+    # provides — an explicit `@font-face` source, or a platform default — the
+    # override replaces the requested family with the matrix's witness family
+    # and the requested face is silently discarded. Measured on the catalog,
+    # which declares `lang="en"`: every `sans-serif` run came back on the
+    # bundled wght=100 Thin master instead of Helvetica, so the host face was
+    # live under `und` and dead on every real page. `browser_family_has_host_face`
+    # answers false on a host with no platform faces, leaving Linux and CI on
+    # exactly the path they had.
+    val host_face_preferred = complex_script == 0 and browser_family_has_host_face(family)
+    val selected_candidate = if normalized_language != "und" and category != "" and not host_face_preferred:
         selected_font_asset_for_language_category(normalized_language, category)
     else:
         nil
@@ -3285,7 +3667,11 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     # codepoint, so a byte-length comparison declared every non-ASCII run
     # invalid (or, when the advances were themselves byte-per-byte, agreed
     # with an inflated width).
-    val character_count = text_codepoints(content).len()
+    # Round 5: `codepoints` above is already `text_codepoints(content)` for this
+    # exact `content`, so recomputing it here walked every string a second time
+    # to arrive at the same number. Reusing the existing binding is exact, not
+    # an approximation of it.
+    val character_count = codepoints.len()
     val valid = identity != "" and advances.len() == character_count
     val resolved = ResolvedFontMetrics(
         valid: valid,
@@ -3314,8 +3700,9 @@ pub fn font_renderer_debug_resolve(family: text, content: text, font_size: i32, 
         " reason=" + m.reason
 
 fn resolve_font_metrics_with_language(family: text, content: text, font_size: i32, language: text) -> ResolvedFontMetrics:
-    val config = font_render_config_default_for_size(font_size)
-    val config_identity = font_render_config_identity(config)
+    val _fr_wg0 = _fr_probe_now()
+    val config_identity = _default_render_config_identity_for_size(font_size)
+    _fr_probe_add_wcfg(_fr_probe_now() - _fr_wg0)
     val resolved = _resolve_font_metrics_with_language_config(family, content, font_size, language, config_identity)
     resolved
 

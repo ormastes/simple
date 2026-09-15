@@ -138,7 +138,7 @@ esac
 ### 3. Run Review Pass (per target)
 
 For `target=gh`: read and follow
-`skills/git/gh_pull_req_review.md` (which itself branches on `--level`).
+`skills/gh_pull_req_review/SKILL.md` (which itself branches on `--level`).
 For `target=bb`: read and follow
 `skills/bb_pull_req_review/SKILL.md` (Agent C scope).
 
@@ -151,7 +151,7 @@ Both sub-skills:
 ### 4. Run Jira Side-Pass (linkage only)
 
 If a Jira key is linked, follow
-`skills/jira/jira_pull_req_review.md` for **comment exchange only** —
+`skills/jira_pull_req_review/SKILL.md` for **comment exchange only** —
 Jira does not gate L2/L3 merge. (Per arch doc Q3: Jira is for ticket
 linking; L2/L3 merge logic lives on gh/bb.)
 

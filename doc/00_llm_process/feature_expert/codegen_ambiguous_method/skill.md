@@ -11,7 +11,7 @@ Tracks workarounds, interpreter behavior, and resolution strategy.
 ## Pipeline Links
 
 - [verify skill](../../../../.claude/skills/verify/SKILL.md)
-- [impl skill](../../../../.claude/skills/impl/IMPL.md)
+- [impl skill](../../../../.claude/skills/impl.md)
 
 ## Feature Links
 

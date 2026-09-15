@@ -540,6 +540,50 @@ jobs:
         run: |
           sh scripts/check/check-no-dangling-reexports.shs
 
+      # Orphaned docstring tail gate.
+      #
+      # A documentation pass appended `## Heading` + prose + a bare closing
+      # `"""` with no opener to many .spl files. The bare closer is parsed as
+      # CODE, so the file does not compile, so the spec runs ZERO examples --
+      # and a suite summary cannot tell that apart from a spec with no
+      # findings. Measured 2026-09-13: avx2_fp_emit_spec.spl and
+      # fma3_emit_spec.spl had been in this state with 99 AVX2-FP and FMA3
+      # encoder examples never executing; all 99 pass on the first run after
+      # repair, so the encoders were correct the whole time and simply
+      # unguarded.
+      #
+      # Ratchet, not a zero-bar: 67 files still carry the signature and are
+      # frozen in scripts/check/orphaned_docstring_baseline.txt. Fails on a NEW
+      # occurrence and equally on a STALE baseline, so a repaired file must
+      # leave the list. Pure text scan, no seed or compiler; ~65s over 44k
+      # files, green on this tree. Fatal --selftest covers a must-flag fixture,
+      # one-line and balanced docstrings that must not flag, and a build/ copy
+      # that must be pruned.
+      # See doc/08_tracking/bug/orphaned_docstring_tail_makes_67_specs_run_zero_examples_2026-09-13.md.
+      # Native SIMD kernel gate (ADVISORY — needs a built seed + llvm-objdump,
+      # and exits 2 without them, which as a blocking gate would fail every
+      # runner that has neither).
+      #
+      # Every other SIMD gate reads the Rust seed, i.e. the INTERPRETER. A
+      # native binary links the C runtime, and that lane was broken three ways
+      # at once on 2026-09-14 while all of them stayed green: zero AVX-512
+      # (the target-attribute idiom is clang-only and the native link is gcc),
+      # every span-returning kernel returning an empty array
+      # (rt_array_new_uninit never set len, so callers read "not backed" and
+      # fell back to scalar), and the glyph mask blend reading packed bytes as
+      # tagged slots. None of them crashed.
+      # See doc/08_tracking/bug/native_binaries_had_no_avx512_2026-09-14.md.
+      - name: Native SIMD kernel gate (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          sh scripts/check/check-native-simd-kernels-real.shs
+
+      - name: Orphaned docstring tail gate
+        if: ${{ !cancelled() && (!contains(steps.receipt.outputs.skip_ids, '|ci-orphaned-docstring-tail|')) }}
+        run: |
+          sh scripts/check/check-orphaned-docstring-tail.shs
+
       # JIT runtime-symbol manifest gate.
       #
       # The JIT symbol table is generated from a HAND-MAINTAINED list,
@@ -1174,6 +1218,7 @@ jobs:
           run_guard check-arm32-real-fsexec-wiring-v16.shs
           run_guard check-arm32-supervisor-resume-v16.shs
           run_guard check-arm64-blocking-user-entry-assembly.shs
+          run_guard check-bootstrap-stage3-receipt-autowire.shs
           run_guard check-arm64-elf-map-owner.shs
           run_guard check-arm64-fault-operands.shs
           run_guard check-arm64-fsexec-probe-abi.shs
@@ -1381,6 +1426,7 @@ jobs:
           # code-idiom-gates as each is observed green here.
           # -------------------------------------------------------------------
           run_guard artifact-manifest-admission-contract.shs
+          run_guard check-vulkan-compute-real.shs
           run_guard ast-sffi-authority.shs
           run_guard async-providerless-sffi-authority.shs
           run_guard audio-manager-sffi-authority.shs
@@ -1403,6 +1449,8 @@ jobs:
           run_guard check-metal-provider-dynload-registry.shs
           run_guard check-no-phantom-field-push.shs
           run_guard check-sffi-exact-fd-dlopen.shs
+          run_guard check-bootstrap-stage3-package-index-cold-init.shs
+          run_guard check-bootstrap-stage3-scv-cold-init-passthrough.shs
           run_guard check-stage3-diagnostic-env-passthrough.shs
           run_guard check-starfive-nvme-storage.shs
           run_guard check-symbol-define-visibility-arg.shs
@@ -1451,6 +1499,8 @@ jobs:
           run_guard metal-session-providerless-guard.shs
           run_guard mir-actor-runtime-abi.shs
           run_guard mmap-provider-contracts.shs
+          run_guard check-bootstrap-stage3-receipt-autowire.shs
+          run_guard check-stage2-parent-receipt-candidate-binding.shs
           run_guard module-loader-resolve-sffi-authority.shs
           run_guard netstack-ipc-sffi-authority.shs
           run_guard network-sffi-authority.shs
@@ -1465,6 +1515,7 @@ jobs:
           run_guard rapier2d-sffi-contract.shs
           run_guard rocm-engine2d-sffi-owner-authority.shs
           run_guard rocm-io-sffi-contracts.shs
+          run_guard check-simd-kernels-vectorized.shs
           run_guard runtime-sffi-owner.shs
           run_guard runtime-value-sffi-authority.shs
           run_guard sdl2-clipboard-sffi-contract.shs

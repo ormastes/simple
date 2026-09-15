@@ -1,0 +1,69 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Purpose: Prove the parser's "Common mistake: Java `new`" hint does not fire on
+a plain identifier named `new` that follows a comparison operator, while still
+firing on the actual `new Type()` misuse it exists to catch.
+Audience: compiler and tooling engineers who maintain error_recovery.rs.
+"""
+# @req: REQ-COMPILER-FRONTEND-002 — stable requirement identity for this spec.
+
+# error_recovery.rs:414 allow-lists the tokens that may precede an identifier
+# named `new` without tripping the JavaNew hint. The list carried Plus, Minus,
+# Star, Slash, And, Or, Assign — every arithmetic/logical operator — but none
+# of the six comparison operators (Eq, NotEq, Lt, Gt, LtEq, GtEq), even though
+# its own comment says `new` is valid "after operators". So
+# `if old.raw == new.raw:` (src/lib/nogc_async_mut/fs_driver/fat32_stub.spl:391)
+# raised
+#
+#   error: Common mistake detected: Use struct literal: Type { field: value }
+#
+# at ERROR severity — not a lint, a hard compile failure — which took every
+# spec that merely IMPORTED that module down with it (declared>=N,
+# executed=0), including test/01_unit/os/formal/process_wait_refinement_spec.
+# This was the single largest failure bucket in the 2026-09-13 test/01_unit
+# sweep: 87 spec files in test/01_unit/os alone.
+#
+# See doc/08_tracking/bug/java_new_hint_fires_after_comparison_operators_2026-09-13.md
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.io_runtime.{getpid}
+
+fn probe_source(op: text) -> text:
+    "struct B:\n    raw: i64\n\nfn f(old: B, new: B) -> bool:\n    val t = old.raw {op} new.raw\n    t\n\nfn main():\n    print f(B(raw: 1), B(raw: 2))\n"
+
+fn compile_probe(op: text, tag: text) -> text:
+    val path = "/tmp/simple_javanew_probe_{getpid()}_{tag}.spl"
+    if file_exists(path):
+        file_delete(path)
+    file_write(path, probe_source(op))
+    val (out, err, _code) = process_run_timeout("bin/simple", ["run", path], 60000)
+    if file_exists(path):
+        file_delete(path)
+    out + "\n" + err
+
+describe "the JavaNew hint does not misfire on comparison operators":
+    it "accepts `new` as an identifier after ==, !=, <, >, <=, >=":
+        # @req REQ-SSPEC-COMPILER
+        for op in ["==", "!=", "<", ">", "<=", ">="]:
+            val captured = compile_probe(op, "cmp")
+            expect(captured.contains("Common mistake")).to_be(false)
+
+    it "still flags the real `new Type()` misuse (positive control)":
+        # @req REQ-SSPEC-COMPILER
+        val path = "/tmp/simple_javanew_probe_{getpid()}_positive.spl"
+        if file_exists(path):
+            file_delete(path)
+        # `return` is not in the allow-list (unlike `=`, which is — `val f =
+        # new Foo()` would not exercise the rule at all), so this genuinely
+        # exercises the JavaNew hint rather than an already-allow-listed spot.
+        file_write(path, "class Foo:\n    x: i64\n\nfn main():\n    return new Foo()\n")
+        val (out, err, _code) = process_run_timeout("bin/simple", ["run", path], 60000)
+        if file_exists(path):
+            file_delete(path)
+        val captured = out + "\n" + err
+        expect(captured.contains("Common mistake")).to_be(true)

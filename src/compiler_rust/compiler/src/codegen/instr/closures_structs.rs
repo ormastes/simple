@@ -128,6 +128,32 @@ fn report_erased_receiver_bind(
 /// name-suffix alone to 'StringBuilder_dot_len'`, and that method tail-calls
 /// `StringBuilder.to_text`, which loads field 0 of a receiver that was never
 /// passed: SEGV at `StringBuilder_dot_to_text+16`, `ldr x28,[x8]`, x8 = 0.
+/// Bind an UNQUALIFIED method name to a cross-module target only when the
+/// scan found exactly one distinct candidate.
+///
+/// A bare name carries no receiver-type evidence, so two or more same-named
+/// methods in the link closure are indistinguishable here. Picking one is a
+/// silent miscompile (the caller runs another type's body); refusing leaves
+/// the name bare for codegen's tag-dispatching builtin lowering, which is
+/// correct for every receiver shape, and reports the ambiguity by name.
+fn unique_unqualified_rebind<'a>(hits: &[&'a str], lookup_name: &str, source: &str) -> Option<&'a str> {
+    match hits {
+        [] => None,
+        [single] => Some(single),
+        many => {
+            eprintln!(
+                "warning: refusing to bind unqualified method `{}` -- {} same-named candidates in {} ({}); \
+                 the receiver type was erased before codegen, so no candidate can be chosen soundly",
+                lookup_name,
+                many.len(),
+                source,
+                many.join(", ")
+            );
+            None
+        }
+    }
+}
+
 pub(crate) fn strip_erased_receiver_qualifier(lookup_name: &str) -> &str {
     match lookup_name.split_once('.') {
         Some(("void", method)) if !method.contains('.') => method,
@@ -1220,27 +1246,44 @@ pub(crate) fn compile_method_call_static<M: Module>(
         // family is a name whose qualifier must not be discarded.
         let no_rebind = enum_helper || bare_builtin_collision;
         // Check use_map for "TypeName.func_name" entries (from imported impl methods)
+        //
+        // AMBIGUITY IS REFUSAL, NOT A COIN FLIP (2026-09-13). These scans used
+        // to take the FIRST `raw` ending in `.<method>` and `break`. `use_map`
+        // and `import_map` are HashMaps, so "first" is iteration order — an
+        // arbitrary, closure-dependent pick among every same-named method in
+        // the link closure. `src/lib/common/bytes/ints.spl` defines `store` /
+        // `to_span` on SIX sibling structs; every call to any of them bound to
+        // one arbitrary survivor, the other five bodies were never referenced
+        // and so never emitted, and `U16le.of(x).store(buf)` silently wrote 4
+        // bytes instead of 2. Binding only when the whole scan agrees on ONE
+        // target keeps every unambiguous cross-module rebind these scans exist
+        // for, and turns the ambiguous case into a named diagnostic instead of
+        // a silent miscompile.
+        // doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
         if resolved_name.is_none() && !no_rebind {
             let method_suffix = format!(".{}", func_name);
+            let mut hits: Vec<&str> = Vec::new();
             for (raw, mangled) in ctx.use_map.iter() {
-                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
-                    resolved_name = Some(mangled.as_str());
-                    break;
+                if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 && !hits.contains(&mangled.as_str())
+                {
+                    hits.push(mangled.as_str());
                 }
             }
+            resolved_name = unique_unqualified_rebind(&hits, lookup_name, "use_map");
         }
         // Also check import_map for qualified entries where type is imported
         if resolved_name.is_none() && !no_rebind {
             let method_suffix = format!(".{}", lookup_name);
+            let mut hits: Vec<&str> = Vec::new();
             for (raw, mangled) in ctx.import_map.iter() {
                 if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
                     let type_part = &raw[..raw.len() - method_suffix.len()];
-                    if ctx.use_map.contains_key(type_part) {
-                        resolved_name = Some(mangled.as_str());
-                        break;
+                    if ctx.use_map.contains_key(type_part) && !hits.contains(&mangled.as_str()) {
+                        hits.push(mangled.as_str());
                     }
                 }
             }
+            resolved_name = unique_unqualified_rebind(&hits, lookup_name, "import_map");
         }
         // Final fallback: import_map bare name (may pick wrong overload)
         if resolved_name.is_none() && !no_rebind {

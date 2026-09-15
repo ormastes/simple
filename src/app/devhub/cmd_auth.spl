@@ -3,11 +3,11 @@
 # Subcommands: login, status, logout
 # Manages credentials for Confluence and Jira
 
-use app.devhub.config.{ItfConfig, load_config, save_config, load_auth_token, save_auth_token, config_dir}
+use app.devhub.config.{ItfConfig, load_config, load_config_for_target, confluence_target_from_args, save_config, save_confluence_target, load_auth_token, save_auth_token, config_dir}
 use app.devhub.auth.{check_confluence_auth, check_jira_auth}
-use app.devhub.atlassian_site.{ATLASSIAN_AUTH_BASIC, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth}
+use app.devhub.atlassian_site.{ATLASSIAN_AUTH_BASIC, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_deployment_warning}
 use app.devhub.flags.{_extract_flag, _has_flag}
-use app.devhub.output.{print_error, print_success, print_info, should_use_color}
+use app.devhub.output.{print_error, print_success, print_info, print_warning, should_use_color}
 use app.ui.render.ansi.{ansi_green, ansi_red, ansi_bold, ansi_reset}
 use std.nogc_sync_mut.file_system.file_ops.{file_exists, file_write_text, file_read_text}
 use std.nogc_sync_mut.io.process_ops.{process_run}
@@ -61,6 +61,10 @@ fn _auth_login(args: [text]) -> i64:
 
 fn _login_confluence(args: [text]) -> i64:
     """Setup Confluence authentication."""
+    val target = confluence_target_from_args(args)
+    if target == "__invalid_confluence_selector__":
+        print_error("provide exactly one non-empty --host/--profile selector")
+        return 1
     val url = _extract_flag(args, "--url", "")
     val user = _extract_flag(args, "--user", "")
     val token = _extract_flag(args, "--token", "")
@@ -68,7 +72,7 @@ fn _login_confluence(args: [text]) -> i64:
     val auth = _extract_flag(args, "--auth", "")
 
     if url == "" and user == "" and token == "":
-        if check_confluence_auth(load_config()):
+        if check_confluence_auth(load_config_for_target(target)):
             print_success("Confluence token already configured; using REST directly (no login needed).")
             return 0
     val err = _token_login_error(url, user, token, auth)
@@ -82,7 +86,7 @@ fn _login_confluence(args: [text]) -> i64:
     _ensure_config_dir()
 
     # Save config
-    var config = load_config()
+    var config = load_config_for_target(target)
     val new_deployment = if deployment != "": deployment else: config.confluence_deployment
     val new_auth = if auth != "": auth else: config.confluence_auth
     val new_user = if user != "": user else: config.confluence_user
@@ -90,7 +94,10 @@ fn _login_confluence(args: [text]) -> i64:
         confluence_url: url,
         confluence_user: new_user,
         confluence_default_space: config.confluence_default_space,
-        jira_url: config.jira_url,
+        confluence_target: config.confluence_target,
+        confluence_gateway_url: config.confluence_gateway_url,
+        confluence_headers: config.confluence_headers,
+        jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
         jira_acli_path: config.jira_acli_path,
         jira_email: config.jira_email,
         default_output: config.default_output,
@@ -107,13 +114,19 @@ fn _login_confluence(args: [text]) -> i64:
         token_envs: config.token_envs,
         jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
         confluence_deployment: new_deployment, confluence_auth: new_auth,
-        bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+        bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+        bb_deployment: config.bb_deployment, bb_project: config.bb_project,
         bb_auth: config.bb_auth, bb_user: config.bb_user
     )
-    save_config(config)
+    if not save_confluence_target(config):
+        print_error("failed to save Confluence target configuration")
+        return 1
 
     # Save token
-    save_auth_token("confluence", token)
+    val token_provider = if config.confluence_target != nil and config.confluence_target != "": "confluence.{config.confluence_target}" else: "confluence"
+    if not save_auth_token(token_provider, token):
+        print_error("failed to save Confluence credentials")
+        return 1
 
     print_success("Confluence REST token authentication configured.")
     print_info("URL", url)
@@ -139,7 +152,8 @@ fn _login_jira(args: [text]) -> i64:
     """Configure Jira authentication.
 
     Usage:
-      itf auth login --jira                                 # delegate to acli --web
+      itf auth login --jira                                 # delegate to acli --web (skipped when a token exists)
+      itf auth login --jira --acli                          # acli --web even when a token exists
       itf auth login --jira --url URL --user EMAIL --token TOKEN  # also wire
         the curl fallback (adapter_jira_curl) that acli lacks update/comment/
         transition verbs for; --url/--user/--token save jira.url, jira.email,
@@ -165,7 +179,10 @@ fn _login_jira(args: [text]) -> i64:
             confluence_url: config.confluence_url,
             confluence_user: config.confluence_user,
             confluence_default_space: config.confluence_default_space,
-            jira_url: url,
+            confluence_target: config.confluence_target,
+            confluence_gateway_url: config.confluence_gateway_url,
+            confluence_headers: config.confluence_headers,
+            jira_url: url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
             jira_acli_path: config.jira_acli_path,
             jira_email: new_email,
             default_output: config.default_output,
@@ -182,11 +199,16 @@ fn _login_jira(args: [text]) -> i64:
             token_envs: config.token_envs,
             jira_deployment: new_deployment, jira_auth: new_auth,
             confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-            bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+            bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+            bb_deployment: config.bb_deployment, bb_project: config.bb_project,
             bb_auth: config.bb_auth, bb_user: config.bb_user
         )
-        save_config(config)
-        save_auth_token("jira", token)
+        if not save_config(config):
+            print_error("failed to save Jira configuration")
+            return 1
+        if not save_auth_token("jira", token):
+            print_error("failed to save Jira credentials")
+            return 1
         print_success("Jira REST token authentication configured (no acli login needed).")
         print_info("URL", url)
         print_info("Deployment", if new_deployment != "": new_deployment else: "cloud")
@@ -196,22 +218,19 @@ fn _login_jira(args: [text]) -> i64:
         return 0
 
     val config = load_config()
-    if check_jira_auth(config):
-        print_success("Jira token already configured; using REST directly (no acli login).")
+    # A configured token means REST, so no login — unless --acli explicitly
+    # asks to (re)run the acli browser login anyway (e.g. Cloud acli session).
+    if check_jira_auth(config) and not _has_flag(args, "--acli"):
+        print_success("Jira token already configured; using REST directly (no acli login). Use --acli to run the acli login anyway.")
         return 0
     val acli = config.jira_acli_path
 
-    # Check if acli is available
-    val (_, _, which_code) = process_run("which", [acli])
-    if which_code != 0:
-        print_error("acli not found at '{acli}'. Install Atlassian CLI or set jira.acli_path in config.")
-        return 1
-
-    # Delegate auth to acli
+    # Delegate auth to acli. No `which` preflight: it is absent on native
+    # Windows and misses .cmd shims; a missing acli fails the call itself.
     print "Delegating to acli for Jira authentication..."
     val (_, stderr, code) = process_run(acli, ["jira", "auth", "login", "--web"])
     if code != 0:
-        print_error("acli auth failed: {stderr}")
+        print_error("acli auth failed (acli_path '{acli}'; install Atlassian CLI or set jira.acli_path): {stderr}")
         return 1
 
     print_success("Jira authentication configured via acli.")
@@ -220,8 +239,13 @@ fn _login_jira(args: [text]) -> i64:
 
 fn _auth_status(args: [text]) -> i64:
     """Show authentication status for all providers."""
-    val config = load_config()
+    val target = confluence_target_from_args(args)
+    if target == "__invalid_confluence_selector__":
+        print_error("provide exactly one non-empty --host/--profile selector")
+        return 1
+    val config = load_config_for_target(target)
     val use_color = should_use_color()
+    val quiet = _has_flag(args, "--quiet") or _has_flag(args, "--silent")
 
     print "Authentication status:"
     print ""
@@ -239,9 +263,13 @@ fn _auth_status(args: [text]) -> i64:
         else:
             print "  ○ Confluence: not configured"
 
-    if conf_ok:
+    if config.confluence_url != "":
         print "    URL:  {config.confluence_url}"
-        print "    User: {config.confluence_user}"
+        if config.confluence_user != "":
+            print "    User: {config.confluence_user}"
+        val warning = atlassian_deployment_warning("Confluence", config.confluence_url, config.confluence_deployment, quiet)
+        if warning != "":
+            print_warning(warning)
 
     print ""
 
@@ -261,6 +289,9 @@ fn _auth_status(args: [text]) -> i64:
     if jira_ok:
         print "    URL:  {config.jira_url}"
         print "    CLI:  {config.jira_acli_path}"
+        val warning = atlassian_deployment_warning("Jira", config.jira_url, config.jira_deployment, quiet)
+        if warning != "":
+            print_warning(warning)
 
     0
 
@@ -269,19 +300,32 @@ fn _auth_logout(args: [text]) -> i64:
     """Remove stored credentials."""
     val is_confluence = _has_flag(args, "--confluence")
     val is_jira = _has_flag(args, "--jira")
+    val target = confluence_target_from_args(args)
+    if target == "__invalid_confluence_selector__":
+        print_error("invalid or conflicting --host/--profile selector")
+        return 1
+    val confluence_config = load_config_for_target(target)
+    val confluence_provider = if confluence_config.confluence_target != nil and confluence_config.confluence_target != "": "confluence.{confluence_config.confluence_target}" else: "confluence"
 
     if not is_confluence and not is_jira:
         # Logout all
-        save_auth_token("confluence", "")
-        save_auth_token("jira", "")
+        val confluence_removed = save_auth_token(confluence_provider, "")
+        val jira_removed = save_auth_token("jira", "")
+        if not confluence_removed or not jira_removed:
+            print_error("failed to remove all credentials")
+            return 1
         print_success("All credentials removed.")
         return 0
 
     if is_confluence:
-        save_auth_token("confluence", "")
+        if not save_auth_token(confluence_provider, ""):
+            print_error("failed to remove Confluence credentials")
+            return 1
         print_success("Confluence credentials removed.")
     if is_jira:
-        save_auth_token("jira", "")
+        if not save_auth_token("jira", ""):
+            print_error("failed to remove Jira credentials")
+            return 1
         print_success("Jira credentials removed.")
 
     0
@@ -309,6 +353,7 @@ fn _print_auth_help():
     print "  itf auth login --jira --url https://jira.corp:8443/jira --deployment datacenter --auth bearer --token PAT"
     print "  itf auth login --jira --url https://company.atlassian.net --user email --token API_TOKEN"
     print "  itf auth login --jira            # acli --web login, only when no jira token is configured"
+    print "  itf auth login --jira --acli     # run the acli --web login even when a jira token exists"
     print ""
     print "Flags:"
     print "  --confluence   Target Confluence"
@@ -318,3 +363,7 @@ fn _print_auth_help():
     print "  --token TOKEN  API token (Cloud) or personal access token (Data Center)"
     print "  --deployment D cloud (default) | datacenter"
     print "  --auth A       basic (default) | bearer"
+    print "  --acli         Jira: force the acli --web login even if a token is configured"
+    print "  --quiet, --silent  Suppress deployment-shape warnings from auth status"
+    print "  --host NAME    Select a named Confluence target"
+    print "  --profile NAME Alias for --host"

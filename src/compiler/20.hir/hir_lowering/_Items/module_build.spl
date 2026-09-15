@@ -162,18 +162,48 @@ impl HirLowering:
         hir_phase_profile_module_end(module.name)
         lowered_module
 
+    me imported_enum_owner_module(local_name: text) -> text:
+        """BOOT-20 (2026-09-14) native-codegen workaround: `imported_enum_owners`
+        is a `{text: text}` CLASS FIELD. Under Stage-2 native codegen its
+        `contains_key`/bracket-read pair silently misreports for THIS specific
+        importer -- a minimal two-file fixture (module A declares `enum Kind`,
+        module B does a plain `use A.{Kind}`, no facade, no re-export, enum
+        never even referenced in B's body) native-builds clean under the seed's
+        own in-process HIR lowering (`imported_enums.len=1,
+        imported_enum_owners.len=1, errors.len=0`) but fails
+        `imported enum \`Kind\` has no declaration owner` when compiled by the
+        Stage-2 candidate (sha 80911c47f07cdb64b4c3) -- same `.spl` logic,
+        different engine, different result. See
+        doc/08_tracking/bug/stage2_native_class_field_text_dict_owner_lost_2026-09-14.md.
+        `self.symbols.define(local_name, SymbolKind.Enum, ..., Some(owner))`
+        (module_import_registration.spl) already records the identical owner
+        in `HirSymbol.defining_module` at registration time, so read it back
+        from there instead, using the same scalar-safe
+        lookup_or_invalid -> bracket-read pattern
+        `claim_materialized_payload_binding` already relies on for exactly
+        this reason."""
+        val existing_id = self.symbols.lookup_or_invalid(local_name)
+        if not existing_id.is_valid():
+            return ""
+        val raw = existing_id.id
+        if not self.symbols.symbols.has(raw):
+            return ""
+        val symbol: HirSymbol = self.symbols.symbols[raw]
+        symbol.defining_module ?? ""
+
     me lower_module_enum_definitions(module: ParserModule) -> Dict<SymbolId, HirEnum>:
         var lowered: Dict<SymbolId, HirEnum> = {}
         val imported_names = self.imported_enums.keys()
         var enum_idx = 0
         while enum_idx < imported_names.len():
             val local_name = imported_names[enum_idx]
-            if not self.imported_enum_owners.contains_key(local_name):
+            val owner_module = self.imported_enum_owner_module(local_name)
+            if owner_module == "":
                 self.error("imported enum `{local_name}` has no declaration owner", Span.empty())
                 enum_idx = enum_idx + 1
                 continue
             hir_phase_profile_count_enum_lowering()
-            val hir_enum = self.lower_enum_with_symbol(self.imported_enums[local_name], self.imported_enum_owners[local_name], local_name, true)
+            val hir_enum = self.lower_enum_with_symbol(self.imported_enums[local_name], owner_module, local_name, true)
             lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
 

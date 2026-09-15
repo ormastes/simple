@@ -485,8 +485,24 @@ fn moduleloader_replace_live(self: LazyModuleLoader, path: text) -> LoadResult:
 
         for old_sym in old_module.symbols.keys():
             if not candidate_symbols.has(old_sym):
-                self.global_symbols = self.global_symbols.remove(old_sym)
-                self.global_symbol_addresses = self.global_symbol_addresses.remove(old_sym)
+                # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+                # natively (rt_dict_remove); assigning it back destroys the map on the
+                # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+                # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+                var _kept_self_global_symbols: Dict<text, (text, LoadedSymbol)> = {}
+                for _k in self.global_symbols.keys():
+                    if _k != old_sym:
+                        _kept_self_global_symbols[_k] = self.global_symbols[_k]
+                self.global_symbols = _kept_self_global_symbols
+                # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+                # natively (rt_dict_remove); assigning it back destroys the map on the
+                # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+                # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+                var _kept_self_global_symbol_addresses: Dict<text, i64> = {}
+                for _k in self.global_symbol_addresses.keys():
+                    if _k != old_sym:
+                        _kept_self_global_symbol_addresses[_k] = self.global_symbol_addresses[_k]
+                self.global_symbol_addresses = _kept_self_global_symbol_addresses
             _ = jit.exec_mapper.unmap_symbol(old_sym)
 
         # Phase-2: retire the old generation in the lifecycle manager.
@@ -734,24 +750,62 @@ fn moduleloader_unload(self: LazyModuleLoader, path: text):
     #    Exec pages already freed by lifecycle — drop_cached_symbol's unmap is idempotent.
     self.global_symbols = globals_without_owned
     for sym_name in owned_symbols:
-        self.global_symbol_addresses = self.global_symbol_addresses.remove(sym_name)
+        # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+        # natively (rt_dict_remove); assigning it back destroys the map on the
+        # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+        # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+        var _kept_self_global_symbol_addresses: Dict<text, i64> = {}
+        for _k in self.global_symbol_addresses.keys():
+            if _k != sym_name:
+                _kept_self_global_symbol_addresses[_k] = self.global_symbol_addresses[_k]
+        self.global_symbol_addresses = _kept_self_global_symbol_addresses
         jit.drop_cached_symbol(sym_name)
 
     # 5. Free JIT symbols triggered by this module but owned by "__jit__".
     self.global_symbols = global_symbols_without_names(self.global_symbols, jit_symbols_to_free)
     for jit_sym in jit_symbols_to_free:
-        self.global_symbol_addresses = self.global_symbol_addresses.remove(jit_sym)
+        # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+        # natively (rt_dict_remove); assigning it back destroys the map on the
+        # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+        # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+        var _kept_self_global_symbol_addresses_2: Dict<text, i64> = {}
+        for _k in self.global_symbol_addresses.keys():
+            if _k != jit_sym:
+                _kept_self_global_symbol_addresses_2[_k] = self.global_symbol_addresses[_k]
+        self.global_symbol_addresses = _kept_self_global_symbol_addresses_2
         jit.drop_cached_symbol(jit_sym)
 
     # 6. Clear template metadata for this module.
     jit.loaded_metadata = loaded_metadata_remove_path(jit.loaded_metadata, path)
-    self.semantic_exports = self.semantic_exports.remove(path)
-    self.semantic_dependencies = self.semantic_dependencies.remove(path)
-
+    # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+    # natively (rt_dict_remove); assigning it back destroys the map on the
+    # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+    # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+    var _kept_self_semantic_exports: Dict<text, [text]> = {}
+    for _k in self.semantic_exports.keys():
+        if _k != path:
+            _kept_self_semantic_exports[_k] = self.semantic_exports[_k]
+    self.semantic_exports = _kept_self_semantic_exports
+    # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+    # natively (rt_dict_remove); assigning it back destroys the map on the
+    # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+    # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+    var _kept_self_semantic_dependencies: Dict<text, [text]> = {}
+    for _k in self.semantic_dependencies.keys():
+        if _k != path:
+            _kept_self_semantic_dependencies[_k] = self.semantic_dependencies[_k]
+    self.semantic_dependencies = _kept_self_semantic_dependencies
     # 7. Remove module from cache.
     moduleloader_drop_semantic_cache_record(self, path)
-    self.modules = self.modules.remove(path)
-
+    # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+    # natively (rt_dict_remove); assigning it back destroys the map on the
+    # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+    # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+    var _kept_self_modules: Dict<text, LoadedModule> = {}
+    for _k in self.modules.keys():
+        if _k != path:
+            _kept_self_modules[_k] = self.modules[_k]
+    self.modules = _kept_self_modules
 fn moduleloader_destroy(self: LazyModuleLoader):
     """Release every lazily created loader service and retained index."""
     if moduleloader_lifecycle_created(self):

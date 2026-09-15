@@ -260,6 +260,23 @@ pub fn web_style_counters_arm():
     _wsc_sec_f = 0
     _wsc_sec_g = 0
     _wsc_sec_h = 0
+    _wsc_sec_i = 0
+    _wsc_sub_0 = 0
+    _wsc_sub_1 = 0
+    _wsc_sub_2 = 0
+    _wsc_sub_3 = 0
+    _wsc_sub_4 = 0
+    _wsc_sub_5 = 0
+    _wsc_sub_6 = 0
+    _wsc_sub_7 = 0
+    _wsc_sub_8 = 0
+    _wsc_sub_9 = 0
+    _wsc_sub_10 = 0
+    _wsc_sub_11 = 0
+    _wsc_sub_12 = 0
+    _wsc_sub_13 = 0
+
+
 
 fn _wsc_armed() -> bool:
     _wsc_on
@@ -295,6 +312,86 @@ var _wsc_sec_e: i64 = 0
 var _wsc_sec_f: i64 = 0
 var _wsc_sec_g: i64 = 0
 var _wsc_sec_h: i64 = 0
+var _wsc_sec_i: i64 = 0
+
+# Sub-bucket timers inside `sec_select` and `sec_cascade`. Round 5 left both as
+# single opaque numbers (2331 ms and 2874 ms across the eight-page catalog) and
+# recorded that splitting them was the first thing round 6 should do. Slots:
+#   0 sel_match  - selector_group_matches_node_parts over a node's candidates
+#   1 sel_sort   - _sort_candidates_by_specificity
+#   2 cas_accum  - candidate decl accumulation loop (incl. the empty-cells probe)
+#   3 cas_merge  - _merged_decls_within_quota on the normal + important strings
+#   4 cas_pre    - inline priority split, writing-mode resolve, final display
+#   5 cas_key    - cascade memo key build + lookup
+#   6 cas_apply  - apply_decls on a memo MISS
+#   7 cas_tail   - inline/important applies + final overflow normalisation
+# Permanent and default-off, same idiom as the section timers above.
+var _wsc_sub_0: i64 = 0
+var _wsc_sub_1: i64 = 0
+var _wsc_sub_2: i64 = 0
+var _wsc_sub_3: i64 = 0
+var _wsc_sub_4: i64 = 0
+var _wsc_sub_5: i64 = 0
+var _wsc_sub_6: i64 = 0
+var _wsc_sub_7: i64 = 0
+# Nested inside slot 7 (`cas_tail`), added in round 10. Slot 7 keeps measuring
+# the same whole span, so its number stays comparable with rounds 5-9; these
+# six split it into its leaves:
+#   8  tail_inline   - inline_normal empty-cells probe + apply
+#   9  tail_imp      - combined_important empty-cells probe + apply
+#   10 tail_inlineimp- inline_important empty-cells probe + apply
+#   11 tail_display  - final_display write / `display:contents` apply
+#   12 tail_overflow - _normalize_final_overflow_axes
+#   13 tail_struct   - details-hidden + selectedcontent applies
+var _wsc_sub_8: i64 = 0
+var _wsc_sub_9: i64 = 0
+var _wsc_sub_10: i64 = 0
+var _wsc_sub_11: i64 = 0
+var _wsc_sub_12: i64 = 0
+var _wsc_sub_13: i64 = 0
+
+# The six nested timers cost six extra clock reads per node, which is enough to
+# inflate slot 7 itself (measured 535 ms -> ~1.2 s across the catalog). They are
+# therefore armed by their OWN env var, so a `SIMPLE_WEB_STYLE_COUNTERS=1` run
+# still reports a `cas_tail_ms` comparable with rounds 5-9.
+var _wsc_tail_sub_on: i32 = -1
+
+fn _wsc_tail_sub_armed() -> bool:
+    if _wsc_tail_sub_on < 0:
+        _wsc_tail_sub_on = if (env_get("SIMPLE_WEB_TAIL_SUBTIMERS") ?? "") == "1": 1 else: 0
+    _wsc_tail_sub_on == 1
+
+fn _wsc_add_sub2(which: i32, us: i64):
+    if which == 8:
+        _wsc_sub_8 = _wsc_sub_8 + us
+    elif which == 9:
+        _wsc_sub_9 = _wsc_sub_9 + us
+    elif which == 10:
+        _wsc_sub_10 = _wsc_sub_10 + us
+    elif which == 11:
+        _wsc_sub_11 = _wsc_sub_11 + us
+    elif which == 12:
+        _wsc_sub_12 = _wsc_sub_12 + us
+    else:
+        _wsc_sub_13 = _wsc_sub_13 + us
+
+fn _wsc_add_sub(which: i32, us: i64):
+    if which == 0:
+        _wsc_sub_0 = _wsc_sub_0 + us
+    elif which == 1:
+        _wsc_sub_1 = _wsc_sub_1 + us
+    elif which == 2:
+        _wsc_sub_2 = _wsc_sub_2 + us
+    elif which == 3:
+        _wsc_sub_3 = _wsc_sub_3 + us
+    elif which == 4:
+        _wsc_sub_4 = _wsc_sub_4 + us
+    elif which == 5:
+        _wsc_sub_5 = _wsc_sub_5 + us
+    elif which == 6:
+        _wsc_sub_6 = _wsc_sub_6 + us
+    else:
+        _wsc_sub_7 = _wsc_sub_7 + us
 
 fn _wsc_add_section(which: i32, us: i64):
     if which == 0:
@@ -311,8 +408,39 @@ fn _wsc_add_section(which: i32, us: i64):
         _wsc_sec_f = _wsc_sec_f + us
     elif which == 6:
         _wsc_sec_g = _wsc_sec_g + us
-    else:
+    elif which == 7:
         _wsc_sec_h = _wsc_sec_h + us
+    else:
+        _wsc_sec_i = _wsc_sec_i + us
+
+# ---------------------------------------------------------------------------
+# Layout-stage cost counters (2026-09-13, round 13), same `_wsc_on` gate and
+# same default-off discipline as the style counters above.
+#
+# Round 12 §4 recorded that `sec_layout*` had NO timers at all: the `layout()`
+# window was the single largest unattributed mass in the cold pipeline and had
+# never been profiled. These eight buckets are INCLUSIVE leaf timers on the
+# layout helpers that do real work; nested ones are noted in the report's own
+# doc rather than subtracted, exactly as `sec_resolve` nests in `sec_metrics`.
+var _wlay_us: [i64] = [0; 10]
+var _wlay_calls: [i64] = [0; 10]
+
+fn _wlay_add(which: i32, us: i64, calls: i64):
+    if _wsc_on:
+        _wlay_us[which] = _wlay_us[which] + us
+        _wlay_calls[which] = _wlay_calls[which] + calls
+
+pub fn web_layout_counters_report() -> text:
+    "lay_measure_ms={_wlay_us[0] / 1000} lay_measure_calls={_wlay_calls[0]}" +
+        " lay_inline_ms={_wlay_us[1] / 1000} lay_inline_calls={_wlay_calls[1]}" +
+        " lay_wrap_ms={_wlay_us[2] / 1000} lay_wrap_calls={_wlay_calls[2]}" +
+        " lay_intrinsic_ms={_wlay_us[3] / 1000} lay_intrinsic_calls={_wlay_calls[3]}" +
+        " lay_flex_ms={_wlay_us[4] / 1000} lay_flex_calls={_wlay_calls[4]}" +
+        " lay_table_ms={_wlay_us[5] / 1000} lay_table_calls={_wlay_calls[5]}" +
+        " lay_grid_ms={_wlay_us[6] / 1000} lay_grid_calls={_wlay_calls[6]}" +
+        " lay_ellipsize_ms={_wlay_us[7] / 1000} lay_ellipsize_calls={_wlay_calls[7]}" +
+        " lay_compose_resolve_ms={_wlay_us[8] / 1000} lay_compose_resolve_calls={_wlay_calls[8]}" +
+        " lay_cps_ms={_wlay_us[9] / 1000} lay_cps_calls={_wlay_calls[9]}"
 
 pub fn web_style_counters_report() -> text:
     "probe_calls={_wsc_probe_calls} probe_ms={_wsc_probe_us / 1000}" +
@@ -324,7 +452,19 @@ pub fn web_style_counters_report() -> text:
         " sec_inherit_ms={_wsc_sec_a / 1000} sec_select_ms={_wsc_sec_b / 1000}" +
         " sec_cascade_ms={_wsc_sec_c / 1000} sec_wm_ms={_wsc_sec_d / 1000}" +
         " sec_metrics_ms={_wsc_sec_e / 1000} sec_store_ms={_wsc_sec_f / 1000}" +
-        " sec_lang_ms={_wsc_sec_g / 1000} sec_resolve_ms={_wsc_sec_h / 1000}"
+        " sec_lang_ms={_wsc_sec_g / 1000} sec_resolve_ms={_wsc_sec_h / 1000}" +
+        " sec_digest_ms={_wsc_sec_i / 1000}" +
+        " sel_match_ms={_wsc_sub_0 / 1000} sel_sort_ms={_wsc_sub_1 / 1000}" +
+        " cas_accum_ms={_wsc_sub_2 / 1000} cas_merge_ms={_wsc_sub_3 / 1000}" +
+        " cas_pre_ms={_wsc_sub_4 / 1000} cas_key_ms={_wsc_sub_5 / 1000}" +
+        " cas_apply_ms={_wsc_sub_6 / 1000} cas_tail_ms={_wsc_sub_7 / 1000}" +
+        " tail_inline_ms={_wsc_sub_8 / 1000} tail_imp_ms={_wsc_sub_9 / 1000}" +
+        " tail_inlineimp_ms={_wsc_sub_10 / 1000}" +
+        " tail_display_ms={_wsc_sub_11 / 1000}" +
+        " tail_overflow_ms={_wsc_sub_12 / 1000}" +
+        " tail_struct_ms={_wsc_sub_13 / 1000}" +
+        " decl_tbl_hits={_decl_table_memo_hits}" +
+        " decl_tbl_misses={_decl_table_memo_misses}"
 # Cap on the number of style rules the cascade will apply per node; rules beyond
 # this index (CSS source order) are skipped so the first rules keep their effect.
 val WEB_STYLE_RULE_QUOTA: i32 = 4096
@@ -810,6 +950,68 @@ fn attr_present(inner: text, name: text) -> bool:
                     return true
         i = i + 1
     false
+
+# Single-pass prefilter for presentational_attr_decls.
+#
+# presentational_attr_decls used to run six independent `attr_value*` /
+# `attr_present` scans over every element's raw attribute text, and each of
+# those materialises `inner.bytes()` again. Almost no element in a real page
+# carries any of the five legacy presentational attributes, so the six scans
+# almost always find nothing. This walks the byte array ONCE, quote-aware,
+# using exactly the token-start + case-insensitive name rule the individual
+# scans use, and answers whether any of the five names can possibly be found.
+#
+# Conservative by construction: a `false` answer means no scan for
+# hidden/bgcolor/width/height/align can match a token start, so all six
+# lookups would have returned nothing. It never suppresses a real match.
+pub fn html_has_presentational_attr(inner: text) -> bool:
+    val inner_len = inner.len()
+    if inner_len == 0:
+        return false
+    val ib = inner.bytes()
+    var quote = 0
+    var i = 0
+    while i < inner_len:  # cpu-lane-loop-ok: one quote-aware pass over ONE element's raw attribute text; bound is that element's attribute-text length
+        val current = ib[i]
+        if quote != 0:
+            if current == quote:
+                quote = 0
+            i = i + 1
+            continue
+        if current == 34 or current == 39:
+            quote = current
+            i = i + 1
+            continue
+        var token_start = i == 0
+        if not token_start:
+            val previous = ib[i - 1]
+            token_start = (
+                previous == 32 or previous == 9 or
+                previous == 10 or previous == 13
+            )
+        if token_start:
+            if (
+                _html_attr_name_at(ib, inner_len, i, "hidden") or
+                _html_attr_name_at(ib, inner_len, i, "bgcolor") or
+                _html_attr_name_at(ib, inner_len, i, "width") or
+                _html_attr_name_at(ib, inner_len, i, "height") or
+                _html_attr_name_at(ib, inner_len, i, "align")
+            ):
+                return true
+        i = i + 1
+    false
+
+fn _html_attr_name_at(ib: [u8], inner_len: i64, at: i64, name: text) -> bool:
+    val nb = name.bytes()
+    val name_len = name.len()
+    if at + name_len > inner_len:
+        return false
+    var j = 0
+    while j < name_len:  # cpu-lane-loop-ok: compares ONE fixed short attribute name at one offset; bound is that name's length
+        if not html_attr_name_byte_equal(ib[at + j], nb[j]):
+            return false
+        j = j + 1
+    true
 
 fn is_void(tag: text) -> bool:
     tag == "meta" or tag == "br" or tag == "img" or tag == "input" or tag == "link" or tag == "hr" or tag == "area" or tag == "base" or tag == "col" or tag == "embed" or tag == "source" or tag == "track" or tag == "wbr"

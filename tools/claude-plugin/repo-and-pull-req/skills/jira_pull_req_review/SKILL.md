@@ -61,7 +61,7 @@ For new comments (since last check):
 ### Step 4 — Run GitHub PR Review
 
 Delegate to gh_pull_req_review for the linked PR:
-- Read and follow `skills/git/gh_pull_req_review.md`
+- Read and follow `skills/gh_pull_req_review/SKILL.md`
 - This handles all GitHub-side comments, fixes, and rebasing
 
 ### Step 5 — Update Jira Status

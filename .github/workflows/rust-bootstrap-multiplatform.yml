@@ -14,6 +14,7 @@ on:
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
       - 'scripts/check/check-bootstrap-portability.shs'
+      - 'scripts/check/check-freebsd-selfhost-ci.shs'
       - 'scripts/check/check-llvm-simd-row-native-arch.shs'
       - 'scripts/check/check-mcp-native-smoke.shs'
       - 'scripts/check/check-cranelift-aot-aggregate-cross.shs'
@@ -63,6 +64,7 @@ on:
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
       - 'scripts/check/check-bootstrap-portability.shs'
+      - 'scripts/check/check-freebsd-selfhost-ci.shs'
       - 'scripts/check/check-llvm-simd-row-native-arch.shs'
       - 'scripts/check/check-mcp-native-smoke.shs'
       - 'scripts/check/check-cranelift-aot-aggregate-cross.shs'
@@ -297,7 +299,60 @@ jobs:
             pkg install -y curl bash
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
           run: |
+            set -eu
             . "$HOME/.cargo/env"
             cd src/compiler_rust
-            cargo build --profile bootstrap -p simple-driver
-            cargo test --workspace --lib
+            echo 'FreeBSD guest resource diagnostics (bounded)'
+            {
+              echo 'sysctl:'
+              sysctl -n hw.ncpu hw.physmem vm.swap_total 2>&1 || true
+              echo 'swapinfo:'
+              swapinfo -h 2>&1 || true
+            } | head -n 40
+
+            CARGO_BUILD_JOBS=1 cargo build --profile bootstrap -p simple-driver || {
+              cargo_status=$?
+              echo "FreeBSD cargo build failed (status=$cargo_status)" >&2
+              echo 'FreeBSD dmesg tail (last 80 lines)' >&2
+              dmesg 2>&1 | tail -n 80 || true
+              exit "$cargo_status"
+            }
+            CARGO_BUILD_JOBS=1 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --lib || {
+              cargo_status=$?
+              echo "FreeBSD cargo test failed (status=$cargo_status)" >&2
+              echo 'FreeBSD dmesg tail (last 80 lines)' >&2
+              dmesg 2>&1 | tail -n 80 || true
+              exit "$cargo_status"
+            }
+
+  # Native FreeBSD self-hosted Stage 3 proof. This is intentionally separate
+  # from the Rust seed build above: it exercises the canonical receipt-free
+  # Stage 2 trust root and the tracked Stage 3 resume interface in the guest.
+  freebsd-selfhost:
+    runs-on: ubuntu-latest
+    name: Self-host — FreeBSD Stage 3
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run native FreeBSD self-host checker
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y bash coreutils curl git gmake llvm18 pkgconf libffi zstd perl5 rsync
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+          run: |
+            set -eu
+            . "$HOME/.cargo/env"
+            export PATH=/usr/local/libexec/gnubin:/usr/local/bin:$PATH
+            sh scripts/check/check-freebsd-selfhost-ci.shs
+
+      - name: Upload FreeBSD self-host evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: freebsd-selfhost-${{ github.sha }}
+          path: build/bootstrap-freebsd-ci
+          if-no-files-found: warn
+          retention-days: 14

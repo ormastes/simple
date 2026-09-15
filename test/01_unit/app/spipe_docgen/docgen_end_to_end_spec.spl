@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Verify that spipe-docgen can generate a page for a real committed spec
+— parse it and write non-empty markdown with no stub.
+Audience: compiler and tooling engineers who maintain src/app/spipe_docgen.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Generates into a local fixture directory which it removes as it goes.
+# @manual: primary
+REQ-APP-SPIPEDOCGEN-001
+"""
+# @req: REQ-APP-SPIPEDOCGEN-001
+
+"""Docgen must survive its own refactors: an arity mismatch broke every spec.
+
+Why this spec exists: `spipe-docgen` failed on EVERY spec in the tree with
+`function expects argument for parameter 'scenario_indent', but none was
+provided`. `find_scenario_body_end` gained a `continuation` parameter in #373
+(so a fixture's column-0 string body no longer ends a scenario early) and one
+of its five call sites was not updated, leaving a three-argument call to a
+four-parameter function. That is a STATIC semantic error, so it was independent
+of the backend, the binary, and the spec being generated — documentation
+generation was simply dead repo-wide.
+Bug: doc/08_tracking/bug/spipe_docgen_missing_scenario_indent_argument_2026-09-13.md
+
+The similar-problem generalisation is that docgen had unit coverage for its
+helpers but no scenario that ran the pipeline END TO END on a real committed
+spec, so a call site that no other spec reached could rot unseen. This is that
+scenario: parse a small tracked spec, generate its page, and read the result
+back off disk.
+
+# @req: REQ-SSPEC-APP
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+use app.spipe_docgen.spipe_docgen.parser.{parse_spipe_file}
+use app.spipe_docgen.spipe_docgen.generator.{generate_feature_doc}
+
+use std.io_runtime.{dir_create_all}
+use std.io_runtime.{file_exists}
+use std.io_runtime.{read_file_text}
+
+describe "spipe-docgen generates a page for a real committed spec":
+
+    it "parses a tracked spec and writes non-empty markdown, with no stub":
+        # @req: REQ-APP-SPIPEDOCGEN-001
+        # @req: REQ-SSPEC-APP
+        step("Verify: the whole docgen pipeline runs on a committed spec")
+        """Before the fix this could not reach an assertion at all: the call
+        site's arity mismatch is a semantic error raised while the docgen
+        module is compiled, so the program never started."""
+
+        step("Pick a small tracked spec and confirm it is really there")
+        val source = "test/01_unit/app/spipe_docgen/spec_kw_line_spec.spl"
+        expect(file_exists(source)).to_equal(true)  # oracle: true — the fixture is a committed spec, not generated here
+
+        step("Parse it")
+        val parsed = parse_spipe_file(source)
+        expect(parsed.is_ok()).to_equal(true)  # oracle: true — parsing a well-formed committed spec must succeed
+
+        step("Generate its page into a local fixture directory")
+        val out_dir = ".build/spipe_docgen_e2e_spec"
+        dir_create_all(out_dir)
+        val generated = generate_feature_doc(parsed.unwrap(), out_dir)
+        expect(generated.is_ok()).to_equal(true)  # oracle: true — generation must succeed, which is exactly what the arity defect prevented
+
+        step("Read the page back off disk: a real page, not a stub")
+        val page_path = generated.unwrap()
+        expect(file_exists(page_path)).to_equal(true)  # oracle: true — the page was actually written
+        val page = read_file_text(page_path)
+        expect(page.len() > 0).to_equal(true)  # oracle: true — a stub would be an empty or unwritten page
+        expect(page.contains("#")).to_equal(true)  # oracle: true — generated markdown carries at least one heading

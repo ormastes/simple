@@ -16,9 +16,25 @@
 # switch or a regex also contains "/" and would be mangled.
 #
 # Record: doc/08_tracking/bug/pr255_host_path_native_corrupts_posix_paths_and_costs_unix_2026-09-02.md
-
-@unsafe(reason: "raw compiled host-platform name ABI", capabilities: [ffi])
-extern fn rt_platform_name() -> text
+#
+# HOST-OS DETECTOR CONSOLIDATION (2026-09-14): this file used to declare its
+# own `extern fn rt_platform_name() -> text`, a THIRD independent copy of the
+# same runtime symbol's signature alongside io_runtime.spl's and pty.spl's
+# (both `-> text?`) and env/types.spl's (`-> text`, same as here). Five
+# differing-signature externs for one symbol co-compiled in one process is
+# exactly the class of bug this repo's compiler already warns about for
+# `file_read_text_at` ("2 co-compiled definitions with 2 differing
+# signatures ... a fallback hit may still dispatch to the wrong one") --
+# and it is the traced root cause behind
+# doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md: four
+# independent PRs (#941, #944, #945, #947) each found
+# std.nogc_sync_mut.env.platform.detect_os() answering "not Windows" while
+# std.io_runtime.host_os() answered "windows" correctly in the SAME process,
+# on a real Windows host, inside the Stage 2 bootstrap sanity harness's
+# in-process native-build. Consolidated onto the single canonical wrapper in
+# std.sffi.platform (the ONLY file that still declares the extern) so no two
+# call sites can ever disagree on its signature again.
+use std.sffi.platform.{platform_name_raw}
 
 fn _host_is_windows(platform: text) -> bool:
     # Fast exact-match arm for the three names the runtime actually emits, so
@@ -98,8 +114,7 @@ fn _host_long_path(native: text) -> text:
     "\\\\?\\" + native
 
 fn _host_platform_name() -> text:
-    unsafe(capabilities: [ffi]):
-        rt_platform_name()
+    platform_name_raw()
 
 # Cached host-platform decision. Empty = not yet computed; [0] is 1/0.
 # `rt_platform_name()` and the name classification run at most once per process.

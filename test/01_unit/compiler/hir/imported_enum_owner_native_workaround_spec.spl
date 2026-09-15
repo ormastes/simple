@@ -1,0 +1,112 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/hir/imported_enum_owner_native_workaround_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/imported_enum_owner_native_workaround_spec.md
+# doc-path: doc/03_plan/sys_test/imported_enum_owner_native_workaround_spec.md
+# doc-path: doc/04_architecture/imported_enum_owner_native_workaround_spec.md
+# doc-path: doc/05_design/imported_enum_owner_native_workaround_spec_oracles.md
+# @manual: primary
+
+"""
+# Imported Enum Owner Survives Under a Plain Single-Hop Import — Unit Spec
+
+Regression guard for BOOT-20 (2026-09-14):
+`doc/08_tracking/bug/stage2_native_class_field_text_dict_owner_lost_2026-09-14.md`.
+
+A minimal two-module fixture -- module A declares `enum Kind`, module B does a
+plain `use A.{Kind}` (no facade, no re-export, the enum never even referenced
+in B's body) -- lowers CLEAN through this exact `.spl` HIR-lowering logic when
+run in-process here (interpreted by the Rust seed): `imported_enums.len=1`,
+`imported_enum_owners.len=1`, `errors.len=0`. The SAME fixture native-built by
+the pinned Stage-2 candidate (sha `80911c47f07cdb64b4c3`) instead fails
+`imported enum \`Kind\` has no declaration owner` -- same logic, different
+engine, different result. Root cause: `imported_enum_owners` is a
+`{text: text}` CLASS FIELD, and Stage-2's native codegen silently misreports
+its `contains_key`/bracket-read pair for this shape (see the bug doc for two
+related, separately-filed native-only reproductions: a class-field
+`{text: text}` bracket-read returning a raw corrupted word, and a compiler
+self-crash lowering a method that writes such a field inside a guarded
+`if`). The fix reads the owner from `HirSymbol.defining_module` instead
+(already recorded at the same registration site), using the same
+scalar-safe `lookup_or_invalid` -> bracket-read pattern
+`claim_materialized_payload_binding` already relies on for exactly this
+reason -- `imported_enum_owners` itself is left in place (other specs pin its
+field/reset shape) but is no longer READ for this decision.
+
+This spec runs the fixture through the in-process HIR-lowering entry point
+(the same technique `enum_shortname_collision_two_owners_spec.spl` uses) so
+it is GREEN under the interpreter by construction -- it is a contract pin, not
+proof of the native-only defect. The native RED/GREEN evidence is the
+fixture under `bin/simple native-build` (seed vs Stage-2 candidate), recorded
+in the bug doc and the BOOT-20 receipt, not reproducible in this spec.
+"""
+use std.spec.step
+
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn boot20_owner_spec_logger() -> Logger:
+    Logger(level: 0)
+
+fn boot20_owner_spec_surfaces(modules: Dict<text, Module>, sources: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(error):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+
+describe "BOOT-20 imported enum owner survives a plain single-hop import":
+    # @manual scenario evidence
+    """A direct `use A.{Kind}` import, no facade, no re-export, enum unused
+    in the consumer's body -- the minimal shape that fails natively."""
+    it "keeps a declaration owner and lowers with no errors":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps a declaration owner and lowers with no errors")
+        val log = boot20_owner_spec_logger()
+        val a_source = "enum Kind:\n    Alpha\n    Beta"
+        val consumer_source = "use boot20owner.a.\{Kind\}\n\nfn main():\n    ()"
+        val a = parse_full_frontend(a_source, "boot20owner.a", "boot20owner.a", log)
+        val consumer = parse_full_frontend(consumer_source, "boot20owner.consumer", "boot20owner.consumer", log)
+
+        var modules: Dict<text, Module> = {}
+        modules["boot20owner.a"] = a
+        modules["boot20owner.consumer"] = consumer
+        val sources = [
+            SourceFile(path: "boot20owner/a.spl", content: a_source, module_name: "boot20owner.a"),
+            SourceFile(path: "boot20owner/consumer.spl", content: consumer_source, module_name: "boot20owner.consumer")
+        ]
+        val surfaces = boot20_owner_spec_surfaces(modules, sources)
+        var lowering = hirlowering_for_module("boot20owner.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+
+        # Vacuity guard: this must exercise a real imported enum, not an empty
+        # closure that would pass by having nothing to check.
+        expect(lowering.imported_enums.keys().len()).to_equal(1)
+
+        var owner_errors: i64 = 0
+        for error in lowering.errors:
+            if error.message.contains("has no declaration owner"):
+                owner_errors = owner_errors + 1
+        expect(owner_errors).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)

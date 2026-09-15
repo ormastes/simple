@@ -34,6 +34,7 @@ use std.nogc_sync_mut.io.cuda_sffi.{
     cuda_compile, cuda_unload
 }
 use std.common.string_core.{bytes_to_text, text_to_bytes}
+use std.io_runtime.{env_get}
 
 # ============================================================================
 # Typed verdicts
@@ -82,6 +83,13 @@ struct CudaProvenanceReport:
 # Device probing -- the single classifier every wrapper below routes through
 # ============================================================================
 
+# True when the operator pinned this host to require a live CUDA device.
+# Same env var and same "1" spelling as gpu_live_required("cuda")
+# (src/lib/nogc_sync_mut/test_runner/gpu_lane_common.spl:64); read directly
+# here so a stdlib io module does not take a dependency on the test runner.
+fn cuda_live_required() -> bool:
+    env_get("CUDA_LIVE_REQUIRED") == "1"
+
 # Classify host CUDA availability into one of the plan's five documented
 # categories, or the empty text when a usable device is present.
 fn cuda_host_blocker_category() -> text:
@@ -100,6 +108,12 @@ fn cuda_host_blocker_category() -> text:
 fn cuda_readback_validate() -> CudaValidationOutcome:
     val blocker = cuda_host_blocker_category()
     if blocker != "":
+        # Plan §CI: on the dedicated live lane the operator pins
+        # CUDA_LIVE_REQUIRED=1, and an absent device must NOT be excused as a
+        # SKIP -- it is a provisioning FAIL. Everywhere else (this sandbox
+        # included) the same absence stays a SKIP.
+        if cuda_live_required():
+            return CudaValidationOutcome(status: "FAIL", detail: blocker)
         return CudaValidationOutcome(status: "SKIP", detail: blocker)
     # A real host-to-device-to-host round trip: the readback must reproduce
     # the source bytes exactly, or the verdict is FAIL.

@@ -1,12 +1,13 @@
 <!-- codex-design -->
 # DevHub mode verification plan
 
-Run `sh test/00_unit/scripts/devhub_windows_launch_modes_test.shs` for
-REQ-DHLM-001 through REQ-DHLM-004, using process dispatch and absence-of-probe
-markers. Inspect the small wrapper diff for REQ-DHLM-005 (no AV operations).
-Run the existing Windows launcher PowerShell test for transport regression.
-The nonexistent PowerShell mode test referenced by the interrupted lane is
-replaced by this implemented shell harness, runnable under Git for Windows.
+Run `sh test/00_unit/scripts/devhub_windows_launch_modes_test.shs` for the
+POSIX wrapper contract and `powershell -NoProfile -ExecutionPolicy Bypass -File
+test/00_unit/scripts/devhub_windows_launcher_test.ps1` for Windows native
+dispatch, argument/exit propagation, explicit POSIX compatibility, and
+absence-of-probe markers. Inspect the wrapper diff for REQ-DHLM-005 (no AV
+operations). Native Windows tests deliberately remove `sh.exe` from PATH while
+retaining `certutil` for receipt hashing.
 
 Outstanding: actual loader design/implementation, native loading behavior,
 and independent classification of the exact reported Wacatac artifact.

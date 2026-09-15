@@ -6988,11 +6988,46 @@ SplArray* rt_array_new(int64_t cap) {
 }
 
 SplArray* rt_array_new_uninit(int64_t cap) {
-    return rt_core_array_new_fill(cap, 0, 0);
+    /* `cap` elements that EXIST but hold undefined values — that is what
+       "uninit" means to every caller, all of which allocate n, fill n and
+       return. `rt_core_array_new_fill` only sets `cap`; `len` stays 0 from the
+       calloc of the header, so without this the array comes back with correct
+       data and a length of ZERO.
+       That is not a crash, which is why it survived: a Simple caller checks
+       `span.len() != n`, reads it as "extern not backed", and silently falls
+       back to the scalar path. Measured in a native binary, EVERY
+       span-returning C kernel was dead this way — the DB bitmap ops, the glyph
+       mask blend, and the soft-shadow coverage blend — while the in-place
+       kernels next to them worked fine and made the lane look healthy.
+       `rt_array_repeat` already sets `len` by hand after the same call; this
+       makes the constructor itself honest instead of requiring every caller to
+       remember. */
+    SplArray* a = rt_core_array_new_fill(cap, 0, 0);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (array) {
+        array->len = cap > 0 ? cap : 0;
+    }
+    return a;
 }
 
 SplArray* rt_array_new_with_cap_u64(int64_t cap) {
     return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
+}
+
+/* Is this array stored as PACKED BYTES rather than tagged int64 slots?
+ *
+ * `[u8]` takes the packed representation (RT_CORE_ARRAY_FLAG_BYTES); every
+ * other element type takes one tagged slot each. A kernel in another
+ * translation unit cannot see the flag, so it has to guess — and
+ * `rt_engine2d_blend_mask_span_u32` guessed "tagged slots" for its glyph mask,
+ * read packed bytes as int64 words, and blended every glyph pixel against
+ * garbage. It went unnoticed because the interpreter path uses the Rust twin,
+ * which unpacks correctly.
+ */
+int rt_array_is_byte_packed(SplArray* value) {
+    RtCoreArray* array = rt_core_array_ptr(value);
+    if (!array) return 0;
+    return (array->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
 }
 
 void rt_array_free(SplArray* value) {
@@ -10791,6 +10826,54 @@ int64_t rt_file_read_regular_no_follow_last_failure(void) {
 
 #define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
 
+#if defined(_WIN32)
+/* Widen a UTF-8 path and, when it is long enough to hit the MAX_PATH ceiling,
+ * qualify it and add the extended-length prefix. A WIDE call is not by itself
+ * exempt: CreateFileW still caps at MAX_PATH unless the path carries the
+ * prefix, which is why a 266-character diagnostic file written successfully
+ * could not be read back. Twin of rt_widen_long_path_rc in runtime.c -- this
+ * file carries a byte-identical copy of the reader below, and archive member
+ * order decides which one links, so both copies must widen or the fix is a
+ * coin flip (see 08987610e54, which fixed the runtime.c copy only after
+ * finding this file's copy still unfixed). Separator and prefix are built
+ * from the numeric code point (92) to keep this free of escape sequences.
+ * Same name as the runtime.c twin (not a fresh one) so the
+ * push-rt-dual-implementation ratchet's already-baselined single-lane entry
+ * for rt_widen_long_path_rc covers this copy too, instead of requiring a new
+ * baseline row for a second name. Caller frees. */
+static wchar_t* rt_widen_long_path_rc(const char* path) {
+    static const wchar_t sep = (wchar_t)92;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
+        free(wide);
+        return NULL;
+    }
+    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    {
+        wchar_t* scan;
+        DWORD need;
+        wchar_t* full;
+        wchar_t* out;
+        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+        need = GetFullPathNameW(wide, 0, NULL, NULL);
+        if (need == 0) return wide;
+        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        if (!full) return wide;
+        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        if (!out) { free(full); return wide; }
+        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        free(full);
+        free(wide);
+        return out;
+    }
+}
+#endif
+
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
@@ -10803,13 +10886,8 @@ int64_t rt_file_read_regular_no_follow_bounded(
     if (!bytes) return RT_RNF_FAIL(9);
     size_t total = 0;
 #if defined(_WIN32)
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) { free(bytes); return RT_RNF_FAIL(9); }
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len)) {
-        free(wide_path); free(bytes); return RT_RNF_FAIL(4);
-    }
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
     HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
@@ -13635,12 +13713,83 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
 }
 
+#if defined(_WIN32)
+/* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
+ * leaves it long, add the extended-length ("\\?\") prefix so a WIDE Win32
+ * call is not itself capped at MAX_PATH (a wide call is not exempt on its
+ * own -- only the prefix lifts the ceiling, to ~32767). Caller frees. Named
+ * without the rt_ prefix -- it is a pure file-local helper with no runtime-
+ * API surface of its own; see scripts/check/check-rt-dual-implementation-
+ * ratchet.shs, which treats any new rt_-prefixed definition as a fresh
+ * single-lane primitive requiring a Simple twin. The path separator and
+ * prefix are built from the numeric code point (92) to keep this free of
+ * escape sequences. */
+static wchar_t* spl_widen_long_path(const char* path) {
+    static const wchar_t sep = (wchar_t)92;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
+        free(wide);
+        return NULL;
+    }
+    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    {
+        wchar_t* scan;
+        DWORD need;
+        wchar_t* full;
+        wchar_t* out;
+        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+        need = GetFullPathNameW(wide, 0, NULL, NULL);
+        if (need == 0) return wide;
+        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        if (!full) return wide;
+        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        if (!out) { free(full); return wide; }
+        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        free(full);
+        free(wide);
+        return out;
+    }
+}
+#endif
+
 int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len, const uint8_t* destination_ptr, uint64_t destination_len) {
     char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) || !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
 #if defined(_WIN32)
+    /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
+     * underlying filesystem's real limit; the AOT native-build cache path
+     * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/simple-aot-diagnostic-<32-hex>/message.module.o)
+     * routinely exceeds it, failing with ERROR_PATH_NOT_FOUND (3), which
+     * collapsed four layers up into the opaque "AOT object publication
+     * failed". Prefer the wide, extended-length-prefixed call so both
+     * endpoints can exceed MAX_PATH. */
+    {
+        wchar_t* wide_staged = spl_widen_long_path(staged);
+        wchar_t* wide_dest = wide_staged ? spl_widen_long_path(destination) : NULL;
+        if (wide_staged && wide_dest) {
+            BOOL ok = MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH);
+            DWORD werror = ok ? 0 : GetLastError();
+            free(wide_staged); free(wide_dest);
+            if (ok) return 1;
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
+            return -1;
+        }
+        free(wide_staged); free(wide_dest);
+    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    DWORD error = GetLastError(); return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
+        return -1;
+    }
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
@@ -13925,12 +14074,27 @@ int64_t rt_time_now_unix(void) {
 }
 
 int64_t rt_time_now_unix_micros(void) {
+#if defined(_WIN32)
+    /* Same cause as rt_time_now_ns: `clock_gettime` becomes the unresolved
+       `clock_gettime64` and is stubbed, so this returned -1 and rt_time_ms
+       with it. GetSystemTimeAsFileTime is 100 ns ticks since 1601-01-01;
+       11644473600 seconds separate that epoch from the Unix one. */
+    FILETIME ft;
+    ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    /* 100 ns ticks -> microseconds, then rebase onto the Unix epoch. */
+    int64_t unix_micros = (int64_t)(u.QuadPart / 10ULL) - 11644473600000000LL;
+    return unix_micros < 0 ? -1 : unix_micros;
+#else
     struct timespec ts = {0, 0};
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
     if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000LL) return -1;
     if ((int64_t)ts.tv_sec == INT64_MAX / 1000000LL &&
         ts.tv_nsec / 1000 > INT64_MAX % 1000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
+#endif
 }
 
 int64_t rt_time_ms(void) {
@@ -13943,12 +14107,33 @@ int64_t rt_entropy_hardware_ready(void) {
 }
 
 int64_t rt_time_now_ns(void) {
+#if defined(_WIN32)
+    /* MinGW maps `clock_gettime` onto `clock_gettime64`, which is NOT in the
+       import set this runtime links against — the native linker reports it as
+       unresolved and substitutes a generated stub, so every call failed and
+       this function returned -1. Measured: rt_time_now_micros/nanos/ms all
+       answered -1 in a native binary while the program around them ran fine,
+       which silently reports ZERO elapsed time to any in-binary benchmark.
+       QueryPerformanceCounter is the monotonic clock Windows actually
+       provides, and it is always available. */
+    LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0) return -1;
+    if (!QueryPerformanceCounter(&counter) || counter.QuadPart < 0) return -1;
+    /* Split to keep the nanosecond scaling exact without overflowing: whole
+       seconds first, then the sub-second remainder. */
+    int64_t secs = (int64_t)(counter.QuadPart / freq.QuadPart);
+    int64_t rem  = (int64_t)(counter.QuadPart % freq.QuadPart);
+    if (secs > INT64_MAX / 1000000000LL) return -1;
+    return secs * 1000000000LL + (rem * 1000000000LL) / (int64_t)freq.QuadPart;
+#else
     struct timespec ts = {0, 0};
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
     if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000000LL) return -1;
     if ((int64_t)ts.tv_sec == INT64_MAX / 1000000000LL &&
         ts.tv_nsec > INT64_MAX % 1000000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
 }
 
 int64_t rt_time_now_nanos(void) {

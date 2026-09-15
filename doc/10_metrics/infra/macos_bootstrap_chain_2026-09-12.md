@@ -1653,3 +1653,469 @@ clearing site 16 should unlock Stage 3, and Stage 4 follows through
 `bootstrap-strategy.sh`, which mints the lineage admission locally — no remote
 scheduler — with `SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE=1` forcing `deploy=0` so
 `bin/release` is never touched.
+
+### Run 30 (2026-09-13) — site 16 repaired; a NEW, earlier Stage-2 link blocker
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, virgin
+evidence root, worktree `agent-a48e6e7adea865a52`, tip `6c801a7f309` (carries
+PR #843), carrying the site-16 fix below. Cold Rust seed.
+
+**Site 16 is fixed, and the fix is in the tree — but this run did not exercise
+it.** Stage 2 never linked, so `stage2_status=1` and the manifest gate at
+`bootstrap-from-scratch.sh:3291` (inside `if [ "${stage2_status}" -eq 0 ]`) was
+not reached. What run 30 does prove about the fix is narrow and worth stating
+exactly: the new library sources cleanly into the script under `set -eu` (the
+run reached its own Stage-2 failure path and exited normally), and the gate's
+own fixtures pass. The call site itself remains unexercised in a real lane.
+
+Verdict, verbatim:
+
+```
+  diagnosis: 2 diagnostic line(s) found. First 5:
+    | Build failed: link failed: ld: warning: -ld_classic is deprecated and will be removed in a future release
+    | clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+PASS — 1 check(s), stage stage2 failed (exit 1) and said why
+  warning: stage2 native-build failed (exit 1); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Six undefined symbols at
+`logs/aarch64-apple-darwin/stage2-native-build.log:2734-2748` —
+`__sffi_enum_discriminant`, `module_surfaces_promote_reason`, `rt_cpu_is_aarch64`,
+`rt_cpu_is_riscv64`, `rt_cpu_is_x86_64`, `rt_cpuid` — in three distinct classes
+(runtime-bundle composition, a re-exported surface symbol, and a per-module SFFI
+helper mangling gap). Run 29 linked cleanly at an earlier tip, so this is a
+REGRESSION in the range between them, not a standing condition. Filed as site 17:
+`doc/08_tracking/bug/stage2_link_undefined_cpu_probe_and_surface_symbols_2026-09-13.md`.
+
+**Site 16's resolution** (design finding, since the bug record called for an
+owner decision): both repairs the record proposed are dead on measurement. The
+manifest's writer returns `m2-receipt-<reason>` at
+`driver_aot_native_output.spl:415-418` unless the Phase-2 cache carries M2
+reverse-reference receipts, which only `reverse_reference_receipt.spl` writes —
+`grep -rl 'reverse_reference|current-admitted' src/compiler_rust/` is EMPTY. So
+teaching the seed to emit the manifest means porting the whole M2
+reuse-admission authority into Rust, and running the pure-Simple writer inside
+the Stage-2 candidate against a seed-written cache fails at the same line. It is
+also not a macOS problem: `can_full_bootstrap=0` ("Force manual bootstrap") pins
+the admitted Rust seed as the Stage-2 producer on EVERY platform unless
+`--stage2-parent` supplies an admitted pure-Simple release, so the gate was only
+ever satisfiable on that producer. The gate is kept and scoped on a positive
+producer fact, with schema checking the old `[ -f ]` never had, and a
+`<manifest>.not-published` evidence record on the skip path. Stage 3 still
+receives `MANIFEST_READ` and still admits ZERO Phase-2 reuse without a manifest
+(verified by reading `phase_compatibility_read_manifest_io_v1`, which returns
+`valid=false` on an absent file rather than aborting). Nothing was deployed.
+
+### Run 31 (2026-09-13) — site 17 CLEARED; Stage 2 links; next blocker is K1 composition
+
+Lane: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`, worktree
+`agent-a887bdd4081fec17c`, tip carrying PR #873 (classes 2 and 3) over a main that
+already carried PR #846 (class 1). Cold Rust seed, `Native build jobs: 5`.
+
+**Site 17 is cleared, and this run proves it rather than inferring it.**
+`/usr/bin/grep -c "Undefined symbols|__sffi_enum_discriminant|module_surfaces_promote_reason|rt_cpu_is_"`
+over `logs/aarch64-apple-darwin/stage2-native-build.log` returns **0**. Run 30's
+six undefined symbols are gone and Stage 2 produced a linked candidate binary —
+the first time this lane has got past the link since run 29.
+
+Verdict, verbatim:
+
+```
+exit:  2
+  diagnosis: the PRIMARY log carries no diagnostic text, but a sibling log
+             written by another sub-step of this stage does. The stage did
+             not fail where the primary log was produced.
+  real log:  .../stage3/aarch64-apple-darwin/stage2-sanity.env.frontend-failure.log
+  1 diagnostic line(s) found there. First 5:
+    | candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+PASS — 1 check(s), stage stage2 failed (exit 2) and said why
+  warning: stage2 native-build failed (exit 2); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+The failure has moved **past the link into the candidate's own sanity smoke**, and
+the real diagnostic is:
+
+```
+PLUG-E-K1-POLICY: bootstrap backend composition admission failed
+(selected policy 'llvm-cranelift'; 'unselected' means the fail-closed stub bound
+instead of a committed K1 composition)
+```
+
+That is **site 18**, already filed by the #846 lane as
+`doc/08_tracking/bug/stage2_sanity_positional_route_k1_composition_admission_failed_2026-09-13.md`.
+It is a backend-composition admission gate, not a link or a symbol problem, and it
+needs an owner the same way site 16 did. Stage 3, the full CLI and Stage 4 were
+never reached; **nothing was deployed**.
+
+Separately flagged by a peer lane and NOT what this run hit: a seed `native-build`
+regression at origin/main producing `method 'len' not found on type 'i64'` on a
+three-line hello world (lane F71). This run's smoke failed on the K1 policy line
+instead, so the two are distinct; if a later rerun shows the `len`/`i64`
+diagnostic, wait for F71's PR before re-attributing.
+
+Origins for run 30's three symbol classes, with a fix commit each, are recorded in
+`doc/08_tracking/bug/stage2_link_undefined_cpu_probe_and_surface_symbols_2026-09-13.md`
+rather than repeated here.
+
+## Runs 32-34 (2026-09-13, lane F72) — site 18 root-caused and CLEARED; site 19 exposed
+
+Lane all three runs: `--stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`,
+worktree `agent-a0e562ca3e5681c38`, cold Rust seed each time.
+
+### Run 32 — died before Stage 2: stale `Cargo.lock` (PR #893)
+
+```
+Building Rust seed compiler + runtime library...
+error: rust-seed-build failed with exit 101
+error: cannot update the lock file .../src/compiler_rust/Cargo.lock because --locked was passed to prevent this
+```
+
+`2cc924ff877` (18:49) dropped `"tempfile"` from the `simple-native-all` lock entry
+while `native_all/Cargo.toml` still declares it as a dev-dependency, so every
+hermetic `cargo build --locked --offline` seed build on every lane failed.
+Restored (the one line cargo regenerates offline) as PR #893.
+
+### Run 33 — site 18 reproduced with the diagnostic; verdict verbatim
+
+```
+  real log:  .../stage3/aarch64-apple-darwin/stage2-sanity.env.frontend-failure.log
+  1 diagnostic line(s) found there. First 5:
+    | candidate_frontend_smoke: hello-world-positional-build failed (raw rc=1)
+PASS — 1 check(s), stage stage2 failed (exit 2) and said why
+  warning: stage2 native-build failed (exit 2); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+Probe log: `PLUG-E-K1-POLICY: bootstrap backend composition admission failed
+(selected policy 'llvm-cranelift'; ...)` followed by an EMPTY line where the new
+per-sub-check `k1-table:` dump should have been -- the dump itself was a victim
+of the same miscompile. Candidate `stage2/aarch64-apple-darwin/simple.rejected`,
+139,502,712 B, sha256 `769bed4ef539a9d4…`.
+
+**Root cause, found in seconds with fixtures built by the seed, NOT by rebuilding:**
+every enum `match` compiled by the seed's `native-build` (llvm AND cranelift)
+took its LAST arm (`q_mixed=30,30,30` vs interpreter `10,20,30`). `df7ac9f6cc2`
+(13:33) made typed matches call `rt_enum_check_variant(subject, enum_id, disc)`;
+the seed's HIR lowering folds `enum_id` from the BARE type name while
+`qualify_enum_runtime_names` later qualifies the constructor's `EnumUnit` name,
+so ctor and check never agree (`id=0 -> 10`, `id=hash("Mixed") -> 10`,
+`id=<stamped> -> 30`). `BackendKind.to_text()` is a `match self`, so the K1
+validator's `name != entry.kind.to_text()` refused the composition. The bug
+record's `34b96e29837` suspect is retracted. Corroboration: the same candidate's
+`compile --format=smf` dies with `E-AST-SEMANTIC-UNHANDLED: TypeKind`.
+Fix (seed, `native_project/mangle.rs`) + 2 Rust tests: PR #898. Fixtures rebuilt
+with the fixed seed under both backends equal the interpreter.
+
+### Run 34 — on landed main (`c1329f766a2`): site 18 CLEARED, site 19 exposed
+
+`stage2-sanity.env`: `status=pass frontend_smoke_status=0
+frontend_smoke_bootstrap0_raw_status=0 frontend_smoke_bootstrap1_ran=true
+frontend_smoke_bootstrap1_raw_status=0`; `hello_world_positional_raw_status=0
+probe=complete`; zero `PLUG-E-K1` lines. The positional hello-world builds and
+runs on both bootstrap legs for the first time on macOS. Verdict, verbatim:
+
+```
+  real log:  .../stage3/aarch64-apple-darwin/stage2-receiver.log
+  2 diagnostic line(s) found there. First 5:
+    | error: stage2 failed the positional pure-Simple Stage-3 route (status 1)
+    | error: in-process native-build: Module surface registry graph promotion failed after phase 2: field composite_names of surface[0] logical=.Users.ormastes.simple..claude.worktrees.agent_a0e562ca3e5681c38.scripts.check.cert.redeploy_gate.fixtures.stage2_module_path_naming canonical=<same> package=.Users.ormastes.simple..claude.worktrees.agent_a0e562ca3e5681c38.scripts.check.cert.redeploy_gate.fixtures (scope sentinel promote=true, surfaces=2)
+PASS — 1 check(s), stage stage2 failed (exit 3) and said why
+  warning: stage2 native-build failed (exit 3); Stage 3/full CLI unavailable
+error: --stop-after-stage2 requires a successful admitted Stage 2 compiler
+```
+
+The failure has moved one probe later, into `bootstrap_stage2_positional_stage3_route`
+(the candidate compiling the module-path-naming fixture through its in-process
+route). That is **site 19**. The two existing records for this message
+(`stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md`, FIXED by
+`460aa9781cc`/`592041db98a` on Linux BOOT-7; `stage2_sanity_module_surface_registry_promotion_fails_2026-09-13.md`,
+CLOSED as already-fixed) do not cover this: the tree carries both fixes and the
+field named is `composite_names`. Not investigated here -- unrelated to K1 and
+out of this lane's scope; filed as
+`doc/08_tracking/bug/stage2_positional_stage3_route_surface_promotion_composite_names_2026-09-13.md`.
+Rejected candidate preserved at `stage2-rejected/aarch64-apple-darwin/simple`,
+139,504,696 B, sha256 `70f1a6517183d74c1a855f4761235dd2c62d52a63bfa3c36f7c5fb53b83f2703`.
+Stage 3, the full CLI and Stage 4 were not reached; **nothing was deployed**.
+
+### Run 35 — on landed main (`60c78b96789`, carries PR #903): site 19 CLEARED, Stage 2 ADMITTED, site 20 exposed
+
+Command identical to run 34's, from worktree `agent-a73a6f3780a2bd75b`:
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2 --full-bootstrap --mode=dynload --jobs=half`.
+Native build jobs 5 (host CPUs 10), LLVM 18 at `/opt/homebrew/opt/llvm@18`.
+Wall clock ~25 min end to end including a full Rust seed rebuild.
+
+**This is the first macOS run to reach an admitted Stage 2.** Verdict, verbatim:
+
+```
+  Stage 2: running bootstrap compiler sanity
+  Stage 2: proving struct receiver/runtime capability
+PASS — 2 invariant(s) checked (producer identified, skip recorded), producer=rust-seed cannot publish the manifest; Stage 3 reuse disabled; evidence=.../stage3/aarch64-apple-darwin/phase2-compatibility.manifest.not-published
+Stage 2 admitted; stopping before Stage 3 as requested.
+```
+
+`BOOTSTRAP_RC=0`. Admitted candidate
+`<storage>/build/bootstrap/stage2/aarch64-apple-darwin/simple` (byte-identical to
+`stage3/aarch64-apple-darwin/stage2-admitted/simple`), 139,504,568 B, sha256
+`aed71b284fd897f6dff37ee2cda23056a32b4967c54d99468fea6aa8fc07124a`.
+`stage2-sanity.env`: `status=pass ... checks_run=5`. Note this env does NOT carry
+run 34's `hello_world_positional_raw_status` / `probe=complete` keys; the
+positional Stage-3-route probe is recorded separately in `stage2-receiver.env`,
+which reads **`status=pass probe_exit=0`** — that is the probe that failed on run
+34 with `field composite_names of surface[0]`, and its fixture log
+`stage2-sanity.env.frontend-bootstrap-0.log.stage2-module-path-naming` is present.
+
+Site 19 root cause: NOT a new promotion instance and NOT a seed miscompile — a
+regression of `460aa9781cc` reintroduced by `db127a8e8c4` (PR #873). The
+repeat-promote post-condition ("a second `rt_transient_heap_promote` answers true
+only for a value still owned by the dying scope") holds for a transient heap
+STRING only, whose `RT_CORE_STRING_FLAG_TRANSIENT` promote clears
+(`runtime_native.c:2474`). Every field in the 24-field loop is an ARRAY: promote
+merely zeroes `transient_scope_id` (`:2493`) and `rt_core_transient_classify`
+(`:2362`) never reads it, so the repeat promote answers true forever and the guard
+was red on the first field of the first surface. Fixed in PR #903 by deleting the
+per-field verdict and restoring the guard-free
+`module_surface_promote_freeze_names`. `460aa9781cc`'s regression spec had been
+RED at 2 of 3 examples on `origin/main` from `db127a8e8c4` until #903; it is now
+4 of 4 and additionally pins the array-field loop.
+
+**Stage 3 was NOT reached — new blocker, site 20.** Both routes fail rc=64 with
+`bootstrap-policy-error: reason-receipt-required`: the prescribed
+`--resume-stage3-from-admitted=<output>`, and a plain continuous
+`--full-bootstrap --mode=dynload --jobs=half` run that reuses the admitted Stage 2
+and hits the gate within seconds. The planner-admission producer needs a Stage-2
+admission + provenance receipt pair that only a non-seed producer may publish —
+which is what the Stage 2 verdict above states outright. No receipt was
+manufactured. Filed as
+`doc/08_tracking/bug/stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md`.
+Stage 4 is downstream of Stage 3 and was therefore not attempted. **Nothing was
+deployed.**
+
+Run-34 repro note for future lanes: run 34's rejected candidate
+(`70f1a651…`) was already gone — worktree `agent-a0e562ca3e5681c38` and its
+`.simple/storage` had been cleaned — so no cheap native repro of site 19 was
+possible. The diagnosis rests on the C runtime source, `460aa9781cc`'s gdb
+measurement, and the regression spec. Interpreter-vs-native is not a usable
+discriminator for this class at all: the seed's interpreter stubs the
+transient-scope externs, so the guard cannot fire there and an interpreter pass
+is vacuous.
+
+## Runs 36-38 (2026-09-14, F74 round 3) — Stage 3 reached, then SEGV; nothing deployed
+
+Seed: rebuilt by `--full-bootstrap` (3m50s); `git diff def2a9c30a1..origin/main --
+src/compiler_rust` was 6 files +313/-2, so the previous lane's "seed parity" claim
+did **not** hold for this range.
+
+| run | tree | stage | outcome |
+|---|---|---|---|
+| 36 | `def2a9c30a1` | Stage 3 resume, threads=1 | **FAIL** after 91 min — 12x `imported enum \`X\` has no declaration owner` (HIR lowering, `src/app/cli/bootstrap_main.spl`). Fixed on main by #952. |
+| 37 | `4f4d0e12832` | Stage 2 run 3 | **FAIL** — receiver probe `NOT_RUN: compiler.common.module_path_naming` |
+| 37 | `4f4d0e12832` | Stage 2 run 4 | **ADMITTED**, 4 min warm. sha256 `f7c5c68b96597b11932beef38d5ef3359e7022249375e3fb5b2e9e023ab860ae` |
+| 38 | `4f4d0e12832` | Stage 3, threads=5 (coordinator) | **FAIL** in 2 min — `SCV-E-ADMISSION: compile-event-journal-missing` (twice; its own remedy cannot reach the child under `env -i`) |
+| 38 | `4f4d0e12832` | Stage 3, threads=1 (direct) | **FAIL** after 23 min — SEGV (signal 11, rc=139) in the HIR phase at unit 2 of 833, `current=compiler.driver.driver` |
+
+**Stage 4 was never attempted. `bin/release/` is untouched. Nothing was deployed
+and no artifact sha can be cited for Stage 3 or Stage 4 — there is none.**
+
+Two positive results worth citing:
+
+- **#952 is effective.** On `4f4d0e12832` the build log's count of
+  `has no declaration owner` is **0** (was 12 on `def2a9c30a1`), and
+  `app.cli.bootstrap_main` lowers successfully. The chain advanced past that
+  defect into the SEGV above.
+- **#955 is proven end to end.** Run 38's resume set **no** manual
+  `SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT` and produced **zero**
+  `planner-admission-v2-unbound` refusals — an unassisted resume passed the
+  planner-admission gate and reached the build. That is the positive-path proof
+  a synthetic receipt cannot give (every failure inside `verify_bound` surfaces
+  as the same `unbound` line).
+
+Threads finding: `--threads 1` is a default, **not** a correctness requirement —
+`resume-stage3-from-admitted.sh:576-587` documents opt-in parallelism via
+`SIMPLE_NATIVE_BUILD_THREADS` (`full` = online CPUs). Changing the *default*
+would alter the "byte-for-byte pinned argv" contract and is a design decision,
+not wiring. The coordinator route it selects is currently unusable on a cold
+checkout — see `doc/08_tracking/bug/stage3_coordinator_route_cold_init_unreachable_under_env_i_2026-09-14.md`.
+
+Logs preserved: `build/f74logs/stage3-run2-native-build.log` (run 36),
+`build/f74logs/stage3-run5-native-build.log` (run 38).
+
+## Runs 39-41 (2026-09-14, F75) — the Stage 3 SEGV is a STACK OVERFLOW, and the recursion is named
+
+Runs 39-41 are not chain runs. They are three lldb replays of run 38's own
+`stage3-command.transcript`, byte-for-byte except for cache/output/evidence
+paths, done because the chain could not advance until the SEGV had a cause.
+Each costs ~22 minutes and reproduces deterministically.
+
+**Run 39 — crash class.** `build/f75logs/repro-lldb.log:12077-12085`:
+
+```
+Process 12291 stopped
+* thread #1, queue = 'com.apple.main-thread',
+  stop reason = EXC_BAD_ACCESS (code=2, address=0x16f603ff0)
+  frame #0: simple`core::hash::sip::Hasher::write
+  ->  0x1008bea38 <+0>:  stp  x26, x25, [sp, #-0x50]!
+      sp = 0x000000016f604040
+```
+
+A **write** fault one word below `sp`, on the **first instruction of a function
+prologue**, on the **main thread** — the stack guard page. This is a stack
+overflow. It rules out the seed-codegen miscompile branch (which would fault
+`code=1` at a small address) and the `rt_transient_heap_promote` runtime branch
+(which would put an `rt_*` symbol at frame #0 as the cause rather than as the
+next callee that needed a frame).
+
+**Trap worth recording: `lldb --batch -o run -o 'bt N'` silently drops the
+backtrace.** Run 39 printed the stop banner and exited with no frames at all.
+The working form is lldb's crash-command list, `-k 'thread backtrace -c N'`,
+and `-c` is mandatory — an unbounded `bt` on a stack this deep never returns.
+
+**Run 40 — the recursion.** `build/f75logs/repro-lldb-2.log:12075-12238` shows
+an exact four-symbol unit repeating for all 151 captured frames:
+
+```
+register_imported_symbol
+  -> register_imported_symbol_inner                        (+1772 = module_import_registration.spl:367)
+     -> register_materialized_enum_payload_dependencies    (module_reexport_materialization.spl:564)
+        -> register_materialized_payload_named_dependency(_inner)   (:485/:491)
+           -> register_imported_symbol                     (:537, materialize_enum = true)
+```
+
+This is **not** the cycle fixed on 2026-08-17 — that one ran through
+`register_imported_type_methods`, whose breaker sits on no edge of this cycle.
+And `register_imported_symbol`'s `registered_import_memo` is by its own comment
+deliberately **not** a re-entrancy breaker ("A key is recorded only AFTER the
+body returns"). The only guard on this cycle is the mark-on-entry in
+`register_materialized_enum_payload_dependencies`.
+
+**Run 41 — depth, to choose the fix.** If that mark-on-entry guard works, every
+level is a distinct enum identity and depth is bounded by the enums reachable
+from `driver.spl` — the tree declares 2,280. 8 MB / 2,280 is ~3.6 KB per
+four-frame level, which these multi-KB functions can plausibly use, so
+"finite but too deep" and "guard not taking effect" both fit the frames.
+Depth ≈ 2,000-2,500 means the walk must be flattened to a worklist; depth far
+beyond 2,280 means the Dict memo is not taking effect and the fix is a `[text]`
+in-progress breaker, the same shape (and for the same documented
+`rt_dict_contains` reason) as `imported_type_methods_in_progress`.
+Full analysis, both candidate fixes, and why guessing between them is not
+acceptable:
+`doc/08_tracking/bug/stage3_hir_enum_payload_closure_stack_overflow_driver_2026-09-14.md`.
+
+**No stack-size lever exists.** `--compile-stack-mib` is passed on the Stage 2
+argv and has zero consumers in product code (`grep -rn stack_mib src` is empty;
+it appears only in four shell scripts), and the Stage 3 argv omits it entirely.
+
+**Harness fixes landed this round (neither unblocks the SEGV):**
+
+- **#976** — the Stage 3 child runs under `env -i`, so the
+  `SIMPLE_SCV_INVENTORY_COLD_INIT=1` remedy that the compiler's own
+  `SCV-E-ADMISSION: compile-event-journal-missing` prescribes could never reach
+  it; runs 36 and 37 failed identically with the variable exported. It is now an
+  explicit, validated, opt-in single-variable pass-through baked into both the
+  args digest and the transcript, gated by
+  `check-bootstrap-stage3-scv-cold-init-passthrough.shs`. The coordinator
+  (threads > 1) route is usable on a cold checkout again.
+- **#977** — the Stage 4 twin of #955 was unbound: the same
+  `bootstrap_planner_v2_verify` call serves `--resume-stage4-from-admitted`, so
+  any lane on a private storage root would have been refused at Stage 4 exactly
+  as Stage 3 was. Measured before/after on the real script,
+  `planner-admission-v2-unbound` -> `resume-output-root-unresolvable`, i.e. the
+  binding block was being skipped entirely. `check-bootstrap-stage3-receipt-autowire.shs`
+  widened to 19 checks including a new executing Stage-4 row.
+- Filed, not fixed:
+  `doc/08_tracking/bug/stage3_declared_fallback_route_read_by_nothing_2026-09-14.md`
+  — every Stage 3 receipt records `fallback_route=direct`, and
+  `SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE` is read by nothing under `src/`.
+
+**Stage 3 remains BLOCKED. Stage 4 was never attempted. `bin/release/` is
+untouched, nothing was deployed, and no Stage 3 or Stage 4 artifact sha exists
+to cite.**
+
+## Runs 42-45 (2026-09-14, F75) — the HIR breaker, and a misread that must not calcify
+
+### The fix, and the measurement that chose it
+
+Run 42 (`build/f75logs/repro-lldb-4.log`) settled the Stage 3 SEGV. `sp` read at
+frames 12/16/20/24 — one full cycle apart each — gives **624 bytes per
+four-frame level, uniform**, over a stack region `0x16f604000-0x16fe00000`
+(7.98 MB), i.e. **13,415 nested levels** of
+
+```
+register_imported_symbol -> register_imported_symbol_inner
+  -> register_materialized_enum_payload_dependencies
+    -> register_materialized_payload_named_dependency -> (repeat)
+```
+
+The cycle was not being broken. Fix (#987, `c56dd5004af`): a `[text]`
+in-progress re-entrancy breaker keyed on `(imported_mod_name, dependency)` —
+the method's own INPUT tuple, and a linear scan over an append-only array, so
+it holds whatever the underlying cause. Spec executed, sabotage -> red -> green.
+
+**The mechanism was over-claimed and is corrected** (#1003): the record first
+blamed `rt_dict_contains` under-reporting. F77 could not reproduce that on the
+interpreter (6 shapes green), there is a second gate on the cycle at
+`module_import_registration.spl:363` keyed on an unstable `local_name`, and the
+2,546 ceiling assumed `origin.module_name` is always the declaring module —
+never verified. The depth measurement stands; the mechanism is open. Do not
+cite that bug as evidence of a Dict defect.
+
+### The misread — and what #1007's record should say
+
+Runs 43-45 were reported as "Stage 3 dies silently with no verdict". **That was
+wrong, and the premise of PR #1007's record is wrong with it.** The lane
+**execs into `resume-stage3-from-admitted.sh`**, so `pgrep -f
+'bootstrap-from-scratch'` misses it and returns 0. The run was alive throughout:
+`31736 -> 38398 -> 38401`, worker at 59 min elapsed, **53:48 CPU, 5.0 GB RSS**.
+The two follow-up launches that looked like empty runs were the output lock
+**working**, and printing so:
+
+```
+mkdir: .../bootstrap.lock: File exists
+error: bootstrap output is locked: .../bootstrap.lock
+```
+
+So #1007's VERDICT-on-exit trap and `check-bootstrap-lane-verdict-line.shs` are
+worth keeping on their own merits — a lane that exits without a verdict line
+*should* be caught — but **the incident that motivated them was a lane misread
+by two sessions, not a harness fault.** The record should say that; leaving it
+as written would put a phantom defect in the tracker and credit the guard with
+catching something that never happened.
+
+The recipe that would have prevented it is now in `.claude/rules/bootstrap.md`:
+resolve `cat <out>.lock/pid`, `ps -p` it, walk `pgrep -P` to the worker, and
+judge liveness from CPU/RSS — never from a process-name grep, and never from log
+size (lane logs are fully buffered; a 0-byte `stage3-native-build.log` on a live
+run means nothing has flushed).
+
+### Two self-inflicted contaminations, recorded so the evidence is not over-read
+
+While run 1 was building, this lane (a) `git checkout`ed the worktree onto the
+F78 tip — a native-build reads source from cwd — and (b) launched a second
+Stage 2 into the **same output root**, replacing
+`stage3/<triple>/stage2-admitted/simple` (18:17) and
+`stage3-planner-admission.receipt` (18:19) beneath a run that started 17:24. The
+running process keeps its open inode and survived, but its on-disk inputs no
+longer describe it.
+
+Consequence, stated rather than glossed: **run 1 is contaminated.** It is
+evidence for exactly one thing — its Stage 2 was built from the branch carrying
+#987, and where the old crash was deterministic at ~23 min this run passed 59
+min with 53 min of CPU, so the breaker got past `compiler.driver.driver`. It is
+**not** a deployable artifact (pre-#1001/#1004) and must not be cited as the
+chain result.
+
+### Stage 2 twice admitted, first attempt each time
+
+Both Stage 2 lanes this round admitted on the **first** try, with the
+receiver-probe `NOT_RUN` flake absent and F76 not yet landed. That is luck, not
+a fix — do not read it as the flake being gone.
+
+**Still no deploy.** `bin/release/` is untouched and no Stage 3 or Stage 4
+artifact sha is claimed. The deploy gate is three conditions, all recorded
+before their results existed: Stage 3 reaching `done=2`; the F77 class probe
+(`class Box: n: i64` + a method, `native-build --mode=dynload`) returning rc 0
+rather than 139 under the Stage 3 binary; and the F78 spec
+`test/01_unit/compiler/option_none_runtime_discriminant_spec.spl` green under
+the same binary. Any failure is reported verbatim, and a MIR/Option frame is
+explicitly not grounds to revert #987.

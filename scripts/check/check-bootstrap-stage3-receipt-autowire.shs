@@ -1,0 +1,201 @@
+#!/bin/sh
+# Pin the Stage-3 planner-receipt auto-production wiring.
+#
+# Site 20 (doc/08_tracking/bug/
+# stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md) was
+# NOT a missing producer -- every receipt the Stage 3 gate reads has one. It was
+# that the LAST producer,
+# scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs, was never
+# invoked, so a seed-rooted lane admitted a Stage 2 and then had no reachable
+# entry point to Stage 3.
+#
+# The wiring must keep four properties, and this guard fails closed on each:
+#   1. the producer is invoked from bootstrap-from-scratch.sh, inside the
+#      Stage-2 trust-root branch, AFTER publish-stage2-parent-receipts.shs (the
+#      producer reads the two receipts that publisher writes);
+#   2. the typed reason is taken from the operator's flag, never a literal --
+#      inventing a reason would defeat the typed-reason policy entirely;
+#   3. the flag is REFUSED outside the trust-root Stage-2 lane rather than
+#      silently ignored;
+#   4. a producer failure fails the run and leaves no receipt behind.
+#
+# Verdict is the last line of stdout:
+#   PASS — <n> check(s) run, 0 failed          exit 0
+#   FAIL — <n> check(s) run, <k> failed        exit 1
+#   ERROR — nothing was checked                exit 2
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+script="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+
+checks=0
+failed=0
+
+note_fail() {
+    failed=$((failed + 1))
+    echo "  FAIL: $1" >&2
+}
+
+check_grep() {
+    # check_grep <description> <pattern>
+    checks=$((checks + 1))
+    if grep -q -- "$2" "$script"; then
+        return 0
+    fi
+    note_fail "$1"
+}
+
+[ -f "$script" ] || { echo "ERROR — nothing was checked (missing $script)"; exit 2; }
+
+# --- 1. producer invoked, after the parent-receipt publisher -----------------
+pub_line=$(grep -n 'publish-stage2-parent-receipts\.shs' "$script" | head -1 | cut -d: -f1)
+prod_line=$(grep -n 'sh "\${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2\.shs"' "$script" | head -1 | cut -d: -f1)
+checks=$((checks + 1))
+if [ -z "$pub_line" ] || [ -z "$prod_line" ]; then
+    note_fail "publisher and/or planner-admission producer are not invoked from bootstrap-from-scratch.sh"
+elif [ "$prod_line" -le "$pub_line" ]; then
+    note_fail "planner-admission producer (line $prod_line) runs before the parent-receipt publisher (line $pub_line)"
+fi
+
+# The invocation must sit inside the trust-root branch that publishes the
+# parent receipts. Both are guarded by the same condition; assert the producer
+# appears between that condition and the end of the Stage-2 admission block.
+trust_line=$(grep -n 'bootstrap_stage2_trust_root}" -eq 1' "$script" | tail -1 | cut -d: -f1)
+checks=$((checks + 1))
+if [ -z "$trust_line" ] || [ -z "$prod_line" ] || [ "$prod_line" -le "$trust_line" ]; then
+    note_fail "planner-admission producer is not inside the Stage-2 trust-root branch"
+fi
+
+# --- 2. the typed reason is the operator's, never a literal -----------------
+check_grep "producer is not passed the operator-supplied reason variable" \
+    '\-\-reason=\${produce_stage3_receipt_reason}'
+checks=$((checks + 1))
+if grep -n -- '--reason=' "$script" | grep -qv 'produce_stage3_receipt_reason'; then
+    note_fail "a literal --reason= is passed to the planner-admission producer"
+fi
+check_grep "--produce-stage3-receipt=<reason> flag is not parsed" \
+    '\-\-produce-stage3-receipt=\*)'
+checks=$((checks + 1))
+if grep -q "produce_stage3_receipt_reason=['\"]\?[a-z]" "$script"; then
+    note_fail "produce_stage3_receipt_reason carries a default reason; it must start empty"
+fi
+
+# The allowlist root handed to the producer must be this run's OWN output
+# directory, never a wildcard or a caller-supplied path: it is what narrows the
+# producer's --bootstrap-output allowlist to the directory this script already
+# selected, created and locked.
+check_grep "the producer's output allowlist root is not bound to \${output_dir}" \
+    'SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=\${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-\${output_dir}}'
+
+# --- 3. refused outside the trust-root Stage-2 lane -------------------------
+check_grep "the flag is not refused outside the Stage-2 trust-root lane" \
+    'produce-stage3-receipt-requires-stage2-trust-root-lane'
+
+# --- 4. fail-closed on producer failure -------------------------------------
+check_grep "producer failure does not fail the run" \
+    'could not produce the Stage 3 planner admission receipt'
+check_grep "a producer that writes nothing is not refused" \
+    'Stage 3 planner admission producer wrote no receipt'
+check_grep "the receipt is not removed when the producer fails" \
+    'rm -f "\${stage3_planner_receipt}"'
+
+# --- 5. behavioural: the refusal actually fires ------------------------------
+# Cheapest real execution that proves property 3: the flag without the
+# trust-root lane must exit 64 with the typed diagnostic and start no stage.
+checks=$((checks + 1))
+behaviour_out=$(cd "$root" && sh "$script" \
+    --produce-stage3-receipt=verify-landed-compiler-fix \
+    --validate-bootstrap-receipt 2>&1)
+behaviour_rc=$?
+case "$behaviour_rc:$behaviour_out" in
+    64:*produce-stage3-receipt-requires-stage2-trust-root-lane*) ;;
+    *)
+        note_fail "flag outside the trust-root lane did not exit 64 with the typed refusal (rc=$behaviour_rc): $(printf '%s' "$behaviour_out" | tail -1)"
+        ;;
+esac
+
+# --- 6. reader-side: the resume verify is bound to the run's OWN output root -
+# The producer binding (property 5 above) has a twin on the reading side. A
+# Stage 3 resume passes --resume-stage3-from-admitted=<out>, but the
+# bootstrap_planner_v2_verify call in bootstrap-from-scratch.sh ran with
+# SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT unset, so a receipt whose output root
+# is outside <repo>/build -- every lane with a private storage root -- was
+# refused as planner-admission-v2-unbound by the very script that had just been
+# handed that directory. Measured 2026-09-14 on the macOS F74 Stage 3 resume.
+check_grep "the resume verify is not bound to this run's own resume output root" \
+    'SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=\${bootstrap_resume_output_root}'
+check_grep "the resume output root binding is not fail-closed" \
+    'resume-output-root-unresolvable'
+# The bound value must come only from the operator's own resume argument -- a
+# wider root (a storage root, a home directory) would re-open the hole #929
+# closed on the producing side.
+# Widened 2026-09-14: the SAME verify call serves the Stage 4 resume
+# (bootstrap-strategy.sh drives --resume-stage4-from-admitted through it and
+# bootstrap_receipt_target defaults to //bootstrap:stage4), and that twin was
+# left unbound by PR #955. The binding now selects whichever resume argument
+# this run actually carries, so require the selector to be built from EXACTLY
+# those two operator arguments and from nothing wider.
+checks=$((checks + 1))
+if ! grep -q 'bootstrap_resume_output_arg=\${resume_stage3_output}' "$script" ||
+   ! grep -q 'bootstrap_resume_output_arg=\${resume_stage4_output}' "$script" ||
+   ! grep -q 'cd -- "\${bootstrap_resume_output_arg}"' "$script"; then
+    note_fail "the bound root is not derived from the stage3/stage4 resume output arguments"
+fi
+# It must be placed BEFORE the verify it exists to bind.
+bind_line=$(grep -n 'bootstrap_resume_output_root=\$(' "$script" | head -1 | cut -d: -f1)
+verify_line=$(grep -n 'bootstrap_planner_v2_verify "\${bootstrap_receipt_path}"' "$script" | head -1 | cut -d: -f1)
+checks=$((checks + 1))
+if [ -z "$bind_line" ] || [ -z "$verify_line" ] || [ "$bind_line" -ge "$verify_line" ]; then
+    note_fail "the output-root binding does not precede the planner-admission verify"
+fi
+# An operator-supplied value must win rather than be overwritten.
+checks=$((checks + 1))
+if ! grep -q 'z "\${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" \]' "$script"; then
+    note_fail "the binding overwrites an operator-supplied SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT"
+fi
+
+# --- 7. behavioural: the binding block really executes on a resume ----------
+# A synthetic receipt cannot prove the positive path here: every failure inside
+# bootstrap_planner_v2_verify_bound surfaces as the same planner-admission-v2-
+# unbound line, so "not unbound" is unreachable without a genuine 29-field
+# receipt bound to a real Stage 2 (that only exists on a live lane). What IS
+# provable cheaply is that the block is reached and fails closed: an
+# unresolvable resume output root must exit 64 with its own typed diagnostic
+# rather than being silently skipped.
+checks=$((checks + 1))
+bind_fixture=$(mktemp -d 2>/dev/null) || bind_fixture=
+if [ -z "$bind_fixture" ]; then
+    note_fail "could not create the reader-binding fixture directory"
+else
+    bind_fixture=$(CDPATH= cd -- "$bind_fixture" && pwd -P)
+    : > "$bind_fixture/receipt"
+    bind_out=$(cd "$root" && SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT= sh "$script" \
+        --resume-stage3-from-admitted="$bind_fixture/absent" \
+        --bootstrap-receipt="$bind_fixture/receipt" \
+        --validate-bootstrap-receipt 2>&1)
+    case "$bind_out" in
+        *resume-output-root-unresolvable*) ;;
+        *) note_fail "an unresolvable resume output root was not refused by the binding block: $(printf '%s' "$bind_out" | tail -1)" ;;
+    esac
+    # Stage 4 twin: the same block must be reached and fail closed for a
+    # --resume-stage4-from-admitted run. Without this row the Stage 4 binding
+    # could be deleted again and only the static grep above would notice.
+    checks=$((checks + 1))
+    bind4_out=$(cd "$root" && SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT= sh "$script" \
+        --resume-stage4-from-admitted="$bind_fixture/absent" \
+        --bootstrap-receipt="$bind_fixture/receipt" \
+        --validate-bootstrap-receipt 2>&1)
+    case "$bind4_out" in
+        *resume-output-root-unresolvable*) ;;
+        *) note_fail "an unresolvable STAGE 4 resume output root was not refused by the binding block: $(printf '%s' "$bind4_out" | tail -1)" ;;
+    esac
+    rm -rf "$bind_fixture"
+fi
+
+[ "$checks" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+if [ "$failed" -gt 0 ]; then
+    echo "FAIL — $checks check(s) run, $failed failed"
+    exit 1
+fi
+echo "PASS — $checks check(s) run, 0 failed"
+exit 0

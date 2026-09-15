@@ -358,21 +358,31 @@ fn pass_status(kind: PassKind) -> PassStatus:
         case BodyOutlining:
             PassStatus.Skeleton
         case AutoVectorize:
-            # ACTIVE as of 2026-09-13, gated by the alias oracle
-            # (auto_vectorize_alias.spl). The pass discovers candidates, applies
-            # the oracle per recipe, and rewrites only what the oracle admits:
-            # provably-disjoint bases, or an exact alias where every access sits
-            # at the induction index. Anything undecidable is REFUSED rather
-            # than guessed, because guessing there is a silent miscompilation.
+            # ACTIVE as of 2026-09-13, after the execution-level differential
+            # test the tracking record named as the gate finally passed.
             #
-            # Consequence to be honest about: MIR locals carry no allocation
-            # identity yet, so every base reports an unproven origin and the
-            # oracle answers NeedsRuntimeGuard for any two DIFFERENT bases.
-            # Until the runtime range check is emitted, that means this pass is
-            # active and sound but rewrites almost nothing. That is the correct
-            # trade — inert beats wrong — and it is what makes the remaining
-            # work (emit the guard, or thread allocation identity) take effect
-            # the moment it lands, instead of sitting behind another flip.
+            # It is Active now, and was not at the previous attempt, because
+            # the rewrite is for the first time RUN rather than inspected. The
+            # four defects that forced the earlier revert (guessed element
+            # width, unguarded fall-through, colliding block ids, undeclared
+            # guard temporaries) are fixed, the emitted body is real
+            # MirSimdLoad/Binop/Store the interpreter executes, and running it
+            # against the scalar loop then exposed two more that no structural
+            # test could have:
+            #
+            #  * the vector loop never advanced its induction variable — the
+            #    increment wrote a separate local — so it looped forever; and
+            #  * a trip count that is not a whole number of chunks wrote one
+            #    element through a one-iteration "peel" and jumped to a block
+            #    that does not exist. Those are now REFUSED (R4b) rather than
+            #    miscompiled, and the width ladder narrows to a divisor so an
+            #    AVX-512 plan still accepts everything an AVX2 plan does.
+            #
+            # The scope this is Active for is therefore deliberately narrow:
+            # elementwise loops with a static trip count that is a whole
+            # number of lanes, cleared by the alias oracle or by the runtime
+            # range guard. Widening it means extending the differential sweep
+            # first.
             PassStatus.Active
         case TargetNarrowForm:
             PassStatus.Skeleton
@@ -443,25 +453,11 @@ fn mir_pass_backend_outcome_name(outcome: MirPassBackendOutcome) -> text:
         case NotApplicable: "not-applicable"
 
 fn pass_witness_contract(kind: PassKind) -> PassWitnessContract?:
+    # Re-added with the Active flip. The registry check requires that an
+    # INACTIVE pass advertise no executable witnesses, so this pair and
+    # `pass_status` must move together in both directions.
     match kind:
         case AutoVectorize:
-            # An Active transform must name an input it DOES rewrite and one it
-            # does NOT, so "active" cannot quietly mean "runs and never fires".
-            # Both of these are real and verified, not placeholders:
-            #
-            #  positive — every base is the SAME local. The alias oracle calls
-            #    that ExactAliasOnly: with every access at the induction index,
-            #    both sides touch the same element in the same iteration, so
-            #    vector order equals scalar order and the rewrite is sound.
-            #
-            #  negative — the bases are DIFFERENT locals with unproven origins.
-            #    The oracle answers NeedsRuntimeGuard, and until that guard is
-            #    emitted the pass refuses rather than guesses.
-            #
-            # Pinned by the "AutoVectorize Active witnesses" block in
-            # test/01_unit/compiler/mir_opt/auto_vectorize_spec.spl, which runs
-            # both witnesses through run_auto_vectorize rather than asserting
-            # their identity strings.
             Some(PassWitnessContract(
                 kind: PassKind.AutoVectorize,
                 positive_id: "auto_vectorize/exact-alias-elementwise-add",
