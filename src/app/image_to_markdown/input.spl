@@ -27,12 +27,21 @@ fn path_within_allowed_root_v1(path: text, allowed_root: text) -> bool:
     if normalized_path == "" or normalized_root == "": return false
     normalized_path == normalized_root or normalized_path.starts_with(normalized_root + "/")
 
+# Conservative upper bound for live admission/request buffers: source text and
+# byte views, Base64/data-URL/provider serialization copies, and RGBA decode.
+fn estimated_image_working_set_bytes_v1(source_bytes: i64, pixels: i64) -> i64:
+    if source_bytes < 0 or pixels < 0: return 2147483649
+    if source_bytes > 268435456 or pixels > 536870912: return 2147483649
+    source_bytes * 8 + pixels * 4
+
 fn admit_local_image_with_limits_v1(path: text, allowed_root: text, max_bytes: i64,
-        max_pixels: i64, detail: text) -> AdmittedImageV1:
+        max_pixels: i64, max_working_set_bytes: i64, detail: text) -> AdmittedImageV1:
     if not path_within_allowed_root_v1(path, allowed_root):
         return _failed_image_v1("path_not_allowed", "image path is outside the permitted root")
     if max_bytes <= 0 or max_bytes > 20971520:
         return _failed_image_v1("invalid_limit", "image byte limit must be between 1 and 20971520")
+    if max_working_set_bytes <= 0 or max_working_set_bytes > 2147483648:
+        return _failed_image_v1("invalid_limit", "image working-set limit must be between 1 and 2147483648")
     if not file_is_regular_no_follow(path):
         return _failed_image_v1("not_regular_file", "image must be a regular non-symlink file")
     val read_result = file_read_regular_no_follow_bounded(path, max_bytes)
@@ -45,6 +54,9 @@ fn admit_local_image_with_limits_v1(path: text, allowed_root: text, max_bytes: i
     if max_pixels <= 0 or inspected.width > max_pixels or inspected.height > max_pixels or
             inspected.width > max_pixels / inspected.height:
         return _failed_image_v1("pixel_limit_exceeded", "decoded pixels exceed configured profile limit")
+    val pixels = inspected.width * inspected.height
+    if estimated_image_working_set_bytes_v1(raw.len(), pixels) > max_working_set_bytes:
+        return _failed_image_v1("memory_limit_exceeded", "estimated image working set exceeds configured profile limit")
     if inspected.mime_type == "image/png":
         val decoded = ingest_png_bytes(raw)
         if decoded.is_err(): return _failed_image_v1("unsupported_or_malformed_image", decoded.unwrap_err())
@@ -57,7 +69,7 @@ fn admit_local_image_with_limits_v1(path: text, allowed_root: text, max_bytes: i
         inspected.width, inspected.height, digest, detail, data_url), error_code: "", error_message: "")
 
 fn admit_local_image_v1(path: text, allowed_root: text, max_bytes: i64, detail: text) -> AdmittedImageV1:
-    admit_local_image_with_limits_v1(path, allowed_root, max_bytes, 268435456, detail)
+    admit_local_image_with_limits_v1(path, allowed_root, max_bytes, 268435456, 2147483648, detail)
 
 fn admit_local_png_v1(path: text, allowed_root: text, max_bytes: i64, detail: text) -> AdmittedImageV1:
     val admitted = admit_local_image_v1(path, allowed_root, max_bytes, detail)

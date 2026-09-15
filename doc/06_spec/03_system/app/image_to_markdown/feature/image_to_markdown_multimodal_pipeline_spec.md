@@ -20,6 +20,8 @@ This manual mirrors `test/03_system/app/image_to_markdown/feature/image_to_markd
    IDs, shared legends, per-panel ranges, and ordered high-definition arrays.
 5. Publish Markdown, structured data, and a synchronized receipt. Bind source/output identity without including image bytes or secrets.
 6. Reject unsafe, unsupported, or unconfigured image requests. An unset SPipe profile performs no model call.
+7. Reject an image before decode or provider dispatch when its conservative
+   working-set estimate exceeds the configured profile memory budget.
 
 ## Expected evidence
 
