@@ -16,6 +16,7 @@
 use std.spec.step
 
 use std.spipe.*
+use std.common.string_core.{char_from_code}
 use std.nogc_sync_mut.http.auth.digest.{
 
     http_digest_make_challenge,
@@ -239,16 +240,25 @@ describe "RFC 7616 Digest challenge format":
         expect(not challenge.contains("qop")).to_equal(true)
 
 # ============================================================================
-# SHA-512-256 unsupported — sentinel propagation
+# SHA-512-256 — implemented (RFC 7616 §6.4); pinned to a python3 hashlib oracle
 # ============================================================================
 
-describe "RFC 7616 Digest SHA-512-256 — unsupported (FR pending)":
+describe "RFC 7616 Digest SHA-512-256 — response pinned to an external oracle":
 
-    it "make_response returns empty string for SHA-512-256 (not yet implemented)":
+    it "make_response computes the SHA-512-256 response (python3 hashlib oracle)":
         val params = (
             "user", "realm", "password",
             "SHA-512-256",
             "GET", "/path",
             "nonce1", "00000001", "cnonce1", "auth"
         )
-        expect(http_digest_make_response(params)).to_equal("")
+        # HA1=sha512_256("user:realm:password"), HA2=sha512_256("GET:/path"),
+        # response=sha512_256(HA1:nonce:nc:cnonce:qop:HA2) — python3 hashlib.
+        # make_response returns the full Digest header carrying that response;
+        # quotes are built via char_from_code to avoid f-string lexing.
+        val q = char_from_code(34)
+        expect(http_digest_make_response(params))
+            .to_equal("Digest username=" + q + "user" + q + ", realm=" + q + "realm" + q
+                + ", nonce=" + q + "nonce1" + q + ", uri=" + q + "/path" + q
+                + ", algorithm=SHA-512-256, qop=auth, nc=00000001, cnonce=" + q + "cnonce1" + q
+                + ", response=" + q + "551f7bb5818f5740158033d0b62e111397f31676555a8a5e66af01d871664d18" + q)
