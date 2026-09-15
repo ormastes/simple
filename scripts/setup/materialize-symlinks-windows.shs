@@ -318,7 +318,7 @@ public static class MaterializerApi {
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool SetFileInformationByHandle(SafeFileHandle h, int cls, byte[] data, uint size);
     [DllImport("kernel32.dll", SetLastError=true)]
-    static extern bool WriteFile(SafeFileHandle h, byte[] data, uint count, out uint written, IntPtr overlapped);
+    static extern bool WriteFile(SafeFileHandle h, IntPtr data, uint count, out uint written, IntPtr overlapped);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool FlushFileBuffers(SafeFileHandle h);
     [DllImport("kernel32.dll", SetLastError=true)]
@@ -355,9 +355,20 @@ public static class MaterializerApi {
         return new IOException(predicate + ":win32=" + Marshal.GetLastWin32Error());
     }
     static void WriteAndFlush(SafeFileHandle h, byte[] bytes) {
-        uint written;
-        if ((ulong)bytes.Length > UInt32.MaxValue || !WriteFile(h, bytes, (uint)bytes.Length, out written, IntPtr.Zero) || written != (uint)bytes.Length)
-            throw Error("receipt.write");
+        if ((ulong)bytes.Length > UInt32.MaxValue) throw new IOException("receipt.write:byte-count-overflow");
+        var pinned = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try {
+            int offset = 0;
+            while (offset < bytes.Length) {
+                uint written;
+                uint remaining = (uint)(bytes.Length - offset);
+                IntPtr buffer = IntPtr.Add(pinned.AddrOfPinnedObject(), offset);
+                if (!WriteFile(h, buffer, remaining, out written, IntPtr.Zero)) throw Error("receipt.write");
+                if (written == 0) throw new IOException("receipt.write:zero-progress");
+                if (written > remaining) throw new IOException("receipt.write:invalid-progress");
+                offset += checked((int)written);
+            }
+        } finally { pinned.Free(); }
         if (!FlushFileBuffers(h)) throw Error("receipt.flush");
     }
     static bool RenameNoReplace(SafeFileHandle h, byte[] rename, out int error) {
@@ -789,6 +800,7 @@ public static class MaterializerApi {
             using (var h = CreateFileW(temp, 0x40010000, 0, IntPtr.Zero, 1, 0x80, IntPtr.Zero)) {
                 if (h.IsInvalid) throw Error("receipt.create-exclusive");
                 bool published = false;
+                bool renamed = false;
                 // Keep the exclusive owned handle open through write, rename,
                 // and cleanup.  FileStream can create a managed wrapper whose
                 // lifetime/flush behavior varies by the host CLR; direct
@@ -811,7 +823,7 @@ public static class MaterializerApi {
                         RequirePendingAbsent(pending);
                         if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("receipt.policy-identity");
                         if (RenameNoReplace(h, rename, out renameError)) {
-                            published = true;
+                            renamed = true;
                             break;
                         }
                         if (!IsTransientRenameError(renameError) || attempt == 4)
@@ -821,6 +833,11 @@ public static class MaterializerApi {
                     // Absence cannot be locked. Invalidation is best effort;
                     // every consumer MUST revalidate pending immediately at use.
                     RequirePendingAbsent(pending);
+                    // A rename is not a valid publication until the
+                    // post-rename invariant check above succeeds. If it
+                    // fails, the finally block deletes the renamed path via
+                    // this same handle instead of leaving a bad receipt.
+                    if (renamed) published = true;
                 } finally {
                     if (!published && !SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4))
                         throw Error("receipt.cleanup-owned-handle");
