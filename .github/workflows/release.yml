@@ -95,6 +95,12 @@ jobs:
             cross_compile: true
 
     runs-on: ${{ matrix.os }}
+    # Beta support contract (doc/07_guide/infra/software_release.md): the only
+    # channel-blocking row is Linux x86_64. macOS is Tier 2 (visible, not
+    # blocking); FreeBSD is blocked; aarch64/riscv64 are experimental; and the
+    # cross/freebsd legs build bootstrap-only seeds that refuse release by
+    # design. Keep those rows visible without letting them hold the release.
+    continue-on-error: ${{ matrix.cross_compile == true || contains(matrix.platform, 'freebsd') || startsWith(matrix.os, 'macos') }}
 
     steps:
       - name: Checkout code
@@ -281,6 +287,53 @@ jobs:
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
           fi
 
+      - name: Build native Linux x86_64 binary via bootstrap-only Rust seed
+        if: runner.os == 'Linux' && matrix.platform == 'linux-x86_64'
+        shell: bash
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Building native Linux x86_64 binary via bootstrap-only Rust seed"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # 1. Build Rust seed (rust-toolchain.toml selects the channel)
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          cargo build --profile bootstrap -p simple-native-all --features driver-compat
+          cd ../..
+
+          BOOTSTRAP_ONLY_SEED="src/compiler_rust/target/bootstrap/simple"
+          if [ ! -f "$BOOTSTRAP_ONLY_SEED" ]; then
+            echo "✗ Rust seed build failed — no binary produced"
+            exit 1
+          fi
+          file "$BOOTSTRAP_ONLY_SEED"
+          ls -lh "$BOOTSTRAP_ONLY_SEED"
+
+          # 2. Compile Simple source with the seed (SCV cold journal: fresh checkout)
+          mkdir -p build/bootstrap/stage1
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
+            "$BOOTSTRAP_ONLY_SEED" native-build \
+            --source-dir src \
+            --entry-closure \
+            --entry src/app/cli/bootstrap_main.spl \
+            --output build/bootstrap/stage1/simple \
+            2>&1 || true
+
+          # 3. Verify the pure-Simple binary; it alone becomes the candidate.
+          NATIVE_BIN="build/bootstrap/stage1/simple"
+          if [ -f "$NATIVE_BIN" ] && "./$NATIVE_BIN" --version 2>/dev/null; then
+            "./$NATIVE_BIN" -c "print 42" || echo "⚠ -c flag not supported (bootstrap binary)"
+            echo "✓ Native-built Simple binary verified"
+            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
+            echo "NEW_RUNTIME_PATH=$(pwd)/$NATIVE_BIN" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+            file "$NATIVE_BIN"
+            ls -lh "$NATIVE_BIN"
+          else
+            echo "✗ native-build failed or binary broken; bootstrap-only Rust seed cannot satisfy release"
+            exit 1
+          fi
+
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -326,7 +379,7 @@ jobs:
           echo "Running native-build to compile Simple source"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           mkdir -p build/bootstrap/stage1
-          RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+          RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
             "$BOOTSTRAP_ONLY_SEED" native-build \
             --source-dir src \
             --entry-closure \
@@ -432,7 +485,7 @@ jobs:
             echo "Running native-build to compile Simple source"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             mkdir -p build/bootstrap/stage1
-            RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+            RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
               "$BOOTSTRAP_ONLY_SEED" native-build \
               --source-dir src \
               --entry-closure \
@@ -657,7 +710,7 @@ jobs:
                 mcp_bin="${mcp_name}"
               fi
               echo "Building native ${mcp_name} for bootstrap package"
-              if RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
+              if RUST_LOG=error SIMPLE_BOOTSTRAP=1 SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
                 "$BINARY_TO_PACKAGE" native-build \
                 --source src/compiler \
                 --source src/app \
@@ -1073,7 +1126,7 @@ jobs:
       - name: Install QEMU + LLVM toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 llvm mtools
+          sudo apt-get install -y -qq qemu-system-x86 llvm mtools binutils
 
       - name: Build SimpleOS kernel (--full)
         timeout-minutes: 50

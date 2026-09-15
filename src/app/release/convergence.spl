@@ -537,9 +537,8 @@ fn inspect_release_main_convergence(root: text, session: ReleaseSession,
         plan: plan
     )
 
-fn record_post_integration_divergence(root: text, session: ReleaseSession,
-                                      request: PostIntegrationDivergenceRequest) -> PostIntegrationDivergenceReceipt:
-    val rejected = \reason: PostIntegrationDivergenceReceipt(
+fn _post_divergence_rejected(request: PostIntegrationDivergenceRequest, reason: text) -> PostIntegrationDivergenceReceipt:
+    PostIntegrationDivergenceReceipt(
         valid: false, reason: reason, mutation: "none", direction: request.direction,
         source_head_before: request.source_head_before, source_head_after: "",
         target_head_before: request.target_head_before, target_head_after: "",
@@ -551,47 +550,50 @@ fn record_post_integration_divergence(root: text, session: ReleaseSession,
         source_unchanged: false, target_equals_result: false,
         main_remains_independent: true
     )
+
+fn record_post_integration_divergence(root: text, session: ReleaseSession,
+                                      request: PostIntegrationDivergenceRequest) -> PostIntegrationDivergenceReceipt:
     val verified = verify_release_session(root, session)
     if not verified.valid:
-        return rejected("trusted release session rejected divergence observation: " + verified.reason)
+        return _post_divergence_rejected(request, "trusted release session rejected divergence observation: " + verified.reason)
     if request.direction != "main_to_release" and request.direction != "release_to_main":
-        return rejected("post-integration divergence direction is invalid")
+        return _post_divergence_rejected(request, "post-integration divergence direction is invalid")
     if (not _commit_sha_valid(request.source_head_before) or
         not _commit_sha_valid(request.target_head_before) or
         not _commit_sha_valid(request.result_commit_sha)):
-        return rejected("post-integration divergence requires exact commit identities")
+        return _post_divergence_rejected(request, "post-integration divergence requires exact commit identities")
     if (not _sha256_valid(request.review_receipt_sha256) or
         not _sha256_valid(request.evidence_receipt_sha256) or
         not _sha256_valid(request.integration_receipt_sha256)):
-        return rejected("post-integration divergence requires review, evidence, and integration receipts")
+        return _post_divergence_rejected(request, "post-integration divergence requires review, evidence, and integration receipts")
     if request.selected_bug_fix_shas.len() == 0 or _has_duplicates(request.selected_bug_fix_shas):
-        return rejected("post-integration divergence requires unique selected bug-fix commits")
+        return _post_divergence_rejected(request, "post-integration divergence requires unique selected bug-fix commits")
     for selected in request.selected_bug_fix_shas:
         if not _commit_sha_valid(selected):
-            return rejected("post-integration divergence contains an invalid selected commit")
+            return _post_divergence_rejected(request, "post-integration divergence contains an invalid selected commit")
 
     val fetch_error = _refresh_convergence_refs(verified.canonical_root, request.release_ref)
     if fetch_error != "":
-        return rejected(fetch_error)
+        return _post_divergence_rejected(request, fetch_error)
     val main_after = _git_value(verified.canonical_root, ["rev-parse", "--verify", "refs/remotes/origin/main"])
     val release_after = _git_value(verified.canonical_root, ["rev-parse", "--verify", "refs/remotes/origin/" + request.release_ref])
     val source_after = if request.direction == "main_to_release": main_after else: release_after
     val target_after = if request.direction == "main_to_release": release_after else: main_after
     if source_after != request.source_head_before:
-        return rejected("convergence source changed before the post-integration receipt was recorded")
+        return _post_divergence_rejected(request, "convergence source changed before the post-integration receipt was recorded")
     if target_after != request.result_commit_sha or session.expected_target_sha != target_after:
-        return rejected("convergence target does not equal the reviewed integration result")
+        return _post_divergence_rejected(request, "convergence target does not equal the reviewed integration result")
     if target_after == request.target_head_before or not _is_ancestor(verified.canonical_root, request.target_head_before, target_after):
-        return rejected("convergence result is not an append-only descendant of the observed target")
+        return _post_divergence_rejected(request, "convergence result is not an append-only descendant of the observed target")
     if target_after == source_after:
-        return rejected("main and release line must remain independent after convergence")
+        return _post_divergence_rejected(request, "main and release line must remain independent after convergence")
     val source_head_is_ancestor = _is_ancestor(verified.canonical_root, source_after, target_after)
     if not convergence_graph_allowed(source_head_is_ancestor):
-        return rejected("convergence must not absorb an entire source line into its target")
+        return _post_divergence_rejected(request, "convergence must not absorb an entire source line into its target")
     for selected in request.selected_bug_fix_shas:
         if (not _is_ancestor(verified.canonical_root, selected, target_after) and
             not _patch_present_in_target(verified.canonical_root, selected, target_after)):
-            return rejected("selected bug fix is not represented in the integrated target")
+            return _post_divergence_rejected(request, "selected bug fix is not represented in the integrated target")
 
     PostIntegrationDivergenceReceipt(
         valid: true, reason: "post-integration divergence recorded",
