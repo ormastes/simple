@@ -1695,3 +1695,4 @@ fn builtin_receiver_method_fallback_ignores_unrelated_user_class_methods() {
         module.err()
     );
 }
+

@@ -34,18 +34,20 @@ EXPECTED_BOOTSTRAP_VERSION=$(bootstrap_stage3_canonical_version "$ROOT_DIR") || 
 }
 
 VM_DIR="${QEMU_VM_DIR:-${ROOT_DIR}/build/freebsd/vm}"
+QEMU_RUNTIME_DIR="${QEMU_RUNTIME_DIR:-${VM_DIR}}"
 QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-8G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
+QEMU_BUILD_JOBS="${SIMPLE_FREEBSD_SELFHOST_JOBS:-1}"
 QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 QEMU_REMOTE_TIMEOUT="${QEMU_REMOTE_TIMEOUT:-300}"
 QEMU_PACKAGE_TIMEOUT="${QEMU_PACKAGE_TIMEOUT:-1800}"
 QEMU_TRANSFER_TIMEOUT="${QEMU_TRANSFER_TIMEOUT:-1800}"
-QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-7200}"
+QEMU_BOOTSTRAP_TIMEOUT="${QEMU_BOOTSTRAP_TIMEOUT:-14400}"
 QEMU_SMOKE_TIMEOUT="${QEMU_SMOKE_TIMEOUT:-600}"
-QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-7200}"
+QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-18000}"
 FREEBSD_VERSION="14.4"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
 FREEBSD_MEDIA_CHECKER="${ROOT_DIR}/scripts/qemu/simple-freebsd-media.shs"
@@ -57,11 +59,11 @@ fi
 export SIMPLE_FREEBSD_MEDIA_SHA256
 SHARED_MEDIA_ROOT="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/images/freebsd"
 QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${SIMPLE_FREEBSD_MEDIA_PATH:-${SHARED_MEDIA_ROOT}/${FREEBSD_IMAGE_NAME}}}}"
-QEMU_CLOUDINIT_ISO="${QEMU_CLOUDINIT_ISO:-${VM_DIR}/freebsd-cloudinit-seed.iso}"
-PID_FILE="${VM_DIR}/qemu.pid"
-SERIAL_LOG="${VM_DIR}/qemu-serial.log"
-QEMU_START_LOG="${VM_DIR}/qemu-start.log"
-OVERLAY_IMAGE="${VM_DIR}/freebsd-run.overlay.qcow2"
+QEMU_CLOUDINIT_ISO="${QEMU_CLOUDINIT_ISO:-${QEMU_RUNTIME_DIR}/freebsd-cloudinit-seed.iso}"
+PID_FILE="${QEMU_PID_FILE:-${QEMU_RUNTIME_DIR}/qemu.pid}"
+SERIAL_LOG="${QEMU_SERIAL_LOG:-${QEMU_RUNTIME_DIR}/qemu-serial.log}"
+QEMU_START_LOG="${QEMU_START_LOG:-${QEMU_RUNTIME_DIR}/qemu-start.log}"
+OVERLAY_IMAGE="${QEMU_OVERLAY_IMAGE:-${QEMU_RUNTIME_DIR}/freebsd-run.overlay.qcow2}"
 PROVENANCE_DIR="${ROOT_DIR}/build/freebsd/bootstrap-logs"
 PROVENANCE_RECEIPT="${PROVENANCE_DIR}/freebsd_qemu_bootstrap_provenance.env"
 
@@ -142,7 +144,7 @@ if [ -z "$TIMEOUT_BIN" ]; then
     TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 fi
 
-PREFLIGHT_ORDER="mode,port,user,memory,cpus,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
+PREFLIGHT_ORDER="mode,port,user,memory,cpus,build_jobs,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
 PREFLIGHT_REASON="none"
 
 preflight_try() {
@@ -163,6 +165,7 @@ preflight_port() { is_valid_port "$QEMU_PORT"; }
 preflight_user() { is_valid_user "$QEMU_USER"; }
 preflight_memory() { is_valid_memory "$QEMU_MEM"; }
 preflight_cpus() { is_positive_integer "$QEMU_CPUS"; }
+preflight_build_jobs() { is_positive_integer "$QEMU_BUILD_JOBS"; }
 preflight_ssh_timeout() { is_positive_integer "$QEMU_SSH_TIMEOUT"; }
 preflight_root_ssh_timeout() { is_positive_integer "$QEMU_ROOT_SSH_TIMEOUT"; }
 
@@ -233,6 +236,7 @@ run_preflight() {
     preflight_try user preflight_user
     preflight_try memory preflight_memory
     preflight_try cpus preflight_cpus
+    preflight_try build_jobs preflight_build_jobs
     preflight_try ssh_timeout preflight_ssh_timeout
     preflight_try root_ssh_timeout preflight_root_ssh_timeout
     preflight_try timeout preflight_timeout
@@ -253,7 +257,7 @@ run_preflight() {
         PREFLIGHT_STATUS="fail"
     fi
     printf 'freebsd_qemu_preflight_status=%s\n' "$PREFLIGHT_STATUS"
-    printf 'freebsd_qemu_preflight_checks=19\n'
+    printf 'freebsd_qemu_preflight_checks=20\n'
     printf 'freebsd_qemu_preflight_order=%s\n' "$PREFLIGHT_ORDER"
     printf 'freebsd_qemu_preflight_reason=%s\n' "$PREFLIGHT_REASON"
     [ "$PREFLIGHT_STATUS" = "pass" ]
@@ -282,6 +286,10 @@ if ! is_valid_memory "$QEMU_MEM"; then
 fi
 if ! is_positive_integer "$QEMU_CPUS"; then
     printf 'Invalid QEMU_CPUS: %s\n' "$QEMU_CPUS" >&2
+    exit 1
+fi
+if ! is_positive_integer "$QEMU_BUILD_JOBS"; then
+    printf 'Invalid SIMPLE_FREEBSD_SELFHOST_JOBS: %s\n' "$QEMU_BUILD_JOBS" >&2
     exit 1
 fi
 if ! preflight_timeout; then
@@ -404,7 +412,11 @@ pkg_root() {
 }
 
 SCRIPT_OK=0
+GIT_AUTHORITY_DIR=""
 cleanup() {
+    if [ -n "$GIT_AUTHORITY_DIR" ] && [ -d "$GIT_AUTHORITY_DIR" ]; then
+        rm -rf "$GIT_AUTHORITY_DIR"
+    fi
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null || true)
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -478,7 +490,9 @@ RSYNC_SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Ba
 # ── Base Image ─────────────────────────────────────────────────────────
 printf '[3/7] Base image\n'
 
-mkdir -p "$VM_DIR"
+mkdir -p "$VM_DIR" "$QEMU_RUNTIME_DIR" \
+    "$(dirname "$OVERLAY_IMAGE")" "$(dirname "$SERIAL_LOG")" \
+    "$(dirname "$QEMU_START_LOG")" "$(dirname "$PID_FILE")"
 
 MEDIA_RECEIPT="$(sh "$MEDIA_CHECKER" --check --path "$QEMU_VM_PATH")" || {
     printf '%s\n' "$MEDIA_RECEIPT" >&2
@@ -493,7 +507,7 @@ pass "Admitted base image: $QEMU_VM_PATH"
 printf '[4/7] Cloud-init ISO\n'
 
 SSH_PUB_KEY_CONTENT=$(cat "$SSH_PUB_KEY")
-CLOUDINIT_DIR="${VM_DIR}/cloudinit.tmp"
+CLOUDINIT_DIR="${QEMU_CLOUDINIT_DIR:-${QEMU_RUNTIME_DIR}/cloudinit.tmp}"
 rm -rf "$CLOUDINIT_DIR"
 mkdir -p "$CLOUDINIT_DIR"
 
@@ -668,19 +682,19 @@ copy_guest_bootstrap_logs() {
     rm -rf "$host_log_dir"
     mkdir -p "$host_log_dir"
     if run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
-        "${VM_USER}@localhost:${VM_HOME}/simple/build/bootstrap/logs/" \
+        "${VM_USER}@localhost:${VM_HOME}/simple/${GUEST_BOOTSTRAP_OUTPUT_RELATIVE}/logs/" \
         "${host_log_dir}/"; then
         guest_log_count=$(find "$host_log_dir" -type f -name '*.log' -size +0c | wc -l | tr -d ' ')
         [ "$guest_log_count" -gt 0 ] ||
-            fail "FreeBSD x86_64 QEMU full bootstrap guest logs missing or empty"
-        info "Bootstrap logs preserved: ${host_log_dir}"
+            fail "FreeBSD x86_64 QEMU Stage 3 self-host guest logs missing or empty"
+        info "Stage 3 self-host logs preserved: ${host_log_dir}"
         find "$host_log_dir" -type f -name '*.log' | sort | tail -4 |
             while IFS= read -r log; do
                 info "Last 40 lines of ${log}:"
                 tail -40 "$log" >&2
             done
     else
-        fail "FreeBSD x86_64 QEMU full bootstrap guest log retrieval failed"
+        fail "FreeBSD x86_64 QEMU Stage 3 self-host guest log retrieval failed"
     fi
 }
 
@@ -734,7 +748,7 @@ else
         $VM_SSH "tail -20 /tmp/simple-pkg-update.log" >&2 || true
         fail "pkg update failed"
     fi
-    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm18 git gmake pkgconf libffi zstd perl5 > /tmp/simple-pkg-install.log 2>&1"; then
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm18 git gmake pkgconf libffi zstd perl5 coreutils > /tmp/simple-pkg-install.log 2>&1"; then
         $VM_SSH "tail -20 /tmp/simple-pkg-install.log" >&2 || true
         fail "dependency installation failed"
     fi
@@ -756,11 +770,21 @@ else
         --exclude='/src/runtime/*.o' \
         --exclude='/src/runtime/*.a' \
         --exclude='/examples/' \
-        --exclude='/doc/' \
+        --include='/doc/' \
+        --include='/doc/04_architecture/' \
+        --include='/doc/04_architecture/compiler/' \
+        --include='/doc/04_architecture/compiler/plugin_arch/' \
+        --include='/doc/04_architecture/compiler/plugin_arch/***' \
+        --exclude='/doc/***' \
         --exclude='*.qcow2' \
         --exclude='/src/compiler_rust/target/' \
         --exclude='/src/compiler_rust/target_*/' \
-        --exclude='/tools/' \
+        --include='/tools/' \
+        --include='/tools/counterpart/' \
+        --include='/tools/counterpart/sdk/' \
+        --include='/tools/counterpart/sdk/c/' \
+        --include='/tools/counterpart/sdk/c/simple_counterpart_abi.h' \
+        --exclude='/tools/***' \
         --exclude='/bin/' \
         --exclude='**/target/debug/' \
         --exclude='**/target/release/' \
@@ -769,12 +793,48 @@ else
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
-    info "Running canonical full bootstrap in VM..."
-    if ! $VM_SSH "cd ${VM_HOME}/simple && env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then
+    # The source transfer deliberately excludes the host worktree's .git
+    # indirection and its multi-gigabyte object store.  Stage 3 still needs
+    # the exact HEAD plus an index so it can bind and re-check the synced
+    # tree's dirty fingerprint.  A depth-one, no-checkout clone provides that
+    # authority without sharing host-only paths or unrelated history.
+    info "Syncing bounded Git authority to VM..."
+    command -v git >/dev/null 2>&1 || fail "host git not found"
+    GIT_AUTHORITY_DIR=$(mktemp -d "${QEMU_RUNTIME_DIR}/git-authority.XXXXXX") ||
+        fail "could not create Git authority workspace"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" git clone --quiet --depth 1 \
+        --no-local --no-checkout "$ROOT_DIR" "$GIT_AUTHORITY_DIR/repo" ||
+        fail "could not create bounded Git authority"
+    # Preserve genuine host-side tracked deletions.  The guest first suppresses
+    # absent paths caused by rsync projection, then restores these paths to the
+    # index so Stage 3 records them as real dirty-state changes.
+    git -C "$ROOT_DIR" diff --no-renames --name-only -z --diff-filter=D HEAD -- \
+        >"$GIT_AUTHORITY_DIR/repo/.git/simple-host-deleted.z" ||
+        fail "could not capture host tracked deletions"
+    $VM_SSH "rm -rf '${VM_HOME}/simple/.git' && mkdir -p '${VM_HOME}/simple/.git'" ||
+        fail "could not prepare guest Git authority"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete --no-owner --no-group \
+        -e "$RSYNC_SSH" \
+        "$GIT_AUTHORITY_DIR/repo/.git/" \
+        "${VM_USER}@localhost:${VM_HOME}/simple/.git/" ||
+        fail "could not sync bounded Git authority"
+    $VM_SSH "git config --global --add safe.directory '${VM_HOME}/simple'" ||
+        fail "could not admit guest Git worktree ownership"
+    $VM_SSH "cd '${VM_HOME}/simple' && git reset --mixed --quiet HEAD && git ls-files --deleted -z | git update-index --skip-worktree -z --stdin && git update-index --no-skip-worktree -z --stdin < .git/simple-host-deleted.z && git rev-parse --verify HEAD >/dev/null" ||
+        fail "guest Git authority is invalid"
+    rm -rf "$GIT_AUTHORITY_DIR"
+    GIT_AUTHORITY_DIR=""
+    pass "Bounded Git authority synced"
+
+    GUEST_BOOTSTRAP_OUTPUT_RELATIVE="build/bootstrap-freebsd-qemu"
+    GUEST_BOOTSTRAP_OUTPUT="${VM_HOME}/simple/${GUEST_BOOTSTRAP_OUTPUT_RELATIVE}"
+    info "Running native FreeBSD Stage 3 self-host checker (explicit output: ${GUEST_BOOTSTRAP_OUTPUT})..."
+    EXACT_COMMAND="env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} SIMPLE_FREEBSD_SELFHOST_JOBS=${QEMU_BUILD_JOBS} SIMPLE_FREEBSD_SELFHOST_TIMEOUT=${QEMU_BOOTSTRAP_TIMEOUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs"
+    if ! $VM_SSH "cd ${VM_HOME}/simple && env SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT} SIMPLE_FREEBSD_SELFHOST_JOBS=${QEMU_BUILD_JOBS} SIMPLE_FREEBSD_SELFHOST_TIMEOUT=${QEMU_BOOTSTRAP_TIMEOUT} LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig PATH=/usr/local/libexec/gnubin:/usr/local/bin:\$PATH sh scripts/check/check-freebsd-selfhost-ci.shs"; then
         copy_guest_bootstrap_logs
-        fail "Canonical FreeBSD bootstrap failed"
+        fail "Canonical FreeBSD Stage 3 self-host checker failed"
     fi
-    STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"
+    STAGE_BIN="${GUEST_BOOTSTRAP_OUTPUT}/stage3/x86_64-unknown-freebsd/simple"
     STAGE_EXISTS=$($VM_SSH "test -x ${STAGE_BIN} && echo yes || echo no" 2>/dev/null)
     if [ "$STAGE_EXISTS" != "yes" ]; then
         fail "Canonical bootstrap produced no stage3 dynload binary"
@@ -823,7 +883,7 @@ else
     printf '%s\n' "$DYNLOAD_ARCHIVE_OUT" | grep -v '^EXIT:' | tail -10
     [ "$DYNLOAD_ARCHIVE_EXIT" = "0" ] || fail "FreeBSD Stage4 dynload provider archive proof failed (exit $DYNLOAD_ARCHIVE_EXIT)"
     printf '%s\n' "$DYNLOAD_ARCHIVE_OUT" | grep -qx 'stage4_dynload_provider_archive=true' || fail "FreeBSD Stage4 dynload provider archive receipt missing"
-    pass "FreeBSD Stage4 dynload provider archive proof completed"
+    pass "FreeBSD Stage4 dynload provider archive proof completed after Stage 3 self-host checker"
 
     info "Running FreeBSD default-LLVM native smoke matrix..."
     MATRIX_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap NATIVE_SMOKE_BACKEND=llvm NATIVE_SMOKE_WORK_DIR=/tmp/simple-freebsd-native-smoke sh scripts/check/native-smoke-matrix.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
@@ -915,5 +975,5 @@ else
     pass "Scoped FreeBSD x86_64 QEMU provenance receipt: $PROVENANCE_RECEIPT"
 
     SCRIPT_OK=1
-    printf '\nFreeBSD x86_64 QEMU full bootstrap PASS\n'
+    printf '\nFreeBSD x86_64 QEMU Stage 3 bootstrap PASS (Stage 4 archive proof also completed)\n'
 fi

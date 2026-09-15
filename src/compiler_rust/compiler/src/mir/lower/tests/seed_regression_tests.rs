@@ -45,7 +45,11 @@ fn trait_typed_parameter_preserves_owner_for_virtual_dispatch() {
         "trait Gateway:\n    fn store() -> i64\n\nstruct Adapter:\n    value: i64\n\nimpl Gateway for Adapter:\n    fn store(self) -> i64: self.value\n\nfn consume(gateway: Gateway) -> i64:\n    gateway.store()\n",
     )
     .expect("trait-typed call must lower to MIR");
-    let consume = mir.functions.iter().find(|function| function.name == "consume").unwrap();
+    let consume = mir
+        .functions
+        .iter()
+        .find(|function| function.name == "consume")
+        .unwrap();
     assert!(
         consume
             .blocks
@@ -397,5 +401,211 @@ fn or_suspend_keeps_eager_unconditional_evaluation() {
     assert!(
         func.locals.iter().all(|l| !l.name.starts_with("__logical_")),
         "or~ must not allocate a short-circuit merge temp (eager path has no branch/merge)"
+    );
+}
+/// `str(x!)` where `x: i64?` force-unwraps to a HIR-`ANY`-typed tagged
+/// RuntimeValue (see `lower_try` in hir/lower/expr/control.rs). `lower_cast_expr`
+/// only special-cased `is_native_scalar` sources for the to-STRING conversion,
+/// so an ANY-typed source fell through to a plain `MirInst::Cast` -- a value
+/// copy in codegen that reinterprets the tagged word as a raw STRING pointer,
+/// corrupting it (rt_string_concat then reads len=-1 and returns NIL).
+/// ANY must route through `emit_to_string` -> `rt_value_to_string`, exactly
+/// like every other tagged-value producer.
+/// See doc/08_tracking/bug/seed_jit_some_constructor_corrupts_value_2026-09-13.md
+#[test]
+fn str_of_force_unwrapped_nullable_scalar_routes_through_to_string() {
+    let mir = compile_to_mir("fn describe() -> text:\n    val x: i64? = 42\n    return str(x!)\n")
+        .expect("str(x!) on a nullable scalar must lower to MIR");
+    let func = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "describe")
+        .expect("describe fn");
+
+    assert!(
+        has_call(func, "rt_value_to_string"),
+        "str(x!) on an ANY-typed force-unwrap must call rt_value_to_string, \
+         not fall through to a raw MirInst::Cast"
+    );
+    assert!(
+        func.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .all(|inst| !matches!(inst, MirInst::Cast { to_ty, .. } if *to_ty == TypeId::STRING)),
+        "an ANY-typed source must not lower str(...) to a bare value-copy Cast to STRING"
+    );
+}
+// ---------------------------------------------------------------------------
+// Flattened-unit cross-module same-named free functions.
+// doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md
+//
+// These build the flattened AST the way `pipeline::module_loader` does: each
+// imported module's functions carry the owner attribute and each `use` leaves
+// an import-binding marker const.
+// ---------------------------------------------------------------------------
+
+fn flattened_items(source: &str, owner: &str) -> Vec<simple_parser::Node> {
+    let module = simple_parser::Parser::new(source).parse().expect("parse failed");
+    module
+        .items
+        .into_iter()
+        .map(|mut item| {
+            if let simple_parser::Node::Function(function) = &mut item {
+                crate::interpreter::tag_function_module_owner(function, owner);
+            }
+            item
+        })
+        .collect()
+}
+
+fn import_binding_marker(importer: &str, local: &str, source_owner: &str, source_name: &str) -> simple_parser::Node {
+    simple_parser::Node::Const(simple_parser::ast::ConstStmt {
+        span: simple_parser::token::Span::new(0, 0, 0, 0),
+        name: format!(
+            "{}{}:{importer}{}:{local}{}:{source_owner}{}:{source_name}",
+            crate::interpreter::FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+            importer.len(),
+            local.len(),
+            source_owner.len(),
+            source_name.len()
+        ),
+        ty: None,
+        value: simple_parser::ast::Expr::Nil,
+        visibility: simple_parser::ast::Visibility::Private,
+        attributes: vec![],
+    })
+}
+
+fn lower_flattened_unit(items: Vec<simple_parser::Node>) -> crate::mir::function::MirModule {
+    let mut module = simple_parser::Parser::new("fn flatten_entry_anchor() -> i64:\n    return 0\n")
+        .parse()
+        .expect("parse failed");
+    module.items.extend(items);
+    let hir_module = crate::hir::lower(&module).expect("hir lower failed");
+    super::super::lower_to_mir(&hir_module).expect("mir lower failed")
+}
+
+fn mir_fn<'m>(mir: &'m crate::mir::function::MirModule, name: &str) -> &'m MirFunction {
+    mir.functions.iter().find(|f| f.name == name).unwrap_or_else(|| {
+        panic!(
+            "no MIR function `{name}`; have {:?}",
+            mir.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+        )
+    })
+}
+
+/// `use provider.{helper}` must not let provider's same-named `http_get`
+/// replace the consumer's own. Provider is placed LAST so plain bare-name
+/// last-write-wins would pick provider's body: only owner resolution passes.
+#[test]
+fn selective_import_does_not_override_importers_same_named_function() {
+    let consumer = "consumer.spl";
+    let provider = "provider.spl";
+    let mut items = vec![import_binding_marker(consumer, "helper", provider, "helper")];
+    items.extend(flattened_items(
+        "fn http_get(url: text) -> i64:\n    return 1\n\nfn build() -> i64:\n    return http_get(\"x\")\n",
+        consumer,
+    ));
+    items.extend(flattened_items(
+        "fn http_get(url: text) -> i64:\n    return 7\n\nfn helper() -> i64:\n    return 42\n",
+        provider,
+    ));
+    let mir = lower_flattened_unit(items);
+
+    let consumer_symbol = crate::interpreter::flatten_owner_mangled_name(consumer, "http_get");
+    mir_fn(&mir, &consumer_symbol);
+    mir_fn(&mir, "http_get");
+    let build = mir_fn(&mir, "build");
+    assert!(
+        has_call(build, &consumer_symbol),
+        "consumer's build() must call the consumer's own http_get ({consumer_symbol})"
+    );
+    assert!(
+        !has_call(build, "http_get"),
+        "consumer's build() must not call provider's bare-named http_get"
+    );
+}
+
+/// Before the consumer's value body is lowered, only its scalar return type
+/// is registered. The provider's later bare-name entry must not replace it.
+#[test]
+fn colliding_forward_and_recursive_calls_keep_resolved_return_type() {
+    use crate::hir::{HirExprKind, HirStmt};
+
+    let consumer = "consumer.spl";
+    let provider = "provider.spl";
+    let consumer_symbol = crate::interpreter::flatten_owner_mangled_name(consumer, "value");
+    for (value_body, recursive) in [("\"consumer\"", false), ("value()", true)] {
+        let source =
+            format!("fn build() -> text:\n    return value()\n\nfn value() -> text:\n    return {value_body}\n");
+        let mut module = simple_parser::Parser::new("fn flatten_entry_anchor() -> i64:\n    return 0\n")
+            .parse()
+            .expect("parse failed");
+        module.items.extend(flattened_items(&source, consumer));
+        module
+            .items
+            .extend(flattened_items("fn value() -> i64:\n    return 7\n", provider));
+        let hir = crate::hir::lower(&module).expect("hir lower failed");
+        let mut callers = vec!["build"];
+        if recursive {
+            callers.push(&consumer_symbol);
+        }
+        for caller in &callers {
+            let function = hir.functions.iter().find(|f| f.name == *caller).expect("caller");
+            let call = function
+                .body
+                .iter()
+                .find_map(|stmt| match stmt {
+                    HirStmt::Return(Some(expr)) => Some(expr),
+                    _ => None,
+                })
+                .expect("return expression");
+            assert_eq!(
+                call.ty,
+                TypeId::STRING,
+                "{caller}'s call must retain the consumer's text return type"
+            );
+            match &call.kind {
+                HirExprKind::Call { func, .. } => assert!(
+                    matches!(&func.kind, HirExprKind::Global(symbol) if symbol == &consumer_symbol),
+                    "{caller} must resolve to the consumer's value"
+                ),
+                other => panic!("expected a direct call, got {other:?}"),
+            }
+        }
+        let mir = super::super::lower_to_mir(&hir).expect("mir lower failed");
+        assert_eq!(mir_fn(&mir, "value").return_type, TypeId::I64);
+        for caller in callers {
+            assert!(has_call(mir_fn(&mir, caller), &consumer_symbol));
+            assert!(!has_call(mir_fn(&mir, caller), "value"));
+        }
+    }
+}
+
+/// The old `http_client` shim shape: `use req.{add_header as req_add_header}`
+/// next to the importer's own `fn add_header` used to lower to a self-call
+/// (stack overflow). The alias must reach req's definition.
+#[test]
+fn import_alias_of_colliding_name_does_not_bind_importers_own_function() {
+    let shim = "shim.spl";
+    let req = "req.spl";
+    let mut items = flattened_items("fn add_header(h: i64) -> i64:\n    return h + 1\n", req);
+    items.push(import_binding_marker(shim, "req_add_header", req, "add_header"));
+    items.extend(flattened_items(
+        "fn add_header(h: i64) -> i64:\n    return req_add_header(h)\n",
+        shim,
+    ));
+    let mir = lower_flattened_unit(items);
+
+    let req_symbol = crate::interpreter::flatten_owner_mangled_name(req, "add_header");
+    mir_fn(&mir, &req_symbol);
+    let shim_add_header = mir_fn(&mir, "add_header");
+    assert!(
+        has_call(shim_add_header, &req_symbol),
+        "the alias must call req's add_header ({req_symbol})"
+    );
+    assert!(
+        !has_call(shim_add_header, "add_header"),
+        "shim's add_header must not call itself through the alias"
     );
 }

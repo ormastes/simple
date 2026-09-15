@@ -553,7 +553,7 @@ impl<'a> MirLowerer<'a> {
         // copy in codegen, so a raw int/float would masquerade as a STRING
         // pointer — rt_string_concat then sees len=-1 and returns NIL,
         // dropping the whole concat to empty (#66). Convert for real.
-        if target == TypeId::STRING && Self::is_native_scalar(inner.ty) {
+        if target == TypeId::STRING && (Self::is_native_scalar(inner.ty) || inner.ty == TypeId::ANY) {
             return self.emit_to_string(source_reg, inner.ty);
         }
 

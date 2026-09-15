@@ -4,17 +4,23 @@
 # Auth:   ~/.config/itf/auth.sdn
 
 use std.nogc_sync_mut.env.{env_get, env_has}
-use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists}
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.io.mod.{file_read, file_exists, file_atomic_write}
 use std.json.{json_parse, json_object_get, json_serialize}
 use app.devhub.errors.{ItfError}
+use app.devhub.auth_token_store.{load_auth_token_from, save_auth_token_to}
 
 
 class ItfConfig:
     confluence_url: text
     confluence_user: text
     confluence_default_space: text
+    confluence_target: text  # selected named target; "" is the legacy singleton
+    confluence_gateway_url: text  # complete API prefix for the selected target
+    confluence_headers: [text]  # ordered repeated `header: Name: Value` entries
     jira_url: text
+    jira_gateway_url: text  # complete API prefix for Jira gateway requests
+    jira_headers: [text]  # ordered per-target gateway headers
     jira_acli_path: text
     jira_email: text
     default_output: text
@@ -39,6 +45,8 @@ class ItfConfig:
     confluence_deployment: text  # [confluence] deployment: cloud|datacenter
     confluence_auth: text        # [confluence] auth: basic|bearer ("" = basic; bearer = Data Center PAT)
     bb_url: text                 # [bitbucket] url: site root ("" = https://api.bitbucket.org/2.0 on Cloud; REQUIRED on datacenter, may carry a context path)
+    bb_gateway_url: text         # complete API prefix for Bitbucket gateway requests
+    bb_headers: [text]           # ordered per-target gateway headers
     bb_deployment: text          # [bitbucket] deployment: cloud|datacenter
     bb_project: text             # [bitbucket] project: <PROJECT_KEY> — the DC counterpart of `workspace`, placed at /projects/{KEY}/repos/{slug}
     bb_auth: text                # [bitbucket] auth: bearer|basic ("" = bearer; basic = base64(user:token))
@@ -49,7 +57,12 @@ class ItfConfig:
             confluence_url: "",
             confluence_user: "",
             confluence_default_space: "",
+            confluence_target: "",
+            confluence_gateway_url: "",
+            confluence_headers: [],
             jira_url: "",
+            jira_gateway_url: "",
+            jira_headers: [],
             jira_acli_path: "acli",
             jira_email: "",
             default_output: "text",
@@ -66,7 +79,7 @@ class ItfConfig:
             token_envs: [],
             jira_deployment: "", jira_auth: "",
             confluence_deployment: "", confluence_auth: "",
-            bb_url: "", bb_deployment: "", bb_project: "",
+            bb_url: "", bb_gateway_url: "", bb_headers: [], bb_deployment: "", bb_project: "",
             bb_auth: "", bb_user: ""
         )
 
@@ -97,7 +110,7 @@ fn load_config() -> ItfConfig:
     if not file_exists(path):
         return ItfConfig.default()
 
-    val content = file_read_text(path)
+    val content = file_read(path)
     if content == nil:
         return ItfConfig.default()
 
@@ -105,6 +118,114 @@ fn load_config() -> ItfConfig:
     for entry in parse_sdn_sections(content):
         config = _apply_config_value(config, entry.0, entry.1, entry.2)
     config
+
+
+fn load_config_for_target(target: text) -> ItfConfig:
+    """Load a named Confluence target. An empty selector uses
+    `confluence.default_target`, then the first `confluence.<name>` section;
+    legacy singleton configuration remains the final fallback."""
+    val path = config_path()
+    if not file_exists(path):
+        val empty = ItfConfig.default()
+        return if target != "": _with_confluence_target(empty, target) else: empty
+    val content = file_read(path)
+    if content == nil:
+        val empty = ItfConfig.default()
+        return if target != "": _with_confluence_target(empty, target) else: empty
+    val entries = parse_sdn_sections(content)
+    var selected = target
+    if selected == "":
+        for entry in entries:
+            if entry.0 == "confluence" and entry.1 == "default_target":
+                selected = entry.2
+    if selected == "":
+        for entry in entries:
+            if entry.0.starts_with("confluence."):
+                selected = entry.0["confluence.".len():]
+                break
+    var config = load_config()
+    if selected == "":
+        return config
+    config = _clear_confluence_target(config)
+    var found = false
+    for entry in entries:
+        if entry.0 == "confluence.{selected}":
+            found = true
+            config = _apply_config_value(config, "confluence", entry.1, entry.2)
+    if not found:
+        return _with_confluence_target(ItfConfig.default(), selected)
+    _with_confluence_target(config, selected)
+
+
+fn _clear_confluence_target(config: ItfConfig) -> ItfConfig:
+    """Clear legacy target values before overlaying one named target."""
+    ItfConfig(
+        confluence_url: "", confluence_user: "", confluence_default_space: "", confluence_target: "",
+        confluence_gateway_url: "", confluence_headers: [],
+        jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+        jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+        default_output: config.default_output, color_mode: config.color_mode,
+        editor_override: config.editor_override, pager_override: config.pager_override,
+        token_cmds: config.token_cmds, wiki_default_backend: config.wiki_default_backend,
+        tasks_default_backend: config.tasks_default_backend, tasks_jira_done_status: config.tasks_jira_done_status,
+        git_default_backend: config.git_default_backend, bb_workspace: config.bb_workspace,
+        bb_repo: config.bb_repo, token_envs: config.token_envs,
+        jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+        confluence_deployment: "", confluence_auth: "",
+        bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+        bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+        bb_auth: config.bb_auth, bb_user: config.bb_user
+    )
+
+
+fn confluence_target_from_args(args: [text]) -> text:
+    """Return the `--host`/`--profile` selector. Invalid, missing, or
+    conflicting selectors return a fail-closed sentinel."""
+    var selected = ""
+    var seen = false
+    var i: i64 = 0
+    while i < args.len():
+        var value = ""
+        var matched = false
+        if args[i] == "--host" or args[i] == "--profile":
+            matched = true
+            if i + 1 < args.len() and not args[i + 1].starts_with("--"):
+                value = args[i + 1]
+                i = i + 1
+        else if args[i].starts_with("--host="):
+            matched = true
+            value = args[i]["--host=".len():]
+        else if args[i].starts_with("--profile="):
+            matched = true
+            value = args[i]["--profile=".len():]
+        if matched:
+            if value == "" or seen:
+                return "__invalid_confluence_selector__"
+            selected = value
+            seen = true
+        i = i + 1
+    selected
+
+
+fn _with_confluence_target(config: ItfConfig, target: text) -> ItfConfig:
+    ItfConfig(
+        confluence_url: config.confluence_url, confluence_user: config.confluence_user,
+        confluence_default_space: config.confluence_default_space, confluence_target: target,
+        confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+        jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+        jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+        default_output: config.default_output, color_mode: config.color_mode,
+        editor_override: config.editor_override, pager_override: config.pager_override,
+        token_cmds: config.token_cmds, wiki_default_backend: config.wiki_default_backend,
+        tasks_default_backend: config.tasks_default_backend, tasks_jira_done_status: config.tasks_jira_done_status,
+        git_default_backend: config.git_default_backend, bb_workspace: config.bb_workspace,
+        bb_repo: config.bb_repo, token_envs: config.token_envs,
+        jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+        confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+        bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+        bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+        bb_auth: config.bb_auth, bb_user: config.bb_user
+    )
 
 
 fn parse_sdn_sections(content: text) -> [(text, text, text)]:
@@ -127,18 +248,27 @@ fn parse_sdn_sections(content: text) -> [(text, text, text)]:
     """
     var out: [(text, text, text)] = []
     var section = ""
+    var headers_indent: i64 = -1
     for line in content.split("\n"):
         val trimmed = line.trim()
+        val indent = line.len() - line.trim_start().len()
         if trimmed == "" or trimmed.starts_with("#"):
             pass_dn
-        else if trimmed.ends_with(":") and not trimmed.contains(" "):
+        else if indent == 0 and trimmed.ends_with(":") and not trimmed.contains(" "):
             # Section header like "confluence:"
             section = trimmed.replace(":", "")
+            headers_indent = -1
+        else if trimmed == "headers:":
+            headers_indent = indent
         else if trimmed.contains(":"):
             val colon_idx = trimmed.find(":")
             val key = trimmed[0:colon_idx].trim()
             val value = trimmed[colon_idx + 1:].trim()
-            out = out + [(section, key, value)]
+            if headers_indent >= 0 and indent > headers_indent:
+                out = out + [(section, "header", "{key}: {value}")]
+            else:
+                headers_indent = -1
+                out = out + [(section, key, value)]
     out
 
 
@@ -150,7 +280,9 @@ fn _with(config: ItfConfig, confluence_url: text, confluence_user: text, conflue
     still work, this just gives new/edited branches a shorter form)."""
     ItfConfig(
         confluence_url: confluence_url, confluence_user: confluence_user, confluence_default_space: confluence_default_space,
-        jira_url: jira_url, jira_acli_path: jira_acli_path, jira_email: jira_email,
+        confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+        jira_url: jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+        jira_acli_path: jira_acli_path, jira_email: jira_email,
         default_output: default_output, color_mode: color_mode,
         editor_override: editor_override, pager_override: pager_override, token_cmds: token_cmds,
         wiki_default_backend: config.wiki_default_backend,
@@ -162,7 +294,8 @@ fn _with(config: ItfConfig, confluence_url: text, confluence_user: text, conflue
         token_envs: config.token_envs,
         jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
         confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-        bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+        bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+        bb_deployment: config.bb_deployment, bb_project: config.bb_project,
         bb_auth: config.bb_auth, bb_user: config.bb_user
     )
 
@@ -174,7 +307,9 @@ fn _with_atlassian(config: ItfConfig, jira_deployment: text, jira_auth: text, co
     from `config` itself, so it cannot set them)."""
     ItfConfig(
         confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
-        jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+        confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+        jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+        jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
         default_output: config.default_output, color_mode: config.color_mode,
         editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
         wiki_default_backend: config.wiki_default_backend,
@@ -186,8 +321,36 @@ fn _with_atlassian(config: ItfConfig, jira_deployment: text, jira_auth: text, co
         token_envs: config.token_envs,
         jira_deployment: jira_deployment, jira_auth: jira_auth,
         confluence_deployment: confluence_deployment, confluence_auth: confluence_auth,
-        bb_url: bb_url, bb_deployment: bb_deployment, bb_project: bb_project,
+        bb_url: bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+        bb_deployment: bb_deployment, bb_project: bb_project,
         bb_auth: bb_auth, bb_user: bb_user
+    )
+
+
+fn _with_provider_routing(config: ItfConfig, provider: text, gateway_url: text, headers: [text]) -> ItfConfig:
+    """Rebuild config while changing one provider's gateway routing data."""
+    ItfConfig(
+        confluence_url: config.confluence_url, confluence_user: config.confluence_user,
+        confluence_default_space: config.confluence_default_space, confluence_target: config.confluence_target,
+        confluence_gateway_url: if provider == "confluence": gateway_url else: config.confluence_gateway_url,
+        confluence_headers: if provider == "confluence": headers else: config.confluence_headers,
+        jira_url: config.jira_url,
+        jira_gateway_url: if provider == "jira": gateway_url else: config.jira_gateway_url,
+        jira_headers: if provider == "jira": headers else: config.jira_headers,
+        jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+        default_output: config.default_output, color_mode: config.color_mode,
+        editor_override: config.editor_override, pager_override: config.pager_override,
+        token_cmds: config.token_cmds, token_envs: config.token_envs,
+        wiki_default_backend: config.wiki_default_backend, tasks_default_backend: config.tasks_default_backend,
+        tasks_jira_done_status: config.tasks_jira_done_status, git_default_backend: config.git_default_backend,
+        bb_workspace: config.bb_workspace, bb_repo: config.bb_repo,
+        jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
+        confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
+        bb_url: config.bb_url,
+        bb_gateway_url: if provider == "bitbucket": gateway_url else: config.bb_gateway_url,
+        bb_headers: if provider == "bitbucket": headers else: config.bb_headers,
+        bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+        bb_auth: config.bb_auth, bb_user: config.bb_user
     )
 
 
@@ -211,7 +374,9 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
         # config.token_envs and so cannot change it.
         return ItfConfig(
             confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
-            jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+            confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+            jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+            jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
             default_output: config.default_output, color_mode: config.color_mode,
             editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
             wiki_default_backend: config.wiki_default_backend,
@@ -223,9 +388,19 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
             token_envs: config.token_envs + [(key, value)],
             jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
             confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-            bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+            bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+            bb_deployment: config.bb_deployment, bb_project: config.bb_project,
             bb_auth: config.bb_auth, bb_user: config.bb_user
         )
+
+    if (section == "confluence" or section == "jira" or section == "bitbucket") and key == "gateway_url":
+        val headers = if section == "confluence": config.confluence_headers else if section == "jira": config.jira_headers else: config.bb_headers
+        return _with_provider_routing(config, section, value, headers)
+
+    if (section == "confluence" or section == "jira" or section == "bitbucket") and key == "header":
+        val headers = if section == "confluence": config.confluence_headers else if section == "jira": config.jira_headers else: config.bb_headers
+        val gateway = if section == "confluence": config.confluence_gateway_url else if section == "jira": config.jira_gateway_url else: config.bb_gateway_url
+        return _with_provider_routing(config, section, gateway, headers + [value])
 
     match full_key:
         "confluence.url":
@@ -256,7 +431,9 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
             # _with() above).
             ItfConfig(
                 confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
-                jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+                confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+            jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+            jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
                 default_output: config.default_output, color_mode: config.color_mode,
                 editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
                 wiki_default_backend: value,
@@ -268,7 +445,8 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 token_envs: config.token_envs,
                 jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
                 confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+            bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+            bb_deployment: config.bb_deployment, bb_project: config.bb_project,
                 bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "tasks.default_backend":
@@ -277,7 +455,9 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
             # be used to change this field either).
             ItfConfig(
                 confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
-                jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+                confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+            jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+            jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
                 default_output: config.default_output, color_mode: config.color_mode,
                 editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
                 wiki_default_backend: config.wiki_default_backend,
@@ -289,7 +469,8 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 token_envs: config.token_envs,
                 jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
                 confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+            bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+            bb_deployment: config.bb_deployment, bb_project: config.bb_project,
                 bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "tasks.jira_done_status":
@@ -299,7 +480,9 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
             # ItfConfig field like tasks_default_backend).
             ItfConfig(
                 confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
-                jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+                confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+            jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+            jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
                 default_output: config.default_output, color_mode: config.color_mode,
                 editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
                 wiki_default_backend: config.wiki_default_backend,
@@ -311,7 +494,8 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 token_envs: config.token_envs,
                 jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
                 confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+            bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+            bb_deployment: config.bb_deployment, bb_project: config.bb_project,
                 bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "git.default_backend":
@@ -321,7 +505,9 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
             # this field itself, so it cannot set it).
             ItfConfig(
                 confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
-                jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+                confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+            jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+            jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
                 default_output: config.default_output, color_mode: config.color_mode,
                 editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
                 wiki_default_backend: config.wiki_default_backend,
@@ -333,7 +519,8 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 token_envs: config.token_envs,
                 jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
                 confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+            bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+            bb_deployment: config.bb_deployment, bb_project: config.bb_project,
                 bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "jira.deployment":
@@ -357,7 +544,9 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
         "bitbucket.workspace":
             ItfConfig(
                 confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
-                jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+                confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+            jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+            jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
                 default_output: config.default_output, color_mode: config.color_mode,
                 editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
                 wiki_default_backend: config.wiki_default_backend,
@@ -369,13 +558,16 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 token_envs: config.token_envs,
                 jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
                 confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+            bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+            bb_deployment: config.bb_deployment, bb_project: config.bb_project,
                 bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         "bitbucket.repo":
             ItfConfig(
                 confluence_url: config.confluence_url, confluence_user: config.confluence_user, confluence_default_space: config.confluence_default_space,
-                jira_url: config.jira_url, jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
+                confluence_target: config.confluence_target, confluence_gateway_url: config.confluence_gateway_url, confluence_headers: config.confluence_headers,
+                jira_url: config.jira_url, jira_gateway_url: config.jira_gateway_url, jira_headers: config.jira_headers,
+                jira_acli_path: config.jira_acli_path, jira_email: config.jira_email,
                 default_output: config.default_output, color_mode: config.color_mode,
                 editor_override: config.editor_override, pager_override: config.pager_override, token_cmds: config.token_cmds,
                 wiki_default_backend: config.wiki_default_backend,
@@ -387,7 +579,8 @@ fn _apply_config_value(config: ItfConfig, section: text, key: text, value: text)
                 token_envs: config.token_envs,
                 jira_deployment: config.jira_deployment, jira_auth: config.jira_auth,
                 confluence_deployment: config.confluence_deployment, confluence_auth: config.confluence_auth,
-                bb_url: config.bb_url, bb_deployment: config.bb_deployment, bb_project: config.bb_project,
+                bb_url: config.bb_url, bb_gateway_url: config.bb_gateway_url, bb_headers: config.bb_headers,
+                bb_deployment: config.bb_deployment, bb_project: config.bb_project,
                 bb_auth: config.bb_auth, bb_user: config.bb_user
             )
         _:
@@ -402,61 +595,95 @@ fn _sdn_kv(key: text, value: text) -> text:
     "    {key}: {value}\n"
 
 
+fn _sdn_headers(headers: [text]) -> text:
+    if headers.len() == 0:
+        return ""
+    var out = "    headers:\n"
+    for header in headers:
+        out = out + "        {header}\n"
+    out
+
+
+fn _without_sdn_section(content: text, section_name: text) -> text:
+    var out = ""
+    var skipping = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if line.len() == line.trim_start().len() and trimmed.ends_with(":") and not trimmed.contains(" "):
+            skipping = trimmed == "{section_name}:"
+        if not skipping:
+            out = out + line + "\n"
+    out
+
+
+fn _named_confluence_blocks(content: text) -> text:
+    var out = ""
+    var keeping = false
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if line.len() == line.trim_start().len() and trimmed.ends_with(":") and not trimmed.contains(" "):
+            keeping = trimmed.starts_with("confluence.")
+        if keeping:
+            out = out + line + "\n"
+    out
+
+
+fn save_confluence_target(config: ItfConfig) -> bool:
+    """Update only the selected named Confluence target, preserving siblings."""
+    if config.confluence_target == nil or config.confluence_target == "":
+        return save_config(config)
+    val path = config_path()
+    val existing = if file_exists(path): file_read(path) else: ""
+    var content = _without_sdn_section(existing, "confluence.{config.confluence_target}")
+    content = content + "\nconfluence.{config.confluence_target}:\n"
+    content = content + _sdn_kv("url", config.confluence_url) + _sdn_kv("user", config.confluence_user)
+    content = content + _sdn_kv("default_space", config.confluence_default_space)
+    content = content + _sdn_kv("deployment", config.confluence_deployment) + _sdn_kv("auth", config.confluence_auth)
+    content = content + _sdn_kv("gateway_url", config.confluence_gateway_url)
+    content = content + _sdn_headers(config.confluence_headers)
+    file_atomic_write(path, content)
+
+
 fn save_config(config: ItfConfig) -> bool:
     """Save config to SDN file."""
     val dir = config_dir()
+    val old_content = if file_exists(config_path()): file_read(config_path()) else: ""
     var content = "# ITF Configuration\n\nconfluence:\n    url: {config.confluence_url}\n    user: {config.confluence_user}\n    default_space: {config.confluence_default_space}\n\njira:\n    url: {config.jira_url}\n    acli_path: {config.jira_acli_path}\n    email: {config.jira_email}\n\nwiki:\n    default_backend: {config.wiki_default_backend}\n\ntasks:\n    default_backend: {config.tasks_default_backend}\n    jira_done_status: {config.tasks_jira_done_status}\n\noutput:\n    format: {config.default_output}\n    color: {config.color_mode}\n\neditor: {config.editor_override}\npager: {config.pager_override}\n"
     # Atlassian deployment-shape keys are appended only when set, so a config
     # that never used them round-trips byte-identically. (Section headers are
     # repeated on purpose: parse_sdn_sections re-enters a section by name.)
-    val jira_shape = _sdn_kv("deployment", config.jira_deployment) + _sdn_kv("auth", config.jira_auth)
+    val jira_shape = _sdn_kv("deployment", config.jira_deployment) + _sdn_kv("auth", config.jira_auth) + _sdn_kv("gateway_url", config.jira_gateway_url) + _sdn_headers(config.jira_headers)
     if jira_shape != "":
         content = content + "\njira:\n" + jira_shape
-    val confluence_shape = _sdn_kv("deployment", config.confluence_deployment) + _sdn_kv("auth", config.confluence_auth)
+    val confluence_shape = _sdn_kv("deployment", config.confluence_deployment) + _sdn_kv("auth", config.confluence_auth) + _sdn_kv("gateway_url", config.confluence_gateway_url) + _sdn_headers(config.confluence_headers)
     if confluence_shape != "":
         content = content + "\nconfluence:\n" + confluence_shape
-    val bb_shape = _sdn_kv("url", config.bb_url) + _sdn_kv("deployment", config.bb_deployment) + _sdn_kv("project", config.bb_project) + _sdn_kv("auth", config.bb_auth) + _sdn_kv("user", config.bb_user)
+    val bb_shape = _sdn_kv("url", config.bb_url) + _sdn_kv("deployment", config.bb_deployment) + _sdn_kv("project", config.bb_project) + _sdn_kv("auth", config.bb_auth) + _sdn_kv("user", config.bb_user) + _sdn_kv("gateway_url", config.bb_gateway_url) + _sdn_headers(config.bb_headers)
     if bb_shape != "":
         content = content + "\nbitbucket:\n" + bb_shape
     if config.token_cmds.len() > 0:
         content = content + "\ntoken_cmd:\n"
         for pair in config.token_cmds:
             content = content + "    {pair.0}: {pair.1}\n"
-    file_write_text(config_path(), content)
+    if config.token_envs.len() > 0:
+        content = content + "\ntoken_env:\n"
+        for pair in config.token_envs:
+            content = content + "    {pair.0}: {pair.1}\n"
+    if config.git_default_backend != "":
+        content = content + "\ngit:\n" + _sdn_kv("default_backend", config.git_default_backend)
+    val bb_selection = _sdn_kv("workspace", config.bb_workspace) + _sdn_kv("repo", config.bb_repo)
+    if bb_selection != "":
+        content = content + "\nbitbucket:\n" + bb_selection
+    for entry in parse_sdn_sections(old_content):
+        if entry.0 == "confluence" and entry.1 == "default_target":
+            content = content + "\nconfluence:\n" + _sdn_kv("default_target", entry.2)
+    content = content + "\n" + _named_confluence_blocks(old_content)
+    file_atomic_write(config_path(), content)
 
 
 fn load_auth_token(provider: text) -> text:
     """Load auth token for a provider (confluence, jira, bitbucket, minio, outlook)."""
-    val path = auth_path()
-    if not file_exists(path):
-        return ""
-
-    val content = file_read_text(path)
-    if content == nil:
-        return ""
-
-    # Simple SDN parsing for auth tokens
-    var section = ""
-    val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
-            pass_dn
-        else if trimmed.ends_with(":") and not trimmed.contains(" "):
-            section = trimmed.replace(":", "")
-        else if section == provider and trimmed.starts_with("token:"):
-            # Same first-colon-only fix as load_config() above (bug
-            # itf-config-colon-value-split) — a token value containing its
-            # own colon (e.g. a "user:pass" style secret) was truncated at
-            # the second colon by `.split(":", 2)`.
-            val colon_idx = trimmed.find(":")
-            val token = trimmed[colon_idx + 1:].trim()
-            # Strip surrounding quotes if present
-            if token.starts_with("\"") and token.ends_with("\""):
-                return token[1:token.len() - 1]
-            return token
-
-    ""
+    load_auth_token_from(auth_path(), provider)
 
 
 fn save_auth_token(provider: text, token: text) -> bool:
@@ -464,14 +691,7 @@ fn save_auth_token(provider: text, token: text) -> bool:
 
     Known providers: confluence, jira, bitbucket, minio, outlook.
     """
-    val path = auth_path()
-    val known = ["confluence", "jira", "bitbucket", "minio", "outlook"]
-    var content = "# ITF Auth Tokens (do not share)\n\n"
-    for p in known:
-        val tok = if p == provider: token else: load_auth_token(p)
-        if tok != "":
-            content = content + "{p}:\n    token: \"{tok}\"\n\n"
-    file_write_text(path, content)
+    save_auth_token_to(auth_path(), provider, token)
 
 
 fn _token_cmd_for(config: ItfConfig, provider: text) -> text:
@@ -512,19 +732,34 @@ fn resolve_auth_token(config: ItfConfig, provider: text) -> text:
     failing, so a developer with a token_cmd and a CI job with an env var can
     share one config file.
     """
-    val env_name = _token_env_for(config, provider)
-    if env_name != "":
-        val from_env = env_get(env_name)
+    val scoped_provider = if provider == "confluence" and config.confluence_target != nil and config.confluence_target != "": "confluence.{config.confluence_target}" else: provider
+    val scoped_env = _token_env_for(config, scoped_provider)
+    if scoped_env != "":
+        val from_env = env_get(scoped_env)
         if from_env != "":
             return from_env.trim()
-
-    val cmd = _token_cmd_for(config, provider)
-    if cmd == "":
-        return load_auth_token(provider)
-    val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", cmd])
-    if code != 0:
+    val scoped_cmd = _token_cmd_for(config, scoped_provider)
+    if scoped_cmd != "":
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", scoped_cmd])
+        if code == 0 and stdout.trim() != "":
+            return stdout.trim()
+    val scoped_token = load_auth_token(scoped_provider)
+    if scoped_token != "":
+        return scoped_token
+    if scoped_provider == provider:
         return ""
-    stdout.trim()
+
+    val fallback_env = _token_env_for(config, provider)
+    if fallback_env != "":
+        val fallback = env_get(fallback_env)
+        if fallback != "":
+            return fallback.trim()
+    val fallback_cmd = _token_cmd_for(config, provider)
+    if fallback_cmd != "":
+        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", fallback_cmd])
+        if code == 0 and stdout.trim() != "":
+            return stdout.trim()
+    load_auth_token(provider)
 
 
 fn resolve_editor(config: ItfConfig) -> text:

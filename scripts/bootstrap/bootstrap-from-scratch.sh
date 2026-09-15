@@ -936,9 +936,20 @@ bootstrap_progress_event() {
       "${progress_terminal}" >>"${build_progress_events}"
   fi
 }
+bootstrap_last_milestone=init
+bootstrap_verdict_written=0
+bootstrap_verdict() {
+  bootstrap_verdict_written=1
+  line="VERDICT — $1"
+  echo "$line" >&2
+  if [ -n "${progress_log}" ]; then
+    echo "$line" >>"${progress_log}" 2>/dev/null || true
+  fi
+}
 bootstrap_progress_mark() {
-  [ -n "${progress_log}" ] || return 0
   milestone=$1
+  bootstrap_last_milestone=${milestone}
+  [ -n "${progress_log}" ] || return 0
   main_log=${2:-}
   {
     echo "milestone=${milestone}"
@@ -963,6 +974,9 @@ bootstrap_cleanup() {
   bootstrap_status=${1:-$?}
   trap - EXIT HUP INT QUIT TERM
   set +e
+  if [ "${bootstrap_verdict_written}" -eq 0 ]; then
+    bootstrap_verdict "ABORTED: stage=${bootstrap_last_milestone} exit=${bootstrap_status} signal=${bootstrap_abnormal_signal:-none} reason=${bootstrap_last_milestone}"
+  fi
   resume_stage4_release_continuation_lock
   if [ "${bootstrap_deploy_tx_active:-0}" -eq 1 ]; then
     bootstrap_deploy_tx_abort || true
@@ -4643,10 +4657,12 @@ if [ "${stage3_ok:-0}" -eq 0 ]; then
   echo "ERROR: internal invariant broken — reached completion with stage3_ok=0." >&2
   echo "  A failed self-host must have exited at the seed-fallback refusal." >&2
   echo "  Treat any binary deployed by this run as unverified." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=2 signal=none reason=stage3-invariant-broken"
   exit 2
 fi
 [ "${stage3_current_acceptance_status}" = verified ] || {
   echo "ERROR: current Stage 3 acceptance was not bound to verified Stage 4 evidence." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=2 signal=none reason=stage3-acceptance-unverified"
   exit 2
 }
 
@@ -4660,6 +4676,8 @@ if ! sh "${repo_root}/scripts/check/check-bootstrap-must-pass.shs" \
   --stage4-binary "${full_bin}" \
   --stage4-provenance "${full_bin}.provenance.env"; then
   echo "ERROR: bootstrap completed but mandatory-check evidence was not recorded." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=1 signal=none reason=mandatory-check-evidence-not-recorded"
   exit 1
 fi
+bootstrap_verdict "ADMITTED: stage=complete exit=0 signal=none reason=bootstrap-must-pass-recorded"
 bootstrap_progress_mark complete ""

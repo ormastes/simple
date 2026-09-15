@@ -466,3 +466,64 @@ Records: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round19_2026-09-14.md`;
 `doc/10_metrics/ui/web_chrome_parity_round18_2026-09-14.md`;
 `doc/08_tracking/bug/ifc_linebox_spec_imports_nonexistent_layout_inline_2026-09-14.md`.
+
+## Line breaking (round 23, 2026-09-14)
+
+`Style` now carries `white_space_pre` alongside `white_space_nowrap`. They are
+NOT interchangeable: `nowrap` collapses newlines, `pre` preserves them as forced
+breaks. `white_space_pre` is set by the `<pre>` UA rule
+(`..._declarations.spl:1359`) and by `white-space: pre`
+(`..._decl_apply.spl:1415`); the `#text` branch of `..._layout.spl` takes the
+`pre` arm FIRST and splits via `compute_preserved_newline_ranges`, which also
+drops one newline after the start tag and opens no trailing empty line. Paint
+needs no parallel change — `..._paint_layout.spl:1015` already draws from
+`wrap_cache.starts/ends`.
+
+`_lay_compute_style_wrap_ranges_inner` no longer chops inside a word. Order of
+arms: space break first, then intra-word chop ONLY under
+`overflow-wrap: break-word`/`anywhere` or `word-break: break-all`, else the
+whole word via `word_end_byte`. A final `endv == start` guard keeps the loop
+finite when a single space exceeds `max_width`. The float-band copy
+(`compute_style_wrap_ranges_float_band`) still has the old behaviour and no
+catalog page exercises it.
+
+`align_inline_line_baselines` returns `line_height` untouched when its node list
+is EMPTY, and `vertical-align: sub`/`super` children are never added to it — so
+a block whose only child is a `<sub>` gets the child's height, not the line's.
+Seeding `inline_line_h` from the container is the obvious fix and is
+contradicted by Chrome under a NUMBER `line-height`; see the bug record before
+trying it again.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`;
+`doc/08_tracking/bug/wbr_not_a_soft_break_opportunity_2026-09-14.md`;
+`doc/08_tracking/bug/sub_sup_line_box_strut_contradiction_2026-09-14.md`.
+
+Block-flow child loop (`simple_web_html_layout_renderer_layout.spl`, ~`:3555`
+onward): `prev_margin_b` carries the pending bottom margin of the previous
+in-flow BLOCK child and is collapsed against the next block's `margin-top`.
+Inline children do not participate in that collapse — they live in an anonymous
+block, which has no margins — so the pending margin must be FLUSHED into `cy`
+when an inline run opens (`:3629`), and `prev_margin_b` is separately zeroed
+after each inline child (`:3854`) so the block-after-inline direction collapses
+against 0. Removing either half breaks a different direction of the boundary;
+applying the flush to block siblings as well double-counts the collapse.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.md`.
+
+`<wbr>` (same loop, `:3710`, RESOLVED round 25) is a zero-width SOFT break
+opportunity, and the DOM shape is what makes it tractable: the tag splits the
+text into separate `#text` siblings, so the opportunity is a node in the child
+list and needs no intra-run machinery — no change to
+`_lay_compute_style_wrap_ranges_inner` or to its
+`compute_style_wrap_ranges_float_band` twin. The arm sits AFTER the `<br>` arm
+and after round 24's `prev_margin_b` flush, so a `<wbr>`-opened run still gets
+the margin. Three things it must get right, each pinned by an AC:
+the element's own box is zero-sized at the pen (not 1 px — the generic inline
+path's `inline_w` floor is what made it invisible); the break is taken ONLY when
+`inline_x + first_word_advance_width(next) > iw`, because Chrome is greedy and
+passes over an opportunity whose following word still fits; and the width tested
+is the first WORD of the next run, not the whole run. A leading `<wbr>` at pen 0
+is guarded out (`inline_x > inline_start_x`) and therefore diverges from Chrome,
+which answers 48 there — recorded, not tuned for.
+
+Records: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.

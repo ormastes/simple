@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+script="$root/scripts/check/check-freebsd-bootstrap-qemu.shs"
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+
+grep -Fq 'QEMU_RUNTIME_DIR="${QEMU_RUNTIME_DIR:-${VM_DIR}}"' "$script" || fail 'QEMU runtime root missing'
+grep -Fq 'QEMU_CLOUDINIT_DIR:-${QEMU_RUNTIME_DIR}/cloudinit.tmp' "$script" || fail 'cloud-init path is not runtime-isolated'
+grep -Fq 'GUEST_BOOTSTRAP_OUTPUT_RELATIVE="build/bootstrap-freebsd-qemu"' "$script" || fail 'guest output path is not explicit'
+grep -Fq -- 'SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT}' "$script" || fail 'QEMU lane does not invoke the native self-host checker'
+grep -Fq -- 'sh scripts/check/check-freebsd-selfhost-ci.shs' "$script" || fail 'QEMU lane checker invocation missing'
+! grep -Fq -- 'bootstrap-from-scratch.sh --strategy=adhoc' "$script" || fail 'QEMU lane retains invalid direct adhoc bootstrap command'
+grep -Fq -- 'SIMPLE_FREEBSD_SELFHOST_OUTPUT=${GUEST_BOOTSTRAP_OUTPUT}' "$script" || fail 'canonical QEMU checker output is not wired'
+grep -Fq -- "--include='/doc/04_architecture/compiler/plugin_arch/***'" "$script" || fail 'required architecture docs remain excluded'
+grep -Fq -- "--include='/tools/counterpart/sdk/c/simple_counterpart_abi.h'" "$script" || fail 'runtime counterpart ABI header remains excluded'
+grep -Fq -- "--exclude='/tools/***'" "$script" || fail 'unneeded tools descendants remain included'
+grep -Fq -- 'git clone --quiet --depth 1' "$script" || fail 'bounded Git authority clone missing'
+grep -Fq -- 'git reset --mixed --quiet HEAD' "$script" || fail 'guest Git authority index is not initialized'
+grep -Fq -- 'git ls-files --deleted -z | git update-index --skip-worktree -z --stdin' "$script" || fail 'excluded tracked paths remain false deletions'
+grep -Fq -- 'diff --no-renames --name-only -z --diff-filter=D HEAD' "$script" || fail 'host tracked deletions and rename sources are not captured'
+grep -Fq -- 'git update-index --no-skip-worktree -z --stdin < .git/simple-host-deleted.z' "$script" || fail 'host tracked deletions remain hidden'
+grep -Fq -- '"$GIT_AUTHORITY_DIR/repo/.git/"' "$script" || fail 'bounded Git authority is not synced'
+grep -Fq -- 'rsync -az --delete --no-owner --no-group' "$script" || fail 'guest Git authority ownership is not local'
+grep -Fq -- "git config --global --add safe.directory" "$script" || fail 'guest Git worktree ownership is not admitted'
+grep -Fq -- 'SIMPLE_FREEBSD_SELFHOST_JOBS=${QEMU_BUILD_JOBS}' "$script" || fail 'QEMU lane does not forward configured build jobs'
+grep -Fq -- 'SIMPLE_FREEBSD_SELFHOST_TIMEOUT=${QEMU_BOOTSTRAP_TIMEOUT}' "$script" || fail 'QEMU lane does not forward the bootstrap timeout'
+grep -Fq -- 'QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-18000}"' "$script" || fail 'outer SSH timeout cannot accommodate bootstrap timeout'
+grep -Fq -- 'is_positive_integer "$QEMU_BUILD_JOBS"' "$script" || fail 'QEMU lane does not validate build jobs before SSH interpolation'
+grep -Fq -- 'preflight_try build_jobs preflight_build_jobs' "$script" || fail 'QEMU preflight omits build jobs'
+grep -Fq 'STAGE_BIN="${GUEST_BOOTSTRAP_OUTPUT}/stage3/x86_64-unknown-freebsd/simple"' "$script" || fail 'Stage 3 path does not follow explicit output'
+grep -Fq 'if ! $VM_SSH ' "$script" || fail 'QEMU bootstrap failure branch missing'
+grep -Fq 'copy_guest_bootstrap_logs' "$script" || fail 'QEMU failure logs are not retained'
+! grep -Fq 'FreeBSD x86_64 QEMU full bootstrap PASS' "$script" || fail 'QEMU claims an unscoped full bootstrap'
+grep -Fq 'FreeBSD x86_64 QEMU Stage 3 bootstrap PASS' "$script" || fail 'QEMU result is not Stage 3 scoped'
+
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/freebsd-qemu-git-contract.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/host/src" "$fixture/host/doc"
+git -C "$fixture/host" init -q
+git -C "$fixture/host" config user.name contract
+git -C "$fixture/host" config user.email contract@example.invalid
+printf 'keep\n' >"$fixture/host/src/keep.spl"
+printf 'delete\n' >"$fixture/host/src/delete.spl"
+printf 'rename\n' >"$fixture/host/src/rename-old.spl"
+printf 'excluded\n' >"$fixture/host/doc/excluded.md"
+git -C "$fixture/host" add .
+git -C "$fixture/host" commit -qm baseline
+git clone -q --no-checkout "$fixture/host" "$fixture/guest"
+git -C "$fixture/guest" reset --hard -q HEAD
+rm "$fixture/host/src/delete.spl" "$fixture/guest/src/delete.spl" \
+    "$fixture/guest/doc/excluded.md"
+mv "$fixture/host/src/rename-old.spl" "$fixture/host/src/rename-new.spl"
+mv "$fixture/guest/src/rename-old.spl" "$fixture/guest/src/rename-new.spl"
+git -C "$fixture/host" add -A
+git -C "$fixture/host" diff --no-renames --name-only -z --diff-filter=D HEAD -- \
+    >"$fixture/guest/.git/simple-host-deleted.z"
+git -C "$fixture/guest" ls-files --deleted -z |
+    git -C "$fixture/guest" update-index --skip-worktree -z --stdin
+git -C "$fixture/guest" update-index --no-skip-worktree -z --stdin \
+    <"$fixture/guest/.git/simple-host-deleted.z"
+visible=$(git -C "$fixture/guest" diff --name-only HEAD)
+printf '%s\n' "$visible" | grep -qx 'src/delete.spl' || fail 'genuine source deletion hidden'
+printf '%s\n' "$visible" | grep -qx 'src/rename-old.spl' || fail 'source side of rename hidden'
+! printf '%s\n' "$visible" | grep -qx 'doc/excluded.md' || fail 'projected exclusion appears dirty'
+before=$(git -C "$fixture/guest" diff --binary HEAD | git hash-object --stdin)
+printf 'changed\n' >"$fixture/guest/src/keep.spl"
+after=$(git -C "$fixture/guest" diff --binary HEAD | git hash-object --stdin)
+[ "$before" != "$after" ] || fail 'included source change does not alter dirty fingerprint'
+[ "$(git -C "$fixture/host" rev-parse HEAD)" = "$(git -C "$fixture/guest" rev-parse HEAD)" ] || fail 'guest HEAD differs from host HEAD'
+
+printf 'freebsd_qemu_invocation_contract=true\n'

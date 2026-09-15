@@ -12,6 +12,35 @@ bootstrap_stage3_error() {
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 source_output=${1:?usage: resume-stage3-from-admitted.sh OUTPUT_DIR}
 
+# VERDICT-on-exit contract: every run of this script must end with exactly one
+# `VERDICT — ` line, so a killed/died background run is diagnosable from its
+# log alone instead of leaving nothing. bootstrap_resume_verdict_written guards
+# against a double write; bootstrap_resume_stage is the coarse step tracker the
+# trap reads. See doc/07_guide/tooling/bootstrap_options.md.
+bootstrap_resume_verdict_written=0
+bootstrap_resume_stage=init
+bootstrap_resume_log=
+bootstrap_resume_verdict() {
+  bootstrap_resume_verdict_written=1
+  line="VERDICT — $1"
+  echo "$line" >&2
+  if [ -n "${bootstrap_resume_log}" ]; then
+    echo "$line" >>"${bootstrap_resume_log}" 2>/dev/null || true
+  fi
+}
+bootstrap_resume_trap() {
+  status=$?
+  sig=${1:-none}
+  if [ "${bootstrap_resume_verdict_written}" -eq 0 ]; then
+    bootstrap_resume_verdict "ABORTED: stage=${bootstrap_resume_stage} exit=${status} signal=${sig} reason=${bootstrap_resume_stage}"
+  fi
+  rm -rf "${lock:-}"
+}
+trap 'bootstrap_resume_trap none' EXIT
+trap 'bootstrap_resume_trap HUP' HUP
+trap 'bootstrap_resume_trap INT' INT
+trap 'bootstrap_resume_trap TERM' TERM
+
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
@@ -74,6 +103,8 @@ candidate="$stage3/simple$bootstrap_stage3_exe"
 manifest="$stage3/provenance.env"
 stage3_transcript="$stage3/stage3-command.transcript"
 stage3_log="$output/logs/$platform/stage3-native-build.log"
+bootstrap_resume_log="$stage3_log"
+bootstrap_resume_stage=stage2-verify
 stage3_status="$stage3/stage3-native-build-status.env"
 stage3_sanity="$stage3/stage3-sanity.env"
 stage2_cache="$stage3/stage2-native-cache"
@@ -481,7 +512,7 @@ if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest \
 fi
 mkdir "$lock" || { echo "error: bootstrap output is locked: $lock" >&2; exit 1; }
 printf '%s\n' "$$" >"$lock/pid"
-trap 'rm -rf "$lock"' EXIT HUP INT TERM
+bootstrap_resume_stage=stage3-build
 
 # Prune native-build cache scope directories older than a TTL.
 #
@@ -870,6 +901,8 @@ export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MO
   BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE2_RECEIVER_DISPLAY \
   BSTAGE3_STAGE2_RECEIVER_LOG BSTAGE3_STAGE2_RECEIVER_LOG_DISPLAY \
   BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
+bootstrap_resume_stage=manifest-verify
 bootstrap_stage3_write_manifest
 bootstrap_stage3_verify_manifest "$manifest" "$manifest" "$root" "$candidate" \
   "$candidate" "${manifest}.authority-map.env"
+bootstrap_resume_verdict "ADMITTED: stage=complete exit=0 signal=none reason=manifest-verified"
