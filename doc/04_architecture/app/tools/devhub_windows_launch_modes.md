@@ -1,10 +1,13 @@
 <!-- codex-design -->
 # DevHub Windows mode boundary
 
-`bin/devhub.cmd` transports arguments through `sh.exe` to `bin/devhub`.
-The shared wrapper owns selection before any artifact probe. Ordinary uses
-the existing native host/provenance boundary. Loading terminates with exit 78.
-There is no transition between modes after failure and no loader execution.
+`bin/devhub.cmd` launches an admitted Windows runtime directly; `sh.exe` is
+only used when the caller explicitly sets `DEVHUB_SH` to request the existing
+POSIX wrapper. The shared wrapper owns selection before application dispatch.
+Ordinary uses the same host/provenance boundary as `bin/devhub`, including
+receipt hash, target, version, and CLI capability checks. Loading terminates
+with exit 78. There is no transition between modes after failure and no loader
+execution.
 
 The interrupted design proposed `loader --runtime runtime run entry`; no
 in-tree executable was found implementing this contract. Moreover, current
