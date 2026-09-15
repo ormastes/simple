@@ -164,6 +164,39 @@ All notable changes to Simple Language will be documented in this file.
   spec inputs and register interpreter byte-array pointers for runtime font
   loading; a full self-hosted rebuild remains unverified.
 
+## [1.0.0-beta.2] - 2026-09-15
+
+First corrected beta of the **1.0.0 line**. The previously published
+`1.0.1-beta.1` identity was a numbering mistake — its own changelog entry
+admits it shipped no self-hosted binary — and is **withdrawn by owner
+decision**; the product returns to the 1.0.0 line. Published identity is
+immutable, so `v1.0.1-beta.1` remains in history marked as withdrawn; do not
+use it.
+
+### Changed
+- **Product version is now `1.0.0-beta.2`** (`release/version.sdn`, `channel: beta`),
+  projected into all 17 declared consumers; every current-version consumer now
+  reads `1.0.0-beta.2`.
+- **Bootstrap pin corrected** — `config/bootstrap.sdn` carries `1.0.0-beta.2`.
+
+### Fixed
+- **Windows bootstrap authority check** — the hosted-root mode check required
+  exactly `0500`, which MSYS/Windows `chmod` cannot set on directories, so no
+  Windows host could bootstrap from the `v1.0.1-beta.1` tag. Fixed on this
+  line; see
+  `doc/08_tracking/bug/beta1_tag_cannot_bootstrap_on_windows_2026-09-14.md`.
+- **T32 cmm validation CLI contract** — `t32_cli` and its contract spec agree
+  on the validation entrypoint (`0718c04b`).
+- **DevHub native Windows launch** — launch the admitted runtime natively and
+  preserve native Windows argv verbatim (`3541100b`, `f5dea5d0`).
+- **Release ruleset pins** — canonical ruleset digests re-pinned and live
+  policy parity restored (`00af1358`).
+
+### Superseded
+- `v1.0.1-beta.1` (2026-09-07): version-only cut with no self-hosted binary,
+  zero release assets, and a broken Windows bootstrap. Withdrawn; this release
+  is the correction, per explicit owner decision.
+
 ## [1.0.1-beta.1] - 2026-09-07
 
 Version-only beta cut of the 1.0 line. It ships **no self-hosted binary**: Stage 2
