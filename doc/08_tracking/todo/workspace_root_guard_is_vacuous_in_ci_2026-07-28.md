@@ -1,4 +1,4 @@
-# TODO: the workspace root guard cannot fail in CI (vacuous gate)
+# RESOLVED 2026-09-15 (kept for history): the workspace root guard cannot fail in CI (vacuous gate)
 
 - **Filed:** 2026-07-28
 - **Status:** open, needs design (do not hack)
