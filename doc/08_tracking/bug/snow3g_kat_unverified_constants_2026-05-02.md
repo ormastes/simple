@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: FIXED 2026-05-19 — All tables verified correct against 3GPP spec and OAI reference (MUL_alpha, DIV_a
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # SNOW 3G KAT: Wrong Keystream — Unverified Constants (MUL_alpha, DIV_alpha, S_Q)
 
 Status: FIXED 2026-05-19 — All tables verified correct against 3GPP spec and OAI reference (MUL_alpha, DIV_a

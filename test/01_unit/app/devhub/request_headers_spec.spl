@@ -1,0 +1,116 @@
+# @cover src/app/devhub/request_headers.spl 100%
+
+use std.spec.step
+
+use app.devhub.config.{ItfConfig}
+use app.devhub.request_headers.{configured_target_headers, validate_configured_headers, append_configured_target_headers, gateway_request_headers, request_uses_gateway}
+
+
+describe "configured DevHub target headers":
+
+    it "selects Jira and Bitbucket provider header lists":
+        val config = ItfConfig(jira_headers: ["X-Jira: one"], bb_headers: ["X-Bb: two"])
+        match configured_target_headers(config, "jira"):
+            Err(message): expect(message).to_equal("")
+            Ok(headers): expect(headers[0]).to_equal("X-Jira: one")
+        match configured_target_headers(config, "bitbucket"):
+            Err(message): expect(message).to_equal("")
+            Ok(headers): expect(headers[0]).to_equal("X-Bb: two")
+
+    it "preserves multiple entries, duplicate names, values, and order":
+        step("Validate an ordered per-target header list with repeated names")
+        val raw = ["X-Scope: alpha", "X-Scope: beta", "X-Trace: one:two"]
+        match validate_configured_headers(raw):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(headers):
+                expect(headers.len()).to_equal(3)
+                expect(headers[0]).to_equal("X-Scope: alpha")
+                expect(headers[1]).to_equal("X-Scope: beta")
+                expect(headers[2]).to_equal("X-Trace: one:two")
+
+    it "appends target headers after caller-owned headers":
+        step("Keep base and configured ordering stable at integration boundary")
+        match append_configured_target_headers(["Accept: application/json"], ["X-One: 1", "X-Two: 2"]):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(headers):
+                expect(headers.len()).to_equal(3)
+                expect(headers[0]).to_equal("Accept: application/json")
+                expect(headers[1]).to_equal("X-One: 1")
+                expect(headers[2]).to_equal("X-Two: 2")
+
+    it "rejects carriage-return injection":
+        step("Reject CR before the HTTP transport boundary")
+        match validate_configured_headers(["X-Okay: yes\rX-Injected: bad"]):
+            Err(message):
+                expect(message).to_contain("CR or LF")
+            Ok(_headers):
+                expect(false).to_equal(true)
+
+    it "rejects line-feed injection":
+        step("Reject LF before the HTTP transport boundary")
+        match validate_configured_headers(["X-Okay: yes\nX-Injected: bad"]):
+            Err(message):
+                expect(message).to_contain("CR or LF")
+            Ok(_headers):
+                expect(false).to_equal(true)
+
+    it "rejects entries without a non-empty header name":
+        step("Require the transport's Name: Value wire shape")
+        match validate_configured_headers([": value"]):
+            Err(message):
+                expect(message).to_contain("non-empty")
+            Ok(_headers):
+                expect(false).to_equal(true)
+
+
+describe "gateway-only configured headers":
+
+    it "recognizes only the configured gateway base and its request paths":
+        step("Classify the resolved URL without matching lookalike hosts")
+        expect(request_uses_gateway("https://gateway.example/api/pages", "https://gateway.example/api")).to_equal(true)
+        expect(request_uses_gateway("https://gateway.example/api?ready=1", "https://gateway.example/api/")).to_equal(true)
+        expect(request_uses_gateway("https://gateway.example/apix", "https://gateway.example/api")).to_equal(false)
+        expect(request_uses_gateway("https://direct.example/api", "https://gateway.example/api")).to_equal(false)
+
+    it "automatically supplies the selected target's configured gateway headers":
+        step("Use configured classification pairs only after gateway resolution")
+        match gateway_request_headers("https://gateway.example/api/pages", "https://gateway.example/api", ["X-Classification: restricted", "X-Scope: team-a"], []):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(headers):
+                expect(headers.len()).to_equal(2)
+                expect(headers[0]).to_equal("X-Classification: restricted")
+                expect(headers[1]).to_equal("X-Scope: team-a")
+
+    it "does not send gateway classification headers to direct targets":
+        step("Apply configured classification pairs only to gateway routing")
+        match gateway_request_headers("https://direct.example/wiki/api/v2/pages", "https://gateway.example/api", ["X-Classification: restricted"], ["X-Explicit: yes"]):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(headers):
+                expect(headers.len()).to_equal(1)
+                expect(headers[0]).to_equal("X-Explicit: yes")
+
+    it "lets repeated explicit headers override a configured name case-insensitively":
+        step("Remove configured values and retain every explicit replacement in CLI order")
+        val configured = ["X-Classification: restricted", "X-Scope: configured", "X-Keep: yes"]
+        val explicit = ["x-scope: cli-one", "X-SCOPE: cli-two"]
+        match gateway_request_headers("https://gateway.example/api", "https://gateway.example/api", configured, explicit):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(headers):
+                expect(headers.len()).to_equal(4)
+                expect(headers[0]).to_equal("X-Classification: restricted")
+                expect(headers[1]).to_equal("X-Keep: yes")
+                expect(headers[2]).to_equal("x-scope: cli-one")
+                expect(headers[3]).to_equal("X-SCOPE: cli-two")
+
+    it "rejects injection in explicit overrides too":
+        step("Apply the same transport-boundary safety to command-line headers")
+        match gateway_request_headers("https://gateway.example/api", "https://gateway.example/api", [], ["X-Test: yes\nX-Bad: no"]):
+            Err(message):
+                expect(message).to_contain("CR or LF")
+            Ok(_headers):
+                expect(false).to_equal(true)

@@ -1,3 +1,8 @@
+---
+name: verify
+description: "QA agent that validates production readiness with full test and coverage checks"
+---
+
 # SStack Phase 7: Verify — QA Agent
 
 ## Role

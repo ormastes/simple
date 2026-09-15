@@ -19,7 +19,9 @@
 # curl write-out for HTTP status follows the MinIO health-probe pattern.
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, bitbucket_pr_collection_url}
+use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, atlassian_strip_slash, bitbucket_api_root, bitbucket_pr_collection_url, bitbucket_resolve_deployment, bitbucket_server_base}
+use app.devhub.request_headers.{gateway_request_headers}
+use app.devhub.redaction.{redact_devhub_diagnostic}
 use common.json.parser.{json_parse}
 use common.json.object_ops.{json_object_get}
 use common.json.array_ops.{json_array_get, json_array_length}
@@ -151,13 +153,18 @@ class BbCurlClient:
     deployment: text
     auth_scheme: text
     user: text          # only read for auth_scheme "basic"
+    gateway_url: text
+    headers: [text]
 
     static fn create(workspace: text, repo: text, token: text) -> BbCurlClient:
-        BbCurlClient(base_url: BBC_API_BASE, workspace: workspace, repo: repo, token: token, curl_path: "curl", deployment: "", auth_scheme: "", user: "")
+        BbCurlClient(base_url: BBC_API_BASE, workspace: workspace, repo: repo, token: token, curl_path: "curl", deployment: "", auth_scheme: "", user: "", gateway_url: "", headers: [])
 
     fn site() -> AtlassianSite:
         val base = if self.base_url == nil or self.base_url == BBC_API_BASE: "" else: self.base_url
-        AtlassianSite.create(base, self.deployment)
+        val deployment = bitbucket_resolve_deployment(base, self.deployment)
+        if deployment == "datacenter":
+            return AtlassianSite(base_url: bitbucket_server_base(base), deployment: deployment)
+        AtlassianSite.create(base, deployment)
 
     fn auth_header() -> text:
         atlassian_auth_header(atlassian_normalize_auth(self.auth_scheme, ATLASSIAN_AUTH_BEARER), self.user, self.token)
@@ -193,7 +200,25 @@ fn bbc_auth_header(token: text) -> text:
 fn bbc_pr_collection_url(client: BbCurlClient) -> text:
     """Cloud: {base}/repositories/{ws}/{repo}/pullrequests — Server / Data
     Center: {base}/rest/api/1.0/projects/{KEY}/repos/{repo}/pull-requests."""
-    bitbucket_pr_collection_url(client.site(), client.workspace, client.repo)
+    bbc_resolve_gateway_url(client, bitbucket_pr_collection_url(client.site(), client.workspace, client.repo))
+
+
+fn bbc_resolve_gateway_url(client: BbCurlClient, url: text) -> text:
+    """Replace this client's primary or DC build-status API root with its gateway root."""
+    if client.gateway_url == nil or client.gateway_url == "":
+        return url
+    val gateway = atlassian_strip_slash(client.gateway_url)
+    if url == gateway or url.starts_with(gateway + "/") or url.starts_with(gateway + "?"):
+        return url
+    val site = client.site()
+    val api_root = atlassian_strip_slash(bitbucket_api_root(site))
+    if api_root != "" and (url == api_root or url.starts_with(api_root + "/") or url.starts_with(api_root + "?")):
+        return gateway + url[api_root.len():]
+    if site.is_datacenter():
+        val build_status_root = atlassian_strip_slash(site.base_url) + "/rest/build-status/1.0"
+        if url == build_status_root or url.starts_with(build_status_root + "/") or url.starts_with(build_status_root + "?"):
+            return gateway + url[build_status_root.len():]
+    url
 
 
 fn bbc_pr_url(client: BbCurlClient, pr_id: i64) -> text:
@@ -318,21 +343,22 @@ fn _bbc_parse_int_or_zero(s: text) -> i64:
 
 fn _bbc_status_label(status: i64, body: text, op: text) -> text:
     """Map an HTTP status code to a stable diagnostic label."""
+    val safe_body = redact_devhub_diagnostic(body)
     if status == 401:
         return "blocked-auth: unauthorized (HTTP 401)"
     if status == 403:
         if op == BB_OP_MERGE:
-            return "blocked: branch policy or merge restriction (HTTP 403): " + body
-        return "blocked-auth: forbidden (HTTP 403): " + body
+            return "blocked: branch policy or merge restriction (HTTP 403): " + safe_body
+        return "blocked-auth: forbidden (HTTP 403): " + safe_body
     if status == 404:
         return "not_found (HTTP 404)"
     if status == 409:
-        return "blocked-conflict: PR is not mergeable (HTTP 409): " + body
+        return "blocked-conflict: PR is not mergeable (HTTP 409): " + safe_body
     if status == 429:
         return "rate_limited (HTTP 429): retry after server-specified interval"
     if status == 0:
-        return "network_error: curl invocation failed: " + body
-    "api_error (HTTP " + status.to_string() + "): " + body
+        return "network_error: curl invocation failed: " + safe_body
+    "api_error (HTTP " + status.to_string() + "): " + safe_body
 
 
 # ============================================================================
@@ -344,11 +370,32 @@ fn _run_curl(client: BbCurlClient, argv: [text]) -> (i64, text, text):
 
     status == 0 indicates curl process error (exit != 0 or unparseable code).
     """
-    val (stdout, stderr, code) = process_run(client.curl_path, argv)
+    var safe_argv: [text] = []
+    match _bbc_gateway_argv(client, argv):
+        Err(message):
+            return (0, "", redact_devhub_diagnostic(message))
+        Ok(configured_argv):
+            safe_argv = configured_argv
+    val (stdout, stderr, code) = process_run(client.curl_path, safe_argv)
     if code != 0:
-        return (0, "", stderr)
+        return (0, "", redact_devhub_diagnostic(stderr))
     val (status, body) = _bbc_parse_status_tail(stdout)
     (status, body, stderr)
+
+
+fn _bbc_gateway_argv(client: BbCurlClient, argv: [text]) -> Result<[text], text>:
+    """Attach gateway-only configured headers while retaining the request argv."""
+    if argv.len() == 0:
+        return Err("Bitbucket curl argv requires a URL")
+    val resolved_url = bbc_resolve_gateway_url(client, argv[argv.len() - 1])
+    match gateway_request_headers(resolved_url, client.gateway_url, client.headers, []):
+        Err(message):
+            Err(message)
+        Ok(headers):
+            var configured = argv[:argv.len() - 1]
+            for header in headers:
+                configured = configured + ["-H", header]
+            Ok(configured + [resolved_url])
 
 
 # ============================================================================

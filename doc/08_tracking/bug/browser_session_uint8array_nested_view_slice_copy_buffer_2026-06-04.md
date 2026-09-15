@@ -1,6 +1,13 @@
 # BrowserSession Uint8Array nested-view slice copied-buffer gap
 
-Status: Fixed in the BrowserSession Uint8Array nested-view slice copied-buffer
+## Closed 2026-09-13 — Recorded fixed in the BrowserSession nested-view slice path
+
+- **inferred** The entry's own Status line records the fix in the BrowserSession `Uint8Array` nested-view slice copied-buffer path.
+- **measured** The single product path it cites still exists in the tree (path-survival scan: 1 referenced source path, 0 missing), so the fix was not lost to a later deletion.
+- **inferred** The browser-session harness is not runnable on this Windows seed host (`bin/simple test` is killed by `process_run_bounded` at its outer bound for every spec, including a 6-line one), so no fresh execution evidence could be added.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 Date: 2026-06-04
 

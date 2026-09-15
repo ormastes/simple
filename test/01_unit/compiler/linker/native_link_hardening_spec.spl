@@ -576,6 +576,35 @@ describe "Native linker hardening":
         expect(msvc).to_contain("gdi32.lib")
         expect(msvc).to_contain("vcruntime.lib")
 
+    it "never emits -rpath for a Windows host on the cc-fallback runtime-lib path":
+        step("Verify: never emits -rpath for a Windows host on the cc-fallback runtime-lib path")
+        """
+        doc/08_tracking/bug/win_native_linking_unconditional_rpath_msvc_2026-09-14.md
+        `_cc_fallback_runtime_lib_args` used to pass a hardcoded
+        `emit_rpath: true` to `native_runtime_archive_link_args` regardless
+        of host OS. `-rpath` is an ELF/Mach-O concept with no PE/COFF
+        equivalent; MSVC's link.exe and lld-link's COFF driver treat the
+        unrecognized token as an input filename ("<dir>.obj" not found,
+        LNK1181) rather than rejecting it outright, so this was silent on
+        every non-Windows CI host and only broke on a real Windows link.
+        """
+        expect(native_linking_os_is_windows("windows")).to_be(true)
+        expect(native_linking_os_is_windows("windows-msvc")).to_be(true)
+        expect(native_linking_os_is_windows("windows-mingw")).to_be(true)
+        expect(native_linking_os_is_windows("linux")).to_be(false)
+        expect(native_linking_os_is_windows("macos")).to_be(false)
+        expect(native_linking_os_is_windows("darwin")).to_be(false)
+        expect(native_linking_os_is_windows("freebsd")).to_be(false)
+        val native = rt_file_read_text(
+            "src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl"
+        ) ?? ""
+        expect(native).to_contain(
+            "val emit_rpath = not native_linking_os_is_windows(host_os())"
+        )
+        expect(native.contains(
+            "native_runtime_archive_link_args(runtime_dir, config.runtime_bundle, archives, true, true, true)"
+        )).to_equal(false)
+
     it "wires the shared policy into every native and shared linker path":
         val native = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl")
         val shared = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl")

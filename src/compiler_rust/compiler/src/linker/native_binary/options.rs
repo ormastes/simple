@@ -94,7 +94,7 @@ impl Default for NativeBinaryOptions {
             target,
             opt_level: NativeOptimizationLevel::Standard,
             backend: None,
-            cpu: TargetCpu::builtin_default_for_arch(target.arch),
+            cpu: TargetCpu::host_aware_default_for(target),
             layout_optimize: false,
             layout_profile: None,
             strip: true,
@@ -538,7 +538,11 @@ impl NativeBinaryOptions {
             .into_iter()
             .filter(|path| !old_default_library_paths.contains(path))
             .collect::<Vec<_>>();
-        let cpu_was_builtin_default = self.cpu == TargetCpu::builtin_default_for_arch(old_target.arch);
+        // "Was it the default?" must be asked about the SAME default the
+        // constructor used, or a host-widened v4 reads as a user override and
+        // survives a retarget onto an arch that cannot run it.
+        let cpu_was_builtin_default = self.cpu == TargetCpu::host_aware_default_for(old_target)
+            || self.cpu == TargetCpu::builtin_default_for_arch(old_target.arch);
 
         self.target = target;
         self.libraries = Self::default_libraries_for_target(&target);
@@ -546,7 +550,7 @@ impl NativeBinaryOptions {
         self.library_paths = Self::default_library_paths_for_target(&target);
         Self::extend_unique(&mut self.library_paths, custom_library_paths);
         if cpu_was_builtin_default {
-            self.cpu = TargetCpu::builtin_default_for_arch(target.arch);
+            self.cpu = TargetCpu::host_aware_default_for(target);
         }
         self
     }

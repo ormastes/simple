@@ -19,6 +19,17 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_VERSION_ROOT
+# bootstrap_stage3_write_stage2_admission_receipt records the ABI policy the
+# bootstrap was launched under and REFUSES to write a receipt when
+# SIMPLE_ABI_POLICY is unset (sanity.shs:592-598). bootstrap-from-scratch.sh
+# exports it (:1222); this selftest harness is invoked standalone -- by
+# `produce-bootstrap-planner-admission-v2.shs --selftest` and by the gate
+# manifest -- so with nothing exporting it every fixture died at
+# `FAIL -- could not create fixture Stage-2 admission` before a single
+# producer assertion ran. Fixtures are v1 by construction; an explicitly
+# supplied policy still wins so the harness can be run under another one.
+SIMPLE_ABI_POLICY=${SIMPLE_ABI_POLICY:-v1}
+export SIMPLE_ABI_POLICY
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
@@ -146,7 +157,13 @@ FIXTURE_CC
             {
                 echo schema=simple-bounded-process-log-v1; echo status=complete
                 echo reason=child-exit; echo raw_status=0; echo max_bytes=4194304
-                echo bytes_captured="$(wc -c <"$mf_probe_log")"; echo timeout_seconds="${COMPILER_BUILD_TIMEOUT_SECONDS:-180}"
+                # `$(( ))` normalises wc's output. BSD/macOS `wc -c <f` right-pads
+                # its count ("      20"), and the verifier requires
+                # `^[0-9]+$` on bytes_captured -- so on macOS every fixture probe
+                # was rejected `bounded-nonnegative-syntax`. sanity.shs already
+                # carries the same normalisation on the reading side; this is the
+                # writing side of the identical BSD trap.
+                echo bytes_captured="$(( $(wc -c <"$mf_probe_log") ))"; echo timeout_seconds="${COMPILER_BUILD_TIMEOUT_SECONDS:-180}"
                 echo term_grace_seconds=1; echo combined_stream=stdout-stderr
                 echo process_group=setsid; echo artifact_limit=none
                 echo log_leaf="${mf_probe_log##*/}"; echo log_sha256="$mf_probe_sha"
@@ -331,9 +348,19 @@ for custom_receipt in "$custom_sanity" "$custom_provenance"; do
 done
 run_custom_output_producer "$custom_root" "$custom_output" >"$scratch/custom-output.log" 2>&1 ||
     fail "producer refused allowlisted external bootstrap output"
-SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$custom_output" \
-bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" "$custom_root" >/dev/null 2>&1 ||
-    fail "external-output receipt failed canonical verification"
+# bootstrap_planner_v2_verify is a shell FUNCTION, not an external command, so
+# a `VAR=x func` prefix assignment PERSISTS in this shell after the call. The
+# positive case below therefore used to leak the allowlist into the negative
+# case underneath it, which then verified and reported
+# `external-output receipt verified without its explicit allowlist` -- a real
+# failure of the fixture, not of the guard. Run the positive case in a subshell
+# and assert the negative case with the variable provably unset.
+(
+    SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$custom_output"
+    export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
+    bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" "$custom_root" >/dev/null 2>&1
+) || fail "external-output receipt failed canonical verification"
+unset SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
 if bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" \
     "$custom_root" >/dev/null 2>&1; then
     fail "external-output receipt verified without its explicit allowlist"

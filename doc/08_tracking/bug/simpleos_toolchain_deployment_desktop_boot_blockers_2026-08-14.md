@@ -104,3 +104,12 @@ must not drive the current resume command.
   arrays. Stage 3/4 are still unadmitted. The next permitted action is one
   materially changed cache-preserving Stage 3 resume after the dedicated
   Stage-4 owner releases canonical bootstrap resources.
+
+## Triage 2026-09-13
+
+Umbrella row over 6 active blockers (B-HOST-CLI through B-PHYSICAL),
+each requiring Stage 3/4 bootstrap admission, a real target-native
+build, guest lld, image builder work, an OVMF/GRUB QEMU run, or
+physical board acquisition. None of this is reachable from a unit
+spec on this host. Leaving OPEN, no attempt.
+

@@ -1,5 +1,12 @@
 # Self-hosted CLI native-build silently returns success without an artifact
 
+## Triage 2026-09-13
+CLOSED for the row's named symptom (silent no-artifact success) -- the doc's
+own 2026-08-17 re-triage already found this does NOT reproduce. The residual
+open item in the same doc ("OPEN / restart12 render lane blocker") is a
+different, unrelated deploy-lane blocker, left as-is. No further action.
+
+
 Status: **RETIRED 2026-08-17 — the silent-no-artifact symptom does NOT reproduce.**
 The residual render-lane blocker is a DEPLOY question, not this defect; see the
 re-triage immediately below before reading the 2026-08-14 text, which is kept

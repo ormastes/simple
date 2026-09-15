@@ -47,3 +47,25 @@ Focused contract:
 ```sh
 sh test/01_unit/scripts/bootstrap_jobs_policy_test.shs
 ```
+
+## Backgrounding a lane run (SIGHUP)
+
+The three bootstrap-lane scripts (`scripts/bootstrap/bootstrap-from-scratch.sh`,
+`scripts/bootstrap/resume-stage3-from-admitted.sh`,
+`scripts/bootstrap/bootstrap-strategy.sh`) each install their own `HUP` trap so
+a caught SIGHUP always runs cleanup and writes a `VERDICT — ABORTED
+... signal=HUP` line — they do **not** `trap '' HUP` to ignore it. That means a
+lane launched as a plain `&` background job is still killed by SIGHUP when the
+invoking shell/session exits; the trap only makes the death diagnosable, it
+does not prevent it. To actually survive the parent shell exiting, background
+the lane with both `setsid` (new session, no controlling terminal to deliver
+SIGHUP from) and `nohup` (belt-and-suspenders, and redirect stdin so the lane
+never blocks on a closed terminal):
+
+```sh
+setsid nohup sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy \
+  >bootstrap-run.log 2>&1 </dev/null &
+```
+
+Always check the log's final line for a `VERDICT — ` record after the fact
+rather than assuming a backgrounded run finished cleanly.

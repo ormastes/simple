@@ -1,9 +1,17 @@
 # Note: rt_tls13_x25519 bare extern unregistered — pure fallback runs in test mode
 
+## Closed 2026-09-13 — confirmed: the pure fallback is KAT-verified and runs standalone
+- **measured** — `bin/simple run test/01_unit/lib/common/crypto/x25519_rfc7748_kat_spec.spl`
+  (Rust seed v1.0.0-rc.1, Windows): `outcome=OK declared>=6 executed=6 passed=6 failed=0`
+  — the RFC 7748 vectors pass through the pure-Simple path with no unregistered-extern nil
+  and no standalone crash.
+- **inferred** — this discharges the "existing KAT and standalone run verification pending"
+  item the entry left after its 2026-07-15 source fix.
+
 **ID:** x25519_extern_not_registered_interp_2026-06-15
 **Date:** 2026-06-15
 **Severity:** P3 — dead unimplemented optimization path; standalone interpreter failure
-**Status:** Source fixed 2026-07-15; existing KAT and standalone run verification pending
+**Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 
 ## Summary
 

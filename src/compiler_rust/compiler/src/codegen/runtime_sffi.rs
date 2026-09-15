@@ -701,6 +701,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_unwrap_or_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_is_none", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_is_some", &[I64], &[I8]),
+    // `.?` presence (nil/None OR empty array/dict/string) — see rt_is_present.
+    RuntimeFuncSpec::new("rt_is_present", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_option_map", &[I64, I64], &[I64]),
     // =========================================================================
     // Unique pointer operations (GC-collaborative manual memory)
@@ -2066,6 +2068,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_canonicalize", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64]),    // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_regular_no_follow_bounded", &[I64, I64, I64], &[I64]), // path_ptr, path_len, max_bytes -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_read_regular_no_follow_last_failure", &[], &[I64]), // -> arm code of the last NIL return
     RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_read_text", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_mmap_len", &[I64, I64], &[I64]), // path_ptr, path_len -> byte length

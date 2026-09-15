@@ -358,6 +358,25 @@ async and performance gates pending until an admitted Pure Simple runtime and
 actual provider execute them. Do not reopen the same five-file facade task;
 start at this missing port and include its production consumers.
 
+### Canonical Vulkan lifetime cut after framebuffer-owner review
+
+The 2026-09-14 Astra escalation rejected the later framebuffer-membership
+candidate and removed its uncommitted production wiring. A copyable session
+field is not canonical authority, and `vulkan_get_device()` returns an
+availability bit rather than a native identity. Copied backend command,
+image/font pool and presenter state can bypass last-release decisions made by
+a framebuffer-only table.
+
+The [canonical driver-owner migration design](../05_design/vulkan_canonical_driver_owner_migration.md)
+defines the complete production cut: module-global raw-mutex authority,
+revocable slot/generation/nonce references, consumed retain results, exact
+framebuffer extents/usage, and canonical recording/pool lifetimes. Its
+copy-before-record and copy-after-record counterexamples are acceptance
+requirements. Raw-mutex primitives exist; the migration is not implemented.
+Native-context binding, presenter release and async support remain unavailable.
+The committed synchronous implementation retains its existing limitations;
+removing the rejected candidate does not prove it copy-safe.
+
 ### V2 implementation escalation: concrete missing boundary
 
 The four-file V2 candidate also failed after two Sol cycles. Astra removed it:

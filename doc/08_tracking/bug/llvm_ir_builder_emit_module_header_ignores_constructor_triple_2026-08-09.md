@@ -96,3 +96,10 @@ is safe and cheap.
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+Reconfirmed via source inspection: `LlvmIRBuilder.emit_module_header()`
+still ignores the constructor-supplied triple per this record. LLVM
+backend codegen fix, not attempted here (risk of breaking native-build
+across targets without full cross-target verification). Left OPEN (P2), no
+code change attempted.

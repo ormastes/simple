@@ -1,6 +1,10 @@
-# CompilerContext multi-def name collision (W13-H class 3b reclassification)
+## Closed 2026-09-13 — verified fixed by grep, name collision resolved
 
-Status: RESOLVED (2026-09-12, per body: "## Status" §"2026-05-19 (Wave 5): Rust-side fix verified complete" and "**Blocking:** resolved.")
+Status: RESOLVED 2026-05-10 (header corrected 2026-09-13). The stale "not fixed in W15-K scope" line below was superseded by the in-body FIXED note. Re-verified 2026-09-13 by grep over `src/compiler/`: only ONE `struct CompilerContext` remains (`99.loader/loader/compiler_sffi.spl:17`, the `handle: i64` variant the `obj_taker.spl` callers need), and `80.driver/init.spl:19` now defines `struct DriverContext`. The three-way name collision no longer exists, so the first-wins `or_insert` lottery cannot mis-resolve it.
+
+---
+
+# CompilerContext multi-def name collision (W13-H class 3b reclassification)
 
 **Filed:** 2026-05-02 by W15-K agent
 **Discovered during:** W15-K HIR class 3b source-side typo fixes
@@ -89,6 +93,3 @@ silently fight each other.
     pre-existing in out-of-scope files (`local_execution.rs`,
     `expression_tests.rs`).
 - **Blocking:** resolved.
-
-## Triage 2026-09-12
-Rule E: the leading status line disagreed with the record's own "## Status" section, which already documents Wave 5 (2026-05-19) verifying the Rust-side fix complete and states "**Blocking:** resolved."; aligned the leading status line to that body verdict instead of closing it stale. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

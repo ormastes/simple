@@ -1,0 +1,97 @@
+# The native link line must be keyed on the TARGET, not shaped like Linux.
+#
+# Regression for the macOS Stage 2 sanity failure of 2026-09-13
+# (doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md,
+# chain run 17): every arm built a Linux-shaped library list, so the darwin
+# link passed `-lc` — a library macOS does not ship — and passed `-lSystem` a
+# second time on top of the one the clang driver already appends:
+#
+#   ld: warning: ignoring duplicate libraries: '-lSystem'
+#   ld: library 'c' not found
+#
+# The Linux and FreeBSD expectations below are the literals captured from the
+# pre-change code; they exist so the darwin fix cannot move those lines.
+use compiler.backend.linker._LinkerWrapper.native_all_support.{
+    native_link_std_lib_args, native_link_uses_crt_objects,
+    native_link_shared_std_libs
+}
+use compiler.backend.linker._LinkerWrapper.native_linking.{
+    native_cc_platform_flags, darwin_sdk_path
+}
+use std.platform.{host_os}
+
+fn count_of(args: [text], needle: text) -> i64:
+    var n = 0
+    for a in args:
+        if a == needle: n = n + 1
+    n
+
+describe "native link line per target":
+    it "never passes -lc on darwin — macOS ships no libc to link against":
+        for mode in ["ld", "cc-pre", "cc-post"]:
+            expect(count_of(native_link_std_lib_args("darwin", mode), "-lc")).to_equal(0)
+            expect(count_of(native_link_std_lib_args("macos", mode), "-lc")).to_equal(0)
+            expect(count_of(native_link_std_lib_args("darwin", mode), "-lm")).to_equal(0)
+            expect(count_of(native_link_std_lib_args("darwin", mode), "-lpthread")).to_equal(0)
+            expect(count_of(native_link_std_lib_args("darwin", mode), "-ldl")).to_equal(0)
+
+    it "names -lSystem exactly once on the direct ld64 line":
+        expect(count_of(native_link_std_lib_args("darwin", "ld"), "-lSystem")).to_equal(1)
+
+    it "leaves -lSystem to the clang driver on the cc fallback line":
+        # The driver appends it; ours was the duplicate the warning named.
+        expect(count_of(native_link_std_lib_args("darwin", "cc-pre"), "-lSystem")).to_equal(0)
+        expect(count_of(native_link_std_lib_args("darwin", "cc-post"), "-lSystem")).to_equal(0)
+
+    it "links no crt objects on darwin, and does on linux and freebsd":
+        expect(native_link_uses_crt_objects("darwin")).to_equal(false)
+        expect(native_link_uses_crt_objects("macos")).to_equal(false)
+        expect(native_link_uses_crt_objects("linux")).to_equal(true)
+        expect(native_link_uses_crt_objects("freebsd")).to_equal(true)
+
+    it "keeps the linux line byte-identical to the pre-change literals":
+        expect(native_link_std_lib_args("linux", "ld")).to_equal(
+            ["-lc", "-lpthread", "-ldl", "--as-needed", "-lm", "--no-as-needed"])
+        expect(native_link_std_lib_args("linux", "cc-pre")).to_equal(
+            ["-lc", "-lpthread", "-ldl"])
+        expect(native_link_std_lib_args("linux", "cc-post")).to_equal(
+            ["-Wl,--as-needed", "-lm", "-Wl,--no-as-needed"])
+
+    it "keeps the freebsd line byte-identical to the pre-change literals":
+        expect(native_link_std_lib_args("freebsd", "ld")).to_equal(
+            ["-lc", "-lpthread", "--as-needed", "-lm", "-lSDL2", "--no-as-needed"])
+        expect(native_link_std_lib_args("freebsd", "cc-pre")).to_equal(
+            ["-lc", "-lpthread", "-Wl,--as-needed", "-lm", "-lSDL2", "-Wl,--no-as-needed"])
+        expect(native_link_std_lib_args("freebsd", "cc-post")).to_equal([])
+
+    it "keeps the darwin homebrew search paths that resolve sdl2-compat":
+        expect(native_link_std_lib_args("darwin", "ld")).to_equal(
+            ["-L", "/opt/homebrew/lib", "-L", "/usr/local/lib", "-lSystem", "-lSDL2"])
+        expect(native_link_std_lib_args("darwin", "cc-pre")).to_equal(
+            ["-L", "/opt/homebrew/lib", "-L", "/usr/local/lib", "-lSDL2"])
+
+    it "pins the macOS SDK so the resolved clang can find libSystem":
+        # `xcrun --find clang` prefers the Xcode toolchain, whose default SDK can
+        # be absent when the active developer dir is CommandLineTools; that clang
+        # then fails with `ld: library 'System' not found`. Only assert the flag
+        # where an SDK actually resolves — on a host with none, "" is correct and
+        # the link must not be handed an empty -isysroot.
+        val sdk = darwin_sdk_path()
+        val flags = native_cc_platform_flags("darwin", false)
+        if host_os() == "macos" or host_os() == "darwin":
+            expect(sdk).to_not_equal("")
+        if sdk != "":
+            expect(count_of(flags, "-isysroot")).to_equal(1)
+            expect(count_of(flags, sdk)).to_equal(1)
+        else:
+            expect(count_of(flags, "-isysroot")).to_equal(0)
+        # Linux must gain no sysroot flag from this.
+        expect(count_of(native_cc_platform_flags("linux", false), "-isysroot")).to_equal(0)
+
+    it "shapes the shared-library line per target too":
+        expect(native_link_shared_std_libs("linux")).to_equal(
+            ["-lc", "-lpthread", "-ldl", "-lm"])
+        expect(native_link_shared_std_libs("freebsd")).to_equal(
+            ["-lc", "-lpthread", "-lm"])
+        expect(native_link_shared_std_libs("darwin")).to_equal(["-lSystem"])
+        expect(count_of(native_link_shared_std_libs("darwin"), "-lc")).to_equal(0)

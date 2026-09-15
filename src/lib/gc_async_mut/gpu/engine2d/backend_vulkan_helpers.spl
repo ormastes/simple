@@ -7,6 +7,7 @@
 #             backend_vulkan_glsl.spl (shader sources, accessed via main init)
 
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend,
+    vulkan_counted_submit_and_wait_fence,
     vulkan_timing_enabled, vulkan_timing_now_us, vulkan_timing_add,
     VK_T_ENQUEUE, VK_T_FLUSH, VK_T_SFFI_BEGIN, VK_T_SFFI_REAP, VK_T_SFFI_DESC,
     VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
@@ -21,7 +22,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_push_constants, vulkan_sffi_dispatch,
     vulkan_sffi_end_compute, vulkan_sffi_discard_command,
     vulkan_sffi_fence_submission_supported,
-    vulkan_sffi_submit_and_wait_fence, vulkan_sffi_wait_fence,
+    vulkan_sffi_wait_fence,
     vulkan_sffi_destroy_fence, vulkan_sffi_free_buffer,
     vulkan_sffi_alloc_buffer,
     vulkan_sffi_copy_from_buffer, vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_to_buffer_u32,
@@ -295,7 +296,7 @@ fn vulkan_dispatch_region_kernel_checked(d_framebuffer: i64, pipe: i64, d_out: i
         val descriptor_destroyed = vulkan_sffi_destroy_descriptor_set(desc)
         return 0
 
-    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    val fence = vulkan_counted_submit_and_wait_fence(cmd)
     if fence < 0:
         if not vulkan_sffi_wait_idle():
             vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
@@ -366,7 +367,7 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
         val source_freed = vulkan_sffi_free_buffer(d_src)
         return 0
 
-    val fence = vulkan_sffi_submit_and_wait_fence(cmd)
+    val fence = vulkan_counted_submit_and_wait_fence(cmd)
     if fence < 0:
         # The runtime quarantines the command/fence. A successful device-idle
         # proves their dependent descriptor/source are now safe to release.
@@ -969,9 +970,7 @@ impl VulkanBackend:
             self._clear_pending_compute_state()
             return 0
 
-        val _t_submit = vulkan_timing_now_us()
-        val fence = vulkan_sffi_submit_and_wait_fence(cmd)
-        vulkan_timing_add(VK_T_SFFI_SUBMIT, _t_submit)
+        val fence = vulkan_counted_submit_and_wait_fence(cmd)
         if fence <= 0 and vulkan_order_trace_enabled():
             vulkan_order_trace("flush-fail stage=submit_and_wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
         if fence < 0:
@@ -2046,6 +2045,29 @@ fn _pack_blur_rect_pc(rx: i32, ry: i32, rw: i32, rh: i32,
     buf = _pack_i32_le(buf, 16, fb_w)
     buf = _pack_i32_le(buf, 20, fb_h)
     buf = _pack_i32_le(buf, 24, radius)
+    buf
+
+fn _pack_shadow_rect_pc(mx: i32, my: i32, mw: i32, mh: i32,
+                        fb_w: i32, fb_h: i32, sr: i32, sg: i32, sb: i32,
+                        shadow_a: i32, prof_off: i32) -> [u8]:
+    """Push constants for the device box-shadow kernel (44 bytes used).
+
+    FROZEN: the field order is shaders/shadow_rect.comp's PushConstants block.
+    `prof_off` is the WORD index in the binding-1 buffer where the host-uploaded
+    separable coverage profiles start (prof_x then prof_y).
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, mx)
+    buf = _pack_i32_le(buf, 4, my)
+    buf = _pack_i32_le(buf, 8, mw)
+    buf = _pack_i32_le(buf, 12, mh)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, sr)
+    buf = _pack_i32_le(buf, 28, sg)
+    buf = _pack_i32_le(buf, 32, sb)
+    buf = _pack_i32_le(buf, 36, shadow_a)
+    buf = _pack_i32_le(buf, 40, prof_off)
     buf
 
 fn _pack_glass_material_pc(fb_w: i32, fb_h: i32, rx: i32, ry: i32, rw: i32, rh: i32,

@@ -1,6 +1,10 @@
 # Bug: `std.sdn.*` resolves to a STALE bundled stdlib copy (divergent SdnValue API)
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — `std.sdn.*` now resolves to the canonical Int-API SdnValue
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's fence is now inverted: `use std.sdn.value.{SdnValue}` + `print(SdnValue.Int(5))` succeeds, while `SdnValue.i32(5)` fails with `unknown variant or method 'i32' on enum SdnValue (declared variants: Null ...)`. The reported defect (canonical `Int` unreachable) no longer reproduces.
+- **inferred** The stale bundled copy `src/compiler_rust/lib/std/src/sdn/value.spl` still exists on disk, but resolver precedence no longer prefers it, so the user-visible divergence is closed; deleting the bundled copy remains a separate bootstrap-owner decision.
 
 **Date:** 2026-06-30
 **Severity:** Medium — latent. Any code importing `std.sdn.value` / `std.sdn.parser`
@@ -48,6 +52,3 @@ The two SDN stdlibs have genuinely diverged (different value model). Either:
 - formally deprecate `std.sdn.*` in favour of `std.common.sdn.*`.
 Touching the bundled copy or resolver order risks the bootstrap path, so this is
 deferred to a deliberate change.
-
-## Triage 2026-09-12
-Re-verified 2026-09-12 via source grep only: both `src/compiler_rust/lib/std/src/sdn/value.spl` (stale) and `src/lib/common/sdn/value.spl` (canonical) still exist, and `interpreter_module/path_resolution.rs` still comments the bundled path as a stale, un-tiered snapshot that could win — inconclusive on whether `std.sdn.*` resolution itself was fixed. Older than 45 days; closing per age policy pending a fresh repro. Evidence: source grep above; seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

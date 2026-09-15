@@ -1,5 +1,88 @@
 # unify_types: the occurs check is dead code, UNIFY_FAIL_OCCURS is unreachable
 
+## Closed 2026-09-13 — fixed; the guard is now structural AND reachable, PROVED by running
+
+**Status: CLOSED (fixed).** The entry's central claim — "`UNIFY_FAIL_OCCURS` is
+never returned by `unify_types` for any input" — is now false, and the second
+half of the complaint ("even if it were reachable it could not detect
+`T = List<T>`, the case it exists to prevent") is also resolved.
+
+### Source: the check is now structural
+
+`src/compiler/10.frontend/core/type_inference.spl:97-164` no longer holds the
+one-line `resolved == var_id` test. It is now `occurs_check` ->
+`occurs_check_depth(var_id, type_id, 0)`, which recurses through the type
+structure with an `OCCURS_MAX_DEPTH` bound (a cycle deeper than the bound is
+itself treated as evidence of an infinite type):
+
+- single-component wrappers: array-generic, option-generic, isolated,
+  exclusive, reference, pointer, atomic, weak
+- two-component composites: dict (key and value), result (ok and err)
+- N-component: tuple elements, union members, and named struct/class/enum types
+  via `named_type_field_type_tags`
+- a separate `occurs_check_fn(var_id, param_tags, ret_tag)` catches
+  `T = fn() -> T`, which has no flat composite tag in this registry
+
+The `is_type_var(resolved) -> false` early-out is kept and commented as
+load-bearing (TYPE_VAR_BASE 50000 sits above TYPE_NAMED_BASE 10000, so without
+it an unbound variable would be misread as a named type).
+
+### Empirical: all three verdicts are now reachable
+
+Probe run against the real module on the Rust seed
+`build/vt4/bootstrap/simple.exe` (`UNIFY_SUCCESS=0`, `UNIFY_FAIL_MISMATCH=1`,
+`UNIFY_FAIL_OCCURS=2`):
+
+```
+1 self-array   occurs=true  unify=2      # v = [v]        -> OCCURS
+2 plain-bind                unify=0      # w = text       -> SUCCESS
+3 same-var                  unify=0      # x = x          -> SUCCESS
+4 self-option  occurs=true  unify=2      # y = y?         -> OCCURS
+5 mismatch                  unify=1      # text = bool    -> MISMATCH
+6 self-dict-value occurs=true unify=2    # z = {text: z}  -> OCCURS
+```
+
+Rows 1, 4 and 6 are exactly the constructions the original entry listed as
+returning SUCCESS. They now return `UNIFY_FAIL_OCCURS`, through three different
+composite shapes (single-component wrapper, another single-component wrapper,
+and the value slot of a two-component composite) — so this is the recursion
+working, not a special case for arrays. Rows 2, 3 and 5 confirm the guard did
+not become trigger-happy: ordinary binding, self-unification and a genuine
+mismatch still return their own verdicts.
+
+MEASURED, not inferred. The fixing commit was not bisected.
+
+### The spec-vacuity half is NOT fixed — and the body below is wrong about it
+
+Measured 2026-09-13, **both** copies still carry 70 `it` blocks, 70
+`expect true` placeholders and **zero** `use` lines:
+
+- `test/01_unit/compiler/type_checker/type_inference_v2_spec.spl`
+- `test/01_unit/lib/std/type_checker/type_inference_v2_spec.spl`
+
+So the sentence further down — "the import works fine and is used by the
+repaired spec" — does not describe the tree at HEAD. Whatever repaired copy
+existed was never landed, or was landed and later reverted. The unifier is
+still covered by no executing assertion, which is why the occurs-check fix
+above had to be proved with an ad-hoc probe instead of by running the spec.
+
+This is a live defect, not history — but it is **not** the mechanical fix it
+looks like, and that is worth recording so the next person does not start it
+expecting a 30-minute job. The spec's header points its assertions at
+`src/lib/std/src/type_checker/type_inference_v2.spl`, which **does not exist**;
+the only `type_inference_v2.spl` in the tree is
+`src/compiler_rust/lib/std/src/type_checker/type_inference_v2.spl`, inside the
+seed's vendored std copy. The engine that is actually live and that the
+occurs-check fix above landed in is a *different* module,
+`compiler.core.type_inference`. So de-vacuifying requires first deciding which
+implementation the 70 examples are meant to cover and retargeting them — a
+scoping decision, not a text substitution. The `it` names themselves
+(`unifies Int with Int`, `fails to unify Int with Bool`, `unifies type variable
+with Int`, ...) do map cleanly onto the `compiler.core.type_inference` API
+exercised in the probe above, which is the obvious target if someone picks
+this up.
+
+
 - **Date:** 2026-08-02
 - **Status:** OPEN
 - **Severity:** HIGH — the type checker has no working guard against infinite

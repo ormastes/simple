@@ -1,4 +1,5 @@
 use std.nogc_sync_mut.sffi.io.{dir_create_all, file_exists}
+use std.common.encoding.sfnt.{font_face_spec_path}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_physical_path}
 
 # `rt_process_run_timeout` is declared here rather than imported through
@@ -35,6 +36,80 @@ enum FontBackend:
     Vector
     Bitmap
 
+# ---------------------------------------------------------------------------
+# Platform default faces
+#
+# A generic family is resolved by the HOST, not by the page: on macOS Chrome
+# maps `monospace` to Menlo and `sans-serif` to Helvetica, and the whole web
+# catalog declares nothing but `font: 16px/1.5 sans-serif` plus the UA's
+# monospace for `<code>`. Measuring those runs against the bundled Noto faces
+# is therefore comparing two DIFFERENT fonts and calling the difference a
+# layout defect — Menlo's `M` is 1233/2048 em (9.633 px at 16) where Chrome
+# measured exactly 9.63, and the bundled Noto Sans SC's static metrics are its
+# wght=100 THIN master (the resolved identity says `axes=wght=100`), which is
+# where the sans runs' −7%/−12% deficit came from.
+#
+# These are PREPENDED to the bundled lists, never replacing them: a face is
+# offered only when its file is present, so Linux and CI keep exactly the
+# candidate order they had. `#N` selects a face of a TrueType collection.
+fn _browser_present_platform_faces(specs: [text]) -> [text]:
+    var out: [text] = []
+    for spec in specs:
+        if file_exists(font_face_spec_path(spec)):
+            out.push(spec)
+    out
+
+fn browser_platform_mono_faces() -> [text]:
+    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#0"])
+
+fn browser_platform_sans_faces() -> [text]:
+    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#0"])
+
+# Weight >= 600 wants a real bold face, not a synthesised one. Helvetica.ttc
+# face 1 is Helvetica Bold; its `abcdefg` run is 61.34 px at 16 against the
+# regular face's 56.94, i.e. the +4 px delta Chrome shows and Simple measured
+# as 0 because both weights resolved to the same face.
+fn browser_platform_sans_bold_faces() -> [text]:
+    _browser_present_platform_faces(["/System/Library/Fonts/Helvetica.ttc#1"])
+
+fn browser_platform_mono_bold_faces() -> [text]:
+    _browser_present_platform_faces(["/System/Library/Fonts/Menlo.ttc#1"])
+
+# Bold routing rides the existing `__simple_font_face__|<source>|<family>`
+# channel, which `browser_font_candidates_for_family` already understands, so
+# no call site learns a new parameter and a family with no platform bold face
+# is returned unchanged (recorded as: regular, no synthesis).
+#
+# It routes ONLY the two GENERIC families whose platform bold face is the same
+# typeface as their regular one. Round 9 built a bold list that fell back to
+# `DejaVu-Bold` for an unrelated family and refused to land it, correctly: that
+# swaps the TYPEFACE, not the weight, and a typeface swap is a parity
+# regression wearing a parity-shaped name. So an explicit family, a bundled
+# family, a serif stack, and an already-decorated `@font-face` value are all
+# returned untouched — bold there stays the regular face, recorded rather than
+# synthesised.
+fn browser_font_family_for_weight(family: text, bold: bool) -> text:
+    if not bold:
+        return family
+    if family.starts_with("__simple_font_face__|"):
+        return family
+    if browser_bundled_font_path_for_family(family) != "":
+        return family
+    val lower = family.to_lower()
+    # The same substring tests, in the same order, as
+    # `browser_font_candidates_for_family` and `_resolved_font_category_uncached`.
+    # Three lists that disagree is exactly how round 10's `system-ui`-resolves-
+    # to-serif defect happened.
+    val faces = if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
+        browser_platform_mono_bold_faces()
+    elif lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
+        browser_platform_sans_bold_faces()
+    else:
+        []
+    if faces.len() == 0:
+        return family
+    "__simple_font_face__|" + faces[0] + "|" + family
+
 fn _browser_resolve_bundled_candidates(paths: [text]) -> [text]:
     var resolved: [text] = []
     for path in paths:
@@ -66,7 +141,7 @@ fn browser_serif_font_candidates() -> [text]:
     ])
 
 fn browser_sans_font_candidates() -> [text]:
-    _browser_resolve_bundled_candidates([
+    browser_platform_sans_faces() + _browser_resolve_bundled_candidates([
         "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf",
         "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf",
         "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf",
@@ -77,7 +152,7 @@ fn browser_sans_font_candidates() -> [text]:
     ])
 
 fn browser_mono_font_candidates() -> [text]:
-    _browser_resolve_bundled_candidates([
+    browser_platform_mono_faces() + _browser_resolve_bundled_candidates([
         "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf",
         "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -98,9 +173,14 @@ fn browser_font_candidates_for_family(family: text) -> [text]:
         return [bundled]
     if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
         return browser_mono_font_candidates()
-    if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica"):
+    # `system-ui` / `-apple-system` / `ui-sans-serif` are the UI SANS stack, not
+    # a serif one; they sat in the serif branch only because that branch tested
+    # `contains("system")`. A page whose whole stack is `system-ui` therefore
+    # measured against Noto Serif. Tested before the serif branch, and the serif
+    # branch no longer claims "system".
+    if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
         return browser_sans_font_candidates()
-    if lower.contains("serif") or lower.contains("times") or lower.contains("georgia") or lower.contains("system"):
+    if lower.contains("serif") or lower.contains("times") or lower.contains("georgia"):
         return browser_serif_font_candidates()
     # Unspecified / unmatched family default: bundled Noto Sans Mono.
     browser_mono_font_candidates()
@@ -310,3 +390,31 @@ fn _browser_font_source_extension(source_url: text) -> text:
     if lower.contains(".ttf"):
         return ".ttf"
     ".font"
+
+# Does this family already resolve to a face the HOST provides — either an
+# explicit `@font-face` source the page named, or a present platform default?
+#
+# The language/category coverage matrix exists to guarantee a BUNDLED face with
+# real coverage for a script, and for non-Latin content that is exactly right.
+# For Latin content it replaces the requested family with the matrix's witness
+# family, and `browser_bundled_font_path_for_family` then answers with that
+# bundled asset ALONE — which silently discards both an explicit `@font-face`
+# source (filed at doc/08_tracking/bug/
+# web_inline_bold_face_advances_never_selected_2026-09-12.md) and, since round
+# 11, the platform face. Measured: the catalog pages declare `lang="en"`, and
+# with it every `sans-serif` run resolved back to the bundled wght=100 Thin
+# master, so the face routing was live under `und` and dead on every real page.
+#
+# On a host with no platform faces this answers false for every generic family,
+# so the matrix keeps its current behaviour there unchanged.
+fn browser_family_has_host_face(family: text) -> bool:
+    if browser_font_face_source_from_family_value(family) != "":
+        return true
+    if browser_bundled_font_path_for_family(family) != "":
+        return false
+    val lower = family.to_lower()
+    if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
+        return browser_platform_mono_faces().len() > 0
+    if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
+        return browser_platform_sans_faces().len() > 0
+    false

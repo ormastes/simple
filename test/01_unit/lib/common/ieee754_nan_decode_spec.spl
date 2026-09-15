@@ -1,0 +1,51 @@
+# Purpose: f32_from_bits / f64_from_bits must decode a NaN bit pattern as a
+# NaN. The all-ones-exponent branch handled only infinity (frac == 0); a NaN
+# fell through with the accumulator still 0.0, so EVERY NaN decoded to zero
+# while infinity decoded correctly. Nothing pinned this, which is why the
+# AVX-512 SIMD fallback oracle's documented NaN semantics were being asserted
+# against 0.0 rather than against a NaN.
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.common.math.ieee754_bits.{f32_from_bits, f32_to_bits, f64_from_bits, f64_to_bits}
+
+describe "ieee754 bit decode handles NaN, not just infinity":
+    it "decodes an f32 quiet NaN as a NaN":
+        step("0x7FC00001 is a quiet NaN; it used to decode to 0.0")
+        val nan = f32_from_bits(0x7FC00001u32)
+        assert_equal(nan == nan, false)
+        assert_equal(nan != nan, true)
+        val zero: f32 = 0.0
+        assert_equal(nan == zero, false)
+
+    it "decodes an f32 signalling NaN payload as a NaN too":
+        step("any non-zero fraction under an all-ones exponent is a NaN")
+        val snan = f32_from_bits(0x7F800001u32)
+        assert_equal(snan == snan, false)
+
+    it "decodes an f64 quiet NaN as a NaN":
+        step("same missing branch existed in the f64 path")
+        val nan = f64_from_bits(0x7FF8000000000001u64)
+        assert_equal(nan == nan, false)
+        assert_equal(nan != nan, true)
+
+    it "still decodes both infinities, which were never broken":
+        step("frac == 0 under an all-ones exponent is infinity, and round-trips")
+        assert_equal(f32_to_bits(f32_from_bits(0x7F800000u32)), 0x7F800000u32)
+        assert_equal(f64_to_bits(f64_from_bits(0x7FF0000000000000u64)), 0x7FF0000000000000u64)
+
+    it "still round-trips ordinary finite values":
+        step("the fix must not disturb the normal path")
+        assert_equal(f32_to_bits(f32_from_bits(0x3F800000u32)), 0x3F800000u32)
+        assert_equal(f32_from_bits(0x3F800000u32), 1.0)
+        assert_equal(f64_to_bits(f64_from_bits(0x3FF0000000000000u64)), 0x3FF0000000000000u64)
+
+    it "orders NaN against ordinary values the way IEEE-754 requires":
+        step("every ordered comparison with a NaN operand is false")
+        val nan = f32_from_bits(0x7FC00001u32)
+        val one: f32 = 1.0
+        assert_equal(nan < one, false)
+        assert_equal(nan > one, false)
+        assert_equal(nan <= one, false)
+        assert_equal(nan >= one, false)

@@ -1,5 +1,14 @@
 # Mission-Critical Infrastructure Hardening V2 — Wave 1 RED
 
+## Triage 2026-09-13
+Partial fix landed since filing: test/01_unit/compiler/mission_critical/compiler_admission_spec.spl
+is now GREEN (10/10; was 6/10 FAIL when filed). Re-ran the other named spec,
+test/01_unit/lib/common/mission_critical/draw_ir_generation_arena_v3_spec.spl:
+still 3/8 passing, 5 failing -- IDENTICAL count to when filed, still
+reproduces verbatim. OPEN, out of scope for this pass: the arena-generation
+persistence gap is in src/lib/common/mission_critical/draw_ir_packed_generation_store_v3.spl-class
+code, non-trivial state-machine logic, not a quick contained fix.
+
 Date: 2026-08-11
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).

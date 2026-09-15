@@ -196,3 +196,7 @@ The alternative fix — having `test_result_wrapper.spl` keep `describe`/`it` at
 module scope instead of nesting them in `fn main()` — was NOT attempted here
 because the hand-written nested form runs correctly on both engines, so nesting
 is not by itself the trigger and removing it may not fix anything.
+
+## Triage 2026-09-13
+
+Doc already explicitly declines a fix here: root cause is in the Rust seed's `rt_bdd_*` intrinsics, the exact registration site is unpinned, and a seed rebuild is "not essential" per repo policy -- changing `it`-body capture semantics affects every spec in the repo and needs its own dedicated regression lane. Respecting that scoping. Leaving OPEN, no code change made.

@@ -6,7 +6,7 @@
 use app.llm_caret.claude_api.{claude_api_send}
 use app.llm_caret.claude_cli.{claude_cli_send}
 use app.llm_caret.local_torch.{local_torch_send}
-use std.gc_async_mut.slang.entrypoints.llm.{slang_generate, engine_backend_available, engine_lib_path}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_generate, slang_release, engine_backend_available, engine_lib_path}
 use app.llm_caret.codex_cli.{codex_cli_send}
 use app.llm_caret.opencode_cli.{opencode_cli_send}
 use app.llm_caret.openai_api.{openai_send}
@@ -316,6 +316,20 @@ fn _dispatch_slang_local(model_root: text, model: text, prompt: text, max_tokens
     if root == "":
         root = "models"
     val answer = slang_generate(root, model, prompt, max_tokens, lib_path, 0)
+    # Release the backend before returning. Without this, the model stays
+    # resident until process exit and ggml's static device destructor runs while
+    # its resource sets are still populated -- on macOS/Metal that is a hard
+    # GGML_ASSERT([rsets->data count] == 0) abort (exit 134) AFTER a perfectly
+    # good answer has already been printed, which is the worst shape of failure:
+    # correct output and a non-zero status. Releasing here also matches what the
+    # inference gate assumes ("models are loaded one at a time and released
+    # between runs").
+    # ponytail: releasing after every dispatch means an interactive multi-turn
+    # session reloads the model per turn, since engine_ensure_loaded's residency
+    # cache is what gets dropped -- upgrade: release from caret's shutdown path
+    # in main.spl instead, so one-shot runs tear down and TUI sessions keep the
+    # model resident across turns.
+    slang_release()
     if answer.is_error:
         return new_llm_error("slang_local", answer.error)
     LLMResponse(

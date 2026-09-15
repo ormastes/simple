@@ -1,0 +1,80 @@
+"""`use lazy` is an optimization: it must never change what a program does.
+
+The two lanes do not agree on whether it optimizes anything. The pure-Simple
+interpreter really defers: `src/compiler/10.frontend/core/interpreter/eval_decls.spl`
+answers a lazy `DECL_USE` with `register_deferred_module(...)`, and
+`module_loader_core.try_force_any_deferred_for` materializes the module on the
+first unresolved lookup of one of its names. The Rust bootstrap seed loads it
+eagerly and says so
+(`interpreter_module/module_evaluator/evaluation_helpers.rs:575`), so on the
+deployed seed (sha256 3d120a6f9ab5704b..., aarch64) the keyword buys nothing:
+an entry importing `app.io.cli_lint_commands` opened **1,109 `.spl` files with
+`use lazy` and 1,109 with an eager `use`** -- byte-identical, reproduced on this
+tree at f26970e9d93.
+See doc/08_tracking/bug/use_lazy_is_a_no_op_in_the_rust_seed_2026-09-12.md
+
+What both lanes must agree on, and what this spec pins, is the SEMANTICS: for
+the same program, the lazy and eager spellings produce the same output and the
+same exit code, whether or not the imported name is ever used. That is the
+contract a future seed-side implementation of deferral must not break, and it is
+what makes the divergence above a pure cost question rather than a behavioural
+one. The spec deliberately does NOT pin the seed's open counts: freezing the
+eager behaviour would turn the defect into a requirement.
+
+Fails closed: a fixture run that produced no output is a FAIL, and an empty
+source read is a FAIL. `SIMPLE_BINARY` selects the binary under test; it
+defaults to `bin/simple`.
+"""
+
+use std.spec.*
+use std.fs.{read_file}
+use std.io_runtime.{process_run}
+
+val FIXTURE_DIR: text = "test/01_unit/compiler/loader/lazy_use_equivalence"
+val SIMPLE_EVAL_DECLS: text = "src/compiler/10.frontend/core/interpreter/eval_decls.spl"
+
+fn run_sh(command: text) -> (text, i64):
+    val result = process_run("sh", ["-c", command])
+    (result.0 + result.1, result.2)
+
+fn run_fixture(entry: text) -> text:
+    """Program output plus a trailing `rc=<n>` line, so a differing exit code
+    shows up in the same comparison as differing output."""
+    val script = "b=$SIMPLE_BINARY; test -n \"$b\" || b=bin/simple; "
+        + "timeout 300 $b run " + FIXTURE_DIR + "/" + entry + " 2>/dev/null; "
+        + "echo \"rc=$?\""
+    val (out, _code) = run_sh(script)
+    out
+
+describe "use lazy equivalence":
+    it "gives the same result for both spellings when the import is used":
+        step("run the eager spelling")
+        val eager = run_fixture("used_eager.spl")
+        expect(eager.len()).to_be_greater_than(0)
+        expect(eager).to_contain("message=helper")
+        step("run the lazy spelling")
+        val lazy = run_fixture("used_lazy.spl")
+        expect(lazy.len()).to_be_greater_than(0)
+        step("output and exit code must be identical")
+        expect(lazy).to_equal(eager)
+        expect(lazy).to_contain("rc=0")
+
+    it "gives the same result for both spellings when the import is never used":
+        step("a deferred loader may skip the module entirely here")
+        val eager = run_fixture("unused_eager.spl")
+        expect(eager.len()).to_be_greater_than(0)
+        expect(eager).to_contain("message=unused")
+        val lazy = run_fixture("unused_lazy.spl")
+        expect(lazy.len()).to_be_greater_than(0)
+        expect(lazy).to_equal(eager)
+        expect(lazy).to_contain("rc=0")
+
+    it "keeps the pure-Simple lane's deferral path wired":
+        step("read the interpreter's use-declaration arm")
+        val source = read_file(SIMPLE_EVAL_DECLS)
+        expect(source.len()).to_be_greater_than(0)
+        step("a lazy use must register a deferred module instead of loading")
+        expect(source).to_contain("decl_get_is_lazy(did)")
+        expect(source).to_contain("register_deferred_module(module_path, current_file, imported_names)")
+        step("and the eager path must still load immediately")
+        expect(source).to_contain("load_module_selective(module_path, imported_names, current_file)")

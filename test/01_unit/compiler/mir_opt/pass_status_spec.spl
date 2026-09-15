@@ -38,10 +38,26 @@ describe "MIR pass operational status":
         expect(pass_status_allows_transform(pass_status(PassKind.CollectionOpt))).to_equal(false)
         expect(pass_expectation(PassKind.CollectionOpt)).to_equal(PassExpectation.NeverTransforms)
 
-    it "keeps vectorization analysis-only":
-        step("Classify the vector analysis")
-        expect(pass_status(PassKind.AutoVectorize)).to_equal(PassStatus.AnalysisOnly)
-        expect(pass_status_allows_transform(pass_status(PassKind.AutoVectorize))).to_equal(false)
+    it "vectorizes for real, now that the rewrite is proven by execution":
+        step("Classify the vector pass")
+        step("It was Active briefly on 2026-09-13 and reverted the same day; it")
+        step("is Active again only because the rewrite is now RUN against the")
+        step("scalar loop and compared, not merely inspected for block shape.")
+        step("That differential test is what caught the two defects no")
+        step("structural check could: an induction variable that never")
+        step("advanced, and a remainder trip count that wrote one element and")
+        step("branched to a block that does not exist.")
+        expect(pass_status(PassKind.AutoVectorize)).to_equal(PassStatus.Active)
+        expect(pass_status_allows_transform(pass_status(PassKind.AutoVectorize))).to_equal(true)
+
+    it "advertises the witness pair its active status requires":
+        step("the registry rejects an ACTIVE pass with no witnesses just as it")
+        step("rejects an inactive one that claims them, so the contract and the")
+        step("status must move together in both directions")
+        val contract = pass_witness_contract(PassKind.AutoVectorize)
+        expect(contract.?).to_equal(true)
+        expect(contract.unwrap().positive_id).to_equal("auto_vectorize/exact-alias-elementwise-add")
+        expect(contract.unwrap().negative_id).to_equal("auto_vectorize/undecidable-distinct-bases")
 
     it "keeps active identity and analysis routes out of transformation dispatch":
         step("Reject an active identity route")
@@ -51,11 +67,16 @@ describe "MIR pass operational status":
 
     it "invalidates shared facts conservatively after any admitted transform":
         step("Invalidate facts after a MIR rewrite")
-        val active = mir_pass_fact_preservation(PassKind.WriteCoalesce)
+        step("This named WriteCoalesce as the transforming example, but that")
+        step("pass is analysis-only, so the 'active' half asserted nothing and")
+        step("the example was red. AutoVectorize is the registry's one genuine")
+        step("Active transform, and it splices new blocks, so CFG, dominance")
+        step("and def-use must all be invalidated after it runs.")
+        val active = mir_pass_fact_preservation(PassKind.AutoVectorize)
         expect(active.cfg).to_equal(false)
         expect(active.dominators).to_equal(false)
         expect(active.def_use).to_equal(false)
-        val analysis = mir_pass_fact_preservation(PassKind.AutoVectorize)
+        val analysis = mir_pass_fact_preservation(PassKind.ReadAheadHoist)
         expect(analysis.cfg).to_equal(true)
         expect(analysis.dominators).to_equal(true)
         expect(analysis.def_use).to_equal(true)
@@ -76,11 +97,17 @@ describe "MIR pass operational status":
 
     it "binds every retained active transform to positive and negative witnesses":
         step("Reject an active pass without both witness identities")
-        val pattern = pass_witness_contract(PassKind.PatternIdiom)
-        expect(pattern.?).to_be(true)
-        expect(pattern.unwrap().positive_id).to_equal("pattern.supported_aes_call")
-        expect(pattern.unwrap().negative_id).to_equal("pattern.unsupported_target")
+        step("This named PatternIdiom, which is Disabled — so its contract is")
+        step("correctly nil and the unwrap here threw. The rule needs a pass")
+        step("that is actually Active to have any force, and AutoVectorize is")
+        step("the only one in the registry.")
+        val vectorize = pass_witness_contract(PassKind.AutoVectorize)
+        expect(vectorize.?).to_be(true)
+        expect(vectorize.unwrap().positive_id).to_equal("auto_vectorize/exact-alias-elementwise-add")
+        expect(vectorize.unwrap().negative_id).to_equal("auto_vectorize/undecidable-distinct-bases")
+        step("and a pass that is NOT active must advertise nothing")
         expect(pass_witness_contract(PassKind.TargetNarrowForm)).to_be_nil()
+        expect(pass_witness_contract(PassKind.PatternIdiom)).to_be_nil()
 
     it "fails closed when a requested pass is unknown or inactive":
         step("Reject an unknown requested pass")

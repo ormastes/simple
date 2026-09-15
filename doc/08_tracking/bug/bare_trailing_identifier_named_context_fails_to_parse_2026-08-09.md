@@ -1,5 +1,11 @@
 # A bare trailing expression named `context` fails to parse
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: Rust seed parser/lexer reserved-word
+handling for a bare trailing `context` identifier -- fix belongs in
+src/compiler_rust/parser, not pure-Simple source. Left OPEN.
+
+
 Status: OPEN (P3)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-09, Counterpart Conformance Wave 1 lane F4

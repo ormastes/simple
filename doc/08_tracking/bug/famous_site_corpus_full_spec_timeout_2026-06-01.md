@@ -1,6 +1,13 @@
 # Bug: famous-site corpus full system spec times out under focused verification
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — Stale: both referenced specs and their whole directory were deleted
+
+- **measured** `ls test/03_system/wm_compare` -> `No such file or directory`; neither `famous_site_corpus_spec.spl` nor `structural_layout_report_spec.spl` exists anywhere under `test/`.
+- **measured** The repro command names `src/compiler_rust/target/debug/simple`, a Linux debug seed not built on this host.
+- **inferred** A timeout report about a spec file that no longer exists cannot be reproduced or fixed; the corpus lane was removed rather than split.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 Date: 2026-06-01
 
@@ -28,6 +35,3 @@ This blocks using the full famous-site corpus system spec as a routine focused g
 
 - `test/03_system/wm_compare/famous_site_corpus_spec.spl` typechecks.
 - `test/03_system/wm_compare/structural_layout_report_spec.spl` covers the new structural report surface and focused corpus layout-report attachment.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

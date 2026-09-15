@@ -22,18 +22,119 @@ bootstrap_stage3_hash_file() {
     fi
 }
 
-# Bind one canonical, non-symlinked comparator executable and its hash.
+# Resolve a file path through any chain of symlinks to the physical file it
+# names. `readlink -f` is GNU-only (macOS/BSD readlink has no -f), so walk the
+# chain explicitly: read one link at a time, resolve a RELATIVE target against
+# the directory of the LINK (not the caller's cwd), and stop at the first
+# non-symlink. Bounded at 32 hops so a symlink cycle terminates instead of
+# spinning. The final physical path is canonicalised with the existing
+# `bootstrap_stage3_canonical_path` helper (`cd -P` + basename), which is this
+# repo's portable realpath.
+bootstrap_stage3_resolve_symlinks() {
+    bootstrap_stage3_resolve_current=$1
+    case "$bootstrap_stage3_resolve_current" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_resolve_hops=0
+    while [ -L "$bootstrap_stage3_resolve_current" ]; do
+        bootstrap_stage3_resolve_hops=$((bootstrap_stage3_resolve_hops + 1))
+        [ "$bootstrap_stage3_resolve_hops" -le 32 ] || return 1
+        bootstrap_stage3_resolve_target=$(
+            readlink -- "$bootstrap_stage3_resolve_current"
+        ) || return 1
+        [ -n "$bootstrap_stage3_resolve_target" ] || return 1
+        case "$bootstrap_stage3_resolve_target" in
+            /*) bootstrap_stage3_resolve_current=$bootstrap_stage3_resolve_target ;;
+            *)
+                bootstrap_stage3_resolve_dir=$(
+                    dirname -- "$bootstrap_stage3_resolve_current"
+                ) || return 1
+                bootstrap_stage3_resolve_current="$bootstrap_stage3_resolve_dir/$bootstrap_stage3_resolve_target"
+                ;;
+        esac
+    done
+    [ -f "$bootstrap_stage3_resolve_current" ] || return 1
+    bootstrap_stage3_canonical_path "$bootstrap_stage3_resolve_current"
+}
+
+# Bind ONE canonical comparator executable and pin its bytes by hash.
+#
+# The candidate may itself be a symlink -- a package-manager shim such as
+# Homebrew's /opt/homebrew/bin/cmp -> ../Cellar/diffutils/<v>/bin/cmp is
+# ALWAYS a symlink, and the old `candidate = canonical` requirement therefore
+# refused to bind on every stock macOS host with `diffutils` installed, killing
+# the bootstrap before Stage 1 (see
+# doc/08_tracking/bug/bootstrap_stage3_comparator_rejects_homebrew_symlinked_cmp_on_macos_2026-09-12.md).
+# The anti-alias property that check was reaching for is supplied by
+# BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256, which pins the CONTENT of the resolved
+# file: an aliased NAME cannot change which bytes run. So resolve the alias
+# instead of rejecting it, and bind the PHYSICAL target.
+#
+# Still refused, each with a stated reason on stderr (the old bare `return 2`
+# surfaced downstream as the misleading "Rust runtime authority changed during
+# private admission"):
+#   * no comparator on PATH, or the named one is absent/unresolvable;
+#   * a target that is not a regular executable file;
+#   * a script wrapper (`#!` magic) -- the trust model is a byte-hash pin of the
+#     bound file, and a wrapper's own bytes do not determine what actually runs,
+#     so hashing it would pin nothing. Refused, not receipted;
+#   * an ambient `cmp` resolving elsewhere than an explicitly pinned
+#     BOOTSTRAP_STAGE3_COMPARE_TOOL (a shadowed comparator).
+bootstrap_stage3_compare_refuse() {
+    echo "error: Stage 3 comparator refused: $1" >&2
+    return 2
+}
+
 bootstrap_stage3_compare_bind() {
-    bootstrap_stage3_compare_candidate=${BOOTSTRAP_STAGE3_COMPARE_TOOL:-}
+    bootstrap_stage3_compare_pinned=${BOOTSTRAP_STAGE3_COMPARE_TOOL:-}
+    bootstrap_stage3_compare_candidate=$bootstrap_stage3_compare_pinned
     if [ -z "$bootstrap_stage3_compare_candidate" ]; then
-        bootstrap_stage3_compare_candidate=$(command -v cmp 2>/dev/null) || return 2
+        bootstrap_stage3_compare_candidate=$(command -v cmp 2>/dev/null) || true
     fi
-    bootstrap_stage3_compare_canonical=$(bootstrap_stage3_canonical_file \
-        "$bootstrap_stage3_compare_candidate") || return 2
-    [ "$bootstrap_stage3_compare_candidate" = \
-        "$bootstrap_stage3_compare_canonical" ] || return 2
+    [ -n "$bootstrap_stage3_compare_candidate" ] ||
+        bootstrap_stage3_compare_refuse "no cmp on PATH" || return 2
+    bootstrap_stage3_compare_canonical=$(bootstrap_stage3_resolve_symlinks \
+        "$bootstrap_stage3_compare_candidate") ||
+        bootstrap_stage3_compare_refuse \
+            "cannot resolve to a regular file: $bootstrap_stage3_compare_candidate" ||
+        return 2
+    [ -x "$bootstrap_stage3_compare_canonical" ] ||
+        bootstrap_stage3_compare_refuse \
+            "not executable: $bootstrap_stage3_compare_canonical" || return 2
+    bootstrap_stage3_compare_magic=""
+    read -r bootstrap_stage3_compare_magic \
+        <"$bootstrap_stage3_compare_canonical" 2>/dev/null ||
+        bootstrap_stage3_compare_magic=""
+    case "$bootstrap_stage3_compare_magic" in
+        '#!'*)
+            bootstrap_stage3_compare_refuse \
+                "script wrapper (#! magic); its own bytes do not determine what runs: $bootstrap_stage3_compare_canonical"
+            return 2
+            ;;
+    esac
+    # Shadowing is decided ONCE, here. `compare_files` must never re-resolve the
+    # ambient `cmp`: doing so made the documented BOOTSTRAP_STAGE3_COMPARE_TOOL
+    # knob useless, because every comparison re-read PATH and rejected the pin.
+    if [ -n "$bootstrap_stage3_compare_pinned" ]; then
+        bootstrap_stage3_compare_ambient=$(command -v cmp 2>/dev/null) || true
+        if [ -n "${bootstrap_stage3_compare_ambient:-}" ]; then
+            bootstrap_stage3_compare_ambient=$(bootstrap_stage3_resolve_symlinks \
+                "$bootstrap_stage3_compare_ambient") ||
+                bootstrap_stage3_compare_ambient=""
+            if [ -n "$bootstrap_stage3_compare_ambient" ] &&
+                [ "$bootstrap_stage3_compare_ambient" != \
+                    "$bootstrap_stage3_compare_canonical" ]; then
+                bootstrap_stage3_compare_refuse \
+                    "ambient cmp ${bootstrap_stage3_compare_ambient} shadows pinned ${bootstrap_stage3_compare_canonical}" ||
+                    return 2
+            fi
+        fi
+    fi
     bootstrap_stage3_compare_hash=$(bootstrap_stage3_hash_file \
-        "$bootstrap_stage3_compare_canonical") || return 2
+        "$bootstrap_stage3_compare_canonical") ||
+        bootstrap_stage3_compare_refuse \
+            "cannot hash: $bootstrap_stage3_compare_canonical" || return 2
     BOOTSTRAP_STAGE3_COMPARE_TOOL="$bootstrap_stage3_compare_canonical"
     BOOTSTRAP_STAGE3_COMPARE_TOOL_SHA256="$bootstrap_stage3_compare_hash"
     export BOOTSTRAP_STAGE3_COMPARE_TOOL \
@@ -48,13 +149,11 @@ bootstrap_stage3_compare_files() {
     [ -f "$1" ] && [ -f "$2" ] || return 2
     [ -n "${BOOTSTRAP_STAGE3_COMPARE_TOOL:-}" ] ||
         bootstrap_stage3_compare_bind || return $?
-    bootstrap_stage3_compare_ambient=$(command -v cmp 2>/dev/null) ||
-        return 2
-    bootstrap_stage3_compare_ambient=$(bootstrap_stage3_canonical_file \
-        "$bootstrap_stage3_compare_ambient") || return 2
-    [ "$bootstrap_stage3_compare_ambient" = \
-        "$BOOTSTRAP_STAGE3_COMPARE_TOOL" ] || return 2
-    [ "$(bootstrap_stage3_canonical_file \
+    # Use the BOUND path. Do not re-resolve the ambient `cmp` here: shadowing is
+    # decided once in `compare_bind`, and re-reading PATH on every comparison is
+    # what made the BOOTSTRAP_STAGE3_COMPARE_TOOL pin unusable on macOS.
+    [ -x "$BOOTSTRAP_STAGE3_COMPARE_TOOL" ] || return 2
+    [ "$(bootstrap_stage3_resolve_symlinks \
         "$BOOTSTRAP_STAGE3_COMPARE_TOOL")" = \
         "$BOOTSTRAP_STAGE3_COMPARE_TOOL" ] || return 2
     [ "$(bootstrap_stage3_hash_file \
@@ -1332,6 +1431,14 @@ bootstrap_stage3_resolve_llvm_build_authority() (
 "$bootstrap_stage3_llvm_homebrew_prefix/lib"
         [ -d "$bootstrap_stage3_llvm_library_path" ] || return 1
     fi
+    bootstrap_stage3_llvm_platform_library_path=
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        FreeBSD)
+            bootstrap_stage3_llvm_platform_library_path=/usr/local/lib
+            [ -d "$bootstrap_stage3_llvm_platform_library_path" ] || return 1
+            bootstrap_stage3_llvm_library_path=$bootstrap_stage3_llvm_platform_library_path
+            ;;
+    esac
     bootstrap_stage3_llvm_resolve_system_lib() {
         [ "$#" -eq 1 ] || return 1
         bootstrap_stage3_llvm_system_name=$1
@@ -1341,6 +1448,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
         for bootstrap_stage3_llvm_system_dir in \
             "$bootstrap_stage3_llvm_libdir" \
             "$bootstrap_stage3_llvm_library_path" \
+            "$bootstrap_stage3_llvm_platform_library_path" \
             "${bootstrap_stage3_llvm_sdkroot:+$bootstrap_stage3_llvm_sdkroot/usr/lib}"
         do
             [ -n "$bootstrap_stage3_llvm_system_dir" ] || continue
@@ -1911,13 +2019,13 @@ bootstrap_stage3_copy_authority() {
 # native runtime archive, and compiler backfill archive, while detecting a
 # producer that changes any member during projection.
 bootstrap_stage3_copy_seed_tuple() {
-    [ "$#" -eq 5 ] || return 64
+    [ "$#" -eq 5 ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 1" >&2; return 64; }
     bootstrap_stage3_tuple_source=$1
     bootstrap_stage3_tuple_destination=$2
     shift 2
     [ -d "$bootstrap_stage3_tuple_source" ] &&
-        [ ! -L "$bootstrap_stage3_tuple_source" ] || return 1
-    [ ! -e "$bootstrap_stage3_tuple_destination" ] || return 1
+        [ ! -L "$bootstrap_stage3_tuple_source" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 2" >&2; return 1; }
+    [ ! -e "$bootstrap_stage3_tuple_destination" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 3" >&2; return 1; }
 
     # Stage4 consumes the non-LTO Rust static runtime directly from deps.
     # Do not infer authority from everything Cargo happened to leave in the
@@ -1942,14 +2050,14 @@ bootstrap_stage3_copy_seed_tuple() {
     # missing, duplicate, nested, or symlink candidates.
     bootstrap_stage3_hosted_deps="$bootstrap_stage3_tuple_source/deps"
     [ -d "$bootstrap_stage3_hosted_deps" ] &&
-        [ ! -L "$bootstrap_stage3_hosted_deps" ] || return 1
+        [ ! -L "$bootstrap_stage3_hosted_deps" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 4" >&2; return 1; }
     bootstrap_stage3_hosted_candidates=
     bootstrap_stage3_hosted_count=0
     for bootstrap_stage3_hosted_path in \
         "$bootstrap_stage3_hosted_deps"/libspl_hosted_runtime-*.rlib; do
         [ -e "$bootstrap_stage3_hosted_path" ] || continue
         [ -f "$bootstrap_stage3_hosted_path" ] &&
-            [ ! -L "$bootstrap_stage3_hosted_path" ] || return 1
+            [ ! -L "$bootstrap_stage3_hosted_path" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 5" >&2; return 1; }
         bootstrap_stage3_hosted_count=$((bootstrap_stage3_hosted_count + 1))
         if [ -z "$bootstrap_stage3_hosted_candidates" ] ||
             [ "$bootstrap_stage3_hosted_path" -nt                 "$bootstrap_stage3_hosted_candidates" ]; then
@@ -1973,7 +2081,7 @@ bootstrap_stage3_copy_seed_tuple() {
     # final state of the target dir rather than from an arbitrary member.
     #
     # Zero candidates is still fatal, and the choice is never silent.
-    [ "$bootstrap_stage3_hosted_count" -ge 1 ] || return 1
+    [ "$bootstrap_stage3_hosted_count" -ge 1 ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 6" >&2; return 1; }
     if [ "$bootstrap_stage3_hosted_count" -gt 1 ]; then
         echo "bootstrap authority: $bootstrap_stage3_hosted_count spl_hosted_runtime rlibs in $bootstrap_stage3_hosted_deps; freezing the newest: $bootstrap_stage3_hosted_candidates" >&2
     fi
@@ -1983,7 +2091,7 @@ bootstrap_stage3_copy_seed_tuple() {
 
     bootstrap_stage3_tuple_seen='|'
     for bootstrap_stage3_tuple_name in "$@"; do
-        [ -n "$bootstrap_stage3_tuple_name" ] || return 1
+        [ -n "$bootstrap_stage3_tuple_name" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 7" >&2; return 1; }
         case "$bootstrap_stage3_tuple_name" in
             ''|/*|*\\*|.|..|*/.|*/..|../*|*/../*|*[!A-Za-z0-9._/-]*)
                 return 1
@@ -1997,7 +2105,7 @@ bootstrap_stage3_copy_seed_tuple() {
         bootstrap_stage3_tuple_path=\
 "$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_name"
         [ -f "$bootstrap_stage3_tuple_path" ] &&
-            [ ! -L "$bootstrap_stage3_tuple_path" ] || return 1
+            [ ! -L "$bootstrap_stage3_tuple_path" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 8" >&2; return 1; }
     done
 
     # One process owns the whole vector.  It binds every source identity and
@@ -2177,38 +2285,38 @@ bootstrap_stage3_copy_seed_tuple() {
         }
         chmod(0500, $destination) or die "freeze destination: $!\n";
     ' "$bootstrap_stage3_tuple_source" \
-        "$bootstrap_stage3_tuple_destination" "$@" || return 1
+        "$bootstrap_stage3_tuple_destination" "$@" || { echo "bootstrap_stage3_copy_seed_tuple: failed check 9" >&2; return 1; }
 
     # Publish a small receipt beside the frozen capsule.  Consumers resolve
     # only this authority-relative path; Cargo target/latest/env paths are not
     # inputs to the contract.
-    chmod 700 "$bootstrap_stage3_tuple_destination" || return 1
+    chmod 700 "$bootstrap_stage3_tuple_destination" || { echo "bootstrap_stage3_copy_seed_tuple: failed check 10" >&2; return 1; }
     bootstrap_stage3_hosted_relative=$bootstrap_stage3_hosted_name
     bootstrap_stage3_hosted_projected=\
 "$bootstrap_stage3_tuple_destination/$bootstrap_stage3_hosted_relative"
     bootstrap_stage3_hosted_sha=$(bootstrap_stage3_hash_file \
-        "$bootstrap_stage3_hosted_projected") || return 1
+        "$bootstrap_stage3_hosted_projected") || { echo "bootstrap_stage3_copy_seed_tuple: failed check 11" >&2; return 1; }
     bootstrap_stage3_hosted_receipt=\
 "$bootstrap_stage3_tuple_destination/hosted-runtime.env"
     bootstrap_stage3_hosted_pending="${bootstrap_stage3_hosted_receipt}.tmp.$$"
     [ ! -e "$bootstrap_stage3_hosted_receipt" ] &&
-        [ ! -L "$bootstrap_stage3_hosted_receipt" ] || return 1
+        [ ! -L "$bootstrap_stage3_hosted_receipt" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 12" >&2; return 1; }
     {
         echo 'schema=simple-bootstrap-hosted-runtime-authority-v1'
         echo 'status=frozen'
         echo "relative_path=$bootstrap_stage3_hosted_relative"
         echo "sha256=$bootstrap_stage3_hosted_sha"
-    } >"$bootstrap_stage3_hosted_pending" || return 1
-    chmod 400 "$bootstrap_stage3_hosted_pending" || return 1
+    } >"$bootstrap_stage3_hosted_pending" || { echo "bootstrap_stage3_copy_seed_tuple: failed check 13" >&2; return 1; }
+    chmod 400 "$bootstrap_stage3_hosted_pending" || { echo "bootstrap_stage3_copy_seed_tuple: failed check 14" >&2; return 1; }
     mv "$bootstrap_stage3_hosted_pending" \
-        "$bootstrap_stage3_hosted_receipt" || return 1
-    chmod 500 "$bootstrap_stage3_tuple_destination" || return 1
+        "$bootstrap_stage3_hosted_receipt" || { echo "bootstrap_stage3_copy_seed_tuple: failed check 15" >&2; return 1; }
+    chmod 500 "$bootstrap_stage3_tuple_destination" || { echo "bootstrap_stage3_copy_seed_tuple: failed check 16" >&2; return 1; }
     bootstrap_stage3_verify_hosted_runtime_authority \
         "$bootstrap_stage3_tuple_destination"
 }
 
 bootstrap_stage3_verify_hosted_runtime_authority() {
-    [ "$#" -eq 1 ] || return 64
+    [ "$#" -eq 1 ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 1" >&2; return 64; }
     bootstrap_stage3_hosted_root=$1
     # Windows ships find.exe and admitted tool PATHs may place System32 ahead
     # of the MSYS utilities. Its command-line grammar is unrelated to POSIX
@@ -2219,28 +2327,28 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
     bootstrap_stage3_hosted_find=find
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MSYS*|MINGW*|CYGWIN*)
-            [ -x /usr/bin/find ] || return 1
+            [ -x /usr/bin/find ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 2" >&2; return 1; }
             bootstrap_stage3_hosted_find=/usr/bin/find
             ;;
     esac
     if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" = 1 ]; then
         expr "$bootstrap_stage3_hosted_root" : \
-            '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
-        [ -d "$bootstrap_stage3_hosted_root" ] || return 1
+            '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 3" >&2; return 1; }
+        [ -d "$bootstrap_stage3_hosted_root" ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 4" >&2; return 1; }
         perl -MFcntl=:mode -e '
             my @st = stat($ARGV[0]);
             @st && S_ISDIR($st[2]) && S_IMODE($st[2]) == oct("0500")
                 or exit 1;
-        ' "$bootstrap_stage3_hosted_root" || return 1
+        ' "$bootstrap_stage3_hosted_root" || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 5" >&2; return 1; }
         bootstrap_stage3_hosted_walk_root="$bootstrap_stage3_hosted_root/."
     else
         [ -d "$bootstrap_stage3_hosted_root" ] &&
-            [ ! -L "$bootstrap_stage3_hosted_root" ] || return 1
+            [ ! -L "$bootstrap_stage3_hosted_root" ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 6" >&2; return 1; }
         bootstrap_stage3_hosted_walk_root=$bootstrap_stage3_hosted_root
     fi
     bootstrap_stage3_hosted_receipt="$bootstrap_stage3_hosted_walk_root/hosted-runtime.env"
     [ -f "$bootstrap_stage3_hosted_receipt" ] &&
-        [ ! -L "$bootstrap_stage3_hosted_receipt" ] || return 1
+        [ ! -L "$bootstrap_stage3_hosted_receipt" ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 7" >&2; return 1; }
     awk -F= '
         $1 == "schema" || $1 == "status" || $1 == "relative_path" ||
         $1 == "sha256" { count[$1]++; next }
@@ -2250,29 +2358,29 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
                 count["relative_path"] != 1 || count["sha256"] != 1)
                 exit 1
         }
-    ' "$bootstrap_stage3_hosted_receipt" || return 1
+    ' "$bootstrap_stage3_hosted_receipt" || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 8" >&2; return 1; }
     [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_hosted_receipt")" = \
-        simple-bootstrap-hosted-runtime-authority-v1 ] || return 1
+        simple-bootstrap-hosted-runtime-authority-v1 ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 9" >&2; return 1; }
     [ "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_hosted_receipt")" = \
-        frozen ] || return 1
+        frozen ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 10" >&2; return 1; }
     bootstrap_stage3_hosted_relative=$(bootstrap_stage3_manifest_value \
-        relative_path "$bootstrap_stage3_hosted_receipt") || return 1
+        relative_path "$bootstrap_stage3_hosted_receipt") || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 11" >&2; return 1; }
     case "$bootstrap_stage3_hosted_relative" in
         deps/libspl_hosted_runtime-*.rlib) ;;
         *) return 1 ;;
     esac
     case "$bootstrap_stage3_hosted_relative" in *../*|*/..|/*) return 1 ;; esac
     bootstrap_stage3_hosted_expected=$(bootstrap_stage3_manifest_value \
-        sha256 "$bootstrap_stage3_hosted_receipt") || return 1
+        sha256 "$bootstrap_stage3_hosted_receipt") || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 12" >&2; return 1; }
     printf '%s\n' "$bootstrap_stage3_hosted_expected" |
-        grep -Eq '^[0-9a-f]{64}$' || return 1
+        grep -Eq '^[0-9a-f]{64}$' || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 13" >&2; return 1; }
     bootstrap_stage3_hosted_path=\
 "$bootstrap_stage3_hosted_walk_root/$bootstrap_stage3_hosted_relative"
     [ -f "$bootstrap_stage3_hosted_path" ] &&
-        [ ! -L "$bootstrap_stage3_hosted_path" ] || return 1
+        [ ! -L "$bootstrap_stage3_hosted_path" ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 14" >&2; return 1; }
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_hosted_path")" = \
-        "$bootstrap_stage3_hosted_expected" ] || return 1
-    set -- $(stat -Lc '%d %i' "$bootstrap_stage3_hosted_walk_root" 2>/dev/null || stat -Lf '%d %i' "$bootstrap_stage3_hosted_walk_root") || return 1
+        "$bootstrap_stage3_hosted_expected" ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 15" >&2; return 1; }
+    set -- $(stat -Lc '%d %i' "$bootstrap_stage3_hosted_walk_root" 2>/dev/null || stat -Lf '%d %i' "$bootstrap_stage3_hosted_walk_root") || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 16" >&2; return 1; }
     bootstrap_stage3_hosted_root_dev=$1
     bootstrap_stage3_hosted_root_ino=$2
     perl -MFile::Find -MFcntl=:mode -e '
@@ -2294,11 +2402,11 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
         }}, $root);
     ' "$bootstrap_stage3_hosted_walk_root" \
         "$bootstrap_stage3_hosted_root_dev" \
-        "$bootstrap_stage3_hosted_root_ino" || return 1
+        "$bootstrap_stage3_hosted_root_ino" || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 17" >&2; return 1; }
     bootstrap_stage3_hosted_count=$("$bootstrap_stage3_hosted_find" "$bootstrap_stage3_hosted_walk_root/deps" \
         -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' |
-        wc -l | tr -d ' ') || return 1
-    [ "$bootstrap_stage3_hosted_count" -eq 1 ] || return 1
+        wc -l | tr -d ' ') || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 18" >&2; return 1; }
+    [ "$bootstrap_stage3_hosted_count" -eq 1 ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 19" >&2; return 1; }
     # Nothing in a frozen generation may be writable. On Windows that is only
     # enforceable for FILES: MSYS cannot clear the write bit on a directory.
     # Measured on this staging tree after the chmod 0500 freeze --
@@ -2314,7 +2422,7 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
         MSYS*|MINGW*|CYGWIN*)
             [ -z "$("$bootstrap_stage3_hosted_find" \
                 "$bootstrap_stage3_hosted_walk_root" \
-                -type f -perm /0222 -print -quit)" ] || return 1
+                -type f -perm /0222 -print -quit)" ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 20" >&2; return 1; }
             ;;
         *)
             # POSIX -perm -MODE rather than GNU -perm /MODE: BSD find (macOS)
@@ -2325,7 +2433,7 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
             [ -z "$("$bootstrap_stage3_hosted_find" \
                 "$bootstrap_stage3_hosted_walk_root" \
                 \( -perm -0200 -o -perm -0020 -o -perm -0002 \) \
-                -print -quit)" ] || return 1
+                -print -quit)" ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 21" >&2; return 1; }
             ;;
     esac
     perl -MFcntl=:mode -e '
@@ -2347,7 +2455,7 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
         }
     ' "$bootstrap_stage3_hosted_walk_root/deps=0500" \
         "$bootstrap_stage3_hosted_receipt=0400" \
-        "$bootstrap_stage3_hosted_path=0400" || return 1
+        "$bootstrap_stage3_hosted_path=0400" || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 22" >&2; return 1; }
     if [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" != 1 ]; then
         # Same platform limitation as the sibling tolerance a few lines above
         # (the $win check on deps/receipt/hosted-path, and the uname-gated
@@ -2364,7 +2472,7 @@ bootstrap_stage3_verify_hosted_runtime_authority() {
             @st && !S_ISLNK($st[2]) && S_ISDIR($st[2]) or exit 1;
             my $win = $^O =~ /^(?:MSWin32|msys|cygwin)$/;
             exit 1 unless $win || S_IMODE($st[2]) == oct("0500");
-        ' "$bootstrap_stage3_hosted_root" || return 1
+        ' "$bootstrap_stage3_hosted_root" || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 23" >&2; return 1; }
     fi
     BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH=$bootstrap_stage3_hosted_relative
     BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256=$bootstrap_stage3_hosted_expected
@@ -2512,7 +2620,7 @@ bootstrap_stage3_pin_private_authority() {
 # Prepare and publish immutable Rust authority generations. The current marker
 # is the commit record; a generation is never mutated after marker admission.
 bootstrap_stage3_prepare_seed_generation() {
-    [ "$#" -eq 7 ] || return 1
+    [ "$#" -eq 7 ] || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
     bootstrap_stage3_generation_source=$1
     bootstrap_stage3_generation_root=$2
     bootstrap_stage3_generation_inputs=$3
@@ -2520,32 +2628,32 @@ bootstrap_stage3_prepare_seed_generation() {
     bootstrap_stage3_generation_native_name=$5
     bootstrap_stage3_generation_backfill_name=$6
     bootstrap_stage3_generation_nonce=$7
-    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_generation_inputs" || return 1
+    bootstrap_stage3_valid_fingerprint "$bootstrap_stage3_generation_inputs" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 2" >&2; return 1; }
     bootstrap_stage3_generation_staging=\
 "$bootstrap_stage3_generation_root/.staging.$bootstrap_stage3_generation_nonce"
     rm -rf "$bootstrap_stage3_generation_staging"
-    mkdir -p "$bootstrap_stage3_generation_root" || return 1
+    mkdir -p "$bootstrap_stage3_generation_root" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 3" >&2; return 1; }
     bootstrap_stage3_copy_seed_tuple "$bootstrap_stage3_generation_source" \
         "$bootstrap_stage3_generation_staging" \
         "$bootstrap_stage3_generation_seed_name" \
         "$bootstrap_stage3_generation_native_name" \
-        "$bootstrap_stage3_generation_backfill_name" || return 1
+        "$bootstrap_stage3_generation_backfill_name" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 4" >&2; return 1; }
     # Carry the successful fingerprint sidecar into the immutable generation.
     # It is optional for legacy callers and is never accepted from a symlink.
     bootstrap_stage3_generation_details_source=${BOOTSTRAP_STAGE3_FINGERPRINT_DETAILS_SOURCE:-}
     if [ -n "$bootstrap_stage3_generation_details_source" ]; then
         [ -f "$bootstrap_stage3_generation_details_source" ] &&
-            [ ! -L "$bootstrap_stage3_generation_details_source" ] || return 1
+            [ ! -L "$bootstrap_stage3_generation_details_source" ] || { echo "bootstrap_stage3_prepare_seed_generation: failed check 5" >&2; return 1; }
     fi
     # Tuple projection returns a frozen 0500 root.  Thaw only that staging
     # root, after all optional inputs have been validated, so generation-owned
     # metadata can be added before publication.  Descendant directories and
     # tuple members remain frozen; no marker can admit this staging path.
-    chmod 700 "$bootstrap_stage3_generation_staging" || return 1
+    chmod 700 "$bootstrap_stage3_generation_staging" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 6" >&2; return 1; }
     if [ -n "$bootstrap_stage3_generation_details_source" ]; then
         cp -p -- "$bootstrap_stage3_generation_details_source" \
-            "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256.details.env" || return 1
-        chmod 400 "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256.details.env" || return 1
+            "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256.details.env" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 7" >&2; return 1; }
+        chmod 400 "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256.details.env" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 8" >&2; return 1; }
     fi
     bootstrap_stage3_generation_stamp=\
 "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256"
@@ -2553,19 +2661,19 @@ bootstrap_stage3_prepare_seed_generation() {
         "$bootstrap_stage3_generation_inputs" \
         "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name" \
         "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_native_name" \
-        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_backfill_name" || return 1
-    chmod 400 "$bootstrap_stage3_generation_stamp" || return 1
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_backfill_name" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 9" >&2; return 1; }
+    chmod 400 "$bootstrap_stage3_generation_stamp" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 10" >&2; return 1; }
     bootstrap_stage3_verify_seed_stamp "$bootstrap_stage3_generation_stamp" \
         "$bootstrap_stage3_generation_inputs" \
         "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name" \
         "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_native_name" \
-        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_backfill_name" || return 1
+        "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_backfill_name" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 11" >&2; return 1; }
     bootstrap_stage3_generation_snapshot=\
 "$bootstrap_stage3_generation_root/.snapshot.$bootstrap_stage3_generation_nonce"
     bootstrap_stage3_directory_snapshot "$bootstrap_stage3_generation_snapshot" \
-        "$bootstrap_stage3_generation_staging" || return 1
+        "$bootstrap_stage3_generation_staging" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 12" >&2; return 1; }
     bootstrap_stage3_generation_hash=$(bootstrap_stage3_hash_file \
-        "$bootstrap_stage3_generation_snapshot") || return 1
+        "$bootstrap_stage3_generation_snapshot") || { echo "bootstrap_stage3_prepare_seed_generation: failed check 13" >&2; return 1; }
     rm -f "$bootstrap_stage3_generation_snapshot"
     BOOTSTRAP_STAGE3_PREPARED_GENERATION=\
 "$bootstrap_stage3_generation_root/$bootstrap_stage3_generation_inputs-$bootstrap_stage3_generation_hash"
@@ -2576,7 +2684,7 @@ bootstrap_stage3_prepare_seed_generation() {
     # macOS can reject rename(2) of a pre-frozen directory in hosted-runner
     # workspaces; immutability begins after the same-parent atomic rename and
     # before any marker can admit the generation.
-    chmod 700 "$bootstrap_stage3_generation_staging" || return 1
+    chmod 700 "$bootstrap_stage3_generation_staging" || { echo "bootstrap_stage3_prepare_seed_generation: failed check 14" >&2; return 1; }
 }
 
 bootstrap_stage3_publish_seed_generation() {
@@ -3904,11 +4012,17 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         "$bootstrap_stage3_seed_find" src/runtime \( -name '*.c' -o -name '*.h' \) \
             -type f -print 2>/dev/null \
             >"$bootstrap_stage3_seed_tmp/runtime.unsorted" || exit 1
+        bootstrap_stage3_seed_counterpart_header=tools/counterpart/sdk/c/simple_counterpart_abi.h
+        [ -f "$bootstrap_stage3_seed_counterpart_header" ] &&
+            [ ! -L "$bootstrap_stage3_seed_counterpart_header" ] || exit 1
+        printf '%s\n' "$bootstrap_stage3_seed_counterpart_header" \
+            >>"$bootstrap_stage3_seed_tmp/runtime.unsorted" || exit 1
         LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/runtime.unsorted" \
             >"$bootstrap_stage3_seed_tmp/runtime.paths" || exit 1
         bootstrap_stage3_hash_path_list \
             "$bootstrap_stage3_seed_tmp/runtime.paths" \
             >>"$bootstrap_stage3_seed_records" || exit 1
+        unset bootstrap_stage3_seed_counterpart_header
         bootstrap_stage3_seed_trace hash-root-policy-inputs
         bootstrap_stage3_seed_lock_hash=$(
             bootstrap_stage3_hash_file src/compiler_rust/Cargo.lock

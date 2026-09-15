@@ -76,3 +76,21 @@ as written, with no change to either.
   in its header so a future reader is not misled by a red verdict.
 - `doc/09_report/render_pipeline_profile_2026-08-06.md` — Finding 2, the
   per-pixel readback this lane's change addresses.
+
+## Re-check 2026-09-13
+
+Not reproducible: `rt_mmio_read_u32`/`rt_mmio_write_u32` now have real host
+definitions in the interpreter extern registry
+(`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:1951-1952`,
+implemented in `memory.rs:1247-1262` as checked-address loads/stores over
+the shadow buffer) — exactly the "cheap fix" this doc suggested. Both
+affected specs pass on the deployed seed:
+
+```
+bin/simple test test/01_unit/os/render_pixel_bridge_spec.spl --no-session-daemon
+  -> 2 total, 2 passed, 0 failed
+bin/simple test test/01_unit/os/render_blit_from_addr_spec.spl --no-session-daemon
+  -> 5 total, 5 passed, 0 failed
+```
+
+- Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13); the suggested host-stub fix has already landed

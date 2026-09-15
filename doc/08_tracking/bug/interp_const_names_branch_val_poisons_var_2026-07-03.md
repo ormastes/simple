@@ -1,6 +1,36 @@
 # Interpreter: branch-scoped `val` const-poisons a later same-named `var` in the same function
 
-- **Status:** FIXED (seed interpreter, `interpreter_helpers/patterns.rs`)
+## Closed 2026-09-13 — fixed, re-verified by running the entry repro
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran a function that executes BOTH paths in one invocation (a branch-scoped
+`val cs`, then a sibling-scope `var cs` that is reassigned) — the exact
+shape described under "Root cause":
+
+```spl
+fn g(flag: bool) -> i64:
+    if flag:
+        val cs = 1
+        print(cs)
+    var cs2 = 0
+    if true:
+        var cs = 5
+        cs = cs + 1
+        cs2 = cs
+    cs2
+```
+
+Result: prints `1` then `6`, exit 0. No `cannot assign to const` abort.
+The `CONST_NAMES` stale-entry fix in `bind_let_pattern_element` holds
+(measured, not inferred).
+
+- **Status:** FIXED (seed interpreter, `interpreter_helpers/patterns.rs`) — CLOSED 2026-09-13 (see top section)
 - **Date:** 2026-07-03
 - **Severity:** high — aborted the whole chromed WM scene render lane
 - **Component:** `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs` (`bind_let_pattern_element`)

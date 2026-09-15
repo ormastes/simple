@@ -1,0 +1,181 @@
+# Per-glyph advances are the DIFFERENCES of a rounded fractional cumulative.
+#
+# Round 11 landed the correct macOS faces and then measured that the correct
+# face could not close the wrap clusters, because the arithmetic downstream of
+# it was wrong in a way no face swap can fix: `measure_text_advances` rounded
+# EVERY codepoint's advance independently to an integer pixel. Menlo's `M` is
+# 1233/2048 em = 9.633 px at 16, which rounds to 10, so `MMMMMMMM` measured
+# 8 x 10 = 80 px where Chrome accumulates fractionally and reports
+# round(8 x 9.633) = round(77.06) = 77.
+#
+# The contract this spec pins, and which round 12 implements:
+#
+#   advances[i] = round(cum[i+1]) - round(cum[i])
+#
+# where `cum` is the exact fractional cumulative in milli-pixels. Three
+# properties follow, and all three are asserted below:
+#
+#   1. the run TOTAL equals round(sum of exact advances)  -- 77, not 80;
+#   2. glyph POSITIONS (the prefix sums of the emitted array) are monotone and
+#      never more than 1 px from the exact fractional pen position, which is
+#      exactly Skia's integer-snapped subpixel positioning;
+#   3. a face whose advances are WHOLE pixels is byte-identical to before.
+#
+# Property 3 is the regression half. The Draw IR -> Engine2D twins consume this
+# array as integer pixel positions and that contract is unchanged -- what moved
+# is WHERE the rounding happens, not that the positions are integers.
+use std.spec.*
+use std.common.encoding.sfnt.{sfnt_face_blob}
+use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+
+val MENLO = "/System/Library/Fonts/Menlo.ttc"
+val HELVETICA = "/System/Library/Fonts/Helvetica.ttc"
+
+# The reference model, written out rather than called, so the spec fails if the
+# implementation drifts toward some other definition of "fractional".
+fn _expected_from_milli(per_glyph_milli: [i64]) -> [i64]:
+    val count = per_glyph_milli.len()
+    var out: [i64] = [0; count]
+    var cumulative: i64 = 0
+    var index: i64 = 0
+    var previous_px: i64 = 0
+    while index < count:
+        cumulative = cumulative + per_glyph_milli[index]
+        val boundary = (cumulative + 500) / 1000
+        out[index] = boundary - previous_px
+        previous_px = boundary
+        index = index + 1
+    out
+
+fn _sum(values: [i32]) -> i64:
+    var total: i64 = 0
+    for value in values:
+        total = total + (value as i64)
+    total
+
+fn _menlo_present() -> bool:
+    file_exists(MENLO)
+
+describe "the reference model itself":
+    it "turns eight 9.633 px advances into 77, not 80":
+        val exact: [i64] = [9633; 8]
+        val emitted = _expected_from_milli(exact)
+        var total: i64 = 0
+        for value in emitted:
+            total = total + value
+        expect(total).to_equal(77)
+
+    it "distributes the deficit rather than shortening one glyph":
+        # Chrome does not emit seven 10s and a 7. Each glyph is the difference
+        # of two rounded boundaries, so the widths alternate 10/9/10/10/9/...
+        # and never differ from the exact advance by a whole pixel.
+        val emitted = _expected_from_milli([9633; 8])
+        var index: i64 = 0
+        while index < emitted.len():
+            assert_true(emitted[index] == 9 or emitted[index] == 10)
+            index = index + 1
+
+    it "keeps positions monotone and within a pixel of the exact pen":
+        val emitted = _expected_from_milli([9633; 8])
+        var position: i64 = 0
+        var index: i64 = 0
+        while index < emitted.len():
+            val previous = position
+            position = position + emitted[index]
+            assert_true(position >= previous)
+            val exact = (9633 * (index + 1)) / 1000
+            val drift = if position >= exact: position - exact else: exact - position
+            assert_true(drift <= 1)
+            index = index + 1
+
+    it "is the identity on a face with whole-pixel advances":
+        # Round 12 must not move a single number on such a face. 9.600 px is
+        # the bundled Noto Sans Mono; 10.000 is the whole-pixel case.
+        val emitted = _expected_from_milli([10000; 8])
+        var index: i64 = 0
+        while index < emitted.len():
+            expect(emitted[index]).to_equal(10)
+            index = index + 1
+
+describe "the live renderer measures Menlo the way Chrome does":
+    it "measures MMMMMMMM at 16 px as 77":
+        # This is the single number round 11 recorded as the residual: Simple
+        # measured 80, Chrome 77. It is the whole point of the round.
+        if not _menlo_present():
+            skip("no Menlo on this host")
+            return
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(MENLO + "#0"))
+        val advances = renderer.measure_text_advances("MMMMMMMM", 16)
+        expect(advances.len()).to_equal(8)
+        expect(_sum(advances)).to_equal(77)
+
+    it "emits per-glyph widths that are each 9 or 10":
+        if not _menlo_present():
+            skip("no Menlo on this host")
+            return
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(MENLO + "#0"))
+        for advance in renderer.measure_text_advances("MMMMMMMM", 16):
+            assert_true(advance == 9 or advance == 10)
+
+    it "keeps glyph positions monotone":
+        if not _menlo_present():
+            skip("no Menlo on this host")
+            return
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(MENLO + "#0"))
+        var position: i32 = 0
+        for advance in renderer.measure_text_advances("MMMMMMMM", 16):
+            assert_true(advance > 0)
+            position = position + advance
+        expect(position).to_equal(77)
+
+    it "keeps measure_text_width equal to the sum of the advances":
+        # The line breaker reads the summed array; anything that measures a
+        # width independently would break at 80 while painting at 77.
+        if not _menlo_present():
+            skip("no Menlo on this host")
+            return
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(MENLO + "#0"))
+        val advances = renderer.measure_text_advances("MMMMMMMM", 16)
+        expect(renderer.measure_text_width("MMMMMMMM", 16) as i64).to_equal(_sum(advances))
+
+    it "still measures a single glyph as its own rounded advance":
+        # A one-character run has no accumulation to do; it must be exactly the
+        # rounded advance, identical to every previous round.
+        if not _menlo_present():
+            skip("no Menlo on this host")
+            return
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(MENLO + "#0"))
+        val advances = renderer.measure_text_advances("M", 16)
+        expect(advances.len()).to_equal(1)
+        expect(advances[0]).to_equal(10)
+
+    it "measures an empty run as an empty array":
+        if not _menlo_present():
+            skip("no Menlo on this host")
+            return
+        var renderer = FontRenderer.new()
+        assert_true(renderer.try_load_runtime_ttf(MENLO + "#0"))
+        expect(renderer.measure_text_advances("", 16).len()).to_equal(0)
+
+describe "the sans face accumulates the same way":
+    it "keeps the Helvetica bold delta at Chrome's +4":
+        # Round 11 measured regular 57 / bold 62, a +5 delta where Chrome has
+        # +4, and attributed the extra pixel to exactly this rounding. The
+        # exact advances are 56.94 and 61.34, whose rounded difference is +4.
+        if not file_exists(HELVETICA):
+            skip("no Helvetica on this host")
+            return
+        var regular = FontRenderer.new()
+        assert_true(regular.try_load_runtime_ttf(HELVETICA + "#0"))
+        var bold = FontRenderer.new()
+        assert_true(bold.try_load_runtime_ttf(HELVETICA + "#1"))
+        val regular_width = _sum(regular.measure_text_advances("abcdefg", 16))
+        val bold_width = _sum(bold.measure_text_advances("abcdefg", 16))
+        expect(regular_width).to_equal(57)
+        expect(bold_width - regular_width).to_equal(4)

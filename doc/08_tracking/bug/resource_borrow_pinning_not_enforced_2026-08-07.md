@@ -158,3 +158,11 @@ diagnostic text rather than the count, then re-run. I deliberately did not edit
 the spec: turning it red-or-green again without being able to re-verify inside
 this session would ship an unverified test change, which is worse than leaving
 an honest note.
+
+## Triage 2026-09-13
+
+Already marked ARCHITECTURAL-OPEN by a prior pass (borrow-liveness/region
+machinery genuinely absent from `record_move`). No new evidence gathered
+this pass — implementing borrow-liveness tracking is a multi-day compiler
+architecture change, well beyond a per-bug TDD fix. Leaving OPEN, no code
+change made.

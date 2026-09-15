@@ -490,3 +490,13 @@ Stage-2 artifact hash, and one owned immutable build scope. Planner production
 must then build from that admitted artifact and independently replay under the
 same lock while rehashing inputs before and after. Only after that verifier
 passes may the one remaining current flat-IfChain Stage-3 cycle run.
+
+## Triage 2026-09-13
+
+492-line record already extensively investigated across multiple
+sessions; every currently-queued repair is confirmed already landed in
+main per the 2026-08-17 evidence section, and what remains blocked is
+a genuine Stage 3 bootstrap admission cycle, which this lane cannot
+run (no self-hosted binary, shared/loaded host, budget). Leaving OPEN,
+no new bootstrap attempt made.
+

@@ -1,5 +1,10 @@
 # Bug: std.common.encoding — entire library unimplemented
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — encoding sources and specs restored; no `.smf` stubs remain
+- **measured**: `ls src/lib/common/encoding/` lists 29 real `.spl` sources (utf8, utf16, utf32, codec, base58, bencode, bson, ini, msgpack, cbor, protobuf, reed_solomon, yaml, ...).
+- **measured**: `find src/lib -name '*.smf'` returns nothing — the three 179-byte stubs named in this entry are gone.
+- **measured**: `ls test/01_unit/lib/common/encoding/` lists 40+ ordinary `*_spec.spl` files (not dotfile overlays), so the runner-discovery premise no longer holds.
+- **measured** (`bin/simple run`): `use std.common.encoding.utf8.{text_codepoint_len, utf8_count_codepoints}` + `std.common.encoding.base58` resolve and execute.
 
 **Date:** 2026-06-26  
 **ID:** encoding_cluster_missing_source  
@@ -78,6 +83,3 @@ source is implemented.
 2. Implement `.spl` source for each module listed above (pure-Simple, no Rust seed changes needed for utf8/utf16/utf32/codec which are pure i64 arithmetic; protobuf+ are larger and may need separate tasks).
 3. De-hiding of specs (`*_spec.spl` public copies from `.spipe_matchers_*`) must follow the spipe harness convention — check how other clusters expose specs before copying.
 4. Verify `text.from_char_code` availability in interpreter mode for the text-wrapping functions in utf8.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

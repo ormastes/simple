@@ -1,0 +1,90 @@
+# Site 7 (BOOT-7, 2026-09-13): `module_surfaces_promote` answered false on every
+# Stage-2 positional Stage-3 route run, so `--stop-after-stage2` could never admit
+# a compiler. Measured with gdb on the Stage-2 candidate
+# (sha256 3ad6fc2a0ac80727..., 152199192 B): the 24-call per-surface chain answered
+# TRUE 24 times, and the false came from `module_surface_promote_freeze_names`'s
+# post-condition, whose premise is wrong.
+#
+# That post-condition assumed "a second rt_transient_heap_promote reports true only
+# for a value that is STILL owned by the dying scope". That holds for a transient
+# heap STRING, whose RT_CORE_STRING_FLAG_TRANSIENT the C runtime clears on promote
+# (runtime_native.c:2474), and for nothing else: a raw allocation only has its
+# RT_CORE_TRANSIENT_RAW_OWNED_BIT cleared while staying in the lookup table
+# (runtime_native.c:2488), and an array/dict/enum/closure only has its
+# transient_scope_id zeroed — and `rt_core_transient_classify` (runtime_native.c:2362)
+# consults NEITHER. So a repeat promote of those representations answers true forever.
+# The gdb trace shows exactly that: calls #25, #26 and #29 all carry the SAME value
+# 0x782ee81 and all three answer 1.
+#
+# See doc/08_tracking/bug/stage2_module_surface_registry_graph_promotion_failed_2026-09-13.md
+#
+# Updated (Linux S3-1, 2026-09-14): `module_surface_promote_fields` now
+# batches its retained ARRAY fields into one `[Any]` array and calls
+# `rt_transient_heap_promote` once instead of once per field
+# (doc/08_tracking/bug/stage3_phase2_surface_stall_after_huffman_46gb_2026-09-14.md
+# — each call pays an O(N) native scan over the whole transient-scope
+# tracking vector, so 24 calls/surface was 24x more of that cost than
+# needed). Its positive assertion below is retargeted to the new
+# `fields.push(...)` shape.
+#
+# `module_surface_promote_freeze_names` was briefly batched the same way
+# (BOOT-18) and then reverted (BOOT-19, same date): the push gate
+# `scripts/check/check-transient-scope-text-field-promotion.shs` greps the
+# committed source for the four literal `rt_transient_heap_promote(surface.<field>)`
+# call sites, has no baseline/allowlist, and cannot be edited from this lane —
+# see `module_surface_promote_field_batching_spec.spl`'s header for the full
+# reasoning. Its positive assertion below is back to the direct-call shape.
+# The negative guards against reinstating the repeat-promote post-condition
+# are unchanged and still hold either way.
+use std.spec
+use std.io.{file_read}
+
+val REGISTRY = "src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+
+describe "freeze-name promotion does not gate on a repeat promote":
+    it "still promotes the four names freeze re-assigns":
+        val registry = file_read(REGISTRY)
+        # Fail closed on a vacuous read: an empty file would satisfy every
+        # negative assertion below.
+        expect(registry.len() > 4000).to_be_true()
+        expect(registry).to_contain("fn module_surface_promote_freeze_names(")
+        expect(registry).to_contain("rt_transient_heap_promote(surface.logical_name)")
+        expect(registry).to_contain("rt_transient_heap_promote(surface.canonical_name)")
+        expect(registry).to_contain("rt_transient_heap_promote(surface.package_name)")
+        expect(registry).to_contain(
+            "rt_transient_heap_promote(surface.preferred_registry_name)")
+
+    it "does not treat a second promote as a failure":
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        val gates_on_repeat_promote = registry.contains(
+            "if rt_transient_heap_promote(surface.logical_name) or")
+        expect(gates_on_repeat_promote).to_be_false()
+        val gates_on_repeat_promote_names = registry.contains(
+            "if rt_transient_heap_promote(names) or")
+        expect(gates_on_repeat_promote_names).to_be_false()
+
+    it "records why the repeat-promote premise is unsound":
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        expect(registry).to_contain("rt_core_transient_classify")
+
+    # Site 19 (macOS run 34, 2026-09-13). `db127a8e8c4` reinstated the deleted
+    # post-condition above AND newly applied it to the 24 retained ARRAY fields
+    # via a `module_surface_promote_field(failure, label, value)` helper, without
+    # running this spec — which has been RED at 2 of 3 examples ever since. An
+    # array is even further from the premise than these four names: promote only
+    # zeroes its `transient_scope_id` (runtime_native.c:2493) and
+    # `rt_core_transient_classify` (:2362) never reads it, so a repeat promote of
+    # a registered array answers true on every call. The guard was therefore red
+    # on the FIRST field of the FIRST surface — `field composite_names of
+    # surface[0]` — and blocked the Stage-2 -> Stage-3 handoff.
+    it "does not gate the retained array fields on a repeat promote either":
+        val registry = file_read(REGISTRY)
+        expect(registry.len() > 4000).to_be_true()
+        expect(registry).to_contain("fn module_surface_promote_fields(")
+        expect(registry).to_contain(
+            "fields.push(surface.composite_names)")
+        expect(registry).to_contain("rt_transient_heap_promote(fields)")
+        expect(registry.contains("fn module_surface_promote_field(")).to_be_false()
+        expect(registry.contains("val _first = rt_transient_heap_promote(value)")).to_be_false()

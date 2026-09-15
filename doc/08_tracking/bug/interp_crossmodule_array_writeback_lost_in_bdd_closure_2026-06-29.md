@@ -1,12 +1,17 @@
 # Bug: cross-module array-arg write-back lost inside BDD it-block closures
 
+## Closed 2026-09-13 — cross-module in-place array mutation now survives into the BDD closure
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Reconstructed the two-file repro verbatim (module `m.spl` with `appendv`/`build`, spec `use m.{build}` asserting `build().len() == 3`) and ran it: `1 example, 0 failures`, `outcome=OK declared>=1 executed=1 passed=1`.
+
 **Date:** 2026-06-29
 **Severity:** Medium-High — silently corrupts results of cross-module functions
 that mutate an array parameter in place, but ONLY under the BDD test runner.
 **Component:** Rust seed interpreter — function-call / closure execution
 (`src/compiler_rust/compiler/src/interpreter_call/block_execution.rs`,
 `interpreter_call/core/function_exec.rs` Bug #19 write-back).
-**Status:** Source fixed; execution verification pending.
+**Status:** Closed (fixed, execution-verified) 2026-09-13
 
 ## Symptom
 

@@ -4,6 +4,10 @@ Date: 2026-08-01
 Status: family enumerated and closed; one structural hardening landed
 Related: `064d40e5896` (the two originally proved instances)
 
+## Closed 2026-09-13 — Already Fixed
+
+Investigation complete and hardening landed in commit `064d40e5896` (fix: native-build llvm dropped every explicit return value). Family sweep completed with all fixes verified.
+
 ## The defect shape
 
 A dispatcher runs a discriminant check to shortcut a `match`, handles the

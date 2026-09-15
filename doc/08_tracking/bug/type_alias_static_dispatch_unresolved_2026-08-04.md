@@ -120,3 +120,9 @@ pure-Simple side, but the bug and its architectural blocker are unchanged.
   capture this bug sits downstream of.
 - `type_alias_swapped_winner_is_inert_2026-08-01.md`
 - `flat_ast_export_from_and_type_alias_loss_2026-07-27.md`
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Record already states this is architectural, needing a Rust-seed interpreter
+name-resolution change, out of scope per repo rules, re-confirmed 2026-08-10.
+No change made.

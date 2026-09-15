@@ -41,6 +41,32 @@ impl HirLowering:
                 unwound = unwound.push(in_progress)
         self.imported_type_methods_in_progress = unwound
 
+    # Re-entrancy stack accessors for `materialized_payload_in_progress`.
+    #
+    # Declared and reached exactly like the three above, and for the same
+    # reason: a newly added field on this class must not be read bare from
+    # `_Items/*.spl` or native-build's semantic pass aborts the worker with
+    # "class `HirLowering` has no field named ...". Do NOT inline these.
+    #
+    # This guards the enum-payload closure cycle, which the Dict memo
+    # `materialized_payload_origins` fails to break -- see the essay on the
+    # field declaration in types.spl for the 13,415-vs-2,546 measurement.
+    me materialized_payload_in_progress_has(key: text) -> bool:
+        for in_progress in self.materialized_payload_in_progress:
+            if in_progress == key:
+                return true
+        false
+
+    me materialized_payload_in_progress_push(key: text):
+        self.materialized_payload_in_progress = self.materialized_payload_in_progress.push(key)
+
+    me materialized_payload_in_progress_pop(key: text):
+        var unwound: [text] = []
+        for in_progress in self.materialized_payload_in_progress:
+            if in_progress != key:
+                unwound = unwound.push(in_progress)
+        self.materialized_payload_in_progress = unwound
+
     me begin_module(filename: text):
         """Reset transient module state without replacing retained owners."""
         # Diagnostics are stable no-GC owners. Clear them in place.
@@ -72,6 +98,11 @@ impl HirLowering:
         # stale entry would silently SKIP a needed method registration rather
         # than recurse, which is the quieter and more dangerous failure.
         self.imported_type_methods_in_progress = []
+        # Same belt-and-braces for the enum-payload closure breaker, for the
+        # same reason and with the same danger profile: a key leaked across a
+        # module boundary would silently SKIP a needed payload registration
+        # rather than recurse.
+        self.materialized_payload_in_progress = []
         # RISDONE (2026-08-21): the completed-registration memo describes ONE
         # importer's symbol table -- the table `reset_module` above just wiped
         # -- so it must not outlive the module it was built for. (The wrapper

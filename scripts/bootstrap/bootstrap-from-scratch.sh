@@ -35,6 +35,7 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
       --strategy) bootstrap_strategy_expect_value=1 ;;
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
       --help|--validate-bootstrap-receipt|--stop-after-stage2|--stop-after-stage3|\
+      --produce-stage3-receipt=*|\
       --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|--diagnostic-sweep)
         bootstrap_strategy_bypass=1
         ;;
@@ -175,6 +176,16 @@ Options:
                      `simple build bootstrap`; required before any stage starts
   --validate-bootstrap-receipt
                      Validate authorization and exit without starting a stage
+  --produce-stage3-receipt=<typed-reason>
+                     Only with `--full-bootstrap --stop-after-stage2`. After the
+                     Stage 2 admission is published, run the canonical producer
+                     (scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs)
+                     against the just-admitted parent and write
+                     <output>/stage3-planner-admission.receipt, then print the
+                     exact `--resume-stage3-from-admitted` command. The reason is
+                     yours to type; it is validated by the producer's allow-list
+                     and never defaulted. Fail-closed: a producer failure fails
+                     the run and no receipt is written.
   --stop-after-stage3
                      Stop after producing and independently verifying the
                      provenance-bound Stage 3 compiler. Requires a planner
@@ -278,6 +289,10 @@ bootstrap_strategy="${SIMPLE_BOOTSTRAP_STRATEGY:-normal}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
 validate_bootstrap_receipt=0
+# Typed reason used to auto-produce the Stage-3 planner receipt at the end of a
+# trust-root Stage-2 lane. Empty means 'do not produce' -- the reason is NEVER
+# invented here; the operator types it, exactly as the planner policy requires.
+produce_stage3_receipt_reason=''
 stop_after_stage3=0
 stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
@@ -298,6 +313,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --validate-bootstrap-receipt)
       validate_bootstrap_receipt=1
+      ;;
+    --produce-stage3-receipt=*)
+      produce_stage3_receipt_reason=${1#*=}
       ;;
     --stop-after-stage3)
       stop_after_stage3=1
@@ -465,6 +483,18 @@ esac
 # This is the common staged-bootstrap boundary, including Windows forwarding
 # and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
 # Stage 1 without the canonical receipt produced by the pure-Simple planner.
+# Checked BEFORE the trust-root chain below, on the raw flags that select that
+# lane, so the refusal is what the caller sees rather than the generic
+# reason-receipt diagnostic. Fail closed rather than silently ignore: a receipt
+# the caller believes was produced, but was not, is exactly the failure mode
+# this gate exists to stop. Pinned by
+# scripts/check/check-bootstrap-stage3-receipt-autowire.shs.
+if [ -n "${produce_stage3_receipt_reason}" ] &&
+   { [ "${stop_after_stage2}" -ne 1 ] || [ "${full_bootstrap}" -ne 1 ] ||
+     { [ -n "${bootstrap_receipt_path}" ] && [ -f "${bootstrap_receipt_path}" ]; }; }; then
+  echo "bootstrap-policy-error: produce-stage3-receipt-requires-stage2-trust-root-lane" >&2
+  exit 64
+fi
 bootstrap_stage2_trust_root=0
 bootstrap_stage2_parent_override=
 bootstrap_stage2_parent_authority=
@@ -513,6 +543,38 @@ if [ "${bootstrap_stage2_trust_root}" -eq 0 ]; then
     bootstrap_receipt_target='//bootstrap:stage2'
   elif [ -n "${resume_stage3_output}" ] || [ "${stop_after_stage3}" -eq 1 ]; then
     bootstrap_receipt_target='//bootstrap:stage3'
+  fi
+  # Reader-side twin of the producer binding at the Stage-2 trust-root lane
+  # (PR #929, SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${...:-${output_dir}}).
+  # bootstrap_planner_v2_verify refuses a receipt whose output root is outside
+  # <repo>/build unless that variable names it -- and this call site never set
+  # it. A Stage 3 resume names its own output root right there on the command
+  # line, so a lane using a private storage root (.simple/storage/build/...)
+  # produced a receipt that its own next step refused as
+  # planner-admission-v2-unbound. Bind the verify to THIS run's own resume
+  # output root and nothing wider; an operator-supplied value always wins.
+  # Stage 4 is the exact twin of the Stage 3 case above and was left unbound by
+  # PR #955: bootstrap-strategy.sh:693 drives --resume-stage4-from-admitted
+  # through this SAME bootstrap_planner_v2_verify call, and
+  # resume-stage4-from-admitted.sh repeats the //bootstrap:stage4 verification,
+  # so a lane on a private storage root reached Stage 4 and was refused as
+  # planner-admission-v2-unbound for the identical reason. Bind it the same way,
+  # to THIS run's own resume output root and nothing wider.
+  bootstrap_resume_output_arg=${resume_stage3_output}
+  [ -n "${bootstrap_resume_output_arg}" ] ||
+    bootstrap_resume_output_arg=${resume_stage4_output}
+  if [ -n "${bootstrap_resume_output_arg}" ] &&
+     [ -z "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ]; then
+    bootstrap_resume_output_root=$(
+      CDPATH= cd -- "${bootstrap_resume_output_arg}" 2>/dev/null && pwd -P
+    ) || bootstrap_resume_output_root=
+    [ -n "${bootstrap_resume_output_root}" ] &&
+      [ "${bootstrap_resume_output_root}" != / ] || {
+      echo "bootstrap-policy-error: resume-output-root-unresolvable" >&2
+      exit 64
+    }
+    SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${bootstrap_resume_output_root}
+    export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
   fi
   bootstrap_planner_v2_verify "${bootstrap_receipt_path}" "${bootstrap_early_repo_root}" || {
     echo "bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2" >&2
@@ -734,6 +796,7 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 PORTABLE_LOCK_ATOMIC_HELPER_PATH=\
 "${repo_root}/scripts/check/lib/portable-hardlink-lock.pl"
 export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "${repo_root}/scripts/check/lib/bootstrap-stage3/phase2-compat-manifest.shs"
 . "${repo_root}/scripts/check/lib/portable-process-lock.shs"
 . "${repo_root}/scripts/bootstrap/bootstrap-authority-wiring.shs"
 . "${repo_root}/scripts/bootstrap/bootstrap-deploy-transaction.shs"
@@ -873,9 +936,20 @@ bootstrap_progress_event() {
       "${progress_terminal}" >>"${build_progress_events}"
   fi
 }
+bootstrap_last_milestone=init
+bootstrap_verdict_written=0
+bootstrap_verdict() {
+  bootstrap_verdict_written=1
+  line="VERDICT — $1"
+  echo "$line" >&2
+  if [ -n "${progress_log}" ]; then
+    echo "$line" >>"${progress_log}" 2>/dev/null || true
+  fi
+}
 bootstrap_progress_mark() {
-  [ -n "${progress_log}" ] || return 0
   milestone=$1
+  bootstrap_last_milestone=${milestone}
+  [ -n "${progress_log}" ] || return 0
   main_log=${2:-}
   {
     echo "milestone=${milestone}"
@@ -900,6 +974,9 @@ bootstrap_cleanup() {
   bootstrap_status=${1:-$?}
   trap - EXIT HUP INT QUIT TERM
   set +e
+  if [ "${bootstrap_verdict_written}" -eq 0 ]; then
+    bootstrap_verdict "ABORTED: stage=${bootstrap_last_milestone} exit=${bootstrap_status} signal=${bootstrap_abnormal_signal:-none} reason=${bootstrap_last_milestone}"
+  fi
   resume_stage4_release_continuation_lock
   if [ "${bootstrap_deploy_tx_active:-0}" -eq 1 ]; then
     bootstrap_deploy_tx_abort || true
@@ -1434,7 +1511,21 @@ bootstrap_stage3_archive_prior_evidence() (
 
 # A reused output root can contain hash-bound sanity evidence from an earlier
 # run. The bounded collector correctly refuses to overwrite those leaves.
-# Fail before any cleanup or probe so evidence and cache remain untouched.
+#
+# Preserving that evidence is the requirement; REFUSING THE RUN never was. The
+# old behaviour failed with "use a new output root with a cache clone", which
+# is the heaviest possible remedy: it discards a warm native cache (tens of
+# minutes on this host) to protect log files that a rename preserves just as
+# well. Every failing-then-retried bootstrap paid that, and in practice the
+# operator archived the leaves by hand and re-ran -- so the guard was not
+# preventing anything, only making the fix manual and undocumented.
+#
+# The leaves are now MOVED into a timestamped sibling directory before the run
+# proceeds. Nothing is overwritten and nothing is deleted, so the invariant the
+# guard exists for is intact and strictly more evidence survives than under a
+# fresh output root. The run is still refused, loudly, if a leaf cannot be
+# moved -- an unmovable leaf means something else holds it, and proceeding
+# would be the overwrite this guard forbids.
 bootstrap_stage2_sanity_output_preflight() (
   bssop_base=$1
   [ -n "${bssop_base}" ] || return 0
@@ -1451,10 +1542,23 @@ bootstrap_stage2_sanity_output_preflight() (
     .frontend-bootstrap-1.log.hello-world-positional .frontend-bootstrap-1.log.hello-world-positional.bounded.env \
     .frontend-bootstrap-1.status.env; do
     if [ -e "${bssop_base}${bssop_suffix}" ] || [ -L "${bssop_base}${bssop_suffix}" ]; then
-      echo "stage2-sanity-error: stale-evidence-output-root; use a new output root with a cache clone" >&2
-      return 1
+      if [ -z "${bssop_archive:-}" ]; then
+        bssop_archive=${bssop_base}.superseded-$(date +%Y%m%d-%H%M%S)
+        if ! mkdir -p "${bssop_archive}"; then
+          echo "stage2-sanity-error: stale-evidence-output-root; cannot create ${bssop_archive}" >&2
+          return 1
+        fi
+      fi
+      if ! mv "${bssop_base}${bssop_suffix}" "${bssop_archive}/"; then
+        echo "stage2-sanity-error: stale-evidence-output-root; cannot archive ${bssop_base}${bssop_suffix}" >&2
+        return 1
+      fi
+      bssop_moved=$(( ${bssop_moved:-0} + 1 ))
     fi
   done
+  if [ "${bssop_moved:-0}" -gt 0 ]; then
+    echo "stage2 sanity: archived ${bssop_moved} stale evidence leaf(s) to ${bssop_archive}" >&2
+  fi
 )
 
 # A timed-out Rust native-build leaves every already-published object in its
@@ -1870,6 +1974,7 @@ bootstrap_native_build_main() {
     SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}" \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
     SIMPLE_BINARY="$(absolute_path "${compiler}")" \
     "${compiler}" "$@"
 }
@@ -2876,6 +2981,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
       "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
       ${stage3_mc_env} \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_COMPILER_PHASE_PROFILE=1" \
@@ -3181,8 +3287,20 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
           stage2_parent_dir=$(dirname -- "${stage2_bin}")
           stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
           stage2_parent_provenance="${stage2_parent_dir}/stage2-provenance.receipt"
+          # The publisher is fail-closed on the CANDIDATE PATH: it asserts
+          # `[ "$(field candidate_path)" = "$candidate" ]`, and the admission
+          # receipt above recorded `${stage2_admitted_absolute}`. Passing
+          # `${stage2_bin}` instead offered a byte-identical copy at a DIFFERENT
+          # path, the assertion exited under `set -eu`, the parent receipts were
+          # never written, and Stage 3 then refused with
+          # `parent-stage2-sanity-unavailable` on a Stage 2 that WAS admitted.
+          # Both sides must read the same variable -- see
+          # doc/08_tracking/bug/stage2_parent_receipt_publish_passes_wrong_candidate_path_2026-09-13.md
+          # and scripts/check/check-stage2-parent-receipt-candidate-binding.shs.
+          # The receipts still land beside ${stage2_bin} (stage2_parent_dir
+          # above); only the identity argument changes.
           sh "${repo_root}/scripts/bootstrap/publish-stage2-parent-receipts.shs" \
-            "$(absolute_path "${stage2_bin}")" \
+            "${stage2_admitted_absolute}" \
             "${stage2_admission_receipt_absolute}" \
             "$(absolute_path "${stage3_source_before}")" \
             "$(absolute_path "${runtime_admitted_snapshot}")" \
@@ -3193,6 +3311,46 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "error: could not publish producer-bound Stage 2 parent receipts" >&2
             exit 1
           }
+          # Close the operational gap recorded in
+          # doc/08_tracking/bug/stage3_resume_receipt_chain_unreachable_from_seed_producer_2026-09-13.md
+          # (site 20): every receipt the Stage 3 gate reads now has a producer,
+          # but nothing invoked the LAST one, so a seed-rooted lane admitted a
+          # Stage 2 and then had no way to reach Stage 3. The producer below
+          # re-verifies the parent authority itself (stage2 binary + the two
+          # receipts published immediately above) and refuses on any mismatch,
+          # so invoking it here grants no trust the operator did not already
+          # establish -- it only removes a manual transcription step. The typed
+          # reason is still the operator's: no default, no invention.
+          if [ -n "${produce_stage3_receipt_reason}" ]; then
+            stage3_planner_receipt="${output_dir}/stage3-planner-admission.receipt"
+            rm -f "${stage3_planner_receipt}"
+            # The producer allowlists its --bootstrap-output to <repo>/build/**
+            # or to the root named by SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT.
+            # Centralized storage puts this run's output outside <repo>/build,
+            # so without this the producer refuses its own lane's directory with
+            # bootstrap-output-outside-allowlisted-root. The value passed is not
+            # a caller-chosen path: it is exactly ${output_dir}, the directory
+            # this script already selected, created and locked, so the allowlist
+            # is narrowed to this run's own output and nothing else. An
+            # explicitly configured root still wins.
+            if ! env "SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-${output_dir}}" \
+              sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
+              "--target=//bootstrap:stage3" \
+              "--reason=${produce_stage3_receipt_reason}" \
+              "--parent-compiler=${stage2_bin}" \
+              "--bootstrap-output=${output_dir}" \
+              "--out=${stage3_planner_receipt}"; then
+              echo "error: could not produce the Stage 3 planner admission receipt" >&2
+              rm -f "${stage3_planner_receipt}"
+              exit 1
+            fi
+            [ -f "${stage3_planner_receipt}" ] || {
+              echo "error: Stage 3 planner admission producer wrote no receipt" >&2
+              exit 1
+            }
+            echo "bootstrap-policy: stage3-planner-receipt=${stage3_planner_receipt}"
+            echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage3-from-admitted=${output_dir} --bootstrap-receipt=${stage3_planner_receipt}"
+          fi
         fi
         # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
         if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
@@ -3247,12 +3405,52 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   fi
 
   if [ "${stage2_status}" -eq 0 ]; then
-    [ -f "${stage2_compatibility_manifest_absolute}" ] || {
-      echo "error: Stage 2 did not publish its compatibility manifest" >&2
+    # Producer-scoped compatibility-manifest gate. The manifest and the M2
+    # reverse-reference authority it binds exist ONLY in the pure-Simple driver
+    # (driver_aot_native_output.spl:398 / reverse_reference_receipt.spl:243);
+    # `grep -rn PHASE2_COMPATIBILITY_MANIFEST src/compiler_rust/` is empty and
+    # so is the seed's reverse-reference grep, so a seed-produced Phase-2 cache
+    # can never carry one. The gate is NOT dropped: it is scoped on a POSITIVE
+    # producer fact computed before Stage 2 ran, a skip leaves evidence on
+    # disk, and Stage 3 still gets MANIFEST_READ and therefore admits ZERO
+    # Phase-2 reuse without a manifest. Selftest is fatal inside the checker.
+    # doc/08_tracking/bug/stage2_compatibility_manifest_unwritable_by_rust_seed_2026-09-13.md
+    stage2_compat_producer_kind=$(
+      bootstrap_phase2_compat_producer_kind \
+        "${bootstrap_stage2_parent_override}"
+    ) || {
+      echo "error: could not determine the Stage 2 producer kind" >&2
       exit 1
     }
+    sh "${repo_root}/scripts/check/check-stage2-compat-manifest-gate.shs" \
+      "--producer-kind=${stage2_compat_producer_kind}" \
+      "--manifest=${stage2_compatibility_manifest_absolute}" \
+      "--evidence=${stage2_compatibility_manifest_absolute}.not-published" \
+      "--producer-path=${stage2_seed_absolute}" || exit 1
+    # Claim the lane BEFORE sealing the cache. resume-stage3-from-admitted.sh
+    # runs check-cache-scope-ownership.shs over this exact dir with lane
+    # `stage2` (:549); with no marker present the guard takes its "unowned or
+    # brand-new cache: claim it" branch and WRITES `.cache_scope` -- into a dir
+    # this line has already made read-only. The write failed `Permission
+    # denied`, the guard returned 2 => `ERROR — nothing was checked`, and
+    # Stage 3 aborted before doing any work, on a Stage 2 that was properly
+    # admitted. Stage 2 sealed a cache it never claimed, and Stage 3 could not
+    # claim it because it was sealed. Writing the marker here closes that
+    # ordering gap: the lane that owns the cache stamps it while the dir is
+    # still writable, and the resume then finds a matching marker and writes
+    # nothing. Fail closed, exactly like the resume side -- a cache already
+    # stamped by a FOREIGN lane is still refused, which is the property the
+    # guard exists for.
+    if [ -f "${bootstrap_cache_scope_guard}" ]; then
+      sh "${bootstrap_cache_scope_guard}" "${stage2_cache_absolute}" stage2 || {
+        echo "error: Stage 2 native cache belongs to a foreign lane scope" >&2
+        exit 1
+      }
+    fi
     chmod -R a-w "${stage2_cache_absolute}"
-    chmod 400 "${stage2_compatibility_manifest_absolute}"
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      chmod 400 "${stage2_compatibility_manifest_absolute}"
+    fi
   fi
 
   if [ "${stop_after_stage2}" -eq 1 ]; then
@@ -3297,8 +3495,15 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "${stage3_provenance_dir}/runtime-before-stage3.txt" || exit 1
     bootstrap_stage3_directory_snapshot \
       "${phase2_cache_before_stage3}" "${stage2_cache_absolute}" || exit 1
-    phase2_manifest_sha_before_stage3=$(bootstrap_stage3_hash_file \
-      "${stage2_compatibility_manifest_absolute}") || exit 1
+    # Absent-by-design on a rust-seed producer (see the producer-scoped gate
+    # above). The sentinel is compared verbatim after Stage 3, so a manifest
+    # that APPEARS mid-Stage-3 is still caught as a mutation.
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      phase2_manifest_sha_before_stage3=$(bootstrap_stage3_hash_file \
+        "${stage2_compatibility_manifest_absolute}") || exit 1
+    else
+      phase2_manifest_sha_before_stage3=absent
+    fi
   fi
   # Stage 3 uses the exact SIMPLE_BOOTSTRAP_STAGE3 focused capsule. That route
   # accepts only bootstrap_main, dynload mode, and the transcribed source roots,
@@ -3340,6 +3545,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     MALLOC_TRIM_THRESHOLD_=0 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
     ${stage3_mc_env} \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_COMPILER_PHASE_PROFILE=1 \
@@ -3384,8 +3590,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: Stage 3 mutated the read-only Phase 2 cache" >&2
       exit 1
     }
-    phase2_manifest_sha_after_stage3=$(bootstrap_stage3_hash_file \
-      "${stage2_compatibility_manifest_absolute}") || exit 1
+    if [ -f "${stage2_compatibility_manifest_absolute}" ]; then
+      phase2_manifest_sha_after_stage3=$(bootstrap_stage3_hash_file \
+        "${stage2_compatibility_manifest_absolute}") || exit 1
+    else
+      phase2_manifest_sha_after_stage3=absent
+    fi
     [ "${phase2_manifest_sha_before_stage3}" = \
       "${phase2_manifest_sha_after_stage3}" ] || {
       echo "error: Stage 3 mutated the Phase 2 compatibility manifest" >&2
@@ -4447,10 +4657,12 @@ if [ "${stage3_ok:-0}" -eq 0 ]; then
   echo "ERROR: internal invariant broken — reached completion with stage3_ok=0." >&2
   echo "  A failed self-host must have exited at the seed-fallback refusal." >&2
   echo "  Treat any binary deployed by this run as unverified." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=2 signal=none reason=stage3-invariant-broken"
   exit 2
 fi
 [ "${stage3_current_acceptance_status}" = verified ] || {
   echo "ERROR: current Stage 3 acceptance was not bound to verified Stage 4 evidence." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=2 signal=none reason=stage3-acceptance-unverified"
   exit 2
 }
 
@@ -4464,6 +4676,8 @@ if ! sh "${repo_root}/scripts/check/check-bootstrap-must-pass.shs" \
   --stage4-binary "${full_bin}" \
   --stage4-provenance "${full_bin}.provenance.env"; then
   echo "ERROR: bootstrap completed but mandatory-check evidence was not recorded." >&2
+  bootstrap_verdict "FAILED: stage=${bootstrap_last_milestone} exit=1 signal=none reason=mandatory-check-evidence-not-recorded"
   exit 1
 fi
+bootstrap_verdict "ADMITTED: stage=complete exit=0 signal=none reason=bootstrap-must-pass-recorded"
 bootstrap_progress_mark complete ""

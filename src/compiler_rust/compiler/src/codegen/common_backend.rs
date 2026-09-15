@@ -695,7 +695,9 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // symbol undeclared was not established; if such a case is ever
             // observed failing the same way, this is where it belongs.
             | "rt_is_some"
+            | "rt_is_present"
             | "rt_is_none"
+            | "rt_enum_check_variant"
             | "rt_value_as_u64"
             | "rt_string_eq"
             // P0 fix (2026-07-22): rt_text_cmp_any backs the codegen/instr/core.rs
@@ -3111,8 +3113,14 @@ mod tests {
     #[test]
     fn option_presence_predicate_runtime_symbols_are_retained() {
         assert!(runtime_symbol_is_codegen_root("rt_is_some"));
+        // `.?` lowers to `rt_is_present`; if it is not a codegen root the LLVM
+        // and Cranelift lanes both fail to declare it and the whole module
+        // bails out to the interpreter.
+        // doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+        assert!(runtime_symbol_is_codegen_root("rt_is_present"));
         assert!(runtime_symbol_is_codegen_root("rt_is_none"));
         assert!(runtime_symbol_is_codegen_root("rt_contains"));
+        assert!(runtime_symbol_is_codegen_root("rt_enum_check_variant"));
         // NOT rooted, on purpose: a genuine `Result` receiver emits
         // `rt_enum_check_discriminant` as a real MIR Call, so it is already in
         // `referenced_call_names`. Asserted so that adding it later is a

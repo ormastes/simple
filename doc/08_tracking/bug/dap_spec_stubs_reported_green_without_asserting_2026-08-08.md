@@ -184,3 +184,36 @@ in the implementation.
 
 ## Triage 2026-09-12
 Rule B: ran `bin/simple test test/01_unit/app/dap/breakpoints_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Re-check 2026-09-13
+
+Implemented all 5 remaining LEAVE-RED gaps documented above, one commit each:
+
+1. `BreakpointEntry.with_hit_condition()` builder + wired into
+   `set_breakpoints()` (`src/lib/nogc_sync_mut/dap/breakpoints.spl`).
+2. `BreakpointManager.clear_all_breakpoints()` (same file).
+3. `DapVariable.with_children()` (`src/lib/nogc_sync_mut/dap/protocol.spl`),
+   mirroring `dap_types.VariableInfo.with_children`.
+4. A distinct `Arguments` scope (`variablesReference=4`, additive) in
+   `handle_scopes()` (`src/lib/nogc_sync_mut/dap/server.spl`), wired to the
+   previously-unused `adapter.read_arguments()` in `handle_variables()`
+   (`src/lib/nogc_sync_mut/dap/dap_handlers.spl`).
+5. `handle_attach()` + a `case "attach":` arm in `handle_request()`
+   (`src/lib/nogc_sync_mut/dap/server.spl`).
+
+All four spec files now pass in full:
+
+```
+breakpoints_spec.spl: 9 total, 9 passed, 0 failed
+protocol_spec.spl:    13 total, 13 passed, 0 failed
+server_spec.spl:      15 total, 15 passed, 0 failed
+adapter_unification_spec.spl: 21 total, 21 passed, 0 failed (unchanged)
+```
+
+Full `test/01_unit/app/dap/` suite re-run: no regressions. Two pre-existing,
+unrelated failures remain (`interpreter_hooks_spec.spl`, a different
+"Interpreter Hook API" gap; `trace32_debug_service_production_spec.spl`, a
+hardware/network-dependent Trace32 integration test) — neither references
+any file or symbol touched here.
+
+- Status: RESOLVED (2026-09-13) — ac4d6bb41fe, d72b184fa78, 08ee91bac72; specs `test/01_unit/app/dap/breakpoints_spec.spl`, `test/01_unit/app/dap/protocol_spec.spl`, `test/01_unit/app/dap/server_spec.spl`

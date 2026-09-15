@@ -113,3 +113,15 @@ fail-open capability check.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Triage 2026-09-13
+
+Two blockers: (1) desugar_traits has no caller in any compile path --
+wiring it requires deciding how/where the driver invokes desugaring,
+compiler-pipeline work; (2) the generated .from() capability check
+uses `if val` which is broken under native AOT (a real nil takes the
+Some branch) -- this is a Rust-seed native codegen defect (if-val/
+Option lowering), not fixable in pure Simple. The doc's own fix order
+requires (2) closed before (1) is wired. Both exceed this lane's
+budget. Leaving OPEN.
+

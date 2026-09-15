@@ -51,3 +51,23 @@ quoting only the flattering one.
 2. Remove the `not tag.starts_with("::")` clause: the same row reports
    `dw 119, dh 85`, and the `<p>` sibling reports `dw 730`.
 3. Restore: `dw 5, dh 1` again.
+
+## Round 7 (2026-09-13) — the SECOND copy of the key scheme had the same defect
+
+The 2026-09-12 fix corrected `_layout_tag` in the differ. It did not correct the
+renderer's own copy: `_simple_web_layout_element`
+(`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:124`),
+which feeds `_simple_web_node_target_key` and the bulk animation target-key
+pass, skipped `#text`/`style`/`script`/`title`/`head`/`meta`/`link`/`base` but
+NOT `::marker` — while the geometry differ's walker comment claims the two
+mirror each other "byte-for-byte". They did not: every hit-test and CSS
+animation target key for an element inside an `<li>` was off by one ordinal, so
+a pointer event or an animation keyed by path addressed the wrong node.
+
+Fixed by excluding any `::`-prefixed tag there too, so all three copies of the
+scheme (Chrome walker, differ, renderer) now agree.
+
+Spec: `test/01_unit/browser_engine/li_marker_nth_path_key_spec.spl` — AC-1 the
+block inside an `<li>` is `path:0/0/0`, AC-2 a second element child keeps
+ordinal 1, AC-3 a block outside any list is unaffected. Sabotage (swap `"::"`
+for a string no tag starts with): AC-1 and AC-2 fail, AC-3 still passes.

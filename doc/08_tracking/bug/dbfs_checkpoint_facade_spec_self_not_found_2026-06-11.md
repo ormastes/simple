@@ -1,6 +1,16 @@
 # dbfs_checkpoint_attr_facade specs still red: `self` not found + missing gc tier module
 
-- **Status:** FIXED 2026-06-11
+## Closed 2026-09-13 — already fixed 2026-06-11; underlying seed defect verified gone
+
+- **measured** The root `me.field`-as-direct-arg seed defect (companion entry
+  `seed_me_field_direct_arg_self_not_found_2026-06-11.md`) no longer reproduces: a
+  minimal `me fn query(op): me._q(me.size_index, op)` prints `10` on the current seed
+  instead of `semantic: variable 'self' not found`.
+- **inferred** Entry records `FIXED 2026-06-11` for both defects (self-receiver strictness
+  and the missing gc_async_mut dbfs_engine wrapper).
+
+
+Status: closed 2026-09-13 (was: - **Status:** FIXED 2026-06-11)
 - **Found:** 2026-06-11, exposed by the `gen` → `slot_gen` rename (see
   `dbfs_checkpoint_gen_reserved_keyword_2026-06-11.md`); previously MASKED
   because the spec failed earlier at the reserved-keyword parse error.

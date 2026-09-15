@@ -1,0 +1,273 @@
+# Caret workbench — pane-backed agent team (lane A9).
+#
+# Closes gap 2 of `.spipe/caret_workbench/state.md`: "a pane's child is not a
+# managed agent". Before this file the manager spawned children with
+# `process_spawn_async` (no piped stdout, so a pane could never show one) while
+# smux panes spawned their own separate children. Two spawn owners for one
+# logical session is the design error the research doc warns about.
+#
+# Here there is ONE authoritative execution per agent: `smux_pane_spawn` runs
+# the agent's argv, and the pid it returns is BOTH the pane's child and the
+# `ManagedAgent`'s pid. The workbench's big region therefore shows the selected
+# agent's own stdout, and a keystroke sent to the pane goes to the agent's
+# stdin.
+#
+# Why liveness and teardown live here rather than in `agent_runtime`
+# --------------------------------------------------------------------------
+# Measured 2026-09-05, macOS arm64, seed runner: the runtime keeps piped
+# children in a DIFFERENT registry from async ones, and
+# `rt_process_is_running` / `rt_process_kill` only consult the async table
+# (`interpreter_extern/system.rs`). A demonstrably live piped child — one that
+# had just transformed a nonce — reported `process_is_running == false` and
+# `process_kill == false`. So this module asks smux (`smux_pane_alive`, which
+# routes to `process_is_piped_alive`) and tears down with `smux_close_pane`
+# (which routes to `process_close_piped`, the call that also reaps). The
+# manager's STATUS RULES are still the manager's: this file feeds team
+# snapshots into `reconcile_multi_caret_manager` / `settle_multi_caret_manager`
+# rather than re-deciding degraded/exited/leaked for a second time.
+#
+# `process_pid_exists(pid)` (a bare kill(pid,0) probe, distinct from the
+# owned-child `process_is_running`) is the only honest OS-truth check for a
+# piped pid, and is what the oracle asserts teardown against.
+
+use app.io.process_ops.{process_pid_exists}
+use app.llm_caret.agent_plan.{AgentLaunchRequest, build_agent_launch_plan}
+use app.llm_caret.agent_runtime.{AgentProcess, AgentTeamProcess,
+    is_known_agent_provider, agent_command_for_provider_with_all,
+    summarize_agent_team}
+use app.llm_caret.multi_caret_manager.{MultiCaretManager,
+    multi_caret_manager_of, reconcile_multi_caret_manager,
+    settle_multi_caret_manager}
+use app.llm_caret.workbench.session_source.{publish_manager_sessions,
+    live_selected, select_live_session}
+use app.llm_caret.workbench.session_contract.{new_session_id}
+use app.llm_caret.workbench.pane_source.{refresh_active_pane}
+use os.apps.smux.api.{smux_create_session, smux_list_windows, smux_list_panes,
+    smux_split_pane, smux_pane_spawn, smux_pane_alive, smux_send_command,
+    smux_close_pane}
+
+# `{ok, error, ...}` structs rather than Option/Result across this boundary --
+# see session_source.spl's header for the filed generic-resolution defect.
+struct PaneAgent:
+    agent_id: text
+    pane_id: text
+    pid: i64
+    status: text
+    reason: text
+
+struct PaneTeam:
+    ok: bool
+    error: text
+    session_id: text
+    window_id: text
+    agents: [PaneAgent]
+    manager: MultiCaretManager
+
+fn _empty_agents() -> [PaneAgent]:
+    var none: [PaneAgent] = []
+    none
+
+fn _team_of(agents: [PaneAgent]) -> [AgentProcess]:
+    var procs: [AgentProcess] = []
+    for a in agents:
+        procs.push(AgentProcess(agent_id: a.agent_id, status: a.status,
+            reason: a.reason, pid: a.pid))
+    procs
+
+fn _failed(manager_id: text, capacity: i64, reason: text) -> PaneTeam:
+    PaneTeam(ok: false, error: reason, session_id: "", window_id: "",
+        agents: _empty_agents(),
+        manager: multi_caret_manager_of(manager_id, "not_started", reason,
+            capacity, summarize_agent_team(manager_id, [])))
+
+# Closes every pane this launch opened. The manager's own rollback
+# (`stop_agent_team`) cannot be reused: it kills through the async registry,
+# which does not see these pids, and it would also leave smux holding dead
+# child_pids that `smux_reset_for_test` would then double-close.
+fn _close_all(session_id: text, window_id: text, agents: [PaneAgent]):
+    for a in agents:
+        if a.pane_id != "":
+            val _closed = smux_close_pane(session_id, window_id, a.pane_id)
+
+# Launches one pane per agent, all-or-nothing. The pane's child IS the agent.
+pub fn launch_pane_team(manager_id: text, requests: [AgentLaunchRequest],
+        capacity: i64, claude_path: text, codex_path: text, gemini_path: text,
+        kimi_path: text, opencode_path: text) -> PaneTeam:
+    if manager_id == "":
+        return _failed(manager_id, capacity, "manager_id_required")
+    if capacity <= 0 or capacity > 16:
+        return _failed(manager_id, capacity, "capacity_out_of_range")
+    if requests.len() == 0:
+        return _failed(manager_id, capacity, "requests_required")
+    if requests.len() > capacity:
+        return _failed(manager_id, capacity, "capacity_exceeded")
+
+    val session = smux_create_session(manager_id)
+    if session.id == "":
+        # smux refuses with an empty-id sentinel when any registry is full.
+        return _failed(manager_id, capacity, "smux_session_unavailable")
+    val windows = smux_list_windows(session.id)
+    if windows.len() == 0:
+        return _failed(manager_id, capacity, "smux_window_missing")
+    val wid = windows[0].id
+
+    var agents: [PaneAgent] = []
+    var seen_ids: [text] = []
+    var idx = 0
+    var failure = ""
+    for req in requests:
+        if failure == "":
+            # Same duplicate-id rule as launch_agent_team_with_all, so a repeated
+            # agent_md_path cannot collide in the roster.
+            var aid = req.agent_md_path
+            for existing in seen_ids:
+                if existing == req.agent_md_path:
+                    aid = req.agent_md_path + "#" + idx.to_text()
+            seen_ids = seen_ids + [req.agent_md_path]
+
+            val plan = build_agent_launch_plan(req)
+            if plan.provider == "team":
+                failure = "team_plan_not_executable"
+            elif not is_known_agent_provider(plan.provider):
+                failure = "unknown_provider:" + plan.provider
+            else:
+                # Pane 0 already exists with the window; every later agent
+                # splits a new one. smux caps panes at 8 -- a split that fails
+                # is a hard refusal here, never a silent clamp.
+                var pane_id = ""
+                val existing_panes = smux_list_panes(session.id, wid)
+                if idx < existing_panes.len():
+                    pane_id = existing_panes[idx].id
+                else:
+                    val split = smux_split_pane(session.id, wid,
+                        existing_panes[existing_panes.len() - 1].id, "vertical")
+                    if split.is_err():
+                        failure = "pane_unavailable:" + split.unwrap_err()
+                    else:
+                        pane_id = split.unwrap().id
+                if failure == "":
+                    val cmd = agent_command_for_provider_with_all(plan.provider,
+                        claude_path, codex_path, gemini_path, kimi_path,
+                        opencode_path)
+                    val spawned = smux_pane_spawn(session.id, wid, pane_id, cmd,
+                        plan.argv)
+                    if spawned.is_err():
+                        failure = "spawn_failed:" + spawned.unwrap_err()
+                        agents.push(PaneAgent(agent_id: aid, pane_id: pane_id,
+                            pid: -1, status: "error", reason: "spawn_failed"))
+                    else:
+                        agents.push(PaneAgent(agent_id: aid, pane_id: pane_id,
+                            pid: spawned.unwrap(), status: "started",
+                            reason: "pane_child_spawned"))
+            idx = idx + 1
+
+    if failure != "":
+        # Fail closed: tear every pane this batch opened back down.
+        _close_all(session.id, wid, agents)
+        return _failed(manager_id, capacity, "launch_rolled_back:" + failure)
+
+    PaneTeam(ok: true, error: "", session_id: session.id, window_id: wid,
+        agents: agents,
+        manager: multi_caret_manager_of(manager_id, "running",
+            "all_processes_started", capacity,
+            summarize_agent_team(manager_id, _team_of(agents))))
+
+fn _with_agents(team: PaneTeam, agents: [PaneAgent],
+        manager: MultiCaretManager) -> PaneTeam:
+    PaneTeam(ok: team.ok, error: team.error, session_id: team.session_id,
+        window_id: team.window_id, agents: agents, manager: manager)
+
+# Re-reads liveness from smux (the piped registry) and hands the snapshot to
+# the manager's own status rules.
+pub fn poll_pane_team(team: PaneTeam) -> PaneTeam:
+    var agents: [PaneAgent] = []
+    for a in team.agents:
+        var status = "not_running"
+        var reason = "invalid_pid"
+        if a.pid > 0:
+            val alive = smux_pane_alive(team.session_id, team.window_id, a.pane_id)
+            if alive.is_err():
+                # The pane is gone; the child it held is unowned, not "exited".
+                status = "error"
+                reason = "pane_lost:" + alive.unwrap_err()
+            elif alive.unwrap():
+                status = "running"
+                reason = "pane_child_running"
+            else:
+                status = "not_running"
+                reason = "pane_child_exited"
+        agents.push(PaneAgent(agent_id: a.agent_id, pane_id: a.pane_id,
+            pid: a.pid, status: status, reason: reason))
+    val snapshot = summarize_agent_team(team.manager.manager_id,
+        _team_of(agents))
+    _with_agents(team, agents,
+        reconcile_multi_caret_manager(team.manager, snapshot))
+
+# Teardown: `smux_close_pane` both signals and REAPS the child, which is what
+# makes the OS-truth assertion (`process_pid_exists(pid) == false`) meaningful.
+pub fn stop_pane_team(team: PaneTeam) -> PaneTeam:
+    var agents: [PaneAgent] = []
+    for a in team.agents:
+        var status = "not_stopped"
+        var reason = "invalid_pid"
+        if a.pid > 0:
+            if smux_close_pane(team.session_id, team.window_id, a.pane_id):
+                status = "stopped"
+                reason = "pane_child_closed"
+            elif not process_pid_exists(a.pid):
+                # The pane was already gone (closed individually, or reaped)
+                # and the OS confirms the child with it. A leak means a LIVE
+                # unowned child; reporting this one as "error" would fail the
+                # teardown over a process that is provably dead.
+                status = "stopped"
+                reason = "pane_already_closed"
+            else:
+                # Pane gone but the child is still running: genuinely unowned.
+                status = "error"
+                reason = "pane_close_failed"
+        agents.push(PaneAgent(agent_id: a.agent_id, pane_id: a.pane_id,
+            pid: a.pid, status: status, reason: reason))
+    val snapshot = summarize_agent_team(team.manager.manager_id,
+        _team_of(agents))
+    _with_agents(team, agents,
+        settle_multi_caret_manager(team.manager, snapshot))
+
+pub fn pane_id_for_agent(team: PaneTeam, agent_id: text) -> text:
+    for a in team.agents:
+        if a.agent_id == agent_id:
+            return a.pane_id
+    ""
+
+pub fn pid_for_agent(team: PaneTeam, agent_id: text) -> i64:
+    for a in team.agents:
+        if a.agent_id == agent_id:
+            return a.pid
+    -1
+
+# Input goes to the SELECTED agent's own stdin, because the pane's child is
+# that agent. A pane with no child is a typed error inside smux, not a silent
+# local append.
+pub fn send_to_agent(team: PaneTeam, agent_id: text, line: text) -> bool:
+    val pane_id = pane_id_for_agent(team, agent_id)
+    if pane_id == "":
+        return false
+    smux_send_command(team.session_id, team.window_id, pane_id, line).is_ok()
+
+# One frame's worth of publication: the roster the surfaces render, plus the
+# selected agent's own pane output. This is the call that makes
+# `caret_gui_html()` and `render_live_workbench` show real agents.
+pub fn publish_pane_team(team: PaneTeam) -> bool:
+    publish_manager_sessions(team.manager)
+    var selected = live_selected().value
+    if selected == "" or selected == "none":
+        if team.agents.len() > 0:
+            selected = team.agents[0].agent_id
+            select_live_session(new_session_id(selected))
+    val pane_id = pane_id_for_agent(team, selected)
+    if pane_id == "":
+        return false
+    refresh_active_pane(team.session_id, team.window_id, pane_id, 20).ok
+
+export PaneAgent, PaneTeam
+export launch_pane_team, poll_pane_team, stop_pane_team
+export pane_id_for_agent, pid_for_agent, send_to_agent, publish_pane_team

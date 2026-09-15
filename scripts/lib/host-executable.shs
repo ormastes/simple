@@ -13,6 +13,47 @@ simple_host_family() {
   esac
 }
 
+# Executable suffix for the host family. Windows release artifacts are named
+# `<prog>.exe`; every other family uses the bare name. Generated launch wrappers
+# used to hardcode a bare name for the `${platform_dir}` candidate, so on Windows
+# they resolved a path that cannot exist and reported "native ... not found".
+simple_exe_suffix() {
+  case "${1:-$(simple_host_family)}" in
+    windows) printf '%s\n' '.exe' ;;
+    *) printf '%s\n' '' ;;
+  esac
+}
+
+# Host release-directory triple, in the same spelling `simple_release_platform_dir`
+# (scripts/setup/release-platform.shs) produces for `bin/release/<triple>/`.
+# Generated wrappers used to default this to a literal `x86_64-unknown-linux-gnu`,
+# which is wrong on every non-Linux host.
+simple_default_platform_triple() {
+  _simple_arch="$(uname -m 2>/dev/null || printf x86_64)"
+  case "${_simple_arch}" in
+    x86_64|amd64) _simple_arch=x86_64 ;;
+    aarch64|arm64) _simple_arch=aarch64 ;;
+    riscv64) _simple_arch=riscv64 ;;
+  esac
+  case "$(uname -s 2>/dev/null || printf unknown)" in
+    MSYS*|MINGW*|CYGWIN*|Windows*)
+      # Mirrors scripts/setup/platform-detect.shs: MSYSTEM selects the ABI,
+      # SIMPLE_WINDOWS_ABI overrides it.
+      _simple_abi="${SIMPLE_WINDOWS_ABI:-}"
+      if [ -z "${_simple_abi}" ]; then
+        case "${MSYSTEM:-}" in
+          MINGW*|UCRT*|CLANG*) _simple_abi=gnu ;;
+          *) _simple_abi=msvc ;;
+        esac
+      fi
+      printf '%s-pc-windows-%s\n' "${_simple_arch}" "${_simple_abi}"
+      ;;
+    Darwin*) printf '%s-apple-darwin-macho\n' "${_simple_arch}" ;;
+    FreeBSD*) printf '%s-unknown-freebsd-elf\n' "${_simple_arch}" ;;
+    *) printf '%s-unknown-linux-gnu\n' "${_simple_arch}" ;;
+  esac
+}
+
 simple_executable_format() {
   [ -f "$1" ] || { printf '%s\n' missing; return 1; }
   _simple_magic=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')

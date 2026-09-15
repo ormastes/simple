@@ -1,11 +1,17 @@
 # Engine2D Read Pixels Provenance Gap
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — Fixed: readback provenance is typed at the Engine2D backend boundary
+
+- **measured** (grep of current source): the "Minimal Fix" landed, under the name `Engine2DReadback` rather than `Engine2DReadbackResult`. `fn read_pixels_with_source() -> Engine2DReadback` is declared on the backend trait (`src/lib/gc_async_mut/gpu/engine2d/backend.spl:104`) and implemented across backends — baremetal, directx, intel, cpu, cuda, among others.
+- **measured**: the exact source taxonomy the entry specified is present — `backend.spl:44-56` maps `device_readback` / `cpu_mirror` and admits `host_cache_after_device_present`, `host_cache_after_device_copy`, `swapchain_present`, `cpu_fallback`. `backend_cpu.spl:73` returns `engine2d_readback(..., "cpu_mirror")`; `backend_cuda.spl:1051` returns `"device_readback"` only on a successful device-to-host copy, exactly as specified.
+- **measured**: `read_pixels()` survives as the compatibility wrapper (`engine.spl:16,286`), and provenance is consumed by the viability probe (`engine.spl:1150,1169` — "viable: device provenance + fill/clip/blit pixel round-trip") and by the Simple Web presenter (`simple_web_engine2d_renderer.spl` via `SimpleWebLayoutEngine2DReadbackResult`).
+- **inferred**: the fail-closed production-wrapper requirement is satisfiable now that the type exists; GPU hardware lanes were not exercised on this Windows host.
 
 Date: 2026-06-14
 
 ## Status
 
-Open.
+CLOSED 2026-09-13 — fixed; provenance typed as `Engine2DReadback` + `read_pixels_with_source()`.
 
 ## Problem
 
@@ -34,6 +40,3 @@ Engine2D boundary.
 - Consume the typed result in the Simple Web Engine2D presenter and WebRender
   artifact receipt before allowing
   `same_frame_gpu_backend_readback_status=pass`.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

@@ -362,6 +362,35 @@ impl MirLowering:
             return true
         self.nil_locals.contains(local.id)
 
+    fn mir_type_is_scalar_numeric(type_: MirType?) -> bool:
+        """True for a registered MIR scalar numeric type (I8..U64, F32, F64).
+        nil (no registered type) is NOT numeric: an unregistered local must
+        keep whatever path it took before this predicate existed."""
+        val found = type_
+        if found == nil:
+            return false
+        val disc = _sffi_method_hir_type_discriminant(found.kind)
+        disc == _sffi_method_hir_type_discriminant(MirTypeKind.I8) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.I16) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.I32) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.I64) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.U8) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.U16) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.U32) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.U64) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.F32) or
+            disc == _sffi_method_hir_type_discriminant(MirTypeKind.F64)
+
+    fn local_hir_type_is_any(local: LocalId) -> bool:
+        """True when the local's DECLARED HIR type is `Any` (a tagged runtime
+        word at MIR I64), the population coerce_concat_operand routes through
+        rt_value_to_string instead of the raw scalar renderers."""
+        if val any_hir_type = self.find_local_hir_type(local.id):
+            match any_hir_type.kind:
+                case HirTypeKind.Any: return true
+                case _: return false
+        false
+
     me local_hir_type_is_str(local: LocalId) -> bool:
         match self.find_local_hir_type(local.id):
             case Some(found_type):
@@ -1017,6 +1046,54 @@ impl MirLowering:
                 self.builder = b_mg_back
                 self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, mg_recv)
                 return mg_recv
+            return mg_recv
+        # SCALAR RECEIVER -> arithmetic add, not array extend.
+        # `collection_desugar.spl`'s Pattern B rewrites `x = x + <identifier>`
+        # into `x.merge(<identifier>)` with no type information, and its
+        # `is_definite_scalar_addend` gate only recognises literal/unary/binary
+        # addend SHAPES -- so `s = s + i` (an accumulator whose addend is
+        # another variable) reaches this arm. Measured on the phase-2 native
+        # lane: `while i <= 10: s = s + i` lowered to
+        # `rt_array_extend_i64(s, i, -1)` on an i64 receiver, the result was
+        # never stored back, and the loop finished with `s == 0`.
+        # MIR is the first layer that knows both operand types, so mirror the
+        # generic binop `+` classification (expr_dispatch.spl: array concat is
+        # taken only when local_is_runtime_array answers for an operand) and
+        # require BOTH operands to be scalar numerics before choosing
+        # arithmetic -- an untyped array local can carry MIR i64 and be absent
+        # from runtime_array_locals, and requiring a numeric addend keeps
+        # `buf = buf + bytes_call()` on the extend path exactly as before.
+        # An `Any`-typed HIR local also lowers to MIR I64 but holds a TAGGED
+        # runtime word (see coerce_concat_operand's Any arm in
+        # expr_dispatch.spl), so it must never reach the integer add below.
+        val mg_recv_scalar = self.mir_type_is_scalar_numeric(self.local_mir_type_of(mg_recv)) and
+            not self.local_hir_type_is_any(mg_recv)
+        val mg_other_scalar = self.mir_type_is_scalar_numeric(self.local_mir_type_of(mg_other)) and
+            not self.local_hir_type_is_any(mg_other)
+        if mg_recv_scalar and mg_other_scalar and
+                not self.local_is_runtime_array(mg_recv) and
+                not self.local_is_runtime_array(mg_other):
+            var mg_add_left = mir_operand_copy(mg_recv)
+            var mg_add_right = mir_operand_copy(mg_other)
+            var mg_add_type = self.local_mir_type_of(mg_recv) ?? MirType.i64()
+            val mg_recv_float = self.local_is_float(mg_recv)
+            val mg_other_float = self.local_is_float(mg_other)
+            if mg_recv_float or mg_other_float:
+                mg_add_type = MirType.f64()
+                var b_mg_widen = self.builder
+                if not mg_recv_float:
+                    mg_add_left = mir_operand_copy(b_mg_widen.emit_cast(mg_add_left, MirType.f64()))
+                if not mg_other_float:
+                    mg_add_right = mir_operand_copy(b_mg_widen.emit_cast(mg_add_right, MirType.f64()))
+                self.builder = b_mg_widen
+            var b_mg_add = self.builder
+            val mg_sum = b_mg_add.emit_binop(MirBinOp.Add, mg_add_left, mg_add_right, mg_add_type)
+            # COPY BACK: the desugared statement discards the call result, so
+            # the sum must land in the receiver local (same hazard the text
+            # arm above documents).
+            b_mg_add.emit_copy(mg_recv, mg_sum)
+            self.builder = b_mg_add
+            self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, mg_recv)
             return mg_recv
         val mg_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_array_extend_i64"),

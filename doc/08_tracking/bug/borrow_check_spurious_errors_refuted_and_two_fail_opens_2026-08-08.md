@@ -271,3 +271,29 @@ fail-open #2 (borrow check skipped for Stage 2/3 under `SIMPLE_BOOTSTRAP=1`
 without `STAGE4=1`). Both are driver-side design changes in
 `src/compiler/80.driver/`, deliberately not drive-by patched for the reason this
 record already gives.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Re-ran `bin/simple test test/01_unit/compiler/borrow/borrow_check_spec.spl`
+on the deployed seed: still `outcome=OK declared>=13 executed=13 passed=13
+failed=0`. The primary "spurious errors" claim remains refuted. Fail-open #1
+(prior-phase errors relabelled `CompileResult.BorrowError` in
+`driver_aot_pipeline.spl:97`) and fail-open #2 (borrow check skipped for
+Stage 2/3 under `SIMPLE_BOOTSTRAP=1` without `STAGE4=1`) are both deliberate
+driver-pipeline design changes, as this record already argues (fixing #1 by
+suppression would manufacture a fourth fail-open; #2 requires deciding
+whether/how to run borrow check under partial bootstrap stages) — out of
+scope for a single bugfix-lane change. Leaving OPEN, unchanged.
+## Triage 2026-09-13
+
+Extensively investigated (273 lines); the original "spurious errors"
+premise is already refuted with a sabotage-verified spec (borrow
+checker itself is clean). The three fail-opens found instead are each
+explicitly "deliberately NOT fixed here" in the record itself --
+diagnostic-mislabeling and stage-dependent skip-gating are compiler
+pipeline architecture decisions requiring careful cross-pipeline
+coordination (3 call sites: AOT/JIT/VHDL), and fail-open #3 needs
+further isolation work the original investigator couldn't complete
+even with a 40-minute interpreted budget. Not a quick fix. Leaving
+OPEN as recorded.
+

@@ -1,7 +1,7 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.*
 use std.gc_async_mut.gpu.browser_engine.layout_table.{
     simple_web_collect_table_rows, simple_web_fixed_table_cell_span,
-    simple_web_fixed_table_column_count
+    simple_web_fixed_table_column_count, table_distribute_auto_columns
 }
 use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_layout}
 use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signed}
@@ -163,6 +163,21 @@ class LayoutResult:
     wrap_ends: [[i32]]
     intrinsic_widths: [i32]
     height: i32
+    # CSS 2.2 8.3.1: the bottom margin of a block's LAST in-flow child
+    # collapses THROUGH the block when the block has no bottom padding,
+    # no bottom border, and no height that would establish a bottom edge.
+    # The margin is then the block's own trailing margin for the parent's
+    # sibling collapsing -- it must not be added to the block's height.
+    # Without this an <li> wrapping a <p> was 16 px taller than Chrome.
+    trailing_margin_b: i32 = 0
+    # CSS 2.2 8.3.1, the symmetric half: the top margin of a block's FIRST
+    # in-flow child collapses THROUGH the block when the block has no top
+    # padding, no top border, and nothing else that would establish a top
+    # edge. The margin is then the block's own LEADING margin and must be
+    # collapsed with the block's declared margin-top by the block's parent
+    # instead of being added to the block's height. Without this
+    # `<div><p>t</p></div>` measured 40 px where Chrome measures 24.
+    leading_margin_t: i32 = 0
 
 class LayoutSelectedResult:
     layout: LayoutResult
@@ -214,13 +229,42 @@ fn inline_line_strut_baseline_offset(st: Style) -> i32:
     val half_leading = (style_line_h(st) - st.font_size) / 2
     half_leading + style_baseline_offset(st)
 
-fn inline_line_baseline_ascent(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_t: i32, margin_b: i32, bh: [i32]) -> i32:
-    if st.display == "inline-block" and child_index.child_count[node_index] == 0:
+# CSS 2.1 §10.8.1: "the baseline of an inline, non-replaced element is the
+# baseline of its font; the baseline of an inline REPLACED element is the
+# bottom margin edge". An empty inline-block already followed the bottom-edge
+# rule (§10.8.1's "if it has no in-flow line boxes" clause) and the two cases
+# are the same arithmetic, so `bottom_edge_baseline` selects between them.
+# Round 19 added the replaced arm: it is what puts Chrome's canvas/svg/audio/
+# video on one shared baseline at y=335 on the `animation` catalog page instead
+# of hanging each one from the font strut.
+#
+# The rule is scoped to REPLACED MEDIA, not to every tag in
+# `grid_item_is_replaced`. Form controls are in that set too, and this engine
+# currently gives `input` and `select` `display:inline`, so an unscoped
+# predicate caught them — measured: it took `form_control_widget_box_spec`'s
+# `<label>Choice <select>…` from 33 px to 39. A form control's baseline is its
+# INNER TEXT baseline (Chrome reports these four as `inline-block` in the first
+# place, per the round-19 census), which the font strut already models, so they
+# keep the strut path until someone measures the inner-text case properly.
+fn replaced_media_bottom_edge_tag(tag: text) -> bool:
+    (
+        tag == "img" or tag == "svg" or tag == "video" or tag == "audio" or
+        tag == "canvas" or tag == "iframe" or tag == "embed" or
+        tag == "object"
+    )
+
+fn bottom_edge_baseline(child_index: HtmlChildIndex, node_index: i32, st: Style, replaced_media: bool) -> bool:
+    if replaced_media and st.display == "inline":
+        return true
+    st.display == "inline-block" and child_index.child_count[node_index] == 0
+
+fn inline_line_baseline_ascent(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_t: i32, margin_b: i32, bh: [i32], replaced: bool) -> i32:
+    if bottom_edge_baseline(child_index, node_index, st, replaced):
         return margin_t + bh[node_index] + margin_b
     inline_line_strut_baseline_offset(st)
 
-fn inline_line_baseline_offset(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_b: i32, bh: [i32]) -> i32:
-    if st.display == "inline-block" and child_index.child_count[node_index] == 0:
+fn inline_line_baseline_offset(child_index: HtmlChildIndex, node_index: i32, st: Style, margin_b: i32, bh: [i32], replaced: bool) -> i32:
+    if bottom_edge_baseline(child_index, node_index, st, replaced):
         return bh[node_index] + margin_b
     inline_line_strut_baseline_offset(st)
 
@@ -240,13 +284,13 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
     while baseline_i < nodes.len():
         val node_index = nodes[baseline_i]
         val node_style = styles[node_index]
+        val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
         val node_ascent = inline_line_baseline_ascent(
             child_index, node_index, node_style,
-            margin_ts[baseline_i], margin_bs[baseline_i], bh
+            margin_ts[baseline_i], margin_bs[baseline_i], bh, node_replaced
         )
-        val node_descent = if (
-            node_style.display == "inline-block" and
-            child_index.child_count[node_index] == 0
+        val node_descent = if bottom_edge_baseline(
+            child_index, node_index, node_style, node_replaced
         ): 0 else: inline_line_baseline_descent(node_style)
         if node_ascent > ascent:
             ascent = node_ascent
@@ -261,7 +305,8 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
         val node_index = nodes[baseline_i]
         val node_baseline_offset = inline_line_baseline_offset(
             child_index, node_index, styles[node_index],
-            margin_bs[baseline_i], bh
+            margin_bs[baseline_i], bh,
+            replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
         )
         # An inline non-replaced box sits in the line box by HALF-LEADING: its
         # content area is centred, so its top is line_y + (line_h - content_h)/2
@@ -292,6 +337,85 @@ fn align_inline_line_baselines(child_index: HtmlChildIndex, line_style: Style, h
             out_by = shifted.by
         baseline_i = baseline_i + 1
     InlineLineAlignment(bx: out_bx, by: out_by, height: resolved_height)
+
+fn block_bottom_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
+    val node = nodes[i]
+    # CSS 2.2 8.3.1: a block's bottom margin collapses with the bottom margin
+    # of its last in-flow child when nothing establishes a bottom edge between
+    # them -- no bottom padding, no bottom border, and no height/clamp/overflow
+    # that would close the box. Chrome measures an <li><p>text</p></li> at the
+    # <p>'s height; Simple measured it 16 px taller because the <p>'s bottom
+    # margin was added to the <li>'s content height instead of collapsing out.
+    # <body>/<html> are excluded: the document box owns page height here and
+    # shrinking it moves nothing but the surface extent.
+    if node.tag == "body" or node.tag == "html":
+        return false
+    if st.display != "block" and st.display != "list-item":
+        return false
+    if st.position_absolute or st.position_fixed:
+        return false
+    if st.float_mode != 0:
+        return false
+    if st.overflow_hidden or st.overflow_auto_y or st.overflow_scroll_y:
+        return false
+    if st.pad_b != 0 or st.border_b != 0:
+        return false
+    if st.height_px != 0 or st.min_height_px != 0 or st.max_height_px != 0:
+        return false
+    if st.min_height_vh or st.flex_fill:
+        return false
+    if node.has_widget_panel_class:
+        return false
+    # Flex and grid ITEMS are independent formatting contexts too (Flexbox 4,
+    # Grid 6): margins never collapse through them, and the containing flex
+    # row sizes itself from the item's outer height. Chrome measures the item
+    # in `<div style="display:flex"><div id="f"><p>t</p></div></div>` at
+    # 56 px; letting the 16 px escape would shrink the row with it.
+    val parent = nodes[i].parent
+    if parent >= 0:
+        val pdisp = styles[parent].display
+        if pdisp == "flex" or pdisp == "inline-flex" or pdisp == "grid" or pdisp == "inline-grid":
+            return false
+    true
+
+fn block_top_margin_collapses_through(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
+    # Mirror of block_bottom_margin_collapses_through for the TOP edge: a
+    # block's top margin collapses with its first in-flow child's top margin
+    # when nothing separates them. The exclusion set is deliberately the same
+    # one the bottom half uses (documents, non-block display, out-of-flow,
+    # floats, BFC roots, widget panels, flex/grid items) so the two halves
+    # cannot disagree about which boxes are formatting-context roots. The
+    # height clamps are kept in the exclusion set too: CSS lets a top margin
+    # escape a fixed-height block, but admitting that here would move boxes
+    # the bottom half still holds in place, so it stays conservative and the
+    # remaining case is recorded rather than guessed at.
+    if node_tag_is_document(nodes[i]):
+        return false
+    if st.display != "block" and st.display != "list-item":
+        return false
+    if st.position_absolute or st.position_fixed:
+        return false
+    if st.float_mode != 0:
+        return false
+    if st.overflow_hidden or st.overflow_auto_y or st.overflow_scroll_y:
+        return false
+    if st.pad_t != 0 or st.border_t != 0:
+        return false
+    if st.height_px != 0 or st.min_height_px != 0 or st.max_height_px != 0:
+        return false
+    if st.min_height_vh or st.flex_fill:
+        return false
+    if nodes[i].has_widget_panel_class:
+        return false
+    val parent = nodes[i].parent
+    if parent >= 0:
+        val pdisp = styles[parent].display
+        if pdisp == "flex" or pdisp == "inline-flex" or pdisp == "grid" or pdisp == "inline-grid":
+            return false
+    true
+
+fn node_tag_is_document(node: HNode) -> bool:
+    node.tag == "body" or node.tag == "html" or node.tag == "#root"
 
 fn relative_layout_result(child_index: HtmlChildIndex, node_index: i32, st: Style, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], height: i32) -> LayoutResult:
     if st.position_relative and (st.left_px != 0 or st.top_px != 0):
@@ -355,16 +479,6 @@ fn style_line_h(st: Style) -> i32:
         return st.resolved_font_line_height
     line_h(st.font_size)
 
-fn resolved_text_range_width(st: Style, start: i32, endv: i32) -> i32:
-    if st.resolved_font_identity == "" or start < 0 or endv > st.resolved_font_advances.len():
-        return -1
-    var width = 0
-    var i = start
-    while i < endv:
-        width = width + st.resolved_font_advances[i]
-        i = i + 1
-    width
-
 # --- ONE advance table, shared by layout and paint -------------------------
 #
 # Round 4 made LAYOUT size an inline run from the resolved per-glyph metrics
@@ -386,7 +500,7 @@ fn resolved_text_range_width(st: Style, start: i32, endv: i32) -> i32:
 # array whenever the measured metrics do not describe this exact string
 # (no resolved face, or an arity mismatch) so both sides fall back to the flat
 # estimate TOGETHER rather than one side at a time.
-fn style_run_byte_advances(st: Style, s: text) -> [i32]:
+fn _lay_style_run_byte_advances_inner(st: Style, s: text) -> [i32]:
     var out: [i32] = []
     if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
         return out
@@ -394,22 +508,56 @@ fn style_run_byte_advances(st: Style, s: text) -> [i32]:
     val adv = st.resolved_font_advances
     if adv.len() != cps.len() or adv.len() == 0:
         return out
-    val n = s.len()
+    # Expand codepoint -> bytes from the CODEPOINT VALUES, not by classifying
+    # `char_code_at` results as lead/continuation bytes. `char_code_at` decodes
+    # — it never answers a value in 128..191 — so the byte classifier could
+    # never recognise a continuation byte, over-ran `adv` on the first
+    # multi-byte codepoint and returned an EMPTY table. That made this whole
+    # helper dead on exactly the runs it exists for (any `&mdash;`, accent or
+    # `×`), silently sending both wrap and paint back to the flat estimate.
     var i = 0
-    var ci = 0
-    while i < n:
-        val b = s.char_code_at(i)
-        if b >= 128 and b < 192:
+    val cn = cps.len()
+    while i < cn:
+        out.push(adv[i])
+        var k = 1
+        val w = utf8_encoded_len(cps[i])
+        while k < w:
             out.push(0)
-        else:
-            if ci >= adv.len():
-                return []
-            out.push(adv[ci])
-            ci = ci + 1
+            k = k + 1
         i = i + 1
-    if ci != adv.len():
+    # Fail closed: if the expansion does not describe this exact string, both
+    # sides must fall back together rather than one at a time.
+    if out.len() != s.len():
         return []
     out
+
+# Number of UTF-8 bytes a codepoint occupies.
+pub fn utf8_encoded_len(cp: i64) -> i32:
+    if cp < 0x80:
+        return 1
+    if cp < 0x800:
+        return 2
+    if cp < 0x10000:
+        return 3
+    4
+
+# First byte offset strictly after `start` that begins a codepoint. Used by the
+# wrap loops for the degenerate "not even one glyph fits" step, so that forcing
+# progress never splits a multi-byte codepoint across two lines.
+#
+# Reads `s.bytes()`, like `skip_wrap_spaces`, and NOT `char_code_at`: this
+# renderer's text API is mixed — `len()` and `substring` are BYTE-indexed while
+# `char_code_at`/`char_at` are CODEPOINT-indexed — so a byte offset handed to
+# `char_code_at` silently reads the wrong character on any non-ASCII run.
+pub fn next_codepoint_start(s: text, start: i32) -> i32:
+    val n = s.len() as i32
+    val b = s.bytes()
+    var i = start + 1
+    while i < n:
+        if b[i] < 128 or b[i] >= 192:
+            return i
+        i = i + 1
+    n
 
 fn byte_advances_range_width(by: [i32], start: i32, endv: i32) -> i32:
     var width = 0
@@ -437,12 +585,32 @@ fn style_text_line_advance_width_with(by: [i32], txt: text, start: i32, endv: i3
 # y=192 h=24 line; Simple gave y=192 h=24 for the same element).
 #
 # 9/8 of the font size (18 px at 16 px) is the normal-metrics approximation this
-# renderer already uses elsewhere for vertical font geometry; Chrome measures
-# 18 px for the UI sans stack and 19 px for the monospace `<code>` stack, both
-# within the 1 px comparison tolerance. A real per-family ascent+descent would
-# need font metrics this layout path does not carry.
+# renderer already uses elsewhere for vertical font geometry. That is the SANS
+# stack's number. Chrome measures 19 px, not 18, for the monospace `<code>`
+# stack at the same 16 px — the note here already said so, and the code never
+# implemented the second half of its own sentence. Measured against headless
+# Chrome (round 10, fixture in doc/10_metrics/ui/web_chrome_parity_round10_
+# 2026-09-13.md): `<code>` h=19 vs `<span>` h=18 at font-size 16. So the
+# monospace content area is 19/16 of the font size. A real per-family
+# ascent+descent would need font metrics this layout path does not carry; these
+# two ratios are what Chrome reports for the two stacks the catalog uses.
+#
+# The family substring list mirrors `browser_font_candidates_for_family`
+# (font_provider.spl) and `_resolved_font_category_uncached` (font_renderer.spl)
+# exactly — three lists that disagree is how `system-ui` ended up resolving to a
+# serif face, so this one is kept identical to them rather than "close enough".
+fn style_font_is_monospace(st: Style) -> bool:
+    val fam = st.font_family.lower()
+    (
+        fam.contains("mono") or fam.contains("courier") or
+        fam.contains("code") or fam.contains("console")
+    )
+
 fn inline_content_area_height(st: Style) -> i32:
-    var h = st.font_size * 9 / 8
+    var h = if style_font_is_monospace(st):
+        st.font_size * 19 / 16
+    else:
+        st.font_size * 9 / 8
     if h < 1:
         h = 1
     h
@@ -465,8 +633,100 @@ fn grid_item_is_replaced(node: HNode) -> bool:
         tag == "embed" or tag == "iframe" or tag == "img" or
         tag == "input" or tag == "meter" or tag == "object" or
         tag == "progress" or tag == "select" or tag == "textarea" or
-        tag == "video"
+        tag == "video" or tag == "svg"
     )
+
+fn replaced_default_box_w(tag: text) -> i32:
+    """UA default BORDER-BOX width for a replaced element that has no intrinsic
+    media size, or 0 for a tag that is not sized this way.
+
+    CSS 2.1 §10.3.2 gives a replaced element with no intrinsic width and no
+    specified width a used width of 300px. Chrome's `<audio controls>` widget
+    is 300px wide by the same rule; its height is the widget default (below),
+    not the §10.6.2 fallback. `<img>` and `<input>` are deliberately absent:
+    they are sized from real intrinsic/UA metrics further down this function's
+    caller, and giving them a 300px default would be a regression.
+    """
+    if tag == "iframe" or tag == "video" or tag == "canvas" or tag == "embed" or tag == "object" or tag == "audio":
+        return 300
+    0
+
+fn replaced_default_box_h(tag: text) -> i32:
+    """UA default BORDER-BOX height matching `replaced_default_box_w`.
+
+    CSS 2.1 §10.6.2 fallback is 150px. `<audio controls>` is the one exception
+    measured against Chrome 152: the control strip is 54px tall.
+    """
+    if tag == "audio":
+        return 54
+    if replaced_default_box_w(tag) > 0:
+        return 150
+    0
+
+# Width Chrome's UA reserves for a <select>'s drop-down arrow, on top of the
+# widest option label. Derived against Chrome 152 on the catalog's forms-media
+# page: Chrome's select border box is 73 px there, and this engine's
+# max-content width for the same `<option>` set (label + the select's own
+# padding 16 and border 2) is 51, so the arrow region is 22.
+val SELECT_ARROW_WIDTH_PX: i32 = 22
+
+# Per-column advance and content-box intercept Chrome's UA uses to turn a text
+# control's `size`/`cols` attribute into an intrinsic CONTENT width. These are
+# NOT this engine's text metrics: `style_char_w` is the 6 px bitmap cell the
+# glyph rasteriser draws into, and using it here is what made every sized
+# control too narrow (measured: `<input size=20>` 138 px against Chrome's 163).
+#
+# A control's width is NOT `columns x text advance`. Chrome adds a fixed
+# font-derived intercept on top of the per-column term, so dividing a single
+# measured width by its `size` recovers neither number. Both were fitted
+# against Chrome 152 at the UA control font size (13.3333 px), on sizes
+# 1,2,3,4,5,6,10,20,40, on two independent pages (the catalog's forms-media,
+# whose author CSS adds 18 px of padding+border, and a bare page with the UA's
+# own 8 px) -- the CONTENT width agreed at 145 px on both, which is what makes
+# these content-box numbers rather than a fit to one page's padding:
+#
+#   <input size=N>     content = N * 7 + 5      exact on every size measured
+#   <textarea cols=N>  content = N * 8 + 17     exact at 10/20/30, 1 px at 40
+#
+# The two differ because Chrome gives them different UA fonts -- `input` is
+# proportional (Arial), `textarea` is monospace, whose '0' advance is 8.0253 --
+# and because a textarea reserves a ~15 px vertical scrollbar gutter, which is
+# the bulk of its larger intercept.
+#
+# Scaled by `glyph_scale` so a control at another font size stays consistent
+# with the rest of this engine's metrics; `glyph_scale` is 1 at the UA control
+# size, so the measured numbers above are reproduced exactly.
+val INPUT_COL_ADVANCE_PX: i32 = 7
+val INPUT_CONTENT_INTERCEPT_PX: i32 = 5
+val TEXTAREA_COL_ADVANCE_PX: i32 = 8
+val TEXTAREA_CONTENT_INTERCEPT_PX: i32 = 17
+
+fn form_control_intrinsic_content_w(node: HNode, st: Style, cols: i32) -> i32:
+    """Content-box width Chrome's UA gives a text control from its `size` /
+    `cols` attribute: a per-column advance plus a fixed font-derived
+    intercept. `<textarea>` and `<input>` carry different UA fonts and a
+    different intercept, so they are separate arms rather than one formula."""
+    val scale = glyph_scale(st.font_size)
+    if node.tag == "textarea":
+        return cols * TEXTAREA_COL_ADVANCE_PX * scale + TEXTAREA_CONTENT_INTERCEPT_PX * scale
+    cols * INPUT_COL_ADVANCE_PX * scale + INPUT_CONTENT_INTERCEPT_PX * scale
+
+fn form_control_rows(node: HNode) -> i32:
+    """Visible text rows of a <textarea>: its `rows` attribute, else the HTML
+    default of 2 (HTML §4.10.11 — Chrome's textarea is two rows tall)."""
+    val attr_rows = parse_int(attr_value(node.attrs_raw, "rows"))
+    if attr_rows > 0:
+        return attr_rows
+    2
+
+fn form_control_cols(node: HNode) -> i32:
+    """Visible character columns of a text control: `size` for <input>, `cols`
+    for <textarea>, else the HTML default of 20 for both."""
+    val attr_name = if node.tag == "textarea": "cols" else: "size"
+    val attr_cols = parse_int(attr_value(node.attrs_raw, attr_name))
+    if attr_cols > 0:
+        return attr_cols
+    20
 
 fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i: i32) -> [i32]:
     val child_count = child_index.child_count[parent_i]
@@ -539,7 +799,7 @@ fn flex_item_outer_height(node: HNode, st: Style) -> i32:
     constrained_outer_height(node, st, style_line_h(st))
 
 fn style_with_height_without_grid_fields(st: Style, height_px: i32) -> Style:
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, white_space_pre: st.white_space_pre, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode)
 
 fn style_with_height(st: Style, height_px: i32) -> Style:
     # Style gained Grid fields after this shared used-value clone was written.
@@ -561,7 +821,7 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
 fn style_with_width_without_height_metadata(
     st: Style, width_px: i32
 ) -> Style:
-    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode)
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_gradient_stop_colors: st.background_gradient_stop_colors, background_gradient_stop_positions: st.background_gradient_stop_positions, background_gradient_angle_deg: st.background_gradient_angle_deg, background_gradient_is_radial: st.background_gradient_is_radial, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, position_fixed: st.position_fixed, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, white_space_pre: st.white_space_pre, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold, float_mode: st.float_mode)
 
 fn style_with_width(st: Style, width_px: i32) -> Style:
     val out = style_with_width_without_height_metadata(st, width_px)
@@ -570,7 +830,7 @@ fn style_with_width(st: Style, width_px: i32) -> Style:
     out.scrollbar_width_none = st.scrollbar_width_none
     out
 
-fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
+fn _lay_intrinsic_text_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
     if widths[i] >= 0:
         return IntrinsicWidthResult(width: widths[i], widths: widths)
     var out_widths = widths
@@ -611,7 +871,7 @@ fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildI
 # nothing but its own padding. This walks EVERY in-flow child — inline children
 # accumulate along the current line, each block child starts a new one — and the
 # widest line wins, which is the max-content rule.
-fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
     var inline_run = 0
     var widest = 0
     var c = child_index.first_child[i]
@@ -646,6 +906,67 @@ fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: Htm
         widest = inline_run
     widest + styles[i].pad_l + styles[i].pad_r + styles[i].border_l + styles[i].border_r
 
+# Max-content width of a table CELL — CSS 2.1 §17.5.2.2's per-cell input to
+# automatic column sizing. It is the same measurement a flex item's
+# `flex-basis: content` needs (widest line over every in-flow child, inline
+# children accumulating along the line), so it delegates rather than growing a
+# second copy that would drift from it.
+fn _lay_table_cell_max_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+    val w = flex_item_max_content_width(nodes, styles, child_index, cell)
+    if w < 1: 1 else: w
+
+# Min-content width of one text run: its longest unbreakable word. Character
+# counting rather than `text_cell_width` is deliberate and approximate — a word
+# is measured in glyph cells, which is the same unit the max-content walk uses
+# for its per-character advance, so the two stay on one scale.
+fn _table_text_min_content_width(txt: text, cst: Style) -> i32:
+    val glyph_w = style_char_w(cst)
+    val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+    var longest = 0
+    var cur = 0
+    # `txt.len()` is a BYTE count and `char_at` is CODEPOINT-indexed, so the
+    # old single cursor read past the end of a non-ASCII cell and counted each
+    # multi-byte character several times, over-sizing the column. `cur` counts
+    # CHARACTERS (it is multiplied by a per-glyph width below), so step by
+    # codepoint and test the word break on the BYTE.
+    val tb = txt.bytes()
+    val nb = txt.len()
+    var i = 0
+    while i < nb:  # cpu-lane-loop-ok: one pass over a cell's text during table column sizing, not on any paint path
+        val b = tb[i]
+        if b == 32 or b == 9 or b == 10:
+            cur = 0
+        else:
+            cur = cur + 1
+            if cur > longest:
+                longest = cur
+        i = next_codepoint_start(txt, i)
+    longest * ink_w
+
+# Min-content width of a table CELL — the other half of CSS 2.1 §17.5.2.2's
+# per-cell input. Without it a column has no floor, so a table that does not
+# fit its containing block has nothing to compress toward and simply overflows.
+fn _lay_table_cell_min_content_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+    var widest = 0
+    var c = child_index.first_child[cell]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over this cell's children during table column sizing
+        val cst = styles[c]
+        if nodes[c].tag == "#text":
+            val w = _table_text_min_content_width(nodes[c].text_trimmed, cst)
+            if w > widest:
+                widest = w
+        elif cst.display != "none" and cst.display != "marker":
+            val child_w = if cst.width_px > 0:
+                cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+            else:
+                table_cell_min_content_width(nodes, styles, child_index, c)
+            if child_w > widest:
+                widest = child_w
+        c = child_index.next_sibling[c]
+    val st = styles[cell]
+    val out = widest + st.pad_l + st.pad_r + st.border_l + st.border_r
+    if out < 1: 1 else: out
+
 # Flex base size for ONE item of a wrapping row. Items that state a basis, a
 # width, a percentage width (`width_px < 0`) or a non-zero `flex-grow` keep the
 # width the caller computed; only an item that states nothing at all is sized to
@@ -655,7 +976,7 @@ fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: Htm
 # auto-width item wrapped onto a line of its own. The NON-wrapping branch of the
 # same layout already measured its items; only the wrap branch did not. See
 # doc/08_tracking/bug/web_flex_wrap_auto_width_item_fills_line_2026-09-12.md.
-fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
+fn _lay_flex_wrap_auto_base_width_inner(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
     if cst.flex_basis_px > 0 or cst.width_px != 0 or cst.flex_grow != 0:
         return caller_base_w
     val max_content = flex_item_max_content_width(nodes, styles, child_index, item)
@@ -667,20 +988,30 @@ fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlC
 #
 # `resolved_font_advances` carries one advance per CODEPOINT; `txt_len` and
 # every wrap offset in this renderer are BYTE indices. On any non-ASCII run the
-# two disagree, so `resolved_text_range_width` bails to -1 and the flat
+# two disagree, so the old per-codepoint range helper bailed out and the flat
 # per-character estimate was compared against a `node_w` that had already been
 # sized from the REAL measured width. A one-glyph em dash therefore "overflowed"
 # its own box and wrapped to one line per BYTE: measured h=72 (3 lines) for
 # `<div>&mdash;</div>` where Chrome reports 24, and the same for any run
 # containing a single accented letter. That inflated every catalog `<li>` whose
 # text carries an `&mdash;`.
-fn style_measured_run_advance(txt: text, txt_len: i32, st: Style) -> i32:
+fn _lay_style_measured_run_advance_inner(txt: text, txt_len: i32, st: Style) -> i32:
     if st.resolved_font_width > 0 and st.resolved_font_advances.len() == text_codepoints(txt).len():
         return st.resolved_font_width
     style_text_line_advance_width(txt, 0, txt_len, st, style_text_advance(st), style_space_advance(st))
 
 fn codepoint_is_space(ch: i64) -> bool:
     ch == 32 or ch == 9 or ch == 10 or ch == 13
+
+# True when normal white-space processing would collapse a leading run of
+# white space in this raw text node. BYTE-indexed on purpose: every ASCII
+# white-space byte is its own codepoint, and no UTF-8 continuation byte can
+# equal one, so reading the first byte is exact and needs no decode.
+pub fn text_starts_with_collapsible_space(raw: text) -> bool:
+    if raw.len() == 0:
+        return false
+    val b = raw.bytes()[0]
+    b == 32 or b == 9 or b == 10 or b == 13
 
 # Advance of ONE space in the face the resolved metrics were measured with.
 # Prefer a real space advance out of the measured array; only when the measured
@@ -694,11 +1025,19 @@ fn resolved_space_advance(st: Style, measured_cps: [i64]) -> i32:
         i = i + 1
     style_space_advance(st)
 
-fn inline_text_advance_width(node: HNode, st: Style) -> i32:
+fn _lay_inline_text_advance_width_inner(node: HNode, st: Style) -> i32:
     if node.tag != "#text":
         return 0
     val raw = node.text_data
+    # `lay_cps` (round 13): this decode runs on EVERY call, including the ones
+    # that then return `st.resolved_font_width` in O(1) from the arity check
+    # below -- so if the inline bucket is dominated by it, the repeat is the
+    # decode, not the measurement. Timed to decide that from data rather than
+    # from code reading; default-off like every counter here.
+    val _cps_t0 = if _wsc_on: _wsc_now_us() else: 0
     val cps = text_codepoints(raw)
+    if _wsc_on:
+        _wlay_add(9, _wsc_now_us() - _cps_t0, 1)
     # `resolved_font_advances` carries ONE advance per codepoint (see
     # font_renderer.measure_text_advances), so the arity check is against the
     # codepoint count. Comparing it against `raw.len()` matched only by
@@ -756,20 +1095,28 @@ fn text_ink_y_offset(fs: i32) -> i32:
 fn text_ink_x_offset(fs: i32) -> i32:
     1
 
-fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
+# `off` and the returned offset are BYTE indices, but `cpl` is a CHARACTER
+# budget (cells per line). Adding the two — and then probing with the
+# CODEPOINT-indexed `char_code_at` — meant a non-ASCII run both got a short
+# line (each multi-byte codepoint spent 2-3 of its character budget) and broke
+# at the wrong place. Spend the budget one CODEPOINT at a time, and test for a
+# space on the BYTE, which is exact: no continuation byte can equal 32.
+pub fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
     val n = txt.len()
-    var limit = off + cpl
-    if limit >= n:
-        return n
+    val tb = txt.bytes()
     var last_space = -1
     var i = off
-    while i < limit:
-        if txt.char_code_at(i) == 32:
+    var taken = 0
+    while i < n and taken < cpl:
+        if tb[i] == 32:
             last_space = i
-        i = i + 1
+        i = next_codepoint_start(txt, i)
+        taken = taken + 1
+    if i >= n:
+        return n
     if last_space > off:
         return last_space
-    limit
+    i
 
 # `skip_wrap_spaces` now lives in ..._foundation.spl (reached here through the
 # export chain). It was defined HERE but also called from ..._style.spl, which
@@ -779,11 +1126,18 @@ fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
 # "Unknown variable: skip_wrap_spaces while lowering parse_font_shorthand_family"
 # and silently ran interpreted (~1000x slower).
 
-fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+# `start`/`endv` are BYTE offsets; `char_code_at` is CODEPOINT-indexed. Read
+# with one cursor this charged one flat advance per BYTE, so a 3-byte em dash
+# cost three glyph widths, and it read the wrong character to decide "is this a
+# space". Walk the bytes and charge once per CODEPOINT — i.e. on a lead byte,
+# never on a UTF-8 continuation byte (128..191).
+pub fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+    val tb = txt.bytes()
     var width = 0
     var i = start
     while i < endv:
-        width = width + if txt.char_code_at(i) == 32: space_advance else: advance
+        if tb[i] < 128 or tb[i] >= 192:
+            width = width + if tb[i] == 32: space_advance else: advance
         i = i + 1
     width
 
@@ -820,7 +1174,7 @@ fn text_line_needs_paint_width(st: Style, line_i: i32, line_count: i32) -> bool:
         return not st.direction_rtl
     false
 
-fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
+fn _lay_ellipsize_text_for_width_inner(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
     if max_width <= 0:
         return ""
     val full_width = style_text_line_advance_width(txt, start, endv, st, advance, space_advance)
@@ -831,17 +1185,30 @@ fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, st
     if max_width <= ellipsis_w:
         return ellipsis
     val content_limit = max_width - ellipsis_w
+    # `start`/`endv` are BYTE offsets (they are cut on with `substring` just
+    # above), so every step of this loop must be byte-indexed too. It used to
+    # mix three index spaces at once: `resolved_text_range_width(st, i, i+1)`
+    # indexed the per-CODEPOINT advance array with a byte offset, and
+    # `char_code_at(i)` / `char_at(i)` are CODEPOINT-indexed in this text API.
+    # On any run past its first non-ASCII codepoint all three disagreed, so an
+    # ellipsized run was measured with one character's advance and built from a
+    # different character. `style_run_byte_advances` is the per-BYTE table that
+    # answers this exactly (the codepoint's advance on its lead byte, 0 on every
+    # continuation byte), which also makes a cut inside a codepoint impossible.
+    val by = style_run_byte_advances(st, txt)
+    val use_by = by.len() == txt.len()
+    val tb = txt.bytes()
     var out = ""
     var used = 0
     var i = start
     while i < endv:
-        val resolved_char_w = resolved_text_range_width(st, i, i + 1)
-        val char_w = if resolved_char_w >= 0: resolved_char_w elif txt.char_code_at(i) == 32: space_advance else: advance
+        val nexti = next_codepoint_start(txt, i)
+        val char_w = if use_by: by[i] elif tb[i] == 32: space_advance else: advance
         if used + char_w > content_limit:
             break
-        out = out + txt.char_at(i)
+        out = out + txt.substring(i, nexti)
         used = used + char_w
-        i = i + 1
+        i = nexti
     out + ellipsis
 
 # --- Left-float exclusion band (bug browser_engine_float_no_inline_wrap_
@@ -861,7 +1228,13 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, n
     val n = txt.len()
     if n == 0:
         return LineWrapRanges(starts: [0; 1], ends: [0; 1])
-    val use_font = st.resolved_font_identity != "" and st.resolved_font_advances.len() == n and full_w > 0 and narrow_w > 0
+    # Byte-indexed advances, for the same reason as
+    # `_lay_compute_style_wrap_ranges_inner`: `n` is a BYTE count and
+    # `resolved_font_advances` is per CODEPOINT, so the old arity check sent
+    # every non-ASCII run to the flat cell-width fallback.
+    val by = style_run_byte_advances(st, txt)
+    val tb = txt.bytes()
+    val use_font = st.resolved_font_identity != "" and by.len() == n and full_w > 0 and narrow_w > 0
     val cw = style_char_w(st)
     var starts: [i32] = []
     var ends: [i32] = []
@@ -873,13 +1246,13 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, n
         if use_font:
             var used = 0
             var last_space = -1
-            while endv < n and used + st.resolved_font_advances[endv] <= max_width:
-                used = used + st.resolved_font_advances[endv]
-                if txt.char_code_at(endv) == 32:
+            while endv < n and used + by[endv] <= max_width:
+                used = used + by[endv]
+                if tb[endv] == 32:
                     last_space = endv
                 endv = endv + 1
             if endv == start:
-                endv = start + 1
+                endv = next_codepoint_start(txt, start)
             elif endv < n and last_space > start:
                 endv = last_space
         else:
@@ -897,7 +1270,7 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, narrow_w: i32, n
         return LineWrapRanges(starts: [0; 1], ends: [0; 1])
     LineWrapRanges(starts: starts, ends: ends)
 
-fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
+fn _lay_compute_wrap_ranges_inner(txt: text, cpl: i32) -> LineWrapRanges:
     val txt_len = txt.len()
     if txt_len == 0:
         return LineWrapRanges(starts: [0; 1], ends: [0; 1])
@@ -921,29 +1294,141 @@ fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
         line = line + 1
     LineWrapRanges(starts: starts, ends: ends)
 
-fn compute_style_wrap_ranges(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
-    if st.resolved_font_identity == "" or st.resolved_font_advances.len() != txt.len() or max_width <= 0:
+# `resolved_font_advances` carries ONE advance per CODEPOINT, while every wrap
+# offset in this renderer is a BYTE index. Comparing its length against
+# `txt.len()` (bytes) therefore matched only on pure-ASCII runs: a single em
+# dash, accented letter or `×` made the arity check fail and dropped the whole
+# wrap onto `compute_wrap_ranges`, the flat cells-per-line estimate
+# (`style_char_w` = 12 px at 16 px against a real ~7.8 px average). The
+# estimate is wide, so such a run wrapped one line too early and every
+# following box inherited the 24 px step — measured as the accumulating
+# vertical drift on `css-layout`/`css-paint`/`html`, all of whose catalog
+# `<li>`s carry an `&mdash;`.
+#
+# `style_run_byte_advances` is the table that already answers this correctly:
+# one advance per BYTE, carrying the codepoint's measured advance on its lead
+# byte and 0 on every UTF-8 continuation byte. Indexing it with the byte
+# offsets this loop already uses is exact, and a break can never land inside a
+# codepoint — a continuation byte adds 0 and therefore always fits.
+fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    # Cheap gates first: building `by` decodes the whole run, so it must not run
+    # for a style that cannot use it anyway.
+    if st.resolved_font_identity == "" or max_width <= 0:
+        return compute_wrap_ranges(txt, fallback_cpl)
+    val by = style_run_byte_advances(st, txt)
+    if by.len() != txt.len():
         return compute_wrap_ranges(txt, fallback_cpl)
     var starts: [i32] = []
     var ends: [i32] = []
     var start = 0
     val n = txt.len()
+    # BYTE-indexed space test. `char_code_at` is CODEPOINT-indexed in this text
+    # API while `endv` is a byte offset (it is cut on with `substring`), so on
+    # any run past its first non-ASCII codepoint the two disagree and the break
+    # landed some bytes away from the space it meant to break at.
+    val tb = txt.bytes()
     while start < n:
         var endv = start
         var used = 0
         var last_space = -1
-        while endv < n and used + st.resolved_font_advances[endv] <= max_width:
-            used = used + st.resolved_font_advances[endv]
-            if txt.char_code_at(endv) == 32:
+        while endv < n and used + by[endv] <= max_width:
+            used = used + by[endv]
+            if tb[endv] == 32:
                 last_space = endv
             endv = endv + 1
-        if endv == start:
-            endv = start + 1
-        elif endv < n and last_space > start:
+        # CSS Text 3 `overflow-wrap: normal` (the initial value) forbids a break
+        # INSIDE a word: a word wider than the line OVERFLOWS it, it is not
+        # chopped. Measured against Chrome on an 80 px box:
+        # `LongWordBreakHere` is ONE line that overflows, and
+        # `LongWord<wbr>BreakHere` is exactly two. Before this arm the loop cut
+        # at whatever byte stopped fitting, and — when the run started
+        # mid-line, so `max_width` was a small pen remainder — at `endv ==
+        # start` it emitted a single CODEPOINT per line: 9 lines for
+        # "BreakHere" against Chrome's 1. Intra-word breaking stays available
+        # where CSS actually asks for it (`overflow-wrap: break-word` /
+        # `anywhere`, `word-break: break-all`), which is why this is a
+        # condition and not a deletion.
+        val may_break_in_word = st.overflow_wrap == "break-word" or st.overflow_wrap == "anywhere" or st.word_break == "break-all"
+        if endv < n and last_space > start:
             endv = last_space
+        elif not may_break_in_word and endv < n:
+            # No break opportunity inside this line: take the whole word, even
+            # though it overflows, and break at the space that ends it.
+            endv = word_end_byte(tb, start, n)
+        if endv == start:
+            # Progress guard: `start` is a space whose own advance already
+            # exceeds `max_width` (a pen remainder of a pixel or two), so the
+            # word arm above has nothing to take. Emit one codepoint so the
+            # outer loop always advances; without it the line list would grow
+            # forever on a 1 px box.
+            endv = next_codepoint_start(txt, start)
         starts.push(start)
         ends.push(endv)
         start = skip_wrap_spaces(txt, endv)
+    LineWrapRanges(starts: starts, ends: ends)
+
+# Advance of the FIRST unbreakable piece of a text run: everything up to the
+# first collapsible space, or the whole run when it has none. Used by the
+# `<wbr>` soft-break arm in the block loop, which may take a break opportunity
+# only when the piece that FOLLOWS it does not fit the line remainder. Using
+# the whole run's advance there instead would break at a `<wbr>` whose next
+# word still fits and only a later word does not — measured against Chrome,
+# `Long<wbr>Word<wbr>BreakHere` in an 80 px box is TWO lines, not three,
+# because Chrome is greedy and uses only the last opportunity that is needed.
+fn first_word_advance_width(node: HNode, st: Style) -> i32:
+    if node.tag != "#text":
+        return 0
+    val txt = node.text_trimmed
+    val n = txt.len()
+    if n == 0:
+        return 0
+    val by = style_run_byte_advances(st, txt)
+    if by.len() != n:
+        # No per-byte table for this style: fall back to the whole-run advance
+        # rather than guessing. That is wider, so it can only make the arm more
+        # conservative about breaking, never less.
+        return inline_text_advance_width(node, st)
+    val tb = txt.bytes()
+    val stop = word_end_byte(tb, 0, n)
+    var w = 0
+    var k = 0
+    while k < stop:  # cpu-lane-loop-ok: scans one word of one text run, bounded by that run's byte length
+        w = w + by[k]
+        k = k + 1
+    w
+
+# Byte offset one past the last byte of the word that starts at `start`, i.e.
+# the next ASCII space at or after `start`, or `n` when the run has none. Used
+# by the `overflow-wrap: normal` arm above, where a word that does not fit the
+# line must overflow it whole rather than be cut.
+fn word_end_byte(tb: [u8], start: i32, n: i32) -> i32:
+    var k = start
+    while k < n:  # cpu-lane-loop-ok: scans one word of one text run, bounded by that run's byte length
+        if tb[k] == 32:
+            return k
+        k = k + 1
+    n
+
+# Line ranges for a `white-space: pre` run: every U+000A is a forced break.
+# Two HTML rules are folded in, both harvested from Chrome rather than recalled:
+# a single newline IMMEDIATELY after the `<pre>` start tag is dropped
+# (`<pre>\nA\nB</pre>` is two lines, not three), and a run that ENDS in a
+# newline does not open a trailing empty line.
+fn compute_preserved_newline_ranges(txt: text, txt_len: i32) -> LineWrapRanges:
+    val tb = txt.bytes()
+    var starts: [i32] = []
+    var ends: [i32] = []
+    var start = if txt_len > 0 and tb[0] == 10: 1 else: 0
+    var k = start
+    while k < txt_len:  # cpu-lane-loop-ok: one pass over one text run's bytes
+        if tb[k] == 10:
+            starts.push(start)
+            ends.push(k)
+            start = k + 1
+        k = k + 1
+    if start < txt_len or starts.len() == 0:
+        starts.push(start)
+        ends.push(txt_len)
     LineWrapRanges(starts: starts, ends: ends)
 
 fn zero_i32_list(count: i32) -> [i32]:
@@ -1003,7 +1488,8 @@ fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
 
 fn explicit_auto_table_column_offsets(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
-    table: i32, inner_width: i32, spacing_x: i32, spacing_y: i32
+    table: i32, inner_width: i32, spacing_x: i32, spacing_y: i32,
+    fill_available: bool
 ) -> [i32]:
     # Keep the legacy zero-spacing admission narrow. Authored spacing also
     # admits constrained and spanning cells after their minimum track widths
@@ -1014,6 +1500,7 @@ fn explicit_auto_table_column_offsets(
         nodes, child_index, rows
     )
     var widths: [i32] = [0; column_count]
+    var col_min: [i32] = [0; column_count]
     for row in rows.rows:
         var column = 0
         var cell = child_index.first_child[row]
@@ -1024,7 +1511,7 @@ fn explicit_auto_table_column_offsets(
                 )
                 val cell_style = styles[cell]
                 if not has_authored_spacing and (
-                    span != 1 or cell_style.width_px <= 0 or
+                    span != 1 or
                     cell_style.min_width_px > 0 or
                     cell_style.max_width_px > 0
                 ):
@@ -1035,7 +1522,17 @@ fn explicit_auto_table_column_offsets(
                             nodes[cell], cell_style, cell_style.width_px
                         )
                     else:
-                        1
+                        # CSS 2.1 §17.5.2.2: a cell with no stated width sizes
+                        # its column from CONTENT, not from a 1px placeholder
+                        # that the caller then fills by an equal split. Until
+                        # this landed, every table whose cells state no width
+                        # bailed out of the auto path entirely (the removed
+                        # `cell_style.width_px <= 0` bail above) and got fixed
+                        # equal columns — the shape `table_layout_spec` used to
+                        # assert and Chrome never produces.
+                        table_cell_max_content_width(
+                            nodes, styles, child_index, cell
+                        )
                     # border-collapse: adjacent cell borders are shared, so a
                     # cell's border-box contributes only half of each vertical
                     # border to its column track (uniform-width borders only —
@@ -1060,6 +1557,25 @@ fn explicit_auto_table_column_offsets(
                             cell_width = min_width
                     if cell_width > widths[column]:
                         widths[column] = cell_width
+                    # The column's FLOOR. A cell with a stated width is its own
+                    # floor; an auto cell's floor is its longest unbreakable
+                    # word. Never above the ceiling just computed.
+                    var cell_min = if cell_style.width_px > 0:
+                        cell_width
+                    else:
+                        table_cell_min_content_width(
+                            nodes, styles, child_index, cell
+                        )
+                    if cell_style.min_width_px > 0:
+                        val floor_width = css_outer_width(
+                            nodes[cell], cell_style, cell_style.min_width_px
+                        )
+                        if cell_min < floor_width:
+                            cell_min = floor_width
+                    if cell_min > cell_width:
+                        cell_min = cell_width
+                    if cell_min > col_min[column]:
+                        col_min[column] = cell_min
                 column = column + span
             cell = child_index.next_sibling[cell]
     if has_authored_spacing:
@@ -1107,34 +1623,74 @@ fn explicit_auto_table_column_offsets(
                             )
                             var grow_column = span_column
                             while grow_column < next_column:
+                                val grow_share = grow_each + (if (
+                                    grow_column - span_column < grow_remainder
+                                ): 1 else: 0)
                                 widths[grow_column] = (
-                                    widths[grow_column] +
-                                    grow_each +
-                                    (if (
-                                        grow_column - span_column <
-                                        grow_remainder
-                                    ): 1 else: 0)
+                                    widths[grow_column] + grow_share
+                                )
+                                # The floor rises with the ceiling: a spanning
+                                # cell's stated requirement is a requirement in
+                                # both directions, or the columns it covers
+                                # could be compressed back below it.
+                                col_min[grow_column] = (
+                                    col_min[grow_column] + grow_share
                                 )
                                 grow_column = grow_column + 1
                     span_column = next_column
                 span_cell = child_index.next_sibling[span_cell]
-    var minimum_width = 0
-    for width in widths:
-        if width <= 0:
+    var sum_max = 0
+    var c_i = 0
+    while c_i < column_count:
+        if widths[c_i] <= 0:
             return []
-        minimum_width = minimum_width + width
-    var grid_width = inner_width - spacing_x * (column_count + 1)
-    if grid_width < minimum_width:
-        grid_width = minimum_width
-    val extra = grid_width - minimum_width
-    val extra_each = extra / column_count
-    val extra_remainder = extra - extra_each * column_count
+        if col_min[c_i] > widths[c_i]:
+            col_min[c_i] = widths[c_i]
+        sum_max = sum_max + widths[c_i]
+        c_i = c_i + 1
+    # CSS 2.1 §17.5.2: a table with a stated width FILLS it; a `width: auto`
+    # table is as wide as its content but never wider than the space it has —
+    # past that ceiling its columns compress between their min- and
+    # max-content widths instead of overflowing the containing block. The
+    # distribution itself is `table_distribute_auto_columns`, the same function
+    # the M14 spec-facing `layout_table` calls, so the two lanes resolve
+    # columns by one rule rather than two that drift.
+    var available = inner_width - spacing_x * (column_count + 1)
+    if available < column_count:
+        available = column_count
+    # CAPMIN (CSS 2.1 §17.5.2): the used width of a `width: auto` table is at
+    # least the min-content width of its CAPTION. Without this the caption is
+    # laid out at the shrink-to-fit table width and wraps — measured on the
+    # `html` catalog page, "Table caption" over a one-word cell wrapped to two
+    # lines (48 px against Chrome's 24) and pushed every later element on the
+    # page down. Chrome widens the table instead.
+    var capmin = 0
+    var cap_child = child_index.first_child[table]
+    while cap_child >= 0:  # cpu-lane-loop-ok: one pass over the table's own children
+        if styles[cap_child].display == "table-caption":
+            val cap_w = table_cell_min_content_width(
+                nodes, styles, child_index, cap_child
+            ) - spacing_x * (column_count + 1)
+            if cap_w > capmin:
+                capmin = cap_w
+        cap_child = child_index.next_sibling[cap_child]
+    val target = if fill_available:
+        available
+    elif sum_max <= available:
+        if capmin > sum_max:
+            if capmin < available: capmin else: available
+        else:
+            0
+    else:
+        available
+    val used = table_distribute_auto_columns(col_min, widths, target)
+    if used.len() != column_count:
+        return []
     var offsets: [i32] = [0; column_count + 1]
     var offset_column = 0
     while offset_column < column_count:
         offsets[offset_column + 1] = (
-            offsets[offset_column] + widths[offset_column] + extra_each +
-            (if offset_column < extra_remainder: 1 else: 0)
+            offsets[offset_column] + used[offset_column]
         )
         offset_column = offset_column + 1
     offsets
@@ -1153,7 +1709,7 @@ fn constrained_outer_height(node: HNode, st: Style, candidate_height: i32) -> i3
         out = 1
     out
 
-fn absolute_outer_width(parent: Style, node: HNode, st: Style, containing_w: i32) -> i32:
+fn absolute_outer_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, node_i: i32, parent: Style, node: HNode, st: Style, containing_w: i32) -> i32:
     if st.width_px == 0 and st.left_px > 0 and st.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
         var stretched = padding_box_w - st.left_px - st.right_px
@@ -1167,7 +1723,36 @@ fn absolute_outer_width(parent: Style, node: HNode, st: Style, containing_w: i32
     val explicit_node_w = css_outer_width(node, st, st.width_px)
     if st.width_px > 0:
         return constrained_outer_width(node, st, explicit_node_w)
-    constrained_outer_width(node, st, containing_w)
+    # CSS 2.1 10.3.7: `width: auto` on an absolutely positioned, non-replaced
+    # box is SHRINK-TO-FIT, not "fill the containing block". The stretch case is
+    # only reachable when BOTH `left` and `right` are given, and that arm is the
+    # first branch above. Falling through to the containing block made every
+    # `width:auto` absolute box as wide as its containing block, which then also
+    # dragged its x through the `right` formula in absolute_child_x (measured on
+    # the catalog's one absolute box: w 810 instead of 77, x 35 instead of 769).
+    #
+    # shrink-to-fit = min(max(preferred-minimum, available), preferred).
+    # `preferred` is the same max-content measurement <select> already uses for
+    # its intrinsic width, so no new measurement surface is introduced here.
+    #
+    # AVAILABLE is not the whole containing block: 10.3.7 takes it as the
+    # containing block MINUS whichever of left/right is specified, because that
+    # offset is already committed. Harvested from Chrome on a fixture where the
+    # content overflows (`right: 10px`, text far wider than the block): Chrome
+    # clamps to 890 in a 900 px block, not to 900. Only the overflow case can
+    # see this, which is why it is taken from a measurement rather than assumed.
+    val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+    var available = padding_box_w
+    if st.right_px >= 0:
+        available = available - st.right_px
+    if st.left_px > 0:
+        available = available - st.left_px
+    var shrink_to_fit = flex_item_max_content_width(nodes, styles, child_index, node_i)
+    if shrink_to_fit > available:
+        shrink_to_fit = available
+    if shrink_to_fit < 1:
+        shrink_to_fit = 1
+    constrained_outer_width(node, st, shrink_to_fit)
 
 fn absolute_outer_height(node: HNode, st: Style, containing_h: i32) -> i32:
     val border_y = st.border_t + st.border_b
@@ -1197,10 +1782,10 @@ fn resolve_vertical_margin_px(margin_px: i32, viewport_h: i32) -> i32:
         return viewport_h * ((0 - margin_px) - 1000) / 100
     margin_px
 
-fn absolute_child_x(parent_x: i32, parent: Style, child_node: HNode, child: Style, containing_w: i32) -> i32:
+fn absolute_child_x(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, child_i: i32, parent_x: i32, parent: Style, child_node: HNode, child: Style, containing_w: i32) -> i32:
     if child.right_px >= 0:
         val padding_box_w = containing_w + parent.pad_l + parent.pad_r
-        return parent_x + parent.border_l + padding_box_w - absolute_outer_width(parent, child_node, child, containing_w) - child.right_px
+        return parent_x + parent.border_l + padding_box_w - absolute_outer_width(nodes, styles, child_index, child_i, parent, child_node, child, containing_w) - child.right_px
     parent_x + parent.border_l + child.left_px
 
 fn absolute_child_y(parent_y: i32, parent: Style, child_node: HNode, child: Style, containing_h: i32) -> i32:
@@ -1228,7 +1813,7 @@ fn absolute_child_style(parent: Style, child: Style, containing_w: i32, containi
 # Grid SS11.5 "Resolving Flexible Track Sizes", simplified: no min-content
 # clamping and no `minmax()` support (see
 # doc/08_tracking/bug/browser_engine_grid_fr_track_unit_unsupported_2026-08-07.md).
-fn grid_track_sizes(raw: text, available_w: i32, gap: i32) -> [i32]:
+fn _lay_grid_track_sizes_inner(raw: text, available_w: i32, gap: i32) -> [i32]:
     var tokens: [text] = []
     var is_fr: [bool] = []
     var fixed_sum = 0
@@ -1633,23 +2218,25 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             node_w = nowrap_intrinsic.width
     node_w = constrained_outer_width(node, st, node_w)
     out_bw[i] = node_w
-    if node.tag == "iframe":
-        # Replaced element (like img): fixed box from CSS width/height, else the
-        # width/height HTML attributes, else the browser default 300x150. The
-        # subtree is never laid out (returns without recursing into children).
+    if replaced_default_box_w(node.tag) > 0:
+        # Replaced element with no intrinsic media loaded: fixed box from CSS
+        # width/height, else the width/height HTML attributes, else the UA
+        # default for the tag (CSS 2.1 §10.3.2/§10.6.2 give 300x150; Chrome's
+        # `<audio controls>` widget default is 300x54). The subtree is never
+        # laid out (returns without recursing into children).
         if st.width_px == 0:
             val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
-            var iframe_w = if attr_w > 0: attr_w else: 300
-            iframe_w = constrained_outer_width(node, st, iframe_w)
-            out_bw[i] = iframe_w
-        val explicit_iframe_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
-        var iframe_h = explicit_iframe_h
+            var replaced_w = if attr_w > 0: attr_w else: replaced_default_box_w(node.tag)
+            replaced_w = constrained_outer_width(node, st, replaced_w)
+            out_bw[i] = replaced_w
+        val explicit_replaced_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        var replaced_h = explicit_replaced_h
         if st.height_px == 0:
             val attr_h = parse_int(attr_value(node.attrs_raw, "height"))
-            iframe_h = if attr_h > 0: attr_h else: 150
-        iframe_h = constrained_outer_height(node, st, iframe_h)
-        out_bh[i] = iframe_h
-        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, iframe_h)
+            replaced_h = if attr_h > 0: attr_h else: replaced_default_box_h(node.tag)
+        replaced_h = constrained_outer_height(node, st, replaced_h)
+        out_bh[i] = replaced_h
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, replaced_h)
     if node.tag == "#text":
         # white-space:pre/nowrap (st.white_space_nowrap, inherited from e.g. a
         # <pre> code block) preserves the raw text incl. leading indentation;
@@ -1676,7 +2263,18 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             band_narrow_w = node_w - g_float_band_indent
             if band_narrow_w < 1:
                 band_narrow_w = 1
-        if st.white_space_nowrap:
+        if st.white_space_pre:
+            # `white-space: pre` PRESERVES newlines as forced line breaks — the
+            # one thing that distinguishes it from `nowrap`, which collapses
+            # them. Both used to share the single-line branch below, so a
+            # `<pre>` block was one line however many rows it held: Chrome
+            # gives `<pre>A\nB</pre>` two lines, Simple gave one, and the
+            # catalog's `<pre>` sample was 24 px short with every later row on
+            # that page dragged up behind it.
+            val pre_ranges = compute_preserved_newline_ranges(txt, txt_len)
+            out_wrap_starts[i] = pre_ranges.starts
+            out_wrap_ends[i] = pre_ranges.ends
+        elif st.white_space_nowrap:
             out_wrap_starts[i] = [0; 1]
             out_wrap_ends[i] = [txt_len; 1]
         elif band_narrow_lines > 0 and full_adv > band_narrow_w:
@@ -1694,9 +2292,73 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         val h = lines * style_line_h(st)
         out_bh[i] = h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
-    if node.tag == "img" or node.tag == "input":
+    if node.tag == "input" or node.tag == "select" or node.tag == "textarea":
+        # Form controls are WIDGETS, not block containers: the UA gives them a
+        # box from their own metrics and never lays their children out as boxes
+        # (Chrome reports every `<option>` as 0x0 — a `<select>` renders its
+        # options in a popup, not in flow). This branch returns before the
+        # child recursion for exactly that reason.
+        #
+        # Height is the content line plus the element's own padding and border.
+        # `box-sizing` only reinterprets a SPECIFIED height, so an auto-height
+        # control is content + padding + border either way; charging only the
+        # content line is what made every control 18 px short (and is the
+        # `expected 19 to equal 21` in web_css_table_replaced_forms_spec).
+        val input_type = attr_value(node.attrs_raw, "type")
+        if node.tag == "input" and (input_type == "checkbox" or input_type == "radio"):
+            # Chrome's UA sizes these two to a fixed 13x13 glyph box and
+            # ignores author padding on them.
+            out_bw[i] = constrained_outer_width(node, st, 13)
+            val check_h = constrained_outer_height(node, st, 13)
+            out_bh[i] = check_h
+            return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, check_h)
+        val control_line_h = style_line_h(st)
+        val control_rows = if node.tag == "textarea": form_control_rows(node) else: 1
+        val explicit_control_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        val auto_control_h = control_rows * control_line_h + st.pad_t + st.pad_b + border_y
+        val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_control_h else: auto_control_h)
+        out_bh[i] = h
+        if st.width_px == 0:
+            # Intrinsic width: `size` columns for <input>, `cols` for
+            # <textarea>, the widest <option> label for <select> — each in the
+            # control's own UA font, plus its padding and border.
+            val cols = form_control_cols(node)
+            var control_w = form_control_intrinsic_content_w(node, st, cols) + st.pad_l + st.pad_r + border_x
+            if node.tag == "select":
+                # `<option>` is display:block in the UA sheet, so
+                # `intrinsic_text_width` (inline-only) never reaches its label;
+                # the max-content walker does, and already adds the select's
+                # own padding and border.
+                control_w = flex_item_max_content_width(nodes, styles, child_index, i) + SELECT_ARROW_WIDTH_PX
+            out_bw[i] = constrained_outer_width(node, st, control_w)
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
+    if node.tag == "img":
+        # `<img>` is a replaced element, so its WIDTH is its own (attribute or
+        # CSS), never the container's. Before round 19 this branch set only the
+        # height and left `out_bw[i]` at the block-path container width, which
+        # was invisible while `img` was block-level and full-width anyway — and
+        # becomes a line-wide box the moment it is routed inline. No UA default
+        # box is invented here: `replaced_default_box_w("img")` stays 0 because
+        # no page in the eight-page catalog carries an `<img>` to measure one
+        # against.
+        #
+        # Stated rather than glossed: a SIZELESS `<img>` does change behaviour.
+        # It used to take the block path's container width (810 px on the
+        # catalog's content column); routed inline with no attribute and no CSS
+        # it now takes the inline pen prediction, which for a childless
+        # replaced box is 1 px. Chrome gives a srcless, sizeless `<img>` a 0x0
+        # box, so the new value is the closer of the two — but it is a change,
+        # and it is unmeasured by this catalog, not verified by it.
+        if st.width_px == 0:
+            val img_attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+            if img_attr_w > 0:
+                out_bw[i] = constrained_outer_width(node, st, img_attr_w)
         val explicit_node_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
-        val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_node_h else: style_line_h(st))
+        var img_auto_h = style_line_h(st)
+        val img_attr_h = parse_int(attr_value(node.attrs_raw, "height"))
+        if img_attr_h > 0:
+            img_auto_h = img_attr_h
+        val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_node_h else: img_auto_h)
         out_bh[i] = h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
     if st.content_visibility_hidden:
@@ -1723,9 +2385,15 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         # width:auto tables shrink to fit: pass 0 as the available inner
         # width so no leftover space is distributed across the columns.
         explicit_auto_table_column_offsets(
-            nodes, styles, child_index, i,
-            if st.width_px > 0: iw else: 0,
-            st.border_spacing_x_px, st.border_spacing_y_px
+            nodes, styles, child_index, i, iw,
+            st.border_spacing_x_px, st.border_spacing_y_px,
+            # A table FILLS a width it states — and a PERCENTAGE width is stated
+            # too. `width_px` holds a percentage as a NEGATIVE value, so the
+            # obvious `width_px > 0` reads `table { width: 100% }` as
+            # `width: auto` and shrink-to-fits it. Measured on the `html`
+            # catalog page (whose stylesheet says exactly that at line 19),
+            # that single misread moved 21 elements away from Chrome.
+            st.width_px != 0
         )
     else:
         []
@@ -2337,9 +3005,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 val cst = styles[fc_wrap]
                 if cst.position_absolute:
                     val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
-                    val ax = absolute_child_x(x, st, nodes[fc_wrap], cst, iw)
+                    val ax = absolute_child_x(nodes, styles, child_index, fc_wrap, x, st, nodes[fc_wrap], cst, iw)
                     val ay = absolute_child_y(y, st, nodes[fc_wrap], cst, absolute_containing_h)
-                    val absolute_w = absolute_outer_width(st, nodes[fc_wrap], cst, iw)
+                    val absolute_w = absolute_outer_width(nodes, styles, child_index, fc_wrap, st, nodes[fc_wrap], cst, iw)
                     val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
                     val child = layout_with_style(nodes, styles, child_index, fc_wrap, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                     out_bx = child.bx
@@ -2578,9 +3246,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             val cst = styles[fc]
             if cst.position_absolute:
                 val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
-                val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
+                val ax = absolute_child_x(nodes, styles, child_index, fc, x, st, nodes[fc], cst, iw)
                 val ay = absolute_child_y(y, st, nodes[fc], cst, absolute_containing_h)
-                val absolute_w = absolute_outer_width(st, nodes[fc], cst, iw)
+                val absolute_w = absolute_outer_width(nodes, styles, child_index, fc, st, nodes[fc], cst, iw)
                 val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
                 val child = layout_with_style(nodes, styles, child_index, fc, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
@@ -2837,9 +3505,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             val cst = styles[flex_c]
             if cst.position_absolute:
                 val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
-                val ax = absolute_child_x(x, st, nodes[flex_c], cst, iw)
+                val ax = absolute_child_x(nodes, styles, child_index, flex_c, x, st, nodes[flex_c], cst, iw)
                 val ay = absolute_child_y(y, st, nodes[flex_c], cst, absolute_containing_h)
-                val absolute_w = absolute_outer_width(st, nodes[flex_c], cst, iw)
+                val absolute_w = absolute_outer_width(nodes, styles, child_index, flex_c, st, nodes[flex_c], cst, iw)
                 val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
                 val child = layout_with_style(nodes, styles, child_index, flex_c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
@@ -2915,6 +3583,8 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     var cy = y + st.border_t + st.pad_t
     var child_count = 0
     var prev_margin_b = 0
+    var trailing_margin_b = 0
+    var leading_margin_t = 0
     var in_inline_run = false
     val inline_start_x = if (
         node.is_details_summary and st.display == "list-item"
@@ -2939,9 +3609,9 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             continue
         if cst.position_absolute:
             val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
-            val ax = absolute_child_x(x, st, nodes[c], cst, iw)
+            val ax = absolute_child_x(nodes, styles, child_index, c, x, st, nodes[c], cst, iw)
             val ay = absolute_child_y(y, st, nodes[c], cst, absolute_containing_h)
-            val absolute_w = absolute_outer_width(st, nodes[c], cst, iw)
+            val absolute_w = absolute_outer_width(nodes, styles, child_index, c, st, nodes[c], cst, iw)
             val resolved_cst = absolute_child_style(st, cst, iw, absolute_containing_h)
             val child = layout_with_style(nodes, styles, child_index, c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
             out_bx = child.bx
@@ -2988,6 +3658,18 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 c = child_index.next_sibling[c]
                 continue
             if cst.display == "inline" or cst.display == "inline-block":
+                # CSS 2.2 8.3.1: vertical margins collapse only between BLOCK
+                # boxes. The inline content that follows a block sibling is
+                # wrapped in an ANONYMOUS block box, which has no margins of
+                # its own, so the preceding block's bottom margin cannot
+                # collapse away — it must still separate the two. The inline
+                # run used to start without flushing it, and the block branch
+                # below then zeroed `prev_margin_b`, so the margin was simply
+                # lost: `<div><p>A</p>text</div>` came out 48 against Chrome's
+                # 64, and the catalog's `x<hr>y` sample 58 against 66.
+                if not in_inline_run and prev_margin_b != 0:
+                    cy = cy + prev_margin_b
+                    prev_margin_b = 0
                 if cst.display == "inline" and nodes[c].tag == "br":
                     val break_line_h = style_line_h(cst)
                     if not in_inline_run:
@@ -3025,6 +3707,51 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     child_count = child_count + 1
                     c = child_index.next_sibling[c]
                     continue
+                if cst.display == "inline" and nodes[c].tag == "wbr":
+                    # `<wbr>` is a zero-width SOFT break OPPORTUNITY, not a
+                    # forced break: HTML gives it no glyph and no advance, and
+                    # the line breaks there only when what follows does not fit
+                    # the remainder of the current line. It splits the DOM text
+                    # into separate `#text` siblings, so the opportunity lands
+                    # exactly at this node and needs no intra-run machinery.
+                    # Harvested from Chrome 152, 900 px, 16px/1.5, `<p>` boxes:
+                    #   width:80  LongWordBreakHere           -> 24 (one line,
+                    #             overflowing; overflow-wrap:normal forbids a cut)
+                    #   width:80  LongWord<wbr>BreakHere      -> 48 (breaks here)
+                    #   width:80  ab<wbr>cd                   -> 24 (fits, no break)
+                    #   width:400 LongWord<wbr>BreakHere      -> 24 (fits)
+                    #   width:80  Long<wbr>Word<wbr>BreakHere -> 48, NOT 72 —
+                    #             Chrome is greedy and takes only the
+                    #             opportunity it needs. Breaking at every `<wbr>`
+                    #             is the sabotage arm this condition exists to fail.
+                    # The element's own box is zero-sized, sitting at the pen.
+                    out_bx[c] = ix + inline_x
+                    out_by[c] = cy
+                    out_bw[c] = 0
+                    out_bh[c] = 0
+                    val wbr_next = child_index.next_sibling[c]
+                    if in_inline_run and inline_x > inline_start_x and wbr_next >= 0:
+                        val wbr_next_w = first_word_advance_width(nodes[wbr_next], styles[wbr_next])
+                        if wbr_next_w > 0 and inline_x + wbr_next_w > iw:
+                            val wbr_aligned = align_inline_line_baselines(
+                                child_index, st, nodes, inline_baseline_nodes,
+                                inline_baseline_margin_ts, inline_baseline_margin_bs,
+                                styles, cy,
+                                inline_line_h, out_bx, out_by, out_bh
+                            )
+                            out_bx = wbr_aligned.bx
+                            out_by = wbr_aligned.by
+                            cy = cy + wbr_aligned.height
+                            inline_x = inline_start_x
+                            inline_line_h = style_line_h(cst)
+                            inline_baseline_nodes = []
+                            inline_baseline_margin_ts = []
+                            inline_baseline_margin_bs = []
+                            out_bx[c] = ix + inline_x
+                            out_by[c] = cy
+                    child_count = child_count + 1
+                    c = child_index.next_sibling[c]
+                    continue
                 val inline_block = cst.display == "inline-block"
                 val inline_margin_l = if inline_block:
                     resolve_horizontal_margin_px(cst.margin_l, iw)
@@ -3052,6 +3779,35 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     resolved_inline_style = style_with_width(
                         cst, percent_content_w
                     )
+                # A replaced box contributes its OWN width to the line, not the
+                # intrinsic width of an inline text walk that never reaches
+                # inside it (`intrinsic_text_width` returns 0 for a childless
+                # replaced element). Without this the pen prediction is 1 px,
+                # so the wrap check below can never fire for a replaced box and
+                # a row of them overflows the line silently. The box itself is
+                # still sized by `layout_with_style`; this only predicts it.
+                val inline_replaced = (
+                    cst.display == "inline" and grid_item_is_replaced(nodes[c])
+                )
+                if inline_replaced and cst.width_px == 0:
+                    val replaced_attr_w = parse_int(
+                        attr_value(nodes[c].attrs_raw, "width")
+                    )
+                    var predicted_w = if replaced_attr_w > 0:
+                        replaced_attr_w
+                    else:
+                        replaced_default_box_w(nodes[c].tag)
+                    predicted_w = constrained_outer_width(
+                        nodes[c], cst, predicted_w
+                    )
+                    if predicted_w > inline_w:
+                        inline_w = predicted_w
+                elif inline_replaced and cst.width_px > 0:
+                    val css_replaced_w = css_outer_width(
+                        nodes[c], cst, cst.width_px
+                    )
+                    if css_replaced_w > inline_w:
+                        inline_w = css_replaced_w
                 val text_advance_w = inline_text_advance_width(nodes[c], cst)
                 if text_advance_w > inline_w:
                     inline_w = text_advance_w
@@ -3063,6 +3819,26 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 # Short inline pieces (intrinsic <= available) are unaffected.
                 # white-space:nowrap remains intrinsic width unless the parent
                 # requested text-overflow:ellipsis, which needs a bounded box.
+                # White-space collapsing keeps ONE space between an inline
+                # sibling and a following text run on the SAME line; only a
+                # space at the START OF A LINE is dropped (CSS 2.1 §16.6.1).
+                # `text_trimmed` trims unconditionally, so a `#text` placed at a
+                # non-zero pen lost the space that separates it from the
+                # `<code>`/`<span>` before it — measured on the catalog `<li>`s:
+                # `<code>align-self</code> — partial; …` is 88 px in Chrome and
+                # 64 in Simple, while the same markup with the space DELETED is
+                # 64 in Chrome too, and the same text at pen 0 is 64 in both.
+                # The missing ~4 px let a 631 px run sit inside a 632 px gap
+                # that Chrome wraps, costing one line box per such `<li>`.
+                if (
+                    nodes[c].tag == "#text" and
+                    not cst.white_space_nowrap and
+                    inline_x > inline_start_x and
+                    text_starts_with_collapsible_space(nodes[c].text_data)
+                ):
+                    inline_x = inline_x + resolved_space_advance(
+                        cst, text_codepoints(nodes[c].text_trimmed)
+                    )
                 if nodes[c].tag == "#text" and (not cst.white_space_nowrap or cst.text_overflow_ellipsis):
                     val avail_inline = iw - inline_x
                     if avail_inline > 0 and inline_w > avail_inline:
@@ -3085,8 +3861,11 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 val inline_outer_w = (
                     inline_margin_l + inline_w + inline_margin_r
                 )
+                # An inline REPLACED box is atomic exactly like an inline-block:
+                # it cannot be split across lines, so it wraps whole when it no
+                # longer fits the remainder of the current line.
                 if (
-                    inline_block and inline_x > 0 and
+                    (inline_block or inline_replaced) and inline_x > 0 and
                     inline_x + inline_outer_w > iw
                 ):
                     val aligned = align_inline_line_baselines(
@@ -3234,6 +4013,43 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_starts = child.wrap_starts
             out_wrap_ends = child.wrap_ends
             out_intrinsic_widths = child.intrinsic_widths
+            # CSS 2.2 8.3.1 leading half. The child's EFFECTIVE top margin is
+            # its declared margin-top collapsed with whatever margin escaped
+            # through its own top edge (child.leading_margin_t), and that is
+            # only known after the child is laid out -- the advance above was
+            # computed from the declared value alone. Correct the difference by
+            # translating the child subtree, which is the same two-phase
+            # mechanics offset_layout_subtree already serves elsewhere.
+            val effective_cst_margin_t = collapse_margins_signed(
+                resolved_cst_margin_t, child.leading_margin_t)
+            var corrected_top_advance = child_top_advance
+            if child.leading_margin_t != 0:
+                if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
+                    val body_margin_t = resolve_vertical_margin_px(st.margin_t, viewport_h)
+                    corrected_top_advance = collapse_margins_signed(
+                        body_margin_t, effective_cst_margin_t) - body_margin_t
+                else:
+                    corrected_top_advance = collapse_margins_signed(
+                        prev_margin_b_before_child, effective_cst_margin_t)
+            # When THIS block also lets a top margin through, the whole
+            # effective leading margin leaves the box: the first in-flow child
+            # sits on the content top edge and the margin becomes this block's
+            # own leading margin for its parent to collapse.
+            val escapes_top = (
+                child_count == 0 and
+                block_top_margin_collapses_through(nodes, styles, i, st)
+            )
+            if escapes_top:
+                leading_margin_t = effective_cst_margin_t
+                corrected_top_advance = 0
+            if corrected_top_advance != child_top_advance:
+                val retopped = offset_layout_subtree(
+                    child_index, c, 0, corrected_top_advance - child_top_advance,
+                    out_bx, out_by)
+                out_bx = retopped.bx
+                out_by = retopped.by
+                cy = cy + (corrected_top_advance - child_top_advance)
+                child_top_advance = corrected_top_advance
             cy = cy + child.height
             val resolved_cst_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
             # CSS 2.2 §8.3.1 self-collapsing block: an in-flow block with no
@@ -3258,9 +4074,17 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 out_by[c] = cy
                 prev_margin_b = collapse_margins_signed(
                     prev_margin_b_before_child,
-                    collapse_margins_signed(resolved_cst_margin_t, resolved_cst_margin_b))
+                    collapse_margins_signed(
+                        resolved_cst_margin_t,
+                        collapse_margins_signed(
+                            resolved_cst_margin_b, child.trailing_margin_b)))
             else:
-                prev_margin_b = resolved_cst_margin_b
+                # The child's own trailing margin (one that collapsed through
+                # it, CSS 2.2 8.3.1) collapses with the child's declared
+                # bottom margin and becomes what separates it from the next
+                # sibling.
+                prev_margin_b = collapse_margins_signed(
+                    resolved_cst_margin_b, child.trailing_margin_b)
             child_count = child_count + 1
         c = child_index.next_sibling[c]
     if child_count > 0:
@@ -3274,7 +4098,10 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_bx = aligned.bx
             out_by = aligned.by
             cy = cy + aligned.height
-        cy = cy + prev_margin_b
+        if block_bottom_margin_collapses_through(nodes, styles, i, st):
+            trailing_margin_b = prev_margin_b
+        else:
+            cy = cy + prev_margin_b
     var h = (cy - y) + st.pad_b + st.border_b
     val explicit_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
     if st.height_px > 0:
@@ -3297,4 +4124,118 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     if h < 1:
         h = 1
     out_bh[i] = h
-    relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
+    val placed = relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
+    LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b, leading_margin_t: leading_margin_t)
+
+# ---------------------------------------------------------------------------
+# Layout-stage leaf timers (2026-09-13, round 13).
+#
+# Round 12 §4 recorded that the `layout()` window had NO timers at all and was
+# the largest unattributed mass in the cold pipeline. These wrappers are the
+# whole instrument: each delegates to the untouched `_lay_*_inner` body, so
+# behaviour is unchanged, and charges its INCLUSIVE wall time to one bucket of
+# `web_layout_counters_report()` only while `SIMPLE_WEB_STYLE_COUNTERS=1` is
+# armed. When it is not armed the wrapper is a straight tail call and reads no
+# clock, matching the default-off discipline of every counter in this engine.
+#
+# Nesting is real and is NOT subtracted, exactly as `sec_resolve` nests inside
+# `sec_metrics`: `lay_wrap` contains the fallback `compute_wrap_ranges`,
+# `lay_intrinsic` contains its own recursion over a subtree, and the flex and
+# table buckets call the measure leaves. Read the buckets as "time under this
+# helper", never as a partition that must sum to the layout window.
+
+fn style_run_byte_advances(st: Style, s: text) -> [i32]:
+    if not _wsc_on:
+        return _lay_style_run_byte_advances_inner(st, s)
+    val t0 = _wsc_now_us()
+    val out = _lay_style_run_byte_advances_inner(st, s)
+    _wlay_add(0, _wsc_now_us() - t0, 1)
+    out
+
+fn style_measured_run_advance(txt: text, txt_len: i32, st: Style) -> i32:
+    if not _wsc_on:
+        return _lay_style_measured_run_advance_inner(txt, txt_len, st)
+    val t0 = _wsc_now_us()
+    val out = _lay_style_measured_run_advance_inner(txt, txt_len, st)
+    _wlay_add(0, _wsc_now_us() - t0, 1)
+    out
+
+fn inline_text_advance_width(node: HNode, st: Style) -> i32:
+    if not _wsc_on:
+        return _lay_inline_text_advance_width_inner(node, st)
+    val t0 = _wsc_now_us()
+    val out = _lay_inline_text_advance_width_inner(node, st)
+    _wlay_add(1, _wsc_now_us() - t0, 1)
+    out
+
+fn compute_style_wrap_ranges(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    if not _wsc_on:
+        return _lay_compute_style_wrap_ranges_inner(txt, max_width, st, fallback_cpl)
+    val t0 = _wsc_now_us()
+    val out = _lay_compute_style_wrap_ranges_inner(txt, max_width, st, fallback_cpl)
+    _wlay_add(2, _wsc_now_us() - t0, 1)
+    out
+
+fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
+    if not _wsc_on:
+        return _lay_compute_wrap_ranges_inner(txt, cpl)
+    val t0 = _wsc_now_us()
+    val out = _lay_compute_wrap_ranges_inner(txt, cpl)
+    _wlay_add(2, _wsc_now_us() - t0, 1)
+    out
+
+fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
+    if not _wsc_on:
+        return _lay_intrinsic_text_width_inner(nodes, styles, child_index, i, widths)
+    val t0 = _wsc_now_us()
+    val out = _lay_intrinsic_text_width_inner(nodes, styles, child_index, i, widths)
+    _wlay_add(3, _wsc_now_us() - t0, 1)
+    out
+
+fn flex_item_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32) -> i32:
+    if not _wsc_on:
+        return _lay_flex_item_max_content_width_inner(nodes, styles, child_index, i)
+    val t0 = _wsc_now_us()
+    val out = _lay_flex_item_max_content_width_inner(nodes, styles, child_index, i)
+    _wlay_add(4, _wsc_now_us() - t0, 1)
+    out
+
+fn flex_wrap_auto_base_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, cst: Style, iw: i32, caller_base_w: i32) -> i32:
+    if not _wsc_on:
+        return _lay_flex_wrap_auto_base_width_inner(nodes, styles, child_index, item, cst, iw, caller_base_w)
+    val t0 = _wsc_now_us()
+    val out = _lay_flex_wrap_auto_base_width_inner(nodes, styles, child_index, item, cst, iw, caller_base_w)
+    _wlay_add(4, _wsc_now_us() - t0, 1)
+    out
+
+fn table_cell_max_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+    if not _wsc_on:
+        return _lay_table_cell_max_content_width_inner(nodes, styles, child_index, cell)
+    val t0 = _wsc_now_us()
+    val out = _lay_table_cell_max_content_width_inner(nodes, styles, child_index, cell)
+    _wlay_add(5, _wsc_now_us() - t0, 1)
+    out
+
+fn table_cell_min_content_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+    if not _wsc_on:
+        return _lay_table_cell_min_content_width_inner(nodes, styles, child_index, cell)
+    val t0 = _wsc_now_us()
+    val out = _lay_table_cell_min_content_width_inner(nodes, styles, child_index, cell)
+    _wlay_add(5, _wsc_now_us() - t0, 1)
+    out
+
+fn grid_track_sizes(raw: text, available_w: i32, gap: i32) -> [i32]:
+    if not _wsc_on:
+        return _lay_grid_track_sizes_inner(raw, available_w, gap)
+    val t0 = _wsc_now_us()
+    val out = _lay_grid_track_sizes_inner(raw, available_w, gap)
+    _wlay_add(6, _wsc_now_us() - t0, 1)
+    out
+
+fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
+    if not _wsc_on:
+        return _lay_ellipsize_text_for_width_inner(txt, start, endv, max_width, st, advance, space_advance)
+    val t0 = _wsc_now_us()
+    val out = _lay_ellipsize_text_for_width_inner(txt, start, endv, max_width, st, advance, space_advance)
+    _wlay_add(7, _wsc_now_us() - t0, 1)
+    out

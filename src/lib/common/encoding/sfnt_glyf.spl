@@ -622,6 +622,18 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
 # Writes meta[2] = advance, meta[3] = bearing_x, meta[6] = glyph_id and the
 # success cookie meta[7] = 310031. Width/height/bearing_y are NOT written --
 # a caller needing ink extents must use `sfnt_measure_glyph_into`.
+#
+# meta[18] = the SAME advance in MILLI-pixels (2026-09-13, round 12). meta[2]
+# is rounded to a whole pixel and must stay that way -- every existing consumer
+# reads it -- but rounding each glyph independently is what made a run of eight
+# Menlo `M` (1233/2048 em = 9.633 px at 16) measure 8 x 10 = 80 px where Chrome
+# accumulates fractionally and reports round(77.06) = 77. `measure_text_advances`
+# sums meta[18] and emits `round(cum[i+1]) - round(cum[i])`, so the run total is
+# the rounded exact total and every glyph position is an integer snap of the
+# exact pen -- which is what Skia's subpixel positioning produces. Both fields
+# come from one `horizontal[0] * scale`, so they can never disagree about the
+# face. A face with whole-pixel advances yields meta[18] == meta[2] * 1000 and
+# the emitted array is byte-identical to the pre-round-12 one.
 fn sfnt_glyph_advance_into(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, mut meta: [i64]):
     if meta.len() < 20: return
     meta[7] = 0
@@ -666,6 +678,7 @@ fn sfnt_glyph_advance_into(blob: [u8], selector_kind: i64, selector_value: i64, 
         None: return
     val scale = size_px as f64 / units_per_em as f64
     meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+    meta[18] = _round_glyf_metric(horizontal[0] as f64 * scale * 1000.0)
     meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
     meta[6] = glyph_id as i64
     meta[15] = selector_kind
@@ -734,6 +747,7 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
         meta[0] = 0
         meta[1] = 0
         meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+        meta[18] = _round_glyf_metric(horizontal[0] as f64 * scale * 1000.0)
         meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
         meta[4] = 0
         meta[5] = 0
@@ -772,6 +786,7 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
     meta[0] = width
     meta[1] = height
     meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+    meta[18] = _round_glyf_metric(horizontal[0] as f64 * scale * 1000.0)
     meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
     meta[4] = _round_glyf_metric(bounds.top * scale)
     meta[5] = width * height
@@ -859,6 +874,89 @@ fn sfnt_blob_glyph_ids_into(blob: [u8], codepoints: [i64], mut out: [i64]):
         Some(value): value
         None: return
     sfnt_cmap_glyph_ids_into(font, codepoints, out)
+
+# Blob-level BATCH advance resolution (2026-09-13, round 13).
+#
+# `sfnt_glyph_advance_into` re-runs `parse_offset_table(blob)` over the whole
+# font blob and three `find_table` directory scans (`head`, `hhea`, `hmtx`)
+# before reading four bytes of `hmtx` -- measured at 1.09 ms per call, 248 ms
+# over the eight-page web catalog for 228 calls (round 12 §3a). The per-glyph
+# work is trivial; the per-call setup is everything.
+#
+# This is the same shape `sfnt_blob_glyph_ids_into` already applies to cmap
+# lookups: parse once, loop the ids. Exactness is BY CONSTRUCTION -- every
+# guard, the `_hmtx` index arithmetic, the `scale` and `_round_glyf_metric`
+# expression below are the same ones `sfnt_glyph_advance_into` uses, so the two
+# agree for every (blob, glyph id, size). `_hmtx` itself is inlined only to
+# drop the fourth `find_table`; its bounds test is reproduced unchanged.
+#
+# `out[i]` is the advance for `glyph_ids[i]` in MILLI-pixels -- the same
+# `meta[18]` quantity `sfnt_glyph_advance_into` reports, not the rounded
+# `meta[2]` pixel value, because the milli lane is the one every catalog page's
+# text takes and rounding first would move glyph positions. It is 0 where the
+# per-glyph function would have failed (id <= 0 or out of range,
+# unbounded/absent table, hmtx short, zero unitsPerEm or numberOfHMetrics, size
+# out of range). `out_px[i]` receives the rounded `meta[2]` pixel value for the
+# same entry, so a caller needing the integer lane does not have to re-derive it
+# (dividing the milli value by 1000 is NOT the same number -- both are rounded
+# independently from the unrounded scale, exactly as the per-glyph function
+# does it).
+fn sfnt_blob_glyph_advances_into(blob: [u8], glyph_ids: [i64], size_px: i64, mut out: [i64], mut out_px: [i64]):
+    var z: i64 = 0
+    while z < out.len():
+        out[z] = 0
+        z = z + 1
+    var zp: i64 = 0
+    while zp < out_px.len():
+        out_px[zp] = 0
+        zp = zp + 1
+    if blob.len() == 0 or size_px <= 0 or size_px > 512:
+        return
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return
+    val head_table = match find_table(font, 1751474532):
+        Some(value): value
+        None: return
+    val hhea_table = match find_table(font, 1751672161):
+        Some(value): value
+        None: return
+    val hmtx_table = match find_table(font, 1752003704):
+        Some(value): value
+        None: return
+    if not _table_is_bounded(font, head_table, 54) or not _table_is_bounded(font, hhea_table, 36) or not _table_is_bounded(font, hmtx_table, 4):
+        return
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
+    if units_per_em == 0 or long_metrics == 0:
+        return
+    val scale = size_px as f64 / units_per_em as f64
+    val hmtx_start = hmtx_table.offset as i64
+    val hmtx_limit = hmtx_start + hmtx_table.length as i64
+    var i: i64 = 0
+    val count = if glyph_ids.len() < out.len(): glyph_ids.len() else: out.len()
+    while i < count:
+        val gid = glyph_ids[i]
+        if gid > 0 and gid <= 4294967295:
+            var metric_end: i64 = 0
+            if gid < long_metrics:
+                metric_end = (gid + 1) * 4
+            else:
+                metric_end = long_metrics * 4 + (gid - long_metrics + 1) * 2
+            if metric_end <= hmtx_table.length as i64:
+                val advance_index = if gid < long_metrics: gid else: long_metrics - 1
+                val advance_pos = hmtx_start + advance_index * 4
+                # Both bounds, exactly as `_hmtx` tests them: it returns None
+                # (advance 0, caller falls through) when EITHER the advance or
+                # the left-side-bearing read would leave the table, even though
+                # this function never reads the bearing.
+                val bearing_pos = if gid < long_metrics: advance_pos + 2 else: hmtx_start + long_metrics * 4 + (gid - long_metrics) * 2
+                if advance_pos + 2 <= hmtx_limit and bearing_pos + 2 <= hmtx_limit:
+                    val raw_advance = read_u16_be(font.blob, advance_pos) as f64
+                    out[i] = _round_glyf_metric(raw_advance * scale * 1000.0)
+                    if i < out_px.len():
+                        out_px[i] = _round_glyf_metric(raw_advance * scale)
+        i = i + 1
 
 fn sfnt_blob_glyph_exists(blob: [u8], codepoint: i64) -> bool:
     if blob.len() == 0 or codepoint < 0 or codepoint > 1114111:

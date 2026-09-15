@@ -629,6 +629,76 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
     ));
 }
 
+/// Site 18 (macOS Stage 2, 2026-09-13): HIR folds the enum-id argument of
+/// `rt_enum_check_variant` into an integer from the BARE enum name, while the
+/// constructor's `EnumUnit` name is qualified by `qualify_enum_runtime_names`.
+/// The check therefore expected `hash("Mixed")` against a value stamped
+/// `hash("pkg.owner.Mixed")`, every arm failed and the match fell to its last
+/// arm -- `BackendKind.to_text()` returned the wrong text and the K1 backend
+/// table validator refused the Stage 2 composition. Both sides must agree.
+fn enum_match_check_ids_after_qualify(module_name: &str) -> (Vec<i64>, Vec<String>) {
+    use crate::mir::MirInst;
+
+    let source = "enum Mixed:\n    A\n    B\n    Custom(text)\n\nfn pick(m: Mixed) -> i64:\n    match m:\n        case A: 10\n        case B: 20\n        case Custom(_): 30\n\nfn build() -> Mixed:\n    Mixed.B\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let lowered = crate::hir::Lowerer::new().lower_module(&ast).expect("enum match module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("enum match module should reach MIR");
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        module_name,
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let mut check_ids = Vec::new();
+    let mut ctor_names = Vec::new();
+    for func in &mir.functions {
+        let mut const_ints = std::collections::HashMap::new();
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::ConstInt { dest, value } = inst {
+                    const_ints.insert(*dest, *value);
+                }
+            }
+        }
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::Call { target, args, .. } if target.name() == "rt_enum_check_variant" => {
+                        check_ids.push(const_ints[&args[1]]);
+                    }
+                    MirInst::EnumUnit { enum_name, .. } => ctor_names.push(enum_name.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(!check_ids.is_empty(), "expected rt_enum_check_variant calls in the lowered match");
+    assert!(!ctor_names.is_empty(), "expected an EnumUnit constructor");
+    (check_ids, ctor_names)
+}
+
+#[test]
+fn enum_match_check_id_is_qualified_like_its_constructor() {
+    let qualified = crate::codegen::shared::enum_runtime_type_id("pkg.owner.Mixed");
+    let (check_ids, ctor_names) = enum_match_check_ids_after_qualify("pkg.owner");
+    assert!(ctor_names.iter().all(|name| name == "pkg.owner.Mixed"), "{ctor_names:?}");
+    assert!(
+        check_ids.iter().all(|&id| id == i64::from(qualified)),
+        "check ids {check_ids:?} must equal the qualified ctor id {qualified}"
+    );
+}
+
+#[test]
+fn enum_match_check_id_stays_bare_without_a_module_name() {
+    let bare = crate::codegen::shared::enum_runtime_type_id("Mixed");
+    let (check_ids, ctor_names) = enum_match_check_ids_after_qualify("");
+    assert!(ctor_names.iter().all(|name| name == "Mixed"), "{ctor_names:?}");
+    assert!(check_ids.iter().all(|&id| id == i64::from(bare)), "{check_ids:?} vs {bare}");
+}
+
 #[test]
 fn enum_runtime_identity_collision_is_reported_before_codegen() {
     let root = std::path::PathBuf::from("/tmp/enum-runtime-identity/src");
@@ -8958,4 +9028,157 @@ fn test_build_import_map_records_struct_inline_method_return_type() {
         Some(&simple_parser::Type::Simple("i64".to_string())),
         "struct inline `me get` return type missing from fn_return_types"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Same-named instance methods on sibling types must not collapse.
+// doc/08_tracking/bug/native_cross_module_same_name_methods_collapse_to_one_impl_2026-09-13.md
+// ---------------------------------------------------------------------------
+
+fn ints_suffix_index() -> std::collections::HashMap<String, Vec<String>> {
+    std::collections::HashMap::from([(
+        "store".to_string(),
+        vec![
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ],
+    )])
+}
+
+fn mir_with_method_calls(names: &[&str]) -> crate::mir::MirModule {
+    let mut mir = crate::mir::MirModule::new();
+    let mut func = crate::mir::MirFunction::new(
+        "main".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    for name in names {
+        func.blocks[0].instructions.push(crate::mir::MirInst::MethodCallStatic {
+            dest: None,
+            receiver: crate::mir::VReg(0),
+            func_name: (*name).to_string(),
+            args: vec![],
+        });
+    }
+    func.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(func);
+    mir
+}
+
+fn mangled_method_names(mir: &crate::mir::MirModule) -> Vec<String> {
+    mir.functions[0].blocks[0]
+        .instructions
+        .iter()
+        .map(|inst| match inst {
+            crate::mir::MirInst::MethodCallStatic { func_name, .. } => func_name.clone(),
+            other => panic!("expected static method call, got {other:?}"),
+        })
+        .collect()
+}
+
+/// (a) Two sibling types with same-named instance methods each keep their own
+/// target, so both bodies stay referenced and both get emitted.
+#[test]
+fn test_sibling_types_same_named_methods_each_resolve_to_their_own_owner() {
+    let mut mir = mir_with_method_calls(&["U16le.store", "U32be.store"]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &ints_suffix_index(),
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec![
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ],
+        "same-named sibling methods collapsed onto one implementation"
+    );
+}
+
+/// (b) A typed receiver whose own method is absent must NOT be bound to an
+/// arbitrary same-named method of an unrelated type.
+///
+/// Scope note: a SINGLE same-named candidate still binds, because a struct
+/// calling an inherited trait default legitimately reaches the resolver as
+/// `Button.render` against the trait's lone `Widget.render`
+/// (`qualified_enum_helpers_never_rebind_in_resolve_call_target` pins that).
+/// What must never happen is choosing one of SEVERAL, which is the shape that
+/// collapsed the six `ints.spl` types.
+#[test]
+fn test_qualified_receiver_never_falls_back_to_unrelated_candidates() {
+    let suffix_index = std::collections::HashMap::from([(
+        "store".to_string(),
+        vec![
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+            "lib__common__bytes__ints__U64be_dot_store".to_string(),
+        ],
+    )]);
+    let mut mir = mir_with_method_calls(&["U16le.store"]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+        &suffix_index,
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec!["U16le.store".to_string()],
+        "qualified receiver was rebound to an unrelated type's method"
+    );
+}
+
+/// (c) A bare (erased-receiver) name with more than one candidate must refuse
+/// to bind rather than pick an arbitrary one.
+#[test]
+fn test_bare_method_with_multiple_candidates_refuses_to_bind() {
+    let mut mir = mir_with_method_calls(&["store"]);
+    let use_map = std::collections::HashMap::from([
+        (
+            "U16le.store".to_string(),
+            "lib__common__bytes__ints__U16le_dot_store".to_string(),
+        ),
+        (
+            "U32be.store".to_string(),
+            "lib__common__bytes__ints__U32be_dot_store".to_string(),
+        ),
+    ]);
+    super::mangle::mangle_mir(
+        &mut mir,
+        "app__entry",
+        true,
+        &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
+        &use_map,
+        &ints_suffix_index(),
+    );
+    assert_eq!(
+        mangled_method_names(&mir),
+        vec!["store".to_string()],
+        "an ambiguous bare method name was bound to an arbitrary candidate"
+    );
+}
+
+#[test]
+fn test_method_owner_matches_accepts_both_mangled_spellings() {
+    assert!(super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U16le_dot_store",
+        "U16le"
+    ));
+    assert!(super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U16le.store",
+        "U16le"
+    ));
+    assert!(!super::mangle::method_owner_matches(
+        "lib__common__bytes__ints__U32be_dot_store",
+        "U16le"
+    ));
+    assert!(!super::mangle::method_owner_matches("store", "U16le"));
 }

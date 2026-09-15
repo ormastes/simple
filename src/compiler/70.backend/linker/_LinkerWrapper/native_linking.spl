@@ -24,9 +24,20 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_hash_sha256, env_get, process_run, cwd}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_hash_sha256, env_get, process_run, cwd, host_os, host_arch}
 use std.common.crypto.sha256.{sha256_text}
-use std.platform.{host_os, host_arch}
+# Was: std.platform.{host_os, host_arch} (nogc_sync_mut.platform), whose
+# host_os()/is_windows_env() ultimately delegates to
+# std.nogc_sync_mut.env.platform.detect_os() -- the same detector proven
+# (by a live trace inside this exact Stage 2 bootstrap sanity harness) to
+# answer "not Windows" while std.io_runtime.host_os() answers "windows"
+# correctly in the same process. That silent misdetection is why the GNU/ELF
+# lib-arg branch (native_link_std_lib_args's linux/unkeyed-host catch-all in
+# native_all_support.spl) fired on a real Windows host, emitting `-rpath`/
+# `--no-as-needed` that lld (Windows COFF driver) rejects outright:
+# "lld: error: unknown argument: -rpath". std.io_runtime.host_os() was
+# already imported into this file for other uses; use its host_os/host_arch
+# directly instead of a second, disagreeing detector.
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
 
@@ -318,8 +329,12 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     val crt = find_crt_files(config.pie, config.verbose)
     if trace:
         print "[LINKER] crt.found={crt.found}"
-    if not crt.found:
-        if not config.allow_cc_fallback:
+    # Darwin links no crt1/crti/crtbegin objects and no -dynamic-linker — ld64
+    # takes its entry glue from libSystem — so a missing CRT set there is normal
+    # and must route to the compiler driver instead of failing the link profile.
+    val crt_required = native_link_uses_crt_objects(os)
+    if not crt.found or not crt_required:
+        if not config.allow_cc_fallback and crt_required:
             return Err("Direct native linker CRT discovery is required by the strict link profile")
         debug("linker", "CRT files not found, falling back to cc")
         if config.verbose:
@@ -397,50 +412,19 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Standard libraries (no -lgcc/-lgcc_s — clang provides compiler-rt)
     # On Linux/FreeBSD wrap optional libs with --as-needed so they are only
     # recorded in DT_NEEDED when actually referenced by the linked objects.
-    if os == "linux":
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-ldl")
-        args.push("--as-needed")
-        args.push("-lm")
-        # -lSDL2 is deliberately ABSENT, for the same reason SDL2.lib is absent
-        # from the Windows list below (:838-848). src/runtime/runtime_sdl2.c
-        # binds every SDL entry point through dlopen/dlsym at first use
-        # (runtime_sdl2.c:11,173,263 SDL2_BIND_REQUIRED), so the archive carries
-        # ZERO undefined SDL_* symbols (measured with `nm -u` on
-        # libsimple_runtime.a: 0) and nothing needs SDL2 at link time.
-        # `--as-needed` does NOT rescue this: it only gates whether DT_NEEDED is
-        # recorded, so ld.lld must still FIND libSDL2.so and hard-fails with
-        # "unable to find library -lSDL2" on any host without it -- which is
-        # every host that has not installed the SDL2 dev package, including this
-        # aarch64 box. src/compiler/70.backend/backend/runtime_compiler.spl:483-485
-        # already states the contract this restores: runtime_sdl2 "needs no SDL2
-        # headers to compile and no -lSDL2 to link, so hosts without SDL2 still
-        # build". A program that genuinely wants SDL2 linked statically still
-        # gets it via config.libraries.
-        # See doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
-        args.push("--no-as-needed")
-    elif os == "macos":
-        # sdl2-compat installs into the Homebrew lib dir, which is not on the
-        # default linker search path — add it before -lSDL2 resolves.
-        # /opt/homebrew/lib covers Apple Silicon brew; /usr/local/lib covers
-        # Intel brew. Both are harmless no-ops when absent.
-        args.push("-L")
-        args.push("/opt/homebrew/lib")
-        args.push("-L")
-        args.push("/usr/local/lib")
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-lm")
-        args.push("-lSystem")
-        args.push("-lSDL2")
-    elif os == "freebsd":
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("--as-needed")
-        args.push("-lm")
-        args.push("-lSDL2")
-        args.push("--no-as-needed")
+    # Keyed on the TARGET, not the host shape: macOS ships no libc/libm/libpthread
+    # to link against (libSystem is all three), so a Linux-shaped list died with
+    # `ld: library 'c' not found`. See native_all_support.spl's table and
+    # doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md.
+    for flag in native_link_std_lib_args(os, "ld"):
+        args.push(flag)
+    # Linux omits -lSDL2 deliberately: src/runtime/runtime_sdl2.c binds every SDL
+    # entry point through dlopen/dlsym at first use, so the archive carries ZERO
+    # undefined SDL_* symbols and --as-needed would NOT rescue a host without the
+    # SDL2 dev package (ld.lld must still FIND libSDL2.so). A program that wants
+    # SDL2 linked statically still gets it via config.libraries.
+    # See doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
+    # macOS/FreeBSD add the Homebrew/pkg lib dirs where sdl2-compat installs.
 
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
     var native_support_inputs = object_files
@@ -670,7 +654,28 @@ fn _cc_fallback_runtime_lib_args(config: NativeLinkConfig) -> [text]:
     if runtime_dir == "" or runtime_dir == "none":
         return []
     val archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
-    native_runtime_archive_link_args(runtime_dir, config.runtime_bundle, archives, true, true, true)
+    # PE/COFF (MSVC link.exe AND mingw ld/lld) has no `-rpath` concept -- it is
+    # an ELF/Mach-O runtime-search-path mechanism. Emitting it unconditionally
+    # here made this cc-fallback path a Windows-native-build landmine: any
+    # code path that reaches link_native_cc on a Windows host (e.g. via a
+    # wrong upstream OS detection routing a real Windows host into the
+    # "Unix-like" link_native_unix -> link_native_cc branch, see
+    # doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md)
+    # turned "-rpath <dir>" into an extra positional cc argument, which
+    # link.exe/lld-link then treated as an input file: "<dir>.obj" not found
+    # (LNK1181). Gate on the same effective host-OS string every other
+    # Windows-vs-Unix branch in this file uses (host_os(), which the fixed
+    # detector now agrees with std.nogc_sync_mut.env.platform.detect_os()
+    # everywhere), so the emitted flag matches the linker this argv will
+    # actually be handed to.
+    val emit_rpath = not native_linking_os_is_windows(host_os())
+    native_runtime_archive_link_args(runtime_dir, config.runtime_bundle, archives, true, true, emit_rpath)
+
+fn native_linking_os_is_windows(os: text) -> bool:
+    """True for every Windows linker flavor this file recognizes (MSVC and
+    mingw), matching the `os` strings native_effective_link_os()/host_os()
+    produce -- "windows", "windows-msvc", "windows-mingw"."""
+    os == "windows" or os == "windows-msvc" or os == "windows-mingw"
 
 fn native_runtime_archive_link_args(runtime_dir: text, runtime_bundle: text,
         archives: [text], cc_fallback: bool, rescan_core_pair: bool,
@@ -996,9 +1001,33 @@ pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: b
         return flags
     []
 
+pub fn darwin_sdk_path() -> text:
+    """The macOS SDK to link against, or "" when none can be resolved.
+
+    `xcrun --find clang` prefers the Xcode toolchain, whose DEFAULT SDK can be
+    absent on a host whose active developer dir is CommandLineTools — that clang
+    then fails the link with `ld: library 'System' not found`, which reads like a
+    missing library and is really a missing sysroot. Measured 2026-09-13 on this
+    host: bare `clang t.c -lSystem` fails, the same clang with `-isysroot
+    $(xcrun --show-sdk-path)` succeeds. SDKROOT wins when set, so a caller can
+    still pin a different SDK.
+    See doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md."""
+    val pinned = env_get("SDKROOT") ?? ""
+    if pinned != "" and file_exists(pinned): return pinned
+    if not file_exists("/usr/bin/xcrun"): return ""
+    val (out, _, code) = process_run("/usr/bin/xcrun", ["--show-sdk-path"])
+    if code != 0: return ""
+    val path = out.trim().split("\n")[0]
+    if path != "" and file_exists(path): return path
+    ""
+
 pub fn native_cc_platform_flags(os: text, strip_output: bool = false) -> [text]:
     if os == "macos" or os == "darwin" or os == "Darwin":
         var flags = ["-Wl,-dead_strip"]
+        val sdk = darwin_sdk_path()
+        if sdk != "":
+            flags.push("-isysroot")
+            flags.push(sdk)
         if strip_output: flags.push("-Wl,-S,-x")
         return flags
     if os == "linux" or os == "Linux" or os == "freebsd" or os == "FreeBSD":
@@ -1106,12 +1135,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(obj)
         val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
         # sdl2-compat lives in the Homebrew lib dir, which cc does not search
-        # by default — add it before -lSDL2 resolves.
-        args.push("-L")
-        args.push("/opt/homebrew/lib")
-        args.push("-L")
-        args.push("/usr/local/lib")
-        for flag in ["-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2"]:
+        # by default — the table adds it before -lSDL2 resolves. It passes no
+        # -lc/-lm/-lpthread (macOS has none of them: libSystem is the C library)
+        # and no -lSystem (the clang driver appends that itself, and ours was the
+        # "ignoring duplicate libraries: '-lSystem'" warning that preceded
+        # `ld: library 'c' not found`).
+        # doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md
+        for flag in native_link_std_lib_args(os_name, "cc-pre"):
             args.push(flag)
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
@@ -1148,12 +1178,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
             args.push(flag)
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-Wl,--as-needed")
-        args.push("-lm")
-        args.push("-lSDL2")
-        args.push("-Wl,--no-as-needed")
+        for flag in native_link_std_lib_args(os_name, "cc-pre"):
+            args.push(flag)
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
@@ -1190,9 +1216,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
             args.push(flag)
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-ldl")
+        for flag in native_link_std_lib_args(os_name, "cc-pre"):
+            args.push(flag)
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
@@ -1200,8 +1225,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
-        args.push("-Wl,--as-needed")
-        args.push("-lm")
+        for flag in native_link_std_lib_args(os_name, "cc-post"):
+            args.push(flag)
         # -lSDL2 removed here for the same reason as the direct-lld Linux arm
         # above: runtime_sdl2.c dlopens SDL at first use, the runtime archive has
         # no undefined SDL_* symbols, and -Wl,--as-needed only gates DT_NEEDED --
@@ -1210,7 +1235,6 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # `not hosted_cross` guard was not enough: the failure is on the NATIVE
         # host lane. See
         # doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
-        args.push("-Wl,--no-as-needed")
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")

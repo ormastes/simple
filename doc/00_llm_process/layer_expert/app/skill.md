@@ -21,6 +21,11 @@ Maintain process knowledge for the `app` layer: owned source, architecture links
 - [Specs](../../06_spec/)
 - [debug_profile feature wiki](../../feature_expert/debug_profile/skill.md) — `src/app/cli_debug/` evidence bundle writer + reader (`simple debug write` / `inspect`); CLI acceptance is hand-verified only, see `todo_db.sdn` row 0
 
+## Landmines
+
+- **`e274cd33719` ("merge all share-history worktree branches into main") is a stale-snapshot clobber that deleted live, still-imported code across many `src/app` lanes** (2026-09-06). Known repaired: `src/app/llm_dashboard/data/types.spl` (104-line stub -> 383 lines, 30 exports incl. `LLMStatus`, `631209209f1`) and the llm_caret spec preambles (`2796fe9a93c`); ~27 more llm_dashboard files are still regressed. For any "symbol not found" that obviously ought to exist, run `git show e274cd33719^:<file>` FIRST and restore rather than re-implement.
+- A smoke test that shells to `bin/simple run` is a false green on this repo: `bin/simple` is the bootstrap seed with no `run`, and `| cat` swallows the exit status. Use `SIMPLE_BINARY` with the bootstrap seed as default, capture stderr, read `$?` directly — model: `test/03_system/tools/llm_dashboard_tui_smoke.spl`.
+
 ## Update Rule
 
 When project work changes this layer's public contract, source ownership, tests, architecture, or verification requirements, update this skill with current links and handoff notes.
@@ -64,3 +69,34 @@ Same family, already recorded:
 The push-side protocol this implements is `.claude/rules/vcs.md` § "Sync must
 never clobber (anti-revert protocol)"; the PR-landing mechanics are in
 `.claude/skills/spipe.md` § "Landing a PR here".
+
+## A CLI entry's `--help` costs its whole import closure (2026-09-13)
+
+A `src/app/cli/*_entry.spl` resolves every top-level `use` before `main()` runs,
+so the help branch inside `main()` is reached only after the implementation
+closure has loaded: `simple lint --help` cost 533 `.spl` opens / 9.4 s and
+`simple test --help` 10,151 / 74 s before printing `Error: unknown option:
+--help`. Nothing written INSIDE the entry fixes this on the seed — the JIT lane
+flattens the whole import closure before codegen, so `use lazy` is loaded
+eagerly and a function-local `use` becomes an unresolved external that de-JITs
+the module.
+
+What works is choosing a DIFFERENT entry for a help request, in the dispatcher,
+the way the driver already selects among the three `test` runners by args:
+`src/app/cli/tool_help.spl` (text + predicates, zero imports) behind
+`tool_help_entry.spl` (two leaf imports) — 8 opens, ~100 ms. Both dispatchers
+must route identically (`driver/src/main.rs` and `src/app/cli/dispatch.spl`),
+and a new `app_path` MUST be added to `dispatch_to_simple_app`'s allowlist or
+dispatch returns None and the driver reports "pure-Simple tool unavailable".
+Record: [subcommand_help_loads_implementation_closure_2026-09-12.md](../../../08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md).
+
+Two traps met while pinning it:
+
+- **`{...}` inside a Simple string literal interpolates.** A spec asserting
+  `to_contain("use app.cli.tool_help.{tool_help_entry_for}")` evaluated the name
+  instead of matching it; a sibling literal died with `variable get_cli_args not
+  found`. Match import groups with brace-free substrings.
+- **A spec that shells out to `simple test` measures nothing.** The nested run
+  sees `SIMPLE_TEST_DEPTH >= 1` and refuses, so an open-count budget PASSES
+  vacuously on a handful of opens. `unset SIMPLE_TEST_DEPTH` before measuring,
+  and assert on the printed content as well as the count.

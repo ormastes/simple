@@ -136,6 +136,20 @@ pub(crate) fn qualify_enum_runtime_names(
         Ok(name.to_string())
     };
 
+    // HIR lowering folds the enum-id argument of `rt_enum_check_variant` into
+    // a plain integer -- `enum_runtime_type_id(<bare type_registry name>)` --
+    // before this pass runs, while the matching `EnumUnit` / `EnumWith` ctor
+    // name is qualified HERE. Left alone, the constructor stamps
+    // hash("pkg.owner.Mixed") and the check expects hash("Mixed"): every arm
+    // of every typed enum `match` fails and control falls to the last arm
+    // (macOS Stage 2 site 18: `BackendKind.to_text()` returned the wrong arm, so
+    // the K1 backend-table validator refused the composition; also site 16,
+    // BOOT-16). The rewrite for `rt_enum_check_variant`'s folded id lives below,
+    // after this pass finishes qualifying constructors -- see `id_remap` /
+    // `requalify_enum_check_variant_ids`, which inserts a fresh `ConstInt`
+    // rather than mutating a shared constant vreg in place (a bare id can feed
+    // more than one call).
+
     for func in &mut mir.functions {
         for block in &mut func.blocks {
             for inst in &mut block.instructions {
@@ -161,7 +175,168 @@ pub(crate) fn qualify_enum_runtime_names(
             }
         }
     }
+
+    // The match side never reaches the rewrite above. `rt_enum_check_variant`
+    // carries its enum identity as an INTEGER, hashed from the BARE declared
+    // name back in HIR lowering (`hir/lower/expr/control.rs`:
+    // `enum_runtime_id_for_type` / `enum_runtime_id_for_pattern`, plus the
+    // `is_ok`/`is_err` shortcut in `mir/lower/lowering_expr_call.rs`), long
+    // before this pass exists to qualify anything. Construction is qualified
+    // here and only then hashed by codegen, so the two sides named DIFFERENT
+    // identities for the same enum: `rid("<module>.Kind")` vs `rid("Kind")`.
+    // `rt_enum_check_variant` answers 0 on an id mismatch, so in a natively
+    // compiled binary no match arm ran at all — site 16, the cause of
+    // `BackendKind.to_text()` returning garbage and of the K1 table refusal.
+    // Route both through the one canonical runtime name by remapping the baked
+    // constant through the same `qualify` closure the constructors took.
+    let mut id_remap: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for bare in local_enums.iter().chain(known_enums.iter()) {
+        let Ok(qualified) = qualify(bare) else {
+            continue;
+        };
+        if &qualified == bare {
+            continue;
+        }
+        let from = i64::from(crate::codegen::shared::enum_runtime_type_id(bare));
+        let to = i64::from(crate::codegen::shared::enum_runtime_type_id(&qualified));
+        // Identity 0/1 are the reserved Result/Option lane and 0 doubles as the
+        // "erased subject, discriminant only" marker. Never rewrite those.
+        if from != to && from > 1 {
+            if let Some(existing) = id_remap.insert(from, to) {
+                if existing != to {
+                    // Two bare names hashed onto one id and disagree on the
+                    // qualified answer. Rewriting either way could be wrong, so
+                    // leave the constant alone rather than guess.
+                    id_remap.remove(&from);
+                }
+            }
+        }
+    }
+    if !id_remap.is_empty() {
+        for func in &mut mir.functions {
+            requalify_enum_check_variant_ids(func, &id_remap);
+        }
+    }
     Ok(())
+}
+
+/// Repoint every `rt_enum_check_variant` enum-id operand at the qualified
+/// identity its constructor uses.
+///
+/// A fresh `ConstInt` is inserted before the call rather than the existing one
+/// being mutated in place: the same constant vreg can legitimately feed other
+/// operands, and rewriting it there would corrupt them.
+fn requalify_enum_check_variant_ids(
+    func: &mut crate::mir::MirFunction,
+    id_remap: &std::collections::HashMap<i64, i64>,
+) -> usize {
+    use crate::mir::MirInst;
+
+    let mut consts: std::collections::HashMap<crate::mir::VReg, i64> = std::collections::HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            if let MirInst::ConstInt { dest, value } = inst {
+                consts.insert(*dest, *value);
+            }
+        }
+    }
+
+    let mut pending: Vec<(usize, usize, i64)> = Vec::new();
+    for (block_idx, block) in func.blocks.iter().enumerate() {
+        for (inst_idx, inst) in block.instructions.iter().enumerate() {
+            let MirInst::Call { target, args, .. } = inst else {
+                continue;
+            };
+            if target.name() != "rt_enum_check_variant" || args.len() < 2 {
+                continue;
+            }
+            let Some(qualified) = consts.get(&args[1]).and_then(|current| id_remap.get(current)) else {
+                continue;
+            };
+            pending.push((block_idx, inst_idx, *qualified));
+        }
+    }
+
+    let rewritten = pending.len();
+    // Descending order so an insertion never shifts a later target's index.
+    for (block_idx, inst_idx, value) in pending.into_iter().rev() {
+        let dest = func.new_vreg();
+        let block = &mut func.blocks[block_idx];
+        block.instructions.insert(inst_idx, MirInst::ConstInt { dest, value });
+        if let MirInst::Call { args, .. } = &mut block.instructions[inst_idx + 1] {
+            args[1] = dest;
+        }
+    }
+    rewritten
+}
+
+/// The Optional/Result helper methods, which codegen lowers as builtins.
+///
+/// A BARE call target with one of these names must never be suffix-rebound to a
+/// user method of the same name. macOS Stage 2 linker blocker, 2026-09-13:
+/// `mold_path.unwrap()` on a `text?` (`mold.spl:704`) lowers to a bare `unwrap`
+/// call target; the bare `.method` scans below then bound it to the ONLY
+/// `.unwrap` entry reachable from the import maps,
+/// `lib__nogc_async_mut__async__poll__Poll.unwrap`, which returns 0 for a text
+/// receiver. `find_linker_path` therefore returned `Ok(0)`,
+/// `darwin_resolve_link_tool(0)` failed `file_exists`, and the hello-world link
+/// died as `Linking failed: no error payload from link_to_native`.
+///
+/// `resolve_call_target` and `resolve_method_call_static` already refuse this
+/// (their guards citing the `FailSafeResult.unwrap` RV64 leak), but those run
+/// only when the earlier scans left the name unresolved — once a scan rebinds,
+/// `known_mangled` holds the new name and the guarded resolver is skipped
+/// entirely. The guard has to be here as well, not only there.
+///
+/// Leaving the name bare routes it through codegen's `bare_rt_redirect` table,
+/// which is the correct lowering for every receiver representation.
+fn is_enum_helper_method(name: &str) -> bool {
+    matches!(
+        name,
+        "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+    )
+}
+
+/// Owner-segment match for an enum-helper rebind.
+///
+/// A mangled candidate is `<module__path>__<Owner>.<method>`; the owner is the
+/// segment between the last `__` and the `.`. For the enum helpers the ONLY
+/// safe rebind is one where the receiver qualifier names that owner exactly.
+///
+/// The `contains(type_part)` heuristic the generic arms use is actively unsafe
+/// here: lowercased, the single Stage 2 candidate
+/// `lib__nogc_async_mut__async__poll__Poll.unwrap` contains the letters of most
+/// short type names, so a generic parameter (`T`, `R`, `U`) or a type called
+/// `Mut` / `Sync` / `Async` / `Lib` / `Wrap` substring-matches it and gets its
+/// `.unwrap()` bound to an unrelated type's method, which returns 0 for a
+/// non-`Poll` receiver (2026-09-13, 208 residual sites across 109 functions).
+fn enum_helper_owner_matches(candidate: &str, type_part: &str) -> bool {
+    let Some((owner_path, _method)) = candidate.rsplit_once('.') else {
+        return false;
+    };
+    let owner = owner_path.rsplit("__").next().unwrap_or(owner_path);
+    owner.eq_ignore_ascii_case(type_part)
+}
+
+/// True when `candidate` is the mangled spelling of `<type_part>.<method>`.
+///
+/// The suffix index holds BOTH spellings — `pkg__mod__Owner.method` and
+/// `pkg__mod__Owner_dot_method` — so an owner test that understands only one
+/// of them silently answers `false` and drops the caller into the very
+/// substring/lone-candidate arms this exists to avoid.
+pub(super) fn method_owner_matches(candidate: &str, type_part: &str) -> bool {
+    if type_part.is_empty() {
+        return false;
+    }
+    let owner_path = match candidate.rsplit_once('.') {
+        Some((owner, _)) => owner,
+        None => match candidate.rfind("_dot_") {
+            Some(idx) => &candidate[..idx],
+            None => return false,
+        },
+    };
+    let owner = owner_path.rsplit("__").next().unwrap_or(owner_path);
+    owner.eq_ignore_ascii_case(type_part)
 }
 
 /// Apply name mangling to a MIR module for the LLVM backend.
@@ -438,7 +613,7 @@ pub(crate) fn mangle_mir(
                             continue;
                         } else if let Some(resolved) = use_map.get(&name) {
                             *target = target.with_name(resolved.clone());
-                        } else {
+                        } else if !is_enum_helper_method(&name) {
                             let method_dot = format!(".{}", name);
                             let mut use_resolved = None;
                             for (raw, mangled) in use_map.iter() {
@@ -553,15 +728,34 @@ pub(crate) fn mangle_mir(
                             *func_name = mangled.clone();
                         } else if let Some(resolved) = use_map.get(func_name.as_str()) {
                             *func_name = resolved.clone();
-                        } else {
+                        } else if !is_enum_helper_method(func_name.as_str()) {
                             let method_part = func_name.as_str();
-                            let mut use_resolved = None;
+                            // Ambiguity is refusal, not a coin flip. This scan
+                            // used to take the FIRST `use_map` key ending in
+                            // `.<method>` and `break` -- an arbitrary,
+                            // HashMap-order pick among every same-named method
+                            // in the closure, made on a BARE name that carries
+                            // no receiver-type evidence at all. Six sibling
+                            // structs with a `store` (ints.spl) collapsed onto
+                            // one body this way. Bind only when the scan agrees.
+                            let mut hits: Vec<String> = Vec::new();
                             for (raw, mangled) in use_map.iter() {
-                                if raw.ends_with(&format!(".{}", method_part)) && raw.len() > method_part.len() + 1 {
-                                    use_resolved = Some(mangled.clone());
-                                    break;
+                                if raw.ends_with(&format!(".{}", method_part))
+                                    && raw.len() > method_part.len() + 1
+                                    && !hits.contains(mangled)
+                                {
+                                    hits.push(mangled.clone());
                                 }
                             }
+                            if hits.len() > 1 {
+                                eprintln!(
+                                    "warning: refusing to bind unqualified method `{}` -- {} same-named candidates ({})",
+                                    method_part,
+                                    hits.len(),
+                                    hits.join(", ")
+                                );
+                            }
+                            let use_resolved = if hits.len() == 1 { hits.pop() } else { None };
                             if let Some(resolved) = use_resolved {
                                 *func_name = resolved;
                             } else if let Some(resolved) = import_map.get(func_name.as_str()) {
@@ -723,10 +917,49 @@ fn resolve_call_target(
             .or_else(|| suffix_index.get(lookup_name))
             .or_else(|| local_suffix_index.get(method))
             .or_else(|| suffix_index.get(method));
+        if is_enum_helper_method(method) {
+            // SECOND ROUTE for the `Poll.unwrap` rebind (2026-09-13). PR #750
+            // guarded `mangle_mir`'s two bare scans and the str/text/string UFCS
+            // arm in `resolve_method_call_static`; 208 sites survived because a
+            // QUALIFIED `T.unwrap` reaches here instead, where `.get(method)`
+            // discards the qualifier and the `candidates.len() == 1` arm below
+            // (plus both `resolve_by_suffix` fall-throughs) binds it to the only
+            // `unwrap` in the 877-unit closure regardless of receiver type.
+            // `static_.init.unwrap()` in cranelift_codegen_adapter.spl is one
+            // such site. For these names the only sound rebind is an exact owner
+            // match; anything else must stay bare so codegen's `bare_rt_redirect`
+            // lowering owns it, which is correct for every receiver shape.
+            if let Some(b) = candidates.into_iter().flatten().find(|c| enum_helper_owner_matches(c, type_part)) {
+                *target = target.with_name(b.clone());
+            }
+            return;
+        }
         if let Some(candidates) = candidates {
+            // Exact owner match first; the substring test is a fallback and
+            // only binds when it is unambiguous.
+            //
+            // The lone-candidate arm is KEPT -- deliberately, and narrowly.
+            // With exactly one same-named method in the whole closure there is
+            // no choice to get wrong, and that case is load-bearing: a struct
+            // calling an INHERITED trait default reaches here as
+            // `Button.render` while the only emitted body is the trait's
+            // `Widget.render` (pinned by
+            // `qualified_enum_helpers_never_rebind_in_resolve_call_target`'s
+            // final assertion). What is removed is the arbitrary pick when the
+            // closure holds SEVERAL same-named methods and none is owned by the
+            // receiver -- `U16le.store` among six `ints.spl` siblings. One
+            // candidate is an absence of ambiguity; six is a coin flip.
+            let type_part_lower = type_part.to_lowercase();
             let best = candidates
                 .iter()
-                .find(|c| c.to_lowercase().contains(&type_part.to_lowercase()))
+                .find(|c| method_owner_matches(c, type_part))
+                .or_else(|| {
+                    let mut subs = candidates.iter().filter(|c| c.to_lowercase().contains(&type_part_lower));
+                    match (subs.next(), subs.next()) {
+                        (Some(only), None) => Some(only),
+                        _ => None,
+                    }
+                })
                 .or_else(|| {
                     if candidates.len() == 1 {
                         candidates.first()
@@ -945,33 +1178,81 @@ fn resolve_method_call_static(
         }
         let type_part_lower = type_part.to_lowercase();
         let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
+        if is_enum_helper_method(method) {
+            // Qualified enum helpers: exact owner match only. The generic
+            // `contains(&type_part_lower)` arm below is a substring test against
+            // the FULL mangled path, so `T.unwrap` / `Mut.unwrap` /
+            // `Async.unwrap` all match
+            // `lib__nogc_async_mut__async__poll__Poll.unwrap` by accident. Same
+            // defect class and same remedy as the guard in
+            // `resolve_call_target`; the str/text/string arm further down keeps
+            // its own `!is_enum_helper_method` check as a belt-and-braces
+            // statement of the same invariant.
+            if let Some(b) = candidates.into_iter().flatten().find(|c| enum_helper_owner_matches(c, type_part)) {
+                *func_name = b.clone();
+            }
+            return;
+        }
         if let Some(candidates) = candidates {
             let best = if has_type_qualifier {
-                candidates.iter().find(|c| c.to_lowercase().contains(&type_part_lower))
+                // A qualified receiver names its owner EXACTLY. Prefer the
+                // candidate whose owner token equals `type_part`; only when no
+                // candidate owns the name outright does the historical
+                // substring test apply, and then only if it is unambiguous.
+                // Six sibling structs with a same-named `store` (ints.spl)
+                // make "first candidate containing the type name" a
+                // closure-order lottery.
+                candidates
+                    .iter()
+                    .find(|c| method_owner_matches(c, type_part))
+                    .or_else(|| {
+                        let mut subs = candidates.iter().filter(|c| c.to_lowercase().contains(&type_part_lower));
+                        match (subs.next(), subs.next()) {
+                            (Some(only), None) => Some(only),
+                            _ => None,
+                        }
+                    })
             } else {
-                let mut use_match: Option<&String> = None;
+                // BARE name: no receiver-type evidence. Collect every
+                // candidate the use/import scans reach and bind only when
+                // they agree on one -- taking the first HashMap hit picks an
+                // arbitrary same-named method and miscompiles the call.
+                let mut hits: Vec<&String> = Vec::new();
                 for (raw, mangled) in use_map.iter() {
                     if raw.ends_with(&format!(".{}", method)) {
                         if let Some(c) = candidates.iter().find(|c| *c == mangled) {
-                            use_match = Some(c);
-                            break;
+                            if !hits.contains(&c) {
+                                hits.push(c);
+                            }
                         }
                     }
                 }
-                if use_match.is_none() {
+                if hits.is_empty() {
                     for (raw, mangled) in import_map.iter() {
                         if raw.ends_with(&format!(".{}", method)) && raw != method {
                             if let Some(c) = candidates.iter().find(|c| *c == mangled) {
                                 let raw_type = raw.split('.').next().unwrap_or("");
-                                if use_map.contains_key(raw_type) {
-                                    use_match = Some(c);
-                                    break;
+                                if use_map.contains_key(raw_type) && !hits.contains(&c) {
+                                    hits.push(c);
                                 }
                             }
                         }
                     }
                 }
-                use_match
+                match hits.len() {
+                    0 => None,
+                    1 => Some(hits[0]),
+                    n => {
+                        eprintln!(
+                            "warning: refusing to bind unqualified method `{}` -- {} same-named candidates ({}); \
+                             the receiver type was erased before mangling, so no candidate can be chosen soundly",
+                            method,
+                            n,
+                            hits.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                        );
+                        None
+                    }
+                }
             };
             let best = best.or_else(|| {
                 // A qualified receiver is semantic type evidence.  Do not
@@ -999,9 +1280,39 @@ fn resolve_method_call_static(
                 // type-qualified matching, which stays strict to avoid the
                 // `str.rfind`-vs-`DoubleEndedIterator.rfind` ambiguity above),
                 // and only when there is a single unambiguous candidate.
+                // NEVER for the Optional/Result helper names (macOS Stage 2
+                // linker blocker, 2026-09-13). `find_mold_path() -> text?`
+                // followed by `mold_path.unwrap()` reaches here as
+                // `text.unwrap` — a qualifier naming the PAYLOAD type, not a
+                // type that owns an `unwrap` method. In the 877-unit Stage 2
+                // closure the suffix index holds exactly ONE `unwrap`
+                // candidate, `lib__nogc_async_mut__async__poll__Poll.unwrap`,
+                // so this single-candidate arm rebound the call to it and
+                // `Ok(mold_path.unwrap())` was constructed with the INTEGER 0.
+                // `darwin_resolve_link_tool(0)` then failed `file_exists` and
+                // the hello-world link died as `Linking failed: no error
+                // payload from link_to_native`. A 1-unit reproducer cannot
+                // show it: `Poll.unwrap` is not in a small closure, so there
+                // is no candidate to rebind to. These names must reach
+                // codegen's builtin enum payload/discriminant lowering, which
+                // is what the bare-receiver guard above already relies on.
+                //
+                // The candidate must itself be an UNOWNED free function. That
+                // is the whole premise of this arm -- "a plain top-level
+                // `fn f(text, ...)` called via UFCS" -- and without the test
+                // the arm also swallows an owned `Type.method`, which is the
+                // exact rebind the arm above refuses:
+                // `test_llvm_mangle_does_not_rebind_qualified_method_to_unrelated_type`
+                // has `str.rfind` versus the lone candidate
+                // `core__traits__DoubleEndedIterator_dot_rfind`, an owned
+                // method of an unrelated type.
                 if has_type_qualifier
                     && matches!(type_part_lower.as_str(), "str" | "text" | "string")
+                    && !is_enum_helper_method(method)
                     && candidates.len() == 1
+                    && candidates
+                        .first()
+                        .is_some_and(|c| !c.contains("_dot_") && !c.contains('.'))
                 {
                     candidates.first()
                 } else {
@@ -1222,8 +1533,122 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_method_call_static;
+    use super::{enum_helper_owner_matches, is_enum_helper_method, resolve_call_target, resolve_method_call_static};
+    use crate::mir::CallTarget;
     use std::collections::HashMap;
+
+    fn poll_index() -> HashMap<String, Vec<String>> {
+        HashMap::from([(
+            "unwrap".to_string(),
+            vec!["lib__nogc_async_mut__async__poll__Poll.unwrap".to_string()],
+        )])
+    }
+
+    fn run_call_target(name: &str, suffix_index: &HashMap<String, Vec<String>>) -> String {
+        let mut target = CallTarget::Pure(name.to_string());
+        let mut unresolved = 0usize;
+        resolve_call_target(
+            &mut target,
+            name,
+            &HashMap::new(),
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+            &HashMap::new(),
+            suffix_index,
+            "caller",
+            "prefix",
+            &mut unresolved,
+        );
+        target.name().to_string()
+    }
+
+    fn run_method_static(name: &str, suffix_index: &HashMap<String, Vec<String>>) -> String {
+        let mut out = name.to_string();
+        resolve_method_call_static(&mut out, &HashMap::new(), &HashMap::new(), &HashMap::new(), suffix_index);
+        out
+    }
+
+    /// Route 2 of the `Poll.unwrap` rebind (2026-09-13): a QUALIFIED helper
+    /// call reaching `resolve_call_target`, whose candidate lookup discards the
+    /// qualifier and whose `candidates.len() == 1` arm then binds any receiver
+    /// to the lone `unwrap` in the closure. `static_.init.unwrap()` in
+    /// cranelift_codegen_adapter.spl is a real site of exactly this shape.
+    #[test]
+    fn qualified_enum_helpers_never_rebind_in_resolve_call_target() {
+        let idx = poll_index();
+        for receiver in ["MirStaticInit", "T", "Mut", "Async", "Lib", "Wrap", "i64", "text"] {
+            let name = format!("{receiver}.unwrap");
+            assert_eq!(run_call_target(&name, &idx), name, "{name} must stay bare");
+        }
+        // The genuine owner still resolves, so the guard is not vacuous.
+        assert_eq!(
+            run_call_target("Poll.unwrap", &idx),
+            "lib__nogc_async_mut__async__poll__Poll.unwrap"
+        );
+        // A non-helper method keeps today's single-candidate behaviour.
+        let other = HashMap::from([("render".to_string(), vec!["lib__ui__widget__Widget.render".to_string()])]);
+        assert_eq!(run_call_target("Button.render", &other), "lib__ui__widget__Widget.render");
+    }
+
+    /// Route 3: the same shape reaching `resolve_method_call_static`, where the
+    /// surviving hole was `find(|c| c.to_lowercase().contains(&type_part_lower))`
+    /// -- a substring test against the FULL mangled path, which
+    /// `lib__nogc_async_mut__async__poll__Poll.unwrap` satisfies for most short
+    /// type names.
+    #[test]
+    fn qualified_enum_helpers_never_substring_match_in_method_call_static() {
+        let idx = poll_index();
+        for receiver in ["T", "Mut", "Async", "Lib", "Wrap", "As", "MirStaticInit"] {
+            for helper in ["unwrap", "is_some", "is_ok"] {
+                let name = format!("{receiver}.{helper}");
+                let idx = if helper == "unwrap" {
+                    idx.clone()
+                } else {
+                    HashMap::from([(
+                        helper.to_string(),
+                        vec![format!("lib__nogc_async_mut__async__poll__Poll.{helper}")],
+                    )])
+                };
+                assert_eq!(run_method_static(&name, &idx), name, "{name} must stay bare");
+            }
+        }
+        assert_eq!(
+            run_method_static("Poll.unwrap", &idx),
+            "lib__nogc_async_mut__async__poll__Poll.unwrap"
+        );
+    }
+
+    /// The Cranelift twin of the qualified-name hole. Its `enum_helper`
+    /// predicate used to be keyed on the WHOLE `lookup_name`, so a qualified
+    /// `MirStaticInit.unwrap` was not recognised as a helper and the bare
+    /// last-resort `use_map.get(method)` scan rebound it. Asserted at source
+    /// level because the scans are inline in a function that needs a whole
+    /// Cranelift `FunctionBuilder` -- the same technique, and the same reason,
+    /// as `bare_enum_helper_scans_are_guarded_in_mangle_mir`.
+    #[test]
+    fn cranelift_enum_helper_guard_is_keyed_on_the_method_segment() {
+        let src = include_str!("../../codegen/instr/closures_structs.rs");
+        assert!(
+            src.contains("let enum_helper_method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);"),
+            "cranelift enum_helper predicate must be keyed on the method segment, not the whole lookup name"
+        );
+        assert!(
+            src.contains("if resolved_name.is_none() && !enum_helper {\n                    resolved_name = ctx\n                        .use_map\n                        .get(method)"),
+            "the cranelift last-resort bare-method lookup lost its enum-helper guard"
+        );
+    }
+
+    #[test]
+    fn enum_helper_owner_match_is_exact_not_substring() {
+        let poll = "lib__nogc_async_mut__async__poll__Poll.unwrap";
+        assert!(enum_helper_owner_matches(poll, "Poll"));
+        assert!(enum_helper_owner_matches(poll, "poll"));
+        for wrong in ["T", "Mut", "Async", "Lib", "Wrap", "Pol", "PollX"] {
+            assert!(!enum_helper_owner_matches(poll, wrong), "{wrong} must not match");
+        }
+        // An unqualified candidate (a free function) owns no type.
+        assert!(!enum_helper_owner_matches("lib__tooling__notify__unwrap_or", "notify"));
+    }
 
     #[test]
     fn array_join_stays_builtin_when_path_join_is_imported() {
@@ -1234,5 +1659,199 @@ mod tests {
             resolve_method_call_static(&mut name, &use_map, &HashMap::new(), &HashMap::new(), &HashMap::new());
             assert_eq!(name, builtin);
         }
+    }
+
+    /// macOS Stage 2 linker blocker, 2026-09-13.
+    ///
+    /// `mold_path.unwrap()` on a `text?` arrives here as `text.unwrap`. The
+    /// Stage 2 closure contributes exactly one `unwrap` candidate,
+    /// `Poll.unwrap`, and the str/text/string single-candidate UFCS arm bound
+    /// the call to it; `Ok(mold_path.unwrap())` then carried the integer 0.
+    /// The enum helpers must stay bare so codegen lowers them as builtins.
+    #[test]
+    fn text_qualified_enum_helpers_never_rebind_to_a_lone_user_method() {
+        let poll_unwrap = "lib__nogc_async_mut__async__poll__Poll.unwrap".to_string();
+        let suffix_index = HashMap::from([
+            ("unwrap".to_string(), vec![poll_unwrap]),
+            (
+                "split_whitespace".to_string(),
+                vec!["lib__common__text_advanced__split_whitespace".to_string()],
+            ),
+        ]);
+
+        for helper in ["unwrap", "unwrap_or", "unwrap_err", "is_some", "is_none", "is_ok", "is_err"] {
+            for receiver in ["str", "text", "string"] {
+                let mut name = format!("{receiver}.{helper}");
+                resolve_method_call_static(
+                    &mut name,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &suffix_index,
+                );
+                assert_eq!(name, format!("{receiver}.{helper}"), "{receiver}.{helper} must stay bare");
+            }
+        }
+
+        // The genuine text-UFCS rebind this arm exists for must still happen,
+        // so the guard above cannot be satisfied by disabling the whole arm.
+        let mut ufcs = "str.split_whitespace".to_string();
+        resolve_method_call_static(
+            &mut ufcs,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &suffix_index,
+        );
+        assert_eq!(ufcs, "lib__common__text_advanced__split_whitespace");
+    }
+
+    /// The blocker itself. `mold_path.unwrap()` on a `text?` lowers to a BARE
+    /// `unwrap` call target, and `mangle_mir`'s two bare `.method` scans (one
+    /// for `MirInst::Call`, one for `MethodCallStatic`) rebound it to the only
+    /// `.unwrap` entry in the import maps. Those scans are inline in a function
+    /// that takes a whole `MirModule`, so this asserts the guard at source
+    /// level -- the same technique the LLVM redirect-table invariant uses, and
+    /// the reason a partial fix survived: guarding only the resolvers left the
+    /// scans that run BEFORE them wide open.
+    #[test]
+    fn bare_enum_helper_scans_are_guarded_in_mangle_mir() {
+        let src = include_str!("mangle.rs");
+
+        for guard in [
+            "} else if !is_enum_helper_method(&name) {",
+            "} else if !is_enum_helper_method(func_name.as_str()) {",
+        ] {
+            assert!(src.contains(guard), "bare `.method` scan lost its guard: {guard}");
+        }
+
+        // Every helper the builtin lowering owns must be covered, and a name it
+        // does not own must not be, so the predicate cannot pass vacuously.
+        for helper in ["unwrap", "unwrap_or", "unwrap_err", "is_some", "is_none", "is_ok", "is_err"] {
+            assert!(is_enum_helper_method(helper), "{helper} must be treated as a builtin helper");
+        }
+        assert!(!is_enum_helper_method("len"));
+        assert!(!is_enum_helper_method("to_string"));
+    }
+}
+
+/// Site 16: construction and match must name the SAME enum runtime identity.
+///
+/// The construction side (`MirInst::EnumUnit` / `EnumWith`) is qualified by
+/// `qualify_enum_runtime_names` above and only then hashed by codegen, so its
+/// id is `rid("<module>.Kind")`. The match side bakes `rid("Kind")` — the BARE
+/// declared name — as an integer constant back in HIR lowering
+/// (`hir/lower/expr/control.rs::enum_runtime_id_for_type` /
+/// `enum_runtime_id_for_pattern`), which this pass never used to see because it
+/// is an integer by the time MIR exists. `rt_enum_check_variant` answers 0 on an
+/// id mismatch, so in a natively compiled binary NO match arm ran.
+#[cfg(test)]
+mod enum_identity_agreement_tests {
+    use crate::mir::{MirInst, MirModule};
+    use std::collections::HashMap;
+
+    const SOURCE: &str = "enum Kind:\n    Cranelift\n    Interpreter\n    Llvm\n\nfn num3(k: Kind) -> i64:\n    match k:\n        case Cranelift: 11\n        case Interpreter: 22\n        case Llvm: 33\n\nfn main():\n    print \"{num3(Kind.Cranelift)}\"\n";
+
+    fn lower_and_qualify(runtime_module_name: &str) -> MirModule {
+        let mut parser = simple_parser::Parser::new(SOURCE);
+        let parsed = parser.parse().expect("fixture must parse");
+        let hir = crate::hir::lower::lower(&parsed).expect("fixture must lower to HIR");
+        let mut mir = crate::mir::lower_to_mir(&hir).expect("fixture must lower to MIR");
+        super::qualify_enum_runtime_names(
+            &mut mir,
+            runtime_module_name,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("qualification must succeed");
+        mir
+    }
+
+    /// Every id codegen will bake for a construction of an enum.
+    fn construction_ids(mir: &MirModule) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for func in &mir.functions {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let enum_name = match inst {
+                        MirInst::EnumUnit { enum_name, .. } | MirInst::EnumWith { enum_name, .. } => enum_name,
+                        _ => continue,
+                    };
+                    ids.push(i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)));
+                }
+            }
+        }
+        ids
+    }
+
+    /// Every id a `rt_enum_check_variant` call will compare against.
+    fn check_ids(mir: &MirModule) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for func in &mir.functions {
+            let mut consts = HashMap::new();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let MirInst::ConstInt { dest, value } = inst {
+                        consts.insert(*dest, *value);
+                    }
+                }
+            }
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let MirInst::Call { target, args, .. } = inst else {
+                        continue;
+                    };
+                    if target.name() != "rt_enum_check_variant" || args.len() < 2 {
+                        continue;
+                    }
+                    ids.push(
+                        *consts
+                            .get(&args[1])
+                            .unwrap_or_else(|| panic!("check-variant enum id operand {:?} is not a ConstInt", args[1])),
+                    );
+                }
+            }
+        }
+        ids
+    }
+
+    fn agree(runtime_module_name: &str) {
+        let mir = lower_and_qualify(runtime_module_name);
+        let built = construction_ids(&mir);
+        let checked = check_ids(&mir);
+        // Vacuity guards: a run that found no construction or no match test
+        // proves nothing and must fail rather than pass silently.
+        assert!(!built.is_empty(), "fixture produced no enum construction under {runtime_module_name}");
+        assert!(!checked.is_empty(), "fixture produced no rt_enum_check_variant under {runtime_module_name}");
+        let built_unique: std::collections::BTreeSet<i64> = built.iter().copied().collect();
+        let checked_unique: std::collections::BTreeSet<i64> = checked.iter().copied().collect();
+        assert_eq!(
+            built_unique, checked_unique,
+            "construction and match must name one runtime identity under {runtime_module_name}"
+        );
+    }
+
+    #[test]
+    fn construction_and_match_agree_on_the_enum_runtime_id() {
+        agree("aa.zz");
+        agree("bbbb.zz");
+    }
+
+    /// The identity is module-qualified by design (the declaring-module name is
+    /// what `imports.rs` registers, and the collision checks depend on it), so
+    /// the shared id legitimately differs between two module names. What must
+    /// never differ is construction vs match WITHIN one build.
+    #[test]
+    fn the_shared_id_follows_the_declaring_module_name() {
+        let aa = check_ids(&lower_and_qualify("aa.zz"));
+        let bbbb = check_ids(&lower_and_qualify("bbbb.zz"));
+        assert!(!aa.is_empty() && !bbbb.is_empty(), "both runs must produce match tests");
+        assert_ne!(aa[0], bbbb[0], "two module names must not collide onto one id");
+        assert_eq!(
+            aa[0],
+            i64::from(crate::codegen::shared::enum_runtime_type_id("aa.zz.Kind")),
+            "the shared id must be the declaring-module-qualified name's id"
+        );
     }
 }

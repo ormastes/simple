@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use simple_parser::ast::{
     Argument, Capability, ConstStmt, Effect, Expr, FunctionDef, ImplBlock, ImportTarget, Module, Node, Type, UseStmt,
@@ -959,7 +960,7 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
         };
 
         eprintln!("{}: {}", level_str, hint.message);
-        eprintln!("  --> {}:{}:{}", path.display(), hint.span.line, hint.span.column);
+        eprintln!("  --> {}:{}:{}", crate::display_path::display_path(path), hint.span.line, hint.span.column);
 
         // Show source line with caret
         if let Some(line) = hint.span.line.checked_sub(1).and_then(|i| source_lines.get(i)) {
@@ -2034,7 +2035,7 @@ pub fn collect_direct_imported_module_paths(path: &Path) -> Result<Vec<PathBuf>,
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
@@ -2086,7 +2087,7 @@ fn collect_imported_module_paths_internal(
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
     display_parser_hints(&parser, &source, &path);
 
@@ -2227,6 +2228,91 @@ fn collect_matching_package_sibling_paths(
     Ok(sibling_files)
 }
 
+thread_local! {
+    /// Physical-file source cache for `load_module_with_imports_internal`,
+    /// keyed by the canonicalized path -- the same key this function already
+    /// computes for `visited`.
+    ///
+    /// The `visited`-based de-dup a few lines below only short-circuits when
+    /// `flatten_imports` is true; for a non-flattened `use` (the common case
+    /// for a plain member import, not a glob/nested-flatten) every call falls
+    /// straight through to a fresh `fs::read_to_string`, with no memo at all.
+    /// A package `__init__.spl` imported by many sibling submodules is
+    /// therefore re-read from disk once per submodule that imports it, not
+    /// once per process. Measured on `simple lint <2-line file>`
+    /// (SIMPLE_EXECUTION_MODE=interpret): `fix/rules/impl_/__init__.spl`
+    /// opened 28 times through THIS call site (28 -> 2 after this fix -- the
+    /// residual 2 is a DIFFERENT, cross-lane duplication: one open per path
+    /// SPELLING of a symlinked directory, `src/compiler/90.tools/...` via
+    /// this function vs `src/compiler/tools/...` -- `tools` is a symlink to
+    /// `90.tools` -- via `module_cache::shared_source`'s independent
+    /// cross-lane cache; not fixed here, see the bug record below).
+    /// `variants/__init__.spl` opened 76 times via an entirely different,
+    /// unrelated call site (`var_overlay::compute_var_roots`, in the
+    /// interpreter's own module resolver) that already has its own
+    /// process-level memo (`VAR_ROOTS_CACHE`) on `origin/main` -- the
+    /// DEPLOYED seed binary measured against simply predates that memo; see
+    /// doc/08_tracking/bug/deployed_seed_binary_missing_var_roots_cache_fix_2026-09-13.md.
+    /// Full attribution, including the residual-2 backtrace:
+    /// doc/08_tracking/bug/pipeline_module_loader_reads_unflattened_import_source_every_call_2026-09-13.md.
+    ///
+    /// This cache only replaces the disk READ (CRLF-normalized raw text,
+    /// before the per-call `target_arch` cfg-strip and the `SIMPLE_BOOTSTRAP`
+    /// textual leniency rewrite below, both of which stay per-call so a
+    /// process that loads the same file for two different `target_arch`
+    /// values still gets a correct, per-arch-stripped result). It does not
+    /// cache the parsed `Module` or the capability-validated return value, so
+    /// behaviour for `flatten_imports=false` revisits is unchanged: a real,
+    /// non-empty `Module` is still parsed and returned every call.
+    ///
+    /// Stamp policy: none, per process -- the same policy `VAR_ROOTS_CACHE`
+    /// (`module_resolver/var_overlay.rs`) and `PARSED_SOURCE_CACHE`
+    /// (`module_cache.rs`) already use. Dropped by `clear_module_cache()` /
+    /// `clear_module_cache_selective()` (`module_cache.rs`), right next to
+    /// `clear_parsed_source_cache()`, so a caller that already resets module
+    /// state for a fresh file also drops this memo. As of this change the
+    /// only callers found (`grep -rn clear_module_cache`) are `#[cfg(test)]`
+    /// fixtures within this crate's own test suite -- `mem_trace.rs` records
+    /// that `lint` and `native-build` never reach `clear_module_cache` today,
+    /// so this wiring currently protects the test harness, not a live
+    /// MCP/LSP staleness path. It is still the right boundary to hook: any
+    /// future long-lived caller (a `Compiler` reused across a multi-file
+    /// `native-build`, an MCP/LSP session) that adopts the existing
+    /// `clear_module_cache*` convention gets this cache invalidated for free,
+    /// the same way it already gets `PARSED_SOURCE_CACHE` and
+    /// `PROBE_SOURCE_CACHE` invalidated. A short-lived one-shot process
+    /// (`simple lint <file>`, `simple run <file>`) never calls
+    /// `clear_module_cache` and behaves exactly as if this cache did not
+    /// exist.
+    static MODULE_SOURCE_TEXT_CACHE: RefCell<HashMap<PathBuf, Rc<str>>> = RefCell::new(HashMap::new());
+}
+
+/// Clear the module-source-text cache. Mirrors
+/// `clear_pipeline_dir_listing_cache` above: long-lived processes that reset
+/// module state must also drop this memo so an edited file is re-read, not
+/// served stale.
+pub fn clear_module_source_text_cache() {
+    MODULE_SOURCE_TEXT_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// Read `path` (already canonicalized by the caller) once per process,
+/// CRLF-normalized. See `MODULE_SOURCE_TEXT_CACHE`.
+fn read_module_source_text_cached(path: &Path) -> Result<String, CompileError> {
+    if let Some(hit) = MODULE_SOURCE_TEXT_CACHE.with(|c| c.borrow().get(path).cloned()) {
+        return Ok(hit.to_string());
+    }
+    let mut source = fs::read_to_string(path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
+    // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
+    if source.contains('\r') {
+        source = source.replace('\r', "");
+    }
+    let cached: Rc<str> = Rc::from(source.as_str());
+    MODULE_SOURCE_TEXT_CACHE.with(|c| {
+        c.borrow_mut().insert(path.to_path_buf(), cached);
+    });
+    Ok(source)
+}
+
 fn load_module_with_imports_internal(
     path: &Path,
     visited: &mut HashSet<PathBuf>,
@@ -2242,11 +2328,7 @@ fn load_module_with_imports_internal(
         });
     }
 
-    let mut source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
-    // Normalize CRLF → LF so indentation-sensitive parsing works on all platforms
-    if source.contains('\r') {
-        source = source.replace('\r', "");
-    }
+    let mut source = read_module_source_text_cached(&path)?;
 
     // Bootstrap leniency: older sources use optional `text?` types which the
     // current parser treats as a bare identifier. During early bootstrap we
@@ -2278,7 +2360,7 @@ fn load_module_with_imports_internal(
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
-        .map_err(|e| CompileError::Parse(format!("in {:?}: {e}", path)))?;
+        .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
 
     // Display error hints (warnings, etc.) from parser
@@ -2636,6 +2718,85 @@ mod tests {
     use std::collections::HashSet;
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn module_source_text_is_read_from_disk_once_per_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pkg_init.spl");
+        fs::write(&path, "val a = 1\n").unwrap();
+        let canonical = path.canonicalize().unwrap();
+        clear_module_source_text_cache();
+
+        let first = read_module_source_text_cached(&canonical).unwrap();
+        assert_eq!(first, "val a = 1\n");
+
+        // Rewriting the file must NOT change the answer within the process:
+        // the memo is the documented per-process policy (same as
+        // `VAR_ROOTS_CACHE`), and proving it here is what keeps a re-read
+        // from silently coming back once this cache exists.
+        fs::write(&path, "val a = 2\n").unwrap();
+        assert_eq!(read_module_source_text_cached(&canonical).unwrap(), first);
+
+        clear_module_source_text_cache();
+        assert_eq!(read_module_source_text_cached(&canonical).unwrap(), "val a = 2\n");
+    }
+
+    #[test]
+    fn module_source_text_cache_is_keyed_by_path_not_shared_across_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a.spl");
+        let b = temp.path().join("b.spl");
+        fs::write(&a, "val a = 1\n").unwrap();
+        fs::write(&b, "val b = 2\n").unwrap();
+        clear_module_source_text_cache();
+
+        assert_eq!(
+            read_module_source_text_cached(&a.canonicalize().unwrap()).unwrap(),
+            "val a = 1\n"
+        );
+        assert_eq!(
+            read_module_source_text_cached(&b.canonicalize().unwrap()).unwrap(),
+            "val b = 2\n"
+        );
+    }
+
+    #[test]
+    fn unflattened_repeat_import_of_the_same_package_init_reads_disk_once() {
+        // Replays the shape measured on `simple lint <2-line file>`:
+        // `fix/rules/impl_/__init__.spl`, a real package imported by many
+        // sibling submodules, was re-read from disk once per submodule
+        // because `load_module_with_imports_internal`'s `visited`-based
+        // de-dup only fires when `flatten_imports` is true, and a plain
+        // (non-glob, non-nested-flatten) member import passes
+        // `flatten_imports=false` for the recursive call that loads the
+        // imported package. Two independent, unflattened loads of the SAME
+        // physical `__init__.spl` (as two different sibling submodules would
+        // each trigger) must both still return a real, non-empty, correctly
+        // parsed `Module` -- the fix must not change that -- while the
+        // second load must come from the cache, not a second disk read.
+        let temp = tempfile::tempdir().unwrap();
+        let init_path = temp.path().join("__init__.spl");
+        fs::write(&init_path, "val marker = 1\n").unwrap();
+        clear_module_source_text_cache();
+
+        let arch = simple_common::target::TargetArch::host();
+        let mut visited_one = HashSet::new();
+        let first = load_module_with_imports_internal(&init_path, &mut visited_one, None, false, arch).unwrap();
+        assert!(!first.items.is_empty(), "first load must return real content, not the flatten-revisit empty Module");
+
+        // Overwrite the file between loads -- if the second call still hit
+        // disk, it would observe this new content instead of the cached one.
+        fs::write(&init_path, "val marker = 2\nval extra = 3\n").unwrap();
+
+        let mut visited_two = HashSet::new();
+        let second = load_module_with_imports_internal(&init_path, &mut visited_two, None, false, arch).unwrap();
+        assert!(!second.items.is_empty(), "second load must also return real content (non-flatten semantics preserved)");
+        assert_eq!(
+            second.items.len(),
+            first.items.len(),
+            "second load must be byte-identical to the first: it came from the source-text cache, not the rewritten file"
+        );
+    }
 
     #[test]
     fn flattened_export_use_emits_global_binding_markers_for_reexport_facades() {

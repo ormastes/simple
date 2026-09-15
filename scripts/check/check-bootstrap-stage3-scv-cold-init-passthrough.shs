@@ -1,0 +1,116 @@
+#!/bin/sh
+# Focused contract: the Stage-3 resume lane must be able to PASS the remedy its
+# own compiler prescribes.
+#
+# WHY. `src/app/compiler_entrypoint/inventory_events.spl:207` fails closed on a
+# checkout with no compile-event cursor and names the fix in the error text:
+#
+#   SCV-E-ADMISSION: compile-event-journal-missing
+#   (first build in this checkout: rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)
+#
+# The Stage-3 child runs under `env -i` (bootstrap_stage3_run_transcribed), so
+# it sees ONLY the variables the step lists.  Measured 2026-09-14 (F74 round 3,
+# Stage 3 runs 3 and 4): the coordinator route died with that exact message,
+# and rerunning with `SIMPLE_SCV_INVENTORY_COLD_INIT=1` exported in the parent
+# shell FAILED IDENTICALLY, because the variable never crossed `env -i`.  A
+# prescribed remedy that the harness makes unreachable is a fail-closed gate
+# with no open door.
+#
+# The fix is an EXPLICIT, SINGLE-VARIABLE pass-through -- deliberately not a
+# blanket env forward -- validated to be exactly `1` and baked into BOTH the
+# recorded argument digest and the transcribed command, exactly like the
+# `SIMPLE_STAGE3_MISSION_CRITICAL` knob beside it.  Unset reproduces the pinned
+# argv byte-for-byte, so existing admission receipts are unaffected.
+#
+# Verdict line is the LAST line of stdout:
+#   PASS  — <n> check(s) ...             exit 0
+#   FAIL  — ...                          exit 1
+#   ERROR — nothing was checked (...)    exit 2
+# Zero checks, or any block that extracts empty, is ERROR.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+knob='SIMPLE_SCV_INVENTORY_COLD_INIT'
+var='${stage3_cold_init_env}'
+
+# --- fatal selftest: the validation shape must actually reject a bad value ---
+selftest() {
+    st_ok=0
+    # accept unset
+    out=$(SIMPLE_SCV_INVENTORY_COLD_INIT= sh -c '
+        case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
+          "") e= ;; 1) e="SIMPLE_SCV_INVENTORY_COLD_INIT=1" ;;
+          *) exit 1 ;;
+        esac; printf "%s" "$e"' 2>/dev/null)
+    rc=$?
+    [ "$rc" -eq 0 ] && [ -z "$out" ] || st_ok=1
+    # accept exactly 1
+    out=$(SIMPLE_SCV_INVENTORY_COLD_INIT=1 sh -c '
+        case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
+          "") e= ;; 1) e="SIMPLE_SCV_INVENTORY_COLD_INIT=1" ;;
+          *) exit 1 ;;
+        esac; printf "%s" "$e"' 2>/dev/null)
+    rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = "SIMPLE_SCV_INVENTORY_COLD_INIT=1" ] || st_ok=1
+    # reject anything else
+    SIMPLE_SCV_INVENTORY_COLD_INIT=yes sh -c '
+        case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
+          "") ;; 1) ;; *) exit 1 ;;
+        esac' 2>/dev/null
+    rc=$?
+    [ "$rc" -eq 1 ] || st_ok=1
+    if [ "$st_ok" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)" >&2
+        exit 2
+    fi
+}
+selftest
+
+checked=0
+failed=0
+failing=''
+
+check_block() {
+    label=$1; file=$2; range=$3; needle=$4
+    if [ ! -f "$file" ]; then
+        echo "ERROR — nothing was checked (missing file: $file)" >&2
+        exit 2
+    fi
+    block=$(sed -n "${range}p" "$file")
+    if [ -z "$block" ]; then
+        echo "ERROR — nothing was checked ($label extracted an empty block from $file)" >&2
+        exit 2
+    fi
+    checked=$((checked + 1))
+    if printf '%s\n' "$block" | grep -Fq "$needle"; then
+        return 0
+    fi
+    failed=$((failed + 1))
+    failing="$failing $label"
+}
+
+# 1. the knob is read, validated, and assigned (opt-in, exactly `1`)
+check_block resume-validation "$resume" \
+    '/^stage3_cold_init_env=$/,/^esac$/' "$knob"
+# 2. baked into the recorded argument digest
+check_block resume-stage3-digest "$resume" \
+    '/^stage3_args=\$(bootstrap_stage3_args_sha256/,/bootstrap_main\.spl)$/' "$var"
+# 3. baked into the transcribed invocation the child actually runs
+check_block resume-stage3-transcript "$resume" \
+    '/^bootstrap_stage3_run_transcribed "\$stage3_transcript"/,/^status=\$?$/' "$var"
+# 4. the compiler-side prescription still names this exact variable; if it is
+#    ever renamed, this pass-through becomes silently useless.
+check_block compiler-prescription \
+    "$root/src/app/compiler_entrypoint/inventory_events.spl" \
+    '/compile-event-journal-missing/,+1' "$knob"
+
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no blocks extracted)" >&2
+    exit 2
+fi
+if [ "$failed" -ne 0 ]; then
+    echo "FAIL — $checked check(s), $failed missing $knob pass-through:$failing"
+    exit 1
+fi
+echo "PASS — $checked check(s), Stage-3 resume passes $knob through env -i (digest + transcript + prescription in sync)"

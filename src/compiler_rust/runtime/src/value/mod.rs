@@ -240,7 +240,8 @@ pub use hpcollections::{
 // Re-export object SFFI functions
 pub use objects::{
     hash_variant_discriminant, rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture,
-    rt_enum_check_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_new, rt_enum_payload, rt_option_map,
+    rt_enum_check_discriminant, rt_enum_check_variant, rt_enum_discriminant, rt_enum_id, rt_enum_new, rt_enum_payload,
+    rt_option_map,
     rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some,
     rt_unwrap_or_self, rt_unwrap_or_trap, rt_unwrap_or_value, rt_expect_or_trap, rt_heap_ref_wellformed,
 };
@@ -421,6 +422,7 @@ pub use sffi::{
     rt_file_canonicalize,
     rt_file_read_text,
     rt_file_read_regular_no_follow_bounded,
+    rt_file_read_regular_no_follow_last_failure,
     rt_file_read_text_rv,
     rt_file_write_text,
     rt_file_copy,

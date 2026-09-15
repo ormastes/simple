@@ -238,8 +238,10 @@ fn native_build_cpu_for_target(target: simple_common::target::Target) -> TargetC
     match std::env::var("SIMPLE_NATIVE_CPU") {
         Ok(raw) if !raw.trim().is_empty() => raw
             .parse::<TargetCpu>()
-            .unwrap_or_else(|_| TargetCpu::builtin_default_for_arch(target.arch)),
-        _ => TargetCpu::builtin_default_for_arch(target.arch),
+            .unwrap_or_else(|_| TargetCpu::host_aware_default_for(target)),
+        // Host-aware: the builtin default is v3 (AVX2), which capped LLVM's
+        // vectorizers at 256 bits for every natively built binary.
+        _ => TargetCpu::host_aware_default_for(target),
     }
 }
 

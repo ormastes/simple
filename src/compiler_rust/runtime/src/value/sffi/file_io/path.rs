@@ -67,6 +67,48 @@ pub unsafe extern "C" fn rt_path_ext(path_ptr: *const u8, path_len: u64) -> Runt
     })
 }
 
+/// Strip Windows' extended-length prefix from a canonicalized path.
+///
+/// `Path::canonicalize` on Windows ALWAYS returns the verbatim form, while
+/// the non-existing-path fallback below returns a plain one. So
+/// `rt_path_absolute` answered in two different shapes depending on whether
+/// the path happened to exist, and every comparison between two of its
+/// results was unreliable -- `starts_with`, equality, and relative-path
+/// arithmetic alike.
+///
+/// Measured on Windows: `path_absolute(".")` came back as
+/// `//?/C:/Users/...` after the caller's separator normalisation, which is
+/// neither a prefix of nor equal to the same directory named any other way.
+/// That broke the SCV snapshot's cache-root ownership guard.
+///
+/// The prefix is a Win32 affordance for exceeding MAX_PATH, not part of the
+/// path's identity, so it is stripped here rather than at each of the many
+/// comparison sites. The UNC spelling maps back to a leading double
+/// separator. Built from the separator's code point because backslash
+/// literals do not survive this repository's tooling reliably.
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: String) -> String {
+    let sep = char::from(92u8);
+    let verbatim: String = [sep, sep, '?', sep].iter().collect();
+    let unc: String = format!("{}UNC{}", verbatim, sep);
+    if let Some(rest) = path.strip_prefix(&unc) {
+        let mut out = String::with_capacity(rest.len() + 2);
+        out.push(sep);
+        out.push(sep);
+        out.push_str(rest);
+        return out;
+    }
+    match path.strip_prefix(&verbatim) {
+        Some(rest) => rest.to_string(),
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: String) -> String {
+    path
+}
+
 /// Convert path to absolute path
 /// Returns the canonicalized absolute path
 #[no_mangle]
@@ -86,7 +128,7 @@ pub unsafe extern "C" fn rt_path_absolute(path_ptr: *const u8, path_len: u64) ->
     // Try to canonicalize (resolve symlinks and make absolute)
     // If that fails, try to make it absolute without resolving symlinks
     let absolute = if let Ok(canonical) = path.canonicalize() {
-        canonical.to_str().unwrap_or(path_str).to_string()
+        strip_verbatim_prefix(canonical.to_str().unwrap_or(path_str).to_string())
     } else {
         // Fallback: join with current directory
         match std::env::current_dir() {
@@ -416,3 +458,53 @@ mod tests {
         }
     }
 }
+
+/// Runnable proof that `rt_path_absolute` answers in ONE shape on Windows.
+///
+/// The defect was not the prefix itself but the inconsistency: an existing
+/// path went through `canonicalize` and came back verbatim-prefixed, a
+/// non-existing one went through the `current_dir` fallback and came back
+/// plain. Comparing two results of the same function was therefore unsound,
+/// which is what broke the SCV cache-root ownership guard. This asserts the
+/// two shapes agree, not merely that a prefix is absent.
+#[cfg(all(test, windows))]
+mod verbatim_prefix_tests {
+    use super::*;
+
+    fn absolute_of(path: &str) -> String {
+        let value = unsafe { rt_path_absolute(path.as_ptr(), path.len() as u64) };
+        let len = unsafe { crate::value::collections::rt_string_len(value) };
+        let data = unsafe { crate::value::collections::rt_string_data(value) };
+        assert!(len >= 0 && !data.is_null(), "rt_path_absolute returned nil");
+        let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    #[test]
+    fn existing_and_missing_paths_agree_on_shape() {
+        let sep = char::from(92u8);
+        let verbatim: String = [sep, sep, '?', sep].iter().collect();
+
+        let dir = std::env::temp_dir();
+        let existing = absolute_of(dir.to_str().unwrap());
+        assert!(
+            !existing.starts_with(&verbatim),
+            "existing path kept the verbatim prefix: {existing}"
+        );
+
+        let missing_path = dir.join("simple-verbatim-probe-does-not-exist");
+        let missing = absolute_of(missing_path.to_str().unwrap());
+        assert!(
+            !missing.starts_with(&verbatim),
+            "missing path gained a verbatim prefix: {missing}"
+        );
+
+        // The real contract: a missing child of an existing directory must
+        // still be recognisable as living under it.
+        assert!(
+            missing.starts_with(existing.trim_end_matches(sep)),
+            "shapes disagree: existing={existing} missing={missing}"
+        );
+    }
+}
+

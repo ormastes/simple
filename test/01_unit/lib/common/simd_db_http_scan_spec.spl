@@ -1,0 +1,61 @@
+use std.spec.*
+use std.common.simd_scan.{
+    scalar_bytes_equal, simd_bytes_equal,
+    scalar_find_byte, simd_find_byte
+}
+use std.db.accel.{byte_span_equals, make_byte_span}
+use std.common.net.http_core.{chunked_body_end_scan}
+
+fn boundary_bytes(len: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < len:
+        out.push((i % 251) as u8)
+        i = i + 1
+    out
+
+describe "platform-neutral DB and HTTP SIMD scan slice":
+    it "keeps database byte equality equal to the scalar oracle across tails and offsets":
+        val lengths = [0, 1, 15, 16, 17, 31, 32, 33]
+        for len in lengths:
+            val left = boundary_bytes(len + 3)
+            val right = boundary_bytes(len + 5)
+            expect(simd_bytes_equal(left, 1, right, 1, len)).to_equal(
+                scalar_bytes_equal(left, 1, right, 1, len)
+            )
+            val lhs_span = make_byte_span(left, 1, len)
+            val rhs_span = make_byte_span(right, 1, len)
+            expect(byte_span_equals(lhs_span, rhs_span)).to_equal(
+                scalar_bytes_equal(left, 1, right, 1, len)
+            )
+
+    it "detects a database mismatch in a complete vector chunk and scalar tail":
+        val left = boundary_bytes(35)
+        val vector_mismatch = boundary_bytes(35)
+        vector_mismatch[8] = 255u8
+        val tail_mismatch = boundary_bytes(35)
+        tail_mismatch[34] = 255u8
+        expect(simd_bytes_equal(left, 0, vector_mismatch, 0, 35)).to_equal(false)
+        expect(simd_bytes_equal(left, 0, tail_mismatch, 0, 35)).to_equal(false)
+
+    it "keeps HTTP delimiter classification equal to the scalar oracle":
+        val bytes = boundary_bytes(40)
+        bytes[0] = 13u8
+        bytes[16] = 13u8
+        bytes[39] = 13u8
+        expect(simd_find_byte(bytes, 0, 13u8)).to_equal(scalar_find_byte(bytes, 0, 13u8))
+        expect(simd_find_byte(bytes, 1, 13u8)).to_equal(scalar_find_byte(bytes, 1, 13u8))
+        expect(simd_find_byte(bytes, 17, 13u8)).to_equal(scalar_find_byte(bytes, 17, 13u8))
+        expect(simd_find_byte(bytes, 40, 13u8)).to_equal(-1)
+
+    it "preserves chunked HTTP framing when CRLF crosses vector boundaries":
+        val padding = "123456789abcdef"
+        val body = padding + "\r\n"
+        val wire = "11\r\n" + body + "\r\n0\r\n\r\n"
+        expect(chunked_body_end_scan(wire)).to_equal(wire.len())
+
+    it "fails closed for invalid spans":
+        val bytes = boundary_bytes(16)
+        expect(simd_bytes_equal(bytes, -1, bytes, 0, 1)).to_equal(false)
+        expect(simd_bytes_equal(bytes, 0, bytes, 0, 17)).to_equal(false)
+        expect(simd_find_byte(bytes, -1, 13u8)).to_equal(-1)

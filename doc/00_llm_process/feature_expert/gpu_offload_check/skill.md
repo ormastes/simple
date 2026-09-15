@@ -481,7 +481,8 @@ none is default): `SIMPLE_VK_READBACK=native`, `SIMPLE_VK_IMAGE_UPLOAD=u32`,
 Pinned GLSL->SPIR-V kernels, one gate each (fail-closed; no
 `glslangValidator` = ERROR, `.spv` never committed): `rect_batch`
 (`check-rect-batch-spirv-pinned.shs`), `blit` (`check-blit-spirv-pinned.shs`),
-`blur_rect` (`check-blur-rect-spirv-pinned.shs`), `glass_material`
+`blur_rect` (`check-blur-rect-spirv-pinned.shs`), `shadow_rect`
+(`check-shadow-rect-spirv-pinned.shs`), `glass_material`
 (`check-glass-material-spirv-pinned.shs`). After editing a `.comp` shader,
 regen via `scripts/tool/gen-rect-batch-spirv.shs` (or the kernel's equivalent)
 before re-running its pin gate.
@@ -514,6 +515,51 @@ lineage: a hardcoded status string looked like a real verdict until someone
 read the computation behind it — the same trap this section's boundary-audit
 gate is designed to avoid by reading real vk-timing buckets, never a name.
 
+## In-process showcase specs (2026-09-13)
+
+`test/02_integration/ui/web_showcase/` holds six sspec scenarios that check
+the showcase catalog's renderer without the shell gates' build artifacts:
+CPU determinism across all 8 tabs, the Vulkan twin (no silent
+`cpu_fallback`), the GPU boundary counters per page, tab A->B->A reuse, a
+single 4K frame, and the Chrome dynlib loader. They read the same counters
+the boundary audit does, via `audit_field` over
+`web_vulkan_lane_census_line()` and `web_route_stage_drain()`.
+
+**Runner trap measured while authoring these (2026-09-13):
+`SIMPLE_TIMEOUT_SECONDS=0` does NOT mean "no timeout".**
+`parse_env_timeout_secs` returns 0 for it and `client_default_timeout_secs`
+(`src/app/test_runner_new/timeout_budget.spl:58-64`) then falls back to
+`CLIENT_DEFAULT_TIMEOUT_SECS = 900`. A showcase spec that needs more than 900 s
+— which these do whenever two run concurrently, since one 320x180 Vulkan frame
+costs ~9-30 s and a CPU frame ~23-60 s — is killed at 900 s and relaunched,
+so it never reaches a verdict and merely looks slow. Pass an explicit
+`--timeout <secs>` instead, and run them one at a time. All six carry
+`@tag: ... slow` for the same reason.
+
+Three limits worth knowing before extending them:
+
+- **`host_pixel_iterations` is unavailable in-process, and the census's own
+  `submits=` is not a substitute.** The audit emits `host_pixel_iterations`
+  only when `timing_armed` (`log.contains("vk-timing bucket")`), armed by
+  `SIMPLE_VK_TIMING=1` before process start; a spec cannot arm itself. And
+  `gpu_boundary_audit.spl:154-156` records that the census `submits=` /
+  `fences=` fields read **0 against 112 real dispatches**, because the pooled
+  slot a probe reaches is not always the instance that drew — so asserting
+  them passes whatever happened. What IS usable in-process is
+  `web_route_stage_drain()`'s `host_paint_pixels`, incremented at
+  `simple_web_html_engine2d_presenter.spl:652` on the upload-bound
+  host-painted fallback: the pass-through term the Vulkan counters cannot
+  see. The boundary spec asserts that, not `submits`.
+- **No budget exists for two things the brief for this work assumed did.**
+  There is no CPU-to-Vulkan pixel budget (`pixel_diff.spl`'s `TOLERANCE=8` is
+  a per-channel delta, and `DiffResult.ok` is well-formedness only), and no
+  4K frame-time budget (the receipt gate pins geometry/schema only). Both are
+  filed: `web_cpu_vulkan_twin_pixel_divergence_unbudgeted_2026-09-13.md`
+  (measured 29.33% mismatch, max_delta 37) and
+  `web_showcase_4k_frame_time_unbudgeted_2026-09-13.md` (4K vulkan 177 s, and
+  cost is NOT monotonic in pixel count — 160x90 measured slower than
+  320x180, so no per-pixel budget transfers between sizes).
+
 ## Update Rule
 
 When the project process creates or changes research, requirements,
@@ -522,3 +568,52 @@ for this feature, update this skill with the new links, current inventory
 numbers, and handoff notes BEFORE committing.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## 2026-09-13 — Chrome-vs-Simple GPU command counts
+
+- Gate: `scripts/check/check-renderdoc-chrome-vs-simple.shs` (selftest 4 fixtures,
+  fatal, runs on macOS; exits 2 `renderdoccmd not found` off the Linux lane).
+- Counter: `src/app/ui/renderdoc_metrics/main.spl` — draws/dispatches/submits/
+  readbacks/clears/pipeline switches per page + 4 invariants. `presents` is the
+  submit proxy, `copies` the readback proxy, upload bytes are `n/a` (not in
+  `renderdoc-events/v1`).
+- Fixtures: `test/fixtures/renderdoc/` (conforming PASS, violating FAIL, empty and
+  missing both ERROR).
+- Evidence + open findings: `doc/10_metrics/ui/renderdoc_chrome_vs_simple_2026-09-13.md`.
+  Still true: **no `.rdc` has ever been captured on any host**, Chrome has no measured
+  command counts, and `css-layout` shows 3 submits against a limit of 1.
+- Trap: the macOS seed aborts rc 138 (SIGBUS) on a cross-module call, which is why the
+  counter is one module and why `check-renderdoc-web-diff.shs --selftest` is ERROR
+  here — `doc/08_tracking/bug/renderdoc_seed_sigbus_cross_module_call_2026-09-13.md`.
+
+## 2026-09-13 (later) — that "3 submits" was WRONG; counting rules
+
+- **Retracted:** the `css-layout` 3-submit/3-readback row above. Re-measured live on
+  the Vulkan device at `origin/main`: `overview` and `css-layout` both read
+  **1 submit / 1 readback / 0 host pixel loops per frame at 900x760 AND 3840x2160**.
+  The bad row was hand-copied from 2026-09-12 lane docs that quote WHOLE-RUN totals
+  across different configuration states, and predates `65634ae996a` (device
+  blur/glass batching) by five hours.
+- **Counting rule:** a submits/readbacks figure is meaningless without the frame
+  count it covers. Split an order trace on `[audit-frame N]`; never sum a run.
+  Quote per-frame numbers from the audit's own `classify`, never by hand.
+- **One parser, two tools:** `check-renderdoc-chrome-vs-simple.shs --trace-derived`
+  delegates every count to `check-web-vulkan-gpu-boundary-audit.shs --classify-only`.
+  Do not grow a second counter in it — that is exactly how the two disagreed.
+  Fixtures `test/fixtures/renderdoc/trace/*.trace.txt` (3 frames x 1 each must report
+  1 and PASS; a genuinely triple final frame must FAIL). Note `.log` is gitignored,
+  hence `.trace.txt`.
+- **Coverage:** `check-web-vulkan-gpu-boundary-audit.shs --matrix` = both pages x both
+  sizes. Only `overview` at 900x760 was ever gated before, which is why nothing
+  contradicted the bad row.
+- **Submit counter was 1-of-7 wired.** `VK_T_SFFI_SUBMIT` was folded at only
+  `backend_vulkan_helpers._flush_pending_compute_impl`; font-atlas, packed-font,
+  resident-2d and immediate-dispatch submitted uncounted. All now go through
+  `vulkan_counted_submit_and_wait_fence` (`backend_vulkan.spl`).
+  `VulkanSession.submit_and_wait` stays raw (module cycle) and has zero callers.
+- **The gate is not vacuous** — proven by live sabotage, not fixture: a second real
+  queue submit in the flush path yields
+  `FAIL — 2 frame(s) audited, violated: submits_per_frame=2 (>1)`.
+- The pooled census `submits=`/`fences=` still read 0 against real submits. That is
+  documented at `gpu_boundary_audit.spl:154-156` as unusable; the gate reads the
+  `sffi_submit_and_wait` timing bucket. Do not re-report this as a new finding.

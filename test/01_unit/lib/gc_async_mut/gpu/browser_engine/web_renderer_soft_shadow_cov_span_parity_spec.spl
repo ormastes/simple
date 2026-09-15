@@ -1,0 +1,140 @@
+# Purpose: `fb_soft_box_shadow` was the last renderer primitive still blending
+# one pixel at a time — ~15 interpreted integer ops per pixel, over the whole
+# blurred halo, for every shadowed element on the page.
+#
+# Its coverage is SEPARABLE (`colcov[x] * cov_y / 256`), so a row is one
+# precomputed column table scaled by a per-row constant, which is exactly the
+# shape a span kernel wants.
+#
+# It needed a NEW kernel rather than a reuse, and that is the whole reason this
+# spec exists. The blend is `/256` FLOOR with alpha in 0..=256 inclusive. The
+# percent kernel rounds via `/100 + 50`; the glyph mask kernel uses `/255` with
+# `inv = 255 - a`. At a = 128 this computes `(s*128 + d*128)/256` while the
+# mask kernel computes `(s*128 + d*127)/255` — every partially-covered shadow
+# pixel would shift. The file already records this hazard for the sibling
+# primitives; these examples make it a test rather than a comment.
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    fb_blend_cov_row, _scalar_blend_cov_row
+}
+
+fn ramp(n: i64) -> [u32]:
+    var b: [u32] = []
+    var i: i64 = 0
+    while i < n:
+        b.push((0xFF000000u32 | ((i * 17 + 11) as u32)))
+        i = i + 1
+    b
+
+fn cov_ramp(n: i64, shape: i64) -> [i32]:
+    """A column coverage table: saturated interior, ramped edges, some zeros."""
+    var c: [i32] = []
+    var i: i64 = 0
+    while i < n:
+        if shape == 0:
+            c.push(((i * 37) % 257).to_i32())
+        elif shape == 1:
+            c.push(256)
+        else:
+            c.push((if i % 3 == 0: 0 else: ((i * 11) % 257)).to_i32())
+        i = i + 1
+    c
+
+fn fbs_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i.to_i32()] != b[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+fn pair_matches(total: i64, offset: i64, count: i64, shape: i64, cov_y: i64, alpha: i64, color: u32) -> bool:
+    val cov = cov_ramp(count, shape)
+    val k = fb_blend_cov_row(ramp(total), offset.to_i32(), cov, count.to_i32(),
+        cov_y.to_i32(), alpha.to_i32(), color)
+    val s = _scalar_blend_cov_row(ramp(total), offset.to_i32(), cov, count.to_i32(),
+        cov_y.to_i32(), alpha.to_i32(), color)
+    fbs_equal(k, s)
+
+describe "the soft-shadow coverage kernel matches its scalar twin":
+    it "matches across widths straddling the 16-lane AVX-512 u32 boundary":
+        step("a shadow row is an arbitrary width; the tail path matters most")
+        var bad = 0
+        var n: i64 = 1
+        while n <= 70:
+            if not pair_matches(128, 0, n, 0, 200, 180, 0xFF3366CCu32):
+                bad = bad + 1
+            n = n + 1
+        assert_equal(bad, 0)
+
+    it "matches for every alpha 0..255 at a fixed coverage":
+        step("floor /256 must hold at both saturating ends and everywhere between")
+        var bad = 0
+        var a: i64 = 0
+        while a <= 255:
+            if not pair_matches(96, 4, 48, 0, 256, a, 0xFF10A0F0u32):
+                bad = bad + 1
+            a = a + 1
+        assert_equal(bad, 0)
+
+    it "matches for every row coverage 0..256":
+        step("cov_y scales the whole row; 0 must leave the row untouched")
+        var bad = 0
+        var cy: i64 = 0
+        while cy <= 256:
+            if not pair_matches(96, 0, 40, 0, cy, 200, 0xFF884422u32):
+                bad = bad + 1
+            cy = cy + 1
+        assert_equal(bad, 0)
+
+    it "matches for a saturated interior and for a table containing zeros":
+        step("cov == 0 must skip the pixel entirely, not blend with a = 0")
+        assert_equal(pair_matches(128, 8, 64, 1, 256, 255, 0xFFFFFFFFu32), true)
+        assert_equal(pair_matches(128, 8, 64, 2, 137, 91, 0xFF010203u32), true)
+
+    it "matches for several colours, since the blend is per-channel":
+        var bad = 0
+        for c in [0xFF000000u32, 0xFFFFFFFFu32, 0xFF010203u32, 0xFF7F8081u32, 0xFFFE0102u32]:
+            if not pair_matches(96, 3, 37, 0, 211, 173, c):
+                bad = bad + 1
+        assert_equal(bad, 0)
+
+    it "honours a non-zero row offset":
+        step("shadow rows start part-way into the framebuffer")
+        assert_equal(pair_matches(256, 100, 40, 0, 180, 200, 0xFF204060u32), true)
+
+    it "clamps an over-long count exactly as the scalar twin does":
+        step("without a matching clamp the twin walks off the end of the row")
+        step("while the kernel stops — disagreement here is a memory-safety bug,")
+        step("not a rounding difference")
+        assert_equal(pair_matches(64, 40, 64, 0, 256, 255, 0xFF3366CCu32), true)
+        assert_equal(pair_matches(64, 63, 16, 0, 256, 255, 0xFF3366CCu32), true)
+
+    it "leaves the row untouched for an empty or negative request":
+        step("a zero count must be a no-op, not a partial write")
+        val before = ramp(64)
+        assert_equal(fbs_equal(
+            fb_blend_cov_row(ramp(64), 0, cov_ramp(8, 0), 0, 256, 255, 0xFF000000u32),
+            before), true)
+        assert_equal(fbs_equal(
+            fb_blend_cov_row(ramp(64), 64, cov_ramp(8, 0), 8, 256, 255, 0xFF000000u32),
+            before), true)
+
+    it "writes nothing outside the requested span":
+        step("the kernel must not run past count or spill into the next row")
+        val total: i64 = 128
+        val before = ramp(total)
+        val out = fb_blend_cov_row(ramp(total), 30, cov_ramp(40, 1), 40, 256, 255, 0xFF123456u32)
+        var leaked = 0
+        var i: i64 = 0
+        while i < total:
+            val inside = i >= 30 and i < 70
+            if not inside and out[i.to_i32()] != before[i.to_i32()]:
+                leaked = leaked + 1
+            i = i + 1
+        assert_equal(leaked, 0)

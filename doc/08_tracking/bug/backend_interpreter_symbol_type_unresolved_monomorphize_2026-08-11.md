@@ -161,3 +161,14 @@ NOT REPRODUCED here, and the docs premise is partly stale.
 
 UNPROVEN: whether stage4 still fails. The in-file evidence suggests the cited symbol is gone,
 but that is not the same as proving the build is green. Re-verify at the next full bootstrap.
+
+## Triage 2026-09-13
+
+Extensively investigated (163 lines); the cited bare `Symbol` type
+reference is confirmed absent from interpreter.spl's current content
+(only HirSymbol/SymbolId remain), and the underlying alias-registration
+fix (TAL2/TAL3) is confirmed present in module_lowering.spl. What
+remains unproven is a full stage4 native-build re-run, which needs a
+freshly rebuilt stage3 binary from current HEAD -- a multi-hour
+bootstrap this lane cannot perform. Leaving OPEN, no new attempt.
+

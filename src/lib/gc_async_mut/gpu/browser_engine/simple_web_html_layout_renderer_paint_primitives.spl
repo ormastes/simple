@@ -12,7 +12,7 @@ use common.ui.draw_ir.{
     draw_ir_rect_bounds,
     draw_ir_style_prop
 }
-use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, blit_rect}
+use std.nogc_async_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, engine2d_simd_fill_row_u32, blit_rect}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 
 fn glyph_scale(fs: i32) -> i32:
@@ -59,15 +59,7 @@ fn fb_rect(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color:
         x1 = fbw
     if y1 > fbh:
         y1 = fbh
-    var py = y0
-    while py < y1:
-        val row = py * fbw
-        var px = x0
-        while px < x1:
-            out[row + px] = color
-            px = px + 1
-        py = py + 1
-    out
+    fb_fill_rows_const(out, fbw, x0, y0, x1, y1, color)
 class ClipRect:
     x0: i32
     y0: i32
@@ -116,12 +108,51 @@ fn fb_rect_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, c
         x1 = clip.x1
     if y1 > clip.y1:
         y1 = clip.y1
+    out = fb_fill_rows_const(out, fbw, x0, y0, x1, y1, color)
+    out
+
+# ============================================================================
+# Solid-fill row template
+#
+# `fb_rect_clip` and `fb_rect` are the busiest primitives in the renderer: every
+# solid background reaches one of them (via fb_style_background_opacity_clip ->
+# rounded -> corners -> radius 0 -> fb_rect_opacity_clip), as do all four
+# border sides, outlines, underlines and form controls — 23 call sites for
+# fb_rect_clip alone, over the whole viewport, overdrawn several times a frame.
+#
+# Both ran one INTERPRETED STORE PER PIXEL. A constant fill deliberately has no
+# span-kernel path (simd_kernels.spl:460-473 measured the extern round trip at
+# 7 ms vs 0 ms scalar — the ABI cannot mutate the caller's array, so the return
+# plus copy-back costs more than the stores it replaces). The cheap bulk
+# channel is `write_span`, so the shape that wins is: build ONE row natively,
+# then bulk-write it per row.
+# ============================================================================
+fn fb_fill_rows_const(fb: [u32], fbw: i32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> [u32]:
+    """Fill the already-clipped rect [x0,x1) x [y0,y1) with a constant colour."""
+    var out = fb
+    val w = x1 - x0
+    if w <= 0 or y1 <= y0:
+        return out
+    val row = engine2d_simd_fill_row_u32(w.to_i64(), color)
+    if row.len() != w:
+        # The native row builder is unavailable; fall back rather than write a
+        # short row, which would leave the tail of every line unpainted.
+        return _scalar_fill_rows_const(out, fbw, x0, y0, x1, y1, color)
     var py = y0
     while py < y1:
-        val row = py * fbw
+        out.write_span(row, (py * fbw + x0).to_i64(), 0, w.to_i64())
+        py = py + 1
+    out
+
+fn _scalar_fill_rows_const(fb: [u32], fbw: i32, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) -> [u32]:
+    """Scalar reference path — identical output by construction."""
+    var out = fb
+    var py = y0
+    while py < y1:
+        val base = py * fbw
         var px = x0
         while px < x1:
-            out[row + px] = color
+            out[base + px] = color
             px = px + 1
         py = py + 1
     out
@@ -184,15 +215,80 @@ fn fb_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
         x1 = clip.x1
     if y1 > clip.y1:
         y1 = clip.y1
+    # Row kernel instead of a per-pixel loop. `blend_opacity` is ~15 integer
+    # ops per pixel, which is the regime where the gather/extern/scatter round
+    # trip pays for itself — the same regime as simd_blend_row (measured 0 ms
+    # vs 13 ms), and unlike a constant fill, where it is a documented loss.
+    #
+    # The kernel carries PERCENT semantics (/100, +50). It is deliberately not
+    # rt_engine2d_simd_blend_const_span_u32, which is straight-alpha src-over
+    # (/255, +128) and would shift every rendered pixel.
     var py = y0
     while py < y1:
         val row = py * fbw
-        var px = x0
-        while px < x1:
-            val idx = row + px
-            out[idx] = blend_opacity(color, out[idx], opacity_pct)
-            px = px + 1
+        out = fb_blend_const_row_opacity(out, row + x0, x1 - x0, color, opacity_pct)
         py = py + 1
+    out
+
+# The kernel returns ONLY the blended span, not the whole framebuffer.
+#
+# It used to return the whole thing, which meant one unpack+repack of the
+# ENTIRE framebuffer per row. Measured with a 10x50 rect on a 1920x384 buffer,
+# that was 1214 ms against the scalar loop's 1116 ms — a REGRESSION on the
+# shape that actually occurs. The original 333 ms -> 1 ms measurement used a
+# rect covering the whole buffer, which hid the fb_len term completely.
+@unsafe(reason: "percent-opacity constant-colour span blend; bounds are enforced inside the kernel", capabilities: [ffi])
+extern fn rt_engine2d_blend_const_span_pct_u32(dst: [u32], offset: i64, count: i64, color: u32, opacity_pct: i64) -> [u32]
+
+@unsafe(reason: "soft box-shadow coverage-span blend kernel", capabilities: [ffi])
+extern fn rt_engine2d_blend_cov_span_u32(dst: [u32], offset: i64, colcov: [i32], count: i64, cov_y_and_alpha: i64, color: u32) -> [u32]
+
+fn fb_blend_const_row_opacity(fb: [u32], offset: i32, count: i32, color: u32, opacity_pct: i32) -> [u32]:
+    """Blend one constant colour across a row span at an integer percent opacity.
+
+    Falls back to the scalar twin when the native kernel is unavailable. An
+    unbacked extern returns nil, so a result whose length is not exactly the
+    requested span is treated as "not backed" and never written back.
+    """
+    if count <= 0:
+        return fb
+    var out = fb
+    if offset < 0 or offset >= out.len():
+        return out
+    var n = count
+    if offset + n > out.len():
+        n = out.len() - offset
+    val span = rt_engine2d_blend_const_span_pct_u32(
+        out, offset.to_i64(), n.to_i64(), color, opacity_pct.to_i64())
+    if span.len() != n:
+        return _scalar_blend_const_row_opacity(fb, offset, count, color, opacity_pct)
+    # Bulk write-back, not a per-element loop. The kernel does the blend
+    # natively and then this loop handed the win back one interpreted store at
+    # a time; `write_span` is the same bulk channel simd_blit_row uses.
+    out.write_span(span, offset.to_i64(), 0, n.to_i64())
+    out
+
+fn _scalar_blend_const_row_opacity(fb: [u32], offset: i32, count: i32, color: u32, opacity_pct: i32) -> [u32]:
+    """Scalar reference path — bit-identical to the kernel by construction.
+
+    The span is clamped to the buffer exactly as the kernel clamps it. This is
+    not defensive dressing: without it the twin walks off the end of the row
+    for an over-long count while the kernel stops, so the two disagree on the
+    one input where disagreement is a memory-safety bug rather than a rounding
+    difference. The parity spec pins that case.
+    """
+    var out = fb
+    if count <= 0 or offset < 0 or offset >= out.len():
+        return out
+    var remaining = out.len() - offset
+    var n = count
+    if n > remaining:
+        n = remaining
+    var i = 0
+    while i < n:
+        val idx = offset + i
+        out[idx] = blend_opacity(color, out[idx], opacity_pct)
+        i = i + 1
     out
 
 fn fb_rounded_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
@@ -396,8 +492,36 @@ fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y
     var py = y0
     while py < y1:
         val row = py * fbw
+        # Split the row into [left corner cells][FLAT interior][right corner
+        # cells]. Only the corner cells need the per-pixel arc test; the
+        # interior is fully covered by definition, so it is one row-kernel
+        # call instead of a branchy per-pixel loop over most of the box.
+        #
+        # This is only sound because the interior now blends with
+        # `blend_opacity`, the same arithmetic the kernel uses. It previously
+        # used a /256 floor, and routing it here while the corner cells kept
+        # the other rounding would have made them disagree at the seam.
+        val l_rad = if tl > 0 and py < y + tl: tl
+                    elif bl > 0 and py >= y + h - bl: bl
+                    else: 0
+        val r_rad = if tr > 0 and py < y + tr: tr
+                    elif br > 0 and py >= y + h - br: br
+                    else: 0
+        var flat_lo = x + l_rad
+        var flat_hi = x + w - r_rad
+        if flat_lo < x0:
+            flat_lo = x0
+        if flat_hi > x1:
+            flat_hi = x1
+        if flat_hi > flat_lo and opacity_pct > 0:
+            out = fb_blend_const_row_opacity(out, row + flat_lo, flat_hi - flat_lo, color, opacity_pct)
         var px = x0
         while px < x1:
+            # Skip the span the row kernel just painted.
+            if flat_hi > flat_lo and px >= flat_lo and px < flat_hi:
+                px = flat_hi
+                if px >= x1:
+                    break
             # Analytic coverage (0..256) instead of a hard in/out test, so the
             # corner arc is anti-aliased: a pixel centred exactly on the arc
             # gets 1/2 coverage and the ramp is one pixel wide.
@@ -411,13 +535,24 @@ fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y
             elif br > 0 and px >= x + w - br and py >= y + h - br:
                 cov = _corner_coverage256(px - (x + w - br), py - (y + h - br), br)
             if cov > 0:
-                var alpha256 = cov
-                if opacity_pct < 100:
-                    alpha256 = (alpha256 * opacity_pct) / 100
-                if alpha256 >= 256:
-                    out[row + px] = color
-                elif alpha256 > 0:
-                    out[row + px] = _blend_alpha256(color, out[row + px], alpha256)
+                if cov >= 256:
+                    # FULLY covered interior: blend exactly as the square-rect
+                    # path does. It used to go through the /256 route below,
+                    # which floors, while fb_rect_opacity_clip rounds (/100,
+                    # +50) — so the same colour at the same opacity painted
+                    # DIFFERENTLY depending on whether the box had rounded
+                    # corners, and differed from its own corner ramp at the
+                    # seam. The /256 route stays for partial coverage, where
+                    # the anti-aliased corner genuinely needs sub-pixel alpha.
+                    out[row + px] = blend_opacity(color, out[row + px], opacity_pct)
+                else:
+                    var alpha256 = cov
+                    if opacity_pct < 100:
+                        alpha256 = (alpha256 * opacity_pct) / 100
+                    if alpha256 >= 256:
+                        out[row + px] = color
+                    elif alpha256 > 0:
+                        out[row + px] = _blend_alpha256(color, out[row + px], alpha256)
             px = px + 1
         py = py + 1
     out
@@ -481,6 +616,75 @@ fn _phi256(z256: i32) -> i32:
         b = 256
     a + ((b - a) * frac) / 128
 
+# One soft-shadow row through the native coverage-span kernel.
+#
+# The shadow's coverage is SEPARABLE — colcov[x] * cov_y / 256 — so a whole row
+# is one precomputed column table scaled by a per-row constant. That is exactly
+# the shape a span kernel wants, and it is why this primitive gets a kernel of
+# its own rather than reusing one: its blend is `/256` FLOOR with alpha in
+# 0..=256, while the percent kernel rounds via `/100 + 50` and the mask kernel
+# uses `/255` with `inv = 255 - a`. At a = 128 this computes
+# `(s*128 + d*128)/256` where the mask kernel computes `(s*128 + d*127)/255`.
+# Substituting either shifts every shadow pixel.
+fn fb_blend_cov_row(fb: [u32], offset: i32, colcov: [i32], count: i32, cov_y: i32, alpha: i32, color: u32) -> [u32]:
+    """Blend one coverage row span; falls back to the scalar twin if unbacked."""
+    if count <= 0:
+        return fb
+    var out = fb
+    if offset < 0 or offset >= out.len():
+        return out
+    var n = count
+    if offset + n > out.len():
+        n = out.len() - offset
+    if n <= 0 or colcov.len() < n:
+        return _scalar_blend_cov_row(fb, offset, colcov, count, cov_y, alpha, color)
+    # cov_y and alpha are packed to keep the extern at six arguments; both are
+    # bounded well below 1024 by construction (cov_y <= 256 from _phi256,
+    # alpha <= 255).
+    val packed = (cov_y.to_i64() * 1024) + alpha.to_i64()
+    val span = rt_engine2d_blend_cov_span_u32(
+        out, offset.to_i64(), colcov, n.to_i64(), packed, color)
+    if span.len() != n:
+        return _scalar_blend_cov_row(fb, offset, colcov, count, cov_y, alpha, color)
+    out.write_span(span, offset.to_i64(), 0, n.to_i64())
+    out
+
+fn _scalar_blend_cov_row(fb: [u32], offset: i32, colcov: [i32], count: i32, cov_y: i32, alpha: i32, color: u32) -> [u32]:
+    """Scalar reference — the exact arithmetic fb_soft_box_shadow used inline.
+
+    Clamped to the buffer exactly as the kernel clamps it, so the two agree on
+    an over-long count instead of one walking off the end of the row.
+    """
+    var out = fb
+    if count <= 0 or offset < 0 or offset >= out.len():
+        return out
+    var n = count
+    if offset + n > out.len():
+        n = out.len() - offset
+    if n > colcov.len():
+        n = colcov.len()
+    val sr = (((color >> 16) & 255u32) as i32)
+    val sg = (((color >> 8) & 255u32) as i32)
+    val sb = ((color & 255u32) as i32)
+    var i = 0
+    while i < n:
+        val cov = (colcov[i] * cov_y) / 256
+        if cov > 0:
+            var a = (cov * alpha) / 255
+            if a > 256:
+                a = 256
+            val idx = offset + i
+            val d = out[idx]
+            val dr = (((d >> 16) & 255u32) as i32)
+            val dg = (((d >> 8) & 255u32) as i32)
+            val db = ((d & 255u32) as i32)
+            val nr = (sr * a + dr * (256 - a)) / 256
+            val ng = (sg * a + dg * (256 - a)) / 256
+            val nb = (sb * a + db * (256 - a)) / 256
+            out[idx] = argb(nr, ng, nb)
+        i = i + 1
+    out
+
 fn fb_soft_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, blur: i32, alpha: i32, clip: ClipRect) -> [u32]:
     if blur <= 0 or alpha <= 0 or w <= 0 or h <= 0:
         return fb
@@ -538,24 +742,10 @@ fn fb_soft_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: 
         val cyr = _phi256(((y1 - py) * 512) / blur)
         val cov_y = (cyl * cyr) / 256
         if cov_y > 0:
-            val row = py * fbw
-            var px = rx0
-            while px < rx1:
-                val cov = (colcov[px - rx0] * cov_y) / 256
-                if cov > 0:
-                    var a = (cov * alpha) / 255
-                    if a > 256:
-                        a = 256
-                    val idx = row + px
-                    val d = out[idx]
-                    val dr = (((d >> 16) & 255u32) as i32)
-                    val dg = (((d >> 8) & 255u32) as i32)
-                    val db = ((d & 255u32) as i32)
-                    val nr = (sr * a + dr * (256 - a)) / 256
-                    val ng = (sg * a + dg * (256 - a)) / 256
-                    val nb = (sb * a + db * (256 - a)) / 256
-                    out[idx] = argb(nr, ng, nb)
-                px = px + 1
+            # One native call per row, replacing ~15 interpreted integer ops
+            # per pixel. `colcov` is already built once per shadow above.
+            out = fb_blend_cov_row(out, py * fbw + rx0, colcov, rx1 - rx0,
+                cov_y, alpha, color)
         py = py + 1
     out
 
@@ -1008,16 +1198,33 @@ fn fb_text_thin_scaled_clip_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32,
     val glyph_h = 7 * scale
     if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
         return out
+    # `start`/`endv` are BYTE offsets — every caller derives them from the wrap
+    # ranges, which are byte-indexed — but `char_code_at` is CODEPOINT-indexed
+    # in this text API. This loop used one cursor for both, so on any run past
+    # its first non-ASCII codepoint it drew the wrong glyphs and walked off the
+    # end of the run. It needs its own codepoint cursor, exactly like the
+    # byte-advance twin `fb_text_thin_scaled_clip_range_adv` below: a
+    # continuation byte draws nothing and consumes no codepoint, and one flat
+    # advance is charged per CODEPOINT, not per byte.
+    val sb = s.bytes()
+    var ci = 0
+    var k = 0
+    while k < start:
+        if sb[k] < 128 or sb[k] >= 192:
+            ci = ci + 1
+        k = k + 1
     var i = start
     var cx = x
     while i < endv:
         if cx >= fbw or cx >= clip.x1:
             return out
-        val code = s.char_code_at(i)
-        val gi = glyph_index_for_char_code(code)
-        if gi >= 0 and gi != 36:
-            out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
-        cx = cx + if code == 32: space_advance else: advance
+        if sb[i] < 128 or sb[i] >= 192:
+            val code = s.char_code_at(ci)
+            val gi = glyph_index_for_char_code(code)
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+            cx = cx + if code == 32: space_advance else: advance
+            ci = ci + 1
         i = i + 1
     out
 
@@ -1034,15 +1241,30 @@ fn fb_text_thin_scaled_clip_range_adv(fb: [u32], fbw: i32, fbh: i32, x: i32, y: 
     val glyph_h = 7 * scale
     if y >= fbh or y >= clip.y1 or y + glyph_h <= 0 or y + glyph_h <= clip.y0:
         return out
+    # `i` walks BYTES (that is what `by`, `start` and `endv` are indexed in),
+    # but `char_code_at` is CODEPOINT-indexed in this text API, so the glyph
+    # lookup needs its own cursor. Until the byte-advance table was fixed it
+    # was always empty on non-ASCII runs and this loop was unreachable for
+    # them, which is why the mix never showed: a continuation byte carries a 0
+    # advance and must draw nothing and consume no codepoint.
+    val sb = s.bytes()
     var i = start
+    var ci = 0
+    var k = 0
+    while k < start:
+        if sb[k] < 128 or sb[k] >= 192:
+            ci = ci + 1
+        k = k + 1
     var cx = x
     while i < endv:
         if cx >= fbw or cx >= clip.x1:
             return out
-        val code = s.char_code_at(i)
-        val gi = glyph_index_for_char_code(code)
-        if gi >= 0 and gi != 36:
-            out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+        if sb[i] < 128 or sb[i] >= 192:
+            val code = s.char_code_at(ci)
+            val gi = glyph_index_for_char_code(code)
+            if gi >= 0 and gi != 36:
+                out = fb_glyph_thin_scaled_clip(out, fbw, fbh, cx, y, gi, color, scale, italic, clip)
+            ci = ci + 1
         cx = cx + by[i]
         i = i + 1
     out
@@ -1065,12 +1287,22 @@ fn apply_text_transform_for_paint(value: text, transform: text) -> text:
         return out
     value
 
-fn reverse_text_for_paint(value: text) -> text:
+# Reverse by CODEPOINT. `value.len()` is a BYTE count while `char_at` is
+# CODEPOINT-indexed, so counting down from the byte length read past the end of
+# any non-ASCII string and dropped its real characters. Walk forward over the
+# bytes, prepending one whole codepoint at a time — which also guarantees no
+# multi-byte sequence is emitted back-to-front.
+pub fn reverse_text_for_paint(value: text) -> text:
+    val vb = value.bytes()
+    val n = value.len()
     var out = ""
-    var i = value.len()
-    while i > 0:
-        i = i - 1
-        out = out + value.char_at(i)
+    var i = 0
+    while i < n:
+        var j = i + 1
+        while j < n and vb[j] >= 128 and vb[j] < 192:
+            j = j + 1
+        out = value.substring(i, j) + out
+        i = j
     out
 
 fn fb_glyph_sparse(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, gi: i32, color: u32, italic: bool) -> [u32]:
@@ -1095,16 +1327,29 @@ fn fb_text_sparse_range(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, s: text, 
     var out = fb
     if y >= fbh or y + 7 <= 0:
         return out
+    # Byte range, codepoint glyph lookup — the same mix as
+    # `fb_text_thin_scaled_clip_range`, and fixed the same way: a separate
+    # codepoint cursor, one glyph and one advance per CODEPOINT, nothing at all
+    # on a UTF-8 continuation byte.
+    val sb = s.bytes()
+    var ci = 0
+    var k = 0
+    while k < start:
+        if sb[k] < 128 or sb[k] >= 192:
+            ci = ci + 1
+        k = k + 1
     var i = start
     var cx = x
     while i < endv:
         if cx >= fbw:
             return out
-        if cx < fbw:
-            val gi = glyph_index_for_char_code(s.char_code_at(i))
+        if sb[i] < 128 or sb[i] >= 192:
+            val code = s.char_code_at(ci)
+            val gi = glyph_index_for_char_code(code)
             if gi >= 0 and gi != 36:
                 out = fb_glyph_sparse(out, fbw, fbh, cx, y, gi, color, italic)
-        cx = cx + if s.char_code_at(i) == 32: space_advance else: advance
+            cx = cx + if code == 32: space_advance else: advance
+            ci = ci + 1
         i = i + 1
     out
 

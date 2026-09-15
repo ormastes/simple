@@ -680,6 +680,23 @@ fn driver_native_nonempty_failure_detail(detail: text) -> text:
         + "compile error' line above for the real reason); tracked in "
         + "doc/08_tracking/bug/stage2_aot_error_message_lost_invalid_heap_2026-09-06.md"
 
+# Decide what a scheduled native module unit that reached the end of the compile
+# phase with no object and no recorded failure should be reported AS.
+#
+# Returns "" when NOT_RUN is the truthful verdict (the compile phase did not
+# reach every unit it scheduled), else the failure detail to record -- the unit
+# WAS dispatched, so "never started (build ended first)" would be false
+# attribution. Split out of the post-process loop so the distinction is
+# specifiable on its own; the loop applies it, it does not re-derive it.
+pub fn driver_native_attempted_unit_failure_detail_v1(
+    attempted: i64, scheduled: i64, capsule_ok: bool, capsule_reason: text
+) -> text:
+    if attempted < scheduled:
+        return ""
+    driver_native_nonempty_failure_detail(
+        "compiled unit has no usable capsule result: "
+            + if capsule_ok: capsule_reason else: "capsule-unavailable:{capsule_reason}")
+
 fn driver_native_record_module_failure(outcomes: BuildOutcomeSet, unit_id: i64,
                                        name: text, detail: text):
     # Emit the detail HERE, at the moment it is known, in addition to storing
@@ -802,14 +819,27 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
     val cache_scope_root = _sffi_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
-fn driver_native_frozen_source_lookup(
-    source_paths: [text], source_contents: [text], source_module_names: [text],
+pub fn driver_native_capsule_identity_empty_v1(identity: text) -> bool:
+    """True when a frozen source identity carries no content.
+
+    Both `""` and the sha256 of the EMPTY string are rejected: the second is
+    what a capture produces when it hashes source text that has already been
+    reclaimed, and it is never a legitimate identity for a source file the
+    compiler actually read (an empty file is not admitted as a source)."""
+    identity == "" or identity == sha256_text("")
+
+pub fn driver_native_frozen_source_lookup(
+    source_paths: [text], source_identities: [text], source_module_names: [text],
     module_name: text
 ) -> (text, text):
     """Return the unique physical path and full-content identity retained by
     phase 1. Malformed inventories, duplicate module names, and path aliases
-    fail closed instead of admitting an object under an ambiguous source."""
-    if source_paths.len() != source_contents.len() or
+    fail closed instead of admitting an object under an ambiguous source.
+
+    Takes the phase-1 IDENTITY owner, never the content owner: source text is
+    freed and the content owner emptied long before native output runs, so
+    hashing it here produced sha256("") for every module."""
+    if source_paths.len() != source_identities.len() or
             source_paths.len() != source_module_names.len():
         return ("", "")
     var found_path = ""
@@ -819,7 +849,7 @@ fn driver_native_frozen_source_lookup(
     while source_index < source_module_names.len():
         if source_module_names[source_index] == module_name:
             found_path = source_paths[source_index]
-            identity = sha256_text(source_contents[source_index])
+            identity = source_identities[source_index]
             module_count = module_count + 1
         source_index = source_index + 1
     if module_count != 1 or found_path == "":
@@ -837,7 +867,7 @@ fn driver_native_frozen_source_lookup(
 
 fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
     val (path, _) = driver_native_frozen_source_lookup(
-        ctx.source_paths_owner, ctx.source_contents_owner,
+        ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
     path
 
@@ -845,63 +875,9 @@ fn driver_native_module_source_identity(
     ctx: CompileContext, module_name: text
 ) -> text:
     val (_, identity) = driver_native_frozen_source_lookup(
-        ctx.source_paths_owner, ctx.source_contents_owner,
+        ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
     identity
-
-fn driver_native_disk_source_identity(source_path: text) -> text:
-    """sha256 of the bytes currently on disk at `source_path`; "" when absent.
-
-    Read the file DIRECTLY rather than through `SourceFile.load` + a
-    match-bound payload field. Measured 2026-09-07 on a Stage-2-compiled
-    compiler (sha256 a11d1c06…848a95): the previous form
-
-        match SourceFile.load(source_path):
-            case Ok(source): sha256_text(source.content)
-            case Err(_): ""
-
-    returned `sha256_text(source_path)` -- the digest of the PATH STRING --
-    because the `case Ok(source)` payload's `.content` read yielded field 0
-    (`path`) instead of `content`. Proven twice with distinct modules: for
-    `build/capsule-repro/sub/hw_fresh_a.spl` it produced
-    009f18fc41410f2512f4fc413689d7fa0f17b3cef6bbad4c1ab488994e1c170b, which is
-    exactly `sha256` of that path text, while the correct content digest is
-    2976a380c6fdfee06ca2b9452d65bc6a3514862c2a626d64e982503241ada42a; the same
-    held for `hw_fresh_b.spl` (47d1543b…). Interpreted under the Rust seed the
-    identical expression returns the correct content digest, so this is a
-    native-codegen field-binding defect, not a source-level one. Its effect was
-    that EVERY capsule verification compared a content digest against a path
-    digest and reported `native-capsule-source-mutated`, which is what blocked
-    Stage 2's sanity gate on a three-line hello world.
-
-    Reading the raw bytes is also the STRICTLY CORRECT counterpart of the
-    frozen side: `source_identity` is `sha256_text(source.content)` over
-    content that `_driver_cached_entry_source_scan` obtained from a raw
-    `rt_file_read_text`, never through `SourceFile.load`. `SourceFile.load`
-    additionally strips a coverage-wrapper marker line
-    (`source_file_coverage_identity`), so for `simple_cov_*` /
-    `spipe_wrapped_*` inputs it would have disagreed with the frozen digest
-    even with correct codegen. The `""`-on-empty behaviour matches
-    `SourceFile.load`, which returns Err for an empty file.
-
-    The underlying field-binding defect is NOT fixed here and is tracked in
-    doc/08_tracking/bug/stage2_capsule_source_mutated_and_unreportable_reason_2026-09-07.md
-    -- it will misread any other `case Ok(record):` field read the same way.
-    """
-    val content = _sffi_file_read_text(source_path) ?? ""
-    if content == "": return ""
-    sha256_text(content)
-
-fn driver_native_module_source_identity(
-    ctx: CompileContext, module_name: text
-) -> text:
-    var identity = ""
-    var count = 0
-    for source in ctx.sources:
-        if source.module_name == module_name:
-            identity = sha256_text(source.content)
-            count = count + 1
-    if count == 1: identity else: ""
 
 fn driver_native_disk_source_identity(source_path: text) -> text:
     """sha256 of the bytes currently on disk at `source_path`; "" when absent.
@@ -959,7 +935,7 @@ pub fn driver_native_capsule_result_reason_v1(
     if not _sffi_file_exists(capsule.object_path):
         return "object-missing:{capsule.object_path}"
     if capsule.cache_source != "":
-        if capsule.source_identity == "":
+        if driver_native_capsule_identity_empty_v1(capsule.source_identity):
             return "source-identity-empty:{capsule.cache_source}"
         val disk_identity = driver_native_disk_source_identity(capsule.cache_source)
         if disk_identity != capsule.source_identity:
@@ -1074,6 +1050,14 @@ pub fn driver_native_collect_capsule_result_v1(
         if capsule.source_identity == "":
             return _collect_failure(module_name, "native-capsule-source-mutated",
                 "frozen-identity-absent"
+                    + " cache-source={capsule.cache_source}")
+        # The digest of the EMPTY string is never a legitimate source identity:
+        # it means the capture hashed content that had already been reclaimed.
+        # Name that separately -- reported as a mutation it sent three Stage-2
+        # lanes chasing a file that was never touched.
+        if driver_native_capsule_identity_empty_v1(capsule.source_identity):
+            return _collect_failure(module_name, "capsule-identity-empty",
+                "frozen identity is the digest of empty content"
                     + " cache-source={capsule.cache_source}")
         val disk_identity = driver_native_disk_source_identity(capsule.cache_source)
         if disk_identity != capsule.source_identity:
@@ -1919,12 +1903,21 @@ impl CompilerDriver:
                 frozen_module_witnesses, frozen_module_witness_reasons)
             if not capsules.ok:
                 return CompileResult.CodegenError(capsules.reason)
+            # How many of the scheduled units the compile phase actually
+            # ATTEMPTED. The post-process loop below needs this to tell
+            # "never started" apart from "started, produced an object, and
+            # then failed its capsule re-check" -- reporting the second as
+            # NOT_RUN is false attribution and cost a Stage-2 lane ~90 min
+            # per occurrence with nothing naming the real invariant. See
+            # doc/08_tracking/bug/stage2_receiver_probe_module_path_naming_not_run_2026-09-14.md
+            var module_units_attempted = 0
             if uncached_names.len() == 1:
                 val name = uncached_names[0]
                 val direct_result = _compile_frozen_module_capsule(capsules,
                     effective_backend, native_target, is_release,
                     driver_opt_level, provider_receipt_hash, backend_session,
                     name)
+                module_units_attempted = 1
                 match direct_result:
                     case Ok(obj_path):
                         val collect_error = driver_native_collect_capsule_result_v1(
@@ -2006,6 +1999,12 @@ impl CompilerDriver:
                     _1))
                 cache_miss_count = cache_miss_count + build_result.stats.completed
                     + build_result.stats.failed
+                # The builder's OWN ledger of what it dispatched. Every unit it
+                # completed or failed was attempted; anything short of
+                # `uncached_names.len()` is the only case in which a unit here
+                # can honestly be called NOT_RUN.
+                module_units_attempted = build_result.stats.completed
+                    + build_result.stats.failed
 
                 if not build_result.success:
                     # ParallelBuilder already accumulates EVERY unit's error; the
@@ -2030,7 +2029,17 @@ impl CompilerDriver:
             for name in uncached_names:
                 val capsule = frozen_native_capsule_batch_find_v1(capsules, name)
                 val obj_path = if capsule.ok: capsule.object_path else: ""
-                if capsule.ok and driver_native_capsule_result_valid_v1(capsule):
+                # Evaluate the receipt invariant EXACTLY ONCE per unit. Deciding
+                # with `..._valid_v1` and then re-deriving the reason with
+                # `..._reason_v1` reads the same mutable state twice: if it
+                # differs between the two reads -- the very instability this
+                # branch exists to report -- the recorded reason comes back
+                # empty and the diagnosis is lost again. One read, one verdict.
+                val capsule_reason = if capsule.ok:
+                    driver_native_capsule_result_reason_v1(capsule)
+                else:
+                    capsule.reason
+                if capsule.ok and capsule_reason == "":
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
                     if ctx.demand_scc_publication != nil:
@@ -2058,14 +2067,36 @@ impl CompilerDriver:
                     module_outcomes.record(
                         BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                 elif not module_outcomes.has_path(name):
-                    # No object and no already-recorded failure: this unit was
-                    # never actually attempted (a dependency skip, or the phase
-                    # ended first). NOT_RUN is stated explicitly — silent absence
-                    # is forbidden (R3). Nothing is pushed to object_files, so no
-                    # artifact is ever fabricated for it (R4).
+                    # No object and no already-recorded failure. Two DIFFERENT
+                    # things used to land here and both were reported as
+                    # NOT_RUN "never started (build ended first)":
+                    #
+                    #   (a) the compile phase genuinely never reached this unit;
+                    #   (b) the compile phase DID run it -- its own collection
+                    #       checkpoint accepted the capsule, `0 failed` -- and
+                    #       the re-check on this line then rejected it.
+                    #
+                    # (b) is not a scheduling outcome and saying "never started"
+                    # about it is false attribution: the Stage-2 receiver probe
+                    # resolved `llc` once per module (so both ran) and still
+                    # reported `1 ok, 1 not run`, with the ONE diagnosable fact
+                    # -- the capsule reason, already computed here -- discarded.
+                    # Distinguish them by the builder's own dispatch ledger and
+                    # fail closed NAMING the invariant in case (b). Nothing is
+                    # relaxed: both still fail the build, and nothing is pushed
+                    # to object_files, so no artifact is fabricated (R4).
                     module_unit_id = module_unit_id + 1
-                    module_outcomes.record(
-                        BuildUnitOutcome.not_run(module_unit_id, name))
+                    val attempted_detail =
+                        driver_native_attempted_unit_failure_detail_v1(
+                            module_units_attempted, uncached_names.len(),
+                            capsule.ok, capsule_reason)
+                    if attempted_detail != "":
+                        driver_native_record_module_failure(module_outcomes,
+                            module_unit_id, name, attempted_detail)
+                    else:
+                        # Stated explicitly — silent absence is forbidden (R3).
+                        module_outcomes.record(
+                            BuildUnitOutcome.not_run(module_unit_id, name))
             # Evict MIR for compiled modules in low-memory mode
             if low_memory:
                 for name in uncached_names:
@@ -2477,7 +2508,22 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             # could not see it -- and "backend object-path status 1" alone
             # cannot tell those apart. That ambiguity is what left this defect
             # opaque across sessions; naming it costs one interpolation.
+            # Ask the RUNTIME how many bytes are on disk before naming the
+            # failure mode. MEASURED 2026-09-13 (lane BOOT-6, `strace -y` on
+            # the Stage-2 candidate `67786227817bf45f...`): the backend wrote
+            # `write(...message.tmp..., "AOT object destination already
+            # exists", 37) = 37` and this frame read all 37 bytes back
+            # (`read = 32`, `read = 5`, `read = 0`) -- and still reported
+            # `diagnostic file empty`, because the `case Ok(message):` payload
+            # read loses the text under this binary's codegen (the same defect
+            # the `[receipt-size-canary]` lines report for an optional-bound
+            # scalar field). "Empty" was therefore a FALSE statement about the
+            # file, and it hid a real, nameable backend failure for a whole
+            # lane. The size is the one fact that does not travel through the
+            # lost binding, and the `?? ""` read below is the same shape that
+            # verifies the capsule receipt successfully on this binary.
             var diagnostic_note = "no diagnostic file"
+            val diagnostic_size = file_size_raw(diagnostic_path)
             match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
                 case Ok(message):
                     if message.len() > 0:
@@ -2485,7 +2531,16 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                             print "warning: diagnostic staging cleanup failed: {diagnostic_dir}"
                             _sffi_stdout_flush()
                         return _aot_compile_failure(name, message)
-                    diagnostic_note = "diagnostic file empty"
+                    if diagnostic_size > 0:
+                        val recovered = _sffi_file_read_text(diagnostic_path) ?? ""
+                        if recovered.len() > 0:
+                            if not dir_remove(diagnostic_dir, true):
+                                print "warning: diagnostic staging cleanup failed: {diagnostic_dir}"
+                                _sffi_stdout_flush()
+                            return _aot_compile_failure(name, recovered)
+                        diagnostic_note = "diagnostic {diagnostic_size} bytes on disk, payload lost on read"
+                    else:
+                        diagnostic_note = "diagnostic file empty"
                 case Err(read_error):
                     diagnostic_note = "diagnostic unreadable: {read_error}"
             if not dir_remove(diagnostic_dir, true):

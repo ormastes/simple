@@ -1,0 +1,152 @@
+# Caret workbench — shared session contract (A0)
+#
+# The ONE type surface every workbench lane imports: the TUI, the GUI, the IDE
+# terminal service, and the Caret lifecycle adapter. It exists so those lanes
+# cannot each invent their own notion of "which session is this" and then
+# disagree at the seam.
+#
+# Two rules this file encodes, both from
+# doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md:
+#
+#   1. Identity is (id, generation) -- never a row index, never a bare PID,
+#      never a display name. A restarted agent reuses its id and bumps its
+#      generation, so a message captured against the old generation is refused
+#      instead of landing in the replacement.
+#   2. The four state axes are INDEPENDENT. A live process is not a working
+#      agent; a dropped transport is not an exited child; declared capability
+#      is not verified capability. Collapsing them is how a UI reports
+#      "Connected" over a session that never handshook.
+
+# ============================================================================
+# Identity
+# ============================================================================
+
+struct SessionId:
+    # Opaque and stable for the life of the logical session.
+    value: text
+    # Bumped on every restart/replacement of the underlying execution.
+    generation: i64
+
+fn new_session_id(value: text) -> SessionId:
+    SessionId(value: value, generation: 1)
+
+fn next_generation(id: SessionId) -> SessionId:
+    SessionId(value: id.value, generation: id.generation + 1)
+
+# Two ids address the same execution only when BOTH halves match.
+fn same_session(a: SessionId, b: SessionId) -> bool:
+    a.value == b.value and a.generation == b.generation
+
+# ============================================================================
+# The four independent state axes
+# ============================================================================
+
+enum ProcessLifecycle:
+    NotStarted
+    Starting
+    Running
+    Stopping
+    Exited
+    Failed
+    # Ownership is uncertain: do NOT claim the child stopped.
+    Lost
+
+enum AgentTurn:
+    Idle
+    Queued
+    Working
+    WaitingApproval
+    WaitingAnswer
+    Completed
+    Cancelled
+    Failed
+    # Terminal-backed providers expose no reliable semantic status.
+    Unknown
+
+enum Transport:
+    Connecting
+    Ready
+    Stale
+    Disconnected
+    Reconnecting
+    Closed
+
+enum CapabilityEvidence:
+    # Declared in a manifest -- proves nothing about behaviour.
+    Declared
+    Probed
+    Available
+    # Exercised end to end on this host.
+    Verified
+    Unavailable
+    Failed
+
+# ============================================================================
+# Composer draft
+# ============================================================================
+
+enum InputMode:
+    # Structured send through the provider adapter.
+    Message
+    # Provider-native command (never reinterpreted as a shell command).
+    ProviderCommand
+    # IDE command registry.
+    WorkbenchCommand
+    # Raw bytes to the terminal. Carries NO implied submit.
+    TerminalPaste
+
+enum Delivery:
+    Draft
+    Queued
+    Sent
+    Acknowledged
+    Rejected
+    # Acknowledgment lost. Never auto-resend a mutating request from here.
+    Unknown
+
+# A draft binds its target at capture time. Changing the selected agent while a
+# draft is in flight must not redirect it -- that is what `target` is for.
+struct ComposerDraft:
+    target: SessionId
+    mode: InputMode
+    body: text
+    delivery: Delivery
+
+fn new_draft(target: SessionId, mode: InputMode) -> ComposerDraft:
+    ComposerDraft(target: target, mode: mode, body: "", delivery: Delivery.Draft)
+
+# Refuses a draft whose captured target no longer names the live session --
+# the same id at an older generation is a stale target, not a match.
+fn draft_targets(draft: ComposerDraft, live: SessionId) -> bool:
+    same_session(draft.target, live)
+
+# ============================================================================
+# Session view — what every surface renders from
+# ============================================================================
+
+struct SessionView:
+    id: SessionId
+    label: text
+    provider: text
+    lifecycle: ProcessLifecycle
+    turn: AgentTurn
+    transport: Transport
+    evidence: CapabilityEvidence
+    # Set when the agent is blocked on the operator (approval or question).
+    needs_attention: bool
+
+fn new_session_view(id: SessionId, label: text, provider: text) -> SessionView:
+    SessionView(id: id, label: label, provider: provider,
+        lifecycle: ProcessLifecycle.NotStarted,
+        turn: AgentTurn.Unknown,
+        transport: Transport.Connecting,
+        evidence: CapabilityEvidence.Declared,
+        needs_attention: false)
+
+# A session is still worth polling while its outcome is undecided. A degraded
+# team with a live survivor is NOT terminal -- that is defect CARET-H001.
+fn is_reconcilable(view: SessionView) -> bool:
+    match view.lifecycle:
+        case ProcessLifecycle.Exited: false
+        case ProcessLifecycle.Failed: false
+        case _: true

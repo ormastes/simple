@@ -1,6 +1,10 @@
 # Variant Overlay — os/env paths path_separator: Runtime-Host Decision, Not Build-Time
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — the OS lane's qualifying seam is implemented; `path_separator` itself stays rejected
+
+- **measured** `src/lib/nogc_sync_mut/target_ext.spl` exists in the tree — the landed replacement seam (`lib_ext`/`exe_ext`) the entry says resolved the OS lane.
+- **inferred** The entry's own body already records `RESOLVED — OS lane IMPLEMENTED via a different (qualifying) seam`, with `platform.spl` delegating and `variants/platform/{windows,mac,linux}/nogc_sync_mut/target_ext.spl` supplying fixed extensions.
+- **inferred** `path_separator` remains a deliberate runtime-host decision (criterion 2 failure), which is a verdict, not an open defect.
 
 Date: 2026-06-29
 Candidate: `variants/os/` overlay keyed on `path_separator` (`:` vs `;`)
@@ -67,7 +71,3 @@ Two changes required together:
    variant without ever calling `detect_os()` at binary runtime.
 Only then can `path_separator` be a legitimate compile-time constant folded via
 the overlay.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

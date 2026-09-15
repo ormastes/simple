@@ -1,0 +1,195 @@
+#!/bin/sh
+set -eu
+
+# Native-FreeBSD Stage 3 self-host proof.
+#
+# This checker deliberately stops at Stage 3.  It proves the Rust trust-root
+# Stage 2, the typed planner admission, and the pure-Simple Stage 3 compiler;
+# it does not claim a Stage 4/full-CLI result.
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$ROOT_DIR"
+
+fail() {
+    printf 'freebsd-selfhost-error: %s\n' "$1" >&2
+    exit 1
+}
+
+[ "$(uname -s 2>/dev/null || true)" = FreeBSD ] ||
+    fail 'this checker is native-FreeBSD-only'
+
+# FreeBSD's llvm18 package intentionally keeps versioned tools outside the
+# default PATH.  Normalize that package layout here so every caller (QEMU and
+# CI) uses the same native self-host interface and fingerprints the real LLVM
+# authority rather than failing before compilation.
+if [ -d /usr/local/llvm18/bin ]; then
+    PATH="/usr/local/llvm18/bin:$PATH"
+    export PATH
+fi
+
+command -v timeout >/dev/null 2>&1 || fail 'GNU timeout is required (install coreutils)'
+command -v sha256sum >/dev/null 2>&1 || fail 'GNU sha256sum is required (install coreutils)'
+command -v llvm-config >/dev/null 2>&1 || fail 'llvm-config is required (install llvm18)'
+
+OUTPUT_DIR=${SIMPLE_FREEBSD_SELFHOST_OUTPUT:-$ROOT_DIR/build/bootstrap-freebsd-ci}
+case "$OUTPUT_DIR" in
+    /*) ;;
+    *) OUTPUT_DIR="$ROOT_DIR/$OUTPUT_DIR" ;;
+esac
+case "$OUTPUT_DIR" in
+    *//*|*/./*|*/../*|*/.|*/..) fail 'output path contains a non-canonical component' ;;
+esac
+mkdir -p "$OUTPUT_DIR" || fail "cannot create output directory: $OUTPUT_DIR"
+OUTPUT_DIR=$(CDPATH= cd -- "$OUTPUT_DIR" && pwd -P) ||
+    fail 'output directory cannot be canonicalized'
+case "$OUTPUT_DIR" in
+    "$ROOT_DIR"/build/*) ;;
+    *) fail 'output directory must remain under this worktree build/' ;;
+esac
+
+LOG_DIR="$OUTPUT_DIR/ci-check-logs"
+mkdir -p "$LOG_DIR"
+CHECK_TIMEOUT=${SIMPLE_FREEBSD_SELFHOST_TIMEOUT:-7200}
+case "$CHECK_TIMEOUT" in
+    ''|*[!0-9]*) fail 'timeout must be a positive integer' ;;
+esac
+[ "$CHECK_TIMEOUT" -gt 0 ] || fail 'timeout must be a positive integer'
+BUILD_JOBS=${SIMPLE_FREEBSD_SELFHOST_JOBS:-1}
+case "$BUILD_JOBS" in
+    ''|*[!0-9]*) fail 'build jobs must be a positive integer' ;;
+esac
+[ "$BUILD_JOBS" -gt 0 ] || fail 'build jobs must be a positive integer'
+
+run_logged() {
+    label=$1
+    shift
+    log="$LOG_DIR/$label.log"
+    set +e
+    timeout -k 15 "$CHECK_TIMEOUT" "$@" >"$log" 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 0 ]; then
+        printf 'freebsd-selfhost-error: %s failed (exit=%s); log=%s\n' \
+            "$label" "$status" "$log" >&2
+        tail -n 120 "$log" >&2 || true
+        return "$status"
+    fi
+}
+
+stage2_log="$LOG_DIR/stage2-trust-root.log"
+set +e
+SIMPLE_NO_STUB_FALLBACK=1 timeout -k 15 "$CHECK_TIMEOUT" sh \
+    "$ROOT_DIR/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --full-bootstrap --stop-after-stage2 --mode=dynload --no-mcp "--jobs=$BUILD_JOBS" \
+    --output="$OUTPUT_DIR" \
+    --produce-stage3-receipt=verify-landed-compiler-fix \
+    >"$stage2_log" 2>&1
+stage2_status=$?
+set -e
+if [ "$stage2_status" -ne 0 ]; then
+    printf 'freebsd-selfhost-error: Stage 2 trust-root failed (exit=%s); log=%s\n' \
+        "$stage2_status" "$stage2_log" >&2
+    tail -n 120 "$stage2_log" >&2 || true
+    exit "$stage2_status"
+fi
+
+receipt="$OUTPUT_DIR/stage3-planner-admission.receipt"
+[ -f "$receipt" ] && [ ! -L "$receipt" ] ||
+    fail 'Stage 2 produced no regular Stage 3 planner receipt'
+
+# The engine prints this command as the canonical handoff. Parse only its
+# fixed, generated grammar; never eval untrusted log text. Execution below
+# uses the tracked resume interface with the parsed, path-bound arguments.
+resume_line_count=$(grep -c '^bootstrap-policy: resume with: ' "$stage2_log" || true)
+[ "$resume_line_count" = 1 ] ||
+    fail 'Stage 2 did not print exactly one canonical Stage 3 resume command'
+resume_line=$(sed -n 's/^bootstrap-policy: resume with: //p' "$stage2_log")
+resume_output=$(printf '%s\n' "$resume_line" | sed -n \
+    's|^sh scripts/bootstrap/bootstrap-from-scratch[.]sh --resume-stage3-from-admitted=\([^[:space:]]*\) --bootstrap-receipt=\([^[:space:]]*\)$|\1|p')
+resume_receipt=$(printf '%s\n' "$resume_line" | sed -n \
+    's|^sh scripts/bootstrap/bootstrap-from-scratch[.]sh --resume-stage3-from-admitted=[^[:space:]]* --bootstrap-receipt=\([^[:space:]]*\)$|\1|p')
+[ -n "$resume_output" ] && [ -n "$resume_receipt" ] ||
+    fail 'canonical Stage 3 resume command grammar is invalid'
+[ "$resume_output" = "$OUTPUT_DIR" ] ||
+    fail 'canonical resume output is not this run output'
+[ "$resume_receipt" = "$receipt" ] ||
+    fail 'canonical resume receipt is not this run receipt'
+
+run_logged stage3-resume env SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_NATIVE_BUILD_THREADS="$BUILD_JOBS" sh \
+    "$ROOT_DIR/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    "--resume-stage3-from-admitted=$resume_output" \
+    "--bootstrap-receipt=$resume_receipt"
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT="$ROOT_DIR"
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$ROOT_DIR/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+
+platform=$(bootstrap_stage3_host_platform) || fail 'cannot determine native FreeBSD target'
+stage2_bin="$OUTPUT_DIR/stage2/$platform/simple"
+stage3_dir="$OUTPUT_DIR/stage3/$platform"
+stage3_bin="$stage3_dir/simple"
+stage3_manifest="$stage3_dir/provenance.env"
+stage2_source_snapshot="$stage3_dir/source-inputs-before.txt"
+for required in "$stage2_bin" "$stage3_bin" "$stage3_manifest" \
+    "$stage2_source_snapshot" "$stage3_dir/stage2-admitted/admission.env"; do
+    [ -f "$required" ] && [ ! -L "$required" ] ||
+        fail "required admitted artifact is missing or symlinked: $required"
+done
+[ -x "$stage2_bin" ] && [ -x "$stage3_bin" ] ||
+    fail 'Stage 2 or Stage 3 compiler is not executable'
+
+sha256_file() {
+    sha256sum -- "$1" | awk '{print $1}'
+}
+stage2_sha=$(sha256_file "$stage2_bin") || fail 'cannot hash Stage 2 compiler'
+stage3_sha=$(sha256_file "$stage3_bin") || fail 'cannot hash Stage 3 compiler'
+source_sha=$(sha256_file "$stage2_source_snapshot") || fail 'cannot hash source snapshot'
+case "$stage2_sha:$stage3_sha:$source_sha" in
+    *[!0-9a-f:]*|*:*:*:) fail 'compiler or source hash is malformed' ;;
+esac
+[ "${#stage2_sha}" = 64 ] && [ "${#stage3_sha}" = 64 ] &&
+    [ "${#source_sha}" = 64 ] || fail 'compiler or source hash has wrong length'
+
+run_logged stage2-provenance sh \
+    "$ROOT_DIR/scripts/bootstrap/check-stage3-recovery-authority.shs" \
+    "--source-root=$ROOT_DIR" \
+    "--output-dir=$OUTPUT_DIR" \
+    "--planner-receipt=$receipt" \
+    "--expected-parent-sha256=$stage2_sha" \
+    "--expected-source-snapshot-sha256=$source_sha" \
+    --minimum-free-bytes=1
+
+run_logged stage3-provenance sh \
+    "$ROOT_DIR/scripts/check/check-bootstrap-stage3-selfverify.shs" \
+    --manifest "$stage3_manifest" --full-provenance --no-deep
+
+expected_version=$(bootstrap_stage3_canonical_version "$ROOT_DIR") ||
+    fail 'canonical release version is invalid'
+stage3_version=$(
+    "$stage3_bin" --version
+) || fail 'Stage 3 --version failed'
+[ "$stage3_version" = "simple-bootstrap $expected_version" ] ||
+    fail "Stage 3 version mismatch: got '$stage3_version'"
+
+smoke_dir="$OUTPUT_DIR/ci-stage3-smoke"
+trap 'rm -rf "$smoke_dir"' EXIT HUP INT TERM
+mkdir -p "$smoke_dir"
+printf 'fn main():\n    print 6 * 7\n' >"$smoke_dir/main.spl"
+run_logged stage3-smoke env SIMPLE_NO_STUB_FALLBACK=1 \
+    "$stage3_bin" native-build "$smoke_dir/main.spl" \
+    --backend cranelift --threads "$BUILD_JOBS" --output "$smoke_dir/probe"
+[ -x "$smoke_dir/probe" ] || fail 'Stage 3 smoke compiler produced no executable'
+smoke_result=$("$smoke_dir/probe") || fail 'Stage 3 smoke executable failed'
+[ "$smoke_result" = 42 ] || fail "Stage 3 smoke output was '$smoke_result', expected 42"
+
+printf 'freebsd_selfhost_status=pass\n'
+printf 'freebsd_selfhost_scope=FreeBSD native Stage 3\n'
+printf 'freebsd_selfhost_platform=%s\n' "$platform"
+printf 'freebsd_selfhost_output=%s\n' "$OUTPUT_DIR"
+printf 'freebsd_selfhost_stage2_sha256=%s\n' "$stage2_sha"
+printf 'freebsd_selfhost_stage3_sha256=%s\n' "$stage3_sha"
+printf 'freebsd_selfhost_stage3_version=%s\n' "$stage3_version"
+printf 'freebsd_selfhost_smoke_result=42\n'

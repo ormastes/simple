@@ -363,3 +363,23 @@ bugs with a code-level fix available in this pass — repeating the 2026-08-06
 investigation would not change that. **No code changed in this re-verification
 pass.** Status stays OPEN / architectural, pending an owner ruling on findings
 1-2 and completion of the SSHCLI lane's own next increment for finding 3.
+
+## Triage 2026-09-13 (BUGFIX-10 fanout)
+
+Re-spot-checked the daemon host-bind blocker: `grep -c "rt_boot_tcp_bind"
+src/runtime/runtime_native.c` still 0. `src/runtime/runtime_native.c` is
+also FENCED in this wave (`scratchpad/egl_offlimits_v2.txt`), so even the
+narrow C-extern fix is off-limits here regardless. Findings 1/2/3/6 remain
+architecture-ownership decisions per the 2026-08-10 entry, not code-level
+fixes available in a bugfix lane. Left OPEN, unchanged.
+## Triage 2026-09-13
+
+365-line findings-only record (nothing edited/deleted per its own
+header). Core issue: sshd's 8 rt_boot_tcp_* externs are baremetal-only
+(defined only in riscv64 freestanding_runtime.c), so the daemon cannot
+bind a host socket at all -- fixing this means adding host-OS C
+runtime bindings (rt_boot_tcp_* -> rt_io_tcp_* equivalents) plus
+routing os/apps/sshd through them, a cross-cutting C+Simple change.
+Six duplication sites also noted but not detailed here given budget.
+Out of this lane's per-item scope. Leaving OPEN.
+

@@ -872,7 +872,7 @@ expiry invalidates the old admission and requires a new exact-state review.
 `--no-verify` only skips local Git hooks and cannot bypass remote checks or
 protection. The operator guides are `doc/07_guide/app/devhub.md` and
 `doc/07_guide/infra/self_review_policy_db.md`; the executable review workflow
-is `tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
+is `tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md`.
 
 - GNU GDB/GDB multiarch, OpenOCD, and picocom are the legitimate free host
   baseline; they do not turn an arbitrary USB cable into Intel DCI.

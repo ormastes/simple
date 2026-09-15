@@ -34,3 +34,7 @@ completion checklist (byte-identical NEON/RVV kernels, VLEN-aware chunk
 counts, same-fixture scalar-vs-vector tests, physical-host runs before
 promotion) is unchanged and remains genuinely out of scope for this
 environment. No fix attempted; status remains OPEN/fail-closed as filed.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: missing NEON/RVV vector-kernel feature work, not a bounded bug fix. No change made.

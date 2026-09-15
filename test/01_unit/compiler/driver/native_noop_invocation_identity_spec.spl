@@ -1,0 +1,39 @@
+use std.spec.*
+use compiler.common.driver_core_types (CompileOptions, driver_core_compile_options_default)
+use compiler.driver.cache.native_noop_admission.{native_noop_normalized_invocation_v1}
+
+# Regression pin for the tree-wide `native-build` breakage introduced by
+# e0fa5ef45e2 (2026-09-07) and fixed 2026-09-13.
+#
+# `native_noop_normalized_invocation_v1` frames every field of the compile
+# options into a `[text]` literal and `native_noop_frame_v1` calls `.len()` on
+# each element. `aspect.mcdc_mode` is `AspectParamsV1.mcdc_mode: i64` (default
+# 0), and it was passed WITHOUT `.to_text()` while every neighbouring i64
+# (`compile_log_level`, `runtime_log_level`) had it. The raw i64 reached the
+# frame loop and `value.len()` raised
+#
+#     error: semantic: method `len` not found on type `i64` (receiver value: 0)
+#
+# `driver_native_noop_request_v1` runs on the DEFAULT native-build path before
+# any user logic, so this killed `native-build` for every input on the tree,
+# including a three-line hello world containing no `.len()` at all. The
+# diagnostic carries no source location, which is why it repeatedly read as a
+# stdlib erased-receiver regression rather than a single un-stringified field.
+#
+# Sabotage check: restore the bare `aspect.mcdc_mode,` in
+# src/compiler/80.driver/cache/native_noop_admission.spl and this example fails
+# with the `len`-on-i64 error above instead of returning a digest.
+describe "native-noop normalized invocation identity":
+    it "frames every option field as text and returns a sha256 digest":
+        val options = driver_core_compile_options_default()
+        val identity = native_noop_normalized_invocation_v1(options, "/tmp/out")
+        # A sha256_text digest: 64 lowercase hex characters. Reaching this at
+        # all is the regression bar -- the defect raised before returning.
+        expect(identity.len()).to_equal(64)
+
+    it "is stable for identical options and varies with the output path":
+        val options = driver_core_compile_options_default()
+        expect(native_noop_normalized_invocation_v1(options, "/tmp/out")).to_equal(
+            native_noop_normalized_invocation_v1(options, "/tmp/out"))
+        expect(native_noop_normalized_invocation_v1(options, "/tmp/out")).to_not_equal(
+            native_noop_normalized_invocation_v1(options, "/tmp/other"))

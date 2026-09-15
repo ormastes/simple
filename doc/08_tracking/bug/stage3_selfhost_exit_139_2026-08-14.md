@@ -1,5 +1,14 @@
 # Stage 3 self-host exits 139 after fresh Stage 2
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: requires running a full bounded bootstrap
+cycle (Stage 2 build -> Stage 3 native-build) to reproduce, which the doc
+itself says takes a full sanctioned-bootstrap pass and was only observed once
+with the crashing console not retained ("exit 139 is an unretained
+observation pending the next diagnostic reproduction"). Not a cheap repro;
+needs a dedicated bootstrap lane per .claude/rules/bootstrap.md. Left OPEN,
+no doc content changed beyond this line.
+
 Date: 2026-08-14
 Status: OPEN
 Owner: compiler bootstrap

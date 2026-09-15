@@ -341,3 +341,14 @@ Left RED per testing rules. Same-session note: the spec's modernization score
 was raised 78 -> 86 (steps, captures, narrative) without touching the failing
 assertion; mutation dual-check on a passing scenario (SSDOC-MNT-008
 expectation) confirmed FAIL-then-green.
+
+## Triage 2026-09-13
+
+Massive census: 835+ specs reference 949+ nonexistent product paths,
+each a vacuous-negative-assertion instance needing individual triage
+(delete the spec assertion, or the path was renamed and the spec needs
+repointing). Two rename clusters already fixed by prior lanes; the
+remaining ~849 are DELETED-or-never-existed and deliberately left RED
+per the doc. Whole-corpus scope, not a single fixable bug. Leaving
+OPEN.
+

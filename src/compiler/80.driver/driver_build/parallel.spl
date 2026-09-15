@@ -282,14 +282,37 @@ impl BuildGraph:
             if visited.has(id):
                 continue
             var stack: [(i64, bool)] = [(id, false)]
-            while stack.?:
+            # `stack.len() > 0`, NOT `stack.?`. House style prefers `.?`, and this
+            # loop used it until 2026-09-13 — but `.?` on an EMPTY array evaluates
+            # TRUE under the seed's native codegen (aarch64-apple-darwin,
+            # --backend llvm), so this loop never terminated. It popped nil off the
+            # empty stack, `unwrap()` did not fail, `visited[nil] = true` did not
+            # make `visited.has(nil)` true, and the body settled into a 2-cycle that
+            # appended a nil to `order` forever — the Stage-2 Stage-3-route timeout
+            # (status 124) on both the macOS and Linux bootstrap lanes. `.len()` is
+            # correct in the same build at every iteration, so it is what guards
+            # here. This deviation is licensed by, and must be removed when the
+            # compiler defect is fixed:
+            # doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+            while stack.len() > 0:
                 # NOTE: `val entry = if val popped = stack.pop(): popped else: break`
                 # mis-evaluates to nil in the seed interpreter — an if-expression
                 # whose else arm diverges (break) returns nil even when the value
                 # arm is taken (only when the condition is an `if val` binding).
-                # The `while stack.?:` guard already ensures the stack is non-empty,
-                # so unwrap directly, matching the working sibling driver/parallel.spl.
-                val (node, expanded) = stack.pop().unwrap()
+                # The loop guard above already ensures the stack is non-empty, so
+                # unwrap directly.
+                # Read the top by INDEX and truncate; do not pop-and-unwrap.
+                # `rt_array_pop` returns the element RAW (never a `Some` enum,
+                # runtime/src/value/collections.rs:1752), while `.unwrap()` lowers to
+                # `rt_enum_payload`, which answers nil for anything that is not an Enum
+                # heap object (objects.rs:519). Measured in the LLVM lane that compiles
+                # Stage 2: `val (n, f) = a.pop().unwrap()` on `[(i64, bool)]` yields nil
+                # for BOTH fields, so nothing is ever marked visited and the DFS
+                # re-expands forever (site 10). See
+                # stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md.
+                val top_index = stack.len() - 1
+                val (node, expanded) = stack[top_index]
+                stack = stack[:top_index]
                 if expanded:
                     order = order.push(node)
                     continue
@@ -342,32 +365,58 @@ class ParallelBuilder:
     # Owner-thread completion hook. Compile callbacks never receive shared
     # cache authority; the orchestrator invokes this after each successful unit.
     owner_collect_fn: any
+    # Process-spawn dispatcher for build()'s "parallel" branch. nil (the
+    # default) preserves today's exact in-process, one-at-a-time behaviour --
+    # every existing caller of build(compile_fn) that never calls
+    # set_spawn_dispatch is unaffected. When set, build()'s non-deterministic
+    # /above-threshold branch routes through build_parallel(spawn_fn,
+    # collect_fn) instead of the serial `while chunk_idx < chunk_end:
+    # compile_fn(...)` loop, so units genuinely run in concurrent OS
+    # processes. See doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md.
+    spawn_dispatch_fn: any
+    spawn_collect_fn: any
 
 impl ParallelBuilder:
     static fn create(config: ParallelBuildConfig) -> ParallelBuilder:
         ParallelBuilder(config: config, graph: BuildGraph.empty(),
-                        stats: BuildStats.empty(), owner_collect_fn: nil)
+                        stats: BuildStats.empty(), owner_collect_fn: nil,
+                        spawn_dispatch_fn: nil, spawn_collect_fn: nil)
 
     me set_owner_collect(collect_fn: any):
         self.owner_collect_fn = collect_fn
 
-    fn wait_for_finished_process(in_flight_pid: {i64: i64}, in_flight_count: i64) -> (i64, i64):
+    # Configure real process-based dispatch for the "parallel" branch of
+    # build(). spawn_fn/collect_fn have exactly build_parallel()'s own
+    # contract (see its docstring below): spawn_fn(path) -> pid,
+    # collect_fn(exit_code, path) -> Result<text, text>. Deterministic and
+    # below-threshold builds are NOT affected -- they keep the sequential
+    # path unconditionally, per build()'s own gating.
+    me set_spawn_dispatch(spawn_fn: any, collect_fn: any):
+        self.spawn_dispatch_fn = spawn_fn
+        self.spawn_collect_fn = collect_fn
+
+    fn wait_for_finished_process(live_pid: [i64]) -> (i64, i64):
         """Wait for any in-flight process to finish using bounded polling.
 
-        Returns: (pid, exit_code), or (-1, -1) if no process is available.
+        Returns: (pid, exit_code), or (-1, -1) if no process is in flight.
 
-        `in_flight_count` is the caller-maintained entry count for
-        `in_flight_pid`. Dict `.len()` must NOT be used here: it returns -1 in
-        natively-compiled code, so the empty-check would never fire and this
-        function would spin forever over an empty `keys()`.
+        `live_pid` is a plain `[i64]` ARRAY, not a pid-keyed Dict. This is not
+        a style choice: measured 2026-09-14 running this function for the
+        first time ever (it had zero callers -- see `build_parallel`'s own
+        comment), a `{i64: i64}` dict's `.keys()` yields type-ERASED
+        elements, and handing one straight to `rt_process_is_running`/
+        `rt_process_wait` fails at runtime with "pid must be an integer" — a
+        local `val pid: i64 = ...` does not re-narrow it. `build_supervised`
+        (below) was already written around exactly this with parallel typed
+        arrays; this function now matches that precedent instead of carrying
+        a second, broken pattern next to the working one.
         """
-        if in_flight_count == 0:
+        if live_pid.len() == 0:
             return (-1, -1)
 
         var poll_iteration = 0
         while true:
-            # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-            for pid in in_flight_pid.keys():
+            for pid in live_pid:
                 if not rt_process_is_running(pid):
                     val exit_code = rt_process_wait(pid, 1)
                     if exit_code != -2:
@@ -478,6 +527,20 @@ impl ParallelBuilder:
                             skipped: self.stats.skipped,
                             parallel_batches: self.stats.parallel_batches)
         else:
+            # Real dispatch: when the caller has configured a process spawn
+            # dispatcher (set_spawn_dispatch), route straight through
+            # build_parallel() -- the genuine rt_process_spawn_async
+            # implementation -- instead of the serial chunk loop below. This
+            # is opt-in and additive: a caller that never calls
+            # set_spawn_dispatch (compile_fn closing over in-process MIR
+            # capsules, which cannot cross a process boundary -- see the
+            # comment in build() above) falls through to the exact same
+            # serial loop as before.
+            if self.spawn_dispatch_fn != nil:
+                val dispatch_spawn = self.spawn_dispatch_fn
+                val dispatch_collect = self.spawn_collect_fn
+                return self.build_parallel(dispatch_spawn, dispatch_collect)
+
             # "Batch-concurrent" here means the ready set is CHUNKED by
             # max_workers -- it does NOT mean the chunk runs concurrently. The
             # inner `while chunk_idx < chunk_end` below calls `compile_fn` one
@@ -488,9 +551,11 @@ impl ParallelBuilder:
             # a name that promises parallelism is the defect class this file
             # already refuses to repeat. The real implementations are
             # `build_parallel()` and `build_supervised()`; both have ZERO
-            # callers because `compile_fn` closes over in-memory frozen MIR
-            # capsules that cannot cross a process boundary (see the comment in
-            # `build()` above and doc/03_plan/infra/unstable_mode_build_side.md).
+            # OTHER callers because `compile_fn` closes over in-memory frozen
+            # MIR capsules that cannot cross a process boundary (see the
+            # comment in `build()` above and
+            # doc/03_plan/infra/unstable_mode_build_side.md) -- set_spawn_dispatch
+            # above is the escape hatch for a caller that has a real spawn_fn.
             val max_workers = self.config.effective_threads()
             if self.config.verbose:
                 print "[PARALLEL] batch mode, chunk size {max_workers} -- "
@@ -592,25 +657,23 @@ impl ParallelBuilder:
         if self.config.verbose:
             print "[PARALLEL] process-parallel mode, {max_workers} workers, {total} units"
 
-        # pid -> unit_id mapping for in-flight processes
-        var in_flight_pid: {i64: i64} = {}
-        var in_flight_path: {i64: text} = {}
-        # Explicit entry count for `in_flight_pid`. Dict.len() returns -1 in
-        # natively-compiled code, so `in_flight_pid.len() < max_workers` was
-        # `-1 < max_workers` -- always true -- and every ready unit spawned at
-        # once (fork storm). keys().len() would be correct but allocates on
-        # every iteration of this hot spawn loop, so we maintain a counter.
-        # Invariant: incremented at the single insert site below, decremented at
-        # the single remove site; the two `continue` paths above it insert
-        # nothing, and the post-loop drain does not re-read the counter, so it
-        # cannot drift.
-        var in_flight_count = 0
+        # In-flight bookkeeping as PARALLEL TYPED ARRAYS, not pid-keyed Dicts
+        # -- see wait_for_finished_process's comment for why: a `{i64: i64}`
+        # dict's `.keys()` yields type-erased elements that fail
+        # `rt_process_is_running`/`rt_process_wait` at runtime with "pid must
+        # be an integer". `[i64]` keeps the element type all the way to the
+        # extern call, same as `build_supervised` below. `live_pid.len()`
+        # (never `Dict.len()`, which returns -1 natively) is the exact
+        # in-flight count.
+        var live_pid: [i64] = []
+        var live_unit: [i64] = []
+        var live_path: [text] = []
 
         while not self.graph.is_complete():
             # Fill worker slots with ready units
             val ready = self.graph.ready_units()
             var ready_idx = 0
-            while in_flight_count < max_workers and ready_idx < ready.len():
+            while live_pid.len() < max_workers and ready_idx < ready.len():
                 val build_unit = ready[ready_idx]
                 ready_idx = ready_idx + 1
 
@@ -642,27 +705,64 @@ impl ParallelBuilder:
                         parallel_batches: self.stats.parallel_batches)
                     continue
 
-                in_flight_pid[pid] = build_unit.id
-                in_flight_path[pid] = build_unit.path
-                in_flight_count = in_flight_count + 1
+                live_pid = live_pid.push(pid)
+                live_unit = live_unit.push(build_unit.id)
+                live_path = live_path.push(build_unit.path)
                 if self.config.verbose:
                     print "[PARALLEL] spawned pid={pid} for {build_unit.path}"
 
+            # `ready_units()` DRAINS `graph.ready_queue` unconditionally, but
+            # the loop above only spawns up to `max_workers` of what it
+            # returned -- whenever one call to `ready_units()` yields more
+            # than `max_workers` units (a layer wider than the worker pool),
+            # the leftover units are still `Pending`, are no longer in
+            # `ready_queue` (already cleared), and no future
+            # `mark_completed` will ever re-add them (they were not waiting
+            # on any dependency). Left alone this silently drops them from
+            # the build forever -- never spawned, never errored, never
+            # counted, never even NOT_RUN -- exactly the "unit vanishes from
+            # the report" defect class R3 forbids elsewhere in this file.
+            # Push them straight back onto the queue so the next pass, once
+            # a worker slot frees up, picks them up.
+            while ready_idx < ready.len():
+                self.graph.ready_queue = self.graph.ready_queue.push(ready[ready_idx].id)
+                ready_idx = ready_idx + 1
+
             # If nothing in-flight and nothing ready, we're stuck
-            if in_flight_count == 0:
+            if live_pid.len() == 0:
                 break
 
             # Wait for one process to finish before recomputing ready work.
-            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(in_flight_pid, in_flight_count)
+            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(live_pid)
             if finished_pid < 0:
                 break
 
-            # Collect result from finished process
-            val unit_id = in_flight_pid[finished_pid]
-            val unit_path = in_flight_path[finished_pid]
-            in_flight_pid.remove(finished_pid)
-            in_flight_path.remove(finished_pid)
-            in_flight_count = in_flight_count - 1
+            # Locate the finished pid's slot, then drop it from all three
+            # parallel arrays (order among the survivors does not matter).
+            var found_idx = -1
+            var scan_idx = 0
+            while scan_idx < live_pid.len():
+                if live_pid[scan_idx] == finished_pid:
+                    found_idx = scan_idx
+                    break
+                scan_idx = scan_idx + 1
+
+            val unit_id = live_unit[found_idx]
+            val unit_path = live_path[found_idx]
+
+            var next_pid: [i64] = []
+            var next_unit: [i64] = []
+            var next_path: [text] = []
+            var keep_idx = 0
+            while keep_idx < live_pid.len():
+                if keep_idx != found_idx:
+                    next_pid = next_pid.push(live_pid[keep_idx])
+                    next_unit = next_unit.push(live_unit[keep_idx])
+                    next_path = next_path.push(live_path[keep_idx])
+                keep_idx = keep_idx + 1
+            live_pid = next_pid
+            live_unit = next_unit
+            live_path = next_path
 
             val result = collect_fn(finished_exit_code, unit_path)
             match result:
@@ -693,13 +793,15 @@ impl ParallelBuilder:
                 parallel_batches: self.stats.parallel_batches + 1)
 
         # Drain remaining in-flight processes on early exit
-        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-        for pid in in_flight_pid.keys():
-            val unit_id = in_flight_pid[pid]
-            val unit_path = in_flight_path[pid]
+        var drain_idx = 0
+        while drain_idx < live_pid.len():
+            val pid = live_pid[drain_idx]
+            val unit_id = live_unit[drain_idx]
+            val unit_path = live_path[drain_idx]
             rt_process_kill(pid)
             self.graph.mark_failed(unit_id, "Build cancelled")
             errors = errors.push((unit_path, "Build cancelled"))
+            drain_idx = drain_idx + 1
 
         BuildResult(success: not self.graph.has_failures(),
                     stats: self.stats, errors: errors, outputs: outputs)

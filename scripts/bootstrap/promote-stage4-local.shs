@@ -1,0 +1,467 @@
+#!/bin/sh
+# Atomically publish or roll back one admitted local Stage 4 tool generation.
+# The only mutable commit point is bin/release/current.env.  All executables
+# and their trust inputs live in an immutable generation directory.
+set -eu
+
+self=${0##*/}
+script_dir=$(CDPATH= cd -- "${0%/*}" && pwd -P)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
+release_root="$repo_root/bin/release"
+mode=promote
+promotion=
+admission=
+resolve_tool=
+lock_wait=30
+
+usage() {
+  cat <<EOF
+Usage:
+  $self --promotion-receipt ABS --toolset-admission ABS [--lock-wait SECONDS]
+  $self --rollback [--lock-wait SECONDS]
+  $self --resolve cli|mcp|lsp-mcp
+EOF
+}
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+hash_file() {
+  [ -f "$1" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256 >/dev/null 2>&1; then
+    sha256 -q "$1"
+  else
+    return 1
+  fi
+}
+
+hash_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+canonical_file() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  parent=$(CDPATH= cd -- "${1%/*}" && pwd -P) || return 1
+  result="$parent/${1##*/}"
+  [ "$result" = "$1" ] || return 1
+  printf '%s\n' "$result"
+}
+
+canonical_dir() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  result=$(CDPATH= cd -- "$1" && pwd -P) || return 1
+  [ "$result" = "$1" ] || return 1
+  printf '%s\n' "$result"
+}
+
+field() {
+  [ "$#" -eq 2 ] || return 1
+  count=$(grep -c "^$2=" "$1" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  sed -n "s/^$2=//p" "$1"
+}
+
+sha_value() {
+  value=$(field "$1" "$2") || return 1
+  printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{64}$' || return 1
+  printf '%s\n' "$value"
+}
+
+safe_atom() {
+  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+require_manifest_keys() {
+  manifest=$1
+  allowed=$2
+  awk -F= -v allowed="$allowed" '
+    BEGIN { n=split(allowed, a, " "); for (i=1; i<=n; i++) ok[a[i]]=1 }
+    /^[A-Za-z0-9_]+=/ {
+      key=$1; if (!ok[key] || ++seen[key] != 1) exit 1; next
+    }
+    { exit 1 }
+    END {
+      for (key in ok) if (seen[key] != 1) exit 1
+    }
+  ' "$manifest"
+}
+
+within() {
+  case "$2" in "$1"|"$1"/*) return 0 ;; *) return 1 ;; esac
+}
+
+verify_bound_file() {
+  manifest=$1 path_key=$2 sha_key=$3
+  path=$(field "$manifest" "$path_key") || return 1
+  path=$(canonical_file "$path") || return 1
+  expected=$(sha_value "$manifest" "$sha_key") || return 1
+  [ "$(hash_file "$path")" = "$expected" ] || return 1
+  printf '%s\n' "$path"
+}
+
+load_toolset_admission() {
+  admission=$(canonical_file "$1") || die 'toolset admission must be an absolute canonical regular file'
+  admission_input_sha=$(hash_file "$admission") || die 'cannot hash toolset admission'
+  require_manifest_keys "$admission" \
+    'schema status platform cli_path cli_sha256 mcp_path mcp_sha256 lsp_mcp_path lsp_mcp_sha256 stage4_provenance_path stage4_provenance_sha256 stage3_acceptance_path stage3_acceptance_sha256 stage5_smoke_log_path stage5_smoke_log_sha256 completed_gate' ||
+    die 'toolset admission has missing, duplicate, or unknown fields'
+  [ "$(field "$admission" schema)" = simple-bootstrap-stage4-toolset-admission-v1 ] || die 'wrong toolset admission schema'
+  [ "$(field "$admission" status)" = admitted ] || die 'toolset is not admitted'
+  platform=$(field "$admission" platform) || die 'missing platform'
+  safe_atom "$platform" || die 'unsafe platform'
+  cli=$(verify_bound_file "$admission" cli_path cli_sha256) || die 'CLI binding failed'
+  mcp=$(verify_bound_file "$admission" mcp_path mcp_sha256) || die 'MCP binding failed'
+  lsp=$(verify_bound_file "$admission" lsp_mcp_path lsp_mcp_sha256) || die 'LSP MCP binding failed'
+  provenance=$(verify_bound_file "$admission" stage4_provenance_path stage4_provenance_sha256) || die 'Stage 4 provenance binding failed'
+  acceptance=$(verify_bound_file "$admission" stage3_acceptance_path stage3_acceptance_sha256) || die 'Stage 3 acceptance binding failed'
+  smoke_log=$(verify_bound_file "$admission" stage5_smoke_log_path stage5_smoke_log_sha256) || die 'Stage 5 smoke binding failed'
+  cli_sha=$(sha_value "$admission" cli_sha256) || die 'invalid CLI hash'
+  mcp_sha=$(sha_value "$admission" mcp_sha256) || die 'invalid MCP hash'
+  lsp_sha=$(sha_value "$admission" lsp_mcp_sha256) || die 'invalid LSP MCP hash'
+  provenance_sha=$(sha_value "$admission" stage4_provenance_sha256) || die 'invalid provenance hash'
+  acceptance_sha=$(sha_value "$admission" stage3_acceptance_sha256) || die 'invalid acceptance hash'
+  smoke_sha=$(sha_value "$admission" stage5_smoke_log_sha256) || die 'invalid smoke log hash'
+  [ -x "$cli" ] && [ -s "$cli" ] && [ -x "$mcp" ] && [ -s "$mcp" ] && [ -x "$lsp" ] && [ -s "$lsp" ] || die 'toolset contains a missing, empty, or non-executable artifact'
+  suffix=
+  case "$platform" in *windows*) suffix=.exe ;; esac
+  candidate_dir=${cli%/*}
+  [ "$mcp" = "$candidate_dir/simple_mcp_server$suffix" ] &&
+    [ "$lsp" = "$candidate_dir/simple_lsp_mcp_server$suffix" ] &&
+    [ "$cli" = "$candidate_dir/simple$suffix" ] || die 'toolset artifacts are partial or mixed across directories'
+  [ "$provenance" = "$cli.provenance.env" ] &&
+    [ "$acceptance" = "$cli.stage3-acceptance.env" ] &&
+    [ "$admission" = "$cli.toolset-admission.env" ] || die 'toolset trust inputs are not adjacent to the CLI'
+  [ "$(field "$admission" completed_gate)" = stage5-native-mcp-smoke ] || die 'Stage 5 native MCP gate is absent'
+  [ "$(field "$acceptance" schema)" = simple-bootstrap-stage3-current-acceptance-v1 ] &&
+    [ "$(field "$acceptance" status)" = verified ] &&
+    [ "$(field "$acceptance" stage4_candidate_path)" = "$cli" ] &&
+    [ "$(sha_value "$acceptance" stage4_candidate_sha256)" = "$(hash_file "$cli")" ] &&
+    [ "$(field "$acceptance" stage4_provenance_path)" = "$provenance" ] &&
+    [ "$(sha_value "$acceptance" stage4_provenance_sha256)" = "$(hash_file "$provenance")" ] || die 'Stage 3 acceptance does not bind this Stage 4 CLI/provenance pair'
+
+  if [ "${SIMPLE_STAGE4_LOCAL_FIXTURE:-0}" = 1 ]; then
+    [ -f "$repo_root/.stage4-local-fixture" ] || die 'fixture mode is confined to a marked copied repository'
+    [ "$(field "$provenance" schema)" = fixture-stage4-provenance-v1 ] &&
+      [ "$(field "$provenance" status)" = pass ] &&
+      [ "$(field "$provenance" output_path)" = "$cli" ] &&
+      [ "$(sha_value "$provenance" output_sha256)" = "$(hash_file "$cli")" ] || die 'fixture provenance does not bind the CLI'
+  else
+    BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    BOOTSTRAP_STAGE3_VERSION_ROOT=$repo_root
+    STAGE4_PROVENANCE_HELPER_PATH="$repo_root/scripts/check/lib/stage4-candidate-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT STAGE4_PROVENANCE_HELPER_PATH
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    . "$STAGE4_PROVENANCE_HELPER_PATH"
+    stage4_verify_candidate_provenance "$provenance" "$cli" "$repo_root" || die 'canonical Stage 4 provenance verification failed'
+  fi
+  [ "$(hash_file "$admission")" = "$admission_input_sha" ] || die 'toolset admission drifted during validation'
+  admission_sha=$admission_input_sha
+}
+
+load_promotion_receipt() {
+  promotion=$(canonical_file "$1") || die 'promotion receipt must be an absolute canonical regular file'
+  promotion_input_sha=$(hash_file "$promotion") || die 'cannot hash promotion receipt'
+  require_manifest_keys "$promotion" \
+    'schema generation status lineage_path lineage_sha256 stage4_result_path stage4_result_sha256 requested_deploy requested_release reason' ||
+    die 'promotion receipt has missing, duplicate, or unknown fields'
+  [ "$(field "$promotion" schema)" = simple-bootstrap-promotion-required-v1 ] &&
+    [ "$(field "$promotion" status)" = blocked-pending-explicit-continuation ] &&
+    [ "$(field "$promotion" requested_deploy)" = true ] || die 'receipt does not authorize explicit deployment'
+  scheduler_generation=$(field "$promotion" generation) || die 'missing scheduler generation'
+  safe_atom "$scheduler_generation" || die 'unsafe scheduler generation'
+  scheduler_dir=${promotion%/*}
+  [ "$promotion" = "$scheduler_dir/promotion-required.env" ] || die 'promotion receipt is outside its generation directory'
+  lineage=$(verify_bound_file "$promotion" lineage_path lineage_sha256) || die 'lineage binding failed'
+  stage4_result=$(verify_bound_file "$promotion" stage4_result_path stage4_result_sha256) || die 'Stage 4 result binding failed'
+  [ "${stage4_result%/*}" = "$scheduler_dir" ] || die 'Stage 4 result belongs to another scheduler generation'
+  [ "$(field "$stage4_result" schema)" = simple-bootstrap-stage4-scheduler-result-v1 ] &&
+    [ "$(field "$stage4_result" generation)" = "$scheduler_generation" ] &&
+    [ "$(field "$stage4_result" status)" = verified ] &&
+    [ "$(field "$stage4_result" publication_status)" = quarantined ] || die 'Stage 4 scheduler result is not verified quarantine evidence'
+  [ "$(field "$stage4_result" stage4_path)" = "$cli" ] &&
+    [ "$(sha_value "$stage4_result" stage4_sha256)" = "$(hash_file "$cli")" ] &&
+    [ "$(field "$stage4_result" stage4_provenance_path)" = "$provenance" ] &&
+    [ "$(sha_value "$stage4_result" stage4_provenance_sha256)" = "$(hash_file "$provenance")" ] || die 'scheduler result and toolset admission are mixed'
+  [ "$(field "$stage4_result" lineage_path)" = "$lineage" ] &&
+    [ "$(sha_value "$stage4_result" lineage_sha256)" = "$(hash_file "$lineage")" ] || die 'scheduler result lineage mismatch'
+  scheduler_root=${scheduler_dir%/*}
+  scheduler_current=$(canonical_file "$scheduler_root/current.env") || die 'scheduler current pointer is absent'
+  [ "$(field "$scheduler_current" schema)" = simple-bootstrap-current-generation-v1 ] &&
+    [ "$(field "$scheduler_current" status)" = qualified ] &&
+    [ "$(field "$scheduler_current" generation)" = "$scheduler_generation" ] &&
+    [ "$(field "$scheduler_current" generation_dir)" = "$scheduler_dir" ] || die 'scheduler generation is no longer current and qualified'
+  lease=$(canonical_file "$scheduler_dir/generation.lease.env") || die 'qualified generation lease is absent'
+  [ "$(field "$lease" schema)" = simple-bootstrap-generation-lease-v1 ] &&
+    [ "$(field "$lease" generation)" = "$scheduler_generation" ] &&
+    [ "$(field "$lease" status)" = qualified-awaiting-explicit-promotion ] &&
+    [ "$(sha_value "$scheduler_current" lease_sha256)" = "$(hash_file "$lease")" ] || die 'qualified generation lease changed'
+  [ "$(hash_file "$promotion")" = "$promotion_input_sha" ] || die 'promotion receipt drifted during validation'
+  promotion_sha=$promotion_input_sha
+}
+
+generation_names() {
+  suffix=
+  case "$platform" in *windows*) suffix=.exe ;; esac
+  generation_dir="$release_root/$platform/generations/$generation_id"
+  generation_receipt="$generation_dir/generation-receipt.env"
+  deployed_cli="$generation_dir/simple$suffix"
+  deployed_mcp="$generation_dir/simple_mcp_server$suffix"
+  deployed_lsp="$generation_dir/simple_lsp_mcp_server$suffix"
+}
+
+verify_generation() {
+  generation_names
+  generation_dir=$(canonical_dir "$generation_dir") || return 1
+  generation_receipt=$(canonical_file "$generation_receipt") || return 1
+  require_manifest_keys "$generation_receipt" \
+    'schema status platform generation_id cli_path cli_sha256 mcp_path mcp_sha256 lsp_mcp_path lsp_mcp_sha256 provenance_path provenance_sha256 acceptance_path acceptance_sha256 toolset_admission_path toolset_admission_sha256 promotion_receipt_path promotion_receipt_sha256 created_at_utc' || return 1
+  [ "$(field "$generation_receipt" schema)" = simple-stage4-local-generation-v1 ] &&
+    [ "$(field "$generation_receipt" status)" = admitted ] &&
+    [ "$(field "$generation_receipt" platform)" = "$platform" ] &&
+    [ "$(field "$generation_receipt" generation_id)" = "$generation_id" ] || return 1
+  for item in cli mcp lsp_mcp provenance acceptance toolset_admission promotion_receipt; do
+    path=$(verify_bound_file "$generation_receipt" "${item}_path" "${item}_sha256") || return 1
+    within "$generation_dir" "$path" || return 1
+  done
+  [ "$(field "$generation_receipt" cli_path)" = "$deployed_cli" ] &&
+    [ "$(field "$generation_receipt" mcp_path)" = "$deployed_mcp" ] &&
+    [ "$(field "$generation_receipt" lsp_mcp_path)" = "$deployed_lsp" ]
+}
+
+pointer_keys='schema status action platform generation_id generation_path generation_receipt_path generation_receipt_sha256 cli_path cli_sha256 mcp_path mcp_sha256 lsp_mcp_path lsp_mcp_sha256 provenance_sha256 admission_sha256 promotion_sha256 previous_pointer_path previous_pointer_sha256 transaction_id committed_at_utc'
+
+verify_pointer() {
+  pointer=$(canonical_file "$1") || return 1
+  require_manifest_keys "$pointer" "$pointer_keys" || return 1
+  [ "$(field "$pointer" schema)" = simple-stage4-local-pointer-v1 ] &&
+    [ "$(field "$pointer" status)" = active ] || return 1
+  pointer_platform=$(field "$pointer" platform) || return 1
+  pointer_generation=$(field "$pointer" generation_id) || return 1
+  safe_atom "$pointer_platform" && safe_atom "$pointer_generation" || return 1
+  saved_platform=${platform:-} saved_generation=${generation_id:-}
+  platform=$pointer_platform generation_id=$pointer_generation
+  generation_names
+  [ "$(field "$pointer" generation_path)" = "$generation_dir" ] &&
+    [ "$(field "$pointer" generation_receipt_path)" = "$generation_receipt" ] &&
+    [ "$(sha_value "$pointer" generation_receipt_sha256)" = "$(hash_file "$generation_receipt")" ] &&
+    [ "$(field "$pointer" cli_path)" = "$deployed_cli" ] &&
+    [ "$(sha_value "$pointer" cli_sha256)" = "$(hash_file "$deployed_cli")" ] &&
+    [ "$(field "$pointer" mcp_path)" = "$deployed_mcp" ] &&
+    [ "$(sha_value "$pointer" mcp_sha256)" = "$(hash_file "$deployed_mcp")" ] &&
+    [ "$(field "$pointer" lsp_mcp_path)" = "$deployed_lsp" ] &&
+    [ "$(sha_value "$pointer" lsp_mcp_sha256)" = "$(hash_file "$deployed_lsp")" ] &&
+    verify_generation || return 1
+  platform=$saved_platform generation_id=$saved_generation
+}
+
+archive_pointer() {
+  source_pointer=$1
+  pointer_sha=$(hash_file "$source_pointer") || return 1
+  history_dir="$release_root/pointers/history"
+  mkdir -p "$history_dir" || return 1
+  archived_pointer="$history_dir/$pointer_sha.env"
+  if [ -e "$archived_pointer" ]; then
+    [ -f "$archived_pointer" ] && [ ! -L "$archived_pointer" ] &&
+      [ "$(hash_file "$archived_pointer")" = "$pointer_sha" ] || return 1
+  else
+    cp "$source_pointer" "$archived_pointer.tmp.$$" || return 1
+    chmod 444 "$archived_pointer.tmp.$$" || return 1
+    mv "$archived_pointer.tmp.$$" "$archived_pointer" || return 1
+  fi
+  printf '%s\n' "$archived_pointer"
+}
+
+write_pointer() {
+  destination=$1 action=$2 previous_path=$3 previous_sha=$4
+  generation_names
+  transaction_id=$(printf 'generation=%s\naction=%s\nprevious=%s\n' "$generation_id" "$action" "$previous_sha" | hash_stream) || return 1
+  {
+    echo schema=simple-stage4-local-pointer-v1
+    echo status=active
+    echo action="$action"
+    echo platform="$platform"
+    echo generation_id="$generation_id"
+    echo generation_path="$generation_dir"
+    echo generation_receipt_path="$generation_receipt"
+    echo generation_receipt_sha256="$(hash_file "$generation_receipt")"
+    echo cli_path="$deployed_cli"
+    echo cli_sha256="$(hash_file "$deployed_cli")"
+    echo mcp_path="$deployed_mcp"
+    echo mcp_sha256="$(hash_file "$deployed_mcp")"
+    echo lsp_mcp_path="$deployed_lsp"
+    echo lsp_mcp_sha256="$(hash_file "$deployed_lsp")"
+    echo provenance_sha256="$(field "$generation_receipt" provenance_sha256)"
+    echo admission_sha256="$(field "$generation_receipt" toolset_admission_sha256)"
+    echo promotion_sha256="$(field "$generation_receipt" promotion_receipt_sha256)"
+    echo previous_pointer_path="$previous_path"
+    echo previous_pointer_sha256="$previous_sha"
+    echo transaction_id="$transaction_id"
+    echo committed_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >"$destination" || return 1
+  chmod 444 "$destination" || return 1
+  verify_pointer "$destination"
+}
+
+cleanup_stage() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ -n "${stage_dir:-}" ] && [ -d "$stage_dir" ]; then
+    case "$stage_dir" in "$release_root"/*/generations/.staging.*) rm -rf -- "$stage_dir" ;; esac
+  fi
+  [ -z "${lock_handle:-}" ] || portable_lock_release "$lock_handle" 2>/dev/null || true
+  exit "$status"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --promotion-receipt) [ "$#" -ge 2 ] || die 'missing promotion receipt'; promotion=$2; shift 2 ;;
+    --toolset-admission) [ "$#" -ge 2 ] || die 'missing toolset admission'; admission=$2; shift 2 ;;
+    --release-root) [ "$#" -ge 2 ] || die 'missing release root'; release_root=$2; shift 2 ;;
+    --lock-wait) [ "$#" -ge 2 ] || die 'missing lock wait'; lock_wait=$2; shift 2 ;;
+    --rollback) mode=rollback; shift ;;
+    --resolve) [ "$#" -ge 2 ] || die 'missing tool name'; mode=resolve; resolve_tool=$2; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+case "$lock_wait" in ''|*[!0-9]*) die 'lock wait must be an integer' ;; esac
+case "$release_root" in /*) ;; *) die 'release root must be absolute' ;; esac
+if [ "${SIMPLE_STAGE4_LOCAL_FIXTURE:-0}" != 1 ] && [ "$release_root" != "$repo_root/bin/release" ]; then
+  die 'production release root is fixed to this repository'
+fi
+mkdir -p "$release_root"
+release_root=$(canonical_dir "$release_root") || die 'release root is symlinked or noncanonical'
+within "$repo_root" "$release_root" || die 'release root escapes repository'
+current_pointer="$release_root/current.env"
+
+if [ "$mode" = resolve ]; then
+  case "$resolve_tool" in cli|mcp|lsp-mcp) ;; *) die 'resolve tool must be cli, mcp, or lsp-mcp' ;; esac
+  verify_pointer "$current_pointer" || die 'active Stage 4 local pointer failed validation'
+  case "$resolve_tool" in
+    cli) resolved_path=$(field "$current_pointer" cli_path) ;;
+    mcp) resolved_path=$(field "$current_pointer" mcp_path) ;;
+    lsp-mcp) resolved_path=$(field "$current_pointer" lsp_mcp_path) ;;
+  esac
+  if [ "${SIMPLE_STAGE4_RESOLVE_NATIVE_WINDOWS:-0}" = 1 ] && command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$resolved_path"
+  else
+    printf '%s\n' "$resolved_path"
+  fi
+  exit 0
+fi
+
+PORTABLE_LOCK_ATOMIC_HELPER_PATH="$repo_root/scripts/check/lib/portable-hardlink-lock.pl"
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$repo_root/scripts/check/lib/portable-process-lock.shs"
+lock_root="$release_root/.stage4-local-locks"
+mkdir -p "$lock_root"
+portable_lock_acquire "$lock_root" promotion "$lock_wait" || die 'local Stage 4 promotion is locked'
+lock_handle=$PORTABLE_LOCK_HANDLE
+stage_dir=
+trap cleanup_stage EXIT HUP INT TERM
+
+if [ "$mode" = rollback ]; then
+  verify_pointer "$current_pointer" || die 'cannot roll back an invalid current pointer'
+  previous_path=$(field "$current_pointer" previous_pointer_path) || die 'current pointer lacks rollback state'
+  previous_sha=$(field "$current_pointer" previous_pointer_sha256) || die 'current pointer lacks rollback hash'
+  [ "$previous_path" != none ] && [ "$previous_sha" != none ] || die 'no previous admitted generation is retained'
+  previous_path=$(canonical_file "$previous_path") || die 'retained previous pointer is invalid'
+  within "$release_root/pointers/history" "$previous_path" || die 'retained pointer escapes history'
+  [ "$(hash_file "$previous_path")" = "$previous_sha" ] && verify_pointer "$previous_path" || die 'retained previous generation failed validation'
+  current_archive=$(archive_pointer "$current_pointer") || die 'failed to archive current pointer before rollback'
+  current_sha=$(hash_file "$current_archive")
+  platform=$(field "$previous_path" platform)
+  generation_id=$(field "$previous_path" generation_id)
+  pointer_tmp="$release_root/.current.rollback.$$"
+  write_pointer "$pointer_tmp" rollback "$current_archive" "$current_sha" || die 'failed to stage rollback pointer'
+  mv -f "$pointer_tmp" "$current_pointer" || die 'atomic rollback pointer publication failed'
+  printf 'PASS: rolled back local Stage 4 toolset generation=%s pointer=%s\n' "$generation_id" "$current_pointer"
+  exit 0
+fi
+
+[ -n "$promotion" ] && [ -n "$admission" ] || die 'promotion and toolset admission receipts are required'
+load_toolset_admission "$admission"
+load_promotion_receipt "$promotion"
+generation_id=$(printf 'toolset=%s\npromotion=%s\n' "$admission_sha" "$promotion_sha" | hash_stream) || die 'cannot derive generation identity'
+generation_names
+mkdir -p "$release_root/$platform/generations"
+if [ -e "$generation_dir" ]; then
+  verify_generation || die 'generation identity collision or partial generation'
+else
+  stage_dir="$release_root/$platform/generations/.staging.$generation_id.$$"
+  [ ! -e "$stage_dir" ] || die 'staging collision'
+  mkdir "$stage_dir" || die 'cannot create generation staging directory'
+  cp "$cli" "$stage_dir/simple$suffix"
+  cp "$mcp" "$stage_dir/simple_mcp_server$suffix"
+  cp "$lsp" "$stage_dir/simple_lsp_mcp_server$suffix"
+  cp "$provenance" "$stage_dir/stage4-provenance.env"
+  cp "$acceptance" "$stage_dir/stage3-acceptance.env"
+  cp "$admission" "$stage_dir/stage4-toolset-admission.env"
+  cp "$promotion" "$stage_dir/promotion-required.env"
+  chmod 555 "$stage_dir/simple$suffix" "$stage_dir/simple_mcp_server$suffix" "$stage_dir/simple_lsp_mcp_server$suffix"
+  chmod 444 "$stage_dir/stage4-provenance.env" "$stage_dir/stage3-acceptance.env" "$stage_dir/stage4-toolset-admission.env" "$stage_dir/promotion-required.env"
+  {
+    echo schema=simple-stage4-local-generation-v1
+    echo status=admitted
+    echo platform="$platform"
+    echo generation_id="$generation_id"
+    echo cli_path="$generation_dir/simple$suffix"
+    echo cli_sha256="$cli_sha"
+    echo mcp_path="$generation_dir/simple_mcp_server$suffix"
+    echo mcp_sha256="$mcp_sha"
+    echo lsp_mcp_path="$generation_dir/simple_lsp_mcp_server$suffix"
+    echo lsp_mcp_sha256="$lsp_sha"
+    echo provenance_path="$generation_dir/stage4-provenance.env"
+    echo provenance_sha256="$provenance_sha"
+    echo acceptance_path="$generation_dir/stage3-acceptance.env"
+    echo acceptance_sha256="$acceptance_sha"
+    echo toolset_admission_path="$generation_dir/stage4-toolset-admission.env"
+    echo toolset_admission_sha256="$admission_sha"
+    echo promotion_receipt_path="$generation_dir/promotion-required.env"
+    echo promotion_receipt_sha256="$promotion_sha"
+    echo created_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >"$stage_dir/generation-receipt.env"
+  chmod 444 "$stage_dir/generation-receipt.env"
+  [ "$(hash_file "$stage_dir/simple$suffix")" = "$cli_sha" ] &&
+    [ "$(hash_file "$stage_dir/simple_mcp_server$suffix")" = "$mcp_sha" ] &&
+    [ "$(hash_file "$stage_dir/simple_lsp_mcp_server$suffix")" = "$lsp_sha" ] &&
+    [ "$(hash_file "$stage_dir/stage4-provenance.env")" = "$provenance_sha" ] &&
+    [ "$(hash_file "$stage_dir/stage3-acceptance.env")" = "$acceptance_sha" ] &&
+    [ "$(hash_file "$stage_dir/stage4-toolset-admission.env")" = "$admission_sha" ] &&
+    [ "$(hash_file "$stage_dir/promotion-required.env")" = "$promotion_sha" ] || die 'staged artifact or authority hash mismatch'
+  chmod 555 "$stage_dir"
+  mv "$stage_dir" "$generation_dir" || die 'generation publication failed'
+  stage_dir=
+  verify_generation || die 'published generation failed verification'
+fi
+
+previous_path=none previous_sha=none
+if [ -e "$current_pointer" ]; then
+  verify_pointer "$current_pointer" || die 'current pointer is invalid; refusing mixed-generation overwrite'
+  if [ "$(field "$current_pointer" generation_id)" = "$generation_id" ]; then
+    printf 'PASS: local Stage 4 toolset already active generation=%s pointer=%s\n' "$generation_id" "$current_pointer"
+    exit 0
+  fi
+  previous_path=$(archive_pointer "$current_pointer") || die 'failed to retain current pointer'
+  previous_sha=$(hash_file "$previous_path")
+fi
+pointer_tmp="$release_root/.current.promote.$$"
+write_pointer "$pointer_tmp" promote "$previous_path" "$previous_sha" || die 'failed to stage active pointer'
+# Re-measure every authority at the commit boundary.
+[ "$(hash_file "$admission")" = "$admission_sha" ] &&
+  [ "$(hash_file "$promotion")" = "$promotion_sha" ] &&
+  verify_generation || die 'authority drifted before atomic publication'
+mv -f "$pointer_tmp" "$current_pointer" || die 'atomic current pointer publication failed'
+printf 'PASS: promoted local Stage 4 toolset generation=%s pointer=%s\n' "$generation_id" "$current_pointer"

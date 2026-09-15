@@ -86,3 +86,9 @@ succeeded) carrying `0xDEAD0000` is a budget expiry, not a hang; only a
 launch that failed to complete is a true device timeout. Gate the
 `completion_unknown` latch on the launch actually failing to complete, rather
 than on the sentinel value alone.
+
+## Triage 2026-09-13
+Reconfirmed via source inspection: CUDA lane still conflates the SVM-G
+budget sentinel with a device timeout per this record. GPU lane semantics
+fix, needs CUDA hardware to verify safely; not attempted here. Left OPEN
+(P2), no code change attempted.

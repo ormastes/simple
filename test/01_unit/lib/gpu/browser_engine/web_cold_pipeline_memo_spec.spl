@@ -1,0 +1,95 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+
+"""
+## Purpose and audience
+Purpose: pin the four cold-render memos added for the web document pipeline —
+the declaration-table memo, the font classifier memos, the live-face memo and
+the resolved-font front memo — to ABSOLUTE oracles, so a future change cannot
+make one of them fast and wrong.
+Audience: engineers maintaining the pure-Simple web renderer's style stage.
+
+Each memo replaces repeated work whose input fully determines its output. The
+danger of every one of them is not that it is slow but that it serves a STALE
+or CORRUPT answer, which a timing benchmark cannot see and a pixel digest sees
+only if the affected page happens to exercise it. These scenarios therefore
+assert VALUES, never durations.
+"""
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    decl_table_build, decl_tbl_get, decl_table_memo_hits, decl_table_memo_misses,
+    decl_table_memo_reset}
+use std.nogc_sync_mut.text_layout.font_renderer.{font_renderer_debug_resolve,
+    resolved_font_front_memo_hits, resolved_font_front_memo_misses}
+
+fn table_text(tbl: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < tbl.len():
+        out = out + tbl[i] + "|"
+        i = i + 1
+    out
+
+describe("web cold-pipeline memos", \:
+    it("serves a repeated declaration block from the memo with byte-identical content", \:
+        decl_table_memo_reset()
+        val block = "color: red; margin-left: 4px; DISPLAY : Flex ; color: blue"
+        val first = decl_table_build(block)
+        val hits_after_first = decl_table_memo_hits()
+        val second = decl_table_build(block)
+        # Oracle 1: the first build is a miss, the second is a hit. Absolute
+        # counts, not "more than before".
+        expect(hits_after_first).to_equal(0)
+        expect(decl_table_memo_hits()).to_equal(1)
+        expect(decl_table_memo_misses()).to_equal(1)
+        # Oracle 2: the memoised table is byte-identical to the fresh one. This
+        # is what a stale or aliased entry would break.
+        expect(table_text(second)).to_equal(table_text(first))
+        # Oracle 3: the table still carries the ORIGINAL semantics — names
+        # trimmed+lowered, values trimmed, LAST-WINS on a duplicate name.
+        expect(decl_tbl_get(second, "color")).to_equal("blue")
+        expect(decl_tbl_get(second, "margin-left")).to_equal("4px")
+        expect(decl_tbl_get(second, "display")).to_equal("Flex")
+    )
+
+    it("does not confuse two different declaration blocks", \:
+        decl_table_memo_reset()
+        val a = decl_table_build("color: red")
+        val b = decl_table_build("color: green")
+        # Two distinct keys are two distinct misses — the memo must not answer
+        # one block with another's table.
+        expect(decl_table_memo_misses()).to_equal(2)
+        expect(decl_table_memo_hits()).to_equal(0)
+        expect(decl_tbl_get(a, "color")).to_equal("red")
+        expect(decl_tbl_get(b, "color")).to_equal("green")
+    )
+
+    it("resolves the same font request identically twice, through the memo", \:
+        # The live-face memo now returns a SHARED FontRenderer instead of
+        # re-parsing the OpenType blob per resolve. A corrupted or torn-down
+        # cached face shows up here as a changed identity/validity string,
+        # which is exactly the failure a duration benchmark cannot see.
+        val first = font_renderer_debug_resolve("sans", "Memo", 16, "und")
+        val misses_after_first = resolved_font_front_memo_misses()
+        val second = font_renderer_debug_resolve("sans", "Memo", 16, "und")
+        expect(second).to_equal(first)
+        # The second identical request is answered by the front memo: hits go
+        # up by exactly one and no new miss is recorded.
+        expect(resolved_font_front_memo_hits() > 0).to_equal(true)
+        expect(resolved_font_front_memo_misses()).to_equal(misses_after_first)
+    )
+
+    it("keeps distinct font requests distinct across the classifier memos", \:
+        # `_resolved_font_language` and `_resolved_font_category` are memoised
+        # on their raw argument. A memo keyed too loosely would answer a
+        # different size or family with the first one seen.
+        val small = font_renderer_debug_resolve("sans", "Memo", 12, "und")
+        val large = font_renderer_debug_resolve("sans", "Memo", 32, "und")
+        val mono = font_renderer_debug_resolve("monospace", "Memo", 12, "und")
+        # Same face family echoed back for the two sans requests, and the
+        # monospace request must not be served the sans answer.
+        expect(small.contains("family=sans")).to_equal(true)
+        expect(large.contains("family=sans")).to_equal(true)
+        expect(mono.contains("family=sans")).to_equal(false)
+    )
+)

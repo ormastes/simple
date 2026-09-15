@@ -37,79 +37,131 @@ use super::interpreter_helpers::handle_method_call_with_self_update;
 /// bodies of `if`/`for`/`while`/`match`/... statements within it) manage their
 /// own scope via their own `exec_block`/`exec_block_fn` call, so recursing
 /// into them here would double-handle (and mis-scope) their locals.
-pub(crate) fn capture_node_scope_shadows(nodes: &[Node], env: &mut Env) -> Vec<(String, Option<Value>)> {
-    let mut shadows = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+/// The names are BORROWED from `nodes`, not cloned. A loop body re-executes
+/// this on every iteration, and the `String` clones it used to make were pure
+/// bookkeeping: three owned copies of the same declared name (`to_owned` into a
+/// scratch `Vec`, `clone` into a dedup `HashSet`, `clone` into the returned
+/// vector) plus the `HashSet` and scratch `Vec` allocations themselves, all
+/// freed again before the next statement ran. Borrowing keeps exactly one owned
+/// copy, the one `enter_block_local` has to hand to its map key, and drops the
+/// dedup set for a linear scan over the names collected so far -- a block
+/// declares a handful of names, so the scan is shorter than hashing one.
+/// `restore_block_scope_shadows` takes `AsRef<str>` so both this borrowed form
+/// and the owned form built by the pattern-`while` binding path still fit it.
+pub(crate) fn capture_node_scope_shadows<'a>(nodes: &'a [Node], env: &mut Env) -> Vec<(&'a str, Option<Value>)> {
+    let mut shadows: Vec<(&'a str, Option<Value>)> = Vec::new();
     for stmt in nodes {
-        let mut names = Vec::new();
         match stmt {
-            Node::Let(let_stmt) => {
-                visit_pattern_binding_names(&let_stmt.pattern, &mut |name| names.push(name.to_owned()));
-            }
-            Node::Const(const_stmt) => names.push(const_stmt.name.clone()),
-            Node::Static(static_stmt) => names.push(static_stmt.name.clone()),
-            _ => {}
-        }
-        for name in names {
-            // Only the first declaration of a name in this block matters: it
-            // reflects the value visible from the enclosing scope before this
-            // block started executing.
-            if seen.insert(name.clone()) {
-                let prior_value = env.get(&name).cloned();
-                // The owner write-back below needs BOTH a prior value and a
-                // non-local name. Test the prior value first: for the common
-                // case (a block-local `val` with no outer binding, e.g. every
-                // loop-body iteration) that skips the `global_binding` probe
-                // and the `CURRENT_EXEC_MODULE` borrow + owner String clone,
-                // both of which are pure reads. Same writes in every case
-                // where a write happened before.
-                if let Some(value) = prior_value.as_ref() {
-                    if !env.is_local(&name) {
-                        let target = env.global_binding(&name).or_else(|| {
-                            crate::interpreter::CURRENT_EXEC_MODULE
-                                .with(|cell| cell.borrow().clone())
-                                .map(|owner| (owner, name.clone()))
-                        });
-                        if let Some((owner, source_name)) = target {
-                            crate::interpreter::set_owned_global(&owner, &source_name, value.clone(), false);
-                        }
+            // The overwhelmingly common declaration is a single identifier
+            // (`val t = ...`), and that case needs no collection at all. Only
+            // a destructuring pattern binds several names, and only then is a
+            // scratch vector allocated -- the visitor borrows `env`'s names
+            // immutably, so the capture (which needs `env` mutably) cannot run
+            // inside it.
+            Node::Let(let_stmt) => match &let_stmt.pattern {
+                simple_parser::ast::Pattern::Identifier(name)
+                | simple_parser::ast::Pattern::MutIdentifier(name)
+                | simple_parser::ast::Pattern::MoveIdentifier(name) => {
+                    capture_one_scope_shadow(name, &mut shadows, env);
+                }
+                pattern => {
+                    let mut names: Vec<&'a str> = Vec::new();
+                    visit_pattern_binding_names(pattern, &mut |name: &'a str| names.push(name));
+                    for name in names {
+                        capture_one_scope_shadow(name, &mut shadows, env);
                     }
                 }
-                shadows.push((name.clone(), prior_value));
-                env.enter_block_local(name);
-            }
+            },
+            Node::Const(const_stmt) => capture_one_scope_shadow(&const_stmt.name, &mut shadows, env),
+            Node::Static(static_stmt) => capture_one_scope_shadow(&static_stmt.name, &mut shadows, env),
+            _ => {}
         }
     }
     shadows
 }
 
-fn capture_block_scope_shadows(block: &Block, env: &mut Env) -> Vec<(String, Option<Value>)> {
+/// Capture one declared name. Only the FIRST declaration of a name in a block
+/// matters: it reflects the value visible from the enclosing scope before this
+/// block started executing, which is what the original `seen` set enforced.
+fn capture_one_scope_shadow<'a>(name: &'a str, shadows: &mut Vec<(&'a str, Option<Value>)>, env: &mut Env) {
+    if shadows.iter().any(|(seen, _)| *seen == name) {
+        return;
+    }
+    crate::perf_counters::bump(&crate::perf_counters::BLOCK_SHADOW_NAMES, 1);
+    let prior_value = env.get(name).cloned();
+    // The owner write-back below needs BOTH a prior value and a non-local
+    // name. Test the prior value first: for the common case (a block-local
+    // `val` with no outer binding, e.g. every loop-body iteration) that skips
+    // the `global_binding` probe and the `CURRENT_EXEC_MODULE` borrow, both of
+    // which are pure reads. Same writes in every case where a write happened
+    // before: the `or_else` arm's `source_name` was `name.clone()`, so passing
+    // `name` straight through is the same write without the String.
+    if let Some(value) = prior_value.as_ref() {
+        if !env.is_local(name) {
+            match env.global_binding(name) {
+                Some((owner, source_name)) => {
+                    crate::perf_counters::bump(&crate::perf_counters::BLOCK_SHADOW_OWNER_WRITES, 1);
+                    crate::interpreter::set_owned_global(&owner, &source_name, value.clone(), false);
+                }
+                None => {
+                    crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| {
+                        if let Some(owner) = cell.borrow().as_ref() {
+                            crate::perf_counters::bump(&crate::perf_counters::BLOCK_SHADOW_OWNER_WRITES, 1);
+                            crate::interpreter::set_owned_global(owner, name, value.clone(), false);
+                        }
+                    });
+                }
+            }
+        }
+    }
+    shadows.push((name, prior_value));
+    env.enter_block_local(name.to_owned());
+}
+
+fn capture_block_scope_shadows<'a>(block: &'a Block, env: &mut Env) -> Vec<(&'a str, Option<Value>)> {
     capture_node_scope_shadows(&block.statements, env)
 }
 
 /// Undo the shadowing captured by `capture_block_scope_shadows`: restore each
 /// name's pre-block value, or remove it entirely if it did not exist before
 /// the block ran (so a block-local `var` never leaks into the caller).
-pub(crate) fn restore_block_scope_shadows(shadows: Vec<(String, Option<Value>)>, env: &mut Env) {
+pub(crate) fn restore_block_scope_shadows<N: AsRef<str>>(shadows: Vec<(N, Option<Value>)>, env: &mut Env) {
     for (name, prior_value) in shadows {
-        env.exit_block_local(&name);
-        let owner_global = if env.is_local(&name) {
+        let name = name.as_ref();
+        env.exit_block_local(name);
+        // Same two candidate owners as before, probed in the same order, but
+        // without materialising the intermediate `(Arc<str>, String)` pair: the
+        // `or_else` arm's source name was `name.clone()`, so the probe can pass
+        // `name` straight through. That removes one String allocation and one
+        // `Arc` clone per declared name per block execution -- i.e. per loop
+        // iteration for a loop body that declares anything.
+        let owner_global = if env.is_local(name) {
             None
         } else {
-            let target = env.global_binding(&name).or_else(|| {
-                crate::interpreter::CURRENT_EXEC_MODULE
-                    .with(|cell| cell.borrow().clone())
-                    .map(|owner| (owner, name.clone()))
-            });
-            target.and_then(|(owner, source_name)| crate::interpreter::owned_global(&owner, &source_name))
+            match env.global_binding(name) {
+                Some((owner, source_name)) => {
+                    crate::perf_counters::bump(&crate::perf_counters::BLOCK_SHADOW_OWNER_PROBES, 1);
+                    crate::interpreter::owned_global(&owner, &source_name)
+                }
+                None => crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| {
+                    let current = cell.borrow();
+                    match current.as_ref() {
+                        Some(owner) => {
+                            crate::perf_counters::bump(&crate::perf_counters::BLOCK_SHADOW_OWNER_PROBES, 1);
+                            crate::interpreter::owned_global(owner, name)
+                        }
+                        None => None,
+                    }
+                }),
+            }
         };
         match (owner_global, prior_value) {
-            (Some(value), _) => env.refresh_globals([(name, value)]),
+            (Some(value), _) => env.refresh_globals([(name.to_owned(), value)]),
             (None, Some(value)) => {
-                env.insert(name, value);
+                env.insert(name.to_owned(), value);
             }
             (None, None) => {
-                env.remove(&name);
+                env.remove(name);
             }
         }
     }

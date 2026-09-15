@@ -384,3 +384,10 @@ explicitly-scoped-out spec would make it worse, not better.
 
 ## Triage 2026-09-12
 No cheap repro attempted in this bulk pass (rule D: newer than 45 days, left open). Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.

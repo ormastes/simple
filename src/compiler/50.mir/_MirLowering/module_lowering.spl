@@ -440,6 +440,20 @@ impl MirLowering:
         if not symbol_info.?:
             return
         val info = symbol_info.unwrap()
+        # `Option<SymbolInfo>`'s nil case does not survive the staged native
+        # ABI: `symbol_info.?` reads PRESENT for an absent symbol, so `unwrap()`
+        # hands back a nil `info` and the very next field read faults. Measured
+        # 2026-09-14 on the Stage-2 candidate (`aarch64-apple-darwin`, sha
+        # 80911c47f07cdb64...): EXC_BAD_ACCESS code=1 address=0x48 at
+        # `record_external_layout_reference + 204` (`ldr x0, [x26, #0x48]`) for
+        # EVERY program declaring a class with a method -- a nine-line
+        # `class Box: n: i64 / me get()` is enough, and hello-world builds fine.
+        # `mir_struct_symbol_name` below already applies exactly this guard and
+        # documents the same hazard (canonical-minted ids that
+        # `get_symbol_raw` knows nothing about); this call site simply never
+        # did. See doc/08_tracking/bug/stage2_native_method_scoped_dict_field_write_segfaults_2026-09-14.md
+        if info == nil:
+            return
         var owner = mir_layout_canonical_module_name(info.defining_module ?? "")
         var key = "{owner}::{info.name}"
         var owner_count = 0
@@ -1149,6 +1163,32 @@ impl MirLowering:
                                         # name-keyed lookups never match.
                                         bootstrap_fn_ret_ok_shape_register(
                                             prescan_call_name, prescan_ok_symbol.name)
+                                    case _: ()
+                        case _: ()
+                case Optional(prescan_optional_inner):
+                    # Exact sibling of the Result arm above, and closed for the
+                    # same reason it was: this `match` had no Optional arm, so a
+                    # callee declared `-> T?` registered NO payload name at all.
+                    # The call result then reached MIR with no struct_value_syms
+                    # entry, `if val fp = <that call>` aliased the same local,
+                    # and `fp.size` fell through resolve_field_index's name-keyed
+                    # tier into the numeric-SymbolId field_map tier (which
+                    # collides across modules in an entry-closure build) and
+                    # finally to a silent index 0 -- reading `path`, a text
+                    # POINTER, as the i64 `size`. Resolved HERE, while
+                    # `module.symbols` is still the DEFINING module's own
+                    # self-consistent table, so no consumer has to dereference a
+                    # foreign per-module SymbolId. Bare name, matching the
+                    # spelling struct_value_syms consumers expect downstream --
+                    # NOT composite_layout_key's module-qualified form.
+                    match prescan_optional_inner.kind:
+                        case Named(prescan_optional_symbol_id, _):
+                            val prescan_optional_symbol = module.symbols.get_symbol_raw(prescan_optional_symbol_id.id)
+                            if prescan_optional_symbol != nil:
+                                match prescan_optional_symbol.kind:
+                                    case Class | Struct:
+                                        bootstrap_fn_ret_opt_shape_register(
+                                            prescan_call_name, prescan_optional_symbol.name)
                                     case _: ()
                         case _: ()
                 case _: ()

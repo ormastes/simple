@@ -1,6 +1,14 @@
 # SPipe Docgen Blocked By Flat AST Bridge Parse Error
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — Does not reproduce: the file that failed to parse no longer exists and docgen processes the spec
+
+- **measured** `bin/simple-interp spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl -o <dir>` printed `Processing specs:` then `OK ide_office_plugin_suite_spec (106 lines)` — no parse error.
+- **measured** `src/compiler/10.frontend/flat_ast_bridge_part2.spl`, the file named in the reported error, is gone; only `flat_ast_bridge.spl` remains.
+- **measured** The run does end `EXIT=139` after emitting the doc — a separate teardown crash, not the reported parse failure; file it separately if it blocks the gate.
+- **inferred** With the offending source file deleted and the spec generating cleanly, the flat-AST-bridge parse blocker is closed.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Date
 2026-06-01
@@ -22,7 +30,3 @@ error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/compiler/10.
 
 ## Impact
 The IDE generated manual currently includes all nine scenarios, but the docgen command cannot be treated as a clean verification gate until the unrelated compiler parse error is fixed.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

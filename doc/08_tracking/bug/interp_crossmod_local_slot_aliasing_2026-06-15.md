@@ -1,6 +1,12 @@
 # Bug: Interpreter local-slot aliasing when cross-module fn receives local object arg
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — does not reproduce: the cross-module local is re-initialized every call
+- **measured** — probe reproducing every listed trigger condition (spec under
+  `test/01_unit/...`, `fn build` in an imported sibling module, local `var w = buf_new()`,
+  passed to cross-module `emit(w, i)`), called from three separate `describe` blocks:
+  `build(3)`, `build(3)`, `build(2)` return 3, 3, 2 — `passed=3 failed=0`. Slot aliasing
+  would have produced 3, 6, 8.
+- **inferred** — Rust seed `bin/simple` v1.0.0-rc.1 on Windows, not the self-hosted binary.
 
 **ID:** interp_crossmod_local_slot_aliasing_2026-06-15
 **Severity:** P1 (silent data corruption, hard to diagnose)
@@ -67,6 +73,3 @@ describe "B":
 ```
 
 Fix: inline `MyHelper` into `MyFn` body.
-
-## Triage 2026-09-12
-Older than 45 days with no directly runnable repro (needs a crafted 2-module `test/`-subdirectory fixture); a workaround is already landed in `deflate_typed.spl`. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

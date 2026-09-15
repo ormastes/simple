@@ -17,13 +17,16 @@
 # Subprocess invocation mirrors `adapter_minio_mc.spl`'s _argv_health pattern.
 # We append `-w "\n%\{http_code\}"` so the trailing line of stdout is the
 # numeric HTTP status; everything before that line is the JSON body.
+# The argv carries a literal backslash-n (curl's -w expands it), never a real
+# newline: Windows cannot pass a newline to a .cmd/.bat curl shim.
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
 use std.common.text_advanced.{escape_json}
 use app.devhub.adapter_jira.{JiraIssue}
 use app.devhub.retry.{ITF_RETRY_MAX_ATTEMPTS, itf_should_retry, itf_retry_wait}
-use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BASIC, atlassian_normalize_auth, atlassian_auth_header, jira_rest_root, jira_search_url}
+use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BASIC, atlassian_strip_slash, atlassian_normalize_auth, atlassian_auth_header, jira_rest_root, jira_search_url}
+use app.devhub.request_headers.{gateway_request_headers}
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +43,8 @@ class JiraClient:
     # auth_scheme is Basic — exactly the pre-existing behaviour.
     deployment: text     # "cloud" | "datacenter"
     auth_scheme: text    # "basic" | "bearer" (Data Center PAT)
+    gateway_url: text    # complete replacement for the deployment REST root
+    headers: [text]      # ordered headers attached only to gateway requests
 
     fn auth_header() -> text:
         """Authorization header value: `Basic <base64(email:api_token)>` by
@@ -71,6 +76,50 @@ fn _jira_api_root(client: JiraClient) -> text:
     jira_rest_root(_jira_site(client))
 
 
+fn jira_resolve_gateway_url(client: JiraClient, url: text) -> text:
+    """Replace only this client's Jira REST root with its gateway root."""
+    if client.gateway_url == nil or client.gateway_url == "":
+        return url
+    val gateway = atlassian_strip_slash(client.gateway_url)
+    if url == gateway or url.starts_with(gateway + "/") or url.starts_with(gateway + "?"):
+        return url
+    val origin = atlassian_strip_slash(_jira_api_root(client))
+    if origin == "" and url.starts_with("/"):
+        return gateway + url
+    if origin != "" and (url == origin or url.starts_with(origin + "/") or url.starts_with(origin + "?")):
+        return gateway + url[origin.len():]
+    url
+
+
+fn _jira_gateway_argv(client: JiraClient, argv: [text]) -> Result<[text], text>:
+    """Route the final URL and attach validated gateway-only headers."""
+    if argv.len() == 0:
+        return Err("Jira curl argv requires a URL")
+    val url = jira_resolve_gateway_url(client, argv[argv.len() - 1])
+    # Older call sites may omit the newly added fields; normalize their nil
+    # defaults so direct Jira clients retain their pre-gateway behaviour.
+    val gateway_url = if client.gateway_url == nil: "" else: client.gateway_url
+    val configured_headers = if client.headers == nil: [] else: client.headers
+    match gateway_request_headers(url, gateway_url, configured_headers, []):
+        Err(message):
+            Err(message)
+        Ok(headers):
+            var configured = argv[:argv.len() - 1]
+            for header in headers:
+                configured = configured + ["-H", header]
+            Ok(configured + [url])
+
+
+fn _jira_run_curl(client: JiraClient, argv: [text]) -> (text, text, i64):
+    """Invoke curl after applying the configured Jira gateway boundary."""
+    match _jira_gateway_argv(client, argv):
+        Err(message):
+            ("", message, 1)
+        Ok(configured):
+            val curl_path = if client.curl_path != "": client.curl_path else: "curl"
+            process_run(curl_path, configured)
+
+
 # ---------------------------------------------------------------------------
 # argv builders (pure functions, exposed for unit tests)
 # ---------------------------------------------------------------------------
@@ -81,7 +130,7 @@ fn _build_curl_argv_get(auth: text, url: text) -> [text]:
         "-s", "-S",
         "-H", "Authorization: {auth}",
         "-H", "Accept: application/json",
-        "-w", "\n%\{http_code\}",
+        "-w", "\\n%\{http_code\}",
         url,
     ]
 
@@ -95,7 +144,7 @@ fn _build_curl_argv_post(auth: text, url: text, body: text) -> [text]:
         "-H", "Accept: application/json",
         "-H", "Content-Type: application/json",
         "-d", body,
-        "-w", "\n%\{http_code\}",
+        "-w", "\\n%\{http_code\}",
         url,
     ]
 
@@ -109,7 +158,7 @@ fn _build_curl_argv_put(auth: text, url: text, body: text) -> [text]:
         "-H", "Accept: application/json",
         "-H", "Content-Type: application/json",
         "-d", body,
-        "-w", "\n%\{http_code\}",
+        "-w", "\\n%\{http_code\}",
         url,
     ]
 
@@ -345,6 +394,15 @@ fn _adf_doc(plain: text) -> text:
     "\{\"type\":\"doc\",\"version\":1,\"content\":[\{\"type\":\"paragraph\",\"content\":[\{\"type\":\"text\",\"text\":\"{esc}\"\}]\}]\}"
 
 
+fn _jira_rich_text(client: JiraClient, plain: text) -> text:
+    """JSON value for a rich-text field (description, comment body): an ADF
+    document on Cloud REST v3, a plain JSON string on Data Center REST v2
+    (which rejects ADF with 400)."""
+    if _jira_site(client).is_datacenter():
+        return "\"{_json_escape(plain)}\""
+    _adf_doc(plain)
+
+
 # ---------------------------------------------------------------------------
 # Public API: each runs curl and returns (success, parsed_T, raw_text).
 # ---------------------------------------------------------------------------
@@ -363,8 +421,7 @@ fn jira_curl_view_issue(client: JiraClient, issue_key: text) -> (bool, JiraIssue
     val fields = "summary,status,issuetype,priority,assignee,description"
     val url = "{base}/issue/{issue_key}?fields={fields}"
 
-    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
-    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_get(auth, url))
+    val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_get(auth, url))
 
     if exit_code != 0:
         return (false, empty, "curl exit {exit_code}: {stderr}")
@@ -412,8 +469,7 @@ fn jira_curl_search(client: JiraClient, jql: text, fields: text, limit: i64) -> 
         body = body + ",\"fields\":{arr}"
     body = body + "\}"
 
-    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
-    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_post(auth, url, body))
+    val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_post(auth, url, body))
 
     if exit_code != 0:
         return (false, [], "curl exit {exit_code}: {stderr}")
@@ -463,12 +519,11 @@ fn jira_curl_create_issue(
     val esc_project = escape_json(project_key)
     val esc_type = escape_json(issue_type)
     val esc_summary = escape_json(summary)
-    val adf = _adf_doc(description)
+    val adf = _jira_rich_text(client, description)
 
     val body = "\{\"fields\":\{\"project\":\{\"key\":\"{esc_project}\"\},\"issuetype\":\{\"name\":\"{esc_type}\"\},\"summary\":\"{esc_summary}\",\"description\":{adf}\}\}"
 
-    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
-    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_post(auth, url, body))
+    val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_post(auth, url, body))
 
     if exit_code != 0:
         return (false, empty, "curl exit {exit_code}: {stderr}")
@@ -507,10 +562,22 @@ fn jira_curl_get_attachment(client: JiraClient, attachment_id: text, dest_path: 
         return (false, "missing email or api_token")
 
     val base = _jira_api_root(client)
-    val url = "{base}/attachment/content/{attachment_id}"
+    var url = "{base}/attachment/content/{attachment_id}"
+    if _jira_site(client).is_datacenter():
+        # DC has no /attachment/content/{id}; the download URL
+        # ({base}/secure/attachment/{id}/{filename}) is the metadata's `content`.
+        val (meta_out, meta_err, meta_exit) = _jira_run_curl(client, _build_curl_argv_get(auth, "{base}/attachment/{attachment_id}"))
+        if meta_exit != 0:
+            return (false, "curl exit {meta_exit}: {meta_err}")
+        val (meta_body, meta_code) = _split_response(meta_out)
+        if not _status_ok(meta_code):
+            return (false, _status_message(meta_code, meta_body))
+        val meta = json_parse(meta_body)
+        if meta == nil or _jstr(meta, "content") == "":
+            return (false, "attachment metadata has no content URL")
+        url = _jstr(meta, "content")
 
-    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
-    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_download(auth, url, dest_path))
+    val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_download(auth, url, dest_path))
 
     if exit_code != 0:
         return (false, "curl exit {exit_code}: {stderr}")
@@ -554,13 +621,12 @@ fn jira_curl_update_issue(client: JiraClient, issue_key: text, summary: text, de
     if summary != "":
         parts = parts + ["\"summary\":\"{_json_escape(summary)}\""]
     if description != "":
-        parts = parts + ["\"description\":{_adf_doc(description)}"]
+        parts = parts + ["\"description\":{_jira_rich_text(client, description)}"]
     val body = "\{\"fields\":\{{parts.join(",")}\}\}"
 
-    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
     var attempt = 0
     while attempt < ITF_RETRY_MAX_ATTEMPTS:
-        val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_put(auth, url, body))
+        val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_put(auth, url, body))
         if exit_code != 0:
             return (false, "curl exit {exit_code}: {stderr}")
         val (resp_body, code) = _split_response(stdout)
@@ -586,12 +652,11 @@ fn jira_curl_add_comment(client: JiraClient, issue_key: text, comment_text: text
 
     val base = _jira_api_root(client)
     val url = "{base}/issue/{issue_key}/comment"
-    val body = "\{\"body\":{_adf_doc(comment_text)}\}"
+    val body = "\{\"body\":{_jira_rich_text(client, comment_text)}\}"
 
-    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
     var attempt = 0
     while attempt < ITF_RETRY_MAX_ATTEMPTS:
-        val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_post(auth, url, body))
+        val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_post(auth, url, body))
         if exit_code != 0:
             return (false, "curl exit {exit_code}: {stderr}")
         val (resp_body, code) = _split_response(stdout)
@@ -615,8 +680,7 @@ fn jira_curl_list_transitions(client: JiraClient, issue_key: text) -> (bool, [Ji
 
     val base = _jira_api_root(client)
     val url = "{base}/issue/{issue_key}/transitions"
-    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
-    val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_get(auth, url))
+    val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_get(auth, url))
     if exit_code != 0:
         return (false, [], "curl exit {exit_code}: {stderr}")
 
@@ -653,10 +717,9 @@ fn jira_curl_transition_issue(client: JiraClient, issue_key: text, transition_id
     val url = "{base}/issue/{issue_key}/transitions"
     val body = "\{\"transition\":\{\"id\":\"{transition_id}\"\}\}"
 
-    val curl_path = if client.curl_path != "": client.curl_path else: "curl"
     var attempt = 0
     while attempt < ITF_RETRY_MAX_ATTEMPTS:
-        val (stdout, stderr, exit_code) = process_run(curl_path, _build_curl_argv_post(auth, url, body))
+        val (stdout, stderr, exit_code) = _jira_run_curl(client, _build_curl_argv_post(auth, url, body))
         if exit_code != 0:
             return (false, "curl exit {exit_code}: {stderr}")
         val (resp_body, code) = _split_response(stdout)

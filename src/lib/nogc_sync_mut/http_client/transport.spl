@@ -1,0 +1,29 @@
+# HTTP Client transport — sends a request tuple built by request.spl.
+#
+# Kept in its own module on purpose: io.http_sffi also defines http_get/
+# http_post/..., and a selective `use io.http_sffi.{http_request_raw}` inside
+# request.spl made the interpreter resolve request.spl's own http_get to
+# http_sffi's object-returning one (see
+# doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md).
+# This module defines no http_* builder names, so there is nothing to shadow.
+
+use std.nogc_sync_mut.io.http_sffi.{http_request_raw}
+
+fn send_request(request: (text, text, list, text)) -> (i64, text, list, text):
+    """Send a built request over the runtime transport.
+    Returns (status, status_text, headers, body). A transport failure is
+    status -1 with the runtime error in status_text — never a fake success
+    (e.g. the Windows core runtime has no native HTTP and reports that)."""
+    var header_lines = ""
+    val headers = request.2
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        if i > 0:
+            header_lines = header_lines + "\n"
+        header_lines = header_lines + "{header.0}: {header.1}"
+        i = i + 1
+    val raw = http_request_raw(request.0, request.1, header_lines, request.3)
+    if raw.0 < 0:
+        return (-1, raw.2, [], "")
+    (raw.0, raw.2, [], raw.1)

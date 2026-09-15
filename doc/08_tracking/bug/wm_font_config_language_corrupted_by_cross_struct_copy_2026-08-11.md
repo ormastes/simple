@@ -1,11 +1,18 @@
 # WM rung-(d): every text Draw IR command skipped — `config.language` reads `normal` instead of `und`
 
-Status: ROOT-CAUSED, fix written in the working copy, **NOT LANDED** — the
-confirming gate run had not produced a verdict when this was written. Nothing
-here may be read as a rung-(d) pass. The four rung-(d) questions (capture
-reached? `scanout_capture_size`? non-uniform PPM? verdict string?) are
-UNANSWERED. Landing is blocked until `check-simpleos-wm-fullscreen-evidence.shs`
-reports `skipped=0` with a pixel-variance-verified non-uniform PPM.
+- Status: RESOLVED (2026-09-13) — the `config.language` cross-struct-copy
+  defect itself is fixed and verified by a pure-Simple unit spec (below). The
+  separate rung-(d) QEMU end-to-end WM gate remains blocked by an UNRELATED
+  guest heap-exhaustion panic during `vfs-init` (see "Gate evidence" below) —
+  that is a different defect and stays out of scope for a pure-Simple lane.
+
+Original status when filed: ROOT-CAUSED, fix written in the working copy,
+**NOT LANDED** — the confirming gate run had not produced a verdict when this
+was written. Nothing here may be read as a rung-(d) pass. The four rung-(d)
+questions (capture reached? `scanout_capture_size`? non-uniform PPM? verdict
+string?) are UNANSWERED. Landing is blocked until
+`check-simpleos-wm-fullscreen-evidence.shs` reports `skipped=0` with a
+pixel-variance-verified non-uniform PPM.
 Lane: SimpleOS WM fullscreen, QEMU + OVMF pflash only. No board claim is made here.
 
 ## Symptom
@@ -154,6 +161,28 @@ text was ever drawn (zero receipts), the panic precedes all rendering, and four
 lines of constructor cannot account for ~191 MiB of heap. But with two variables
 moved this is an argument, not a measurement, and it is recorded as such.
 
+## Verification 2026-09-13
+
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl:221` (`engine2d_default_font_config_for`)
+already carries the literal-init fix described above at this sha (the
+`force_cpu_target` branch constructs `FontRenderConfig(... language: "und" ...)`
+directly instead of copying fields off `base`). A dedicated unit spec already
+exists and is GREEN, exercising the fixed function directly without QEMU:
+
+```
+bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/font_config_literal_init_spec.spl
+-> 4 examples, 0 failures
+```
+
+Binary: `bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
+(symlinked from the shared main worktree), sha256 `3d120a6f9ab5`.
+
+This closes the specific defect this record describes (the cross-struct copy
+manufacturing `language="normal"`). The rung-(d) QEMU gate blocker recorded
+under "Gate evidence" (guest heap exhaustion at `vfs-init`, before any render
+code runs) is a distinct, unrelated defect and needs its own record/lane — it
+is not re-diagnosed here.
+
 ## Follow-ups
 
 - The underlying codegen defect is unfixed; only this call site is worked around.
@@ -162,3 +191,18 @@ moved this is an argument, not a measurement, and it is recorded as such.
 - `font_render_config_valid` does not validate the language sentinel, so a corrupt
   language reaches selection before anything complains. Tightening it would have
   caught this one gate-run earlier.
+
+## Triage 2026-09-13
+
+The header still says "fix written in the working copy, NOT LANDED",
+but `src/lib/gc_async_mut/gpu/engine2d/engine.spl:221-238`
+(`engine2d_default_font_config_for`) now contains the literal-init
+fix described in "Fix" above -- it IS landed in source (confirmed by
+reading the file directly; the eleven-field cross-struct copy is gone,
+replaced by the literal FontRenderConfig construction with
+`language: "und"`). What remains genuinely blocked is rung-(d)
+verification itself: `check-simpleos-wm-fullscreen-evidence.shs`
+needs a QEMU + OVMF pflash boot reaching desktop readiness, which this
+lane cannot run (no kernel build, no QEMU). Leaving OPEN — source fix
+present, gate verification still pending as originally noted.
+

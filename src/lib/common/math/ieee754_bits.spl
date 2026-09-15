@@ -1,0 +1,128 @@
+# Strict SIMD arithmetic support. Rounding is nearest, ties to even; no fast
+# reassociation is permitted. The existing scalar math owner supplies f64 FMA.
+use std.common.binary_io.{f64_from_bits, f64_to_bits}
+use std.common.math.math.{math_fma}
+
+fn _sign64() -> i64: ~0x7FFFFFFFFFFFFFFF
+
+fn _is_nan64(bits: i64) -> bool:
+    (bits & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000
+
+pub fn math_f32_widen_bits(bits: i64) -> i64:
+    """Widen IEEE binary32 bits exactly, preserving sign and NaN payload."""
+    val sign = (bits & 0x80000000) << 32
+    val exponent = (bits >> 23) & 255
+    var fraction = bits & 0x7FFFFF
+    if exponent == 255:
+        return sign | 0x7FF0000000000000 | (fraction << 29)
+    if exponent == 0:
+        if fraction == 0: return sign
+        var power = -126
+        while fraction < 0x800000:
+            fraction = fraction << 1
+            power = power - 1
+        return sign | ((power + 1023) << 52) | ((fraction & 0x7FFFFF) << 29)
+    sign | ((exponent + 896) << 52) | (fraction << 29)
+
+pub fn math_f64_decode_bits(bits: i64) -> f64:
+    """Decode finite values, infinities and signed zero; NaNs become quiet NaN.
+
+    Payload-sensitive operations must retain the input bits before decoding.
+    No division by zero is used: the scalar math owner creates invalid NaN.
+    """
+    val magnitude = bits & 0x7FFFFFFFFFFFFFFF
+    if magnitude > 0x7FF0000000000000:
+        val infinity = f64_from_bits(0x7FF0000000000000u64)
+        return math_fma(infinity, 0.0, 0.0)
+    val value = f64_from_bits(magnitude as u64)
+    if (bits & _sign64()) != 0: value * -1.0 else: value
+
+fn _round_shift(value: i64, shift: i64, midpoint_bias: i64) -> i64:
+    var rounded = value >> shift
+    val remainder = value & ((1 << shift) - 1)
+    val half = 1 << (shift - 1)
+    if remainder > half or (remainder == half and (midpoint_bias > 0 or (midpoint_bias == 0 and (rounded & 1) != 0))):
+        rounded = rounded + 1
+    rounded
+
+fn _round_f64_bits(bits: i64, midpoint_bias: i64) -> i64:
+    val sign = (bits >> 32) & 0x80000000
+    val exponent = (bits >> 52) & 2047
+    val fraction = bits & 0xFFFFFFFFFFFFF
+    if exponent == 2047:
+        if fraction == 0: return sign | 0x7F800000
+        return sign | 0x7F800000 | (fraction >> 29) | 0x400000
+    # Every binary64 subnormal is smaller than half a binary32 subnormal.
+    if exponent == 0: return sign
+    val power = exponent - 1023
+    if power > 127: return sign | 0x7F800000
+    if power < -150: return sign
+    val significand = 0x10000000000000 | fraction
+    if power < -126:
+        return sign | _round_shift(significand, -power - 97, midpoint_bias)
+    var rounded = _round_shift(significand, 29, midpoint_bias)
+    var exponent32 = power + 127
+    if rounded == 0x1000000:
+        rounded = rounded >> 1
+        exponent32 = exponent32 + 1
+    if exponent32 == 255: return sign | 0x7F800000
+    sign | (exponent32 << 23) | (rounded & 0x7FFFFF)
+
+pub fn math_f64_round_to_f32_bits(value: f64) -> i64:
+    """Round a binary64 value once to binary32, including subnormals/overflow."""
+    _round_f64_bits(f64_to_bits(value) as i64, 0)
+
+pub fn math_f64_fma_bits(a: i64, b: i64, c: i64) -> i64:
+    """IEEE fused a*b+c with one binary64 rounding; quiet first NaN payload."""
+    if _is_nan64(a): return a | 0x8000000000000
+    if _is_nan64(b): return b | 0x8000000000000
+    if _is_nan64(c): return c | 0x8000000000000
+    val aa = a & 0x7FFFFFFFFFFFFFFF
+    val bb = b & 0x7FFFFFFFFFFFFFFF
+    val cc = c & 0x7FFFFFFFFFFFFFFF
+    val infinity = 0x7FF0000000000000
+    val product_sign = (a xor b) & _sign64()
+    if (aa == infinity and bb == 0) or (bb == infinity and aa == 0):
+        return 0x7FF8000000000000
+    if aa == infinity or bb == infinity:
+        if cc == infinity and (c & _sign64()) != product_sign: return 0x7FF8000000000000
+        return product_sign | infinity
+    if cc == infinity: return c
+    if (aa == 0 or bb == 0) and cc == 0:
+        return product_sign & c & _sign64()
+    val value = math_fma(math_f64_decode_bits(a), math_f64_decode_bits(b), math_f64_decode_bits(c))
+    f64_to_bits(value) as i64
+
+pub fn math_f32_fma_bits(a: i64, b: i64, c: i64) -> i64:
+    """IEEE fused binary32 a*b+c, without a binary64-to-binary32 double round.
+
+    Two binary32 significands have at most 48 product bits and exponent range
+    -298..255, so their product is exact and normal in binary64. Knuth TwoSum
+    retains the exact addition residual; its direction breaks a rounded
+    binary64 midpoint before the single binary32 rounding.
+    Reference: https://www.tuhh.de/ti3/paper/rump/RuOgOi07I.pdf (TwoSum).
+    """
+    val a64 = math_f32_widen_bits(a)
+    val b64 = math_f32_widen_bits(b)
+    val c64 = math_f32_widen_bits(c)
+    val aa = a & 0x7FFFFFFF
+    val bb = b & 0x7FFFFFFF
+    val cc = c & 0x7FFFFFFF
+    if aa >= 0x7F800000 or bb >= 0x7F800000 or cc >= 0x7F800000 or ((aa == 0 or bb == 0) and cc == 0):
+        return _round_f64_bits(math_f64_fma_bits(a64, b64, c64), 0)
+    val product = math_f64_decode_bits(a64) * math_f64_decode_bits(b64)
+    val addend = math_f64_decode_bits(c64)
+    val total = product + addend
+    val virtual_addend = total - product
+    val product_error = product - (total - virtual_addend)
+    val addend_error = addend - virtual_addend
+    val residual = product_error + addend_error
+    var bias = 0
+    if residual > 0.0: bias = 1
+    else if residual < 0.0: bias = -1
+    val total_bits = f64_to_bits(total) as i64
+    if (total_bits & _sign64()) != 0: bias = -bias
+    _round_f64_bits(total_bits, bias)
+
+export math_f32_widen_bits, math_f64_decode_bits, math_f64_round_to_f32_bits
+export math_f32_fma_bits, math_f64_fma_bits

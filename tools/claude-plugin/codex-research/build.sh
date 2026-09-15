@@ -60,7 +60,7 @@ mkdir -p "$DIST_DIR"
 tar -czf "$DIST_DIR/$PACKAGE_NAME.tar.gz" \
     -C "$SCRIPT_DIR" \
     .claude-plugin/plugin.json \
-    skills/research.md \
+    skills/codex-research/SKILL.md \
     agents/research.md \
     build.sh
 

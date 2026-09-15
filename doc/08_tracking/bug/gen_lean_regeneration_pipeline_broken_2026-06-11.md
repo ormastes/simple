@@ -1,6 +1,15 @@
 # gen-lean regeneration pipeline broken (multi-layer drift)
 
-Status: FIXED 2026-06-11 — all layers repaired, 4 lean_* spec suites green (27/27)
+## Closed 2026-09-13 — pipeline repaired 2026-06-11, all four lean_* suites green in-entry
+
+- **inferred** Entry status: `FIXED 2026-06-11 — all layers repaired, 4 lean_* spec suites
+  green (27/27)`; no later entry reopens the regeneration pipeline.
+- **inferred** The lean frontend it regenerates (`src/compiler/10.frontend/core/`) is
+  present and consistent in this tree (parser_expr.spl, primary_expr.spl, tokens.spl all
+  carry the post-fix symbols referenced by later June entries).
+
+
+Status: closed 2026-09-13 (was: Status: FIXED 2026-06-11 — all layers repaired, 4 lean_* spec suites green (27/27))
 
 **Date:** 2026-06-11
 **Severity:** Medium (verification automation gap — committed Lean proofs cannot be

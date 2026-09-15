@@ -228,3 +228,12 @@ exposed to the identical no-op. Only the resolver's own maps were converted, to
 keep this change scoped. The general defect — Dict/array-typed class-field
 receivers losing their type at MIR lowering — is the real upstream fix and is
 tracked at `expr_dispatch.spl:361-372`.
+
+## Triage 2026-09-13
+
+Reconfirmed: root cause (Stage 3 self-host `lookup_or_invalid` symbol-id
+mismatch) remains unfixed per this record's own analysis; the landed
+containment (`hir_payload_binding_names_agree` name-agreement gate) still
+does not fix it, only prevents the hard fatal. Fixing this needs a full
+Stage 3 native-build self-host run to observe, which is outside a
+single-bug, no-bootstrap-lane budget. Left OPEN, no code change attempted.

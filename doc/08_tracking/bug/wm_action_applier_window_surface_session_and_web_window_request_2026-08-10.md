@@ -1,5 +1,17 @@
 # `wm_action_applier_spec` — 2 real product gaps, exposed once the spec stopped being dead
 
+## Triage 2026-09-13
+Re-ran test/01_unit/os/compositor/wm_action_applier_spec.spl: now
+declared>=18 executed=18 passed=11 failed=7 -- MORE failures than the doc's
+own "after" snapshot (17 declared, 2 failed), so this has regressed further
+or grown more coverage that surfaces more real gaps (7 named: window-manager
+state materialization into compositor surfaces, web-window render request
+surface, lifecycle-change helper, remote update trees, host-neutral
+lifecycle actions, hosted-window-identity recycling, maximize-geometry
+restore). OPEN, out of scope for this pass: this is compositor/window-manager
+product code (src/os/compositor/wm_action_applier.spl-class), not a
+contained fix -- 7 distinct gaps need their own investigation.
+
 **Status:** OPEN — RED and left RED. The spec is correct; the product is not.
 **Filed:** 2026-08-10
 **Supersedes the "zero-examples" half of**

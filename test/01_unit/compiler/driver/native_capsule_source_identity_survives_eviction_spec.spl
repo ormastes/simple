@@ -1,0 +1,63 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_aot_native_output.{
+    driver_native_capsule_identity_empty_v1,
+    driver_native_frozen_source_lookup
+}
+
+# Regression for site 10 of the macOS Stage-2 chain
+# (doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md): the frozen
+# capsule source identity was computed by hashing `SourceFile.content` at
+# capsule-freeze time. By then phase 3 has run `reclaim_source_contents` ->
+# `reclaim_streaming_source_contents_owner` -> `evict_sources`, so the content
+# is empty and every module froze
+# e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 -- the
+# sha256 of the empty string -- making `native-capsule-source-mutated` fire
+# against files that were never touched.
+describe "native capsule frozen source identity":
+    it "returns the phase-1 identity recorded for the module, not a re-hash":
+        val (path, identity) = driver_native_frozen_source_lookup(
+            ["a.spl", "b.spl"],
+            [sha256_text("contents of a"), sha256_text("contents of b")],
+            ["mod.a", "mod.b"],
+            "mod.b")
+        expect(path).to_equal("b.spl")
+        expect(identity).to_equal(sha256_text("contents of b"))
+
+    it "is the sha256 of the file's own bytes":
+        # The disk side hashes raw file bytes, so the frozen side must agree
+        # byte for byte for an unmodified file.
+        val content = "fn main():\n    print \"hi\"\n"
+        val (_, identity) = driver_native_frozen_source_lookup(
+            ["only.spl"], [sha256_text(content)], ["mod.only"], "mod.only")
+        expect(identity).to_equal(sha256_text(content))
+        expect(identity.len()).to_equal(64)
+
+    it "fails closed on a duplicate module name":
+        val (path, identity) = driver_native_frozen_source_lookup(
+            ["a.spl", "b.spl"],
+            [sha256_text("a"), sha256_text("b")],
+            ["mod.dup", "mod.dup"],
+            "mod.dup")
+        expect(path).to_equal("")
+        expect(identity).to_equal("")
+
+    it "fails closed when the inventory arrays disagree in length":
+        val (path, identity) = driver_native_frozen_source_lookup(
+            ["a.spl", "b.spl"], [sha256_text("a")], ["mod.a", "mod.b"], "mod.a")
+        expect(path).to_equal("")
+        expect(identity).to_equal("")
+
+describe "capsule identity empty check":
+    it "rejects the digest of empty content":
+        expect(driver_native_capsule_identity_empty_v1(sha256_text(""))).to_equal(true)
+        expect(driver_native_capsule_identity_empty_v1(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        ).to_equal(true)
+
+    it "rejects an absent identity":
+        expect(driver_native_capsule_identity_empty_v1("")).to_equal(true)
+
+    it "accepts a real content digest":
+        expect(driver_native_capsule_identity_empty_v1(
+            sha256_text("fn main(): ()"))).to_equal(false)

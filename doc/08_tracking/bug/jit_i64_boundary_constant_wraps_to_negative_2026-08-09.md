@@ -90,3 +90,10 @@ P60=1152921504606846976  P62=4611686018427387904  MAXDEC=9223372036854775807
 ```
 
 (identical on interpret and jit). Probe `_scratch/p_int.spl`.
+
+## Triage 2026-09-13 (BUGFIX-6 lane)
+
+Skipped from this row-order pass: primary file/fix surface is the Rust seed
+(`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
+pure-Simple, non-Codex lane within the triage budget. Not reproduced or
+re-diagnosed this pass; left OPEN as-is.

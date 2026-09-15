@@ -4719,6 +4719,29 @@ int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
 }
 
+/* Presence predicate for the postfix `.?` operator -- the C twin of the Rust
+ * runtime's rt_is_present (compiler_rust/runtime/src/value/objects.rs) and of
+ * rt_is_present in src/runtime/simple_core/core_string.spl.
+ *
+ * `.?` is absent for nil/None AND for an EMPTY array, dict or string; every
+ * other value (including 0, false, tuples, closures and structs) is present.
+ * That is exactly the tree-walk interpreter's Expr::ExistsCheck arm. Using
+ * rt_is_some here instead made a natively compiled `while arr.?:` loop forever
+ * on an empty-but-allocated array while `.len()` read 0 in the same binary --
+ * doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md */
+int8_t rt_is_present(int64_t value) {
+    if (rt_is_none(value)) return 0;
+    int64_t payload = rt_unwrap_or_self(value);
+    if (payload == rt_core_nil()) return 0;
+    RtCoreString* s = rt_core_as_string(payload);
+    if (s) return s->len > 0;
+    RtCoreArray* a = rt_core_as_registered_array(payload);
+    if (a) return a->len > 0;
+    RtCoreDict* d = rt_core_as_dict(payload);
+    if (d) return rt_dict_len(payload) > 0;
+    return 1;
+}
+
 /* Repeat a string `count` times.
  *
  * Mirrors the tree-walking interpreter (interpreter_method/string.rs, arm
@@ -6636,6 +6659,64 @@ double rt_math_log2(double x) {
     return log2(x);
 }
 
+/* Stage2 bootstrap link (core-C-only lane): `rt_math_sqrt` is the twelfth
+ * member of the libm passthrough family above and had NO C definition at all,
+ * so the CoreCBootstrap lane could not link any program that reaches
+ * `math.sqrt` -- observed as the `link` class of the native-vs-interpreter
+ * differential census (doc/10_metrics/infra/
+ * native_interp_differential_2026-09-13.md). Byte-for-byte twin of the Rust
+ * side (runtime/src/value/sffi/math.rs: `x.sqrt()`), which is `f64::sqrt` ->
+ * the IEEE-754 correctly-rounded square root; C99 `sqrt` is the same
+ * correctly-rounded operation, so the two agree on every input including
+ * -0.0 (-> -0.0), negative (-> NaN) and infinities. */
+double rt_math_sqrt(double x) {
+    return sqrt(x);
+}
+
+/* Same lane, same census, same shape as the eleven above and as rt_math_sqrt:
+ * eight more libm passthroughs that existed only in the Rust crate
+ * (runtime/src/value/sffi/math.rs), each a one-line method call. They surfaced
+ * as the NEXT unresolved set once the six symbols of this change stopped
+ * blocking `test/01_unit/compiler/backend/llvm_ir_builder_spec.spl`, so closing
+ * them here is what actually moves that row off the `link` class rather than
+ * trading one unresolved name for another.
+ *
+ * min/max mirror Rust's `f64::min`/`f64::max`, which are the IEEE-754
+ * minNum/maxNum operations -- they return the non-NaN operand when exactly one
+ * side is NaN. C99 `fmin`/`fmax` are specified as the same operations, so a
+ * naive `a < b ? a : b` would NOT be a twin and is deliberately not used. */
+double rt_math_exp(double x) {
+    return exp(x);
+}
+
+double rt_math_cbrt(double x) {
+    return cbrt(x);
+}
+
+double rt_math_sin(double x) {
+    return sin(x);
+}
+
+double rt_math_cos(double x) {
+    return cos(x);
+}
+
+double rt_math_tan(double x) {
+    return tan(x);
+}
+
+double rt_math_hypot(double x, double y) {
+    return hypot(x, y);
+}
+
+double rt_math_min(double a, double b) {
+    return fmin(a, b);
+}
+
+double rt_math_max(double a, double b) {
+    return fmax(a, b);
+}
+
 /* Fault limits are process policy for the pure-Simple runner and its child
  * compiler/test processes. Keep this provider independent from the legacy
  * Rust CLI CGU (which also owns seed-delegating rt_cli_run_tests). The names
@@ -6907,11 +6988,46 @@ SplArray* rt_array_new(int64_t cap) {
 }
 
 SplArray* rt_array_new_uninit(int64_t cap) {
-    return rt_core_array_new_fill(cap, 0, 0);
+    /* `cap` elements that EXIST but hold undefined values — that is what
+       "uninit" means to every caller, all of which allocate n, fill n and
+       return. `rt_core_array_new_fill` only sets `cap`; `len` stays 0 from the
+       calloc of the header, so without this the array comes back with correct
+       data and a length of ZERO.
+       That is not a crash, which is why it survived: a Simple caller checks
+       `span.len() != n`, reads it as "extern not backed", and silently falls
+       back to the scalar path. Measured in a native binary, EVERY
+       span-returning C kernel was dead this way — the DB bitmap ops, the glyph
+       mask blend, and the soft-shadow coverage blend — while the in-place
+       kernels next to them worked fine and made the lane look healthy.
+       `rt_array_repeat` already sets `len` by hand after the same call; this
+       makes the constructor itself honest instead of requiring every caller to
+       remember. */
+    SplArray* a = rt_core_array_new_fill(cap, 0, 0);
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (array) {
+        array->len = cap > 0 ? cap : 0;
+    }
+    return a;
 }
 
 SplArray* rt_array_new_with_cap_u64(int64_t cap) {
     return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
+}
+
+/* Is this array stored as PACKED BYTES rather than tagged int64 slots?
+ *
+ * `[u8]` takes the packed representation (RT_CORE_ARRAY_FLAG_BYTES); every
+ * other element type takes one tagged slot each. A kernel in another
+ * translation unit cannot see the flag, so it has to guess — and
+ * `rt_engine2d_blend_mask_span_u32` guessed "tagged slots" for its glyph mask,
+ * read packed bytes as int64 words, and blended every glyph pixel against
+ * garbage. It went unnoticed because the interpreter path uses the Rust twin,
+ * which unpacks correctly.
+ */
+int rt_array_is_byte_packed(SplArray* value) {
+    RtCoreArray* array = rt_core_array_ptr(value);
+    if (!array) return 0;
+    return (array->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
 }
 
 void rt_array_free(SplArray* value) {
@@ -9046,6 +9162,272 @@ int64_t rt_array_pop(SplArray* a) {
     return value;
 }
 
+/* ===========================================================================
+ * Core-C-only lane twins: rt_utf8_* / rt_numeric_dot_f64 / rt_array_remove
+ *
+ * These five were Rust-runtime-only. The CoreCBootstrap lane -- the lane the
+ * self-hosted Stage 2/3 binaries link against -- never links that crate, so
+ * any program reaching them failed to LINK. That is the `link` class of the
+ * native-vs-interpreter differential census
+ * (doc/10_metrics/infra/native_interp_differential_2026-09-13.md, 9 rows) and
+ * doc/08_tracking/bug/
+ * core_c_bootstrap_runtime_lane_missing_rt_utf8_math_array_symbols_2026-09-13.md.
+ * They are live call targets, never bypassed.
+ *
+ * They are written HERE, beside rt_array_pop, for the reason stated in the
+ * comment immediately below it: RtCoreArray, rt_core_as_array and the
+ * rt_core_is_int/as_int/is_float/as_float tag helpers are all file-local to
+ * this translation unit, and re-declaring RtCoreArray elsewhere is exactly the
+ * layout drift that links cleanly and corrupts silently.
+ *
+ * Every body below mirrors its Rust twin's SEMANTICS, not its code shape; the
+ * one deliberate, stated exception is the packed-SIMD reassociation noted on
+ * rt_numeric_dot_f64.
+ * ======================================================================== */
+
+/* Twin of Rust's `runtime_value_array_to_bytes`
+ * (runtime/src/value/utf8_kernels.rs): every element must be an integer in
+ * 0..=255, or the whole decode refuses (Rust's `None`).
+ *
+ * Rust reaches elements through `rt_array_get`, which RE-TAGS the packed
+ * layouts before returning them. This lane's `rt_array_get` hands back a RAW
+ * byte for FLAG_BYTES instead, so routing through it would make a byte-backed
+ * array decode differently from a generic one. The layouts are therefore read
+ * directly here. Returns the byte count, or -1 for refusal; on success *out
+ * owns a malloc'd buffer (NULL when the length is 0).
+ *
+ * A zero-length array is Some(empty) in Rust even when its data pointer is
+ * null, so the length check precedes the data check. */
+static int64_t splc_utf8_array_to_bytes(int64_t value, uint8_t** out) {
+    RtCoreArray* array = rt_core_as_array(value);
+    *out = NULL;
+    if (!array) return -1;
+    int64_t len = array->len;
+    if (len < 0) return -1;
+    if (len == 0) return 0;
+    if (!array->data) return -1;
+    uint8_t* buf = (uint8_t*)malloc((size_t)len);
+    if (!buf) return -1;
+    for (int64_t i = 0; i < len; i++) {
+        int64_t elem;
+        if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+            elem = (int64_t)((uint8_t*)array->data)[i];
+        } else if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+            elem = (int64_t)((uint64_t*)array->data)[i];
+        } else {
+            int64_t tagged = ((int64_t*)array->data)[i];
+            if (!rt_core_is_int(tagged)) { free(buf); return -1; }
+            elem = rt_core_as_int(tagged);
+        }
+        if (elem < 0 || elem > 255) { free(buf); return -1; }
+        buf[i] = (uint8_t)elem;
+    }
+    *out = buf;
+    return len;
+}
+
+/* Twin of what `std::str::from_utf8` runs (core's run_utf8_validation), which
+ * is what Rust's `scalar_validate` / `scalar_find_invalid` call. Returns the
+ * number of leading bytes that form valid UTF-8: `len` when the whole input is
+ * valid, otherwise Rust's `Utf8Error::valid_up_to()`, which is the offset of
+ * the FIRST BYTE of the offending sequence (not of the offending byte).
+ *
+ * RFC 3629 strictness, encoded in the lead/second-byte ranges below: C0/C1
+ * overlong leads, 3-byte overlongs (E0 80..9F), UTF-16 surrogates
+ * (ED A0..BF => U+D800..U+DFFF), 4-byte overlongs (F0 80..8F), anything above
+ * U+10FFFF (F4 90.. and F5..FF), bare continuation bytes, and truncated
+ * sequences are all invalid. Truncation reports the sequence start too.
+ *
+ * All of Rust's SIMD tiers (avx2/avx512/neon) are documented in
+ * utf8_kernels.rs as byte-for-byte identical to the scalar result for every
+ * input including malformed UTF-8 -- they only skip a pure-ASCII prefix -- so
+ * one scalar twin covers every tier. */
+static int64_t splc_utf8_valid_up_to(const uint8_t* b, int64_t len) {
+    int64_t i = 0;
+    while (i < len) {
+        uint8_t first = b[i];
+        if (first < 0x80) { i++; continue; }
+        int width;
+        if (first < 0xC2) return i;       /* continuation byte, or overlong C0/C1 lead */
+        else if (first < 0xE0) width = 2;
+        else if (first < 0xF0) width = 3;
+        else if (first < 0xF5) width = 4;
+        else return i;                    /* F5..FF: beyond U+10FFFF */
+        if (i + width > len) return i;    /* truncated: reported at the start */
+        uint8_t second = b[i + 1];
+        if (width == 2) {
+            if (second < 0x80 || second > 0xBF) return i;
+        } else if (width == 3) {
+            int ok = (first == 0xE0 && second >= 0xA0 && second <= 0xBF)
+                  || (first >= 0xE1 && first <= 0xEC && second >= 0x80 && second <= 0xBF)
+                  || (first == 0xED && second >= 0x80 && second <= 0x9F)
+                  || (first >= 0xEE && second >= 0x80 && second <= 0xBF);
+            if (!ok) return i;
+            if (b[i + 2] < 0x80 || b[i + 2] > 0xBF) return i;
+        } else {
+            int ok = (first == 0xF0 && second >= 0x90 && second <= 0xBF)
+                  || (first >= 0xF1 && first <= 0xF3 && second >= 0x80 && second <= 0xBF)
+                  || (first == 0xF4 && second >= 0x80 && second <= 0x8F);
+            if (!ok) return i;
+            if (b[i + 2] < 0x80 || b[i + 2] > 0xBF) return i;
+            if (b[i + 3] < 0x80 || b[i + 3] > 0xBF) return i;
+        }
+        i += width;
+    }
+    return len;
+}
+
+/* Twin of rt_utf8_count_codepoints. NOT validation-based, deliberately: Rust
+ * walks lead bytes with `sequence_len(..).unwrap_or(1)` and counts one
+ * codepoint per step, so malformed input still yields a number rather than an
+ * error, and a stray continuation byte counts as one. The width table is
+ * `sequence_len`'s exactly (<0x80 => 1, <0xC0 => None, <0xE0 => 2, <0xF0 => 3,
+ * <0xF8 => 4, else None), with None spelled as the unwrap_or(1) step. A final
+ * truncated sequence may step past the end, which simply ends the loop -- same
+ * as Rust. A refused decode returns 0, matching the Rust `else` arm. */
+int64_t rt_utf8_count_codepoints(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int64_t count = 0;
+    int64_t i = 0;
+    while (i < len) {
+        uint8_t byte = buf[i];
+        int step;
+        if (byte < 0x80) step = 1;
+        else if (byte < 0xC0) step = 1;   /* sequence_len None -> unwrap_or(1) */
+        else if (byte < 0xE0) step = 2;
+        else if (byte < 0xF0) step = 3;
+        else if (byte < 0xF8) step = 4;
+        else step = 1;                    /* sequence_len None -> unwrap_or(1) */
+        i += step;
+        count++;
+    }
+    free(buf);
+    return count;
+}
+
+/* Twin of rt_utf8_validate. Rust returns `bool`, whose extern "C" ABI is a
+ * single byte holding 0 or 1 -- int8_t here, the spelling this file already
+ * uses for every other boolean-returning rt_* export. A refused decode is
+ * `false`, matching the Rust `else` arm. */
+int8_t rt_utf8_validate(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int8_t ok = (splc_utf8_valid_up_to(buf, len) == len) ? 1 : 0;
+    free(buf);
+    return ok;
+}
+
+/* Twin of rt_utf8_find_invalid: -1 when the input is entirely valid, otherwise
+ * the byte offset of the first invalid sequence. A refused decode returns 0,
+ * matching the Rust `else` arm -- note that this collides with "invalid at
+ * offset 0"; the convention is mirrored rather than improved, because the two
+ * lanes must answer identically. */
+int64_t rt_utf8_find_invalid(int64_t bytes_value) {
+    uint8_t* buf = NULL;
+    int64_t len = splc_utf8_array_to_bytes(bytes_value, &buf);
+    if (len < 0) return 0;
+    int64_t at = splc_utf8_valid_up_to(buf, len);
+    free(buf);
+    return (at == len) ? -1 : at;
+}
+
+/* Twin of Rust's `runtime_numeric_to_f64`: floats pass through, integers widen,
+ * everything else refuses. Order matters only in that both lanes accept the
+ * same set. */
+static int splc_numeric_to_f64(int64_t value, double* out) {
+    if (rt_core_is_float(value)) { *out = rt_core_as_float(value); return 1; }
+    if (rt_core_is_int(value)) { *out = (double)rt_core_as_int(value); return 1; }
+    return 0;
+}
+
+/* Element read that re-tags the packed layouts, i.e. what Rust's rt_array_get
+ * does and what this lane's rt_array_get does NOT (see
+ * splc_utf8_array_to_bytes). Returns 0 for an out-of-range index. */
+static int splc_array_numeric_at(RtCoreArray* array, int64_t index, double* out) {
+    if (!array->data || index < 0 || index >= array->len) return 0;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        *out = (double)(int64_t)((uint8_t*)array->data)[index];
+        return 1;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        *out = (double)(int64_t)((uint64_t*)array->data)[index];
+        return 1;
+    }
+    return splc_numeric_to_f64(((int64_t*)array->data)[index], out);
+}
+
+/* Twin of rt_numeric_dot_f64 -> packed_dot_f64 -> scalar_dot_runtime_f64:
+ * lengths must match, every element must be numeric, and the accumulation is
+ * `acc = a.mul_add(b, acc)` -- a fused multiply-add, one rounding per term.
+ * C99 `fma` is the same operation, so the scalar lane agrees bit-for-bit.
+ * A non-array receiver, a length mismatch or a non-numeric element yields NIL
+ * (the tagged special `3`), never 0.0 -- a 0.0 would read as a legitimate dot
+ * product of orthogonal vectors.
+ *
+ * STATED LIMIT, not an oversight: when BOTH operands are all-float arrays of
+ * length >= 24 (PACK_THRESHOLD_F64), Rust hands the pair to the active SIMD
+ * provider, whose lane-wise reassociation can differ in the last ulp from the
+ * sequential fma above. That variance already exists WITHIN the Rust lane
+ * across SIMD tiers, so it is not a C-vs-Rust property; reproducing one
+ * particular tier's blocking here would pin the C lane to whichever host built
+ * it. The sequential fma is the semantics every tier is a reassociation of. */
+int64_t rt_numeric_dot_f64(int64_t lhs_value, int64_t rhs_value) {
+    RtCoreArray* lhs = rt_core_as_array(lhs_value);
+    RtCoreArray* rhs = rt_core_as_array(rhs_value);
+    if (!lhs || !rhs) return rt_core_nil();
+    if (lhs->len < 0 || lhs->len != rhs->len) return rt_core_nil();
+    double acc = 0.0;
+    for (int64_t i = 0; i < lhs->len; i++) {
+        double a, b;
+        if (!splc_array_numeric_at(lhs, i, &a)) return rt_core_nil();
+        if (!splc_array_numeric_at(rhs, i, &b)) return rt_core_nil();
+        acc = fma(a, b, acc);
+    }
+    return rt_value_float(acc);
+}
+
+/* Twin of rt_array_remove: remove the element at `index`, shift the tail down
+ * one slot, shrink the length, and RETURN THE REMOVED ELEMENT. A non-array
+ * receiver, a null data pointer, a negative index or an index >= len is NIL --
+ * note that, unlike this lane's rt_array_get, a negative index does NOT count
+ * from the end; Rust refuses it, so this refuses it.
+ *
+ * All three storage layouts are handled exactly as Rust does. Byte- and
+ * u64-packed arrays store raw scalars, so their element is read through the
+ * correctly-sized pointer and RE-TAGGED on the way out; handing back the raw
+ * scalar would be misdecoded by the caller. memmove is required, not memcpy:
+ * source and destination overlap by design. */
+int64_t rt_array_remove(int64_t array_value, int64_t index) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    if (!array) return rt_core_nil();
+    int64_t len = array->len;
+    if (!array->data || index < 0 || index >= len) return rt_core_nil();
+    int64_t tail = len - 1 - index;
+
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        uint8_t* base = (uint8_t*)array->data;
+        int64_t removed = (int64_t)base[index];
+        memmove(base + index, base + index + 1, (size_t)tail);
+        array->len -= 1;
+        return (int64_t)((uint64_t)removed << 3) | RT_VALUE_TAG_INT;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        uint64_t* base = (uint64_t*)array->data;
+        int64_t removed = (int64_t)base[index];
+        memmove(base + index, base + index + 1, (size_t)tail * sizeof(uint64_t));
+        array->len -= 1;
+        return (int64_t)((uint64_t)removed << 3) | RT_VALUE_TAG_INT;
+    }
+    int64_t* base = (int64_t*)array->data;
+    int64_t removed = base[index];
+    memmove(base + index, base + index + 1, (size_t)tail * sizeof(int64_t));
+    array->len -= 1;
+    return removed;
+}
+
 /* pop / clear: receiver-dispatched spellings of rt_array_pop/rt_array_clear.
  *
  * These had NO C definition anywhere (only the Rust runtime's
@@ -10414,41 +10796,114 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
+/* Why the last bounded no-follow read returned nil.
+ *
+ * The reader has a dozen indistinguishable `rt_nil` exits, and its Simple
+ * caller could only report "returned nil". That is what left the Stage 2
+ * bootstrap failure unexplainable across sessions: the AOT diagnostic was
+ * written successfully and read back as nil with nothing able to name the arm
+ * that refused it. The Rust twin in
+ * runtime/src/value/sffi/file_io/file_ops.rs carries the same code space; this
+ * copy exists because the `core-c-bootstrap` lane resolves the C reader, so a
+ * Rust-only diagnostic would leave that lane with an unresolved external.
+ *
+ * Starts at a sentinel rather than zero so a readout is never ambiguous:
+ * 77 = never called, 100 = succeeded, 1..10 name a rejected arm, and a literal
+ * 0 means this extern is itself unresolved in the lane that read it. */
+/* Thread-local, NOT a global: the bootstrap reads with 24 jobs in flight, so a
+ * concurrent successful read on another thread would overwrite the code before
+ * the failing caller could report it.
+ *
+ * Spelled `_Thread_local` to match this tree's existing TLS (runtime_native.c
+ * and runtime_timestamp.c) rather than a fresh __declspec/__thread macro: one
+ * spelling already proven on every toolchain here beats a second one that has
+ * to be re-argued. */
+static _Thread_local int64_t rt_rnf_last_failure = 77;
+
+int64_t rt_file_read_regular_no_follow_last_failure(void) {
+    return rt_rnf_last_failure;
+}
+
+#define RT_RNF_FAIL(code) (rt_rnf_last_failure = (code), rt_nil)
+
+#if defined(_WIN32)
+/* Widen a UTF-8 path and, when it is long enough to hit the MAX_PATH ceiling,
+ * qualify it and add the extended-length prefix. A WIDE call is not by itself
+ * exempt: CreateFileW still caps at MAX_PATH unless the path carries the
+ * prefix, which is why a 266-character diagnostic file written successfully
+ * could not be read back. Twin of rt_widen_long_path_rc in runtime.c -- this
+ * file carries a byte-identical copy of the reader below, and archive member
+ * order decides which one links, so both copies must widen or the fix is a
+ * coin flip (see 08987610e54, which fixed the runtime.c copy only after
+ * finding this file's copy still unfixed). Separator and prefix are built
+ * from the numeric code point (92) to keep this free of escape sequences.
+ * Same name as the runtime.c twin (not a fresh one) so the
+ * push-rt-dual-implementation ratchet's already-baselined single-lane entry
+ * for rt_widen_long_path_rc covers this copy too, instead of requiring a new
+ * baseline row for a second name. Caller frees. */
+static wchar_t* rt_widen_long_path_rc(const char* path) {
+    static const wchar_t sep = (wchar_t)92;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
+        free(wide);
+        return NULL;
+    }
+    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    {
+        wchar_t* scan;
+        DWORD need;
+        wchar_t* full;
+        wchar_t* out;
+        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+        need = GetFullPathNameW(wide, 0, NULL, NULL);
+        if (need == 0) return wide;
+        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        if (!full) return wide;
+        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        if (!out) { free(full); return wide; }
+        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        free(full);
+        free(wide);
+        return out;
+    }
+}
+#endif
+
 int64_t rt_file_read_regular_no_follow_bounded(
         const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
     const int64_t rt_nil = 3;
     char path[RT_TEXT_PATH_MAX];
     if (max_bytes < 0 || path_len == 0 ||
         !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
-        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return rt_nil;
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
     size_t capacity = (size_t)max_bytes + 1;
     uint8_t* bytes = (uint8_t*)malloc(capacity);
-    if (!bytes) return rt_nil;
+    if (!bytes) return RT_RNF_FAIL(9);
     size_t total = 0;
 #if defined(_WIN32)
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) { free(bytes); return rt_nil; }
-    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
-    if (!wide_path || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len)) {
-        free(wide_path); free(bytes); return rt_nil;
-    }
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
     HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
-    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return rt_nil; }
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
     BY_HANDLE_FILE_INFORMATION info;
     LARGE_INTEGER size;
     if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
         (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
         size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
-        CloseHandle(handle); free(bytes); return rt_nil;
+        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
     }
     while (total < capacity) {
         DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
         DWORD read_count = 0;
         if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
-            CloseHandle(handle); free(bytes); return rt_nil;
+            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
         }
         if (read_count == 0) break;
         total += (size_t)read_count;
@@ -10457,26 +10912,27 @@ int64_t rt_file_read_regular_no_follow_bounded(
 #else
 #ifndef O_NOFOLLOW
     free(bytes);
-    return rt_nil;
+    return RT_RNF_FAIL(9);
 #else
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) { free(bytes); return rt_nil; }
+    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
         (uint64_t)st.st_size > (uint64_t)max_bytes) {
-        close(fd); free(bytes); return rt_nil;
+        close(fd); free(bytes); return RT_RNF_FAIL(5);
     }
     while (total < capacity) {
         ssize_t count = read(fd, bytes + total, capacity - total);
         if (count < 0 && errno == EINTR) continue;
-        if (count < 0) { close(fd); free(bytes); return rt_nil; }
+        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
         if (count == 0) break;
         total += (size_t)count;
     }
     close(fd);
 #endif
 #endif
-    if (total > (size_t)max_bytes) { free(bytes); return rt_nil; }
+    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+    rt_rnf_last_failure = 100;
     int64_t result = rt_string_new(bytes, (uint64_t)total);
     free(bytes);
     return result;
@@ -13257,12 +13713,83 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
     return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
 }
 
+#if defined(_WIN32)
+/* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
+ * leaves it long, add the extended-length ("\\?\") prefix so a WIDE Win32
+ * call is not itself capped at MAX_PATH (a wide call is not exempt on its
+ * own -- only the prefix lifts the ceiling, to ~32767). Caller frees. Named
+ * without the rt_ prefix -- it is a pure file-local helper with no runtime-
+ * API surface of its own; see scripts/check/check-rt-dual-implementation-
+ * ratchet.shs, which treats any new rt_-prefixed definition as a fresh
+ * single-lane primitive requiring a Simple twin. The path separator and
+ * prefix are built from the numeric code point (92) to keep this free of
+ * escape sequences. */
+static wchar_t* spl_widen_long_path(const char* path) {
+    static const wchar_t sep = (wchar_t)92;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
+        free(wide);
+        return NULL;
+    }
+    if (wide_len - 1 < 248 || (wide[0] == sep && wide[1] == sep)) return wide;
+    {
+        wchar_t* scan;
+        DWORD need;
+        wchar_t* full;
+        wchar_t* out;
+        for (scan = wide; *scan; scan++) { if (*scan == L'/') *scan = sep; }
+        need = GetFullPathNameW(wide, 0, NULL, NULL);
+        if (need == 0) return wide;
+        full = (wchar_t*)malloc(((size_t)need + 8) * sizeof(wchar_t));
+        if (!full) return wide;
+        if (GetFullPathNameW(wide, need, full, NULL) == 0) { free(full); return wide; }
+        out = (wchar_t*)malloc(((size_t)wcslen(full) + 8) * sizeof(wchar_t));
+        if (!out) { free(full); return wide; }
+        out[0] = sep; out[1] = sep; out[2] = L'?'; out[3] = sep;
+        memcpy(out + 4, full, (wcslen(full) + 1) * sizeof(wchar_t));
+        free(full);
+        free(wide);
+        return out;
+    }
+}
+#endif
+
 int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len, const uint8_t* destination_ptr, uint64_t destination_len) {
     char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) || !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
 #if defined(_WIN32)
+    /* MoveFileExA is an ANSI entry point capped at MAX_PATH regardless of the
+     * underlying filesystem's real limit; the AOT native-build cache path
+     * (<repo>/.simple/storage/.../stage2-home/.cache/simple/v1/projects/
+     * <64-hex>/native-build/simple-aot-diagnostic-<32-hex>/message.module.o)
+     * routinely exceeds it, failing with ERROR_PATH_NOT_FOUND (3), which
+     * collapsed four layers up into the opaque "AOT object publication
+     * failed". Prefer the wide, extended-length-prefixed call so both
+     * endpoints can exceed MAX_PATH. */
+    {
+        wchar_t* wide_staged = spl_widen_long_path(staged);
+        wchar_t* wide_dest = wide_staged ? spl_widen_long_path(destination) : NULL;
+        if (wide_staged && wide_dest) {
+            BOOL ok = MoveFileExW(wide_staged, wide_dest, MOVEFILE_WRITE_THROUGH);
+            DWORD werror = ok ? 0 : GetLastError();
+            free(wide_staged); free(wide_dest);
+            if (ok) return 1;
+            if (werror == ERROR_ALREADY_EXISTS || werror == ERROR_FILE_EXISTS) return 0;
+            rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExW", destination);
+            return -1;
+        }
+        free(wide_staged); free(wide_dest);
+    }
     if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
-    DWORD error = GetLastError(); return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) return 0;
+        rt_secure_temp_dir_diag("rt_file_publish_noreplace MoveFileExA", destination);
+        return -1;
+    }
 #else
 #if defined(__linux__) && defined(SYS_renameat2)
     if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
@@ -13547,12 +14074,27 @@ int64_t rt_time_now_unix(void) {
 }
 
 int64_t rt_time_now_unix_micros(void) {
+#if defined(_WIN32)
+    /* Same cause as rt_time_now_ns: `clock_gettime` becomes the unresolved
+       `clock_gettime64` and is stubbed, so this returned -1 and rt_time_ms
+       with it. GetSystemTimeAsFileTime is 100 ns ticks since 1601-01-01;
+       11644473600 seconds separate that epoch from the Unix one. */
+    FILETIME ft;
+    ULARGE_INTEGER u;
+    GetSystemTimeAsFileTime(&ft);
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    /* 100 ns ticks -> microseconds, then rebase onto the Unix epoch. */
+    int64_t unix_micros = (int64_t)(u.QuadPart / 10ULL) - 11644473600000000LL;
+    return unix_micros < 0 ? -1 : unix_micros;
+#else
     struct timespec ts = {0, 0};
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
     if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000LL) return -1;
     if ((int64_t)ts.tv_sec == INT64_MAX / 1000000LL &&
         ts.tv_nsec / 1000 > INT64_MAX % 1000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
+#endif
 }
 
 int64_t rt_time_ms(void) {
@@ -13565,12 +14107,33 @@ int64_t rt_entropy_hardware_ready(void) {
 }
 
 int64_t rt_time_now_ns(void) {
+#if defined(_WIN32)
+    /* MinGW maps `clock_gettime` onto `clock_gettime64`, which is NOT in the
+       import set this runtime links against — the native linker reports it as
+       unresolved and substitutes a generated stub, so every call failed and
+       this function returned -1. Measured: rt_time_now_micros/nanos/ms all
+       answered -1 in a native binary while the program around them ran fine,
+       which silently reports ZERO elapsed time to any in-binary benchmark.
+       QueryPerformanceCounter is the monotonic clock Windows actually
+       provides, and it is always available. */
+    LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0) return -1;
+    if (!QueryPerformanceCounter(&counter) || counter.QuadPart < 0) return -1;
+    /* Split to keep the nanosecond scaling exact without overflowing: whole
+       seconds first, then the sub-second remainder. */
+    int64_t secs = (int64_t)(counter.QuadPart / freq.QuadPart);
+    int64_t rem  = (int64_t)(counter.QuadPart % freq.QuadPart);
+    if (secs > INT64_MAX / 1000000000LL) return -1;
+    return secs * 1000000000LL + (rem * 1000000000LL) / (int64_t)freq.QuadPart;
+#else
     struct timespec ts = {0, 0};
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
     if (ts.tv_sec < 0 || (int64_t)ts.tv_sec > INT64_MAX / 1000000000LL) return -1;
     if ((int64_t)ts.tv_sec == INT64_MAX / 1000000000LL &&
         ts.tv_nsec > INT64_MAX % 1000000000LL) return -1;
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
 }
 
 int64_t rt_time_now_nanos(void) {

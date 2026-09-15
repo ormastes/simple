@@ -31,7 +31,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # because a smaller row set is indistinguishable from a passing one. The floor
 # makes that class self-detecting: the count may only ever GROW. Raise it in the
 # same commit that adds rows; lowering it requires a reviewed deletion.
-ROW_FLOOR=234
+ROW_FLOOR=317
 CHECKED=0
 FAILED=0
 OFFENDERS=""
@@ -756,6 +756,282 @@ must_contain     "WHILESHAPE parity spec ratio pin"  "$WHILEPARITY" "expect(slow
 must_contain     "WHILESHAPE parity spec absolute pin" "$WHILEPARITY" "expect(slow * 2 <= PERF_N).to_equal(true)"
 must_contain     "WHILESHAPE parity spec is non-vacuous on the counter" \
     "$WHILEPARITY" "expect(r.counter >= 0).to_equal(true)"
+
+# --- 2026-09-13 (PERF-5 target 1): daemon_lock_alive() shelled out to
+# /bin/sh via process_run_timeout on every call (up to 8 execve("/bin/sh")
+# per `simple test <spec>` with a warm daemon). Fixed to answer via
+# pid_alive_and_named(): on a real /proc (Linux), file_exists("<root>/<pid>")
+# (mirroring light_daemon.spl's own pid_is_live()) plus a plain
+# <root>/<pid>/cmdline text read, zero spawns; on a host with no /proc, a
+# single bounded `kill -0 <pid>` exec via the typed process alias (no
+# /bin/sh, no rt_* call), identity skipped -- restoring the OLD shell
+# version's actual no-/proc behavior after a first cut of this fix
+# regressed it to fail-closed-always-dead (lead review, 2026-09-13). These
+# rows pin the shell-out's absence, both replacement mechanisms' presence,
+# and the perf pins that would catch a regression back to a shell.
+CLIENTSPL="$ROOT/src/app/test_runner_new/test_runner_client.spl"
+DAEMONLOCKSPEC="$ROOT/test/05_perf/test_runner/daemon_lock_alive_shell_spawn_spec.spl"
+must_not_contain "DAEMONLOCK daemon_lock_alive no longer shells out" \
+    "$CLIENTSPL" "process_run_timeout("
+must_not_contain "DAEMONLOCK daemon_lock_alive no longer shells to kill -0" \
+    "$CLIENTSPL" 'kill -0 \"$pid\"'
+must_contain     "DAEMONLOCK liveness answered via /proc existence, in-process" \
+    "$CLIENTSPL" 'not file_exists("{proc_root}/{pid}")'
+must_contain     "DAEMONLOCK identity answered via a plain cmdline text read" \
+    "$CLIENTSPL" 'read_file_text_result("{proc_root}/{pid}/cmdline")'
+must_contain     "DAEMONLOCK no-/proc fallback is a single bounded kill -0, no shell" \
+    "$CLIENTSPL" 'process_run_bounded("/bin/kill", ["-0", pid], 2000, 0)'
+must_contain     "DAEMONLOCK perf pin exists and is fail-closed on an unreadable trace" \
+    "$DAEMONLOCKSPEC" "expect(sh_count >= 0).to_equal(true)"
+must_contain     "DAEMONLOCK perf pin budgets zero /bin/sh spawns, not a shrunk count" \
+    "$DAEMONLOCKSPEC" "expect(sh_count <= 0).to_equal(true)"
+must_contain     "DAEMONLOCK fallback-branch example exercises an injected no-/proc root" \
+    "$DAEMONLOCKSPEC" "no_proc_root ="
+must_contain     "DAEMONLOCK fallback-branch example pins a live pid as alive" \
+    "$DAEMONLOCKSPEC" "expect(pid_alive_and_named(my_pid, no_proc_root)).to_equal(true)"
+must_contain     "DAEMONLOCK fallback-branch example pins a dead pid as dead" \
+    "$DAEMONLOCKSPEC" 'expect(pid_alive_and_named("999999999", no_proc_root)).to_equal(false)'
+# --- BLOCKSHADOW: block-scope shadow bookkeeping is not re-allocated per iteration
+# `exec_block` runs capture_node_scope_shadows before and
+# restore_block_scope_shadows after EVERY block execution, so a loop body that
+# declares a `val`/`var` -- 28,246 sites in src/lib/common, the most common
+# loop-body shape there -- paid the whole bookkeeping once per iteration (~250
+# ns of a ~1,170 ns iteration, on child USER CPU time; wall clock on this host
+# does not survive its own control). It was
+# allocating three owned copies of each declared name plus a dedup HashSet plus
+# a scratch Vec, and a fourth String and an Arc clone on the restore side.
+# These rows pin the borrowed-name form, the dropped HashSet, the two
+# owner-store paths that must keep passing `name` straight through, the
+# counters that make the path observable, and the parity spec's fail-closed
+# gates. See doc/08_tracking/bug/interpreter_block_scope_shadow_realloc_per_iteration_2026-09-13.md.
+BLOCKEXEC="$ROOT/src/compiler_rust/compiler/src/interpreter/block_exec.rs"
+BLOCKPARITY="$ROOT/test/05_perf/interp/block_scope_shadow_parity_spec.spl"
+must_contain     "BLOCKSHADOW captured names are borrowed, not cloned" \
+    "$BLOCKEXEC" "pub(crate) fn capture_node_scope_shadows<'a>(nodes: &'a [Node], env: &mut Env) -> Vec<(&'a str, Option<Value>)> {"
+must_contain     "BLOCKSHADOW restore accepts both the borrowed and the owned form" \
+    "$BLOCKEXEC" "pub(crate) fn restore_block_scope_shadows<N: AsRef<str>>(shadows: Vec<(N, Option<Value>)>, env: &mut Env) {"
+must_contain     "BLOCKSHADOW dedup is a linear scan over the names collected so far" \
+    "$BLOCKEXEC" "if shadows.iter().any(|(seen, _)| *seen == name) {"
+must_not_contain "BLOCKSHADOW no per-block dedup HashSet" \
+    "$BLOCKEXEC" "let mut seen = std::collections::HashSet::new();"
+must_contain     "BLOCKSHADOW single-identifier declaration needs no collection" \
+    "$BLOCKEXEC" "Node::Let(let_stmt) => match &let_stmt.pattern {"
+must_contain     "BLOCKSHADOW capture owner write passes the name through" \
+    "$BLOCKEXEC" "crate::interpreter::set_owned_global(owner, name, value.clone(), false);"
+must_contain     "BLOCKSHADOW restore owner probe passes the name through" \
+    "$BLOCKEXEC" "crate::interpreter::owned_global(owner, name)"
+must_contain     "BLOCKSHADOW pattern-name visitor carries the AST lifetime" \
+    "$ROOT/src/compiler_rust/compiler/src/interpreter/core_types.rs" \
+    "pub(crate) fn visit_pattern_binding_names<'p>(pattern: &'p simple_parser::ast::Pattern, visit: &mut impl FnMut(&'p str)) {"
+must_contain     "BLOCKSHADOW captured names are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "BLOCK_SHADOW_NAMES"
+must_contain     "BLOCKSHADOW owner-store probes are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "BLOCK_SHADOW_OWNER_PROBES"
+must_contain     "BLOCKSHADOW parity spec pins the path count, not a wall-clock ratio" \
+    "$BLOCKPARITY" "expect(r.names >= PAIR_N * PAIR_ROUNDS).to_equal(true)"
+must_contain     "BLOCKSHADOW parity spec pins one owner probe per captured name" \
+    "$BLOCKPARITY" "expect(r.probes <= r.names).to_equal(true)"
+must_contain     "BLOCKSHADOW parity spec is non-vacuous on the counter row" \
+    "$BLOCKPARITY" "expect(r.names > 0).to_equal(true)"
+must_contain     "BLOCKSHADOW parity spec keeps the module-global oracle" \
+    "$BLOCKPARITY" "assert_semantics(binary, \"sem_global_shadow.spl\", \"sem_global_shadow\", 4, \"30:9\")"
+# --- PUBLISHGLOBALS: the call-entry global publish must not scan the caller frame
+# `publish_and_repoint` runs on EVERY call out of a frame and two of its three
+# steps used to walk the caller's whole overlay asking `is_local` -- two string
+# hashes per entry -- to discard almost all of them. Counted on the base seed at
+# n = 2,000,000: 3 entries scanned per call for a narrow caller, 23 for the same
+# call with 20 extra caller locals, with ONE entry surviving the filter and NONE
+# published across either whole run. That is PERF-7's unattributed
+# caller-frame-width term. These rows pin the `nonlocal_overlay` superset that
+# replaced the walk, its lazy `Option` (an ordinary frame must never construct
+# the set), every consumer that must keep using it instead of `overlay_entries`,
+# the audit oracle and its `SIMPLE_ENV_AUDIT` gate, the counters, and the spec's
+# count-based pin and anti-vacuity assertion. See
+# doc/08_tracking/bug/interpreter_call_entry_publish_scans_the_whole_caller_frame_2026-09-13.md.
+PUBVALUE="$ROOT/src/compiler_rust/compiler/src/value.rs"
+PUBFEXEC="$ROOT/src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs"
+PUBSPEC="$ROOT/test/05_perf/interp/call_entry_publish_scan_spec.spl"
+PUBTESTS="$ROOT/src/compiler_rust/compiler/src/value_tests_nonlocal_overlay.rs"
+must_contain     "PUBLISHGLOBALS the publishable-name superset exists" \
+    "$PUBVALUE" "nonlocal_overlay: Option<FrameSet<String>>,"
+must_contain     "PUBLISHGLOBALS the superset is lazily allocated" \
+    "$PUBVALUE" "self.nonlocal_overlay = Some(set);"
+must_contain     "PUBLISHGLOBALS every overlay-key insertion goes through one recorder" \
+    "$PUBVALUE" "fn note_overlay_key(&mut self, key: &str) {"
+must_contain     "PUBLISHGLOBALS the superset drives the publishable iterator" \
+    "$PUBVALUE" "pub fn nonlocal_overlay_entries(&self) -> impl Iterator<Item = (&String, &Value)> + '_ {"
+must_contain     "PUBLISHGLOBALS the invariant has its own oracle" \
+    "$PUBVALUE" "pub fn nonlocal_overlay_audit_misses(&self) -> Vec<String> {"
+must_contain     "PUBLISHGLOBALS drop_published_globals starts from the superset" \
+    "$PUBVALUE" "            .filter(|name| self.overlay.contains_key(name.as_str()))"
+# No must_not_contain on drop_published_globals' old walk: every line of it
+# that is genuinely gone is a fragment other functions still use, and these
+# matchers are line-oriented `grep -qF` (a multi-line needle is ORed line by
+# line, so it would fire on an unrelated `.keys()`). The positive row above
+# plus the spec's count pin carry that guarantee.
+must_contain     "PUBLISHGLOBALS the superset is dropped wholesale on clear" \
+    "$PUBVALUE" "        self.nonlocal_overlay = None;"
+must_contain     "PUBLISHGLOBALS the call-entry publish uses the superset" \
+    "$PUBFEXEC" "        .nonlocal_overlay_entries()"
+must_not_contain "PUBLISHGLOBALS the call-entry publish no longer walks the overlay" \
+    "$PUBFEXEC" "        .filter(|(name, _)| !env.is_local(name) && !env.is_refreshed_global(name))"
+must_contain     "PUBLISHGLOBALS the audit is gated and fail-closed" \
+    "$PUBFEXEC" "fn env_audit_enabled() -> bool {"
+must_contain     "PUBLISHGLOBALS the audit aborts on a missing name" \
+    "$PUBFEXEC" "CowEnv nonlocal_overlay superset is missing publishable overlay name(s): {missed:?}"
+must_contain     "PUBLISHGLOBALS the scan is counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "PUBLISH_GLOBALS_SCANNED"
+must_contain     "PUBLISHGLOBALS the publishes are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "PUBLISH_GLOBALS_PUBLISHED"
+must_contain     "PUBLISHGLOBALS the spec pins width-independence by COUNT" \
+    "$PUBSPEC" "expect(extra < CALL_N / 100).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec pins the narrow caller too" \
+    "$PUBSPEC" "expect(narrow.scanned < CALL_N / 100).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec is non-vacuous on the counter row" \
+    "$PUBSPEC" "expect(r.calls >= expect_iters).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec forbids an empty superset" \
+    "$PUBSPEC" "expect(r.published >= SEM_N).to_equal(true)"
+must_contain     "PUBLISHGLOBALS the spec keeps the caller-global oracle" \
+    "$PUBSPEC" 'expect(r.acc).to_equal("200:200")'
+must_contain     "PUBLISHGLOBALS the invariant is unit-tested across mutation orderings" \
+    "$PUBTESTS" "fn nonlocal_overlay_superset_covers_every_mutation_ordering() {"
+must_contain     "PUBLISHGLOBALS the superset is proven equal to the walk it replaced" \
+    "$PUBTESTS" "fn nonlocal_overlay_entries_match_the_overlay_walk_it_replaced() {"
+# --- PERFSELFBIN: the perf-spec binary override must divert off the daemon ---
+# 2026-09-13 (PERF-7, fixed PERF-9). `SIMPLE_PERF_SELF_BIN` selects the
+# interpreter a perf spec measures, but it was absent from the test runner's
+# binary-override list, so a daemon-served run answered from the daemon's
+# FROZEN environment. A lane asked for the BASE seed, was served the CANDIDATE,
+# and recorded 10/10 green for a spec that is RED on base. The variable belongs
+# in exactly the list whose whole purpose is "any request naming one of these
+# takes the direct lane, where the child really does inherit it".
+# See doc/08_tracking/bug/perf_self_bin_override_served_from_frozen_daemon_env_2026-09-13.md.
+must_contain     "PERFSELFBIN the perf binary override is a daemon-bypass selector" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" '"SIMPLE_PERF_SELF_BIN"]'
+must_contain     "PERFSELFBIN the bypass list is still what the override check reads" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" "    for name in _binary_override_vars():"
+must_contain     "PERFSELFBIN a named override still diverts off the daemon" \
+    "$ROOT/src/app/test_runner_new/test_runner_client.spl" "    val binary_override_bypass = _has_binary_override()"
+# --- TOOLHELP: `lint|fmt|fix|test --help` must not load the implementation ---
+# 2026-09-13. A tool command's real entry resolved its whole implementation
+# closure before main() could reach its help branch: 533 `.spl` opens / 9.4 s
+# for `lint --help`, 10,151 / 74 s for `test --help` (which then printed
+# `unknown option: --help` and no help at all). Fixed by DISPATCHING a different,
+# closure-free entry for a help request, in BOTH dispatchers. The mechanism is
+# the routing plus the thinness of the entry it routes to: an import added to
+# either leaf silently gives the closure back.
+# doc/08_tracking/bug/subcommand_help_loads_implementation_closure_2026-09-12.md
+TOOLHELP="$ROOT/src/app/cli/tool_help.spl"
+TOOLHELPENTRY="$ROOT/src/app/cli/tool_help_entry.spl"
+DRIVERMAIN="$ROOT/src/compiler_rust/driver/src/main.rs"
+must_contain     "TOOLHELP route predicate has one Simple owner" \
+    "$TOOLHELP" "fn tool_help_entry_for(command: text, rest: [text]) -> text:"
+must_contain     "TOOLHELP help text owner imports nothing" \
+    "$TOOLHELP" "# This module imports NOTHING on purpose"
+must_contain     "TOOLHELP thin entry reads argv through the closure-free leaf" \
+    "$TOOLHELPENTRY" "use app.cli.entry_args."
+must_not_contain "TOOLHELP thin entry must not reach the CLI hub" \
+    "$TOOLHELPENTRY" "use std.cli.cli_util"
+must_not_contain "TOOLHELP thin entry must not import an implementation" \
+    "$TOOLHELPENTRY" "use app.io.cli_lint_commands"
+must_contain     "TOOLHELP seed driver routes a help request" \
+    "$DRIVERMAIN" "if let Some(help_app) = tool_help_entry_for(entry.name, &ctx.args[1..]) {"
+must_contain     "TOOLHELP seed driver admits the thin entry to dispatch" \
+    "$DRIVERMAIN" "app_relative_path != TOOL_HELP_ENTRY"
+must_contain     "TOOLHELP pure-Simple dispatcher routes identically" \
+    "$ROOT/src/app/cli/dispatch.spl" "val help_app = tool_help_entry_for(entry.name, args[1:args.len()])"
+must_contain     "TOOLHELP lint entry help text pinned equal to the shared owner" \
+    "$ROOT/test/01_unit/app/cli/tool_help_route_spec.spl" \
+    "holds lint_entry's own help text equal to the shared owner's, line for line"
+must_contain     "TOOLHELP budget spec clears the nested-test guard" \
+    "$ROOT/test/05_perf/startup/tool_help_closure_budget_spec.spl" "unset SIMPLE_TEST_DEPTH"
+must_contain     "TOOLHELP budget spec fails closed on an empty trace" \
+    "$ROOT/test/05_perf/startup/tool_help_closure_budget_spec.spl" \
+    "expect(parse_field(out, \"tracelines\")).to_be_greater_than(0)"
+
+# --- LOCALUSEENUM: a block-scoped `use` must publish its enums -------------
+# 2026-09-13. Both block-scoped `use` arms handed the module loader a local
+# CLONE of the enum map and dropped it, so a function-local import loaded the
+# module's FUNCTIONS and lost its ENUMS ("enum `X` not found in this scope").
+# doc/08_tracking/bug/function_local_use_loses_enum_scope_2026-09-12.md
+must_contain     "LOCALUSEENUM block_execution publishes imported enums" \
+    "$ROOT/src/compiler_rust/compiler/src/interpreter_call/block_execution.rs" \
+    "if !enums.contains_key(enum_name) {"
+must_contain     "LOCALUSEENUM node_exec publishes imported enums" \
+    "$ROOT/src/compiler_rust/compiler/src/interpreter/node_exec.rs" \
+    "if !enums.contains_key(enum_name) {"
+must_contain     "LOCALUSEENUM spec keeps the module-scope control fixture" \
+    "$ROOT/test/01_unit/compiler/loader/function_local_use_enum_scope_spec.spl" \
+    "entry_top_level_use.spl"
+
+# --- 2026-09-13 (PERF-7): the owned-receiver method call resolved its method
+# TWICE. `obj.m(a, b)` on a class instance is the most frequent interpreted
+# shape in src/lib/common (21,601 call sites). Every one of the six owned-receiver
+# fast paths asked `object_method_exists` whether the class had the method —
+# probing the thread-local method-index cache — and then re-resolved the SAME
+# name inside `find_and_exec_method_with_self_owned_values`, because the bool
+# answer could not carry the resolution across the `env.remove` that takes the
+# receiver out of its slot. The class name was copied into an owned `String` for
+# the same reason. `resolve_object_method` returns the resolution itself (an
+# `Arc<ClassDef>` + index, or an `Arc<FunctionDef>`), which borrows nothing, so
+# one probe and no copy suffice. These rows pin the mechanism, the absence of
+# both retired helpers, the counters that make the ratio observable, and the
+# spec's count budget.
+MECALLEXEC="$ROOT/src/compiler_rust/compiler/src/interpreter_method/special/execution.rs"
+MECALLPAT="$ROOT/src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs"
+MECALLCALLS="$ROOT/src/compiler_rust/compiler/src/interpreter/expr/calls.rs"
+MECALLSPEC="$ROOT/test/05_perf/interp/owned_method_call_parity_spec.spl"
+must_contain     "MECALL single-probe resolver exists" \
+    "$MECALLEXEC" "pub fn resolve_object_method("
+must_contain     "MECALL resolution borrows nothing (survives the receiver move)" \
+    "$MECALLEXEC" "Class(Arc<ClassDef>, usize),"
+must_contain     "MECALL executor takes the resolution instead of a name" \
+    "$MECALLEXEC" "pub fn exec_resolved_method_with_self_owned_values("
+must_not_contain "MECALL the bool pre-check is gone" \
+    "$MECALLEXEC" "pub fn object_method_exists("
+must_not_contain "MECALL the re-resolving executor is gone" \
+    "$MECALLEXEC" "pub fn find_and_exec_method_with_self_owned_values("
+must_contain     "MECALL statement path resolves under the receiver borrow" \
+    "$MECALLPAT" "Some(resolve_object_method(classes, impl_methods, class, method))"
+must_not_contain "MECALL statement path no longer copies the class name to cross the borrow" \
+    "$MECALLPAT" "let class_name = class.clone();"
+must_contain     "MECALL expression path resolves once too" \
+    "$MECALLCALLS" "Some(Value::Object { class, .. }) => resolve_object_method(classes, impl_methods, class, method),"
+must_contain     "MECALL dispatches are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_CALLS"
+must_contain     "MECALL method-table probes are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_METHOD_LOOKUPS"
+must_contain     "MECALL per-call String allocations are counted" \
+    "$ROOT/src/compiler_rust/compiler/src/perf_counters.rs" "MECALL_STRING_ALLOCS"
+must_contain     "MECALL every method-table probe is counted, at the probe itself" \
+    "$MECALLEXEC" "crate::perf_counters::bump(&crate::perf_counters::MECALL_METHOD_LOOKUPS, 1);"
+must_contain     "MECALL parity spec pins one probe per dispatch" \
+    "$MECALLSPEC" "expect(r.lookups <= r.calls).to_equal(true)"
+must_contain     "MECALL parity spec pins the allocation budget" \
+    "$MECALLSPEC" "expect(r.strallocs <= r.calls * 3).to_equal(true)"
+must_contain     "MECALL parity spec is non-vacuous on the dispatch counter" \
+    "$MECALLSPEC" "expect(r.calls > 0).to_equal(true)"
+# PERF-8 (2026-09-13): load_module_with_imports_internal's visited-based
+# de-dup only fired when flatten_imports was true, so a plain member import
+# of a package re-read that package's __init__.spl from disk once per
+# sibling submodule that imported it. Measured on `simple lint <2-line
+# file>`: fix/rules/impl_/__init__.spl opened 28 times.
+LOADERRS="$ROOT/src/compiler_rust/compiler/src/pipeline/module_loader.rs"
+LOADERCACHESPEC="$ROOT/test/05_perf/startup/lint_repeated_package_init_open_budget_spec.spl"
+must_contain     "PIPELINEMODLOADER source-text memo exists" \
+    "$LOADERRS" "static MODULE_SOURCE_TEXT_CACHE: RefCell<HashMap<PathBuf, Rc<str>>>"
+must_contain     "PIPELINEMODLOADER call site reads through the cache, not fs::read_to_string directly" \
+    "$LOADERRS" "let mut source = read_module_source_text_cached(&path)?;"
+must_contain     "PIPELINEMODLOADER cache is dropped at the clear_module_cache boundary" \
+    "$LOADERRS" "pub fn clear_module_source_text_cache()"
+must_contain     "PIPELINEMODLOADER wired into clear_module_cache()" \
+    "$ROOT/src/compiler_rust/compiler/src/module_cache.rs" "crate::pipeline::module_loader::clear_module_source_text_cache();"
+must_contain     "PIPELINEMODLOADER perf pin exists for the impl_/__init__.spl open budget" \
+    "$LOADERCACHESPEC" "IMPL_INIT_OPEN_CEILING"
+must_contain     "PIPELINEMODLOADER unit test proves the cache mechanism (not just presence)" \
+    "$LOADERRS" "fn module_source_text_is_read_from_disk_once_per_process"
+must_contain     "PIPELINEMODLOADER unit test proves flatten_imports=false revisits still return real content" \
+    "$LOADERRS" "fn unflattened_repeat_import_of_the_same_package_init_reads_disk_once"
 
 echo ""
 if [ "$CHECKED" -eq 0 ]; then

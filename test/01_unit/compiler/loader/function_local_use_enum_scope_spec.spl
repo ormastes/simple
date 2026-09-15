@@ -1,0 +1,79 @@
+"""A function-local `use` must bring the imported closure's ENUMS into scope.
+
+Moving a `use` inside the function that needs it is the lazy-import pattern used
+by `src/app/mcp/bootstrap/main_lazy_v2.spl` and 157 other sites. On the deployed
+seed (sha256 3d120a6f9ab5704b..., aarch64) it loaded the module's FUNCTIONS and
+silently lost its ENUMS, so the call died at run time:
+
+    error: semantic: enum `FixtureLevel` not found in this scope
+
+Cause: both block-scoped `use` arms -- `interpreter_call/block_execution.rs` and
+`interpreter/node_exec.rs` -- borrow `enums` immutably and hand
+`load_and_merge_module` a local CLONE to register into. Each carried a comment
+claiming the imported enums "reach the interpreter through GLOBAL_ENUMS", but
+nothing on that path wrote them there, so the clone was dropped on the floor.
+The fix publishes the names the import added to `GLOBAL_ENUMS`, the cross-module
+registry every enum lookup already falls back to.
+See doc/08_tracking/bug/function_local_use_loses_enum_scope_2026-09-12.md
+
+STILL OPEN, deliberately not asserted here: the same import also emits
+`[jit-fallback] unresolved external symbol ...: whole module dropped to the
+interpreter`. That is the same root as
+use_lazy_is_a_no_op_in_the_rust_seed_2026-09-12.md -- any import the pipeline's
+whole-closure flatten does not see is an unresolved external for the JIT -- and
+is why the pattern is still not used for the CLI entries.
+
+The first example below fails on any binary built before that fix — including
+the seed deployed at `bin/release/**` on 2026-09-13 — and passes on one built
+from this tree. The second (module-scope control) passes on EVERY binary, which
+is what makes the first a real discriminator rather than a broken fixture.
+
+Fails closed: a run that produced no output at all is a FAIL, not a pass.
+`SIMPLE_BINARY` selects the binary under test; it defaults to `bin/simple`.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val FIXTURE_DIR: text = "test/01_unit/compiler/loader/function_local_use_enum_scope"
+
+fn run_sh(command: text) -> (text, i64):
+    val result = process_run("sh", ["-c", command])
+    (result.0 + result.1, result.2)
+
+fn run_fixture(entry: text) -> (text, i64):
+    val script = "b=$SIMPLE_BINARY; test -n \"$b\" || b=bin/simple; "
+        + "timeout 300 $b run " + FIXTURE_DIR + "/" + entry + " 2>&1; "
+        + "echo \"rc=$?\""
+    run_sh(script)
+
+fn rc_of(blob: text) -> i64:
+    var found = -1
+    for line in blob.split("\n"):
+        if line.trim().starts_with("rc="):
+            val text_value = line.trim()
+            found = text_value.substring(3, text_value.len()).trim().to_i64()
+    found
+
+describe "function-local use enum scope":
+    it "keeps the imported closure's enum in scope for a function-local use":
+        step("run the fixture whose import lives inside the function")
+        val (out, _code) = run_fixture("entry_local_use.spl")
+        step("fail closed when the run produced nothing")
+        expect(out.len()).to_be_greater_than(0)
+        step("the enum must resolve: no `not found in this scope`")
+        var scope_errors = 0
+        for line in out.split("\n"):
+            if line.split("not found in this scope").len() > 1:
+                scope_errors = scope_errors + 1
+        expect(scope_errors).to_equal(0)
+        step("and the value that travelled through the enum must be right")
+        expect(out).to_contain("level=warning")
+        expect(rc_of(out)).to_equal(0)
+
+    it "gives a top-level use of the same module the same result":
+        step("the module-scope spelling was never broken; it is the control")
+        val (out, _code) = run_fixture("entry_top_level_use.spl")
+        expect(out.len()).to_be_greater_than(0)
+        expect(out).to_contain("level=warning")
+        expect(rc_of(out)).to_equal(0)

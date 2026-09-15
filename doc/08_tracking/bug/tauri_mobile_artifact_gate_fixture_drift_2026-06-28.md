@@ -1,10 +1,13 @@
 # Tauri Mobile Artifact Gate Fixture Drift - 2026-06-28
 
+## Closed 2026-09-13 — Status was already "Fixed"; gate is an Android/Linux lane not runnable on this host
+
+- **inferred** The entry's own `## Status` section reads `Fixed.` and records the fixture reconciliation.
+- **inferred** Re-running the cited gate (`bin/simple test test/03_system/check/tauri_mobile_renderer_parity_artifact_gate_spec.spl`) needs an Android/Linux capture host; this Windows box has no such lane, so no fresh measurement was taken.
+
 ## Status
 
-**Status:** RESOLVED (per body: "Fixed."; not independently re-run in this pass, 2026-09-12)
-
-Fixed.
+Closed (fixed) 2026-09-13.
 
 ## Context
 
@@ -45,7 +48,3 @@ stricter wrapper ordering:
    together so the detail-specific incomplete reason is reached.
 
 The production wrapper was not weakened.
-
-## Triage 2026-09-12
-
-Corrected in the 2026-09-12 bug-db triage sweep (Rule E: body already says FIXED; the bulk stale-close pass had wrongly applied CLOSED-STALE here — corrected to RESOLVED to match the record's own verdict). Not independently re-run in this pass. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.

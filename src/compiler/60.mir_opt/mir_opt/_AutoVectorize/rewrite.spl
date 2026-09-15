@@ -33,8 +33,12 @@ use compiler.mir_opt.mir_opt.auto_vectorize.*
 #   auto_vectorize_codegen.spl  - Phase 4: vector code generation
 
 use compiler.mir.mir_data (MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId)
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind}
 use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
 use compiler.backend.feature_caps (x86_caps_from_target, preferred_lane_count_x86)
+use compiler.mir_opt.mir_opt.auto_vectorize_target (auto_vectorize_target_level)
+use compiler.mir_opt.mir_opt.auto_vectorize_receipt (SimdReqEvidence, check_simd_requirement)
+use compiler.mir_opt.mir_opt.auto_vectorize_alias (AliasBase, alias_base, decide_recipe_aliasing, alias_decision_permits_vectorization, alias_decision_requires_guard)
 use compiler.frontend.parser_types (Attribute)
 
 # Shared types (cycle-free base module)
@@ -43,7 +47,7 @@ use compiler.mir_opt.mir_opt.auto_vectorize_types (VectorLoopInfo, ArrayAccess)
 use compiler.mir_opt.mir_opt.auto_vectorize_analysis (DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only)
 use compiler.mir_opt.mir_opt.auto_vectorize_validate (VectorizabilityResult, check_vectorizability, get_vectorizable_type)
 use compiler.mir_opt.mir_opt.auto_vectorize_cost (CostEstimate, estimate_vectorization_cost, should_vectorize_loop)
-use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block)
+use compiler.mir_opt.mir_opt.auto_vectorize_codegen (VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block, create_alias_guard_block, create_scalar_version_block, create_remainder_guard_block, element_size_bytes, vector_loop_locals, vector_mir_type, simd_binop_name)
 
 # ============================================================================
 # Main Auto-Vectorization Pass
@@ -77,7 +81,19 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
     for sym in module.functions.keys():
         val func = module.functions[sym]
         var cur_func = func
-        for block in cur_func.blocks:
+        # Evidence for the @must(simd)/@prefer(avx512) receipt (N1-followup:
+        # the tag used to be parsed and then dropped on the floor).
+        var func_vectorized = false
+        var func_lane_bits = 0
+        # A reduction / matrix kernel that was RECOGNISED but is log-only in N1
+        # is not the same failure as a loop nothing matched. Saying
+        # "loop-not-vectorized" for it sends the reader hunting for a pattern
+        # bug that is not there.
+        var func_recognised_only = false
+        # @simd(disable) is a refusal, not a hint: skip pattern matching and
+        # rewriting entirely for this function.
+        val blocks_to_scan = if cur_func.simd_disabled: [] else: cur_func.blocks
+        for block in blocks_to_scan:
             # Try elementwise pattern — rewrite if accepted
             val ew = mir_pattern_match_elementwise_loop(block)
             if ew.?:
@@ -110,22 +126,95 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
                             induction_update: r.induction_update
                         )
                 _log_recipe(cur_func.name, r)
-                val rewritten = rewrite_elementwise_add(r, cur_func)
+                # Deferred until the alias verdict is known, because an
+                # undecidable pair must go through the GUARDED rewrite rather
+                # than the bare one.
+                var rewritten = cur_func
                 # If block count changed, rewrite was applied
-                if rewritten.blocks.len() != cur_func.blocks.len():
+                # ALIAS ORACLE — pass-level policy, applied per recipe.
+                #
+                # The output may share an allocation with an input at an
+                # unknown offset, in which case vector order differs from
+                # scalar order and the rewrite is a miscompilation rather than
+                # an optimization. auto_vectorize_alias.spl explains why an
+                # EXACT alias is safe here and a partial one is not.
+                #
+                # MIR locals carry no allocation identity today, so every base
+                # reports origin -1 ("unproven"). The oracle therefore answers
+                # NeedsRuntimeGuard for any two DIFFERENT bases, and until that
+                # guard is emitted, undecidable must mean REFUSE. Guessing here
+                # is precisely the silent wrong answer the oracle exists to
+                # prevent.
+                # A recipe with no output base is refused by the rewriter's own
+                # R5 and has nothing to alias against, so do not unwrap it here.
+                var alias_ok = false
+                var needs_guard = false
+                if r.output_base.?:
+                    var alias_ins: [AliasBase] = []
+                    for ib in r.input_bases:
+                        alias_ins.push(alias_base(ib.id, -1, true))
+                    val alias_decision = decide_recipe_aliasing(
+                        alias_base(r.output_base.unwrap().id, -1, true), alias_ins)
+                    alias_ok = alias_decision_permits_vectorization(alias_decision)
+                    needs_guard = alias_decision_requires_guard(alias_decision)
+                    if not alias_ok:
+                        _log_alias_refusal(cur_func.name, alias_decision.reason)
+
+                if alias_ok:
+                    if needs_guard:
+                        # Statically undecidable: emit the runtime range check
+                        # and version the loop against an unmodified scalar
+                        # clone. The oracle has NOT proven safety here; it has
+                        # deferred the decision to something that can see the
+                        # real addresses.
+                        rewritten = rewrite_elementwise_add_guarded(r, cur_func)
+                    else:
+                        rewritten = rewrite_elementwise_add(r, cur_func)
+
+                if alias_ok and rewritten.blocks.len() != cur_func.blocks.len():
                     cur_func = rewritten
                     module_modified = true
+                    func_vectorized = true
+                    val lane_bits = r.chunk_width * _element_bits(r.element_type)
+                    if lane_bits > func_lane_bits:
+                        func_lane_bits = lane_bits
 
             # Try reduction pattern — log only (no rewrite in N1)
             val red = mir_pattern_match_reduction(block, cur_func.has_fast_math)
             if red.?:
                 val r = red.unwrap()
                 _log_recipe(cur_func.name, r)
+                func_recognised_only = true
 
             val matrix = mir_pattern_match_matrix_kernel(block, cur_func.has_fast_math)
             if matrix.?:
                 val r = matrix.unwrap()
                 _log_recipe(cur_func.name, r)
+                func_recognised_only = true
+
+        # Enforce the SIMD optimization requirement now that we know what the
+        # pass actually achieved for this function.
+        val outcome = check_simd_requirement(
+            cur_func.simd_req_level,
+            cur_func.simd_req_backend,
+            SimdReqEvidence(
+                vectorized:      func_vectorized,
+                lane_width_bits: func_lane_bits,
+                avx512_admitted: auto_vectorize_target_level() == "x86_64-v4",
+                recognised_only: func_recognised_only))
+        # Reported, not panicked. `pipeline_optimize` returns a bare MirModule
+        # with no Result channel, so a panic here would abort the whole compiler
+        # process (natively: rt_panic) with no span and no error code. Until the
+        # optimizer pipeline can carry a diagnostic, an unmissable stderr line is
+        # the honest maximum — see the "not yet fatal" note in
+        # doc/08_tracking/bug/auto_vectorize_pass_is_analysis_only_2026-09-13.md.
+        match outcome.verdict:
+            case Error:
+                print("error[SIMD-REQ-001] {cur_func.name}: {outcome.reason}")
+            case Warn:
+                print("warning[SIMD-REQ-001] {cur_func.name}: {outcome.reason}")
+            case _:
+                ()
 
         if module_modified:
             var new_functions = new_module.functions
@@ -186,6 +275,20 @@ fn _binop_name(op: MirBinOp) -> text:
         case _:    "other"
 
 fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
+    """Rewrite without a runtime alias guard. Callers that have not PROVEN the
+    bases disjoint must use rewrite_elementwise_add_guarded instead."""
+    _rewrite_elementwise_add_impl(recipe, func, false)
+
+fn rewrite_elementwise_add_guarded(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
+    """Rewrite behind a runtime alias guard (loop versioning).
+
+    Used when the alias oracle answers NeedsRuntimeGuard: the bases cannot be
+    separated statically, so the decision is deferred to a range check that
+    branches to an unmodified scalar clone when the spans partially overlap.
+    """
+    _rewrite_elementwise_add_impl(recipe, func, true)
+
+fn _rewrite_elementwise_add_impl(recipe: VectorRecipe, func: MirFunction, emit_guard: bool) -> MirFunction:
     """
     N1 Wave — MIR rewriter for the elementwise-add pattern.
 
@@ -231,22 +334,59 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
     if not supports_elementwise_rewrite(recipe.op_name):
         return func
 
-    # R3: static trip count too short (skip if unknown, i.e. -1)
+    # R3: static trip count too short for the PLANNED width. Narrow the width
+    # instead of declining outright.
+    #
+    # Without this ladder, widening the planning level to AVX-512 would make
+    # the pass REFUSE loops it vectorizes today: an f32 loop with a static trip
+    # count of 8..15 fits an AVX2 8-lane recipe but not a 16-lane one, so an
+    # AVX-512 host would decline exactly the loops an AVX2 host accepts. That
+    # is a regression disguised as an upgrade, and it would also make
+    # @must(simd) pass on one host and fail on another for identical source.
+    var recipe = _narrow_recipe_to_trip_count(recipe)
     if recipe.trip_count >= 0 and recipe.trip_count < recipe.chunk_width:
         return func
 
-    # R4: dynamic trip count (-1) — runtime trip count unknown, cannot build static
-    # exit guard in create_vector_loop_block or static peel body clone.
-    # Refuse until a SCEV/runtime-guard path is added in a follow-up wave.
-    if recipe.trip_count < 0:
+    # R4 used to refuse a dynamic trip count outright, which meant this pass
+    # declined essentially all real code: a request body, a row set, a
+    # framebuffer sized at runtime have no compile-time length. The bound is
+    # now taken as an OPERAND from the loop header, so a runtime length is
+    # vectorized exactly like a constant one — see `_loop_bound_operand` and
+    # the `%i <= n - VF` guard in `create_vector_loop_block`. What remains a
+    # decline is a header with no recognisable `i < n` test at all, handled
+    # below where the operand is resolved.
+    # A trip count that is not a whole number of chunks is no longer refused.
+    # R4b existed because the old "peel" block ran exactly ONE iteration and
+    # branched to a block that did not exist (D7), so a remainder was a
+    # miscompile. The vector loop now hands the tail to an unmodified clone of
+    # the scalar body, which finishes it from whatever index the vector loop
+    # stopped at — so a remainder is just the scalar loop doing its job, and
+    # needs no special case at all.
+
+    # R4c: the element/lane pair must have a vector type, and the op must have
+    # a vector spelling. Otherwise `create_vector_loop_block` emits an EMPTY
+    # body — and an empty body is not a harmless no-op here, it is a
+    # miscompile: the loop still advances the index by a whole vector each
+    # time, so every element it steps over is never written at all.
+    #
+    # That was survivable when the emitted block was inert and nothing
+    # consumed it. It stopped being survivable the moment the vector loop
+    # became the thing that drives the index. Measured: an i64 recipe rewrote
+    # 3 blocks into 5 containing ZERO SIMD instructions.
+    if not vector_mir_type(recipe.element_type, recipe.chunk_width).?:
         return func
-    # Misaligned static trip counts (trip_count % chunk_width != 0) are now handled
-    # by create_peeling_block emitting a scalar body clone for the remainder.
-    # No longer refused here — Defect C (Wave L3b) is resolved.
+    if not simd_binop_name(recipe.op_name).?:
+        return func
 
     # R5: need an output base
     if not recipe.output_base.?:
         return func
+
+    # NOTE: this function is a MECHANISM and applies no alias policy. The
+    # ALIAS ORACLE is applied by run_auto_vectorize, its only caller, so that
+    # unit tests can exercise the rewrite itself without the pass-level policy
+    # deciding for them. Do not call this directly from a new site without
+    # consulting auto_vectorize_alias.spl first.
 
     # R6: need at least 2 inputs
     if recipe.input_bases.len() < 2:
@@ -255,10 +395,14 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
     val out_base = recipe.output_base.unwrap()
 
     # Build VectorizeContext from recipe
+    var max_block_id_for_ctx = recipe.header_block.id
+    for block in func.blocks:
+        if block.id.id > max_block_id_for_ctx:
+            max_block_id_for_ctx = block.id.id
     val ctx = VectorizeContext(
         vector_width: recipe.chunk_width,
         element_type: recipe.element_type,
-        next_local:   recipe.header_block.id
+        next_local:   max_block_id_for_ctx + 1
     )
 
     # Synthesize a VectorLoopInfo for alignment_check_block / peeling_block
@@ -274,10 +418,32 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
         step:          1
     )
 
-    # exit_block_id: the continuation block that follows the three new blocks.
-    # It is the first block with id > recipe.header_block.id (the original successor),
-    # or header_block.id + 3 as a conservative default.
-    val exit_block_id = recipe.header_block.id + 3
+    # D3: resolve the REAL exit block instead of assuming header + 3.
+    #
+    # The old scheme assigned align/peel/vec as header+0/+1/+2 and hard-coded
+    # the exit as header+3, while every original block with an id greater than
+    # the header was kept verbatim. On any CFG with a continuation block that
+    # produces DUPLICATE ids — the peel block shadows the real exit, since
+    # lookup is first-match — and the vector path exits to a block that does
+    # not exist. The single-block unit fixture exits to id 99 with no
+    # continuation, which is exactly why it never showed.
+    var exit_block_id = -1
+    for blk in func.blocks:
+        if blk.id.id == recipe.header_block.id:
+            match blk.terminator:
+                case If(_, then_, else_):
+                    if then_.id != recipe.header_block.id:
+                        exit_block_id = then_.id
+                    if else_.id != recipe.header_block.id:
+                        exit_block_id = else_.id
+                case Goto(target):
+                    if target.id != recipe.header_block.id:
+                        exit_block_id = target.id
+                case _:
+                    pass_do_nothing
+    if exit_block_id < 0:
+        # No resolvable exit edge: refuse rather than invent one.
+        return func
 
     # Collect scalar body blocks for peel clone (blocks with id == header_block.id
     # are the loop body in this simplified CFG representation).
@@ -286,36 +452,276 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
         if block.id.id == recipe.header_block.id:
             body_blocks_for_peel.push(block)
 
-    # Create the three new BBs (Wave L3b: all with sound terminators)
-    val align_block  = create_alignment_check_block(ctx, loop_info)
-    val vec_block    = create_vector_loop_block(ctx, recipe.header_block.id, recipe.input_bases, out_base, recipe.op_name, recipe.trip_count, exit_block_id)
-    val peel_block   = create_peeling_block(ctx, loop_info, body_blocks_for_peel)
+    # The loop needs exactly one body block to clone as its remainder.
+    if body_blocks_for_peel.len() != 1:
+        return func
+
+    # The bound the vector loop guards against. An OPERAND, so a runtime
+    # length works as well as a constant; nil means the header has no
+    # recognisable `i < n` test and we decline rather than invent one.
+    # Candidate index locals: the recipe's induction variable and index
+    # locals, PLUS whatever feeds them through an add-const in the header.
+    #
+    # That last step is not optional. The matcher reports the increment's DEST
+    # as the induction variable — `%5` for `%5 = %4 + 1` — while the loop
+    # compares the pre-increment name `%4`. Without following the `+ const`
+    # edge backwards, the candidate set is {5}, no comparison mentions 5, and
+    # every loop the driver offers is declined. That is exactly what happened:
+    # the end-to-end examples went red while the direct-rewrite ones passed,
+    # because their fixture happens to increment the compared local in place.
+    var index_candidates: [LocalId] = [recipe.induction_var]
+    for il in recipe.index_locals:
+        index_candidates.push(il)
+    for blk in func.blocks:
+        if blk.id.id == recipe.header_block.id:
+            for inst in blk.instructions:
+                match inst.kind:
+                    case BinOp(d, op, left, right):
+                        var is_add = false
+                        match op:
+                            case Add: is_add = true
+                            case _: pass_do_nothing
+                        var rhs_const = false
+                        match right.kind:
+                            case Const(_, _): rhs_const = true
+                            case _: pass_do_nothing
+                        if is_add and rhs_const:
+                            var dest_is_candidate = false
+                            for c in index_candidates:
+                                if c.id == d.id:
+                                    dest_is_candidate = true
+                            if dest_is_candidate:
+                                match left.kind:
+                                    case Copy(src): index_candidates.push(src)
+                                    case _: pass_do_nothing
+                    case _: pass_do_nothing
+    val bound_opt = _loop_bound(func, recipe.header_block.id, index_candidates)
+    if not bound_opt.?:
+        return func
+    val lb = bound_opt.unwrap()
 
     # Splice: replace header block; keep blocks before it and all blocks after it.
     # Defect B fix: patch any predecessor block whose terminator targets the
     # original header_block.id to point to the new alignment-check block instead.
     val orig_header_id = recipe.header_block.id
-    val new_header_id  = align_block.id.id
+    # Loop versioning. When the alias oracle could not separate the bases
+    # statically, the entry point becomes a runtime range check that branches
+    # to an unmodified clone of the original loop whenever the spans partially
+    # overlap. New ids are taken ABOVE the highest existing block id rather
+    # than at header_id + N, because the latter scheme silently assumes those
+    # slots are free and there is nothing in the IR that guarantees it.
+    var max_block_id = orig_header_id
+    for block in func.blocks:
+        if block.id.id > max_block_id:
+            max_block_id = block.id.id
+    # EVERY new block is allocated above the highest existing id.
+    #
+    # align_check and vec_loop used to sit at header+0 and header+2, which
+    # assumes those slots are free. They are not: a lowered `while` produces
+    # cond at H, exit at H+1 and the continuation at H+2, so vec_loop landed
+    # ON the continuation. Both were emitted, the interpreter keyed blocks by
+    # id with last-write-wins, and the continuation came second — so the
+    # vector loop was overwritten and align_check jumped straight into the
+    # continuation. The loop silently never ran. Measured on a three-block
+    # function: ids [0, 1(align_check), 3(vec_loop), 3(continuation), 5].
+    val vec_base  = max_block_id + 1     # align_check
+    val guard_id  = max_block_id + 4
+    val scalar_id = max_block_id + 5
+    val rguard_id = max_block_id + 6     # re-tests i < n before the remainder
+
+    # align_check takes the header's own id (ctx.next_local == header id), so
+    # this is that id — stated directly rather than read off a block that is
+    # now constructed further down, once the remainder block id is known.
+    val new_header_id  = vec_base
+
+
+    # The scalar clone is now ALWAYS built, because it is two things at once:
+    # the alias-guard fallback it always was, and the remainder loop the
+    # vector path falls into when fewer than a full vector remain. Those never
+    # conflict — a run takes one entry or the other — and sharing one block
+    # keeps a single copy of the scalar semantics instead of the old "peel"
+    # block's separate, wrong one.
+    # Vector temporaries start above BOTH the existing locals and the guard
+    # temporaries. Basing them on `max local + 1` alone put them straight on
+    # top of the guard's own block, which reserves 8 slots per input base from
+    # that same point — the differential tests went red immediately, which is
+    # the one thing that makes a collision like this cheap to find.
+    var vtemp = 0
+    for lc in func.locals:
+        if lc.id.id >= vtemp:
+            vtemp = lc.id.id + 1
+    vtemp = vtemp + recipe.input_bases.len() * 8 + 3
+    val align_block = create_alignment_check_block(
+        ctx, loop_info, lb.bound, lb.index, vtemp, rguard_id)
+    val vec_block   = create_vector_loop_block(
+        ctx, vec_base, recipe.input_bases, out_base,
+        recipe.op_name, lb.bound, lb.index, vtemp, rguard_id)
+    val rguard_block = create_remainder_guard_block(
+        rguard_id, lb.index, lb.bound, vtemp, scalar_id, exit_block_id)
+
+    val elt = element_size_bytes(recipe.element_type)
+    # The guard computes `span = bound * elt` itself, so a runtime bound is as
+    # usable as a constant one. Only the ELEMENT WIDTH must be known — an
+    # unknown width would make the check admit everything, which is worse than
+    # not vectorizing.
+    val guard_usable = emit_guard and elt > 0 and body_blocks_for_peel.len() == 1
+
+    # D2: when a guard is REQUIRED but cannot be built, decline.
+    #
+    # This used to fall through to the entry below, splicing the blocks with no
+    # guard at all — the caller then saw the block count change and applied an
+    # UNGUARDED rewrite for a recipe the alias oracle had explicitly refused to
+    # clear. That is the opposite of the stated contract, and it was masked
+    # only because the element width was hard-coded to 4 so span_bytes was
+    # never 0.
+    if emit_guard and not guard_usable:
+        return func
+
+    val entry_id = if guard_usable: guard_id else: new_header_id
 
     var new_blocks: [MirBlock] = []
 
     for block in func.blocks:
         if block.id.id < orig_header_id:
-            # Patch terminators that target the old header to point to align_check.
-            val patched = _patch_terminator_target(block, orig_header_id, new_header_id)
+            # Patch terminators that targeted the old header to the new entry.
+            val patched = _patch_terminator_target(block, orig_header_id, entry_id)
             new_blocks.push(patched)
 
-    # Insert alignment-check at the header's position, then vec and peel
+    # D4: guard temporaries must be REAL locals.
+    #
+    # They were numbered from an arbitrary base and never appended to
+    # func.locals, so they had no type entry — core_codegen derives
+    # unsigned/ptr local sets from `body.locals` — and could collide with a
+    # function that happened to hold that many locals. Number them from the
+    # end of the existing local list, the convention used elsewhere, and
+    # declare each one.
+    var guard_locals: [MirLocal] = []
+    var first_temp = 0
+    for lc in func.locals:
+        if lc.id.id >= first_temp:
+            first_temp = lc.id.id + 1
+    if guard_usable:
+        # 8 slots per input base (6 used, 2 spare for the combining AND) —
+        # matching create_alias_guard_block's stride.
+        var t = first_temp
+        val temp_count = recipe.input_bases.len() * 8 + 2
+        var made = 0
+        while made < temp_count:
+            guard_locals.push(MirLocal(
+                id: LocalId(id: t + made),
+                name: nil,
+                type_: MirType(kind: MirTypeKind.I64),
+                kind: LocalKind.Temp,
+                is_ghost: false))
+            made = made + 1
+        new_blocks.push(create_alias_guard_block(
+            guard_id, out_base, recipe.input_bases, lb.bound, elt,
+            new_header_id, scalar_id, first_temp))
+
+    # Alignment-check at the header position, then the vector loop. There is
+    # no peel block any more: the scalar clone below is the remainder.
     new_blocks.push(align_block)
     new_blocks.push(vec_block)
-    new_blocks.push(peel_block)
+    new_blocks.push(rguard_block)
 
     # Blocks after the original header (continuation / exit)
     for block in func.blocks:
         if block.id.id > orig_header_id:
-            new_blocks.push(block)
+            # Patched as well. A lowered `while` puts its cond block AFTER the
+            # body as often as before it, and an unpatched cond still branches
+            # to the header id that no longer exists.
+            new_blocks.push(_patch_terminator_target(block, orig_header_id, entry_id))
 
-    MirFunction.with_blocks(func, new_blocks)
+    new_blocks.push(create_scalar_version_block(body_blocks_for_peel[0], scalar_id))
+
+    # The vector loop's own temporaries must be declared too, WITH their
+    # vector types. The guard temporaries were given this treatment (D4) and
+    # the vector body's were not, which left the AVX-512 selector unable to
+    # shape a single one of them: it reads `func.locals` and nothing else, so
+    # it rejected every auto-vectorized function with
+    # `avx512-load-splat-gather-shape-mismatch`. The pass therefore emitted no
+    # AVX-512 at all on the native path — see the chain spec, which feeds this
+    # function's real output to the real admission.
+    var spliced = MirFunction.with_blocks(func, new_blocks)
+    var all_locals = spliced.locals
+    for gl in guard_locals:
+        all_locals.push(gl)
+    for vl in vector_loop_locals(ctx, vtemp):
+        all_locals.push(vl)
+    spliced.locals = all_locals
+    spliced
+
+struct LoopBound:
+    """The loop's `i < n`, as the pass needs it: which local, against what."""
+    index: LocalId
+    bound: MirOperand
+
+fn _loop_bound(func: MirFunction, header_id: i64, candidates: [LocalId]) -> LoopBound?:
+    """The header's induction test, returning BOTH halves.
+
+    Two things come out of one instruction, and taking only one of them was a
+    bug. The BOUND is what the vector loop guards against — an operand, so a
+    runtime length works as well as a constant, which is the whole reason a
+    loop over a request body or a row set can be vectorized now. The INDEX is
+    whichever local that test actually compares, and it must be that one
+    rather than the recipe's nominal `induction_var`: the pattern matcher
+    names the increment's DEST (`%5` in `%5 = %4 + 1`) while the loop compares
+    the pre-increment name (`%4`). Indexing on the recipe's answer found no
+    comparison at all and declined every loop the driver fed it.
+
+    `candidates` is the set of locals that may legitimately be the index — the
+    recipe's induction variable plus its index locals. Restricting to that set
+    keeps this from latching onto an unrelated comparison in the body.
+
+    Returns nil when the header has no such test, which is a decline, never a
+    guess: vectorizing against an invented bound reads past the end of the
+    arrays.
+    """
+    # The header first, then any block that BRANCHES TO the header.
+    #
+    # A lowered `while` does not keep its test in the body. It emits
+    #     while_cond: %c = i < n; If(%c, while_body, while_exit)
+    #     while_body: ...; i += 1; Goto(while_cond)
+    # and the pattern matcher matches the BODY. Looking only in the body found
+    # no comparison and declined, which meant this pass fired on single-block
+    # fixtures and on nothing the compiler actually produces. The test is one
+    # edge away, in the block that jumps here.
+    val in_header = _find_bound_in(func, header_id, candidates)
+    if in_header.?:
+        return in_header
+    for blk in func.blocks:
+        if blk.id.id != header_id and _branches_to(blk, header_id):
+            val found = _find_bound_in(func, blk.id.id, candidates)
+            if found.?:
+                return found
+    nil
+
+fn _branches_to(blk: MirBlock, target_id: i64) -> bool:
+    match blk.terminator:
+        case Goto(t): t.id == target_id
+        case If(_, t, e): t.id == target_id or e.id == target_id
+        case _: false
+
+fn _find_bound_in(func: MirFunction, block_id: i64, candidates: [LocalId]) -> LoopBound?:
+    for blk in func.blocks:
+        if blk.id.id == block_id:
+            for inst in blk.instructions:
+                match inst.kind:
+                    case BinOp(_, op, left, right):
+                        var is_cmp = false
+                        match op:
+                            case Lt: is_cmp = true
+                            case Le: is_cmp = true
+                            case _: pass_do_nothing
+                        if is_cmp:
+                            match left.kind:
+                                case Copy(l):
+                                    for c in candidates:
+                                        if c.id == l.id:
+                                            return Some(LoopBound(index: l, bound: right))
+                                case _: pass_do_nothing
+                    case _: pass_do_nothing
+    nil
 
 fn _patch_block_id(id: BlockId, old_id: i64, new_id: i64) -> BlockId:
     """Return new_id as BlockId if id.id == old_id, otherwise return id unchanged."""
@@ -508,3 +914,70 @@ fn has_fast_math(fn_attrs: [Attribute]) -> bool:
 # Main pass
 
 # Re-exports from sub-modules
+
+fn _element_bits(element_type: text) -> i64:
+    """Bit width of one vector lane element; 0 for an unrecognised type."""
+    if element_type == "f32" or element_type == "i32" or element_type == "u32":
+        return 32
+    if element_type == "f64" or element_type == "i64" or element_type == "u64":
+        return 64
+    if element_type == "i16" or element_type == "u16":
+        return 16
+    if element_type == "i8" or element_type == "u8":
+        return 8
+    0
+
+fn _halve_lane_count(lanes: i64) -> i64:
+    """Next power-of-two lane count down, floored at the 128-bit-class 4."""
+    if lanes > 4:
+        return lanes / 2
+    lanes
+
+fn _narrow_recipe_to_trip_count(recipe: VectorRecipe) -> VectorRecipe:
+    """
+    Step the recipe's chunk width down 512 -> 256 -> 128 until it fits the
+    static trip count AND divides it evenly, so a wider planning level never
+    vectorizes FEWER loops than a narrower one.
+
+    Divisibility is part of "fits": R4b refuses a trip count that is not a
+    whole number of chunks, so narrowing only until `trip >= width` leaves
+    shapes like trip 12 at 8 lanes — which R4b then refuses, even though the
+    same loop vectorizes cleanly at 4. That is exactly the AVX-512-refuses-
+    what-AVX2-accepts regression this ladder exists to prevent, arriving by a
+    different route.
+
+    A dynamic trip count (-1) is left alone: there is nothing to fit against,
+    and narrowing on no evidence would silently give up lanes.
+    """
+    if recipe.trip_count < 0:
+        return recipe
+    var width = recipe.chunk_width
+    while width > 4 and (recipe.trip_count < width or recipe.trip_count % width != 0):
+        width = _halve_lane_count(width)
+    if width == recipe.chunk_width:
+        return recipe
+    # VectorRecipe is cross-module — the spread operator silently drops fields.
+    VectorRecipe(
+        kind:             recipe.kind,
+        header_block:     recipe.header_block,
+        induction_var:    recipe.induction_var,
+        trip_count:       recipe.trip_count,
+        element_type:     recipe.element_type,
+        vector_width:     width,
+        op_name:          recipe.op_name,
+        note:             recipe.note,
+        input_bases:      recipe.input_bases,
+        output_base:      recipe.output_base,
+        accumulator:      recipe.accumulator,
+        chunk_width:      width,
+        index_locals:     recipe.index_locals,
+        store_value:      recipe.store_value,
+        induction_update: recipe.induction_update)
+
+fn _log_alias_refusal(func_name: text, reason: text):
+    """Record why a recognised loop was not vectorized.
+
+    Silence here would be indistinguishable from "no pattern matched", which
+    is the wrong diagnosis to hand someone whose @must(simd) just failed.
+    """
+    print("[auto-vectorize] {func_name}: alias oracle declined — {reason}")

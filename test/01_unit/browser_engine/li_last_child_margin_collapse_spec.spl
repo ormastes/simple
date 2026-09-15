@@ -1,0 +1,159 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS 2.2 8.3.1 parent/last-child bottom-margin collapsing in the
+pure-Simple web layout renderer against the same Chrome-derived box oracle the
+round-4 probe uses. A `<li>` whose last in-flow child is a `<p>` must NOT carry
+the `<p>`'s 16 px bottom margin inside its own height; the margin collapses
+through and separates the `<li>` from its next sibling instead.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (headless --dump-dom + getBoundingClientRect on
+test/fixtures/browser_engine/layout/round4_probe.html at 900x20000, body
+margin 0, font 16px/1.5 sans-serif) -- x y w h:
+  ul1  0 120 900 104    li1  40 120 860 64   lp1 40 160 860 24   li2 40 200 860 24
+Before this fix Simple reported li1 h=80 (Chrome 64) because the trailing
+margin was added to the list item's content height. `li2` at y=200 is the
+other half of the same invariant: the collapsed margin must still push the
+next sibling down, so shrinking `li1` must not move `li2` up.
+
+Deliberately NOT asserted (still open, recorded as such):
+  - the SYMMETRIC case, a FIRST child's TOP margin collapsing through, is no
+    longer asserted HERE because it now has its own file: round 7 closed it
+    (`LayoutResult.leading_margin_t` + a two-phase subtree re-offset) and pins
+    it in `test/01_unit/browser_engine/first_child_top_margin_collapse_spec.spl`.
+    AC-7 and AC-8 below still assert a DELTA rather than an absolute height;
+    that is now a free choice rather than a workaround, and the absolute
+    figures (50 and 42) are asserted in the new file.
+    doc/08_tracking/bug/web_first_child_top_margin_never_collapses_through_2026-09-13.md
+  - `<strong>` WIDTH: bold-face advances are never selected.
+    doc/08_tracking/bug/web_inline_bold_face_advances_never_selected_2026-09-12.md
+  - table/cell geometry: still full-width blocks.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-MARGIN-COLLAPSE-002 — a block with no bottom padding, border, or height collapses its last in-flow child's bottom margin through itself.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+
+# Byte-identical list fragment of the round-4 probe page.
+# Byte-identical body of test/fixtures/browser_engine/layout/round4_probe.html
+# (the file Chrome was pointed at for the ul/li oracle above), inlined so the
+# spec does not depend on the runner's cwd.
+val PAGE: text = (
+    "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+    "  * { box-sizing: border-box; }" +
+    "  body { margin: 0; font: 16px/1.5 sans-serif; }" +
+    "</style></head><body>" +
+    "<p id=\"p1\">Paragraph with <strong id=\"s1\">strong</strong>, " +
+    "<em id=\"e1\">emphasis</em>, and a <a id=\"a1\" href=\"#x\">working anchor</a>.</p>" +
+    "<div id=\"brbox\">one<br id=\"br1\">two<br id=\"br2\"></div>" +
+    "<ul id=\"ul1\"><li id=\"li1\"><code id=\"c1\">align-content</code> &mdash; partial" +
+    "<p id=\"lp1\">No claim.</p></li><li id=\"li2\">short</li></ul>" +
+    "<table id=\"t1\"><tbody><tr id=\"r1\"><td id=\"d1\">cell one</td>" +
+    "<td id=\"d2\">cell two</td></tr></tbody></table>" +
+    "</body></html>"
+)
+
+fn field(id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, VW, VH, id, name)
+
+fn probe(inner: text, id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(
+        HEAD + inner + "</body></html>", VW, VH, id, name)
+
+describe "last-child bottom margin collapses through its block":
+    it "AC-1: the list item is Chrome's 64 px, not the 80 px it measured before":
+        expect(field("li1", "h")).to_equal("64")
+
+    it "AC-2: the collapsed margin still separates the next list item":
+        # Shrinking li1 must not pull li2 up: the 16 px margin that left the
+        # box has to reappear between the siblings. Chrome: li2 y=200.
+        expect(field("li2", "y")).to_equal("200")
+
+    it "AC-3: the list box height matches Chrome's 104 px":
+        expect(field("ul1", "h")).to_equal("104")
+
+    it "AC-4: the inner paragraph is where Chrome puts it (unmoved)":
+        expect(field("lp1", "y")).to_equal("160")
+        expect(field("lp1", "h")).to_equal("24")
+
+    it "AC-5: an explicit height still declares its own box":
+        # Chrome: 70 (probe.html #c). A height establishes a bottom edge.
+        expect(probe(
+            "<div id=\"x\" style=\"height:70px\"><p id=\"q\">t</p></div>",
+            "x", "h")).to_equal("70")
+
+    it "AC-6: overflow:hidden establishes a BFC and keeps both margins inside":
+        # Chrome: 56 (probe.html #d) = 16 + 24 + 16.
+        expect(probe(
+            "<div id=\"x\" style=\"overflow:hidden\"><p id=\"q\">t</p></div>",
+            "x", "h")).to_equal("56")
+
+    it "AC-7: bottom padding keeps the trailing margin INSIDE the box":
+        # Chrome: 50 for the padded box vs 24 for the plain wrapper, i.e. the
+        # padded one is 26 px taller (10 px padding + the 16 px margin that no
+        # longer collapses out). The DELTA is asserted rather than the absolute
+        # height because both Simple figures still carry the separate +16 px
+        # leading-margin defect recorded above.
+        val padded = probe(
+            "<div id=\"x\" style=\"padding-bottom:10px\"><p id=\"q\">t</p></div>",
+            "x", "h").to_i32()
+        val plain = probe(
+            "<div id=\"x\"><p id=\"q\">t</p></div>", "x", "h").to_i32()
+        expect(padded - plain).to_equal(26)
+
+    it "AC-8: a bottom border keeps it inside too":
+        # Chrome: 42 vs 24 -> 18 px (2 px border + the retained 16 px margin).
+        val bordered = probe(
+            "<div id=\"x\" style=\"border-bottom:2px solid #000\"><p id=\"q\">t</p></div>",
+            "x", "h").to_i32()
+        val plain = probe(
+            "<div id=\"x\"><p id=\"q\">t</p></div>", "x", "h").to_i32()
+        expect(bordered - plain).to_equal(18)
+
+    it "AC-9: a flex item is a formatting-context root — nothing collapses through":
+        # Chrome: 56 (probe2.html #f) = 16 + 24 + 16.
+        expect(probe(
+            "<div style=\"display:flex\"><div id=\"x\"><p id=\"q\">t</p></div></div>",
+            "x", "h")).to_equal("56")
+
+    it "AC-10: a grid item likewise":
+        # Chrome: 56 (probe2.html #g).
+        expect(probe(
+            "<div style=\"display:grid\"><div id=\"x\"><p id=\"q\">t</p></div></div>",
+            "x", "h")).to_equal("56")
+
+    it "AC-11: a table cell is a BFC root, so both margins stay inside":
+        # Chrome: 58 for `<td><p>t</p></td>` (probe2.html #td) — the cell keeps
+        # the 16 px top and bottom margins; 58 vs 56 is the UA border-spacing
+        # the cell box picks up, which Simple does not model yet, so the
+        # assertion is that the margin did NOT escape (>= 56), not the exact
+        # Chrome figure. Table geometry as a whole is still open. No explicit
+        # cell guard exists in the helper: a cell's display is "table-cell",
+        # which the display test already rejects; this AC pins that, so a
+        # future widening of the display test cannot silently break cells.
+        val cell = probe(
+            "<table><tbody><tr><td id=\"x\"><p id=\"q\">t</p></td></tr></tbody></table>",
+            "x", "h").to_i32()
+        expect(cell).to_be_greater_than(55)
+
+    it "AC-12: a trailing margin escaping a self-collapsing child is not lost":
+        # `<div><p style="margin:32px 0"></p></div>` is self-collapsing to a
+        # single 32 px margin; the next sibling must sit 32 px below the
+        # wrapper's top, not 16 (margin dropped) and not 48 (double-counted).
+        # Chrome: the following <p> starts 32 px after the wrapper's origin.
+        val marker = probe(
+            "<div id=\"m\"><p style=\"margin:32px 0\"></p></div><p id=\"x\">x</p>",
+            "m", "y").to_i32()
+        val nxt = probe(
+            "<div id=\"m\"><p style=\"margin:32px 0\"></p></div><p id=\"x\">x</p>",
+            "x", "y").to_i32()
+        expect(nxt - marker).to_equal(32)

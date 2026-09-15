@@ -1,0 +1,91 @@
+# Site 8 (BOOT-8, 2026-09-13): the Stage-2 candidate SEGV'd in
+# `compiler.mir.mir_json.serialize_mir_function` on the positional Stage-3 route.
+# Measured on the pinned candidate (sha256 f02b5a4c1310df6e..., 152198856 B):
+# `x21` is defined once, by `csel x21, x0, x20, ne` in the struct-copy prologue
+# (x0 = rt_alloc(240), x20 = the incoming `func`), so the observed `x21 = 3` is
+# the ARGUMENT, and 3 is `TAG_SPECIAL | SPECIAL_NIL` per
+# src/compiler_rust/runtime/src/value/tags.rs — i.e. `func` is nil, not a live
+# inline word, and not a nil FIELD of a live struct.
+#
+# The nil comes from `module.functions[symbol]` in
+# `native_capsule_mir_identity_v1`: a Dict keyed by a struct is keyed by object
+# IDENTITY (rt_core_dict_hash mixes the raw pointer and rt_native_eq answers 0
+# for two distinct struct allocations, runtime_native.c:9220,4002), and
+# `native_capsule_sorted_symbol_ids_v1`'s swap bound an element to a local
+# (`val temporary = result[i]`), which COPIES the struct. Every swapped key came
+# back as a fresh object that its own dict no longer resolves.
+#
+# See doc/08_tracking/bug/stage2_stage3_route_segv_mir_json_shadow_witness_2026-09-13.md
+#
+# Lane note, stated rather than papered over: the interpreter lane this spec runs
+# in does NOT reproduce the copy. Measured with the shared Rust seed
+# (sha256 3d120a6f9ab5704b...): the identical bubble sort defined LOCALLY resolves
+# 2 of 3 keys, while the same algorithm called through the
+# `compiler.driver.driver_types` import resolves 20 of 20 — the imported compiler
+# module is interpreted and never allocates the copy that native codegen does.
+# So the product-behavioural examples below are regression controls, not the RED;
+# the RED is the structural example, and the true red->green is the bootstrap run.
+# The 2-of-3 measurement itself is recorded in the bug record rather than asserted
+# here, because its verdict flips with the lane the helper is compiled in.
+use std.spec.{describe, it, expect}
+use std.io.{file_read}
+use compiler.driver.driver_types.{native_capsule_sorted_symbol_ids_v1}
+use compiler.hir.hir_types.{SymbolId}
+
+val DRIVER_TYPES = "src/compiler/80.driver/driver_types.spl"
+
+fn resolvable_count(table: Dict<SymbolId, i64>, keys: [SymbolId]) -> i64:
+    var hits = 0
+    for key in keys:
+        if val value = table[key]:
+            hits = hits + 1
+    hits
+
+fn ordered_ids(symbols: [SymbolId]) -> text:
+    var rendered = ""
+    for symbol in symbols:
+        rendered = "{rendered}{symbol.id},"
+    rendered
+
+describe "native capsule symbol ordering keeps dict keys resolvable":
+    it "resolves every sorted key in the dict the keys came from":
+        var table: Dict<SymbolId, i64> = {}
+        table[SymbolId(id: 9)] = 90
+        table[SymbolId(id: 2)] = 20
+        table[SymbolId(id: 5)] = 50
+        val keys = table.keys()
+        # Fail closed on vacuity: an empty key list satisfies every count below.
+        expect(keys.len()).to_equal(3)
+        # Control: the unsorted keys straight out of the dict all resolve, so a
+        # miss after sorting is the sort's doing and not a dict defect.
+        expect(resolvable_count(table, keys)).to_equal(3)
+        val sorted = native_capsule_sorted_symbol_ids_v1(keys)
+        expect(sorted.len()).to_equal(3)
+        expect(resolvable_count(table, sorted)).to_equal(3)
+
+    it "still orders by ascending symbol id":
+        val sorted = native_capsule_sorted_symbol_ids_v1(
+            [SymbolId(id: 9), SymbolId(id: 2), SymbolId(id: 5), SymbolId(id: 2)])
+        expect(sorted.len()).to_equal(4)
+        expect(ordered_ids(sorted)).to_equal("2,2,5,9,")
+
+    it "leaves an already sorted list resolvable and unreordered":
+        var table: Dict<SymbolId, i64> = {}
+        table[SymbolId(id: 1)] = 10
+        table[SymbolId(id: 4)] = 40
+        val keys = table.keys()
+        expect(keys.len()).to_equal(2)
+        val sorted = native_capsule_sorted_symbol_ids_v1(keys)
+        expect(ordered_ids(sorted)).to_equal("1,4,")
+        expect(resolvable_count(table, sorted)).to_equal(2)
+
+    it "keeps that pattern out of the capsule identity sort":
+        val source = file_read(DRIVER_TYPES)
+        # Fail closed on a vacuous read: an empty file satisfies every negative.
+        expect(source.len() > 20000).to_be_true()
+        expect(source).to_contain("fn native_capsule_sorted_symbol_ids_v1(")
+        # The swap must move ints, and the result must be rebuilt from the
+        # ORIGINAL key objects by index -- never from a struct local.
+        expect(source).to_contain("        result.push(keys[index])")
+        val swaps_struct_temporary = source.contains("result[j] = temporary")
+        expect(swaps_struct_temporary).to_be_false()

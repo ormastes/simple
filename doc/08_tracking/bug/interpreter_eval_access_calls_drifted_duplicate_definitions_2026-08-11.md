@@ -293,3 +293,14 @@ Two corrections to how this row is being tracked:
 
 The doc's own instruction "DO NOT DEDUPE — needs a load-order fix, not deletion"
 is respected: no source was changed.
+
+## Triage 2026-09-13
+
+295-line record, extensively re-verified across 3+ passes; current
+conclusion is a latent maintenance hazard (two divergent interpreter
+definitions, winner decided by load order) requiring a reconcile/retire
+decision across two frontend modules plus a duplicated
+_driver_collect_sources helper -- not a localized bug fixable within
+this lane's budget, and the doc itself notes 10.frontend is claimed by
+another lane. Leaving OPEN, no attempt.
+

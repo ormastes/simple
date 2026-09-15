@@ -51,7 +51,17 @@ use app.devhub.adapter_bitbucket.{
     BB_OP_MERGE,
     BB_MAX_PAGES,
     _bb_collect_pages,
-    _bb_combine_values_json
+    _bb_combine_values_json,
+    bb_pr_collection_url_for,
+    bb_pr_list_url_for,
+    bb_build_dc_create_pr_body,
+    bb_build_dc_comment_body,
+    bb_build_dc_merge_body,
+    bb_dc_page_url,
+    bb_curl_argv,
+    bb_curl_argv_with_headers,
+    bb_resolve_gateway_url,
+    _bb_gateway_argv
 }
 use std.common.json.{json_parse, json_object, json_string, json_boolean}
 use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
@@ -431,7 +441,6 @@ describe "bb_map_http_error":
         val e = bb_map_http_error(500, "boom", BB_OP_GENERAL)
         expect(e.kind).to_equal("api_error")
         expect(e.status_code).to_equal(500)  # oracle: 500 is the wire status for a provider-side failure
-
 
 # ============================================================================
 # Retry-After handling
@@ -852,3 +861,98 @@ describe "_bb_combine_values_json (--json envelope _capped signal)":
         expect(envelope).to_contain("\"_capped\": true")
         val parsed = json_parse(envelope)
         expect(parsed != nil).to_equal(true)
+
+
+# ============================================================================
+# Bitbucket Server / Data Center 8.19 (REST 1.0)
+# ============================================================================
+
+fn _mk_dc_client(url: text, deployment: text) -> BbClient:
+    BbClient(token: "pat-123", base_url: url, deployment: deployment, auth_scheme: "", user: "")
+
+
+# @manual_section: bb-datacenter-rest-1-0
+describe "bb Server / Data Center URLs and auth":
+    it "custom host:port URL resolves to /rest/api/1.0 project repo PRs":
+        step("Verify: custom port URL")
+        val c = _mk_dc_client("https://xxx.yyy.net:222", "")
+        expect(bb_pr_collection_url_for(c.site(), "KEY", "slug")).to_equal("https://xxx.yyy.net:222/rest/api/1.0/projects/KEY/repos/slug/pull-requests")
+
+    it "trailing slash, context path and an included /rest/api/1.0 all normalize":
+        step("Verify: URL normalization")
+        val want = "https://xxx.yyy.net:222/bitbucket/rest/api/1.0/projects/KEY/repos/slug/pull-requests"
+        expect(bb_pr_collection_url_for(_mk_dc_client("https://xxx.yyy.net:222/bitbucket/", "").site(), "KEY", "slug")).to_equal(want)
+        expect(bb_pr_collection_url_for(_mk_dc_client("https://xxx.yyy.net:222/bitbucket/rest/api/1.0/", "").site(), "KEY", "slug")).to_equal(want)
+        expect(bb_pr_collection_url_for(_mk_dc_client("https://xxx.yyy.net:222/bitbucket/rest/api/1.0", "datacenter").site(), "KEY", "slug")).to_equal(want)
+
+    it "explicit cloud deployment and the default URL stay on api.bitbucket.org":
+        step("Verify: cloud selection")
+        expect(_mk_dc_client("https://api.bitbucket.org/2.0", "").site().is_datacenter()).to_equal(false)
+        expect(_mk_dc_client("https://xxx.yyy.net:222", "cloud").site().is_datacenter()).to_equal(false)
+        expect(_mk_dc_client("https://xxx.yyy.net:222", "server").site().is_datacenter()).to_equal(true)
+
+    it "sends Authorization: Bearer <PAT> on server":
+        step("Verify: bearer header")
+        val c = _mk_dc_client("https://xxx.yyy.net:222", "")
+        expect(c.auth_header()).to_equal("Bearer pat-123")
+        val argv = bb_curl_argv("GET", "https://xxx.yyy.net:222/rest/api/1.0/projects", c.auth_header(), "")
+        expect(argv.contains("Authorization: Bearer pat-123")).to_equal(true)
+        expect(argv[argv.len() - 1]).to_equal("https://xxx.yyy.net:222/rest/api/1.0/projects")
+
+    it "PR list uses limit= and state=ALL for all":
+        step("Verify: DC list query")
+        val s = _mk_dc_client("https://xxx.yyy.net:222", "").site()
+        expect(bb_pr_list_url_for(s, "KEY", "slug", "all", 25)).to_equal("https://xxx.yyy.net:222/rest/api/1.0/projects/KEY/repos/slug/pull-requests?state=ALL&limit=25")
+
+    it "paging replaces start=":
+        step("Verify: DC paging")
+        expect(bb_dc_page_url("https://h/x?state=ALL&limit=25", 25)).to_equal("https://h/x?state=ALL&limit=25&start=25")
+        expect(bb_dc_page_url("https://h/x?state=ALL&limit=25&start=25", 50)).to_equal("https://h/x?state=ALL&limit=25&start=50")
+
+    it "DC bodies use fromRef/toRef, text and strategyId":
+        step("Verify: DC bodies")
+        val create = bb_build_dc_create_pr_body("KEY", "slug", "T", "feat", "main", ["jdoe"], "")
+        expect(create).to_contain("\"id\": \"refs/heads/feat\"")
+        expect(create).to_contain("\"toRef\"")
+        expect(create).to_contain("\"key\": \"KEY\"")
+        expect(create).to_contain("\"name\": \"jdoe\"")
+        expect(json_parse(create) != nil).to_equal(true)
+        expect(bb_build_dc_comment_body("hi", "", -1)).to_equal("{\"text\": \"hi\"}")
+        expect(bb_build_dc_merge_body("squash")).to_equal("{\"strategyId\": \"squash\"}")
+        expect(bb_build_dc_merge_body("merge_commit")).to_equal("{\"strategyId\": \"no-ff\"}")
+
+
+describe "Bitbucket gateway routing and headers":
+    it "rewrites Cloud and Data Center primary API roots without changing resource paths":
+        val cloud = BbClient(token: "t", base_url: "https://api.bitbucket.org/2.0", deployment: "cloud", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket/", headers: [])
+        val dc = BbClient(token: "t", base_url: "https://bb.example", deployment: "datacenter", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: [])
+        expect(bb_resolve_gateway_url(cloud, "https://api.bitbucket.org/2.0/repositories/acme/widgets")).to_equal("https://gateway.example/bitbucket/repositories/acme/widgets")
+        expect(bb_resolve_gateway_url(dc, "https://bb.example/rest/api/1.0/projects/KEY/repos/widgets")).to_equal("https://gateway.example/bitbucket/projects/KEY/repos/widgets")
+
+    it "routes the Data Center build-status API through the gateway with configured headers":
+        val client = BbClient(token: "t", base_url: "https://bb.example/bitbucket", deployment: "datacenter", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: ["X-Classification: restricted", "X-Scope: team"])
+        val direct_url = "https://bb.example/bitbucket/rest/build-status/1.0/commits/deadbeef"
+        match _bb_gateway_argv(client, "GET", direct_url, ""):
+            Err(message):
+                expect(message).to_equal("")
+            Ok(argv):
+                expect(argv.contains("Authorization: Bearer t")).to_equal(true)
+                expect(argv.contains("X-Classification: restricted")).to_equal(true)
+                expect(argv.contains("X-Scope: team")).to_equal(true)
+                expect(argv[argv.len() - 1]).to_equal("https://gateway.example/bitbucket/commits/deadbeef")
+
+    it "leaves unrelated direct URLs unchanged and without gateway headers":
+        val client = BbClient(token: "t", base_url: "https://bb.example", deployment: "datacenter", auth_scheme: "", user: "", gateway_url: "https://gateway.example/bitbucket", headers: ["X-Classification: restricted"])
+        match _bb_gateway_argv(client, "GET", "https://other.example/resource", ""):
+            Err(message): expect(message).to_equal("")
+            Ok(argv):
+                expect(argv.contains("X-Classification: restricted")).to_equal(false)
+                expect(argv[argv.len() - 1]).to_equal("https://other.example/resource")
+
+    it "retains transport headers and repeated configured gateway headers for every verb":
+        for method in ["GET", "POST", "PUT", "DELETE"]:
+            val argv = bb_curl_argv_with_headers(method, "https://gateway.example/bitbucket/resource", "Bearer token", if method == "POST" or method == "PUT": "{}" else: "", ["X-Scope: one", "X-Scope: two"])
+            expect(argv.contains("Authorization: Bearer token")).to_equal(true)
+            expect(argv.contains("X-Scope: one")).to_equal(true)
+            expect(argv.contains("X-Scope: two")).to_equal(true)
+            expect(argv[argv.len() - 1]).to_equal("https://gateway.example/bitbucket/resource")

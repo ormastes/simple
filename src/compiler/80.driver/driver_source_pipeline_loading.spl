@@ -5,6 +5,7 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
+use std.common.crypto.sha256.{sha256_text}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.driver.driver_source_loading.{
     _driver_module_name_from_path,
@@ -827,6 +828,8 @@ impl CompilerDriver:
         var owned_authored_paths: [text] = []
         var owned_contents: [text] = []
         var owned_content_hashes: [i64] = []
+        var owned_identities: [text] = []
+        var identity_by_physical_path: Dict<text, text> = {}
         var owned_module_names: [text] = []
         var content_by_physical_path: Dict<text, text> = {}
         for loaded_source in all_sources:
@@ -845,6 +848,18 @@ impl CompilerDriver:
             val raw_content_hash = rt_hash_text(owned_content)
             owned_content_hashes = owned_content_hashes.push(
                 if raw_content_hash == 0: 1 else: raw_content_hash)
+            # Capture the whole-source sha256 HERE, while the content is still
+            # live. Every later holder of this text is freed/blanked before
+            # native capsule freeze, so this is the only point at which the
+            # frozen source identity can still be computed. Digests are memoised
+            # per physical path so an aliased file is hashed once.
+            var owned_identity = ""
+            if identity_by_physical_path.contains_key(physical_key):
+                owned_identity = identity_by_physical_path[physical_key]
+            else:
+                owned_identity = sha256_text(owned_content)
+                identity_by_physical_path[physical_key] = owned_identity
+            owned_identities = owned_identities.push(owned_identity)
             owned_module_names = owned_module_names.push(
                 driver_source_owner_text_copy(loaded_source.module_name))
         log_phase("phase1:load_sources:owner_copy:done n={all_sources.len()}")
@@ -852,6 +867,7 @@ impl CompilerDriver:
         self.ctx.source_authored_paths_owner = owned_authored_paths
         self.ctx.source_contents_owner = owned_contents
         self.ctx.source_content_hashes_owner = owned_content_hashes
+        self.ctx.source_identities_owner = owned_identities
         self.ctx.source_module_names_owner = owned_module_names
         # Canonical phase-1 owners now retain the source bodies. Drop the
         # duplicate scan payloads before parsing/lowering grows compiler RSS.

@@ -1,0 +1,311 @@
+# Caret TUI workbench — grid renderer (lane A6, AC-4).
+#
+# Turns a WorkbenchLayout (tui_layout.spl) plus real session state
+# (session_contract.spl) into a fixed-size character grid: exactly
+# `layout.height` rows of exactly `layout.width` columns each. That fixed
+# shape is what makes the output a real, diffable terminal capture instead
+# of a source grep.
+#
+# Behaviour this file is required to honour (state.md AC-4, doc §4.3/§5.1):
+#   - Status text comes from the state enums, never guessed: an Unknown
+#     AgentTurn renders as "Unknown", not "Idle".
+#   - The composer shows a visible `To <agent>` indicator bound to the
+#     draft's captured target -- selecting a different roster row must NOT
+#     silently move that indicator (session_contract.draft_targets).
+#   - Inactive previews are read-only: they carry no input affordance and
+#     are rendered from the same SessionView, never a separate mutable copy.
+
+use app.llm_caret.workbench.tui_layout.{Rect, WorkbenchLayout, CompactView}
+use app.llm_caret.workbench.session_contract.{
+    SessionId, SessionView, ComposerDraft, InputMode, ProcessLifecycle,
+    AgentTurn, Transport, CapabilityEvidence, same_session}
+
+# ============================================================================
+# Grid primitives
+# ============================================================================
+
+# A grid is a FLAT array (row-major, `y * width + x`), never `[[text]]`.
+# Array indexing in this runtime returns nested arrays BY VALUE: `outer[y]`
+# yields a copy, so mutating that copy silently drops the write. A flat
+# array of cells is mutated in place through direct top-level indexing,
+# which is the only form that is actually observed by later reads.
+struct Grid:
+    width: i64
+    height: i64
+    cells: [text]
+
+fn _make_grid(width: i64, height: i64) -> Grid:
+    var cells: [text] = []
+    var i = 0
+    val total = width * height
+    while i < total:
+        cells.push(" ")
+        i = i + 1
+    Grid(width: width, height: height, cells: cells)
+
+fn _set_cell(grid: Grid, x: i64, y: i64, ch: text):
+    if y < 0 or y >= grid.height or x < 0 or x >= grid.width:
+        return
+    grid.cells[y * grid.width + x] = ch
+
+fn _put_str(grid: Grid, x: i64, y: i64, max_w: i64, s: text):
+    var i = 0
+    val n = s.len()
+    while i < n and i < max_w:
+        _set_cell(grid, x + i, y, s.substring(i, i + 1))
+        i = i + 1
+
+fn _draw_box(grid: Grid, r: Rect):
+    if r.w <= 1 or r.h <= 1:
+        return
+    var x = 0
+    while x < r.w:
+        _set_cell(grid, r.x + x, r.y, "-")
+        _set_cell(grid, r.x + x, r.y + r.h - 1, "-")
+        x = x + 1
+    var y = 0
+    while y < r.h:
+        _set_cell(grid, r.x, r.y + y, "|")
+        _set_cell(grid, r.x + r.w - 1, r.y + y, "|")
+        y = y + 1
+    _set_cell(grid, r.x, r.y, "+")
+    _set_cell(grid, r.x + r.w - 1, r.y, "+")
+    _set_cell(grid, r.x, r.y + r.h - 1, "+")
+    _set_cell(grid, r.x + r.w - 1, r.y + r.h - 1, "+")
+
+fn _grid_to_lines(grid: Grid) -> [text]:
+    var lines: [text] = []
+    var y = 0
+    while y < grid.height:
+        var line = ""
+        var x = 0
+        while x < grid.width:
+            line = line + grid.cells[y * grid.width + x]
+            x = x + 1
+        lines.push(line)
+        y = y + 1
+    lines
+
+# ============================================================================
+# State -> text (never a guessed default)
+# ============================================================================
+
+pub fn lifecycle_text(v: ProcessLifecycle) -> text:
+    match v:
+        case ProcessLifecycle.NotStarted: "Not started"
+        case ProcessLifecycle.Starting: "Starting"
+        case ProcessLifecycle.Running: "Running"
+        case ProcessLifecycle.Stopping: "Stopping"
+        case ProcessLifecycle.Exited: "Exited"
+        case ProcessLifecycle.Failed: "Failed"
+        case ProcessLifecycle.Lost: "Lost"
+
+pub fn turn_text(v: AgentTurn) -> text:
+    match v:
+        case AgentTurn.Idle: "Idle"
+        case AgentTurn.Queued: "Queued"
+        case AgentTurn.Working: "Running"
+        case AgentTurn.WaitingApproval: "Needs approval"
+        case AgentTurn.WaitingAnswer: "Needs answer"
+        case AgentTurn.Completed: "Completed"
+        case AgentTurn.Cancelled: "Cancelled"
+        case AgentTurn.Failed: "Failed"
+        case AgentTurn.Unknown: "Unknown"
+
+pub fn transport_text(v: Transport) -> text:
+    match v:
+        case Transport.Connecting: "Connecting"
+        case Transport.Ready: "Ready"
+        case Transport.Stale: "Stale"
+        case Transport.Disconnected: "Disconnected"
+        case Transport.Reconnecting: "Reconnecting"
+        case Transport.Closed: "Closed"
+
+pub fn evidence_text(v: CapabilityEvidence) -> text:
+    match v:
+        case CapabilityEvidence.Declared: "Declared"
+        case CapabilityEvidence.Probed: "Probed"
+        case CapabilityEvidence.Available: "Available"
+        case CapabilityEvidence.Verified: "Verified"
+        case CapabilityEvidence.Unavailable: "Unavailable"
+        case CapabilityEvidence.Failed: "Failed"
+
+pub fn input_mode_text(v: InputMode) -> text:
+    match v:
+        case InputMode.Message: "Message"
+        case InputMode.ProviderCommand: "Provider command"
+        case InputMode.WorkbenchCommand: "Workbench command"
+        case InputMode.TerminalPaste: "Terminal paste"
+
+fn _find_index(sessions: [SessionView], id: SessionId) -> i64:
+    var i = 0
+    while i < sessions.len():
+        if same_session(sessions[i].id, id):
+            return i
+        i = i + 1
+    -1
+
+fn _label_for(sessions: [SessionView], id: SessionId) -> text:
+    val idx = _find_index(sessions, id)
+    if idx >= 0:
+        sessions[idx].label
+    else:
+        id.value
+
+# ============================================================================
+# Render input
+# ============================================================================
+
+struct WorkbenchRenderInput:
+    sessions: [SessionView]
+    selected: SessionId
+    draft: ComposerDraft
+    focus_label: text
+    # Live terminal output for the big active-session region (lane A8, seam
+    # 2). These are the lines a real child produced, drained from an smux
+    # pane. `active_pane_id` names the PANE, not the selected agent: the two
+    # identities are still distinct (see workbench/pane_source.spl).
+    active_pane_id: text
+    active_output: [text]
+
+pub fn new_render_input(sessions: [SessionView], selected: SessionId, draft: ComposerDraft, focus_label: text) -> WorkbenchRenderInput:
+    var no_output: [text] = []
+    WorkbenchRenderInput(sessions: sessions, selected: selected, draft: draft,
+        focus_label: focus_label, active_pane_id: "", active_output: no_output)
+
+pub fn new_render_input_with_output(sessions: [SessionView], selected: SessionId, draft: ComposerDraft, focus_label: text, active_pane_id: text, active_output: [text]) -> WorkbenchRenderInput:
+    WorkbenchRenderInput(sessions: sessions, selected: selected, draft: draft,
+        focus_label: focus_label, active_pane_id: active_pane_id,
+        active_output: active_output)
+
+fn _pending_count(sessions: [SessionView]) -> i64:
+    var n = 0
+    var i = 0
+    while i < sessions.len():
+        if sessions[i].needs_attention:
+            n = n + 1
+        i = i + 1
+    n
+
+# ============================================================================
+# Full-layout regions
+# ============================================================================
+
+fn _render_roster(grid: Grid, r: Rect, input: WorkbenchRenderInput):
+    _draw_box(grid, r)
+    _put_str(grid, r.x + 1, r.y + 1, r.w - 2, "Agents")
+    var row = r.y + 2
+    var i = 0
+    while i < input.sessions.len() and row < r.y + r.h - 1:
+        val s = input.sessions[i]
+        var prefix = "  "
+        if same_session(s.id, input.selected):
+            prefix = "> "
+        var attn = ""
+        if s.needs_attention:
+            attn = " !"
+        _put_str(grid, r.x + 1, row, r.w - 2, prefix + s.label + " " + s.provider + " " + turn_text(s.turn) + attn)
+        row = row + 1
+        i = i + 1
+
+fn _render_details(grid: Grid, r: Rect, input: WorkbenchRenderInput):
+    _draw_box(grid, r)
+    _put_str(grid, r.x + 1, r.y + 1, r.w - 2, "Selected")
+    val idx = _find_index(input.sessions, input.selected)
+    if idx < 0:
+        _put_str(grid, r.x + 1, r.y + 2, r.w - 2, "No selection")
+        return
+    val s = input.sessions[idx]
+    # Doc §5.1: the compact summary is identity/turn/transport; lifecycle
+    # and capability evidence are secondary metadata behind an expanded
+    # inspector, not squeezed into this always-visible 5-8 row region.
+    _put_str(grid, r.x + 1, r.y + 2, r.w - 2, s.label + " / " + s.provider)
+    _put_str(grid, r.x + 1, r.y + 3, r.w - 2, "Turn: " + turn_text(s.turn))
+    _put_str(grid, r.x + 1, r.y + 4, r.w - 2, "Transport: " + transport_text(s.transport))
+
+fn _render_composer(grid: Grid, r: Rect, input: WorkbenchRenderInput):
+    _draw_box(grid, r)
+    # Visible `To <agent>` indicator bound to the draft's OWN captured
+    # target -- never the currently selected row. That is what stops a
+    # focus change from silently redirecting an in-flight draft.
+    _put_str(grid, r.x + 1, r.y + 1, r.w - 2, "To " + _label_for(input.sessions, input.draft.target) + "  [" + input_mode_text(input.draft.mode) + "]")
+    _put_str(grid, r.x + 1, r.y + 2, r.w - 2, input.draft.body)
+
+fn _render_active(grid: Grid, r: Rect, input: WorkbenchRenderInput):
+    _draw_box(grid, r)
+    val idx = _find_index(input.sessions, input.selected)
+    if idx < 0:
+        _put_str(grid, r.x + 1, r.y + 1, r.w - 2, "No session selected")
+        return
+    val s = input.sessions[idx]
+    _put_str(grid, r.x + 1, r.y + 1, r.w - 2, s.label + " / " + s.provider + " / " + turn_text(s.turn))
+    _put_str(grid, r.x + 1, r.y + 2, r.w - 2, "ACTIVE SESSION")
+    _put_str(grid, r.x + 1, r.y + 3, r.w - 2, "Transport: " + transport_text(s.transport))
+    # Live terminal output. No pane attached says so rather than filling the
+    # region with invented conversation text.
+    if input.active_pane_id == "":
+        _put_str(grid, r.x + 1, r.y + 4, r.w - 2, "Pane: none attached")
+        return
+    _put_str(grid, r.x + 1, r.y + 4, r.w - 2, "Pane " + input.active_pane_id)
+    var row = r.y + 5
+    var i = 0
+    while i < input.active_output.len() and row < r.y + r.h - 1:
+        _put_str(grid, r.x + 1, row, r.w - 2, input.active_output[i])
+        row = row + 1
+        i = i + 1
+
+fn _render_previews(grid: Grid, previews: [Rect], input: WorkbenchRenderInput):
+    var shown = 0
+    var i = 0
+    while i < input.sessions.len() and shown < previews.len():
+        val s = input.sessions[i]
+        if not same_session(s.id, input.selected):
+            val r = previews[shown]
+            _draw_box(grid, r)
+            _put_str(grid, r.x + 1, r.y + 1, r.w - 2, s.label + " / " + turn_text(s.turn))
+            _put_str(grid, r.x + 1, r.y + 2, r.w - 2, "[read-only]")
+            shown = shown + 1
+        i = i + 1
+
+fn _render_status(grid: Grid, r: Rect, input: WorkbenchRenderInput):
+    val line = "Focus: " + input.focus_label + " -> " + _label_for(input.sessions, input.draft.target) +
+        "   Mode: " + input_mode_text(input.draft.mode) +
+        "   Pending: " + _pending_count(input.sessions).to_text()
+    _put_str(grid, r.x, r.y, r.w, line)
+
+# ============================================================================
+# Compact single-view fallback
+# ============================================================================
+
+# Each region renderer already draws its own box and title, so the compact
+# fallback simply hands it the WHOLE available rect -- no second frame, no
+# inset math that could double-draw a border.
+fn _render_compact(grid: Grid, r: Rect, view: CompactView, input: WorkbenchRenderInput):
+    match view:
+        case CompactView.Session:
+            _render_active(grid, r, input)
+        case CompactView.Agents:
+            _render_roster(grid, r, input)
+        case CompactView.Compose:
+            _render_composer(grid, r, input)
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+pub fn render_workbench(layout: WorkbenchLayout, input: WorkbenchRenderInput) -> [text]:
+    val grid = _make_grid(layout.width, layout.height)
+    if layout.is_full:
+        _render_roster(grid, layout.roster, input)
+        _render_details(grid, layout.details, input)
+        _render_composer(grid, layout.composer, input)
+        _render_active(grid, layout.active, input)
+        _render_previews(grid, layout.previews, input)
+    else:
+        _render_compact(grid, layout.compact_view_rect, layout.compact_selected, input)
+    _render_status(grid, layout.status, input)
+    _grid_to_lines(grid)
+
+export WorkbenchRenderInput, new_render_input, new_render_input_with_output,
+    render_workbench,
+    lifecycle_text, turn_text, transport_text, evidence_text, input_mode_text

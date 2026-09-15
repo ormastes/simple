@@ -696,8 +696,7 @@ impl Lowerer {
                     return Ok(self.class_pattern_condition(&subject_ref, &variant, payload, ctx));
                 }
 
-                // Use rt_enum_check_discriminant(subject, expected_disc) -> bool
-                // All enums use hashed variant name discriminants consistently
+                // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
@@ -713,8 +712,15 @@ impl Lowerer {
 
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
-                        args: vec![subject_ref.clone(), expected_val],
+                        name: "rt_enum_check_variant".to_string(),
+                        args: vec![
+                            subject_ref.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                                ty: TypeId::I64,
+                            },
+                            expected_val,
+                        ],
                     },
                     ty: TypeId::BOOL,
                 };
@@ -1029,7 +1035,7 @@ impl Lowerer {
                 }
                 acc
             }
-            Pattern::Enum { variant, payload, .. } => {
+            Pattern::Enum { name, variant, payload, .. } => {
                 // A struct/class spelling (`Point(x, y)`) also arrives as
                 // Pattern::Enum. Emitting a discriminant check for it would
                 // read an object pointer's enum header and never match — see
@@ -1051,9 +1057,13 @@ impl Lowerer {
                 };
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
-                        name: "rt_enum_check_discriminant".to_string(),
+                        name: "rt_enum_check_variant".to_string(),
                         args: vec![
                             slot.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(self.enum_runtime_id_for_pattern(name, variant)),
+                                ty: TypeId::I64,
+                            },
                             HirExpr {
                                 kind: HirExprKind::Integer(expected_disc),
                                 ty: TypeId::I64,
@@ -1521,6 +1531,36 @@ impl Lowerer {
                     .iter()
                     .any(|(variant, payload)| variant == name && payload.is_none())
             })
+    }
+
+    /// Stable runtime identity for a statically known enum. Zero keeps the
+    /// legacy discriminant-only lane for erased or unresolved user values.
+    pub(crate) fn enum_runtime_id_for_type(&self, subject_ty: TypeId) -> i64 {
+        match self.module.types.get(subject_ty) {
+            Some(HirType::Enum { name, .. }) => i64::from(crate::codegen::shared::enum_runtime_type_id(name)),
+            _ => 0,
+        }
+    }
+
+    fn enum_runtime_id_for_pattern(&self, enum_name: &str, variant_name: &str) -> i64 {
+        if !enum_name.is_empty() && enum_name != "_" {
+            return i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name));
+        }
+
+        let mut owner: Option<&str> = None;
+        for (_, ty) in self.module.types.iter() {
+            let HirType::Enum { name, variants, .. } = ty else {
+                continue;
+            };
+            if !variants.iter().any(|(variant, _)| variant == variant_name) {
+                continue;
+            }
+            if owner.is_some_and(|prior| prior != name) {
+                return 0;
+            }
+            owner = Some(name);
+        }
+        owner.map_or(0, |name| i64::from(crate::codegen::shared::enum_runtime_type_id(name)))
     }
 
     /// Is a bare `case <name>:` arm provably NOT an intended binding?
@@ -2081,7 +2121,13 @@ impl Lowerer {
             let inner_hir = self.lower_expr(inner, ctx)?;
             return Ok(HirExpr {
                 kind: HirExprKind::BuiltinCall {
-                    name: "rt_is_some".to_string(),
+                    // `rt_is_present`, NOT `rt_is_some`: `.?` is absent for an
+                    // empty array/dict/string too, exactly as the interpreter's
+                    // `Expr::ExistsCheck` arm decides it. `rt_is_some` made
+                    // `while arr.?:` loop forever on a drained array under
+                    // native codegen —
+                    // doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md
+                    name: "rt_is_present".to_string(),
                     args: vec![inner_hir],
                 },
                 ty: TypeId::BOOL,
@@ -2131,7 +2177,9 @@ impl Lowerer {
         // CANONICAL SEMANTICS (decided, not silently picked): `if x:` on an
         // optional/reference-typed `x` means PRESENCE — "x is not nil" — the
         // same meaning `x.?` already carries in condition position two dozen
-        // lines above, and the same predicate (`rt_is_some`) implements both.
+        // lines above. NOTE: they are no longer the SAME predicate -- a bare `.?`
+        // uses `rt_is_present` (nil/None or an empty array/dict/string is absent)
+        // while this tagged-slot wrap keeps `rt_is_some` (not the nil sentinel).
         // This deliberately does NOT adopt `RuntimeValue::truthy`'s
         // emptiness-aware rule; see the residual note below.
         //
@@ -2181,8 +2229,8 @@ impl Lowerer {
     /// whole browser-engine module to the interpreter.
     ///
     /// Recognizes exactly the shape `lower_exists_check` emits —
-    /// `LetIn { value, body: If { condition: rt_is_some(Local(idx)), .. } }` —
-    /// and replaces it with `rt_is_some(value)`, dropping the now-unused
+    /// `LetIn { value, body: If { condition: rt_is_present(Local(idx)), .. } }` —
+    /// and replaces it with `rt_is_present(value)`, dropping the now-unused
     /// binding. Recurses through `and`/`or`/`not` so
     /// `fn f() -> bool: a.? and b.?` is covered too.
     pub(crate) fn coerce_exists_value_to_bool_in_place(expr: &mut HirExpr) {
@@ -2218,7 +2266,7 @@ impl Lowerer {
                     HirExprKind::If { condition, .. } => matches!(
                         &condition.kind,
                         HirExprKind::BuiltinCall { name, args }
-                            if name == "rt_is_some"
+                            if name == "rt_is_present"
                                 && matches!(
                                     args.first().map(|a| &a.kind),
                                     Some(HirExprKind::Local(idx)) if idx == local_idx
@@ -2235,7 +2283,8 @@ impl Lowerer {
                         },
                     );
                     expr.kind = HirExprKind::BuiltinCall {
-                        name: "rt_is_some".to_string(),
+                        // Same presence rule as `lower_condition` — see there.
+                        name: "rt_is_present".to_string(),
                         args: vec![subject],
                     };
                     expr.ty = TypeId::BOOL;
@@ -2362,7 +2411,10 @@ impl Lowerer {
 
         let condition = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_is_some".to_string(),
+                // Presence, not mere non-nil: an empty array/dict/string makes
+                // `.?` yield nil in value position too, matching the
+                // interpreter. See `lower_condition`.
+                name: "rt_is_present".to_string(),
                 args: vec![HirExpr {
                     kind: HirExprKind::Local(subject_idx),
                     ty: subject_ty,
@@ -2514,9 +2566,13 @@ impl Lowerer {
                 (hasher.finish() & 0xFFFF_FFFF) as i64
             };
             builtin_check(
-                "rt_enum_check_discriminant",
+                "rt_enum_check_variant",
                 vec![
                     subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(RESULT_ENUM_ID),
+                        ty: TypeId::I64,
+                    },
                     HirExpr {
                         kind: HirExprKind::Integer(err_disc),
                         ty: TypeId::I64,
@@ -2781,9 +2837,13 @@ impl Lowerer {
 
         let is_err = HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: "rt_enum_check_discriminant".to_string(),
+                name: "rt_enum_check_variant".to_string(),
                 args: vec![
                     subject_ref.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                        ty: TypeId::I64,
+                    },
                     HirExpr {
                         kind: HirExprKind::Integer(err_disc),
                         ty: TypeId::I64,

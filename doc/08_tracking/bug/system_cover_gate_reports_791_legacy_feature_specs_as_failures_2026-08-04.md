@@ -102,3 +102,14 @@ scope assessment both still hold:
   architectural/deferred, not silently downgraded.
 
 No code changed for this doc; only this confirmation note.
+
+## Triage 2026-09-13
+Reconfirmed: architectural, root cause unchanged per the 2026-08-10
+re-verification. Test-runner/legacy-feature-suite annotation gap. Left
+as-is, no code change attempted.
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+Still a large-scale annotation backlog (791 files) plus a runner-reporting
+policy question (gate violations counted as failed tests vs. a separate
+verdict category) — architectural, not a shard-scale fix. No change made.
+Leaving OPEN.

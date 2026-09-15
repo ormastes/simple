@@ -2,7 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use app.io.env_ops.{cwd}
-use app.io.process_ops.{process_run_direct, process_run_inherit}
+use app.io.process_ops.{process_run_direct, process_run_inherit, process_run_bounded}
 
 # Extern fn declarations (runtime resolves at file level)
 
@@ -176,7 +176,16 @@ fn _cli_resolve_symlink(path: text) -> text:
 # ITSELF, and `ps` is asked about a PID we name, not about its own process.
 fn _cli_self_exe_via_pid_query() -> text:
     if _cli_is_windows_platform():
-        return ""
+        # Windows has neither /proc nor `ps`. Returning "" here left argv[0]
+        # (the `.spl` entry) as the "executable": `simple test` spawned the
+        # source file (child died ~80ms, exit -1) and the single-file runner
+        # refused it. Ask PowerShell for OUR pid's image path. Bounded run:
+        # rt_process_run (process_run_direct) segfaults here on the seed.
+        val (win_out, _win_err, win_code) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Process -Id {getpid()}).Path"], 20000, 65536)
+        val win_path = win_out.trim()
+        if win_code != 0 or win_path == "" or win_path.ends_with(".spl") or not _cli_file_exists_impl(win_path):
+            return ""
+        return win_path
     val (stdout, _stderr, code) = process_run_direct("ps", ["-o", "comm=", "-p", "{getpid()}"])
     if code != 0:
         return ""
@@ -234,8 +243,17 @@ fn _cli_current_exe_path() -> text:
         return entry
     _cli_self_exe_via_pid_query()
 
+# Process-lifetime cache: the executable never changes, and on Windows the
+# lookup spawns PowerShell (~0.5-1.5s), so pay it at most once per process.
+var _cli_current_exe_cache = ""
+
 pub fn cli_current_exe_path() -> text:
-    _cli_current_exe_path()
+    if _cli_current_exe_cache != "":
+        return _cli_current_exe_cache
+    val found = _cli_current_exe_path()
+    if found != "" and not found.ends_with(".spl"):
+        _cli_current_exe_cache = found
+    found
 
 fn _cli_seed_sibling_path(exe_path: text) -> text:
     val slash = exe_path.last_index_of("/")

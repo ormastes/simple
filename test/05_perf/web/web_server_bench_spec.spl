@@ -52,6 +52,7 @@ use app.test.bench.bench_report.{bench_emit}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_dir_create_all(path: text) -> bool
 
 # ============================================================================
@@ -200,14 +201,23 @@ describe "web server bench (AC-3, AC-8, AC-9)":
     it "bench_emit writes report and metrics files":
         # @req REQ-SSPEC-PERF
         step("bench_emit writes report and metrics files")
-        # AC-3: emit benchmark docs. Verified via file existence (text primitive),
-        # not by reading BenchResult fields (cross-module struct bug workaround).
-        # bench_run_warm is also invoked to exercise the harness path.
-        # TODO: bench_run_warm + bench_emit require cross-module struct construction
-        # which returns Unit in interpreter mode (bug: interp_cross_module_struct_unit).
-        # Enable once that bug is fixed. File-existence verification is the AC-3
-        # evidence that the harness wired up correctly.
-        pending("interp-cross-module-struct-unit")
+        # AC-3: emit benchmark docs, and verify via file existence.
+        # Re-measured 2026-09-13: bench_run_warm()'s cross-module BenchResult
+        # construction no longer returns Unit in interpreter mode on this
+        # binary/host, so both bench_run_warm and bench_emit are exercised
+        # directly here instead of being pending().
+        val bc = make_bench_case("web_server_bench_emit_probe", "warm", "cpu", 100)
+        val result = bench_run_warm(bc, fn(): _build_health_response())
+        # Prove bench_run_warm's cross-module BenchResult is real (not Unit).
+        expect(result.name).to_equal("web_server_bench_emit_probe")
+        val results = [result]
+        bench_emit(results, REPORT_PATH, TABLE_PATH)
+        expect(rt_file_exists(REPORT_PATH)).to_equal(true)
+        expect(rt_file_exists(TABLE_PATH)).to_equal(true)
+        # Prove bench_emit actually wrote content, not just left pre-existing
+        # tracked files in place.
+        val report_text = rt_file_read_text(REPORT_PATH)
+        expect(report_text).to_contain("web_server_bench_emit_probe")
 
     it "cold-start row: pending — server accept-loop blocks forever":
         # @req REQ-SSPEC-PERF

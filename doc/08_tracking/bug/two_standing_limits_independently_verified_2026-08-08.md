@@ -122,3 +122,9 @@ do not treat silence as a pass) so this doesn't need re-deriving.
 ## Triage 2026-09-12
 
 Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
+
+## Re-check 2026-09-13
+
+Re-ran `bin/simple test test/01_unit/compiler/lexer/lexer_radix_literal_suffix_spec.spl --no-session-daemon` on the deployed seed (`bin/release/aarch64-unknown-linux-gnu/simple`, hand-linked from `/home/yoon/dev/simple/bin/simple`): `9 total, 9 passed, 0 failed`, `Duration: 135ms` — matches the doc's own verified verdict, no regression. This record is a meta-verification report (two previously-repeated numbers checked against source), not an actionable code defect — both claims in the doc are already confirmed correct and a reusable fence (`scripts/check/check-lexer-radix-literal-suffix.shs`) exists. No code change applies.
+
+- Status: CLOSED (2026-09-13) — not reproducible / not a code defect on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)

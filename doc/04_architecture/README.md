@@ -74,6 +74,7 @@ TLDR files should fit on one screen and answer:
 - [UI Architecture](ui/00_ui_architecture.md) - Semantic UI state, render/Draw IR, shell adapters, and UI test location model
 - [Web Framework Architecture](ui/web/00_web_framework_architecture.md) - Web framework flow connected to UI snapshots and `ui.web`
 - [Test Architecture](test/00_test_architecture.md) - Test runner, SPipe, markdown/Sdoctest, remote, QEMU, and bare-metal lanes
+- [Distributed Textual Database Architecture](simple_distributed_textual_databases.md) ([TLDR](simple_distributed_textual_databases_tldr.md)) - SCV semantic patches, compact Git settlement, CI/provider bridges, and evidence retention
 
 ## MDSOC Reports
 

@@ -118,3 +118,26 @@ in this doc is contradicted by the tree:
 this is a content-based already-fixed *candidate*, not a verified close. A
 crash-injection spec over `atomic_replace_at` + mount recovery is still owed
 before this doc is closed.
+
+## Triage 2026-09-13 — a real crash/recovery spec exists and is green
+
+Ran `test/01_unit/os/kernel/fs/fat32_atomic_replace_recovery_spec.spl` on
+`bin/simple` = Rust seed `bin/release/aarch64-unknown-linux-gnu/simple`
+(symlinked from the shared main worktree), sha256 `3d120a6f9ab5`:
+
+```
+14 examples, 0 failures
+Results: 14 total, 14 passed, 0 failed
+```
+
+This is the crash/recovery-path spec the previous note said was "still
+owed" — it exists and is green (unit-level, not the QEMU power-cut/reboot
+matrix the doc's own "Closure evidence" bar requires for a full close).
+Combined with the source-level confirmation already in this record (dual-bank
+`Fat32ReplaceState`, mount-time recovery, honest adapter gating), this raises
+confidence the implementation is real, but does not by itself meet the
+documented closure bar (QEMU power-cut/reboot matrix + physical UNO Q
+evidence), which is outside this lane's scope (no QEMU/board access here).
+Status left OPEN (P1) rather than claimed RESOLVED, since the doc's own bar
+is explicit and higher than a unit spec; recording the unit-level green so
+whoever runs the QEMU matrix next has one fewer open question.

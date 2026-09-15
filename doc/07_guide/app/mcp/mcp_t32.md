@@ -17,6 +17,17 @@ Enable the TRACE32 Remote API in PowerView with `RCL.Port 20000` or a matching `
 claude mcp add t32-mcp -- /absolute/path/to/simple/bin/t32_mcp_server
 ```
 
+On Windows the entry is `bin/t32_mcp_server.cmd`. It is self-contained. It runs
+`bin/release/x86_64-pc-windows-msvc/t32_mcp_server.exe` when that exists.
+Otherwise it runs `examples/10_tooling/trace32_tools/t32_mcp/main.spl` under
+`bin/release/x86_64-pc-windows-msvc/simple.exe`; set `SIMPLE_BINARY` to use a
+different runtime. When neither exists it exits 127 with an error on stderr. It
+sets `SIMPLE_TIMEOUT_SECONDS=0`, because the seed wall-clock-kills entries under
+`examples/` after 10s, which would kill the long-lived stdio server. If an MCP
+client reports `CONNECTION_CLOSED` for `t32-mcp`, check those two paths first.
+(Before 2026-09-13 the launcher chained through a gitignored
+`bin/release/<triple>/t32_mcp_server.cmd`, so fresh checkouts failed that way.)
+
 Hosted `bin/simple ... frontend_cold.spl` launches are legacy/debug-only and
 should be used only with explicit `SIMPLE_ALLOW_HOSTED_FALLBACK=1` opt-in.
 

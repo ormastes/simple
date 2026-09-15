@@ -44,3 +44,9 @@ now evicts: `self.completed.remove(task_id)` at :161, guarded by the
 `contains_key` check at :156 and read at :158, with the in-source comment at :160
 ("global Runtime would otherwise leak one completed entry per call"). The
 unbounded-retention path described in this doc no longer exists. Closing.
+
+## Triage 2026-09-13
+Reconfirmed via source inspection: bounded-memory contract for detached
+completed results is still unimplemented per this record's own description.
+Fix is a runtime design change (async task-result lifecycle), not a quick
+single-file fix. Left OPEN, no code change attempted.

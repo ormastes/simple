@@ -169,3 +169,15 @@ is gone from the LSP lane.
 STILL LIVE by content: `config/mcp/mcp_startup_lib.shs` (14,686 B) is still
 present and obsolete, and the orphan `src/app/lsp_mcp/main.spl` (13,877 B)
 still exists with its own dispatch (`:418` `make_error(id, -32601, ...)`).
+
+## Triage 2026-09-13
+
+Section 1 (raw-source MCP config launches) already confirmed FIXED by
+prior lanes. Sections 2-4 (obsolete mcp_startup_lib.shs, duplicated
+JSON-RPC framing, orphan src/app/lsp_mcp/main.spl) are explicitly
+recorded as deferred pending a spec-first change on untested surface
+-- a multi-part cleanup/dedup decision, not a localized bug, and the
+doc itself declines to guess which framing implementation should
+survive. Exceeds this lane's per-item scope as a single fix. Leaving
+OPEN as recorded.
+

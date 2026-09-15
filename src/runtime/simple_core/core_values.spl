@@ -127,7 +127,18 @@ pub fn rt_is_none(value: i64) -> i8:
         return 1
     if _sffi_core_values_enum_id(value) != 1:
         return 0
-    return if _sffi_core_values_enum_discriminant(value) == 1: 1 else: 0
+    # Both reference twins -- rt_is_none in src/runtime/runtime_native.c
+    # (`discriminant == 1 || discriminant == RT_DISC_NONE`) and the Rust
+    # runtime's objects.rs rt_is_none (`== 1 || == hash_variant_discriminant
+    # ("None")`) -- accept the legacy HASHED None discriminant alongside the
+    # positional one. This twin accepted only the positional 1, so a boxed
+    # None built by a hashed-discriminant producer read as SOME here and as
+    # NONE on the C/Rust lanes -- and rt_unwrap_or_trap five lines below
+    # already knew the hashed form, which is precisely the "`.?` says present,
+    # `unwrap()` yields nil" split. 2371748697 is hash("None"), the same
+    # constant that function uses.
+    val discriminant = _sffi_core_values_enum_discriminant(value)
+    return if discriminant == 1 or discriminant == 2371748697: 1 else: 0
 
 pub fn rt_unwrap_or_self(value: i64) -> i64:
     # Only the canonical Option (enum_id 1, Some=0/None=1) unwraps here.
@@ -165,3 +176,12 @@ pub fn rt_unwrap_or_trap(value: i64) -> i64:
 pub fn rt_enum_check_discriminant(value: i64, expected: i64) -> i8:
     val discriminant = _sffi_core_values_enum_discriminant(value)
     return if discriminant < expected or discriminant > expected: 0 else: 1
+
+pub fn rt_enum_check_variant(value: i64, expected_enum_id: i64, expected_discriminant: i64) -> i8:
+    val actual_discriminant = _sffi_core_values_enum_discriminant(value)
+    if actual_discriminant != expected_discriminant:
+        return 0
+    val actual_enum_id = rt_enum_id(value)
+    if actual_enum_id < 0:
+        return 0
+    return if expected_enum_id == 0 or actual_enum_id == 0 or actual_enum_id == expected_enum_id: 1 else: 0

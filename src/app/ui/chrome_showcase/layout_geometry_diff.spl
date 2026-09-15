@@ -3,38 +3,19 @@
 #
 # Chrome side is produced by scripts/check/check-chrome-layout-geometry-diff.shs
 # (a <script> appended to a copy of the page emits GEOM| lines into a <pre>,
-# harvested with --headless=new --dump-dom). Simple side is the Draw IR emitted
-# by web_render_backend("pure_simple", w, h).render_html_to_draw_ir(html).
+# harvested with --headless=new --dump-dom). Simple side is the LAID-OUT
+# ELEMENT list from simple_web_layout_element_geometry_lines(html, w, h) -- one
+# row per element, paintless boxes included, so both sides enumerate the same
+# set (round 9; before that the Simple side read Draw IR COMMANDS and dropped
+# every box that painted nothing).
 #
 # Verdict is the LAST line of stdout. 0 elements compared is ERROR, never PASS.
-use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend}
-use common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_element_geometry_lines,
+    simple_web_layout_last_render_degraded,
+    simple_web_layout_last_render_degrade_reason}
 use app.wm_compare_host.cli_util.{get_cli_args}
 use app.wm_compare_host.file_ops.{file_read_text, file_write}
-
-# Element tags the Simple layout tree does not materialise; the Chrome-side
-# walker skips exactly the same set so the ordinals line up.
-# Boxes that participate in the shared nth-path key scheme. The Chrome side is
-# a `document.querySelectorAll('*')` walk, so it sees ELEMENTS only — a box the
-# Simple renderer emits for something that is not an element must therefore be
-# excluded here, or the two sides number their children differently.
-#
-# `::marker` is exactly that case and it is not cosmetic: the pure-Simple
-# renderer emits a marker box as the FIRST child of every `<li>`, so Chrome's
-# `li > *:nth(0)` (the real first element) was being compared against Simple's
-# marker box, and every later sibling was off by one too. On the catalog's
-# feature-inventory pages that is ~100 `<li>` elements, each contributing 2-3
-# false mismatches, which is why the differ reported a `<code>` element as
-# 119 px too wide and 85 px too tall when the actual element differs by 5 px.
-# The marker boxes are still reported under "Simple-only boxes", so removing
-# them from the key scheme hides nothing.
-fn _layout_tag(tag: text) -> bool:
-    (
-        tag != "#text" and tag != "style" and tag != "script" and
-        tag != "title" and tag != "head" and tag != "meta" and
-        tag != "link" and tag != "base" and
-        not tag.starts_with("::")
-    )
 
 struct GeomBox:
     key: text
@@ -44,14 +25,6 @@ struct GeomBox:
     w: i32
     h: i32
     features: text
-
-fn _style_value(command: DrawIrCommand, key: text) -> text:
-    var i = 0
-    while i < command.computed_style.len():
-        if command.computed_style[i].key == key:
-            return command.computed_style[i].value
-        i = i + 1
-    ""
 
 fn _to_i32(raw: text) -> i32:
     if raw == "":
@@ -79,6 +52,101 @@ fn _to_i32(raw: text) -> i32:
 
 fn _abs(v: i32) -> i32:
     if v < 0: 0 - v else: v
+
+# An element that generates NO BOX is reported by `getBoundingClientRect()` as
+# the all-zero rect, because there is no box whose corners could be returned.
+# That is a REPORTING CONVENTION, not a position: Chrome is saying "this
+# element has no geometry", not "this element sits at the viewport origin with
+# zero size".
+#
+# Comparing a real Simple position against that convention produces a delta
+# equal to Chrome's own zeros plus Simple's whole position, and round 19
+# measured what that costs: ONE `<wbr>` deep in the `html` catalog page carried
+# `dx=180 dy=9781 dw=1 dh=1` = 9963, which was **80% of that page's entire Σ**
+# and had been silently inflating this series' headline percentages for at
+# least two rounds. It is not layout error; it is the instrument comparing two
+# different kinds of thing.
+#
+# Census over all eight harvested `*.geom.txt` (round 20, Run A) — the set is
+# NOT wbr-only, and is not guessable from the tag alone:
+#
+#   html         path:0/0/4/2/86/1/0/0   wbr      (a break opportunity)
+#   animation    path:0/0/4/0            span     (fallback child of <audio>)
+#   animation    path:0/0/5/0            span     (fallback child of <video>)
+#   forms-media  path:0/0/1/3/0/0        option   (inside a closed <select>)
+#   forms-media  path:0/0/1/3/0/1        option
+#
+# Three distinct causes, one convention. `<br>` is NOT in this set — it has a
+# real rect in Chrome — so a tag-name allowlist would be both wrong and
+# unmaintainable. The rule keys on what Chrome actually REPORTS.
+#
+# The comparison rule, therefore:
+#   * Chrome boxless + Simple boxless-or-absent -> agreement. Compared, not
+#     mismatched. This is the state a correct engine is in.
+#   * Chrome boxless + Simple emits a real box  -> a mismatch of kind
+#     `extra_box`, counted ONCE, with all four deltas recorded as 0 so the Σ
+#     metric sees the defect's WEIGHT (one wrong box) rather than the
+#     magnitude of coordinates Chrome never claimed.
+#
+# What this deliberately does NOT do: it never lets a Simple all-zero box off
+# where Chrome reported a real one. That direction is a genuine layout failure
+# (an element that was never laid out) and stays a full-Σ mismatch — the
+# `boxless-control-*` selftest fixtures pin exactly that asymmetry.
+pub fn chrome_reports_no_box(b: GeomBox) -> bool:
+    b.x == 0 and b.y == 0 and b.w == 0 and b.h == 0
+
+# Chrome says the element is NOT RENDERED, whatever rect it also reported.
+#
+# `chrome_reports_no_box` above keys on the rect being all-zero, which is the
+# shape a boxless element (<wbr>, <br>) takes. It does NOT cover the other way
+# an element can fail to be rendered: Blink FORCE-LAYS-OUT a
+# content-visibility:hidden subtree when script measures a descendant, so such
+# an element reports a PHANTOM, fully non-zero rect at the position it would
+# occupy if it were rendered.
+#
+# Measured on forms-media's `<details id="details">` (which carries NO `open`
+# attribute), Chrome 152, one page, both states side by side:
+#
+#     d1  rect=0,100,900,18  vis=true   <- <details>, SUMMARY height only
+#     p1  rect=0,134,900,18  vis=false  <- the <p>: PHANTOM, and it OVERLAPS...
+#     after1 rect=0,118,900,18          <- ...the following sibling
+#     d1::details-content content-visibility = hidden
+#
+# The <p> is not in flow: the <details> is summary-height, the next sibling
+# starts immediately after it, and the <p>'s rect lands on top of that sibling.
+# Simple's zero-size box for it is CORRECT, and the 864 Σ the differ charged
+# for that row was measuring a property of Chrome's measurement API, not a
+# layout defect.
+#
+# `checkVisibility()` is the right ground truth and is precisely scoped —
+# verified on a probe page rather than assumed: it is false for `display:none`
+# and for a content-visibility:hidden subtree, and stays TRUE for
+# `visibility:hidden` (`rect=0,0,68,18 cv=true`) and `opacity:0`
+# (`rect=72,0,80,18 cv=true`), both of which DO occupy layout space and must
+# keep being compared at full Σ.
+#
+# A row Chrome reports as not-rendered joins the SAME arm as a boxless one, so
+# the asymmetry that arm already enforces carries over unchanged: Simple
+# emitting a REAL box where Chrome renders nothing is still a mismatch
+# (`extra_box`). This rule can only forgive Simple for NOT drawing something
+# Chrome also does not draw.
+pub fn chrome_reports_not_rendered(b: GeomBox) -> bool:
+    b.features.contains("rendered=false")
+
+# Simple paints nothing for this element.
+#
+# Deliberately WEAKER than `chrome_reports_no_box`, and used ONLY in the
+# not-rendered arm. That predicate demands all four values be zero, which is the
+# right test for a boxless element; here the question is different — Simple
+# still walks a not-rendered element and hands it a flow POSITION, then gives it
+# no size. On forms-media's closed <details> it emits `45,375,0,0`: a real
+# origin, zero extent. A box with no width and no height paints nothing wherever
+# its origin sits, so zero EXTENT is the honest test of "renders nothing".
+#
+# This does not weaken the arm's control: a Simple box with any real extent
+# fails this predicate and is still reported as `extra_box`.
+pub fn simple_renders_nothing(b: GeomBox) -> bool:
+    b.w == 0 and b.h == 0
 
 # --- Chrome side -----------------------------------------------------------
 
@@ -108,125 +176,38 @@ pub fn parse_chrome_geom(dump: text) -> [GeomBox]:
 
 # --- Simple side -----------------------------------------------------------
 
-fn _seen(ids: [text], id: text) -> bool:
-    var i = 0
-    while i < ids.len():
-        if ids[i] == id:
-            return true
-        i = i + 1
-    false
-
-fn _index_of_id(ids: [text], id: text) -> i32:
-    var i = 0
-    while i < ids.len():
-        if ids[i] == id:
-            return i
-        i = i + 1
-    -1
-
-fn _path_key(ids: [text], parents: [text], ordinals: [i32], body_id: text, start: i32) -> text:
-    if body_id == "":
-        return ""
-    if ids[start] == body_id:
-        return "path:"
-    var parts: [i32] = []
-    var current = start
-    var guard = 0
-    while current >= 0 and ids[current] != body_id and guard < 256:
-        parts.push(ordinals[current])
-        current = _index_of_id(ids, parents[current])
-        guard = guard + 1
-    if current < 0:
-        return ""
-    if ids[current] != body_id:
-        return ""
-    var path = "path:"
-    var p = parts.len() - 1
-    while p >= 0:
-        if p < parts.len() - 1:
-            path = path + "/"
-        path = path + parts[p].to_string()
-        p = p - 1
-    path
-
-val FEATURE_KEYS = [
-    "display", "position", "float", "flex-direction", "flex-wrap",
-    "justify-content", "align-items", "margin-left", "margin-top",
-    "padding-left", "padding-top", "border-left-width", "border-top-width",
-    "line-height", "font-size", "text-align", "vertical-align",
-    "white-space", "overflow", "box-sizing", "grid-template-columns"
-]
-
-fn _feature_text(c: DrawIrCommand) -> text:
-    var out = ""
-    var i = 0
-    while i < FEATURE_KEYS.len():
-        if out != "":
-            out = out + ";"
-        out = out + FEATURE_KEYS[i] + "=" + _style_value(c, FEATURE_KEYS[i])
-        i = i + 1
-    out
-
 # Rebuilds the nth-path key from the Draw IR parent chain. Draw IR carries
 # component_id/parent_id plus a `tag` computed-style prop, which is enough to
 # recover the element tree without touching the renderer internals.
 pub fn simple_geom_boxes(html: text, width: i32, height: i32) -> [GeomBox]:
+    """Enumerates the LAID-OUT ELEMENTS, not the Draw IR commands.
+
+    Until round 9 this walked `render_html_to_draw_ir(...)`'s command list, so a
+    box that paints nothing produced no command and entered no list, while
+    Chrome's side keeps every element (`document.body.querySelectorAll('*')`).
+    Measured on the eight catalog pages that asymmetry was worth exactly ONE
+    row; the 236 elements the differ could not compare were the `<li>` desync,
+    and that turned out to be a TREE-CONSTRUCTION defect fixed in
+    html_tree_builder.spl — see
+    doc/08_tracking/bug/web_geometry_differ_li_reparented_desyncs_nth_paths_2026-09-13.md.
+
+    The renderer now hands over one row per layout element, keyed by its own
+    canonical nth-path function, so the Simple side cannot silently compare a
+    subset of what Chrome reports: `missing_in_simple` is 0 on all 8 pages."""
     var out: [GeomBox] = []
     if html == "":
         return out
-    val composition = web_render_backend("pure_simple", width, height).render_html_to_draw_ir(html)
-    if composition.batches.len() == 0:
-        return out
-    var ids: [text] = []
-    var parents: [text] = []
-    var tags: [text] = []
-    var xs: [i32] = []
-    var ys: [i32] = []
-    var ws: [i32] = []
-    var hs: [i32] = []
-    var feats: [text] = []
-    var b = 0
-    while b < composition.batches.len():
-        val commands = composition.batches[b].commands
-        var i = 0
-        while i < commands.len():
-            val c = commands[i]
-            val tag = _style_value(c, "tag")
-            if tag != "" and _layout_tag(tag) and not _seen(ids, c.component_id):
-                ids.push(c.component_id)
-                parents.push(c.parent_id)
-                tags.push(tag)
-                xs.push(c.x)
-                ys.push(c.y)
-                ws.push(c.width)
-                hs.push(c.height)
-                feats.push(_feature_text(c))
-            i = i + 1
-        b = b + 1
-    var ordinals: [i32] = []
-    var n = 0
-    while n < ids.len():
-        var ordinal = 0
-        var m = 0
-        while m < n:
-            if parents[m] == parents[n]:
-                ordinal = ordinal + 1
-            m = m + 1
-        ordinals.push(ordinal)
-        n = n + 1
-    var body_id = ""
-    var t = 0
-    while t < tags.len():
-        if tags[t] == "body" and body_id == "":
-            body_id = ids[t]
-        t = t + 1
-    var k = 0
-    while k < ids.len():
-        val key = _path_key(ids, parents, ordinals, body_id, k)
-        if key != "":
-            out.push(GeomBox(key: key, tag: tags[k], x: xs[k], y: ys[k],
-                             w: ws[k], h: hs[k], features: feats[k]))
-        k = k + 1
+    val lines = simple_web_layout_element_geometry_lines(html, width, height)
+    var i = 0
+    while i < lines.len():
+        val parts = lines[i].split("|")
+        if parts.len() >= 7 and parts[0] == "GEOM":
+            out.push(GeomBox(
+                key: parts[1], tag: parts[2],
+                x: _to_i32(parts[3]), y: _to_i32(parts[4]),
+                w: _to_i32(parts[5]), h: _to_i32(parts[6]),
+                features: ""))
+        i = i + 1
     out
 
 # --- Diff ------------------------------------------------------------------
@@ -251,6 +232,29 @@ struct GeomDiffResult:
     missing_in_chrome: i32
     rows: [GeomDiffRow]
     extra_keys: [text]
+
+# A Simple side on which EVERY box is (0,0,0,0) is not a page that mismatches
+# everywhere -- it is a page that was never laid out, and the only honest
+# verdict for it is "nothing was checked".
+#
+# Round 13 (2026-09-14) found this shape sitting in three rounds of recorded
+# metrics. The runner binary predated a `rt_engine2d_blend_cov_span_u32` extern
+# that the layout module had begun declaring; an unregistered extern answers
+# silent nil, the renderer emitted 432 boxes of which 432 were (0,0,0,0),
+# `missing_in_simple` was 0 because every KEY was still present, and the differ
+# reported 430 mismatches whose delta was exactly Chrome's own geometry. That
+# table was then read as a layout defect and filed as one. Nothing upstream can
+# be relied on to notice this, which is why the check lives here.
+#
+# One box is not enough to judge on -- a single-element page could legitimately
+# be a zero-sized box -- so the rule needs at least two.
+pub fn all_boxes_degenerate(boxes: [GeomBox]) -> bool:
+    if boxes.len() < 2:
+        return false
+    for b in boxes:
+        if b.x != 0 or b.y != 0 or b.w != 0 or b.h != 0:
+            return false
+    true
 
 fn _has(haystack: text, needle: text) -> bool:
     haystack.contains(needle)
@@ -338,11 +342,35 @@ pub fn geometry_diff(chrome: [GeomBox], simple: [GeomBox], tolerance: i32) -> Ge
     var compared = 0
     var mismatched = 0
     var missing_in_simple = 0
+    var extra_box = 0
     var i = 0
     while i < chrome.len():
         val c = chrome[i]
         val j = _find_key(simple, c.key)
-        if j < 0:
+        val c_not_rendered = chrome_reports_not_rendered(c)
+        if chrome_reports_no_box(c) or c_not_rendered:
+            # Chrome generates no box here (see `chrome_reports_no_box`). The
+            # element IS compared — it is not skipped, or a Simple-only box
+            # could hide in the gap — but it is compared against "no box"
+            # rather than against the coordinates 0,0,0,0.
+            compared = compared + 1
+            # A not-rendered element is excused when Simple gives it no EXTENT
+            # (it may still carry a flow origin); a boxless one keeps the
+            # stricter all-four-zero test it has always had.
+            val simple_draws_it = if c_not_rendered:
+                    j >= 0 and not simple_renders_nothing(simple[j])
+                else:
+                    j >= 0 and not chrome_reports_no_box(simple[j])
+            if simple_draws_it:
+                extra_box = extra_box + 1
+                rows.push(GeomDiffRow(
+                    key: c.key, tag: c.tag, dx: 0, dy: 0, dw: 0, dh: 0,
+                    feature: "extra_box", chrome_features: c.features,
+                    inherited: false))
+            # Simple absent or likewise boxless: the two agree. Note that an
+            # ABSENT Simple row is agreement only in this arm -- everywhere
+            # else a missing Simple box is still `missing_in_simple`.
+        elif j < 0:
             missing_in_simple = missing_in_simple + 1
             rows.push(GeomDiffRow(key: c.key, tag: c.tag, dx: -1, dy: -1,
                                   dw: -1, dh: -1, feature: "missing-in-simple",
@@ -384,6 +412,11 @@ pub fn geometry_diff(chrome: [GeomBox], simple: [GeomBox], tolerance: i32) -> Ge
                 feature: classify_feature(chrome[ci].features),
                 chrome_features: chrome[ci].features, inherited: inherited))
         n = n + 1
+    # An `extra_box` is a real defect and is counted once, as a ROOT mismatch:
+    # a box that should not exist cannot be "inherited" from a parent's offset,
+    # because its whole delta is its existence rather than its position.
+    mismatched = mismatched + extra_box
+    root_mismatched = root_mismatched + extra_box
     var extra_keys: [text] = []
     var k = 0
     while k < simple.len():
@@ -530,10 +563,190 @@ pub fn selftest_report() -> text:
     else:
         log = log + "selftest inherited-delta: PASS (2 mismatched, 1 root, 1 inherited)\n"
 
-    if failures == 0:
-        log + "SELFTEST PASS — 4 fixture(s) checked"
+    # An all-zero Simple side is a page that was never laid out, and must be
+    # recognised as such rather than reported as "everything mismatches".
+    # Both halves are checked: the degenerate side must be caught, and a real
+    # side that merely CONTAINS a zero box must not be.
+    val degenerate = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 0, h: 0, features: ""),
+        GeomBox(key: "path:0", tag: "div", x: 0, y: 0, w: 0, h: 0, features: "")
+    ]
+    if not all_boxes_degenerate(degenerate) or all_boxes_degenerate(nested_simple):
+        failures = failures + 1
+        log = log + "selftest all-zero-side: FAIL\n"
     else:
-        log + "SELFTEST FAIL — " + failures.to_string() + " of 4 fixture(s) failed"
+        log = log + "selftest all-zero-side: PASS (degenerate caught, real side kept)\n"
+
+    # --- boxless elements (round 20) ---------------------------------------
+    # Chrome reports an element that generates no box as the all-zero rect.
+    # Four fixtures, and the two CONTROLS are the load-bearing half: without
+    # them this rule would also swallow a Simple side that failed to lay an
+    # element out at all, which is the opposite defect.
+    val boxless_chrome = parse_chrome_geom(
+        "GEOM|path:|body|0|0|900|600|display=block\n" +
+        "GEOM|path:0|div|10|10|100|50|display=block\n" +
+        "GEOM|path:0/0|wbr|0|0|0|0|display=inline\n")
+
+    # (a) Chrome boxless, Simple emits no row for it at all -> agreement.
+    val boxless_agree = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "div", x: 10, y: 10, w: 100, h: 50, features: "")
+    ]
+    val r5 = geometry_diff(boxless_chrome, boxless_agree, 1)
+    if r5.compared != 3 or r5.mismatched != 0 or r5.missing_in_simple != 0:
+        failures = failures + 1
+        log = log + "selftest boxless-agreement: FAIL (compared=" +
+              r5.compared.to_string() + " mismatched=" +
+              r5.mismatched.to_string() + " missing=" +
+              r5.missing_in_simple.to_string() + ")\n"
+    else:
+        log = log + "selftest boxless-agreement: PASS (3 compared, 0 mismatched, 0 missing)\n"
+
+    # (b) Chrome boxless, Simple emits a REAL box -> one extra_box mismatch
+    # whose four deltas are 0, so the Sigma metric weighs it as one defect and
+    # not as the magnitude of a position Chrome never claimed.
+    val boxless_extra = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "div", x: 10, y: 10, w: 100, h: 50, features: ""),
+        GeomBox(key: "path:0/0", tag: "wbr", x: 180, y: 9781, w: 1, h: 1, features: "")
+    ]
+    val r6 = geometry_diff(boxless_chrome, boxless_extra, 1)
+    var r6_row = -1
+    var r6i = 0
+    while r6i < r6.rows.len():
+        if r6.rows[r6i].feature == "extra_box":
+            r6_row = r6i
+        r6i = r6i + 1
+    if r6.compared != 3 or r6.mismatched != 1 or r6.root_mismatched != 1 or r6_row < 0:
+        failures = failures + 1
+        log = log + "selftest boxless-extra-box: FAIL (mismatched=" +
+              r6.mismatched.to_string() + " root=" +
+              r6.root_mismatched.to_string() + ")\n"
+    elif r6.rows[r6_row].dx != 0 or r6.rows[r6_row].dy != 0 or
+         r6.rows[r6_row].dw != 0 or r6.rows[r6_row].dh != 0:
+        failures = failures + 1
+        log = log + "selftest boxless-extra-box: FAIL (deltas not zeroed: dy=" +
+              r6.rows[r6_row].dy.to_string() + ")\n"
+    else:
+        log = log + "selftest boxless-extra-box: PASS (1 extra_box, all deltas 0)\n"
+
+    # (c) CONTROL, opposite direction: Chrome reports a REAL box and Simple's
+    # is all-zero. That is an element Simple never laid out -- a genuine layout
+    # failure -- and it must stay a FULL-magnitude mismatch, never be excused
+    # as "boxless". This is the fixture that stops the rule widening.
+    val boxless_control_simple_zero = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "div", x: 0, y: 0, w: 0, h: 0, features: ""),
+        GeomBox(key: "path:0/0", tag: "wbr", x: 0, y: 0, w: 0, h: 0, features: "")
+    ]
+    val r7 = geometry_diff(boxless_chrome, boxless_control_simple_zero, 1)
+    var r7_div = -1
+    var r7i = 0
+    while r7i < r7.rows.len():
+        if r7.rows[r7i].key == "path:0":
+            r7_div = r7i
+        r7i = r7i + 1
+    if r7.mismatched != 1 or r7_div < 0:
+        failures = failures + 1
+        log = log + "selftest boxless-control-simple-zero: FAIL (mismatched=" +
+              r7.mismatched.to_string() + ")\n"
+    elif r7.rows[r7_div].dx != 10 or r7.rows[r7_div].dy != 10 or
+         r7.rows[r7_div].dw != 100 or r7.rows[r7_div].dh != 50:
+        failures = failures + 1
+        log = log + "selftest boxless-control-simple-zero: FAIL (deltas suppressed: dy=" +
+              r7.rows[r7_div].dy.to_string() + ")\n"
+    else:
+        log = log + "selftest boxless-control-simple-zero: PASS (real box vs zero still full-Sigma)\n"
+
+    # (d) CONTROL: Chrome reports a REAL box and Simple emits NO row. Absence
+    # is agreement ONLY under the boxless arm; here it must still be
+    # `missing_in_simple`, exactly as fixture 3 asserts for the pre-round-20
+    # path.
+    val boxless_control_absent = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0/0", tag: "wbr", x: 0, y: 0, w: 0, h: 0, features: "")
+    ]
+    val r8 = geometry_diff(boxless_chrome, boxless_control_absent, 1)
+    if r8.missing_in_simple != 1:
+        failures = failures + 1
+        log = log + "selftest boxless-control-absent: FAIL (missing=" +
+              r8.missing_in_simple.to_string() + ")\n"
+    else:
+        log = log + "selftest boxless-control-absent: PASS (real box absent is still missing_in_simple)\n"
+
+    # --- not-rendered elements (round 22) ----------------------------------
+    # Chrome reports a fully NON-ZERO phantom rect for an element it does not
+    # render (a content-visibility:hidden subtree, e.g. the children of a closed
+    # <details>). Every fixture below carries a real rect, so the boxless arm
+    # above cannot reach any of them — only `rendered=false` can.
+    val notrendered_chrome = parse_chrome_geom(
+        "GEOM|path:|body|0|0|900|600|display=block|rendered=true\n" +
+        "GEOM|path:0|details|45|365|810|24|display=block|rendered=true\n" +
+        "GEOM|path:0/0|summary|45|365|810|24|display=block|rendered=true\n" +
+        "GEOM|path:0/1|p|45|405|810|24|display=block|rendered=false\n")
+
+    # (e) Chrome not-rendered (phantom rect), Simple emits a ZERO-SIZE box at a
+    # position of its own -- the exact forms-media shape. This is agreement:
+    # neither engine renders the element. Before this rule it was a full-Sigma
+    # mismatch worth 864.
+    val notrendered_agree = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "details", x: 45, y: 365, w: 810, h: 24, features: ""),
+        GeomBox(key: "path:0/0", tag: "summary", x: 45, y: 365, w: 810, h: 24, features: ""),
+        GeomBox(key: "path:0/1", tag: "p", x: 45, y: 375, w: 0, h: 0, features: "")
+    ]
+    val r9 = geometry_diff(notrendered_chrome, notrendered_agree, 1)
+    if r9.compared != 4 or r9.mismatched != 0:
+        failures = failures + 1
+        log = log + "selftest not-rendered-agreement: FAIL (compared=" +
+              r9.compared.to_string() + " mismatched=" +
+              r9.mismatched.to_string() + ")\n"
+    else:
+        log = log + "selftest not-rendered-agreement: PASS (4 compared, 0 mismatched)\n"
+
+    # (f) CONTROL that stops the rule widening: Chrome does not render it and
+    # Simple draws a REAL box. Simple is rendering something Chrome does not, so
+    # this stays a mismatch -- `extra_box`, deltas zeroed. If this fixture ever
+    # passes as agreement, the rule has become "ignore the row", which is the
+    # compensating-error state this arm exists to avoid.
+    val notrendered_extra = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "details", x: 45, y: 365, w: 810, h: 24, features: ""),
+        GeomBox(key: "path:0/0", tag: "summary", x: 45, y: 365, w: 810, h: 24, features: ""),
+        GeomBox(key: "path:0/1", tag: "p", x: 45, y: 405, w: 810, h: 24, features: "")
+    ]
+    val r10 = geometry_diff(notrendered_chrome, notrendered_extra, 1)
+    if r10.mismatched != 1:
+        failures = failures + 1
+        log = log + "selftest not-rendered-control-extra-box: FAIL (mismatched=" +
+              r10.mismatched.to_string() + ")\n"
+    else:
+        log = log + "selftest not-rendered-control-extra-box: PASS (Simple box Chrome does not render is still a mismatch)\n"
+
+    # (g) CONTROL that pins the rule's SCOPE: a `rendered=true` row with a real
+    # rect is compared at full Sigma exactly as before. This is the fixture that
+    # proves the new predicate reads the flag rather than matching the tag or
+    # forgiving every row that carries a `rendered=` field at all --
+    # visibility:hidden and opacity:0 elements are `rendered=true` in Chrome and
+    # must keep their deltas.
+    val notrendered_control_visible = [
+        GeomBox(key: "path:", tag: "body", x: 0, y: 0, w: 900, h: 600, features: ""),
+        GeomBox(key: "path:0", tag: "details", x: 45, y: 365, w: 810, h: 24, features: ""),
+        GeomBox(key: "path:0/0", tag: "summary", x: 45, y: 465, w: 810, h: 24, features: ""),
+        GeomBox(key: "path:0/1", tag: "p", x: 45, y: 375, w: 0, h: 0, features: "")
+    ]
+    val r11 = geometry_diff(notrendered_chrome, notrendered_control_visible, 1)
+    if r11.mismatched != 1:
+        failures = failures + 1
+        log = log + "selftest not-rendered-control-visible-row: FAIL (mismatched=" +
+              r11.mismatched.to_string() + ")\n"
+    else:
+        log = log + "selftest not-rendered-control-visible-row: PASS (rendered=true row still compared at full Sigma)\n"
+
+    if failures == 0:
+        log + "SELFTEST PASS — 12 fixture(s) checked"
+    else:
+        log + "SELFTEST FAIL — " + failures.to_string() + " of 12 fixture(s) failed"
 
 fn main():
     val args = get_cli_args()
@@ -574,6 +787,31 @@ fn main():
     val dump = file_read_text(geom_path)
     val chrome = parse_chrome_geom(dump)
     val simple = simple_geom_boxes(html, width, height)
+    # A render that tripped its wall-clock budget is TRUNCATED, not laid out:
+    # every node past the break keeps renderer_default_style() and contributes
+    # a box that is wrong for a reason that has nothing to do with CSS. Reading
+    # such a run as a geometry comparison is exactly how round 13's numbers
+    # became void, so this is fail-closed rather than a warning. The break is
+    # total on html.html (node 46 of 883 => all-zero side) but need not be:
+    # a break at node 800 leaves a plausible-looking table that is still a
+    # measurement of the deadline, not of the layout.
+    if simple_web_layout_last_render_degraded():
+        print("chrome_boxes=" + chrome.len().to_string())
+        print("simple_boxes=" + simple.len().to_string())
+        print("ERROR — nothing was checked (the Simple render for " + html_path +
+              " tripped its wall-clock render budget (" +
+              simple_web_layout_last_render_degrade_reason() +
+              "); the layout is truncated, not slow. Raise " +
+              "SIMPLE_WEB_RENDER_BUDGET_MS — SIMPLE_TIMEOUT_SECONDS does NOT " +
+              "disable the render budget)")
+        return
+    if all_boxes_degenerate(simple):
+        print("chrome_boxes=" + chrome.len().to_string())
+        print("simple_boxes=" + simple.len().to_string())
+        print("ERROR — nothing was checked (every Simple box is 0x0 at 0,0 for " +
+              html_path + "; the page was not laid out. Run with " +
+              "SIMPLE_EXECUTION_MODE=interpreter and SIMPLE_TIMEOUT_SECONDS=0)")
+        return
     val result = geometry_diff(chrome, simple, 1)
     file_write(out_prefix + ".sdn", diff_sdn(html_path, result))
     file_write(out_prefix + ".md", diff_md(html_path, result))

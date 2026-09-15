@@ -24,9 +24,9 @@ describe "test runner main HIR contract":
         # @req REQ-SSPEC-APP
         step("imports time and atomic file helpers from concrete owners")
         val source = rt_file_read_text("src/app/test_runner_new/test_runner_main.spl") ?? ""
-        expect(source).to_contain("use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}")
-        expect(source).to_contain("use std.nogc_sync_mut.io.file_ops.{file_atomic_write}")
-        assert_false(source.contains("use std.io.{time_now_unix_micros}"))
+        expect(source).to_contain("use std.nogc_sync_mut.io.time_ops.\{time_now_unix_micros\}")
+        expect(source).to_contain("use std.nogc_sync_mut.io.file_ops.\{file_atomic_write\}")
+        assert_false(source.contains("use std.io.\{time_now_unix_micros\}"))
 
     it "keeps daemon duration visible to success and failure branches":
         # @req REQ-SSPEC-APP
@@ -37,12 +37,24 @@ describe "test runner main HIR contract":
         expect(duration).to_be_less_than(branch)
         expect(source).to_contain("monitor_timeout.to_int() ?? 0")
 
-    it "applies the same adjacent fixes to the library runner mirror":
+    it "keeps the library runner mirror a thin facade over the fixed app copy":
         # @req REQ-SSPEC-APP
-        step("applies the same adjacent fixes to the library runner mirror")
+        # NOTE: the two divergent implementations this example originally
+        # locked in step ("applies the same adjacent fixes ... mirror") have
+        # since been deduplicated: src/lib/nogc_sync_mut/test_runner/test_runner_main.spl
+        # is now a thin re-export facade over app.test_runner_new.test_runner_main
+        # (see that file's own header comment: "DO NOT re-add an
+        # implementation here. Fix the app copy instead."). It therefore no
+        # longer carries its own time/file-owner imports or duration-scope
+        # ordering to check line-for-line -- the "same adjacent fix" is now
+        # structural: there is only ONE implementation, so it cannot drift.
+        # This example instead locks the facade shape itself, so a
+        # regression that reintroduces a second divergent implementation
+        # (silently losing the app copy's owner fixes for callers routed
+        # through the lib path) is caught.
+        step("keeps the library runner mirror a thin facade over the fixed app copy")
         val source = rt_file_read_text("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl") ?? ""
-        expect(source).to_contain("use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}")
-        expect(source).to_contain("monitor_timeout.to_int() ?? 0")
-        val duration = source.index_of("val duration_ms = (time_now_unix_micros() - start_time) / 1000")
-        val branch = source.index_of("if daemon_result.status == TRESP_COMPLETED")
-        expect(duration).to_be_less_than(branch)
+        expect(source).to_contain("export use app.test_runner_new.test_runner_main.*")
+        expect(source).to_contain("use app.test_runner_new.test_runner_main.\{run_test_cli\}")
+        assert_false(source.contains("use std.nogc_sync_mut.io.time_ops.\{time_now_unix_micros\}"))
+        assert_false(source.contains("val duration_ms = (time_now_unix_micros() - start_time) / 1000"))

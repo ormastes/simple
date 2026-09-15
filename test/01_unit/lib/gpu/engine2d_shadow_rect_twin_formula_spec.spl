@@ -1,0 +1,88 @@
+"""
+# Every Engine2D backend paints a box-shadow with ONE shared integer formula
+## Purpose and audience
+For the engineers who own the Engine2D backends (CPU/software, Vulkan, Metal,
+OpenGL, WebGPU, Intel, baremetal). Engine2D's backends are TWINS: the same
+Draw IR must produce the same pixels on every one of them. This scenario pins
+the box-shadow formula -- the one a backend is most tempted to "approximate"
+on the device -- so that a second, cheaper-looking implementation cannot be
+introduced without this spec going red.
+## Operator workflow
+Run: SIMPLE_EXECUTION_MODE=interpreter \\
+     bin/simple test test/01_unit/lib/gpu/engine2d_shadow_rect_twin_formula_spec.spl
+No GPU device is needed. The formula is exercised through the software
+backend, which is the reference twin, and the properties asserted are the ones
+that discriminate it from the flat-band approximation.
+## Compatibility and limitations
+This is a FORMULA pin, not a device comparison: it cannot observe what a
+Vulkan device does. It is the device-free half of the pair whose device-side
+half is test/02_integration/ui/web_showcase/catalog_vulkan_twin_spec.spl.
+## Verification guidance and troubleshooting
+The failure this exists to catch, measured 2026-09-13: the Vulkan backend
+painted a box-shadow as a FLAT alpha rect padded by blur_r followed by a blur,
+instead of the shared coverage-profile blend. A flat band has the SAME
+coverage at its outer edge as at its centre; the shared formula's coverage
+falls off monotonically. Assertions below are written as that discrimination,
+so a regression to any flat-band approximation fails here regardless of which
+backend introduces it.
+"""
+# Lifecycle: doc/10_metrics/ui/engine2d_twin_parity_2026-09-13.md
+# @tag: ui, engine2d, gpu, twin, unit
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val SURFACE: i32 = 64
+val SHADOW_COLOR: u32 = 0x80000000u32
+
+fn shadow_surface(blur_r: i32) -> [u32]:
+    var engine = Engine2D.create_with_backend(SURFACE, SURFACE, "software")
+    engine.clear(0xFFFFFFFFu32)
+    engine.draw_shadow_rect(24, 24, 16, 16, 0, 0, blur_r, SHADOW_COLOR)
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn luma_at(pixels: [u32], x: i32, y: i32) -> i32:
+    val px = pixels[y * SURFACE + x]
+    ((px >> 16) & 0xFFu32).to_i32()
+
+describe "the Engine2D box-shadow formula shared by every backend twin":
+
+    it "darkens the shadow rect and leaves the far field untouched":
+        # @req REQ-UI-ENGINE2D-SHADOW-001
+        step("Paint one 16x16 shadow with blur radius 4 on a white software surface")
+        val pixels = shadow_surface(4)
+        # oracle: emu_draw_shadow_rect (backend_emu_adv.spl:283), the single
+        #         implementation every non-Vulkan backend already delegated to
+        expect(luma_at(pixels, 32, 32) < 255).to_equal(true)
+        expect(luma_at(pixels, 2, 2)).to_equal(255)
+
+    it "falls off monotonically outward instead of painting a flat band":
+        # @req REQ-UI-ENGINE2D-SHADOW-002
+        # @capture(statistics): centre / edge / outside luma of the shadow field
+        step("Sample the shadow along a row leaving its centre")
+        val pixels = shadow_surface(4)
+        val centre = luma_at(pixels, 32, 32)
+        val edge = luma_at(pixels, 32, 40)
+        val outside = luma_at(pixels, 32, 46)
+        print("shadow luma centre={centre} edge={edge} outside={outside}")
+
+        step("Coverage decreases with distance, which a flat band cannot do")
+        # oracle: _emu_shadow_profile (backend_emu_adv.spl:262) is a triple
+        #         1-D box blur of a 0/255 coverage step, so coverage is
+        #         non-increasing outward and strictly lower past the rect edge.
+        #         The flat-fill-then-blur approximation this replaced returned
+        #         the SAME value at all three samples.
+        expect(centre < edge).to_equal(true)
+        expect(edge < outside).to_equal(true)
+        expect(outside).to_equal(255)
+
+    it "keeps a zero-radius shadow a hard rect":
+        # @req REQ-UI-ENGINE2D-SHADOW-003
+        step("A shadow with blur radius 0 has no falloff to compute")
+        val pixels = shadow_surface(0)
+        # oracle: emu_draw_shadow_rect's blur_r <= 0 branch draws the rect
+        #         directly, so inside is blended and one pixel outside is not
+        expect(luma_at(pixels, 32, 32) < 255).to_equal(true)
+        expect(luma_at(pixels, 32, 41)).to_equal(255)

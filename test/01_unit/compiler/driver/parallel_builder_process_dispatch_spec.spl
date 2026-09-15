@@ -1,0 +1,205 @@
+"""
+## Purpose and audience
+Purpose: Prove that `ParallelBuilder.build()`'s non-deterministic /
+above-threshold branch achieves REAL OS-level concurrency once a process
+spawn dispatcher is configured, instead of the plain serial `while chunk_idx
+< chunk_end: compile_fn(...)` loop that silently discards `--threads`/`--jobs`.
+Audience: compiler and tooling engineers who maintain the native-build driver.
+"""
+# @req: REQ-COMPILER-DRIVER-PARALLEL-001 — stable requirement identity for this spec.
+
+# Root cause this spec targets, verbatim from the bug records:
+#   doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md
+#   doc/08_tracking/bug/stage3_native_build_serial_ignores_jobs_2026-09-14.md
+# `ParallelBuilder.build()` (parallel.spl:412) has a "parallel" branch
+# (:503-585 as of this writing) that chunks the ready set by `max_workers`
+# and then runs `compile_fn` for every unit ONE AT A TIME, in-process, with
+# no spawn and no thread. `--threads`/`--jobs` only moves a chunk boundary.
+#
+# `build_parallel(spawn_fn, collect_fn)` (:590) is the genuine
+# `rt_process_spawn_async`-based implementation and already works (see the
+# sibling `build_supervised` specs in this directory) -- it simply has no
+# caller from `build()`. This spec exercises `build()` itself (the surface
+# the native-build driver actually calls, not the already-working
+# `build_parallel`/`build_supervised` directly), through a new
+# `set_spawn_dispatch(spawn_fn, collect_fn)` configuration method that routes
+# the "parallel" branch through `build_parallel` when it is set, and keeps
+# today's exact behaviour (serial, in-process) when it is not -- so no
+# existing caller (the native-build driver included) changes behaviour by
+# this change alone.
+#
+# It must go RED against today's code, which has no such method at all:
+# `ParallelBuilder` has no `set_spawn_dispatch`, so this spec fails to run.
+# It must go GREEN once `set_spawn_dispatch` exists and `build()`'s parallel
+# branch actually dispatches through `build_parallel` -- proven here with
+# REAL child processes and REAL wall-clock evidence, never a stats counter
+# that could be set to lie about concurrency without actually providing any.
+
+use std.spec.*
+use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# 4 layers of 10 units. Layer L>0's units each depend on exactly ONE unit in
+# layer L-1 (unit i in layer L depends on unit i in layer L-1). This gives
+# real fan-out -- 10 units become ready at once inside a layer -- while still
+# exercising dependency ordering across layers.
+fn add_layered_graph(builder: ParallelBuilder) -> [text]:
+    var paths: [text] = []
+    var prev_layer: [i64] = []
+    var layer_idx = 0
+    while layer_idx < 4:
+        var layer: [i64] = []
+        var i = 0
+        while i < 10:
+            val idx = layer_idx * 10 + i
+            val path = "unit_{idx}.spl"
+            val deps: [i64] = if prev_layer.len() > 0: [prev_layer[i]] else: []
+            val id = builder.add_unit(path, deps)
+            layer = layer.push(id)
+            paths = paths.push(path)
+            i = i + 1
+        prev_layer = layer
+        layer_idx = layer_idx + 1
+    paths
+
+# Peak simultaneous overlap across (start_ns, end_ns) intervals. O(n^2) is
+# fine at n=40. An interval [s, e] is "live" at time t when s <= t <= e; the
+# peak is the max, over every interval's own start time, of how many
+# intervals are live at that instant.
+fn peak_overlap(starts: [i64], ends: [i64]) -> i64:
+    var peak = 0
+    val n = starts.len()
+    var i = 0
+    while i < n:
+        var count = 0
+        var j = 0
+        while j < n:
+            if starts[j] <= starts[i] and ends[j] >= starts[i]:
+                count = count + 1
+            j = j + 1
+        if count > peak:
+            peak = count
+        i = i + 1
+    peak
+
+describe "ParallelBuilder.build() real process dispatch":
+    it "spawns real OS processes concurrently instead of one compile_fn call at a time":
+        step("Verify: real overlap, correct result set, dependency order respected")
+        # @req: REQ-COMPILER-DRIVER-PARALLEL-001
+
+        # --- fixture: a private marker directory, unique to this run -------
+        val (mk_out, mk_err, mk_code) = rt_process_run("/bin/sh", ["-c", "mktemp -d"])
+        expect(mk_code).to_equal(0)  # oracle: 0 — mktemp must succeed or nothing below means anything
+        val dir = mk_out.trim()
+        expect(dir.len() > 0).to_be_true()
+
+        # --- build the dispatch graph ---------------------------------------
+        val config = ParallelBuildConfig(num_threads: 8, parallel_threshold: 4,
+            deterministic: false, verbose: false, unstable: false, unit_timeout_ms: 0)
+        val builder = ParallelBuilder.create(config)
+        val paths = add_layered_graph(builder)
+        expect(paths.len()).to_equal(40)  # oracle: 40 — 4 layers x 10 units, named expected value
+
+        # Each unit's child: writes its OWN start/end nanosecond timestamp,
+        # sleeping in between, so overlap is measured by the CHILD's own
+        # wall clock, not the parent's guess about when it asked.
+        val spawn_fn = \path:
+            rt_process_spawn_async("/bin/sh", ["-c",
+                "date +%s%N > '" + dir + "/" + path + ".start'; "
+                + "sleep 0.15; "
+                + "date +%s%N > '" + dir + "/" + path + ".end'"])
+        val collect_fn = \code, path:
+            if code == 0: Ok(path) else: Err("unit {path} exited {code}")
+
+        builder.set_spawn_dispatch(spawn_fn, collect_fn)
+        val result = builder.build(nil)
+
+        # --- (b) result set equals what a sequential build would produce ---
+        expect(result.success).to_be_true()
+        expect(result.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(result.stats.completed).to_equal(40)  # oracle: 40 — named expected value from the requirement
+        expect(result.outputs.len()).to_equal(40)  # oracle: 40 — named expected value from the requirement
+        for path in paths:
+            expect(result.outputs.contains(path)).to_be_true()
+
+        # Oracle: an ordinary sequential (deterministic) build of the SAME
+        # graph shape, with an instant in-process compile_fn, must produce
+        # the identical 40-path result set -- proving the dispatch path
+        # changed HOW units run, not WHAT the build computes.
+        val seq_config = ParallelBuildConfig(num_threads: 1, parallel_threshold: 999,
+            deterministic: true, verbose: false, unstable: false, unit_timeout_ms: 0)
+        val seq_builder = ParallelBuilder.create(seq_config)
+        val seq_paths = add_layered_graph(seq_builder)
+        val seq_result = seq_builder.build(\path: Ok(path))
+        expect(seq_result.outputs.len()).to_equal(result.outputs.len())  # oracle: equal — same graph shape must yield the same output count
+        for path in seq_paths:
+            expect(result.outputs.contains(path)).to_be_true()
+
+        # --- (a) at least 2 units were genuinely in flight at once ---------
+        # Read every unit's own start/end nanosecond timestamps back. This is
+        # evidence written by the CHILD processes themselves, not a stats
+        # field the fix could set without providing real concurrency.
+        val (read_out, read_err, read_code) = rt_process_run("/bin/sh", ["-c",
+            "cd '" + dir + "' && for f in *.start; do "
+            + "b=\"${f%.start}\"; "
+            + "echo \"$b $(cat \"$f\") $(cat \"$b.end\" 2>/dev/null || echo 0)\"; "
+            + "done"])
+        expect(read_code).to_equal(0)  # oracle: 0 — reading markers back must succeed
+        # Glob order ("*.start") is NOT insertion order, so every marker
+        # carries its own unit path alongside its timestamps -- three
+        # parallel arrays, all aligned by the SAME line/index.
+        var mpaths: [text] = []
+        var starts: [i64] = []
+        var ends: [i64] = []
+        for line in read_out.trim().split("\n"):
+            val t = line.trim()
+            if t.len() == 0:
+                continue
+            val parts = t.split(" ")
+            expect(parts.len()).to_equal(3)  # oracle: 3 — "path start end" per line, fail closed on a malformed marker
+            val s = parts[1].trim().parse_int() ?? -1
+            val e = parts[2].trim().parse_int() ?? -1
+            expect(s > 0).to_be_true()
+            expect(e > 0).to_be_true()
+            mpaths = mpaths.push(parts[0].trim())
+            starts = starts.push(s)
+            ends = ends.push(e)
+        # Fail closed on vacuity: 0 markers observed must not read as "no
+        # overlap found", it must fail the run outright.
+        expect(starts.len()).to_equal(40)  # oracle: 40 — one marker pair per unit, named expected value
+
+        val overlap = peak_overlap(starts, ends)
+        # `.to_be_at_least` on a computed (non-literal) i64 hits an unrelated
+        # interpreter dynamic-dispatch gap in this tree; `.to_be_true()` on a
+        # plain boolean comparison is the proven-working matcher used
+        # throughout the rest of this spec.
+        expect(overlap >= 2).to_be_true()  # oracle: >= 2 — the guide's own concurrency bar
+
+        # --- (c) dependency order respected: a dependent never starts ------
+        # before its dependency's own child finished writing its end marker.
+        fn marker_of(unit_paths: [text], starts_in: [i64], ends_in: [i64], target: text) -> (i64, i64):
+            var idx = 0
+            while idx < unit_paths.len():
+                if unit_paths[idx] == target:
+                    return (starts_in[idx], ends_in[idx])
+                idx = idx + 1
+            (-1, -1)
+
+        var layer_idx = 0
+        while layer_idx < 4:
+            var i = 0
+            while i < 10:
+                if layer_idx > 0:
+                    val dep_idx = (layer_idx - 1) * 10 + i
+                    val cur_idx = layer_idx * 10 + i
+                    val (_, dep_end) = marker_of(mpaths, starts, ends, "unit_{dep_idx}.spl")
+                    val (cur_start, _) = marker_of(mpaths, starts, ends, "unit_{cur_idx}.spl")
+                    expect(dep_end > 0).to_be_true()
+                    expect(cur_start > 0).to_be_true()
+                    expect(cur_start >= dep_end).to_be_true()
+                i = i + 1
+            layer_idx = layer_idx + 1
+
+        rt_process_run("/bin/sh", ["-c", "rm -rf '" + dir + "'"])

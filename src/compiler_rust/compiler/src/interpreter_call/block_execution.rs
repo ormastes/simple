@@ -1133,10 +1133,16 @@ pub(super) fn exec_block_closure_into(
             // See doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
             Node::UseStmt(use_stmt) => {
                 let current_file = crate::interpreter::get_current_file();
-                // `enums` is borrowed immutably in this signature; enum imports
-                // reach the interpreter through GLOBAL_ENUMS rather than this
-                // map, so a local copy satisfies the loader without dropping
-                // them.
+                // `enums` is borrowed immutably in this signature, so the
+                // loader gets a local clone to register the imported closure's
+                // enums into -- and that clone used to be dropped on the floor.
+                // The old comment here claimed those enums "reach the
+                // interpreter through GLOBAL_ENUMS"; nothing on this path put
+                // them there, so a block-scoped import of a module whose
+                // closure defines an enum loaded the FUNCTIONS and lost the
+                // ENUMS, and the first use failed at run time with
+                // "enum `X` not found in this scope". Publish them below.
+                // See doc/08_tracking/bug/function_local_use_loses_enum_scope_2026-09-12.md
                 let mut merged_enums = enums.clone();
                 let loaded = crate::interpreter::interpreter_module::load_and_merge_module(
                     use_stmt,
@@ -1145,6 +1151,20 @@ pub(super) fn exec_block_closure_into(
                     classes,
                     &mut merged_enums,
                 )?;
+                // Publish enums the import brought in to the cross-module
+                // registry every enum lookup already falls back to
+                // (interpreter/expr/calls.rs, interpreter_call/mod.rs,
+                // interpreter_method/mod.rs). Only names the local map does not
+                // already carry are published, so a local definition is never
+                // clobbered by an import.
+                GLOBAL_ENUMS.with(|cell| {
+                    let mut registry = cell.borrow_mut();
+                    for (enum_name, enum_def) in merged_enums.iter() {
+                        if !enums.contains_key(enum_name) {
+                            registry.insert(enum_name.clone(), Arc::clone(enum_def));
+                        }
+                    }
+                });
                 if let Value::Dict(exports) = &loaded {
                     // Mirrors the module-scope unpack rules in interpreter_eval:
                     // Group imports bind only the named items, Glob binds all,

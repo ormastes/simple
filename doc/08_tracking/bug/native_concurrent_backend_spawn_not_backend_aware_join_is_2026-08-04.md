@@ -143,3 +143,7 @@ cause location (`concurrency.rs:207`/`:272` spawn missing the
 `get_concurrent_registry()` backend branch that `:339` join has) is unchanged
 and remains in `src/compiler_rust/`, which this session's hard constraints
 forbid editing. Status remains ARCHITECTURAL-OPEN; no code or spec changed.
+
+## Triage 2026-09-13
+
+Already marked ARCHITECTURAL-OPEN; fix location is `src/compiler_rust/compiler/src/interpreter_extern/concurrency.rs`, out of scope for a pure-Simple TDD pass. No new evidence this pass. Leaving OPEN.

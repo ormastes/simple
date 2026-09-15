@@ -111,3 +111,25 @@ File/track "native isel backends have no float register class" as its own
 follow-up if float-typed tuple/struct fields on the native-isel (non-LLVM,
 non-C) backend path are in scope for near-term work; do not attempt a
 GetField-only patch there.
+
+## Triage 2026-09-13
+Reconfirmed: C backend fix is static-verified but native-run verification
+is pending a build slot (native-build is currently broken on this worktree
+by an unrelated rt_env_vars registration gap, see
+native_entry_closure_requires_unavailable_rt_env_vars_2026-09-09.md, which
+blocks obtaining that build slot here too). Native isel float-field gap
+remains open, blocked on a larger register-class gap per this record. Left
+as-is, no code change attempted.
+## Triage 2026-09-13 (BUGFIX-12 shard 22)
+
+The cited C-backend path,
+`src/compiler/70.backend/backend/_CBackendTranslate/instruction_lowering.spl`,
+no longer exists at `f26970e9d93` — that directory is gone entirely, so the
+C-backend translate module has been refactored/relocated since 2026-08-08.
+Could not re-verify the "C backend — FIXED (static-verified)" claim at its
+cited location within a shard triage budget, and re-locating the successor
+module plus re-auditing the fix was out of scope this pass. The separately-
+filed native-isel float-register-class gap (x86_64/aarch64/riscv64/riscv32
+have no float value representation at all) is architectural and unrelated to
+the moved file; nothing suggests it has been addressed. No change made.
+Leaving OPEN pending a re-audit against the current C-backend module location.

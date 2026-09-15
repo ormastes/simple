@@ -2825,9 +2825,41 @@ impl LlvmBackend {
                 //
                 // A bare (unqualified) name still reaches the table: that is a
                 // genuinely erased receiver, where `rt_to_string` is correct.
+                // ROUTE 4 of the `Poll.unwrap` rebind (2026-09-13, measured: 208
+                // `bl Poll.unwrap` sites across 109 functions survived the
+                // mangler-side guards because they are produced HERE, not by the
+                // mangler). A qualified enum helper such as `i64.unwrap` or
+                // `MirStaticInit.unwrap` is not a builtin OWNER, so this predicate
+                // called it a user-type method, `runtime_func` became `None`, and
+                // the fall-back below suffix-scanned the module for `.unwrap`,
+                // found the single `lib__nogc_async_mut__async__poll__Poll.unwrap`
+                // and bound to it -- returning 0 for every non-`Poll` receiver.
+                //
+                // For the enum helpers the qualifier names the PAYLOAD type, not
+                // an owner that has an `unwrap` method, so it is not type evidence
+                // at all and the builtin lowering is correct for every receiver --
+                // the same conclusion the bare-name guards already rest on.
+                //
+                // A GENUINE user method is still protected: by the time it reaches
+                // here the mangler has rewritten it to its full mangled spelling
+                // (`lib__x__Rival.unwrap`), whose owner carries `__`. A payload-type
+                // qualifier (`i64`, `text`, `T`, `MirStaticInit`) never does, so the
+                // `__` test separates the two without a name list.
+                let enum_helper_payload_qualifier = {
+                    let dotted = func_name.replace("_dot_", ".");
+                    let leaf = dotted.rsplit('.').next().unwrap_or("");
+                    let owner = dotted.rsplit_once('.').map(|(o, _)| o).unwrap_or("");
+                    matches!(
+                        leaf,
+                        "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+                    ) && !owner.is_empty()
+                        && !owner.contains("__")
+                };
                 let qualified_owner_is_user_type = {
                     let dotted = func_name.replace("_dot_", ".");
-                    dotted.contains('.') && !super::qualified_runtime_method_owner_is_builtin(func_name)
+                    dotted.contains('.')
+                        && !enum_helper_payload_qualifier
+                        && !super::qualified_runtime_method_owner_is_builtin(func_name)
                 };
 
                 // Map well-known methods to runtime functions
@@ -2930,7 +2962,22 @@ impl LlvmBackend {
                     "repeat" => Some("lib__common__string_core__str_repeat"),
                     "map" => Some("rt_option_map"),
                     // Option/Result methods (LLVM-specific)
-                    "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                    // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+                    // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+                    // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+                    // the representation `rt_is_some`/`rt_is_none` already accept) is not
+                    // one -- so every `.unwrap()` on a flat optional silently produced nil
+                    // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+                    // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+                    // implements the flat-nullable convention ("not a boxed enum: return
+                    // the value unchanged") and traps only on a genuine None/Err.
+                    // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+                    // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+                    // exported err-trap twin, and routing it through the Ok-trap helper
+                    // would abort on the very receiver it exists to read.
+                    "unwrap" => Some("rt_unwrap_or_trap"),
+                    "unwrap_or" => Some("rt_unwrap_or_value"),
+                    "unwrap_err" => Some("rt_enum_payload"),
                     "is_none" => Some("rt_is_none"),
                     "is_some" => Some("rt_is_some"),
                     "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),

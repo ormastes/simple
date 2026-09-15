@@ -2122,6 +2122,17 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_engine2d_simd_blend_const_span_u32",
         simd::rt_engine2d_simd_blend_const_span_u32
     );
+    insert_simple!(
+        "rt_engine2d_blend_const_span_pct_u32",
+        simd::rt_engine2d_blend_const_span_pct_u32
+    );
+    insert_simple!("rt_engine2d_blend_mask_span_u32", simd::rt_engine2d_blend_mask_span_u32);
+    insert_simple!("rt_engine2d_blend_cov_span_u32", simd::rt_engine2d_blend_cov_span_u32);
+    insert_simple!("rt_simd_find_byte_span", simd::rt_simd_find_byte_span);
+    insert_simple!("rt_simd_bytes_equal_span", simd::rt_simd_bytes_equal_span);
+    insert_simple!("rt_db_bitmap_and_u32", simd::rt_db_bitmap_and_u32);
+    insert_simple!("rt_db_bitmap_or_u32", simd::rt_db_bitmap_or_u32);
+    insert_simple!("rt_db_bitmap_andnot_u32", simd::rt_db_bitmap_andnot_u32);
     insert_simple!("rt_engine2d_simd_copy_row_u32", simd::rt_engine2d_simd_copy_row_u32);
     insert_simple!("rt_engine2d_simd_blend_row_u32", simd::rt_engine2d_simd_blend_row_u32);
     insert_simple!("rt_simd_aes_round_last_u8x16", simd::rt_simd_aes_round_last_u8x16);
@@ -2941,6 +2952,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // PTY (pseudo-terminal) operations
     insert_simple!("rt_pty_open", pty::rt_pty_open);
     insert_simple!("rt_pty_spawn", pty::rt_pty_spawn);
+    insert_simple!("rt_pty_read", pty::rt_pty_read);
+    insert_simple!("rt_pty_write", pty::rt_pty_write);
+    insert_simple!("rt_pty_close", pty::rt_pty_close);
     // I/O wrappers that pass empty slice or alias another function
     insert_simple!("rt_stdin_read_line", rt_stdin_read_line_stub);
     insert_simple!("rt_stdout_flush", io::stdout_flush);

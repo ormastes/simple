@@ -188,7 +188,15 @@ fn lifecycle_unload_module(self: ResourceLifecycleManager, exec_mapper: SharedEx
     for jit_sym in owned.jit_symbols:
         _ = exec_mapper.unmap_symbol(jit_sym)
         if self.registry.jit_origin.has(jit_sym):
-            self.registry.jit_origin = self.registry.jit_origin.remove(jit_sym)
+            # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+            # natively (rt_dict_remove); assigning it back destroys the map on the
+            # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+            # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+            var _kept_self_registry_jit_origin: Dict<text, text> = {}
+            for _k in self.registry.jit_origin.keys():
+                if _k != jit_sym:
+                    _kept_self_registry_jit_origin[_k] = self.registry.jit_origin[_k]
+            self.registry.jit_origin = _kept_self_registry_jit_origin
             self.registry.jit_count = self.registry.jit_count - 1
 
     # 2. Free loader-mapped exec pages for this module.
@@ -199,7 +207,15 @@ fn lifecycle_unload_module(self: ResourceLifecycleManager, exec_mapper: SharedEx
         self.smf_cache_mgr.ref_count_dec(smf_path)
 
     # 4. Remove ownership record.
-    self.registry.owner_resources = self.registry.owner_resources.remove(module_path)
+    # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
+    # natively (rt_dict_remove); assigning it back destroys the map on the
+    # compiled lane. Rebuild without the key. See doc/08_tracking/bug/
+    # dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+    var _kept_self_registry_owner_resources: Dict<text, OwnedResources> = {}
+    for _k in self.registry.owner_resources.keys():
+        if _k != module_path:
+            _kept_self_registry_owner_resources[_k] = self.registry.owner_resources[_k]
+    self.registry.owner_resources = _kept_self_registry_owner_resources
     self.registry.owner_count = self.registry.owner_count - 1
 
     if self.config.verbose:

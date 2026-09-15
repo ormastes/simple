@@ -178,3 +178,17 @@ Unblock condition for closing this row: a native-build that completes, then
 (`native_struct_return_by_value_field_read_spec.spl`,
 `native_aggregate_return_transport_class_spec.spl`) going green. Do not close it
 on the source diff alone.
+
+## Triage 2026-09-13
+
+Re-confirmed unchanged from the 2026-08-17 re-check: the frontend-side
+fail-open (`access.rs` `.unwrap_or(0)`) is already fixed in source, but
+the runtime symptom needs a completed `native-build --entry-closure`
+run to re-measure, and the last attempt hit a 2GB allocation failure
+during parse before reaching codegen (see
+`native_build_source_closure_zero_sources_2026-08-17.md`). Running
+native-build on this shared, already-loaded host risks starving other
+concurrent lanes and this defect's own unblock condition explicitly
+requires a completed build plus two RED specs going green, which is
+well beyond this lane's per-item budget. Leaving OPEN, no new attempt.
+

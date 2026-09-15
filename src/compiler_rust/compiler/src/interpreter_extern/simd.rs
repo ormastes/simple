@@ -2416,3 +2416,726 @@ pub fn rt_xgetbv(args: &[Value]) -> Result<Value, CompileError> {
 
     Ok(Value::Int(value))
 }
+
+// ---------------------------------------------------------------------------
+// Percent-opacity constant-colour span blend (web renderer row kernel).
+//
+// `rt_engine2d_simd_blend_const_span_u32` blends with STRAIGHT-ALPHA src-over
+// (/255, +128 rounding, alpha taken from the colour). The web renderer's
+// `blend_opacity` instead blends by an integer PERCENT (/100, +50 rounding),
+// so the two are not interchangeable — substituting one for the other shifts
+// every rendered pixel. This kernel exists because the renderer's row loop
+// needs the percent semantics, bit for bit.
+//
+// The body is deliberately a plain indexed loop over a `&mut [u32]`: that is
+// the shape LLVM auto-vectorizes, and the `blend_const_span_pct_avx512`
+// wrapper below re-emits it under `avx512bw` so a capable host gets ZMM-width
+// codegen without any hand-written intrinsics to get wrong. Correctness is
+// therefore identical across all three paths by construction — they are the
+// same source loop compiled three ways.
+// ---------------------------------------------------------------------------
+
+/// One pixel of the percent blend. MUST stay bit-identical to
+/// `blend_opacity` in
+/// `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl`.
+#[inline(always)]
+fn blend_opacity_pct_u32(src: u32, dst: u32, opacity_pct: i32) -> u32 {
+    if opacity_pct >= 100 {
+        return src;
+    }
+    if opacity_pct <= 0 {
+        return dst;
+    }
+    let sr = ((src >> 16) & 255) as i32;
+    let sg = ((src >> 8) & 255) as i32;
+    let sb = (src & 255) as i32;
+    let dr = ((dst >> 16) & 255) as i32;
+    let dg = ((dst >> 8) & 255) as i32;
+    let db = (dst & 255) as i32;
+    let inv = 100 - opacity_pct;
+    let r = (sr * opacity_pct + dr * inv + 50) / 100;
+    let g = (sg * opacity_pct + dg * inv + 50) / 100;
+    let b = (sb * opacity_pct + db * inv + 50) / 100;
+    // Mirrors the Simple `argb` helper EXACTLY
+    // (renderer_foundation.spl:1223), which does not clamp:
+    //     0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+    // Clamping here would be a no-op for every reachable input (channels are
+    // 0..255 and opacity_pct is 0..100 after the early returns above), but
+    // writing it out this way makes the two bit-identical by construction
+    // rather than by argument.
+    0xFF00_0000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
+#[inline(always)]
+fn blend_const_span_pct_scalar(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    for d in dst.iter_mut() {
+        *d = blend_opacity_pct_u32(src, *d, opacity_pct);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+unsafe fn blend_const_span_pct_avx512(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    blend_const_span_pct_scalar(dst, src, opacity_pct);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blend_const_span_pct_avx2(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    blend_const_span_pct_scalar(dst, src, opacity_pct);
+}
+
+/// Dispatch on the widest admitted host tier. Every path runs the same source
+/// loop, so this can change speed but never results.
+fn blend_const_span_pct_dispatch(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512f") {
+            // SAFETY: guarded by the runtime feature probe immediately above.
+            unsafe { blend_const_span_pct_avx512(dst, src, opacity_pct) };
+            return;
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the runtime feature probe immediately above.
+            unsafe { blend_const_span_pct_avx2(dst, src, opacity_pct) };
+            return;
+        }
+    }
+    blend_const_span_pct_scalar(dst, src, opacity_pct);
+}
+
+/// Interpreter bridge: blend one constant colour over `dst[offset..offset+count)`
+/// at an integer percent opacity. Interpreter arrays are immutable Arc values,
+/// so the updated destination array is returned.
+pub fn rt_engine2d_blend_const_span_pct_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_blend_const_span_pct_u32 expects 5 arguments (dst, offset, count, color, opacity_pct)"
+                .to_string(),
+        ));
+    }
+    // Returns ONLY the blended span, never the whole destination.
+    //
+    // The first cut unpacked and repacked the ENTIRE framebuffer, and
+    // fb_rect_opacity_clip calls this once per row — so the cost was
+    // O(rows x fb_len) boxed Value copies instead of O(rows x span). The
+    // original benchmark used rect == whole buffer, which hid it completely.
+    // Re-measured with a 10x50 rect on a 1920x384 buffer: 1214 ms against the
+    // scalar loop's 1116 ms, i.e. a REGRESSION on the shape that actually
+    // occurs. Returning just the span removes the fb_len term entirely.
+    let offset_raw = require_u64_value("rt_engine2d_blend_const_span_pct_u32(offset)", &args[1])? as i64;
+    let count_raw = require_u64_value("rt_engine2d_blend_const_span_pct_u32(count)", &args[2])? as i64;
+    let color = require_u32_value("rt_engine2d_blend_const_span_pct_u32(color)", &args[3])?;
+    let opacity_pct = require_u64_value("rt_engine2d_blend_const_span_pct_u32(opacity_pct)", &args[4])? as i64;
+
+    if offset_raw < 0 || count_raw <= 0 {
+        return Ok(pack_u32_array(Vec::new()));
+    }
+    let offset = offset_raw as usize;
+    // Read only the requested window out of the destination.
+    let mut span = unpack_u32_window("rt_engine2d_blend_const_span_pct_u32(dst)", &args[0], offset, count_raw as usize)?;
+    if span.is_empty() {
+        return Ok(pack_u32_array(Vec::new()));
+    }
+    let pct = opacity_pct.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    blend_const_span_pct_dispatch(&mut span, color, pct);
+    Ok(pack_u32_array(span))
+}
+
+/// Unpack `count` elements starting at `offset`, clamped to the array's real
+/// length. O(count), not O(len) — the whole point of the span-returning ABI.
+fn unpack_u32_window(
+    name: &str,
+    value: &Value,
+    offset: usize,
+    count: usize,
+) -> Result<Vec<u32>, CompileError> {
+    let items = match value {
+        Value::Array(items) => items,
+        Value::FrozenArray(items) => items,
+        other => {
+            return Err(CompileError::runtime(format!(
+                "{name}: expected [u32] array, got {:?}",
+                other
+            )))
+        }
+    };
+    if offset >= items.len() {
+        return Ok(Vec::new());
+    }
+    let end = (offset + count).min(items.len());
+    items[offset..end]
+        .iter()
+        .map(|item| require_u32_value(name, item))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// DB row-bitmap word kernels (query execution hot path).
+//
+// `RowBitmap::and_with` / `or_with` / `and_not` / `count` in
+// src/lib/nogc_sync_mut/db/accel.spl are word-wise u32 loops over the row
+// bitmap — the innermost work of every filtered scan, posting-list intersect
+// and union. In the interpreter each iteration is an interpreted step; these
+// kernels replace the whole loop with one call.
+//
+// `or_with` and `and_not` take explicit word counts because the Simple loops
+// treat an index past the end of either operand as a zero word rather than
+// clamping the span. The kernels reproduce that exactly instead of shortening
+// the result, which would silently drop set rows.
+//
+// As with the renderer kernel, each tier is the SAME source loop re-emitted
+// under `#[target_feature]`, so a wider tier changes speed and never results.
+// ---------------------------------------------------------------------------
+
+macro_rules! db_bitmap_tiers {
+    ($scalar:ident, $avx512:ident, $avx2:ident, $dispatch:ident, $($arg:ident: $ty:ty),*) => {
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx512bw")]
+        unsafe fn $avx512(out: &mut [u32], $($arg: $ty),*) { $scalar(out, $($arg),*) }
+
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = "avx2")]
+        unsafe fn $avx2(out: &mut [u32], $($arg: $ty),*) { $scalar(out, $($arg),*) }
+
+        fn $dispatch(out: &mut [u32], $($arg: $ty),*) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::is_x86_feature_detected!("avx512bw")
+                    && std::is_x86_feature_detected!("avx512f")
+                {
+                    // SAFETY: guarded by the runtime feature probe above.
+                    unsafe { $avx512(out, $($arg),*) };
+                    return;
+                }
+                if std::is_x86_feature_detected!("avx2") {
+                    // SAFETY: guarded by the runtime feature probe above.
+                    unsafe { $avx2(out, $($arg),*) };
+                    return;
+                }
+            }
+            $scalar(out, $($arg),*)
+        }
+    };
+}
+
+#[inline(always)]
+fn db_bitmap_and_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32]) {
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = lhs[i] & rhs[i];
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_and_scalar,
+    db_bitmap_and_avx512,
+    db_bitmap_and_avx2,
+    db_bitmap_and_dispatch,
+    lhs: &[u32],
+    rhs: &[u32]
+);
+
+#[inline(always)]
+fn db_bitmap_or_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32], lhs_words: usize, rhs_words: usize) {
+    // The per-element `if i < words` bounds test is hoisted out of the loop.
+    //
+    // It is not cosmetic: with the test inside, llvm-objdump showed ZERO zmm
+    // instructions in the avx512 variant of this kernel -- a data-dependent
+    // branch per lane blocks vectorization outright, so the function was
+    // AVX-512 in name only. Splitting the span into a both-operands region and
+    // a single-operand tail leaves three straight-line loops LLVM can widen.
+    let both = lhs_words.min(rhs_words).min(out.len());
+    let (head, tail) = out.split_at_mut(both);
+    for (i, o) in head.iter_mut().enumerate() {
+        *o = lhs[i] | rhs[i];
+    }
+    for (k, o) in tail.iter_mut().enumerate() {
+        let i = both + k;
+        let l = if i < lhs_words { lhs[i] } else { 0 };
+        let r = if i < rhs_words { rhs[i] } else { 0 };
+        *o = l | r;
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_or_scalar,
+    db_bitmap_or_avx512,
+    db_bitmap_or_avx2,
+    db_bitmap_or_dispatch,
+    lhs: &[u32],
+    rhs: &[u32],
+    lhs_words: usize,
+    rhs_words: usize
+);
+
+#[inline(always)]
+fn db_bitmap_andnot_scalar(out: &mut [u32], lhs: &[u32], rhs: &[u32], rhs_words: usize) {
+    // Same hoist as db_bitmap_or_scalar, for the same measured reason: the
+    // per-element bounds test left the avx512 variant with zero zmm
+    // instructions. Past rhs_words the right operand reads as zero, so
+    // `x & !0` is just a copy of the left operand.
+    let both = rhs_words.min(out.len());
+    let (head, tail) = out.split_at_mut(both);
+    for (i, o) in head.iter_mut().enumerate() {
+        *o = lhs[i] & !rhs[i];
+    }
+    for (k, o) in tail.iter_mut().enumerate() {
+        *o = lhs[both + k];
+    }
+}
+db_bitmap_tiers!(
+    db_bitmap_andnot_scalar,
+    db_bitmap_andnot_avx512,
+    db_bitmap_andnot_avx2,
+    db_bitmap_andnot_dispatch,
+    lhs: &[u32],
+    rhs: &[u32],
+    rhs_words: usize
+);
+
+/// Shared prologue: unpack both operands and the word limit, or return Nil so
+/// the Simple caller falls back to its scalar twin rather than producing a
+/// short bitmap (which would silently drop set rows).
+fn db_bitmap_operands(
+    name: &str,
+    args: &[Value],
+    expected: usize,
+) -> Result<Option<(Vec<u32>, Vec<u32>, usize)>, CompileError> {
+    if args.len() != expected {
+        return Err(CompileError::runtime(format!(
+            "{name} expects {expected} arguments"
+        )));
+    }
+    let lhs = unpack_u32_array(name, &args[0])?;
+    let rhs = unpack_u32_array(name, &args[1])?;
+    let limit_raw = require_u64_value(name, &args[2])? as i64;
+    if limit_raw < 0 {
+        return Ok(None);
+    }
+    Ok(Some((lhs, rhs, limit_raw as usize)))
+}
+
+pub fn rt_db_bitmap_and_u32(args: &[Value]) -> Result<Value, CompileError> {
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_and_u32", args, 3)? else {
+        return Ok(Value::Nil);
+    };
+    if limit > lhs.len() || limit > rhs.len() {
+        return Ok(Value::Nil);
+    }
+    let mut out = vec![0u32; limit];
+    db_bitmap_and_dispatch(&mut out, &lhs, &rhs);
+    Ok(pack_u32_array(out))
+}
+
+pub fn rt_db_bitmap_or_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_db_bitmap_or_u32 expects 5 arguments (lhs, rhs, limit, lhs_words, rhs_words)".to_string(),
+        ));
+    }
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_or_u32", args, 5)? else {
+        return Ok(Value::Nil);
+    };
+    let lhs_words = (require_u64_value("rt_db_bitmap_or_u32(lhs_words)", &args[3])? as usize).min(lhs.len());
+    let rhs_words = (require_u64_value("rt_db_bitmap_or_u32(rhs_words)", &args[4])? as usize).min(rhs.len());
+    let mut out = vec![0u32; limit];
+    db_bitmap_or_dispatch(&mut out, &lhs, &rhs, lhs_words, rhs_words);
+    Ok(pack_u32_array(out))
+}
+
+pub fn rt_db_bitmap_andnot_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_db_bitmap_andnot_u32 expects 4 arguments (lhs, rhs, limit, rhs_words)".to_string(),
+        ));
+    }
+    let Some((lhs, rhs, limit)) = db_bitmap_operands("rt_db_bitmap_andnot_u32", args, 4)? else {
+        return Ok(Value::Nil);
+    };
+    if limit > lhs.len() {
+        return Ok(Value::Nil);
+    }
+    let rhs_words = (require_u64_value("rt_db_bitmap_andnot_u32(rhs_words)", &args[3])? as usize).min(rhs.len());
+    let mut out = vec![0u32; limit];
+    db_bitmap_andnot_dispatch(&mut out, &lhs, &rhs, rhs_words);
+    Ok(pack_u32_array(out))
+}
+
+// ---------------------------------------------------------------------------
+// Byte-span scan kernels (HTTP request parsing, DB span compare).
+//
+// `simd_find_byte` / `simd_bytes_equal` in src/lib/common/simd_scan.spl back
+// the HTTP request-line and header scan (http_core.spl:_crlf_from) and the DB
+// span compare (db/accel.spl:byte_span_equals). Their FixedVec implementation
+// is both wrong and ~25x slower than scalar (see
+// doc/08_tracking/bug/fixedvec_splat_boxing_mismatch_breaks_simd_scan_2026-09-13.md),
+// so the public entry points currently run the scalar oracle.
+//
+// These kernels are the native alternative: the whole scan happens in one call
+// instead of one interpreted step per byte. Same tiering discipline as the
+// other kernels here — one source loop, three `#[target_feature]` emissions,
+// so the tier changes speed and never results.
+//
+// NOTE the cost model: the interpreter stores arrays as Vec<Value>, so the
+// unpack is O(n) boxed reads before the scan. Whether that pays for itself is
+// an empirical question per call site, not an assumption — measure before
+// routing a hot path through these.
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn find_byte_scalar(hay: &[u8], needle: u8) -> i64 {
+    // Chunked rather than `iter().position()`.
+    //
+    // `position` is an EARLY-EXIT loop: every iteration may leave the loop, so
+    // LLVM cannot widen it, and llvm-objdump confirmed the avx512 variant of
+    // this kernel contained ZERO zmm instructions -- AVX-512 in name only,
+    // while the three sibling kernels here genuinely vectorized.
+    //
+    // The fix is the standard memchr shape: fold a whole chunk into one
+    // "any match" flag with NO branch inside the fold, so the fold vectorizes,
+    // and only pay a scalar scan for the single chunk that actually hits.
+    const CHUNK: usize = 64;
+    let mut base = 0usize;
+    while base + CHUNK <= hay.len() {
+        let block = &hay[base..base + CHUNK];
+        let mut hit = 0u8;
+        for &b in block {
+            hit |= (b == needle) as u8;
+        }
+        if hit != 0 {
+            for (k, &b) in block.iter().enumerate() {
+                if b == needle {
+                    return (base + k) as i64;
+                }
+            }
+        }
+        base += CHUNK;
+    }
+    for (k, &b) in hay[base..].iter().enumerate() {
+        if b == needle {
+            return (base + k) as i64;
+        }
+    }
+    -1
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+unsafe fn find_byte_avx512(hay: &[u8], needle: u8) -> i64 { find_byte_scalar(hay, needle) }
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_byte_avx2(hay: &[u8], needle: u8) -> i64 { find_byte_scalar(hay, needle) }
+
+fn find_byte_dispatch(hay: &[u8], needle: u8) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512f") {
+            // SAFETY: guarded by the runtime feature probe above.
+            return unsafe { find_byte_avx512(hay, needle) };
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the runtime feature probe above.
+            return unsafe { find_byte_avx2(hay, needle) };
+        }
+    }
+    find_byte_scalar(hay, needle)
+}
+
+fn unpack_u8_array(name: &str, value: &Value) -> Result<Vec<u8>, CompileError> {
+    let items = match value {
+        // ByteArray/FrozenByteArray are already unboxed bytes — the common
+        // representation for real HTTP buffers and file reads. Taking them
+        // directly skips the O(n) boxed-read unpack entirely, so these kernels
+        // are at their fastest on exactly the buffers that matter.
+        Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => return Ok(bytes.to_vec()),
+        Value::Array(items) => items,
+        Value::FrozenArray(items) => items,
+        other => {
+            return Err(CompileError::runtime(format!(
+                "{name}: expected [u8] array, got {:?}",
+                other
+            )))
+        }
+    };
+    items
+        .iter()
+        .map(|item| require_u64_value(name, item).map(|v| v as u8))
+        .collect()
+}
+
+/// First index of `needle` at or after `start`, or -1. Returns -1 for an
+/// out-of-range start rather than erroring, matching the Simple oracle's
+/// span-validation contract.
+pub fn rt_simd_find_byte_span(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_simd_find_byte_span expects 3 arguments (bytes, start, needle)".to_string(),
+        ));
+    }
+    let bytes = unpack_u8_array("rt_simd_find_byte_span(bytes)", &args[0])?;
+    let start_raw = require_u64_value("rt_simd_find_byte_span(start)", &args[1])? as i64;
+    let needle = require_u64_value("rt_simd_find_byte_span(needle)", &args[2])? as u8;
+    if start_raw < 0 || start_raw as usize >= bytes.len() {
+        return Ok(Value::Int(-1));
+    }
+    let start = start_raw as usize;
+    let found = find_byte_dispatch(&bytes[start..], needle);
+    Ok(Value::Int(if found < 0 { -1 } else { start as i64 + found }))
+}
+
+/// Span equality. False for any out-of-range span, matching the oracle.
+pub fn rt_simd_bytes_equal_span(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_simd_bytes_equal_span expects 5 arguments (lhs, lhs_start, rhs, rhs_start, len)"
+                .to_string(),
+        ));
+    }
+    let lhs = unpack_u8_array("rt_simd_bytes_equal_span(lhs)", &args[0])?;
+    let lhs_start = require_u64_value("rt_simd_bytes_equal_span(lhs_start)", &args[1])? as i64;
+    let rhs = unpack_u8_array("rt_simd_bytes_equal_span(rhs)", &args[2])?;
+    let rhs_start = require_u64_value("rt_simd_bytes_equal_span(rhs_start)", &args[3])? as i64;
+    let len = require_u64_value("rt_simd_bytes_equal_span(len)", &args[4])? as i64;
+    if lhs_start < 0 || rhs_start < 0 || len < 0 {
+        return Ok(Value::Bool(false));
+    }
+    let (ls, rs, n) = (lhs_start as usize, rhs_start as usize, len as usize);
+    if ls + n > lhs.len() || rs + n > rhs.len() {
+        return Ok(Value::Bool(false));
+    }
+    Ok(Value::Bool(lhs[ls..ls + n] == rhs[rs..rs + n]))
+}
+
+// ---------------------------------------------------------------------------
+// Glyph mask-blend span kernel (text rendering).
+//
+// `blit_glyph` (src/lib/nogc_sync_mut/text_layout/font_rasterizer.spl:791)
+// blends a rasterized glyph's u8 coverage mask into an ARGB buffer, one pixel
+// at a time with five branches and ~15 integer ops each. Text is the other
+// high-volume path in the web renderer after solid fills.
+//
+// Semantics MUST mirror blit_glyph exactly, and it is NOT the same blend as
+// either of the two kernels already here:
+//   * it is straight-alpha src-over with FLOOR /255 (not the percent blend's
+//     /100 + 50),
+//   * and it always writes opaque alpha, ignoring the destination's alpha
+//     entirely -- so it must take the opaque-dst branch unconditionally rather
+//     than reusing a general Porter-Duff path.
+//
+// Span-returning, like the percent kernel: returning the whole destination
+// would make the cost O(rows x buffer) instead of O(rows x span).
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn blend_mask_span_scalar(dst: &mut [u32], mask: &[u8], color: u32) {
+    let fg_r = ((color >> 16) & 0xFF) as u32;
+    let fg_g = ((color >> 8) & 0xFF) as u32;
+    let fg_b = (color & 0xFF) as u32;
+    for (i, d) in dst.iter_mut().enumerate() {
+        let a = mask[i] as u32;
+        // Branchless in the vector body: `a == 0` and `a == 255` both fall out
+        // of the general formula (inv=255 -> dst, inv=0 -> fg), so no early
+        // exit is needed and the loop stays widenable.
+        let inv = 255 - a;
+        let cur = *d;
+        let r = (fg_r * a + ((cur >> 16) & 0xFF) * inv) / 255;
+        let g = (fg_g * a + ((cur >> 8) & 0xFF) * inv) / 255;
+        let b = (fg_b * a + (cur & 0xFF) * inv) / 255;
+        *d = 0xFF00_0000u32 | (r << 16) | (g << 8) | b;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512bw")]
+unsafe fn blend_mask_span_avx512(dst: &mut [u32], mask: &[u8], color: u32) {
+    blend_mask_span_scalar(dst, mask, color)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blend_mask_span_avx2(dst: &mut [u32], mask: &[u8], color: u32) {
+    blend_mask_span_scalar(dst, mask, color)
+}
+
+fn blend_mask_span_dispatch(dst: &mut [u32], mask: &[u8], color: u32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512f") {
+            // SAFETY: guarded by the runtime feature probe above.
+            unsafe { blend_mask_span_avx512(dst, mask, color) };
+            return;
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the runtime feature probe above.
+            unsafe { blend_mask_span_avx2(dst, mask, color) };
+            return;
+        }
+    }
+    blend_mask_span_scalar(dst, mask, color)
+}
+
+// ---------------------------------------------------------------------------
+// Soft box-shadow coverage span.
+//
+// `fb_soft_box_shadow` blended one pixel at a time with ~15 integer ops each.
+// Its coverage is SEPARABLE — `colcov[x] * cov_y / 256` — so a whole row is one
+// precomputed column table scaled by a per-row constant, which is exactly the
+// shape a span kernel wants.
+//
+// The arithmetic is `/256` FLOOR with alpha in 0..=256 inclusive, and it is NOT
+// interchangeable with either kernel already here: the percent blend rounds via
+// `/100 + 50`, and the mask blend uses `/255` with `inv = 255 - a`. At a = 128
+// this computes `(s*128 + d*128)/256` where the mask kernel computes
+// `(s*128 + d*127)/255`. Substituting either shifts every shadow pixel, which
+// is why this is a new kernel rather than a reuse.
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn blend_cov_one(dst: u32, cov: i32, alpha: i32, sr: i32, sg: i32, sb: i32) -> u32 {
+    if cov <= 0 {
+        return dst;
+    }
+    let mut a = (cov * alpha) / 255;
+    if a > 256 {
+        a = 256;
+    }
+    let dr = ((dst >> 16) & 255) as i32;
+    let dg = ((dst >> 8) & 255) as i32;
+    let db = (dst & 255) as i32;
+    let inv = 256 - a;
+    let nr = (sr * a + dr * inv) / 256;
+    let ng = (sg * a + dg * inv) / 256;
+    let nb = (sb * a + db * inv) / 256;
+    0xFF00_0000u32 | ((nr as u32) << 16) | ((ng as u32) << 8) | (nb as u32)
+}
+
+fn blend_cov_span_scalar(dst: &mut [u32], colcov: &[i32], cov_y: i32, alpha: i32, color: u32) {
+    let sr = ((color >> 16) & 255) as i32;
+    let sg = ((color >> 8) & 255) as i32;
+    let sb = (color & 255) as i32;
+    // Hoisted out of the loop: a per-element branch on bounds is a
+    // data-dependent branch per lane and blocks vectorization outright, which
+    // is how three earlier kernels ended up with zero zmm despite carrying the
+    // attribute.
+    let n = dst.len().min(colcov.len());
+    for i in 0..n {
+        let cov = (colcov[i] * cov_y) / 256;
+        dst[i] = blend_cov_one(dst[i], cov, alpha, sr, sg, sb);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl")]
+unsafe fn blend_cov_span_avx512(dst: &mut [u32], colcov: &[i32], cov_y: i32, alpha: i32, color: u32) {
+    blend_cov_span_scalar(dst, colcov, cov_y, alpha, color)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blend_cov_span_avx2(dst: &mut [u32], colcov: &[i32], cov_y: i32, alpha: i32, color: u32) {
+    blend_cov_span_scalar(dst, colcov, cov_y, alpha, color)
+}
+
+fn blend_cov_span_dispatch(dst: &mut [u32], colcov: &[i32], cov_y: i32, alpha: i32, color: u32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512f") {
+            // SAFETY: guarded by the runtime feature probe above.
+            unsafe { blend_cov_span_avx512(dst, colcov, cov_y, alpha, color) };
+            return;
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the runtime feature probe above.
+            unsafe { blend_cov_span_avx2(dst, colcov, cov_y, alpha, color) };
+            return;
+        }
+    }
+    blend_cov_span_scalar(dst, colcov, cov_y, alpha, color)
+}
+
+fn unpack_i32_array(name: &str, value: &Value) -> Result<Vec<i32>, CompileError> {
+    let items = match value {
+        Value::Array(items) => items,
+        Value::FrozenArray(items) => items,
+        other => {
+            return Err(CompileError::runtime(format!(
+                "{name}: expected [i32] array, got {:?}",
+                other
+            )))
+        }
+    };
+    items
+        .iter()
+        .map(|item| require_u64_value(name, item).map(|v| v as i32))
+        .collect()
+}
+
+/// Blend one soft-shadow row: `dst[offset..offset+count]` against
+/// `colcov[0..count]` scaled by `cov_y`, returning ONLY that span. An
+/// out-of-range request returns an empty array, which the caller treats as
+/// "not backed" and falls back rather than painting a short row.
+pub fn rt_engine2d_blend_cov_span_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 6 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_blend_cov_span_u32 expects 6 arguments (dst, offset, colcov, count, cov_y_and_alpha, color)"
+                .to_string(),
+        ));
+    }
+    let dst_off = require_u64_value("rt_engine2d_blend_cov_span_u32(offset)", &args[1])? as i64;
+    let count_raw = require_u64_value("rt_engine2d_blend_cov_span_u32(count)", &args[3])? as i64;
+    // cov_y and alpha are packed as cov_y * 1024 + alpha to keep the extern at
+    // six arguments; both are bounded well below 1024 by their construction
+    // (cov_y <= 256 from _phi256, alpha <= 255).
+    let packed = require_u64_value("rt_engine2d_blend_cov_span_u32(cov_y_and_alpha)", &args[4])? as i64;
+    let color = require_u32_value("rt_engine2d_blend_cov_span_u32(color)", &args[5])?;
+    if dst_off < 0 || count_raw <= 0 || packed < 0 {
+        return Ok(pack_u32_array(Vec::new()));
+    }
+    let cov_y = (packed / 1024) as i32;
+    let alpha = (packed % 1024) as i32;
+    let count = count_raw as usize;
+    let mut span = unpack_u32_window(
+        "rt_engine2d_blend_cov_span_u32(dst)",
+        &args[0],
+        dst_off as usize,
+        count,
+    )?;
+    let colcov = unpack_i32_array("rt_engine2d_blend_cov_span_u32(colcov)", &args[2])?;
+    if span.len() != count || colcov.len() < count {
+        return Ok(pack_u32_array(Vec::new()));
+    }
+    blend_cov_span_dispatch(&mut span, &colcov[..count], cov_y, alpha, color);
+    Ok(pack_u32_array(span))
+}
+
+/// Blend `count` mask pixels into `dst[offset..]`, returning ONLY that span.
+/// An out-of-range span returns an empty array, which the caller treats as
+/// "not backed" and falls back rather than writing a short row.
+pub fn rt_engine2d_blend_mask_span_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 6 {
+        return Err(CompileError::runtime(
+            "rt_engine2d_blend_mask_span_u32 expects 6 arguments (dst, offset, mask, mask_offset, count, color)"
+                .to_string(),
+        ));
+    }
+    let dst_off = require_u64_value("rt_engine2d_blend_mask_span_u32(offset)", &args[1])? as i64;
+    let mask_off = require_u64_value("rt_engine2d_blend_mask_span_u32(mask_offset)", &args[3])? as i64;
+    let count_raw = require_u64_value("rt_engine2d_blend_mask_span_u32(count)", &args[4])? as i64;
+    let color = require_u32_value("rt_engine2d_blend_mask_span_u32(color)", &args[5])?;
+    if dst_off < 0 || mask_off < 0 || count_raw <= 0 {
+        return Ok(pack_u32_array(Vec::new()));
+    }
+    let count = count_raw as usize;
+    let mut span = unpack_u32_window(
+        "rt_engine2d_blend_mask_span_u32(dst)",
+        &args[0],
+        dst_off as usize,
+        count,
+    )?;
+    let mask_all = unpack_u8_array("rt_engine2d_blend_mask_span_u32(mask)", &args[2])?;
+    let m0 = mask_off as usize;
+    if span.len() != count || m0 + count > mask_all.len() {
+        return Ok(pack_u32_array(Vec::new()));
+    }
+    blend_mask_span_dispatch(&mut span, &mask_all[m0..m0 + count], color);
+    Ok(pack_u32_array(span))
+}

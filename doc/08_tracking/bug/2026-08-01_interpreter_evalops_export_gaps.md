@@ -5,6 +5,10 @@
 **Filed by:** follow-up from `2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`
 **Area:** pure-Simple interpreter, `_EvalOps` package surface
 
+## Closed 2026-09-13 — Partially Fixed (Items 1 and 2)
+
+Items 1 and 2 verified as fixed: `eval_int_method` is exported in `__init__.spl`, and text `.at` method implemented in `call_method_eval.spl`. Item 3 (systemic export gaps in other packages) remains open as documented and is outside scope of this triage.
+
 Three gaps in the live dispatch tree
 `src/compiler/10.frontend/core/interpreter/_EvalOps/`. All three share one root
 cause: the package `__init__.spl` uses **explicit export lists**, so nothing in

@@ -22,7 +22,7 @@ pub(crate) fn get_pattern_name(pattern: &simple_parser::ast::Pattern) -> Option<
     }
 }
 
-pub(crate) fn visit_pattern_binding_names(pattern: &simple_parser::ast::Pattern, visit: &mut impl FnMut(&str)) {
+pub(crate) fn visit_pattern_binding_names<'p>(pattern: &'p simple_parser::ast::Pattern, visit: &mut impl FnMut(&'p str)) {
     use simple_parser::ast::Pattern;
 
     match pattern {

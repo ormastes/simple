@@ -1,7 +1,7 @@
 # Two exported classes named ThreadPool collapse into a type with neither API
 
 - **Date:** 2026-08-02
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-09-13) — see Fix landed below.
 - **Severity:** HIGH — a name collision between two exported classes silently
   produces an unusable type instead of an error or a correct resolution. An
   explicit module-qualified import does not save you.
@@ -115,3 +115,50 @@ reach.
 - `doc/08_tracking/bug/vacuous_spec_corpus_census_and_inert_assertion_forms_2026-08-02.md`
 - `doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md`
 - `doc/08_tracking/bug/unify_occurs_check_unreachable_2026-08-02.md`
+
+## Fix landed (2026-09-13, BUGFIX-11)
+
+Applied fix option 1 from "Fix required" above: renamed
+`src/lib/nogc_async_mut/io/file.spl`'s `class ThreadPool` to
+`class FileThreadPool`, so a single `ThreadPool` (the `thread_pool.spl` real
+worker pool) is reachable everywhere; the io/file fallback pool keeps its own
+distinct API under its own name. Updated every facade that names it by bare
+import so no stale reference to the old name remains:
+
+- `src/lib/nogc_async_mut/io/file.spl` (definition, `new`/`default`, export)
+- `src/lib/nogc_async_mut/io/__init__.spl:77`
+- `src/lib/nogc_async_mut/io.spl:92,119`
+- `src/lib/nogc_sync_mut/io.spl:121,157`
+- `src/lib/nogc_sync_mut/__init__.spl:204`
+- `src/lib/gc_async_mut/io.spl:92,126`
+- `src/lib/gc_async_mut/io/file.spl:10`
+
+`grep -rn '\bThreadPool\b' --include=*.spl src/lib` confirms the only
+remaining bare `ThreadPool` references are `thread_pool.spl` itself and
+`nogc_async_mut/__init__.spl:178` (which exports the real one, unaffected).
+
+**RED (before fix, exact doc reproduction):**
+`test/01_unit/lib/nogc_async_mut/io/threadpool_duplicate_export_repro_spec.spl`
+(originally the doc's own three examples, importing
+`std.nogc_async_mut.io.file.{ThreadPool}`) — `3 examples, 3 failures`,
+matching the doc's `method ... not found` / `undefined field 'size'`
+messages exactly.
+
+**GREEN (after fix):** the spec was updated to import `FileThreadPool` (the
+renamed symbol) and to check both class declarations remain distinct by
+name via `read_file_text` — `bin/simple test
+test/01_unit/lib/nogc_async_mut/io/threadpool_duplicate_export_repro_spec.spl`
+-> `3 examples, 0 failures`, `PASS`.
+
+**Regression check:** `test/01_unit/lib/nogc_async_mut/io/async_file_spec.spl`
+(17 examples), `thread_pool_spec.spl` (6 examples), and
+`thread_pool_state_contract_spec.spl` (3 examples) all still PASS.
+`thread_pool_authority_spec.spl` fails, but pre-existing and unrelated: it
+does a text match against `thread_pool.spl` (untouched by this change) and
+that file's content already contains every string the spec asserts, so the
+failure is a pre-existing brittle-match issue in the spec itself, not a
+regression from this fix.
+
+Not fixed here (out of scope, per "Fix required" item 2/3): making a
+duplicate exported class name a hard error at module-resolution time, and a
+repo-wide sweep for other same-name collisions. Both remain open follow-ups.

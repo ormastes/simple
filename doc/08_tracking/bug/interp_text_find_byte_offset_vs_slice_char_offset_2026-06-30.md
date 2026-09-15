@@ -1,6 +1,9 @@
 # Bug: `text.find` returns a BYTE offset but `text.slice`/`text.len` use CHAR offsets
 
-**Status:** RESOLVED (2026-09-12, re-verified: repro now prints the correct slice)
+## Closed 2026-09-13 — `find` and `slice` agree on units in the reported case
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's reproducer (`"ab—cdMARKERxyz"`, em-dash before the marker) prints `MARKERxyz` — the expected value; the reported `RKERxyz` skew does not occur.
 
 **Date:** 2026-06-30
 **Severity:** Medium — silent data corruption. Mixing `find` with `slice`/`len`
@@ -40,6 +43,3 @@ weakened.
 Make the text intrinsics consistent: either `find` should return a CHAR offset
 (matching `slice`/`len`/`substring`), or provide a clearly-named byte/char pair.
 Audit other `find`+`slice` call sites for the same latent skew.
-
-## Triage 2026-09-12
-Re-verified 2026-09-12: ran the record's own repro (em-dash before a MARKER, `s.find` then `s.slice`); it printed the correct `MARKERxyz`, not the previously-reported byte/char-offset-mismatched `RKERxyz`. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

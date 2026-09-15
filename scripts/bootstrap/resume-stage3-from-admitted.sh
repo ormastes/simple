@@ -12,6 +12,35 @@ bootstrap_stage3_error() {
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 source_output=${1:?usage: resume-stage3-from-admitted.sh OUTPUT_DIR}
 
+# VERDICT-on-exit contract: every run of this script must end with exactly one
+# `VERDICT — ` line, so a killed/died background run is diagnosable from its
+# log alone instead of leaving nothing. bootstrap_resume_verdict_written guards
+# against a double write; bootstrap_resume_stage is the coarse step tracker the
+# trap reads. See doc/07_guide/tooling/bootstrap_options.md.
+bootstrap_resume_verdict_written=0
+bootstrap_resume_stage=init
+bootstrap_resume_log=
+bootstrap_resume_verdict() {
+  bootstrap_resume_verdict_written=1
+  line="VERDICT — $1"
+  echo "$line" >&2
+  if [ -n "${bootstrap_resume_log}" ]; then
+    echo "$line" >>"${bootstrap_resume_log}" 2>/dev/null || true
+  fi
+}
+bootstrap_resume_trap() {
+  status=$?
+  sig=${1:-none}
+  if [ "${bootstrap_resume_verdict_written}" -eq 0 ]; then
+    bootstrap_resume_verdict "ABORTED: stage=${bootstrap_resume_stage} exit=${status} signal=${sig} reason=${bootstrap_resume_stage}"
+  fi
+  rm -rf "${lock:-}"
+}
+trap 'bootstrap_resume_trap none' EXIT
+trap 'bootstrap_resume_trap HUP' HUP
+trap 'bootstrap_resume_trap INT' INT
+trap 'bootstrap_resume_trap TERM' TERM
+
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
@@ -74,6 +103,8 @@ candidate="$stage3/simple$bootstrap_stage3_exe"
 manifest="$stage3/provenance.env"
 stage3_transcript="$stage3/stage3-command.transcript"
 stage3_log="$output/logs/$platform/stage3-native-build.log"
+bootstrap_resume_log="$stage3_log"
+bootstrap_resume_stage=stage2-verify
 stage3_status="$stage3/stage3-native-build-status.env"
 stage3_sanity="$stage3/stage3-sanity.env"
 stage2_cache="$stage3/stage2-native-cache"
@@ -363,32 +394,62 @@ stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
-if [ -n "$stage2_compile_stack_mib" ]; then
-  stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=$stage2_library_path" \
+# The Stage-2 build-args vector is reconstructed from the RECORDED transcript --
+# every env VALUE and the argv verbatim -- not from a hand-written copy of
+# bootstrap-from-scratch.sh:2827. The hand-written copy was stale in both halves
+# and no Stage 3 resume could verify any Stage 2 the current engine produces:
+#
+#   env  -- it omitted SIMPLE_ABI_POLICY, SIMPLE_PLUGIN_MANIFEST_POLICY,
+#           SIMPLE_KERNEL_K1_POLICY, SIMPLE_COVERAGE_CUTOVER_STATE,
+#           SIMPLE_K1_COMPOSITION_SHA256_BEFORE, SIMPLE_FRONTEND_CACHE,
+#           SIMPLE_FRONTEND_CACHE_DIR,
+#           SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE and
+#           SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT, all of which the engine
+#           hashes;
+#   argv -- it omitted the k1 composition `--source <repo>/src/compositions/
+#           kernel_llvm_cranelift`, which the engine passes FIRST.
+#
+# Measured on the macOS Stage 2 admitted 2026-09-13: the hand-list computed
+# e0b89ae21d0a…, the receipt recorded 126998d2176d…, and Stage 3 refused with
+# `bootstrap-stage3-admission-mismatch: build_args_sha256`. Rebuilt from the
+# transcript the two are identical. The env NAMES and their order stay pinned
+# here (they are the engine's vector, and
+# bootstrap_stage3_stage2_canonical_env_names is the allowlist); only the values
+# and the argv come from the transcript, so a future engine change to a VALUE or
+# to argv can no longer rot this reconstruction. The recorded digest remains the
+# authority -- this makes the recomputation faithful, it does not relax it.
+set --
+while IFS= read -r stage2_transcript_line; do
+  case "$stage2_transcript_line" in argv:*) ;; *) continue ;; esac
+  stage2_transcript_argv=${stage2_transcript_line#argv:}
+  stage2_transcript_argv=${stage2_transcript_argv#*:}
+  set -- "$@" "$stage2_transcript_argv"
+done <"$stage2_transcript"
+[ "$#" -gt 0 ] || exit 1
+[ "$1" = native-build ] || exit 1
+stage2_env_value() {
+  bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
+}
+stage2_args=$(bootstrap_stage3_args_sha256 \
+  "RUST_LOG=$(stage2_env_value RUST_LOG)" \
+  "LIBRARY_PATH=$stage2_library_path" \
   "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
-  native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
-  --source src/lib --entry-closure --threads "$stage2_threads" \
-  --compile-stack-mib "$stage2_compile_stack_mib" \
-  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path "$runtime" -o "$stage2")
-else
-  stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=$stage2_library_path" \
-  "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
-  native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
-  --source src/lib --entry-closure --threads "$stage2_threads" \
-  --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path "$runtime" -o "$stage2")
-fi
+  "SIMPLE_BOOTSTRAP=1" \
+  "SIMPLE_ABI_POLICY=$(stage2_env_value SIMPLE_ABI_POLICY)" \
+  "SIMPLE_PLUGIN_MANIFEST_POLICY=$(stage2_env_value SIMPLE_PLUGIN_MANIFEST_POLICY)" \
+  "SIMPLE_KERNEL_K1_POLICY=$(stage2_env_value SIMPLE_KERNEL_K1_POLICY)" \
+  "SIMPLE_COVERAGE_CUTOVER_STATE=$(stage2_env_value SIMPLE_COVERAGE_CUTOVER_STATE)" \
+  "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=$(stage2_env_value SIMPLE_K1_COMPOSITION_SHA256_BEFORE)" \
+  "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+  "SIMPLE_NATIVE_BUILD_RUST=1" \
+  "SIMPLE_NO_STUB_FALLBACK=1" \
+  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" \
+  "SIMPLE_FRONTEND_CACHE=$(stage2_env_value SIMPLE_FRONTEND_CACHE)" \
+  "SIMPLE_FRONTEND_CACHE_DIR=$(stage2_env_value SIMPLE_FRONTEND_CACHE_DIR)" \
+  "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
+  "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
+  "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
+  "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
   "$stage2_sanity" "$stage2_sanity" "$(dirname -- "$stage2_sanity")" \
   "$stage2" "$root"
@@ -451,7 +512,7 @@ if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest \
 fi
 mkdir "$lock" || { echo "error: bootstrap output is locked: $lock" >&2; exit 1; }
 printf '%s\n' "$$" >"$lock/pid"
-trap 'rm -rf "$lock"' EXIT HUP INT TERM
+bootstrap_resume_stage=stage3-build
 
 # Prune native-build cache scope directories older than a TTL.
 #
@@ -579,6 +640,24 @@ case "${SIMPLE_STAGE3_MISSION_CRITICAL:-}" in
   1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
   *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
 esac
+# One-time SCV compile-event-journal cold init for the Stage 3 recompile.
+# OPT-IN, same shape as stage3_mc_env above.  The compiler's own admission
+# (src/app/compiler_entrypoint/inventory_events.spl:207) fails closed on a
+# checkout with no event cursor and PRESCRIBES
+# `SIMPLE_SCV_INVENTORY_COLD_INIT=1` -- but the Stage 3 child runs under
+# `env -i`, so an outer export never reached it and the prescribed remedy was
+# unreachable (2026-09-14, F74 Stage 3 runs 3 and 4: identical
+# `SCV-E-ADMISSION: compile-event-journal-missing` with the variable set).
+# This is an explicit, single-variable pass-through -- NOT a blanket env leak:
+# the value is validated to be exactly `1` and is baked into BOTH the args
+# hash and the transcribed invocation, so unset reproduces the pinned argv
+# byte-for-byte and an existing admission receipt is unaffected.
+stage3_cold_init_env=
+case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
+  '') ;;
+  1) stage3_cold_init_env="SIMPLE_SCV_INVENTORY_COLD_INIT=1" ;;
+  *) echo "error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1" >&2; exit 1 ;;
+esac
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
@@ -588,7 +667,8 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_FRONTEND_CACHE=0" \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  ${stage3_mc_env} \
+  "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
+  ${stage3_mc_env} ${stage3_cold_init_env} \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$progress" \
   "SIMPLE_COMPILER_PHASE_PROFILE=1" \
   "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$phase_profile" \
@@ -617,7 +697,8 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$stage3_fallback_route" \
   SIMPLE_FRONTEND_CACHE=0 \
   MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_NATIVE_ARENA_DECLS=1 \
-  SIMPLE_NO_STUB_FALLBACK=1 ${stage3_mc_env} \
+  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_PACKAGE_INDEX_COLD_INIT=1 ${stage3_mc_env} \
+  ${stage3_cold_init_env} \
   SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
   SIMPLE_COMPILER_PHASE_PROFILE=1 \
   SIMPLE_COMPILER_PHASE_PROFILE_FILE="$phase_profile" \
@@ -820,6 +901,8 @@ export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MO
   BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE2_RECEIVER_DISPLAY \
   BSTAGE3_STAGE2_RECEIVER_LOG BSTAGE3_STAGE2_RECEIVER_LOG_DISPLAY \
   BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
+bootstrap_resume_stage=manifest-verify
 bootstrap_stage3_write_manifest
 bootstrap_stage3_verify_manifest "$manifest" "$manifest" "$root" "$candidate" \
   "$candidate" "${manifest}.authority-map.env"
+bootstrap_resume_verdict "ADMITTED: stage=complete exit=0 signal=none reason=manifest-verified"

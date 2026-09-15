@@ -393,6 +393,31 @@ fn array_join_stays_a_static_string_builtin() {
 }
 
 #[test]
+fn text_receiver_join_is_not_typed_as_unrelated_user_join_method() {
+    // `Thread.join() -> i64?` (std.concurrent.thread) used to win the by-name
+    // `.join` fallback, so `"/" + "/".join(parts)` was rejected as Add on an
+    // unwrapped optional.
+    let module = parse_and_lower(
+        "class Thread:\n    handle: i64\n    fn join() -> i64?:\n        nil\n\nfn joined(parts: [text]) -> text:\n    return \"/\" + \"/\".join(parts)\n",
+    )
+    .expect("text-receiver join must lower");
+    let joined = module
+        .functions
+        .iter()
+        .find(|function| function.name == "joined")
+        .expect("joined");
+    let returned = joined
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .expect("joined return");
+    assert_eq!(returned.ty, TypeId::STRING);
+}
+
+#[test]
 fn text_rfind_uses_string_method_lowering() {
     let module = parse_and_lower(
         r#"struct text:
@@ -1023,7 +1048,7 @@ fn test_trait_typed_method_result_enables_result_builtin() {
         .unwrap();
     let body = format!("{:?}", failed.body);
     assert!(
-        body.contains("rt_enum_check_discriminant") && !body.contains("method: \"is_err\""),
+        body.contains("rt_enum_check_variant") && !body.contains("method: \"is_err\""),
         "trait Result return must lower is_err as a builtin: {body}"
     );
 }
@@ -1529,4 +1554,19 @@ fn test_declared_type_struct_name_looks_through_payload_wrappers() {
         None
     );
     assert_eq!(Lowerer::declared_type_struct_name(&Type::Union(vec![ff()])), None);
+}
+
+#[test]
+fn builtin_receiver_method_fallback_ignores_unrelated_user_class_methods() {
+    // `Widget.frob() -> i64?` must not type `frob` on a text or array receiver.
+    // Before the owner filter, both `+` expressions below were rejected as Add
+    // on an unwrapped optional, dropping the module to the interpreter.
+    let module = parse_and_lower(
+        "class Widget:\n    id: i64\n    fn frob() -> i64?:\n        nil\n\nfn on_text(s: text) -> i64:\n    val n = s.frob() + 1\n    return 0\n\nfn on_array(xs: [text]) -> i64:\n    val n = xs.frob() + 1\n    return 0\n",
+    );
+    assert!(
+        module.is_ok(),
+        "builtin receivers must not borrow Widget.frob's i64? return type: {:?}",
+        module.err()
+    );
 }

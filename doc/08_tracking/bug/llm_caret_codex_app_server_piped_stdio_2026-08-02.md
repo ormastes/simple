@@ -29,3 +29,7 @@ diagnostic evidence for spawn, aliveness, and write failures.
 3. Prove `thread/start`, `thread/inject_items`, structured `turn/start`,
    preconditioned `turn/steer`, and `turn/interrupt`.
 4. Only then connect `CodexAppServerAdapter` to the live process client.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs a live installed codex CLI process to spawn and exchange JSON-RPC with; not available/verifiable in this environment. No change made.

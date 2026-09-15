@@ -1,9 +1,16 @@
 # Interpreter crash: simpleos_platform_qemu_smoke_lane / lane-contract field access
 
+## Closed 2026-09-13 — Interpreter Option-poison does not reproduce; the QEMU build half is stale-by-host
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the site-2 repro is clean. An imported module returning `[QemuScenario]` supports BOTH access patterns — `get_all_scenarios()[0].name` prints `a` and `for s in get_all_scenarios(): print s.name` prints `a` / `b`. No `'name' on Option`, no crash. The seed's element-type resolution no longer differs by call site.
+- **inferred**: the workaround dispatch this entry describes lives in `src/os/qemu_runner_part3.spl`; that file and its siblings `qemu_runner_part1/4/5.spl` no longer exist — the runner was refactored after this report, so the entry's own fix sites are gone.
+- **inferred**: the "build-feasibility blocker" half is stale-by-host — it measured an LLVM-featureless Linux driver and per-arch `--backend cranelift` ENOENT walls for arm64/arm32/riscv32/x86_64 entry sources. No such lane exists on this Windows host, and `native-build` itself fails here before producing a binary.
+- Verdict: the interpreter root cause this entry left open is not reproducible; anything remaining is SimpleOS build-lane work belonging to that lane's own tracking.
+
 - **ID:** interp_simpleos_lane_contract_crash
 - **Date:** 2026-06-13
 - **Severity:** P1 (blocks interpreter-mode testing of all catalog-lane QEMU scenarios)
-- **Status:** workarounds landed 2026-06-13 (interpreter root cause open)
+- **Status:** CLOSED 2026-09-13 (interpreter root cause no longer reproduces). Originally: workarounds landed 2026-06-13
 
 ## Two distinct Option-poison sites (both worked around, root cause shared & open)
 1. **Platform catalog** (`simpleos_platform_qemu_smoke_lane` etc.) — `Option<SimpleOsPlatformBuildTarget>` unwrap mis-binds. Fixed by index-based accessors (`_simpleos_platform_target_index`, `*_or_smoke`, `*_direct`) so no Option crosses a boundary.

@@ -1079,6 +1079,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_canonicalize",
     "rt_file_read_text",
     "rt_file_read_regular_no_follow_bounded",
+    "rt_file_read_regular_no_follow_last_failure",
     "rt_file_read_text_rv",
     "rt_file_write_text",
     "rt_file_fsync",
@@ -1877,6 +1878,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_is_contract_violation",
     "rt_is_none",
     "rt_is_some",
+    "rt_is_present",
     "rt_log_clear_scope_levels",
     "SCOPE_LEVELS_dot_has",
     // Array predicate/closure helpers. Codegen emits these names; without a

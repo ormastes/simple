@@ -1584,3 +1584,10 @@ Not landed as a git commit at the time this section was written — see the
 session's final status note for push state; if unpushed, the working tree at
 these 8 paths is the source of truth for the repair described here.
 - **7 gutted specs** with no recoverable content anywhere.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: repo-wide census spans thousands of files (720+ tautology
+occurrences alone); only 4 specs repaired so far by design. Repairing more is
+real, valuable, but mass-scale work far beyond a single-bug budget. No change
+made.

@@ -79,3 +79,8 @@ investigation; nothing was pushed (nothing to push — no fix produced).
 
 ## Triage 2026-09-12
 Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+
+## Triage 2026-09-13
+Reconfirmed as Rust-seed cargo build breakage at a specific origin/main SHA,
+blocking a virtio arm64 repro. Cargo/Rust build work, out of scope for a
+pure-Simple lane (no cargo build attempted here). Left OPEN, no code change.

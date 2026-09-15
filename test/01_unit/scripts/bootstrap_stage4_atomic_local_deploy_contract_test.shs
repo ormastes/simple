@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+promoter="$root/scripts/bootstrap/promote-stage4-local.shs"
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+setup="$root/scripts/setup/setup.shs"
+resolver="$root/bin/stage4_local_resolve.cmd"
+wrappers="$root/bin/simple.cmd $root/bin/simple_mcp_server.cmd $root/bin/simple_lsp_mcp_server.cmd"
+checked=0
+
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+check() { checked=$((checked + 1)); "$@" || fail "check $checked: $*"; }
+reject() {
+  checked=$((checked + 1))
+  if "$@"; then fail "check $checked unexpectedly matched: $*"; fi
+}
+
+check sh -n "$promoter" "$bootstrap" "$setup"
+check grep -Fq simple-bootstrap-stage4-toolset-admission-v1 "$bootstrap"
+check grep -Fq 'completed_gate=stage5-native-mcp-smoke' "$bootstrap"
+check grep -Fq -- '--promotion-receipt "${promotion_receipt_path}"' "$bootstrap"
+check grep -Fq -- '--toolset-admission "$(absolute_path "${stage4_toolset_admission}")"' "$bootstrap"
+reject grep -Fq 'bootstrap-deploy-receipt-v1' "$bootstrap"
+reject grep -Fq 'mcp_deploy_tmp=' "$bootstrap"
+
+check grep -Fq simple-stage4-local-generation-v1 "$promoter"
+check grep -Fq simple-stage4-local-pointer-v1 "$promoter"
+check grep -Fq 'stage4_verify_candidate_provenance' "$promoter"
+check grep -Fq "mv -f \"\$pointer_tmp\" \"\$current_pointer\"" "$promoter"
+check grep -Fq "verify_pointer \"\$current_pointer\"" "$promoter"
+check grep -Fq "verify_generation || die 'authority drifted before atomic publication'" "$promoter"
+check grep -Fq "die 'toolset artifacts are partial or mixed across directories'" "$promoter"
+check grep -Fq -- '--rollback' "$promoter"
+check grep -Fq -- '--resolve cli|mcp|lsp-mcp' "$promoter"
+
+check grep -Fq 'promote-stage4-local.shs" --resolve "%~1"' "$resolver"
+for wrapper in $wrappers; do
+  check grep -Fq 'stage4_local_resolve.cmd' "$wrapper"
+  reject grep -Eq 'compiler_rust|src[/\\]app|SIMPLE_.*FALLBACK|release[/\\][A-Za-z0-9_-]+' "$wrapper"
+done
+check grep -Fq 'promote-stage4-local.shs" --resolve cli' "$setup"
+check grep -Fq 'promote-stage4-local.shs" --resolve mcp' "$setup"
+check grep -Fq 'promote-stage4-local.shs" --resolve lsp-mcp' "$setup"
+reject grep -Fq 'SIMPLE_MCP_NATIVE:-' "$setup"
+reject grep -Fq 'SIMPLE_LSP_MCP_NATIVE:-' "$setup"
+
+printf 'PASS: %s atomic local Stage 4 deployment contract checks\n' "$checked"
