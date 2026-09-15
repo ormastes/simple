@@ -1,0 +1,47 @@
+#!/bin/sh
+set -Eeuo pipefail
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/setup/host-env.shs"
+host_env_apply_path
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) echo 'BLOCKED: Windows/MSYS required' >&2; exit 77 ;; esac
+for tool in git mktemp cygpath powershell stat; do
+    command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool" >&2; exit 77; }
+done
+
+tmp=$(mktemp -d "$root/build/test-tmp/simple-materialize-receipt.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT
+export TMPDIR="$tmp"
+
+repo="$tmp/repo"
+mkdir -p "$repo" "$tmp/out"
+git -C "$repo" init -q
+git -C "$repo" config core.symlinks false
+git -C "$repo" config user.email test@example.invalid
+git -C "$repo" config user.name materializer-receipt-test
+printf 'payload\n' >"$repo/target.txt"
+printf 'target.txt' >"$repo/alias"
+blob=$(git -C "$repo" hash-object -w --stdin <"$repo/alias")
+git -C "$repo" add target.txt
+git -C "$repo" update-index --add --cacheinfo "120000,$blob,alias"
+git -C "$repo" commit -qm fixture
+
+receipt="$tmp/out/receipt.env"
+log="$tmp/materializer.log"
+sh "$root/scripts/setup/materialize-symlinks-windows.shs" \
+    --strict-missing --receipt "$receipt" "$repo" >"$log" 2>&1
+grep -Fqx 'result=complete' "$receipt"
+grep -Fqx 'pending_count=0' "$receipt"
+test "$(stat -c '%d:%i' "$repo/alias")" = "$(stat -c '%d:%i' "$repo/target.txt")"
+test "$(cat "$repo/alias")" = 'payload'
+test "$(find "$tmp/out" -maxdepth 1 -name '.materializer-*.tmp' | wc -l | tr -d ' ')" -eq 0
+
+# Publication is no-replace: an existing receipt remains byte-for-byte intact.
+cp "$receipt" "$tmp/receipt.before"
+if sh "$root/scripts/setup/materialize-symlinks-windows.shs" \
+    --strict-missing --receipt "$receipt" "$repo" >"$tmp/rerun.log" 2>&1; then
+    echo 'receipt publication unexpectedly replaced an existing destination' >&2
+    exit 1
+fi
+cmp "$receipt" "$tmp/receipt.before"
+echo 'PASS: Windows receipt publication uses direct native write/flush and no-replace cleanup'

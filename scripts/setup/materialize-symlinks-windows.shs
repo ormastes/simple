@@ -318,6 +318,10 @@ public static class MaterializerApi {
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool SetFileInformationByHandle(SafeFileHandle h, int cls, byte[] data, uint size);
     [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool WriteFile(SafeFileHandle h, byte[] data, uint count, out uint written, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool FlushFileBuffers(SafeFileHandle h);
+    [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out TagInfo info, uint size);
     [DllImport("kernel32.dll", SetLastError=true)]
     static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] input, int inputSize,
@@ -349,6 +353,30 @@ public static class MaterializerApi {
     }
     static Exception Error(string predicate) {
         return new IOException(predicate + ":win32=" + Marshal.GetLastWin32Error());
+    }
+    static void WriteAndFlush(SafeFileHandle h, byte[] bytes) {
+        uint written;
+        if ((ulong)bytes.Length > UInt32.MaxValue || !WriteFile(h, bytes, (uint)bytes.Length, out written, IntPtr.Zero) || written != (uint)bytes.Length)
+            throw Error("receipt.write");
+        if (!FlushFileBuffers(h)) throw Error("receipt.flush");
+    }
+    static bool RenameNoReplace(SafeFileHandle h, byte[] rename, out int error) {
+        if (SetFileInformationByHandle(h, 3, rename, (uint)rename.Length)) {
+            error = 0;
+            return true;
+        }
+        error = Marshal.GetLastWin32Error();
+        return false;
+    }
+    static bool IsTransientRenameError(int error) { return error == 32 || error == 33; }
+    static void RequireAbsent(string path, string predicate) {
+        uint attrs = GetFileAttributesW(path);
+        int error = Marshal.GetLastWin32Error();
+        if (attrs != 0xFFFFFFFFu) throw new IOException(predicate + ".exists");
+        if (error != 2 && error != 3) throw new IOException(predicate + ".probe:win32=" + error);
+    }
+    static void RequirePendingAbsent(List<string> pending) {
+        foreach (string absent in pending) RequireAbsent(absent, "pending");
     }
     static SafeFileHandle Open(string p, bool raw, uint access) {
         var h = CreateFileW(p, access, 1, IntPtr.Zero, 3,
@@ -761,38 +789,41 @@ public static class MaterializerApi {
             using (var h = CreateFileW(temp, 0x40010000, 0, IntPtr.Zero, 1, 0x80, IntPtr.Zero)) {
                 if (h.IsInvalid) throw Error("receipt.create-exclusive");
                 bool published = false;
-                // Keep the exclusive owned handle open through rename/cleanup.
-                using (var output = new FileStream(h, FileAccess.Write)) {
-                    try {
-                        output.Write(receiptBytes, 0, receiptBytes.Length);
-                        output.Flush(true);
-                        byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
-                        int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
-                        byte[] rename = new byte[lengthOffset + 4 + name.Length + 2];
-                        // ReplaceIfExists=FALSE, RootDirectory=NULL; native full path.
-                        Buffer.BlockCopy(BitConverter.GetBytes(name.Length), 0, rename, lengthOffset, 4);
-                        Buffer.BlockCopy(name, 0, rename, lengthOffset + 4, name.Length);
-                        foreach (string absent in pending) {
-                            if (GetFileAttributesW(absent) != 0xFFFFFFFFu) {
-                                SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4);
-                                throw new IOException("pending.not-absent-after-publish");
-                            }
-                        }
+                // Keep the exclusive owned handle open through write, rename,
+                // and cleanup.  FileStream can create a managed wrapper whose
+                // lifetime/flush behavior varies by the host CLR; direct
+                // Win32 I/O keeps publication on this one handle.
+                try {
+                    WriteAndFlush(h, receiptBytes);
+                    byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+                    int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
+                    byte[] rename = new byte[lengthOffset + 4 + name.Length + 2];
+                    // ReplaceIfExists=FALSE, RootDirectory=NULL; native full path.
+                    Buffer.BlockCopy(BitConverter.GetBytes(name.Length), 0, rename, lengthOffset, 4);
+                    Buffer.BlockCopy(name, 0, rename, lengthOffset + 4, name.Length);
+                    int renameError = 0;
+                    for (int attempt = 0; attempt < 5; attempt++) {
+                        // ERROR_SHARING_VIOLATION/ERROR_LOCK_VIOLATION can be
+                        // transient when antivirus/indexers briefly open the
+                        // private temporary file. Revalidate every invariant
+                        // before retrying; never replace an appearing target.
+                        RequireAbsent(Path.GetFullPath(destination), "receipt.destination");
+                        RequirePendingAbsent(pending);
                         if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("receipt.policy-identity");
-                        if (!SetFileInformationByHandle(h, 3, rename, (uint)rename.Length)) throw Error("receipt.rename-no-replace");
-                        // Absence cannot be locked. Invalidation is best effort;
-                        // every consumer MUST revalidate pending immediately at use.
-                        foreach (string absent in pending) {
-                            if (GetFileAttributesW(absent) != 0xFFFFFFFFu) {
-                                SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4);
-                                throw new IOException("pending.not-absent-after-publish");
-                            }
+                        if (RenameNoReplace(h, rename, out renameError)) {
+                            published = true;
+                            break;
                         }
-                        published = true;
-                    } finally {
-                        if (!published && !SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4))
-                            throw Error("receipt.cleanup-owned-handle");
+                        if (!IsTransientRenameError(renameError) || attempt == 4)
+                            throw new IOException("receipt.rename-no-replace:win32=" + renameError);
+                        System.Threading.Thread.Sleep(100);
                     }
+                    // Absence cannot be locked. Invalidation is best effort;
+                    // every consumer MUST revalidate pending immediately at use.
+                    RequirePendingAbsent(pending);
+                } finally {
+                    if (!published && !SetFileInformationByHandle(h, 4, new byte[] {1,0,0,0}, 4))
+                        throw Error("receipt.cleanup-owned-handle");
                 }
             }
         } finally { if (policyStream != null) policyStream.Dispose(); foreach (var h in held) h.Dispose(); }
