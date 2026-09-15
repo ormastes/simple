@@ -1029,3 +1029,41 @@ fn test_force_unwrap_of_flat_nullable_normalizes_a_boxed_some() {
         );
     }
 }
+
+#[test]
+fn test_try_on_optional_branches_and_propagates_none() {
+    let module = parse_and_lower(
+        "fn inner(bad: bool) -> text?:\n    if bad:\n        return None\n    return Some(\"v\")\n\nfn outer(bad: bool) -> text?:\n    val value = inner(bad)?\n    return Some(value)\n",
+    )
+    .unwrap();
+    let outer = module.functions.iter().find(|f| f.name == "outer").unwrap();
+    let repr = format!("{:?}", outer.body);
+
+    assert!(
+        repr.contains("rt_is_none"),
+        "Option `?` omitted its absence test: {repr}"
+    );
+    assert!(
+        repr.contains("Return(Some"),
+        "Option `?` omitted its early return: {repr}"
+    );
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "Option `?` omitted Some/flat payload normalization: {repr}"
+    );
+}
+
+#[test]
+fn test_force_unwrap_on_optional_does_not_gain_try_early_return() {
+    let module = parse_and_lower("fn outer(value: text?) -> text:\n    return value!\n").unwrap();
+    let repr = format!("{:?}", module.functions[0].body);
+
+    assert!(
+        repr.contains("rt_unwrap_or_self"),
+        "force unwrap lost payload normalization: {repr}"
+    );
+    assert!(
+        !repr.contains("rt_is_none"),
+        "force unwrap incorrectly gained `?` propagation: {repr}"
+    );
+}

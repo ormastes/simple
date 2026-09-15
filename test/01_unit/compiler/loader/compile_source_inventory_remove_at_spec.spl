@@ -1,37 +1,83 @@
-# CompileSourceInventory delete semantics — owner-missing RED.
-#
-# The canonical CompileSourceInventory owner is not present in this checkout.
-# These scenarios intentionally stop at the missing owner rather than inventing
-# a replacement record type, handles, source markers, or Array.remove_at calls.
+# CompileSourceInventory delete semantics.
 # @req REQ-COMPILE-SOURCE-INVENTORY-REMOVE-AT
 
-use std.spec.{describe, it, step}
+use std.spec.{describe, expect, it, step}
+use std.scv.compile_source_inventory.{
+    CompileSourceEventV1, CompileSourceInventoryEntryV1,
+    CompileSourceInventoryV1, compile_source_inventory_apply_event_v1
+}
 
-describe "CompileSourceInventory remove_at contract":
-    it "EXPECTED RED: removes the first entry and preserves survivor fields/order":
-        step("Call the real CompileSourceInventory owner for first-entry removal")
-        fail("owner-missing: CompileSourceInventory.remove_at")
+fn digest_a() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-    it "EXPECTED RED: removes a middle entry and preserves survivor fields/order":
-        step("Call the real CompileSourceInventory owner for middle-entry removal")
-        fail("owner-missing: CompileSourceInventory.remove_at")
+fn digest_b() -> text:
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-    it "EXPECTED RED: removes the last entry without changing earlier entries":
-        step("Call the real CompileSourceInventory owner for last-entry removal")
-        fail("owner-missing: CompileSourceInventory.remove_at")
+fn entry(path: text, digest: text) -> CompileSourceInventoryEntryV1:
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest, 10)
 
-    it "EXPECTED RED: leaves absent deletes unchanged and preserves flags":
-        step("Delete an absent source identity through the real owner")
-        fail("owner-missing: CompileSourceInventory absent-delete semantics")
+fn inventory() -> CompileSourceInventoryV1:
+    CompileSourceInventoryV1(1, 7, [
+        entry("a.spl", digest_a()),
+        entry("b.spl", digest_b()),
+        entry("c.spl", digest_a())
+    ])
 
-    it "EXPECTED RED: preserves old entry and generation behavior":
-        step("Observe entry identity and generation after owner deletion")
-        fail("owner-missing: CompileSourceInventory generation contract")
+fn delete_event(path: text) -> CompileSourceEventV1:
+    CompileSourceEventV1("git", "delete", path, "", "", "", "", "", 0)
 
-    it "EXPECTED RED: repeated delete is idempotent and bounds are fail-closed":
-        step("Repeat deletion and exercise negative and upper bounds")
-        fail("owner-missing: CompileSourceInventory bounds/idempotence contract")
+describe "CompileSourceInventory delete contract":
+    it "removes the first entry and preserves survivor order":
+        step("Delete the first source identity")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("a.spl"))
+        expect(change.valid).to_equal(true)
+        expect(change.inventory!.entries.len()).to_equal(2)
+        expect(change.inventory!.entries[0].source_identity).to_equal("b.spl")
+        expect(change.inventory!.entries[1].source_identity).to_equal("c.spl")
 
-    it "EXPECTED RED: native closure compilation has no Array.remove_at method call":
-        step("Compile the real owner through the native closure path")
-        fail("owner-missing: native CompileSourceInventory closure compile regression")
+    it "removes a middle entry and preserves survivor fields":
+        step("Delete the middle source identity")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("b.spl"))
+        expect(change.inventory!.entries.len()).to_equal(2)
+        expect(change.inventory!.entries[0].source_identity).to_equal("a.spl")
+        expect(change.inventory!.entries[1].source_identity).to_equal("c.spl")
+        expect(change.inventory!.entries[1].content_digest).to_equal(digest_a())
+
+    it "removes the last entry without changing earlier entries":
+        step("Delete the last source identity")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("c.spl"))
+        expect(change.inventory!.entries.len()).to_equal(2)
+        expect(change.inventory!.entries[0].source_identity).to_equal("a.spl")
+        expect(change.inventory!.entries[1].source_identity).to_equal("b.spl")
+
+    it "leaves an absent delete unchanged":
+        step("Delete an absent source identity")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("z.spl"))
+        expect(change.valid).to_equal(true)
+        expect(change.reason).to_equal("ok-no-change")
+        expect(change.content_changed).to_equal(false)
+        expect(change.semantics_changed).to_equal(false)
+        expect(change.inventory!.generation).to_equal(7)
+
+    it "increments generation and reports semantic change":
+        step("Observe generation and change flags after deletion")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("b.spl"))
+        expect(change.inventory!.generation).to_equal(8)
+        expect(change.content_changed).to_equal(true)
+        expect(change.semantics_changed).to_equal(true)
+
+    it "repeated deletion is idempotent":
+        step("Delete the same source identity twice")
+        val first = compile_source_inventory_apply_event_v1(inventory(), delete_event("b.spl"))
+        val second = compile_source_inventory_apply_event_v1(first.inventory!, delete_event("b.spl"))
+        expect(second.valid).to_equal(true)
+        expect(second.reason).to_equal("ok-no-change")
+        expect(second.inventory!.generation).to_equal(8)
+        expect(second.inventory!.entries.len()).to_equal(2)
+
+    it "rejects an invalid delete identity without mutation":
+        step("Exercise the fail-closed identity boundary")
+        val change = compile_source_inventory_apply_event_v1(inventory(), delete_event("../b.spl"))
+        expect(change.valid).to_equal(false)
+        expect(change.reason).to_equal("event-invalid")
+        expect(change.inventory).to_be_nil()

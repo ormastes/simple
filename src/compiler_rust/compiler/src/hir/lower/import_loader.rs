@@ -1419,6 +1419,33 @@ fn pressed(backend: InputBackend) -> bool:
         };
         assert_eq!(*field_index, 0, "MouseEvent.left_just_pressed is field 0: {body}");
         assert_eq!(returned.ty, TypeId::BOOL, "field type must survive the import: {body}");
+
+        let trait_info = lowered
+            .trait_infos
+            .get("InputBackend")
+            .expect("selectively imported trait must retain its method table");
+        let poll = trait_info
+            .methods
+            .get("poll_mouse")
+            .expect("imported trait method metadata");
+        assert_eq!(poll.vtable_slot, 0, "declaration order defines the imported vtable slot");
+
+        let mir = crate::mir::lower_to_mir(&lowered).expect("imported trait call must lower to MIR");
+        let pressed = mir.functions.iter().find(|func| func.name == "pressed").expect("pressed MIR function");
+        assert!(
+            pressed
+                .blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| matches!(instruction, crate::mir::MirInst::MethodCallVirtual { vtable_slot: 0, .. })),
+            "Any-aliased imported trait receiver must dispatch through its declared vtable slot"
+        );
+        assert!(
+            pressed.blocks.iter().flat_map(|block| &block.instructions).all(|instruction| {
+                !matches!(instruction, crate::mir::MirInst::MethodCallStatic { func_name, .. } if func_name == "poll_mouse")
+            }),
+            "imported trait call must not degrade to an unresolved bare static method"
+        );
     }
 
     #[test]

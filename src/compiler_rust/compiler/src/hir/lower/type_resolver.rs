@@ -821,80 +821,11 @@ impl Lowerer {
                         }
                         return Ok((variant_idx, variant_field_ty));
                     }
-                    if let Some((idx, owner_field_ty)) = self.try_resolve_current_owner_field(field) {
-                        if crate::hir::lower::trace_field_get_enabled() {
-                            let fpath = self
-                                .current_file
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown");
-                            eprintln!("[FT2] S-OWNER/{field} struct={name} idx={idx} in {fpath}");
-                        }
-                        return Ok((idx, owner_field_ty));
-                    }
-                    // Receiver-BLIND last resort: `resolve_global_field_info`
-                    // ignores `name` entirely and returns "the struct with the
-                    // most fields that happens to declare this field name".
-                    // Every attempt above is receiver-scoped; this one is not,
-                    // so it must obey the same ambiguity veto the ANY branches
-                    // at the top of this function already apply. Without the
-                    // veto it silently emits a wrong byte offset AND a wrong
-                    // field type — see
-                    // `driver_native_capsule_result_invalid_reason_v1`, where
-                    // `fp.size`/`fp.content_hash` on a `FileFingerprint`
-                    // (size@3:i64, content_hash@1:text) compiled to
-                    // `ldr [ptr,#56]`/`ldr [ptr,#88]` past the end of a
-                    // 32-byte allocation, printed as raw u64/i64, and wrote a
-                    // capsule receipt reading `size=16 content_hash=129` for a
-                    // 1032-byte object.
-                    if !self.is_ambiguous_global_field(field) {
-                        if let Some((idx, field_ty, _, _)) = self.resolve_global_field_info(field) {
-                            if crate::hir::lower::trace_field_get_enabled() {
-                                let fpath = self
-                                    .current_file
-                                    .as_ref()
-                                    .and_then(|p| p.file_name())
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown");
-                                eprintln!("[FT2] S-GLOBALINFO/{field} struct={name} idx={idx} in {fpath}");
-                            }
-                            return Ok((idx, field_ty));
-                        }
-                    }
-                    let mut best: Option<(usize, TypeId, usize)> = None;
-                    for (_, search_ty) in self.module.types.iter() {
-                        if let HirType::Struct {
-                            fields: search_fields, ..
-                        } = search_ty
-                        {
-                            for (idx, (field_name, field_ty)) in search_fields.iter().enumerate() {
-                                if field_name == field {
-                                    let count = search_fields.len();
-                                    // Smallest index wins -- memory-safe, see
-                                    // the proof on the TypeId::ANY branch.
-                                    if best
-                                        .as_ref()
-                                        .is_none_or(|(i, _, c)| idx < *i || (idx == *i && count > *c))
-                                    {
-                                        best = Some((idx, *field_ty, count));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some((idx, field_ty, _)) = best {
-                        if crate::hir::lower::trace_field_get_enabled() {
-                            let fpath = self
-                                .current_file
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown");
-                            eprintln!("[FT2] S-BEST/{field} struct={name} idx={idx} in {fpath}");
-                        }
-                        return Ok((idx, field_ty));
-                    }
+                    // A nominal receiver is authoritative.  If `name` does not
+                    // declare `field` in any same-name definition, borrowing a
+                    // slot from an unrelated struct fabricates a field and can
+                    // emit the wrong offset.  Receiver-blind lookup belongs only
+                    // to the explicit dynamic (`Any`) branches above.
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
                         struct_name: name,

@@ -278,6 +278,8 @@ impl Lowerer {
                 if let Some(projected) = self.try_lower_result_projection(&recv_hir, field) {
                     return Ok(projected);
                 }
+                let receiver_is_dynamic =
+                    recv_hir.ty == TypeId::ANY || matches!(self.module.types.get(recv_hir.ty), Some(HirType::Any));
                 let mut candidate_struct_names = Vec::new();
                 if !Self::is_unspecific_field_struct_name(&struct_name) {
                     candidate_struct_names.push(struct_name.clone());
@@ -365,7 +367,7 @@ impl Lowerer {
                 // that `get_field_info` uses in its ANY branch but applied
                 // here in the fallback chain where it was previously skipped
                 // because `candidate_struct_names` was empty.
-                if candidate_struct_names.is_empty() && !self.is_ambiguous_global_field(field) {
+                if receiver_is_dynamic && candidate_struct_names.is_empty() && !self.is_ambiguous_global_field(field) {
                     if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
                         if crate::hir::lower::trace_field_get_enabled() {
                             let fpath = self
@@ -386,7 +388,7 @@ impl Lowerer {
                     }
                 }
 
-                if !has_known_method {
+                if !has_known_method && receiver_is_dynamic {
                     // ROOT FIX (bug #62): when the field NAME is globally
                     // ambiguous (defined in more than one struct), the
                     // owner guess below is receiver-type-blind ("most
@@ -488,6 +490,20 @@ impl Lowerer {
                         struct_name,
                         field: field.to_string(),
                         available_fields: Vec::new(),
+                    });
+                }
+                if !has_known_method {
+                    // A statically known receiver cannot acquire a field merely
+                    // because an unrelated struct uses the same spelling.  The
+                    // dynamic fallbacks above are intentionally reserved for
+                    // `Any`; nominal receivers fail closed with their own name.
+                    return Err(LowerError::CannotInferFieldType {
+                        struct_name,
+                        field: field.to_string(),
+                        available_fields: candidate_struct_names
+                            .iter()
+                            .flat_map(|name| self.registry_field_names_for_struct(name))
+                            .collect(),
                     });
                 }
                 // Field not found - treat as no-paren method call

@@ -2134,6 +2134,7 @@ fn test_discover_files_includes_explicit_entry_outside_source_dirs() {
     let entry_file = tools_dir.join("main.spl");
     std::fs::write(&lib_file, "fn helper(): pass").unwrap();
     std::fs::write(&entry_file, "fn main(): pass").unwrap();
+    assert!(entry_file.is_absolute());
 
     let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
         .config(NativeBuildConfig {

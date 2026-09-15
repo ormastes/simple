@@ -1866,6 +1866,9 @@ impl<'a> MirLowerer<'a> {
         // bridge, mirroring u64. See
         // doc/08_tracking/bug/stage3_numeric_interpolation_slot_corruption_2026-08-13.md.
         if method == "to_string" || method == "to_text" || method == "str" {
+            if receiver.ty == TypeId::CHAR {
+                return self.emit_to_string(receiver_reg, TypeId::CHAR);
+            }
             if receiver.ty == TypeId::U64 || receiver.ty == TypeId::I64 {
                 let raw_fn = if receiver.ty == TypeId::U64 {
                     "rt_raw_u64_to_string"

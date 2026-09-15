@@ -25,6 +25,26 @@ fn test_basic_types() {
 }
 
 #[test]
+fn declared_return_type_rejects_explicit_and_implicit_mismatches() {
+    for source in [
+        "fn wrong() -> bool:\n    return \"not-a-bool\"\n",
+        "fn wrong() -> bool:\n    \"not-a-bool\"\n",
+    ] {
+        let error = parse_and_lower(source).expect_err("declared bool return must reject text");
+        assert!(
+            matches!(
+                error,
+                LowerError::TypeMismatch {
+                    expected: TypeId::BOOL,
+                    found: TypeId::STRING
+                }
+            ),
+            "unexpected diagnostic: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn test_lower_function_with_locals() {
     let module = parse_and_lower("fn compute(x: i64) -> i64:\n    let y: i64 = x * 2\n    return y\n").unwrap();
 
@@ -74,4 +94,26 @@ fn snapshot_len() -> i64:
     entries.len() + seen
 "#;
     parse_and_lower(source).expect("declared extern return type must survive calls, coalescing, len, and iteration");
+}
+
+#[test]
+fn unannotated_value_function_uses_tagged_any_return_instead_of_void() {
+    let module = parse_and_lower(
+        "fn no_ret_type(data: [i64], index: i64):\n    data[index]\n\nfn caller() -> i64:\n    no_ret_type([7, 8, 9], 1)\n",
+    )
+    .expect("unannotated value function must lower");
+
+    let callee = module
+        .functions
+        .iter()
+        .find(|function| function.name == "no_ret_type")
+        .unwrap();
+    assert_eq!(callee.return_type, TypeId::ANY);
+    assert!(matches!(callee.body.last(), Some(HirStmt::Expr(expr)) if expr.ty == TypeId::I64));
+}
+
+#[test]
+fn unannotated_procedure_remains_void() {
+    let module = parse_and_lower("fn procedure():\n    val value = 1\n").expect("procedure must lower");
+    assert_eq!(module.functions[0].return_type, TypeId::VOID);
 }
