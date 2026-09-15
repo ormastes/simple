@@ -6,10 +6,12 @@
 use std.nogc_sync_mut.io.http_sffi.{rt_http_request}
 use std.json.{json_parse}
 use std.common.json.serializer.{json_pretty}
-use app.devhub.config.{load_config}
+use app.devhub.config.{load_config, load_config_for_target, confluence_target_from_args}
 use app.devhub.auth.{confluence_auth_header, confluence_api_base, jira_auth_header, jira_api_base}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
 use app.devhub.output.{print_error}
+use app.devhub.redaction.redact_devhub_diagnostic
+use app.devhub.request_headers.gateway_request_headers
 
 
 fn handle_api(args: [text]) -> i64:
@@ -26,17 +28,24 @@ fn handle_api(args: [text]) -> i64:
     val url = args[1]
     val remaining = if args.len() > 2: args[2:] else: []
     val data = _extract_flag(remaining, "--data", "")
-    val extra_header = _extract_flag(remaining, "--header", "")
+    val explicit_headers = _extract_flag_values(remaining, "--header")
     val use_jira = _has_flag(remaining, "--jira")
     val verbose = _has_flag(remaining, "--verbose")
     val include = _has_flag(remaining, "--include")
 
     if method != "GET" and method != "POST" and method != "PUT" and method != "DELETE":
-        print_error("unsupported method: {method}. Use GET, POST, PUT, or DELETE.")
+        print_error(redact_devhub_diagnostic("unsupported method: {method}. Use GET, POST, PUT, or DELETE."))
         return 1
 
     # Resolve full URL if relative path given
-    val config = load_config()
+    val target = confluence_target_from_args(remaining)
+    if not use_jira and target == "__invalid_confluence_selector__":
+        print_error("invalid or conflicting --host/--profile selector")
+        return 1
+    val config = if use_jira: load_config() else: load_config_for_target(target)
+    if not use_jira and target != "" and config.confluence_url == "" and config.confluence_gateway_url == "":
+        print_error("unknown Confluence target: {target}")
+        return 1
     val base = if use_jira: jira_api_base(config) else: confluence_api_base(config)
     val full_url = _resolve_api_url(url, base)
 
@@ -48,18 +57,29 @@ fn handle_api(args: [text]) -> i64:
     # rt_http_request is the real extern-backed transport, already used this
     # way by adapter_minio.spl).
     val auth = if use_jira: jira_auth_header(config) else: confluence_auth_header(config)
-    val headers = _build_api_headers(auth, extra_header, data != "")
+    val selected_headers = if use_jira:
+        gateway_request_headers(full_url, config.jira_gateway_url, config.jira_headers, explicit_headers)
+    else:
+        gateway_request_headers(full_url, config.confluence_gateway_url, config.confluence_headers, explicit_headers)
+    var request_headers: [text] = []
+    match selected_headers:
+        Err(message):
+            print_error(redact_devhub_diagnostic(message))
+            return 1
+        Ok(safe_headers):
+            request_headers = safe_headers
+    val headers = _build_api_headers_many(auth, request_headers, data != "")
 
     if verbose:
-        print "> {method} {full_url}"
+        print redact_devhub_diagnostic("> {method} {full_url}")
         if auth != "":
-            print "> Authorization: {_auth_scheme_label(auth)} ***"
-        if extra_header != "":
-            print "> {extra_header}"
+            print redact_devhub_diagnostic("> Authorization: {auth}")
+        for header in request_headers:
+            print redact_devhub_diagnostic("> {header}")
         if data != "":
             print "> Content-Type: application/json"
             print "> "
-            print "> {data}"
+            print redact_devhub_diagnostic("> {data}")
         print ""
 
     val (status, body, err) = rt_http_request(method, full_url, headers, data)
@@ -69,7 +89,7 @@ fn handle_api(args: [text]) -> i64:
         print ""
 
     if status < 0:
-        print_error("request failed: {err}")
+        print_error(redact_devhub_diagnostic("request failed: {err}"))
         return 1
 
     # Pretty-print JSON if possible
@@ -94,26 +114,39 @@ fn _resolve_api_url(url: text, base: text) -> text:
     url
 
 
-fn _auth_scheme_label(auth: text) -> text:
-    """The scheme word of an Authorization value ("Basic" / "Bearer") for the
-    --verbose echo — the credential itself is never printed."""
-    if auth.starts_with("Bearer "):
-        return "Bearer"
-    "Basic"
-
-
 fn _build_api_headers(auth: text, extra_header: text, has_body: bool) -> [text]:
     """Build the header list for rt_http_request: always Accept: json, plus
     Authorization when auth is configured, Content-Type when a body is
     present, and the user's --header verbatim when given. Pure/testable."""
+    val extras = if extra_header == "": [] else: [extra_header]
+    _build_api_headers_many(auth, extras, has_body)
+
+
+fn _build_api_headers_many(auth: text, extra_headers: [text], has_body: bool) -> [text]:
+    """Build transport headers and retain every ordered explicit/config entry."""
     var headers: [text] = ["Accept: application/json"]
     if auth != "":
         headers = headers + ["Authorization: {auth}"]
     if has_body:
         headers = headers + ["Content-Type: application/json"]
-    if extra_header != "":
-        headers = headers + [extra_header]
+    headers = headers + extra_headers
     headers
+
+
+fn _extract_flag_values(args: [text], flag_name: text) -> [text]:
+    """Collect repeated `--flag value` and `--flag=value` occurrences in order."""
+    var values: [text] = []
+    var i: i64 = 0
+    while i < args.len():
+        if args[i] == flag_name and i + 1 < args.len():
+            values = values + [args[i + 1]]
+            i = i + 2
+        else if args[i].starts_with(flag_name + "="):
+            values = values + [args[i][flag_name.len() + 1:]]
+            i = i + 1
+        else:
+            i = i + 1
+    values
 
 
 fn _print_api_help():
@@ -127,7 +160,9 @@ fn _print_api_help():
     print "Flags:"
     print "  --jira          Target the Jira REST v3 base instead of Confluence"
     print "  --data JSON     Request body"
-    print "  --header H      Extra header (Name: Value)"
+    print "  --header H      Extra header (repeatable; overrides configured name)"
+    print "  --host NAME     Select a configured Confluence target"
+    print "  --profile NAME  Alias for --host"
     print "  --verbose        Print request/response details"
     print "  --include        Print response headers"
     print ""

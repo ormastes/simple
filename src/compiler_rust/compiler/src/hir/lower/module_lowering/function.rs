@@ -633,6 +633,8 @@ impl Lowerer {
         };
         let previous_function_name = self.current_function_name.clone();
         let previous_function_line = self.current_function_line;
+        let fn_flatten_owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+        let previous_function_owner = std::mem::replace(&mut self.current_function_owner, fn_flatten_owner.clone());
         self.current_function_name = Some(func_name.clone());
         // Attribution anchor for the `lenient_types` unresolved-name fallback:
         // `Expr::Identifier` has no span, so the enclosing function's
@@ -922,12 +924,13 @@ impl Lowerer {
         self.current_class_type = previous_class_type;
         self.current_function_name = previous_function_name;
         self.current_function_line = previous_function_line;
+        self.current_function_owner = previous_function_owner;
 
         // Use qualified name for methods (ClassName.method) for DI compatibility
         let name = if let Some(owner) = owner_type {
             format!("{}.{}", owner, f.name)
         } else {
-            f.name.clone()
+            self.flatten_emitted_symbol(fn_flatten_owner.as_deref(), &f.name)
         };
 
         // Determine verification mode from effects

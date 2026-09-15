@@ -1,0 +1,97 @@
+# DevHub configured request-header validation
+#
+# Config loaders keep headers as an ordered list instead of a dictionary so
+# repeated names (for example two X-Scope values) remain distinct.  This
+# module owns the transport-boundary validation and deliberately leaves the
+# entries byte-for-byte unchanged after validation.
+
+use app.devhub.config.{ItfConfig}
+
+
+fn configured_target_headers(config: ItfConfig, provider: text) -> Result<[text], text>:
+    """Validated ordered headers for the resolved provider target."""
+    if provider == "confluence":
+        return validate_configured_headers(config.confluence_headers)
+    if provider == "jira":
+        return validate_configured_headers(config.jira_headers)
+    if provider == "bitbucket":
+        return validate_configured_headers(config.bb_headers)
+    Ok([])
+
+
+fn validate_configured_headers(raw_entries: [text]) -> Result<[text], text>:
+    """Validate ordered `Name: Value` entries from one configured target.
+
+    Duplicate names and entry order are preserved.  CR/LF is rejected before
+    an entry reaches the HTTP transport, preventing header injection.
+    """
+    var validated: [text] = []
+    for entry in raw_entries:
+        match _validate_configured_header(entry):
+            Err(message):
+                return Err(message)
+            Ok(_):
+                validated = validated + [entry]
+    Ok(validated)
+
+
+fn append_configured_target_headers(base: [text], raw_entries: [text]) -> Result<[text], text>:
+    """Append validated target headers without reordering either list."""
+    match validate_configured_headers(raw_entries):
+        Err(message):
+            Err(message)
+        Ok(configured):
+            Ok(base + configured)
+
+
+fn gateway_request_headers(resolved_url: text, gateway_url: text, configured: [text], explicit: [text]) -> Result<[text], text>:
+    """Select gateway-target headers, then apply CLI overrides.
+
+    An explicit header replaces every configured entry with the same
+    case-insensitive name. Repeated explicit entries remain repeated and keep
+    their command-line order. Configured classification pairs are automatic
+    only when the resolved request is the configured gateway.
+    """
+    match validate_configured_headers(explicit):
+        Err(message):
+            return Err(message)
+        Ok(valid_explicit):
+            if not request_uses_gateway(resolved_url, gateway_url):
+                return Ok(valid_explicit)
+            match validate_configured_headers(configured):
+                Err(message):
+                    return Err(message)
+                Ok(valid_configured):
+                    var merged: [text] = []
+                    for entry in valid_configured:
+                        val configured_name = _configured_header_name(entry).lower()
+                        var overridden = false
+                        for override in valid_explicit:
+                            if _configured_header_name(override).lower() == configured_name:
+                                overridden = true
+                        if not overridden:
+                            merged = merged + [entry]
+                    Ok(merged + valid_explicit)
+
+
+fn request_uses_gateway(resolved_url: text, gateway_url: text) -> bool:
+    """True when the resolved request URL is the configured gateway or below it."""
+    if gateway_url == "":
+        return false
+    val base = if gateway_url.ends_with("/"): gateway_url[:gateway_url.len() - 1] else: gateway_url
+    resolved_url == base or resolved_url.starts_with(base + "/") or resolved_url.starts_with(base + "?")
+
+
+fn _configured_header_name(entry: text) -> text:
+    val colon = entry.find(":")
+    if colon < 1:
+        return ""
+    entry[:colon].trim()
+
+
+fn _validate_configured_header(entry: text) -> Result<bool, text>:
+    if entry.contains("\r") or entry.contains("\n"):
+        return Err("configured header must not contain CR or LF")
+    if _configured_header_name(entry) == "":
+        return Err("configured header must use a non-empty 'Name: Value' form")
+    Ok(true)

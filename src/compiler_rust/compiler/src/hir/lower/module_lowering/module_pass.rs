@@ -462,17 +462,24 @@ impl Lowerer {
             }
             Node::Function(f) => {
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
-                self.globals.insert(f.name.clone(), ret_ty);
-                self.local_globals.insert(f.name.clone());
+                // Same symbol `lower_function` emits the body under, so a
+                // cross-module same-named function keeps its own return type.
+                let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+                let symbol = self.flatten_emitted_symbol(owner.as_deref(), &f.name);
+                self.globals.insert(symbol.clone(), ret_ty);
+                self.local_globals.insert(symbol.clone());
                 // Track pure functions for CTR-030-032
                 if f.is_pure() {
-                    self.pure_functions.insert(f.name.clone());
+                    self.pure_functions.insert(symbol.clone());
                 }
                 if ret_ty != TypeId::ANY
                     && !self.is_reference_type(ret_ty)
-                    && f.body.statements.iter().all(|statement| matches!(statement, Node::Pass(_)))
+                    && f.body
+                        .statements
+                        .iter()
+                        .all(|statement| matches!(statement, Node::Pass(_)))
                 {
-                    self.proven_nonescaping_functions.insert(f.name.clone());
+                    self.proven_nonescaping_functions.insert(symbol);
                 }
             }
             Node::Class(c) => {

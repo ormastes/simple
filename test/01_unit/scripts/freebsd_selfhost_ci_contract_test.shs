@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+workflow="$root/.github/workflows/rust-bootstrap-multiplatform.yml"
+checker="$root/scripts/check/check-freebsd-selfhost-ci.shs"
+authority="$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+
+sh -n "$checker" || fail 'self-host checker shell syntax'
+grep -Fq 'PATH="/usr/local/llvm18/bin:$PATH"' "$checker" ||
+    fail 'checker must normalize the FreeBSD llvm18 tool path'
+grep -Fq "command -v llvm-config >/dev/null 2>&1 || fail 'llvm-config is required (install llvm18)'" "$checker" ||
+    fail 'checker must reject a missing LLVM build authority explicitly'
+grep -Fq 'bootstrap_stage3_llvm_platform_library_path=/usr/local/lib' "$authority" ||
+    fail 'LLVM authority must bind FreeBSD package libraries under /usr/local/lib'
+grep -Fq 'bootstrap_stage3_llvm_library_path=$bootstrap_stage3_llvm_platform_library_path' "$authority" ||
+    fail 'LLVM authority must forward the bound FreeBSD library path to sanitized builds'
+grep -Fq 'bootstrap_stage3_seed_counterpart_header=tools/counterpart/sdk/c/simple_counterpart_abi.h' "$authority" ||
+    fail 'seed fingerprint must bind the runtime counterpart ABI header'
+grep -Fq '[ "$(uname -s 2>/dev/null || true)" = FreeBSD ]' "$checker" ||
+    fail 'checker is not native-FreeBSD-only'
+grep -Fq -- '--full-bootstrap --stop-after-stage2 --mode=dynload --no-mcp "--jobs=$BUILD_JOBS"' "$checker" ||
+    fail 'receipt-free Stage 2 command is not canonical and bounded'
+grep -Fq 'BUILD_JOBS=${SIMPLE_FREEBSD_SELFHOST_JOBS:-1}' "$checker" ||
+    fail 'checker build concurrency must be explicitly configurable'
+grep -Fq 'SIMPLE_NATIVE_BUILD_THREADS="$BUILD_JOBS"' "$checker" ||
+    fail 'Stage 3 resume must inherit configured build concurrency'
+grep -Fq -- '--backend cranelift --threads "$BUILD_JOBS"' "$checker" ||
+    fail 'Stage 3 smoke must inherit configured build concurrency'
+grep -Fq -- '--produce-stage3-receipt=verify-landed-compiler-fix' "$checker" ||
+    fail 'typed Stage 3 receipt reason is missing'
+grep -Fq 'resume-stage3-from-admitted' "$checker" || fail 'tracked Stage 3 resume interface missing'
+! grep -Eq '^[[:space:]]*eval[[:space:]]' "$checker" || fail 'resume command uses unsafe eval'
+grep -Fq 'check-stage3-recovery-authority.shs' "$checker" || fail 'Stage 2 provenance verifier missing'
+grep -Fq -- '--full-provenance' "$checker" || fail 'Stage 3 provenance verifier missing'
+grep -Fq 'sha256sum --' "$checker" || fail 'executable hash verification missing'
+grep -Fq 'simple-bootstrap $expected_version' "$checker" || fail 'version verification missing'
+grep -Fq 'print 6 * 7' "$checker" || fail 'Stage 3 compile/run smoke source missing'
+grep -Fq 'freebsd_selfhost_scope=FreeBSD native Stage 3' "$checker" ||
+    fail 'checker does not label evidence as Stage 3'
+grep -Fq 'tail -n 120' "$checker" || fail 'failure logs are not bounded'
+grep -Fq 'return "$status"' "$checker" || fail 'subcommand failure is not propagated'
+grep -Fq 'exit "$stage2_status"' "$checker" || fail 'Stage 2 failure is not propagated'
+
+selfhost=$(awk '/^  freebsd-selfhost:/{seen=1} seen{print}' "$workflow")
+[ -n "$selfhost" ] || fail 'FreeBSD self-host workflow job missing'
+printf '%s\n' "$selfhost" | grep -Fq 'vmactions/freebsd-vm@v1' || fail 'FreeBSD VM action missing'
+printf '%s\n' "$selfhost" | grep -Fq 'coreutils' || fail 'GNU coreutils dependency missing'
+printf '%s\n' "$selfhost" | grep -Fq 'timeout-minutes: 180' || fail 'job timeout missing'
+printf '%s\n' "$selfhost" | grep -Fq 'sh scripts/check/check-freebsd-selfhost-ci.shs' || fail 'checker invocation missing'
+printf '%s\n' "$selfhost" | grep -Fq 'if: always()' || fail 'always-upload evidence step missing'
+printf '%s\n' "$selfhost" | grep -Fq 'build/bootstrap-freebsd-ci' || fail 'explicit checker output artifact missing'
+! printf '%s\n' "$selfhost" | grep -Eq 'continue-on-error:|\|\|[[:space:]]*true' ||
+    fail 'self-host job contains an optional/fail-open path'
+
+printf 'freebsd_selfhost_ci_contract=true\n'

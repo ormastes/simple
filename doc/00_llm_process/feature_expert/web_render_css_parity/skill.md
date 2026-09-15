@@ -875,3 +875,109 @@ byte-identical.
 Round 20 measurements: `doc/10_metrics/ui/web_chrome_parity_round20_2026-09-14.md`.
 Round 21 measurements: `doc/10_metrics/ui/web_chrome_parity_round21_2026-09-14.md`.
 Round 22 measurements: `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`.
+
+## Round 23 (2026-09-14) — rank the ORIGINATING deltas, not the raw Σ
+
+- **Raw root-row Σ over-weights cascade.** Clustering round 23's baseline put
+  `html/block-flow/li` on top at Σ 1597 across 49 rows — almost all of it `dy`
+  inherited from a height error in an EARLIER sibling. Re-rank on
+  `|dx| + |dw| + |dh|` only (drop the pure-`dy` followers), then attribute each
+  shift to the rows downstream of it: `shift x downstream_root_rows`. That moved
+  the `<pre>` row (dh 24, 44 rows below it, ~1150 attributed) above the `<wbr>`
+  row (dh 168 but only 2 rows below it, ~1000). Check the arithmetic against
+  `<body>`'s own `dh` — the signed originating shifts must sum to it exactly.
+- **Σ can fall 42% with the mismatch COUNT unmoved, and that is not a failure.**
+  Shortening a cascade leaves every downstream row non-zero but small, and the
+  differ's threshold is 1 px. The count falls only when a cascade is removed.
+- **`white-space: pre` is not `nowrap`.** They had shared one `Style` flag;
+  `pre` PRESERVES newlines, `nowrap` COLLAPSES them. The discriminator is
+  `<div style="white-space:pre">A\nB</div>` — if it fails identically to
+  `<pre>`, the newline reaches layout and layout throws it away, so it is NOT a
+  missing UA rule. Two HTML rules must be harvested, not recalled: a newline
+  immediately after `<pre>` is dropped, and a trailing newline opens no line.
+- **`overflow-wrap: normal` forbids breaking inside a word.** A word wider than
+  the line overflows. The worst case is a run that STARTS mid-line, where
+  `max_width` is a pen remainder of a few pixels and the old `endv == start` arm
+  emitted one codepoint per line (9 lines for "BreakHere"). Keep intra-word
+  breaking reachable for `break-word`/`anywhere`/`break-all` — that control is
+  what makes the rule statable.
+- **`<wbr>` is boxless AND a break opportunity; only the first is implemented.**
+  The control that proves the fix must be tag-scoped: `LongWord<i></i>BreakHere`
+  is ONE line in both engines, so a run boundary alone is correctly not a break.
+  Filed `doc/08_tracking/bug/wbr_not_a_soft_break_opportunity_2026-09-14.md`.
+- **A fix that is right in two contexts and wrong in a third is a compensating
+  error — back it out.** Seeding the line box from the container's strut (CSS
+  2.1 10.8.1) fixes `<sub>` in the catalog and under no author CSS, and is
+  contradicted under `font: 16px/1.5`, where Chrome measures 20 for a div whose
+  strut would be 24. Round 23 reverted it rather than land the catalog green on
+  an unstatable rule:
+  `doc/08_tracking/bug/sub_sup_line_box_strut_contradiction_2026-09-14.md`.
+- **From a detached worktree the freshness gate fails closed** on a missing
+  `build/cargo-r2/release/simple`, and `simple test <dir>` additionally needs
+  `bin/simple` to exist. Symlink both to the main tree's artifact and RECORD
+  that the check path differs from prior rounds.
+
+Round 23 measurements: `doc/10_metrics/ui/web_chrome_parity_round23_2026-09-14.md`.
+
+## Round 24 — one defect, two top-ranked roots
+
+- **Rank on ATTRIBUTED Σ and the ranking changes under you.** The standing
+  "`<wbr>` ~1000" lead was stale the moment round 23 landed: that row is now
+  +24 over 4 rows, ~96 attributed. Re-derive the ranking from run A every
+  round; do not inherit last round's list.
+- **Pin the sign convention from a row whose two absolute values you know.**
+  `li` 86 is Chrome 48 / Simple 24 and prints `dh=+24`, so `dh = Chrome −
+  Simple` and a positive `dh` means Simple is SHORT. Round 23's prose has this
+  backwards in one sentence.
+- **Two differently-shaped symptoms on two pages were ONE defect.** An `<hr>`
+  demo box 8 px short on `html.html` and a 16 px page-wide shift on
+  `animation.html` were both "a block's bottom margin is dropped in front of an
+  anonymous inline run". Before opening two investigations, check whether the
+  lost distance equals the preceding block's `margin-bottom`.
+- **A root at the TOP of a page is worth far more than the same root two thirds
+  down.** Fixing the animation head removed 62 mismatches; fixing `<hr>` removed
+  zero, because its cascade rows only shrank from 6 to −2 and the differ's
+  threshold is 1 px. Predict count and Σ separately.
+- **Predict, then record the misses.** Round 24 predicted `forms-media`
+  unchanged; it improved 189 → 117, because the same defect sat in its `<form>`
+  and the ranking had only diagnosed the top two pages. Under-scoping a
+  diagnosis to the pages you ranked is the recurring miss.
+
+Round 24 measurements: `doc/10_metrics/ui/web_chrome_parity_round24_2026-09-14.md`.
+
+## Round 25 — `<wbr>`, and the value of a prediction that MISSES
+
+- **Pin the Σ DEFINITION before ranking, not after.** Σ in every round of this
+  series is `|dx|+|dy|+|dw|+|dh|` summed over `inherited: false` rows ONLY.
+  Summing all rows on this baseline gives 3223 against the reported 1258 — a
+  2.6× discrepancy that would silently invalidate every before/after table.
+  Resolve it against a small page's own `.geometry_diff.md` root table
+  (`css-layout`: 9 + 8 + 1 = 18) before touching any code.
+- **The biggest root is not always the one to take.** `<sub>`/`<sup>` is ~380
+  attributed here, three times the next root, and is filed as a measured
+  contradiction. Rank by attributed Σ, then take the largest ACTIONABLE row and
+  say in writing which rows you skipped and why.
+- **A prediction that misses is worth more than one that hits.**
+  `Long<wbr>Word<wbr>BreakHere` in an 80 px box was predicted 72 and measured
+  **48**: Chrome's line breaker is GREEDY, taking only the opportunity it needs,
+  so the first `<wbr>` is passed over. The eager implementation would have
+  matched the catalog's single `li` 86 perfectly and been wrong. Always harvest a
+  MULTI-opportunity case, not only the one the catalog shows you.
+- **Measure the first WORD, not the whole run.** A soft-break arm that tests the
+  following run's full advance breaks at opportunities Chrome passes over. The
+  helper is `first_word_advance_width` — everything up to the first collapsible
+  space.
+- **Two sabotage arms must fail DIFFERENT AC sets.** Disabling the arm fails
+  AC-1/AC-2; inverting the fit test fails AC-2/AC-4/AC-5. Same failing set from
+  both arms means one of them is not testing what you think.
+- **A `<br>` `dx` row is not a `<br>` placement bug.** Simple already places
+  `<br>` at `ix + inline_x`, which is Chrome's rule, so css-paint's `dx`
+  49/24/8 says the PEN is short at those points — a text-advance
+  under-measurement on the preceding runs. Discriminate the `<br>` rect from the
+  following run's rect in the fixture before editing anything.
+- **`strong`/`b` `dw` deficits look like ONE root: bold metrics.** `overview` is
+  29 of 34 Σ this shape (a `strong` 6 px narrow, then four siblings each `dx`
+  +6 behind it); `html` shows `strong` +9 and `b` +4. `<q>` +10 is a different
+  root in the same rows — Chrome's UA quotation marks, which Simple never emits.
+
+Round 25 measurements: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.

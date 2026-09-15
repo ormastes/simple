@@ -6,7 +6,7 @@
 use std.nogc_sync_mut.env.{env_get}
 use app.devhub.config.{ItfConfig, load_config, resolve_auth_token}
 use app.devhub.errors.{ItfError}
-use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BASIC, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, jira_rest_root, confluence_rest_root}
+use app.devhub.atlassian_site.{AtlassianSite, ATLASSIAN_AUTH_BASIC, ATLASSIAN_AUTH_BEARER, atlassian_normalize_auth, atlassian_auth_header, atlassian_strip_slash, jira_rest_root, confluence_rest_root}
 
 
 fn jira_site(config: ItfConfig) -> AtlassianSite:
@@ -36,6 +36,8 @@ fn jira_auth_header(config: ItfConfig) -> text:
 fn jira_api_base(config: ItfConfig) -> text:
     """Get the Jira REST API base URL (used by `itf api --jira`): REST v3 on
     Cloud, REST v2 on Server / Data Center."""
+    if config.jira_gateway_url != nil and config.jira_gateway_url != "":
+        return atlassian_strip_slash(config.jira_gateway_url)
     jira_rest_root(jira_site(config))
 
 
@@ -53,7 +55,11 @@ fn confluence_api_base(config: ItfConfig) -> text:
     """Get the Confluence REST API base URL: `/api/v2` on Cloud (the
     configured URL already carries `/wiki`), `/rest/api` on Server / Data
     Center (which has no v2 API — see confluence_rest_root for the named
-    resource-path gap)."""
+    resource-path gap). A configured gateway overrides the complete prefix."""
+    # gateway_url is a complete API prefix, independent of origin deployment.
+    # Auth is still resolved for the selected target through auth.sdn.
+    if config.confluence_gateway_url != nil and config.confluence_gateway_url != "":
+        return atlassian_strip_slash(config.confluence_gateway_url)
     confluence_rest_root(confluence_site(config))
 
 
@@ -72,11 +78,13 @@ fn check_confluence_auth(config: ItfConfig) -> bool:
     """True when Confluence REST credentials are configured (url + token,
     plus confluence.user unless confluence.auth is bearer)."""
     val scheme = atlassian_normalize_auth(config.confluence_auth, ATLASSIAN_AUTH_BASIC)
-    atlassian_token_ready(config.confluence_url, resolve_auth_token(config, "confluence"), scheme, config.confluence_user)
+    val target_url = if config.confluence_gateway_url != nil and config.confluence_gateway_url != "": config.confluence_gateway_url else: config.confluence_url
+    atlassian_token_ready(target_url, resolve_auth_token(config, "confluence"), scheme, config.confluence_user)
 
 
 fn check_jira_auth(config: ItfConfig) -> bool:
     """True when Jira REST credentials are configured (jira.url + a token
     from env/token_cmd/auth.sdn, plus jira.email unless jira.auth is
     bearer). When true, Jira commands use REST directly — no acli login."""
-    atlassian_token_ready(config.jira_url, resolve_auth_token(config, "jira"), jira_auth_scheme(config), config.jira_email)
+    val target_url = if config.jira_gateway_url != nil and config.jira_gateway_url != "": config.jira_gateway_url else: config.jira_url
+    atlassian_token_ready(target_url, resolve_auth_token(config, "jira"), jira_auth_scheme(config), config.jira_email)

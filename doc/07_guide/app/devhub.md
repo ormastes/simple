@@ -432,6 +432,43 @@ addressed by key. A configured token is used directly (`[token_env]` >
 `[token_cmd]` > `auth.sdn`), and no login is started. Auth is Basic
 `confluence.user:token` by default, or `Bearer <PAT>` with `confluence.auth: bearer`.
 
+Named targets use `confluence.<name>:` sections. `--host NAME` and
+`--profile NAME` are aliases; without either flag, `default_target` is used,
+then the first named target in file order. Repeated `header:` entries preserve
+multiple values and are attached automatically by both `wiki` and `api` when
+the selected target routes through its gateway. `gateway_url` is a complete API prefix; routing and headers stay in
+`config.sdn`, while target-scoped secrets stay in `auth.sdn`.
+
+```sdn
+confluence:
+    default_target: internal
+
+confluence.internal:
+    url: https://company.atlassian.net/wiki
+    gateway_url: https://gateway.corp/confluence
+    user: you@company.com
+    header: X-Classification: Internal
+    header: X-Scope: Engineering
+    header: X-Scope: Documentation
+
+confluence.public:
+    url: https://public.example/confluence
+    deployment: datacenter
+    auth: bearer
+```
+
+```sdn
+# ~/.config/itf/auth.sdn
+confluence.internal:
+    token: "..."
+confluence.public:
+    token: "..."
+```
+
+For example, `devhub wiki list --host internal` and
+`devhub api GET /content --profile internal` select the same target. `auth
+status --quiet` (or `--silent`) suppresses only deployment-shape warnings.
+
 ```sdn
 # Confluence Data Center (Bearer PAT)
 confluence:

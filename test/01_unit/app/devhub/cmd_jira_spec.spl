@@ -77,6 +77,16 @@ fn write_fixture_config(jira_url: text, jira_email: text, jira_token: text):
     rt_file_write_text("{dir}/auth.sdn", auth_body)
 
 
+fn write_fixture_gateway_config(jira_url: text, gateway_url: text, jira_email: text, jira_token: text):
+    """Write the Jira REST gateway fields used by the command-client seam."""
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _mk = rt_dir_create_all(dir)
+    val config_body = "jira:\n    url: {jira_url}\n    gateway_url: {gateway_url}\n    headers:\n        X-Classification: restricted\n        X-Scope: jira\n    acli_path: acli\n    email: {jira_email}\n"
+    val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
+    val auth_body = "jira:\n    token: \"{jira_token}\"\n"
+    rt_file_write_text("{dir}/auth.sdn", auth_body)
+
+
 fn run_jira_with_fixture(args: [text], override_home: bool) -> (i64, text):
     """Run handle_jira(args) with FIXTURE_DIR prepended to PATH (so `acli`
     and `curl` resolve to the fakes) and, if `override_home`, HOME pointed
@@ -146,6 +156,18 @@ describe "itf jira update/comment/transition (fake-binary fixture)":
             expect(log.contains("jira workitem transition PROJ-1 --status In Progress")).to_equal(true)
 
     context "acli fails, jira curl credentials configured — falls back to curl":
+
+        it "carries gateway URL and ordered headers from config into the curl client":
+            reset_fixture()
+            install_fake_bin("acli", FAKE_ACLI_FAIL)
+            install_fake_bin("curl", FAKE_CURL_OK)
+            write_fixture_gateway_config("https://fixture.atlassian.net", "https://gateway.example/jira", "fixture@example.com", "fixture-token")
+            val (code, log) = run_jira_with_fixture(["update", "PROJ-1", "--summary", "New title"], true)
+            expect(code).to_equal(0)
+            expect(log.contains("https://gateway.example/jira/issue/PROJ-1")).to_equal(true)
+            expect(log.contains("X-Classification: restricted")).to_equal(true)
+            expect(log.contains("X-Scope: jira")).to_equal(true)
+            expect(log.contains("fixture.atlassian.net/rest/api/3/issue/PROJ-1")).to_equal(false)
 
         it "update: falls back to a PUT on /rest/api/3/issue/KEY":
             reset_fixture()
