@@ -1,4 +1,5 @@
 use std.spec.*
+use std.common.string_core.{char_from_code}
 use std.nogc_sync_mut.env.system_location.{
     SystemLocationKind, SystemLocationInputs, LazyPathTemplate,
     system_location_resolve_from, resolve_system_path_template_from, system_path_native_for,
@@ -62,13 +63,21 @@ describe "lazy system path variables":
             inputs(platform: "windows")).unwrap()
         expect(value).to_equal("C:/Users/Alice/AppData/Local")
 
-    it "converts portable paths at Windows file and executable boundaries":
-        expect(system_path_native_for("C:/tools/simple.exe", "windows")).to_equal("C:\\tools\\simple.exe")
-        expect(system_path_native_for("/d/cache/objects", "windows")).to_equal("D:\\cache\\objects")
-        expect(system_path_native_for("c/tools/simple.exe", "windows")).to_equal("C:\\tools\\simple.exe")
-        expect(system_path_native_for("/c/tools/simple.exe", "MINGW64_NT")).to_equal("C:\\tools\\simple.exe")
+        # Backslash-bearing expectations are built via char_from_code(92): a
+        # literal "\\" in this spec lexes as two backslashes on the run lane,
+        # which made otherwise-identical strings compare unequal.
+        val bs = char_from_code(92)
+        expect(system_path_native_for("C:/tools/simple.exe", "windows")).to_equal("C:" + bs + "tools" + bs + "simple.exe")
+        # MinGW drive conversion emits a LOWER-CASE drive letter and the compact
+        # `c/rest` spelling is deliberately absent (see fs/host_path.spl
+        # _mingw_drive_to_windows) — both pinned by fs/host_path_spec.spl.
+        expect(system_path_native_for("/d/cache/objects", "windows")).to_equal("d:" + bs + "cache" + bs + "objects")
+        # Compact `c/rest` spelling: only separators are rewritten, no drive
+        # colon is inserted (pinned by fs/host_path_spec.spl).
+        expect(system_path_native_for("c/tools/simple.exe", "windows")).to_equal("c" + bs + "tools" + bs + "simple.exe")
+        expect(system_path_native_for("/c/tools/simple.exe", "MINGW64_NT")).to_equal("c:" + bs + "tools" + bs + "simple.exe")
         expect(system_path_native_for("//server/share/tool.exe", "windows"))
-            .to_equal("\\\\server\\share\\tool.exe")
+            .to_equal(bs + bs + "server" + bs + "share" + bs + "tool.exe")
         expect(system_path_native_for("/var/cache/simple", "linux")).to_equal("/var/cache/simple")
 
     it "gives SIMPLE_CACHE precedence and rejects relative overrides":
@@ -80,12 +89,15 @@ describe "lazy system path variables":
             .to_equal(true)
 
     it "resolves registered references and escaped braces":
-        # Keep doubled braces split: the current bootstrap frontend incorrectly
-        # re-interpolates `{{name}}` even when it came from a raw literal.
-        val escaped_template = r"{sys:user_cache}/simple/" + "{" + "{" + "literal" + "}" + "}"
+        # Braces are built via char_from_code: a "{" inside a plain
+        # double-quoted string is lexed as an f-string interpolation on the
+        # run lane (`semantic: variable 'literal' not found`).
+        val ob = char_from_code(123)
+        val cb = char_from_code(125)
+        val escaped_template = r"{sys:user_cache}/simple/" + ob + ob + "literal" + cb + cb
         val value = resolve_system_path_template_from(
             escaped_template, inputs()).unwrap()
-        expect(value).to_equal("/home/alice/.cache/simple/{literal}")
+        expect(value).to_equal("/home/alice/.cache/simple/" + ob + "literal" + cb)
 
     it "rejects unknown and malformed references":
         expect(resolve_system_path_template_from('{sys:unknown}/x', inputs()).is_err())
