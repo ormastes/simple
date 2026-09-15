@@ -52,6 +52,12 @@ extern fn rt_file_create_excl(path: text, content: text) -> bool
 extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "raw file-stat ABI; zero and negative values are provider-defined failure states", capabilities: [ffi])
 extern fn rt_file_stat(path: text) -> i64
+@unsafe(reason: "opens an OS-owned metadata handle that must be released exactly once", capabilities: [ffi])
+extern fn rt_stat_open(path: text) -> i64
+@unsafe(reason: "reads modification time from a live metadata handle", capabilities: [ffi])
+extern fn rt_file_stat_mtime(handle: i64) -> i64
+@unsafe(reason: "consumes a raw OS metadata handle", capabilities: [ffi])
+extern fn rt_file_stat_free(handle: i64) -> bool
 
 # --- Shell helpers (local copies to avoid circular imports) ---
 # These are minimal copies needed for file operations.
@@ -228,8 +234,16 @@ fn file_stat(path: text) -> i64:
 
 fn file_modified_time(path: text) -> i64:
     # Get file modification time in seconds since epoch.
-    # Uses direct syscall via SFFI (no subprocess spawning).
-    file_stat(path)
+    # A zero result fails closed: cache users must treat it as unavailable.
+    val handle = unsafe(capabilities: [ffi]):
+        rt_stat_open(host_path_native(path))
+    if handle <= 0:
+        return 0
+    val modified = unsafe(capabilities: [ffi]):
+        rt_file_stat_mtime(handle)
+    unsafe(capabilities: [ffi]):
+        rt_file_stat_free(handle)
+    if modified > 0: modified else: 0
 
 fn file_remove(path: text) -> bool:
     file_delete(path)

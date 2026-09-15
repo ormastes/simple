@@ -1035,7 +1035,9 @@ impl Lowerer {
                 }
                 acc
             }
-            Pattern::Enum { name, variant, payload, .. } => {
+            Pattern::Enum {
+                name, variant, payload, ..
+            } => {
                 // A struct/class spelling (`Point(x, y)`) also arrives as
                 // Pattern::Enum. Emitting a discriminant check for it would
                 // read an object pointer's enum header and never match — see
@@ -2354,7 +2356,7 @@ impl Lowerer {
     /// Non-bool return types are unaffected and lower normally, so
     /// `fn f() -> T?: x.?` still yields `T?` per spec.
     pub(crate) fn lower_bool_return_expr(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
-        if ctx.return_type == TypeId::BOOL {
+        if ctx.return_type == TypeId::BOOL && matches!(expr, Expr::ExistsCheck(_)) {
             return self.lower_condition(expr, ctx);
         }
         self.lower_expr(expr, ctx)
@@ -2687,19 +2689,19 @@ impl Lowerer {
     /// above (and as `create_enum_value` at construction) — the proven-correct
     /// path, since a hand-written `case Err(e)` always matched.
     ///
-    /// SCOPE: `Result` ONLY. The `"Err"` discriminant above is computed from a
-    /// string literal UNCONDITIONALLY, with no branch on the subject's type, so
-    /// for an `Option` the test is false for BOTH `Some` and `None`: `None?`
-    /// neither early-returns nor yields a value that matches either variant. The
-    /// "mirrors the pure-Simple `lower_try_expr`" claim above therefore holds for
-    /// `Result` only — that lowering has a dedicated `case HirTypeKind.Optional`
-    /// arm (presence via `rt_enum_discriminant`/`rt_is_some`, both the flat-
-    /// nullable and boxed physical reps, `None`-handle promotion before the early
-    /// return) which this function has no equivalent of. Tracked in
-    /// `doc/08_tracking/bug/try_operator_on_option_no_early_return_2026-08-08.md`.
+    /// `Option`/`T?` takes a separate type-directed path: `rt_is_none` recognizes
+    /// both the flat nil sentinel and the canonical boxed `None`, the absent arm
+    /// returns that value immediately, and `rt_unwrap_or_self` yields either a
+    /// boxed `Some` payload or the already-flat present value. Force unwrap uses
+    /// the same payload normalization but deliberately does not propagate.
     /// Guard for the Result half (the spec DSL cannot reach this lowering):
     /// `scripts/check/check-try-operator-error-propagation.shs`.
-    pub(super) fn lower_try(&mut self, inner: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    pub(super) fn lower_try(
+        &mut self,
+        inner: &Expr,
+        ctx: &mut FunctionContext,
+        propagate_absence: bool,
+    ) -> LowerResult<HirExpr> {
         // Lower the inner expression once and bind it to a temp.
         let inner_hir = self.lower_expr(inner, ctx)?;
         let subject_ty = inner_hir.ty;
@@ -2757,13 +2759,19 @@ impl Lowerer {
                     // reserved OPTION_ENUM_ID (runtime/src/value/objects.rs:326).
                     // So a genuinely-flat nullable keeps its previous behaviour
                     // bit for bit, and a boxed `Some(x)` is flattened to `x`.
-                    return Ok(HirExpr {
+                    let payload_ty = TypeId::ANY;
+                    let present = HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_unwrap_or_self".to_string(),
-                            args: vec![inner_hir],
+                            args: vec![inner_hir.clone()],
                         },
-                        ty: TypeId::ANY,
-                    });
+                        ty: payload_ty,
+                    };
+                    return if propagate_absence {
+                        Ok(self.lower_option_try_branch(inner_hir, subject_ty, payload_ty, ctx))
+                    } else {
+                        Ok(present)
+                    };
                 }
 
                 // Same defect class, class/struct pointee (case B of the
@@ -2806,13 +2814,18 @@ impl Lowerer {
                     // real object reference — and every non-Option user enum —
                     // untouched, so the class/enum identity this branch exists
                     // to preserve is preserved.
-                    return Ok(HirExpr {
+                    let present = HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_unwrap_or_self".to_string(),
-                            args: vec![inner_hir],
+                            args: vec![inner_hir.clone()],
                         },
                         ty: pointee,
-                    });
+                    };
+                    return if propagate_absence {
+                        Ok(self.lower_option_try_branch(inner_hir, subject_ty, pointee, ctx))
+                    } else {
+                        Ok(present)
+                    };
                 }
             }
         }
@@ -2886,6 +2899,57 @@ impl Lowerer {
             },
             ty: payload_ty,
         })
+    }
+
+    fn lower_option_try_branch(
+        &mut self,
+        value: HirExpr,
+        subject_ty: TypeId,
+        payload_ty: TypeId,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$try_option_subject".to_string(), subject_ty, Mutability::Immutable);
+        let subject_ref = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+        let is_none = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_none".to_string(),
+                args: vec![subject_ref.clone()],
+            },
+            ty: TypeId::BOOL,
+        };
+        let early_return = HirExpr {
+            kind: HirExprKind::Block(vec![HirStmt::Return(Some(subject_ref))]),
+            ty: payload_ty,
+        };
+        let present = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_unwrap_or_self".to_string(),
+                args: vec![HirExpr {
+                    kind: HirExprKind::Local(subject_idx),
+                    ty: subject_ty,
+                }],
+            },
+            ty: payload_ty,
+        };
+        HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(value),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(is_none),
+                        then_branch: Box::new(early_return),
+                        else_branch: Some(Box::new(present)),
+                    },
+                    ty: payload_ty,
+                }),
+            },
+            ty: payload_ty,
+        }
     }
 
     /// Lower a range expression (start..end or start..=end) to HIR

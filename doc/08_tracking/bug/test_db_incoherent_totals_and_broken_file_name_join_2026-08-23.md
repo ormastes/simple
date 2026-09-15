@@ -1,7 +1,7 @@
 # Test DB is incoherent: totals do not reconcile, and the file→name join is wrong
 
 - **Filed:** 2026-08-23
-- **Status:** OPEN
+- **Status:** FIXED 2026-09-14 (reconstructed V3 snapshot; malformed-load rejection added)
 - **Surfaces:** `doc/08_tracking/test/test_result.md`, `doc/08_tracking/test/test_db.sdn`,
   `src/lib/nogc_sync_mut/test_runner/{doc_generator.spl,test_db_io.spl,test_db_parser.spl}`
 - **Gate:** `scripts/check/check-test-summary-reconciles.shs` (ADVISORY — honestly RED, see below)
@@ -9,6 +9,22 @@
 ## Symptom
 
 Two independent defects in the same recorded artefacts.
+
+## Resolution (2026-09-14)
+
+The committed file was a concatenation of parallel legacy snapshots, not one
+database: primary IDs restarted, only 73 strings survived while references
+reached 862, and its eight-field test rows did not match the V3 schema.  The V3
+snapshot was reconstructed from the 859 unique status rows in `test_result.md`:
+63 passed, 42 failed, and 754 explicitly `unknown`.  No unknown result was
+promoted to passed.  Unattributable aggregate timing/run data was omitted from
+the new empty V3 volatile database; the corrupt input remains recoverable from
+Git history at `8bc9a7923d7`.
+
+The production parser now reports an integrity error for non-contiguous primary
+IDs, legacy-width test rows, missing strings, and missing file/suite references;
+`RunnerTestDbCore.load` and `load_from` reject such data before rebuilding
+indexes or saving it back.
 
 **1. Totals do not reconcile.** `doc/08_tracking/test/test_result.md` reads
 **Total 770 / Passed 0 / Failed 0**. A tracker that knows about 770 tests and

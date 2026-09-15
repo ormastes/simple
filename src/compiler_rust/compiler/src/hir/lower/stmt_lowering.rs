@@ -209,9 +209,7 @@ impl Lowerer {
             ast::Type::Simple(name) | ast::Type::Generic { name, .. } => {
                 (!name.is_empty()).then(|| (name.clone(), false))
             }
-            ast::Type::Optional(inner)
-            | ast::Type::Capability { inner, .. }
-            | ast::Type::Pointer { inner, .. } => {
+            ast::Type::Optional(inner) | ast::Type::Capability { inner, .. } | ast::Type::Pointer { inner, .. } => {
                 Self::declared_type_struct_name(inner).map(|(name, _)| (name, true))
             }
             _ => None,
@@ -679,6 +677,7 @@ impl Lowerer {
                     // just laundered through a return. 42 owned `-> bool`
                     // functions in this repo return a bare `.?`.
                     let expr = self.lower_bool_return_expr(v, ctx)?;
+                    self.validate_declared_return_type(ctx.return_type, expr.ty)?;
 
                     // Check for returning local reference (E2005)
                     // If the return expression is a variable reference, check its origin

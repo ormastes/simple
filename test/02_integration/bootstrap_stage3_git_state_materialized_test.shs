@@ -5,10 +5,19 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 77 ;; esac
 case_name=setup
-tmp=$(mktemp -d "${TMPDIR:?}/stage3-consumer-test.XXXXXX")
+# The v2 publisher deliberately accepts only lexically drive-qualified Windows
+# receipt paths.  MSYS /tmp is not drive-qualified, and CI-provided user temp
+# directories can inherit ACLs that deny the shell.  Keep this disposable
+# fixture under the checkout's ignored bootstrap output root so the test
+# reaches the native consumer on every Windows runner.
+fixture_tmp_parent="$root/build/bootstrap/windows-stage3-consumer-test"
+mkdir -p "$fixture_tmp_parent"
+TMPDIR=$fixture_tmp_parent
+export TMPDIR
+tmp=$(mktemp -d "$fixture_tmp_parent/stage3-consumer-test.XXXXXX")
 repo="$tmp/repo"
 cleanup() {
-    case "$tmp" in "$TMPDIR"/stage3-consumer-test.*) ;; *) return 1 ;; esac
+    case "$tmp" in "$fixture_tmp_parent"/stage3-consumer-test.*) ;; *) return 1 ;; esac
     # Unlink junction leaves before any recursive removal of the owned fixture.
     FIXTURE_ROOT="$(cygpath -aw "$repo")" powershell -NoProfile -NonInteractive -Command '
       foreach ($name in @("dir-link","extra-junction")) {
@@ -16,6 +25,7 @@ cleanup() {
         if ([IO.Directory]::Exists($p)) { [IO.Directory]::Delete($p,$false) }
       }' >/dev/null 2>&1 || :
     rm -rf -- "$tmp"
+    rmdir -- "$fixture_tmp_parent" 2>/dev/null || :
 }
 trap cleanup EXIT
 trap 'rc=$?; printf "FAIL case=%s line=%s exit=%s\n" "$case_name" "$LINENO" "$rc" >&2; tail -c 2500 "$tmp/error" >&2 2>/dev/null || :; exit "$rc"' ERR
@@ -51,7 +61,7 @@ accept() {
     test ! -s "$tmp/stdout"
     grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/$1.state"
     grep -qx 'alias_collapse_count=1' "$tmp/$1.state"
-    test "$(find "$TMPDIR" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+    test "$(find "$fixture_tmp_parent" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
 }
 reject() {
     case_name=$1
@@ -60,7 +70,7 @@ reject() {
     fi
     test ! -s "$tmp/stdout"
     test ! -e "$tmp/$1.state"
-    test "$(find "$TMPDIR" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+    test "$(find "$fixture_tmp_parent" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
 }
 fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
 
