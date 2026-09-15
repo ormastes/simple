@@ -164,6 +164,25 @@ All notable changes to Simple Language will be documented in this file.
   spec inputs and register interpreter byte-array pointers for runtime font
   loading; a full self-hosted rebuild remains unverified.
 
+## [1.0.0-beta.3] - 2026-09-15
+
+Second corrected beta of the **1.0.0 line**. The `v1.0.0-beta.2` tag is
+superseded without publication: its release run confirmed the macOS toolchain
+blocker below, which must ship in the release workflow itself.
+
+### Fixed
+- **Release macOS legs** — `dtolnay/rust-toolchain@stable` installs a rustc that
+  SIGSEGVs/SIGABRTs at first invocation on the current macOS runner images,
+  which blocked every tag from publishing assets (the `v1.0.1-beta.1` zero-asset
+  release). Release legs now use the repo-standard `@nightly` toolchain,
+  verified green for install + build on `macos-latest` (aarch64) by the
+  `v1.0.0-beta.2` tag run of `rust-bootstrap-multiplatform.yml`. See
+  `doc/08_tracking/bug/release_macos_rustc_crashes_both_runners_2026-09-14.md`.
+
+### Changed
+- **Product version is now `1.0.0-beta.3`**, projected into all 17 declared
+  consumers.
+
 ## [1.0.0-beta.2] - 2026-09-15
 
 First corrected beta of the **1.0.0 line**. The previously published
