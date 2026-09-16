@@ -1,6 +1,8 @@
 use super::super::super::types::*;
 use super::super::*;
 use super::parse_and_lower;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[test]
 fn test_lower_simple_function() {
@@ -42,6 +44,36 @@ fn declared_return_type_rejects_explicit_and_implicit_mismatches() {
             "unexpected diagnostic: {error:?}"
         );
     }
+}
+
+#[test]
+fn declared_return_type_accepts_same_name_struct_across_registration_paths() {
+    // TypeIds are module-registry-local (every HirModule owns its own
+    // TypeRegistry; `register` always allocates a fresh id, and imported
+    // named types are re-registered per module), so a declared `-> Pair`
+    // and a returned Pair value can carry DIFFERENT TypeIds for the same
+    // nominal type -- the day the declared-return check landed, raw
+    // TypeId equality rejected 542 previously valid app files. Named
+    // aggregates must compare by name, not by registry-local id. This
+    // fixture pins the accepted case; cross-module import re-registration
+    // is exercised by the full bootstrap closure.
+    let source = "fn make() -> Pair:\n    return Pair{a: 1, b: 2}\n";
+    let mut parser = simple_parser::Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "Pair".to_string(),
+        vec![
+            ("a".to_string(), simple_parser::Type::Simple("i64".to_string())),
+            ("b".to_string(), simple_parser::Type::Simple("i64".to_string())),
+        ],
+    )])));
+
+    let lowered = lowerer
+        .lower_module(&module)
+        .expect("same-name struct return across registration paths must be accepted");
+    assert_eq!(lowered.functions.len(), 1);
 }
 
 #[test]
