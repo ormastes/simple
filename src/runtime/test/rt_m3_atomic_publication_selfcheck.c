@@ -1,3 +1,8 @@
+/* POSIX-only: mkdtemp/mkdir-2-arg/symlink publication hardening for the
+ * no-follow copy/link runtime paths; no Windows backing for the POSIX
+ * syscalls it drives. Mirrors runtime_process_observation_v4_selfcheck.c. */
+#if !defined(_WIN32)
+
 #define _POSIX_C_SOURCE 200809L
 #include "../runtime.h"
 
@@ -91,3 +96,9 @@ int main(void) {
     if (rmdir(root) != 0) return 25;
     return 0;
 }
+
+#else
+
+int main(void) { return 0; }
+
+#endif

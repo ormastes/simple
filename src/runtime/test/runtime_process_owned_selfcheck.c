@@ -1,3 +1,10 @@
+/* POSIX-only live contract check: the process-owned runtime it exercises is
+ * itself gated `#if !defined(_WIN32) && defined(__unix__)` in
+ * runtime_process_owned.c, and the body below drives ESTALE/SIGKILL/getpgid
+ * semantics that have no Windows backing. Mirrors
+ * runtime_process_observation_v4_selfcheck.c. */
+#if !defined(_WIN32) && defined(__unix__)
+
 #include "runtime.h"
 
 #include <assert.h>
@@ -356,3 +363,9 @@ int main(void) {
     puts("runtime_process_owned_selfcheck: PASS");
     return 0;
 }
+
+#else
+
+int main(void) { return 0; }
+
+#endif

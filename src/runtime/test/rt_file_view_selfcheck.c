@@ -1,3 +1,10 @@
+/* POSIX-only: exercises mkdtemp/symlink/mkdir-2-arg and the real
+ * rt_file_view_open_beneath_no_follow_v1 body. The _WIN32 runtime is a
+ * compile-time stub (runtime_file_view.c returns -1/0/3), so there is
+ * nothing meaningful to selfcheck there. Mirrors
+ * runtime_process_observation_v4_selfcheck.c. */
+#if !defined(_WIN32)
+
 #include "../runtime.h"
 
 #include <assert.h>
@@ -90,3 +97,9 @@ int main(void) {
     puts("rt_file_view_selfcheck: PASS");
     return 0;
 }
+
+#else
+
+int main(void) { return 0; }
+
+#endif

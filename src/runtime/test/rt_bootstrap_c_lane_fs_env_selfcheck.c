@@ -45,6 +45,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* setenv is POSIX; MSVC only has _putenv_s. The runtime's env surface is
+ * cross-platform, so map the call sites instead of gating the selfcheck. */
+#ifdef _WIN32
+#define setenv(key, value, overwrite) _putenv_s(key, value)
+#endif
+
 /* SplArray is opaque outside runtime_native.c; test code, like any other
  * translation unit, only ever sees it as a pointer handed back through
  * rt_array_* accessors. */

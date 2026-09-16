@@ -25,6 +25,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+
+/* MSVC's <errno.h> lacks ENOTSUP (and MinGW only defines it under some
+ * feature-test macros); the submit path reports -ENOTSUP for missing
+ * AcceptEx/ConnectEx providers, so pin the BSD value the rest of the
+ * runtime expects. ENOMEM/EMFILE come from <errno.h> above. */
+#ifndef ENOTSUP
+#define ENOTSUP 129
+#endif
 
 /* ================================================================
  * Operation Types
