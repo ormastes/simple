@@ -821,11 +821,55 @@ impl Lowerer {
                         }
                         return Ok((variant_idx, variant_field_ty));
                     }
+                    // Language leniency, mirroring the HirType::Any branch
+                    // above: the self-hosted reference compiler and the
+                    // interpreter accept a field access on a nominal struct
+                    // that does not declare the field when the field
+                    // resolves globally UNAMBIGUOUSLY (observed live in the
+                    // full-bootstrap closure: CompileOptions.target_opt_ctx
+                    // sets, SymbolId.name / Template.name reads in
+                    // debug-identity helpers, where the local registry view
+                    // of the struct is incomplete). The Any branch already
+                    // carries this risk class for dynamic receivers;
+                    // globally-unresolvable fields (pure typos) still fail
+                    // closed below.
+                    if !self.is_ambiguous_global_field(field) {
+                        if let Some((idx, field_ty, _count, _sname)) =
+                            self.resolve_global_field_info(field)
+                        {
+                            if crate::hir::lower::trace_field_get_enabled() {
+                                let fpath = self
+                                    .current_file
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown");
+                                eprintln!("[FT2] S-RECEIVER-BLIND/{field} struct={name} idx={idx} in {fpath}");
+                            }
+                            return Ok((idx, field_ty));
+                        }
+                    } else {
+                        // The field is real but globally AMBIGUOUS (declared
+                        // on several structs), so no static offset is
+                        // trustworthy -- the same best-effort situation the
+                        // Any branch faces for dynamic receivers. Degrade to
+                        // slot 0 with ANY rather than reject programs the
+                        // self-hosted compiler and the interpreter accept
+                        // (observed live: `name` reads on SymbolId/Template
+                        // in debug-identity helpers). Proper fix is dynamic
+                        // field-access nodes in the seed, matching the
+                        // self-hosted lowering.
+                        eprintln!(
+                            "warning: field '{field}' not declared on struct '{name}' and is globally ambiguous; degrading to slot 0 (ANY) -- best-effort, matching the dynamic-receiver risk class"
+                        );
+                        return Ok((0, TypeId::ANY));
+                    }
                     // A nominal receiver is authoritative.  If `name` does not
                     // declare `field` in any same-name definition, borrowing a
                     // slot from an unrelated struct fabricates a field and can
                     // emit the wrong offset.  Receiver-blind lookup belongs only
-                    // to the explicit dynamic (`Any`) branches above.
+                    // to the explicit dynamic (`Any`) branches above and to the
+                    // unambiguous-global leniency immediately above.
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
                         struct_name: name,

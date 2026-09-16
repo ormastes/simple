@@ -258,6 +258,21 @@ fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> 
         });
     }
 
+    // The directory itself may BE the numbered module named `last` (segment
+    // `mir_opt` -> `60.mir_opt`): after the same-named file marker, prefer
+    // the directory's own package marker over a same-named CHILD package
+    // inside it. Without this, `compiler.mir_opt` resolved into the
+    // subpackage `60.mir_opt/mir_opt/` whenever one existed, and every name
+    // the outer package re-exported (optimizationconfig_debug and friends)
+    // silently resolved to nothing in entry-closure builds.
+    let dir_name = dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let dir_module_name = dir_name.split_once('.').map_or(dir_name, |(_, rest)| rest);
+    if dir_module_name == last {
+        if let Some(resolved) = resolve_exact_directory_module(dir, original_path) {
+            return Some(resolved);
+        }
+    }
+
     let dir_path = dir.join(last);
     let init_path = dir_path.join("__init__.spl");
     if p_exists(&init_path) && p_is_file(&init_path) {

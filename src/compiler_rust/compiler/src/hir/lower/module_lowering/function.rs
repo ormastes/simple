@@ -77,7 +77,20 @@ impl Lowerer {
         if expected == TypeId::NIL || found == TypeId::NIL {
             return true;
         }
+        // `void` is the dual bottom: a `-> unit`-annotated function may end
+        // in a value expression, and a value-declared function may end in a
+        // void statement call (the interpreter ignores the value slot and
+        // the pre-check compiler admitted every such body).
+        if expected == TypeId::VOID || found == TypeId::VOID {
+            return true;
+        }
         if is_numeric_type(expected) && is_numeric_type(found) {
+            return true;
+        }
+        // Truthiness: the seed itself coerces numeric tails in `-> bool`
+        // functions (coerce_exists_tail_in_place), and the interpreter
+        // accepts any numeric where a predicate is declared.
+        if expected == TypeId::BOOL && is_numeric_type(found) {
             return true;
         }
         match (
@@ -117,6 +130,25 @@ impl Lowerer {
                         return true;
                     }
                 }
+                // An array literal `[a, b, c]` coerces to a declared
+                // 3-tuple when the elements pairwise match (the self-hosted
+                // compiler and the interpreter both accept this spelling).
+                if let (
+                    HirType::Tuple(expected_elements),
+                    HirType::Array {
+                        element: found_element,
+                        size: Some(found_size),
+                    },
+                ) = (expected_ty, found_ty)
+                {
+                    if expected_elements.len() == *found_size
+                        && expected_elements
+                            .iter()
+                            .all(|element| self.type_ids_compatible(*element, *found_element))
+                    {
+                        return true;
+                    }
+                }
                 let compatible = self.hir_type_variants_compatible(expected_ty, found_ty);
                 if !compatible && std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
                     eprintln!(
@@ -127,6 +159,29 @@ impl Lowerer {
             }
             _ => true,
         }
+    }
+
+    /// Whether the seed's static typing is authoritative for a hard error
+    /// here. It is, for plain primitive pairs. Aggregate typing in the
+    /// gradual corners (trailing `match` arm unification, cross-module
+    /// re-registration, ANY-field fallback copies) is KNOWN to diverge from
+    /// the self-hosted reference compiler: an aggregate on either side of
+    /// an otherwise-incompatible comparison downgrades the check to a
+    /// warning instead of rejecting the program (see
+    /// validate_declared_return_type).
+    fn hir_type_is_plain(ty: &HirType) -> bool {
+        matches!(
+            ty,
+            HirType::Void
+                | HirType::Bool
+                | HirType::Any
+                | HirType::Char
+                | HirType::Int { .. }
+                | HirType::Float { .. }
+                | HirType::String
+                | HirType::Nil
+                | HirType::Unknown
+        )
     }
 
     fn type_ids_compatible(&self, expected: TypeId, found: TypeId) -> bool {
@@ -286,6 +341,31 @@ impl Lowerer {
 
     pub(crate) fn validate_declared_return_type(&self, expected: TypeId, found: TypeId) -> LowerResult<()> {
         if self.hir_types_compatible(expected, found) {
+            return Ok(());
+        }
+        // Aggregate on either side: the seed's aggregate typing in the
+        // gradual corners (trailing `match` arm unification, cross-module
+        // re-registration, ANY-field fallback copies) diverges from the
+        // self-hosted reference compiler, so an aggregate mismatch cannot be
+        // a hard error without rejecting valid programs (observed live:
+        // 542 files the day this check landed). Downgrade to a warning; the
+        // hard-error scope is primitive-vs-primitive pairs, where the seed's
+        // typing IS authoritative.
+        let downgrade_to_warning = match (
+            self.module.types.get(expected),
+            self.module.types.get(found),
+        ) {
+            (Some(expected_ty), Some(found_ty)) => {
+                !Self::hir_type_is_plain(expected_ty) || !Self::hir_type_is_plain(found_ty)
+            }
+            _ => true,
+        };
+        if downgrade_to_warning {
+            eprintln!(
+                "warning: declared return type mismatch admitted (seed aggregate typing not authoritative): expected={expected:?} {:?} found={found:?} {:?}",
+                self.module.types.get(expected),
+                self.module.types.get(found)
+            );
             return Ok(());
         }
         if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {

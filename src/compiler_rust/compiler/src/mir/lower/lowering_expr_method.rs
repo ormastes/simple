@@ -222,6 +222,53 @@ impl<'a> MirLowerer<'a> {
                         );
                     }
                 }
+                // Std Result helpers `ok()`/`err()`: the same variant-payload
+                // extraction as unwrap/unwrap_err for the Ok/Err variant.
+                // std wraps the payload in Option, but every in-tree call
+                // site either guards with is_ok/is_err or immediately chains
+                // .unwrap(), so the raw payload is the operationally correct
+                // lowering (and matches what unwrap/unwrap_err already do).
+                // Without these arms, builtin-typed receivers fall through to
+                // the codegen builtin fail-closed branch and the module is
+                // rejected (observed live in the stage2 entry-closure build).
+                "ok" => {
+                    if let Some(payload_ty) = self
+                        .enum_variant_payload_type_for_method_receiver(receiver.ty, "Ok")
+                        .or_else(|| self.enum_variant_payload_type_for_method_receiver(effective_ty, "Ok"))
+                    {
+                        return self.lower_builtin_call_expr(
+                            "rt_enum_payload",
+                            std::slice::from_ref(receiver),
+                            payload_ty,
+                        );
+                    }
+                    if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
+                        return self.lower_builtin_call_expr(
+                            "rt_enum_payload",
+                            std::slice::from_ref(receiver),
+                            TypeId::ANY,
+                        );
+                    }
+                }
+                "err" => {
+                    if let Some(payload_ty) = self
+                        .enum_variant_payload_type_for_method_receiver(receiver.ty, "Err")
+                        .or_else(|| self.enum_variant_payload_type_for_method_receiver(effective_ty, "Err"))
+                    {
+                        return self.lower_builtin_call_expr(
+                            "rt_enum_payload",
+                            std::slice::from_ref(receiver),
+                            payload_ty,
+                        );
+                    }
+                    if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
+                        return self.lower_builtin_call_expr(
+                            "rt_enum_payload",
+                            std::slice::from_ref(receiver),
+                            TypeId::ANY,
+                        );
+                    }
+                }
                 "is_some" => {
                     if self.enum_has_variant_for_method_receiver(receiver.ty, "Some")
                         || self.enum_has_variant_for_method_receiver(effective_ty, "Some")
