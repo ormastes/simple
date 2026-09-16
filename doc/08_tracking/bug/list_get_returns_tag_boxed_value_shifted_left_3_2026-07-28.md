@@ -1,5 +1,35 @@
 # `list.get(i)` returns the raw tag-boxed word (`value << 3`) on the JIT/native path
 
+## Re-verified 2026-09-13 — JIT lane still correct; AOT caveat unchanged, so LEFT OPEN
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Re-ran this entry's own fixture. Both the seed JIT lane and the tree-walk
+lane report `b[0]=42 b.get(0)=42` — bracket read and `.get()` agree, no
+`value << 3` word leaks through (measured). That confirms the 2026-08-07 /
+2026-08-09 re-verifications still hold on a binary built 2026-09-13.
+
+Deliberately NOT closed: the caveat in the header is unchanged — the
+AOT/native-codegen lane (`native-build --backend cranelift/llvm`) is still
+not directly verified end to end, and no self-hosted binary is deployed on
+this host to do it. The `src/os/crypto/**` `mut`-annotation prohibition
+therefore also still stands.
+
+Cross-reference added: a **fourth** site with this exact `value << 3`
+signature was found on 2026-09-13 and is still live — `Some(x)` pattern
+destructuring binds the still-tagged word on the JIT lane, in both the
+`if val Some(x)` and `match ... case Some(x)` forms. Filed as
+`doc/08_tracking/bug/jit_some_pattern_payload_shifted_left_3_2026-09-13.md`.
+The root cause named in this entry — "a missing tag-box decode/unbox step at
+the call site" — appears to be the same omission at a site that was never
+swept, so whoever fixes it should sweep the remaining payload-extraction
+sites rather than patching one more.
+
 - **Filed:** 2026-07-28
 - **Severity:** P0 — silent wrong values, no error, on the DEFAULT engine
 - Status: FIXED

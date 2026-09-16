@@ -1,10 +1,15 @@
 # Bug: `_1` placeholder lambda hoists to the outermost expression in nested calls
 
+## Re-verified OPEN 2026-09-13 — still reproduces on the Windows Rust seed
+- **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`): `wrap(find_gt(arr, twice(_1) == 4))` printed `<closure@0x...>` instead of a value — the placeholder lambda swallowed the whole `wrap(...)` expression, exactly the hoisting this entry describes.
+- **measured**: both call sites (matching and non-matching predicate) printed closures, so the failure is unconditional, not value-dependent.
+- **inferred**: left OPEN — the desugaring lives in the compiler front end (`src/compiler/**` / `src/compiler_rust/**`), both off-limits this session because a bootstrap is running concurrently.
+
 - **ID:** short_grammar_placeholder_outermost_scope_hoist_2026-06-26
 - **Found:** 2026-06-26
 - **Severity:** P2 — silently wrong results; any `_N` placeholder used inside an inner call argument captures the whole surrounding expression
 - **Category:** Compiler / short-grammar placeholder / lambda scoping
-- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+- **Status:** OPEN (worked around in `json_coverage_spec` by using explicit `\x:` lambdas)
 
 ## Summary
 
@@ -65,6 +70,3 @@ effect after a self-hosted rebuild/bootstrap.
 
 - `short_grammar_pipe_placeholder_parentheses_2026-05-27` (pipe RHS placeholder, fixed)
 - `short_grammar_placeholder_value_binding_interpreter_2026-05-27` (stale)
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

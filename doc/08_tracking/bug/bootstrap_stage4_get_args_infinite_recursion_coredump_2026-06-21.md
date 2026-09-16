@@ -1,5 +1,14 @@
 # Bootstrap Stage 4 binary SIGSEGVs at startup — `io.cli_ops.get_args` infinite recursion
 
+## Triage 2026-09-13 — STILL OPEN: bootstrap-scoped, cannot be touched or exercised now
+- **measured** — Stage 4 artifacts do exist on this host
+  (`build/bootstrap/full/x86_64-pc-windows-msvc/{simple.exe,simple_mcp_server.exe,simple_lsp_mcp_server.exe}`),
+  but a bootstrap is running concurrently in this workspace, so those files are being
+  written and must not be executed or judged mid-run.
+- **inferred** — the remaining defects this entry names are in `scripts/bootstrap/**` and
+  seed/cranelift codegen, both off-limits to this triage pass. Left OPEN; re-verify after
+  the in-flight bootstrap finishes.
+
 - **Id:** bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21
 - **Status:** Open root cause; guarded 2026-06-22
 - **Severity:** P1 — a fresh `bootstrap-from-scratch.sh --pure-simple` produces a
@@ -86,22 +95,3 @@ not runnable. That doc's severity downgrade should be revisited.
 - `doc/08_tracking/bug/bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17.md`
 - `doc/08_tracking/bug/f64_self_hosted_call_result_codegen_2026-06-21.md` (blocked by this)
 - `doc/09_report/bootstrap_crash_report_2026_04_01.md` (LIM-010 history)
-
-## Triage 2026-09-12
-Rule B: re-ran `bin/simple test test/01_unit/compiler/bootstrap/stage4_smoke_gate_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
-
-## Triage 2026-09-12 — reproduced, left OPEN
-
-Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust bootstrap seed,
-`Simple Language v1.0.0-rc.1`), sha256 prefix `3d120a6f`.
-
-```
-SIMPLE_RUST_SEED_WARNING=0 timeout 420 bin/simple test \
-  test/01_unit/compiler/bootstrap/stage4_smoke_gate_spec.spl --no-session-daemon
-SPEC FILE VERDICT: test/01_unit/compiler/bootstrap/stage4_smoke_gate_spec.spl outcome=ERROR declared>=18 executed=18 passed=6 failed=12 skipped=0 dropped=0
-```
-
-12 of 18 examples red — the largest remaining failure count in this shard's P1
-set, and far broader than the single `get_args` recursion the title names. Not
-triaged further here: the spec is a bootstrap stage-4 smoke gate, so the failures
-need a bootstrap lane to interpret, which this fan-out is explicitly not running.

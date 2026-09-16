@@ -1,15 +1,5 @@
 # The `collections.rs` clobber is ONE commit replayed 6 times — and it is still armed
 
-## Triage 2026-09-13
-CLOSED for the acute recurrence -- confirming the doc's own conclusion:
-collections.rs is 6649 lines (grown, not clobbered) and still carries
-HeapObjectType::UInt, and the doc's own text already says "tree is healthy
-tree is healthy ... No new guard is warranted." The residual source-clone
-hygiene items (1-3) cannot be done from this worktree. No further action.
-
-
-**Status:** OPEN (unverified 2026-09-12)
-
 - **Date:** 2026-08-11
 - **Status (updated 2026-08-17):** ROOT CAUSE FOUND; tree is healthy
   (`collections.rs` 6200 lines, `HeapObjectType::UInt` consistent); the
@@ -198,7 +188,3 @@ git rev-parse <sha>:src/compiler_rust/runtime/src/value/collections.rs  # 95b6ac
 cd /home/ormastes/dev/pub/simple && git rev-list --count origin/main..HEAD   # 44
 git show HEAD:src/compiler_rust/runtime/src/value/collections.rs | wc -l     # 4211
 ```
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

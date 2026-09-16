@@ -1,7 +1,13 @@
 # JIT SIGSEGV: field access on a `nil` receiver (`b.n` where `b` is nil)
 
+## Re-verified OPEN 2026-09-13 — REOPENED: still a hard SIGSEGV, the null guard is not effective here
+- **measured** (Windows Rust seed v1.0.0-rc.1): `struct B: n: i64` + `fn get(b: B?) -> i64: return b.n` called with `nil` printed `start` then died with `Segmentation fault`, rc=139, and **no** message on stdout or stderr — not a "defined trap".
+- **measured**: `SIMPLE_JIT_TRACE_ADDR=1 SIMPLE_EXECUTION_MODE=jit` emitted `[jit-addr] get` and `[jit-addr] main` with 0 fallback lines, so the crashing code really was JIT-compiled.
+- **measured**: `SIMPLE_EXECUTION_MODE=interpret` on the same file exits rc=0 with `error: semantic: undefined field 'n': cannot access field on value of type 'nil'` — the interpreter arm is correct, the Cranelift arm is not.
+- **inferred**: the status line was flipped back to OPEN. The fix lives in `src/compiler_rust/**` (Cranelift FieldGet/FieldSet), which is off-limits this session (concurrent bootstrap), so no repair was attempted.
+
 **Date:** 2026-06-25
-**Status:** RESOLVED 2026-06-25 — null guard added in Cranelift FieldGet/FieldSet codegen.
+**Status:** REOPENED 2026-09-13 — SIGSEGV reproduces on the Windows Rust seed (see section above)
 **Area:** Cranelift JIT codegen (`run`/`-c` path), NOT interpreter / type inference.
 **Severity:** crash (SIGSEGV) — was a wild null deref; now a defined trap.
 

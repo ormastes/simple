@@ -1,9 +1,16 @@
 # Bug: `{{` / `}}` collapse to a single brace in ALL string literals (not just interpolated)
 
+## Triage 2026-09-13 — STILL OPEN, reproduced; fix is in string-literal lexing and blocked here
+- **measured** — `print("{{a}}")` prints `{a}` and `print("plain {{ and }}")` prints
+  `plain { and }` under `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) — the brace
+  escape is applied to plain, non-interpolated literals exactly as filed.
+- **inferred** — the fix is in string-literal lexing under `src/compiler/**` /
+  `src/compiler_rust/**`, off-limits to this pass (concurrent bootstrap). Left OPEN.
+
 - **ID:** string_literal_double_brace_collapse_2026-06-16
 - **Severity:** P2 (silently corrupts any literal building JSON/braces; root cause of broken LSP code-action edits)
 - **Area:** language / interpreter (string-literal lexing)
-- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+- **Status:** open — minimal repro confirmed
 - **Found while:** isolating the "substring off-by-one" suspected during reliable-mode P1/R3 (turns out NOT substring — see below)
 
 ## Summary
@@ -151,7 +158,3 @@ concatenation; that is a valid spelling under this grammar and needs no
 rewrite (they may equally use `}}}}`). The LSP code-action emitter cited under
 "Impact" must emit `}}}}` or concatenate — its bug record, not the lexer, owns
 that fix.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

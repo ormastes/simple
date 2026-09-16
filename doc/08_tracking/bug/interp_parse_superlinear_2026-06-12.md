@@ -1,5 +1,21 @@
 # Lean-parser parse_module is superlinear and degrades per call (interp AND compiled stage4)
 
+## Not closed 2026-09-13 — parse-side half fixed in-entry, the other two halves remain
+
+- **inferred** The entry already records the parse-side per-token whole-source fetch as
+  FIXED (2026-06-13) and re-attributes the compiled-stage4 `check` cost to type inference.
+- **inferred** Two things it leaves open are untouched in this tree: interpreter
+  `parse_module` aging across calls in one process, and the type-inference superlinearity
+  blocking the full `src/lib` sweep gate. Neither has a closing record anywhere in
+  `doc/08_tracking/bug/`.
+- **measured** Re-timing is not credible from this host: the same class of long-running
+  interpreted work hits the runner's outer bound here (a single spec was killed at
+  `budget_ms=930000`), so a Windows timing series would not be comparable to the Linux
+  numbers in the entry.
+- Left OPEN: needs the Linux profiling host, and the type-inference half is a
+  `src/compiler` change blocked by the concurrent bootstrap.
+
+
 - **ID:** interp_parse_superlinear
 - **Severity:** P2 (perf). The parse-side per-token whole-source fetch is FIXED
   (2026-06-13). The remaining superlinear `check` cost on compiled stage4 was

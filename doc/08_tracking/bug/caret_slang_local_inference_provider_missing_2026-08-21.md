@@ -1,5 +1,4 @@
 # Caret cannot yet launch Slang local inference
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -79,6 +78,3 @@ it are unmet:
   children.
 - Then, separately, A3/A4 for the native path, at which point the `"stub":true`
   branch in `serving_chat.spl` stops being reachable for a slang pack.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

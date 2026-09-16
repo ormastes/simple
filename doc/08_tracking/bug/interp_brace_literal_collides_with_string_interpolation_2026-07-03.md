@@ -1,5 +1,40 @@
 # Literal `{ ... }` sharing a string with other `{placeholder}`s is silently swallowed, not interpolated
 
+## Re-verified 2026-09-13 — PARTLY CHANGED, core inconsistency STILL REPRODUCES (left open)
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Three cases, run on both lanes:
+
+1. A literal with brace groups and NO other placeholder —
+   `print("body{font:14px;color:red;}")` — prints verbatim, correct.
+
+2. A literal that mixes a brace group with a real placeholder —
+   `print("css {margin:0} then {name}")` — fails:
+
+   ```
+   error: semantic: variable `margin` not found
+   ```
+
+3. `print("a { b } {name} c")` — same shape, same failure on `b`.
+
+What changed since 2026-07-03: the failure is no longer **silent**. The
+brace group is not swallowed and no wrong string is produced — the program
+now stops with a named diagnostic on both the seed JIT and tree-walk lanes.
+The silent-wrong-output half of this report is therefore gone (measured).
+
+What has NOT changed, and is why this stays open: brace handling inside a
+single literal still depends on whether that literal happens to contain
+another placeholder. Case 1 and case 2 differ only by the presence of
+`{name}` later in the same string, yet the earlier `{...}` is literal in one
+and an interpolation in the other. That is the inconsistency the entry asks
+to resolve, and it needs the escaping/semantics decision the entry calls for.
+
 **Date:** 2026-07-03
 **Severity:** P2 (silent wrong output, not a crash)
 **Status:** open

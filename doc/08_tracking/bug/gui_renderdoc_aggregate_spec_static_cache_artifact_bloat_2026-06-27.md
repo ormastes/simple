@@ -1,5 +1,10 @@
 # Bug: GUI RenderDoc aggregate spec multiplies cached gate artifacts
 
+## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
+- **measured**: every product path this entry references still exists in the tree, so there is no removed-code / dead-reference basis for closing it stale.
+- **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
+- **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
+
 **Status:** mitigated
 
 **Area:** GUI/web RenderDoc aggregate status, SPipe system test resources

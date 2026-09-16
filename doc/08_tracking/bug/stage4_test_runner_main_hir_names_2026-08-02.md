@@ -1,32 +1,5 @@
 # Stage4 test-runner main HIR names
 
-- Status: RESOLVED (2026-09-13) — the source-level fix described below was
-  already landed; only its regression spec,
-  `test/01_unit/app/test_runner_new/test_runner_main_hir_contract_spec.spl`,
-  was stale and RED (2 of 3 examples failing) for two unrelated reasons, both
-  fixed in this change, no source edit needed:
-  1. Its `to_contain('...{file_atomic_write}')`-style assertions used
-     DOUBLE-quoted string literals containing `{name}`. Double-quoted strings
-     in this language are interpolated by default (see
-     `doc/07_guide/quick_reference/syntax_quick_reference.md` § String
-     Interpolation), so `"...{file_atomic_write}"` silently became
-     `"...<fn:file_atomic_write>"` before comparison and could never match the
-     real, literal `{file_atomic_write}` import text. Switched to single-quoted
-     raw string literals, which this language does not interpolate.
-  2. The third example still asserted the OLD contract ("the library mirror
-     gets the same time/duration fixes applied"), but `4a4cfcf0bb4`
-     ("refactor(test-runner): consolidate divergent duplicate runner into a
-     facade") later deleted that second implementation entirely — the mirror
-     is now a one-line re-export facade, so `index_of` correctly returned -1
-     for both search strings on both sides of the `to_be_less_than` compare.
-     Rewrote the example to assert the current contract: the facade re-exports
-     the app copy and does not re-carry the old duplicated behaviours.
-  Verified: `SPEC FILE VERDICT: ... outcome=OK declared>=3 executed=3
-  passed=3 failed=0` on `bin/release/aarch64-unknown-linux-gnu/simple`,
-  interpreter mode.
-
-**Status (historical):** OPEN (unverified 2026-09-12)
-
 ## Reproduction
 
 Stage4 reached `src/app/test_runner_new/test_runner_main.spl` and reported
@@ -246,35 +219,3 @@ payload types against the current child's filename. The compiler fix and
 behavioral regression are tracked in
 `hir_package_sibling_imported_enum_surface_leak_2026-08-02.md`. No fourth build
 was attempted.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
-
-## Resolution 2026-09-13
-
-The root Stage4 bootstrap blocker this doc chased across many follow-up
-passes was ultimately attributed to the HIR directory-package resolver
-leaking sibling-imported enum surfaces (see "Package-sibling import leak
-confirmed" above), tracked and marked **FIXED** in
-`doc/08_tracking/bug/hir_package_sibling_imported_enum_surface_leak_2026-08-02.md`.
-
-Separately, this doc's own regression spec
-(`test/01_unit/app/test_runner_new/test_runner_main_hir_contract_spec.spl`)
-had its own defect, unrelated to Stage4: two of its `to_contain` assertions
-used unescaped `{name}` inside string literals, which Simple's string
-interpolation evaluated to a function-reference stringification
-(`<fn:file_atomic_write>`) instead of preserving the literal `{name}` text
-being searched for — so the checks compared against a garbled needle.
-Additionally, its third example still pinned an assumption (a duplicated
-lib-mirror implementation with its own matching fixes) that had since been
-made obsolete by consolidating the lib mirror into a thin re-export facade
-over the app copy. Fixed both: escaped the braces, and rewrote the third
-example to lock the facade shape instead.
-
-```
-RED:   test_runner_main_hir_contract_spec.spl: 3 total, 1 passed, 2 failed
-GREEN: test_runner_main_hir_contract_spec.spl: 3 total, 3 passed, 0 failed
-```
-
-- Status: RESOLVED (2026-09-13) — abfb90aef7c (regression-spec fix), root cause already fixed per hir_package_sibling_imported_enum_surface_leak_2026-08-02.md; spec `test/01_unit/app/test_runner_new/test_runner_main_hir_contract_spec.spl`

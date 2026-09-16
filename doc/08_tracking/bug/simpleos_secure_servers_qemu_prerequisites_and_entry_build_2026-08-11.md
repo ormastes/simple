@@ -1,5 +1,4 @@
 # SimpleOS secure-server QEMU evidence blocked before launch
-**Status:** OPEN (unverified 2026-09-12)
 
 The filesystem server evidence lane cannot currently reach QEMU. The canonical image is absent, `mcopy` is unavailable, the SimpleOS cross `ld.lld` is absent, and `bin/simple` identifies itself as the Rust bootstrap seed rather than the required pure-Simple self-hosted compiler.
 
@@ -68,6 +67,3 @@ Required owners are:
 Until all four owners exist and the QEMU gate observes both nonce-bound socket
 exchanges concurrently, a kernel containing only the launcher marker is
 explicitly rejected evidence.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

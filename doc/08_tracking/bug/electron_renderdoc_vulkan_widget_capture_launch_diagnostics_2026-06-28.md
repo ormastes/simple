@@ -1,5 +1,9 @@
 # Electron RenderDoc Vulkan Widget Capture Launch Diagnostics - 2026-06-28
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
+- **inferred**: this entry cites no backticked product paths, so a path-existence stale test does not apply; nothing indicates the code it describes was removed.
+- **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
+- **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
 
 ## Status
 
@@ -51,6 +55,3 @@ the widget fixture ARGB proof nonblank and Chromium Vulkan/ANGLE fields present.
   and currently times out without ARGB or `.rdc`.
 - If retrying Electron flags, reject `--in-process-gpu` unless it still proves
   Vulkan and emits a valid `.rdc`.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

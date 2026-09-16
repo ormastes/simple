@@ -1,7 +1,5 @@
 # SimpleOS scheduler mapped-address-space adoption
 
-Status: OPEN (unverified 2026-09-12)
-
 ## Status
 
 Implemented, pending admitted-runtime and production-token verification:

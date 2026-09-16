@@ -1,6 +1,21 @@
 # Native AOT: cross-module generic `Result<[u8], E>` payload type erasure
 
-**Status:** OPEN — blocked on a large prerequisite (not a contained fix).
+## Triage 2026-09-13 — STILL OPEN: native AOT could not be exercised on this host
+- **measured** — a probe was built (module `modB.spl` returning `Result<[u8], Err>`; the
+  importer does `match get_bytes(3): case Ok(d) => print(d.len()); print(d[0])`). It prints
+  `3` then `65` under `bin/simple run` — but the entry says the interpreter is unaffected,
+  so that proves nothing.
+- **measured** — the AOT lane does not work here at all:
+  `bin/simple native-build <probe> -o <exe>` fails with
+  `error: semantic: unknown extern function: rt_env_vars` /
+  `native-build worker exited with code 1`, and a `--compile` invocation produced no
+  artifact next to the source, so its identical `3` / `65` output cannot be attributed to
+  native AOT.
+- **inferred** — this AOT-only bug is neither confirmed nor cleared from this Windows seed
+  host. Left OPEN. (An earlier draft of this triage closed it on the `--compile` output;
+  that was withdrawn once the missing artifact and the native-build failure were seen.)
+
+**Status:** OPEN — see the Triage 2026-09-13 section below
 **Date:** 2026-06-22 (supersedes the 2026-06-21 doc dropped by parallel churn).
 **Mode:** native AOT only (`bin/simple <file> --compile` / `native-build`). Interpreter and `check` are unaffected.
 

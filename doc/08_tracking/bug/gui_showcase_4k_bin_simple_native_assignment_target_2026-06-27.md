@@ -1,6 +1,9 @@
 # GUI Showcase 4K `bin/simple` Native Assignment Target Failure - 2026-06-27
 
-**Status:** RESOLVED (2026-09-12, per record's own mitigation)
+## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
+- **measured**: every product path this entry references still exists in the tree, so there is no removed-code / dead-reference basis for closing it stale.
+- **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
+- **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
 
 ## Summary
 
@@ -51,6 +54,3 @@ Investigate why the `bin/simple` launcher/native-build path reports unsupported
 assignment targets while the release self-hosted binary accepts the retained
 perf alias. Keep the fix in pure Simple compiler/runtime code; do not use the
 Rust seed as perf evidence.
-
-## Triage 2026-09-12
-Not independently re-run in this pass (the 4K showcase perf wrapper is not a cheap <=3 min check); the status line above formalizes the record's own "Current Mitigation" section (wrapper now prefers release self-hosted binaries), since none existed before. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

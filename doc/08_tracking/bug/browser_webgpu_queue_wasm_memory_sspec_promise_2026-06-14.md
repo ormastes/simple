@@ -1,7 +1,7 @@
 # Browser WebGPU Queue WASM Memory SSpec Promise Harness Gap
 
 Date: 2026-06-14
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+Status: open (re-triaged 2026-09-13 — see the note at the end of this file)
 Priority: P2
 
 ## Summary
@@ -38,5 +38,8 @@ Stabilize SSpec nested Promise handling or add a harness helper for settled
 BrowserSession Promise drains, then add the queue-upload SSpec without weakening
 the assertion or leaving the broad browser WebGPU spec red.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+## Triage 2026-09-13 — LEFT OPEN (cannot be exercised on this host)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the broad spec this entry leans on as its green baseline, `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl`, no longer runs here at all — `executed=0`, outcome=ERROR, `cannot resolve import 'plugins.backend_wasm.wasm_codegen_adapter'` (E1034). With the baseline down there is nothing to compare a new SSpec scenario against.
+- **inferred**: the gap as filed is an SSpec harness limitation around nested Promise chains, needing a settled-Promise drain helper. That is unchanged work — no fix has landed that would close it, and the runtime support it cites (`src/lib/nogc_sync_mut/js/engine/interpreter_native.spl`) still exists.
+- Verdict: OPEN — genuinely unresolved, and additionally blocked here by the baseline spec's import failure.
