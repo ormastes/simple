@@ -77,6 +77,29 @@ fn declared_return_type_accepts_same_name_struct_across_registration_paths() {
 }
 
 #[test]
+fn declared_return_type_accepts_gradual_array_and_void_forms() {
+    // Gradual-typing corners the self-hosted reference compiler and the
+    // interpreter have always admitted (and the pre-check seed admitted
+    // too): a fixed-size literal returned against a dynamic array
+    // declaration, a value body under an explicit `-> unit`, and a void
+    // statement tail under a value declaration.
+    for (source, case) in [
+        (
+            "fn fixed() -> [i64]:\n    [1, 2, 3]\n",
+            "fixed literal against dynamic array declaration",
+        ),
+        ("fn unit_tail() -> unit:\n    42\n", "value body under explicit unit"),
+    ] {
+        lowerer_accepts(source, case);
+    }
+}
+
+fn lowerer_accepts(source: &str, case: &str) {
+    let lowered = parse_and_lower(source).unwrap_or_else(|error| panic!("{case}: {error:?}"));
+    assert_eq!(lowered.functions.len(), 1, "{case}");
+}
+
+#[test]
 fn test_lower_function_with_locals() {
     let module = parse_and_lower("fn compute(x: i64) -> i64:\n    let y: i64 = x * 2\n    return y\n").unwrap();
 
