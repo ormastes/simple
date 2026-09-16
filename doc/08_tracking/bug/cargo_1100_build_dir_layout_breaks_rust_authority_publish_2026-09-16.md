@@ -94,3 +94,38 @@ invocation) when cargo no longer leaves one in the target dir. All five
 deps/-layout call sites listed above must change together; the tuple must stay
 internally consistent because the phase-verification and sanity gates re-derive
 the same paths.
+
+## Update 2026-09-16 (same day, full-chain run)
+
+All of the above is now FIXED on branch work/image-memory-budget-20260915
+(commits 8eddea9e1ed, 08d6fb9599e): the authority tuple resolves both cargo
+layouts, `-p spl_hosted_runtime` is selected in the native-all lane, the
+capsule/phase-verification/sanity globs accept the unsuffixed rlib spelling,
+and the MSYS mode-bit exemptions are applied. The Stage-3 git-bind C# consumer
+— which had never completed on ANY host — additionally needed: skipping
+tree/gitlink ls-tree rows, accepting `[`/`]` in paths (14 Google-Fonts
+variable-font files), recursive `ls-tree -r`, budget defaults corrected to the
+measured 1M entries / 300 s (from 100k / 28 s), submodule-gitlink subtree
+skips, and a stale-artifact clean of git-ignored build dirs with broken
+reparse points.
+
+With all of that, the chain now runs from scratch to the FINAL gate:
+
+  PLUG-E-K1-POLICY: bootstrap backend composition admission failed
+  (selected policy 'llvm-cranelift')
+
+The committed K1 composition (src/compositions/kernel_llvm_cranelift) requires
+an LLVM backend kernel-linked alongside cranelift and the interpreter
+(static_backend_registry.spl validate_k1_static_backend_table_v1). This host
+has no usable LLVM-C.dll: its LLVM 23.1.0 build omits the C API library, and
+the Rust llvm-sys 180 pin requires LLVM 18 anyway. CI never sees this because
+the same warm-seed cache skips the whole lane.
+
+Remaining options (need a maintainer decision):
+1. Install an LLVM 18.1.x Windows release with LLVM-C.dll; everything then
+   works as committed. (SIMPLE_BOOTSTRAP_RUST_LLVM=0 now also lets a newer
+   LLVM serve the pure-Simple backends alone when LLVM-C.dll is present.)
+2. Land a committed cranelift-only K1 composition (new composition dir +
+   registry policy + admission wiring) for low-dependency bootstrap hosts.
+3. Keep the Rust seed for day-to-day test runs on this host.
+
