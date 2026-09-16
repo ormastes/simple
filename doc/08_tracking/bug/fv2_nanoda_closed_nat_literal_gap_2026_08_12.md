@@ -1,4 +1,8 @@
 # FV2 nanoda closed Nat-literal gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -63,3 +67,4 @@ Choose and review one sound route:
 
 Until then, the six roots remain `model_proven`/replay-rejected rather than
 `artifact_verified`.
+

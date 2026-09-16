@@ -1,4 +1,8 @@
 # A trait-typed field call (`self.backend.<m>()`) has no vtable on the freestanding native lane
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-05
 - Lane: freestanding `--target x86_64-unknown-none --backend cranelift
@@ -186,3 +190,4 @@ because it needs its own boot verification.
 
 Related: `jit_game2d_backend_method_dispatch_sigsegv_2026-07-02.md`,
 `native_with_trait_impl_no_vtable_duck_trap_2026-07-28.md`.
+

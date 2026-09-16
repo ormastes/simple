@@ -1,4 +1,8 @@
 # Native font acceptance exits 132 before its first summary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -110,3 +114,4 @@ blockers: boxed `None` still uses a mismatched discriminant, the global
 the class payload fixed or promote native-smoke case 20 until a representation
 rule resolves all three, a new pure-Simple compiler builds, and the unchanged
 probe exits exactly 7.
+

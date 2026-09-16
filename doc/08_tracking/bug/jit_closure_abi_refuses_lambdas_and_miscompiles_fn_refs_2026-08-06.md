@@ -1,4 +1,8 @@
 # JIT closure ABI: lambdas refuse the whole module, and named-fn refs SILENTLY MISCOMPILE
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-06
 - **Re-verified:** 2026-08-07 — both defects still live, unchanged behavior.
@@ -409,3 +413,4 @@ stamping the dest vreg does not change which print sink MIR already chose.
 
 Until then the guard is correct and must stay: a lambda under the JIT is a
 crash or a silently wrong number, not a slow-but-right fallback.
+

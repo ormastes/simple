@@ -1,4 +1,8 @@
 # P0: phase 2 silently drops a loop-carried accumulator update
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-13
 **Lane:** phase 2 only (the pure-Simple Stage 2 compiler). Phase 1 (Rust seed) is correct on **both** its backends.
@@ -83,3 +87,4 @@ receipt defect that is currently closing it.
   arrives as a pointer-shaped integer, so no `native-build` completes.
 - Sampled compile matrices: 19 of 75 `src/lib` files SEGV under phase 2 where
   phase 1 never crashes; 0 of 90 specs compile (the spec DSL does not resolve).
+

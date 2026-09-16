@@ -1,4 +1,8 @@
 # Parallel test timeout classification
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIXED; RUNTIME QUALIFICATION PENDING
 **Severity:** P1 — timeout totals and the stable run outcome could report a killed child as an ordinary failure
@@ -31,3 +35,4 @@ test evidence. The Rust-seed direct contract then remained live for more than
 50 seconds and was terminated by exact process group. Do not claim runtime or
 Stage 4 qualification until an admitted pure-Simple runner executes the focused
 contract with structured nonempty evidence.
+

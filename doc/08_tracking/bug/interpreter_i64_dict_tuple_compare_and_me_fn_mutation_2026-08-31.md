@@ -1,4 +1,8 @@
 # Two interpreter defects found while building the textual BM25 side-index
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** OPEN — both observed in real code, neither reduced to a minimal case
@@ -64,3 +68,4 @@ Reduce each to a minimal spec under `test/01_unit/compiler/`, establish the
 interpreter/native split, and check whether all three of today's defects share a
 root cause in value boxing or COW propagation. Until then the workarounds above
 stand and are documented at their call sites.
+

@@ -1,4 +1,8 @@
 # `print` drops its newline under native-build only
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (P2)
 **Filed:** 2026-08-17
@@ -70,3 +74,4 @@ Rust seed `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the
 shared main worktree), sha256 `3d120a6f9ab5`. Left OPEN; the native-build
 `rt_env_vars` breakage blocking this re-check is not filed separately here
 for time — flagged for whoever next touches native-build.
+

@@ -1,4 +1,8 @@
 # sosix_process_sharing_spec pre-existing RED — `sosix_dataset_active` not found
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-27
 - Spec: `test/system/app/os/feature/sosix_process_sharing_spec.spl`
@@ -26,3 +30,4 @@ red predates it. Spec left RED per testing rules.
 Restore/export `sosix_dataset_active` (and whatever sibling symbols the sealed
 dataset scenarios reference) from the sosix sharing module, or reconcile the
 spec with the module's current API.
+

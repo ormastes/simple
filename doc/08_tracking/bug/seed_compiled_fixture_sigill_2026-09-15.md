@@ -1,4 +1,8 @@
 # Seed-compiled fixtures die with SIGILL (public_dup / cfg_dup dispatch specs) (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `bin/simple` is currently the Rust seed (`bin/release/aarch64-unknown-linux-gnu/simple`,
 prints the bootstrap-seed banner). Two dispatch-contract specs drive the seed
@@ -30,3 +34,4 @@ currently deployed in the release slot the wrapper exits
 `error: refusing non-production Simple runtime` before the driver runs — the
 spec is blocked until a production self-hosted binary is redeployed. Not a
 spec defect.
+

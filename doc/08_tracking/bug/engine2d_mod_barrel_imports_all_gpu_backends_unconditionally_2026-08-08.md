@@ -1,4 +1,8 @@
 # SimpleOS baremetal kernel link drags in CUDA/Metal host-GPU FFI — root cause is `engine.spl`'s `Engine2D` facade, NOT `mod.spl`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-08
 **Severity:** high — blocks the SimpleOS desktop-kernel freestanding link /
@@ -162,3 +166,4 @@ pflash) launches → serial output.
   report with the (corrected-here) `mod.spl` attribution
 - `build/simpleos_wm_fullscreen_evidence2/native-objects-K0fOB0/` — the
   traced build objects (local scratch, not committed)
+

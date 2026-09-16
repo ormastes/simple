@@ -1,4 +1,8 @@
 # `eprint` in a module importing `std.io_runtime` is re-routed to STDOUT with a literal `[STDERR] ` prefix
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-10
 - Status: FIXED
@@ -166,3 +170,4 @@ All six logging checks pass together after the fix:
 - `doc/08_tracking/bug/logging_surfaces_that_suppress_errors_by_default_family_2026-08-10.md`
 - `doc/08_tracking/bug/prelude_builtins_rebindable_by_transitive_import_2026-08-10.md` (OPEN)
 - `doc/08_tracking/bug/seed_native_build_unknown_extern_rt_array_len_safe_2026-07-12.md`
+

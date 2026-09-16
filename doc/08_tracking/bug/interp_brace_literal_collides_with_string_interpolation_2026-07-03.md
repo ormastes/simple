@@ -1,4 +1,8 @@
 # Literal `{ ... }` sharing a string with other `{placeholder}`s is silently swallowed, not interpolated
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-verified 2026-09-13 — PARTLY CHANGED, core inconsistency STILL REPRODUCES (left open)
 
@@ -143,3 +147,4 @@ rather than a lookup on the immediate identifier) should require the same
 `{{`/`}}` escape uniformly, with a clear parse-time diagnostic when it's
 missing — not a silent swallow of the whole span in one case and a
 context-free "variable not found" in the other.
+

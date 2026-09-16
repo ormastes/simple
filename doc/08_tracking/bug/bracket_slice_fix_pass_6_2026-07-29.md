@@ -1,4 +1,9 @@
 # Bracket-slice byte/char index campaign — Pass 6 (2026-07-29)
+## Closed 2026-09-16 — bencode decode FIXED, byte-exact both engines; closes last campaign deferral
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Scope (coordinator assignment): the last named deferral — bencode's **decode**
 path (`src/lib/common/encoding/bencode.spl`). Encode side was already fixed in
@@ -117,3 +122,4 @@ with the engine investigation lanes (not this campaign):
   engine wrong, interpreter correct).
 - kafka `bytes_to_int32` tag-box `.get(i)` corruption (pass 3, `list.get(i)`
   returning `value<<3`).
+

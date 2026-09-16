@@ -1,4 +1,8 @@
 # Language / interpreter gaps surfaced by the full `test/01_unit` sweep (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Found by the 5-agent sweep-fix campaign (`.spipe/simply_showcase/state.md`).
 These are NOT spec/library typos — each needs a compiler or runtime change.
@@ -208,3 +212,4 @@ slice2 `dc58fec5f1b` `8da31723373`; slice3 `e5a7528f063` `46bb8524167`
     lanes contend on the shared results DB; sweeps running alongside other
     sessions can stall or lose rows. Sweep verdicts should not depend on a
     single shared writable DB file.
+

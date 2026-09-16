@@ -1,4 +1,8 @@
 # Native dynload build drops static initializers on module-level `var` globals
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Source implemented for scalar initialization, load, and store. Strict
@@ -93,3 +97,4 @@ zero-filled/`.data` section the loader honors). Until then, entries on this path
 must runtime-initialize any mutable module global they depend on. Likely related
 to the previously noted "seed segfault on uninit module var" and "zero-store
 array inits" observations.
+

@@ -1,4 +1,8 @@
 # Duplicate-check invalid enum value false-green — 2026-07-19
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** SOURCE FIXED / STAGE 4 QUALIFICATION PENDING
 
@@ -20,3 +24,4 @@ Local semantic mode excluded every candidate pair from the same `.spl` file,
 while semantic-LLM mode compared them. The local path now keeps same-file pairs
 and still uses its index-based `seen_pairs` key to emit each pair once. The
 focused regression uses two documented functions in one temporary file.
+

@@ -1,4 +1,9 @@
 # Interpreter: the call-entry global publish walks the caller's WHOLE overlay, twice, on every call
+## Closed 2026-09-16 — Status RESOLVED 2026-09-13 (PERF-9): mechanism removed, counts pinned by spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED (2026-09-13, PERF-9) — mechanism isolated by counting, then
   removed; pinned by counts in
@@ -125,3 +130,4 @@ later (only the `STEAL_NO_BINDING` counter differs).
   the per-call cost is the largest interpreter target by cost x frequency.
 - PERF-7's attribution receipt, which measured this term and filed it
   unattributed.
+

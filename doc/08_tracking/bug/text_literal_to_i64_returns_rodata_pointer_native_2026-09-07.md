@@ -1,4 +1,8 @@
 # `"7".to_i64()` returns a `.rodata` pointer under native codegen (2026-09-07)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. Pre-existing; NOT introduced by, and NOT cured by, the
 `rt_to_int_dynamic` routing fix landed the same day.
@@ -58,3 +62,4 @@ contract intact for genuine numbers.
 Affects any native `text_literal.to_i64()` / `.to_int()`. Not reached by the
 interpreter, and not reached when the text came from argv, a file read, a
 concatenation, or an interpolation.
+

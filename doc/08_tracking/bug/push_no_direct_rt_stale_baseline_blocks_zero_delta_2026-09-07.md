@@ -1,4 +1,9 @@
 # Push no-direct-rt stale baseline blocked zero-delta branches
+## Closed 2026-09-16 — Fix and evidence: --baseline-rev; selftest 19/19, topic PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -22,3 +27,4 @@ lanes retain their prior semantics.
 
 - Selftest: 19/19, including unchanged-debt PASS and added-debt FAIL fixtures.
 - SciLib topic: tip 6,313; `origin/main` 6,313; PASS.
+

@@ -1,4 +1,8 @@
 # ARM64 Socket IPC Runtime Owner Leak
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-12  
 **Status:** STATIC REPAIR PRESENT — target link confirmation pending  
@@ -31,3 +35,4 @@ test/01_unit/os/kernel/net/socket_ipc_transport_link_contract_spec.spl
 A future ARM64 build owner must confirm the target link has no undefined
 `rt_ipc_send_bytes` or `rt_ipc_recv_bytes`. Per the delegated lane contract,
 this repair did not rebuild the ARM64 kernel or run QEMU.
+

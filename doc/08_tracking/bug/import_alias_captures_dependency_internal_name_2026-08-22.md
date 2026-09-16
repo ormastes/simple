@@ -1,4 +1,8 @@
 # Import alias captures dependency internal name
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Importing `read_file_text as rt_file_read_text` from `std.io_runtime` causes
 the imported module's internal `file_read` path to resolve recursively through
@@ -26,3 +30,4 @@ not rewrite or capture identifiers resolved inside the dependency module.
 Until resolver ownership is fixed and tested across interpreter/JIT/native,
 callers use the canonical exported name directly. Raw SFFI exports must not be
 restored as a workaround.
+

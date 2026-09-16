@@ -1,4 +1,9 @@
 # macOS bootstrap Rust-hosted archive lacks `copy_mem`
+## Closed 2026-09-16 — Status Resolved in source 2026-07-17; focused runtime suite 7/7, archive exports copy_mem
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -34,3 +39,4 @@ separate invocation/provider-selection issue: the old Stage 3 driver selected
 `target/bootstrap/deps/libsimple_runtime.a` instead of
 `libsimple_native_all.a`, leaving 73 hosted compiler hooks unresolved. Resume
 with the explicit bootstrap hosted-bundle selector in a fresh bounded turn.
+

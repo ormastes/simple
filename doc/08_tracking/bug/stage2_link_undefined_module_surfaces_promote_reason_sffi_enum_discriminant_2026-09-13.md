@@ -1,4 +1,8 @@
 # Site 17: Stage 2 does not LINK on `origin/main` — `module_surfaces_promote_reason` and `_sffi_enum_discriminant` undefined
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Area: Stage-2 native link (`--backend=llvm --mode=dynload`), pure-Simple symbol
@@ -107,3 +111,4 @@ failure to produce a candidate at all. Site 16's root cause has since been found
 and fixed in the seed (see that record's 2026-09-13 addendum); this new link hole
 is what now stands between the chain and a Stage-2 candidate, so the enum fix
 could not be confirmed at Stage-2 scale by either BOOT-16 run.
+

@@ -1,4 +1,9 @@
 # native (bootstrap/entry-closure): module-level `val` globals read as uninitialized stack garbage
+## Closed 2026-09-16 — ...ackend emits alloca-without-store. ## Fix (same-named files) - HIR bootstrap return: lower
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-23  **Status:** FIXED (three-layer fix, same change set)
 - **Severity:** critical — any native app using a module-level `val` (e.g.
@@ -44,3 +49,4 @@ No compile error is raised (silent).
 ## Repro
 `src/app/mcprepro`-style entry with the two `val`s above; native-build with
 `--entry-closure`; run and check output (fixed: `name=repro-server cap=1048576`).
+

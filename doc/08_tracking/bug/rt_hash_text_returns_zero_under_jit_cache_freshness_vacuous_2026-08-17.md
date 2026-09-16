@@ -1,4 +1,8 @@
 # rt_hash_text returns 0 under JIT/native — every cache source-hash check is vacuous
+## Obsolete 2026-09-16 — SUPERSEDED 2026-09-07 by rt_hash_text_cross_lane_disagreement doc covering same defect, now fixed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Filed:** 2026-08-17
 **Status:** SUPERSEDED 2026-09-07 — the "Fix landed" claim below was wrong: `compile_inline_hash_text`
@@ -163,3 +167,4 @@ PASS — 6 case(s) checked, 0 failed          (rc=0)
 JIT hashes are nonzero and identical to the interpreter; the detector reports 6
 cases (not the degenerate 4) with no `degenerate` NOTE. Matches the
 isolated-build result. **Status: RESOLVED.**
+

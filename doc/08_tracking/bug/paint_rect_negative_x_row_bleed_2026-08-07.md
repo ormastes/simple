@@ -1,4 +1,9 @@
 # `paint_rect` negative-origin x bleeds into the preceding row instead of clipping
+## Closed 2026-09-16 — Status resolved 2026-08-07; per-row x-clip fix with before/after pixel evidence, spec 9/9
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Status**: resolved 2026-08-07
 - **File**: `src/lib/common/ui/render_opt/paint_chunk_rasterizer.spl:136-143` (`paint_rect`)
@@ -98,3 +103,4 @@ into the preceding row (FIXED: ...)"`, and three new cases were added:
 fully-off-left negative x paints nothing, right-edge overflow clips instead
 of bleeding into the next row, and a partial-overlap negative-y rect paints
 only its in-bounds rows with no wrap-around bleed.
+

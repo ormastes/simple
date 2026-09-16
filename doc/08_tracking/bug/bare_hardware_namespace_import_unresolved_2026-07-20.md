@@ -1,4 +1,8 @@
 # Bare `hardware.*` namespace imports fail to resolve (needs `std.` prefix; ~64 specs affected)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
@@ -82,3 +86,4 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 (Broader sibling pattern: 64 files under `test/01_unit/hardware/` use the
 same bare `use hardware.X` import style; likely all share this root cause,
 not independently verified here — out of shard scope.)
+

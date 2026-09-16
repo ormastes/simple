@@ -1,4 +1,8 @@
 # WASM WAT codegen matched the MirOperand STRUCT against non-existent variants — every call and every operand silently dropped
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Status:** FIXED (see "Fix" below). Fix is **UNCOMPILED** — see "Verification".
@@ -134,3 +138,4 @@ executed.
   left for a separate change to keep this diff scoped.
 - The WASM backend appears to have no spec coverage at all; nothing in the
   suite would have caught any of this.
+

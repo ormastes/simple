@@ -1,4 +1,8 @@
 # Vulkan 8K benchmark blocked by missing struct-receiver runtime symbol
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-11
 
@@ -50,3 +54,4 @@ prevents an honest 8K p50/p95 claim for that path as well.
    `VULKAN_8K_RETAINED` result.
 4. Receipt identifies device type/driver and does not promote llvmpipe to
    physical-GPU evidence.
+

@@ -1,4 +1,8 @@
 # Enterprise vertical modules deleted from src
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -19,3 +23,4 @@ enterprise_finance/inventory either.
 ## Unblock condition
 Reinstate the modules (or port the specs to the replacement modules with a
 reviewed mapping). Verify with `bin/simple run` on each spec.
+

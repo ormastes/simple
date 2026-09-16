@@ -1,4 +1,8 @@
 # FAT32 database atomic replace and mount recovery are missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -141,3 +145,4 @@ evidence), which is outside this lane's scope (no QEMU/board access here).
 Status left OPEN (P1) rather than claimed RESOLVED, since the doc's own bar
 is explicit and higher than a unit spec; recording the unit-level green so
 whoever runs the QEMU matrix next has one fewer open question.
+

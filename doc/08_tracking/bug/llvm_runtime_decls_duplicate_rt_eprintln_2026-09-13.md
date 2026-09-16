@@ -1,4 +1,8 @@
 # LlvmBackend.compile_module() fails on any module: duplicate `rt_eprintln` declaration
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Binary: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed, `sha256sum` first 8:
@@ -53,3 +57,4 @@ otherwise-empty MIR module (zero functions), so it reproduces unconditionally �
 `llvm_backend_tools.spl`) — de-duplicate declared runtime symbols before
 emitting them into the IR text, or find where `rt_eprintln` is declared twice
 in the template list.
+

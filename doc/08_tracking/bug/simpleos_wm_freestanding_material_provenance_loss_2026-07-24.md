@@ -1,4 +1,8 @@
 # BUG: freestanding WM loses realized glass fallback provenance
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** source fix implemented; fresh QEMU verification pending
 **Severity:** high
@@ -60,3 +64,4 @@ absent, the downstream provenance gate still rejects the frame.
 - MCP and LSP native packages: built and returned valid `initialize` replies.
 - QEMU runtime: retry cap was reached before the CSS-state fix could be
   exercised. A fresh session must run the canonical evidence wrapper once.
+

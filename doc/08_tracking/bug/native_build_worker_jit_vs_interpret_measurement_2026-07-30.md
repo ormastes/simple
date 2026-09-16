@@ -1,4 +1,8 @@
 # native-build worker: JIT vs interpret measurement (2026-07-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment: measure the `native_build_worker.spl` compile pipeline under
 `SIMPLE_EXECUTION_MODE=jit` versus the forced-`interpret` default, since
@@ -196,3 +200,4 @@ re-applied this pass since the measurement's subject is the worker's
 own compile performance, not the retype's correctness; the entry file
 itself was removed after this pass's runs, consistent with prior
 passes' scratch-file discipline).
+

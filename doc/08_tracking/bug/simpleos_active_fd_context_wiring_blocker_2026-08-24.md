@@ -1,4 +1,8 @@
 # SimpleOS active FD context wiring blocker (2026-08-24)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The legacy `os.kernel.fd_table` stores one process-global active descriptor
 mirror. Callers switch it with `fd_activate_task`, and fd/open/dup/close plus
@@ -112,3 +116,4 @@ This does not complete the production cut. The legacy `fd_context_*` storage is
 still task-ID keyed, FD/OFD refcount copying still lacks rollback, and direct C
 and internal callers still use ambient `fd_activate_task`. Those pieces must be
 migrated together; wiring only these owner primitives would remain unsafe.
+

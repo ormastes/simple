@@ -1,4 +1,9 @@
 # Seed JIT: match over a `-> Option<T>` call leaves the `None` arm unmatched (nil 0x3 fall-through)
+## Closed 2026-09-16 — FIXED 2026-08-16; after-fix both lanes agree r=false
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-16 (seed, HIR pattern lowering)
 **Found via:** font registry validation — `val has_fvar = match find_table(...): Some(_): true / None: false` printed `has_fvar=error` on the JIT lane (see
@@ -68,3 +73,4 @@ excluded.
 Both lanes agree: `r=false`; the mirrored `find_table` repro prints
 `has_fvar=true` / `has_miss=false` on JIT and interpreter alike; statement-form
 match prints `none`.
+

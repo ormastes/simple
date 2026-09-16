@@ -1,4 +1,9 @@
 # native-build worker timeout fires far earlier than the configured budget
+## Closed 2026-09-16 — ..._misaccounted_2026-08-09 - Status: FIXED 2026-08-21 (digit value = code point - 48; `nativ
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **ID:** native_build_worker_timeout_misaccounted_2026-08-09
 - Status: FIXED 2026-08-21 (digit value = code point - 48; `native_build_parse_secs`/`native_build_timeout_ms` made `pub` so the spec can import them). See also doc/08_tracking/bug/native_build_timeout_not_forwarded_to_worker_2026-08-21.md for the run6 recurrence and the orphaned-worker half.
@@ -45,3 +50,4 @@ Watch wall time until the "timed out after 21600s" error appears (observed at
 
 - `native_build_fixed_cost_floor_hides_incrementality_2026-08-08`
 - `native_build_cache_scope_key_renders_corrupt_persistent_cache_2026-08-08`
+

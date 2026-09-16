@@ -1,4 +1,9 @@
 # BUG: x86_64 sshd fails SSH version exchange under freestanding native-build
+## Closed 2026-09-16 — maining exec wiring is small (route the resolved path to `fs_exec_spawn_ring3`).
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** open
 **Severity:** high (blocks all x86_64 SSH login; rv64 SSH login is proven, x64 is not)
@@ -128,3 +133,4 @@ work before an SSH command can drive `fs_exec_spawn_ring3`. Fixing the version
 exchange (then verifying KEX/packet/auth for the same `[u8]`/take hazards) makes
 x64 SSH login work; the remaining exec wiring is small (route the resolved path to
 `fs_exec_spawn_ring3`).
+

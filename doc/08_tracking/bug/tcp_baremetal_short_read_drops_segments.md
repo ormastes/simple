@@ -1,4 +1,9 @@
 # BUG: boot_tcp_read_text single non-blocking read drops later TCP segments (rv64 DB SELECT fails)
+## Closed 2026-09-16 — ...v64 DB SELECT fails) **Status:** RESOLVED (2026-07-11) **Severity:** medium-high (any HTTP
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (2026-07-11)
 **Severity:** medium-high (any HTTP body split across TCP segments is silently truncated)
@@ -46,3 +51,4 @@ gate end-to-end (the earlier text.len() miscompile fix unmasked this bug).
 Build note discovered en route: in this virtual workspace
 `cargo build -p simple-driver -p simple-native-all --features llvm` does NOT
 activate llvm — use `--features simple-driver/llvm,simple-native-all/llvm`.
+

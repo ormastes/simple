@@ -1,4 +1,9 @@
 # Rust Test Runner Explicit Non-Test False Green
+## Closed 2026-09-16 — Status: Fixed in temporary Rust runner 2026-07-17; empty discovery now fails
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -28,3 +33,4 @@ covers targeted/untargeted, spec, and doctest counts.
 The bounded binary-target test command timed out after 180 seconds while still
 compiling `simple-compiler`; the test body did not run, and the command was not
 retried. Rustfmt and the source contract pass.
+

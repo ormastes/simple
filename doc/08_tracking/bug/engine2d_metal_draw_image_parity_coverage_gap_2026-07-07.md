@@ -1,4 +1,9 @@
 # draw_image (kernel_blit_image) had a real Metal dispatch path but ZERO CPU-vs-Metal parity coverage
+## Closed 2026-09-16 — Status Closed; draw_image parity coverage added, all gates pass bit-exact
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 Closed (2026-07-07) — coverage gap, not a live divergence. No fix was needed;
@@ -110,3 +115,4 @@ other `draw_*` methods on `MetalBackend` (`draw_ellipse`, `draw_arc`,
 — they have no Metal kernel at all, so they are single-algorithm (not
 dual-algorithm) and outside this parity class by construction; nothing to
 prove there.
+

@@ -1,4 +1,8 @@
 # `if val x = opt_class_field:` unwrap binds a COPY of a class instance, not the same reference — mutation through it is silently lost
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Area: Rust seed interpreter, `Option<T>` unwrap / pattern-bind semantics for class (reference) types
@@ -98,3 +102,4 @@ Narrow further: does `if let`/`if val` binding for `Option<T>` route through a
 different code path than a bare class-typed parameter bind? Compare the
 seed's pattern-match/binding lowering for `Option::Some(x)` destructuring
 against a plain class parameter bind to find where the copy is introduced.
+

@@ -1,4 +1,8 @@
 # Inline-assembly colon form drops operand contracts
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -32,3 +36,4 @@ block.
 The grammar fix must be compile-time only. It must not add runtime wrapper
 calls, allocation, lookup, dispatch, or instruction count. Memory clobbers must
 remain compiler barriers without emitting additional hardware instructions.
+

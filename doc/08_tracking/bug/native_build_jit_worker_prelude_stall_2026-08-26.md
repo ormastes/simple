@@ -1,4 +1,8 @@
 # Native-build worker JIT prelude stalls before source closure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -57,3 +61,4 @@ source-closure tail immediately after
 with a bounded per-file receipt rather than another whole-worker retry.
 Splitting only the full CLI removes 2,792 JIT functions but is insufficient.
 No Vulkan showcase or guest-frame claim may be admitted from a seed-only run.
+

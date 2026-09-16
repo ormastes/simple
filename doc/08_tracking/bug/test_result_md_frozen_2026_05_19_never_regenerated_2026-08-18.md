@@ -1,4 +1,9 @@
 # test_result.md is frozen at 2026-05-19 — it is NOT being rewritten daily
+## Closed 2026-09-16 — ...y exits and the DB is closed out. ## Fix directions (not applied — other lanes own these f
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-18 · **Lane:** TALLY · **Status:** OPEN (diagnosis complete)
 
@@ -74,3 +79,4 @@ actually exits and the DB is closed out.
    a write failure is silent. Should be reported.
 3. Consider stamping the source DB's run id / end_time into the header alongside
    `Local::now()`, so a frozen file is self-evidently frozen.
+

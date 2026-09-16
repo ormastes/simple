@@ -1,4 +1,8 @@
 # HandleArena spec fails on anonymous-tuple `.0`/`.1` field access
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (likely interpreter/compiler tuple-return defect, not a lib API gap)
@@ -42,3 +46,4 @@ it needs interpreter/compiler-level investigation into anonymous tuple
 `.0`/`.1` access under the `simple test` evaluation path, which is out of
 scope for this cluster-fix pass (guide: "Do NOT attempt a Rust seed source
 fix; out of scope").
+

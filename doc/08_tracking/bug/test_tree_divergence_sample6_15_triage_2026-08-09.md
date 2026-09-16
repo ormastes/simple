@@ -1,4 +1,8 @@
 # Test-tree divergence: sample 6 (15 pairs) triage (2026-08-09)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** 9 pairs reconciled (real fixes; 8 verified GREEN with `bin/simple run`,
 1 fixed-but-unverifiable due to a pre-existing structural issue present in
@@ -84,3 +88,4 @@ made with the Edit/Write tools only — no `git stash`/`checkout`/`restore`/
 No changes were made to `scripts/check/test_tree_divergence_baseline.txt` or
 `scripts/check/check-test-tree-divergence.shs`. Nothing was committed or
 pushed — left for review per instructions.
+

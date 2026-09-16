@@ -1,4 +1,8 @@
 # `var q: T = p` does NOT copy a struct's nested array — it aliases (Rust seed)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01 · **Status:** OPEN · **Found by:** D4 per-codeword ECC work
 (`examples/09_embedded/simpleos_nvme_fw/fw/`)
@@ -478,3 +482,4 @@ need the files.
 If they are re-created for a fix, give them spec structure and a home outside
 `test/`, or the repo's idiom ratchet will reject them (measured: they fail
 `Code Idiom & Structural Ratchet Gates`).
+

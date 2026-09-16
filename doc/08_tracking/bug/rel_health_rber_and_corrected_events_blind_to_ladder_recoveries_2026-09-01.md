@@ -1,4 +1,8 @@
 # rel_health RBER / corrected_events are blind to every read-retry-ladder recovery
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - id: rel-health-rber-blind-to-ladder-2026-09-01
 - date: 2026-09-01
@@ -67,3 +71,4 @@ bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_emu_recovery_check.
 ```
 (verdict line `NVME EMU RECOVERY OK`; the RBER finding is recorded in the
 comment block above the health assertions, not asserted).
+

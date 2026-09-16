@@ -1,4 +1,8 @@
 # SpirvBuilder drops its whole module to the interpreter via an unresolved JIT symbol
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-11
 **Impact:** cost roughly four hours across two lanes before being diagnosed
@@ -73,3 +77,4 @@ convert a mysterious timeout into a named error.
 
 Open. Not a defect in `SpirvBuilder`'s SPIR-V output, which is proven conformant
 under Khronos SPIRV-Tools v2025.1 — this is purely a JIT symbol-resolution gap.
+

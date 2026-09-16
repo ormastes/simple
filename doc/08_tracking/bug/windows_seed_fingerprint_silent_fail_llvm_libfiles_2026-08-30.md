@@ -1,4 +1,8 @@
 # Windows seed fingerprint fails mute on `llvm-config --libfiles`; and fingerprints a different LLVM than the build links
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-30
 **Status:** Defect 1 FIXED in this change; Defect 2 OPEN
@@ -201,3 +205,4 @@ bootstrap_stage3_seed_inputs_fingerprint "$PWD" llvm "--features llvm" "$PATH" \
 - `scripts/bootstrap/bootstrap-from-scratch.sh` (`seed_inputs_hash`)
 - `scripts/setup/platform-detect.shs`
 - `doc/03_plan/compiler/windows_bootstrap_separate_hosts_nonconflicting_plan_2026-08-30.md`
+

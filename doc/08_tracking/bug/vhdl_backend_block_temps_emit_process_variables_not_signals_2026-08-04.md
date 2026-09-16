@@ -1,4 +1,8 @@
 # VHDL backend emits block-level MIR temps as process VARIABLES (`:=`); the E2E spec expects concurrent SIGNAL assignments (`<=`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -212,3 +216,4 @@ designed behavior for ANY change to the offender list (even a shrink),
 requiring a human to confirm the shrink is benign rather than auto-passing —
 which this note does. The remaining 3079 unbaselined + 965 baselined
 offenders are pre-existing and untouched by this lane.
+

@@ -1,4 +1,8 @@
 # Native module-level derived `i32` constant is tag-shifted
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Observed:** 2026-07-27 on the pure-Simple Cranelift Stage 3 lane.
 - **Scope:** focused 300-DPI Engine2D font producer probe.
@@ -37,3 +41,4 @@ receiving the typed `FontRenderer` in `x0`, followed by
 The source now exposes one atomic mutating `reset_cache_stats_receipt()` call,
 while the remaining compiler defect stays open. This adaptation has not
 received a fourth native run; the three-cycle cap is exhausted.
+

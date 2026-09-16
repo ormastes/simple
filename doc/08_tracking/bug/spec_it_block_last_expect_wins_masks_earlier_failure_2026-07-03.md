@@ -1,4 +1,8 @@
 # Bug: `std.spec` `it` block only reports the LAST `expect()`/assertion, silently masking earlier failures
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Severity:** P0 — trust: the per-`it` ✓/✗ marker (the thing agents are told to
@@ -98,3 +102,4 @@ file-summary bug and should be prioritized accordingly.
   exactly one meaningful `expect()`/`assert_*`, or explicitly combine
   multiple checks into one boolean before the final assertion, until the
   runner itself accumulates failures correctly.
+

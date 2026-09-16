@@ -1,4 +1,8 @@
 # Three push-tier gates are red on an unmodified `origin/main`, so every push is a `--no-verify` push
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06 · **Status:** RECORDED (measured, not fixed) · **Measured at:** `a12a19eb775`
 (worktree checkout of `origin/main`); the reporting session measured the same three at
@@ -223,3 +227,4 @@ redeploy was forbidden for this session.
 
 No fix, no baseline regeneration, no gate edit, and no build of any kind — no bootstrap, no
 stage self-compilation, no `cargo`. This record is filing only.
+

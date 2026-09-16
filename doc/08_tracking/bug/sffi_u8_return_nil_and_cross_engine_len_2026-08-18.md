@@ -1,4 +1,8 @@
 # SFFI `-> [u8]` siblings: interpreter binds `nil`, and `rt_bytes_alloc` length disagrees across engines
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
 **Area:** interpreter / SFFI return marshalling
@@ -66,3 +70,4 @@ the fix lands.
 Root cause is in the extern return marshalling, and the two engines disagree,
 so a one-engine patch would paper over Defect B. Left open rather than
 half-fixed.
+

@@ -1,4 +1,8 @@
 # `draw_ir_runtime_queue_spec.spl` has 2 unrelated failures, discovered while re-checking a different bug
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found by: BUGFIX-7 lane while re-checking
@@ -33,3 +37,4 @@ Out of scope for the lane that found it (busy on a different bug shard).
 Needs someone to grep for `engine2d_draw_ir_payload_summary` and its likely
 renamed sibling, and to find where the `runtime-` id prefix is added/expected
 to reconcile scenario 1.
+

@@ -1,4 +1,8 @@
 # CLI Dispatch Perf Spec Still Fails
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: new, different failure mode; not closable
 - **measured** — `bin/simple run test/05_perf/cli_dispatch_perf_spec.spl` (Rust seed
@@ -35,3 +39,4 @@ syntax or fix the benchmark target.
 
 Do not use this spec as release evidence until the failing benchmark case is
 identified and made deterministic.
+

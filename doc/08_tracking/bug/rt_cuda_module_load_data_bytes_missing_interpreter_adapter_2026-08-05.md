@@ -1,4 +1,9 @@
 # `rt_cuda_module_load_data_bytes` has no interpreter adapter — next layer after `rt_array_data_ptr_u8`
+## Closed 2026-09-16 — Status RESOLVED 2026-08-07; adapter added, error advanced to next layer
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED 2026-08-07
 **Found:** 2026-08-05
@@ -128,3 +133,4 @@ native-runtime refactor); filed as
 - `x25519mlkem768_vulkan_candidate_spec.spl`: `Results: 3 total, 3 passed, 0 failed`
 - `x25519mlkem768_cuda_warmup_contract_spec.spl`: `Results: 3 total, 3 passed, 0 failed`
 - `x25519mlkem768_manifest_existence_gate_spec.spl`: `Results: 8 total, 8 passed, 0 failed`
+

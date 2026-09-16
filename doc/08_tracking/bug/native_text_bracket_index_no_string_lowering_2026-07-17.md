@@ -1,4 +1,8 @@
 # Native path: `text[i]` bracket indexing has no string-aware lowering — garbage output, then SIGSEGV on comparison
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** Critical (silent wrong output escalating to crash; core string-indexing feature)
@@ -115,3 +119,4 @@ than reaching the raw-pointer `emit_gep`/`emit_load` fallback.
 - `.char_at()` on the identical receiver/index is confirmed correct on both
   paths in the same probe file, isolating the defect to bracket-index syntax
   specifically.
+

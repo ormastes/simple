@@ -1,4 +1,9 @@
 # Bug: `bin/simple os build/test --scenario=...` compiler-discovery probe times out at 5s, fails ALL scenarios — FIXED
+## Closed 2026-09-16 — Status FIXED 2026-08-06; timeout raised + configurable, mechanism verified directly
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **ID:** os-build-scenario-runner-5s-compiler-probe-timeout-2026-08-06
 **Domain:** os/simpleos build tooling (`src/os/_QemuRunner/os_build_run.spl`)
@@ -180,3 +185,4 @@ from `_find_simple_binary`/`_find_simple_binary_for_target`'s candidate list.
 - `doc/08_tracking/bug/riscv64_kernel_codegen_blocker_2026-07-20.md` (update
   2026-08-06) — the actual riscv64 kernel build blocker once this probe is
   bypassed.
+

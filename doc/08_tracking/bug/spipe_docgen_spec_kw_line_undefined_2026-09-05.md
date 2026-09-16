@@ -1,4 +1,8 @@
 # `spipe-docgen` imported two functions that were defined nowhere — every manual generation aborted
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 (Two symbols, same defect class, found one after the other: `spec_kw_line`
 first, then `scenario_at_is_unconditional_pending`. Both are documented below.)
@@ -127,3 +131,4 @@ Verified with `src/compiler_rust/target/debug/simple` (current-source Rust seed,
 built 2026-09-04 18:13). The sanctioned `bin/release/aarch64-apple-darwin/simple_seed`
 (2026-07-25) cannot parse current stdlib source — see
 `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`.
+

@@ -1,4 +1,8 @@
 # Cross-module struct field/constructor visibility blocks the 140-module lint closure at step 2/6
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-08-23 from the monomorphization lane, as a **measured negative
 result**: it is what actually stops a real closure, and it is NOT what the
@@ -89,3 +93,4 @@ reverted while shards were live), so shards may have seen inconsistent
 compiler source. The conclusion is unaffected: every one of the 1512 errors is
 an HIR visibility/resolution error in files this lane never touched, and the
 build died before monomorphization ran at all.
+

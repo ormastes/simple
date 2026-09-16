@@ -1,4 +1,8 @@
 # scripts/setup/setup.shs fails on a dash /bin/sh host (rc=2, `bin/simple` never created)
+## Obsolete 2026-09-16 — duplicate of setup_shs_pipefail_dash_abort_before_windows_guard; same dash/pipefail symptom+area
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 - Status: OPEN (2026-09-13)
 - Host: this Linux aarch64 box, `/bin/sh -> dash`
@@ -47,3 +51,4 @@ Either invoke the helper with `bash` explicitly
 guard (or drop it — the script's own commentary says it should be a no-op on
 non-Windows by construction, and pipefail is not load-bearing for its actual
 NTFS-junction/hardlink logic).
+

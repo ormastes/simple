@@ -1,4 +1,8 @@
 # Seed stage-2 link failure: LLVM backend misses method-call→rt_* lowering
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** critical (the redeploy wall — blocks self-hosted bootstrap stage 2)
@@ -54,3 +58,4 @@ pattern) or earlier lowering.
   release path; refreshed/self-hosted redeploy depends on this fix.
 - `bootstrap_stage2_empty_mir_bodies_2026-07-05.md`,
   `selfhost_bootstrap_unresolved_symbols_2026-06-24.md` — earlier stage-2 walls.
+

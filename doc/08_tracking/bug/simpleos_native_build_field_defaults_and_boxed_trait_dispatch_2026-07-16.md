@@ -1,4 +1,9 @@
 # Bug: entry-closure cranelift — omitted `= nil` field defaults retain garbage; trait dispatch on boxed SoftwareBackend faults
+## Closed 2026-09-16 — ...ords may be poisoned the same way. ## Fix directions 1. **Root (preferred):** in the seed,
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Status update (2026-07-16, full-fix-chain):** Symptom A ROOT-FIXED in `6b59a8c4bf7` —
   NOT entry-closure-specific: BOTH HIR struct-construction sites (brace form in
@@ -66,3 +71,4 @@ Full kernel build + QEMU boot per
 `doc/08_tracking/bug/simpleos_native_build_bare_len_dynamic_dispatch_symbol_collision_2026-07-16.md`
 recipe; watch serial after `launcher apps=15`. Last-known serial:
 `build/os/_wk/serial.log`; screendumps `build/os/_wk/shot25*.ppm` (0.00%).
+

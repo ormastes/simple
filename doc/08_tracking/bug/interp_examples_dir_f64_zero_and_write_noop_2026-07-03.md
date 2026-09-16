@@ -1,4 +1,9 @@
 # Bug: scripts under examples/ zero nested f64 payloads and no-op file writes
+## Closed 2026-09-16 — Status resolved 2026-07-03: write no-op fixed and verified, f64-zero not reproducible in resolution
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-03
 **Severity:** high (silently wrong results)
@@ -69,3 +74,4 @@ does the test/ spec context.
 ## Impact
 In-repo example scripts that exercise f64-carrying models give silently wrong
 output. User macros outside the repo are unaffected.
+

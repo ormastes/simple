@@ -1,4 +1,8 @@
 # Native: 3-operand text `+` chain over a 2-byte span loop reportedly prints nothing (unfiled observation, unfiled bug)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Filed: 2026-09-13
 - Status: **UNCONFIRMED — native reproduction blocked by a pre-existing,
@@ -139,3 +143,4 @@ as an alternate driver.
   for a 2-byte span). **This record cannot be closed or hardened into a root
   cause until `native-build` itself is unblocked** — see the two OPEN records
   above. Re-run this file's three probes once either of those lands a fix.
+

@@ -1,4 +1,9 @@
 # Phase 1 verification escaped seed authority and false-passed missing tools
+## Closed 2026-09-16 — Status FIXED IN WORKING TREE; focused cargo test and authority test PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-08
 **Status:** FIXED IN WORKING TREE
@@ -69,3 +74,4 @@ A passing row records the exact artifact path and SHA-256.
 The full Phase 1 matrix was deliberately not repeated unchanged. Its next run
 must use the changed verifier and a new work root so the summary itself proves
 the fixed command and artifact contract.
+

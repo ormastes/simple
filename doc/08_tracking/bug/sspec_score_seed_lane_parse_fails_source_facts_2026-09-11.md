@@ -1,4 +1,8 @@
 # sspec-score-seed-lane.shs fails on this host: seed parser rejects a transitive import (2026-09-11)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `sh scripts/check/sspec-score-seed-lane.shs <spec>` errors on every spec on
 this host (`.claude/worktrees/agent-a786cf790505813ca`, macOS aarch64):
@@ -49,3 +53,4 @@ pulls it in transitively — needs a real import trace, not guessed), or (b)
 deploy a current self-hosted `bin/release/<triple>/simple` on this host so the
 scorer can run via `simple sspec-maintain scan <spec>` directly instead of the
 seed-lane workaround.
+

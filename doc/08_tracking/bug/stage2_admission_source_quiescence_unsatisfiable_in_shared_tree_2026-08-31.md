@@ -1,4 +1,8 @@
 # Stage 2 admission source-quiescence invariant is unsatisfiable in the shared working tree
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-31
 - Severity: high (blocks every bootstrap redeploy attempted from the shared tree)
@@ -60,3 +64,4 @@ Run bootstraps from a clean detached worktree of a named commit:
 copying, no receipt forgery; the quiescence invariant holds by construction
 and the run is reproducible against a commit id. `.claude/rules/bootstrap.md`
 should document this as the standard bootstrap procedure on shared hosts.
+

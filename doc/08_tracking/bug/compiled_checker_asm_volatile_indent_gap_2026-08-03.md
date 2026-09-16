@@ -1,4 +1,9 @@
 # Compiled checker asm-volatile indented-block gap
+## Closed 2026-09-16 — Status CLOSED 2026-09-13; not reproducible, riscv32_startup spec 54/0 PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: CLOSED (2026-09-13) — not reproducible on
   `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`
@@ -45,3 +50,4 @@ reported file/line no longer exists in that shape, and the grammar it
 exercised parses cleanly today on the deployed binary. If the "compiled
 checker" referenced here is a distinct Stage 4 tool with its own parser
 path (not `bin/simple test`), re-open with that tool's own repro command.
+

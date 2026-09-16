@@ -1,4 +1,8 @@
 # Portable-compute CUDA emitter crashes in the pure-Simple runtime
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open
 **Date:** 2026-07-17
@@ -63,3 +67,4 @@ deployment, but is not accepted as pure-Simple or CUDA toolchain evidence.
 - The tracked backend passes its provenance/trust check.
 - Device readback covers translucent destination alpha and matches the common
   composition result.
+

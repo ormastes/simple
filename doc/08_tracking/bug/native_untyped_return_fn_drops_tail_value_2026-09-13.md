@@ -1,4 +1,8 @@
 # A function with no declared return type returns 0 in native codegen
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Filed: 2026-09-13
 - Found by: reducing the `crash` class of
@@ -92,3 +96,4 @@ was written. Because it changes the MIR of every un-annotated function in the
 tree, it needs the full differential harness
 (`scripts/check/check-native-interp-differential.shs`) run before and after, not
 a spot check.
+

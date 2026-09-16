@@ -1,4 +1,8 @@
 # Bare field reference inside methods is illegal in every lane, yet ~740 product-code sites use it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-10
 - Status: OPEN (P2)
@@ -579,4 +583,5 @@ change well beyond this lane's per-item budget and risky to attempt
 without a scoped plan (some modules already fixed per the header note,
 "the wider 62-file family is filed here as systemic follow-up").
 Leaving OPEN, no attempt.
+
 

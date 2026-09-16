@@ -1,4 +1,8 @@
 # Structural union symbol and named-narrowing follow-up
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -34,3 +38,4 @@ remain unsupported.
   diagnostic behavior.
 - Sorted preregistration makes genuine same-hash assignment independent of
   declaration and dictionary traversal order.
+

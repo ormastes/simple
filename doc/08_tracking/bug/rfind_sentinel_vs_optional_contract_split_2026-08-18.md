@@ -1,4 +1,8 @@
 # rfind: sentinel (-1) vs Optional contract split across stdlib call sites
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-18
 - Area: compiler (MIR lowering) + lib (stdlib call sites)
@@ -112,3 +116,4 @@ a test result. Deferred command for whoever picks this up:
 ```
 bin/simple test test/01_unit/lib/text/rfind_optional_spec.spl
 ```
+

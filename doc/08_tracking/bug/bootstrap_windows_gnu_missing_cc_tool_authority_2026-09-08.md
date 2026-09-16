@@ -1,4 +1,9 @@
 # Windows GNU bootstrap tool authority assumes an absent cc alias
+## Closed 2026-09-16 — Focused repair verified; behavioral test and live snapshot pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Owner: Astra Phase 1 continuation. Status: focused repair verified; canonical Stage 2 continuation pending.
 
@@ -50,3 +55,4 @@ toolchain block). Neither failure re-entered the repaired missing-cc snapshot
 path. The metadata evidence and bounded recovery contract are tracked in
 `bootstrap_rust_toolchain_sysroot_resolution_2026-09-08.md`. No Stage 2 artifact
 or release admission is claimed by this focused repair.
+

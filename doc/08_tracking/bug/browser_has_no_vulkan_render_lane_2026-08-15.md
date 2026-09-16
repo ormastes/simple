@@ -1,4 +1,8 @@
 # Browser has no Vulkan render lane; deployed seed lacks the vulkan feature
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-15
 **Status:** PARTIAL (2026-08-15: docker/Vulkan system lane GREEN with a
@@ -128,3 +132,4 @@ it and reads it back pixel-perfect on lavapipe (`readback_source=device_readback
   a vulkan-featured seed.
 - Longer term: a real browser `vulkan` render lane routing draw IR through
   engine2d GPU primitives.
+

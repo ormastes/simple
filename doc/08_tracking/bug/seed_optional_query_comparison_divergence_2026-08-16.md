@@ -1,4 +1,8 @@
 # Seed interpreter: `.?` operator yields value-or-nil, not bool; module-private `val` imports resolve inconsistently
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date**: 2026-08-16
 - **Status**: PARTIAL FIX (Divergence A: 2 sites fixed in h1_client.spl, 43 total sites tree-wide remain; Divergence B: constant made pub; Divergence C: open)
@@ -177,3 +181,4 @@ This lack of context makes seed-vs-self-hosted discrepancies hard to localize. A
 ## Landing note (2026-08-16)
 
 The two h1_client.spl guard fixes landed in the browser development lane. The BROWSER_MAX_RESOURCE_BYTES `pub val` change was made but downstream chunked-decode failure was not resolved as part of this investigation — that work remains open.
+

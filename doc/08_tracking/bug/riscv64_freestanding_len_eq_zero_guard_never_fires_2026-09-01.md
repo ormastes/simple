@@ -1,4 +1,8 @@
 # riscv64 freestanding: `x.len() == 0` is FALSE on a collection whose `.len()` is 0
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN
 - Date: 2026-09-01
@@ -272,3 +276,4 @@ Identify the real collection `parse_and_build_module` populates and probe ITS
 count in-guest, to split the search: a count of 2 blames HIR lowering, a count
 of 1 blames the parser. Do not assume which; the last two assumptions here were
 both wrong.
+

@@ -1,4 +1,8 @@
 # `src/os/**`: 46 imported modules/symbols that were never implemented
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (out-of-scope — no implementation invented, per triage brief)
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` + `src/unit/**` scope)
@@ -143,3 +147,4 @@ where a guessed implementation is worse than a recorded gap.
 4. **Compositor** — decide whether `FbCompositorBackend` and the `draw_*`
    families are still wanted, or whether the importing `mod.spl` re-export lines
    should be deleted as dead.
+

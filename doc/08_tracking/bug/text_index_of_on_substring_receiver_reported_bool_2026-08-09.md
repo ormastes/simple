@@ -1,4 +1,8 @@
 # `text.index_of` on a substring receiver reported as returning a bool
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -149,3 +153,4 @@ Note the two remaining arguments *against* `index_of`, unchanged:
 Re-run the reproducer on a self-hosted pure-Simple binary produced by
 `bin/simple build bootstrap`, and either promote this to Open with that
 transcript or retract it.
+

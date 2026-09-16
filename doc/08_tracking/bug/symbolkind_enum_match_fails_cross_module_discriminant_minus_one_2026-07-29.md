@@ -1,4 +1,8 @@
 # Bug: `SymbolKind` enum-variant patterns never match through `HirLowering.symbols` — `rt_enum_discriminant` returns -1
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-29
 - **Severity:** medium (silent — any `case SymbolKind.X:` gate on a `Symbol` pulled out of `HirLowering.symbols.symbols` silently never fires)
@@ -524,3 +528,4 @@ standing instruction — not removed.
 
 No commit/push performed (per campaign rule); changes left in-tree for
 orchestrator review.
+

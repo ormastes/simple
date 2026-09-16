@@ -1,4 +1,8 @@
 # SimpleOS GPU Fallback Wire Request Completion Timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -83,3 +87,4 @@ Prepared-host Metal/Vulkan failure rows remain separate macOS tasks. Do not
 reintroduce a synchronous compositor wait derived from poll count.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.
+

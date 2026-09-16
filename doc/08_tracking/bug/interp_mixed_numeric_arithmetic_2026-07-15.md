@@ -1,4 +1,9 @@
 # Interpreter mixed integer/float arithmetic is wrong or rejected
+## Closed 2026-09-16 — RESOLVED 2026-09-06 with executable proof: spec 10/10 green, defect re-injection discriminates
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - status: **RESOLVED 2026-09-06 — executable proof landed.** (Was: "source fixed
   2026-07-15; executable interpreter proof pending a runnable pure-Simple
@@ -53,3 +58,4 @@ restored        : Files: 1   Passed: 10  Failed: 0
 One `it` block deliberately drives a genuine type error (`i64 - nil`) and
 asserts `ops_get_error()` contains `"type error"`, so the many
 `expect(ops_get_error()).to_equal("")` assertions elsewhere are not vacuous.
+

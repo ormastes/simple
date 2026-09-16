@@ -1,4 +1,8 @@
 # Web frame-reuse verification gaps
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -29,3 +33,4 @@ make parser errors include source locations, then prove: full frame retained;
 matching revision-only reply accepted; stale/missing revision rejected; exact
 full/reuse IPC bytes counted; unchanged frame sends no DrawIR/images. These are
 mechanism receipts only—8K/80 additionally requires the campaign matrix row.
+

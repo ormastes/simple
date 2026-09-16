@@ -1,4 +1,8 @@
 # `me`-method mutation through an OPTION-typed binding is silently discarded
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-04
 **Status:** OPEN (language/runtime defect). Callers must work around it by
@@ -505,3 +509,4 @@ interpreter represents/copies `Optional<Class>` payloads across a mutating
 method call, which is core language-runtime work well outside a single-file,
 <45-minute pure-Simple change. Left OPEN; no code change attempted here.
 The underlying language/runtime defect is a compiler-semantics change (silent discard of `me`-method mutation through an Option-typed binding) beyond this pass's budget. The suggested lint-only follow-up (extend `OPTME001` in `src/compiler/35.semantics/lint/option_me_call.spl` to also flag the optional-typed-FIELD shape, not just local bindings) was considered but not attempted this pass: `OPTME001` is a broadly-run lint rule and widening its pattern risks false positives across the whole tree without careful fixture coverage, which needs its own dedicated pass. Leaving OPEN, no code change made.
+

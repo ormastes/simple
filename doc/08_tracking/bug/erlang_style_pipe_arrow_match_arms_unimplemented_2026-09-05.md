@@ -1,4 +1,9 @@
 # Erlang-style `| pattern -> expr` match arms are documented as preferred but parse nowhere
+## Closed 2026-09-16 — ... here instead of guessed at. ## Resolution options (pick one — do not leave the doc as-is)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-09-05
 **Severity:** medium — documentation promises a syntax no compiler accepts; 16 tracked files are silently unparseable
@@ -103,3 +108,4 @@ of guessed at.
 
 Either way the current state — documented as *preferred*, implemented nowhere,
 with 16 unparseable files in tree — should not persist.
+

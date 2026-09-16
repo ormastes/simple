@@ -1,4 +1,8 @@
 # math3d.spl `_cos`/`_sin` Taylor series loses precision away from zero
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (numeric precision defect in pure-Simple lib code)
@@ -86,3 +90,4 @@ Taylor series) — math3d's version reimplements it in pure Taylor form instead
 of reusing the extern-backed helper, seemingly to avoid a second extern
 declaration; consolidating on the extern-backed version would fix this for
 free.
+

@@ -1,4 +1,8 @@
 # RISC-V Priv/MMU/RV64 Regression Findings (2026-07-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Investigation scope:** Verify BUG-RISCV-002 and BUG-RISCV-003 against current source  
 **Source paths:** `src/lib/hardware/rv32i_rtl/`, `src/lib/hardware/rv64gc_rtl/`  
@@ -145,3 +149,4 @@ CI passes with disconnected/missing features because:
 - RV32 PL core: `src/lib/hardware/rv32i_rtl/core.spl`
 - RV64 staged regression: `src/lib/hardware/rv64gc_rtl/core.spl` (staged, uncommitted)
 - Sync history: `115803a7aff`, `0a749ba7f10`, `1d6c39a87e8`
+

@@ -1,4 +1,8 @@
 # LLVM Imported Array Length/Index Runtime Handle Bug
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -57,3 +61,4 @@ literal syntax.
 
 The next verification must preserve runtime-array length and the exact packed
 color before accepting native quality or SIMD-hit evidence.
+

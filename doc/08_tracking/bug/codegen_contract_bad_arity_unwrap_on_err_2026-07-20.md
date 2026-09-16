@@ -1,4 +1,8 @@
 # Bug (or stale-test — needs design-intent call): GPU-intrinsic bad-arity
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 "emits diagnostic comment" specs call `.unwrap()` unconditionally, crashing
 on the `Err` the backend now correctly returns
 
@@ -88,3 +92,4 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 "$BIN" test \
    bucket in one pass.
 3. If embedded comment is correct: file a product bug against the
    CUDA/OpenCL intrinsic arity-check path for returning Err instead.
+

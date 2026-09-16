@@ -1,4 +1,9 @@
 # lint PARSE001 false positive on `use std.spec.*` describe-specs (2026-07-29)
+## Closed 2026-09-16 — Item 1 (PARSE001 false positive) FIXED by commit f4adc39bf39, verified; items 2-3 tracked separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status Update (2026-07-30)
 
@@ -33,3 +38,4 @@ defects, all report-only so far:
 Repro for (1): `bin/simple lint test/03_system/check/stage4_memory_gate_spec.spl`
 (errors) vs `SIMPLE_EXECUTION_MODE=interpreter bin/simple test <same file>`
 (Results: 2 total, 2 passed).
+

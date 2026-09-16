@@ -1,4 +1,8 @@
 # BorrowGraph: moving one field flags a read of a DIFFERENT field
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Spec (RED, intentionally left failing):** `test/01_unit/compiler/deep/borrow_check_move_1_spec.spl`
   — "moving one field does not flag a read of a DIFFERENT field" (`assert_false failed: got true`),
@@ -16,3 +20,4 @@
 - **Context:** found during the 2026-09-15 full-suite failure sweep. The spec itself was also
   missing its `use compiler.borrow.borrow_check.*` import and its `field_of` helper; those were
   restored (spec now runs: 7/8 pass) — only this genuine behavior gap remains red.
+

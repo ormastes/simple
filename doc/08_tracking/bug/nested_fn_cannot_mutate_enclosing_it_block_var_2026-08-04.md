@@ -1,4 +1,8 @@
 # Nested `fn` cannot mutate an enclosing `it`-block `var`; compound assignment fails "variable not found"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -185,3 +189,4 @@ is fixable within by-value semantics. Note `Env` writes clear the
 origin/main `1d4aafe3914` the R5 repros do not fire the hook at all (no
 `HOOK RAN`, final len=1 in both variants) — R5 is only observable atop the
 unlanded after_all drain fix referenced in its record.
+

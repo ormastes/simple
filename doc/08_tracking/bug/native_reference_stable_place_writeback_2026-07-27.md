@@ -1,4 +1,8 @@
 # Native Reference Stable-Place and Write-Back Semantics
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -43,3 +47,4 @@ The 2026-07-27 xhigh review confirmed the concrete loss points:
 
 Until those checks pass, firmware output-buffer code must retain its existing
 `unsafe_addr_of` boundary.
+

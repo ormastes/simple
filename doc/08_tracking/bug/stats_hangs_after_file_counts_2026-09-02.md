@@ -1,4 +1,8 @@
 # `simple stats` prints the file counts and then hangs indefinitely
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/app/doc_coverage/**
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 - Date: 2026-09-02
 - Status: OPEN
@@ -60,3 +64,4 @@ seed of this vintage.
    than inferred.
 2. Re-run after `doc-coverage` is repaired; if the hang disappears, this record
    closes as a duplicate of that one.
+

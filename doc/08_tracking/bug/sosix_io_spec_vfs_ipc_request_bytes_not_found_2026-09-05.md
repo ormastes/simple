@@ -1,4 +1,8 @@
 # `io_spec` red: `semantic: variable vfs_ipc_request_bytes not found`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-05. Status: CLOSED 2026-09-05 (pre-existing; reproduced BEFORE and AFTER the
 `os.sosix.core` lift). The failing examples were source-text assertions over
@@ -24,3 +28,4 @@ whether `os.userlib.fs` exports it (`E0410`: `pub` alone exports nothing) and
 whether the spec reaches it through `os.sosix.io_state` re-exports. Plan task
 G2 rewrites this route onto the v1 positioned stack, which removes the import;
 the example must be re-read at that point rather than deleted.
+

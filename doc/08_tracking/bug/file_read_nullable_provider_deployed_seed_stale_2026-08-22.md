@@ -1,4 +1,8 @@
 # Nullable file-read provider deployment gate
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The source providers now agree that `rt_file_read_text` returns nil when a file
 cannot be read and returns text, including valid empty text, on success. Native
@@ -18,3 +22,4 @@ Evidence completed:
 The temporary Simple cross-lane spec was removed after reaching the mandated
 three-cycle cap against the stale deployed binary. Recreate it only after the
 new provider is deployed.
+

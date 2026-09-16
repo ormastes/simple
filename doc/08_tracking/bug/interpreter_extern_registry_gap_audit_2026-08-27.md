@@ -1,4 +1,8 @@
 # Audit: native-codegen registry vs interpreter extern dispatch gap (2026-08-27)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Read-only audit. Nothing fixed. Worktree: detached `origin/main` @ `ed6545f2e3b`.
 
@@ -189,3 +193,4 @@ So the failures are attributable to the missing registration, not to the harness
     defects. No attempt was made to classify the 675.
   - Registered/handled counts are name-set only; **signature/arity agreement was
     not checked**. A name present in both registries can still misbehave.
+

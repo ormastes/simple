@@ -1,4 +1,8 @@
 # `os.*` module-level uninitialized array `var` is unresolvable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-08-02. Base `a19ce60e1d`. Engine: Rust seed (`bin/simple`), interpreter path.
 
@@ -131,3 +135,4 @@ the kernel IPC layer sat behind one uninvoked function.
    does to validate.
 2. Re-run `os_storage_spec` wired up and confirm its 21 assertions pass.
 3. Do not mass-add initializers as a substitute for the fix.
+

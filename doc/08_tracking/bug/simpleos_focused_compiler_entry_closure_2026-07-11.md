@@ -1,4 +1,8 @@
 # SimpleOS focused compiler target closure remains overbroad
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -104,3 +108,4 @@ failures), and disassembly proves `rt_set_args` stores through the C owner while
 `rt_cli_get_args` reloads argc/argv. New ELF SHA-256 is
 `7859f1522e587765409dd8655b572ac76a392f8b609cde8cdae0ed1a3bb61b98`.
 The three-run cap prevents another QEMU claim this cycle.
+

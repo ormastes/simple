@@ -1,4 +1,8 @@
 # `simple_pipe` codebase duplicate scan and child startup
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open — compatibility design complete; implementation blocked on a
 shared freshness/order contract.
@@ -73,3 +77,4 @@ branch identity and preserves independent caps; it cannot wrap today's scans.
 
 MCP JSON escaping and bounded first-line rendering no longer copy growing text
 prefixes. This reduces parent allocation traffic but does not close this bug.
+

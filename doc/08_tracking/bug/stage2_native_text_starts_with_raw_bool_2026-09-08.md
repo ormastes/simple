@@ -1,4 +1,8 @@
 # Stage-2 native `text.starts_with` consumes the raw bool ABI incorrectly
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -44,3 +48,4 @@ Align native method-call lowering and the core-C boolean return convention,
 then add a native executable test that asserts both matching and non-matching
 `text.starts_with`/`text.ends_with` results. Retire any temporary planner
 containment only after that test passes with the admitted bootstrap compiler.
+

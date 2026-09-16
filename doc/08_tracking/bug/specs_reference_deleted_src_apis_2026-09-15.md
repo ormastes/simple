@@ -1,4 +1,8 @@
 # Specs reference src APIs that no longer exist (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Verified failing under plain `bin/simple run` (not wrapper artifacts). Each spec calls a
 symbol that exhaustive `src/` grep cannot find under any module; the subject was deleted
@@ -26,3 +30,4 @@ or renamed without a spec update. One record for the family; unblock condition p
 Unblock condition: re-add the API under its old name (preferred for externs
 `rt_fd_pread`/`rt_fd_pwrite`), or land a reviewed rename mapping and update the specs in
 the same change. Specs stay RED until then; assertions were not weakened.
+

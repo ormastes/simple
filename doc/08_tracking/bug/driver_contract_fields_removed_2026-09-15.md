@@ -1,4 +1,8 @@
 # Driver specs reference removed class fields / option flags (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Test-wave triage of `test/01_unit/compiler/driver/`: three specs assert fields
 that no longer exist on the implementing classes (verified against src on
@@ -27,3 +31,4 @@ changed.
 Each is either a deliberate API change (specs must be updated to the new
 contract by the owning lane) or a regression (fields must come back). Decide
 per item; none are spec-side mechanical fixes.
+

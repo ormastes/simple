@@ -1,4 +1,8 @@
 # vmm_copyin_bytes_from_space returns empty `bytes` when a copy crosses two mapped pages
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open
 **Category:** GENUINE-BUG (interpreter/runtime — nested-loop array accumulation)
@@ -131,3 +135,4 @@ implementation.
 ## Affected specs
 
 - `test/01_unit/os/kernel/memory/vmm_copyin_spec.spl` (1 of 7 examples: "copies a byte range that crosses two mapped readable pages")
+

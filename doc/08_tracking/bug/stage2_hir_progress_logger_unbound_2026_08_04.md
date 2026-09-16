@@ -1,4 +1,9 @@
 # Stage 2 HIR progress logger is unbound
+## Closed 2026-09-16 — ...gress logger is unbound ## Status Resolved on 2026-08-04. ## Reproduction The strict x86 P
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -24,3 +29,4 @@ method and is not replaced by the environment-gated phase logger.
 `test/01_unit/compiler/driver/hir_progress_cadence_contract_spec.spl` checks
 the helper export, the split-module import, both HIR call sites, and the
 16-module cadence.
+

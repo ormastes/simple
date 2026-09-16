@@ -1,6 +1,10 @@
 <!-- codex-design -->
 
 # SimpleOS QEMU VirtIO-serial host-GPU transport gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-30
 Reviewed revision: `9cd238428b4ea0c1481c153cae66b8b017629994`
@@ -259,3 +263,4 @@ BLOCKED  SIMPLE_LIB=src bin/simple test test/03_system/os/qemu/simpleos_qemu_hos
 The interpreter spec was not retried because this checkout has no admitted
 `bin/simple`, and this delegated lane forbids bootstrap. This environmental
 blocker does not change the transport finding.
+

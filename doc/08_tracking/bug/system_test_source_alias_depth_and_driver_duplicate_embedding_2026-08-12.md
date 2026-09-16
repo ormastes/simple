@@ -1,4 +1,9 @@
 # System-test source aliases are dangling and duplicate driver embedding
+## Closed 2026-09-16 — ...embedding ## Status Claimed and fixed 2026-08-12. ## Defect The source aliases copied from
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -23,3 +28,4 @@ canonical physical file, making wrapper selection deterministic and unique.
 `driver/tests/build_script_symlink_dedup.rs` checks the exact three link
 targets/resolutions and an adjacent two-alias fixture that must yield one
 canonical wrapper.
+

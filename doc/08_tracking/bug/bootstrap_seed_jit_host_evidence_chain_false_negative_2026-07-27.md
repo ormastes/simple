@@ -1,4 +1,8 @@
 # Bootstrap-seed JIT host-evidence chain false negative
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: open, diagnostic runner only
 - Owner: compiler/bootstrap diagnostics
@@ -34,3 +38,4 @@ SSpec passes 13/13.
 JIT and interpreter modes return the same pure-classifier result for the exact
 same retained text. Reproduce with a fresh admitted pure-Simple compiler before
 assigning production severity; do not repair or qualify against the Rust seed.
+

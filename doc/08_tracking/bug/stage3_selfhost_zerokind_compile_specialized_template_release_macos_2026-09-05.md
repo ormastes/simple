@@ -1,4 +1,8 @@
 # Stage 3 self-host fails: E-MIR-TYPE-ZeroKind on `compile_specialized_template_release` scope-tail (macOS arm64)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Status:** OPEN — blocks the adhoc full-CLI lane at `5418d2075bb` on this host
@@ -257,3 +261,4 @@ Second attempt, 11:28 local: 37 GiB free, no peer bootstrap; worktree
 `<scratch>/zk-wt` at `5418d2075bb` recreated, watchdog re-armed, the same
 `--stop-after-stage2` command started (log: `<scratch>/zk-stage2-build.log`).
 Outcome recorded below when known.
+

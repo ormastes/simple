@@ -1,4 +1,9 @@
 # Stage 1: `unresolved type: BlockValue` in `hir_lowering/module_surface.spl`
+## Closed 2026-09-16 — RESOLVED; regression spec verified RED before / GREEN after
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-21
 
@@ -96,3 +101,4 @@ second-impl-block defect — see
 Calling `resolve_materialized_enum_payload_origin` directly, with
 `use compiler.hir.hir_lowering.items.*` in the spec so the impl block's own
 module is in the closure, is the workable shape and is what the spec does.
+

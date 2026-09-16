@@ -1,4 +1,8 @@
 # sspec modernization residual wave resid6_part_01 — blocked and pre-existing-red specs
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler/**
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 - Date: 2026-08-27
 - Batch: /tmp/sspec_census/resid6_part_01 (52 specs, all re-scored fresh after
@@ -84,3 +88,4 @@ session_int_numeric_guard, arm64_payload_symbol_contract (26).
   `expect(1).to_equal(1)`.
 - `lib/std/language/mixin_static_poly_integration_spec.spl` — 8 describes of
   bare `expect true`, zero examples execute.
+

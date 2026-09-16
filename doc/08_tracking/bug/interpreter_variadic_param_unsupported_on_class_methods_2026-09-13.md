@@ -1,4 +1,9 @@
 # Variadic parameter works on a free function but is rejected on a class method
+## Closed 2026-09-16 — Status RESOLVED 2026-09-13: fixed by PERF-9, oracle spec RED 1/9 to GREEN 9/9
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED (2026-09-13) — diagnosed and pinned as an oracle by PERF-7;
   fixed by PERF-9 in `bind_args_with_values_named`, with a nine-oracle spec at
@@ -110,3 +115,4 @@ have replaced the caller's first tail variable with the tuple. It now stops at
 the variadic parameter positionally and skips it when labelled — the same stop
 `bind_args`' own write-back already took. Two of the nine oracles are exactly
 that: the caller's variables must be unchanged after a variadic method call.
+

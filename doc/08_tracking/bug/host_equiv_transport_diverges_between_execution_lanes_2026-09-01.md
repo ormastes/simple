@@ -1,4 +1,8 @@
 # `host_equiv_transport_check` passes on the JIT lane and FAILS on the interpreter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Found by:** the pre-commit audit; **reproduced by the parent.**
@@ -66,3 +70,4 @@ Interpret-lane parity is **confirmed** for `nvme_registers_check`,
 `admin_transport_check` and `nvme_ready_gate_check`. The other 10 checks were
 still running at audit cutoff (interpret is ~10x slower) and are **unverified on
 that lane** — not known good.
+

@@ -1,4 +1,8 @@
 # nvme_cosmos_openssd_boot_spec pre-existing RED (2026-08-27)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl is RED at
 HEAD and after the SSDOC-TRC-003 repair (score 49 -> 82, comment-only edits:
@@ -12,3 +16,4 @@ callback service, FTL metadata runner, NFC media binding, PCIe-to-NVMe bridge,
 NVMe dispatcher, QEMU boot verdict, silicon profile build. Left RED per testing
 rules. Mutation dual-check skipped as weak (spec already RED); edits touched
 only comments so behavior is unchanged by construction.
+

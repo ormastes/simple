@@ -1,4 +1,9 @@
 # Web showcase `vector-font-evidence`: CSS style pass truncates on wall-clock budget, marker node keeps default style
+## Closed 2026-09-16 — ...596c6bf66e3f;axes=static reason=resolved resolve16=valid=true family=Noto Sans SC identity
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Status:** ROOT-CAUSED (fix plan below; not yet landed)
@@ -211,3 +216,4 @@ kills the run before a verdict. `SIMPLE_TRACE_FONT_STYLE=1` arms the
   no node carrying `Bungee` ever reaches paint, because the cascade stopped
   before styling it. It is not evidence that the paint-side producer is wrong.
 - `bin/simple` is stale/broken; use `src/compiler_rust/target/bootstrap/simple`.
+

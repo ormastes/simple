@@ -1,4 +1,8 @@
 # Interpreted-lane semantics defects on macOS — present in BOTH deployed and stage4-candidate binaries
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-25
 **Area:** compiler / interpreter lane (aarch64-apple-darwin)
@@ -57,3 +61,4 @@ The stage4 candidate additionally garbles conditional-Option-return + `??`
 handles; conversely the incumbent breaks plain-nil-return + `??` (prints "nil"
 instead of the default), which the candidate handles. Root-cause in progress in
 the stage4 deploy arc (see memory project_stage4_macos_deploy_ladder_2026-07-25).
+

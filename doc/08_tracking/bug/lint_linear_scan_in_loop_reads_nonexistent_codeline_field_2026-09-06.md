@@ -1,4 +1,8 @@
 # `bin/simple lint` aborts: `class CodeLine has no field named code`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
 **Status:** OPEN — recorded, not fixed (see "Why this was not fixed in passing")
@@ -90,3 +94,4 @@ unrelated to this defect and does not touch `src/compiler/`.
 4. Separately: make the linter exit non-zero when it aborts. A run that
    analysed nothing must not exit 0 (same principle the pre-push guards apply —
    `ERROR — nothing was checked` is exit 2, never a pass).
+

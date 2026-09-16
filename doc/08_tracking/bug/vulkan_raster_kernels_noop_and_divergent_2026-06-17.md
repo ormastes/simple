@@ -1,4 +1,8 @@
 # Vulkan Raster Kernels No-op / Divergent vs CPU Reference - 2026-06-17
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: no GPU/Vulkan lane on this triage host
 - **measured** — the referenced sources still exist
@@ -216,3 +220,4 @@ first-failure preservation without fabricating a GPU receipt. The low-level
 dispatch helper only returns the checked status; the primitive owner is the
 single provenance writer, so a rejected dispatch cannot preempt its typed
 reason or falsely mark device readback dirty.
+

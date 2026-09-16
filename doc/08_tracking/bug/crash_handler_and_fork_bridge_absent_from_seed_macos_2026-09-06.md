@@ -1,4 +1,8 @@
 # BUG: the C crash handler and the fork bridge are absent from the Rust seed, so Phase 2 of the SIGSEGV hardening plan cannot be verified
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (blocked on a compiler deploy; no code fix attempted)
 **Found:** 2026-09-06, macOS aarch64 (Darwin 25.5.0)
@@ -83,3 +87,4 @@ banner. At that point the spec to write asserts, on the parent side:
 WIFSIGNALED — asserting `true` here would be asserting the failure mode), and
 `rt_fork_parent_stderr()` containing both `[simple-runtime] Fatal:` and
 `Backtrace:`.
+

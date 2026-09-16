@@ -1,4 +1,8 @@
 # `test/01_unit/check` — 33 of 36 spec files RED: real architecture-conformance debt, not spec bugs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: RECORDED, not fixed — see rationale below (explicit instruction: "record, do not silence")
 - Binary: `/home/yoon/dev/cargo-fulltest/release/simple`, sha256 `4dfdf671742007d30210` (measurement below is on this binary; not re-verified on the lane's rebuilt seed `d4c0779c…`, but these specs assert on product source text/shape, not on the JavaNew parser fix, so no material change is expected)
@@ -74,3 +78,4 @@ testing; not triaged further here.
   the directory's 30 genuine debt items would misrepresent this directory's
   real health; flagged above for whoever picks up `test/01_unit/check`
   specifically.
+

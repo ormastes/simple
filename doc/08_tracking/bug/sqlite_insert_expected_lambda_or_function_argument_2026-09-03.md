@@ -1,4 +1,8 @@
 # `sqlite_insert(...)` fails to compile: "expected lambda or function argument"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-09-03
 - **Severity:** MEDIUM — blocks every SQLite write path on the Rust seed
@@ -48,3 +52,4 @@ it is not caused by that restore.
 `context_sql_index_packs` and `context_sql_query_packs_by_source` reach
 `sqlite_insert` on their path-ingest branch and are expected to fail the same
 way. The read-side (`context_sql_get_pack`) is unaffected and runs clean.
+

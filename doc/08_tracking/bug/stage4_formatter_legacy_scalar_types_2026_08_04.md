@@ -1,4 +1,8 @@
 # Stage 4 formatter legacy scalar types
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler/tools/formatter/main.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 
@@ -36,3 +40,4 @@ separate `stage4_runtime_core_owner_gap_2026-07-18.md` concern.
 Cycle 1 continued to `compiler.tools.fix.main`, proving the formatter no longer
 blocks HIR. Evidence:
 `build/bootstrap-stage4-x86-phase4-llvm23/logs/x86_64-unknown-linux-gnu/stage4-native-build-formatter-cycle1.log`.
+

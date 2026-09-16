@@ -1,4 +1,9 @@
 # The share-history merge landed NVFS consumers without their API, and a weak stub hid it
+## Closed 2026-09-16 — Status FIXED; definitions landed, guards added (RED->GREEN); remaining blocker filed separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-09-01
 - Status: FIXED (the missing definitions), with a follow-on blocker filed separately
@@ -86,3 +91,4 @@ production mount ok=false err=... nvfs-root: driver-open-failed:code=0:base=4:bl
 
 See `freestanding_match_over_fserror_yields_default_2026-09-01.md`. It was NOT
 faked green.
+

@@ -1,4 +1,8 @@
 # SimpleOS Clang filesystem proof blocked by pure compiler native-build
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -93,3 +97,4 @@ already-buffered prefix from memory and reserves the stream for forward reads.
 No further QEMU attempt is permitted this session. A focused source check was
 terminated after 90 seconds without output; validate this patch and run one
 fresh gate next session.
+

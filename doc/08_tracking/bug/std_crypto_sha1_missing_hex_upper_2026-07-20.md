@@ -1,4 +1,8 @@
 # `std.crypto.sha1` (array-based) lacks `sha1_hex_upper` present in the sibling `std.common.crypto.sha1` (text-based) module
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** low (single missing convenience export; text-based sibling has it)
@@ -55,3 +59,4 @@ to guess at from test-triage scope. Left the spec unmodified.
 
 - `test/unit/lib/common/crypto/sha1_spec.spl` — 1 of 11 examples
   ("'abc' uppercase hex").
+

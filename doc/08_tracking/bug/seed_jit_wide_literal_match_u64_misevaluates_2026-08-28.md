@@ -1,4 +1,8 @@
 # Seed JIT: literal-arm `match` on u64 mis-evaluates in a stdlib module (2026-08-28)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. Workaround shipped (table scan), filed per CLAUDE.md rule
 "when a compact expression form fails ... record a concrete bug".
@@ -51,3 +55,4 @@ build/hal_fx/seed_after run build/hal_fx/probe_arms2.spl  # h1=false q4=false
 ## Next step
 Minimise from `probe_sup2.spl` + the module import; suspect the JIT-fallback
 interpreter's u64 literal comparison in imported-module context.
+

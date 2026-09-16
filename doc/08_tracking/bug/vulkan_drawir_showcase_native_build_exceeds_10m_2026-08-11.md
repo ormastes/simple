@@ -1,4 +1,8 @@
 # Vulkan DrawIR showcase native build exceeds 10 minutes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -64,3 +68,4 @@ bounded worker lifetime (`--timeout`, default 180 seconds) and writes closure,
 phase, and progress receipts beside the requested artifact. It exits `6`
 before build on the current seed-only state rather than consuming the old
 ten-minute budget. This is a fail-closed deployment fix, not an 8K/80 result.
+

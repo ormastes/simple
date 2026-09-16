@@ -1,4 +1,8 @@
 # SOSIX filesystem-program receipts are synthetic on x86_32, ARM32, and RISC-V
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -176,3 +180,4 @@ the contract but cannot be copied as an AArch32 control-transfer implementation.
 No architecture may claim completion merely because an embedded proof binary
 or inline instruction probe runs; the bytes must be read from the mounted path
 whose identity is printed in BEGIN.
+

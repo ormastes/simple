@@ -1,4 +1,8 @@
 # Tiny frontend profiling unavailable in admitted release runtime
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open  
 **Date:** 2026-09-03
@@ -25,4 +29,5 @@ these failed commands as compiler performance would be false evidence.
 Produce a current, producer-authenticated self-hosted runtime that can execute
 the valid tiny fixture, expose frontend phase counters, and complete the
 optimizer command without Rust-seed fallback.
+
 

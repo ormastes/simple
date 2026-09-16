@@ -1,4 +1,8 @@
 # ROOT: `Option<T>` None promoted to Some because None-ness is decided from STATIC nil provenance
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-14
 **Status:** FIXED at the lowering (unverified by execution — see Evidence)
@@ -196,3 +200,4 @@ folding into the else branch next time this function is touched.
   bootstrap storage, so the BEFORE state could not be executed through this
   lowering at all. The root cause rests on code reading plus the interpreter
   oracle; that is stated here rather than dressed up as a measurement.
+

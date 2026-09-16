@@ -1,4 +1,8 @@
 # i18n duplicate module coverage identity
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `src/lib/nogc_sync_mut/i18n/bundle.spl` and
 `src/std/nogc_sync_mut/i18n/bundle.spl` are byte-identical production copies.
@@ -11,3 +15,4 @@ When both paths were instrumented, all hits mapped to `src/lib` (50/95 lines,
 This prevents trustworthy aggregate all-owner coverage and creates divergence
 risk. Select one authoritative implementation, convert the other path to a
 thin compatibility re-export, and canonicalize coverage source identities.
+

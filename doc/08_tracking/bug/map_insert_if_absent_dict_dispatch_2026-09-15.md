@@ -1,4 +1,8 @@
 # Map.insert_if_absent fails dispatch as "method not found on type dict" (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - File: `src/lib/nogc_sync_mut/src/map.spl:325` — `me insert_if_absent(self, key: K, value: V) -> bool`
   exists; the async facade `src/lib/nogc_async_mut/src/map.spl` re-exports it.
@@ -13,3 +17,4 @@
 - Unblock condition: make `insert_if_absent` dispatchable on `Map` receivers (likely the
   explicit-`self` `me` signature or the facade re-export chain), then the three specs
   should pass unchanged.
+

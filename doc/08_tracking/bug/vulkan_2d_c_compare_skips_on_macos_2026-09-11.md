@@ -1,4 +1,8 @@
 # `check-vulkan-2d-c-compare.shs` always reports `compare_status=skipped` — two independent causes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Measured 2026-09-11 on macOS (Apple M4), at `origin/main` = `75b81c1d1f0` (#528 merge; #529/#530 not present at fetch time).
 
@@ -66,3 +70,4 @@ was produced manually (same workload: 800x600, 64 rects, 300 frames, 5
 warmups, both legs against the same MoltenVK ICD) — see
 `doc/10_metrics/ui/vulkan_2d_c_vs_simple_compare_macos_2026-09-11.md`,
 `mode=manual`.
+

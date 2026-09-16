@@ -1,4 +1,8 @@
 # Every loop-body shape above the generic floor is dominated by one call
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found by: PERF-6, base `origin/main` f26970e9d93, seed sha256 `22878382bc1b5ccf...`
@@ -51,3 +55,4 @@ tuple bind should be ~4,000 given the closure and method-call rows above; the
 extra ~4,500 ns is unexplained and is the largest per-statement cost in the
 corpus. The destructuring path is also the only block-shadow capture path that
 still allocates a scratch vector.
+

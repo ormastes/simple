@@ -1,4 +1,9 @@
 # Regression: ambiguous package exports in `10.frontend/core/__init__.spl` break all fresh native-builds
+## Closed 2026-09-16 — all known instances VERIFIED fixed; no ambiguous core export remains in full-CLI closure
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Introduced by** the parallel commit `050209d9b36` ("fix: speed up pure Simple
 bootstrap") on origin/main. Breaks any `native-build` that loads the compiler
@@ -43,3 +48,4 @@ LLVM backend, so it is forced onto the buggy cranelift path. The unblock is the
 #99 whole-compiler redeploy: build the in-guest toolchain with the pure-Simple
 SELF-HOSTED compiler (no such miscompile), not the seed. See
 `scratchpad/lanebx_recover/DIAGNOSIS_FINAL.md`.
+

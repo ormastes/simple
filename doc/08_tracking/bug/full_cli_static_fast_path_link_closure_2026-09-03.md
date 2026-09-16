@@ -1,4 +1,8 @@
 # Full CLI static fast path retains the product link closure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open optimization opportunity
 **Observed:** 2026-09-03 on macOS arm64
@@ -19,3 +23,4 @@ runtime source interpretation or a Rust-seed fallback.
 Acceptance requires a producer-authenticated rebuilt arm64 full CLI and at
 least 30 before/after process samples reporting p50, p95, max RSS, binary
 segments, linked images, binary digest, and output parity.
+

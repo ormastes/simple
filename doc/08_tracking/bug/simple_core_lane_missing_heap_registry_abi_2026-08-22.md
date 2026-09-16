@@ -1,4 +1,8 @@
 # simple-core lane: 8 core-required ABI symbols need the C heap-registry design ported
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPTION 1 IMPLEMENTED 2026-08-31 (all 13 ported to pure Simple — see Appendix (2)); awaiting Linux `emit_archive` test pass before closing
 **Test:** `pipeline::native_project::tests::test_simple_core_source_tree_emits_partial_runtime_archive`
@@ -200,3 +204,4 @@ The selfcheck's shared-cache / literal-intern assertions are NOT satisfiable
 on this lane (no intern exists; those symbols are not in the 88) and its
 `rt_heap_registry_count` assertions map onto the per-kind registries
 (`rt_heap_registry_count` itself is not core-required and was not added).
+

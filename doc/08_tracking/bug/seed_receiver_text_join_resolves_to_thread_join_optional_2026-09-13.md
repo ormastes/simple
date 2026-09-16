@@ -1,4 +1,8 @@
 # Seed HIR: `"sep".join(xs)` is typed as `Thread.join() -> i64?`, dropping the whole module to the interpreter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-13
 - Lane: Rust seed (`bin/simple.exe`, Windows x86_64-pc-windows-msvc), `run` JIT path
@@ -50,3 +54,4 @@ and lowers `"/" + "/".join(parts)`.
    typed from an unrelated user class.
 2. The lowering error should carry the source file:line of the failing expression, not
    the entry module — locating this took a leave-one-out import bisect.
+

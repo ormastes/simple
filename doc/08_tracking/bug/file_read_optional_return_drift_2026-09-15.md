@@ -1,4 +1,8 @@
 # file_read definitions drifted to optional returns
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -14,3 +18,4 @@ single plain `text` return type across all definitions.
 ## Unblock condition
 Decide the contract: restore the total text return, or re-pin the spec to
 the optional-return design deliberately.
+

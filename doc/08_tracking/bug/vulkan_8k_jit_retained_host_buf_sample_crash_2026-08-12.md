@@ -1,4 +1,8 @@
 # Vulkan 8K strict-JIT retained host-buffer sample crash
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-12
 
@@ -154,3 +158,4 @@ negative reduction and directly guards the collision/mirror boundary.
 This Darwin ARM host enumerates Apple M4 through MoltenVK, not lavapipe. The
 focused owner and strict-JIT evidence can run here, but no 8K lavapipe or NVIDIA
 receipt is claimed; the full 7680x4320 capacity rerun remains pending.
+

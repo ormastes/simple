@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence stepped over on 2026-08-20 landing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Range: origin/main..<hardening landing>. Delta verdict: PASS — 2 pre-existing offender(s), 0 introduced by this range.
 Recorded per the scoped-delta escape in .claude/rules/vcs.md. List: 855 lines, sha256 157b3ad28d92a1cc54675d5ebd828fd5ae00e06b308b933066091341c12a8a2b.
@@ -860,3 +864,4 @@ unit:test_runner/mode_filter_spec.spl
 unit:tools/cat_spec.spl
 unit:tools/simple_os_primary_spec.spl
 ```
+

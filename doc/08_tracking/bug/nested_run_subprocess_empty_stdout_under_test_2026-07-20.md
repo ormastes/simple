@@ -1,4 +1,8 @@
 # `*_log_modes_spec.spl`: nested `bin/simple run <app>/main.spl` subprocess returns empty stdout under `bin/simple test`, but the identical command succeeds run standalone
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `bin/simple test` execution of specs that spawn
@@ -90,3 +94,4 @@ different observable symptom).
 
 Both spec files are correct as written (they reflect real, working CLI
 contracts, confirmed by manual reproduction) and were left unmodified.
+

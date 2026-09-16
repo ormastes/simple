@@ -1,4 +1,8 @@
 # Parallel runtime: raw RuntimeValue transport violates isolation
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-12
 - **Severity:** P0 (ownership/isolation correctness)
@@ -107,3 +111,4 @@ policy-selected capacity, cancellation/terminal receipts, and admitted Stage 4
 evidence remain required. Session freshness and replay lifecycle details are
 tracked separately in
 `process_transfer_session_replay_identity_2026-08-12.md`.
+

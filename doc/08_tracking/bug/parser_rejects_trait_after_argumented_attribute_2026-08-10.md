@@ -1,4 +1,9 @@
 # Parser rejects `trait` after an argumented attribute (`@doc("...")`)
+## Closed 2026-09-16 — Status FIXED 2026-08-10, sabotage-verified regression spec, landed to origin/main
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-08-10)
 **Found:** 2026-08-10 by stream M3, while fixing
@@ -73,3 +78,4 @@ and an `it` block calling the method):
 
 Landed to `origin/main`: parser fix (`items.rs`, `definitions.rs`) plus the
 regression spec.
+

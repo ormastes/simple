@@ -1,4 +1,9 @@
 # SimpleOS: the two `default_axes == "static"` faces are rejected by selected-asset validation -- 2026-08-09
+## Closed 2026-09-16 — ...egistration and unrelated to this. ## Fix recipe 1. **Make the receipt name the reason fir
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status 2026-08-17: the read-derived root cause below is FALSIFIED by execution
 
@@ -234,3 +239,4 @@ and verify by diffing **both directions** -- origin's version may be ahead on
 some axes and behind on others, so overwriting either way can revert real work.
 Read both the `-` and `+` sides of `diff -u <origin> <local>` before choosing,
 then apply the readiness/diagnostic change on top of the reconciled file.
+

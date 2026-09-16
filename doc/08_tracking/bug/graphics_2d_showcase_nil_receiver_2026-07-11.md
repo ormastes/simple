@@ -1,4 +1,8 @@
 # Graphics 2D showcase nil-receiver crash
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -21,3 +25,4 @@ The failure occurs before the first Engine2D readback/provenance row. The app no
 - Requested GPU backends must match the actual backend and report device-readback provenance with a positive real handle or fail explicitly.
 - Five semantic scene samples must demonstrate at least four adjacent differences; background-only output fails.
 - GUI mode creates a real window and routes close/Q/Escape without reporting unavailable presentation as success.
+

@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence recorded for the round-23 parity landing (2026-09-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `check-test-tree-divergence.shs` is RED on `origin/main` and has been for
 several days. The round-23 web↔Chrome parity change
@@ -49,3 +53,4 @@ This record admits one landing over a pre-existing red. It does not reduce the
 divergence, and `--generate-baseline` was NOT run: 3,083 of the offenders are
 new relative to the baseline, i.e. real accumulated debt, and regenerating the
 baseline would hide it.
+

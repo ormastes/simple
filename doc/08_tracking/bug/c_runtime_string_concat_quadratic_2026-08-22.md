@@ -1,4 +1,8 @@
 # C runtime: `rt_string_concat` is a fresh malloc+memcpy per append (quadratic builder loops)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-22
 **Area:** `src/runtime/runtime_native.c:2794-2830` (`rt_string_concat`); pure
@@ -151,3 +155,4 @@ An in-place append inside `rt_string_concat` without a compiler-provided
 ownership proof is an aliasing bug, which is strictly worse than quadratic.
 No regression gate was added, because no fix landed — a gate here would pin
 nothing.
+

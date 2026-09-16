@@ -1,4 +1,8 @@
 # Bootstrap Stage 4 AST/HIR overlap exhausts the no-GC heap registry
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -366,3 +370,4 @@ suite pass. Entry publication, imported-alias refresh, and block/function
 shadow relay regressions bring the serialized suite to 25/25. This is focused
 evidence only; method/lambda lifecycle review and a
 new bounded Retry 12 remain required for Stage 4 admission.
+

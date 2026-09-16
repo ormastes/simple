@@ -1,4 +1,8 @@
 # gen-lean CLI Infinite Recursion — Rust codegen unreachable - 2026-06-30
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -65,3 +69,4 @@ bin/simple gen-lean compare
   same path.
 - Example/firmware Lean proofs use hand-transcribed mirror defs (marked `gen lean` sections)
   verified by raw `lean <file>`; this is unaffected by the bug.
+

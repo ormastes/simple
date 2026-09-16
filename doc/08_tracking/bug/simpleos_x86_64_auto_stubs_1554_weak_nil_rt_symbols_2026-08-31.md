@@ -1,4 +1,8 @@
 # Tracked `auto_stubs.c` weak-nil-stubs 1554 `rt_*` symbols, so the x86_64 kernel link is fail-open
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Scope: goal item 2 (SimpleOS WM Vulkan-backed evidence). Found while running the
@@ -108,3 +112,4 @@ operation is not wired". This is NOT the same bug as the StrBytes length-match
 gap fixed in `f3762655e06` — that one raised a loud error on the native-build
 frontend path; this one is silent on the `run` path and survives that fix. Not
 diagnosed further; the two may or may not share a root cause.
+

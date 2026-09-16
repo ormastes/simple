@@ -1,4 +1,9 @@
 # credential_kdf_cost returns the wrong value on a path that cannot — three implementations refuted
+## Closed 2026-09-16 — Status: RESOLVED 2026-09-13; fixed by 343a3f1fb28, spec 12/12 green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED (2026-09-13) — fixed by 343a3f1fb28 (2026-08-25,
   "fix(sffi): centralize credential entropy"). Root cause matched the doc's
@@ -127,3 +132,4 @@ actually received. **Read that number first.**
 Ran `bin/simple test test/01_unit/lib/terminal/credential_key_file_format_spec.spl --no-session-daemon` on the deployed seed: `12 total, 12 passed, 0 failed`. The case in question, `expect(credential_kdf_cost()).to_equal(10)` (line 128), passes — `credential_kdf_cost()` correctly returns `10` with `SIMPLE_CREDENTIAL_KDF_COST` unset. Not reproducible; the underlying `rt_env_get`/module-constant-read defect this doc suspected does not reproduce on the current binary.
 
 - Status: CLOSED (2026-09-13) — not reproducible on `bin/release/aarch64-unknown-linux-gnu/simple` (hand-linked from `/home/yoon/dev/simple`, 2026-09-13)
+

@@ -1,4 +1,9 @@
 # Bracket-slice byte-index survey — fix pass 3 (2026-07-29)
+## Closed 2026-09-16 — Fixes landed with PROVED evidence (toml.spl, mqtt x3, kafka x3)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Batch 3, widened hunt per the coordinator's pattern: files mixing bare
 single-index `s[i]` (character-indexed) with a `.len()`/`.length()`-bounded
@@ -208,3 +213,4 @@ guard — matching what's provably verified).
 10 files changed: `toml.spl` (fix), `mqtt/packet.spl` × 3 (fix),
 `kafka/serialization.spl` × 3 (fix), 3 new multi-byte specs. No
 gate/budget files touched.
+

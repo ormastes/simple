@@ -1,4 +1,8 @@
 # host_compositor_entry calls `_host_backend_selector`, which is defined nowhere
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06 · **Status:** OPEN · **Found by:** slim-UI lane (running `test/01_unit/app/ui/shared_wm_entrypoints_spec.spl`)
 
@@ -23,3 +27,4 @@ Define or restore `_host_backend_selector` in `src/os/compositor/host_compositor
 reproducing example (that spec's failing case) plus a generalization spec that greps
 every `src/os/compositor` module for called-but-undefined `_`-prefixed helpers, and
 re-run `shared_wm_entrypoints_spec` to 8/8.
+

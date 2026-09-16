@@ -1,4 +1,8 @@
 # Bootstrap Stage 1: seed native-build CPU-spins with runaway allocation on src/app entry closure (2026-07-17)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Severity: release blocker.** Blocks the entire Linux redeploy chain: stage1
 never completes → self-hosted binary cannot be rebuilt → deployed stale seed
@@ -60,3 +64,4 @@ or instrument the closure walk.
 ## Status (2026-07-18)
 
 SUPERSEDED/PARTIALLY RESOLVED. Fresh cargo seed (built 2026-07-17 from src/compiler_rust) runs stage1-3 cleanly (rc=0, no spin). Jul-16 prebuilt artifact remains defective; replace with fresh cargo build.
+

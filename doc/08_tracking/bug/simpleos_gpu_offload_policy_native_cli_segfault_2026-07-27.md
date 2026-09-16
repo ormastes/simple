@@ -1,4 +1,8 @@
 # SimpleOS GPU Offload Policy Native CLI Segfault
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -140,3 +144,4 @@ Evidence was built from source revision `1948920dadc4`. Retained logs:
 hashes for the runtime archive, daemon, and probe.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.
+

@@ -1,4 +1,8 @@
 # native-build worker leaks unboundedly in the seed interpreter's execution phase
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **CORRECTED 2026-09-06 — read the addendum at the bottom before acting on
 > anything below it.** The attribution in this record ("values allocated by the
@@ -1279,3 +1283,4 @@ with real numbers but is unexercised, because in this tree the collision
 work is not a working set; it is a defect.**
 would land in mmap, and any real reclamation would let glibc reuse instead of
   **zero callers** — the phase-boundary snapshot facility is dead code. The
+

@@ -1,4 +1,9 @@
 # Pure-Simple `list`-param element read: correct for int content, SIGSEGV on non-int content (2026-08-08)
+## Closed 2026-09-16 — 2026-08-17 triage: SIGSEGV half ALREADY-FIXED by content; fence PASSes
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Assignment: implement, in pure Simple, the fix for the seed-documented
 `<<3` untyped-`list`-element-read bug
@@ -148,3 +153,4 @@ plus a `KNOWN-OPEN` line reporting `list0=40 list1=56` (value*8). That KNOWN-OPE
 belongs to the SEED lane and is tracked by
 `untyped_list_element_read_seed_rootcause_2026-07-30.md`, not by this pure-Simple
 doc.
+

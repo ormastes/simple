@@ -1,4 +1,9 @@
 # SimpleOS loader catalog population owner blocker
+## Closed 2026-09-16 — ...cord global capacity blocker is resolved by the target-scoped catalog redesign: keys now c
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -72,3 +77,4 @@ remain the only hot-path work.
 
 No runtime verification was run while recording or updating this blocker, per
 user request.
+

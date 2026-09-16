@@ -1,4 +1,8 @@
 # Audit: seed-only fixes (2026-08-08 session) vs pure-Simple compiler counterpart
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Per CLAUDE.md: `src/compiler_rust/` is bootstrap-seed-only; `src/compiler/`
 (numbered layers 00-99, pure Simple) is the real compiler. This audits five
@@ -113,3 +117,4 @@ is not a "mirror this fix" task since the fix's mechanism doesn't transfer.)
   in `src/compiler/10.frontend/core/interpreter/eval.spl`; today every
   decision-coverage row from the pure-Simple interpreter is filed under the
   literal `"eval"`. Scoped follow-up steps are listed under Finding 1.
+

@@ -1,4 +1,9 @@
 # `main`'s `.spipe/spipe` gitlink points at a commit that exists on no SPipe remote
+## Closed 2026-09-16 — Fix section: PR #371 pinned gitlink to 06d7d34; fresh-clone submodule update verified PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-09-06. Found while re-landing PR #371 after PR #375 ("session-cleanup") merged.
 
@@ -34,3 +39,4 @@ A push-tier guard row that, for every gitlink in the outgoing range, runs
 `git -C <submodule> branch -r --contains <sha>` and FAILs when empty. Same fail-closed shape as
 the other guards; a range with zero gitlink changes is `PASS — 0 gitlink(s) changed`, not ERROR,
 since absence of a gitlink change is a positive fact here.
+

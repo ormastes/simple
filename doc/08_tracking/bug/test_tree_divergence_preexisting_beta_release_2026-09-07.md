@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence stepped over on the 1.0.1-beta.1 landing
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. scripts/check/check-test-tree-divergence-delta.shs origin/ma
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 Range: `origin/main..65817763e31` (the `1.0.1-beta.1` version-projection cut).
 Recorded per the scoped-delta escape in `.claude/rules/vcs.md`, which requires
@@ -25,3 +29,4 @@ expected result rather than a lucky one.
 
 Full offender list: `test_tree_divergence_preexisting_beta_release_2026-09-07.txt`
 (3944 lines, sha256 `350e5bef70fd1202c5acfc7dd88a6479375b1a482e20e82ea9075c61cd3ed00d`).
+

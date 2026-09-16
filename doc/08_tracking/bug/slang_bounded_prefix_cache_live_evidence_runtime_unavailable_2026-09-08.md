@@ -1,4 +1,8 @@
 # Slang bounded prefix cache live evidence blocked by runtime
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-08. Status: open environment blocker.
 
@@ -19,3 +23,4 @@ successful compilation/export against the installed llama.cpp SDK. Close this
 blocker only with an admitted self-hosted runtime and a runnable small GGUF,
 then retain provenance, fallback state, raw samples, p50/p95, maximum RSS, and
 output checksums.
+

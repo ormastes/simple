@@ -1,4 +1,8 @@
 # Thread unsafe FFI bootstrap boundary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Failure
 
@@ -36,3 +40,4 @@ owner evidence rather than executable or Stage-4 acceptance evidence.
 Receipts are retained under
 `build/native_probe/mcdc_cycle4_threads/{retry.log,retry.time}`. The static
 ownership preflight also rejects lexical unsafe blocks in both repaired owners.
+

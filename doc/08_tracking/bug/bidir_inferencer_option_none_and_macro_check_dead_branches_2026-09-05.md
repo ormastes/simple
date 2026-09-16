@@ -1,4 +1,8 @@
 # bidirectional_inferencer uses undeclared `Option.None`; macro_check error paths reference nonexistent symbols and infinite-loop
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Found by:** sspec score-80 wave 9B (modernizing `test/unit/compiler/type_inference/bidir_check_spec.spl` and `test/unit/compiler/macros/macro_check_spec.spl`)
@@ -42,3 +46,4 @@ source-contract.
 - The five macro_check defects above fixed; then their source-contract
   scenarios can become direct-call scenarios. The `check_shadowing`
   infinite loop is the most severe (a hang, not just a semantic error).
+

@@ -1,4 +1,8 @@
 # macOS bootstrap blocked at origin/main: seed compile break + Linux-only Stage-3 authority lib (2026-09-06)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** partially FIXED (3 fixes in this change); the remaining `/proc` coupling is documented below.
 **Host:** aarch64-apple-darwin, macOS 25.5.0. **Base:** `1bd13da6125`.
@@ -680,3 +684,4 @@ platform gets wrong. Untouched here.
 | Stage 4 link gates 1-5 | **fixed** |
 | Stage 4 link gate 6 | open (runtime capsule symbol strength) |
 | native f64 correctness | **broken** — blocks deployment on its own |
+

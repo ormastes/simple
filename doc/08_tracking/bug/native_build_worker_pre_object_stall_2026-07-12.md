@@ -1,4 +1,8 @@
 # Native-Build Worker Pre-Object Stall
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -63,3 +67,4 @@ The remaining set is recorded in
 groups: memtrack and SDL transitive link ownership, optional GPU backend ABI
 (ROCm/oneAPI/OpenCL/OpenGL), and Simple-to-Simple closure misses such as
 `run_check`, `json_serialize`, and iterator trait methods.
+

@@ -1,4 +1,8 @@
 # Method/field access on a `Result<T,E>` compiles and returns a garbage sentinel instead of a type error
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
 **Status:** OPEN
@@ -69,3 +73,4 @@ Related family — silent-wrong-value defects found in the same session:
 `doc/08_tracking/bug/module_var_write_lost_when_rhs_method_reads_me_2026-09-05.md`
 (module-level `var` write discarded when the RHS reads `me`). All three fail in
 the same direction: the program keeps running and gives a plausible wrong answer.
+

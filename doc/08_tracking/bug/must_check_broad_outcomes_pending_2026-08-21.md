@@ -1,4 +1,8 @@
 # Must-check broad outcomes remain pending
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -28,3 +32,4 @@ The authoritative rows are in `config/check/must_check_gates.sdn`; their live
 state is written to `doc/08_tracking/check/must_check_db.sdn`. Removing a row,
 changing it to `pass` without bootstrap-owned evidence, or treating TODO as
 success is a release-blocking defect.
+

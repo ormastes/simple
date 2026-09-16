@@ -1,4 +1,9 @@
 # DimSolver.try_eval ignores the substitution, so a bound dimension variable never evaluates
+## Closed 2026-09-16 — Status FIXED; re-verified 2026-08-17 by source inspection
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -43,3 +48,4 @@ to a constant") is exactly what a solved variable is.
 Have `try_eval` resolve through the substitution before matching (e.g. match on
 `self.apply_substitution(expr).kind`, or add a `case Var(id)` arm that looks the
 binding up and recurses). Re-run the spec; the example must go green.
+

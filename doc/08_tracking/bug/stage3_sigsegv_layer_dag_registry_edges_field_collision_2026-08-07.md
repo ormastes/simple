@@ -1,4 +1,8 @@
 # Stage-3 combined-fix SIGSEGV at parse start: `LayerDagRegistry.edges` field-offset collision (2026-08-07)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status: FIXED, landed
 
@@ -157,3 +161,4 @@ Never approached the 100G abort threshold.
 - No `cargo build`, no `--full-bootstrap`.
 - Reproduction and fix both done in the isolated worktree
   `/home/ormastes/dev/simple-s3bisect`.
+

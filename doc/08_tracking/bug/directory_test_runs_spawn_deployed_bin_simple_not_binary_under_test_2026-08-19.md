@@ -1,4 +1,9 @@
 # Directory test runs spawn the deployed `bin/simple`, not the binary under test — 2026-08-19
+## Closed 2026-09-16 — Status FIXED; /proc self-exe resolver; RED/GREEN plus independent control verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (`find_simple_binary()` now resolves the running executable
 through the `/proc` self-exe link).
@@ -157,3 +162,4 @@ counts must be re-measured with a binary the children actually run.
   `src/app/test_runner_new/test_runner_client.spl:190`. They were left alone to
   keep this diff minimal; they carry the same defect and should move to the same
   resolver once a portable extern exists.
+

@@ -1,4 +1,8 @@
 # HIR closure digest re-key BLOCKED: textual interface digest under-captures struct fields
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-23
 **Status:** OPEN — re-key deliberately NOT performed
@@ -233,3 +237,4 @@ that must trigger fallback.
 
 **Status: still OPEN.** The closure digest remains keyed on `content_hash`
 and its guard row is untouched.
+

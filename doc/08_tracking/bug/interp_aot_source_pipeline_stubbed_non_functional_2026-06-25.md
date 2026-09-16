@@ -1,4 +1,8 @@
 # interp: AOT source-compile pipeline stubbed / non-functional under seed interpreter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage note 2026-09-13 — left OPEN: fix blocked by the concurrent bootstrap
 - **inferred**: the remedy named in this entry lands in `src/compiler/**` and/or `src/compiler_rust/**`. A bootstrap is running concurrently in this workspace, so editing either tree would desync it; no repair was attempted.
@@ -70,3 +74,4 @@ $SEED run src/compiler/80.driver/main.spl -c /tmp/hello.spl --target wasm32 -o /
 # before parse fix: "accessing field 'functions' on nil"
 # after parse fix:  reaches HIR/MIR stub -> empty module
 ```
+

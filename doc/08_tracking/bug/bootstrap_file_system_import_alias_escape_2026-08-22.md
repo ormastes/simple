@@ -1,4 +1,8 @@
 # Bootstrap file-system import alias escape
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Category
 
@@ -29,3 +33,4 @@ RSS. Logs, `/usr/bin/time -v` receipts, entry source, and isolated cache are in
 
 This is focused bootstrap-compatibility evidence, not a full compiler build or
 a Stage-4 acceptance result.
+

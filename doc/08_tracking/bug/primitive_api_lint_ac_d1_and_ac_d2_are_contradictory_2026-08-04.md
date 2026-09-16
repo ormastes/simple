@@ -1,4 +1,8 @@
 # primitive_api lint: AC-D1 and AC-D2 assert opposite verdicts on the same signature shape
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ARCHITECTURAL-OPEN — confirmed genuine spec/rule-design
 contradiction, not a code bug (re-verified 2026-08-09, final terminal-status
@@ -115,3 +119,4 @@ wins.
 ## Triage 2026-09-13
 
 Already marked ARCHITECTURAL-OPEN (a genuine spec/rule-design contradiction needing an owner to choose an AST/body-aware discriminator, not a code bug). No new evidence this pass. Leaving OPEN.
+

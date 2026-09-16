@@ -1,4 +1,8 @@
 # Bug: HIR Lowering Ignores Nested fn Declarations — "Unknown variable: decorator while lowering skip"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** hir_nested_fn_not_lowered_as_variable
 **Severity:** P2 (blocks JIT for all spec files importing std.spec.decorators)
@@ -115,3 +119,4 @@ The specs still run in interpreter mode (JIT fallback to interpreter was the old
 - **measured**: the underlying defect still reproduces. A nested `fn decorator` referenced as a value (`val f = decorator`) fails to compile: `GlobalLoad: unresolved identifier 'decorator' (not a global, function, const-data name, or import)`, `JIT compilation failed ... 1 function body/bodies failed to compile: [outer]`, silently falling back to the interpreter (which then answers correctly, `42`).
 - **inferred**: the fix site is the Rust seed (`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` and the Cranelift global-load path). This session must not touch `src/compiler_rust/**` — a bootstrap is running concurrently — so the fix is deferred, not declined.
 - Verdict: OPEN, downgraded in urgency: no longer blocks spec JIT, but nested `fn`-as-value is still unsupported and fails loudly rather than being lowered.
+

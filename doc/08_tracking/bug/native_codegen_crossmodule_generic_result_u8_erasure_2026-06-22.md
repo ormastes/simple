@@ -1,4 +1,8 @@
 # Native AOT: cross-module generic `Result<[u8], E>` payload type erasure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: native AOT could not be exercised on this host
 - **measured** — a probe was built (module `modB.spl` returning `Result<[u8], Err>`; the
@@ -92,3 +96,4 @@ is built by `scripts/bootstrap/bootstrap-from-scratch.sh` (Rust seed → stage2
 `native-build --source src/compiler --source src/app --source src/lib
 --entry-closure`). Stage2 yields a deployable binary; stage3 self-host
 convergence is the historically-fragile part.
+

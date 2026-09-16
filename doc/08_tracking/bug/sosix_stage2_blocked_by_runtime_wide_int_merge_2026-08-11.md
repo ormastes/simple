@@ -1,4 +1,8 @@
 # SOSIX executable gates blocked by incomplete runtime wide-integer merge
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
 **Status:** open, concurrent-owner integration required
@@ -68,3 +72,4 @@ runtime merge is still internally inconsistent. The first hard error is now
 and 7662 while only the replacement `RtCoreWideInt`/`rt_core_as_heap_int`
 model is defined. No second bootstrap was attempted because the prerequisite C
 syntax gate was red.
+

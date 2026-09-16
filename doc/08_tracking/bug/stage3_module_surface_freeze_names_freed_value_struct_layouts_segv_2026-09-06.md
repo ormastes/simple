@@ -1,4 +1,8 @@
 # Stage 3 SIGSEGV in `value_struct_layouts`: `module_surfaces_freeze` names are freed by the registry retention scope
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-06
 - **Severity:** P0 — the single blocker to a deployed self-hosted compiler; every
@@ -195,3 +199,4 @@ enough for them and nothing covered the texts.
 - Evidence trail kept at `/home/yoon/segv-lane/unpack/wt1/{ProcMaps,ProcStatus}`;
   the 39 GB `CoreDump` was deleted after analysis and is re-derivable with
   `apport-unpack` from the original `.crash` in `/var/crash`.
+

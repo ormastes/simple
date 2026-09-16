@@ -1,4 +1,8 @@
 # SimpleOS x86_64 hello-world in-guest — literal OVMF serial transcript
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Captured 2026-08-31 by `scripts/check/check-simpleos-hello-world-in-guest-ovmf.shs`.
 Boot chain: OVMF pflash -> GRUB-EFI -> multiboot1. No `-kernel`, no isa-debug-exit.
@@ -12,9 +16,12 @@ raw capture at `build/os/hello/lane/hello_in_guest_ovmf.serial.log`.
 [2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x3,0x0)
 BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x3,0x0)
 [grub-uefi] multiboot loading /boot/kernel.elf ...
-WARNING: no console will be available to OS
-error: no suitable video mode found.
-[BOOT32] entry
+
+WARNING: no console will be available to OS
+
+error: no suitable video mode found.
+
+[BOOT32] entry
 [BOOT64] entry
 [BOOT64] idt
 [heap] alloc sz=0x100020 off_before=0x594bb0 caller=0x80069a2
@@ -65,3 +72,4 @@ BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x3,0x0)
 [spawn] entering user cs=0x2b iopl=3 rip=0x4194304 rsp=0x549757910912
 ABC
 ```
+

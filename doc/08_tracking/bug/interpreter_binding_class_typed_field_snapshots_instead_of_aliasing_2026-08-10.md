@@ -1,4 +1,8 @@
 # Binding a class-typed FIELD to a local snapshots it — interpreter only
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **Root cause lives elsewhere — see
 > `interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md`**,
@@ -310,3 +314,4 @@ got worse; it says the closure was never checked against the artifact it blocks.
 
 Not done here, deliberately: the spec was **not edited**, no source was changed
 to make anything pass, and the disposition line above was **not flipped**.
+

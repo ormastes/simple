@@ -1,4 +1,8 @@
 # Optimizer Pass Outcome Counters and Verify-Each Are Missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -63,3 +67,4 @@ execution.
 Focused pure-Simple Stage 4 tests prove the execution record is produced by the real
 dispatcher, all changed outputs pass the general verifier, and disabling a pass makes
 its positive witness report no transformation.
+

@@ -1,4 +1,8 @@
 # `simple check` costs ~2s per function declaration (parse), plus ~20s fixed per worker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
@@ -114,4 +118,5 @@ either and the fix requires locating a superlinear term inside the
 Rust seed's parser -- deep compiler-internals work, not a bounded unit
 fix. Leaving OPEN, no new attempt; commands.md's 2026-08-18 seed
 redeploy note (numbers improved but not fixed) still applies.
+
 

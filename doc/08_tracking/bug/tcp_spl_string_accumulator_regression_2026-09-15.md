@@ -1,4 +1,8 @@
 # tcp.spl regained a whole-buffer string accumulator
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -16,3 +20,4 @@ regression reintroduced on top of the append-shape refactor.
 ## Unblock condition
 Replace the accumulator with the append-based reader shape, then re-run the
 spec.
+

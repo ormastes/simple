@@ -1,4 +1,8 @@
 # Stage-2 core-C bootstrap is missing runtime symbols
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-09  
 **Status:** Resolved on `slang-physical-provider-activation`; Stage-2 now links
@@ -50,3 +54,4 @@ Fake compatibility stubs and Rust-seed verification do not satisfy this gate.
 - The 2026-09-09 Stage-2 build compiled 861/861 modules and linked successfully,
   then advanced to compiler sanity. Its later sanity failure is tracked in
   `stage2_rust_transient_promotion_positional_hello_2026-09-09.md`.
+

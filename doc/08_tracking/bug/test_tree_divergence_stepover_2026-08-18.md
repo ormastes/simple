@@ -1,4 +1,8 @@
 # Test-tree divergence step-over record — 2026-08-18 (lane test-fix)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `check-test-tree-divergence.shs --ref HEAD` is RED on `origin/main` independently
 of this lane:
@@ -31,3 +35,4 @@ C-runtime, and the delta helper above.
 The 1 unbaselined new divergence and the 2 mirror-only entries are owned by
 whichever lane introduced them; this record only documents that this lane did
 not add to them.
+

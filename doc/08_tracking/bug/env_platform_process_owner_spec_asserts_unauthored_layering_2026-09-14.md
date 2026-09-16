@@ -1,4 +1,8 @@
 # `env_platform_process_owner_spec.spl` asserted a layering that never existed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 FIXED in this change.
@@ -81,3 +85,4 @@ SIMPLE_BINARY=<repo>/bin/release/x86_64-pc-windows-msvc/simple.exe \
   simple.exe test test/01_unit/lib/nogc_sync_mut/env_platform_process_owner_spec.spl
 ```
 `SPEC FILE VERDICT: ... outcome=OK declared>=1 executed=1 passed=1 failed=0 skipped=0 dropped=0`
+

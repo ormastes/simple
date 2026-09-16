@@ -1,4 +1,8 @@
 # Hosted WM source check exceeds 180 seconds
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -38,3 +42,4 @@ the wrapper timeout mismatch.
 - The reproduction completes with a deterministic pass/fail diagnostic.
 - Warm elapsed time and max RSS are recorded.
 - The new hosted-WM Vulkan contract remains 3/3 green.
+

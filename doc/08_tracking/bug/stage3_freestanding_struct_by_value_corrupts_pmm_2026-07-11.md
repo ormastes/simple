@@ -1,4 +1,9 @@
 # Stage3 Freestanding Struct-by-Value Corrupts PMM
+## Closed 2026-09-16 — ...**Status (2026-07-17):** Likely fixed by commits `ca1e18c1744a` and `7c30ce49d04f` per tri
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status (2026-07-17):** Likely fixed by commits `ca1e18c1744a` and `7c30ce49d04f` per triage evidence (see note below).
 
@@ -34,3 +39,4 @@ multiboot wrapper supplied Limine aggregates.
 ## Triage note (2026-07-17)
 
 Commits `ca1e18c1744a` and `7c30ce49d04f` likely address the aggregate ABI and enum-payload defects described above. The workarounds (scalar-only APIs, direct-boot path) are confirmed in production use. Pending runtime verification: fresh stage3 freestanding build must compile and boot with zero PMM/VMM faults.
+

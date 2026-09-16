@@ -1,4 +1,8 @@
 # phase 2: `str(i64)` returns a raw pointer instead of a text
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-13
 **Lane:** phase 2 only (the pure-Simple Stage 2 compiler). Phase 1 (Rust seed) is correct.
@@ -75,3 +79,4 @@ The returned word is reaching the caller undecoded — the same shape as
 (`phase2_file_size_garbage_breaks_capsule_receipt_2026-09-13.md`). Whether
 those share one cause in phase 2's SFFI return handling is unproven and worth
 checking first, since a single fix might close both.
+

@@ -1,4 +1,8 @@
 # A perf spec's binary resolution falls through to the deployed seed in directory mode
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found by: PERF-6 while diffing `test/05_perf/interp/` between two seeds
@@ -62,3 +66,4 @@ PERF-6 spent an hour on interleaved runs before the fingerprint was run down.
 
 Not fixed here: (2) touches the runner and the sibling spec, both outside
 PERF-6's scope, and (1) is applied only to the spec this lane owns.
+

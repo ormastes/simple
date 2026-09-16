@@ -1,4 +1,9 @@
 # `check` crashed under interpret mode: dict API on a `[text]` array in expand_check_targets (RESOLVED 2026-09-01)
+## Closed 2026-09-16 — RESOLVED with fix in src/app/check/targets.spl and before/after evidence table
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -73,3 +78,4 @@ Pure `.spl` fix, platform-agnostic; nothing Unix-side touched. The latent
 question — why the hybrid engine ACCEPTS `array[string] = bool` silently — is
 an engine-divergence issue worth its own look; this record fixes the caller,
 not the divergence.
+

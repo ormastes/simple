@@ -1,4 +1,8 @@
 # Simple compiler performance audit: missing admitted Stage 4 binary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -41,3 +45,4 @@ Deploy or link a provenance-recorded pure-Simple Stage 4 binary built for commit
 `37bd406e219cc35cae049b4130f5167c21801864` (or rebuild this branch through the
 documented minimal bootstrap composition), then run each planned focused check
 once in isolated output/cache directories.
+

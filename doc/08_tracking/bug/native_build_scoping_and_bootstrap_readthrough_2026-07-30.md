@@ -1,4 +1,8 @@
 # `native-build` scoping + fail-open readthrough (2026-07-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment: read `native_build_worker.spl` and the CLI arg plumbing that
 invokes it to answer definitively why the pass-13/14 archive-lane attempts
@@ -325,3 +329,4 @@ small** — with two caveats now on record:
    now the recommended next attempt: it directly follows from this
    pass's own citations (matches the one invocation shape proven to work
    for all 6 real callers) rather than introducing a new mechanism.
+

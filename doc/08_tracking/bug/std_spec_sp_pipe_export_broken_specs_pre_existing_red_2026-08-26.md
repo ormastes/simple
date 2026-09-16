@@ -1,4 +1,8 @@
 # std.spec no longer exports SPipe — dependent specs pre-existing RED at HEAD (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 Any spec importing `use std.spec.SPipe` fails at load:
@@ -21,3 +25,4 @@ that cannot load).
 ## Unblock condition
 Either `std.spec` re-exports `SPipe` (e.g. `use std.spipe.*` re-export) or the
 spec's import is corrected to the module that now provides `SPipe`.
+

@@ -1,4 +1,8 @@
 # Web showcase repro re-run after the read-side fix — STILL BLOCKED, and it is the already-documented write-side defect, not a new gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 This is the original repro that launched the whole JIT chase this
 session: `web_standards_showcase status=fail reason=blank-or-uniform
@@ -209,3 +213,4 @@ the synthetic `val X = get_value()` fixture.
 - Timestamps: baseline run started 2026-07-30 19:45:24 UTC, fixed-binary
   run started 2026-07-30 19:48:19 UTC; both completed in well under a
   minute.
+

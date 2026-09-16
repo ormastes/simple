@@ -1,4 +1,9 @@
 # MDSOC cross_query cannot construct `CrossDimensionResult` — missing construct_types import
+## Closed 2026-09-16 — Status FIXED 2026-08-25; gpu_layer_facets_spec 9/9, cross_query_spec 1/1
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-25  **Status:** FIXED 2026-08-25 (see Resolution)  **Severity:** medium (whole cross-dimension query API is unusable)
 
@@ -42,3 +47,4 @@ FIXED: `src/compiler/85.mdsoc/cross_query.spl` now imports `ConstructCapsule`, `
 (the cross_query case is the reproduce; the other 8 are the neighbours); `cross_query_spec.spl` -> `1 passed`.
 Still latent, NOT fixed here: `construct_checker.spl:10` has the same import shape for
 `check_capsule_deps`/`check_shared_consistency`/`register_capsules` — no spec exercises them yet.
+

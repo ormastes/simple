@@ -1,4 +1,8 @@
 # Context-switch SFFI saves into by-value copies
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -33,3 +37,4 @@ The corrected switch remains O(1), allocation-free, lock-free, and direct. Do
 not add per-switch hashing, signatures, symbol lookup, generic marshalling,
 context copying, or heap indirection. Validate layout/artifact identity once at
 admission and alignment/lifetime when the scheduler-owned context is created.
+

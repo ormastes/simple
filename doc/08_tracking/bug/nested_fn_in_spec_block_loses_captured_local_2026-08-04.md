@@ -1,4 +1,8 @@
 # BUG: a nested `fn` declared inside a spec `it` block does not capture the block's locals — silently reads zero, or dies with "variable not found"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 
@@ -170,3 +174,4 @@ once the capture defect is fixed.
 `No test files found … Results: 0 total` and exit 0 (concurrent runs rewrite a
 shared path-scoped manifest), and a missing `@cover` annotation aborts the run
 so zero specs execute. Treat any `0 total` as **unmeasured**, not passing.
+

@@ -1,4 +1,8 @@
 # Seed test-runner kills the spec child at ~600s regardless of --timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02 · **Severity:** high (blocks long system specs) · **Area:** test runner / seed delegation
 
@@ -36,3 +40,4 @@ ceiling.
 Run the showcase spec as above on a loaded box (interpreter + contention
 pushes it past 600s); observe exit 255 + `Process timed out` at ~600s while
 the child was still progressing (per-thread utime still advancing).
+

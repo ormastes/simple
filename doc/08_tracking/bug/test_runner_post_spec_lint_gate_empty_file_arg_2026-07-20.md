@@ -1,4 +1,9 @@
 # test-runner post-spec lint gate invokes simple_lint with an empty/missing file arg
+## Closed 2026-09-16 — ... that companion source can't be resolved, invokes `simple_lint` with an empty path instead
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-08-06) — see "Resolution" below
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
@@ -220,3 +225,4 @@ present in current `main` (landed as a side effect of the sibling
 which this doc was not previously cross-linked to). This doc was left open
 only because it was never updated to point at that landed fix. Closing as
 FIXED; the original investigation above is kept for context.
+

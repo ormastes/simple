@@ -1,4 +1,8 @@
 # An execution lane can report a clean result without ever having run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Found by:** the COW-scoping agent; **verified by the parent.**
@@ -69,3 +73,4 @@ Measured on the Rust bootstrap seed. `SIMPLE_EXECUTION_MODE` appears as a string
 in the deployed binary but in no `.rs`/`.spl` source under `src/` — the deployed
 binary is not built from this worktree, so the demotion logic cannot be cited
 here.
+

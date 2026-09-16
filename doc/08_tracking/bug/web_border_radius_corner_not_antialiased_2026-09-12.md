@@ -1,4 +1,9 @@
 # border-radius corners are not anti-aliased (2026-09-12)
+## Closed 2026-09-16 — Status FIXED 2026-09-12; both painters AA, specs green, sabotage check
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-09-12, second pass). Both painters anti-alias the
 corner. The Engine2D half, previously reverted and blocked, landed as a
@@ -263,3 +268,4 @@ directions.
    pre-existing divergence, deliberately left alone (hand-written PTX is a
    high-risk edit with no device here to verify it) rather than silently
    claimed as covered by "one formula".
+

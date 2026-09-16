@@ -1,4 +1,8 @@
 # SPIPE005 residual: assertion-free SPipe examples
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Rule:** SPIPE005 — "SPipe example has no real assertion or sanctioned skip"
@@ -249,3 +253,4 @@ No firing was silenced by weakening the rule. The only recognizer added matches 
 genuine assertion idiom (paren-less `check`/`fail`), was proven additive
 (NEW-ONLY = 0) and precision-tested against assignment lookalikes. No `pass` was
 added to any spec to suppress a finding.
+

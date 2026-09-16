@@ -1,4 +1,8 @@
 # Bug: regex engines expose no importable `.spl` candidate-verify API
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — LEFT OPEN as a feature request, not closed as a bug
 - **measured** — `grep -rn "fn matches_at\|fn is_match\|fn compile" src/lib/common/regex_engine/*.spl`
@@ -71,3 +75,4 @@ step. Track as a feature request alongside this bug.
 ## Related
 - AC-4 of `.spipe/search-custom-types/state.md`
 - `doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md`
+

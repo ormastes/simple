@@ -1,4 +1,8 @@
 # Browser WebGPU JS/WASM System Spec Perf Threshold - 2026-06-14
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -39,3 +43,4 @@ integration spec while keeping the broad scenario manual intact.
 - **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the 56 s / 126-case figure cannot be re-measured. The spec aborts in 26 s with `declared>=127 executed=0 passed=0 failed=0`, outcome=ERROR — `cannot resolve import 'plugins.backend_wasm.wasm_codegen_adapter' ... module path segment 'plugins' not found` (E1034), and the strict JIT refuses to fall back.
 - **inferred**: the resolver's own help text points at `test/03_system/app/browser/feature\plugins`, a backslash-joined relative path, which suggests a Windows path-separator problem in relative import resolution rather than a genuinely missing module. Not confirmed, and not this bug.
 - Verdict: OPEN. The perf/splitting follow-up is still valid work, but on this host the spec has a harder problem than being slow.
+

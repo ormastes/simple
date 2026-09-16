@@ -1,4 +1,8 @@
 # PerfFacts Def/Use Variant Coverage Is Incomplete
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -41,3 +45,4 @@ fixture corpus, and consumers reject injected unknown or undeclared-local cases.
 The generated-registry source contract now requires every `MirInstKind` to have a named
 access arm and rejects wildcard fallback. The three explicitly incomplete representations
 remain visible rather than satisfying the full unblock condition.
+

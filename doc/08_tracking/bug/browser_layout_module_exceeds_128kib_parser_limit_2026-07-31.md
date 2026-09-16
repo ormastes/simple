@@ -1,4 +1,8 @@
 # `simple_web_html_layout_renderer_layout.spl` exceeds the 128 KiB parser limit on main (2026-07-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — pre-existing on `origin/main`, NOT introduced by the change
 that found it.
@@ -67,3 +71,4 @@ touching it must be sequenced after that lane. Status stays
 change per file (verified by total-byte-count non-decrease, per the warning
 above about a prior split that silently dropped 663 lines) — not something to
 attempt inside a mixed bug-sweep pass. No code changed by this note.
+

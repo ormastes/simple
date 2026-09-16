@@ -1,4 +1,8 @@
 # Stage 2 link: three Simple-level undefined symbols (`GenericTemplate.is_err`, `Unit`, `str.split_whitespace`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Diagnosed, NOT fixed (deliberately handed off — see rationale per symbol)
 **Observed:** 2026-09-07
@@ -128,3 +132,4 @@ only this one leaf name would mask the general bug without closing it.
   `rt_file_*_create_excl_no_follow` Rust-runtime twins); they are independent,
   pre-existing Stage 2 link failures uncovered only because those two runtime
   symbols were fixed first.
+

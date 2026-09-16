@@ -1,4 +1,8 @@
 # Coverage collector never records top-level `val`/`pub val` initializers, `match` heads, expression-position `if` heads, or certain executed `return`/`break` statements
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-15
 - **Area:** interpreter coverage collector (`SIMPLE_COVERAGE=1` lane; reporter in
@@ -79,3 +83,4 @@ SIMPLE_COVERAGE=1 bin/simple test --coverage \
 # -> coverage: .../layout_table.spl 96% (96/99), coverage-branch 94% (32/34)
 # lines 97/109/175 are the three tail if-expressions, both branches taken.
 ```
+

@@ -1,4 +1,8 @@
 # SFFI authority baseline stale after GPU/bootstrap sync
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24  
 **Status:** OPEN — committed baseline provenance mismatch
@@ -43,3 +47,4 @@ gate green.
 
 The Stage-4 wiring spec's direct runtime reads remain separate uncounted debt
 and should migrate to the canonical file facade independently.
+

@@ -1,4 +1,8 @@
 # Bug: `bin/simple test` runner grows unbounded RSS → OOM-killed (45–118 GB)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-06-14
 - **Severity:** P1 (kills CI containers via kernel global_oom)
@@ -136,3 +140,4 @@ still climbs from output parsing. (Use a deliberately verbose/large-output spec 
 - **inferred**: the leak is also structurally unreachable on Windows. The root-cause analysis rests on the fork path (`_is_fork_available()` true on Linux, `rt_fork_child_exit` → `_exit()`); there is no fork on Windows, so the parent-process accumulation pattern would differ even if the runner worked.
 - **measured**: all eight repo paths the entry cites still exist — this is stale by host, not by removed code.
 - Verdict: OPEN. The static analysis is unrefuted and the OOM evidence came from Linux CI containers; re-measure there.
+

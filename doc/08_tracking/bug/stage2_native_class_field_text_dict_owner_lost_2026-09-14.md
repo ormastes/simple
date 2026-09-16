@@ -1,4 +1,8 @@
 # Stage-2 native codegen: `imported enum has no declaration owner` on a plain single-hop import
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-14)
 - Lane: BOOT-20 (`work/bootstrap-s3-2-2026-09-14`)
@@ -170,3 +174,4 @@ table, not a native-buggy class field`), `work/bootstrap-s3-2-2026-09-14`.
 - `doc/07_guide/language/dict_native_pitfalls.md` — existing truth table;
   this bug is a new row (class-field `text`-valued bracket-read garbage on a
   hit), not yet added there pending wider confirmation.
+

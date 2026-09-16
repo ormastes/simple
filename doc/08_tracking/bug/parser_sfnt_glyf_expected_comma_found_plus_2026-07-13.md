@@ -1,4 +1,9 @@
 # Bug: `EXPR as TYPE < ...` misparsed as generic-args list ("expected Comma, found Plus")
+## Closed 2026-09-16 — Status SOURCE FIXED 2026-07-15; verification shows harness loads, showcase proceeds
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **ID:** parser_sfnt_glyf_expected_comma_found_plus_2026-07-13
 **Filed:** 2026-07-13
@@ -78,3 +83,4 @@ Focused Rust regressions cover the less-than AST shape, adjacent generic casts,
 and spaced generic declarations. The canonical pure-Simple parser spec covers
 the less-than/cast AST shape and adjacent generic casts. These tests were added
 with the source fix; execution is pending the parent bootstrap/build lane.
+

@@ -1,4 +1,8 @@
 # `it` block reads a STALE module-level `var` after a helper writes it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ROOT CAUSE PINNED + FIX LANDED 2026-08-17 (seed fix; redeploy pending)
 
@@ -200,3 +204,4 @@ is not by itself the trigger and removing it may not fix anything.
 ## Triage 2026-09-13
 
 Doc already explicitly declines a fix here: root cause is in the Rust seed's `rt_bdd_*` intrinsics, the exact registration site is unpinned, and a seed rebuild is "not essential" per repo policy -- changing `it`-body capture semantics affects every spec in the repo and needs its own dedicated regression lane. Respecting that scoping. Leaving OPEN, no code change made.
+

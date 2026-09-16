@@ -1,4 +1,8 @@
 # The native object cache misses an identical second build it has a valid entry for
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found: bootstrap lane BOOT-6, `work/bootstrap-full-4-2026-09-12`
@@ -48,3 +52,4 @@ BOOT-6 fixed the collision (`llvm_backend_tools.spl` now clears a stale
 destination before publishing), not the miss. After that fix the second build
 succeeds by RECOMPILING; `cached=0` remains. Diagnosing the miss needs a trace
 line naming the declining sub-condition, which does not exist today.
+

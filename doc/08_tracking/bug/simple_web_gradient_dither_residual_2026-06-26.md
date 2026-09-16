@@ -1,4 +1,8 @@
 # Simple Web Gradient Dither Residual
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
 - **inferred**: this entry cites no backticked product paths, so a path-existence stale test does not apply; nothing indicates the code it describes was removed.
@@ -50,3 +54,4 @@ Derive the remaining Chromium/Skia color deltas in the larger nested and
 positioned scenes. Fix the underlying selector/layout/color sources where
 possible, and split a manifest policy only if the residual is proven to be a
 stable Chromium compositor/rasterization difference.
+

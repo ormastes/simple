@@ -1,4 +1,8 @@
 # native-build: `?` on `Option` silently miscompiles (treated as `Result`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Severity:** high (silent-wrong on BOTH oracle and native — no diagnostic)
 **Found:** 2026-07-14, errhandling lane
@@ -176,3 +180,4 @@ lowering. Typed lets, assignments, fields, parameters, direct/function-value
 calls, returns, control-flow merges, Option methods, and early `?` absence now
 route through `ensure_option_handle`; the runtime recognizes only enum id 1 /
 None ordinal 1 plus the raw-nil migration fallback. Execution remains pending.
+

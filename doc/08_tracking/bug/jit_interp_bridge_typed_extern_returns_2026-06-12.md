@@ -1,4 +1,8 @@
 # JIT InterpCall bridge: f64/text extern returns not representable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Not closed 2026-09-13 — half fixed (text/heap returns), the f64 half remains
 
@@ -77,3 +81,4 @@ fn main():
 EOF
 src/compiler_rust/target/release/simple run /tmp/r.spl   # null text, not a version string
 ```
+

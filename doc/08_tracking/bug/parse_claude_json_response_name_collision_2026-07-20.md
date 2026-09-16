@@ -1,4 +1,8 @@
 # `parse_claude_json_response` likely global-registry name collision (2 modules, same name)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** medium
@@ -91,3 +95,4 @@ literal input, not a bug. Deciding whether this test's premise (endpoint is
 still an unimplemented `501` stub) is stale requires knowing the current
 `/v1/chat/completions` handler contract — left unclassified, not attempted as
 a mechanical fix.
+

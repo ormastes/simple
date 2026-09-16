@@ -1,4 +1,8 @@
 # async_spec.spl: TaskState declared as `class` instead of `enum` — fixing the declaration hangs the run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-01
@@ -70,3 +74,4 @@ bin/simple test test/01_unit/lib/std/async_spec.spl
 timeout 30 bin/simple test test/01_unit/lib/std/async_spec.spl; echo "rc=$?"
 # rc=124
 ```
+

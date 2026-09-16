@@ -1,4 +1,8 @@
 # Stage-4 self-hosted daemon-fallback relint/compile traversal is non-memoized
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 # and dominates `simple test`/`simple run` wall time on specs with broad
 # private/internal imports (e.g. `arch_check_spec.spl`) — this, not
 # `strip_ansi`/`parse_test_output`, is the actual driver of the 550s+ hang
@@ -377,3 +381,4 @@ needed to preserve it.
 
 Committed in `/tmp/wt_relint` (own worktree per this lane's mission — not
 pushed; a separate review+landing lane handles that).
+

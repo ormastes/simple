@@ -1,4 +1,8 @@
 # Test runner explicit empty selection false-green
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -62,3 +66,4 @@ artifact runs the focused CLI controls above.
 - `doc/08_tracking/bug/test_runner_fresh_seed_silent_noop_2026-07-17.md`
 - `doc/08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md`
 - `doc/08_tracking/bug/stage4_test_runner_daemon_fallback_relint_nonmemoized_2026-07-20.md`
+

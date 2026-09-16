@@ -1,4 +1,8 @@
 # Paren-form struct spread `T(..base, f: v)` parses as a RANGE, and hangs the compiler (2026-08-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (feature unimplemented). Two mitigations landed; the language
 feature itself is deliberately NOT attempted here.
@@ -111,3 +115,4 @@ than being done mid-bootstrap-lane.
   `for symbol in module.functions.keys()` while writing `rewritten_functions[symbol]`
   inside the loop — the O(n^2) copy-on-write pattern called out in
   `.claude/rules/code-style.md`. Worth its own pass.
+

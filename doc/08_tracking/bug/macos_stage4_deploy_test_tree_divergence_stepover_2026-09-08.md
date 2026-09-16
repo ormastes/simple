@@ -1,4 +1,8 @@
 # macOS Stage4 lane: pre-existing test-tree divergence step-over
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-08
 - Range: origin/main..bc05ef2ba447fb3767521cd123d9d6b95df4428c
@@ -9,3 +13,4 @@
 This lane touches no duplicated test-tree path. The exact guard-produced list is
 retained beside this record as
 `macos_stage4_deploy_2026-09-08_divergence_offenders.txt`.
+

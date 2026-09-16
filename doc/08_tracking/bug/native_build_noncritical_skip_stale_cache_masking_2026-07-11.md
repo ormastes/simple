@@ -1,4 +1,8 @@
 # BUG: native-build "non-critical file skipped" + stale cache object silently links OLD code
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Resolved 2026-07-16 — fail-closed behavior verified by executed
 regression on both the seed pipeline and the pure-Simple native driver (see
@@ -114,3 +118,4 @@ a `Warning: {} files failed to compile` success branch, but it is unreachable �
 - `doc/08_tracking/bug/codegen_stub_fallback_silent_exit0_2026-06-11.md` (sibling class: silent success on codegen fallback)
 - `doc/08_tracking/bug/rv64_llvm_nested_len_arg_miscompile_2026-07-11.md` (runtime bug whose diagnosis this masking derailed)
 - `doc/08_tracking/bug/native_build_entry_closure_skips_failed_modules_2026-07-13.md` (same class: skip-and-link on entry-closure dependency failures; the skip path it describes is likewise gone at this revision — failures abort before link — but its focused regression, a required module with a deterministic HIR error asserting no linker invocation, remains listed there)
+

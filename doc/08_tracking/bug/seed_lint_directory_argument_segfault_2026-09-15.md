@@ -1,4 +1,8 @@
 # Seed `lint` segfaults on a directory argument
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Observed (2026-09-15, seed `bin/release/aarch64-unknown-linux-gnu/simple`,
   50,093,192 bytes, mtime 2026-09-06):** `bin/simple lint <dir>` segfaults
@@ -18,3 +22,4 @@
 - **Unblock condition:** `bin/simple lint <dir>` returns a verdict (or a clean
   usage error) instead of SIGSEGV; re-verify with the reproducer above on both
   seed and self-hosted binaries.
+

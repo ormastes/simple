@@ -1,4 +1,8 @@
 # Callerless VFS executable-read bypass
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open — blocks SimpleOS enhancement AC-5 filesystem isolation
 
@@ -41,3 +45,4 @@ bootstrap exception and must remain explicitly named as such.
 Focused unit coverage must show context-less nonboot lookup is rejected and a
 real caller can discover only a granted executable path. QEMU system evidence
 must demonstrate cross-domain PATH denial.
+

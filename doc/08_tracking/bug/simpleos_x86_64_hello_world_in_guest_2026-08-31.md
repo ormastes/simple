@@ -1,4 +1,8 @@
 # SimpleOS x86_64 hello-world in-guest: what blocks each half (2026-08-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Goal: run hello world **on SimpleOS x86_64**, booted through **real firmware
 (OVMF pflash -> GRUB-EFI -> multiboot1)** — never QEMU `-kernel`, never
@@ -636,3 +640,4 @@ its `_start` sets up its own `.bss` stack inside a mapped RW page.
 Gate verdict, honestly RED — the lane is landed RED, not weakened to green:
 `FAIL — 1 program(s) staged, 7 rung(s) checked, missing: L6 L7;`
 `interpreter row ADVISORY/RED: no in-guest Simple interpreter exists in this tree`
+

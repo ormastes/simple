@@ -1,4 +1,8 @@
 # devhub native-build fails in HIR: `unresolved name: json_object_get` (+89 more)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
 - Status: OPEN
@@ -105,3 +109,4 @@ on a 7-line json program. `[mir-lower] WARNING: unresolved method call
 `[post-mono-verify] unhandled HirTypeKind variant at walk_type` both appear on
 those runs, so any future "successful" devhub build is suspect until they are
 addressed.
+

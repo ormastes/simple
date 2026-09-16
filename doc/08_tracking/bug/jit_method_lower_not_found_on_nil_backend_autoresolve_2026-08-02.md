@@ -1,4 +1,9 @@
 # JIT: "method lower not found on nil" during engine2d backend auto-resolution
+## Closed 2026-09-16 — fixed at .spl call sites, verified both engines; residual tracked in jit_game2d bug
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** Cranelift JIT method dispatch / engine2d backend resolve
 
@@ -73,3 +78,4 @@ gap stays open under the 2026-07-02 bug.
 Fixed at the .spl call sites (nil-guard + typed-route shutdown guard);
 underlying JIT missing-vtable duck-dispatch defect remains open (tracked by
 jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
+

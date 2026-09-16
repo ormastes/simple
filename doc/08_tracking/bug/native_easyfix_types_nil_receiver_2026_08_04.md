@@ -1,4 +1,8 @@
 # Native EasyFix types nil receiver
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -22,3 +26,4 @@ Do not weaken the contract or claim an EasyFix behavioral PASS. Diagnose the
 first failing constructor/field access with a smaller native fixture in a
 separate bounded lane; this does not justify a runtime alias or feature-local
 nil workaround.
+

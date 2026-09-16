@@ -1,4 +1,8 @@
 # Stage 2 core_codegen references undeclared load_symbol_slot
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -44,3 +48,4 @@ a debug interpolation. HIR therefore emitted an unresolved `GlobalLoad`, which
 LLVM correctly rejected as undeclared. The diagnostic now prints only the
 decoded symbol id, and the source-contract regression follows the indexed
 handler signatures including `module_index` and `ir_handle`.
+

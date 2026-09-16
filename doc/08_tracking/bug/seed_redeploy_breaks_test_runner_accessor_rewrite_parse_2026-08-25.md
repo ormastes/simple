@@ -1,4 +1,8 @@
 # Seed redeployed 2026-08-25 05:16 UTC cannot parse `tooling/easy_fix/accessor_rewrite.spl` — `bin/simple test` and md doctests abort
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (observed; owner = the session that redeployed). **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple`, 60,641,352 bytes, mtime 2026-08-25 05:16:29.
 
@@ -144,3 +148,4 @@ should rebase onto these hunks rather than re-deploying its own build.
   block with and without `reason:`.
 - `test/01_unit/compiler/parser/unsafe_identifier_block_header_spec.spl` —
   Simple-level behavioural regression exercising the same headers.
+

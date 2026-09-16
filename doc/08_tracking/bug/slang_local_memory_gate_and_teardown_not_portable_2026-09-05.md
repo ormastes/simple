@@ -1,4 +1,8 @@
 # slang_local was unrunnable off the DGX: Linux-only memory probe, DGX-scale budget constants, and a Metal teardown abort after a correct answer
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed** 2026-09-05 · lane `slang-on-mac`, goal `caret_workbench` AC-6
 **Host** macOS 26 / Apple silicon (arm64)
@@ -124,3 +128,4 @@ exit 0. `SIMPLE_BINARY` is required on this host: both the gate and `bin/caret`
 prefer `bin/simple`, which is bootstrap-only and has no `run` subcommand while
 still answering `--version`. That selector is a separate latent trap, not fixed
 here.
+

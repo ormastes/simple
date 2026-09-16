@@ -1,4 +1,8 @@
 # Real-child process frames are REJECTED under the spec runner but ACCEPTED from `fn main()` — identical code
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-05. Found while trying to close
 `doc/03_plan/agent_tasks/parent_authoritative_actor_process.md` E1 box
@@ -80,3 +84,4 @@ with `src/compiler_rust/target/debug/simple` (current-source Rust seed, built
 2026-09-04 18:13) — the sanctioned `bin/release/aarch64-apple-darwin/simple_seed`
 (2026-07-25) cannot parse current stdlib source at all, see
 `doc/08_tracking/bug/stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`.
+

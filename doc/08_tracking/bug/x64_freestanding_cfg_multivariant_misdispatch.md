@@ -1,4 +1,9 @@
 # BUG: @cfg multi-variant function mis-dispatch on x86_64-unknown-none native-build
+## Closed 2026-09-16 — ...o no per-decl arch selection ran.) ## Fix `native_project/discovery.rs::strip_inactive_cfg
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed (2026-07-10)
 **Severity:** high (silently routes to the wrong architecture's implementation)
@@ -65,3 +70,4 @@ variant selection so `x86_64` targets bind the `@cfg(x86_64)` variant.
 ## Related
 
 - `doc/08_tracking/bug/x64_ssh_kernel_fat32_stream_open_zero.md` (bug #4 there)
+

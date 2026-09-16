@@ -1,4 +1,8 @@
 # LLM Caret HTTP Attempt Timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -26,3 +30,4 @@ local server that intentionally never completes a response.
 - sockets/tasks are released after cancellation;
 - Claude API, OpenAI, and compatibility-provider system specs use the same
   timeout-capable facade.
+

@@ -1,4 +1,9 @@
 # native (entry-closure): get_args() always [] — `?? []` on non-optional extern result emits rt_is_some on a raw SplArray*
+## Closed 2026-09-16 — ... `-> [T]` return-tag conventions. ## Fix direction - MIR lowering: `x ?? d` where x's decl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-23  **Status:** OPEN (diagnosed by disasm, W81 + rLSP3)
 - **Severity:** high — argv is empty in every entry-closure native
@@ -34,3 +39,4 @@ disagree on tagging; audit extern `-> [T]` return-tag conventions.
 
 ## Repro
 W81: entry `val a = get_args(); print a.len()` with extra CLI args → prints 0.
+

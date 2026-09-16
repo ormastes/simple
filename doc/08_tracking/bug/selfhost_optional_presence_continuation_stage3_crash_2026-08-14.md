@@ -1,4 +1,9 @@
 # Self-host optional-presence continuation rejected during Stage 3
+## Closed 2026-09-16 — grammar repair landed, focused spec passes; crash-on-parse-error kept as distinct gap
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Failure
 
@@ -31,3 +36,4 @@ the release gate because the previous failure occurred only under self-host.
 The secondary crash-after-parser-error is retained as a distinct hardening gap;
 this grammar repair must not be cited as proof that malformed input exits
 without a signal.
+

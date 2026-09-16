@@ -1,4 +1,8 @@
 # SOSIX/QEMU Matrix: Current-Host Media and Self-Hosted Runner Blockers
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. test/03_system/os/qemu/sys_qemu_<arch>_fs_exec_spec.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-08-11  
 **Status:** OPEN  
@@ -86,3 +90,4 @@ After fresh media generation, run each `test/03_system/os/qemu/sys_qemu_<arch>_f
 
 - Owner: SOSIX/QEMU integration lane
 - Final reviewer: independent normal/highest-capability reviewer
+

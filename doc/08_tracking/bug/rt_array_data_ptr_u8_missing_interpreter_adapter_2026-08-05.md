@@ -1,4 +1,9 @@
 # `rt_array_data_ptr_u8` had no interpreter adapter — fixed
+## Closed 2026-09-16 — Status FIXED 2026-08-05; error changed to next-layer gap, regressions green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-08-05)
 **Found:** 2026-08-05, while closing the CUDA kernel-artifact gap for AC-5
@@ -68,3 +73,4 @@ covered exactly the areas it touches (Vulkan dispatch, CUDA dispatch) — so it
 was landed together rather than held indefinitely. See
 `doc/08_tracking/bug/mlkem_ntt_simd_public_interface_probe_crashes_not_pass_2026-08-05.md`
 and prior session history for the caution that led to holding it initially.
+

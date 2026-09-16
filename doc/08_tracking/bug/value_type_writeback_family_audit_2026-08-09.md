@@ -1,4 +1,8 @@
 # Value-type write-back family audit (2026-08-09)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Follow-up sweep to `e5bc26ced33`, which fixed two defects in
 `src/compiler/70.backend/backend/env.spl` (doubly-indexed assignment target;
@@ -155,3 +159,4 @@ Completed 2026-08-10 in commit `0e8a8cc87bc94e22c90ceb7eaab1e50aec668083`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+

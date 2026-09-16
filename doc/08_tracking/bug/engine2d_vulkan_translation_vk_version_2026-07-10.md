@@ -1,4 +1,9 @@
 # Engine2D Vulkan Translation Requires Missing `vk_version` Argument
+## Closed 2026-09-16 — ...lkanBackend.create()` to be mis-resolved to `compiler.backend.vulkan_backend.VulkanBackend
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -45,3 +50,4 @@ translation rows.
 
 Native Linux Vulkan RenderDoc capture succeeds. Translation rows remain
 host-supported-but-failing, never reported as native DirectX/Metal or passes.
+

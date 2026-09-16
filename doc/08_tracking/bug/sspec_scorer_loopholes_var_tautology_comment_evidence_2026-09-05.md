@@ -1,4 +1,9 @@
 # sspec-maintain scorer: three loopholes let ceremony score as substance (var tautology, trailing-comment tautology, comment-line evidence) + one false positive (MNT-009 punctuation)
+## Closed 2026-09-16 — ...ainability points for a real file. ## Fix - `_assignment` accepts `val` and `var`; a new `
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-05
 **Status:** FIXED in `src/app/sspec_maintain/source_facts.spl` (same day); specs below
@@ -60,3 +65,4 @@ calibration fixtures: `scripts/check/sspec-score-seed-lane.shs`.
 
 Both are unexecuted by `bin/simple test` on this host (no full CLI); their
 fixture texts were measured through the seed lane on 2026-09-05.
+

@@ -1,4 +1,8 @@
 # Stage 4 SBOM JSON owner and native method dispatch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -35,3 +39,4 @@ builders' same-named terminal methods and `generate_sbom_json`. A rebuilt
 compiler could not yet be linked with the narrow bootstrap runtime (optional
 Cranelift/GUI symbols are absent), and the admitted Stage3 lacks the LLVM
 feature, so no runtime PASS is claimed until the next current-head bootstrap.
+

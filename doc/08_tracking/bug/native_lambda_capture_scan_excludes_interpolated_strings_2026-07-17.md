@@ -1,4 +1,9 @@
 # Native path: lambda-capture scan explicitly excludes interpolated string literals, so outer variables used only inside `"{...}"` in a lambda body are "undefined"
+## Closed 2026-09-16 — ...fic capture-scan exclusion. ## Resolution (2026-07-17) FIXED (haiku fix lane F5, opus-revi
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Severity:** Medium-High (loud build failure, but a real functionality gap:
@@ -102,3 +107,4 @@ same expression appeared outside a string literal.
 ## Resolution (2026-07-17)
 
 FIXED (haiku fix lane F5, opus-reviewed APPROVE, static verification only): collect_free_var_syms and lambda_capture_scan_supported now recurse into string interpolations via two mirrored helpers (switch_operators_calls.spl); lambda_body_captures already handled StringLit and is untouched.
+

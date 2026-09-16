@@ -1,4 +1,8 @@
 # Native struct allocation failure is unchecked before generated stores
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIX IMPLEMENTED — bootstrap activation and system verification pending
 **Area:** Rust Cranelift / Rust LLVM / pure-Simple Cranelift object lowering
@@ -36,3 +40,4 @@ The code-level unchecked-store defect is fixed, but this record remains open
 until a rebuilt authority emits the guards and a canonical Stage 3 transaction
 either succeeds or terminates with the deterministic diagnostic rather than a
 null-store SIGSEGV.
+

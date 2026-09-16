@@ -1,4 +1,8 @@
 # `shared` Parameter Lowers As Undeclared LLVM Global
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -26,3 +30,4 @@ named `shared` followed by a field read such as `shared.source`.
 
 Add a focused LLVM-lowering regression and fix name classification so local
 bindings take precedence over global/variant canonicalization.
+

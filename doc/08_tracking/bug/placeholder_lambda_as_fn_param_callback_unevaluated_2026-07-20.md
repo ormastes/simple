@@ -1,4 +1,8 @@
 # Placeholder-lambda callback passed to a free-function parameter is never invoked (returns `<lambda>`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Found by:** whole-suite `test/unit/` triage campaign, cluster
@@ -90,3 +94,4 @@ site rather than the runtime value's actual callable-ness. Not root-caused
 further (would require reading the placeholder-lambda desugaring/lowering
 code, out of scope for this triage pass — no Rust seed source fix per the
 fix-guide's scope).
+

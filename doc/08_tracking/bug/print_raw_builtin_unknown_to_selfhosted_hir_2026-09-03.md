@@ -1,4 +1,8 @@
 # `print_raw` is a Rust-seed builtin the self-hosted HIR does not know
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
 - Status: OPEN
@@ -50,3 +54,4 @@ verify, which is blocked separately.
 ## Cross-platform
 
 No platform-specific content — a missing front-end builtin, identical on Unix.
+

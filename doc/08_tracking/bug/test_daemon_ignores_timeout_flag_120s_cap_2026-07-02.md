@@ -1,4 +1,8 @@
 # Bug: `bin/simple test <file> --timeout N` still hard-caps at 120s (light daemon)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-02
 **Component:** `src/app/test_runner_new/test_runner_client.spl`,
@@ -47,3 +51,4 @@ Used by `scripts/check/check-game2d-breakout.shs` for exactly this reason.
 Include the requested timeout in the request file payload
 (`test_runner_client.spl`) and thread it through to whatever spawns/kills
 the child process in `light_daemon.spl`, instead of a fixed 120s.
+

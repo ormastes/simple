@@ -1,4 +1,9 @@
 # Vulkan engine2d lane publishes a TRUNCATED frame as a proven device frame when the font route fails
+## Closed 2026-09-16 — Status FIXED 2026-08-04 (second attempt); A/B tables and traces verify; regression spec owed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-02 (mechanism re-pinned 2026-08-04; **FIXED 2026-08-04**)
 **Status:** **FIXED** — see "Fix (2026-08-04, second attempt) — the write-back"
@@ -784,3 +789,4 @@ downstream symptom of this defect, not a separate one.
 - **The sibling occurrences** of the option-binding write-back defect in
   `engine2d/engine.spl` (cuda/metal/opencl/rocm) and `engine3d/engine.spl` are
   filed and unfixed — see the language bug doc's table.
+

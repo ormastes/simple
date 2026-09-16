@@ -1,4 +1,8 @@
 # `completion_wait_set_spec` red: re-watching a consumed generation accepts a duplicate notify
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-05. Status: CLOSED 2026-09-05. Pre-existing (reproduced BEFORE and AFTER the
 `os.sosix.core -> std.common.contracts.sosix` lift). Fixed in
@@ -31,3 +35,4 @@ either track consumed generations in a bounded set (must stay allocation-free
 after creation) or reject `watch` of a generation that was already consumed.
 Then the spec goes green without edits. Evidence: `bin/simple` is the Rust seed
 (`bin/release/aarch64-unknown-linux-gnu/simple`, 2026-09-04 14:46).
+

@@ -1,4 +1,8 @@
 # Shared working copy is ~109,000 lines behind origin — any whole-WC commit reverts landed work
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-17
 - Area: infra / VCS / multi-session hygiene
@@ -79,3 +83,4 @@ session to whole-WC-commit.
    manual — this is the case for automating it).
 3. Longer term: stop using one shared working copy for many parallel sessions;
    per-session worktrees make staleness impossible to accumulate silently.
+

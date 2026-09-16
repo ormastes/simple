@@ -1,4 +1,8 @@
 # Pre-existing test-tree-divergence red must not block an unrelated landing — recorded per the scoped-delta escape
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-07
 **Severity:** low — this is a recording obligation, not a new defect; see "What
@@ -4058,3 +4062,4 @@ it did not cause. **It is not a claim that the test-tree divergence is fixed,
 reduced, or otherwise resolved.** The 3941-entry (full-tree) / 3207-entry
 (delta) pre-existing red remains exactly as red as it was before this commit,
 and remains open work for whoever owns reconciling the duplicate test trees.
+

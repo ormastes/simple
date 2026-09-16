@@ -1,4 +1,8 @@
 # `VulkanVmExecutor.run_source` clobbers arena DATA on every call — unusable as-is for K6's cross-cell persistence contract
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found while implementing:** Stream K, task K6 (`VulkanExec` notebook executor),
 `doc/03_plan/agent_tasks/notebook_lanes_parallel_plan_2026-08-07.md`.
@@ -88,3 +92,4 @@ Verified: `test/02_integration/app/tools/notebook/vulkan_exec_spec.spl` —
 lint clean. The "suggested real fix" above remains open and unattempted;
 any future attempt must preserve absolute addressing, not `data_off`-relative
 offsets.
+

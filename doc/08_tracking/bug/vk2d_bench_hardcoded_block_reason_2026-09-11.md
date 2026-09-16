@@ -1,4 +1,9 @@
 # vk2d_bench hardcoded block reason — FIXED 2026-09-11
+## Closed 2026-09-16 — FIXED 2026-09-11; verdict spec sabotage-proven; real-device run status=pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 `test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl` printed
 `status=blocked reason=unconditional-submit-wait` from a hardcoded string
@@ -96,3 +101,4 @@ on this host. Root-caused the JIT-vs-interpreter Vulkan-init discrepancy only
 to this env-var workaround; the underlying "MoltenVK does not survive the JIT
 execution path" gap is separate from this bench's status-literal defect and is
 not further investigated here.
+

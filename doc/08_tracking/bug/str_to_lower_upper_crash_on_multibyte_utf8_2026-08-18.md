@@ -1,4 +1,8 @@
 # str_to_lower / str_to_upper crash on multibyte UTF-8 input
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
 **Found during:** C-MIG-0026 evidence-package work (differential test of
@@ -122,3 +126,4 @@ Existing `string_core` specs re-verified green post-fix (sequential runs):
 (112/112), `string_core_ends_with_crosslang_spec.spl` (6/6),
 `string_core_rfind_crosslang_spec.spl` (5/5),
 `string_core_char_from_code_crosslang_spec.spl` (6/6) — all `0 failed`.
+

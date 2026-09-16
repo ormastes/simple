@@ -1,4 +1,8 @@
 # `simple lint <file>` intermittently SEGVs (rc 139) on the deployed seed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Binary: deployed seed `bin/release/aarch64-unknown-linux-gnu/simple`,
@@ -58,3 +62,4 @@ fix, i.e. the defect may be gone at `origin/main` and alive only in the artifact
 everyone is actually running. Whoever picks this up should start by diffing the
 deployed seed's provenance against `f26970e9d93` rather than by hunting the
 crash.
+

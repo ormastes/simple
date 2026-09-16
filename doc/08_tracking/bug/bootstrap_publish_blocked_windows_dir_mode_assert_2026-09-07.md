@@ -1,4 +1,9 @@
 # Bootstrap Publish Blocked on Windows: Unconditional 0500 Directory-Mode Assert
+## Closed 2026-09-16 — Status FIXED 2026-09-07; PREPARE_RC=0 replay and real lane verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-09-07 — Windows tolerance added to the missed check.
 **Severity:** Blocking — every phase-1 `--full-bootstrap` run on a Windows host
@@ -101,3 +106,4 @@ pre-existing test (`test/01_unit/scripts/portable_process_lock_test.shs`,
 "alias contender acquired an already-owned lane") — verified via `git stash`
 on just this file that it fails identically without the fix, so it is
 pre-existing/environmental, not caused by this change.
+

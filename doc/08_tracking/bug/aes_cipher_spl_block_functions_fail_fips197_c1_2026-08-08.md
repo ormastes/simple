@@ -1,4 +1,9 @@
 # `src/lib/common/aes/` scalar AES is non-functional: `expand_key` produces a wrong schedule from word 4 on, and `aes_encrypt_block`/`aes_decrypt_block` fail FIPS-197 C.1 — while the only specs covering them are round-trip-only and pass anyway
+## Closed 2026-09-16 — ...*Date:** 2026-08-08 **Status:** RESOLVED (not reproduced) — see "Re-verification 2026-08-0
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-08
 **Status:** RESOLVED (not reproduced) — see "Re-verification 2026-08-09" section below.
@@ -210,3 +215,4 @@ symptom) appears to have been fixed or no longer applies to this code path —
 already exists at `test/01_unit/lib/common/simd_dispatch_facade_spec.spl:22`
 (added in `aff29a24dfe`, after this bug was originally filed) and is green.
 No source change was needed.
+

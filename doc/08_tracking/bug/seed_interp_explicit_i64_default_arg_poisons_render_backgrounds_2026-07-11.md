@@ -1,4 +1,8 @@
 # seed_interp: explicit i64 default-arg marshalling poisons render-background colors
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: open
 - Area: Seed interpreter default-argument marshalling; affects `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
@@ -126,3 +130,4 @@ The only difference is the i64 value at the call boundary. White pixels (0xFFFFF
 2. A side effect of the marshalling corrupts the renderer's internal color state.
 
 Tracked in `doc/08_tracking/bug/bug_db.sdn` as `seed_interp_explicit_i64_default_arg_poisons_render_backgrounds`.
+

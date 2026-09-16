@@ -1,4 +1,9 @@
 # SimpleOS aligned allocation ownership boundary
+## Closed 2026-09-16 — Status "Mitigated"; fail-closed boundary with passing C safety evidence test
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -31,3 +36,4 @@ semantics for over-alignment, invalid alignment/size, and page-aligned APIs.
 To support alignment above 16 bytes, add a registered aligned-allocation block
 format to the dlmalloc owner and make `free`/`realloc` recognize it before
 advertising those requests as supported.
+

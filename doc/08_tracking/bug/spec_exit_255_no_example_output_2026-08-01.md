@@ -1,4 +1,8 @@
 # Spec exits 255 with no example output: 60s test-runner timeout, not a parse error (ALREADY-FIXED, re-verified 2026-08-10)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Status:** ALREADY-FIXED (re-verified 2026-08-10) — the specific 255/no-output
@@ -206,3 +210,4 @@ src/compiler_rust/target/bootstrap/simple test --timeout 600 \
 - `doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`
 - `doc/08_tracking/bug/text_find_native_exposure_audit_2026-07-31.md`
 - `doc/08_tracking/bug/compiler_cross_module_private_symbol_collision_2026-06-16.md`
+

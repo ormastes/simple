@@ -1,4 +1,8 @@
 # Widget Showcase Frame Distribution Is Not Yet Verified
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Problem
 
@@ -26,3 +30,4 @@ mean. Those rows were not distribution evidence.
 
 The latest diagnostic run was capped at 7/9 after three cycles. It is not a
 performance qualification, and no 4K/8K FPS claim is valid yet.
+

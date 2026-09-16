@@ -1,4 +1,8 @@
 # Census: every `tree`-mode push row, and what each one needs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Companion to
 `doc/08_tracking/bug/push_gates_evaluate_working_checkout_not_pushed_commit_2026-09-06.md`,
@@ -511,3 +515,4 @@ failed` on an unmodified tree and topic pushes are still made with
 `--no-verify`, which skips the dispatcher and every row in it. These gates now
 read the right tree *when they run*; on the current landing path they do not
 run.
+

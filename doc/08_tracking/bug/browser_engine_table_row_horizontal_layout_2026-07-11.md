@@ -1,4 +1,8 @@
 # browser_engine: table rows lay cells vertically (no horizontal table layout)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: open
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
@@ -33,3 +37,4 @@ structure. Filed instead of fixed per session scope (surgical fixes only).
 Presentational attributes (`bgcolor`/`width`/`height`/`align`) now map to
 lowest-priority CSS decls, so HN's orange `bgcolor="#ff6600"` header bar and
 table widths paint; only the horizontal cell flow remains wrong.
+

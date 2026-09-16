@@ -1,4 +1,8 @@
 # `bin/simple test` double-executes unbound expression-statements inside `it` bodies (2026-08-18) — CONFIRMED, narrower than reported
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Update 2026-08-18 (later probe): does NOT reproduce now — root-cause question MOOT, status downgraded
 
@@ -465,3 +469,4 @@ running simultaneously), or (b) re-instrument
 `exec_block_closure_into` with the idx/len probe from the "later probe"
 update and leave it running across many iterations rather than 3-4, since
 point-probes have twice now missed the window.
+

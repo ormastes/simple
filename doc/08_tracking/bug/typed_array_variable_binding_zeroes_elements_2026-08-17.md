@@ -1,4 +1,9 @@
 # Binding a typed array variable to another variable zeroes its elements
+## Closed 2026-09-16 — ... **Status:** ROOT-CAUSED and FIXED 2026-08-17 in `rt_array_copy` (`src/compiler_rust/runti
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **ID:** typed_array_variable_binding_zeroes_elements_2026-08-17
 **Date:** 2026-08-17
@@ -245,3 +250,4 @@ runners are different engines, and a green spec does not cover the run path.
 
 `test/01_unit/compiler/typed_array_variable_binding_spec.spl` (and its
 `test/unit/` mirror) pins the copy semantics directly.
+

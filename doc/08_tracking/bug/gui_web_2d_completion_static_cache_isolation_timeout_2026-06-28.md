@@ -1,4 +1,8 @@
 # GUI/Web/2D Completion Static Cache Isolation Timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage note 2026-09-13 — could not verify: the spec runner is broken on this host
 - **measured** (Windows Rust seed v1.0.0-rc.1): `bin/simple test` is non-functional here — a 3-line 1-assertion spec returns in under a second with `WARNING: test daemon unavailable; running directly`, `error: test-runner: code -1 (process_run_bounded killed the child at its budget)` and a false `reason=outer-bound-timeout budget_ms=930000`. Seven real specs produced byte-identical verdicts.
@@ -66,3 +70,4 @@ Split the aggregate cache into two modes:
 
 The completion SSpec can then consume the read-only seeded cache without
 allowing concurrent runs to mutate shared evidence.
+

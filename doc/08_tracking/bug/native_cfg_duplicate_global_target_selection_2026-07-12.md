@@ -1,4 +1,8 @@
 # Native cfg duplicate global target selection
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-15):** source implemented; focused AArch64/RISC-V object
 regression execution remains pending.
@@ -21,3 +25,4 @@ AArch64/RISC-V IR or object regression for duplicate cfg global names.
 Target-aware top-level global filtering is shared across native discovery,
 imports, driver/JIT, interpreter, and module loading. The focused object
 regressions were added but not executed in this source-only audit.
+

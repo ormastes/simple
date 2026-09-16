@@ -1,4 +1,8 @@
 # FV2 independent replay adapter fail-open native build
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -49,3 +53,4 @@ manifest.
   fallback.
 - Re-run setup with an admitted current-source pure-Simple compiler and require
   a clean manifest plus independent replay of every release proof root.
+

@@ -1,4 +1,8 @@
 # String-only MIR arm is receiver-blind for `find`/`rfind`: array receiver silently returns -1
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Severity:** high — silent wrong answer (a present element reports "not found")
@@ -111,3 +115,4 @@ other way: a name-only list **forces** builtin dispatch onto a receiver whose
 type was never checked, and the runtime's own type guard then returns its
 failure sentinel (`-1` / `false`). The observable symptom matches the report;
 the cause is receiver-blind over-inclusion, not exclusion.
+

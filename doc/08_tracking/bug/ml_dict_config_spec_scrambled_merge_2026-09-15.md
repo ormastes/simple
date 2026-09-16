@@ -1,4 +1,8 @@
 # ml/dict_config_spec.spl is a scrambled merge (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - File: `test/01_unit/lib/nogc_async_mut/ml/dict_config_spec.spl`
 - Observed: parse error `Unexpected token: expected expression, found Indent`. The file
@@ -13,3 +17,4 @@
   `it` blocks under restored `context` wrappers or drop the interleaved comment blocks).
   Left RED rather than guessed at — restructuring blind would risk changing what is
   asserted.
+

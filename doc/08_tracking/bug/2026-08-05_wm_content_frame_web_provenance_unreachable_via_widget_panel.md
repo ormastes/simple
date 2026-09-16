@@ -1,4 +1,8 @@
 # `wm_content_frame_web_provenance_valid` is unreachable for `widget-panel`-wrapped WM content
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-05
 - Status: OPEN (P2)
@@ -110,3 +114,4 @@ the already-admitted surface classes instead of `.widget-panel`. Any of these
 touches shared theme/renderer code used well beyond this showcase and needs
 its own verification pass; each interpreted HTML render in this environment
 costs 30-50 CPU-minutes, so iterating on it is expensive.
+

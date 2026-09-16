@@ -1,4 +1,8 @@
 # Bug: `simple test` daemon evaluator diverges from `simple run` on `text?`-returning lookup + equality pattern
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — workaround applied in new code, latent defect left in place in existing code per scope constraint (see below)
 
@@ -253,3 +257,4 @@ item 1's fix.
 3. Grep for the same `for ... return value / nil` + `== nil` comparison shape
    elsewhere in `src/lib/**` — this is a common idiom and other call sites
    may have the same masked defect at scale.
+

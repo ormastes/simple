@@ -1,4 +1,9 @@
 # `Matrix3x3` is imported from `std.common.drawing.vector` but only exists in the skia tree (2026-08-04)
+## Closed 2026-09-16 — Status FIXED 2026-08-09/10; Matrix3x3 moved and verified via both import paths
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-08-09/10)
 **Found:** 2026-08-04
@@ -100,3 +105,4 @@ the live 2-D/Vulkan hardening work this lane was scoped away from, and it drags
 — a trig dependency the common drawing module does not currently carry. Whether
 those move too, or `Matrix3x3` moves without its transform constructors, is a
 placement decision for the owner of that tree.
+

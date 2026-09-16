@@ -1,4 +1,8 @@
 # Stage-2 seed incremental bootstrap silently spins before first artifact
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** inconclusive bounded attempt — no Stage-2 admission, Stage-3,
 Stage-4, ML-KEM coverage, or GPU runner evidence may cite this run.
@@ -44,3 +48,4 @@ coverage or provenance-bound CUDA/Vulkan/Metal full-operation runners.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs a Stage-2 bootstrap run to reproduce/verify. No change made.
+

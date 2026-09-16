@@ -1,4 +1,8 @@
 # `native-build --entry-closure` runs a global stdlib pass regardless of what the program imports
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** entry_closure_runs_global_stdlib_pass_regardless_of_imports_2026-08-08
 - **Date:** 2026-08-08
@@ -370,3 +374,4 @@ entry-closure logic is spread across six other files in the same directory:
 Not reproduced by this lane — exercising the ~1469-1515-line global stdlib prefix needs
 a full native-build run against `test/fixtures/rt_io_file_roundtrip/main.spl`, which was
 not affordable alongside the live bootstrap. Row remains OPEN and UNVERIFIED here.
+

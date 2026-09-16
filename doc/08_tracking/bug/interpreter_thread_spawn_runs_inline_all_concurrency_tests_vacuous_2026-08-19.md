@@ -1,4 +1,8 @@
 # Interpreter `rt_thread_spawn_isolated` runs the closure INLINE — every concurrency test on that path is vacuous
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-19. Found by lane aspect-dynload while trying to PROVE a
 compare-and-swap primitive, not while testing threads.
@@ -106,3 +110,4 @@ over non-atomic array state is decoration, not a gate — and there is no execut
 path today on which two callers can reach it concurrently. Building the future
 first would produce something that looks thread-safe and is not, which is
 strictly worse than the current honest absence.
+

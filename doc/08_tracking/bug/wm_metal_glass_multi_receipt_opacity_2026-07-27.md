@@ -1,4 +1,8 @@
 # WM Metal Glass Multi-Receipt and Inactive Opacity
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** source fixed and independently accepted / runtime unverified
 **Affected lane:** hosted WM `DrawIrComposition -> Engine2D -> Metal`
@@ -46,3 +50,4 @@ independent highest-capability review found no remaining P0/P1 source issue.
   retain the ordered per-material receipts. Inactive/sub-opaque Metal must
   remain an explicit fail-closed capability row until a GPU-only delta path is
   implemented and independently verified.
+

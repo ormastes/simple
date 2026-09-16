@@ -1,4 +1,8 @@
 # 342 `SIMPLE_JIT_STRICT` suite failures — root cause: a stray tracked `test/01_unit/lib/src/` poisons project-root detection
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-08-31. **Root cause CORRECTED 2026-08-31 (same day).** Status: OPEN,
 fix in flight on `fix/cov-wrapper-import-resolution`.
@@ -161,3 +165,4 @@ unrelated to this one: `fix/cov-wrapper-hir-lowering` (#164),
 `fix/cov-wrapper-undefined-identifiers` (#163).
 
 Original (retracted) filing: PR #169.
+

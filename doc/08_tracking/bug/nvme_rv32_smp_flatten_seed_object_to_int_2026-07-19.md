@@ -1,4 +1,9 @@
 # `native-build --emit-object` regression: "cannot convert object to int" (generic, content/target-independent)
+## Closed 2026-09-16 — Status FIXED with root-cause fix in mir_opt driver + verification (a-d) and later layers
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-19
 **Area:** compiler/native-build, `--emit-object` code path specifically
@@ -440,3 +445,4 @@ Verification method note: a shared main WC repeatedly gave false greens via
 native-build **cache replays** and false reds via other sessions' in-flight
 edits; all layer-2/3 evidence above was produced in a pristine detached
 worktree at origin tip with `SIMPLE_NATIVE_BUILD_CLEAN=1`.
+

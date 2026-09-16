@@ -1,4 +1,8 @@
 # Bootstrap builds from the LIVE shared working copy, so a parallel session's half-second of conflict markers aborts a 2-hour lane
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-05
@@ -311,3 +315,4 @@ as an oversight rather than intent: a self-host worker is precisely the
 Option 2 is the smallest correct change; option 1 is reversible and needs no
 edit to a shared script. Either way the decision belongs to whoever owns the
 box, not to a single lane mid-run.
+

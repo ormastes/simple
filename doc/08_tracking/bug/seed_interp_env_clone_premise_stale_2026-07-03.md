@@ -1,4 +1,9 @@
 # Bug/Analysis: Task #67 "env.clone per nested call" premise is stale — CowEnv already eliminates it
+## Closed 2026-09-16 — closed as already-fixed by analysis; CowEnv verified empirically, no fix needed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **ID:** seed_interp_env_clone_premise_stale_2026-07-03
 **Severity:** P3 — informational; no regression, no fix needed for the described issue
@@ -82,3 +87,4 @@ already closed.
 No code change made. `src/compiler_rust/target/bootstrap/simple` untouched (read-only per task
 constraints). This doc records the analysis so the next perf pass doesn't re-derive the same
 (incorrect) premise.
+

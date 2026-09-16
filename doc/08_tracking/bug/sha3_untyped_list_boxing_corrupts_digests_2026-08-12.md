@@ -1,4 +1,9 @@
 # sha3.spl untyped-list boxing corrupts SHA-3 digests (same family as sha256_core, harder shape)
+## Closed 2026-09-16 — Status RESOLVED 2026-08-12; retyping sufficed; FIPS/NIST vectors exact; sha3+hmac specs pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED 2026-08-12 — retyping to `[i64]` (the sha256_core recipe) WAS
 sufficient; the earlier "failed fix" was a stale-stdlib-root measurement trap,
@@ -68,3 +73,4 @@ Specs: `test/01_unit/lib/common/crypto/sha3_kat_spec.spl` (mirrored at
   as sha256_core.
 - Deployment note: the fix must exist in whatever stdlib root the running
   binary loads (here also synced to `/mnt/data/build-clean/src/lib/...`).
+

@@ -1,4 +1,8 @@
 # i18n locale generation allocation density
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Generating 4,096 multilingual declarations currently performs 20,495 heap
 allocations (about 5.00/message), retains 385,024 bytes for 352,350 output
@@ -10,4 +14,5 @@ or byte sink that appends headers, identifiers, delimiters, and escaped valid
 UTF-8 runs directly. Acceptance requires matched output, zero per-entry
 temporary allocations, allocation/byte counters, p50/p95/p99, peak RSS, and
 zero retained bytes after output disposal.
+
 

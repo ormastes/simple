@@ -1,4 +1,8 @@
 # SimpleOS server credential zeroization gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -125,3 +129,4 @@ The existing retained-artifact credential scan and destruction of every
 credential-bearing normal/crash image remain in force. This record is not
 closed until a freshly built ARM64 payload completes the QEMU gate and produces
 the signed target readback receipt.
+

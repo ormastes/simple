@@ -1,3 +1,8 @@
+## Obsolete 2026-09-16 — reopened as wrong; superseded by noalloc_decorator_unbound_in_seed_interpreter_2026-08-08.md (verified exists)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
+
 > # REOPENED 2026-08-08 — this doc's verdict is WRONG (its measurement is not)
 >
 > A tiebreaker lane re-ran both probes with proven edit-visibility. The defect

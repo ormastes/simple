@@ -1,4 +1,8 @@
 # `is_dir` answers false for every real path inside an interpreter-fallback module (and for any backslash path even under JIT)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-02
 - Status: OPEN
@@ -70,3 +74,4 @@ is recorded as the first thing to check, not as a finding.
    and `file_exists` already accept forms `is_dir` rejects, so the three
    disagree today.
 3. Grep for `is_dir(` guards in tooling paths — each is a latent silent no-op.
+

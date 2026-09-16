@@ -1,4 +1,8 @@
 # Interpreter: `.?` operator is an identity pass-through, not a bool conversion
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** high (silently wrong boolean result; `.?` is the prescribed
@@ -236,3 +240,4 @@ different consumer operator surfacing a harder failure (semantic error
 instead of a silently wrong boolean). Not re-filed as a separate doc — same
 root, needs the same interpreter-side fix. `src/lib/**` not modified (out of
 triage scope; this is upstream stdlib code, not a test-spec edit).
+

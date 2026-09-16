@@ -1,4 +1,8 @@
 # Seed parser accepts `match` keyword as an identifier — divergence detonates at bootstrap Stage 4
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H bootstrap redeploy)
@@ -66,3 +70,4 @@ git only.
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md` (Lane H)
 - Same family (seed accepts / self-hosted rejects):
   `seed_parser_rejects_multiline_if_expression_chain_2026-07-27.md` (inverse direction)
+

@@ -1,4 +1,8 @@
 # Deep-Recheck Bug Inventory — 2026-07-05
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Source: 9-subsystem deep-recheck workflow (sonnet audit + opus adversarial verify).
 `real=` is the opus verifier's verdict. All are **current-source** bugs unless marked
@@ -71,3 +75,4 @@ high-impact (opus); **P2** = wide/risky (fix+verify after wall); **DOC** = featu
 2. **Now (P1, opus):** type-checker-is-a-noop + generic trait-bound.
 3. **After wall (P1/P2 batch):** interpreter f64/SIGSEGV, AOP compiled-path (4), lint/fmt non-functional, regalloc multi-arch, HIR diagnostics/generic-args, loader relocation/facade.
 4. **DOC/features:** Array.map/reduce, DictComprehension lowering, GPU HIR, dead-code removals.
+

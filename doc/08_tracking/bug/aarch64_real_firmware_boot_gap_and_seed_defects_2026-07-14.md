@@ -1,4 +1,8 @@
 # aarch64 SimpleOS: real-firmware boot gap + 2 seed/driver defects (launch sanity, 2026-07-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Found by Lane LAUNCH-OS-AARCH64 doing a real launch sanity check. The aarch64
 kernel boot gate (loader + FS-exec staging) reproduces GREEN
@@ -1233,3 +1237,4 @@ user`s stated top priority, and this fleet was instructed not to start VMs
 against it). Board-run is therefore BLOCKED, not passed. The EFI half of this
 doc remains superseded by
 `arm64_efi_real_firmware_lane_unreproducible_and_unified_lane_uses_kernel_2026-08-11.md`.
+

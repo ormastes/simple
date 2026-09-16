@@ -1,4 +1,8 @@
 # domain_arena v1/v2 API surface mismatch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -13,3 +17,4 @@ Discovered by: test-wave agent B (spec triage)
 ## Unblock condition
 Either restore the v1 write_byte/quota API and the v2 module, or port both
 specs to the current arena API with a reviewed mapping.
+

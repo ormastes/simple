@@ -1,4 +1,8 @@
 # Web file renderer nil-receiver crash
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -24,3 +28,4 @@ The active worktree already contains concurrent changes in `simple_web_html_layo
 - Unsupported elements produce explicit diagnostics rather than blank success or a crash.
 - The focused showcase test records visible content, backend provenance, dimensions, nonblank pixels, and real interaction state.
 - Public URL/WM/SimpleOS paths must reject white, striped, canned `about:network`, and degraded tag-stripped output as standards-render success.
+

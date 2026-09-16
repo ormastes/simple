@@ -1,4 +1,8 @@
 # Stage-4 self-hosted `simple test` superlinear stall parsing large captured
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 # subprocess output (arch_check_spec.spl) — NOT caused by suffix-boundary /
 # procfs-read / rt_array_copy / bool-inference fixes
 
@@ -463,3 +467,4 @@ cost on every *generic* equality comparison for the lifetime of a process,
 and is worth a defensive O(1) hash-set rewrite if a future profile shows it
 hot on a path that does reach it (e.g. `Any`-typed or dict-key equality).
 Not investigated further; out of scope for this lane.
+

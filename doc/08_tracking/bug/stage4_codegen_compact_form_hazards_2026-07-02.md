@@ -1,4 +1,8 @@
 # Stage4 (seed-compiled self-host) codegen hazards — `-c "print(1+1)"` crash chain
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Task #59. Each layer is a place where the **Rust seed's native (cranelift)
 codegen** mis-executes a construct that the seed itself accepts. Fixes so far
@@ -1957,3 +1961,4 @@ native-build would NOT exonerate the pure-Simple preprocessor. There is no
 verifiable fix to land here, so no `.spl` change was made for #4 (shipping an
 unverifiable source edit would be a cover-up). #4 stays OPEN pending a fresh
 self-hosted rebuild; re-test the arm64-first reproducer after redeploy.
+

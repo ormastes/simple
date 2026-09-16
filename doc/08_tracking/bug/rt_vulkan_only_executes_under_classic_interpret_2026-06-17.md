@@ -1,4 +1,8 @@
 # rt_vulkan_* Only Execute Under Classic Interpreter - 2026-06-17
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: no GPU/Vulkan lane on this triage host
 - **measured** — the referenced sources still exist
@@ -101,3 +105,4 @@ its loader probes only `libvulkan.so.1` and `libvulkan.so` under `cfg(unix)`,
 so Darwin never tries `libvulkan.1.dylib` or `libvulkan.dylib`. That source
 file was already dirty in another active compiler lane and was not modified
 by this investigation.
+

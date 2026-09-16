@@ -1,4 +1,8 @@
 # `export use m.f as g` does not bind — no renaming re-export
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-03. Status: OPEN. Class: language/module-system gap (not a crash).
 
@@ -83,3 +87,4 @@ module system, and that a facade cannot express its intent directly.
   `export use X.*` is needed for shims). Renaming is not covered there.
 - `doc/02_requirements/nfr/cs_caret_suite.md` NFR-2 — the requirement this gap
   degrades.
+

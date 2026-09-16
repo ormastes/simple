@@ -1,4 +1,8 @@
 # Vulkan vs CPU thick-line row coverage divergence — 2026-08-15
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 Rendering the SAME scene through the same `Engine2D` draw API on the strict
@@ -74,3 +78,4 @@ exercised.
 OPEN — divergence measured and fenced; fix is to unify thick-line coverage
 between `SoftwareBackend.draw_line` and the vulkan line path, then remove the
 spec tolerance.
+

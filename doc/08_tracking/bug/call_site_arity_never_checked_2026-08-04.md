@@ -1,4 +1,8 @@
 # Call-site argument count is never checked before codegen (2026-08-04)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-measured 2026-09-13 — detection IS now armed, but only on one lane, and only at RUNTIME
 
@@ -754,3 +758,4 @@ and the blocker is named: the lean bridge must capture `has_default` faithfully 
 **That is the real fix target, not `resolve.spl`.** No patch applied: arming the check
 without the bridge fix would false-fire on every valid omitted-default call, which is a
 worse regression than the bug. Prerequisite filed as the actual dependency.
+

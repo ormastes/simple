@@ -1,4 +1,9 @@
 # Tautology-guarded skip specs: a repo-wide false-green family (2026-08-04)
+## Closed 2026-09-16 — ....{...}`, so 6/13 module lookups resolved to nothing — the same defect that once invented 1
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** OPEN — 4 specs repaired and sabotage-proven; complete inventory below.
 
@@ -1591,3 +1596,4 @@ Out of lane: repo-wide census spans thousands of files (720+ tautology
 occurrences alone); only 4 specs repaired so far by design. Repairing more is
 real, valuable, but mass-scale work far beyond a single-bug budget. No change
 made.
+

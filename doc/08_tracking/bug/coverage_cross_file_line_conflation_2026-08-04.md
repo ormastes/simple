@@ -1,4 +1,9 @@
 # Statement coverage conflated line numbers across files (defect D)
+## Closed 2026-09-16 — Status: FIXED (this commit); before/after coverage attribution verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (this commit). One residual, tracked below, remains OPEN.
 **Severity:** high — every measured statement-coverage number in the repo was an
@@ -117,3 +122,4 @@ coverage is what `simple test` reports, so that path was fixed first.
 `DebugState::should_stop`, so the debugger's breakpoint file matching consumed
 the same `"<source>"` placeholder and was equally broken. It now receives real
 paths.
+

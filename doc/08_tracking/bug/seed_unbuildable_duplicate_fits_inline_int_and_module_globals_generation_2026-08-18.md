@@ -1,4 +1,8 @@
 # The Rust seed does not compile on origin/main (two independent causes)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-18
 **Severity:** HIGH — blocks any seed rebuild, which is the only way to verify a
@@ -69,3 +73,4 @@ can verify a fix to the live JIT container-boxing truncation defect
 (`jit_container_i64_boxing_truncation_2026-08-18.md`), whose fix sites are all
 in `src/compiler_rust/`. The two are stacked: the codegen defect cannot be
 closed until this builds.
+

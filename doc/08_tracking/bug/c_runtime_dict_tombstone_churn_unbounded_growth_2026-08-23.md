@@ -1,4 +1,9 @@
 # C runtime: a delete-heavy dict grows its table forever (tombstones drive the doubling)
+## Closed 2026-09-16 — Status FIXED; before/after measured; selfcheck failing pre-fix, passing post-fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-23
 **Area:** `src/runtime/runtime_native.c` — `rt_core_dict_put` resize branch
@@ -117,3 +122,4 @@ strings are registered immortal and aliased by pointer, so no runtime-only
 sole-owner fast path is sound. That fix is a MIR lowering feature
 (`rt_string_append_owned` with an escape check, or builder-loop lowering) and
 belongs to a lane that may edit lowering.
+

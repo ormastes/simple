@@ -1,4 +1,9 @@
 # Formula engine: spill-origin cell contributes wrong value to numeric aggregation over its own spill range
+## Closed 2026-09-16 — Status fixed; resolution in formula_spill_origin_spec.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-04
 **Severity:** medium (wrong SUM/AVERAGE results over dynamic-array spill ranges)
@@ -36,3 +41,4 @@ cached_display for FormulaVal cells whose expression head is in the
 
 Found during ref2 review (OFFSET/INDIRECT batch); reviewer-reproduced.
 Related: dynamic-array spill design in file_formats.spl two-phase recalc.
+

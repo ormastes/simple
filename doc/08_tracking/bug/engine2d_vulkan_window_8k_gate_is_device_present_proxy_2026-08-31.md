@@ -1,4 +1,8 @@
 # check-engine2d-vulkan-window-8k passes via an xvfb device-present PROXY, not real window rendering
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-31
 **Status:** OPEN
@@ -41,3 +45,4 @@ against the source damage buffer.
 Treat `scope=xvfb-device-present-proxy` as NOT proving rendering. Rendering
 claims for the window lane must cite `check-gui-vulkan-window.shs`
 (`assert_vulkan_frame=pass`, `assert_widget_content=pass`) instead.
+

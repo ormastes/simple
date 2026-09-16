@@ -1,4 +1,9 @@
 # rt_hash_text disagreed across lanes, blocking bootstrap for two days — FIXED 2026-09-07
+## Closed 2026-09-16 — Status FIXED 2026-09-07; all four lanes agree, cross-lane check PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-09-07
 **Status:** FIXED — all four lanes verified to agree; see Verification below.
@@ -126,3 +131,4 @@ FAIL — 4 lane(s) checked, 3 divergent
 sh scripts/check/check-rt-hash-text-cross-lane.shs --simple-bin <fixed binary>
 PASS — 4 lane(s) checked, 4 input(s) each, 0 divergent
 ```
+

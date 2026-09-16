@@ -1,4 +1,8 @@
 # V-lane suite: `compositor_occlusion_spec.spl` times out under shared-WC contention at the plan's 600s floor
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Status**: OPEN (RED-by-design — the timeout is real load contention, not a
   code defect; the plan explicitly bounds the fix's headroom, so this is not
@@ -94,3 +98,4 @@ by widening the timeout; a real fix (splitting the pixel-content examples out
 of the timed critical path, or a reserved/serialized slot) is a perf-suite
 architecture change out of scope for a shard triage pass. Did not re-run the
 suite (would reproduce the same contention-driven timeout). Leaving OPEN.
+

@@ -1,4 +1,9 @@
 # NAME001 bounded edit-distance allocation churn
+## Closed 2026-09-16 — ...ance allocation churn ## Status Resolved structurally with a three-row fixed-band implemen
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -30,3 +35,4 @@ For the NAME001 limits one and two, work is `O(K * limit)` and live/allocated
 matrix storage is `O(limit)` per comparison, replacing `O(K^2)` cells,
 one-byte substring temporaries, and cumulative row allocation. Exact runtime
 and allocation measurements remain unavailable under the no-verify direction.
+

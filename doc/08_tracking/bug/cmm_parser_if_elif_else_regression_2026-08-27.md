@@ -1,4 +1,8 @@
 # CMM parser if/elif/else regression caught by de-vacuated spec (2026-08-27)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Rewriting test/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.spl and
 test/03_system/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.spl from
@@ -16,3 +20,4 @@ ELSE IF chaining in cmm_parser_stmts.spl. Scores went 49 -> 93 (ORA-001/ORA-002
 cleared). Mutation dual-check performed on the feature copy: flipping the
 vacuity guard to `to_equal(true)` -> `Results: 2 total, 0 passed, 2 failed`;
 reverted byte-exact.
+

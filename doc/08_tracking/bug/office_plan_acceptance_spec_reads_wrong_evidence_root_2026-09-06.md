@@ -1,4 +1,8 @@
 # Office plan-acceptance spec reads an evidence root the gate never writes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - date: 2026-09-06
 - status: OPEN
@@ -46,3 +50,4 @@ evidence directory" wording argues for. Either must be validated by an actual
 gate run, which needs an admitted Phase-3 compiler (`SIMPLE_TARGET_PHASE3`,
 `scripts/check/build-office-standalone-target.shs:46`). No `build/**/stage3/**`
 compiler exists in this tree, and producing one is a bootstrap.
+

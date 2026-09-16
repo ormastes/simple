@@ -1,4 +1,8 @@
 # SIMD ISA copy kernel API removed from src
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -15,3 +19,4 @@ import-prefix fix; only the copy-kernel dispatch spec stays RED.
 ## Unblock condition
 Restore the copy kernel API or port the spec to the replacement dispatch
 path with a reviewed mapping.
+

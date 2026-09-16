@@ -1,4 +1,8 @@
 # SimpleOS WM Freestanding ByteSpan CSS Scanner Fault
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -137,3 +141,4 @@ Runtime verification remains gated on a fresh Stage 2/3 bootstrap, relocation
 proof, canonical hosted WM evidence, and canonical OVMF evidence. Presentation
 evidence must also carry and validate the Web render backend plus the realized
 solid-material SHA-256; configured theme markers alone are insufficient.
+

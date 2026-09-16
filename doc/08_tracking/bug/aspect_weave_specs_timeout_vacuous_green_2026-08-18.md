@@ -1,4 +1,8 @@
 # Aspect weave/join-point specs time out, and the runner reports it as a vacuous green
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > ## CORRECTIONS (2026-08-18, later the same day)
 >
@@ -304,3 +308,4 @@ Known limit, stated rather than papered over: the detector covers the entry's
 own `extern` declarations (1 today), not the 85 symbols that arrive through the
 `--entry-closure` transitive graph; and its wiring half is a static check on
 driver source, not a link proof.
+

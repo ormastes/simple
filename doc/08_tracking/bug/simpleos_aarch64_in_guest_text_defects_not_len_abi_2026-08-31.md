@@ -1,4 +1,8 @@
 # SimpleOS aarch64 in-guest: two text defects that are NOT the `.len()` u32/i64 ABI bug
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Lane: aarch64 in-guest toolchain components (EDK2/AAVMF pflash -> BOOTAA64.EFI)
@@ -124,3 +128,4 @@ Current verdict (unchanged across the PR #173 rebuild):
     rt_closure_func_ptr undefined symbol: rt_closure_new)
 
 `COMPONENTS=devtool` gives `PASS — 1 component(s) checked`, exit 0.
+

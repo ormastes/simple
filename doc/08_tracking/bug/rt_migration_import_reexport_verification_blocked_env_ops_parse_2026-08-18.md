@@ -1,4 +1,8 @@
 # Verification of ae5401713a9 import-re-export risk: BLOCKED (inconclusive)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-18
 
@@ -60,3 +64,4 @@ and no fix was applied to `env_ops.spl` because it is out of scope for this
 review (different commit, different concern). Recommend: fix
 `env_ops.spl:8`'s invalid import syntax first (blocking bug, filed here), then
 re-run this verification.
+

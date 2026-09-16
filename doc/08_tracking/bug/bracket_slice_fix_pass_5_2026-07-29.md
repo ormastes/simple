@@ -1,4 +1,9 @@
 # Bracket-slice byte-index survey — pass 5 (2026-07-29): base58_encode fixed; bencode decode path deferred
+## Closed 2026-09-16 — base58_encode FIXED and landed with PROOF; bencode decode deferred to pass 6
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Per the coordinator's explicit fallback ("if bencode decode explodes in
 scope, land base58 alone and doc the boundary"): base58_encode is fixed
@@ -163,3 +168,4 @@ either engine can be the wrong one depending on code shape.
 2 files changed: `base58.spl` (fix), 1 new spec, this doc. `bencode.spl`
 decode path unchanged (deferred, not silently dropped — scoped above).
 No gate/budget files touched.
+

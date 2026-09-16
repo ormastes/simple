@@ -1,4 +1,8 @@
 # wine_process_tls_dispatch_spec pre-existing RED — missing VM write-readback evidence token
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-27
 - Spec: `test/system/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.spl`
@@ -26,3 +30,4 @@ The PEB/TEB write-gate path must emit the documented
 `VMWriteReadback:PEBTEBLayoutBytes*` evidence token (or the spec's expected
 token must be reconciled with the gate's actual evidence vocabulary by the
 feature owner).
+

@@ -1,4 +1,9 @@
 # Bug: `install_generated_simpleos_wm_theme` has zero production callers — its own comment contradicts that
+## Closed 2026-09-16 — Status closed-invalid 2026-07-28: zero-caller finding refuted, 4 real boot callers verified in resolution
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-27
 **Status:** closed — invalid (finding contradicted by working copy, 2026-07-28)
@@ -137,3 +142,4 @@ with the caller count again. The unit test
 (`test/01_unit/os/compositor/simpleos_wm_theme_bootstrap_spec.spl`) is kept —
 it is a normal unit test for a function that also has real callers, not the
 dead-code test this bug alleged.
+

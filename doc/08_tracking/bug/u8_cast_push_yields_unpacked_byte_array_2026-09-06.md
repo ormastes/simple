@@ -1,4 +1,8 @@
 # BUG: `push(x as u8)` grows a `[u8]` whose storage is not byte-packed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-09-06 (macOS aarch64, `src/compiler_rust/target/debug/simple`, interpreter path)
@@ -98,3 +102,4 @@ against `[u8]`.
   `test/03_system/feature/language/parent_commit_piped_result_spec.spl`
   ("should validate, commit, and close one fragmented child result" went from
   7 failed checks to 5 with the mask workaround in place).
+

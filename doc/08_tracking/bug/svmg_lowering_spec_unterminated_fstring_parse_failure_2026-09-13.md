@@ -1,4 +1,8 @@
 # `test/01_unit/compiler/backend/svmg_lowering_spec.spl` fails to parse: "Unterminated f-string"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found by: BUGFIX-13 lane, while re-verifying
@@ -71,3 +75,4 @@ smaller *syntactically complete* fragments — not naive `head -N`, which
 produces spurious errors of its own from truncated blocks) and file the
 root cause against the lexer/parser (`src/compiler/10.frontend/core/lexer*.spl`
 or the interpolation-scanning code specifically).
+

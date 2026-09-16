@@ -1,4 +1,8 @@
 # Stage 3 blocked: the self-hosted parser rejects caseless `pattern -> body` match arms
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED 2026-09-06 (parser + lexer, `src/compiler/10.frontend/core/`)
 **Filed:** 2026-09-06
@@ -371,3 +375,4 @@ unrelated reason (standalone-SMF restriction, i.e. it reached semantics):
   warning: stage3 self-host failed (exit 1); Stage 4 unavailable
 ## Where it stops
   whose pattern binds 2+ fields. The reproducer above binds zero.
+

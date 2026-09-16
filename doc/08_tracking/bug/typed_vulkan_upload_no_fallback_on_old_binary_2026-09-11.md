@@ -1,4 +1,9 @@
 # Typed Vulkan rect-batch upload had no working fallback on an old binary (2026-09-11)
+## Closed 2026-09-16 — ...ern hits the identical fatal path. ## Fix Invert the default: the typed word-upload lane i
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -98,3 +103,4 @@ Vulkan/GPU path has the same landmine unless it is opt-in by default the same
 way. Filing a general-purpose extern-availability probe is future work, not
 done here (`.claude/rules/commands.md`'s "NEVER over-engineer" applies -- this
 fix is scoped to the one regressed call site).
+

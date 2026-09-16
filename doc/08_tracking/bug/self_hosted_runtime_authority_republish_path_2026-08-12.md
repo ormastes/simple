@@ -1,4 +1,8 @@
 # Self-hosted runtime-authority republish path (2026-08-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -426,3 +430,4 @@ with zero and one explicit argument against the frozen runtime. Stage-3 resume
 must run from this same frozen checkout and revalidate both receipts along with
 the admitted snapshots before writing its manifest. No deployment or rendering
 claim follows from an in-progress or failed Stage-2 run.
+

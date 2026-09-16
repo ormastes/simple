@@ -1,4 +1,8 @@
 # SIGSEGV cannot be wired into the Simple signal layer: no C→Simple fault bridge, and the fork externs are absent from the seed interpreter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-06
 - **Area:** runtime / signals / test harness
@@ -96,3 +100,4 @@ Any ONE of these makes the three boxes implementable:
 
 Until then the three acceptance examples are correctly RED and
 `serial_sigsegv_and_test_hardening_spec.spl` keeps `# @tag:in-development`.
+

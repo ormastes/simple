@@ -1,4 +1,8 @@
 # Wall-clock perf ratios are not measurable on this host; use child CPU time
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found by: PERF-6, host load 27-40, 90 users, 20 cores
@@ -85,3 +89,4 @@ Only the `component_scaling` evidence above belongs to this record: it fails on 
 and resolves no binary, so no fallback can explain it. Every failing example in both specs
 is a ratio pin (`stays within 3x`, `linear pin`); **no semantics example failed on either
 seed in any run.**
+

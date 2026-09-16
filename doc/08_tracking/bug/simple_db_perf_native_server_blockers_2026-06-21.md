@@ -1,4 +1,8 @@
 # Simple DB Perf Native/Server Blockers - 2026-06-21
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: benchmark lane not runnable from this host
 - **measured** — the gate script `scripts/check/check-simple-db-perf-compare.shs` still
@@ -99,3 +103,4 @@ Crash-safety note:
 
 - Do not loop native/release rebuilds while investigating this; run one bounded
   native check at a time and stop on segfault/core-dump/fallback.
+

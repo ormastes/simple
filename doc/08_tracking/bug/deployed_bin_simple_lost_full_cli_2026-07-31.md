@@ -1,4 +1,8 @@
 # `bin/simple` deployed as a bootstrap-only binary — `test`/`run`/`lint` all gone (2026-07-31)
+## Obsolete 2026-09-16 — dupe of deployed_bin_simple_bootstrap_only_2026-07-31.md (same 12:14 deploy, same missing test/run/lint); condition recorded gone 2026-08-17
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Status:** OPEN, ACTIVE BREAKAGE of the repo's default tooling.
 **Detected:** 2026-07-31 ~12:20 UTC, mid-session, between two spec runs.
@@ -71,3 +75,4 @@ Guard worth adding: a post-deploy smoke check that the published binary answers
 `test --help`, `run --help` and `lint --help` before it is allowed to replace
 `bin/release/<triple>/simple`. A deploy that silently narrows the CLI surface
 should fail loudly at deploy time, not at the next contributor's first command.
+

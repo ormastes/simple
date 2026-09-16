@@ -1,4 +1,9 @@
 # `@noalloc` family manifest declares the noalloc family non-allocating, and prefix matching extends that to its own allocator submodules
+## Closed 2026-09-16 — Status FIXED (WP-11/WP-12a) with before/after regression proof through audit driver
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-07
 **Severity:** high — this is the load-bearing check for the baremetal/flight tier
@@ -273,3 +278,4 @@ class-aware checking (so `init_only`/`bounded_pool` allocation in
 
 Tracked as WP-12a in
 `doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md`.
+

@@ -1,4 +1,9 @@
 # CSS min() / max() / clamp() were not parsed on lengths (2026-09-12)
+## Closed 2026-09-16 — Status FIXED for width; 11-example spec sabotage-verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED for `width`.
 **Component:** pure-Simple web renderer, declaration application.
@@ -67,3 +72,4 @@ only `width` is wired. Nested `calc()` inside `min()`/`clamp()` is NOT handled:
 this declaration path uses bare `parse_int` and has no `calc` evaluator at all,
 so "nest it in calc" was not applicable here. `css_math_args` already tracks
 paren depth, so a future `calc` evaluator drops in without re-tokenizing.
+

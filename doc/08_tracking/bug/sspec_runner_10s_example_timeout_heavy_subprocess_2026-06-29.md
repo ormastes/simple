@@ -1,4 +1,8 @@
 # Bug: sspec test runner kills a heavy subprocess example at a fixed 10s timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-06-29
 **Severity:** medium (workaround: keep per-example subprocess work under ~10s)
@@ -40,3 +44,4 @@ A configurable per-example timeout (or a longer default for `03_system` specs), 
 timeout, surface the timeout reason in the example's captured `err` (or a distinct status)
 so a spec can distinguish "child timed out" from "child failed", instead of a silent
 partial capture with `code == 1`.
+

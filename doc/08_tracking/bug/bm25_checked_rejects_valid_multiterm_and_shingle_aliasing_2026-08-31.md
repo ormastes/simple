@@ -1,4 +1,8 @@
 # Two real defects in the landed search primitives
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** OPEN — both found during integration wiring, both worked around locally
@@ -68,3 +72,4 @@ Neither defect was visible to the package that owned the code — both required 
 *consumer* to exercise the primitive for real. That is an argument for landing
 integration paths alongside primitives rather than after them; a green package
 suite proved less than it appeared to.
+

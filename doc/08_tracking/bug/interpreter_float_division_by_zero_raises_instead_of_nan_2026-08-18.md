@@ -1,4 +1,8 @@
 # Interpreter float division `0.0 / 0.0` raises instead of producing NaN
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: BLOCKED-ON-DEPLOY (fix committed to source, not yet in the deployed binary)
 - Found: 2026-08-18, while writing C-MIG-0033 (`test/01_unit/lib/common/numeric_round_is_nan_crosslang_spec.spl`)
@@ -119,3 +123,4 @@ the workaround inline but does NOT assert the correct IEEE 754 behavior
 (doing so would currently fail). A follow-up spec asserting `0.0 / 0.0`
 produces NaN (not an error) should be added once this is fixed, and this doc
 updated to RESOLVED with that spec cited.
+

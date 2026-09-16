@@ -1,4 +1,8 @@
 # Loader: interpreter cannot invoke a raw i64 code address (segment mapper positive control stays red)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-18. Lane: aspect-dynload.
 Binary: `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
@@ -127,3 +131,4 @@ legitimately RED because of this defect and must stay RED until it is fixed.
 * NOT blocked by this: the address-level acceptance spec
   `test/01_unit/compiler/loader/joinpoint_patchpoint_spec.spl`, which reads the
   patched pointer back out of the mapped page and passes 31/31 checks today.
+

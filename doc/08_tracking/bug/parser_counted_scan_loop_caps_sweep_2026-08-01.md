@@ -1,4 +1,9 @@
 # Counted `for i in 0..N` loops used as unbounded parser scan loops
+## Closed 2026-09-16 — sweep completed; all 118 loops converted to unbounded while with equivalence-sweep evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Swept (preventive) — no reachable cap demonstrated
 **Date:** 2026-08-01
@@ -191,3 +196,4 @@ covers the one boundary in this family that was ever shown to be real.
 
 A spec that would genuinely cover the remaining 116 loops needs an input that
 trips one of them, and this lane did not find one.
+

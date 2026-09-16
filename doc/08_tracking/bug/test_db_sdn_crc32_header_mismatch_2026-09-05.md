@@ -1,4 +1,8 @@
 # `doc/08_tracking/test/test_db.sdn` is committed with a stale CRC32 header
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-05. Found while documenting the real `simple perf` workflow for
 `.claude/skills/lib/perf_ladder.md`: `simple perf record` and `simple perf
@@ -68,3 +72,4 @@ change and record the before/after CRC here.
 - `.claude/skills/lib/perf_ladder.md` — records the resulting BLOCKED commands.
 - `doc/08_tracking/bug/perf_regression_tests_4_mechanisms_red_2026-09-05.md` —
   separate, unrelated perf-gate issue found in the same pass.
+

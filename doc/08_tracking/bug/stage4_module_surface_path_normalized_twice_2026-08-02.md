@@ -1,4 +1,8 @@
 # Stage 4 module-surface builder normalizes every source path twice
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status and claim
 
@@ -50,3 +54,4 @@ AST declaration graphs, or serial Phase-2 execution.
   21/21 PASS.
 - Optimizer analysis completed for both changed pure-Simple compiler files.
 - Direct environment-runtime guards PASS for working and staged scopes.
+

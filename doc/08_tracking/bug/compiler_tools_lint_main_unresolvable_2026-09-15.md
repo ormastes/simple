@@ -1,4 +1,8 @@
 # use compiler.tools.lint.main unresolvable from spec location
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -13,3 +17,4 @@ Discovered by: test-wave agent B (spec triage)
 ## Unblock condition
 Expose the lint entry through a std.* path (or document the sanctioned way
 for specs to import compiler tools), then fix the import.
+

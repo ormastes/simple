@@ -1,4 +1,8 @@
 # Native runtime: text literals never reach a `text` extern, and binary reads truncate at the first NUL
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-07
 - Arch measured: aarch64-unknown-linux-gnu
@@ -165,3 +169,4 @@ a `"FELL-THROUGH"` sentinel as the trailing expression, prints `len=0` for both.
 It does NOT fall through — in Stage 2's *output*. Stage 2 itself is Stage 1's
 output, and Stage 1 was not measured, so the hypothesis is refuted for the
 generation that could be tested and remains open for the one that could not.
+

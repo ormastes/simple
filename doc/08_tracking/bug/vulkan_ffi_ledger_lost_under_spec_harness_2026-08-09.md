@@ -1,4 +1,8 @@
 # `VulkanFfi` rejection ledger never accumulates under the spec harness (works under `bin/simple run`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13
 OPEN, out of scope for this pass: the doc's own investigation already
@@ -117,3 +121,4 @@ failed assertion, not the first. The run above reported only
 `expected  to equal shutdown` although the two preceding count assertions
 had failed too. Reading a single failure message as "only one assertion
 failed" is a mistake.
+

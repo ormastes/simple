@@ -1,4 +1,8 @@
 # BUG: freestanding module frame-builder emitted duplicated slot stores with +16 displacement — layout-sensitive codegen corruption
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open (reproduced once with real dumped bytes; vanishes with unrelated code motion)
 **Severity:** high when it strikes (silent memory corruption), low reproducibility (layout-sensitive)
@@ -31,3 +35,4 @@ buildA_run.log / buildB_run.log in the session scratchpad. Frame dump deltas
 are recorded in the notes. No minimal repro yet — extraction of a standalone
 case (module fn with loop-carried slot pointer + reassignment, compare dumped
 stores across padding variants) is the next step.
+

@@ -1,4 +1,8 @@
 # Seed datetime i32 timestamp ABI
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -18,3 +22,4 @@ seed-library declarations in `tooling/time_utils.spl` and
 
 This is separate from the hosted C/common arithmetic correction; silently
 casting only one declaration would preserve truncation at another boundary.
+

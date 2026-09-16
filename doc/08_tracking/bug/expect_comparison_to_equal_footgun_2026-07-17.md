@@ -1,4 +1,8 @@
 # expect(a == b).to_equal(false) comparison-matcher footgun
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Status:** PHASE-1 SWEPT — parse-aware transformer rewrote 1,386 simple cases in 321 files (2026-07-17); ~1,360 complex lines remain flagged by the checker
@@ -67,3 +71,4 @@ deployed binary's rt_cli_arg_count gap; seed runner cannot compile the
 pure-Simple test-runner) — A/B confirmed the failure is byte-identical for
 origin and swept content, i.e. pre-existing and unrelated. Remaining
 ~1,360 complex lines: run the checker for the current list.
+

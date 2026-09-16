@@ -1,4 +1,8 @@
 # macOS Vulkan native entry blockers — 2026-07-24
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -252,3 +256,4 @@ the next session must isolate the first remaining fallback transition with
 per-operation provenance before another full live launch. Window capture and
 keyboard/pointer/click evidence remain blocked behind that strict device
 readback gate; web, GUI widgets, WM, Metal, and QEMU were not started.
+

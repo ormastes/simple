@@ -1,4 +1,8 @@
 # `resolve_methods` never runs on the real compile path
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Status:** OPEN — diagnosed precisely, deliberately NOT fixed (structural)
@@ -151,3 +155,4 @@ lines 332/368/407/481/514). Do not trust the location without checking.
 
 **No source fixes were applied to MCP**, deliberately: rewriting idiomatic Simple
 to dodge a compiler bug is prohibited by CLAUDE.md and would hide the defect.
+

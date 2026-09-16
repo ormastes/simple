@@ -1,4 +1,9 @@
 # Native provider `.so` routed to the SimpleOS registry
+## Closed 2026-09-16 — ...expose `simple_provider_query_v1`. ## Fix - Add bounded raw-text host runtime entry points
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -36,3 +41,4 @@ result encoder. Its size predicate is tested without allocating a megabyte-size
 fixture, avoiding an interpreter-performance regression in the regression test.
 Do not claim invocation PASS until a fresh bounded session rebuilds the provider
 and runner once with the admitted Pure Simple Stage 2/3 tool.
+

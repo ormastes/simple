@@ -1,4 +1,8 @@
 # `ide --feature-check --tui`: a call result that should be truthy returns 0
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/ide/main.spl` (or its feature-check TUI rendering
@@ -47,3 +51,4 @@ lead for follow-up.
 
 Spec left unmodified — no evidence of a stale assertion; flagged as a
 genuine TUI-path gap.
+

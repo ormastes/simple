@@ -1,4 +1,8 @@
 # 199 lib specs fail on 133 `std.*` modules that exist nowhere in the tree
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -187,4 +191,5 @@ a feature-completeness gap (tests for code that doesn't exist yet),
 not a bug fixable by editing tests or a small module. Implementing
 133 missing modules is far beyond this lane's per-item budget. Leaving
 OPEN.
+
 

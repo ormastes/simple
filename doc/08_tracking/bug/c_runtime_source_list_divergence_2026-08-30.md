@@ -1,4 +1,8 @@
 # C runtime source-list divergence — independent verification (2026-08-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Follow-up to `doc/08_tracking/bug/rt_symbol_census_windows_2026-08-30.md`.
 Read-only analysis. Every set below was computed mechanically (extractor:
@@ -210,3 +214,4 @@ Nothing today compares these three lists. A cheap fail-closed check — "every
 defined by at least one member of list 2" — would have caught
 `runtime_terminal.c`, `runtime_simd_case.c` (fixed the same way earlier), and
 `runtime_coverage_core.c`. Not implemented here.
+

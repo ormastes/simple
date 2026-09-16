@@ -1,4 +1,8 @@
 # Legacy MCP feature tests target a REMOVED API and assert nothing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -193,3 +197,4 @@ removed `app.mcp.session`/`McpState` API (their `*_spec.spl` /
 `working_check*.spl` siblings in the same directory appear to be the live
 replacements) once an owner confirms none of the 7 still has a reachable
 non-stale counterpart.
+

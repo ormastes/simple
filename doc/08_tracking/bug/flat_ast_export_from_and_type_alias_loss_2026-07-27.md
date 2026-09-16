@@ -1,4 +1,8 @@
 # Flat AST loses export-from provenance and type aliases
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Observed
 
@@ -20,3 +24,4 @@ import alias syntax. This preserves their existing public names and targets.
 - Add a flat type-alias declaration, parser dispatch, and module assembly.
 - Resolve alias RHS ownership for type lowering and static member lookup.
 - Add parser/HIR tests for generic and non-generic aliases and export-from.
+

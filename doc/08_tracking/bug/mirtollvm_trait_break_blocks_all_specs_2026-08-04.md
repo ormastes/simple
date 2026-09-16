@@ -1,4 +1,8 @@
 # `MirToLlvm` no longer satisfies `MirTextCodegen` — blocks EVERY spec on main
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED — verified stale as of 2026-08-05 (see "2026-08-05 verification" below)
 **Found:** 2026-08-04
@@ -133,3 +137,4 @@ bin/simple test test/01_unit/lib/common/arch_spec.spl
 
 Score the **last line**, not the exit code — the log is thousands of lines of
 `[gc-warning]` noise first.
+

@@ -1,4 +1,8 @@
 # Entry-module top-level val initializers never execute under freestanding native-build cranelift
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -25,3 +29,4 @@ Blocks ring-3 USEROK smoke from using module-level state. Workaround works but n
 
 ## Next Step
 Implement `__module_init_*` emission and entry-point invocation in freestanding cranelift backend. Cross-reference with `baremetal_entry_closure_class_instantiation_fault_2026-07-06.md` — both bugs share the same root fix.
+

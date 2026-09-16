@@ -1,4 +1,8 @@
 # VirtIO input SFFI publishes split mutable event snapshots
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -31,3 +35,4 @@ before a safe promotion. Until then, declarations and wrappers require
 The migration must reduce six calls to one, use a stack/local output descriptor,
 and add no heap allocation, copy of queue payloads, map lookup, hash, signature
 verification, lock, or generic dispatch per poll. Admission remains one-time.
+

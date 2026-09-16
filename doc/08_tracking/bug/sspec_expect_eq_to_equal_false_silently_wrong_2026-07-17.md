@@ -1,4 +1,8 @@
 # SSpec: `expect(a == b).to_equal(false)` silently checks `a` equals `b` instead of asserting they differ
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** high (silently asserts the OPPOSITE of what the test author
@@ -275,3 +279,4 @@ the rewrite lived in `interpreter_call/bdd.rs`. The mechanism that fixed it is
 visible there now: the comparison arm returns `Value::Bool(matched)` and marks a
 false result PROVISIONAL, so a chained `.to_*()` matcher stays authoritative.
 Probe `_scratch/eq_probe2_spec.spl`. Not fixed by this session.
+

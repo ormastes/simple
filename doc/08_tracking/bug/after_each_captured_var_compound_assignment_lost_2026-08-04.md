@@ -1,4 +1,8 @@
 # BUG: a write inside `after_each` that reads the captured variable is lost; a constant write is not
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-measured 2026-09-13 — reproduces, but the TITLE IS WRONG: the constant write is lost too
 
@@ -151,3 +155,4 @@ does not) by varying nesting and hook count one factor at a time.
 
 **Do not "fix" the spec** by deleting the `after_each` assertion — verifying
 that `after_each` actually runs is the entire point of that example.
+

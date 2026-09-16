@@ -1,4 +1,8 @@
 # Block vertical advance over-measured ~12 % — cause still NOT isolated (2026-09-12)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. Not fixed. Four candidate causes now excluded by fixture.
 **Component:** pure-Simple web renderer, block layout.
@@ -69,3 +73,4 @@ file:line could be named: every fixture that isolates a single mechanism is
 correct, so the cause is a composition of element-specific defaults that needs
 the per-element-type sweep above before a line can be attributed. Guessing a
 line would be worse than filing.
+

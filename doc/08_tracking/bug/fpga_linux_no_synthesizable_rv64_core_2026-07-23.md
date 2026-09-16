@@ -1,4 +1,8 @@
 # BLOCKER: no synthesizable rv64 core → Linux cannot run on the real FPGA
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-23
 **Severity:** blocker (board-runnable rule: "when board-run is genuinely blocked, say so explicitly and file it")
@@ -56,3 +60,4 @@ This is true for the rv32 *and* rv64 emitted cores. `write_generated_core_lane`
 - rv64 Linux on FPGA: **blocked** — no synthesizable core exists; needs a new
   rv64gc+Sv39 RTL core (large) and a connected board (absent here).
 - rv32/rv64 core-model **hardening + 10-min soak**: achievable and being run.
+

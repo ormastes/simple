@@ -1,4 +1,9 @@
 # MCP core-C bootstrap archive misses collection/text symbols
+## Closed 2026-09-16 — Status Fixed; runtime exports added, retry link passed, gate green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -61,3 +66,4 @@ linked artifact. Its single `--help` and `--version` smokes both exited 0, with
 version `Simple MCP Server v4.0.0`.
 
 Provider token usage and comparable completed-bug average: unavailable.
+

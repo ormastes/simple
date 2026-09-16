@@ -1,4 +1,8 @@
 # A user-defined `class Promise<T>` with a `static fn resolved(...)`/`rejected(...)` is shadowed by the builtin async `Promise` class name
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** Rust interpreter static-method dispatch for a locally-defined
@@ -113,3 +117,4 @@ from user-Promise.
 Verified with:
 `SIMPLE_RUST_SEED_WARNING=0 timeout 90 bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/futures_promises_spec.spl --no-session-daemon 2>&1 | sed 's/\x1b\[[0-9;]*m//g'`
 → `Passed: 6, Failed: 9`
+

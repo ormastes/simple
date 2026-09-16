@@ -1,4 +1,9 @@
 # BUG: rt_extras.c RuntimeString layout 4 bytes off vs baremetal_stubs.c — string-data reads shifted
+## Closed 2026-09-16 — ...g-data reads shifted **Status:** RESOLVED (2026-07-12) — **but the header fix was REVERTED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (2026-07-12) — **but the header fix was REVERTED by the tree
 wipe `6f86ff32a7d` / restore `ae55a746719` and had to be re-applied 2026-08-31.**
@@ -56,3 +61,4 @@ Pre-existing, NOT covered here (flagged during audit): (1) rt_text_to_bytes
 returns a tagged RuntimeValue array while [u8] callers expect BYTE_PACKED —
 latent encoding mismatch; (2) header RuntimeArray (u32/inline) vs
 baremetal_stubs.c RuntimeArray (u64/pointer) divergence.
+

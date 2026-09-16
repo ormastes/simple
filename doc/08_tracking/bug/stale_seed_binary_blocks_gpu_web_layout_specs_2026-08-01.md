@@ -1,4 +1,8 @@
 # Stale deployed `bin/simple_seed` blocks every spec importing `browser_renderer_protocol.spl`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-01
 **Status:** ALREADY-FIXED (re-verified 2026-08-09) — the grammar fix
@@ -93,3 +97,4 @@ RED on the stale seed (whole-file parse error) and GREEN on the fixed parser.
 Do not rewrite `browser_renderer_protocol.spl:575`/`:583` to dodge the parse
 error. The source is correct under the current grammar; normalising it to a
 workaround would hide the stale-binary problem and re-open the coverage gap.
+

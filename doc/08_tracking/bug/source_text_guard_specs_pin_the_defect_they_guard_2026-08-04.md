@@ -1,4 +1,8 @@
 # Source-text guard specs went red *because* the defect they guard was fixed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED for the three specs found; filed for the anti-pattern
 **Found:** 2026-08-04
@@ -95,3 +99,4 @@ nowhere in `src/`. It therefore fails the whole file at load with
 test (a tautological assertion cannot fail), so making it green would mean
 inventing an API to satisfy a probe. It needs its author to say whether the
 counter was planned or the file is scratch; left alone rather than deleted.
+

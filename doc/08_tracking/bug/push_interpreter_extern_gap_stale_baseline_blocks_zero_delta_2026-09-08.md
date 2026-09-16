@@ -1,4 +1,9 @@
 # Interpreter extern gap push ratchet attributed mainline debt to topics
+## Closed 2026-09-16 — Fix and evidence: --baseline-rev; selftest 9/9 PASS, SciLib PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -20,3 +25,4 @@ retain strict frozen-baseline and stale-row enforcement.
 
 - Checker selftest: PASS, 9 numbered fixtures.
 - SciLib tip versus its parent: PASS, 220 declarations and zero new gaps.
+

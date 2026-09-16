@@ -1,4 +1,8 @@
 # Stage-2 native codegen: SEGVs compiling a method that writes a `self.<dict>[k] = v` inside a guarded `if`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-14)
 - Lane: BOOT-20 (`work/bootstrap-s3-2-2026-09-14`), found while chasing
@@ -117,3 +121,4 @@ applies and documents (`Option`'s nil case does not survive the staged native
 ABI; `.?` reads PRESENT for an absent symbol). Guard added; pinned by
 `test/01_unit/compiler/mir/external_layout_reference_nil_info_guard_source_spec.spl`.
 Clearing the rc-139 needs a rebuilt Stage-2 candidate, which lane F77 did not have.
+

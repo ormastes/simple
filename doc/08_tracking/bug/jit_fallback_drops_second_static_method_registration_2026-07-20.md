@@ -1,4 +1,8 @@
 # JIT-compile failure anywhere in the whole-program closure → interpreter fallback loses a struct's 2nd+ static method registration
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Scope:** `bin/release/x86_64-unknown-linux-gnu/simple` (self-hosted binary) JIT-to-interpreter fallback path (compiler internals — needs a rebuild to verify current source, not a `.spl` source edit)
@@ -110,3 +114,4 @@ source already contains the required all-method registration behavior.
 Source invariant pinned; deployed-binary verification pending. The exact
 `test/03_system/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`
 assertion remains unchanged and red on the stale deployed binary.
+

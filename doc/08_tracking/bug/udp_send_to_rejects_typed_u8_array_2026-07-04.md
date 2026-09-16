@@ -1,4 +1,8 @@
 # Bug: extern calls taking `[u8]` reject a genuinely-typed `[u8]` array — "byte array element must be integer, got u8"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-04
 **Severity:** P1 — every extern that marshals bytes through
@@ -78,3 +82,4 @@ typed Simple array actually uses (`Value::U8`, if that is the boxed
 representation) alongside `Value::Int`, so callers do not need to manually
 downgrade a typed byte array to an untyped integer array before any
 byte-taking extern call.
+

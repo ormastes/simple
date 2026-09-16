@@ -1,4 +1,8 @@
 # Engine2D 2D performance bug register — reproduction + lint detectability
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-03. One row per measured perf defect: how to reproduce it, and
 whether a lint can find it automatically.
@@ -103,3 +107,4 @@ Executable, in the repo:
 The resolution sweep for defect #4 is currently run by hand (commands in the
 table above); folding it into the compare gate as extra `evidence.env` rows is
 the obvious next step and is not yet done.
+

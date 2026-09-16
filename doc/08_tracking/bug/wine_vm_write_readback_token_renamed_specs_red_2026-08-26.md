@@ -1,4 +1,8 @@
 # Wine VM write-readback evidence token renamed; specs asserting the old token are RED
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-26
 - Discovered during: sspec modernization batch `ora_batch_aa`
@@ -44,3 +48,4 @@ token or all affected specs are updated in one reviewed change.
 The loader-runtime spec itself was modernized in the same session (score
 49 -> 100, `effective_aggregate=100`); the failing assertion is byte-identical
 to HEAD's.
+

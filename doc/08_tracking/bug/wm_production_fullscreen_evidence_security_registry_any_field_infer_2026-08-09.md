@@ -1,4 +1,8 @@
 # Bug: `check-wm-production-fullscreen-evidence.shs` still fails to build — security-registry pre-pass hits the SAME `struct 'ANY' field 'message'` error the main lowering fix already cleared
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status: FIX LANDED (2026-08-09), commit `7fa2d06aaa8`.** Genuine compiler
 defect, not environmental. Reproduced deterministically on 2026-08-09.
@@ -164,3 +168,4 @@ Skipped from this row-order pass: primary file/fix surface is the Rust seed
 (`src/compiler_rust/**`) or otherwise not exercisable/fixable from this
 pure-Simple, non-Codex lane within the triage budget. Not reproduced or
 re-diagnosed this pass; left OPEN as-is.
+

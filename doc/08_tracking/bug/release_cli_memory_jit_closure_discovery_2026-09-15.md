@@ -1,4 +1,8 @@
 # Release CLI memory footprint, release-app JIT closure fallback, and local consumer-discovery failure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-15
 **Impact:** every local `simple release …` invocation; the version authority
@@ -83,3 +87,4 @@ warnings for `env_get` (5 definitions, 2 signatures), `env_vars`,
 `process_run_with_limits`, `process_wait`, and `shell` — JIT call sites "fall
 back to the last definition when types are ambiguous … may still dispatch to
 the wrong one". Collision-correctness risk adjacent to this file's concerns.
+

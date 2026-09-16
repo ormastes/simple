@@ -1,4 +1,8 @@
 # `newunit` declares a type that cannot be constructed from source; its spec never tries
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Found by:** parent session, while retesting a workstream-I claim.
@@ -56,3 +60,4 @@ warning). Self-hosted retest is blocked by the bootstrap redeploy failure. Do no
 close on a seed-only fix. See
 `doc/08_tracking/bug/function_argument_types_unchecked_2026-09-01.md`, which
 carries the same caveat.
+

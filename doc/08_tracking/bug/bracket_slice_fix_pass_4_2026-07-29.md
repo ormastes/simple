@@ -1,4 +1,9 @@
 # Bracket-slice byte-index survey — fix pass 4 (2026-07-29), campaign closeout
+## Closed 2026-09-16 — Campaign marked CLOSED; fixes and safe verdicts landed, deferrals named
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Batch 4: the four files deferred from pass 3 (`protobuf_wire.spl`,
 `base58.spl`, `bencode.spl`, `parser_types_expr.spl`), all sharing the
@@ -208,3 +213,4 @@ survey.
 campaign (`bracket_slice_byte_index_survey_2026-07-29.md` and passes 1-3
 remain as the historical record, not edited). No gate/budget files
 touched.
+

@@ -1,4 +1,8 @@
 # `src/lib/gc_sync_mut/` exists with real content, violating the "not a public variant directory" invariant the spec + structure.md both encode
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** repo layout — `src/lib/gc_sync_mut/` vs.
@@ -76,3 +80,4 @@ never-weaken rule.
 - Affected: `test/feature/lib/gc_parity/gc_module_loader_spec.spl` (1 of 2
   examples fails; the array-utilities-from-common example in the same file
   passes cleanly).
+

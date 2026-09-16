@@ -1,4 +1,8 @@
 # SimpleOS filesystem-server thread runtime bridge
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Current gate
 
@@ -44,3 +48,4 @@ trampoline is CPU bring-up, not an application-thread API.
    throughput comparisons. Single-worker TCP operation can be tested earlier.
 
 No QEMU or native build evidence was produced by this audit.
+

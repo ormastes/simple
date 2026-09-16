@@ -1,4 +1,8 @@
 # Theme package source-capture design hard stop
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** rejected design series; unintegrated
 **Series:** `48fbcd1d91`, `ae814abf14`, `7e714f01b0`, `50c886ca9b`
@@ -70,3 +74,4 @@ session may resume only after:
 4. gating native integration on the landed encoder-input ABI probe;
 5. keeping the legacy aggregate loader/cache independent until its consumers
    receive a separately reviewed migration.
+

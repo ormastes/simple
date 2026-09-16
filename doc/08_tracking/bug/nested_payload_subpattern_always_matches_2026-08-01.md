@@ -1,4 +1,9 @@
 # Nested enum payload sub-patterns always-match and never-bind on the JIT
+## Closed 2026-09-16 — in-body Fixed status: sub-patterns fixed at any depth, measured BADCOUNT 14->0; residue MIR site owned separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Status:** Fixed for variant sub-patterns at ANY depth, literal sub-patterns,
@@ -243,3 +248,4 @@ The native column for `match` on an enum is **unmeasurable**, not passing:
 native has no `match`-on-enum lowering at all, so `compile --native` refuses
 these programs rather than answering them. Closing blocker 1 removes one reason
 the gate must stay shut; it does not by itself make native correct.
+

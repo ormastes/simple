@@ -1,4 +1,8 @@
 # SimpleOS shared TLS fragment accumulator is quadratic
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** IMPLEMENTED — admitted self-hosted runtime evidence pending
 **Owner:** shared TLS application-record stream owner
@@ -69,3 +73,4 @@ alone is not a pass signal here — read the `Results:`/`SPEC FILE VERDICT`
 line.
 
 **Still open:** self-hosted-binary latency/peak-RSS evidence.
+

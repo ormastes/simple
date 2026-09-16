@@ -1,4 +1,8 @@
 # BUG: with the "native" concurrent backend, spawn stores the result in the pure_std map but join reads the native registry — every join returns nil
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ARCHITECTURAL-OPEN (re-confirmed 2026-08-10; fix requires editing src/compiler_rust, out of scope for a .spl-lane pass)
 **Found:** 2026-08-04
@@ -147,3 +151,4 @@ forbid editing. Status remains ARCHITECTURAL-OPEN; no code or spec changed.
 ## Triage 2026-09-13
 
 Already marked ARCHITECTURAL-OPEN; fix location is `src/compiler_rust/compiler/src/interpreter_extern/concurrency.rs`, out of scope for a pure-Simple TDD pass. No new evidence this pass. Leaving OPEN.
+

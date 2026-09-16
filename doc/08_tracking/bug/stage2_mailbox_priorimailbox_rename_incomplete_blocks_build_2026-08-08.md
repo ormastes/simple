@@ -1,4 +1,8 @@
 # Stage-2 build fails: incomplete `Mailbox` -> `PriorityMailbox` rename leaves a dangling symbol (2026-08-08)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## REGRESSED (2026-08-08)
 
@@ -242,3 +246,4 @@ either — the chain simply never got there.
 
 `df -h /` before and during: 215G free on `/`, well above the 100G abort
 threshold; both replay runs together used well under 1G of scratch space.
+

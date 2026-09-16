@@ -1,4 +1,8 @@
 # Release: `rustc` crashes on both macOS runners, blocking every release
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-14
 **Impact:** `build-bootstrap` can never be green, so `whole-tests` and
@@ -77,3 +81,4 @@ the whole job down and skips both downstream jobs. `create-release` never fails
 
 - `beta1_tag_cannot_bootstrap_on_windows_2026-09-14.md` — the Windows lane, and
   the gate analysis this record extends.
+

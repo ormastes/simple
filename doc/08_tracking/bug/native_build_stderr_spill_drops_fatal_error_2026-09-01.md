@@ -1,4 +1,8 @@
 # native-build's stderr spill silently drops the real fatal error
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Status:** OPEN — measured, not fixed
@@ -57,3 +61,4 @@ The defect is in path/size handling, not platform-conditional code; the same
 truncation logic runs on Linux and macOS. The earlier hardcoded-`/tmp` spill
 bug in this same function (fixed, `15523fad2c4`) was Windows-only, but this
 byte-count mismatch is not.
+

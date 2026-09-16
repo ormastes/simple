@@ -1,4 +1,8 @@
 # Pure-Simple parser rejects multiline if-expressions in FV2 contract bridge
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-12
 
@@ -36,3 +40,4 @@ mailbox/transfer verification pass.
 the bridge after the normalization. A mailbox spec currently reaches the
 adjacent pre-existing blocker in `verification_region_effects.spl` first:
 `Unexpected token: expected pattern, found Else`.
+

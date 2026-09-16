@@ -1,4 +1,8 @@
 # Stage-2 (phase 2) native-build process SEGVs on `callback_trampoline_spec.spl`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## FILED, not fixed — 2026-09-13, FULLTEST lane
 
@@ -64,3 +68,4 @@ echo $?   # 139 (128 + SIGSEGV) after ~115s
 - Binary: pinned Stage-2 candidate `bin/release/aarch64-unknown-linux-gnu/simple.phase2`, sha256 `d19daa8c090c2a30ec6f56304ea354c947edc870c822235f97b97b3d30e0d1ae`
 - Class: `crash` (native-build process SEGV, not a handled compile error)
 - Related: `phase2_stage2_spec_framework_unresolved_reexport_chase_2026-09-13.md`
+

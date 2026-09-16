@@ -1,4 +1,9 @@
 # Stage4 module-surface owner-index copy retention
+## Closed 2026-09-16 — ...eir traversal and key-array costs. ## Fix and preserved behavior Visit each category key a
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -59,3 +64,4 @@ procedural, not a quantitative acceptance threshold.
 - `simple check src/compiler` was attempted once and was inconclusive: spawned
   workers resolve the hard-coded isolated-worktree path `bin/simple`, which is
   absent. No source diagnostic preceded that infrastructure failure.
+

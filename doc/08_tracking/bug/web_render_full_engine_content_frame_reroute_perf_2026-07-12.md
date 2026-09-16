@@ -1,4 +1,8 @@
 # Full HTML layout engine ~55-60x slower than tag-strip fallback per actual content-frame re-render
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/compiler_rust/target/bootstrap/simple run <probe>.spl
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 
@@ -74,3 +78,4 @@ persist at some ratio in compiled code too.
   (e.g. terminal echo), consider debouncing content_revision-triggered
   re-renders (coalesce rapid successive content changes within one frame
   tick) rather than reverting to the tag-strip fallback.
+

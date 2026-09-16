@@ -1,4 +1,8 @@
 # Transparent-Destination Blend — TLDR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ```sdn
 blend_bug:
@@ -9,3 +13,4 @@ blend_bug:
 ```
 
 Fix `color.blend` once, then refresh CPU/GPU parity anchors and add a transparent-destination oracle.
+

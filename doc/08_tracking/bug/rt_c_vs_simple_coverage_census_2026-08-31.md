@@ -1,4 +1,8 @@
 # `rt_*` coverage census: C vs PURE SIMPLE vs Rust
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31. **Analysis-only** — no source was modified to produce this.
 **Repo:** `C:\Users\ormas\dev\simple` (main checkout), working tree at HEAD.
@@ -409,3 +413,4 @@ visible: it is deliberately re-implementing what C already provides, for the
 bounded core ABI, and nothing wider. `src/os/kernel` is a separate lane
 (SimpleOS baremetal), which is why its 47 Simple-only names are expected rather
 than gaps in the hosted runtime.
+

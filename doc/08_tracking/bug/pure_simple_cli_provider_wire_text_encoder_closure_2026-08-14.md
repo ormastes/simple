@@ -1,4 +1,9 @@
 # Pure Simple CLI provider pulled unused text encoder into its archive
+## Closed 2026-09-16 — Status fixed and verified with admitted Stage 2 compiler evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -51,3 +56,4 @@ forbidden str.to_bytes / rt_string_to_bytes imports: none
 ```
 
 No bootstrap or Rust-seed fallback was used.
+

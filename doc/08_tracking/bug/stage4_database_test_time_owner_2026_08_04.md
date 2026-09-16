@@ -1,4 +1,8 @@
 # Stage 4 test database time owner
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -29,3 +33,4 @@ The database extension now imports `rt_timestamp_now` from the physical
 Start a fresh maximum-three-cycle x86 Phase 4 continuation with the preserved
 cache. Do not run a fourth cycle in the exhausted session. Essential-tool and
 post-x86 platform admission remain gated on an exact candidate.
+

@@ -1,4 +1,9 @@
 # MCP stdio smoke: seed whole-program flat registry corrupts extract_id() when main_lazy_protocol.spl joins the import closure
+## Closed 2026-09-16 — Symptom 2 root-caused and FIXED 2026-07-17; regression tests fail-to-pass verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Scope:** `src/app/mcp/main.spl` (`.spl` fix, DONE) + `src/compiler_rust` interpreter
@@ -492,3 +497,4 @@ is too stale to exercise these edits through a full bootstrap/redeploy
 modified `.spl` source directly via `simple test`/interpreter mode — the
 real-import spec above is genuine build-and-run verification of the fixed
 functions, not merely a source read or a parallel reimplementation.
+

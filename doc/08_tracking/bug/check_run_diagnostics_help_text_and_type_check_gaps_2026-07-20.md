@@ -1,4 +1,8 @@
 # `simple check`/`simple run` diagnostics: missing `help:` annotations + `check` not detecting type mismatches
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `simple check` / `simple run` CLI diagnostics output
@@ -84,3 +88,4 @@ Rust-seed source fix in this triage pass.
 Both spec files are correct as written and left unmodified — the "never
 weaken an assertion" rule applies; these are real coverage/contract gaps,
 not stale test syntax.
+
