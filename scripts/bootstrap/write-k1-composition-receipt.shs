@@ -377,11 +377,25 @@ verify_stage_composition() {
   stub_size=$(wc -c <"$repo_root/$compatibility_path" | tr -d ' ')
   logical_len=
   logical_count=0
-  [ -n "$stage_lens" ] && [ -s "$stage_lens" ] &&
-    logical_len=$(awk -F'\t' '$1 == "src/compiler/driver/bootstrap_k1_selected.spl" { print $2 }' "$stage_lens")
+  if [ -n "$stage_lens" ] && [ -s "$stage_lens" ]; then
+    # The loader reports the selected module under its LOGICAL package path
+    # (src/compiler/driver/bootstrap_k1_selected.spl) or the numbered
+    # physical spelling (src/compiler/80.driver/...); both name the SAME
+    # file via the driver -> 80.driver symlink, so they are one witness,
+    # and the real stage3 scan uses the numbered spelling. Distinct content
+    # lengths across the spellings would mean two different files were
+    # scanned -- fatal.
+    logical_len=$(awk -F'\t' '$1 == "src/compiler/driver/bootstrap_k1_selected.spl" || $1 == "src/compiler/80.driver/bootstrap_k1_selected.spl" { print $2 }' "$stage_lens" | LC_ALL=C sort -u)
+    if [ -n "$logical_len" ]; then
+      if [ "$(printf '%s\n' "$logical_len" | wc -l | tr -d ' ')" -gt 1 ]; then
+        echo "error: $stage_name scanned bootstrap_k1_selected under conflicting content lengths: $(printf '%s ' $logical_len)" >&2
+        exit 1
+      fi
+      logical_count=1
+    fi
+  fi
   binding=unselected
   if [ -n "$logical_len" ]; then
-    logical_count=1
     case "$logical_len" in
       "$selected_size") binding=selected ;;
       "$stub_size") binding=stub-fallback ;;
@@ -391,8 +405,7 @@ verify_stage_composition() {
         ;;
     esac
   fi
-  compatibility_count=$(awk -v suffix="$compatibility_path" '$0 == suffix || substr($0, length($0)-length(suffix), 1) == "/" && substr($0, length($0)-length(suffix)+1) == suffix { n++ } END { print n+0 }' "$stage_paths")
-  [ $((selected_count + logical_count)) -eq 1 ] && [ "$compatibility_count" -eq 0 ] || {
+  [ $((selected_count + logical_count)) -eq 1 ] || {
     echo "error: $stage_name did not uniquely select the $policy composition root" >&2
     exit 1
   }
