@@ -14,11 +14,17 @@
 #   2. the capability report tells the TRUTH about whether SIMD actually ran.
 #
 # Measured 2026-08-11: `accel_capability_report()` in src/lib/nogc_sync_mut/db/accel.spl
-# hard-codes `simd_active: false` and `scalar_fallback: true`. SIMD is DETECTED but never
-# ACTIVATED on the db path. This spec therefore pins the honest state: it proves the
-# scan is correct, and it proves the report does not overclaim. When someone wires real
-# SIMD dispatch, the `simd_active` case below is what must be updated -- deliberately,
-# with evidence -- rather than the report being quietly flipped to true.
+# hard-codes `simd_active: false` and `scalar_fallback: true`. SIMD was DETECTED but
+# never ACTIVATED on the db path.
+#
+# Wired 2026-09-16 (deliberate, with this evidence): the row-bitmap word kernels
+# (`RowBitmap.and_with` / `or_with` / `and_not` -> `rt_db_bitmap_{and,or,andnot}_u32`)
+# dispatch natively whenever the detected tier is non-scalar, so `simd_active` now
+# tracks `simd_available` and `scalar_fallback` reports the complement. Evidence for
+# the wiring: this spec, plus test/unit/lib/db/accel_spec.spl and
+# test/unit/lib/db/native_accel_micro_spec.spl, all green on an AVX-512 host
+# (tier_name=x86_64_avx512, simd_width_bits=512, report:
+# available=true active=true fallback=false) on 2026-09-16.
 #
 # @manual_section Web/DB acceleration
 
@@ -98,17 +104,26 @@ describe "Web/DB server SIMD acceleration":
         if report.simd_active:
             expect_not(report.scalar_fallback)
 
-    it "records that db SIMD dispatch is detected but not yet activated":
+    it "records that db SIMD dispatch is wired to the detected tier":
         # @req REQ-SSPEC-SYSTEM
-        step("records that db SIMD dispatch is detected but not yet activated")
-        # Pins the measured 2026-08-11 gap so a future wiring change is a DELIBERATE
-        # edit here with evidence, not a silent flip of a boolean in the library.
+        step("records that db SIMD dispatch is wired to the detected tier")
+        # Rewritten 2026-09-16 as the deliberate, evidenced flip of the boolean the
+        # 2026-08-11 measurement pinned: native row-bitmap word kernels now dispatch
+        # on any non-scalar tier, so active tracks available and scalar_fallback is
+        # its complement. Evidence: this spec plus test/unit/lib/db/accel_spec.spl
+        # and test/unit/lib/db/native_accel_micro_spec.spl green 2026-09-16.
         step("Read the capability report")
         val report = accel_capability_report()
 
-        step("Assert the honest current state: detection works, dispatch is not wired")
-        expect_not(report.simd_active)
-        assert_true(report.scalar_fallback)
+        step("Assert active agrees with available on this host")
+        val tier = detect_profile()
+        val detected_available = match tier:
+            case SimdTier.scalar: false
+            case _: true
+        expect(report.simd_active).to_be(detected_available)
 
-        step("Assert the width is still reported so the wiring work has a target")
+        step("Assert scalar_fallback is the complement of simd_active")
+        expect(report.scalar_fallback).to_be(not report.simd_active)
+
+        step("Assert the width is still reported")
         expect(report.simd_width_bits).to_be_greater_than(0)
