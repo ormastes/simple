@@ -52,3 +52,15 @@ Note this is a *different* defect from the one named in
 ("replace its text-growing hash in the hot path"), which is about the DrawIR
 v3 packed generation store, not this route key. Both want the same missing
 ingredient.
+
+## 2026-09-16 — re-measured on Windows seed; still open, cost down ~30x
+
+`test/05_perf/web_render_chrome/web_draw_ir_route_key_cost_spec.spl` PASS
+(interpreter mode), current medians: small=10,030 us / medium=37,406 us /
+large=152,459 us, encoded bytes unchanged (30,571 / 121,514 / 485,835). The
+July baseline on the Rust dev interpreter was 317 ms / 1.27 s / 4.94 s, so the
+serializer itself is ~30x cheaper now and the per-frame tax is far smaller than
+when this was filed. The structural issue stands, however: DrawIrComposition
+still carries no generation/revision counter, so any memo of the route key
+remains unsound as the type stands. Row stays open for the generation-counter
+design change; the 2026-09-16 numbers are the new baseline.
