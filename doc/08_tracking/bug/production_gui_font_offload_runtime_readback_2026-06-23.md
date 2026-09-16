@@ -1,6 +1,11 @@
 # Bug: Production GUI font offload lacks runtime glyph readback
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
+- **measured**: every product path this entry references still exists in the tree, so there is no removed-code / dead-reference basis for closing it stale.
+- **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
+- **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
+
+Status: open
 Date: 2026-06-23
 Area: GUI/web renderer parity, Engine2D font offload
 
@@ -34,6 +39,3 @@ Related historical evidence is in:
 
 - `doc/09_report/production_gui_web_renderer_parity_evidence_2026-06-16.md`
 - `doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md`
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

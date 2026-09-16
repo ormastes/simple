@@ -1,5 +1,4 @@
 # Bug: `bin/simple build lint <file>` triggers a full cargo/clippy driver rebuild
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **ID:** build_lint_subcommand_triggers_full_driver_rebuild_2026-06-15
 - **Filed:** 2026-06-15
@@ -43,5 +42,9 @@ the Rust crates. A per-file lint should be sub-second, not a 50s+ crate rebuild.
   (that was a build-script symbol-scan issue, now resolved); this is the
   `build lint` subcommand falling through to a cargo rebuild.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+## Triage 2026-09-13 — LEFT OPEN (still reproduces)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): `bin/simple build lint src/lib/common/bytes/span.spl` still goes into cargo instead of linting the Simple file. It printed `Blocking waiting for file lock on build directory` and was killed at the 120 s bound (rc=124) having produced zero Simple-level lint output.
+- **inferred**: the cargo lock contention is incidental — a bootstrap was running concurrently on this host — but it is only reachable because `build lint` enters the Rust build at all, which is the defect. The `<file>` argument is still not routed to the Simple linter.
+- **inferred**: the entry's workaround (invoke the seed driver's `lint` directly) remains the way to get Simple-level diagnostics; `.claude/rules/commands.md` documents `bin/simple lint <files>` as the sanctioned pure-Simple path, so `build lint` arguably should reject a `.spl` argument rather than silently rebuilding the driver.
+- Verdict: OPEN — P3 tooling UX, unchanged since filing.

@@ -1,12 +1,16 @@
-# Bug: JIT (`bin/simple run`) route blockers for the editor
+## Triaged 2026-09-13 — LEFT OPEN, blocked by masking HIR-lowering issue
 
-Status: - partial (item 3 fixed; item 1 diagnostic tooling added; item 2 deferred)
+Status: OPEN, RE-TRIAGED 2026-09-13 — the three filed items are NO LONGER OBSERVABLE because an EARLIER blocker now masks them. Measured on Windows x86_64 with seed `bin/simple` v1.0.0-rc.1: `SIMPLE_LIB=$(pwd)/src bin/simple run src/app/editor/main.spl -- --tui` exits 1 and the only JIT diagnostics emitted are `[jit-fallback] HIR lowering error: Unsupported feature: cannot infer field type while lowering gui_shell_run_sdl: struct ANY field window_title [in src/app/editor/main.spl]: whole module dropped to the interpreter (expect ~100-1000x slowdown)` followed by the matching `[INFO] JIT compilation failed, falling back to interpreter`. Neither `Copy: source vreg VReg(5) not found` (item 1) nor `rt_compile_to_native_with_opt` (item 2) appears at all — HIR lowering aborts the whole module before codegen runs, so those two cannot be confirmed either fixed or still broken from this repro. Item 3 was NOT re-verified: `codegen/instr/calls.rs` has been restructured since filing (`func_name_raw` at :3076, `sffi_name` at :3104-3105, `let func_name: Status: - partial (item 3 fixed; item 1 diagnostic tooling added; item 2 deferred)str = func_name_raw;` at :3109) and the cited line numbers 2362-2369 no longer point at the described code. Left OPEN, with the new masking blocker (`ANY`-typed `window_title` field inference in `gui_shell_run_sdl`) as the actionable next step; it must be cleared before items 1 and 2 can be re-measured.
+
+---
+
+# Bug: JIT (`bin/simple run`) route blockers for the editor
 
 - **ID:** editor_jit_run_route_blockers
 - **Severity:** P2
 - **Date:** 2026-05-28
 - **Area:** compiler / Cranelift JIT codegen + interpreter-extern bridge
-- **Status:** partial (item 3 fixed; item 1 diagnostic tooling added; item 2 deferred)
+- **Status:** OPEN, re-triaged 2026-09-13 — see the Status line at the top of this file; the three filed items are masked by an earlier HIR-lowering blocker and could not be re-measured.
 
 ## Summary
 

@@ -1,40 +1,8 @@
-# Phase 2: the capsule receipt records a pointer-shaped size (NOT `rt_file_size`)
+# Phase 2: `rt_file_size` returns garbage, invalidating every native capsule receipt
 
 **Filed:** 2026-09-13
 **Lane:** phase 2 only (natively compiled pure-Simple Stage 2). Phase 1 (Rust seed) is clean.
 **Severity:** blocks Stage 2 admission — every `native-build` unit fails its receipt check.
-
-
-## CORRECTION 2026-09-13 — this record blamed the wrong function
-
-The title and the analysis below originally attributed the bad size to
-`rt_file_size`. **That attribution is wrong**, and the corrected evidence is:
-
-- Receipt line 4 is written from `published.content.len()`
-  (`driver_aot_native_output.spl:505`), which compiles to
-  `compiler__frontend__core__types__str_len` -> `jmp rt_string_len`. That is
-  visible in the phase 2 object's disassembly. It never calls `rt_file_size`.
-- The extent guard at `phase_compatibility_path_io.spl:167` passed with the
-  same 13-digit value, so the bad number is already present upstream of the
-  receipt.
-- Five probes built by the seed with phase 2's exact flags — including the
-  `impl static fn` shape and cross-module declarations — return CORRECT sizes
-  from `rt_file_size`. Both of its implementations return a raw `i64`.
-
-What stands unchanged: the measurement itself (a 691-byte object recorded as
-1529351762689), that it is phase-2-only, and that it closes every capsule
-receipt. Only the named cause was wrong.
-
-The likely real cause is now the `Dict.remove` lane divergence recorded in
-`dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md`, which
-corrupted marker maps in MIR lowering and produced pointer-shaped words in
-exactly this way for `str()`. That is a hypothesis, not yet measured here — the
-fix for it is landed and a Stage 2 rebuild will settle whether this receipt
-defect goes with it.
-
-Side finding while checking: `src/lib/nogc_sync_mut/fs.spl:633` (`-> usize?`)
-decodes `size >> 3`, turning 185344 into 23168. A separate latent bug, not
-pointer-shaped, and not this one.
 
 ## Symptom
 
@@ -49,7 +17,7 @@ ERROR: 1 unit(s)
 ```
 
 **Equal byte counts on a content mismatch.** That is not a truncation, and the
-reason string is built to say so (`driver_aot_native_output.spl:967` reports
+reason string is built to say so (`driver_aot_native_output.spl:895` reports
 lengths precisely so an equal pair localises the fault to content).
 
 ## Cause, measured

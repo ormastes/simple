@@ -1,7 +1,5 @@
 # native-build: struct/class with a `static fn new()` crashes (nil-symbol)
 
-**Status:** RESOLVED (per record's own **Resolved:** 2026-07-15 field)
-
 **Severity:** high (loud crash — blocks ALL stdlib collections)
 **Found:** 2026-07-14, collections lane
 **Resolved:** 2026-07-15
@@ -55,6 +53,3 @@ entry-closure lowering switches to that module's symbol table.
 The complete parity gate reports `total=38 pass=38 fail=0` and
 `native_seed_parity=true`. This resolves the local named-struct constructor
 layer; it does not claim every generic stdlib collection is now native-ready.
-
-## Triage 2026-09-12
-Not independently re-run; formalizing the record's own Resolved field into a top-level Status line for gate compliance. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

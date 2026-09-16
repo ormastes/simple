@@ -1,5 +1,10 @@
 # Bug: Missing Harden Probe Build Target
 
+## Triage note 2026-09-13 — left OPEN: needs a SimpleOS build/QEMU lane unavailable here
+- **measured**: the referenced product paths still exist, so there is no removed-code basis for a stale closure.
+- **inferred**: reproduction needs the SimpleOS x86_64 build artifacts / QEMU system-test lane (and for the SSP item, a clang hardening-flag build). This triage host is Windows with no such lane, and `bin/simple test` is broken here regardless.
+- **inferred**: no work attempted — the changes would land in `src/compiler/**` or `src/app/compile/**`, and a bootstrap is running concurrently in this workspace.
+
 **Date:** 2026-06-28
 **Category:** build / OS hardening
 **Status:** OPEN

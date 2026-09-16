@@ -1,5 +1,16 @@
 # f64 call-result corrupted in self-hosted (production) codegen
 
+## Triage 2026-09-13 — STILL OPEN: seed half confirmed fixed, self-hosted half still blocked
+- **measured** — the seed fix holds: `fn half(x: f64) -> f64: return x / 2.0` called from
+  `main` prints `3.5` for `half(7.0)` and `2.5` for `half(3.0) + 1.0` under
+  `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) — an f64 call result used both
+  directly and as an operand.
+- **inferred** — that is exactly the half this entry already records as fixed and landed.
+  The open half is the port into
+  `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`, which needs a working
+  self-hosted build; a bootstrap is running concurrently and `src/compiler/**` is off-limits
+  to this pass. Left OPEN.
+
 - **Status:** OPEN (seed fixed & landed; self-hosted port blocked by bootstrap breakage)
 - **Severity:** High — any f64 returned from a non-inlined function is wrong in `bin/simple` compiled/JIT mode
 - **Date:** 2026-06-21

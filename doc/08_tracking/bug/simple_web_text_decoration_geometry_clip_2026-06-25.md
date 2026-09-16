@@ -1,5 +1,9 @@
 # Simple Web Text Decoration Geometry Clip Blocker
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl -> 118 passed, 12 failed, still reproduces)
+
+## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
+- **inferred**: this entry cites no backticked product paths, so a path-existence stale test does not apply; nothing indicates the code it describes was removed.
+- **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
+- **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
 
 Date: 2026-06-25
 
@@ -46,6 +50,3 @@ Before claiming support for `text-decoration-thickness` or
 
 Do not add the properties to `CSS_SUPPORTED` as no-ops. That would make
 traceability report support that the renderer cannot prove.
-
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl` on the deployed seed; 12 of 130 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
