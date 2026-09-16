@@ -438,26 +438,64 @@ fn open_regular_no_follow(path: &Path) -> Option<std::fs::File> {
     }
 }
 
+/// Arm codes mirror the runtime's `READ_NF_*` vocabulary so a caller that
+/// pairs this reader with `rt_file_read_regular_no_follow_last_failure`
+/// observes the same contract in both interpreter and native lanes.
+const READ_NF_NEVER_CALLED: i64 = 77;
+const READ_NF_OK: i64 = 100;
+const READ_NF_BAD_ARGS: i64 = 2;
+const READ_NF_OPEN: i64 = 4;
+const READ_NF_METADATA: i64 = 5;
+const READ_NF_NOT_REGULAR: i64 = 6;
+const READ_NF_TOO_LARGE: i64 = 7;
+const READ_NF_REPARSE: i64 = 8;
+const READ_NF_READ: i64 = 9;
+const READ_NF_BAD_UTF8_CONTENT: i64 = 10;
+
+thread_local! {
+    static READ_NF_LAST_FAILURE: std::cell::Cell<i64> =
+        const { std::cell::Cell::new(READ_NF_NEVER_CALLED) };
+}
+
+fn read_no_follow_record(code: i64) {
+    READ_NF_LAST_FAILURE.with(|cell| cell.set(code));
+}
+
 /// Read one regular file from one no-follow handle with a hard byte bound.
 pub fn rt_file_read_regular_no_follow_bounded(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let max_bytes = match args.get(1) {
         Some(Value::Int(value)) if *value >= 0 => *value,
-        _ => return Ok(Value::Nil),
+        _ => {
+            read_no_follow_record(READ_NF_BAD_ARGS);
+            return Ok(Value::Nil);
+        }
     };
     let mut file = match open_regular_no_follow(Path::new(&path)) {
         Some(file) => file,
-        None => return Ok(Value::Nil),
+        None => {
+            read_no_follow_record(READ_NF_OPEN);
+            return Ok(Value::Nil);
+        }
     };
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(_) => return Ok(Value::Nil),
+        Err(_) => {
+            read_no_follow_record(READ_NF_METADATA);
+            return Ok(Value::Nil);
+        }
     };
-    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+    if !metadata.is_file() {
+        read_no_follow_record(READ_NF_NOT_REGULAR);
+        return Ok(Value::Nil);
+    }
+    if metadata.len() > max_bytes as u64 {
+        read_no_follow_record(READ_NF_TOO_LARGE);
         return Ok(Value::Nil);
     }
     #[cfg(windows)]
     if metadata.file_attributes() & 0x0000_0400 != 0 {
+        read_no_follow_record(READ_NF_REPARSE);
         return Ok(Value::Nil);
     }
     let limit = match (max_bytes as u64).checked_add(1) {
@@ -467,12 +505,26 @@ pub fn rt_file_read_regular_no_follow_bounded(args: &[Value]) -> Result<Value, C
     let mut bytes = Vec::new();
     let mut bounded = file.take(limit);
     if bounded.read_to_end(&mut bytes).is_err() || bytes.len() as i64 > max_bytes {
+        read_no_follow_record(READ_NF_READ);
         return Ok(Value::Nil);
     }
     match String::from_utf8(bytes) {
-        Ok(content) => Ok(Value::text(content)),
-        Err(_) => Ok(Value::Nil),
+        Ok(content) => {
+            read_no_follow_record(READ_NF_OK);
+            Ok(Value::text(content))
+        }
+        Err(_) => {
+            read_no_follow_record(READ_NF_BAD_UTF8_CONTENT);
+            Ok(Value::Nil)
+        }
     }
+}
+
+/// Arm code recorded by the most recent bounded no-follow read.
+pub fn rt_file_read_regular_no_follow_last_failure(
+    _args: &[Value],
+) -> Result<Value, CompileError> {
+    Ok(Value::Int(READ_NF_LAST_FAILURE.with(|cell| cell.get())))
 }
 
 /// Read file through the mmap-named API.
