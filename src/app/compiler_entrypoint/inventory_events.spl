@@ -89,6 +89,19 @@ fn compiler_inventory_event_push_v1(
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
         return events
+    # The inventory only ever holds compile sources (.spl / simple.sdn):
+    # apply_event rejects every other identity as event-invalid and fails the
+    # WHOLE refresh. Concurrent checkouts transiently drop non-source files
+    # under src/ (editor temps, generated notes, atomic-write .tmp siblings),
+    # and one such listing killing a multi-hour build's admission is exactly
+    # what happened on 2026-09-16 (SCV-E-ADMISSION git-event-apply:event-invalid
+    # after ~3h of compilation). Skip non-source identities at the boundary,
+    # mirroring compile_source_inventory_path_valid_v1 in std.scv.
+    if not ((normalized.ends_with(".spl") or normalized == "simple.sdn" or
+            normalized.ends_with("/simple.sdn")) and
+            not normalized.starts_with("/") and not normalized.contains("//") and
+            not normalized.split("/").contains("..")):
+        return events
     if operation == "delete":
         return events.push(compile_source_inventory_git_event_v1(
             "delete", normalized, ""))
