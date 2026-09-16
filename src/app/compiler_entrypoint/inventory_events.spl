@@ -3,7 +3,7 @@
 
 use app.io.mod.{dir_create, file_atomic_write, file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
-use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_current_v1}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 
 struct CompilerInventoryRefreshV1:
@@ -89,6 +89,13 @@ fn compiler_inventory_event_push_v1(
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
         return events
+    # The inventory tracks compilable sources only (.spl and simple.sdn
+    # manifests). Release/development checkouts carry tens of thousands of
+    # other files under src/ (vendored C, fonts, docs); admitting the first
+    # one fails apply with event-invalid, and hashing them dominated
+    # cold-init wall time. Filter before touching the file.
+    if not compile_source_inventory_path_valid_v1(normalized):
+        return events
     if operation == "delete":
         return events.push(compile_source_inventory_git_event_v1(
             "delete", normalized, ""))
@@ -129,7 +136,8 @@ fn compiler_inventory_git_events_v1(
     var events: [CompileSourceEventV1] = []
     if cold_init:
         val listed = compiler_inventory_git_lines_v1(
-            root, ["ls-files", "--cached", "--others", "--exclude-standard", "--"] + source_roots)
+            root, ["-c", "core.quotePath=false", "ls-files",
+                "--cached", "--others", "--exclude-standard", "--"] + source_roots)
         if listed == nil:
             return nil
         for path in listed!.split("\n"):
