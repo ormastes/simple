@@ -57,10 +57,10 @@ verify_capsule() {
   require_unique_keys "$capsule/hosted-runtime.env" schema status relative_path sha256 || return 1
   [ "$(value schema "$capsule/hosted-runtime.env")" = simple-bootstrap-hosted-runtime-authority-v1 ] || return 1
   [ "$(value status "$capsule/hosted-runtime.env")" = frozen ] || return 1
-  case "$hosted_relative" in deps/libspl_hosted_runtime-*.rlib) ;; *) return 1 ;; esac
+  case "$hosted_relative" in deps/libspl_hosted_runtime*.rlib) ;; *) return 1 ;; esac
   [ -f "$capsule/$hosted_relative" ] && [ ! -L "$capsule/$hosted_relative" ] || return 1
   [ "$(hash_file "$capsule/$hosted_relative")" = "$hosted_sha" ] || return 1
-  [ "$(find "$capsule/deps" -maxdepth 1 -type f -name 'libspl_hosted_runtime-*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
+  [ "$(find "$capsule/deps" -maxdepth 1 -type f -name 'libspl_hosted_runtime*.rlib' | wc -l | tr -d ' ')" = 1 ] || return 1
   aggregate=$(printf '%s\n' "$compiler_sha" "$native_sha" "$hosted_receipt_sha" "$(value seed_authority_stamp_sha256 "$receipt")" "$backfill_sha" | sha256sum | awk '{print $1}')
   [ "$(value capsule_identity_sha256 "$receipt")" = "$aggregate" ] || return 1
   # `-perm /MODE` (any of these bits) is a GNU findutils extension. BSD find,
@@ -70,7 +70,15 @@ verify_capsule() {
   # capsule immutable no matter how writable it actually was. That is fail-OPEN
   # in an immutability check. POSIX `-perm -MODE` (all of these bits) is honoured
   # by both implementations; OR the three single-bit tests to recover "any".
-  [ -z "$(find "$capsule" \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit)" ] || return 1
+  # MSYS/Windows cannot clear the write bit on a directory (chmod 0500 lands
+  # as 0755, measured on Git Bash 2026-09-16), so on those hosts only files
+  # participate in the writability sweep; directory immutability is not
+  # representable there. Same limitation the tuple-copy checks document.
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    MSYS*|MINGW*|CYGWIN*) capsule_perm_type='-type f' ;;
+    *) capsule_perm_type= ;;
+  esac
+  [ -z "$(find "$capsule" $capsule_perm_type \( -perm -0200 -o -perm -0020 -o -perm -0002 \) -print -quit)" ] || return 1
 }
 
 case ${1:-} in
@@ -102,7 +110,7 @@ case ${1:-} in
     cp "$authority/hosted-runtime.env" "$authority/simple.inputs.sha256" "$staging/"
     [ ! -f "$authority/libsimple_compiler_backfill.a" ] || cp "$authority/libsimple_compiler_backfill.a" "$staging/"
     hosted_relative=$(value relative_path "$authority/hosted-runtime.env")
-    case "$hosted_relative" in deps/libspl_hosted_runtime-*.rlib) ;; *) die 'invalid hosted authority path' ;; esac
+    case "$hosted_relative" in deps/libspl_hosted_runtime*.rlib) ;; *) die 'invalid hosted authority path' ;; esac
     cp "$authority/$hosted_relative" "$staging/$hosted_relative"
     hosted_receipt_sha=$(hash_file "$authority/hosted-runtime.env")
     stamp_sha=$(hash_file "$authority/simple.inputs.sha256")

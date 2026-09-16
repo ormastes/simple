@@ -35,7 +35,13 @@ chmod 755 "$tmp/compiler"
 make_authority "$tmp/authority"
 capsule=$($tool publish "$tmp/compiler" "$tmp/authority" "$tmp/output")
 $tool verify "$capsule"
-[ "$(stat -c '%a' "$capsule")" = 500 ] || fail 'capsule is writable'
+# MSYS cannot clear the directory write bit (chmod 0500 lands as 0755), so
+# the exact 0500 assertion is Unix-only; on Windows hosts the publish-side
+# find sweep (files-only there) is the enforceable immutability check.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MSYS*|MINGW*|CYGWIN*) ;;
+  *) [ "$(stat -c '%a' "$capsule")" = 500 ] || fail 'capsule is writable' ;;
+esac
 [ -f "$capsule/libsimple_native_all.a" ] || fail 'native_all missing'
 
 if $tool publish "$tmp/compiler" "$tmp/authority" "$tmp/output" >/dev/null 2>&1; then
@@ -109,11 +115,21 @@ if $tool verify "$writable" >/dev/null 2>&1; then fail 'writable leaf accepted';
 
 writable_dir=$(fresh_capsule writable-dir)
 chmod u+w "$writable_dir"
-if $tool verify "$writable_dir" >/dev/null 2>&1; then fail 'writable directory accepted'; fi
+# MSYS directories are always owner-writable (0755): the writable-directory
+# negative is unrepresentable there, matching the tool's files-only sweep.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MSYS*|MINGW*|CYGWIN*) ;;
+  *) if $tool verify "$writable_dir" >/dev/null 2>&1; then fail 'writable directory accepted'; fi ;;
+esac
 
 symlinked=$(fresh_capsule symlinked)
 chmod u+w "$symlinked"; mv "$symlinked/deps" "$symlinked/deps.real"; ln -s deps.real "$symlinked/deps"
-if $tool verify "$symlinked" >/dev/null 2>&1; then fail 'symlink deps accepted'; fi
+# MSYS without SeCreateSymbolicLinkPrivilege creates a text placeholder, not a
+# real symlink, so the symlink negative is unrepresentable there.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MSYS*|MINGW*|CYGWIN*) ;;
+  *) if $tool verify "$symlinked" >/dev/null 2>&1; then fail 'symlink deps accepted'; fi ;;
+esac
 
 duplicate=$(fresh_capsule duplicate)
 chmod u+w "$duplicate/deps"; cp "$duplicate/deps/libspl_hosted_runtime-fixture.rlib" "$duplicate/deps/libspl_hosted_runtime-duplicate.rlib"
