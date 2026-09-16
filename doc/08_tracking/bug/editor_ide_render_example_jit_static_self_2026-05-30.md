@@ -1,7 +1,11 @@
-# Bug: IDE render example falls back from JIT on static-method self diagnostic
+## Closed 2026-09-13 — verified fixed, no JIT fallback on self in static method
 
 Date: 2026-05-30
-Status: RESOLVED (2026-09-12, re-verified: `bin/simple test test/01_unit/lib/editor/editor_launch_contract_spec.spl` now PASSes)
+Status: RESOLVED — verified by running 2026-09-13 (Windows x86_64, seed `bin/simple` v1.0.0-rc.1). `bin/simple run examples/10_tooling/ide/simple_ide_render.spl` exits 0 and prints the expected render proof (`target=pure_simple`, `has_editor_source=true`, `has_markdown_language=true`) with NO `[INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: cannot use `self` in static method` line. That fallback line does still appear for other inputs on this same binary (see `jit_inline_lambda_text_return_raw_handle_2026-09-13.md`), so its absence here is a positive signal rather than suppressed logging. The JIT-lowering proof this entry was left open on is therefore satisfied.
+
+---
+
+# Bug: IDE render example falls back from JIT on static-method self diagnostic
 
 ## Observation
 
@@ -82,6 +86,3 @@ Current fallback text is:
 Functional status remains PASS for the embedded example render contract, but the
 JIT/native proof remains open under this bug until the imported render block
 type is available to HIR lowering.
-
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/lib/editor/editor_launch_contract_spec.spl` on the deployed seed and it PASSed, so the recorded defect no longer reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

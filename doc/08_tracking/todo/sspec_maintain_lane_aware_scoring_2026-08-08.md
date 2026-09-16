@@ -1,7 +1,5 @@
 # SSpec-Maintain Lane-Aware Scoring
 
-Status: OPEN (unverified 2026-09-12)
-
 Recognition of lane-gated specs in scoring metrics to prevent SKIP-clean lanes from scoring as missing coverage.
 
 ## Resolved 2026-09-06

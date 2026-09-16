@@ -1,5 +1,4 @@
 # Context-switch SFFI saves into by-value copies
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -34,6 +33,3 @@ The corrected switch remains O(1), allocation-free, lock-free, and direct. Do
 not add per-switch hashing, signatures, symbol lookup, generic marshalling,
 context copying, or heap indirection. Validate layout/artifact identity once at
 admission and alignment/lifetime when the scheduler-owned context is created.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

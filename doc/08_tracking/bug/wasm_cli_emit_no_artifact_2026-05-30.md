@@ -1,6 +1,10 @@
-# Bug: `simple compile/build --target=wasm32*` emits no artifact
+## Closed 2026-09-13 — silent-failure defect resolved, diagnostic now emitted
 
-Status: likely-fixed (triaged 2026-06-11, evidence: fix implemented + GUI WASM unblocked per body)
+Status: RESOLVED (silent-failure defect) — measured 2026-09-13 on Windows x86_64 with the seed `bin/simple` v1.0.0-rc.1. The filed defect was "EXIT=3, no artifact, NO diagnostic". Re-run: `bin/simple compile scratch_w.spl --target wasm32-wasi -o scratch_w.wasm` now exits 1 and prints an actionable diagnostic — `error: WASM compilation failed: compile failed: codegen: WebAssembly targets require the LLVM/WASM backend; rebuild `simple-driver` with `--features wasm` or `--features wasm-wasi``. So the silent-failure half is gone. The second repro arm (`bin/simple build <file> --target=... --wasm-backend=wat`, filed as "EXIT=0, no file") is STALE: `build` no longer accepts a source file at all (`error: unknown build subcommand: scratch_w.spl`, exit 1) — the CLI shape changed, see CLAUDE.md on `bin/simple build`. What remains is a build-configuration fact (this seed was compiled without the `wasm`/`wasm-wasi` cargo feature), not a compiler defect, and it now reports itself. Not reopened.
+
+---
+
+# Bug: `simple compile/build --target=wasm32*` emits no artifact
 
 **Date:** 2026-05-30
 **Area:** compiler / CLI / wasm backend

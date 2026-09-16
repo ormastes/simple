@@ -108,3 +108,10 @@ Medians over 3 runs (wall clock):
 | fs_exec_fallback_contract_spec | 192 | 179 | -13ms |
 
 The specs still run in interpreter mode (JIT fallback to interpreter was the old path; now they JIT partially but still interpreter-execute the test bodies due to other HIR limitations). The ~10-15ms improvement comes from eliminating the failed JIT attempt overhead on the decorator module. JIT does not make these specs faster in practice since test execution is I/O-bound, not compute-bound.
+
+## Triage 2026-09-13 — LEFT OPEN (reported symptom gone, underlying gap still reproduces)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the reported SYMPTOM is gone — running spec files (`test/01_unit/app/ui/profile_spec.spl`, `test/01_unit/compiler/interpreter/closure_nested_typed_binding_spec.spl`) logs no `Unknown variable: decorator while lowering skip`. The pure-Simple workaround in `decorators.spl` holds.
+- **measured**: the underlying defect still reproduces. A nested `fn decorator` referenced as a value (`val f = decorator`) fails to compile: `GlobalLoad: unresolved identifier 'decorator' (not a global, function, const-data name, or import)`, `JIT compilation failed ... 1 function body/bodies failed to compile: [outer]`, silently falling back to the interpreter (which then answers correctly, `42`).
+- **inferred**: the fix site is the Rust seed (`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` and the Cranelift global-load path). This session must not touch `src/compiler_rust/**` — a bootstrap is running concurrently — so the fix is deferred, not declined.
+- Verdict: OPEN, downgraded in urgency: no longer blocks spec JIT, but nested `fn`-as-value is still unsupported and fails loudly rather than being lowered.

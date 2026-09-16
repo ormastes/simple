@@ -1,5 +1,4 @@
 # Generic external receipt semantic quarantine
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -64,6 +63,3 @@ fixture policy, missing/duplicate mapping role, signed-path mismatch, unsafe
 inner and outer paths, aliasing, every false semantic field, generic-label-only
 admission, and legacy v1 acceptance. Remove this row from quarantine only after
 the exact valid three-architecture bundle passes that suite.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

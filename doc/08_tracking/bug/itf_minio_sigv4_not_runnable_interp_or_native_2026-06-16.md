@@ -1,5 +1,16 @@
 # itf minio SigV4 HTTP round-trip not runnable (interpreter or naive native compile)
 
+## Triage 2026-09-13 — STILL OPEN: no MinIO endpoint on this host
+- **measured** — `bin/itf minio health` (Rust seed v1.0.0-rc.1, Windows) dispatches and
+  loads config, then stops at `error: MinIO URL not configured` — so the SigV4 HTTP
+  round-trip this entry tracks cannot be exercised here at all.
+- **measured** — the same run emitted five
+  `[compiler_cross_module_private_symbol_collision]` warnings (`http_put` with 3
+  co-compiled definitions across 2 signatures, plus `join_path`, `process_run_with_limits`,
+  `process_wait`, `shell`), which is directly relevant to the module/native gaps this entry
+  says remain.
+- **inferred** — left OPEN; closing it needs a reachable MinIO/S3 endpoint.
+
 - **ID:** itf_minio_sigv4_not_runnable_interp_or_native_2026-06-16
 - **Severity:** P2
 - **Area:** app/itf (minio), runtime HTTP extern, interpreter/native compile

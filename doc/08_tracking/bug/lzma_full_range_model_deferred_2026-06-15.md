@@ -1,5 +1,12 @@
 # Bug / Deferral: lzma_full_range_model_deferred_2026-06-15
 
+## Triage 2026-09-13 — STILL OPEN: the deferral is still live
+- **measured** — `src/lib/common/compress/typed/lzma2_typed.spl:9-10` still carries
+  `# Full LZMA literal/match range model deferred — see: doc/08_tracking/bug/lzma_full_range_model_deferred_2026-06-15.md`,
+  so the scope boundary has not moved and the source still points back at this entry.
+- **inferred** — a recorded deferral rather than a defect; it closes when the range model
+  is implemented. Left OPEN so the in-source pointer stays honest.
+
 **Status:** Deferred (not faked)
 **Filed:** 2026-06-15
 **Component:** `src/lib/common/compress/typed/lzma2_typed.spl` — C4.3 RangeCoder scaffold

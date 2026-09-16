@@ -1,7 +1,5 @@
 # Untyped `list` element-read seed root cause + kafka fallback fix (2026-07-30)
 
-**Status:** OPEN (unverified 2026-09-12)
-
 Assignment (leverage play): root-cause and, if contained, fix the untyped-
 `list` element-read miscompile IN THE SEED — one codegen fix would retire
 all ~750 danger sites named in the previous census pass at once.
@@ -398,30 +396,3 @@ above therefore no longer holds.
 
 **Status: CLOSE as already-fixed.** Kept open only if a lane can show a
 `list`-read miscompile on a seed built from current source.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule D: filed after 2026-07-29, no runnable repro in the record); left open with a status line added since none existed. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification.
-
-## Cross-reference 2026-09-13 (found while triaging a sibling record)
-
-While re-running `sh scripts/check/check-untyped-list-element-shift.shs` for
-`pure_simple_untyped_list_element_read_unconditional_int_decode_segv_2026-08-08.md`,
-the guard came back fully green on BOTH lanes with no `KNOWN-OPEN` line:
-
-```
-PASS — interpreter reference lane correct: typed=[5,7], list-param=[5,7]
-PASS — 4 value(s) checked, untyped ': list' param element read correct on the JIT lane:
-       list=[5,7], typed [i64] control=[5,7] (both expected 5,7)
-```
-
-The 2026-08-17 triage on this record's sibling doc recorded this same guard
-showing `KNOWN-OPEN list0=40 list1=56` for the seed/JIT lane — the exact
-symptom this record (`untyped_list_element_read_seed_rootcause_2026-07-30`)
-describes. That KNOWN-OPEN line is now absent. Binary: `bin/simple` = Rust
-seed `bin/release/aarch64-unknown-linux-gnu/simple` (symlinked from the
-shared main worktree), sha256 `3d120a6f9ab5`. Not independently re-verified
-against this record's own MIR-dump-based repro (out of scope for the lane
-that found this cross-reference); flagging so this record's owner can
-confirm and close if the guard's disappearance of KNOWN-OPEN indeed reflects
-a landed fix rather than a guard-script change.

@@ -1,6 +1,6 @@
 ---
 id: llvm_import_path_mangling_os_prefix_mismatch_2026-06-15
-status: INVESTIGATING
+status: OPEN (triage 2026-09-13: host-blocked; see Triage section below)
 severity: high
 discovered: 2026-06-15
 discovered_by: SimpleOS riscv64 LLVM build (`bin/simple os build --scenario=rv64-base`)
@@ -12,6 +12,18 @@ related: src/os/kernel/boot/tcp_baremetal_min.spl
 related: src/os/kernel/log/klog_api.spl
 related: src/os/kernel/fs/fat32.spl
 ---
+
+## Triage 2026-09-13 — STILL OPEN: host-blocked; the named `.spl` blocker is now resolved
+- **measured** — the concrete source defect this entry blames for fat32 being dropped (a
+  2-arg `dev.read_sector(root_lba + sec_idx.to_u64(), sec_buf)` against a 1-arg trait) is
+  gone: `src/os/kernel/fs/_Fat32Filesystem/mount_and_read.spl:94` and
+  `.../directory_mutation.spl:87` both call the 1-arg form now, matching
+  `c_nvme_adapter.spl:47`.
+- **measured** — every path the entry names still exists, so the "referenced paths gone"
+  stale test does not apply.
+- **inferred** — the mangling bug itself can only be re-checked by
+  `bin/simple os build --scenario=rv64-base`, a riscv64 LLVM lane that does not run from
+  this Windows triage host. Left OPEN, host-blocked.
 
 # LLVM rv64 link fails: cross-module call references `os__kernel__…` but definitions emit bare/weak names
 

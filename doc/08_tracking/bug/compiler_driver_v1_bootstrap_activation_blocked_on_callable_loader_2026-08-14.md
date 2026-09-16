@@ -1,12 +1,5 @@
 # CompilerDriverV1 bootstrap activation is blocked on a callable provider loader
 
-## Triage 2026-09-13
-OPEN, out of scope for this lane: blocked on a callable dynamic-provider
-loader existing at all (per the doc's own Unblock condition) -- a compiler
-driver architecture change, not a contained bugfix. Left OPEN.
-
-**Status:** OPEN (unverified 2026-09-12)
-
 ## Impact
 
 `src/compiler/80.driver/driver_provider_contract_v1.spl` and
@@ -50,6 +43,3 @@ Owner: provider loader / bootstrap-core integration lane.
 
 Bootstrap reason for the current provider-boundary implementation: `none`.
 Only the new provider modules and focused tests are expected to rebuild.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

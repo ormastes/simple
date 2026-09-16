@@ -1,5 +1,12 @@
 # Bug: LSP code-action edits never apply — emitter/parser mismatch (+ interp substring snag)
 
+## Triage 2026-09-13 — STILL OPEN: its named root cause still reproduces
+- **measured** — the entry names `string_literal_double_brace_collapse_2026-06-16` as the
+  blocker for the in-place fix, and that bug still reproduces: `print("{{a}}")` prints
+  `{a}` under `bin/simple run` (Rust seed v1.0.0-rc.1, Windows).
+- **inferred** — with the blocking lexer defect live and unfixable from this pass (compiler
+  tree frozen by a concurrent bootstrap), the emitter/parser mismatch cannot be closed.
+
 - **ID:** lsp_code_action_edit_emit_parse_mismatch_2026-06-16
 - **Severity:** P2 (LSP quickfix/refactor actions surface but apply no edit)
 - **Area:** lsp / app

@@ -1,5 +1,4 @@
 # Bug: `for x in <custom struct>` silently iterates zero times (no iterator protocol)
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
 
 - **ID:** for_in_custom_struct_no_iterator_protocol_2026-06-15
 - **Filed:** 2026-06-15
@@ -111,5 +110,8 @@ Scope: the **Rust seed's** interpreter lane. The pure-Simple interpreter
 (`eval_stmts.spl`, the file the work package attributed this row to) was not
 separately measured.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+## Triage 2026-09-13 — LEFT OPEN (still reproduces, exactly as filed)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): a `ByteSpan` built via `ByteBuffer.new()` + four `push_byte` + `freeze()` reads back correctly by index (`len=4`, values `222 173 190 239`), but `for b in span: n = n + 1` leaves `n` at `0` — printed `iter=0`. Zero iterations, no error, no diagnostic, exactly as reported.
+- **inferred**: this is a real language capability gap, not a stale report — there is no iterator protocol for user-defined structs, so the fix is compiler work (desugaring `for-in` to an `iter()`/`next()` protocol or equivalent). That lands in `src/compiler/**` or the Rust seed, both of which this session must not touch while a bootstrap runs concurrently.
+- Verdict: OPEN. The silent-zero-iterations behaviour is the dangerous part — a diagnostic on `for-in` over a type with no iterator would be a cheap partial mitigation.

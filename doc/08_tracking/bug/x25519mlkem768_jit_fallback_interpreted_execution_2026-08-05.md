@@ -1,7 +1,5 @@
 # X25519MLKEM768: all hot-path operations run interpreted, not JIT-compiled
 
-**Status:** OPEN (unverified 2026-09-12)
-
 - **Date:** 2026-08-05
 - **Severity:** P2 (perf — JIT lost on the entire hybrid-KEM hot path; program
   still runs correctly via interpreter fallback, so this is a benchmark
@@ -70,28 +68,3 @@ Not fixed in this pass (compiler-layer defect, explicitly out of scope for
 the AC-9 measurement task). Recorded here so the AC-9 report's benchmark
 numbers carry an accurate interpreted-execution attribution rather than being
 read as native/JIT performance.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
-
-## Triage 2026-09-13 (BUGFIX-10 fanout)
-
-This is a benchmark-attribution issue, not a correctness bug (program
-already runs correctly via interpreter fallback), explicitly scoped as
-"compiler-layer defect... out of scope" by its own record. Root cause
-depends on two upstream defects: the cross-module-`bool`-field HIR lowering
-gap (`hir_lowering_bool_field_infer_imported_struct_2026-07-03.md`) and the
-`cuda_module_load_binary` unresolved-symbol registration gap — both
-compiler/runtime-layer, not X25519MLKEM768-specific. The named driver file
-(`src/app/test/x25519mlkem768_perf_bench.spl`) no longer exists in this
-tree (renamed or removed since 2026-08-05); did not chase down its
-replacement within budget. Left OPEN, unchanged; still not this lane's
-scope per the record's own framing.
-## Triage 2026-09-13
-
-Perf-attribution issue (JIT lost on X25519MLKEM768 hot path, falls
-back to interpreter) -- correctness is not affected, this is a
-benchmark/JIT-dispatch investigation requiring deep codegen work.
-Out of this lane's per-item budget. Leaving OPEN.
-

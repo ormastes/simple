@@ -1,6 +1,9 @@
 # Spec Runner Silently Runs Only the LAST Top-Level `describe` (hollow green)
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Triage note 2026-09-13 — could not verify: the spec runner is broken on this host
+- **measured** (Windows Rust seed v1.0.0-rc.1): `bin/simple test` is non-functional here — a 3-line 1-assertion spec returns in under a second with `WARNING: test daemon unavailable; running directly`, `error: test-runner: code -1 (process_run_bounded killed the child at its budget)` and a false `reason=outer-bound-timeout budget_ms=930000`. Seven real specs produced byte-identical verdicts.
+- **inferred**: every runner-behaviour claim in this entry (example counts, PASS/FAIL bookkeeping, daemon timeouts) is therefore unverifiable here; a green or red from this host would be meaningless either way.
+- **inferred**: left OPEN, not stale — the referenced spec files all still exist.
 
 Date: 2026-06-28
 
@@ -44,7 +47,3 @@ former siblings one level deep. Then all it-blocks run.
   it-blocks == reported examples), OR
 - the runner emits a hard error/warning when it would drop a top-level describe,
   so a hollow green is impossible to ship silently.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro in the record, no status line existed); closed as stale per the "too old / not valid -> close" triage policy. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

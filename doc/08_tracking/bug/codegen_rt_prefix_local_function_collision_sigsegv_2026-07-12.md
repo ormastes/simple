@@ -12,6 +12,52 @@ related: doc/08_tracking/bug/seed_native_build_unknown_extern_rt_array_len_safe_
 
 # Codegen: locally-defined function whose name coincidentally matches a runtime SFFI symbol name compiles to a SIGSEGV, not a call to the local body
 
+## Re-verified 2026-09-13 — seed lanes clean; pure-Simple lane still pending (LEFT OPEN)
+
+**Lane caveat (added in the same 2026-09-13 pass, after review):** this entry is
+filed against the **pure-Simple / self-hosted** lane, which the run recorded
+below does NOT exercise. No self-hosted binary is deployed on this host —
+`bin/release/simple.exe`, `bin/release/x86_64-pc-windows-msvc/simple.exe` and
+`bin/release/x86_64-pc-windows-gnu/simple.exe` all print the Rust
+bootstrap-seed banner. Running the repro through the pure-Simple CLI on the
+seed (`simple run src/app/cli/main.spl -- run <repro>`) emitted only lint
+diagnostics and never executed the program, so that substitute lane does not
+work either. The seed result below therefore shows only that the **seed** does
+not exhibit the defect; it does NOT discharge the pure-Simple fix.
+**This entry stays OPEN pending a deployed self-hosted binary.**
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran the repro verbatim — a local generic function whose name collides with a
+runtime SFFI symbol name:
+
+```spl
+fn rt_array_len_safe<T>(array: [T]) -> i64:
+    return array.len()
+
+fn main() -> i64:
+    val arr: [i64] = [10, 20, 30, 40]
+    val n = rt_array_len_safe(arr)
+    print(n)
+    return n - 4
+```
+
+Both lanes print `4` and exit cleanly. No SIGSEGV: the call reaches the
+local body instead of being displaced by the same-named runtime import,
+which is exactly the ownership rule the Resolution (2026-07-17) describes.
+The "SOURCE-FIXED-EXECUTION-PENDING" status is discharged (measured).
+
+Scope of the evidence: this covers the Cranelift/JIT and tree-walk lanes.
+A full `native-build` link was not run (no self-hosted binary is deployed on
+this host and a bootstrap was in progress), so the native-link path is
+covered by source reasoning only.
+
+
 ## Resolution (2026-07-17)
 
 The pure-Simple Cranelift adapter resolves ordinary user-authored named calls

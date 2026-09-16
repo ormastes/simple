@@ -1,7 +1,5 @@
 # native (entry-closure): get_args() always [] — `?? []` on non-optional extern result emits rt_is_some on a raw SplArray*
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
-
 - **Date:** 2026-07-23  **Status:** OPEN (diagnosed by disasm, W81 + rLSP3)
 - **Severity:** high — argv is empty in every entry-closure native
   (`--version`/`--help`/flag parsing dead; stdio servers unaffected in serve
@@ -36,7 +34,3 @@ disagree on tagging; audit extern `-> [T]` return-tag conventions.
 
 ## Repro
 W81: entry `val a = get_args(); print a.len()` with extra CLI args → prints 0.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

@@ -1,5 +1,12 @@
 # CLI Dispatch Perf Spec Still Fails
-**Status:** OPEN (2026-09-12, re-verified: `bin/simple test test/05_perf/cli_dispatch_perf_spec.spl` still FAILs — still reproduces)
+
+## Triage 2026-09-13 — STILL OPEN: new, different failure mode; not closable
+- **measured** — `bin/simple run test/05_perf/cli_dispatch_perf_spec.spl` (Rust seed
+  v1.0.0-rc.1, Windows) does not reach any benchmark: it fails to parse with
+  `Unexpected token: expected expression, found Indent`. So the "one failing benchmark
+  case" this entry reports can be neither confirmed nor cleared here.
+- **inferred** — the spec is now blocked earlier in the pipeline than the defect it tracks.
+  Left OPEN, with the parse failure recorded as the current state on this host.
 
 Date: 2026-06-21
 
@@ -28,6 +35,3 @@ syntax or fix the benchmark target.
 
 Do not use this spec as release evidence until the failing benchmark case is
 identified and made deterministic.
-
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/05_perf/cli_dispatch_perf_spec.spl` on the deployed seed; it FAILs, confirming the defect still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

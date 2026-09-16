@@ -1,6 +1,13 @@
 # Bug: simple-lsp-mcp native tools/call broken + source-mode diagnostics deadlock
 
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Triage 2026-09-13 — STILL OPEN: bootstrap-scoped, cannot be touched or exercised now
+- **measured** — Stage 4 artifacts do exist on this host
+  (`build/bootstrap/full/x86_64-pc-windows-msvc/{simple.exe,simple_mcp_server.exe,simple_lsp_mcp_server.exe}`),
+  but a bootstrap is running concurrently in this workspace, so those files are being
+  written and must not be executed or judged mid-run.
+- **inferred** — the remaining defects this entry names are in `scripts/bootstrap/**` and
+  seed/cranelift codegen, both off-limits to this triage pass. Left OPEN; re-verify after
+  the in-flight bootstrap finishes.
 
 - **Filed:** 2026-06-18
 - **Severity:** P1 (LSP MCP tools unusable on native; diagnostics unusable in source mode)
@@ -88,6 +95,3 @@ printf '%s\n' \
 # source diagnostics: hang (zombie child + parent futex_wait) — only with the gate disabled
 SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 SIMPLE_LIB=$PWD/src bin/simple run src/app/simple_lsp_mcp/main.spl  # then send lsp_diagnostics
 ```
-
-## Triage 2026-09-12
-Older than 45 days. The record's own "Current mitigation (shipped 2026-06-18)" section already documents the live workaround (source-mode default, diagnostics gated off); the two "Real fixes (pending)" items were not re-tested (native binary not rebuilt in this pass, and the diagnostics deadlock path is deliberately not exercised here to avoid hanging the triage run). Closing per age policy; reopen with a fresh repro if the native/diagnostics fixes are attempted. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

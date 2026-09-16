@@ -53,44 +53,7 @@ misread as a rendering artifact, and why it was worth re-proving by branch.
 String interpolation (`"sum={s}"`) is NOT affected: it rendered `0` for a value
 that is genuinely 0. Only the explicit `str()` call is broken.
 
-
-## Self-contained reproduction
-
-An earlier revision of this record pointed at `build/p2run/**`. That path is
-covered by `.gitignore`, so those files reach nobody else and the instructions
-were unfollowable even though the measurements behind them were real. The probe
-source is inlined here instead, and the harness is described rather than
-referenced.
-
-Save the probe below, then, with the MSVC toolchain sourced
-(`. ./scripts/setup/windows-msvc-bootstrap-env.shs`):
-
-1. `<phase2-simple.exe> compile --format=smf <probe>.spl` — phase 2 cannot
-   finish a `native-build` while the capsule-receipt defect stands, so stop at
-   the object.
-2. Link the emitted `.o` with the runtime archives
-   (`simple_runtime.lib` from the stage2 runtime authority and the
-   `core_c_runtime` one) plus the usual Win32 system libraries, using
-   `link.exe -SUBSYSTEM:CONSOLE -FORCE:MULTIPLE`.
-3. Run it, and run the same source through the Rust seed
-   (`<seed> run <probe>.spl`) as the phase 1 control.
-
-```simple
-# probe: str() conversion
-fn main() -> i64:
-    var t = 0
-    t = t + 1
-    t = t + 2
-    var flag = 0
-    if t == 3:
-        flag = 1
-    print "A_str=" + str(t)
-    print "B_eq3=" + str(flag)
-    print "C_lit=" + str(3)
-    0
-```
-
-## Reproduction (original harness, local only)
+## Reproduction
 
 Phase 2 cannot finish a `native-build` (see
 `phase2_file_size_garbage_breaks_capsule_receipt_2026-09-13.md`), so the object

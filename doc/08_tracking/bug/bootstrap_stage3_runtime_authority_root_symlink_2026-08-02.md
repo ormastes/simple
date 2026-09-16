@@ -1,5 +1,4 @@
 # Bootstrap Stage 3 runtime authority root symlink
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -41,6 +40,3 @@ Validation (run once):
 ```text
 bootstrap_stage3_runtime_authority_root=true
 ```
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.
