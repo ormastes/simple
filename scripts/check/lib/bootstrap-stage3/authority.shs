@@ -2045,16 +2045,22 @@ bootstrap_stage3_copy_seed_tuple() {
 
     # The hosted GPU/backend linker needs the Rust hosted-runtime rlib, but it
     # must never rediscover it from a mutable Cargo target after admission.
-    # Cargo owns exactly one hash-named product in the selected profile's deps
-    # directory.  Project that one leaf into the immutable generation; reject
-    # missing, duplicate, nested, or symlink candidates.
+    #
+    # Cargo changed its per-crate artifact layout in the 2026-09-11 nightly
+    # (cargo 1.100.0-nightly, observed live when rustup refreshed the
+    # floating "nightly" toolchain): intermediate crate outputs moved from
+    # deps/ to build/<crate>/<metadata>/out/, and deps/ is no longer created
+    # at all. Both layouts must be admitted. The frozen generation layout is
+    # NOT changed: whichever candidate wins, it is still stored under
+    # deps/<basename> and every downstream receipt/verifier keeps the deps/
+    # spelling. Candidates are validated as regular non-symlink files either
+    # way.
     bootstrap_stage3_hosted_deps="$bootstrap_stage3_tuple_source/deps"
-    [ -d "$bootstrap_stage3_hosted_deps" ] &&
-        [ ! -L "$bootstrap_stage3_hosted_deps" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 4" >&2; return 1; }
     bootstrap_stage3_hosted_candidates=
     bootstrap_stage3_hosted_count=0
     for bootstrap_stage3_hosted_path in \
-        "$bootstrap_stage3_hosted_deps"/libspl_hosted_runtime-*.rlib; do
+        "$bootstrap_stage3_hosted_deps"/libspl_hosted_runtime-*.rlib \
+        "$bootstrap_stage3_tuple_source"/build/spl_hosted_runtime/*/out/libspl_hosted_runtime-*.rlib; do
         [ -e "$bootstrap_stage3_hosted_path" ] || continue
         [ -f "$bootstrap_stage3_hosted_path" ] &&
             [ ! -L "$bootstrap_stage3_hosted_path" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 5" >&2; return 1; }
@@ -2089,6 +2095,35 @@ bootstrap_stage3_copy_seed_tuple() {
         "$bootstrap_stage3_hosted_candidates")
     set -- "$@" "$bootstrap_stage3_hosted_name"
 
+    # Record source aliases for members whose cargo layout spelling differs
+    # from the frozen deps/ spelling. The perl projection opens the alias
+    # path but still stores the member under its canonical deps/ name, so the
+    # generation layout and all receipts are layout-independent.
+    bootstrap_stage3_tuple_aliases=
+    case "$bootstrap_stage3_hosted_candidates" in
+        "$bootstrap_stage3_hosted_deps"/*) ;;
+        *)
+            bootstrap_stage3_hosted_alias=${bootstrap_stage3_hosted_candidates#"$bootstrap_stage3_tuple_source"/}
+            bootstrap_stage3_tuple_aliases="$bootstrap_stage3_hosted_name=$bootstrap_stage3_hosted_alias"
+            ;;
+    esac
+    # Same layout change for the runtime archive: older cargo parked it in
+    # deps/ (the slot the last invocation wins); newer cargo leaves the
+    # staticlib at the profile root, where the last runtime-producing build
+    # still wins. Admit the root spelling as a source alias for the GNU
+    # spelling only; the frozen generation still stores deps/libsimple_runtime.a.
+    if [ "$bootstrap_stage3_tuple_runtime_name" = deps/libsimple_runtime.a ] &&
+        [ ! -f "$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_runtime_name" ] &&
+        [ -f "$bootstrap_stage3_tuple_source/libsimple_runtime.a" ] &&
+        [ ! -L "$bootstrap_stage3_tuple_source/libsimple_runtime.a" ]; then
+        case "$bootstrap_stage3_tuple_aliases" in
+            '') bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_runtime_name=libsimple_runtime.a" ;;
+            *) bootstrap_stage3_tuple_aliases="$bootstrap_stage3_tuple_aliases;$bootstrap_stage3_tuple_runtime_name=libsimple_runtime.a" ;;
+        esac
+    fi
+    BOOTSTRAP_STAGE3_TUPLE_SOURCE_ALIASES=$bootstrap_stage3_tuple_aliases
+    export BOOTSTRAP_STAGE3_TUPLE_SOURCE_ALIASES
+
     bootstrap_stage3_tuple_seen='|'
     for bootstrap_stage3_tuple_name in "$@"; do
         [ -n "$bootstrap_stage3_tuple_name" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 7" >&2; return 1; }
@@ -2102,8 +2137,26 @@ bootstrap_stage3_copy_seed_tuple() {
         esac
         bootstrap_stage3_tuple_seen=\
 "$bootstrap_stage3_tuple_seen$bootstrap_stage3_tuple_name|"
+        # Aliased members (new cargo layout) resolve their source path here;
+        # the alias target was already validated as a regular non-symlink
+        # file when it was recorded.
+        bootstrap_stage3_tuple_lookup_name=$bootstrap_stage3_tuple_name
+        bootstrap_stage3_alias_rest=$bootstrap_stage3_tuple_aliases
+        while [ -n "$bootstrap_stage3_alias_rest" ]; do
+            bootstrap_stage3_alias_entry=${bootstrap_stage3_alias_rest%%";"*}
+            case "$bootstrap_stage3_alias_entry" in
+                "$bootstrap_stage3_tuple_name="*)
+                    bootstrap_stage3_tuple_lookup_name=${bootstrap_stage3_alias_entry#"$bootstrap_stage3_tuple_name"=}
+                    break
+                    ;;
+            esac
+            case "$bootstrap_stage3_alias_rest" in
+                *";"*) bootstrap_stage3_alias_rest=${bootstrap_stage3_alias_rest#*";"} ;;
+                *) break ;;
+            esac
+        done
         bootstrap_stage3_tuple_path=\
-"$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_name"
+"$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_lookup_name"
         [ -f "$bootstrap_stage3_tuple_path" ] &&
             [ ! -L "$bootstrap_stage3_tuple_path" ] || { echo "bootstrap_stage3_copy_seed_tuple: failed check 8" >&2; return 1; }
     done
@@ -2116,6 +2169,15 @@ bootstrap_stage3_copy_seed_tuple() {
         use strict;
         use warnings;
         my ($source, $destination, @names) = @ARGV;
+        # New-cargo-layout source aliases: name=relative-source-path pairs
+        # separated by semicolons. The member is read from the alias path
+        # but stored under its canonical name, so the frozen layout is
+        # layout-independent.
+        my %source_alias = map {
+            my ($alias_name, $alias_path) = split /=/, $_, 2;
+            ($alias_name => $alias_path)
+        } grep { length } split /;/,
+            ($ENV{BOOTSTRAP_STAGE3_TUPLE_SOURCE_ALIASES} // q{});
         my @source_root_stat = lstat($source);
         @source_root_stat && S_ISDIR($source_root_stat[2]) &&
             !S_ISLNK($source_root_stat[2]) or die "unsafe source root\n";
@@ -2161,7 +2223,7 @@ bootstrap_stage3_copy_seed_tuple() {
             return $sha->hexdigest;
         }
         for my $name (@names) {
-            my $path = source_path($source, $name);
+            my $path = source_path($source, $source_alias{$name} // $name);
             my ($fh, $st) = open_bound($path);
             my $digest = digest_fh($fh);
             push @before, [$name, $st->[0], $st->[1], $st->[2],
@@ -2172,7 +2234,7 @@ bootstrap_stage3_copy_seed_tuple() {
         for my $record (@before) {
             my ($name, $dev, $ino, $source_mode, $size, $mtime, $ctime,
                 $digest) = @$record;
-            my $path = source_path($source, $name);
+            my $path = source_path($source, $source_alias{$name} // $name);
             my ($in, $now) = open_bound($path);
             ($now->[0] == $dev && $now->[1] == $ino && $now->[2] == $source_mode)
                 or die "source identity changed\n";
@@ -2250,7 +2312,7 @@ bootstrap_stage3_copy_seed_tuple() {
         }
         for my $record (@before) {
             my ($name, $dev, $ino, $mode, $size, $mtime, $ctime, $digest) = @$record;
-            my ($fh, $now) = open_bound(source_path($source, $name));
+            my ($fh, $now) = open_bound(source_path($source, $source_alias{$name} // $name));
             ($now->[0] == $dev && $now->[1] == $ino && $now->[2] == $mode &&
              $now->[7] == $size && $now->[9] == $mtime && $now->[10] == $ctime &&
              digest_fh($fh) eq $digest) or die "source vector changed\n";
