@@ -1,0 +1,96 @@
+# cargo 1.100 nightly build-dir layout drift breaks the Rust authority publish path
+
+Date: 2026-09-16
+Branch: work/image-memory-budget-20260915 (merged origin/main @ e5ffe745ce9)
+Host: Windows 11, Git Bash (MINGW64), x86_64-pc-windows-gnu
+
+## Symptom
+
+`--full-bootstrap` (the receipt-free Stage-2 trust-root lane) compiles all four
+Rust lanes successfully and then aborts at the immutable-generation publish:
+
+```
+bootstrap_stage3_copy_seed_tuple: failed check 4
+bootstrap_stage3_prepare_seed_generation: failed check 4
+error: could not prepare immutable Rust authority generation
+VERDICT — ABORTED: stage=rust-rust-compiler-backfill-build exit=1
+```
+
+## Root cause
+
+cargo 1.100.0-nightly (7941be6fb 2026-09-11, rustc 215a8af4b 2026-09-15) ships
+the new build-dir filesystem layout unconditionally: the per-profile `deps/`
+directory is no longer created. Final crate artifacts are written directly into
+the profile directory, and dependency rlibs are no longer materialized as
+individual files.
+
+Verified with a minimal two-crate path-dependency project on this host:
+
+- `cargo build` (any profile) -> `target/<profile>/` contains only final
+  artifacts (`ct.exe`, `ct.d`); NO `deps/` directory is created.
+- `-Z build-dir-new-layout` and `[build] build-dir-new-layout = false` do not
+  restore the old layout (tested both; flag description still says "Use the new
+  build-dir filesystem layout").
+
+The authority publisher `bootstrap_stage3_copy_seed_tuple`
+(scripts/check/lib/bootstrap-stage3/authority.shs:2021) hard-requires the old
+layout:
+
+- check 4: `$source/deps` must be a real directory (absent under new cargo).
+- runtime archive derived as `deps/libsimple_runtime.a` (now profile-root).
+- hosted archive discovered as `deps/libspl_hosted_runtime-*.rlib` — this rlib
+  is NOT materialized at all by new cargo (only final selected-package
+  artifacts are), so there is no in-tree file to copy.
+
+`deps/` layout assumptions are additionally baked into:
+
+- scripts/bootstrap/phase2-runtime-capsule.shs:60,63,105
+- scripts/bootstrap/bootstrap-phase-verification.shs:59,65
+- scripts/check/lib/bootstrap-stage3/sanity.shs:556
+
+The comment at src/compiler_rust/native_all/Cargo.toml:46-57 documents the
+two-rlib-in-deps behavior this gate was written for.
+
+## Why CI is green
+
+The Windows/Linux Stage-2 CI lanes reuse a warm Rust-seed cache keyed by the
+cargo-inputs fingerprint, so the rebuild + publish path never executes there.
+The drift only surfaces on a machine with a stale/absent seed (fresh clone or,
+as here, a tree whose src/compiler_rust or src/runtime content changed).
+
+## Reproduce
+
+1. Invalidate the seed (touch any file under src/compiler_rust or
+   src/runtime), or use a fresh clone.
+2. `sh scripts/bootstrap/bootstrap-windows.sh --full-bootstrap --stop-after-stage2 --backend=cranelift --jobs=min`
+3. Wait through the four Rust lanes (~35 min at jobs=1); publish aborts.
+
+## Impact
+
+- No fresh machine can complete even the Stage-2 trust-root lane with current
+  nightly cargo. The whole self-host chain (Stage 2 -> planner admission ->
+  Stage 3/4) is closed to anyone without a warm seed cache.
+- The check worker (`simple check`) and the native MCP servers cannot be
+  produced, so `check src/app/mcp`, `check src/app/simple_lsp_mcp` and the
+  MCP stdio integration spec stay red on affected machines.
+
+## Evidence (this run)
+
+- Fingerprint-keyed cargo target:
+  build/c/a59b2e0e2e98d4b5199878c1fa66c9804260abc4673fa517a260d8649876f173/x86_64-pc-windows-gnu/bootstrap/
+  contains 19 entries: simple.exe, simple-stub.exe, simple_runtime.dll,
+  libsimple_driver.rlib, libsimple_native_all.a, libsimple_runtime.a/.rlib/
+  .dll.a, libsimple_compiler_backfill.a, .d files. NO deps/ subdir.
+- `find <target> -name 'libspl_hosted_runtime*'` -> no results.
+- Bootstrap main log: /tmp/bootstrap_s2f.log (VERDICT ABORTED at stage=rust).
+
+## Suggested direction
+
+Teach the authority layer to accept the new layout: resolve the artifact dir as
+`$source/deps` when present else `$source`, and source the hosted-runtime rlib
+from wherever cargo materializes it — or emit it explicitly (e.g. build
+spl_hosted_runtime with `--emit=link` crate-type rlib via a dedicated cargo
+invocation) when cargo no longer leaves one in the target dir. All five
+deps/-layout call sites listed above must change together; the tuple must stay
+internally consistent because the phase-verification and sanity gates re-derive
+the same paths.
