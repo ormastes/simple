@@ -1,8 +1,10 @@
 # Shared DB acceleration helpers.
 #
-# Phase 1 keeps behavior-identical scalar implementations and exposes a stable
-# capability/reporting surface so callers can adopt batch scans now and gain
-# host SIMD kernels later without changing their contracts.
+# The row-bitmap word kernels (and/or/and_not) dispatch to native
+# AVX-512BW -> AVX2 -> scalar tiers of the same source loop, so the tier
+# changes speed and never results. The text/key span scans stay scalar for
+# now; each keeps a scalar twin and a length-checked fallback so an unbacked
+# native extern can never silently drop rows.
 
 use std.simd.{detect_profile, profile_name, simd_width, SimdTier}
 
@@ -351,6 +353,12 @@ fn popcount_u32(word: u32) -> i64:
     value = (value & 0x33333333u32) + ((value >> 2u32) & 0x33333333u32)
     (((value + (value >> 4u32)) & 0x0F0F0F0Fu32) * 0x01010101u32 >> 24u32) as i64
 
+# simd_active tracks simd_available because the row-bitmap word kernels
+# (and_with / or_with / and_not -> rt_db_bitmap_{and,or,andnot}_u32) dispatch
+# natively whenever the detected tier is non-scalar; see the kernel section
+# above and commit c0663588233 ("AVX-512 row-bitmap kernels"). Deliberate
+# wiring evidence: test/03_system/lib/db/webdb_simd_accel_system_spec.spl and
+# test/unit/lib/db/{accel,native_accel_micro}_spec.spl, run 2026-09-16.
 fn accel_capability_report() -> AccelCapabilityReport:
     val tier = detect_profile()
     val available = match tier:
@@ -359,8 +367,8 @@ fn accel_capability_report() -> AccelCapabilityReport:
     AccelCapabilityReport(
         tier_name: profile_name(),
         simd_available: available,
-        simd_active: false,
-        scalar_fallback: true,
+        simd_active: available,
+        scalar_fallback: not available,
         simd_width_bits: simd_width()
     )
 
