@@ -25,6 +25,27 @@ Third corrected beta of the **1.0.0 line**.
   `v1.0.0-beta.5`; main carries the same content plus the K1 receipt fix.
   The 1.0.1 line remains withdrawn; 1.0.0 is the only line.
 
+## [1.0.0-beta.6] - 2026-09-16
+Fourth beta of the **1.0.0 line**; supersedes the failed
+`v1.0.0-beta.5` tag run (release-blocking SCV admission bug, fixed below).
+
+### Fixed
+- **SCV cold-init admission rejected every fresh checkout**: the compile
+  source inventory admits only .spl/simple.sdn paths, but the cold-init git
+  walk turned all ~60k files under src/ into events, so apply failed with
+  `git-event-apply:event-invalid` on the first non-source file after ~1.7 h.
+  Producers now filter non-source paths before reading/hashing; cold-init
+  ls-files passes core.quotePath=false; the filesystem-watch translator
+  skips non-source paths. Bug entry:
+  doc/08_tracking/bug/release_scv_cold_init_event_invalid_non_source_paths_2026-09-16.md.
+- Carried from 1.0.0-beta.5: runner memory + macOS rustc poisoning fixes,
+  ENAMETOOLONG healing (78 symlinks), K1 fixes, nightly pin, cold-init
+  opt-in, linux-x86_64 leg, beta channel-blocking contract.
+
+### Release
+- Product version is `1.0.0-beta.6`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.6`. The 1.0.1 line remains withdrawn.
+
 ## [Unreleased]
 
 ### Added
