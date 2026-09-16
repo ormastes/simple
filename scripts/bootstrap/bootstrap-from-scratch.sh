@@ -2506,10 +2506,17 @@ elif [ "${full_bootstrap}" -eq 1 ] && bootstrap_stage3_rust_tuple_requires_compl
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     --target "${PLATFORM}" -p simple-driver ${llvm_features}
+  # spl_hosted_runtime is selected alongside simple-native-all because the
+  # authority tuple freezes deps/libspl_hosted_runtime-*.rlib: cargo < 1.100
+  # left it in deps/ as a byproduct of these invocations, but the cargo >=
+  # 1.100 build-dir layout only materializes artifacts of SELECTED packages,
+  # so the hosted rlib must be selected explicitly or the publish step has
+  # nothing to freeze. Same features as the simple-compiler dependency
+  # (win32-real on Windows), so feature unification is unchanged.
   run_rust_authority_cargo rust-native-all-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    --target "${PLATFORM}" -p simple-native-all ${llvm_features}
+    --target "${PLATFORM}" -p simple-native-all -p spl_hosted_runtime ${llvm_features}
   # Rebuild simple-runtime LAST with LTO off so deps/libsimple_runtime.a holds
   # machine-code symbol definitions. Under the bootstrap profile's thin-LTO the
   # rlib members export symbols only inside embedded `__bitcode` sections, which
