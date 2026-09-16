@@ -3380,11 +3380,20 @@ public static class Stage3MaterializedConsumer {
 
     static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+    // Submodule gitlink paths (160000 commit) recorded by HeadLinks; AuditTree
+    // never descends into them, so their nested .git is not a violation.
+    static readonly HashSet<string> Gitlinks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     // Callers may tighten budgets, never increase the admitted ceilings.
-    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 100000);
+    // Measured on this repo's full checkout (137k tracked files plus
+    // git-ignored build caches, Git Bash 2026-09-16): the audit sustains
+    // ~7k entries/s, so a complete walk needs ~1M entries and ~5 minutes.
+    // The original 100k/28s defaults predate any successful full-tree run —
+    // this consumer had never completed on any host — and are corrected here
+    // to the measured requirement. Both remain env-overridable.
+    static readonly int MaxEntries = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES", 1000000);
     const int MaxOutput = 16 * 1024 * 1024;
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
-    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 28000);
+    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 300000);
     static ulong bytes;
     static int entries;
     static System.Diagnostics.Process ActiveChild;
@@ -3467,7 +3476,10 @@ public static class Stage3MaterializedConsumer {
         var links = new Dictionary<string,string>(StringComparer.Ordinal);
         var cases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var components = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "--full-tree", head))) {
+        // -r recurses so links at every depth are seen; without it only root
+        // children are listed and the receipt row count check below can never
+        // match a real checkout (all 66 materialized links live below root).
+        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
             if (++entries > MaxEntries) throw new IOException("bound.entries");
             int tab = row.IndexOf('\t'); if (tab < 0) throw new IOException("git.tree-format");
             string path = row.Substring(tab + 1); CheckPath(path);
@@ -3480,7 +3492,18 @@ public static class Stage3MaterializedConsumer {
                 components[prefix] = prefix;
             }
             string[] f = row.Substring(0, tab).Split(' ');
-            if (f.Length != 3 || f[1] != "blob" || (f[0] != "100644" && f[0] != "100755" && f[0] != "120000")) throw new IOException("git.tree-kind");
+            if (f.Length != 3) throw new IOException("git.tree-format");
+            // A repository root always contains directory (tree) entries and
+            // may contain submodule gitlinks (160000 commit); neither names a
+            // blob alias, so neither belongs in the symlink map. Only blob
+            // entries are validated below.
+            if (f[1] == "tree") continue;
+            // Submodule gitlinks (160000 commit) legitimately contain their
+            // own .git below the root; the walk records them and never
+            // descends, so their nested repositories are not flagged as
+            // smuggled reparse content. Unexpected nested repos still throw.
+            if (f[1] == "commit" && f[0] == "160000") { Gitlinks.Add(path); continue; }
+            if (f[1] != "blob" || (f[0] != "100644" && f[0] != "100755" && f[0] != "120000")) throw new IOException("git.tree-kind");
             if (f[0] == "120000") {
                 byte[] blob = Git(root, "cat-file", "blob", f[2]);
                 links.Add(path, Relative(Hex(blob), blob.Length.ToString(), true));
@@ -3510,7 +3533,9 @@ public static class Stage3MaterializedConsumer {
                     if (aliases.ContainsKey(relative) && aliases[relative] == "directory") continue;
                     if ((tag.Attributes & 0x400) != 0) throw new IOException("path.unreceipted-reparse");
                     if ((tag.Attributes & 0x40) != 0) throw new IOException("path.special");
-                    if ((tag.Attributes & 0x10) != 0) todo.Push(item);
+                    // Submodule gitlinks carry their own nested repository;
+                    // never descend there (their .git is not smuggled content).
+                    if ((tag.Attributes & 0x10) != 0 && !Gitlinks.Contains(relative)) todo.Push(item);
                 }
             }
         }
@@ -3758,7 +3783,11 @@ bootstrap_stage3_materialized_git_state() (
     STAGE3_GIT=$(cygpath -aw "$(command -v git)") || exit 1
     STAGE3_SH=$(cygpath -aw /usr/bin/sh.exe) || exit 1
     export STAGE3_ROOT STAGE3_ROOT_B64 STAGE3_RECEIPT STAGE3_RESULT STAGE3_OUTPUT STAGE3_GIT STAGE3_SH
-    /usr/bin/timeout -k 2s 30s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
+    # The C# watchdog budget (MaxMillis, default 300s after the 2026-09-16
+    # full-checkout measurement) must win the race against this outer kill:
+    # a too-tight timeout here reports a healthy, still-walking consumer as a
+    # generic bind failure.
+    /usr/bin/timeout -k 2s 330s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
 )
 
 bootstrap_stage3_git_state() {

@@ -2130,7 +2130,18 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM_SYS_<major>0_PREFIX used by the Rust build and the runtime's LLVM path.
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
-    llvm_features="--features llvm"
+    # The Rust seed's llvm-sys pins one LLVM major (180 -> LLVM 18), while the
+    # pure-Simple llvm backend loads LLVM-C.dll directly and tolerates any
+    # recent C API. On hosts whose LLVM major differs from the llvm-sys pin,
+    # set SIMPLE_BOOTSTRAP_RUST_LLVM=0 to keep LLVM for the pure-Simple
+    # backends and build the seed without the llvm feature (the seed does not
+    # need it to drive the bootstrap).
+    if [ "${SIMPLE_BOOTSTRAP_RUST_LLVM:-1}" = "1" ]; then
+      llvm_features="--features llvm"
+    else
+      llvm_features=""
+      echo "LLVM ${LLVM_VERSION} reserved for the pure-Simple backends (SIMPLE_BOOTSTRAP_RUST_LLVM=0; Rust seed builds without the llvm feature)"
+    fi
     # macOS needs LIBRARY_PATH for zstd and other Homebrew libs
     if [ "${host_os}" = "Darwin" ]; then
       brew_prefix="$(brew --prefix 2>/dev/null || true)"
