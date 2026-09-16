@@ -1,5 +1,4 @@
 # PerfFacts Def/Use Variant Coverage Is Incomplete
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -42,6 +41,3 @@ fixture corpus, and consumers reject injected unknown or undeclared-local cases.
 The generated-registry source contract now requires every `MirInstKind` to have a named
 access arm and rejects wildcard fallback. The three explicitly incomplete representations
 remain visible rather than satisfying the full unblock condition.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and carries no short (<=3 min) repro; left open with a status line added since none existed. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

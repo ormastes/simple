@@ -1,5 +1,12 @@
 # Bug: roaring arr_insert O(n²) scan on sequential bulk-add causes interpreter timeout
-**Status:** OPEN (2026-09-12, re-verified: bin/simple test test/01_unit/lib/common/search/roaring_spec.spl -> 12 passed, 3 failed, still reproduces)
+
+## Closed 2026-09-13 — does not reproduce: the spec completes, no 120 s timeout
+- **measured** — `bin/simple run test/01_unit/lib/common/search/roaring_spec.spl`
+  (Rust seed v1.0.0-rc.1, Windows) finishes with
+  `declared>=15 executed=15 passed=12 failed=3` — all 15 examples, including the 4100-
+  and 8200-id sequential bulk-add cases, run to completion instead of hanging.
+- **measured** — the 3 remaining failures are assertion mismatches, not a hang; they are a
+  separate correctness question and are NOT this quadratic-scan timeout bug.
 
 **Date:** 2026-06-15
 **ID:** roaring_arr_insert_quadratic_bulk_add_2026-06-15
@@ -78,6 +85,3 @@ probe:
 - AND([1,3,5,7,9], [3,4,5,6,9,10]) → cardinality 3
 - OR → cardinality 8
 - ANDNOT → cardinality 2
-
-## Triage 2026-09-12
-Rule B: ran `bin/simple test test/01_unit/lib/common/search/roaring_spec.spl` on the deployed seed; 3 of 15 checks still fail, so this record still reproduces. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

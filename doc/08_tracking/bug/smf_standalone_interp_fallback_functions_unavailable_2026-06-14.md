@@ -4,7 +4,7 @@
 - **Severity:** P2 (feature-scale gap; blocks SMF benchmark/run of any workload whose hot path
   uses string interpolation or other interp-routed constructs — e.g. the web http server)
 - **Found:** 2026-06-14, AC-5 web benchmark SMF emission (perf-opt umbrella).
-- **Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+- **Status:** OPEN (re-triaged 2026-09-13 — see the note at the end of this file) — honestly omitted; `web_bench_driver` graceful-skips the smf plane with a
   printed reason (no fabricated rows). Script-plane rows still emit.
 
 ## Symptom
@@ -39,5 +39,9 @@ interpolation (`"HTTP/1.1 {status_code} {reason}\r\n"`), which correctly trigger
 Until one lands, SMF benchmark emission is limited to workloads whose hot path is natively
 compilable; interpolation-heavy ops (http serialize) stay honestly omitted.
 
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.
+## Triage 2026-09-13 — LEFT OPEN (SMF compilation is broken outright on this host)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the repro cannot even reach the reported failure. `bin/simple compile <file>.spl -o <file>.smf` on a three-line function whose body is a genuinely interpolated FString fails at codegen: `Failed to preserve SMF imports/relocations from object code: Invalid data: Failed to parse object file: Invalid section: relocation source section .rdata$.refptr is not executable code`. No `.smf` is produced, so `rt_interp_call: function not found` was never reached.
+- **inferred**: that COFF `.rdata$.refptr` failure is a separate Windows SMF-emission defect, not this bug. It does mean the standalone-SMF lane is entirely unavailable here.
+- **inferred**: neither of the two fix options has landed — native string-format codegen would have to remove the `FallbackReason::StringOps` route, and SMF interp-snapshot seeding would have to embed the snapshot; nothing in the entry or the tree indicates either.
+- Verdict: OPEN.

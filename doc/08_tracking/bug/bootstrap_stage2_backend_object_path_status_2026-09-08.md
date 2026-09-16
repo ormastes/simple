@@ -312,3 +312,57 @@ same way `rt_secure_temp_dir` was instrumented (report `GetLastError` and the
 path), then run ONE bootstrap. The reason string is the only signal a cycle
 produces, and a one-line trace has out-performed every round of inference in
 this investigation.
+
+## 2026-09-13 — the read was never the fault (measured, not inferred)
+
+`rt_file_read_regular_no_follow_bounded` now records which of its eleven exits
+it took, in an atomic read back through
+`rt_file_read_regular_no_follow_last_failure` and named in the Simple `Err`
+text. The atomic starts at a sentinel (77) and stores a distinct value on
+success (100), so a readout separates four states that all used to read as
+zero: never called, succeeded, a named rejection arm, and "this diagnostic
+extern is itself unresolved in the lane that read it".
+
+Stage 2 sanity now reports:
+
+    backend object-path status 1 (diagnostic unreadable:
+    regular no-follow bounded file read returned nil (read succeeded): <path>)
+
+**The reader ran and returned a real 29-byte heap string.** The nil is created
+after the extern returns, between the `RuntimeValue` and the Simple `text?`
+binding: `content.?` is TRUE (so the Optional is present and non-NIL) while
+`content.unwrap().len()` is -1 (so the word inside does not decode as a heap
+string). This is the force-unwrap Option-wrapper family, not file I/O.
+
+### Hypotheses this retires, each with the measurement that killed it
+
+- **MAX_PATH / extended-length paths.** `LongPathsEnabled` is `0x1` on this
+  host and Rust's std already applies `maybe_verbatim`. A write+read probe at
+  the exact failing path (267 chars) through the seed returns `write true /
+  read ok len 26`. The Rust-side `long_path` helper written for this was
+  reverted as dead code; the C-side widening in `runtime_native.c` and
+  `runtime.c` is correct but was never on this path.
+- **Mixed separators under a verbatim prefix.** Reproduced with the exact
+  backslash/forward-slash mix from the log: still `read ok`. Both C helpers
+  (`rt_widen_long_path`, `rt_secure_create_directory_long`) normalise `/` to
+  the separator before `GetFullPathNameW` anyway.
+- **The capability sandbox.** The gate is symmetric across read and write and
+  returns true with no active sandbox; the write in the same process succeeded.
+- **A C/Rust split of the reader.** Measured per archive: the C
+  `runtime_sffi_c.lib` defines `rt_secure_temp_dir` and **not** the reader;
+  `simple_native_all.lib` carries both. Staging is C, the reader is Rust, and
+  they share one archive — no split-representation problem.
+- **The `file_read_regular_no_follow_bounded` name collision.** Real (two
+  co-compiled definitions, `(i64,i64,i64)->i64` in `sffi/fs.spl` vs
+  `(text,i64)->Result<text,text>` in `io/file_ops.spl`, and the raw one breaks
+  its own file's `_raw`/`_unchecked` convention) but **not this defect**: the
+  warning does not appear in `stage2-sanity.env.frontend-failure.log`. Worth
+  fixing as the hygiene the compiler asks for, separately.
+
+### Methodology trap this run added
+
+`arm 0` was read as "the reader succeeded" when zero was simultaneously the
+atomic's initial value, the success code, and what an unresolved extern returns.
+Three states on one number is not a measurement. A diagnostic code space must
+make "I was never set" distinguishable from every real answer before its
+readout is worth anything.

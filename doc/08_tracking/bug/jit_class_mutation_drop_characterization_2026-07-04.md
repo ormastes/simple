@@ -1,5 +1,47 @@
 # Class-in-array mutation drop in interpret mode — characterization (task #112)
 
+## Re-verified 2026-09-13 — STILL REPRODUCES on the interpret lane (left open)
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+Ran the "no function-call boundary involved" minimal repro verbatim:
+
+```spl
+class Counter:
+    var val: i64
+
+fn main():
+    var arr = [Counter(val: 42)]
+    var c = arr[0]
+    c.val = 777
+    print(arr[0].val)
+
+main()
+```
+
+| lane | result | verdict |
+|---|---|---|
+| seed JIT (`run`) | `777` | correct — class is a reference |
+| tree-walk (`SIMPLE_EXECUTION_MODE=interpreter run`) | `42` | **mutation still dropped** |
+
+This is the exact defect the entry characterizes, on the exact lane it names
+("Class-in-array mutation drop in **interpret mode**"), and it still
+reproduces (measured). The 2026-07-04 source fix landed for the 70.backend
+`InterpreterBackendImpl`; the seed tree-walk interpreter that `bin/simple
+test` actually uses does not have it.
+
+Sharper than the original filing: the two lanes now **disagree** on the same
+program, so this is a backend divergence as well as a wrong answer. Reading
+a class instance out of an array and mutating it works under `run` and
+silently does nothing under the interpreter, which is the harder failure
+mode to notice — a spec that passes under `run` proves nothing about the
+lane the test runner uses.
+
 - **Status:** SOURCE FIX LANDED (2026-07-04) for the 70.backend `InterpreterBackendImpl` (class reference model, see bottom section) — pending REGATE on a healthy stage4 binary. `compiler.core.interpreter` (flat-AST) was found already-correct for this repro; the observed `42` on the deployed binary is source/binary divergence.
 - **Discovered:** 2026-07-04 (task #112, following up on #108's discriminator work and #35's
   `struct_param_mutation_semantics_2026-07-03.md`)

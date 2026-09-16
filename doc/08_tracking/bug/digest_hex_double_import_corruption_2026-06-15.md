@@ -1,9 +1,14 @@
 # Bug: Digest.hex() returns garbage when seam.spl and ctypes are both imported
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+
+## Closed 2026-09-13 — Does not reproduce: `Digest.hex()` is correct under the double import
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): a file importing BOTH `std.common.crypto.typed.seam` and `std.common.crypto.typed.ctypes.{Digest}` — the exact double-import shape — then calling `Digest.new([0u8, 1u8, 2u8, 255u8]).hex()` prints `hex=000102ff len=4`. That is the payload bytes, correctly hex-encoded, not the struct representation bytes.
+- **measured**: `len()` agrees at 4, so the previously-unaffected accessors are still fine and `hex()` has joined them.
+- **inferred**: the original driver was `SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed`, a Linux artifact absent here; the Windows seed was used instead, so this is "does not reproduce on the current seed" rather than a located fix.
 
 **ID:** digest_hex_double_import_corruption_2026-06-15
 **Filed:** 2026-06-15
-**Severity:** P1 — silent data corruption; hex() returns structurally plausible but wrong hex strings
+**Status:** CLOSED 2026-09-13 (does not reproduce). **Severity:** P1 — silent data corruption; hex() returns structurally plausible but wrong hex strings
 **Component:** interpreter — cross-module struct method dispatch when two modules both import ctypes
 **Driver:** `SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed`
 
@@ -92,6 +97,3 @@ Use `ct_eq(Digest.new(known_bytes))` for equality checks instead of comparing
 
 - `doc/08_tracking/bug/cross_module_struct_method_poisons_itblock_byte_ops_2026-06-15.md`
 - `doc/08_tracking/bug/dual_backend_generic_typed_seam_2026-06-15.md`
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

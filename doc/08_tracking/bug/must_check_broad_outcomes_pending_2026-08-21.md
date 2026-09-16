@@ -1,7 +1,5 @@
 # Must-check broad outcomes remain pending
 
-**Status:** OPEN (unverified 2026-09-12)
-
 ## Status
 
 Open. These outcomes are intentionally represented as `todo` in
@@ -30,7 +28,3 @@ The authoritative rows are in `config/check/must_check_gates.sdn`; their live
 state is written to `doc/08_tracking/check/must_check_db.sdn`. Removing a row,
 changing it to `pass` without bootstrap-owned evidence, or treating TODO as
 success is a release-blocking defect.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

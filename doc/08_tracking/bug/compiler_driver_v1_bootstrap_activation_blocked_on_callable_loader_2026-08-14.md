@@ -1,5 +1,4 @@
 # CompilerDriverV1 bootstrap activation is blocked on a callable provider loader
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Impact
 
@@ -44,6 +43,3 @@ Owner: provider loader / bootstrap-core integration lane.
 
 Bootstrap reason for the current provider-boundary implementation: `none`.
 Only the new provider modules and focused tests are expected to rebuild.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

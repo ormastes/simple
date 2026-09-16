@@ -1,7 +1,14 @@
 # BUG: `text + i64` produces garbage in interpreter (seed) — use `.to_text()`
 
+## Closed 2026-09-13 — does not reproduce: `text + i64` renders the decimal string
+- **measured** — `print("x" + v)` with `val v: i64 = 42` prints `x42`; `print("" + 7)`
+  prints `7`. Rust seed `bin/simple` v1.0.0-rc.1 on Windows, in both the default JIT run
+  and with `SIMPLE_NO_JIT=1`.
+- **inferred** — filed against the seed driver, which is what was measured; the Linux host
+  was not re-tested.
+
 **Date:** 2026-06-15
-**Status:** CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+**Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 **Severity:** Medium — silently corrupts string building; no error, just wrong output
 **Found by:** search-custom-types AC-3 (Aho-Corasick) spec, while building canonical
 sort keys with `"" + v`.
@@ -61,7 +68,3 @@ In the interpreter's `+` dispatch, when the LHS is `text` and the RHS is an
 integer/`i64`, format the RHS via the same path as `.to_text()` before
 concatenation, mirroring the documented interpreter rule that `1 + "x"` →
 `"1x"`. Currently the reverse (`"x" + 1`) appears to misread the RHS payload.
-
-## Triage 2026-09-12
-
-Reviewed in the 2026-09-12 bug-db triage sweep (Rule C: filed before 2026-07-29, no runnable repro cheap enough to verify in this pass); closed as stale per the "too old / not valid -> close" triage policy, superseding the prior status line above. Evidence: worktree `simple-bugdb-triage` branch `work/bugdb-triage-2026-09-12`; deployed seed `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple` (50,093,192 B, 2026-09-06 09:59) available for re-verification if reopened.

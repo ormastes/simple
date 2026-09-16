@@ -1,7 +1,5 @@
 # Native Engine2DReadback Aggregate ABI
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
-
 ## Status
 
 The tagged aggregate base fix is deployed. Provider retention now reaches live
@@ -50,7 +48,3 @@ Deploy the name-keyed field-layout precedence fix from
 `native_engine2d_readback_cross_module_field_layout_2026-07-26.md`, then require
 device readback, positive handle/device identity, zero mismatches, and passing
 strict/parity specs.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

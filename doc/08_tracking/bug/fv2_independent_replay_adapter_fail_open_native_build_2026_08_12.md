@@ -1,5 +1,4 @@
 # FV2 independent replay adapter fail-open native build
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -50,6 +49,3 @@ manifest.
   fallback.
 - Re-run setup with an admitted current-source pure-Simple compiler and require
   a clean manifest plus independent replay of every release proof root.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

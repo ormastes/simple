@@ -1,5 +1,4 @@
 # FV2 nanoda closed Nat-literal gap
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -64,6 +63,3 @@ Choose and review one sound route:
 
 Until then, the six roots remain `model_proven`/replay-rejected rather than
 `artifact_verified`.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

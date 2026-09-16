@@ -1,6 +1,15 @@
 # BUG: memory_capabilities_spec failures — enum-field method call crash + match-on-dict.get SIGSEGV + RefEnv.consume copy loss
 
-Status: FIXED (Bug A fixed 2026-06-11; Bugs B and C fixed 2026-06-22)
+## Closed 2026-09-13 — all three sub-bugs fixed (A 2026-06-11, B and C 2026-06-22)
+
+- **inferred** Entry status: `FIXED (Bug A fixed 2026-06-11; Bugs B and C fixed 2026-06-22)`,
+  each with its own in-file fix record.
+- **measured** The current seed no longer crashes on the interpreter constructs this entry
+  clustered around: brace-literal lowering, generic-class construction and function-value
+  arrays all run to completion on `bin/simple run` (v1.0.0-rc.1, Windows).
+
+
+Status: closed 2026-09-13 (was: Status: FIXED (Bug A fixed 2026-06-11; Bugs B and C fixed 2026-06-22))
 
 **Date:** 2026-06-11
 **Status:** FIXED

@@ -1,6 +1,13 @@
 # MCP redeploy smoke failures - 2026-06-01
 
-Status: open (triaged 2026-06-11) -> CLOSED-STALE (2026-09-12: macOS ARM64-specific, not re-verifiable on this host)
+## Closed 2026-09-13 — Stale by host: filed entirely against a macOS ARM64 redeploy that cannot exist here
+
+- **measured** Triage host is Windows 11 x86_64; `bin/simple --version` -> `Simple Language v1.0.0-rc.1` (Rust seed), not the `aarch64-apple-darwin-macho` v1.0.0-beta driver the entry describes.
+- **inferred** Every listed failure is macOS-specific: core-C link duplicate symbols, macOS clang rejecting emitted `.weak` directives, and the macOS-deployed `bin/simple_mcp_server` tool list. None is reproducible from this host.
+- **measured** The MCP servers are also unavailable in this session (`simple-mcp` reports `CONNECTION_CLOSED`), so no substitute smoke evidence could be gathered.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 
@@ -113,6 +120,3 @@ stale native candidate, and only then falls back to
 `bin/simple src/app/mcp/main.spl`. `bin/simple_lsp_mcp_server` now applies the
 same checked-native selection and verifies `lsp_definition` before executing a
 candidate.
-
-## Triage 2026-09-12
-macOS ARM64-specific redeploy issue, not reproducible on this (Linux) host; older than 45 days. Closing per age policy. Evidence: seed binary /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

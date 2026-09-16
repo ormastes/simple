@@ -1,6 +1,19 @@
 # BUG (tracking): gc/nogc memory audit — consolidated open findings (2026-06-11)
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Not closed 2026-09-13 — tracking list, at least one listed item still reproduces
+
+- **measured** Item 7 is still true: neither `src/lib/common/js/engine/vm_object_store.spl`
+  nor `src/lib/nogc_sync_mut/js/engine/vm_object_store.spl` defines a `delete_object`;
+  dead JS object rows still accumulate.
+- **measured** Item 4's port target exists and is live —
+  `src/compiler/35.semantics/gc_boundary_check.spl` is present — but the seed-side port it
+  asks for is a `src/compiler_rust` edit, off limits during the running bootstrap.
+- **inferred** Items 1-2 (no GC in compiled programs; boundary enforced only in lint) are
+  architecture decisions, not defects that can be verified fixed.
+- Left OPEN by design: this is a tracking list whose items close individually.
+
+
+Status: OPEN (tracking list; items close individually)
 
 **Date:** 2026-06-11
 **Status:** OPEN (tracking list; items close individually)
@@ -54,6 +67,3 @@ Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with
     structural fix (true nogc GPU layer or reclassification) is open.
 13. **INFO — resource_tracker** is wired only to test-runner metrics; no production
     io/net/http/database code registers handles.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no repro that ran conclusively within the triage budget; closed stale per the standing 'too old -> close' decision. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

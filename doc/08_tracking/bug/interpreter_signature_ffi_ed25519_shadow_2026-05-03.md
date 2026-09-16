@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: FIXED 2026-05-19 — renamed `signature_sffi.ed25519_sign` → `ed25519_sign_pkcs8`; updated all callers
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Interpreter: signature_ffi.ed25519_sign shadows os.crypto.ed25519.ed25519_sign (arity conflict)
 
 Status: FIXED 2026-05-19 — renamed `signature_sffi.ed25519_sign` → `ed25519_sign_pkcs8`; updated all callers

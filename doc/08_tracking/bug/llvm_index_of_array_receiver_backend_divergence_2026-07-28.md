@@ -1,6 +1,44 @@
 # Backend divergence: `index_of` routes to a different runtime symbol under LLVM than under Cranelift/JIT
 
-- **Status:** OPEN
+## Closed 2026-09-13 — fixed at source; both LLVM tables now emit the polymorphic symbol
+
+**Evidence class: inferred from source, NOT measured.** Reproducing this
+needs an LLVM native build, which was not run — a bootstrap was in progress
+and no self-hosted binary is deployed on this host. The routing table this
+entry pins down is, however, checkable directly, and it is the whole content
+of the bug.
+
+The entry's own routing table says the defect is that the two LLVM
+builtin-method tables emit `rt_string_find` (string-only, returns the -1
+mismatch sentinel for an array receiver) where Cranelift/JIT emits the
+receiver-polymorphic `rt_index_of`. At HEAD both LLVM sites emit
+`rt_index_of`:
+
+```
+compiler/src/codegen/llvm/emitter.rs:361     "index_of" => Some("rt_index_of"),
+compiler/src/codegen/llvm/functions.rs:2907  "index_of" => Some("rt_index_of"),
+compiler/src/codegen/instr/calls.rs:3671     "index_of" => Some("rt_index_of"),
+```
+
+matching the Cranelift/JIT route named in the entry. The only remaining
+`rt_string_find` route for this method is receiver-GATED, which is the
+behaviour the entry asks for rather than the bug it reports:
+
+```
+compiler/src/codegen/llvm/functions.rs:3425
+  ("String" | "string" | "str" | "text", "find" | "find_str" | "index_of")
+      => Some("rt_string_find"),
+```
+
+A regression test for exactly this now exists in-tree —
+`compiler/src/codegen/llvm/emitter.rs:2434`:
+`assert_eq!(LlvmEmitter::runtime_method_name("index_of"), Some("rt_index_of"));`
+— so the divergence is pinned, not merely repaired. That test was not
+executed here (running `cargo test` would contend with the in-progress
+bootstrap); anyone with an idle tree can confirm with
+`cargo test -p simple-compiler runtime_method_name`.
+
+- **Status:** OPEN — CLOSED 2026-09-13 (see top section)
 - **Filed:** 2026-07-28
 - **Class:** wrong-answer (silent), backend divergence
 - **Base revision:** origin/main `b410e53a7a2`

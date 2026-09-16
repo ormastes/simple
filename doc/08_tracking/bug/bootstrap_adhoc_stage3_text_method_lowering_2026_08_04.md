@@ -1,5 +1,4 @@
 # Ad-hoc bootstrap tool blocked by Stage3 text/array MIR method lowering
-**Status:** OPEN (unverified 2026-09-12)
 
 ## Status
 
@@ -56,6 +55,3 @@ without producing a replacement full compiler, so no newer admissible producer
 is available in this workspace. Do not retry the same Stage3 binary; resume
 only after its MIR receiver-method crash is fixed or a newer verified producer
 exists.
-
-## Triage 2026-09-12
-Rule D: record postdates 2026-07-29 and has no cheap repro reachable within budget; left open with an explicit unverified status line.

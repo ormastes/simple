@@ -1,6 +1,11 @@
 # simple-driver cargo test linker bus error
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — stale by host: a resource/toolchain failure on a Linux box that no longer exists
+- **inferred**: every symptom is host state, not repo state — `collect2: ld terminated with signal 7 [Bus error]` from `rust-lld`/`cc` while linking many `simple-driver` test binaries, i.e. memory/IO pressure on that specific machine. No `src/` defect is implicated and the entry proposes no code change.
+- **inferred**: the toolchain it ran against is gone — the repo has since pinned LLVM 23.1.0 via `scripts/setup/llvm-toolchain-env.shs` (.claude/rules/commands.md), and this host is Windows/MSVC with no link path of that shape.
+- **inferred**: deliberately not re-run — `src/compiler_rust/**` is off-limits this session (concurrent bootstrap), and a `cargo test` link storm is exactly the unattended step the entry itself advises against.
+
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 Severity: P2 resource/toolchain
 Date: 2026-06-27
 
@@ -29,6 +34,3 @@ Filtered Rust tests should either avoid linking unrelated test binaries or fail 
 - Prefer `CARGO_BUILD_JOBS=1 cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --lib` for compile verification of driver-library changes.
 - Investigate whether `simple-driver` integration tests can be split or filtered to avoid linking all heavy test binaries for a single unit-test filter.
 - Capture host memory and linker parallelism settings before retrying full Rust test linking.
-
-## Triage 2026-09-12
-Rule C: record predates 2026-07-29 (>=45 days) and carries no short (<=3 min) repro; closed stale per the standing triage decision. Binary identity (not run, no repro to verify): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

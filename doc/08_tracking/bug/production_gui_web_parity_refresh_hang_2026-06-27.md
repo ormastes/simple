@@ -1,5 +1,10 @@
 # Production GUI/Web Parity Refresh Hang
 
+## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
+- **inferred**: this entry cites no backticked product paths, so a path-existence stale test does not apply; nothing indicates the code it describes was removed.
+- **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
+- **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
+
 - Date: 2026-06-27
 - Status: mitigated; paint/text parity still open
 - Area: production GUI/web renderer parity evidence

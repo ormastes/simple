@@ -1,7 +1,5 @@
 # X25519MLKEM768 Vulkan NTT coefficient mismatch — root-caused: negative-operand `%` on the NVIDIA Vulkan compute path
 
-**Status:** OPEN (unverified 2026-09-12)
-
 Date: 2026-08-05
 Worktree: `/home/ormastes/dev/pub/simple/.claude/worktrees/x25519-paired-timing`
 Relates to: `x25519mlkem768_vulkan_spirv_artifact_missing_2026-08-05.md` (same
@@ -187,7 +185,3 @@ forward and inverse.
   worktree, not committed)
 - `build/evidence/x25519mlkem768/vulkan/x25519mlkem768_ntt_forward.spv`,
   `..._inverse.spv` (freshly built, gitignored, not committed)
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

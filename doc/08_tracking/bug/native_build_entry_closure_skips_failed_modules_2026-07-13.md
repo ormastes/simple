@@ -1,7 +1,5 @@
 # Bug: native-build entry closure skips failed semantic dependencies
 
-**Status:** CLOSED-STALE (2026-09-12: no parseable status and no cheap repro in the record; reopen with a fresh repro against the current seed)
-
 ## Status
 
 Reported dotted-import resolution, parse, and HIR-skip path source-fixed; fresh
@@ -64,7 +62,3 @@ no Rust-seed result is substituted.
 The next source fix must distinguish valid single-segment module imports from
 scanner false positives and fail unresolved required modules closed. Do not
 remove the skip while another agent owns the active driver/bootstrap rebuild.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

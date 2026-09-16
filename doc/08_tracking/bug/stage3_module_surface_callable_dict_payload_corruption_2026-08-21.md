@@ -1,7 +1,5 @@
 # Stage-3 ModuleSurface callable dictionary payload corruption (2026-08-21)
 
-**Status:** OPEN (unverified 2026-09-12)
-
 ## Status
 
 Callable ownership fix verified through all 664 Stage-3 surface parses. The
@@ -56,7 +54,3 @@ the existing glob/module-route meaning.
 Callable ownership is verified, but the broader bootstrap remains blocked by
 the primary-import owner above. No further bootstrap is permitted in this
 bounded session.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

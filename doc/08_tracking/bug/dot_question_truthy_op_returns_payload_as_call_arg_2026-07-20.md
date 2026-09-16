@@ -1,7 +1,61 @@
 # `.?` truthy-check returns the unwrapped payload (not `true`) when passed directly as a `bool`-typed call argument
 
+## Closed 2026-09-13 — fixed on the lane this entry names (measured); a JIT-lane divergence split out
+
+Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`
+(Simple Language v1.0.1-beta.1, 39,267,840 bytes, sha256 prefix `1b62a1a42755774fc087`,
+built 2026-09-13 on this host). Windows 11 / Git Bash, default `run` lane
+(seed JIT with interpreter fallback). This is the **Rust bootstrap seed**, not a
+deployed pure-Simple self-hosted binary — the self-hosted lane remains unverified
+on this host.
+
+This entry is filed against the evaluator `bin/simple test` uses — the
+tree-walk interpreter — so that lane is the one that decides it.
+
+```spl
+fn check(condition: bool) -> text:
+    if condition == true:
+        "EQ-true"
+    else:
+        "NEQ-true: {condition}"
+
+fn get(f: bool) -> text?:
+    if f:
+        return "payload"
+    nil
+
+fn main():
+    print(check(get(true).?))
+    print(check(get(false).?))
+```
+
+Tree-walk lane (`SIMPLE_EXECUTION_MODE=interpreter run`):
+
+```
+EQ-true
+NEQ-true: false
+```
+
+The `bool`-typed parameter receives a real boolean — `true` for a present
+Option, `false` for `nil` — passed **directly** as a call argument with no
+intermediate `val`, which is the exact shape this entry says was broken. The
+reported symptom (the unwrapped payload — a `Bug` struct, a `text` — arriving
+where a `bool` was expected) does not reproduce (measured).
+
+Recorded rather than lost: the **seed JIT** lane is now wrong on the same
+program in a different way — `NEQ-true: <special:65>` for the Some case and
+`NEQ-true: error` for the nil case, and with a bare `if condition:` it treats
+`nil.?` as truthy and takes the wrong branch. That is a distinct defect on a
+lane this entry does not cover, so it is filed separately:
+
+`doc/08_tracking/bug/jit_dot_question_as_bool_call_arg_yields_special_value_2026-09-13.md`
+
+The spec-level workaround this entry describes can be removed for the
+tree-walk lane, but not for anything that runs through the JIT lane until the
+split-out entry is fixed.
+
 - **Date:** 2026-07-20
-- **Status:** open (worked around at the spec level, not root-fixed)
+- **Status:** open (worked around at the spec level, not root-fixed) — CLOSED 2026-09-13 (see top section)
 - **Area:** interpreter evaluation of the `.?` operator (`.? over is_* predicates`
   is the documented idiom per `.claude/rules/language.md`), under
   `bin/simple test` (SSpec evaluator).

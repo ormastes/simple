@@ -1,8 +1,14 @@
 # JIT: string method call on a local/global VARIABLE receiver returns empty/garbage
 
+## Closed 2026-09-13 — Already fixed; string methods on variable receivers return correct values
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows, default Cranelift JIT lane): `val T = "ABCDEF"; print T.char_at(0)` → `A`; `print "{T.length()}"` → `6`; a module-level `val TABLE: text = "ABCDEF"; TABLE.char_at(1)` → `B`. No empty string, no `<value:0xffff…>`, no `-1`.
+- **inferred**: matches the entry's own 2026-08-17 re-verification and the named fix commit `4802c92768c` in the parser postfix-call disambiguation; the deployed Windows seed carries that fix.
+- Caveat: exercised through `bin/simple run` (JIT) only; `--native` AOT was not re-run on this host.
+
 - **Date:** 2026-06-13
 - **Severity:** P1 (silent wrong result in compiled/JIT code; correct in interpreter)
-- Status: FIXED
+- Status: CLOSED 2026-09-13 (fixed; re-verified by execution)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
   currently-deployed seed binary (`bin/release/x86_64-unknown-linux-gnu/simple`,
   built 2026-08-09). Root cause was a Rust-seed **parser** heuristic (not MIR

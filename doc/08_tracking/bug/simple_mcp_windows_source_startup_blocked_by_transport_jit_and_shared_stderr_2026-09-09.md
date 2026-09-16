@@ -65,3 +65,40 @@ module, which confirms the dependency boundary as the likely code fix.
 - The canonical Stage 2 trust-root attempt correctly failed closed when sparse
   policy/composition authorities were absent; no untrusted binary was used for
   release verification.
+
+## Verdict on `simple_mcp_server.exe.disabled` (measured 2026-09-13)
+
+Question asked: should the disabled April artifact be re-enabled (renamed back
+to `.exe`) or rebuilt? **Rebuilt. Do not re-enable it.**
+
+Measured directly on the artifact
+(`bin/release/x86_64-pc-windows-msvc/simple_mcp_server.exe.disabled`,
+dated 2026-04-23, 2,657,280 bytes):
+
+| probe | result |
+|---|---|
+| `--version` under a 30s timeout | rc=124 (timed out), **no output at all** |
+| MCP `initialize` frame on stdin, 30s timeout | no bytes on stdout |
+
+It does not answer `--version`, which is the cheapest possible liveness probe,
+so it cannot answer a handshake either. Renaming it to `.exe` would make the
+`.cmd` prefer a **hanging** binary over the slow-but-working source fallback —
+strictly worse than the present state, and it would hang Codex/Claude MCP
+startup rather than merely making it slow.
+
+Two independent reasons a rebuild is required rather than a rename:
+
+1. It is a hung binary, per the measurement above.
+2. Even a working artifact would still be rejected by the generated sh wrapper:
+   `native_hash_is_valid` requires a `<binary>.sha256` sidecar and **no
+   `.sha256` sidecar exists anywhere in
+   `bin/release/x86_64-pc-windows-msvc/`**. That is the reason the Jun-1
+   `simple_lsp_mcp_server.exe` in the same directory is also skipped: it is
+   host-compatible (verified PE, `simple_host_executable_compatible` returns
+   true) and is named in the candidate list, and is rejected purely for the
+   missing sidecar. A rebuild must therefore emit the sidecar alongside the
+   binary.
+
+The file is deliberately left in place, renamed to nothing and deleted by
+nothing: it is the only record of what the April artifact was, and deleting it
+would not produce a working server.

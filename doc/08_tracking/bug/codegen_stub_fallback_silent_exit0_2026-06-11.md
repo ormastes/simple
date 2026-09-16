@@ -1,6 +1,15 @@
 # BUG: [CODEGEN-STUB-FALLBACK] silently replaces functions with empty stubs and exits 0
 
-Status: FIXED (2026-06-11)
+## Closed 2026-09-13 — already fixed and re-verified 2026-08-09 in-entry
+
+- **inferred** Entry records `FIXED (2026-06-11)` and an explicit 2026-08-09
+  re-verification of the `SIMPLE_ALLOW_STUB_FALLBACK` gate.
+- **measured** A deliberately unbuildable native-build on this host exits **1** with a
+  real diagnostic (`unknown extern function: rt_env_vars`), not a silent exit 0 — the
+  exact failure mode this entry filed.
+
+
+Status: closed 2026-09-13 (was: Status: FIXED (2026-06-11))
 
 **Date:** 2026-06-11
 **Status:** FIXED — re-verified 2026-08-09: `SIMPLE_ALLOW_STUB_FALLBACK` /

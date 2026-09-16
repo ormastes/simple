@@ -1,5 +1,16 @@
 # browser_renderer_spec — 22 residual failures (sequence-dependent + :has(> ) direct-child)
 
+## Not closed 2026-09-13 — still open; re-verification blocked on this host
+
+- **measured** `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`
+  (Rust seed v1.0.0-rc.1, Windows) ends `reason=outer-bound-timeout budget_ms=930000`,
+  `executed=1 passed=0 failed=1 timeout=1` — the 98-test spec cannot complete here,
+  so the 76/22 split can neither be confirmed nor refuted.
+- **inferred** The `:has(> .badge)` cluster is a source-level defect in the renderer,
+  untouched by anything since; nothing in the tree indicates it was fixed.
+- Left OPEN: needs a Linux host where the spec finishes inside the runner budget.
+
+
 Date: 2026-06-11
 Status: open
 Owner: gui-render-watch lane (gpu-backend-dx-harden session)
@@ -48,6 +59,3 @@ Note: repro currently blocked by the stage4 deploy seed gap — see
 2. Find the cross-test state: render the same fixture twice in one process
    and diff pixels; suspect module-level memoization in the fallback path.
 3. Re-bisect the sequence-dependent group after 1-2 land.
-
-## Triage 2026-09-12
-Rule B: re-ran `bin/simple test test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl` on the deployed seed; it still FAILs, matching the recorded defect. Status word left as-is. Binary: /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

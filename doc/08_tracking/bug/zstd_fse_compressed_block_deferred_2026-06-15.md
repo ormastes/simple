@@ -1,5 +1,12 @@
 # zstd_fse_compressed_block_deferred_2026-06-15
 
+## Triage 2026-09-13 — STILL OPEN: the deferral is still live
+- **measured** — `src/lib/common/compress/typed/zstd_typed.spl:302` still returns
+  `ZstdDecodeResult(ok: false, ..., error: "compressed blocks not supported (FSE deferred)")`
+  — the exact behaviour this entry defers.
+- **inferred** — an intentional scope boundary, not a defect; it closes when FSE decode
+  lands. Left OPEN.
+
 **Status:** Deferred (not a bug — intentional scope boundary)
 **Filed:** 2026-06-15
 **Component:** `src/lib/common/compress/typed/zstd_typed.spl`

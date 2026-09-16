@@ -1,7 +1,5 @@
 # `str_char_at` Unicode correctness has measurable ASCII overhead
 
-**Status:** OPEN (unverified 2026-09-12)
-
 ## Status
 
 Open optimization follow-up; correctness fix retained.
@@ -31,7 +29,3 @@ intrinsic that uses cached ASCII metadata without an extra FFI round trip. Keep
 the scalar reference as the semantic oracle. Acceptance requires matched-host
 latency, allocation bytes/count, and peak/steady RSS evidence; no speedup may
 trade for a memory regression outside the calibrated gate.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).

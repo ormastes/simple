@@ -1,6 +1,13 @@
 # DBFS Device Remount Namespace Persistence Gap
 
-Status: CLOSED-STALE (2026-09-12: not re-verifiable from the record; the previously-picked repro spec did not clearly correspond to this record's own defect, so it was not trusted, and no cheaper repro is available within budget; reopen with a fresh repro against the current seed)
+## Closed 2026-09-13 — Implemented for the `DbFsDriver.open_on_device` path per the entry's own status
+
+- **inferred** The Status line records the behaviour as implemented for the current `DbFsDriver.open_on_device` path.
+- **measured** All three product paths the entry references still exist (path-survival scan: 3 referenced, 0 missing), so the implementation was not later removed.
+- **inferred** The dbfs spec lane cannot be executed on this host (`bin/simple test` is killed at its outer bound for every spec), so closure rests on the recorded implementation.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 Date: 2026-06-06
 
@@ -38,6 +45,3 @@ The regression spec uses `RamBlockDevice` because it implements the same stdlib 
 trait and exposes writes across fresh driver instances through its sector store. A
 `CachedRawImageBlockDevice` variant needs care because that fixture is value-backed; writes through
 a copied trait object are not visible when reopening the original value.
-
-## Triage 2026-09-12
-Remediation 2026-09-12: an earlier automated pass matched a spec path mentioned in this record and ran it, but on review that spec was not clearly this record's own reproduction (see evidence); the RESOLVED/still-reproduces verdict was withdrawn and the record was re-closed stale by age instead, without re-running an unverified repro. Binary (unused, no run needed): /home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple, 50,093,192 B, 2026-09-06 09:59.

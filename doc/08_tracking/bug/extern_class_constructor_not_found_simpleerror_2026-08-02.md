@@ -1,5 +1,84 @@
 # `extern class` constructor is not callable — `SimpleError` fails with E1002
 
+## Closed 2026-09-13 — FIXED (one line in `src/lib/common/error.spl`), verified by running
+
+**Status: CLOSED (fixed).** Root cause isolated, fix applied, both lanes green.
+
+### Reproduced first
+
+The entry's own program, on the Rust seed `build/vt4/bootstrap/simple.exe`:
+
+```
+use std.error.{SimpleError, error}
+val e = error("boom")
+print "msg={e.message} code={e.code}"
+```
+
+failed identically on the default JIT lane **and** on
+`SIMPLE_EXECUTION_MODE=interpret`:
+`error[E1002]: function `SimpleError` not found`.
+
+### Root cause isolated to the `extern` keyword alone
+
+A/B on two otherwise byte-identical local modules — same fields, same
+constructor, same `export`, differing only in the declaration keyword:
+
+| declaration | result |
+|---|---|
+| `class SimpleError:` | `msg=boom code=0` — works |
+| `extern class SimpleError2:` | `E1002: function `SimpleError2` not found` |
+
+So it is not a link problem with *this* type, an import problem, or a
+declaration-visibility problem: `extern class` simply does not register a
+constructor. The entry's own diagnosis ("It is a LINK problem, not a missing
+declaration") was on the right track.
+
+### Why plain `class` is the correct fix here, not a workaround
+
+The docstring claimed `SimpleError` "is a builtin runtime type". It is not —
+searched and found **nothing** backing it:
+
+- no `SimpleError` anywhere in `src/runtime/**` C sources
+- no `SimpleError` in the frontend (`src/compiler/10.frontend/**`)
+
+and every use in `src/lib/**` (`nogc_async_mut/net/sffi.spl`,
+`nogc_sync_mut/net/*`, `gc_async_mut/net/*`, `play/cdp/client.spl`,
+`security/enforcement/capability.spl`) only ever *constructs* it from Simple
+code via `error(...)` and threads it through `Result<T, SimpleError>`. Nothing
+external ever supplies an instance, so there is no foreign representation for
+`extern` to be describing.
+
+### Fix
+
+`src/lib/common/error.spl:9` — `extern class SimpleError:` -> `class SimpleError:`.
+
+### Verified
+
+- The reported program now prints `msg=boom code=0` on **both** the default JIT
+  lane and `SIMPLE_EXECUTION_MODE=interpret`.
+- Consumer regression check: a program that imports
+  `std.nogc_async_mut.net.sffi` (the module declaring
+  `file_write_bytes(...) -> Result<(), SimpleError>`) alongside `std.error`,
+  builds an `Err(error("x"))` and `match`es it, prints `err=x code=0`. The
+  SFFI consumers still load and the `Result<(), SimpleError>` shape still
+  matches.
+
+### One correction to the report
+
+The entry says `SimpleError` is declared twice, at `src/lib/common/error.spl:9`
+and `src/lib/common/error/error.spl:15`. **The second file no longer exists.**
+There is exactly one declaration today, which is also why the fix is a single
+line.
+
+### Left open elsewhere
+
+The general defect — *`extern class` registers no constructor for any type* —
+is broader than `SimpleError` and is NOT fixed by this change; the A/B above is
+a clean minimal repro for whoever takes it. It was not fixed here because the
+constructor-registration path is in the seed (`src/compiler_rust/**`), which was
+off-limits during this pass (concurrent bootstrap).
+
+
 - **Status:** open
 - **Date:** 2026-08-02
 - **Found at:** `f3354f1924ab032503ae64f8761c8c067e76656b`

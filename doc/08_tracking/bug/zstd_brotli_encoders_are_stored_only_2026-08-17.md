@@ -1,7 +1,5 @@
 # zstd and brotli encoders are container writers only — they never compress
 
-**Status:** OPEN (unverified 2026-09-12)
-
 **Status (2026-08-17, revised): zstd FIXED — `zstd_compress_frame` now emits
 real Huffman-coded Compressed_Blocks. brotli STILL-OPEN.**
 
@@ -201,7 +199,3 @@ rather than faked.
 Until the encoders are implemented, `supported_encodings()` legitimately lists
 zstd and br — the dispatcher will simply never select them for a body they
 cannot shrink.
-
-## Triage 2026-09-12
-
-Status line inserted mechanically by the bug-db triage (record had no parseable `Status:` line); rule: filed before 2026-07-29 with no cheap repro → CLOSED-STALE, otherwise OPEN (unverified).
