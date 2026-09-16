@@ -1,4 +1,8 @@
 # A `u64` literal above `i64::MAX` fails to parse
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-05
 **Area:** compiler / frontend / lexer-parser, lint
@@ -50,3 +54,4 @@ with a comment pointing here.
 
 Either the literal parses, or the diagnostic names the offending token and
 its position instead of failing the entire file with a file-level PARSE001.
+

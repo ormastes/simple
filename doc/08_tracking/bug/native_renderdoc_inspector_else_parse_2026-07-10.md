@@ -1,4 +1,8 @@
 # Native RenderDoc Inspector `Else` Parse Failure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -37,3 +41,4 @@ error: compile failed: parse: in "src/app/test/renderdoc_replay_inspect.spl": Un
 - `parse_renderdoc_capture_xml` and `inspect_renderdoc_capture` are implemented in pure Simple.
 - The real repo RenderDoc 1.44 CLI successfully converts the canonical Vulkan `.rdc` to XML containing driver, chunks, buffers, shaders, pipelines, and dispatch actions.
 - Native unit execution of the inspector remains blocked; it is not accepted as verification evidence.
+

@@ -1,4 +1,9 @@
 # Native: module-level `var x = false` is garbage-truthy at startup
+## Closed 2026-09-16 — ...it_flag_value()` read-only getters. ## Fix direction (hypothesis — verify against codegen)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Severity:** P1
 **Date:** 2026-06-13
@@ -93,3 +98,4 @@ native entry-closure builds; bool literal may be dropped or mis-sized.
 - **measured**: the reported lane cannot run here. `bin/simple native-build --entry flag.spl --output flagbin` fails before producing a binary: `error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated.`
 - **inferred**: the original report used `--runtime-bundle core-c-bootstrap` on Linux. With no working native-build and no self-hosted binary on this host, neither reproduction nor clearance is possible.
 - Verdict: OPEN — unverified, not disproven. Needs a Linux native-build lane.
+

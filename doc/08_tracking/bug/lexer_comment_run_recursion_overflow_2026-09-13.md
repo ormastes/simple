@@ -1,4 +1,9 @@
 # CoreLexer recursed once per skipped line — a long comment banner killed the whole test runner
+## Closed 2026-09-16 — Status FIXED 2026-09-13; loop instead of recursion; RED-to-GREEN evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED (2026-09-13)
 - Binary: `/home/yoon/dev/cargo-fulltest/release/simple`, sha256 `4dfdf671742007d30210` (Rust seed built 2026-09-13 16:00)
@@ -110,3 +115,4 @@ No regression in the neighbouring lexer specs (run before and after):
 `lexer_snapshot_spec` reports `5 examples, 2 failures` both WITH and WITHOUT
 this change (verified by restoring `HEAD:lexer_struct.spl` and re-running) — a
 pre-existing red, not caused here.
+

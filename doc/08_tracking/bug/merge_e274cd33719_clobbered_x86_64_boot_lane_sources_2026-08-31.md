@@ -1,4 +1,9 @@
 # Merge e274cd33719 clobbered x86_64 SimpleOS boot-lane sources (2026-08-31)
+## Closed 2026-09-16 — sources restored from pre-merge blobs; both boot-lane gates PASS verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Class:** stale-snapshot clobber (same family as the sync-clobber incidents in
 `.claude/rules/vcs.md`). Commit `e274cd33719` "chore: merge all share-history
@@ -34,3 +39,4 @@ The merge touched 992 files; only the x86_64 boot-lane surfaces gated by the
 scripts above were audited and repaired. Other subtrees (e.g. `src/os/userlib`)
 may carry the same mixed forward/backward damage and deserve the same two-way
 (pre-merge vs post-merge) symbol-set diff before trusting either side.
+

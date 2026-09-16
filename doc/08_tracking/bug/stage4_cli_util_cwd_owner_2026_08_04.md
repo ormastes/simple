@@ -1,4 +1,8 @@
 # Stage 4 CLI utility cwd owner
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -30,3 +34,4 @@ fallback disabled, then exited 30 with empty output. Evidence is retained under
 `build/focused/stage4-cli-util/`. Its deliberate first form exited 41 because
 the repository root has no package manifest; the accepted contract checks the
 documented empty-manifest result plus quoted CSV behavior.
+

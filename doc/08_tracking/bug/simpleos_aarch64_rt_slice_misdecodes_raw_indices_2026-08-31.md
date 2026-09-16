@@ -1,4 +1,9 @@
 # SimpleOS aarch64 freestanding: `rt_slice` mis-decodes RAW indices that are multiples of 8
+## Closed 2026-09-16 — rt_slice fix verified in-guest (BEFORE/AFTER serial); defect 1 confirmed FIXED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-31
 Lane: aarch64 in-guest toolchain components (EDK2/AAVMF pflash -> BOOTAA64.EFI)
@@ -157,3 +162,4 @@ byte-identically red on **x86_64**, whose `rt_slice` was already correct
 Two freestanding runtimes with *different* and independently-correct slice ABIs
 failing identically means the defect is not in either runtime's index handling.
 It needs its own investigation, upstream of the arch layer.
+

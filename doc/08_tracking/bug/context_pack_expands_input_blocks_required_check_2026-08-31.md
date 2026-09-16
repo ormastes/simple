@@ -1,4 +1,8 @@
 # Context-pack tool expands its input; its guard is orphaned; the pair blocks every PR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** OPEN — real product defect, currently unenforced
@@ -67,3 +71,4 @@ the presence of a label.
 
 Do not wire the guard before the tool is fixed: that trades an orphan-guard
 failure for a real-defect failure and leaves the repo just as blocked.
+

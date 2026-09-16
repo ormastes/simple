@@ -1,4 +1,9 @@
 # check-cpu-backend-artifacts.shs passes having verified nothing, and the fix blocks every push
+## Closed 2026-09-16 — Status: RESOLVED 2026-08-17; guard now verifies 6 real claims, before/after measured
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED 2026-08-17 — vacuity removed at the source, not reported.
 The guard now verifies 3 real compiler-independent claims on this host, so
@@ -183,3 +188,4 @@ path, is exactly the unverified-claim failure this campaign exists to stop.
   summary line would now see `status=PASS_WITH_SKIPS`.
 - **Whether the other 16 category-A guards in the census are stale-sensitive in
   practice** was not tested.
+

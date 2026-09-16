@@ -1,4 +1,9 @@
 # Browser Fetch redirect deadline reset
+## Closed 2026-09-16 — Source fix and SSpec implemented; runtime PASS blocked by separate parse failure
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -44,3 +49,4 @@ The retained standalone fixed pure Phase 2 docgen
 generated the mirrored manual as 1/1 complete with 0 stubs.
 The only remaining documentation-quality warning is the allowed 19-line
 recommendation (100+ suggested); it is not runtime evidence.
+

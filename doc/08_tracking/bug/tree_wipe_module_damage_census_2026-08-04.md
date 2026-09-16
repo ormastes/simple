@@ -1,4 +1,8 @@
 # Tree-wipe damage census — surviving modules destroyed or truncated
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-04  
 **Status:** OPEN (inventory complete; 3 of 39 truncations restored — 4 more
@@ -427,3 +431,4 @@ then split truncation from rewrite by novel-line fraction.
 ## Triage 2026-09-13
 
 This is an ongoing multi-session damage-recovery census (3/39 truncations restored, several more checked and found unrestorable), not a single actionable code bug. No new restoration work attempted this pass given the remaining shard size. Leaving OPEN as previously tracked.
+

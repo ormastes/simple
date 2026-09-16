@@ -1,4 +1,9 @@
 # Cross-engine differential: 29 of 150 cells disagree between interpreter and JIT
+## Closed 2026-09-16 — Status: RESOLVED; all 29 cells fixed, last one 2026-08-23 with regression fixture
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-17
 **Severity:** HIGH — silent wrong results, no diagnostic on any of them
@@ -227,3 +232,4 @@ radius:
 
     sh scripts/check/check-engine-differential.shs --quick
     SIMPLE_BIN=/path/to/fresh/simple sh scripts/check/check-engine-differential.shs
+

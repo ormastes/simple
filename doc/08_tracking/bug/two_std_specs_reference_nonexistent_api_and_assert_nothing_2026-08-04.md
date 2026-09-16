@@ -1,4 +1,8 @@
 # BUG: two `test/01_unit/std` specs are permanently red — one imports a class that does not exist, one asserts nothing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (architectural — blocked on owner decision, not a lane-fixable defect)
 **Re-verified:** 2026-08-10 — `bin/simple test test/01_unit/std/mock_simple_spec.spl`
@@ -125,3 +129,4 @@ Re-confirmed: no `class Mock` exists in `src/lib/` (only `MockFunction`/
 doc explicitly forbids the shortcut fix (repoint the import to `MockFunction`)
 as a false-green manufacture, and requires an owner decision (feature vs.
 delete) that a shard triage pass cannot make. No change made. Leaving OPEN.
+

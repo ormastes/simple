@@ -1,4 +1,8 @@
 # Multi-line trailing-`or` condition + inline `: return` body — known parser grammar limitation (re-encountered via a corrupt shared-WC edit, origin unaffected)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-30
 **Status:** CORRECTED same day — see "Correction" below. The parse failure
@@ -138,3 +142,4 @@ verify, and is left for whoever picks up the grammar-fix backlog item.
   not traced).
 - No code change made this pass (grammar fix not attempted — backlog item,
   not urgent given the existing workaround).
+

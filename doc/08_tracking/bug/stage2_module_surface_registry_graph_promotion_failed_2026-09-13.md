@@ -1,4 +1,8 @@
 # Stage 2 passes sanity and the struct receiver, then fails the Stage-3 route in `module_surfaces_promote`
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. scripts/check/check-bootstrap-stage2-struct-receiver.shs:134
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 - Status: **FIXED (2026-09-13, proven by BOOT-7)** — `592041db98a` removes the
   repeat-promote post-condition from `module_surface_promote_freeze_names`. The proof is
@@ -99,3 +103,4 @@ day by deleting the per-field verdict and restoring the guard-free
 `module_surface_promote_freeze_names`; the regression spec this record landed is
 green again and now also pins the array-field loop. See
 `stage2_positional_stage3_route_surface_promotion_composite_names_2026-09-13.md`.
+

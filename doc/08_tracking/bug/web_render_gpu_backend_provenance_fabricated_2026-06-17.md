@@ -1,4 +1,8 @@
 # Web-Render GPU Backend Provenance Fabricated - 2026-06-17
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: no GPU/Vulkan lane on this triage host
 - **measured** — the referenced sources still exist
@@ -93,3 +97,4 @@ asserts the lie.
 ## Related
 - `rt_vulkan_only_executes_under_classic_interpret_2026-06-17.md` (why GPU
   backends silently no-op outside the classic interpreter).
+

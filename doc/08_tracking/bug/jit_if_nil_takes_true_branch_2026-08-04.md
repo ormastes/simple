@@ -1,4 +1,8 @@
 # JIT: `if nil:` takes the TRUE branch — a nil condition is truthy under Cranelift, falsy under the interpreter (2026-08-04)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ARCHITECTURAL-OPEN (re-verified 2026-08-17, still reproduces, and
 the class is WIDER than this title says)
@@ -374,3 +378,4 @@ rather than worked around by reshuffling the spec's text.
 **Landing note:** the new spec exists only under `test/01_unit/`, with no
 `test/unit/` mirror, so `scripts/check/check-test-tree-divergence.shs` may want
 a baseline row when this lands.
+

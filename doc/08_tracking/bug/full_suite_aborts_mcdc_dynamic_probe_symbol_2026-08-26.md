@@ -1,4 +1,8 @@
 # A full-suite run aborts before executing anything: `variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found` (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. The original operator report says this was found in a clean worktree at
 `b2cbf73988f` with the 2026-08-26 01:16 deployed seed. No binary digest or retained worktree
@@ -302,3 +306,4 @@ discriminator; it is not about file count.
 
 Neither fix is landed here: both touch other sessions' active files, and blocker 2 needs an audit
 of how wide the two-registry gap is rather than a single symbol patched in isolation.
+

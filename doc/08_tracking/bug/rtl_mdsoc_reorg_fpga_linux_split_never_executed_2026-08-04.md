@@ -1,4 +1,8 @@
 # `#rtl-mdsoc-reorg` was specced TDD-red and never executed — 94 permanently-red examples per tree (2026-08-04)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -121,3 +125,4 @@ Sequenced follow-ups:
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: 94 permanently-red examples across a specced-but-unimplemented refactor programme, not a bounded bug fix. No change made.
+

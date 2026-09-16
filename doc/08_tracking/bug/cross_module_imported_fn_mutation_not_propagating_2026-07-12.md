@@ -1,4 +1,8 @@
 # Cross-module imported function mutation not propagating to caller's instance
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -117,3 +121,4 @@ branch).
 - `graphics_2d_showcase_gui.spl`'s local copy of `draw_showcase` and helpers is
   deleted and the cross-module import restored, and the client render path
   still produces a nonblank frame.
+

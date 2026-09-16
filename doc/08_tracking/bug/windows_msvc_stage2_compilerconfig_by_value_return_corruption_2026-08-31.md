@@ -1,4 +1,8 @@
 # Windows MSVC Stage 2: CompilerConfig/CompileOptions by-value struct transport corrupts fields non-deterministically
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** CONFIRMED (measured) as a Windows symptom; root cause identified and FIXED upstream in commit `35b22b6aedf1` (2026-08-31 18:34, landed on macOS lane) — Windows re-verification against a post-fix stage1 still outstanding, see "Session update 2026-08-31 (later)" below. Do not close without that re-run.
@@ -1206,3 +1210,4 @@ independent fix).
 but the underlying mechanism is now believed FIXED upstream, unverified on
 Windows.** Do not mark this doc resolved without a fresh Windows Stage 2 run
 against a post-35b22b6 stage1.
+

@@ -1,4 +1,9 @@
 # `green_task_error` is an exported API that can only ever return `""`
+## Closed 2026-09-16 — Status FIXED; self-report channel wired, two new specs added
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -91,3 +96,4 @@ The module header was updated in the same change as this report: it described
 three counters where the struct has five, and asserted that task errors are
 recorded as per-task death reasons, which §"The defect" above shows is not the
 case.
+

@@ -1,4 +1,8 @@
 # Modules/imports referenced by specs do not exist in src
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -27,3 +31,4 @@ Discovered by: test-wave agent B (spec triage)
 ## Unblock condition
 Per spec: restore the module, or port the spec to the replacement API /
 sanctioned import path with a reviewed mapping.
+

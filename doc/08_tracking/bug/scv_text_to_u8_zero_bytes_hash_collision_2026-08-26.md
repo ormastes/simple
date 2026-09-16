@@ -1,4 +1,9 @@
 # SCV: `scv_text_to_u8` returned all-zero bytes — every text-derived id collided by length (2026-08-26)
+## Closed 2026-09-16 — Status: FIXED in store.spl; separate seed defect tracked elsewhere
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED in `src/lib/scv/store.spl` (`scv_text_to_u8` now uses `text.bytes()`); the
 underlying seed defect is OPEN.
@@ -31,3 +36,4 @@ chunk id is always the digest of the bytes on disk (one digest path).
   other stdlib code using that idiom is silently wrong. Needs a runtime reproduce spec + fix.
 - Object ids in repositories created before this fix are length-collided; `fsck`/`rebuild-db` on
   such repos will report corruption. No migration written (SCV is pre-cutover).
+

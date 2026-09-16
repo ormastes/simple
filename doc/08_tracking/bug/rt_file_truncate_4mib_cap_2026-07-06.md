@@ -1,4 +1,8 @@
 # rt_file_truncate caps extend at 4 MiB via the self-hosted binary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-06
 **Area:** runtime, self-hosted interpreter extern marshalling, SimpleOS image build
@@ -89,3 +93,4 @@ Trace the `rt_file_truncate` extern signature/marshalling in the
 self-hosted interpreter, confirm where the length is clamped to 4 MiB,
 and widen it to the full 64-bit length the native `ftruncate`
 (`runtime_native.c:2644`) already accepts.
+

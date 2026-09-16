@@ -1,4 +1,8 @@
 # Pure backend @naked gaps: alloca suppression + E-NAKED validation seed-only; ~{memory} default delta
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-28 (HAL impl A Opus verification, D1/D2)
 **Status:** OPEN
@@ -26,3 +30,4 @@ Source: $SCRATCHPAD/hal/VERIFY_impl_A.md (commit 644292b2e6a).
 (readelf Addralign 4 vs 2). Decision needed: make @align p2align-semantics or
 require byte counts (`@align(4)`) in twins. Until decided, riscv twins must
 write the byte count explicitly. Source: $SCRATCHPAD/hal/VERIFY_batch1.md.
+

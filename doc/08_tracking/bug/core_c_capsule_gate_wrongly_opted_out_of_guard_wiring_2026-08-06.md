@@ -1,4 +1,9 @@
 # core-C capsule gate is opted out of guard wiring on a false rationale
+## Closed 2026-09-16 — Status: RESOLVED 2026-09-13; optout gone, check-guard-wiring passes
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED (2026-09-13) — `scripts/check/guard_wiring_optout.txt` no
   longer lists `build-core-c-bootstrap-runtime-capsule.shs`
@@ -72,3 +77,4 @@ Confirmed still present: `scripts/check/guard_wiring_optout.txt` still carries t
 ## Re-check 2026-09-13 (correction to the triage note above)
 
 Correction: `grep -n "build-core-c-bootstrap-runtime-capsule.shs" scripts/check/guard_wiring_optout.txt` returns NOTHING — the false exemption entry is gone from the file (removed by another lane between the 2026-08-17 verification and now; `guard_wiring_optout.txt` is 521 lines today). Whether the gate is now actually wired into a caller (the doc's required ordering: wire first, then remove) was not confirmed — `sh scripts/check/check-guard-wiring.shs` did not complete within a 60s budget in this pass, and only a comment (not a real invocation) references the script from `check-no-unresolved-runtime-symbols.shs`. This needs a follow-up run of `check-guard-wiring.shs` to completion to confirm whether removing the exemption without confirmed wiring left the gate genuinely unwired-and-unexempted (which would newly FAIL that check) or whether wiring already landed too.
+

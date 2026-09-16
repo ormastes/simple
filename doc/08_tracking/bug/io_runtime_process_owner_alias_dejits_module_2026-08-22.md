@@ -1,4 +1,8 @@
 # io_runtime process-owner aliases de-JIT the module
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -35,3 +39,4 @@ used path remains JIT-capable. Each declaration is explicitly unsafe-tagged and
 contracted, and each raw call is confined to one allocation-free lexical FFI
 scope. Remove those duplicates only after this bug has a regression test and
 the canonical-owner form remains JIT-compiled.
+

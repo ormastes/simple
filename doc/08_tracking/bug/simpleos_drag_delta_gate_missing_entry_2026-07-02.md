@@ -1,4 +1,8 @@
 # Bug: check-simpleos-wm-qmp-drag-delta-evidence.shs invokes a nonexistent entry file
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-02
 - **Severity:** medium (gate cannot run at all)
@@ -274,3 +278,4 @@ cannot reach a `pass` end-to-end on this host until the `app.io.cli_ops` /
   exercises the x86_64 SimpleOS LLVM linker instead of falling through the
   generic x86_64 Cranelift default. The environment override still wins for
   explicit Cranelift diagnostics.
+

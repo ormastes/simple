@@ -1,4 +1,9 @@
 # Bracket-slice byte-index survey — fix pass 2 (2026-07-29)
+## Closed 2026-09-16 — Fixes landed with PROVED evidence (convert_storage.spl, gdb_mi_parser x3 copies)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Batch 2, follow-up to `bracket_slice_fix_pass_1_2026-07-29.md` (`1bd388912f5`)
 and the harness root-cause (`9186d5daa73`). Per the harness finding,
@@ -182,3 +187,4 @@ Spec: `test/01_unit/lib/nogc_sync_mut/debug/remote/protocol/gdb_mi_parser_multib
 `pure/nn/serialization.spl`, `web_framework/session.spl`,
 `widget_eval.spl`, `mcp/fileio_json.spl` unchanged (no bug found, or
 already fixed elsewhere). No gate/budget files touched.
+

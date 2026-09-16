@@ -1,4 +1,8 @@
 # BUG: a `bool`-declared parameter accepts a non-bool silently — and the JIT corrupts it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-measured 2026-09-13 — still OPEN. Both halves live; the corruption now renders as `error`, and the lanes disagree three ways
 
@@ -233,3 +237,4 @@ have had `check(opt.?)` rewritten to `check(opt != nil)`, which is why those
 two files are green while the other 28 identical files are red. That workaround
 hid the defect rather than removing it, and it should be reverted once the real
 fix lands.
+

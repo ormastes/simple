@@ -1,4 +1,9 @@
 # `rt_process_spawn_async` always returns pid=-1 under JIT (`bin/simple run`)
+## Closed 2026-09-16 — Status FIXED 2026-07-31; fixed-vs-reverted rebuild proof, real pid under JIT
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED — one-line addition to `process_c_runtime_arg_indices` in
 `src/compiler_rust/compiler/src/codegen/instr/calls.rs`
@@ -245,3 +250,4 @@ SIMPLE_BIN=bin/release/x86_64-unknown-linux-gnu/simple
 SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BIN" run probe.spl   # PID=<real>
 SIMPLE_EXECUTION_MODE=jit "$SIMPLE_BIN" run probe.spl         # PID=-1
 ```
+

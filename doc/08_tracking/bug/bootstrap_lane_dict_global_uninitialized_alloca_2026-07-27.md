@@ -1,4 +1,8 @@
 # Bug: module-level Dict global lowers to uninitialized alloca in the stage-4 bootstrap lane
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-27
 **Status:** unconfirmed
@@ -85,3 +89,4 @@ runtime.
   working pattern for array-typed module globals (commit `952d2ca34d7`).
 - `src/compiler/20.hir/hir_lowering/module_registry.spl` — current
   array-based implementation (commit `797497d757bd`), post-workaround.
+

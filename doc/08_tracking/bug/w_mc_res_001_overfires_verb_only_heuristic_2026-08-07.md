@@ -1,4 +1,8 @@
 # W-MC-RES-001 over-fires ~208 findings; verb-only heuristic cannot separate handle acquires from value constructors
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. **Filed:** 2026-08-07. Rule: `W-MC-RES-001
 unwrapped_foreign_resource` (REQ-MC-023), implemented in
@@ -220,3 +224,4 @@ code change made in this pass.**
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: fixing a verb-only lint heuristic overfiring on ~208 findings needs a real disambiguation design (handle-acquire vs value-constructor), not a bounded fix. No change made.
+

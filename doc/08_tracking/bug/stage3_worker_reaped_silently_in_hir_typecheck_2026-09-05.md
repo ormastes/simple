@@ -1,4 +1,8 @@
 # Stage-3 worker dies silently in phase 3, and it is NOT an OOM
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — sole remaining Stage-3 blocker after the ZeroKind and import fixes
 **READ `## UPDATE 2` FIRST.** The cause is a **SIGSEGV** in the Stage-2 compiler.
@@ -532,3 +536,4 @@ but it is not the explanation for those deaths.
 
 Not changed here: the monitor is a shared resource guard and another session had
 a live run against it at the time of writing.
+

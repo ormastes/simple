@@ -1,4 +1,8 @@
 # Native: module-level `var s = ""` (text) global emits `global i64 <ptr>` → llc fails
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Severity:** P2
 **Date:** 2026-07-16
@@ -110,3 +114,4 @@ and cache directories stayed empty. Per the three-cycle/runaway guard, do not
 retry or start a full bootstrap in this lane; resume from a separately admitted
 self-hosted candidate and run only
 `NATIVE_PARITY_CASES=module_global_text_array_persistence`.
+

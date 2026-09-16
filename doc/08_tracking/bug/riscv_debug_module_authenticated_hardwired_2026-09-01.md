@@ -1,4 +1,8 @@
 # RISC-V debug module hard-wires `dmstatus.authenticated = 1` (no auth unit exists)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
 **Found by:** workstream F (`simple_riscv_production_dft_svap_plan.md` §2), independently re-verified by the parent session.
@@ -49,3 +53,4 @@ against exactly the current broken code.
 
 Tracked as gate 6.4 in `doc/03_plan/hardware/simple_riscv_production_dft_svap_plan.md`,
 landing ADVISORY and honestly RED.
+

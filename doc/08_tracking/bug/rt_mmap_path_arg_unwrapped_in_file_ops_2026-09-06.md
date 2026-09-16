@@ -1,4 +1,8 @@
 # `rt_mmap`'s path argument is the one unwrapped path site in `file_ops.spl`, falsifying PR #255's "every operation" claim
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06 · **Status:** RECORDED (measured, not fixed) · **Measured at:** `a12a19eb775`
 (worktree checkout of `origin/main`); reported at `4699194f81e`. No build was run.
@@ -87,3 +91,4 @@ doc/08_tracking/bug/` returns only the PR #255 record, so the call-site gap is u
   PR #255 corruption defect to one more call path; unwrapping the other 18 is a larger
   change than this record's evidence supports. The decision belongs to whoever resolves
   PR #255.
+

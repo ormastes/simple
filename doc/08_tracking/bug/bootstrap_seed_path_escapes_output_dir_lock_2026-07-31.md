@@ -1,4 +1,8 @@
 # Bootstrap lock is keyed on `--output`, but the seed path is not — concurrent bootstraps still collide
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** 2026-07-31, during a `--full-bootstrap --deploy` redeploy on a shared
 working copy with several other sessions active.
@@ -173,3 +177,4 @@ that dirties the tree under every one of them.
 
 Note step 2 succeeds in acquiring its own `${output_dir}.lock` — the guard does
 not fire, which is the point of this report.
+

@@ -1,4 +1,8 @@
 # Pure-Simple Default-Trait `is_empty` Link Gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -25,3 +29,4 @@ Native trait lowering must materialize reachable default method bodies or
 rewrite a default call through the concrete receiver implementation. Once that
 is verified for arrays, strings, Dicts, and custom trait implementors, these
 compatibility expressions may return to the standard API spelling.
+

@@ -1,4 +1,8 @@
 # SimpleOS signed catalog boot provisioning blocker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The fail-closed catalog population transaction now has an explicit pure-Simple
 owner. A loader-package adapter can consume the committed hosted safe-root
@@ -61,3 +65,4 @@ The original "no production input" blocker is narrowed, not closed:
 Authoritative narrow handoff:
 `doc/03_plan/agent_tasks/simpleos_combined_signed_catalog_boot.md` and
 `.spipe/simpleos_combined_signed_catalog_boot/state.md`.
+

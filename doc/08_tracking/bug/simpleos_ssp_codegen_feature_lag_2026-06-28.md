@@ -1,4 +1,9 @@
 # SimpleOS SSP (Stack-Smashing Protector) Codegen — Feature Lag
+## Closed 2026-09-16 — ...99-102), gated by an `ssp` flag resolved from `TargetPreset` (Hosted = on, Baremetal = off
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Triage note 2026-09-13 — left OPEN: needs a SimpleOS build/QEMU lane unavailable here
 - **measured**: the referenced product paths still exist, so there is no removed-code basis for a stale closure.
@@ -47,3 +52,4 @@ as the explicit deferred feature lag.
 - A spec under `test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl`
   asserts canary presence for the desktop preset and absence for an opted-out
   embedded preset.
+

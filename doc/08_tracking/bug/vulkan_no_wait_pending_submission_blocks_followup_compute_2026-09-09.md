@@ -1,4 +1,8 @@
 # Vulkan no-wait submission blocks the next compute command
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-09-09
@@ -79,3 +83,4 @@ Requirement options and the selected-capability design are recorded in:
 - `doc/02_requirements/nfr/vulkan_async_compute_submission_ring.md`
 - `doc/05_design/runtime/vulkan_async_compute_submission_ring.md`
 - `doc/03_plan/sys_test/vulkan_async_compute_submission_ring.md`
+

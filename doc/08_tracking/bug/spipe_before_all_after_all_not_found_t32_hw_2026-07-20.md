@@ -1,4 +1,8 @@
 # `before_all`/`after_all` unresolved when imported from `std.spipe` (t32_hw specs)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -61,3 +65,4 @@ No Rust seed / `src/compiler_rust` fix attempted (out of scope per triage
 guide — needs a rebuild). This doc is filed for follow-up; do not re-file for
 the same "function `before_all` not found" signature in other t32_hw specs —
 reference this doc instead.
+

@@ -1,4 +1,8 @@
 # Site 16: the Stage-2 candidate refuses a POSITIONAL entry — `PLUG-E-K1-POLICY: bootstrap backend composition admission failed`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: ROOT-CAUSED, fix landing (2026-09-13, macOS F72 lane) -- see "Root cause" at the end; the MIR-lowering suspect below is retracted
 - Area: `src/app/cli/bootstrap_main.spl` in-process native-build route / K1 static
@@ -294,3 +298,4 @@ value **in place**, which can corrupt any other operand fed by the same
 constant; the later one (`id_remap` / `requalify_enum_check_variant_ids`)
 inserts a **fresh** `ConstInt` per call site instead. The in-place mutator was
 removed during PR sync and only the fresh-`ConstInt` mechanism remains.
+

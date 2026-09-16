@@ -1,4 +1,8 @@
 # BUG: x86_64 freestanding — `rt_string_to_int` is a hardcoded stub returning 0
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open. Found 2026-07-12 while root-causing the SSH command-decode bug (Phase 2e).
@@ -31,3 +35,4 @@ negative/whitespace case.
 - `doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md` (sibling
   freestanding text-op corrections; §Status point 3 = the deep-stack `starts_with`
   bug, still open)
+

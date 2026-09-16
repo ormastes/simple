@@ -1,4 +1,9 @@
 # Bug: backend type_mapper composite-type strategy dispatch accesses
+## Closed 2026-09-16 — ... type `function` **Status:** FIXED 2026-08-09 — `InterpreterTypeMapper.map_struct` rewritt
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 `.kind` on a value of type `function`
 
 **Status:** FIXED 2026-08-09 — `InterpreterTypeMapper.map_struct` rewritten to
@@ -74,3 +79,4 @@ inside a nested call embedded in a string interpolation can bind to the
 wrong scope — is not otherwise characterized or fixed here; only this one
 call site is confirmed to hit it, and it has been rewritten to avoid the
 pattern rather than to exercise it.
+

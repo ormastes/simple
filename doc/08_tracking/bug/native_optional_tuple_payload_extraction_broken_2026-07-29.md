@@ -1,4 +1,8 @@
 # Native lane: optional-tuple payload extraction is broken in every consumption form
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ROOT-CAUSED and FIXED in the seed's HIR lowering (pending seed
 redeploy to take effect in the deployed binary).
@@ -128,3 +132,4 @@ this defect, not on the MQTT logic, which is correct in isolation.
 - Any module returning optional tuples that newly gains native compilation
   (e.g. by adding type annotations) is exposed; the interpreter fallback was
   masking this.
+

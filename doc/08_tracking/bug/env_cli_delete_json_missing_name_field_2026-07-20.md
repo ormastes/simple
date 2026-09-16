@@ -1,4 +1,8 @@
 # `env` app CLI: `delete --log-mode=json` output missing `"name"` field
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/env/main.spl` (`delete` subcommand, JSON log mode)
@@ -41,3 +45,4 @@ envelopes, this looks like a small, isolated formatting gap specific to the
 Spec left unmodified — the assertion matches the established `create`/
 `status` JSON contract in the same file; fixing this is a `src/app/env/main.spl`
 change, not a test change.
+

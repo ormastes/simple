@@ -1,4 +1,9 @@
 # Bracket-slice byte-index survey — fix pass 1 (2026-07-29)
+## Closed 2026-09-16 — Fixes landed with PROVED multi-byte evidence (string.spl, glob.spl mirrors)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Follow-up to `doc/08_tracking/bug/bracket_slice_byte_index_survey_2026-07-29.md`.
 Fixes the 4 files that survey flagged as "missed-HIGH" (matched the HIGH-risk
@@ -155,3 +160,4 @@ This doc + `test_harness_execution_divergence_2026-07-29.md` +
 `string_multibyte_spec.spl` + `glob_multibyte_spec.spl`. `number.spl` and
 `comment_extractor.spl` unchanged (no bug found). No gate/budget files
 touched.
+

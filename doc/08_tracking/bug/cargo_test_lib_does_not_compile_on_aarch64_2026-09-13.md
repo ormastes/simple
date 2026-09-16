@@ -1,4 +1,8 @@
 # `cargo test --lib -p simple-compiler` does not compile on aarch64 at `origin/main`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found: 2026-09-13, PERF-9, running the mandatory before/after seed test leg
@@ -48,3 +52,4 @@ identical).
 **Not committed on this lane.** It is PR #842's defect, not PERF-9's, and PERF-9
 applied it only as a disclosed, identical measurement patch to BOTH sides so the
 before/after comparison could run at all. It needs an owner.
+

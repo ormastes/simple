@@ -1,4 +1,8 @@
 # Native path: `.parse_f64()` and `.to_upper()` unresolved in MIR lowering
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** Medium (loud build failure, not silent-wrong; but a real
@@ -137,3 +141,4 @@ Specs (both green on Windows, engine parity verified interpreter vs
 cranelift-jit via `[engine-receipt]`):
 - `test/01_unit/compiler/mir/text_upper_chars_to_float_mir_lowering_spec.spl` (defect repro + empty-concat pin)
 - `test/01_unit/compiler/mir/text_number_method_mir_arm_census_spec.spl` (class generalization census)
+

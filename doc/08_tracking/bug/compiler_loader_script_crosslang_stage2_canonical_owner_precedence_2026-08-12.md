@@ -1,4 +1,8 @@
 # Stage2 canonical-owner precedence failures remain after cd0277
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -34,3 +38,4 @@ fail-closed behavior for unknown and non-struct carriers. Then run one fresh
 bounded Stage2 admission attempt and retain its exact exit, output absence or
 hash, and failure census. Do not claim performance or Stage4 evidence until
 Stage2 is emitted and admitted.
+

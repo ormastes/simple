@@ -1,4 +1,9 @@
 # Interpreter/compiler: .get(i) on module-level array vars fails with "unknown extern function: rt_args_count"
+## Closed 2026-09-16 — Status RESOLVED with per-engine execution evidence; regression gate spec landed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-04
 **Severity:** medium (silent-ish — semantic error at eval time, misleading message)
@@ -126,3 +131,4 @@ problem, and it is uniform across engines. No cross-reference defect applies.
 
 **Classification: ALREADY FIXED.** The RESOLVED status above stands, now backed
 by reproducible per-engine evidence rather than an unrecorded claim.
+

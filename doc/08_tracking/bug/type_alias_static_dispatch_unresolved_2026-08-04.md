@@ -1,4 +1,8 @@
 # `type X = Y` does not resolve as a static-call receiver — `X.new()` sees nil
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — architectural (needs a Rust-seed interpreter name-resolution
 change, out of scope per repo rules; re-confirmed 2026-08-10)
@@ -126,3 +130,4 @@ pure-Simple side, but the bug and its architectural blocker are unchanged.
 Record already states this is architectural, needing a Rust-seed interpreter
 name-resolution change, out of scope per repo rules, re-confirmed 2026-08-10.
 No change made.
+

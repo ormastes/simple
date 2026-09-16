@@ -1,4 +1,8 @@
 # native lane: a `text` element is DESTROYED at the STORE, not lost at the read
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: PARTIALLY FIXED. `a[i]`, `.first()`/`.last()` and `for x in a` are
   fixed for all four element types. **Nested `[[text]]` / `[[bool]]` remain
@@ -255,3 +259,4 @@ minutes and the run hit its time cap during the Stage 2 determinism re-check.
 
 wide `i64` (2^60), negative `i64`, `f64` 0.1, `Dict<text, text>`, plain `text`
 and `.len()`, `bool`, class-field `[text]`.
+

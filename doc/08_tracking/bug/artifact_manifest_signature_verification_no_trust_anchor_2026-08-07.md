@@ -1,4 +1,8 @@
 # `SimpleArtifactManifest.signature` has a real Ed25519 primitive available but NO trust-anchor/key-distribution infra to call it meaningfully
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
@@ -84,3 +88,4 @@ Not repaired here: `src/os/crypto/**` is explicitly out of scope for this lane.
 ## Triage 2026-09-13
 
 Confirmed still absent: `grep -c "trust_anchor\|manifest_verify_signature" src/os/kernel/loader/artifact_manifest.spl` returns 0. Implementing a trust-anchor/key-registry design plus a signature wire format is multi-step security-architecture work (the doc's own "Land, in order" list has 4 steps before wiring `ed25519_verify`), explicitly out of scope for `src/os/crypto/**` per the prior lane. Leaving OPEN, no code change made.
+

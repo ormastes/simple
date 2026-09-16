@@ -1,4 +1,8 @@
 # The `# @cover` gate reports 791 un-annotated legacy feature specs as test FAILURES
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (re-verified 2026-08-10, architectural — root cause unchanged)
 **Found:** 2026-08-04
@@ -113,3 +117,4 @@ Still a large-scale annotation backlog (791 files) plus a runner-reporting
 policy question (gate violations counted as failed tests vs. a separate
 verdict category) — architectural, not a shard-scale fix. No change made.
 Leaving OPEN.
+

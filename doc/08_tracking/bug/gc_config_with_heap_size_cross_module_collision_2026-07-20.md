@@ -1,4 +1,8 @@
 # `GcConfig.with_heap_size` unresolvable — one specific static method missing from an otherwise-working class, identical struct/impl defined in 3 sibling family modules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** interpreter class/impl registry — `struct GcConfig` +
@@ -98,3 +102,4 @@ picks this up.
 - Affected: `test/feature/lib/gc_parity/nogc_sync_mut_contract_spec.spl`
   (1 of 2 examples fails; the pointer-handle example in the same file
   passes cleanly).
+

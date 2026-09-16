@@ -1,4 +1,8 @@
 # Stage 4 cannot continue from an admitted resumed Stage 3
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -74,3 +78,4 @@ passed once with: `PASS: admitted Stage 4 resume is planner-bound, locked,
 immutable, collision-safe, and uses existing gates`. No admitted Stage-3
 artifact and planner receipt were present in this worktree, so the live Stage-4
 continuation was correctly not started.
+

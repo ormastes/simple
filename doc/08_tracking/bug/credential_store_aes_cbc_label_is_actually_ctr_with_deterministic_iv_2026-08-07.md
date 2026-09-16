@@ -1,4 +1,9 @@
 # Credential store claims "AES-256-CBC" but `aes_cbc_encrypt`/`aes_cbc_decrypt` are undocumented CTR aliases, and the IV is deterministic — not random — so the mismatch is in the dangerous direction
+## Closed 2026-09-16 — Status: FIXED 2026-08-08; real CBC+PKCS7, CSPRNG IV, KAT specs 18/18
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-07
 **Status:** FIXED 2026-08-08 — real CBC + PKCS#7 implemented, OS-CSPRNG IV,
@@ -630,3 +635,4 @@ duplicate implementation in
 
 Probe files left in place at `.nvprobe_aes/` (untracked, not part of this
 change) for anyone re-attempting this once the lowering gap is fixed.
+

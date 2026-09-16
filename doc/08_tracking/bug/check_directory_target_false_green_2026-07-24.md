@@ -1,4 +1,9 @@
 # Check directory target false-green
+## Closed 2026-09-16 — '## Fix' section landed with regression spec; deployed-CLI repro predates redeploy
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -30,3 +35,4 @@ for actual checked files. Existing per-file worker isolation remains intact.
 
 The retained deployed CLI reproduced the old worker false-green on 2026-07-24.
 Fresh pure-Simple Stage 4 runtime qualification remains pending.
+

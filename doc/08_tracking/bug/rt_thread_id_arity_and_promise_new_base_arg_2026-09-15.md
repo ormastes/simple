@@ -1,4 +1,8 @@
 # Runtime arity/constructor regressions: rt_thread_id and Promise.new executor (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Two distinct src/runtime-side regressions found while fixing wave specs; both leave the
 affected specs RED because the spec text is correct per sibling convention.
@@ -24,3 +28,4 @@ affected specs RED because the spec text is correct per sibling convention.
 - Unblock: make `static fn new` callable as `Promise.new(executor)` again (the `base`
   parameter suggests dispatch hits a different `new` builtin), then the 7 remaining
   examples should pass unchanged.
+

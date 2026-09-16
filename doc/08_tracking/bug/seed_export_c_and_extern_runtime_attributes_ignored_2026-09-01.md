@@ -1,4 +1,8 @@
 # Seed native backend silently ignores `@export("C", name:)` and `@extern("runtime", ...)`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed** 2026-09-01 · **Status** OPEN · **Severity** high (silent, link-time only)
 
@@ -45,3 +49,4 @@ name. Add a guard asserting an `@export("C")` symbol is present in the object.
 `extern fn rt_riscv_uart_put`, and a `spl_`-prefixed `spl_riscv_noalloc_alloc_page`
 (mangle.rs keeps the ABI name for any `spl_`-prefixed function). This is a
 workaround recorded per `.claude/rules/code-style.md`, not a fix.
+

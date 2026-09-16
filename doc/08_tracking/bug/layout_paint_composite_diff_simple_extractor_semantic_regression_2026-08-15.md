@@ -1,4 +1,9 @@
 # Chrome differential drivers: Simple-side extractor blocked by semantic regression
+## Closed 2026-09-16 — RESOLVED 2026-08-15; ClassInstance arm fix; drivers refreshed, specs 4/4 4/4 3/3
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-15
 **Status:** RESOLVED (2026-08-15)
@@ -79,3 +84,4 @@ and redeployed to `bin/release/x86_64-unknown-linux-gnu/simple`.
 - `chrome_layout_differential_spec.spl` executed=4 passed=4 failed=0
 - `chrome_paint_differential_spec.spl` executed=4 passed=4 failed=0
 - `chrome_composite_differential_spec.spl` executed=3 passed=3 failed=0
+

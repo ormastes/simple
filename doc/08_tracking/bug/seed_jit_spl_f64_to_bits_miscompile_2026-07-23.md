@@ -1,4 +1,8 @@
 # Seed JIT miscompiles `spl_f64_to_bits` (float→bits) + interpreter traps on f64 div-by-zero
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-23
 - **Component:** Rust bootstrap-seed `simple` binary (seed-only; not the self-hosted `bin/simple`)
@@ -147,3 +151,4 @@ Interpreter-run float models cannot rely on IEEE inf/NaN semantics for `/0`.
 Both workarounds are already applied by `src/lib/hardware/rv64gc_rtl/fpu.spl`
 and its probe `test/01_unit/lib/hardware/rv64gc_rtl/fpu_probe.spl`: the FPU model
 runs interpreter-only (Issue 1) and guards divisors before dividing (Issue 2).
+

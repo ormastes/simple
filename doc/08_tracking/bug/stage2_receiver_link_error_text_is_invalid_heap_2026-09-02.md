@@ -1,4 +1,8 @@
 # Stage 2 receiver probe: the MSVC link error message is a corrupted heap handle
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-02
 **Status:** ROOT-CAUSED 2026-09-02; fix authored, verification build running
@@ -192,3 +196,4 @@ runner constructs the probe environment, and give it the toolchain bin dirs (or
 pass an absolute compiler via `SIMPLE_CC`) rather than widening PATH globally.
 Then re-run. Also consider replacing the `OS`-env-var Windows test with a
 host-derived predicate.
+

@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence recorded for round 22's landing (2026-09-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `.claude/rules/vcs.md` requires that landing on a `check-test-tree-divergence-delta`
 PASS also RECORD the pre-existing offender list — an unrecorded step-over is a
@@ -66,3 +70,4 @@ enumeration, is the authority, and it reports **0 introduced**.
 ## Related
 
 `doc/10_metrics/ui/web_chrome_parity_round22_2026-09-14.md`.
+

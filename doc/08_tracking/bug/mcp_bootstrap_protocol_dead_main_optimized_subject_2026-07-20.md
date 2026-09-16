@@ -1,4 +1,8 @@
 # `bootstrap_protocol_test.spl` shells out to a deleted file: `src/app/mcp/bootstrap/main_optimized.spl`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `test/feature/lib/mcp/bootstrap_protocol_test.spl` (test subject,
@@ -66,3 +70,4 @@ A maintainer familiar with the MCP bootstrap consolidation should either:
   `integration_spec.spl` (in-process, no missing subject).
 
 Affected: `test/feature/lib/mcp/bootstrap_protocol_test.spl` only.
+

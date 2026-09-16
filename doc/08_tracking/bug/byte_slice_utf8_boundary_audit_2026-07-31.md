@@ -1,4 +1,8 @@
 # Audit: byte-indexed `.slice()`/`.substring()` splitting UTF-8 codepoints
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-31
 **Scope:** Follow-up to `8151c391932` ("fix(interpreter): byte-transparent text
@@ -244,3 +248,4 @@ Contrast — confirmed SAFE despite matching the same literal-N grep pattern:
   inference from a sample, not a measurement over the full set.
 
 No fixes were applied — this is an audit only, per instructions.
+

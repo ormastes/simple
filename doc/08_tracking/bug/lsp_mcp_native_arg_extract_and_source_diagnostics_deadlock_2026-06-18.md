@@ -1,4 +1,8 @@
 # Bug: simple-lsp-mcp native tools/call broken + source-mode diagnostics deadlock
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: bootstrap-scoped, cannot be touched or exercised now
 - **measured** — Stage 4 artifacts do exist on this host
@@ -95,3 +99,4 @@ printf '%s\n' \
 # source diagnostics: hang (zombie child + parent futex_wait) — only with the gate disabled
 SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 SIMPLE_LIB=$PWD/src bin/simple run src/app/simple_lsp_mcp/main.spl  # then send lsp_diagnostics
 ```
+

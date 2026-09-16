@@ -1,4 +1,8 @@
 # `native-build` worker times out, making a mandatory pre-push guard permanently RED
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed** 2026-08-17. **Status** OPEN. **Impact** blocks EVERY guarded push on
 this host, for every lane.
@@ -345,3 +349,4 @@ Corroborating datapoint at full scale, same day: the direct-seed
 VmRSS 9164 MiB`), well inside a 1800s bound — memory, not time. Detail:
 `doc/08_tracking/bug/native_build_direct_seed_jit_hang_2026-07-30.md`
 (2026-08-18 section).
+

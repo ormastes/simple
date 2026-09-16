@@ -1,4 +1,8 @@
 # X25519MLKEM768: all hot-path operations run interpreted, not JIT-compiled
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-05
 - **Severity:** P2 (perf — JIT lost on the entire hybrid-KEM hot path; program
@@ -68,3 +72,4 @@ Not fixed in this pass (compiler-layer defect, explicitly out of scope for
 the AC-9 measurement task). Recorded here so the AC-9 report's benchmark
 numbers carry an accurate interpreted-execution attribution rather than being
 read as native/JIT performance.
+

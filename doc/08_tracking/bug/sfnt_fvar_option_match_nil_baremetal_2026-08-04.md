@@ -1,4 +1,8 @@
 # Option payload extraction via `val x = match opt: Some(v): v` yields nil on freestanding native lane
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-04
 - Lane: freestanding x86_64-unknown-simpleos (cranelift native build, OVMF boot),
@@ -82,3 +86,4 @@ the source-shape fix per the CLAUDE.md rule: workaround landed AND compiler
 bug recorded — the value-position Option match lowering still needs a real
 compiler fix; until then this shape must not be reintroduced in
 freestanding-lane code).
+

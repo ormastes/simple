@@ -1,4 +1,8 @@
 # Core interpreter unreachable under the Rust seed host: package free-calls fail (E1002) and the AST arena splits into two instances across module-alias families
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-28  **Status:** OPEN (hand-off: LOADER/module-resolution owner)
 **Found by:** perf_interp lane at release tip `bb87306b64c`, seed `phase1_1787877671`
@@ -55,3 +59,4 @@ core_frontend_parse_reset -> resolve_module_locals -> eval_module).
 Canonicalize module identity before global-state allocation (one instance per FILE,
 not per alias path), or rewrite `compiler.core.*` <-> `compiler.frontend.core.*` to a
 single canonical id in the seed's module loader.
+

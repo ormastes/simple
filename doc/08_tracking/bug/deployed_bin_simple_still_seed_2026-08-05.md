@@ -1,4 +1,8 @@
 # Deployed `bin/simple` is still the Rust seed, not the self-hosted binary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** BUG-2026-08-05-deployed-seed-not-selfhosted
 - **Date:** 2026-08-05
@@ -184,3 +188,4 @@ invent a compiler root cause from correlated failures on a disqualified seed.
 Status remains **OPEN**. This digest must not certify Phase 1 tools or MCP/LSP
 verification. Closure requires a provenance-admitted self-hosted Stage 4
 deployment and a fresh essential-tools smoke over the deployed bytes.
+

@@ -1,4 +1,8 @@
 # The aarch64 JIT arena is never unmapped, and the vendored edit that added it is unguarded
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-06
 **Severity:** medium — a leak bounded by process lifetime, plus a process gap that
@@ -83,3 +87,4 @@ pages use `align_down(self.high, ps)`, there is no overlap and no post-hoc offse
 shifting. W^X holds — the arena is mapped `PROT_READ|PROT_WRITE` and only made RX
 after relocation, and `publish_veneers` snaps `self.high = start` so no page is
 written after publication.
+

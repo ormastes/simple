@@ -1,4 +1,9 @@
 # BUG: native path — `.push()` on untyped arrays fatal + `[""; N]` fill-literal emits invalid IR
+## Closed 2026-09-16 — in-body 'Resolved in source' for all three facets; concat-forwarding execution pending
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status (2026-07-15):** source implemented for all three facets. Historical
 native evidence covers push/fill; strict concat-forwarding execution remains
@@ -39,3 +44,4 @@ All three blocked the pure-Simple `--entry` injection in bootstrap_main.spl
 (#138 Phase 2, reverted). Fix direction: add rt_array_push interception for
 Unresolved receivers; type rt_array_repeat results as tagged i64 in
 translate_copy_move; root-cause the concat drop in extract_rt_string_array.
+

@@ -1,4 +1,8 @@
 # `native-build` is dead for EVERY input — nil-deref in the interpreted compiler
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -158,3 +162,4 @@ out with no output and read as a total hang. Budget >300s.
 The fixture's log also carries `unsupported MIR type kind [infer-arm]:
 HirTypeKind::Infer((0, 0))`, which is not in the 2026-08-07 record. Possibly
 pre-existing and merely unlogged; flagged, not investigated.
+

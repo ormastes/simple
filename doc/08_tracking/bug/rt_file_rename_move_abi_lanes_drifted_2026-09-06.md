@@ -1,4 +1,8 @@
 # `rt_file_rename` / `rt_file_move` ABI has drifted across four lanes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
 **Found by:** sspec score-80 wave 16B (modernizing
@@ -43,3 +47,4 @@ This record was filed twice. The first copy was created by wave 16B and then
 disappeared from the working tree before it was committed — untracked files in
 this shared checkout are periodically swept by peer sessions. Filed again and
 committed in the same change as the spec it documents.
+

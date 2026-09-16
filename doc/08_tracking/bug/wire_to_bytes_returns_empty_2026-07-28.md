@@ -1,4 +1,9 @@
 # `wire_to_bytes()` returns an empty array on both engines
+## Closed 2026-09-16 — ...w-up until that one is separately resolved. ## Symptom ``` fn wire_to_bytes(wire: text) ->
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-28
 **Status:** FIXED (confirmed 2026-09-05) — see verification note below
@@ -84,3 +89,4 @@ exactly this reason; the comment there points back at this file.
 Root-cause `to_bytes` on `text` (builtin resolution or wire-text decoding), add
 a `wire_to_bytes` case to `tls_common_wire_guard_spec.spl` covering the
 text -> bytes direction, then sweep the ~20 call sites above.
+

@@ -1,4 +1,9 @@
 # SimpleOS `realpath` must not fabricate canonical paths
+## Closed 2026-09-16 — ... it from `realpath`. It neither resolved `.`/`..`, symlinks, or existence, nor made relati
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -24,3 +29,4 @@ can be advertised as implemented.
 relative, missing, oversized, and null paths. The strict hosted C harness
 passes after providing the guest-private errno ABI, a stub syscall dependency,
 and a `SIZE_MAX` compatibility guard in the guest headers.
+

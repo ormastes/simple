@@ -1,4 +1,8 @@
 # Stage 4 db_atomic physical-owner gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -29,3 +33,4 @@ row mapping with an explicit loop; and consumes the current two-field
 generation and stopped only at the narrow core bundle's missing
 `rt_file_atomic_write`. Production cycle 1 crossed the repaired module and
 advanced to `compile_targets.spl`.
+

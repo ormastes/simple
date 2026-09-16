@@ -1,4 +1,8 @@
 # ssh_kex_rsa_contract_spec: import path fixed, but 0 examples execute (likely private-helper symbol collision)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -62,3 +66,4 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 
 - `test/01_unit/os/apps/sshd/ssh_kex_rsa_contract_spec.spl` (import path fixed
   in-place; spec still does not go green — 0 examples executed)
+

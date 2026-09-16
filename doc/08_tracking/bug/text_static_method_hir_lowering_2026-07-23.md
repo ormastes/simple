@@ -1,4 +1,8 @@
 # HIR: static method call on builtin type name `text` unresolved (entry-closure)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** 2026-07-23, MCP native rebuild campaign (rMCP11).
 **Status:** OPEN — call site worked around (std.string_core.char_from_code).
@@ -195,3 +199,4 @@ bin/simple run i64_parse_repro.spl   # fn main(): match i64.parse("42"): ...
   don't consider this bug closed until they're triaged too.
 - Status stays **OPEN**. Do not revert the `main_lazy_query_tools.spl`
   workaround — it is still required.
+

@@ -1,4 +1,8 @@
 # Non-discriminating (vacuous) spec family — enumerated sweep
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-08
 **Status:** Open — detector landed, top findings proven, remediation outstanding.
@@ -381,4 +385,5 @@ vacuous specs (the headline example alone is an 86-example spec file
 needing its commented-out module import and assertions restored, which
 requires the target module to actually be import-ready). Not a single
 localized bug; out of this lane's per-item budget. Leaving OPEN.
+
 

@@ -1,4 +1,8 @@
 # Stage-3 imported composite prebind skips dependencies (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -35,3 +39,4 @@ The third receipt-bound run again emitted the original first diagnostics in
 stopped after this exact recurrence under the three-cycle verification cap.
 Stage 3/4 and the bootstrap must-check therefore remain blocked; no push is
 permitted.
+

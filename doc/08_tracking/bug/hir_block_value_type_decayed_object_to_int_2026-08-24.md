@@ -1,4 +1,9 @@
 # `E-HIR-BLOCK-VALUE-TYPE-DECAYED` / `cannot convert object to int` blocks native-build of `io_runtime`
+## Closed 2026-09-16 — RESOLVED 2026-08-24; fix landed be3e6fe4a21; gate PASS both signatures 0
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED 2026-08-24 — see "Root cause (measured)" below. The
 filed signature was TWO defects, not one, and the headline one was a FALSE
@@ -276,3 +281,4 @@ same defect. Its input comes from the typed accessor
 moved LoadGlobal onto, not from `rt_enum_payload` / `rt_tuple_get`. It is
 additionally guarded by `if packed_return_local > 0xFFFFFFFF`, an i64
 comparison that a live object could not reach silently. No change made.
+

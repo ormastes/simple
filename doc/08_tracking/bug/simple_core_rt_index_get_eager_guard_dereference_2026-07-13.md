@@ -1,4 +1,9 @@
 # Simple-core `rt_index_get` eagerly dereferences an invalid collection
+## Closed 2026-09-16 — "## Fix and evidence": unsafe path deleted; disassembly + live-execution evidence in body
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -29,3 +34,4 @@ allocate it on every iteration. The textual-LLVM SSA repair accepts those MIR
 cross-block allocation destination before spilling it. Focused MIR CFG, combined
 SSA/loop, and dual-backend parity regressions are present; executable proof
 remains pending a known-good pure-Simple native test CLI.
+

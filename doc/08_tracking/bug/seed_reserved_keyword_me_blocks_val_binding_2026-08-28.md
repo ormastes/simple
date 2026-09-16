@@ -1,4 +1,8 @@
 # Bug: Rust seed reserves `me` as a keyword token, rejecting it as an ordinary `val`/pattern name
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-28
 **Component:** `src/compiler_rust/parser` (seed lexer/parser), consumer: `src/app/test_daemon/light_daemon.spl`
@@ -79,3 +83,4 @@ already know it's a keyword). Two follow-ups worth tracking separately:
   error (proceeds to normal daemon startup/import warnings).
 - See `$S/light_daemon_parse_REPORT.md` for the full whole-compiler-tests rerun after
   this fix.
+

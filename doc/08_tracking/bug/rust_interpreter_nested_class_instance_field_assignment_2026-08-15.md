@@ -1,4 +1,9 @@
 # Rust interpreter rejects nested ClassInstance field assignment
+## Closed 2026-09-16 — Status: fixed; focused filters pass; canonical Stage-2 compile-to-link cleared
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed; both focused Rust filters pass and the canonical Stage-2
 compile-to-link cleared the blocker.
@@ -205,3 +210,4 @@ Probed the pipeline chain BEYOND the blocked assignment with the pre-fix seed
   value` right after "Phase 1: loading..." — no earlier regression has crept in;
   this was pre-rebuild evidence. The corrected seed and subsequent canonical
   846/846 compile-to-link run later cleared this blocker.
+

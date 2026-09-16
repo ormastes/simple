@@ -1,4 +1,8 @@
 # BUG: `wm_false_success_family_spec.spl` cannot reach a clean verdict even after all Wave-1 lanes' owned sites are fixed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-05
 - **Severity:** medium — blocks Task #59's stated success bar ("baseline
@@ -98,3 +102,4 @@ Whichever lane owns `src/lib/nogc_async_mut/wm/service.spl` (wm-core/A2)
 should close its predicate-4 gap and add its baseline accounting; whichever
 lane owns `wm_false_success_family_spec.spl` (A0) should decide how the
 non-vacuity floor is meant to resolve once the family is fully closed.
+

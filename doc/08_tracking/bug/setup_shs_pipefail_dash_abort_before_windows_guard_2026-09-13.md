@@ -1,4 +1,8 @@
 # `scripts/setup/setup.shs` aborts on Linux: `set -o pipefail` under dash fires before the Windows-only early-exit guard
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Filed: 2026-09-13, lane BUGFIX-8, while preparing a fresh worktree
@@ -122,3 +126,4 @@ Either:
 Whichever direction is chosen, add a regression check that runs
 `materialize-symlinks-windows.shs` under dash (or plain POSIX `sh`) on a
 non-Windows `uname -s` and asserts exit 0.
+

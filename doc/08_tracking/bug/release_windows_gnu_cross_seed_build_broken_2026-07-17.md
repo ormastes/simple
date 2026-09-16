@@ -1,4 +1,9 @@
 # Release: Linux→Windows-gnu cross seed build broken (2026-07-17)
+## Closed 2026-09-16 — ...ED at 310bcdf1131. Both defects resolved: signal.c _WIN32 guard + restored vendor libs (79
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Lane:** release.yml `build-bootstrap` windows-x86_64 cross (Linux runner,
 `cargo build --profile bootstrap -p simple-driver --target x86_64-pc-windows-gnu`).
@@ -44,3 +49,4 @@ the CI windows-gnu cross lane stays red.
 ## Status (2026-07-18)
 
 FIXED+PUSHED at 310bcdf1131. Both defects resolved: signal.c _WIN32 guard + restored vendor libs (79 MB size decision accepted by commit). Cross-build verified: PE32+ simple.exe produced locally.
+

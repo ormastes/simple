@@ -1,4 +1,8 @@
 # Four unrelated `LayoutBox` types across the layout lanes (2026-08-10)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** PARTIALLY RESOLVED — name collision removed, spacing record still duplicated
 **Severity:** low (no live defect), medium as a defect-hiding surface
@@ -120,3 +124,4 @@ only the assertions caught it. Worth a separate bug.
 lanes and were not touched.
 
 **Do not add a fifth spacing record** — nest `common.layout.box_model.BoxModel`.
+

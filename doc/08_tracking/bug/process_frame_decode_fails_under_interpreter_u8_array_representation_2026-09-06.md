@@ -1,4 +1,8 @@
 # `decode_process_transfer_frame` rejects a byte-identical `[u8]` built with `as u8` — interpreter-only, breaks the whole piped parent-commit transport
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-06
 - **Area:** compiler / interpreter — `[u8]` element representation; structural transfer codec
@@ -114,3 +118,4 @@ own attention:
 - A JIT/interpreter divergence that silently changes *results* (not just speed)
   makes `[jit-fallback]` a correctness event, not a performance note. It is
   currently logged as "expect ~100-1000x slowdown".
+

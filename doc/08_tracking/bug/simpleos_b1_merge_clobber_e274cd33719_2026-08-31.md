@@ -1,4 +1,8 @@
 # B1: SimpleOS kernel unbuildable — root cause is the share-history merge clobber, not stale idioms
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-08-31. Status: OPEN (partial repair landed in-worktree).
 
@@ -425,3 +429,4 @@ classify as SKIP — not a clobber.
 - Claims in this record rest on `--timeout 1200` runs. The lane uses the 300s
   default, so "failing modules: 0" is a statement about lowering, **not** a
   statement that the lane can build the kernel. Do not conflate the two.
+

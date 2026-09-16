@@ -1,4 +1,8 @@
 # file_mmap_read_bytes aborts instead of returning Err
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -15,3 +19,4 @@ the spec.
 ## Unblock condition
 Make the wrapper catch the rt failure and return Err (see sibling
 file_read_lines behavior), then re-run the spec.
+

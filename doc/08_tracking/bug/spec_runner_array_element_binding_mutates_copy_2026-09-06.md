@@ -1,4 +1,8 @@
 # Spec runner: mutating an array element through a binding writes a copy (differs from `simple run`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06 · **Status:** OPEN · **Found by:** slim-UI lane A04 (Tiny layout), seed `src/compiler_rust/target/bootstrap/simple`
 
@@ -26,3 +30,4 @@ Two specs per `.claude/rules/testing.md`: one reproducing the binding-copy diver
 (same source, `run` vs spec runner), one for the `s.nodes[0].value = 1` semantic error.
 Fix in the pure-Simple interpreter's assignment lowering; until then Tiny specs use
 whole-element assignment (`s.nodes[i] = TinyGuiNode(...)`) and say so.
+

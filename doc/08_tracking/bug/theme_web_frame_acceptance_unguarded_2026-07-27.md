@@ -1,4 +1,8 @@
 # Bug: external Web frame acceptance never reads or stores a theme identity at all — not just stale after a theme change
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-27
 **Status:** open
@@ -124,3 +128,4 @@ review before integration) rather than a local patch to
   `require_external_web_frame` / `set_external_web_frame`.
 - `src/os/compositor/host_wm_theme_bootstrap.spl:19-26` —
   `install_default_host_wm_theme`, presence-only check.
+

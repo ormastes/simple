@@ -1,4 +1,8 @@
 # mcp lazy-loading spec red: `mcp_lib` modules no longer exist (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `test/01_unit/lib/mcp/lazy_loading_spec.spl` fails at HEAD with:
@@ -35,3 +39,4 @@ Delete-candidate note: this was flagged as a delete-candidate in the
 Restore or re-home the lazy registry/category loader API, or rewrite the spec
 against `src/lib/nogc_sync_mut/mcp/**`; the spec must reach
 `Results: N total, N passed, 0 failed`.
+

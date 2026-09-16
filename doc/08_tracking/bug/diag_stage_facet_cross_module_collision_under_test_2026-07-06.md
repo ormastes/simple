@@ -1,4 +1,8 @@
 # std.diag dbg_stage() aborts under `bin/simple test` when co-compiled with the browser_engine/host_compositor module graph
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-06
 **Severity:** medium — blocks writing `bin/simple test` specs that prove
@@ -439,4 +443,5 @@ widened detector is signal, not a flood.
   times out on this file — a pre-existing, unrelated hang), but has not been run.
 - **Promotion to a hard error under a gate** (the rest of item 3) is not done
   and should wait until item 2 lands.
+
 

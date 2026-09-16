@@ -1,4 +1,8 @@
 # StringBuilder is worse than naive `+` concat in the tree-walk interpreter, and gets worse than O(n^2) as n grows
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: LOCALIZED (2026-08-18) — root cause proven, contained fix attempted and found insufficient; see "Verdict" below
 - Found: 2026-08-18
@@ -264,3 +268,4 @@ doc's measured evidence above serving as the timing record instead.
   file and was not exercised by this bench; it may not share this defect since
   it bypasses the Simple-level array entirely. Worth trying as the interpreter
   remedy in the follow-up above instead of fixing array-`StringBuilder`.
+

@@ -1,4 +1,9 @@
 # Guard fixtures missing locally silently disable pre-push checks (2026-08-08)
+## Closed 2026-09-16 — Status swept; 4 symlinks restored, 0 remaining MISSING-LOCALLY
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** swept; 4 files restored; 0 remaining MISSING-LOCALLY.
 **Trigger:** `scripts/check/check-jit-closure-blockers.shs` fail-closed with
@@ -194,3 +199,4 @@ already passed.
 | check-no-conflict-markers-push.shs | check-no-conflict-markers-push: NOTHING TO PUSH — fd73bdc9047cf574583f27e6715fd2953139e20f..fd73bdc9047cf574583f27e6715fd2953139e20f is empty; NO FILES WERE CHECKED | 0 |
 | check-guard-wiring.shs | check-guard-wiring: FAIL — 476 guard(s) checked, 48 unwired, 0 bad opt-out(s), 2 copied hook(s) | 1 |
 | check-vacuous-specs.shs | (TIMEOUT 170s) selftest: 8/8 fixtures behaved correctly (F1,F3,F4,F6 flagged; F2,F5,F7,F8 clean) | 124 |
+

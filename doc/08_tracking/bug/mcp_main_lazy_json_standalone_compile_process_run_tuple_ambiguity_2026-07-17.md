@@ -1,4 +1,9 @@
 # Rust checker rejected valid repeated-field tuple returns
+## Closed 2026-09-16 — Status FIXED 2026-07-17; checker restriction removed, positional tuple restored
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-07-17
 
@@ -58,3 +63,4 @@ next fresh bootstrap session must also rerun the self-hosted native-build
 cycle; this session stopped after its mandatory three-cycle cap, with the
 labeled tuple parse error recorded in
 `build/bootstrap-current/logs/stage4-native-build-cycle3.log`.
+

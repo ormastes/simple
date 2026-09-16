@@ -1,4 +1,8 @@
 # Module-level `val` dict export is unresolved through `use module.{name}` / `use module.*`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (SIMPLE-CAPABILITY / compiler import resolution)
 **Filed:** 2026-09-01
@@ -76,3 +80,4 @@ pattern.
 bin/simple test test/01_unit/lib/std/shell/file_system_spec.spl
 # Results: 9 total, 0 passed, 9 failed — all "variable `file` not found"
 ```
+

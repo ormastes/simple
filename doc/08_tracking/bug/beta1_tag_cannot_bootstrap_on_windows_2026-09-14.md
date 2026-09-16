@@ -1,4 +1,8 @@
 # The v1.0.1-beta.1 tag cannot bootstrap on Windows
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-14
 **Impact:** the beta 1 GitHub release has carried **zero assets since 2026-09-06**, and
@@ -135,3 +139,4 @@ The earlier note "cargo 1.75 against a lockfile that declares version 4 (needs
 
 So the WSL lane needs a host glibc newer than Ubuntu 22.04's, or a rustup-style
 static toolchain — not merely a newer apt pocket.
+

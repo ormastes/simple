@@ -1,4 +1,8 @@
 # Stage 2 Windows unresolved-symbol inventory (2026-08-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Authoritative, attributed inventory of every symbol the Windows Stage 2 link
 cannot resolve. Read-only analysis; nothing was rebuilt.
@@ -245,3 +249,4 @@ one-line fix it looks like — see the collision measurement above.
 
 Re-run the reproduction above against a fresh `native-objects-*` directory. The
 build is finished when `final.sym` contains exactly `_fltused` and `raise`.
+

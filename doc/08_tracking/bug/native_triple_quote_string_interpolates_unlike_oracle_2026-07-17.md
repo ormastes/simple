@@ -1,4 +1,9 @@
 # Native path: triple-quoted `"""..."""` strings interpolate `{...}`, but the oracle treats them as raw/literal
+## Closed 2026-09-16 — Resolution evidence section: parser no-interpolation bit fix; parity case added
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Severity:** Medium (silent behavioral divergence, no diagnostic on either
@@ -79,3 +84,4 @@ should route through the same "no interpolation" handling as single-quoted
   triple, `r"..."`, and `r"""..."""` literal-brace forms. It is selected on
   hosted non-Linux and FreeBSD gates; execution remains pending because this
   source-only repair session did not run compiler/native commands.
+

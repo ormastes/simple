@@ -1,4 +1,8 @@
 # BUG: LLM Caret compiled carrier cannot be produced within bounded build time
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** `llm_caret_compiled_carrier_build_latency`
 - **Severity:** P1 (blocks production compiled database/plugin carriers)
@@ -118,3 +122,4 @@ imported database methods were unresolved, lowered to const-zero placeholders,
 and caused a nil-receiver crash (exit 132, Task #145). Owner-module free
 façades now replace open/startup/query/close plus map/join rendering. Their
 closure contract test exits 0; the three-cycle guard prevented another compile.
+

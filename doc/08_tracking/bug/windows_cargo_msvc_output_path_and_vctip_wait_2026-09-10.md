@@ -1,4 +1,8 @@
 # Windows Cargo MSVC output paths and descendant wait
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The Phase 1 Rust seed build exited 101 while building `libmimalloc-sys`.
 MSVC emitted C1083 with an empty compiler-generated-file name and `Invalid
@@ -61,3 +65,4 @@ MSVC compiled at the configured 211-character object path with exit 0 and
 produced a 794-byte x64 COFF object. Its 10-second bounded diagnostic terminated
 the remaining telemetry descendant and retained native exit 0 in
 `build/native_probe/configured-cargo-cl/command.env`.
+

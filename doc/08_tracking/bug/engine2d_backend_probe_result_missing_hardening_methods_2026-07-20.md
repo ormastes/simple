@@ -1,4 +1,8 @@
 # Engine2D BackendProbeResult missing is_hardware/strict_failure_without_fallback (present on 3D counterpart)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -60,3 +64,4 @@ diverges from 3D and the spec needs to target a different/newer type instead.
   fail; this is the contested gpu/engine2d area so was left unedited per this
   campaign's ENV-skip guidance, but the root cause above is a genuine,
   well-defined API gap, not an environment/hardware-availability issue)
+

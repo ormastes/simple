@@ -1,4 +1,8 @@
 # Self-hosted native build loses cross-unit builtin method identity
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -116,3 +120,4 @@ entry-closure native builds, and the build emits a runnable pure-Simple compiler
 2. Reproduce with a narrow VHDL entry-closure fixture before another full build.
 3. Prove generated MIR/native calls use canonical `rt_string_*` symbols.
 4. Run one fresh full self-hosted compiler build and retain its provenance.
+

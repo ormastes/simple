@@ -1,4 +1,8 @@
 # Site 20: Stage 3 unreachable — the receipt chain has no entry point from a rust-seed Stage 2 (macOS, 2026-09-13)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: RESOLVED (2026-09-13, macOS lane F74 r2). The premise below ("only a
   non-seed producer can publish") was already stale when this was filed: the
@@ -192,3 +196,4 @@ guide separately forbids writing admission/provenance receipts.
 Not fixed here, per the coordinator's instruction not to fix site 20/18-08
 in parallel with whoever owns it. Binary identity of the admitted candidate is
 recorded above for whoever picks this up next.
+

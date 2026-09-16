@@ -1,4 +1,8 @@
 # `std.nogc_sync_mut.file_system.file_ops` is a MOCK: `file_exists` is true for any path, reads return "mock file content"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
 **Status:** OPEN — worked around at one call site, root cause not fixed
@@ -98,3 +102,4 @@ mock module fails the spec instead of shipping.
    through them and today only works by resolution luck.
 3. Longer term this is the flat name-keyed function registry again; the
    2026-08-09 record is the tracking item for that.
+

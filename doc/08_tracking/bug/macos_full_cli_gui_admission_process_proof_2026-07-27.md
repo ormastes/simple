@@ -1,4 +1,8 @@
 # macOS Full-CLI GUI Admission Process Proof
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** cycle-3 source candidate / builder self-test blocked after fixture chmod repair / Swift link+self-test blocked after `-lbsm` repair / live Endpoint Security evidence unavailable (exit 125)
 **Evidence row:** `MAC-WM-GLASS-LOCAL-001`
@@ -67,3 +71,4 @@ the provisioned identities and artifact, run:
 sh scripts/check/check-macos-vulkan-gui-widget-live-evidence.shs
 sh scripts/check/check-macos-vulkan-web-live-evidence.shs
 ```
+

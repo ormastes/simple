@@ -1,4 +1,8 @@
 # `load_sdoctest_blocks` / `compute_sdoctest_coverage` are re-exported and called but never defined
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
@@ -85,3 +89,4 @@ Needs an owner to either implement the two functions in
 `analysis/sdoctest_coverage.spl` (matching the zero-arg + result-object shape
 the four call sites assume), or remove the two `export` lines from
 `analysis/mod.spl` and rework the four call sites. Not guessed at here.
+

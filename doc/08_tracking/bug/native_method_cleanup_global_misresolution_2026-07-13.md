@@ -1,4 +1,8 @@
 # Native method cleanup global misresolution
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status: Resolved 2026-07-16** — owner dispatch verified empirically at
 c8f4b62261a under the dual-backend protocol (seed-interpreter oracle vs
@@ -65,3 +69,4 @@ natively prints a raw handle integer (see
 `native_method_text_return_prints_handle_2026-07-16.md`) — a text-decode gap on
 the method-result path, not a dispatch misresolution (the same program with
 `i64` returns has full parity).
+

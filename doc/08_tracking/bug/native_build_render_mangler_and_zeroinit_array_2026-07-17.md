@@ -1,3 +1,8 @@
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
 
 ## Root #5 status update — module_global_init PARTIAL coverage (blocker)
 Codex landed module_global_init.rs fix (Optional globals → nil sentinel + eager

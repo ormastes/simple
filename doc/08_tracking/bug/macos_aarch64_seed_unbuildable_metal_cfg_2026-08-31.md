@@ -1,4 +1,9 @@
 # main unbuildable on macOS aarch64: metal_impl gated on OS but deps gated on feature (2026-08-31)
+## Closed 2026-09-16 — Status FIXED (this commit); re-gating fix with cargo check verification evidence
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status: FIXED** (this commit)
 
@@ -58,3 +63,4 @@ macOS cfg paths of pure-Rust crates, but the workspace pulls vendored C
 cross-check ERRORs on this host. Left as a filed gap rather than a weakened or
 half-wired guard; closing it needs either stubbing ring out of the check lane
 or a macOS CI-side required check.
+

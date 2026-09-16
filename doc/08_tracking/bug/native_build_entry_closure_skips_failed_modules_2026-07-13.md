@@ -1,4 +1,8 @@
 # Bug: native-build entry closure skips failed semantic dependencies
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -62,3 +66,4 @@ no Rust-seed result is substituted.
 The next source fix must distinguish valid single-segment module imports from
 scanner false positives and fail unresolved required modules closed. Do not
 remove the skip while another agent owns the active driver/bootstrap rebuild.
+

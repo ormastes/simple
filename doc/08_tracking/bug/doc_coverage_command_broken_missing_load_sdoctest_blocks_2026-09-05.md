@@ -1,4 +1,8 @@
 # `bin/simple doc-coverage` fails: two exported analysis functions are defined nowhere
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-05
@@ -82,3 +86,4 @@ warnings); `run` on small files OK; `todo-scan` OK (rc 0, 71,755 files scanned,
 the working tree even when nothing changed. That is by design (both are listed
 as auto-generated in `.claude/rules/structure.md`) but is easy to leave behind
 by accident.
+

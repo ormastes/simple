@@ -1,4 +1,9 @@
 # Bare `expect X matcher(Y)` DSL breaks inside `fn main():` wrapper ("cannot convert matcher to int")
+## Closed 2026-09-16 — ..._spec.spl --no-session-daemon ``` ## Fix hypothesis (not attempted — compiler lowering iss
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -81,3 +86,4 @@ file content is wrong, so no test-only edit can fix it.
   independently verified against other `.spipe_wrapped_entry_*` files in this
   triage pass, flagging for whoever picks this up to check the wider
   `.spipe_wrapped_entry_*` family).
+

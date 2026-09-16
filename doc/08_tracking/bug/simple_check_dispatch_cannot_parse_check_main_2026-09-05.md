@@ -1,4 +1,8 @@
 # `simple check` fails to parse its own entrypoint on every input (2026-09-05)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 OPEN. Blocks the acceptance checkbox
@@ -53,3 +57,4 @@ Find which parser the `check` dispatch arm invokes (it differs from the `run`
 path's) and why it rejects a colon that the normal parser accepts. Do not
 "fix" `src/app/check/main.spl` by rewriting source the normal parser already
 accepts -- that would move the defect, not repair it.
+

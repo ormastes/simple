@@ -1,4 +1,8 @@
 # Instrumented statement-coverage tooling is inert (three independent breaks)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** test tooling / coverage
 **Found during:** web-rendering GPU offload coverage campaign (goal: verify
@@ -72,3 +76,4 @@ plus per-file evidence (>=1 recordable function of the same file in the
 called set). Measured: dom.spl 28% -> 87%, dom_identity_index 40% -> 83%,
 non-imported control 0/108, previously-gated modules byte-identical,
 no-env-var output byte-clean.
+

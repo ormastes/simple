@@ -1,4 +1,8 @@
 # Bug: `skip` reserved token cannot be used as a struct field name
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN, reproduced; fix is in the lexer and blocked here
 - **measured** — `struct S: skip: bool / n: i64` still fails to parse under `bin/simple run`
@@ -41,3 +45,4 @@ statement position inside an `it`/`describe` block, not as a globally reserved
 token. Several other words have the same problem (`gen`, `val`, `unit`,
 `pass_out`, `kernel`, `trace`) — a general "soft keyword in non-directive
 position" pass would cover the family.
+

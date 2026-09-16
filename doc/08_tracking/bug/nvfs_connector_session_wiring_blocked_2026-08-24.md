@@ -1,4 +1,8 @@
 # NVFS Connector Session Wiring Blocked by Device-Owner Teardown
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -122,3 +126,4 @@ failed post-session teardown retains a retryable slot without replaying session
 close. This remains unverified by explicit instruction. The remaining trust
 seam is caller-supplied nonzero device-owner identity because `BlockDevice`
 still cannot derive stable identity itself.
+

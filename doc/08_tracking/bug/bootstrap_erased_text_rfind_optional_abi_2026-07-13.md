@@ -1,4 +1,8 @@
 # Bootstrap erased-text `rfind` loses Optional not-found semantics
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -20,3 +24,4 @@ method lowering owns `replace(...).rfind(...)`, or adapt the runtime result into
 the canonical Optional representation. Add executable found and missing-needle
 coverage before removing TODO 559. Do not add a second runtime string-search
 owner or a caller-specific constant.
+

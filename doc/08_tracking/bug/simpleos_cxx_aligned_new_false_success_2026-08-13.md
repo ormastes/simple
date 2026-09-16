@@ -1,4 +1,9 @@
 # SimpleOS C++ aligned-new false success
+## Closed 2026-09-16 — Status "Mitigated"; false-success aborts; evidence test passed under strict C
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -40,3 +45,4 @@ evidence, not SimpleOS target execution.
 Supporting larger C++ alignment requires the same allocator-owned
 aligned-block representation needed by `posix_memalign`; do not widen either
 surface independently.
+

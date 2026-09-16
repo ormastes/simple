@@ -1,4 +1,8 @@
 # Stage 3 self-host post-HIR segfault (2026-08-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > Historical frontier record. The current dispatch authority is
 > `stage3_current_source_hir_rss_termination_2026-08-14.md`. In particular,
@@ -559,3 +563,4 @@ Stage 3 log SHA-256 is
 No Stage 3/4 candidate or deployed CLI exists. The three-cycle cap is exhausted;
 the next fresh lane must expose and repair the first hidden frontend diagnostic
 before the 1-to-21 error expansion instead of repeating this transaction.
+

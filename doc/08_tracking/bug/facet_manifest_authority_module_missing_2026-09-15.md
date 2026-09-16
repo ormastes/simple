@@ -1,4 +1,8 @@
 # facet_manifest_authority_adapter_spec imports a module that exists nowhere (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `test/01_unit/compiler/driver/facet_manifest_authority_adapter_spec.spl`
 imports:
@@ -31,3 +35,4 @@ compiler.driver.driver_facet_manifest_authority ... module path segment
 Land `driver_facet_manifest_authority` and the `ApkFacet*` aspect-pack types,
 or delete the spec together with the feature decision. Leaving it RED documents
 the missing subject.
+

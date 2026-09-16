@@ -1,4 +1,8 @@
 # `list.get(i)` returns the raw tag-boxed word (`value << 3`) on the JIT/native path
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-verified 2026-09-13 — JIT lane still correct; AOT caveat unchanged, so LEFT OPEN
 
@@ -286,3 +290,4 @@ results back through `.get()`. With the store verified through `a[i]`, the
 - `doc/07_guide/language/dict_native_pitfalls.md` — `Dict.get()`/`Dict.len()` are
   separately broken under native codegen. The two defects are independent; both
   make `.get()` unsafe.
+

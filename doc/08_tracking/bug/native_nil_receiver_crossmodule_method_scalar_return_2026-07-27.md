@@ -1,4 +1,8 @@
 # Bug: cranelift AOT mis-tags the return value of a cross-module struct method returning a primitive scalar
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-07-27
 - **Lane:** BB2 (board-build, team BOARD)
@@ -229,3 +233,4 @@ All under `build/board_check/`:
 | `probe_g.spl`, `probe_h.spl` | same-module generic/non-generic controls (both pass natively) |
 | `probe_i.spl` | real `std.ecs.ComponentStore` repro |
 | `probe_b/d/e/f.spl` | original TTY narrowing probes |
+

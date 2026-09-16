@@ -1,4 +1,9 @@
 # Test runner false-fails specs with 10–99 examples (downstream of the `i64?` payload-3 collision)
+## Closed 2026-09-16 — test-runner symptom FIXED via find_raw; deferred root cause tracked in interp_index_of doc
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-24
 **Status:** Test-runner symptom FIXED (pure-Simple, `find_raw`); root cause is a
@@ -61,3 +66,4 @@ item — this fix only closes the test-runner critical path.
 
 Retracts `named_arg_self_field_value_parse_regression_2026-07-24.md` (the
 `self.field` parse-regression theory was wrong — a red herring).
+

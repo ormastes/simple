@@ -1,4 +1,8 @@
 # FAT32 live executable identity adapter blocker (2026-08-24)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -137,3 +141,4 @@ The backend identity/capsule provider also needs a deterministic unpin-failure
 injection seam before candidate-cleanup quarantine and exact retry can receive
 executable failure-path coverage; the owner retains that authority today, but
 this turn intentionally does not claim runtime evidence.
+

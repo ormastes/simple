@@ -1,4 +1,9 @@
 # BUG: `FontRenderBatch` missing `atlas_owner_generation` field + missing native-safe identity free functions — dropped during codex-font-branch reland
+## Closed 2026-09-16 — Status FIXED; field + free fns implemented; spec assertions pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 FIXED (2026-07-20). Root cause confirmed by git evidence; field and free
@@ -204,3 +209,4 @@ resolved).
 - `doc/08_tracking/bug/bdd_expect_compare_to_equal_bool_eager_fail_2026-06-30.md`
   (the separate, pre-existing, already-filed harness bug behind the residual
   red assertion — not fixed by or in scope of this doc)
+

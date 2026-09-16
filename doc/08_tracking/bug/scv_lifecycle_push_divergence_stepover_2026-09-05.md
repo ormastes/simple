@@ -1,4 +1,8 @@
 # Step-over record: pre-existing test-tree divergence at the Stage 0.5 push
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Range landed:** `e0432cd7be2..db6350534b4` (7 commits, Stage 0.5 source-complete)
@@ -43,3 +47,4 @@ exceeds the interactive budget on this host. Recording the omission rather than
 implying coverage.
 
 The divergence backlog itself is not this lane's to fix and is untouched here.
+

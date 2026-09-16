@@ -1,4 +1,9 @@
 # riscv64 in-guest: the guest RESETS while executing a cross-function call
+## Closed 2026-09-16 — RESOLVED 2026-09-02 in body: fixed b655e343cdb, guard RED/GREEN, fault gone; new + blocker tracked separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **RESOLVED 2026-09-02 — this record's own defect is fixed.** The "reset" was
 > never a reset and, once the trap vector landed, was measured as an S-mode
@@ -518,3 +523,4 @@ and its offender count did not move. What changed is entirely inside the row: th
 `scause=0x5` trap frame is gone and the failure is now a clean interpreter-level
 error from inside the callee's body. The row stays RED until the `+` defect above
 is fixed.
+

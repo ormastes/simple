@@ -1,4 +1,8 @@
 # `hardware.rv32imac.*` modules gone; 6 specs orphaned (2026-08-18)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 OPEN — reported, NOT fixed. Deleting the specs needs approval.
@@ -79,3 +83,4 @@ compiler (the code is from 2026-03-15 and predates later grammar/stdlib changes)
 and may need import-path updates if `src/hardware/` is no longer a resolution root.
 
 Until then the 6 specs stay in place, unmodified. **Do not delete them.**
+

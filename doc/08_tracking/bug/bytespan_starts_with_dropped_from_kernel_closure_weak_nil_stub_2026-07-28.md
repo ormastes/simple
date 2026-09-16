@@ -1,4 +1,8 @@
 # ByteSpan.starts_with dropped from the SimpleOS kernel closure and silently replaced by a nil-returning WEAK stub
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-07-28
 - **Severity:** high (silent wrong answer, no diagnostic, in the WM render path)
@@ -219,3 +223,4 @@ change regresses. `rt_*` symbols are excluded by construction
 (`simple_module_symbol_tail` returns `None` for them), so the `rt_*` channels are
 untouched. Unit test:
 `stubs::tests::stale_module_move_is_detected_and_rt_channels_are_untouched`.
+

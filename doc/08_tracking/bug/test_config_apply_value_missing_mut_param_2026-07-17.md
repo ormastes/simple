@@ -1,4 +1,8 @@
 # test_config.spl: apply_test_config_value mutates its own stack frame only, never the caller's TestConfig
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** medium (the `test:` section of `config/simple.test.sdn` never actually
@@ -94,3 +98,4 @@ Found while writing `test/01_unit/lib/test_runner/test_config_spec.spl`
 (new hardening unit spec, task: pure-Simple test-runner engine package
 hardening). That spec pins the current (broken) contract explicitly rather
 than asserting the intended-but-unreachable behavior.
+

@@ -1,4 +1,9 @@
 # Mode-carrying write externs exist in the seed source but not in the deployed binary
+## Closed 2026-09-16 — Status: FIXED 2026-08-10; externs deployed, call site adopted, specs green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (2026-08-10) — deployed binary now carries the externs; call site adopted
 **Filed:** 2026-08-08
@@ -162,3 +167,4 @@ verified until the spec above runs green.
 | `src/lib/nogc_async_mut/oauth2.spl:123` | same — full duplicate, not a shim |
 | `src/app/play/session_store.spl:151` | `rt_file_write_text`, default mode. Browser/session state, may carry auth cookies — worth a look, not fixed here |
 | `src/app/svim/_SvimCore/session_commands.spl:170` | editor buffer contents, not a secret — no action |
+

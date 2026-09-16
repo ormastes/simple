@@ -1,4 +1,8 @@
 # JIT Method-Dispatch Worklist — remaining gaps after 2026-07-29 sweeps
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Derived from `doc/08_tracking/bug/jit_method_dispatch_audit_2026-07-29.md`.
 Already-landed methods are NOT relisted: `count`/`drop`/`entries`/`insert`/
@@ -121,3 +125,4 @@ grep + existing dispatch-arm shapes in
 - Every candidate MUST be re-confirmed on a `fn main()`-wrapped probe on the
   freshly-built seed (JIT==interp, [jit-addr]) before landing — the worklist was
   inferred from grep, not run.
+

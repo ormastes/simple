@@ -1,4 +1,9 @@
 # A float-returning method used directly as a call argument prints raw tagged bits
+## Closed 2026-09-16 — Status FIXED; 34/34 PASS on fixed binary, 26/34 FAIL on unfixed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-08-10
 - Status: FIXED
@@ -195,3 +200,4 @@ filed separately rather than folded in:
   a *third*, separate mechanism — an integer-ABI call to libm)
 - `3f4486b45fa` — the print-drop defect with the same direct-argument shape
 - `scripts/check/check-native-print-stdout-oracle.shs`
+

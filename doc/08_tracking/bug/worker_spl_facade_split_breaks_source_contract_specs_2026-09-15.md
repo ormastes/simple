@@ -1,4 +1,8 @@
 # worker.spl facade split breaks source-contract specs (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - File: `src/lib/nogc_async_mut/http_server/worker.spl` (now a 6-line facade exporting
   from `worker_owner.spl` / `worker_connection_extensions.spl`).
@@ -21,3 +25,4 @@
   `submit_async_handler` lifecycle markers) in the worker/io driver sources, or re-point
   these source-contract specs at the new owner files with reviewed marker updates —
   a content decision, not mechanical drift, so it is left RED rather than rewritten.
+

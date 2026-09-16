@@ -1,4 +1,9 @@
 # `wm_action_applier_spec` executes NOTHING on both legs — `vulkan_order_env_get` not found
+## Closed 2026-09-16 — ...ound **Status:** PRIMARY DEFECT RESOLVED 2026-08-17 — the spec now EXECUTES (17/17, 14 pas
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** PRIMARY DEFECT RESOLVED 2026-08-17 — the spec now EXECUTES (17/17,
 14 passed). Three genuine failures it was hiding are now visible and remain
@@ -94,3 +99,4 @@ any of the three into `pending`.
 **Not re-measured:** the legacy `test/unit/os/compositor/wm_action_applier_spec.spl`
 leg (12 `it` blocks) — it should be run and reconciled with the numbered leg,
 since the two trees diverged and this record covers both.
+

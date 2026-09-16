@@ -1,4 +1,8 @@
 # SimpleOS backend render receipt producer/parser missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: open
 - Priority: P0
@@ -47,3 +51,4 @@ tracks retained PPM artifact SHA-256 and decoded raw-pixel SHA-256.
   is corrected, but the hard three-cycle cap forbids another run this session.
 - Resume exactly:
   `SIMPLE_LIB=src <fresh-stage4> test test/01_unit/lib/common/renderdoc/backend_render_receipt_wire_spec.spl --mode=interpreter --clean`.
+

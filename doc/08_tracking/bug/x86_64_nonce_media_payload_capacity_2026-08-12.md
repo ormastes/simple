@@ -1,4 +1,8 @@
 # x86_64 nonce media exceeds configured FAT image capacity
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -53,3 +57,4 @@ Start a guarded fresh session through:
 ```bash
 bin/codex exec -C /home/ormastes/dev/pub/simple 'Resume doc/08_tracking/bug/x86_64_nonce_media_payload_capacity_2026-08-12.md. Use the admitted pure-Simple compiler and current explicit-only payload selection. Run exactly one `sh scripts/check/rebuild-sosix-qemu-media.shs --run --rows x86_64`; if and only if it succeeds, run exactly one canonical Linux x86_64 matrix/QEMU row with a fresh nonce. Retain build, image, serial, hashes, and capacity receipt. Stop after either failure; do not resize or retry.'
 ```
+

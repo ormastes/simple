@@ -1,4 +1,9 @@
 # BUG: native path — untyped text `==` never matches + fused boolean conditions evaluate wrong
+## Closed 2026-09-16 — Status RESOLVED; verified fixed at origin tip 8932fcb3a148
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status (2026-07-15):** RESOLVED — verified fixed at origin tip 8932fcb3a148.
 
@@ -36,3 +41,4 @@ SIMPLE_RUNTIME_PATH), run with matching argv — guard never fires.
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148: `probe06_untyped_text_eq_a.spl` (`fn check(a: text) -> i64` computing `a == "spl"`, `a.starts_with("d")`, `a.ends_with("l")`, and fused `not starts_d and ends_l`; called with `"spl"` and `"dashl"`). Oracle: `bin/simple run` → `11` then `0`. Native: `native-build --entry --clean` exit 0, binary built, run → `110` (= both values concatenated, matches oracle). Text equality now uses shared runtime content comparison and boolean fusion evaluates correctly.
+

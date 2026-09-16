@@ -1,4 +1,8 @@
 # WM rung-(d): every text Draw IR command skipped — `config.language` reads `normal` instead of `und`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: RESOLVED (2026-09-13) — the `config.language` cross-struct-copy
   defect itself is fixed and verified by a pure-Simple unit spec (below). The
@@ -205,4 +209,5 @@ verification itself: `check-simpleos-wm-fullscreen-evidence.shs`
 needs a QEMU + OVMF pflash boot reaching desktop readiness, which this
 lane cannot run (no kernel build, no QEMU). Leaving OPEN — source fix
 present, gate verification still pending as originally noted.
+
 

@@ -1,4 +1,8 @@
 # Native tool builds fail on two compiler gaps and lose their own diagnostics
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-31
 **Status:** OPEN — measured, not yet fixed
@@ -72,3 +76,4 @@ precedes Git-for-Windows' (otherwise cc1 crashes on every input — see
 None of the three is Windows-only in *cause*; defect 3 is Windows-only in
 *symptom* (the root-relative path happens to be writable on Unix, so the
 diagnostics survive there and the bug is invisible).
+

@@ -1,4 +1,9 @@
 # Bootstrap progress watcher reports only wrapper RSS
+## Closed 2026-09-16 — Status Fixed for future canonical runs; tree_* fields added, tests cover
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -41,3 +46,4 @@ descendant was still the per-file fingerprint/source-authority shell chain.
 That prebuild latency is separately measurable, but source and tool authority
 are admission inputs. It must not be shortened by dropping hashes or snapshots;
 this fix deliberately does not change it.
+

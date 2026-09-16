@@ -1,4 +1,8 @@
 # `struct text:` shadowing the built-in string — undecided language question
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — needs a language decision, not a compiler patch.
 **Found:** 2026-08-22, during the `cargo test` seed backlog triage
@@ -96,3 +100,4 @@ keeps its original `"text.rfind"` expectation for the same reason: that
 expectation is a consequence of today's shadowing behaviour, and it must move
 only when the decision above is taken, not as a side effect of a test-triage
 pass.
+

@@ -1,4 +1,9 @@
 # native (bootstrap): declared function return types ignored — call results all typed i64
+## Closed 2026-09-16 — ...ret` comment); after the bridge was fixed, the workaround inverted into a silent re-typing
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-23  **Status:** PARTIALLY FIXED (Str returns; other types
   remain on the builtin-table fallback by design, see ceiling)
@@ -36,3 +41,4 @@ with repro coverage: Array, Dict, struct/class Named, f64, Optional.
 ## Repro
 W87: `fn t1() -> text: "xy"` + `print "{t1()}"` → printed `2099630`
 (pointer digits). Fixed: prints `xy` (W91/W93).
+

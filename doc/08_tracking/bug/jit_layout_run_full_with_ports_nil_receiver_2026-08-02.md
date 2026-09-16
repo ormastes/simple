@@ -1,4 +1,8 @@
 # JIT: layout_run_full_with_ports dies with nil-receiver field access (core dump)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** Cranelift JIT / gpu_web layout ports
 
@@ -38,3 +42,4 @@ with `SIMPLE_EXECUTION_MODE=interpreter` completes.
 
 Open. Engine-divergence family
 (`doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`).
+

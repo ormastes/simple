@@ -1,4 +1,9 @@
 # Importing a module named `main` adds a phantom test failure
+## Closed 2026-09-16 — ...+1 phantom file failure" signature. ## Fix A patch exists but is **UNVERIFIED** — it could
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Component:** `evaluate_module_impl`, `src/compiler_rust/compiler/src/interpreter_eval.rs`
@@ -154,3 +159,4 @@ contents, one named `main.spl` and one named `notmain.spl`. The name was the
 variable nobody had isolated, because it was never the thing under suspicion.
 When a hypothesis keeps surviving in weakened form, test the attribute you have
 been treating as incidental.
+

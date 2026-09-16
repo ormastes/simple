@@ -1,4 +1,8 @@
 # Specs importing compiler.tools.lint.main gain a file-level failure: "cannot convert dict to int"
+## Obsolete 2026-09-16 — Root-caused as test-runner defect; tracking moved to test_runner_wildcard_imported_main_phantom_failure_2026-08-01.md (verified exists, same symptom)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Date:** 2026-07-31
 **Severity:** spec-verdict pollution — example results stay correct, but every
@@ -120,3 +124,4 @@ the same methodology per file to get genuine single-file isolation.
 **Note on tooling:** `bin/simple check` is not available as an alternate probe
 while the live binary is clobbered — it internally spawns `bin/simple run` and
 dies with `unknown command 'run'`. Use `compile <src> -o <tmp>` instead.
+

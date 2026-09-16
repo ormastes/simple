@@ -1,4 +1,8 @@
 # Stage-2 Rust transient promotion rejects positional hello world
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-09
 **Status:** Repair implemented; focused Rust and native-all-provider regression
@@ -59,3 +63,4 @@ same ownership shape: a native struct allocated before the scope, containing
 a string allocated inside the scope. It passes both the ordinary runtime and
 the production `native-all-provider` composition and proves that the child
 survives scope end.
+

@@ -1,4 +1,8 @@
 # Full bootstrap blocked: Rust inputs changed mid-build (concurrent sessions)
+## Obsolete 2026-09-16 — one-off 2026-08-15 shared-worktree concurrent-session environment; guard correct, no code defect
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 Date: 2026-08-15. Session: sole temporary build owner attempting to replace the
 seed-masquerading `bin/simple` with a self-hosted binary.
@@ -44,3 +48,4 @@ mid-run; still prints the seed banner).
 Logs: rust-seed-build logs under
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/`; session logs in scratchpad
 `boot4.log`/`boot5.log`.
+

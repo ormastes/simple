@@ -1,4 +1,8 @@
 # Bug: `bin/simple build lint <file>` triggers a full cargo/clippy driver rebuild
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** build_lint_subcommand_triggers_full_driver_rebuild_2026-06-15
 - **Filed:** 2026-06-15
@@ -48,3 +52,4 @@ the Rust crates. A per-file lint should be sub-second, not a 50s+ crate rebuild.
 - **inferred**: the cargo lock contention is incidental — a bootstrap was running concurrently on this host — but it is only reachable because `build lint` enters the Rust build at all, which is the defect. The `<file>` argument is still not routed to the Simple linter.
 - **inferred**: the entry's workaround (invoke the seed driver's `lint` directly) remains the way to get Simple-level diagnostics; `.claude/rules/commands.md` documents `bin/simple lint <files>` as the sanctioned pure-Simple path, so `build lint` arguably should reject a `.spl` argument rather than silently rebuilding the driver.
 - Verdict: OPEN — P3 tooling UX, unchanged since filing.
+

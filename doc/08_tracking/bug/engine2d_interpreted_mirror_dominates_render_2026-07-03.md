@@ -1,4 +1,8 @@
 # Perf: Engine2D per-op interpreted mirror makes every backend equally slow
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-03
 - **Severity:** high (blocks WM-chrome-via-CSS at desktop resolution; goal item)
@@ -24,3 +28,4 @@ shrinks the mirror to 1x1 and reads back from the GPU once per frame.
    interpreted per-element copy loop).
 2. Then: simple_web_layout_render_html_pixels via Draw IR + Engine2D
    (native), and raise/remove the wm_scene CSS cap.
+

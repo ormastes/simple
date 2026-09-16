@@ -1,4 +1,8 @@
 # MCP interpreter-mode startup takes ~11-13s before `initialize` answers
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 OPEN — breakdown below, fix identified but not yet applied (see "Why not
@@ -133,3 +137,4 @@ interpreter-forced `.cmd` wrapper.
 - No `SIMPLE_TRACE`/module-load-timing env var exists in the seed
   (`src/compiler_rust`) to get a per-module breakdown finer than the
   black-box `--probe` measurement above; adding one was out of scope.
+

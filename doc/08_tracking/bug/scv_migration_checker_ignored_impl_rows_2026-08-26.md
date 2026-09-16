@@ -1,4 +1,9 @@
 # SCV migration checker structurally ignored SCV-IMPL ledger rows (2026-08-26, FIXED same day)
+## Closed 2026-09-16 — title: FIXED same day; fix landed, selftest F7, re-signed and verified
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Found by:** W4 + Wave-1 closeout lane, while flipping the 8 Wave-1 rows.
 
@@ -25,3 +30,4 @@ WOTS key (leaf 40) and re-verified against
 **Defect-class note:** a fail-closed checker with a fail-open ROW FILTER is
 still fail-open for anything the filter does not name. Any future id family
 added to the ledger must ship with a matching selftest fixture.
+

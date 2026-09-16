@@ -1,4 +1,8 @@
 # `resource` invariant 3 (borrow pinning across foreign calls) is not enforced
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ARCHITECTURAL-OPEN (final terminal-status pass 2026-08-10:
 re-read `record_move` at `src/compiler/55.borrow/borrow_check/borrow_graph.spl:533`
@@ -166,3 +170,4 @@ machinery genuinely absent from `record_move`). No new evidence gathered
 this pass — implementing borrow-liveness tracking is a multi-day compiler
 architecture change, well beyond a per-bug TDD fix. Leaving OPEN, no code
 change made.
+

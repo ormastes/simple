@@ -1,4 +1,9 @@
 # Trailing-operator line continuation rejected for comparison/equality operators (seed parser only)
+## Closed 2026-09-16 — Status FULLY FIXED; comparison/equality landed 2026-07-30, elif closed 2026-07-31, re-verified 2026-08-01
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FULLY FIXED. Comparison and equality landed 2026-07-30; the
 `elif` sub-case landed 2026-07-31 (`a7e5fbccf85` plus the shared
@@ -134,3 +139,4 @@ open rather than rushed. It was already broken before this fix, so nothing
 regressed. The behaviour is pinned by
 `elif_condition_continuation_is_still_unsupported`, which asserts the
 current failure and tells whoever fixes it to flip the assertion.
+

@@ -1,4 +1,8 @@
 # `export_sdoctest_spec.spl` subprocess bound: investigated, NOT the actual blocker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Closed as not-the-cause — duplicate root cause of
 `sdoctest_mode_unknown_extern_rt_string_ends_with_2026-08-07.md`
@@ -87,3 +91,4 @@ Results: 9 total, 8 passed, 1 failed
 
 Unchanged from before this investigation — as expected, since no code was
 modified.
+

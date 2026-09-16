@@ -1,4 +1,8 @@
 # Assorted src-side behavior gaps behind remaining RED specs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-15
 Discovered by: test-wave agent B (spec triage)
@@ -30,3 +34,4 @@ None were weakened during triage.
 - fs_driver/positioned_binary_backend_parity_spec.spl — `pread_bytes_handle` /
   `pread_bounded_bytes_handle` missing on DbFsDriver (only the text-returning
   `pread_handle` exists in src/lib/nogc_sync_mut/db/dbfs_driver/namespace_io.spl)
+

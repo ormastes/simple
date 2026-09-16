@@ -1,4 +1,9 @@
 # Seed interpreter: `.?` boolean-context consumers re-decide presence from payload truthiness ("0 is falsy" landmine)
+## Closed 2026-09-16 — fixed at seed source; 2026-09-06 re-probe on deployed seed not reproducible
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-18
 **Lane:** N2 (root-caused from lane M4's report)
@@ -296,3 +301,4 @@ Probes `_scratch/p_opt.spl` and `_scratch/p_opt3.spl` (the latter also covers
 `if zero_v().is_some():` taking the correct arm). This record is about behaviour
 "at scale", which a small probe cannot disprove — it retires the minimal shape
 only.
+

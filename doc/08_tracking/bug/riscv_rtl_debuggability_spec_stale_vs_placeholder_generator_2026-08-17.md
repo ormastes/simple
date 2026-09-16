@@ -1,4 +1,9 @@
 # riscv_rtl_debuggability_spec asserts a lint-clean bundle the generator deliberately never emits
+## Closed 2026-09-16 — Status RESOLVED 2026-08-17: spec rewritten fixture-based, 13/13 GREEN
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED 2026-08-17 via unblock option (b) — spec rewritten fixture-based, 13/13 GREEN
 - Resolution: the spec now builds a known-clean bundle itself (`make_clean_bundle`
@@ -68,3 +73,4 @@ rather than a generator promise the design explicitly refuses to make.
 
 Deliberately NOT done: relaxing the assertions to expect the placeholder
 findings. That would hide the real gap (per `.claude/rules/testing.md`).
+

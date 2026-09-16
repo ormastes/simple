@@ -1,4 +1,9 @@
 # Native-build cache omits compiler identity
+## Closed 2026-09-16 — ...s compiler identity **Status:** Resolved 2026-07-16 — identity-in-key verified empirically
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Resolved 2026-07-16 — identity-in-key verified empirically
 (miss on compiler change proven end-to-end; see Regression evidence). The
@@ -110,3 +115,4 @@ is byte-identical at 8ac25987333). Native-build itself is broken at
 native verification": `rt_dict_*` extern migration incompatible with the
 deployed 2026-07-11 seed interpreter, bisect-proven), so end-to-end runs were
 executed at the fix commit.
+

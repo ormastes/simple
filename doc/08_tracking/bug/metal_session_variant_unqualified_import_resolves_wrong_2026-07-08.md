@@ -1,4 +1,8 @@
 # Unqualified `std.gpu.engine2d.metal_session` import can resolve to the wrong memory-model variant
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** 2026-07-08, incidental finding during the "new kernel not found"
 blocker investigation (`engine2d_metal_new_kernel_pipeline_not_found_2026-07-07.md`).
@@ -52,3 +56,4 @@ with divergent public method sets should either (a) be a resolution error that
 names the ambiguous candidates, or (b) deterministically prefer the variant
 matching the importing module's memory-model family. Filed as a record; not
 fixed in the GPU-dict pilot change.
+

@@ -1,4 +1,8 @@
 # browser_engine text-metrics spec: multiple real API gaps (missing fields/fn, nil SFFI)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
@@ -57,3 +61,4 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 
 - `test/01_unit/app/ui.chromium/text_metrics_spec.spl` (13 of 14 examples,
   4 distinct root causes as above)
+

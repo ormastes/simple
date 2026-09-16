@@ -1,4 +1,8 @@
 # SimpleOS `sched_yield` false-success repair
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -21,3 +25,4 @@ ABI tuple and propagated `EINTR`.
 
 This does not establish whole-SimpleOS scheduler evidence; guest boot and
 multi-task runtime evidence remain governed by the mission-critical matrix.
+

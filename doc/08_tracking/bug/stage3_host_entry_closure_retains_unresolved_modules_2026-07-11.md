@@ -1,4 +1,8 @@
 # Stage3 Host Entry Closure Retains Unresolved Modules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The pure-Simple stage3 compiler builds the production hosted WM with
 `--source src/os/hosted/hosted_entry.spl --entry-closure`, compiles all source
@@ -117,3 +121,4 @@ through it by the interpreted seed), and a correct fix needs a matching
 interpreter's own decl-eval path) — verifying that safely requires the
 self-hosted bootstrap rebuild loop, which is out of scope for a
 worktree-only diagnosis pass.
+

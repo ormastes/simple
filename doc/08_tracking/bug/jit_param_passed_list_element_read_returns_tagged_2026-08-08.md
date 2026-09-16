@@ -1,4 +1,9 @@
 # JIT: element read from a parameter-passed `list`-spelled param returns the TAGGED value (`v << 3`)
+## Closed 2026-09-16 — Status FIXED; binop-lowering fix verified on rebuilt seed (98 vs 84)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-08 · **Severity:** critical (silent wrong data, no diagnostic,
 source reads correct) · **Engine:** JIT (Cranelift) via `bin/simple run` on the
@@ -263,3 +268,4 @@ just "succeeded". **Always run the sabotage probe from the same cwd as the
 measurement**, and confirm the marker is visible before believing any stdlib
 result. From the repo root the marker returned 4242, and the fixed module then
 verified correctly on the JIT lane (valid padding stripped, invalid rejected).
+

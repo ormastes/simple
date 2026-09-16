@@ -1,4 +1,8 @@
 # SimpleOS FD compatibility runtime wiring blockers
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Requested invariant
 
@@ -60,3 +64,4 @@ No runtime wiring was applied. Falling back to the legacy owner for descriptors
 missing from the canonical context would violate the single-owner invariant;
 failing those operations would regress existing file/pipe/socket behavior.
 Both outcomes are rejected.
+

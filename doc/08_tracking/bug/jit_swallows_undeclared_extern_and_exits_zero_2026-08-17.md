@@ -1,4 +1,8 @@
 # JIT logs an undeclared extern, then continues and exits 0 with a wrong value
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (P1)
 **Filed:** 2026-08-17
@@ -91,3 +95,4 @@ resolution path) is Rust seed source, and making a mode's *default* stricter
 requires a rebuild+redeploy to verify — out of scope for this lane. Third
 question (declared-but-missing-at-link-time extern) not tested; out of budget.
 Left OPEN.
+

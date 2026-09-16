@@ -1,4 +1,8 @@
 # Performance Test Failures — Triage Report (05_perf + perf sections)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-18  
 
@@ -187,3 +191,4 @@ Fix the `print_summary` exports/imports affecting 117 tests:
 - **Verification method:** bin/simple fix --dry-run + visual inspection
 - **Remaining issues:** 117 print_summary failures (systemic), 1 missing children param, 2 function keyword specs (helper inspection needed)
 - **Note:** NEVER invoked `bin/simple test` per coordinator instruction
+

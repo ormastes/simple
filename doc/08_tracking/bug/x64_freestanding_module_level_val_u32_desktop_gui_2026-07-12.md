@@ -1,4 +1,8 @@
 # BUG: freestanding native-build silently corrupts a module-level `val: u32` read inside `spl_start()` (desktop GUI entry)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Severity:** medium (silent corruption, not a crash -- easy to miss; blocks refactoring magic-number literals into named constants for baremetal entry files)
@@ -85,3 +89,4 @@ inspection of a real freestanding artifact with this shape), which is out of
 scope here (no rebuild, no QEMU/board boot per this pass's constraints).
 Left open; do not close this doc from the module-init link-stage fix landed
 in the other two docs.
+

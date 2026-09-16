@@ -1,4 +1,9 @@
 # Killed spec emits no verdict line — a broken spec reads as "not yet run"
+## Closed 2026-09-16 — Status FIXED re-verified; timeout verdict line on all four paths; probe proof
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -91,3 +96,4 @@ Results: 1 total, 0 passed, 1 failed
 
 - `doc/07_guide/infra/testing.md` § Runner Operational Caveats, items F5/F6
 - `stale_daemon_lock_fakes_total_red_2026-08-09.md`
+

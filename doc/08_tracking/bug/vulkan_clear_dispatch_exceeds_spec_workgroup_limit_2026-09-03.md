@@ -1,4 +1,8 @@
 # Full-surface `clear` exceeds the Vulkan spec-minimum workgroup count at 4K and above
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Filed 2026-09-03. Status: OPEN. Severity: HIGH (portability/correctness —
 undefined behaviour on a conformant device), but **latent on this host**.
@@ -75,3 +79,4 @@ this arc. Fix when the machine is quiet and both gates run clean.
 Found by a delegated defaults/sizing audit; call site verified independently by
 reading `backend_vulkan.spl`. Full inventory:
 `doc/08_tracking/bug/engine2d_8k_default_sizing_inventory_2026-09-03.md`.
+

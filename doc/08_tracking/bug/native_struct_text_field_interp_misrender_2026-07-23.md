@@ -1,4 +1,9 @@
 # native (entry-closure): struct text fields misrender in string interpolation
+## Closed 2026-09-16 — in-body Resolution section: MIR field projection source fix; staged execution pending
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-23  **Status:** SOURCE FIXED; staged execution pending
 - **Severity:** medium — no crash; wrong output when interpolating struct
@@ -42,3 +47,4 @@ The exact W83 before/after assignment oracle now lives in
 FreeBSD, AArch64/RISC-V64 execution, and ARM32/RV32/Windows-ARM64 object gates.
 A focused source contract pins both type-propagation steps. Rebuilt execution
 remains pending.
+

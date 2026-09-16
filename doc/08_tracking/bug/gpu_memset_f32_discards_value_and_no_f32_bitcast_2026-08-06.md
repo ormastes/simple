@@ -1,4 +1,8 @@
 # gpu_memset_f32 discards its `value` argument and returns Ok(()) — blocked on a missing f32→u32 bitcast
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 01).
@@ -107,3 +111,4 @@ No on-device execution of anything in this report. `cuInit` returns 3
 (`CUDA_ERROR_NOT_INITIALIZED`) in this process even though two real GPUs
 (RTX A6000 + TITAN RTX, driver 580.126.16) are present and `libcuda.so.1`
 dlopens. No `cuMemsetD32_v2` call was ever issued against a real allocation.
+

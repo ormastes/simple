@@ -1,4 +1,8 @@
 # Bootstrap Parser Rejects Address-Of Cast Arguments
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -54,3 +58,4 @@ and commas cascade into recovery diagnostics.
 Fix cast grouping so `&value as u64` is
 `Cast(Unary(Ref, value), u64)`, then complete native stable-place/write-back
 evidence. Do not rewrite valid userlib syscall arguments as a workaround.
+

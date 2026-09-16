@@ -1,4 +1,9 @@
 # A naked `case StructName(field):` pattern matched against an `Option<StructName>` value always falls to the wildcard arm
+## Closed 2026-09-16 — ...y this naked-pattern shape and was fixed in lane SYM0 (see `hir_get_symbol_id_zero_returns
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** open (general defect class, not swept beyond the one confirmed site)
 **Found:** 2026-07-29 (lane SYM0 `get-symbol-id-zero-nil`), while diagnosing
@@ -92,3 +97,4 @@ Lint rule honestly skipped: `match_exhaustiveness.spl` returns early on
 types; `sffi_lint.spl` has `HirTypeKind.Optional` info but no function-body
 walker. A real rule needs a new HIR body walker with type-environment
 threading — filed as future work, not a drop-in addition.
+

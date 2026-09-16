@@ -1,4 +1,8 @@
 # Caret cannot yet launch Slang local inference
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -78,3 +82,4 @@ it are unmet:
   children.
 - Then, separately, A3/A4 for the native path, at which point the `"stub":true`
   branch in `serving_chat.spl` stops being reachable for a slang pack.
+

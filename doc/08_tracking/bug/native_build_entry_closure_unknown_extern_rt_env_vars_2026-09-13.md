@@ -1,4 +1,8 @@
 # `native-build` is red tree-wide: `semantic: unknown extern function: rt_env_vars`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found: bootstrap lane BOOT-11, `work/bootstrap-codegen-1-2026-09-13`, base `origin/main f26970e9d93`
@@ -59,3 +63,4 @@ Remaining suspects, in order, not yet discriminated:
 and every other spec that shells out to `native-build` cannot pass at this
 commit. A green `bin/simple test` run is therefore NOT evidence about the native
 lane today.
+

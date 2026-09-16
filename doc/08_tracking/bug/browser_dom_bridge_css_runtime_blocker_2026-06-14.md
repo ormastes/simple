@@ -1,4 +1,8 @@
 # Browser DOM Bridge CSS Runtime Blocker - 2026-06-14
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -40,3 +44,4 @@ only land the optimization with matching rule/declaration counts.
 - **inferred**: the fix is the same shape as the `interface` guard — skip the TsNamespace arm when the token sits in a named-argument position (next lexeme `:` inside a call) — in `src/compiler/10.frontend/parser/recovery.spl` and `src/compiler_rust/parser/src/error_recovery.rs`. Both are off-limits to this session: a bootstrap is running concurrently, and `src/compiler_rust/**` must not be edited.
 - **inferred**: the original report's `List<T>()`/inferred-`ANY` runtime fallbacks and the >90 s five-rule probe hang could not be re-tested at all, since load now fails first. The `parse_css_rules` repeated-tail-slice perf concern also stands unmeasured.
 - Verdict: OPEN, and now with a concrete first step that is independent of the CSS work.
+

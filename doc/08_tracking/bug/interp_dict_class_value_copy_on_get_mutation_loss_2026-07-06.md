@@ -1,4 +1,8 @@
 # Interpreter: `Dict<K, ClassInstance>.get()`/`.set()` copies the value — mutations through the fetched instance are silently lost
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-07-06
 - Severity: high (silent state loss — any cache/accumulator held in a Dict misbehaves)
@@ -99,3 +103,4 @@ completely (6 of 7 checks fail). **Conclusion: PARTIALLY FIXED.** The
 production-relevant JIT path (`bin/simple run`, the default engine) is fixed;
 the interpreter path (what `bin/simple test` spec BODIES execute, and what
 this bug was originally filed against) is not.
+

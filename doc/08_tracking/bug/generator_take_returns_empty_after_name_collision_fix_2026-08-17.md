@@ -1,4 +1,9 @@
 # `std.generator` take() returns an empty array (2026-08-17)
+## Closed 2026-09-16 — original empty-array P1 RESOLVED by d7213eb6174 with green spec; JIT crash filed separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: RESOLVED (interpreter path) 2026-09-13 — fixed by d7213eb6174 (2026-08-17,
   "fix(src): land forward deltas from 20 spend-limit-killed sessions"), which
@@ -76,3 +81,4 @@ Rust-seed backend, not in `src/lib/nogc_async_mut/generator.spl` itself (that
 file is correct, as proven by the interpreter-mode pass) — out of scope for a
 pure-Simple lane fix. Left OPEN for a seed-side lane; the interpreter-mode
 fix is recorded here so it is not re-investigated.
+

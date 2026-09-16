@@ -1,4 +1,8 @@
 # Runtime compiler temporary namespace hardening
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Open risks
 
@@ -20,3 +24,4 @@ would leave the concurrent write collision intact.
 This is intentionally separate from the landed early-error cleanup fix, which
 correctly deletes the current full planned list but does not create the shared
 namespace risk.
+

@@ -1,4 +1,8 @@
 # `slh_dsa_wots.spl` retype — scoped archive-lane attempt #2 (2026-07-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment: execute the scoped follow-up to the pass-13 blocked archive-lane
 attempt — use a scoped `native-build` invocation (avoiding the
@@ -119,3 +123,4 @@ fall back to a different validation strategy entirely for `src/os/crypto`
 (e.g. a from-scratch, hand-rolled minimal test harness that links only
 the exact functions needed, bypassing `native-build`'s whole-project
 model) rather than repeating variations on the same CLI invocation.
+

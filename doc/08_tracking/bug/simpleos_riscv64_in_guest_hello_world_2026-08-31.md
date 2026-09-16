@@ -1,4 +1,9 @@
 # SimpleOS riscv64 in-guest hello world: native GREEN, interpreter blocked on Stage2 admission
+## Closed 2026-09-16 — ..., every archive member x86-64). Fixed by returning no archive for non-host `TargetOS::None
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-31
 Base: `goal/simpleos-b1-merge-clobber-restore-20260831` @ `91b6b9f28dd`
@@ -135,3 +140,4 @@ Separately, autodiscovery compiles `*.inc.c` files as standalone translation
 units, which fails for four of them under `arch/riscv64/boot/`. It is non-fatal
 today (they are `#include`d by the real TU) but it makes every riscv64 build log
 carry spurious "failed to compile" lines that mask real errors.
+

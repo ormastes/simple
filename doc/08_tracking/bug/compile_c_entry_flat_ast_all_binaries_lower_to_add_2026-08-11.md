@@ -1,4 +1,9 @@
 # compile_c_entry flat-AST bridge lowers EVERY binary op to Add and EVERY unary to Neg
+## Closed 2026-09-16 — Status FIXED; operator decode fix applied, module loads clean (test lane blocked pre-existing)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **ID:** compile_c_entry_flat_ast_all_binaries_lower_to_add_2026-08-11
 - Status: FIXED
@@ -141,3 +146,4 @@ The two are **distinct defects on distinct lanes** and must not be conflated:
 
 Filed separately because this lane's defect is not reached by the WM gate and would
 otherwise have survived only in a session transcript.
+

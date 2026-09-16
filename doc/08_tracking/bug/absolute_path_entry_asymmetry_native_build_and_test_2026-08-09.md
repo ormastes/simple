@@ -1,4 +1,8 @@
 # Absolute paths are mishandled in opposite directions by `native-build --entry` and `simple test` -- 2026-08-09
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status: PARTIALLY FIXED (Half 1 implemented 2026-08-16; admitted Stage 2/4 verification pending). Half 2 remains OPEN / fail-open.
 
@@ -103,3 +107,4 @@ The `simple test` half is the dangerous one: it manufactures false GREENs.
   exit non-zero.
 - Both checks belong in the CLI-behaviour spec corpus so the asymmetry cannot
   silently return.
+

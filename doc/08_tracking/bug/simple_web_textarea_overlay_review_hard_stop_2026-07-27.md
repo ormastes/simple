@@ -1,4 +1,8 @@
 # Simple Web textarea overlay review hard stop
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open / fail-closed  
 **Affected goal:** WM glass theme on host and SimpleOS  
@@ -76,3 +80,4 @@ reviewed functional behavior while:
 Live completion still requires an admitted source-matched pure-Simple runtime,
 focused executed specs, computed-style/Draw-IR evidence, framebuffer pixels,
 native events, timing, and RSS.
+

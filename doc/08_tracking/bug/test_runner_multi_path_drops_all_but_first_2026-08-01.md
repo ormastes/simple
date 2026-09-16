@@ -1,4 +1,8 @@
 # `simple test a.spl b.spl` silently runs ONLY the first spec and exits 0 — a failing second spec is dropped
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed 2026-08-01 (runner-fix lane)
 **Severity:** high (fail-open in the test runner itself)
@@ -155,3 +159,4 @@ Repo-wide sweep with `/usr/bin/grep` (not ugrep):
 - `simple compile` invoked by absolute path exits 0 without compiling.
 - The default JIT exits 0 while printing "whole module dropped to the
   interpreter".
+

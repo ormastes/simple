@@ -1,4 +1,8 @@
 # Bootstrap Stage 2 backend object-path failure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -366,3 +370,4 @@ atomic's initial value, the success code, and what an unresolved extern returns.
 Three states on one number is not a measurement. A diagnostic code space must
 make "I was never set" distinguishable from every real answer before its
 readout is worth anything.
+

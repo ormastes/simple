@@ -1,4 +1,8 @@
 # Formal Verification Section Test Failures (106/274)
+## Obsolete 2026-09-16 — Superseded: umbrella premise retracted; per-defect 2026-07-20 docs verified present
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **UPDATE 2026-07-20:** This doc's core premise ("the specification modules
 themselves do not exist in the codebase") is now false — re-triaged on
@@ -92,3 +96,4 @@ All 106 failures stem from missing implementations of:
 
 **Status:** DOCUMENTED  
 **No immediate action required** — this is a known future feature section.
+

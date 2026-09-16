@@ -1,4 +1,8 @@
 # 4edef8fab8 stale-snapshot clobber: 458 files still unrepaired, 32,530 lines missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-27
 **Offending commit:** `4edef8fab8` "feat: snapshot current development state"
@@ -150,3 +154,4 @@ A wholesale revert would undo every genuine change that landed after it,
 including the 9.57x re-export fix. Repair must be per-file, restoring from
 `4edef8fab8~1` only where HEAD has no newer intentional change. The list above
 is the work queue, not a patch.
+

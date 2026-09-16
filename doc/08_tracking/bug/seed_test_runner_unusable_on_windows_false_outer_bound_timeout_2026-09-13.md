@@ -1,4 +1,8 @@
 # Seed `bin/simple test` cannot derive its own executable identity on Windows: `child-spawn-failure` unless `SIMPLE_BINARY` is set
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-13 · **Severity:** high (removes all spec-level evidence on Windows) · **Area:** test runner / process layer / Windows host
 
@@ -83,3 +87,4 @@ symlink to `bin/release/x86_64-pc-windows-msvc/simple.exe`, which may be why
    delay is what made this read as a timeout to four independent investigators.
 3. Until (1) lands, document `SIMPLE_BINARY` in the Windows tooling guide — this
    sweep lost most of its spec-level evidence for want of one env var.
+

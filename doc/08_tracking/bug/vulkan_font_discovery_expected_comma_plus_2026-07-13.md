@@ -1,4 +1,8 @@
 # Vulkan font discovery parse failure: expected comma, found plus
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -103,3 +107,4 @@ bitwise expressions containing indexed `off + N` operands or another compact
 expression form introduced after the staged compiler was built. Fix the grammar
 if the form is intended Simple syntax; otherwise rewrite only that expression
 and then run one fresh production build/QEMU cycle.
+

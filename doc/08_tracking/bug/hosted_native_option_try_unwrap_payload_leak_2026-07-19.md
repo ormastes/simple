@@ -1,4 +1,9 @@
 # HOSTED native `.?` / if-val Option unwrap leaks the Some tag instead of the payload
+## Closed 2026-09-16 — RESOLVED; i64/text/struct verified on rebuilt run executables; specs PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-19
 **Status:** RESOLVED 2026-07-20 for i64/text/struct/None — root-fixed and
@@ -261,3 +266,4 @@ fix does not cover it).
 `NATIVE_SMOKE_CASES=optnil scripts/check/native-smoke-matrix.shs` (case
 `optnil|i64? .? unwrap|...|7`) — was marked xfail against this bug; flip once
 this fix redeploys to the smoke-matrix's binary.
+

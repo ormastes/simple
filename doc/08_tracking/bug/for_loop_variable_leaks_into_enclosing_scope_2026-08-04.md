@@ -1,4 +1,9 @@
 # `for` loop variable leaks into the enclosing scope and clobbers an outer `val`
+## Closed 2026-09-16 — FIXED IN SOURCE 2026-08-08 both engines; guard green; specs 24/24
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED IN SOURCE 2026-08-08 — both engines. The loop variable is now
 scoped to the loop and no longer clobbers an outer binding. Guard:
@@ -215,3 +220,4 @@ and try-operator guards all still PASS.
 
 **Not yet closed:** `bin/release/<triple>/simple` predates this fix, so the guard
 is red until the next seed redeploy.
+

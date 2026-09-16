@@ -1,4 +1,8 @@
 # Pinned Stage-2 candidate SIGSEGVs at the monomorphize phase
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found: bootstrap lane BOOT-11, `work/bootstrap-codegen-1-2026-09-13`
@@ -34,3 +38,4 @@ set it reaches monomorphize and dies there.
 This is consistent with, and adds a phase to, the standing record that every
 tracked stage binary crashes (`.claude/rules/vcs.md`, the
 `check-stage-binaries-runnable.shs` advisory guard, measured 2026-08-18).
+

@@ -1,4 +1,8 @@
 # Bug: Lean Parser Bitwise/Pipe Precedence Divergence
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Not closed 2026-09-13 — STILL REAL; fix blocked by a concurrent bootstrap
 
@@ -57,3 +61,4 @@ in the leveled chain: `parse_multiplication` → `parse_bitwise_and` → `parse_
 - tok_precedence (dead code, spec reference only): src/compiler/10.frontend/core/tokens.spl
 - M1 parser fix commit: landed infix &/^ + prefix ~ at multiplication level as deliberate
   short-term placement matching existing PIPE placement (1ea5249607 + follow-up fix commit).
+

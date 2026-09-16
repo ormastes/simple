@@ -1,4 +1,8 @@
 # Bug: theme_package_spec — missing runtime dependencies
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Still OPEN 2026-09-13 — premise unchanged: `src/app/ui/web/` is still empty
 - **measured**: `ls src/app/ui/web/` returns nothing — `html.spl` and `generate_css` were never implemented, so the spec's first import still cannot resolve.
@@ -32,3 +36,4 @@ The spec imports three modules that do not exist on disk or in git history:
 - Implement `src/app/ui/web/html.spl` with `generate_css(theme: text) -> text`
 - Add `fn simple_web_app_html_with_theme` to `simple_web_window_renderer.spl` (or update spec to use `themed_simple_web_html_with_theme`)
 - Investigate `BrowserBackend` trait impl error and add `theme_bg`/`theme_accent` exports
+

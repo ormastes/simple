@@ -1,4 +1,8 @@
 # GUI Showcase 4K `bin/simple` Native Assignment Target Failure - 2026-06-27
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
 - **measured**: every product path this entry references still exists in the tree, so there is no removed-code / dead-reference basis for closing it stale.
@@ -54,3 +58,4 @@ Investigate why the `bin/simple` launcher/native-build path reports unsupported
 assignment targets while the release self-hosted binary accepts the retained
 perf alias. Keep the fix in pure Simple compiler/runtime code; do not use the
 Rust seed as perf evidence.
+

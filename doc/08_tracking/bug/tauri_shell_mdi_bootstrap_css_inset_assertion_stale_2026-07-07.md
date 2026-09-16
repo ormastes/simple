@@ -1,4 +1,8 @@
 # Tauri Shell `tauri_mdi_bootstrap_has_drag_and_desktop_root` Stale CSS Assertion - 2026-07-07
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -45,3 +49,4 @@ assert on a more change-resistant substring (e.g. just
 `"#wm-desktop{position:fixed;"` plus a separate check for the dock-reservation
 value). Not fixed here — out of scope for the P1.2 invoke() round-trip item;
 flagged per repo convention rather than silently left red.
+

@@ -1,4 +1,9 @@
 # Multiline SFFI authority scan performance is not yet accepted
+## Closed 2026-09-16 — Status Resolved; optimized scan 27.18s vs 40.85s (-33%), RSS +408KiB within limits
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Resolved
 
@@ -39,3 +44,4 @@ The identical corrected census completes in 27.18 seconds / 14,540 KiB while
 retaining exactly 21,556 calls, 2,187 explicit, and 19,369 missing. Relative to
 the same-tree old scanner at 40.85 seconds / 14,132 KiB, wall time improves by
 about 33% and peak RSS increases by only 408 KiB, within the 1 MiB limit.
+

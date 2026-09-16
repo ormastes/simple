@@ -1,4 +1,8 @@
 # Seed interpreter: caller local sharing a global's bare name clobbers the global on call-out
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-28  **Status:** worked around in Simple source; seed defect open
 **Symptom:** `error: semantic: nil is forbidden by the non-optional return contract of 'decl_get_span'`
@@ -80,3 +84,4 @@ Verifier-noted omission (post-ACCEPT): the defect-class neighbour list should al
 
 The accepted patch's bug record lists only `module_lowering.spl:363` and `eval_decls.spl:26`;
 fold this entry into the record when the patch lands (patch itself already accepted, unchanged).
+

@@ -1,4 +1,8 @@
 # `bin/simple run <spec>.spl` exits nonzero when the import graph transitively
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 # lazily-loads a module with its own `fn main()` — root-caused and fixed
 
 **Date:** 2026-07-20 (root-cause lane; supersedes/resolves the prior OPEN
@@ -154,3 +158,4 @@ the deploy gate.
 - `doc/08_tracking/bug/stage4_test_runner_strip_ansi_superlinear_hang_2026-07-20.md`
   — already exonerates `strip_ansi`/`parse_test_output`; unaffected by this
   fix.
+

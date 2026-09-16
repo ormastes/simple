@@ -1,4 +1,8 @@
 # `app.dashboard.main` is a 14-line stub — both dashboard modules import an API that was never written
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
@@ -94,3 +98,4 @@ written logic, so it is filed as a gap rather than deleted.
 Two legitimate outcomes, both needing an owner: implement the
 `app.dashboard.main` table/constants API that these 27 KB were written against,
 or delete both modules as abandoned. Not guessed at here.
+

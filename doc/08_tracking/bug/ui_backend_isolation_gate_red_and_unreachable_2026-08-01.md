@@ -1,4 +1,8 @@
 # UI backend-isolation gate: red since 2026-07-25, and never executed in CI
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-01
 - **Guard:** `scripts/check/check-ui-backend-isolation.shs`
@@ -211,3 +215,4 @@ Unblock requires the gate to reach `new=0`. Cheapest credible path: resolve
 **G6/G7** (2 files), then G2–G5 (18 files). Only after `new=0` should the hook be
 installed, and it should be installed as a **symlink**, not a copy — the
 guard-wiring ratchet fails copied hooks because they go stale silently.
+

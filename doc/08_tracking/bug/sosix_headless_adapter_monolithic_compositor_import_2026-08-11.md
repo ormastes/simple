@@ -1,4 +1,8 @@
 # SOSIX Headless Adapter Pulls Monolithic Compositor Closure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed for the SOSIX adapter path; legacy compositor closure remains broad  
 **Observed:** 2026-08-11
@@ -26,3 +30,4 @@ The same adapter spec remained 4/4 and its reported duration fell from about
 20.7 seconds to 216 ms. The existing façade-based compositor occlusion spec
 also remained 10/10, proving import compatibility, though its broad legacy
 closure still took about 147 seconds and remains separate optimization work.
+

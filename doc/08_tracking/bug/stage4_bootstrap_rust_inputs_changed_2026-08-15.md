@@ -1,4 +1,8 @@
 # Stage 4 bootstrap aborted because Rust inputs changed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** historical provenance abort cleared; refreshed frozen baseline
 verified. **Observed:** 2026-08-15.
@@ -104,3 +108,4 @@ would reproduce `Rust inputs changed during full bootstrap` rather than teach
 anything new. The guard is correct; the environment still cannot satisfy it.
 Requires a quiesced tree or a private worktree with a frozen `src/compiler_rust`.
 Nothing changed.
+

@@ -1,4 +1,8 @@
 # Executable checker failed-only retry peak RSS — 2026-08-02
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Observation
 
@@ -24,3 +28,4 @@ and process isolation while fixing the peak.
 Evidence is recorded in
 `build/mini_builds/stage4-failed-only-retry/retry.time` and the associated
 durable per-file results.
+

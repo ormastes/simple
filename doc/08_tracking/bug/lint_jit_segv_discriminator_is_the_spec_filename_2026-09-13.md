@@ -1,4 +1,8 @@
 # `simple lint` SIGSEGVs in the JIT lane for any file whose basename ends `_spec` — content-independent
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found: 2026-09-13, PERF-9, while trying to reproduce PERF-5's report.
@@ -86,3 +90,4 @@ then chokes on `describe`/`it`".
 
 `SIMPLE_EXECUTION_MODE=interpret bin/simple lint <spec>` — rc 0, correct
 verdict.
+

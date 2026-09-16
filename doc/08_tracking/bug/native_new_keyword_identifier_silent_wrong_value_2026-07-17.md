@@ -1,4 +1,8 @@
 # Native path: `new` used as a plain identifier silently evaluates to the wrong value (and crashes when used as a method arg)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** High (silent wrong output with no diagnostic; escalates to SIGSEGV)
@@ -146,3 +150,4 @@ to pin down the mechanism to file this).
 - Confound test (non-keyword variable name in the same `.replace()` shape)
   passes on both oracle and native, isolating the defect to the `new`
   identifier specifically.
+

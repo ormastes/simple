@@ -1,4 +1,8 @@
 # Slang prefix-cache live evidence blocked by runtime provenance
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-08. Status: open evidence blocker.
 
@@ -14,3 +18,4 @@ prefill latency, and maximum RSS remain unmeasured. Resolve by admitting a
 current self-hosted runtime, then run the focused Slang source check and a small
 real GGUF cached/uncached differential with at least one warmup and seven
 interleaved samples. Do not treat this record as a performance result.
+

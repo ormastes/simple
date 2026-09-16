@@ -1,4 +1,8 @@
 # `container[key].push(x)` silently loses the write for dict values and tuple/struct fields
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-31
 **Engine tested:** tree-walk interpreter (`bin/simple test`) — JIT/native unverified
@@ -123,3 +127,4 @@ c["k"].push(2)
 - `.claude/memory/feedback_arrays_value_types.md` — refine: the copy happens at
   dict-value and tuple/struct-field access, not at every array index
 - `doc/07_guide/language/dict_native_pitfalls.md`
+

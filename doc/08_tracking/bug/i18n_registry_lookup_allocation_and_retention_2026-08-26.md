@@ -1,4 +1,8 @@
 # i18n registry lookup allocation and retention
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -23,4 +27,5 @@ state and test whether catalog capacity is retained or released.
 3. Cold load, warm lookup p50/p95/p99, steady/peak RSS, and post-drop retained
    bytes are reported in the same native run.
 4. Concurrent locale contexts do not use mutable process/thread global state.
+
 

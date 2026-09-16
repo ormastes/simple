@@ -1,4 +1,8 @@
 # Codegen (JIT) lane still >2x C oracle for C-MIG-0019/0022/0023
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-18
 **Status:** OPEN — perf finding, no fix attempted here
@@ -469,3 +473,4 @@ additionally checks 12 join/bytes cases through the new fast paths
   this. The fix applied here (accumulate bytes, convert once) is the pattern
   to copy; a census of other `parts.push(char_*)`-then-`join` loops has not
   been done.
+

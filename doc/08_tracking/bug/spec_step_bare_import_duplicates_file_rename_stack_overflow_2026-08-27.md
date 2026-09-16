@@ -1,4 +1,8 @@
 # `use std.spec.step` puts a duplicate `file_rename` in the unit; every atomic write self-recurses
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-27
 - Found by: SCV-IMPL-B-01 (sj-capsule transaction coordinator)
@@ -76,3 +80,4 @@ Make flattened-unit duplicate resolution prefer the alias binding recorded at
 the definition site, or reject a duplicate top-level `fn` whose body calls an
 import aliased to the same name. Either turns a silent infinite recursion into a
 diagnostic.
+

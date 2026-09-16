@@ -1,4 +1,8 @@
 # SSpec `test` evaluator diverges from `run` on `.?` operator and class-in-array aliasing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Open  **Found:** 2026-07-20 (whole-suite triage cluster, test/03_system/)
 
@@ -129,3 +133,4 @@ All 4 affected examples are in regression-guard specs
 per their `describe`/file naming) — i.e. these assert previously-working
 behavior and are currently red under `bin/simple test`, the project's default
 test-running path.
+

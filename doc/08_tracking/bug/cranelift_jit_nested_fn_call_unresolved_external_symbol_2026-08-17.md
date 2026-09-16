@@ -1,4 +1,8 @@
 # Cranelift JIT: calling ANY nested `fn` drops the whole module to the interpreter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-17 (lane NESTEDFN)
 - **Severity:** P2 — no wrong results, but silent whole-module loss of native codegen
@@ -88,3 +92,4 @@ mangled names) during MIR lowering so the JIT module defines them, or reject the
 earlier with a construct-level diagnostic. Both are resolver/lowering changes and
 are deliberately out of scope for this filing; the reproducer above is the
 deliverable.
+

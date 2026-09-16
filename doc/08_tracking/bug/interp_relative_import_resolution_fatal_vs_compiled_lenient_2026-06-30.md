@@ -1,4 +1,9 @@
 # Bug: unresolvable relative `import ..` is FATAL in interpret mode, lenient when compiled
+## Closed 2026-09-16 — Status RESOLVED: seed fix landed, module_import_spec 21/0; secondary parse note only
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-06-30
 **Severity:** Low — edge case (deprecated `import` syntax + relative path on a
@@ -53,3 +58,4 @@ A secondary seed parse bug was found while fixing the stale paths:
 `src/compiler_rust/lib/std/src/core/iter.spl` fails to parse under the seed's
 eager `export … from` load path ("expected Newline after impl block colon,
 found Identifier Iterator").
+

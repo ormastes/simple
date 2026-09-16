@@ -1,4 +1,8 @@
 # Assignment to a field of an indexed element is rejected: "complex indexed field receiver is not supported"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-11 · **Status:** open · **Area:** compiler / semantics
 **Binary:** `bin/release/aarch64-apple-darwin-macho/simple`, size 26264696, mtime 1788766698
@@ -56,3 +60,4 @@ interpreter and native codegen. The failure above was observed on the interprete
 Locate the `complex indexed field receiver is not supported` message in the assignment
 lowering path and determine whether the restriction is a lowering gap or a deliberate
 aliasing guard. If deliberate, the message should say so and name the supported form.
+

@@ -1,4 +1,8 @@
 # `parse_child_example_summary` returns has_summary=0 on every run — a silently dead scraper (2026-08-08)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -85,3 +89,4 @@ to skip the leading escape sequence — that helper is where to instrument first
 Note also that the runner already has a second, working path
 (`SPEC FILE VERDICT` / `warning: child exit 1 contradicted by a clean SPEC FILE
 VERDICT; trusting the verdict`), which is why a dead scraper is silent.
+

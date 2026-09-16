@@ -1,4 +1,8 @@
 # SSH: client proven real, daemon cannot bind on host, and six duplication sites
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (findings; nothing edited or deleted)
 **Found:** 2026-08-05
@@ -382,4 +386,5 @@ runtime bindings (rt_boot_tcp_* -> rt_io_tcp_* equivalents) plus
 routing os/apps/sshd through them, a cross-cutting C+Simple change.
 Six duplication sites also noted but not detailed here given budget.
 Out of this lane's per-item scope. Leaving OPEN.
+
 

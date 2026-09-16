@@ -1,4 +1,8 @@
 # Rust authority fingerprint includes its own generated build outputs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed in the frozen worktree; focused authority self-test passed;
 canonical authority publication and Stage-2 verification pending.
@@ -69,3 +73,4 @@ script/test changes and run one cache-preserving
 `--full-bootstrap --stop-after-stage2` transaction.
 
 Provider token usage and comparable completed-bug average: unavailable.
+

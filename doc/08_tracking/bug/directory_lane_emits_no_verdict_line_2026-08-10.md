@@ -1,4 +1,9 @@
 # Directory test lane emitted no `SPEC FILE VERDICT:` line for any file
+## Closed 2026-09-16 — Status FIXED; emit_spec_file_verdicts added; sabotage proof and regression spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-10
 - Status: FIXED
@@ -91,3 +96,4 @@ from parallel directory runs, which
 fires, `doc/08_tracking/test/test_result.md` and `test_db.sdn` do not record the
 run, compounding the same invisibility. Not root-caused — recorded so it is not
 lost.
+

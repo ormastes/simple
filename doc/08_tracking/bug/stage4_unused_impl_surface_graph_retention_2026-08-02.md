@@ -1,4 +1,8 @@
 # Stage 4 promotes unused implementation metadata graphs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status and claim
 
@@ -65,3 +69,4 @@ No candidate Stage-4 build was run: the final correctness cycle is the single
 authorized Stage-4 cycle, and its compiler does not yet contain this fix. A
 future generation comparison must not attribute that external cycle's RSS to
 this change.
+

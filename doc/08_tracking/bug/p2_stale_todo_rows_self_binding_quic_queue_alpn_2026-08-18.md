@@ -1,4 +1,9 @@
 # P2 todo_db rows falsified: self-binding, QUIC send queue, ALPN extraction
+## Closed 2026-09-16 — all three row clusters verified falsified, closed as done; spec evidence 8/8 green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-18. Lane: P2 sweep (worktree `p2-sweep`, seed `bin/simple`).
 
@@ -62,3 +67,4 @@ routes via `protocol_from_alpn` to the H1/H2 paths. Rows closed as `done`.
   forbidden to do. Left open with this note.
 - Rows 542 and 547 are architectural migration items with no reproducible RED;
   left open.
+

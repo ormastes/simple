@@ -1,4 +1,8 @@
 # Stage-4 self-hosted parser fails on >100KB single-line string literals — scale-dependent, not a syntax defect
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-24
 **Severity:** high (blocked stage-4 full-CLI build)
@@ -117,3 +121,4 @@ different workloads.
 
 - `src/app/ui.web/html.spl` — line 118 split into 28 lines (now spans
   118-145).
+

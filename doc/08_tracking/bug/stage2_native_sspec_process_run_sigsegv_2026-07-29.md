@@ -1,4 +1,8 @@
 # Stage 2 Native SSpec Runner Process Crash
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -160,3 +164,4 @@ The NVMe Phase 2 software gate is complete. Do not substitute the stale global
 deployed CLI for the admitted Stage 2/runtime pair, and do not rerun the bounded
 Stage 3 command. Physical Cosmos+ BT-001..BT-006 remains the next production
 gate.
+

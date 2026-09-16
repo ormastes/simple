@@ -1,4 +1,8 @@
 # Phase 2 bootstrap cannot infer a module-global call initializer
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -30,3 +34,4 @@ build under strict no-stub mode and retain the existing cross-module exit-42
 identity behavior. Until then, the canonical module-global identity probe uses
 `val initialized_value: i64 = initialize_value()`; this does not change its
 runtime identity assertion.
+

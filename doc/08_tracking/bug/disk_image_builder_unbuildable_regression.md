@@ -1,4 +1,8 @@
 # BUG: os.port.disk_image builder is unbuildable (both interp and native paths)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Severity:** high (blocks building any SimpleOS FAT disk image from Simple)
@@ -80,3 +84,4 @@ Probe: `probe10_disk_image.spl` (minimal reproduction of `os.port.disk_image` us
 
 **Status correction:** Interp path is now fixed; native path still open with
 altered error signature. Status remains OPEN (native blocker unchanged).
+

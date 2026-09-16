@@ -1,4 +1,9 @@
 # SimpleOS WM text: broken font fallback and missing placeholder degrade when metrics invalid
+## Closed 2026-09-16 — Status fixed/landed with three fixing commit SHAs listed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Status:** fixed / landed (SHAs below)
@@ -42,3 +47,4 @@ invalid, and unsynchronized shared renderer state feeding those decisions.
   degrade that triggers this fallback.
 - `self_hosted_font_renderer_optional_field_shape_2026-07-11.md` — the shared
   `FontRenderer` state-retention concern that the renderer-state sync addresses.
+

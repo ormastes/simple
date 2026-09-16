@@ -1,4 +1,8 @@
 # JIT: cross-module tuple `.0` read returns nil
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-verified 2026-09-13 — STILL REPRODUCES exactly as reported; stays OPEN
 
@@ -137,3 +141,4 @@ blanket-claim error (which was about the *interpreter*, not the JIT). Status
 unchanged: **OPEN — ARCHITECTURAL (Cranelift JIT codegen,
 `src/compiler_rust/compiler/src/codegen/**`, re-confirmed by fresh repro
 2026-08-10, unchanged output `field0=nil`)**.
+

@@ -1,4 +1,8 @@
 # Stage2 bootstrap link: complete undefined-symbol census (2026-09-07)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Problem
 
@@ -1024,3 +1028,4 @@ the 32/30/36/10 symbols the four landed/in-flight batches already cover.
    with real `git merge` (not prose): all three merged with **zero code
    `work/stage2-simd-iofile`, `work/stage2-fs-env-symbols`) onto `origin/main`
     **zero C implementation, zero Rust `#[no_mangle]` implementation** for
+

@@ -1,4 +1,9 @@
 # push-must-check blocks every push: must_check ledger id-set drifted from the gate manifest (2026-09-01)
+## Closed 2026-09-16 — ledger regenerated; verdict after: push-must-check PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Verdict (before)
 
@@ -118,3 +123,4 @@ worktrees under `.claude/worktrees/` carry a
 `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md`
 names `--rev-list-args-or-tips` and `--push-tip` as known caller/callee option
 mismatches. Landing a competing fix would clobber that work.
+

@@ -1,4 +1,8 @@
 # `if val Some(x) = opt: EXPR else: EXPR2` loses field access on `x` when used as a value-producing expression (2026-07-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — worked around at the one call site this lane needed
 (`src/lib/gc_async_mut/game2d/tilemap.spl::_pixels_for_tile`), not fixed at
@@ -112,3 +116,4 @@ seed warning banner via `bin/simple --version`), so every reproduction in
 this doc, including this one, exercised the seed's interpreter. Status
 confirmed unchanged: **OPEN — ARCHITECTURAL (Rust seed interpreter
 `interpreter/expr/calls.rs:1002`, verified 2026-08-10)**.
+

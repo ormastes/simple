@@ -1,4 +1,8 @@
 # Six HAL environment-executor specs import test modules that exist nowhere — they can never execute
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
 **Found by:** sspec score-80 wave 12G (modernizing the `hal_environment_*` executor specs)
@@ -41,3 +45,4 @@ assertions in waves 12C–12G, but their runtime scenarios stay
 Implement (or restore) the `app.test.hal_environment_executor` module
 family — or the `src/` product surface it was meant to wrap — so the six
 specs' imports resolve and their scenarios execute.
+

@@ -1,4 +1,8 @@
 # `admit` is a hard keyword and cannot name a function
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (low severity, worked around)
 **Found:** 2026-08-21, Phase 5 (D4 loader admission) of
@@ -52,3 +56,4 @@ Either:
   next to `test/01_unit/compiler/parser_move_contextual_keyword_spec.spl`; or
 - both names added to the **Reserved keywords** list in
   `.claude/rules/language.md`, and this record closed as by-design.
+

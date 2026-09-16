@@ -1,4 +1,9 @@
 # `case Point { x: 0, y: b }:` — named-field struct patterns were unreachable
+## Closed 2026-09-16 — ...were unreachable **Status:** FIXED 2026-08-04 (two defects: parser, then binder). **Found:
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-04 (two defects: parser, then binder).
 **Found:** 2026-08-04, while fixing top-level struct-pattern refutability
@@ -88,3 +93,4 @@ gate (not `OPENCOUNT`). `d1_named_miss` is the row an irrefutable `Bool(true)`
 condition cannot answer; `d1_named_hit` is the row a missing binder cannot
 answer. Both directions are required — a positive-only test detects neither
 defect.
+

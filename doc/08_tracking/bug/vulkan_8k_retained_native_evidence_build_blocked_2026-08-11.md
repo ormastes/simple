@@ -1,4 +1,8 @@
 # Vulkan 8K retained native evidence build blocked
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-11
 
@@ -121,3 +125,4 @@ ordering trace flooded the bounded command output before the final timing row.
 No numeric 8K/80 conclusion is permitted until a fresh session captures the
 single receipt row with trace disabled. Do not rerun in this session; the
 three-cycle verification cap has been reached.
+

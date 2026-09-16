@@ -1,4 +1,8 @@
 # Step-over record: pre-existing test-tree divergence at the Dict.clear landing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-17
 - **Range landed:** `origin/main..0fad89f8307` (4 commits)
@@ -130,3 +134,4 @@ hir_payload_kind_is_type                 2
 
 So the reproducer spec lands GREEN against origin, and the class spec lands
 deliberately RED at 7/8 for the Array side.
+

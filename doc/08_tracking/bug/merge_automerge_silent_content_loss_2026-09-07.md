@@ -1,4 +1,8 @@
 # Git auto-merge silently loses content, with no conflict and no marker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-09-07
 - **Severity:** high — landed code is silently deleted; every pre-push guard passes
@@ -255,3 +259,4 @@ on stderr via `run_push_gate`. An advisory verdict is not a pass.
   can decide soundly.
 - A push range `P1..M` re-scans the second parent's side, so pre-existing red
   from older merges re-fires. Acceptable while advisory; see promotion criteria.
+

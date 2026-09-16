@@ -1,4 +1,8 @@
 # zstd_fse_compressed_block_deferred_2026-06-15
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: the deferral is still live
 - **measured** — `src/lib/common/compress/typed/zstd_typed.spl:302` still returns
@@ -66,3 +70,4 @@ zstd -d < raw_frame.zst
 ```
 Frames with compressed blocks from external tools will be rejected by
 `zstd_decompress` until this deferral is resolved.
+

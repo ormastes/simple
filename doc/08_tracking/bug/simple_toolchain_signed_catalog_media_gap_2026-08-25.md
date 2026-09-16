@@ -1,4 +1,8 @@
 # Simple toolchain signed-catalog media gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -96,3 +100,4 @@ adds all three rows before the catalog's sole seal operation. The ingestion
 entry remains package-private; ordinary boot does not require this optional
 media and the authenticated launch bridge remains dormant until boot supplies
 the real authority registry and parent task context.
+

@@ -1,4 +1,8 @@
 # Office sheet-GUI: real event dispatch exists framework-wide, but the sheet grid has no per-cell click target to hit-test against
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-04
 **Severity:** medium (blocks real mouse/keyboard click-to-select on the sheet-GUI pixel path; state-driven equivalent shipped as the honest MVP instead)
@@ -207,3 +211,4 @@ not invent a new one.
    GUI backend does this at all; `run_sheet_tui_mode` does it for the TUI
    backend only, via termios, not via `common.ui.event`'s `UIEvent`
    variants).
+

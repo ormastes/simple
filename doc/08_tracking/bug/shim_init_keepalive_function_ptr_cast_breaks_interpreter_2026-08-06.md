@@ -1,4 +1,8 @@
 # `shim_init()` cannot run under the tree-walk interpreter — `_shim_keepalive()`'s function-pointer-to-u64 casts fail at runtime
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-06
 **Status:** OPEN
@@ -113,3 +117,4 @@ scope for this sweep).
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs interpreter support for function-pointer-to-u64 casts, an interpreter semantic gap, not a bounded local fix. No change made.
+

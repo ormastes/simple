@@ -1,4 +1,8 @@
 # SimpleOS WM evidence lanes blocked: no runnable pure-Simple compiler on host (2026-08-20)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 OPEN — blocked on a bootstrap redeploy. Not a WM code defect: the WM was never
@@ -106,3 +110,4 @@ kernel-boot gate exists in `scripts/check/` at all (searched
 FPGA-preflight and OpenSBI-alone gates exist). That remains a **NO GATE
 EXISTS** state for an actual SimpleOS riscv64 boot, same root blocker (no
 self-hosted compiler to build a riscv64 SimpleOS kernel) as x86_64.
+

@@ -1,4 +1,8 @@
 # The RT/HAL general exit-capture surface asserted by its spec exists nowhere in `src/`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
 **Found by:** sspec score-80 wave 16C (modernizing
@@ -51,3 +55,4 @@ tree before commit — untracked files in this shared checkout are periodically
 swept by peer sessions. Re-derived from the spec's own `# NOTE:` block, with
 the four-symbol absence re-verified independently, and committed alongside the
 spec.
+

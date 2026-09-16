@@ -1,4 +1,8 @@
 # Electron RenderDoc Vulkan Widget Capture Launch Diagnostics - 2026-06-28
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
 - **inferred**: this entry cites no backticked product paths, so a path-existence stale test does not apply; nothing indicates the code it describes was removed.
@@ -55,3 +59,4 @@ the widget fixture ARGB proof nonblank and Chromium Vulkan/ANGLE fields present.
   and currently times out without ARGB or `.rdc`.
 - If retrying Electron flags, reject `--in-process-gpu` unless it still proves
   Vulkan and emits a valid `.rdc`.
+

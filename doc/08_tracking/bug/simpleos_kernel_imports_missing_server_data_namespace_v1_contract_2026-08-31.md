@@ -1,4 +1,9 @@
 # SimpleOS kernel closure imports a stdlib contract module that does not exist
+## Closed 2026-09-16 — ...ernel/` closure, not an arch port. ## Fix directions (not attempted here) Either restore/a
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-31
 Scope: goal item 2 — SimpleOS window-manager smoke tests with Vulkan-backed
@@ -82,3 +87,4 @@ build script (there is an arm64 precedent,
 `scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`) so that a
 broken `src/os/` closure fails loudly instead of hiding behind a
 missing-artifact precondition ERROR.
+

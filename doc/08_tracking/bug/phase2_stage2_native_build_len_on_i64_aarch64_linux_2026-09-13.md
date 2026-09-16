@@ -1,4 +1,8 @@
 # Phase 2 (Stage 2) native-build cannot complete on aarch64 Linux: `method \`len\` not found on type \`i64\`` with no location
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-13, FULLTEST lane (`work/fulltest-phase2-2026-09-13`).
 **Status:** OPEN — this is the SAME class as
@@ -121,3 +125,4 @@ number of probes was affordable in this session; not completed here.
 `git bisect` over `src/compiler`, `src/lib`, `src/app` between `0fce018eda3`
 and `origin/main` (990 commits touching those paths) with the above
 matched-pair probe as the bisect script is the mechanical next step.
+

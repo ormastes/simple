@@ -1,4 +1,9 @@
 # screen_ansi_spec: 2 pre-existing RED examples hidden by a parse error since 2026-08-27
+## Closed 2026-09-16 — Status FIXED 2026-09-06; 2026-09-06 addendum: spec 23/23, CLOSED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-05 · **Status:** FIXED 2026-09-06 (see Fix section; one spec off-by-one remains) · **Lane:** ui_slim_kernel_plugin (found while landing A03)
 
@@ -112,3 +117,4 @@ glyph; the runner surfaces one message per example, which masked the real style 
 Fixing the literal was left to the owner of the original example.
 
 **2026-09-06 addendum:** the `:226` literal was corrected to `"D"` by the lane owner (overwrite semantics); the spec is now 23/23 on the seed lane. Status: CLOSED.
+

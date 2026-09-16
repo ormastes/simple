@@ -1,4 +1,9 @@
 # Native mixed numeric ordering depends on operand order
+## Closed 2026-09-16 — ...erand order - status: source fixed 2026-07-16; staged platform execution pending - severit
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - status: source fixed 2026-07-16; staged platform execution pending
 - severity: high (possible silent wrong comparison)
@@ -28,3 +33,4 @@ duplicate builds. First staged platform-matrix execution is pending.
 
 Unsigned integer/float ordering is tracked separately in
 `native_unsigned_float_ordering_codegen_2026-07-16.md`.
+

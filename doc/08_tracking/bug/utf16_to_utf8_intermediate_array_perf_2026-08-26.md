@@ -1,4 +1,8 @@
 # UTF-16 to UTF-8 conversion retains a high-cost intermediate array
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -51,3 +55,4 @@ performance gate:
 The candidate regressed p95 by about 4.7% and the process RSS observation by
 about 19%. The next implementation must write encoded bytes directly into a
 reserved sink rather than merely removing one of multiple allocation layers.
+

@@ -1,4 +1,8 @@
 # Bug / Deferral: lzma_full_range_model_deferred_2026-06-15
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: the deferral is still live
 - **measured** — `src/lib/common/compress/typed/lzma2_typed.spl:9-10` still carries
@@ -72,3 +76,4 @@ by exhaustive testing of all 256 possible 8-bit sequences in Python.
 Use `lzma2_compress_uncompressed()` + `xz_encode()` for LZMA2/XZ framing with
 full round-trip correctness. Compression ratio is 1:1 (no compression) but the
 wire format is fully spec-compliant for the uncompressed-chunk case.
+

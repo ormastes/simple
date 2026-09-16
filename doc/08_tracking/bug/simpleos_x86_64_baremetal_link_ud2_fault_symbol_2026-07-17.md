@@ -1,4 +1,8 @@
 # SimpleOS: every x86_64 baremetal link broken — `spl_x86_on_kernel_ud2_fault` undefined (2026-07-17)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found by:** release sanity T3 lane (both QEMU x86_64 gates FAIL on this).
 
@@ -83,3 +87,4 @@ build now dies with `Terminated` (`reason=kernel-build`) — host contention
 the gate's budget killed it. Symbol fix plausibly effective; full PASS
 verification deferred to a quiet host. isa-debug-exit rework rides the same
 rerun and is likewise pending a completed boot.
+

@@ -1,4 +1,8 @@
 # GUI/Web/2D Vulkan Pairwise Aggregate Evidence
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage 2026-09-13 — STILL OPEN: no GPU/Vulkan lane on this triage host
 - **measured** — the referenced sources still exist
@@ -191,3 +195,4 @@ software, `cpu`, and `cpu_simd` aliases on the direct `cpu_mirror` path, leaving
 real GPU backend requests on the existing Engine2D path. Verification evidence:
 native probe exit `0`, `Engine2D.is_err` stderr count `0`, JSON pixels `768`,
 and GUI/Web/2D Vulkan pairwise mismatches all `0`.
+

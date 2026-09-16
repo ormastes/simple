@@ -1,4 +1,8 @@
 # Text-wide branch coverage lacks a retained all-owner closure receipt
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -20,3 +24,4 @@ Use the existing compiler manifest for Simple owners and add the missing text/i1
 
 - Owner: text/i18n integration lane, with compiler coverage/tooling and backend owners.
 - Unblock: one retained aggregate names every owned file and branch denominator, rejects missing/stale owners, shows 100% reachable outcomes or reviewed exclusions per owner, merges native Rust/C evidence, and binds forced backend identity.
+

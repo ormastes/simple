@@ -1,4 +1,8 @@
 # riscv_dual_arch_spec.spl shadows 7 kernel types — real fields/methods never exercised
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status (2026-08-10): converted to describe/it, real types wired in, now genuinely RED
 
@@ -122,3 +126,4 @@ Rewrite against the real `dual_arch_contract.spl` / `backend_test_verify.spl`
 / `fpga_orchestration.spl` types, filling all required fields, calling the
 real business-logic methods (not reimplementing them), and converting to
 `describe`/`it` so it participates in the daemon-run corpus and CI verdict.
+

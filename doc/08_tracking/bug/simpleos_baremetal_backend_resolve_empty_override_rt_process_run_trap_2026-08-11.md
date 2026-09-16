@@ -1,4 +1,8 @@
 # SimpleOS baremetal backend-resolve empty-override trap — partial fix, deeper trap remains
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status (updated 2026-08-11, second pass)
 Root cause (a) (empty-override) and root cause (b) (the `rt_process_run`
@@ -306,3 +310,4 @@ xvfb-run -a sh scripts/check/check-simpleos-wm-visible-display-evidence.shs
 tail -c 2000 build/simpleos_wm_visible_display_evidence/serial.log
 objdump -dr build/os/simpleos_wm_simple_web_check_32.elf | grep rt_process_run
 ```
+

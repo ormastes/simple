@@ -1,4 +1,8 @@
 # seed JIT: `me`-method write-back into a `self` array-of-structs field crashes ("nil receiver")
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
@@ -130,3 +134,4 @@ receiver is passed by reference — the `self` array slot appears to be nil'd
 free-function path which is correct. Related landmines:
 `.claude/rules/language.md` (arrays are value types) and the boxed-int JIT class
 in `seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`.
+

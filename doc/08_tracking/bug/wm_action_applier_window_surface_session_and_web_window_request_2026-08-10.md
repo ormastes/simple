@@ -1,4 +1,9 @@
 # `wm_action_applier_spec` — 2 real product gaps, exposed once the spec stopped being dead
+## Closed 2026-09-16 — ...-08-10.md` (that blocker is now resolved — see `aliased_use_import_does_not_bind_in_transi
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Triage 2026-09-13
 Re-ran test/01_unit/os/compositor/wm_action_applier_spec.spl: now
@@ -57,3 +62,4 @@ Add the `session` field to `WindowSurface` and implement/export
 Do not delete either `it` block, and do not mark the file pending. These two
 examples are the only assertions covering the session-attachment and
 web-render-request paths.
+

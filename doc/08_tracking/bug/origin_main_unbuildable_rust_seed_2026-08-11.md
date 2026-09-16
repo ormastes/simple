@@ -1,4 +1,9 @@
 # origin/main unbuildable (Rust seed) — 2026-08-11
+## Closed 2026-09-16 — missing-gate defect fixed: check-seed-builds-push.shs created, selftested, wired into pre-push
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Summary
 `origin/main` was found unbuildable: `cargo build --release --bin simple` in
@@ -52,3 +57,4 @@ Same convention as the other five guards:
 The two incomplete changes that caused the actual break are being repaired
 separately (concurrent session, same day). This record is scoped to the
 missing-gate defect and its fix, not the specific compile errors.
+

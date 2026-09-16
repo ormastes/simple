@@ -1,4 +1,8 @@
 # i18n extractor allocation density and unstable auto IDs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The current extractor allocates 20,495 times and 2,879,182 bytes for 4,096
 explicit messages: about five allocations and 703 bytes allocated per message.
@@ -14,3 +18,4 @@ discovery is an opt-in audit. Persist stable package/module/key IDs, retain
 borrowed spans or interned text through extraction, and compile once into the
 typed catalog schema/IR. The optimized hot extractor must report reduced
 allocations and stable IDs under unrelated source edits.
+

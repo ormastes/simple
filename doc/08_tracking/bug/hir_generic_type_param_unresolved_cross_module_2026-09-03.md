@@ -1,4 +1,8 @@
 # HIR: a generic type parameter is treated as a missing named type across modules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-09-03
 Compiler: `build/bootstrap/stage3/x86_64-pc-windows-msvc/stage2-admitted/simple.exe`
@@ -101,3 +105,4 @@ Same class as
 `stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md`, which is
 cited in the materialization source itself (line ~1032). So fixing the HIR half
 may only move a generic-using program's failure to a codegen SEGV.
+

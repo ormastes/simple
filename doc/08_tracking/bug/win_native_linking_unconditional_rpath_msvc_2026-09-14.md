@@ -1,4 +1,9 @@
 # `_cc_fallback_runtime_lib_args` emitted `-rpath` unconditionally on Windows (2026-09-14)
+## Closed 2026-09-16 — ... its caller's routing was correct. ## Fix `_cc_fallback_runtime_lib_args` now computes `em
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -52,3 +57,4 @@ unchanged: the direct-linker path in `link_native_unix` is only reached after
 `link_to_native` has already routed a real Windows host to
 `link_native_windows`/`_link_native_mingw`, and `native_msvc_runtime_selection`
 already passed `emit_rpath: false` unconditionally.
+

@@ -1,4 +1,8 @@
 # Query error matcher generation freshness
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** Generation implemented; execution evidence follow-up open
 **Date:** 2026-08-22
@@ -59,3 +63,4 @@ mask tests. This removes helper dispatch and runtime ID/shift work without
 introducing a runtime manifest or changing rule order. Boundary source contracts
 pin low bit 63, high bit 0, and high bit 51; behavioral contracts cover the
 63/64 transition through macro and AOP rules.
+

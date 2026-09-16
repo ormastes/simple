@@ -1,4 +1,8 @@
 # `alias X = Y` is spec-documented but silently degrades to a bare identifier (2026-09-01)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -89,3 +93,4 @@ reference, accepted by the lexer, and silently dropped by the parser.
 
 - `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.md`
   — the x86_64 WM row this blocked.
+

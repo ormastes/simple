@@ -1,4 +1,9 @@
 # Bug: checker raw-text concurrency lint false positives
+## Closed 2026-09-16 — claimed/fixed by Stage 4 root lane; rebuilt checker verification in body
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** claimed and fixed by the Stage 4 root lane
 
@@ -24,3 +29,4 @@ Exact and adjacent coverage is in
 The refreshed strict checker built with 46 compiled units, zero failures, in
 27.75 seconds (228,528 KiB max RSS). That exact executable accepts both
 `src/app/cli/check.spl` and the canonical `multicore_green.spl` owner.
+

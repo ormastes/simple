@@ -1,4 +1,8 @@
 # `"lit".to_bytes()` — method not found on `text`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-06
 - Status: OPEN
@@ -38,3 +42,4 @@ spec line is left as written — REQ-CUDA-VALIDATION-03 is separately blocked on
 a missing `rt_cuda_module_load_data_ex` extern (see the module TODO in
 `src/lib/nogc_sync_mut/io/cuda_host_validation.spl`), so repairing only this
 line would just move the failure to the `api_used` assertion.
+

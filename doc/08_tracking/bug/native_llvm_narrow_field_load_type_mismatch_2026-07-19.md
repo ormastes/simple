@@ -1,4 +1,9 @@
 # LLVM backend: narrow struct-field readback emits mistyped load → llc rejects
+## Closed 2026-09-16 — ...ots are uniformly 8 bytes). ## Resolution Commit `09bee48d1a5d` loads the physical native-
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-07-19 · **Status:** SOURCE FIXED / FOCUSED LLVM-IR REGRESSION ADDED · **Area:** LLVM backend / struct field access
 **Lane:** interpreted native-build worker (`SIMPLE_NATIVE_BUILD_WORKER=1
@@ -52,3 +57,4 @@ Two additional infra findings while attempting the all-i64 end-to-end run:
    End-to-end verification on this lane needs a quiescent tree or a pinned
    worktree. The defaulted-field fix's IR-level verification (store 5/true)
    was captured on a coherent tree and stands.
+

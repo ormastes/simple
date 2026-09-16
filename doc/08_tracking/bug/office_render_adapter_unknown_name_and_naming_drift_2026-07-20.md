@@ -1,4 +1,8 @@
 # `office_render` adapter: unknown adapter names not detected/warned; "word" adapter output uses "LibreOffice Writer" not "Word"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Component:** `src/app/office/render_adapter.spl` (`office_render`)
@@ -54,3 +58,4 @@ convention decide the canonical per-adapter display name (and update either
 the adapter's output string or the spec's expected substring accordingly),
 and separately implement unknown-`adapter_name` detection + warning in
 `office_render`.
+

@@ -1,4 +1,8 @@
 # font_renderer: resolve_font_metrics_with_language nil-receiver crash under seed (blocks WM Draw IR composition + widget_draw_ir)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** STILL OPEN 2026-08-10 (re-verified this pass, third root-fix
 lane) — the mutex mitigation from lane 1 is confirmed still landed and
@@ -379,3 +383,4 @@ a real font candidate is found.
   stale-node sweep after close recompose, drawn-rect vs dispatch lockstep) and
   a NOTE for the widget_draw_ir composition specs. Un-skip and implement when
   this bug lands.
+

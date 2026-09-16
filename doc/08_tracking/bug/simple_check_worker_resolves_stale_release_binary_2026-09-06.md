@@ -1,4 +1,8 @@
 # `simple check` resolves its worker to a stale release binary and fails on every target
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - date: 2026-09-06
 - status: MITIGATED (root cause still open — needs a redeploy)
@@ -62,3 +66,4 @@ bootstrap and is out of scope for the lane that found this.
 `worker_entry_load_failed` body forced to `false` ->
 `bin/simple check src/app/editor/commands.spl` exits 1 with the parse error;
 restored -> `All checks passed (1 file(s))`.
+

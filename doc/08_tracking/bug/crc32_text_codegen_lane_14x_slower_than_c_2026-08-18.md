@@ -1,4 +1,9 @@
 # crc32_text 14.4x slower than C in the codegen (strict-JIT) lane
+## Closed 2026-09-16 — re-measured 1.2x 2026-09-06; status changed OPEN -> RESOLVED
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** OPEN (PERF-REGRESSION / SIMPLE-CAPABILITY)
 **Filed:** 2026-08-18
@@ -87,3 +92,4 @@ register promotion) was NOT what the gap turned out to be, and none of those
 were fixed — measured directly on this host, a `[u8]` indexed-store loop runs
 at ~3 ns/byte and a bare `push` loop at ~2 ns/byte, i.e. the JIT's scalar
 array code is already fine. Do not re-open this against those hypotheses.
+

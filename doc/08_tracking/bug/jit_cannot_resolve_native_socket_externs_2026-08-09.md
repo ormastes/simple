@@ -1,4 +1,8 @@
 # JIT cannot resolve the native socket externs — every "JIT mode" networking run is silently an interpreter run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-09
 - Status: **FIXED 2026-08-17** (was OPEN P2)
@@ -257,3 +261,4 @@ make JIT networking work. `bin/simple test` under the interpreter passes
 **Conclusion: STILL BROKEN under JIT.** The `bug_db.sdn` row's
 `fix-implemented-verification-pending` status should not be read as "JIT
 sockets work" — they do not, on this host, today.
+

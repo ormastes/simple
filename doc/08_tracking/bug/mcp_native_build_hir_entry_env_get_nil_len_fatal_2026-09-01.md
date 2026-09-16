@@ -1,4 +1,8 @@
 # MCP native-build HIR-entry fatal: `.len()` on Option::None from ambiguous `env_get` dispatch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01 · **Status:** FIXED (`628ac26d38d`) · **Severity:** blocker (made MCP native build unmeasurable)
 
@@ -135,3 +139,4 @@ assignment, mutual recursion through a `_inner` helper, a mutating bool-returnin
 `me` called in an `if`, and the same across a cross-module `impl Box:` extension.
 Like the layer-3 `env_get` defect, this only manifests under the full compiler
 closure, which is consistent with the ambiguous-dispatch warnings the run emits.
+

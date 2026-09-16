@@ -1,4 +1,8 @@
 # TLS chain-of-trust signature verification (`verify_signature`) has no implementation anywhere
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Scope:** `src/lib/nogc_sync_mut/tls/validation.spl` (deleted `validate_chain`)
@@ -63,3 +67,4 @@ To implement real chain-of-trust validation:
    to `validation.spl` using those primitives instead of a phantom import.
 3. Add real test coverage (currently none existed even for the deleted
    phantom-backed version).
+

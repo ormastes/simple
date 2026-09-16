@@ -1,4 +1,9 @@
 # JIT text ordering (`<` `<=` `>` `>=`) compared POINTERS, not content
+## Closed 2026-09-16 — Status Fixed; rt_native_cmp fix + regression spec; sibling falsification documented
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Severity:** P0 (silent wrong answers, no diagnostic, engine-divergent)
@@ -204,3 +209,4 @@ still-open defect but does not apply to this shape.
 produce identical printed evidence and demand completely different responses.
 Only a branch side-effect distinguishes them. Never let a printed bool be the
 sole signal when the bool itself is what is under suspicion.
+

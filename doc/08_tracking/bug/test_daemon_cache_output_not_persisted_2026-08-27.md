@@ -1,4 +1,9 @@
 # test_daemon cache spec RED: result_output field gone, output not persisted across save/load
+## Closed 2026-09-16 — ...ithmetic oracle. Once the RED is resolved, wrapping the fixture text differently lifts the
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-27
 - Found via: sspec modernization residual batch resid6_part_00.
@@ -30,3 +35,4 @@ fixture string embeds `expect(1).to_equal(1)`, which the line-based scorer
 misreads as a local-arithmetic oracle. Once the RED is resolved, wrapping the
 fixture text differently lifts the false blocker (verified experimentally:
 score 94 with the fixture respelled).
+

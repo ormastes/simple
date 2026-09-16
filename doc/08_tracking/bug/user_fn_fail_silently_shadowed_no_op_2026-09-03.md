@@ -1,4 +1,8 @@
 # A user-defined `fn fail` is silently replaced by a no-op builtin
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-09-03
 - **Severity:** HIGH — turns assertion helpers into no-ops, producing false GREEN
@@ -74,3 +78,4 @@ Either make the prelude `fail` yield to a user definition of the same name, or
 — at minimum — emit the same "shadows the prelude builtin" warning already
 produced for `print_raw`. A builtin that silently swallows a call is the worst
 of the three options.
+

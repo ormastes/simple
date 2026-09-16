@@ -1,4 +1,8 @@
 # Windows host-OS detector disagreement — root cause and fix (2026-09-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -102,3 +106,4 @@ invariant that every public host-OS resolver
 in-process. Manually verified on a real Windows host (`bin/release/x86_64-pc-windows-msvc/simple.exe run`,
 a standalone probe importing all five resolvers together): every resolver
 answered `"windows"`.
+

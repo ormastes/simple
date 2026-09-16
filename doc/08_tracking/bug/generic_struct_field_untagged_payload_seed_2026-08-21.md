@@ -1,4 +1,8 @@
 # Generic fn returning scalar `T` yields untagged payload (value * 8) on the seed (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Found by:** A7 perf-baseline fixture authoring (`test/05_perf/compiler_hardening/wall_generic.spl`).
 **Binary:** `bin/release/x86_64-unknown-linux-gnu/simple` (Rust seed, 59867576 bytes, 2026-08-21 05:10:21 +0000), `bin/simple run`.
@@ -34,3 +38,4 @@ Generic struct fields show the same defect in a different coat: with
 - The mono lane must ship a failing-pre-fix reproduce spec plus class
   neighbours (`f64`, `bool`, enum payload `T`, `Pair<T>` field, nested
   `Pair<Pair<i64>>`) per the fixes-need-reproduce rule.
+

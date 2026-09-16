@@ -1,4 +1,9 @@
 # RV32/RV64 RTL Unification Results (2026-07-21)
+## Closed 2026-09-16 — Status COMPLETE; merge executed, compilation verified, acceptance criteria PASS
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** COMPLETE — Merge executed, compilation verified
 **Task:** Merge duplicated RV32/RV64 generated-RTL lanes into XLEN-parameterized templates
@@ -165,3 +170,4 @@ All checks passed (1 file(s))
 - Plan: `doc/03_plan/hardware/riscv/rv32_rv64_unification_plan_2026-07-21.md`
 - Audit: `doc/01_research/hardware/riscv/riscv_rtl_disconnect_audited_bugs_2026-07-21.md`
 - Regression findings: `doc/08_tracking/bug/riscv_priv_mmu_rv64regression_findings_2026-07-21.md` (to be created by RISCV-002/003 agent)
+

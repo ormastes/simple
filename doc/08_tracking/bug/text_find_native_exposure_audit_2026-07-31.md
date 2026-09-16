@@ -1,4 +1,8 @@
 # Text `.find()` Native Codegen Exposure Audit — 2026-07-31
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## RETRACTION (2026-07-31, same day) — the BYTE/CHAR-RISK section is WRONG
 
@@ -216,3 +220,4 @@ val failed_start = output.find("\"failed\":") + 9
 **Defects Referenced:**
 - `doc/08_tracking/bug/native_text_search_http_hot_path_2026-05-13.md` — native codegen bug
 - `doc/08_tracking/bug/interp_text_find_byte_offset_vs_slice_char_offset_2026-06-30.md` — byte/char divergence
+

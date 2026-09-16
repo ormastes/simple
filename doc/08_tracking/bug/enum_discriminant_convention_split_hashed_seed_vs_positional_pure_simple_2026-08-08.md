@@ -1,4 +1,8 @@
 # Enum discriminant convention split: hashed (seed) vs positional (pure-Simple)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Filed:** 2026-08-08
 - Status: OPEN (P2)
@@ -202,3 +206,4 @@ non-negotiable guardrail, in priority order:
 ## Triage 2026-09-13
 
 Confirmed unchanged: the doc's own "Recommended fix (converge, or fence)" section documents this as an architectural convention split between the Rust seed's hashed enum discriminants (`codegen/instr/result.rs`) and pure-Simple's positional convention, not yet converged. A real fix requires either a Rust-seed codegen change (cargo build/redeploy cycle) or a cross-runtime fencing decision — both out of scope for this pure-Simple TDD pass. No live cross-over was found (per "Reachability" section), so severity remains low today. Leaving OPEN, no code change made.
+

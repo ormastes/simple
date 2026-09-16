@@ -1,4 +1,8 @@
 # mcp_failure_prevention_spec pre-existing RED at HEAD (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `bin/simple test test/03_system/app/mcp/feature/mcp_failure_prevention_spec.spl`
@@ -23,3 +27,4 @@ fix cannot be dual-checked green on a spec whose scenarios already fail).
 MCP/LSP wrapper interface-cache evidence gate and the NFR evidence script
 (`scripts/check/check-mcp-lsp-nfr-evidence.shs`) must pass on this host, or
 the gates need environment-appropriate timeouts.
+

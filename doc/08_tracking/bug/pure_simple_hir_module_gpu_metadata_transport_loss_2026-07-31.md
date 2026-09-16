@@ -1,4 +1,9 @@
 # Pure-Simple HIR Module GPU Metadata Transport Loss
+## Closed 2026-09-16 — Status Closed; seed dispatcher root cause fixed, suites 3/3 and 9/9 pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -95,3 +100,4 @@ An incremental `bin/simple check` of `_MirLowering/module_lowering.spl` also
 failed to complete within the standing 60-second CPU monitor limit and exited
 255. This is retained as a tooling-performance blocker; no bootstrap or retry
 with a raised timeout was attempted.
+

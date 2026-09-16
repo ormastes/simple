@@ -1,4 +1,8 @@
 # Two bootstrap-seed interpreter bugs (found by Lane H4 pseudo-fs work)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Both reproduce under `src/compiler_rust/target/release/simple run` (the seed
 interpreter); both are worked-around in Lane H4 but should be fixed at the seed.
@@ -34,3 +38,4 @@ function, not directly.
 Worked around in Lane H4 (pseudo-fs mount adapters landed). Real fixes are seed
 interpreter/codegen changes → gate on `bin/simple build bootstrap`, currently
 blocked by the toolchain redeploy.
+

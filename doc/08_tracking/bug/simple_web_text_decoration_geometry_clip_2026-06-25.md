@@ -1,4 +1,8 @@
 # Simple Web Text Decoration Geometry Clip Blocker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
 - **inferred**: this entry cites no backticked product paths, so a path-existence stale test does not apply; nothing indicates the code it describes was removed.
@@ -50,3 +54,4 @@ Before claiming support for `text-decoration-thickness` or
 
 Do not add the properties to `CSS_SUPPORTED` as no-ops. That would make
 traceability report support that the renderer cannot prove.
+

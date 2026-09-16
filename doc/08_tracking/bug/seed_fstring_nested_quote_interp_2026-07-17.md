@@ -1,4 +1,9 @@
 # Seed f-string lexer REGRESSION: nested string literal inside interpolation breaks (2026-07-17)
+## Closed 2026-09-16 — FIXED+PUSHED 310bcdf1131; regression tests 25/25+19/19+4/4 passed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Found by:** release sanity, stage1 retry with freshly built seed
 (`src/compiler_rust/target/bootstrap/simple`).
@@ -43,3 +48,4 @@ line numbers, which cost real time — diagnostics gap worth fixing alongside.
 ## Status (2026-07-18)
 
 FIXED+PUSHED at 310bcdf1131 (strings.rs lexer fix) + 7a27c446582 (.spl hoists revert). Regression tests: 25/25 + 19/19 + 4/4 passed.
+

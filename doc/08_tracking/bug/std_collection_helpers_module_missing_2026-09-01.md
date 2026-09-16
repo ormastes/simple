@@ -1,4 +1,8 @@
 # `std.collection_helpers` module does not exist — spec covers 33+ unimplemented functions
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Filed:** 2026-09-01
@@ -55,3 +59,4 @@ supposed to avoid risky, large changes without dedicated review.
 B=src/compiler_rust/target/release/simple.exe
 SIMPLE_BINARY="$B" "$B" test test/01_unit/lib/std/common/collection_helpers_spec.spl
 ```
+

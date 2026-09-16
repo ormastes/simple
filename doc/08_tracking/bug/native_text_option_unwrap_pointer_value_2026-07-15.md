@@ -1,4 +1,9 @@
 # native-build: text Option unwrap returns a pointer integer
+## Closed 2026-09-16 — Status RESOLVED; verified fixed at origin tip 8932fcb3a148 with verification section
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Severity:** high (silent wrong value, now FIXED at tip)
 **Found:** 2026-07-15 while adding Result unwrap preservation controls
@@ -50,3 +55,4 @@ those controls execute after the runner is repaired.
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148: `probe02_text_option_unwrap_a.spl` (doc's exact repro: `val value: text? = "opt"; print(value.unwrap())`). Native: `native-build --entry --clean` exit 0, binary built, run → `opt` (correct, matches intended expectation). Note: oracle itself has an unrelated flat-nullable `.unwrap()` landmine for both text and i64; filed separately as `seed_interp_flat_nullable_unwrap_wrong_value_2026-07-16.md`.
+

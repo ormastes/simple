@@ -1,4 +1,8 @@
 # Driver/bootstrap source-contract specs assert anchors that moved (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Test-wave triage of `test/01_unit/compiler/driver/` (agent C lane). Several
 "source contract" specs `file_read` a driver module and assert exact code
@@ -42,3 +46,4 @@ restored. Do not "fix" by deleting the stale assertions.
 seed's cranelift codegen sources (e.g. `store(MemFlags::new(), zero, new_ptr,
 off)`) which no longer appear in `src/compiler_rust/compiler/src/codegen/` —
 same class, Rust-side.
+

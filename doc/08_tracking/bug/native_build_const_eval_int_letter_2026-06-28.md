@@ -1,4 +1,9 @@
 # native-build const-eval: hex-letter parse (FIXED) + residual typed/module-val gaps (OPEN)
+## Closed 2026-09-16 — ...-f digit fails const-eval — **FIXED 2026-06-28** `native-build` aborted with `error: seman
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Triage note 2026-09-13 — Parts 1 and 2 confirmed fixed; acceptance still unmet, so OPEN
 - **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`): `0xca`, `0xAbCdEf`, `0b1010`, `0o17` const-evaluate to `202 11259375 10 15` — Part 1 (hex letter digits) is fixed and stays fixed.
@@ -115,3 +120,4 @@ freestanding PIE ELF with the current cargo seed — the libc port is sound.
 - Then `build_simplebox("x86_64-unknown-none")` produces a runnable
   `build/os/rootfs/bin/simplebox` and `simplebox seq '  2'` proves
   `libc_strtoul` executes in the compiled binary.
+

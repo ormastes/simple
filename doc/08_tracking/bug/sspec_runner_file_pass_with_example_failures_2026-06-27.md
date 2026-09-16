@@ -1,4 +1,8 @@
 # SSpec Runner Reports File PASS With Example Failures
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage note 2026-09-13 — could not verify: the spec runner is broken on this host
 - **measured** (Windows Rust seed v1.0.0-rc.1): `bin/simple test` is non-functional here — a 3-line 1-assertion spec returns in under a second with `WARNING: test daemon unavailable; running directly`, `error: test-runner: code -1 (process_run_bounded killed the child at its budget)` and a false `reason=outer-bound-timeout budget_ms=930000`. Seven real specs produced byte-identical verdicts.
@@ -80,3 +84,4 @@ Regression coverage:
 ```sh
 bin/simple test test/03_system/check/test_runner_single_example_failure_contract_spec.spl --mode=interpreter
 ```
+

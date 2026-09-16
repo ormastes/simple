@@ -1,4 +1,8 @@
 # SimpleOS filesystem WebSocket integration status
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `/SERVERS.ELF` now recognizes a bounded RFC 6455 upgrade, transfers coalesced
 read-ahead bytes to the connection owner, answers Ping, validates Pong, echoes
@@ -12,3 +16,4 @@ unavailable because this executable has no TLS transport.
 Browser `Origin` requests fail closed until an allowlist exists. Authentication,
 subprotocols, extensions, and an application message endpoint remain open work
 and must not be inferred from frame support.
+

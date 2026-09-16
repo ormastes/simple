@@ -1,4 +1,8 @@
 # Wave coverage wrapper fails specs that pass plain `bin/simple run` (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Observed: in the 2026-09-15 test wave, 38 specs under `test/01_unit/lib/nogc_async_mut*/`
   were reported FAIL, but every one of them passes plain `bin/simple run <spec>`
@@ -19,3 +23,4 @@
   exists and yields PASS for sibling specs), instead of recording a FAIL.
 - Not spec-side drift: editing these specs cannot change the wave verdict; they are
   intentionally left as-is.
+

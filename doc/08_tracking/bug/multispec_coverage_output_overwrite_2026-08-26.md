@@ -1,4 +1,8 @@
 # Multi-spec coverage output is overwritten by child processes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 When `simple test` receives several spec files with one
 `SIMPLE_COVERAGE_OUTPUT`, each child writes that same path. The final artifact
@@ -10,3 +14,4 @@ Required fix: derive a collision-free artifact per child and merge only after
 checking schema, source revision, runtime/backend identity, static denominator,
 and duplicate decision consistency. Until then, multi-spec CSV output is not
 admissible aggregate coverage evidence.
+

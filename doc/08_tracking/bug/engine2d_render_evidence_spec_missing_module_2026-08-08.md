@@ -1,4 +1,8 @@
 # engine2d_render_evidence_spec.spl fails to load: missing `os.kernel.arch.x86.render_capture_ack` module (2026-08-08)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -61,3 +65,4 @@ functions were relocated/renamed elsewhere and the spec is simply stale.
 Unit B3, `doc/03_plan/ui/testing/render_2d_vulkan_functional_coverage_plan_2026-08-07.md`,
 2026-08-08. Out of scope to fix here — B3 is verification-only (collision
 set: read-only, script file only).
+

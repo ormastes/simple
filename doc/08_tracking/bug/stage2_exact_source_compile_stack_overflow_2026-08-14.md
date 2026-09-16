@@ -1,4 +1,8 @@
 # Stage 2 exact-source compile worker stack overflow (2026-08-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed; focused prerequisite verification passed
 
@@ -55,3 +59,4 @@ hash and transcribed command.
   `compile-bootstrap_focused_native_build.spl` with an OS-reported stack of at
   least 64 MiB.
 - Full bootstrap was intentionally not rerun in this focused lane.
+

@@ -1,4 +1,8 @@
 # `test/system/code_quality` specs import three modules/types that exist nowhere in the tree
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-04
@@ -118,3 +122,4 @@ lands with this re-verification.
 STILL-OPEN. `ls src/lib/common/iterable.spl src/lib/common/set_utils.spl` ->
 both "No such file or directory". `test/system/code_quality/deprecated_removed_spec.spl`
 is still present and still imports them. The specs remain unloadable.
+

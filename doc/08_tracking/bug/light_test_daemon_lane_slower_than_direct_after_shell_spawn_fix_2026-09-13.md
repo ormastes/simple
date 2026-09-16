@@ -1,4 +1,8 @@
 # Light test-daemon lane is slower than the direct lane even after removing all `/bin/sh` spawns from `daemon_lock_alive()`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 
@@ -89,3 +93,4 @@ grep -c 'execve("/bin/sh"' /tmp/warm.log                     # 0, post-fix
 /usr/bin/time -f 'wall=%e s' bin/simple test test/fixtures/concurrency/conc_a_spec.spl
 /usr/bin/time -f 'wall=%e s' bin/simple test test/fixtures/concurrency/conc_a_spec.spl --no-session-daemon --no-session-share
 ```
+

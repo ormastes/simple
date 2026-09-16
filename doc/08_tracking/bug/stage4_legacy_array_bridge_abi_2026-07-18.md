@@ -1,4 +1,8 @@
 # Stage4 legacy bridges returned incompatible arrays
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -22,3 +26,4 @@ helpers and reject legacy array, dictionary, and split exports.
 
 No Simple, compiler, runtime, C, Rust, Cargo, or native execution is claimed in
 this static-only session.
+

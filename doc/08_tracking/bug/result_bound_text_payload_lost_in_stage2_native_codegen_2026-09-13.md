@@ -1,4 +1,8 @@
 # `case Ok(message):` loses a text payload under Stage-2 native codegen
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found: bootstrap lane BOOT-6, `work/bootstrap-full-4-2026-09-12`
@@ -71,3 +75,4 @@ payload that nobody has a runtime-side cross-check for.
 Reduce it: a self-contained `.spl` that writes n bytes, reads them through
 `file_read_regular_no_follow_bounded`, and prints `.len()`, compiled natively
 by a Stage-2 binary. Until that exists the blast radius is unknown.
+

@@ -1,4 +1,8 @@
 # UTF-8 invalid-`text` guard blocks safe branch closure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -21,3 +25,4 @@ Close or proof-gate every unchecked bytes-to-`text` constructor, establish the
 validated-UTF-8 invariant across native/interpreter/FFI ingress, then remove
 the redundant validation branch. Re-run the owner once in a fresh verification
 session and require 100% branch coverage.
+

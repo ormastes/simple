@@ -1,4 +1,8 @@
 # `right: auto` is not honoured on an absolutely positioned box (2026-09-14)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Found while landing round 22's shrink-to-fit fix for `width: auto` absolute
 boxes (`absolute_auto_width_shrink_to_fit_spec.spl`). It is a **separate**
@@ -68,3 +72,4 @@ the fixture in the spec's AC-2 comment. Harvest with
   found it.
 * `test/01_unit/browser_engine/absolute_auto_width_shrink_to_fit_spec.spl` —
   header records it as residue 2; AC-2 routes around it deliberately.
+

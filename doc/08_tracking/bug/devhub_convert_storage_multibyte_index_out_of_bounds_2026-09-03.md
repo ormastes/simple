@@ -1,4 +1,8 @@
 # devhub convert_storage: string index out of bounds on any non-ASCII content
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
 - Status: OPEN
@@ -45,3 +49,4 @@ effectively ASCII-only today.
 Nothing was changed by this record. The failing code is pure string handling
 with no platform calls, so it is expected to reproduce on Unix — unverified
 here (no Unix host in this session).
+

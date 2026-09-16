@@ -1,4 +1,8 @@
 # `LspEmitter` / `LspCodeAction` are imported and called but were never implemented
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped
@@ -87,3 +91,4 @@ from `query_diagnostics` — not from `query_check.spl`. Nothing in `src/` or
 `test/` imports `app.cli.query_check`. So `query_check.spl` looks like a
 shadowed duplicate. Left in place rather than deleted, because removing a
 ~650-line file needs its own verification pass.
+

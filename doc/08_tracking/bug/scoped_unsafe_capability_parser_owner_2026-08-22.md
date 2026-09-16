@@ -1,4 +1,9 @@
 # Scoped unsafe capability parser owner (2026-08-22)
+## Closed 2026-09-16 — root cause repaired in 763457a1f113; AST regression spec added
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -67,3 +72,4 @@ set lacks 45 runtime providers (including SDL2 and legacy I/O symbols). This is
 positive evidence for the scoped compiler question, but not an executable or a
 full Stage-4 acceptance result. Logs and `/usr/bin/time -v` receipts are under
 `build/native_probe/mcdc_cycle3_sffi_hosted/`.
+

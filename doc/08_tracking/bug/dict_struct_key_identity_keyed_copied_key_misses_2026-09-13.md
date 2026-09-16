@@ -1,4 +1,8 @@
 # A Dict keyed by a struct is keyed by object identity, so a copied key silently misses
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found: bootstrap lane BOOT-8 while measuring site 8
@@ -95,3 +99,4 @@ struct returns and struct arguments, not just array-element sorts.
 Either give struct keys structural hashing + equality in both runtimes, or refuse them: make
 a struct-keyed `Dict` a compile-time error unless the type opts in. Until then the language
 guide needs the rule "never bind a struct dict key to a local before looking it up".
+

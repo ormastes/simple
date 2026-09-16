@@ -1,4 +1,9 @@
 # JIT container boxing truncates any i64 outside -2^60 ..= 2^60-1
+## Closed 2026-09-16 — RESOLVED stale deployed seed; fix in source; two-sided verification on fresh build
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **RESOLVED 2026-08-18 — STALE DEPLOYED SEED, not a live source defect.**
 >
@@ -274,3 +279,4 @@ would pass identically whether the bug is present or fixed.
 - `doc/08_tracking/bug/runtime_from_int_still_truncates_61bit_2026-08-17.md`
 - `doc/08_tracking/bug/seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`
 - `doc/08_tracking/bug/cross_engine_differential_29_disagreements_2026-08-17.md`
+

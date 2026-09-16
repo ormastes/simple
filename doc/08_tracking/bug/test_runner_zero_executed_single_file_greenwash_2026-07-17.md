@@ -1,4 +1,9 @@
 # Test runner: zero-executed spec exits 0 PASS on the single-file path
+## Closed 2026-09-16 — ...her an example had *actually run*. ## Fix `test_runner_single.spl` now counts REAL execute
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Severity:** high (greenwashing — a spec with zero real `it` executions reads as passing)
@@ -79,3 +84,4 @@ wrapper" duplicate (per repo rule).
 Same greenwash family as
 [[test_runner_60s_silent_kill_greenwash_2026-07-04]] and
 [[test_runner_orphan_it_silently_ignored_2026-07-04]].
+

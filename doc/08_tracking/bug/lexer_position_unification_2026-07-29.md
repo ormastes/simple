@@ -1,4 +1,9 @@
 # Bug/audit: two lexer position states coexist; three live mixing sites fixed, one whole cluster found fully dead
+## Closed 2026-09-16 — partially fixed then completed; dead cluster + orphaned accessors deleted; specs green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-29
 **Status:** partially fixed (lane LEX1) — the three real MIXING sites found in
@@ -369,3 +374,4 @@ bin/simple test --no-session-daemon <spec>`, seed binary
 
 All eight specs green, matching the mandated counts exactly. No defects
 found.
+

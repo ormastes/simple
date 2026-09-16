@@ -1,4 +1,8 @@
 # x86_64 matrix real filesystem execution is not integrated
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The x86_64 repository already contains a real CPL3 execution mechanism:
 
@@ -408,3 +412,4 @@ nonce stdout, `FS_PROGRAM_END rc=37 reaped=true`, and final PASS markers. New
 package-probe entry from silently returning. Static wiring/listing and C syntax
 checks pass; a fresh admitted build and QEMU run are still required, so the row
 remains RED rather than promoted.
+

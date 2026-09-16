@@ -1,4 +1,8 @@
 # SimpleOS secure-server QEMU evidence blocked before launch
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The filesystem server evidence lane cannot currently reach QEMU. The canonical image is absent, `mcopy` is unavailable, the SimpleOS cross `ld.lld` is absent, and `bin/simple` identifies itself as the Rust bootstrap seed rather than the required pure-Simple self-hosted compiler.
 
@@ -67,3 +71,4 @@ Required owners are:
 Until all four owners exist and the QEMU gate observes both nonce-bound socket
 exchanges concurrently, a kernel containing only the launcher marker is
 explicitly rejected evidence.
+

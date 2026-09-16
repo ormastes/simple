@@ -1,4 +1,9 @@
 # `compile --native` binary omits program body — silent exit 3 (NIL sentinel)
+## Closed 2026-09-16 — ...e callee name built on the stack. ## FIX APPLIED (fail loudly; seed pipeline/execution.rs,
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-07-19 · **Status:** SOURCE FIXED; native execution pending · **Area:** native AOT / linker
 **Blocks:** running showcases as native binaries (the fast lane that escapes
@@ -78,3 +83,4 @@ SIMPLE_RUNTIME_PATH="$PWD/build/simple-core" SIMPLE_LINKER=ld \
   bin/simple compile --native examples/06_io/ui/graphics_2d_showcase.spl -o /tmp/g2d
 SHOWCASE_RESOLUTION=320x240 /tmp/g2d ; echo $?   # -> silent, 3
 ```
+

@@ -1,4 +1,8 @@
 # `Array.remove_at` is not a supported native or interpreter operation
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Filed: 2026-09-08
 - Severity: P1
@@ -15,3 +19,4 @@ The inventory code incorrectly assigned the nonexistent `remove_at` result
 back to the array. It now uses canonical `entries.remove(found)` as a statement.
 Implementing a first-class `remove_at` alias consistently across interpreter,
 MIR, LLVM, Cranelift, and documentation remains a separate language task.
+

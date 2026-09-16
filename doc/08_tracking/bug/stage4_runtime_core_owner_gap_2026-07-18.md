@@ -1,4 +1,8 @@
 # Stage4 omitted core C runtime owners
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -42,3 +46,4 @@ this session's static-only restriction.
   linker's duplicate-definition suppression.
 - Add the isolated SQLite and remaining CLI capability owners. Missing owners
   must continue to fail at requested-owner resolution.
+

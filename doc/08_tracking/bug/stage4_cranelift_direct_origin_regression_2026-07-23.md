@@ -1,4 +1,8 @@
 # stage4 cranelift-direct lane regressed by flat-lane fixes (origin 4b79454)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-23
 **Lane:** stage4 full-CLI binary, `native-build --backend cranelift` (cranelift-direct)
@@ -61,3 +65,4 @@ simple native-build pm5.spl --backend cranelift -o /tmp/pm5.bin   # SEGVs
 - The campaign's batch-5 (value-position match/if result correctness) lands ON TOP
   of this regressed base: it strictly improves the lane (pm1/pm2/pm4 0 -> correct
   arm values) and does not touch the regressed behaviors.
+

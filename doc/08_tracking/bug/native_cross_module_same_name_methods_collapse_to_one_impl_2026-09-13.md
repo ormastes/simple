@@ -1,4 +1,8 @@
 # Native: same-named instance methods on sibling types in one module collapse to ONE implementation
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **RESOLVED by PR #867** (2026-09-13,
   `https://github.com/ormastes/simple/pull/867`, "fix(seed): type imported
@@ -169,3 +173,4 @@ be an error, never an arbitrary pick.
 All 6 failing examples of `test/01_unit/lib/common/bytes/ints_spec.spl` under
 native build. Any stdlib or user code with same-named instance methods on
 sibling types in one module is silently miscompiled natively.
+

@@ -1,4 +1,8 @@
 # Temporary Rust recovery runner remains alive after passing examples
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** REPRODUCED / PURE-SIMPLE QUALIFICATION PENDING
 **Severity:** P1 — a green focused run does not terminate
@@ -24,3 +28,4 @@ bounded pure-Simple Stage4 essential-tools smoke, which must exit normally.
 - structured-evidence examples: 3 passed, 0 failed
 - enclosing recovery command: exit 124 after 60 seconds
 - post-timeout matching child scan: empty
+

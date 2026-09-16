@@ -1,4 +1,9 @@
 # silent_default lint was unreachable dead code at origin after a stale-snapshot clobber
+## Closed 2026-09-16 — Status FIXED 2026-08-17; wiring restored; ablation measured both arms (0 vs 1 W-MC-DEF hit)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-17 (wiring restored, ablation measured both arms).
 
@@ -66,3 +71,4 @@ Two independent ways a file-granular census reports a false all-clear:
 presence of a file does not mean its content is complete (this bug — 6 of 7
 files back, feature still dead), and presence of a spec does not mean its fix is
 present, nor that the spec exercises the path that was lost.
+

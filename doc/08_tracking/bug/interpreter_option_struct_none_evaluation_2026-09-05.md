@@ -1,4 +1,8 @@
 # Interpreter lane fails on ANY evaluation of a None-valued `Option<struct>`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Found by:** sspec score-80 wave 8D (modernizing `test/system/coupling_analysis_spec.spl`)
@@ -45,3 +49,4 @@ None-valued `Option<struct>` evaluates without a semantic error on the
 interpreter lane; then the W-rule halves in
 `test/system/coupling_analysis_spec.spl` (and its eventual twin) can be
 re-pointed at direct None-matching.
+

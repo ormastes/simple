@@ -1,4 +1,8 @@
 # Bug: Stage 4 `--low-memory` build grows past 25 GB RSS
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -98,3 +102,4 @@ Observed on 2026-07-18:
 Acceptance requires a produced full CLI, bounded warm elapsed time/RSS evidence,
 and green test-runner, lint, and duplication probes. A CPU-active process with
 unbounded RSS is not a passing “slow build.”
+

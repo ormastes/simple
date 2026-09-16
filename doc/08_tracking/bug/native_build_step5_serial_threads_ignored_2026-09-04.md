@@ -1,4 +1,8 @@
 # native-build late phases are serial: `--threads` is plumbed end-to-end and then discarded
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-04
 **Area:** `src/compiler/80.driver/driver_build/parallel.spl`, `driver_aot_native_output.spl`
@@ -273,3 +277,4 @@ builds were in the FRONT END at the time (`phase2:surface:file:*`,
 settles nothing. That share decides P2-vs-P3 and must be sampled during a real
 step-5 window. Also still open: whether the original >1h33m stall was step 4 or
 step 5.
+

@@ -1,4 +1,8 @@
 # RESOLVED: `sqrt_f64` unguarded for negative input — returned finite garbage instead of NaN
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Filed: 2026-08-18
 - Status: RESOLVED 2026-08-18
@@ -156,3 +160,4 @@ the negative-input divergence no longer exists. See the updated header
 comment in `special_sqrt_crosslang_spec.spl` for the resolved-state summary
 (the file previously stated the divergence as permanent/documented; that
 framing is now stale and superseded by this doc).
+

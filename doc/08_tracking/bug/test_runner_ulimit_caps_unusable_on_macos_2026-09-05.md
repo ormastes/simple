@@ -1,4 +1,8 @@
 # Test runner's ulimit caps make `simple test <dir>` unusable on macOS (2026-09-05)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 PARTIALLY FIXED. Blocker (1) below is fixed in this working tree; blocker (2)
@@ -126,3 +130,4 @@ Blockers 3, then 2, then (already done) 1. Fixing 1 alone does not move the
 ## Related
 Matches the previously recorded "Memory limit 16GB lie" class -- a per-UID
 `ulimit` misfire being reported as a memory/compilation problem.
+

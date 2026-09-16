@@ -1,4 +1,8 @@
 # SReplay capability labels overstate implementation (2026-09-05)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Source-verified truth reset for `doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md`
 §4.2. That table was produced by GitHub code search, not by reading the files.
@@ -114,3 +118,4 @@ replay is a real, independent mechanism, not one of the seven rows under
 review. **No CLI/MCP help string in this tree overstates a Track-3/5/6/kernel
 capability** — the overstated wording lived entirely in the prose guide
 (`sreplay.md`), which is fixed below. No string literal edits were needed.
+

@@ -1,4 +1,8 @@
 # Bug: bootstrap AST env mirror serves stale nodes and bypasses the stale-index guard
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** ast_env_mirror_bypasses_stale_index_guard_2026-08-01
 **Severity:** P1 — latent correctness (silent wrong AST tag) + proven O(N^2) + **exec ceiling already exceeded by current source files** (measured 2026-08-01)
@@ -246,3 +250,4 @@ several parser fixes. **This must be landed only together with a bootstrap-lane 
 Under `SIMPLE_BOOTSTRAP=1` without `SIMPLE_NATIVE_ARENA_DECLS=1`, parse a large file (N expr nodes),
 then parse a small one, then read a node index between the two counts: `expr_get_tag` returns the
 first file's tag instead of -1. Expected after fix: -1 plus the OOB diagnostic.
+

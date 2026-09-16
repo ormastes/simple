@@ -1,4 +1,9 @@
 # Array/tuple sub-pattern of a STRUCT FIELD bound garbage on the JIT
+## Closed 2026-09-16 — Status FIXED 2026-08-04; collect_pattern_bindings fallbacks; JIT rows match interpreter post-fix
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-04.
 **Found:** 2026-08-04, while fixing top-level struct-pattern refutability.
@@ -94,3 +99,4 @@ An A/B of every fixture in `test/fixtures/compiler/` between the pre-fix and
 post-fix binaries (md5-distinct) showed exactly two diffs: this fixture going
 4 FAIL -> 4 PASS, and `native_option_uniform_tagged_abi_repro.spl` printing
 different raw pointer addresses (ASLR, not a behaviour change).
+

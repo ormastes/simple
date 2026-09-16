@@ -1,4 +1,8 @@
 # JIT SIGSEGV: field access on a `nil` receiver (`b.n` where `b` is nil)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-verified OPEN 2026-09-13 — REOPENED: still a hard SIGSEGV, the null guard is not effective here
 - **measured** (Windows Rust seed v1.0.0-rc.1): `struct B: n: i64` + `fn get(b: B?) -> i64: return b.n` called with `nil` printed `start` then died with `Segmentation fault`, rc=139, and **no** message on stdout or stderr — not a "defined trap".
@@ -261,3 +265,4 @@ field-type resolution would recurse forever.
    logic bug above too).
 3. Add a runnable guard test (`b: T? = nil; b.field`) that must produce the same
    clean `undefined field … on 'nil'` error as plain `nil`, never a segfault.
+

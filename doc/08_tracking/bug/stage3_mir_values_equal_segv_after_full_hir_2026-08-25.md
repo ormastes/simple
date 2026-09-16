@@ -1,4 +1,8 @@
 # Stage 3 self-host SIGSEGV while lowering `values_equal` after full HIR
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-25  
 **Status:** BLOCKED AFTER THREE CYCLES — final fix not yet admitted
@@ -162,3 +166,4 @@ SIMPLE_TIMEOUT_SECONDS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh \
 
 Then require `real-lower:done eval_gteq` and complete Stage 3 admission before
 promoting any must-check compiler row.
+

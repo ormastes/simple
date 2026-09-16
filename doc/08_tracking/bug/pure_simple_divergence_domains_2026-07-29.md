@@ -1,4 +1,8 @@
 # Pure-Simple oracle-vs-plain divergence sweep — non-print domains (2026-07-29)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Method: `bin/simple run X.spl` (plain = deployed/default engine, currently the
 Rust seed since the pure-Simple native harness is not deployed) vs
@@ -56,3 +60,4 @@ Total: **9 new divergences** across 6 domains (plus 1 shared-non-divergent gap n
 ## Notes / caveats
 - All "plain" runs above used the currently-deployed engine (`bin/simple run` → Rust seed w/ JIT-then-interpreter-fallback banner), per the sweep's oracle/plain convention; needs re-confirmation against the pure-Simple native harness directly once that path is fixed/deployed.
 - p10b's segfault, p11b's `?`-chain corruption, and p11d/e/f's for-loop-return corruption are new site-level findings distinct from the already-memory-tracked `list.get(i)` `<<3` tag-box family and the `Option<i64>==3` collision family — flagged for a fresh codegen trace rather than assumed to be the same bug, since the multiplier is not consistently ×8.
+

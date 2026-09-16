@@ -1,4 +1,8 @@
 # Coverage tooling does not reproduce end-to-end — no `spl-coverage` CLI in the deployed binary, no branch probes emitted by production MIR lowering, and no coverage artifact written by the spipe/.spl test-runner path
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-07
 - **Severity:** high (planning-blocking) — two landed 2026-08-07 coverage plans
@@ -596,3 +600,4 @@ with `# @cover src/lib/common/base_encoding.spl`, run as
 the 4/10 hand-checked against the artifact rows (exactly 4 rows have both
 counts > 0). Branch coverage is now measurable on the spipe/.spl runner
 path, with the executed-decisions denominator caveat above.
+

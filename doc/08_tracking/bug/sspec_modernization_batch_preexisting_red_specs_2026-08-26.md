@@ -1,4 +1,8 @@
 # Pre-existing red specs found during sspec modernization batch (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 During the ora_batch_ac sspec-maintain modernization sweep, the following
 specs failed at HEAD BEFORE any edit (verified: the only working-copy diff
@@ -312,3 +316,4 @@ Inverted dual check: flipping the direction to `to_equal(false)` makes it PASS
 passed, 1 failed`, "expected false to equal true"). The fixture still fails
 on purpose; discovery markers and describe/it names unchanged. Mirror
 regenerated.
+

@@ -1,4 +1,9 @@
 # sha256_core value-tagging defect silently corrupts live SHA-256 digests
+## Closed 2026-09-16 — Status FIXED 2026-08-11; retype + dead fn removed; FIPS vectors and 10-check parity spec pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (`.spl`-level workaround) 2026-08-11, this session — see
 *2026-08-11 second follow-up: root cause isolated and fixed* below. Both FIPS
@@ -296,3 +301,4 @@ No pure-Simple compile path currently exists to verify an engine fix:
 `runtime_native.c` does not compile
 (`runtime_native_c_uncompilable_unsigned_box_never_implemented_2026-08-11.md`),
 `bootstrap/stage3/simple native-build` SIGSEGVs, and `bin/simple` is the Rust seed.
+

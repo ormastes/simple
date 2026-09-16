@@ -1,4 +1,8 @@
 # Phase 2 Vulkan Engine2D closure requires unselected backend providers
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -32,3 +36,4 @@ Admission is a strict build of
 `src/app/wm_compare/vulkan_primitive_feature_producer.spl` with no fabricated
 symbols, followed by physical-device execution and its normalized C parity
 gate. Do not enable `SIMPLE_ALLOW_INTERNAL_STUBS` as a workaround.
+

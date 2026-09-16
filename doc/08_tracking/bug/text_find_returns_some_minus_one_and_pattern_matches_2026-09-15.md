@@ -1,4 +1,8 @@
 # `text.find(needle)` returns `Some(-1)` when absent and treats needle as a pattern
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Observed (2026-09-15, seed `bin/release/aarch64-unknown-linux-gnu/simple`):**
   `text.find(needle)` on a missing needle returns `Some(-1)` instead of
@@ -14,3 +18,4 @@
 - **Unblock condition:** `text.find` returns `None` on miss and does literal
   matching (or a documented `find_pattern` split); add a std spec asserting
   both.
+

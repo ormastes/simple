@@ -1,4 +1,8 @@
 # JIT Gap Implementation Plan — 2026-07-29
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ANALYSIS/DESIGN ONLY.** No source was edited, nothing was built, nothing was
 committed. This turns `jit_gap_reaudit_2026-07-29.md` +
@@ -338,3 +342,4 @@ dispatch files' arms one batch at a time** (fast, since each arm is a
 self-contained few-line block). If a strict same-file rule is required with
 no exceptions, the max safe parallelism is **1** for the dispatch-arm step
 and **6** for everything upstream of it.
+

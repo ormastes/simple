@@ -1,4 +1,8 @@
 # Bug: Web Rendering Disconnected from Engine2D GPU Backends
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED  
 **Date:** 2026-07-01  
@@ -152,3 +156,4 @@ SIMPLE_2D_BACKEND=software # Force software-only rendering
 - [[project_renderer_unification_2026-06-15]] — Historical renderer unification (mentions text_metrics_spec orphaned issue)
 - `doc/05_design/ui/renderer_unification_2026-06-15.md` — Renderer architecture design
 - `src/lib/gc_async_mut/gpu/browser_engine/web_render_backend.spl` — WebRenderBackend (proper impl, uses simple_web_renderer correctly)
+

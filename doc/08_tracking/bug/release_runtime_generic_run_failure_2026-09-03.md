@@ -1,4 +1,8 @@
 # Release runtime hides source execution failure
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -39,4 +43,5 @@ Three independent defects combined:
 
 The existing executable cannot acquire source changes without a rebuild. Until then,
 its `run` result remains unqualified and must not be treated as a source-program error.
+
 

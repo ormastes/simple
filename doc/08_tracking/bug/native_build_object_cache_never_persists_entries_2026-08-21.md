@@ -1,4 +1,9 @@
 # native-build object cache never persisted entries: second identical build = 0 hits (2026-08-21)
+## Closed 2026-09-16 — ...= 0 hits (2026-08-21) ## Status RESOLVED 2026-08-21 — 809ce6d4e71. Evidence: spec test/02_
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 RESOLVED 2026-08-21 — 809ce6d4e71. Evidence: spec test/02_integration/compiler/driver/native_build_cache_second_build_hits_spec.spl (see body for verdict).
@@ -62,3 +67,4 @@ partial file if the parent dies mid-phase).
 - The cache scope directory already folds `SIMPLE_CACHE_SCOPE` (`lane=`), the
   compiler identity and a `sources-<interface fingerprint>` component, so the
   fix makes incremental stage builds in one lane genuinely reusable.
+

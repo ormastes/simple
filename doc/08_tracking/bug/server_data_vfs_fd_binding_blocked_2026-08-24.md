@@ -1,4 +1,8 @@
 # Server-data VFS fd binding remains blocked
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The attempted `/srv/data/{web,db}` DBFS syscall binding was reverted after two
 independent static-review cycles. Protected open therefore intentionally keeps
@@ -49,3 +53,4 @@ must be unconditional; failed backend cleanup moves to retained quarantine.
 
 No tests, builds, SPipe, optimizer, benchmarks, or runtime verification were
 run in this lane.
+

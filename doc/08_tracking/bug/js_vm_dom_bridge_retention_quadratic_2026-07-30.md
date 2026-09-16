@@ -1,4 +1,8 @@
 # JS VM DOM bridge retention is frame-linear and property-scan quadratic
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -96,3 +100,4 @@ Add a focused SSpec with these exact steps:
 Use live-object/live-property metrics, not monotonic `next_id`. The current
 test that expects the cap to reject a second replacement is regression evidence
 for this bug, not proof of lifecycle correctness.
+

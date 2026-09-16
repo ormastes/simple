@@ -1,4 +1,8 @@
 # `bootstrap_context_mir_source_spec` is a stale source-text spec, not a link failure (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIX IMPLEMENTED — reviewer GO pending.
 
@@ -81,3 +85,4 @@ The mutation example operates on the loaded production
 registration, or swapping their order must each flip the same real oracle from
 true to false. Status remains review-pending until an independent focused run
 and reviewer GO validate this hardened postimage.
+

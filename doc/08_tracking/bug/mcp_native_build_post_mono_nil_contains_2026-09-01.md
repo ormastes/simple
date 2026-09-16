@@ -1,4 +1,9 @@
 # MCP native build: `method 'contains' not found on type 'nil'` immediately after monomorphization
+## Closed 2026-09-16 — PINNED AND FIXED 2026-09-02 (ae4ea13e847); blocker cleared, header OPEN superseded
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-01 · **Status:** OPEN · **Severity:** blocker (last thing between the MCP build and MIR lowering)
 
@@ -451,3 +456,4 @@ Relaunched on that form and confirmed progressing (`parse 18/100` at 50 s),
 detached, cmd PID **5016**. Output paths are unchanged (`run4.out` / `run4.err`
 / `run4.rc` in the scratchpad `mcp/` directory listed above), as is the harvest
 recipe.
+

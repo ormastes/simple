@@ -1,4 +1,8 @@
 # Bug: source-mode MCP server stalls mid-workload under load (stdio, seed interpreter)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Found:** 2026-08-28, MCP parity lane, while measuring before/after legs
   with `scratchpad/ab/drive2.py` against
@@ -38,3 +42,4 @@
   `scratchpad/parity/leg_before_exec.log`, `leg_after_*.log`.
 - **Next:** retry on the natively-built server after the mcp_health redeploy;
   if it reproduces, strace the read loop at the stall point.
+

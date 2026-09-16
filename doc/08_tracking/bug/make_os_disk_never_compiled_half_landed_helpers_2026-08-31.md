@@ -1,4 +1,9 @@
 # `scripts/os/make_os_disk.c` did not compile or link on `origin/main` (2026-08-31)
+## Closed 2026-09-16 — Status FIXED in same change; helpers restored, fix documented
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED in the same change that filed this record.
 
@@ -66,3 +71,4 @@ media provenance question (is the manifest stale, or did the licence files
 drift?) and must be answered by whoever owns the font bundle — NOT by
 regenerating the checksums to make a build pass. Filed here so it is not lost;
 it still blocks the wrapper even though the C writer itself now builds.
+

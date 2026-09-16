@@ -1,4 +1,9 @@
 # `--no-verify` bypass evidence — lane-bootstrap plan-doc landing (2026-08-19)
+## Closed 2026-09-16 — bypass evidence record complete: doc-only push landed, 6 mandatory guards green, no open item
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Recorded because bypassing the pre-push hook without written evidence is a
 violation, not a shortcut. Same convention as
@@ -76,3 +81,4 @@ Deliberately NOT committed and NOT pushed:
 touching no code, no test tree, and no build input, the six that did run cover
 the failure modes those 57 exist to catch. A code change must NOT reuse this
 record as precedent — re-run the hook, or record fresh evidence.
+

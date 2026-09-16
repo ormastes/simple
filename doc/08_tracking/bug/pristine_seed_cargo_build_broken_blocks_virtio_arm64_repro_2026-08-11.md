@@ -1,4 +1,8 @@
 # Pristine seed `cargo build --release` is broken at origin/main HEAD — blocks virtio arm64 defect repro
+## Obsolete 2026-09-16 — verified: WideInt mismatch gone, rt_array_each/rt_map now exported; build defect absent from source
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 - Date: 2026-08-11
 - SHA tested: `7f967a8ad7029ec5f3e93d239a22cd544a6b82b9` (origin/main, fresh `git fetch` + `git worktree add --detach`)
@@ -75,3 +79,4 @@ No files under `src/os/drivers/virtio/` or `src/compiler_rust/compilability.rs`
 were modified in this session — the blocker is entirely upstream in the Rust
 runtime crate. Worktree `/mnt/data/build-virtio` was removed after this
 investigation; nothing was pushed (nothing to push — no fix produced).
+

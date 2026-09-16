@@ -1,4 +1,8 @@
 # x86_64 real filesystem-exec closure — 2026-08-13
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Functional diagnostic result
 
@@ -83,3 +87,4 @@ admission, one-line QEMU argv/version, collector nonce once, workload nonce
 twice (kernel and child), the mounted program, and the full exit-37/reap/PASS
 lifecycle. The collector was invoked and correctly stopped with `expected
 exactly 24 evidence bundles`; this is a row PASS, not a false matrix promotion.
+

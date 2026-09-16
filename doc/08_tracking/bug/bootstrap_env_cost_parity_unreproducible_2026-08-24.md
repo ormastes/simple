@@ -1,4 +1,8 @@
 # Reported 20x bootstrap-env compile regression is NOT reproducible on the deployed seed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -153,3 +157,4 @@ PASS — 2 configuration(s) timed, plain=10826ms bootstrap=10522ms, ratio=97 bud
 - This guard covers the seed path only. It would not have caught a regression
   that lives exclusively in the `.spl` driver, because no runnable pure-Simple
   compiler exists in this worktree to exercise it.
+

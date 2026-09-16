@@ -1,4 +1,8 @@
 # Cross-module ByteSpan misreads small heap-built [u8] arrays (deployed interpreter)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-07-19 · **Status:** OPEN · **Area:** interpreter / cross-module struct fields
 **Found via:** every PNG chunk CRC from `png_encode.spl` was wrong while its
@@ -73,3 +77,4 @@ bootstrap redeploy; verify with `build/tmp/bspan/m_localvs.spl` (expect
 Pre-existing separate quirk (unchanged): `[u8]` passed to `[i64]` param
 misdecodes multiples of 8. The png_encode flat-fn workaround can be
 reverted after redeploy verification.
+

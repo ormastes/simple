@@ -1,4 +1,9 @@
 # std.common.json tokenizer rejects raw non-ASCII string content
+## Closed 2026-09-16 — Status FIXED; empty-slice sentinel fix; round-trip spec extended
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED — `json_tokenize`, `json_skip_whitespace`, and
 `json_string_escapes_are_valid` now walk with 1-unit slices (`s[i:i+1]`)
@@ -64,3 +69,4 @@ throughout), or track a character count for loop bounds. Keyword slicing
 `test/01_unit/lib/common/json/json_unicode_escape_spec.spl` has the
 serialize-direction assertion and a comment pointing here; when this bug is
 fixed, extend that spec with the full round-trip.
+

@@ -1,4 +1,8 @@
 # SVM-G device single-buffer code/data co-residency diverges from ref_vm's separate code array
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: open (documented divergence, not blocking)
 - Found: 2026-08-07, Task C3 (vulkan_vm executor), while running the D3
@@ -103,3 +107,4 @@ an explicit design decision among the three unblock options (snapshot
 semantics, retire/relabel the vector, or accept permanently) — not a local
 code fix — so it stays out of scope for a shard triage pass. No change made.
 Leaving OPEN as documented ("not blocking").
+

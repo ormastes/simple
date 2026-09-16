@@ -1,4 +1,8 @@
 # `todo(...)` parses into the same AST node as `pass_todo(...)`; REQC003's dedicated branch is unreachable from real source
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-08-07 · **Severity:** low (coverage gap, not silent-wrong-data — a
 weak `todo(...)` still gets flagged, just as REQC001 instead of REQC003)
@@ -98,3 +102,4 @@ applied unilaterally here.
 
 **Verdict: BLOCKED (real fix is in `10.frontend`, out of scope for this worker).**
 No code change made in this pass.
+

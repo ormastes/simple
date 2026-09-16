@@ -1,4 +1,8 @@
 # X25519MLKEM768 coverage contract omits GPU admission owners
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -51,3 +55,4 @@ Start with `src/app/test/x25519mlkem768_coverage_contract.spl`, then run the
 focused coverage composer, critical-inventory, and manifest-existence specs on
 the self-hosted binary. A fresh native coverage run is additionally required
 before closing this record.
+

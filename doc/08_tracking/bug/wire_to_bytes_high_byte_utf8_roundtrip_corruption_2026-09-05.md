@@ -1,4 +1,8 @@
 # `bytes_to_wire`/`wire_to_bytes` corrupt round trips for byte values >= 0x80
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05
 **Status:** Open
@@ -91,3 +95,4 @@ raw byte position using a byte-count-safe primitive instead of `len()`/
   original empty-array defect this generalizes from — that one is fixed).
 - `test/01_unit/lib/nogc_async_mut/io/tls_common_wire_to_bytes_repro_spec.spl`
   (reproduction spec for the original, now-fixed defect; GREEN, 4/4).
+

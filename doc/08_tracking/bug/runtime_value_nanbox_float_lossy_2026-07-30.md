@@ -1,4 +1,8 @@
 # RuntimeValue NaN-boxing is lossy for all normal floats (2026-07-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `RuntimeValue.from_float(x)` → `as_float()` does NOT round-trip. For any normal
@@ -39,3 +43,4 @@ scheme's test suite. Do not hack in place.
 Parallel divergence scan lane 4 (2026-07-30). Anchor-family sibling: the landed
 `04a68b28` (logical-vs-bitwise operators) and `e9bee8a2baf` (gc_async_mut byte
 serialization) fixes.
+

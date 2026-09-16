@@ -1,4 +1,8 @@
 # FAT32 atomic-replace lifecycle test fails with `FsError::Corrupt`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (2026-09-13)
 - Found by: BUGFIX-7 lane while fixing
@@ -45,3 +49,4 @@ to), not in the mock. This scenario was previously unreachable under
 fail to compile before any example ran (the file's `MockFat32BlockDevice` had
 a 2-arg `read_sector` against the trait's declared 1-arg signature) — so this
 may be a long-standing latent defect, not a new regression.
+

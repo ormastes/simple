@@ -1,4 +1,9 @@
 # SOSIX sync leg never released its ring slot on return
+## Closed 2026-09-16 — ...bytes on the first iteration only. ## Fix `sync.spl:92-94` — after the wait loop, a COMPLE
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-09-05 · **Status:** CLOSED (same day) · **Lane:** `.spipe/sosix_runtime_unification/state.md`
 
@@ -29,3 +34,4 @@ in flight), which `fs_sync_spec` "reports a native wait timeout…" pins with
   "performs exactly one ring hop per unified read…" (64 consecutive sync reads on a
   capacity-1 ring through the real file driver; `occupancy == 0` after) and
   `file_driver_spec` round-trip (write then read on one ring).
+

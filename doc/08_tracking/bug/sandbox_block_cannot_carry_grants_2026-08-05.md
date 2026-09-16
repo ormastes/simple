@@ -1,4 +1,9 @@
 # `sandbox` block cannot carry `grant:` — grants require a `security gate`
+## Closed 2026-09-16 — Status: fixed 2026-08-05; end-to-end tests + sabotage check in body
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** fixed 2026-08-05
 **Found:** 2026-08-05, while making WASI capability enforcement reachable from the CLI.
@@ -121,3 +126,4 @@ this is a parser/HIR-lowering gap only.
 - Runtime (already correct, no change needed):
   `src/compiler_rust/wasm-runtime/src/wasi_env.rs`,
   `WasiCapabilityTable::from_sandbox_lowering_sdn`.
+

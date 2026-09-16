@@ -1,4 +1,8 @@
 # Parser `peek` recursion stack-overflow kills the whole directory test run
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Observed (2026-09-15 full-suite wave, seed
   `bin/release/aarch64-unknown-linux-gnu/simple`):** in directory-scope
@@ -23,3 +27,4 @@
 - **Unblock condition:** the parser (or its interpreter driver) converts
   runaway recursion in `peek` into a per-spec diagnostic instead of process
   death; isolate the crashing input via bisection of the affected dirs first.
+

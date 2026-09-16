@@ -1,4 +1,9 @@
 # Parser rejects `pub union` after an attribute (`pub enum` works)
+## Closed 2026-09-16 — in-body RESOLVED 2026-08-10 with landed fix, rebuilt seed, green spec verdicts
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED 2026-08-10 (stream N3) — see "Resolution" at the bottom.
 **Found:** 2026-08-10 by stream J4 (duplicate-test-tree merge, step 1)
@@ -137,3 +142,4 @@ AFTER (rebuilt seed + restored coverage):
   `declared>=3 executed=3 passed=3 failed=0 dropped=0`
 - `test/01_unit/compiler/parser/pub_enum_with_attribute_spec.spl` —
   `declared>=3 executed=3 passed=3 failed=0 dropped=0`
+

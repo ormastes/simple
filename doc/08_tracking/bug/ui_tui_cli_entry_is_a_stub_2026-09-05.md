@@ -1,4 +1,8 @@
 # `simple ui tui` runs a stub; the real TUI app is unreachable from the CLI
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-05 · **Status:** OPEN · **Lane:** ui_slim_kernel_plugin (found while gating the product entry)
 
@@ -27,3 +31,4 @@ the ordinary route no longer drags the compositor in, keeping the stub only behi
 explicit `--stub` for size audits; or declare `tui_web` the product TUI and delete the
 dead route. Pick one, then re-gate with `scripts/check/check-ui-slim-closure.shs` on the
 terminal module and measure T1.
+

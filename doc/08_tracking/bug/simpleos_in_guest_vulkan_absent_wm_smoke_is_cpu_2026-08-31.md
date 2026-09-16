@@ -1,4 +1,8 @@
 # In-guest Vulkan does not exist in SimpleOS; every WM smoke frame is CPU-rendered
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-31
 Scope: goal item 2 — x86_64 / arm64 / riscv64 SimpleOS window-manager smoke tests
@@ -486,3 +490,4 @@ for some time, independently of anything in this session.
 
 Four of five understood; two fixed outright. No framebuffer evidence was
 produced, and none is claimed.
+

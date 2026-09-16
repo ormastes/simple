@@ -1,4 +1,9 @@
 # Native build source closure reports locationless array-to-int conversion
+## Closed 2026-09-16 — ...rray-to-int conversion ## Status Resolved on 2026-08-26. The no-stub pure-Simple CLI build
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -36,3 +41,4 @@ only forwards integer handles to `rt_array_free`. The existing focused test
 `rt_array_free_leaves_interpreter_managed_arrays_to_arc` passes. A post-fix
 shard advances beyond the former failure through closure item 704/1046 without
 an array-to-int conversion.
+

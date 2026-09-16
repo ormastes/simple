@@ -1,4 +1,8 @@
 # `src/lib/common/encoding/yaml.spl` has a broken cross-submodule import — repo-wide, reproduces under both `run` and `test`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** medium (product source bug, not test-only — affects every real
@@ -103,3 +107,4 @@ green.
 - `test/unit/lib/common/encoding/yaml_spec.spl` — currently fails at import
   resolution (dead `std.common.yaml` path, see above); after that companion
   fix, 22 of 27 examples would still fail via this source-level blocker.
+

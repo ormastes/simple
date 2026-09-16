@@ -1,4 +1,8 @@
 # BUG: test runner JSON format is not machine-readable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Reproduction
 
@@ -44,3 +48,4 @@ One fresh cached Stage 4 link was attempted on 2026-07-24. It timed out after
 blocker, then build one fresh incremental Stage 4 CLI and run the single
 whole-stdout contract through that exact binary. Do not retry the full CLI
 through the Rust seed or weaken the aggregate assertions.
+

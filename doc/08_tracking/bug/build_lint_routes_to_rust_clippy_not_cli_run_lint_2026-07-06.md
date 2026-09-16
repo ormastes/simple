@@ -1,4 +1,8 @@
 # `bin/simple build lint` routes to Rust-driver clippy — pure-Simple `cli_run_lint` never executes
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-07-06
 - Severity: medium (policy violation + inert lint-time gates)
@@ -36,3 +40,4 @@ task #21) — the same delegation lane is involved.
 
 ## Workaround (current)
 Pre-commit hook enforcement + `sh scripts/check/check-ui-backend-isolation.shs` directly.
+

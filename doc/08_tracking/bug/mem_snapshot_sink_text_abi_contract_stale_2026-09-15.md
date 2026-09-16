@@ -1,4 +1,8 @@
 # memory_snapshot_sink_source_spec asserts the retired raw-pointer snapshot ABI (2026-09-15)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `test/01_unit/compiler/driver/memory_snapshot_sink_source_spec.spl` asserts the
 Stage3 memory-snapshot provider ABI passes raw `(ptr, len)` pairs:
@@ -26,3 +30,4 @@ spec's raw-ABI assertions (including the `not_to_contain` guard) must be
 rewritten to the text contract with equal strength; if raw pairs are required
 (e.g. for the memory-snapshot budget discipline the spec describes), the src
 regressed. Do not soften to vacuous assertions.
+

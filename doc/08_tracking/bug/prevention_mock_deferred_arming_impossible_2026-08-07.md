@@ -1,4 +1,8 @@
 # Prevention-mock deferred arming is impossible under this interpreter; `std.spec.*` also can't reach it
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-07
 **Area:** `src/lib/nogc_sync_mut/spec.spl` (Unit U2, `sspec_prevention_mock_plan_2026-08-07.md`)
@@ -152,3 +156,4 @@ identically (`semantic: function 'get_test_count' not found` via
 (cross-scope class-instance value semantics, no persistent module state
 across `it` examples, wildcard-import symbol resolution) and out of scope for
 a local .spl patch, exactly as already concluded. No change made.
+

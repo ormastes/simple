@@ -1,4 +1,9 @@
 # BUG: seed segfaults compiling uninitialized module-level array var (`var x: [T; N]`)
+## Closed 2026-09-16 — RESOLVED 2026-07-11; two defects fixed and verified with test counts
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (2026-07-11)
 **Severity:** medium (crash, and it blocks the natural workaround for the zero-store bloat bug)
@@ -32,3 +37,4 @@ Two coupled defects, both fixed:
 Verified: uninit `[i64; 65536]` probe prints `0`/`200` (was `3`/`3`);
 `= [0; N]` control unchanged; simple-compiler --lib 2880 passed / 235 failed
 (baseline 2878/237 — fixes 2 pre-existing, zero net-new); simple-type --lib 88/0.
+

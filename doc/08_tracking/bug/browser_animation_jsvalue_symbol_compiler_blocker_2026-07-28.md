@@ -1,4 +1,8 @@
 # Browser animation target blocked by `JsValue.Symbol` lowering
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -24,3 +28,4 @@ build/browser-full-refresh/stage2/x86_64-unknown-linux-gnu/simple native-build \
 Trace every `JsValue.Symbol` construction and pattern through HIR-to-MIR enum
 resolution, fix the shared qualified-variant lowering, and rerun the fixture.
 Do not replace symbols with strings or use the Rust seed as target evidence.
+

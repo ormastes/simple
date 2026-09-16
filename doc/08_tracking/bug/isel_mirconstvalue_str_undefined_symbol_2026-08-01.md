@@ -1,4 +1,9 @@
 # Native ISel called a function that does not exist: `mirconstvalue_Str` — direct calls silently dropped on x86_64 and aarch64
+## Closed 2026-09-16 — Status FIXED with Fix section; static correction validated against enum def (uncompiled caveat)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-01
 **Status:** FIXED (see "Fix" below). Fix is **UNCOMPILED** — see "Verification".
@@ -126,3 +131,4 @@ An unresolved call in a `case` pattern produced no build failure and no
 diagnostic. Combined with the sibling WASM defect and the dead `is_self_call`
 in `mir_opt/tco.spl`, this is the third instance in one sweep of the same
 family: **a `case` arm is not evidence that the arm ever runs.**
+

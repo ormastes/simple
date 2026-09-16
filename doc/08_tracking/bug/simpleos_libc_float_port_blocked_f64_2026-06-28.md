@@ -1,4 +1,8 @@
 # SimpleOS libc: float functions cannot be ported to pure Simple (f64 unreliable)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Triage note 2026-09-13 — f64 premise does NOT reproduce on the seed's two arms; still OPEN
 - **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`, under BOTH `SIMPLE_EXECUTION_MODE=interpret` and `=jit`): nested f64 return `outer(2.0)` -> `3.25`, struct-field f64 return `getv(P(v: 1.125))` -> `1.125`, accumulate loop -> `0.5`, `"2.75".to_f64()` -> `2.75`. No 0.0, no nested-return corruption, no call-boundary garbage.
@@ -50,3 +54,4 @@ value-semantics model).
   with KAT specs, then delete the C twins (keep-C-until-parity policy).
 - Syscall group: confirm each is a thin Simple-over-syscall wrapper or
   legitimately C; no pure-Simple obligation.
+

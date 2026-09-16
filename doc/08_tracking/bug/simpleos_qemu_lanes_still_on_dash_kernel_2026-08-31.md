@@ -1,4 +1,8 @@
 # SimpleOS QEMU lanes still booting with `-kernel` (census 2026-08-31)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `.claude/rules/board-runnable.md` mandates real-firmware boot (OVMF pflash /
 EDK2-AAVMF / OpenSBI) and forbids QEMU `-kernel` pass semantics and
@@ -42,3 +46,4 @@ uncommented `-kernel ["$]` and uncommented `isa-debug-exit`. The only matches
 (riscv64-opensbi:68, mcp-roundtrip:182, arm64-efi:184) are a case-guard that
 REJECTS those flags and two PASS-verdict strings saying "no -kernel, no
 isa-debug-exit" — not boot usage.
+

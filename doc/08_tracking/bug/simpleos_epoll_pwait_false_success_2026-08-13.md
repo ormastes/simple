@@ -1,4 +1,9 @@
 # SimpleOS epoll_pwait signal-mask false success
+## Closed 2026-09-16 — Status "Mitigated"; non-null masks honestly rejected; evidence test passed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -22,3 +27,4 @@ install masks, manage pending delivery, and block on readiness.
 `test/01_unit/os/libc/simpleos_epoll_pwait_honesty_test.c` passed under strict
 C compilation with SimpleOS headers. It checks rejection of a non-null mask
 and preserved ordinary empty-wait behavior for `NULL`.
+

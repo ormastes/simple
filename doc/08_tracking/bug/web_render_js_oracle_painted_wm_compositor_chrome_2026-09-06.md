@@ -1,4 +1,8 @@
 # Web-render JS oracle painted the WM compositor's chrome for an engine2d scene
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-06
 - Status: FIXED (oracle), residual measured and open (text)
@@ -134,3 +138,4 @@ is measuring a different renderer. Not chased further in this lane.
 `scripts/check-node-simple-web-engine2d-*.shs` — missing the `check/` path
 segment. Those files do not exist. The sibling layout matrix gate uses the correct
 `scripts/check/...`.
+

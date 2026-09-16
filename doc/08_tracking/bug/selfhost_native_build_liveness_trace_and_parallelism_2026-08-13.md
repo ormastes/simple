@@ -1,4 +1,8 @@
 # Self-hosted native build has no usable liveness trace or parallel compilation
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Evidence
 
@@ -76,3 +80,4 @@ V9's source-level and bootstrap evidence cannot become admitted production
 qualification until the self-hosted runtime can be built and its progress is
 observable. Re-running the same uninstrumented multi-minute command provides
 no additional evidence.
+

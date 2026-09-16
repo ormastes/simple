@@ -1,4 +1,8 @@
 # interp: url_encode unusable in interpreter — "Cannot resolve module: utilities"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - ID: interp_http_url_encode_utilities_unresolved_2026-06-14
 - Severity: P2
@@ -66,3 +70,4 @@ the chain resolves; only the interpreter's module resolver fails.
 - **measured**: the `gc_async_mut` twin works — `use std.gc_async_mut.http_client.types.{url_encode}` prints `ENC=ops%64acme.com`, exit 0.
 - **measured**, adjacent defect found while verifying and NOT fixed here: that output is wrong. `@` is 0x40, so the correct encoding is `%40`. The cause is that `i64.to_string(radix)` ignores its radix — `val c = 64; c.to_string(16)` and `c.to_string(2)` both print `64`. Five stdlib percent-encoders depend on it (`gc_async_mut/http_client/types.spl:55`, `gc_async_mut/oauth2.spl:230`, `nogc_async_mut/http_client/types.spl:55`, `nogc_async_mut/oauth2.spl:230`, `nogc_sync_mut/oauth2.spl:230`), so every one of them emits decimal where hex is required. Deliberately not patched at the call sites: that would mask a broken primitive across the whole stdlib. Fix belongs in `to_string(radix)`.
 - Verdict: OPEN — the module-resolution half is fixed; a segfault and a wrong-output primitive remain.
+

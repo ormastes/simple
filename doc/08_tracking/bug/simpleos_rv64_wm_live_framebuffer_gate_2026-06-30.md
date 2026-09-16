@@ -1,4 +1,8 @@
 # SimpleOS RV64 WM Live Framebuffer Gate Missing
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - status: source-ready-contract-v2-live-proof-pending
 - gate: `scripts/check/check-simpleos-host-configuration-matrix.shs`
@@ -30,3 +34,4 @@ Historical scanout-probe evidence:
   `rv64_display_smoke_qmp_wm_anchor_matches=5`.
 - `check-simpleos-host-configuration-matrix.shs` reports
   `qemu_riscv64_wm_live: pass`. PASS.
+

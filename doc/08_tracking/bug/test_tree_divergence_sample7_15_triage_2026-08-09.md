@@ -1,4 +1,8 @@
 # Test-tree divergence sample 7 — 15-pair triage (2026-08-09)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Residue class used: `NR%65==20` on `scripts/check/test_tree_divergence_baseline.txt`
 (prior sessions used ~0, offset-33-step-65, `NR%65==50`, `NR%65==15`,
@@ -107,3 +111,4 @@ byte-level difference even though it is behaviorally inert.
 
 Not committed/pushed per task instructions — left for review and landing via
 git plumbing.
+

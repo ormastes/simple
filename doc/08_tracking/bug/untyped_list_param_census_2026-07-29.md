@@ -1,4 +1,8 @@
 # Untyped `list` function-parameter census — classification and fix order (2026-07-29)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Background
 
@@ -235,3 +239,4 @@ are proven safe in every shape tested across passes 7 and 8) — the
 `W1006`-style demotion-detection precedent in `src/os/crypto` shows this
 codebase already has infrastructure for exactly this kind of static
 landmine gate.
+

@@ -1,4 +1,9 @@
 # Three env-var names for "which binary runs specs" produced a silent, confident, WRONG verdict
+## Closed 2026-09-16 — ... the right binary is *named*, a resolved binary that cannot do what is asked (e.g. the dep
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -102,3 +107,4 @@ All three print `plan_acceptance_runner=<binary> (source: <VARNAME>)` and
 command 'run'` and exiting 1) produces `ERROR — nothing was checked
 ('<path>' (from SIMPLE_BINARY) is not usable: not executable, or exists but
 rejects the 'run' command)`, exit 2. `--selftest` (12 fixtures) still passes.
+

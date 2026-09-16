@@ -1,4 +1,8 @@
 # ARM64 QEMU Dynamic Root Dirent and Fabricated-Stub Blockers
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11  
 **Status:** STATIC REPAIR PRESENT — fresh build/live proof still pending  
@@ -313,3 +317,4 @@ paths while accepting the four exact root files and populated SYS/APPS/SYS
 descendants. The compiler defect is tracked separately in
 `arm64_freestanding_text_equality_route_miscompile_2026-08-12.md`. No rebuild
 or QEMU run accompanied this source repair.
+

@@ -1,4 +1,8 @@
 # Stage 3 stalls in `rt_transient_heap_promote` — one enormous scan, NOT quadratic
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 > **CORRECTION 2026-09-02 (same day, before any fix was attempted).** This record
 > originally claimed the cost was O(n^2) because `rt_transient_heap_promote` was
@@ -112,3 +116,4 @@ The quadratic characterisation is from stack sampling plus reading the call site
 an instrumented count of `scope.objects` length over time. The hot path is certain; the
 exact growth curve is inferred from `Vec::retain`'s definition and the per-surface call
 pattern, and has not been measured directly.
+

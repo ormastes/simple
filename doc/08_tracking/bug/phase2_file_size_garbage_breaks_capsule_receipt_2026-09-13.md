@@ -1,4 +1,8 @@
 # Phase 2: `rt_file_size` returns garbage, invalidating every native capsule receipt
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-13
 **Lane:** phase 2 only (natively compiled pure-Simple Stage 2). Phase 1 (Rust seed) is clean.
@@ -86,3 +90,4 @@ Without `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` the run stops earlier, at
 `persistent package index admission failed: scv-authority-missing` — a separate
 issue with the isolated `stage2_home` the sanity harness creates, which has no
 package index and is exactly the cold-init case.
+

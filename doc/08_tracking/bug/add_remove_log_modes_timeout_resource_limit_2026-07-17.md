@@ -1,4 +1,8 @@
 # Bug: add_remove_log_modes_spec.spl Timeout Under Resource Limits
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17  
 **Lane:** L5 (test/02_integration and test/integration)  
@@ -60,3 +64,4 @@ added for readers. Both files parse clean (fix --dry-run, 0 errors). Regular
 section runs will no longer die on this spec; the slow lane gives the 16
 interpreter spawns adequate budget. Durable improvement (retarget spec to
 compiled binaries once redeploy lands) remains listed above as option 1.
+

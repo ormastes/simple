@@ -1,4 +1,8 @@
 # Deployed macOS binaries reject `rt_raw_i64_to_string` — entire host-compositor spec chain unrunnable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-04
 - **Area:** tooling/deploy (extern registry of BOTH `bin/release/aarch64-apple-darwin-macho/simple` and its `simple_seed` sibling)
@@ -41,3 +45,4 @@ driver + `-p simple-compiler-backfill` + no-LTO runtime last), or make the
 interpreter treat an unknown extern DECLARATION as a load-time warning and only
 fail on CALL (the whole-module-load failure on unknown extern decl is already
 a known defect class, 07-18).
+

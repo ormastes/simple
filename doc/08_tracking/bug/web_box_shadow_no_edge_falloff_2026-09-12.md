@@ -1,4 +1,9 @@
 # box-shadow produced a hard band with no edge falloff (2026-09-12)
+## Closed 2026-09-16 — Status FIXED; coverage-field blur landed, spec oracles + blast radius green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED.
 **Component:** Engine2D software/emulation backend.
@@ -68,3 +73,4 @@ unmodified files. So are `backend_software_primitives_spec.spl`,
 Outer shadows are not clipped to the outside of the border box, as CSS requires;
 a transparent box therefore shows the shadow through its interior (this is what
 AC-1's fixture exploits). Inset shadows are untouched.
+

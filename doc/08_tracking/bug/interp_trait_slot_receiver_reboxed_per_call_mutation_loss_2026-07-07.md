@@ -1,4 +1,8 @@
 # Interpreter: `me` method called through a `Trait?`-typed module slot re-boxes the receiver per call, losing field mutations
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-07
 **Severity:** medium — silently drops state mutations on any object stored
@@ -62,3 +66,4 @@ shared reference/handle. A minimal regression repro: module-level
 field; call a `me`-mutating method through `slot` (re-reading the module var
 each time, not a locally-held binding) 3× in sequence; assert the counter
 accumulates rather than resetting.
+

@@ -1,4 +1,8 @@
 # Triage of the 2 crash-investigation byproduct defects (Round 2)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: 1 FIXED (`build_targets_spec.spl`), 1 filed as another lane's in-flight work (`c_backend_export_spec.spl`)
 - Binary: `d4c0779cef6cf0cc4054` / rebuilt `57761d4fbfed5e444a36`
@@ -78,3 +82,4 @@ happens not to matter for the fixed example (the unsafe-output check does not
 depend on the fixture existing), so nothing broke; flagged here in case
 another example in this file depends on that directory actually existing on
 this host.
+

@@ -1,4 +1,8 @@
 # Engine3D Vulkan font adapter SFFI unavailable in pure-Simple test child
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The focused adapter suite imports the canonical Engine3D Vulkan backend, but the
 pure-Simple child reports that Vulkan initialization, device, buffer, shader,
@@ -11,3 +15,4 @@ time/memory receipts cannot be produced through this runner. Fix the module
 family/export closure, then run on a Vulkan-capable device with forced backend,
 queue/fence timing, readback, atlas/upload accounting, VRAM HWM, and cleanup
 retention. Do not replace this with source-text assertions or CPU fallback.
+

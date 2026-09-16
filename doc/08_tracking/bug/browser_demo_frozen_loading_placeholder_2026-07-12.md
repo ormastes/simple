@@ -1,4 +1,8 @@
 # browser_demo app is a frozen "Loading..." placeholder, not a browser
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -60,3 +64,4 @@ Two acceptable directions, either is sufficient:
    `os.apps.browser` / the Simple Web renderer, not this demo app).
 
 No navigation logic was implemented as part of filing this bug.
+

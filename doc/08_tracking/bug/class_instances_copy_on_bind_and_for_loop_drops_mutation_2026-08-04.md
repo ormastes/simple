@@ -1,4 +1,8 @@
 # BUG: `class` instances copy on binding, and `for` loop mutation is discarded entirely
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Re-measured 2026-09-13 — still OPEN. Now a clean LANE DIVERGENCE, and the affected-spec list is re-triaged
 
@@ -202,3 +206,4 @@ correct against the documented reference-type contract; the runtime is not.
   fields it explicitly resets — it is a targeted workaround for one field, not
   a fix for the underlying copy-on-bind/for-loop mutation-drop defect
   documented here.
+

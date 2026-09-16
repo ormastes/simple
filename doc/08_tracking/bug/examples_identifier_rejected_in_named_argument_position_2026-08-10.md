@@ -1,4 +1,9 @@
 # `examples` is an undocumented contextual keyword: rejected as a named argument (2026-08-10)
+## Closed 2026-09-16 — ...med argument (2026-08-10) **Status: FIXED 2026-08-17.** Resolution 1 (make them contextual
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status: FIXED 2026-08-17.** Resolution 1 (make them contextual everywhere)
 was taken, for both members of the census family:
@@ -139,3 +144,4 @@ rather than the single reported case.
   currently run, so the defect is user-visible regardless.
 - Whether `examples` also fails as a *parameter* name or as a `class` field
   constructor argument (only `struct` was probed).
+

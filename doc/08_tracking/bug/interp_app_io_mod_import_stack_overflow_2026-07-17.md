@@ -1,4 +1,9 @@
 # Importing `app.io.mod` under the interpreter crashes with a stack overflow
+## Closed 2026-09-16 — Status RESOLVED 2026-07-17: two root causes fixed, regression tests added and green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-17
 **Severity:** high (silently corrupts any BDD spec that imports the facade)
@@ -247,3 +252,4 @@ module of plain `extern fn` wrappers and was never implicated in this bug.
 fixed, but its much larger transitive surface (via `app.io.cli_ops`) is
 inherently more exposed to this class of process-wide name-collision bug
 than a narrow leaf import.
+

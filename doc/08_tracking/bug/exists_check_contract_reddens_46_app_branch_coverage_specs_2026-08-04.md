@@ -1,4 +1,8 @@
 # App-scope blast radius of the `T?`-into-`bool`-parameter defect: 46 branch-coverage specs
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** ALREADY-FIXED, re-verified 2026-08-10 — the root cause (seed
 `coerce_param` had no bool arm, `src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs`)
@@ -82,3 +86,4 @@ touching it from here would collide. Rewriting the 138 assertions to
 corpus — precisely what the 2026-08-01 bug asks not to happen ("the lowering of
 `.?` needs a single documented contract and a spec that gates it"). No spec was
 touched.
+

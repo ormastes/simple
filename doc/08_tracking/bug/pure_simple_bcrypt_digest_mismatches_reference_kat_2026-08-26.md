@@ -1,4 +1,8 @@
 # pure-Simple bcrypt digest mismatches reference KAT (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 `src/os/crypto/bcrypt.spl` `bcrypt_hash` produces structurally valid $2a$04$
@@ -32,3 +36,4 @@ fail, so the spec is intentionally RED until the digest defect is fixed.
 Fix the eksblowfish/Blowfish core in `src/os/crypto/bcrypt.spl` until the two
 KAT scenarios in `test/01_unit/lib/crypto/bcrypt_kat_spec.spl` pass byte-exact
 against the reference values above.
+

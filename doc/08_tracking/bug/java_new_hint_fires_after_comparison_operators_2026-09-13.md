@@ -1,4 +1,9 @@
 # A `new` identifier after any comparison operator raises a bogus "Common mistake" ERROR
+## Closed 2026-09-16 — Status FIXED; cargo tests + RED-to-GREEN spec; 87-failure bucket cleared
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: **FIXED (2026-09-13, continuation)** — see "Fix, applied" below.
 - Binary at discovery: `/home/yoon/dev/cargo-fulltest/release/simple`, sha256 `4dfdf671742007d30210` (Rust seed, 2026-09-13 16:00)
@@ -129,3 +134,4 @@ Same family, filed separately:
 `doc/08_tracking/bug/allow_reserved_as_hard_keyword_2026-09-13.md` — `allow`
 and `forbid` are hard keywords against the lexer's own comment. Both are cases
 of an ordinary English word that the front end reserves without meaning to.
+

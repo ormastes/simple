@@ -1,4 +1,8 @@
 # native-build timeout discards successfully compiled object cache
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** NO-MANGLE SOURCE FIXED / DEPLOY QUALIFICATION PENDING
 **Severity:** P1 — prevents bounded incremental builds from converging
@@ -37,3 +41,4 @@ global-fingerprint inputs.
 
 An admitted Stage 4 rebuild and bounded retry remain required before production
 deployment is qualified.
+
