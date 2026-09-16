@@ -85,3 +85,12 @@ medium 37,406 us, large 152,459 us; SDN bytes identical to the July table
 (30,571 / 121,514 / 485,835). Roughly 30x cheaper than the July Rust dev
 interpreter numbers. End-to-end route evidence (producer/consumer boundary)
 remains open, unchanged.
+
+## 2026-09-16 closure note
+
+The serializer-cost concern this file tracked is resolved in source: the
+route key no longer serializes the scene (document identity + extent + parked
+owner token + env knobs), and `composition_checksum()` is memoized on the
+composition revision. The 2026-09-16 cost-spec re-run (10.0/37.4/152.5 ms,
+PASS) is the retained baseline for any future serializer work. The remaining
+spec redness under the seed is counter instrumentation, tracked separately.
