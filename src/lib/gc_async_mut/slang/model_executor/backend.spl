@@ -44,6 +44,7 @@ enum BackendError:
     PhysicalPageInvalid
     PhysicalPageBusy
     InvalidTokenBudget
+    CapacityExceeded
 
 fn backend_error_text(e: BackendError) -> text:
     match e:
@@ -61,6 +62,7 @@ fn backend_error_text(e: BackendError) -> text:
         BackendError.PhysicalPageInvalid: "physical paged KV provider rejected its configuration"
         BackendError.PhysicalPageBusy: "physical paged KV provider is busy"
         BackendError.InvalidTokenBudget: "max_tokens must be a nonnegative signed 64-bit integer"
+        BackendError.CapacityExceeded: "prompt plus generation exceeds the context window"
 
 const SLANG_CAP_PHYSICAL_PAGED_KV: i64 = 32
 const SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS: i64 = 64
@@ -524,8 +526,14 @@ fn _generate_request_observed(input: BackendActiveGenerationRequest) -> Result<B
         return Err(BackendError.InvalidTokenBudget)
     if _push_request_text(b, request, prompt) < 0:
         return Err(BackendError.TokenizeFailed)
-    if _call2(b.f_request_tokenize, request.handle, 1) < 0:
+    # Guard capacity in Simple BEFORE eval_prompt: past this point the C side
+    # GGML_ASSERT(n_tokens_all <= cparams.n_batch)s and kills the whole process
+    # (measured 2026-09-16, caret agent turn with a transcript over n_ctx).
+    val prompt_tokens = _call2(b.f_request_tokenize, request.handle, 1)
+    if prompt_tokens <= 0:
         return Err(BackendError.TokenizeFailed)
+    if prompt_tokens + max_tokens > _call1(b.f_request_n_ctx, request.handle):
+        return Err(BackendError.CapacityExceeded)
     if _call1(b.f_request_prefix_prepare, request.handle) < 0:
         return Err(BackendError.DecodeFailed)
     if _call1(b.f_request_eval_prompt, request.handle) < 0:
@@ -569,8 +577,12 @@ fn generate_observed_request(input: BackendGenerationRequest) -> Result<BackendG
     # attending to the first and eventually overruns n_ctx.
     if _push_text(b, prompt) < 0:
         return Err(BackendError.TokenizeFailed)
-    if _call1(b.f_tokenize, 1) < 0:
+    # Same Simple-side capacity guard as the request path above.
+    val shared_prompt_tokens = _call1(b.f_tokenize, 1)
+    if shared_prompt_tokens <= 0:
         return Err(BackendError.TokenizeFailed)
+    if shared_prompt_tokens + max_tokens > _call0(b.f_n_ctx):
+        return Err(BackendError.CapacityExceeded)
     if _call0(b.f_prefix_prepare) < 0:
         return Err(BackendError.DecodeFailed)
     if _call0(b.f_eval_prompt) < 0:

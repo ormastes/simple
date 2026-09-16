@@ -68,7 +68,8 @@ use app.llm_caret.image_profile.{configured_image_profile_v1}
 use app.llm_caret.multimodal_types.{validate_model_profile_v1}
 use app.llm_caret.multimodal_provider.{complete_multimodal_wire_v1}
 use app.llm_caret.tools.{PermissionPolicy, ModelResponse,
-    default_policy, allow_all_policy, parse_tool_use_blocks, new_model_text, new_model_tools}
+    default_policy, allow_all_policy, parse_tool_use_blocks, parse_tool_use_tags,
+    new_model_text, new_model_tools}
 use app.llm_caret.types.{Message}
 use app.llm_caret.chat_tui.{
     make_chat_tui_with_status,
@@ -451,6 +452,8 @@ fn main_configure(provider: text, model: text, api_key: text, base_url: text,
     RT_SYSTEM_PROMPT = system_prompt
     RT_SESSION_ID = session_id
     RT_MAX_TOKENS = max_tokens
+    if RT_SYSTEM_PROMPT == "" and (provider == "slang_local" or provider == "local_torch"):
+        RT_SYSTEM_PROMPT = local_agent_tool_prompt()
 
 fn main_session_id() -> text:
     RT_SESSION_ID
@@ -465,7 +468,11 @@ fn main_session_id() -> text:
 fn build_model_response(resp: LLMResponse) -> ModelResponse:
     if resp.is_error:
         return new_model_text("ERROR: " + resp.error)
-    val calls = parse_tool_use_blocks(resp.raw)
+    var calls = parse_tool_use_blocks(resp.raw)
+    if calls.len() == 0:
+        # Local providers (slang_local, local_torch) carry no wire tool JSON;
+        # their tool calls arrive as <tool_use> tags in plain content.
+        calls = parse_tool_use_tags(resp.content)
     if calls.len() > 0:
         return new_model_tools(resp.content, calls)
     new_model_text(resp.content)
@@ -478,6 +485,42 @@ fn _last_user_content(msgs: [Message]) -> text:
         i = i - 1
     ""
 
+# slang_local's dispatch takes a single prompt (no messages transport), so the
+# running transcript -- including tool results -- must be flattened into it or
+# every turn after the first loses all context and the model hallucinates.
+fn _render_agent_transcript(msgs: [Message]) -> text:
+    var out = ""
+    if RT_SYSTEM_PROMPT != "":
+        out = "SYSTEM: " + RT_SYSTEM_PROMPT + "\n\n"
+    for m in msgs:
+        if m.content.trim() != "":
+            out = out + m.role + ": " + m.content + "\n"
+    # Raw-completion cue: without a trailing assistant marker the model sees a
+    # finished exchange and answers with an immediate EOS (measured 2026-09-16:
+    # empty Assistant turn the moment transcript flattening landed). The cue
+    # also PREFILLS the think-open: Qwen3.5 raw-completion otherwise sometimes
+    # emits "<think>" then EOS as its very next token (deterministic per
+    # prompt, measured 2026-09-16: caret a9/a10 both ended their first turn
+    # at exactly "<think>"). Prefilling puts the model INSIDE the think block,
+    # so it must continue; _dispatch_slang_local strips the closing tag.
+    out + "assistant: <think>\n"
+
+# Tool protocol for providers with no wire tool-call format: the system prompt
+# teaches the tag form, parse_tool_use_tags reads it back.
+fn local_agent_tool_prompt() -> text:
+    # NOTE: no bare {..} in these literals -- the language treats them as
+    # interpolation (`variable path not found`), so the example block is
+    # assembled by concatenation and tool args listed parenthesized.
+    val example = "<tool_use>" + "{\"name\": \"bash\", \"input\": {\"command\": \"ls\"}" + "}</tool_use>"
+    "You are a coding agent with tools, sandboxed to a workspace.\n" +
+    "To use a tool, emit exactly one block like this and stop:\n" +
+    example + "\n" +
+    "Tools: bash(command, timeout_ms) runs a shell command; read_file(path); " +
+    "write_file(path, content); list_dir(path); glob(pattern).\n" +
+    "Each call returns a [tool_result ...] block as the next user message. " +
+    "NEVER narrate a tool result you did not receive -- either call the tool or " +
+    "say you cannot. When the task is done, reply with plain text and no tool_use block."
+
 fn _messages_json(msgs: [Message]) -> text:
     var items: [text] = []
     for m in msgs:
@@ -489,7 +532,9 @@ fn _messages_json(msgs: [Message]) -> text:
 # the pure build_model_response tests; this just threads the running
 # transcript + session id through provider.dispatch_send.
 fn main_responder(msgs: [Message]) -> ModelResponse:
-    val prompt = _last_user_content(msgs)
+    var prompt = _last_user_content(msgs)
+    if RT_PROVIDER == "slang_local" or RT_PROVIDER == "local_torch":
+        prompt = _render_agent_transcript(msgs)
     val messages_json = _messages_json(msgs)
     val resp = dispatch_send(
         RT_PROVIDER, prompt, RT_MODEL, RT_API_KEY, RT_BASE_URL, RT_CLI_PATH,

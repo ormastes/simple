@@ -72,7 +72,44 @@ Replace the ggml backend behind the same
 paged attention) and A5 (scheduler + worker). Callers do not change when the
 backend does — that is what the seam is for.
 
+## Verified end to end (2026-09-16, GB10 host)
+
+- Models on disk under `/home/yoon/dev/model`: `Qwen3-Coder-Next-Q4_K_M`
+  (4-shard GGUF, 46G) and `Qwen3.5-9B-Q3_K_M` (4.7G, unsloth GGUF) both
+  generate through `slang_local` → caret; safetensors models (GLM-4.7-Flash,
+  Qwen3.5-122B-NVFP4) are refused with a typed reason. Architecture support
+  follows the linked llama.cpp (`qwen35` graph builders present at rev
+  `f9f09f02c`, 2026-09-03).
+- Working one-shot: `SLANG_MODEL_ROOT=/home/yoon/dev/model bin/caret
+  --provider slang_local --model <dir> --prompt "..."`. Without
+  `SLANG_MODEL_ROOT` caret scans `models/` and reports "model not found".
+- Evidence gate: `sh scripts/check/check-slang-ggml-inference.shs --models
+  /home/yoon/dev/model` → PASS (5/5 verdicts, 1 generated, 4 typed refusals).
+
+### Operational traps confirmed today
+
+- **Shim symbol drift**: `backend.spl` at origin/main dlsyms 17 symbols
+  including `slang_ggml_capabilities`; a shim built from older source exports
+  14 and the TUI dies with `spl_dlsym: unresolved symbol`. Rebuild with
+  `sh scripts/check/build-slang-ggml-shim.shs` in the tree you run from
+  (50 symbols exported as of 2026-09-16). Never share one `libslang_ggml.so`
+  across trees at different revisions.
+- **Stale seed kills the TUI**: `rt_atexit_install` was unregistered in
+  interpreters built before 2026-09-07
+  (`doc/08_tracking/bug/caret_tui_mode_dies_rt_atexit_install_unregistered_2026-09-06.md`).
+  The sealed seed at `src/compiler_rust/target/bootstrap/simple` (2026-09-08)
+  has the fix; older `bin/simple` symlinks may not.
+- **`--prompt` is one-shot by design** — no tool loop. The agent loop
+  (`run_agent_loop`) only runs in the TUI. Headless: start the TUI inside
+  tmux and drive it with `tmux send-keys`; see
+  `doc/07_guide/app/llm/local_llm_slang_caret_setup.md`.
+- **Fresh worktrees have no `build/sffi/`** — the engine default
+  `build/sffi/libslang_ggml.so` resolves relative to cwd, so run the shim
+  build script in the worktree (also fixes the `2>/dev/null`-silent
+  "GGUF recognised but no ggml backend library is configured" error).
+
 ## Related
 
 `doc/05_design/ml/slang/slang_master_plan.md`,
+`doc/07_guide/app/llm/local_llm_slang_caret_setup.md`,
 `doc/08_tracking/bug/caret_slang_local_inference_provider_missing_2026-08-21.md`.
