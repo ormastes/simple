@@ -176,4 +176,64 @@ bootstrap_stage3_copy_seed_tuple "$msvc" "$test_tmp/msvc-out" \
 [ -f "$test_tmp/msvc-out/deps/simple_runtime.lib" ] ||
     fail "Windows MSVC runtime archive was omitted"
 
+# Cargo >= 1.100 nightly (2026-09-11) artifact layout: deps/ is never
+# created; the hosted rlib lives at build/spl_hosted_runtime/<metadata>/out/
+# and the runtime archive at the profile root. Both must be admitted and
+# projected into the frozen deps/ spelling.
+newlayout="$test_tmp/newlayout"
+mkdir -p "$newlayout/build/spl_hosted_runtime/8325cc995898e003/out"
+printf '#!/bin/sh\necho seed\n' >"$newlayout/simple"
+chmod 755 "$newlayout/simple"
+printf 'native\n' >"$newlayout/libsimple_native_all.a"
+printf 'backfill\n' >"$newlayout/libsimple_compiler_backfill.a"
+printf 'runtime-static\n' >"$newlayout/libsimple_runtime.a"
+printf 'hosted-runtime\n' \
+    >"$newlayout/build/spl_hosted_runtime/8325cc995898e003/out/libspl_hosted_runtime-8325cc995898e003.rlib"
+bootstrap_stage3_copy_seed_tuple "$newlayout" "$test_tmp/newlayout-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a ||
+    fail "cargo 1.100 build/*/out layout was rejected"
+[ ! -e "$newlayout/deps" ] ||
+    fail "new-layout fixture unexpectedly grew a deps/ directory"
+[ -f "$test_tmp/newlayout-out/deps/libspl_hosted_runtime-8325cc995898e003.rlib" ] ||
+    fail "hosted rlib was not projected into deps/ from build/*/out"
+[ -f "$test_tmp/newlayout-out/deps/libsimple_runtime.a" ] ||
+    fail "runtime archive was not projected into deps/ from profile root"
+cmp "$newlayout/libsimple_runtime.a" \
+    "$test_tmp/newlayout-out/deps/libsimple_runtime.a" >/dev/null ||
+    fail "runtime archive bytes changed during alias projection"
+[ "$(file_mode "$test_tmp/newlayout-out/deps/libsimple_runtime.a")" = 400 ] ||
+    fail "new-layout runtime archive was not frozen read-only"
+
+# Mixed layout: both spellings present; the newest candidate wins regardless
+# of which layout produced it, and only the winner is projected.
+mixed="$test_tmp/mixed"
+make_tuple "$mixed"
+mkdir -p "$mixed/build/spl_hosted_runtime/aaaaaaaaaaaaaaaa/out"
+printf 'hosted-newer\n' \
+    >"$mixed/build/spl_hosted_runtime/aaaaaaaaaaaaaaaa/out/libspl_hosted_runtime-aaaaaaaaaaaaaaaa.rlib"
+touch -t 202001010000 "$mixed/deps/libspl_hosted_runtime-fixture.rlib"
+touch -t 202601010000 \
+    "$mixed/build/spl_hosted_runtime/aaaaaaaaaaaaaaaa/out/libspl_hosted_runtime-aaaaaaaaaaaaaaaa.rlib"
+bootstrap_stage3_copy_seed_tuple "$mixed" "$test_tmp/mixed-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a ||
+    fail "mixed cargo layout was rejected"
+[ -f "$test_tmp/mixed-out/deps/libspl_hosted_runtime-aaaaaaaaaaaaaaaa.rlib" ] ||
+    fail "newest hosted rlib (build/*/out) did not win the deps/ slot"
+[ ! -e "$test_tmp/mixed-out/deps/libspl_hosted_runtime-fixture.rlib" ] ||
+    fail "stale hosted rlib spelling was projected alongside the winner"
+
+# A new-layout candidate that is a symlink must still be refused (alias
+# selection keeps the non-symlink discipline).
+linkalias="$test_tmp/linkalias"
+make_tuple "$linkalias"
+mkdir -p "$linkalias/build/spl_hosted_runtime/evilmeta/out"
+mv "$linkalias/deps/libspl_hosted_runtime-fixture.rlib" \
+    "$linkalias/build/hosted.real"
+ln -s ../../../hosted.real \
+    "$linkalias/build/spl_hosted_runtime/evilmeta/out/libspl_hosted_runtime-evil.rlib"
+if bootstrap_stage3_copy_seed_tuple "$linkalias" "$test_tmp/linkalias-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a; then
+    fail "symlinked new-layout hosted rlib was accepted"
+fi
+
 echo "PASS: bootstrap Stage 3 projects only a stable seed tuple"
