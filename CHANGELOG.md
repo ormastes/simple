@@ -2,6 +2,29 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [1.0.0-beta.5] - 2026-09-16
+Third corrected beta of the **1.0.0 line**.
+
+### Fixed
+- Release runner memory + macOS rustc poisoning (beta.4 losses): direct
+  native-build invocations run `--mode dynload --threads 4` (windows-x86_64
+  OOM in default one-binary mode); macOS cargo-build sites run under
+  `env -u DYLD_LIBRARY_PATH` (brew LLVM 22 poisoned nightly rustc).
+- Main tree ENAMETOOLONG: 78 oversized symlinks (56 in `da8964fe990`, 22 more
+  found later) restored to short targets; CI checkout of main works again.
+- Bootstrap K1 receipt admits seed-built stage2 via transcript binding (#1028).
+- Carried from 1.0.0-beta.3/4: nightly toolchain pin (`rust-toolchain.toml`),
+  SCV cold-init inventory on direct native-build, linux-x86_64 native-build
+  leg, beta channel-blocking contract (linux-x86_64 + windows-x86_64
+  blocking; macOS Tier-2; cross/SimpleOS continue-on-error).
+
+### Release
+- Product version is `1.0.0-beta.5`, projected into all 19 declared version
+  sites (VERSION, simple.sdn manifests, CLI identity, compiler_rust Cargo
+  manifests/lockfile, npm registry packages/server manifests). Ships as tag
+  `v1.0.0-beta.5`; main carries the same content plus the K1 receipt fix.
+  The 1.0.1 line remains withdrawn; 1.0.0 is the only line.
+
 ## [Unreleased]
 
 ### Added
