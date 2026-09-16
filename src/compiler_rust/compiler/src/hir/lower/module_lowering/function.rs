@@ -1,11 +1,13 @@
 use simple_parser as ast;
+use simple_parser::ast::ReferenceCapability;
 
 use crate::hir::lifetime::{ReferenceOrigin, ScopeKind};
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, HirStmt, LayoutAnchor, LayoutPhase, LocalVar, TypeId,
+    ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, HirStmt, HirType, LayoutAnchor, LayoutPhase,
+    LocalVar, PointerKind, TypeId,
 };
 
 /// Whether an unannotated function body produces a value at its boundary.
@@ -47,13 +49,251 @@ fn is_numeric_type(ty: TypeId) -> bool {
 }
 
 impl Lowerer {
+    /// Whether two TypeIds denote the same type for the declared-return
+    /// check.
+    ///
+    /// TypeIds are MODULE-REGISTRY-LOCAL: `TypeRegistry::register` always
+    /// allocates a fresh id, and `register_named` interns by name only per
+    /// registry (every `HirModule` owns its own registry). The same named
+    /// type therefore legitimately carries DIFFERENT TypeIds at its
+    /// declaration site and at a body's trailing-expression site -- within
+    /// one module via the structural-registration paths, and across modules
+    /// via the per-module registries. Raw TypeId equality rejected 542
+    /// app files this way the day this check landed (all previously valid
+    /// programs). Compare semantically instead.
+    ///
+    /// A TypeId that does not resolve in this module's registry belongs to
+    /// another module's registry; module-local ids are meaningless across
+    /// registries, so those comparisons are admitted. The check's sound
+    /// scope is intra-module comparisons, which is also where the
+    /// native-struct return ABI risk it was added for lives.
+    pub(crate) fn hir_types_compatible(&self, expected: TypeId, found: TypeId) -> bool {
+        if expected == TypeId::ANY || found == TypeId::ANY || expected == found {
+            return true;
+        }
+        // `nil` is the language's bottom literal: trailing `nil` arms (and
+        // `-> T?` declarations) coerce per gradual typing, and both the
+        // self-hosted compiler and the interpreter have always admitted them.
+        if expected == TypeId::NIL || found == TypeId::NIL {
+            return true;
+        }
+        if is_numeric_type(expected) && is_numeric_type(found) {
+            return true;
+        }
+        match (
+            self.module.types.get(expected),
+            self.module.types.get(found),
+        ) {
+            (Some(expected_ty), Some(found_ty)) => {
+                // Immutable shared references are value-transparent in
+                // Simple: a `shared &T` returned where `T` is declared is
+                // accepted by the self-hosted reference compiler and the
+                // interpreter alike (e.g. text methods invoked on shared
+                // receivers). Admit them interchangeably; mutable/unique
+                // references keep strict structural equality.
+                if let (
+                    HirType::Pointer {
+                        kind: PointerKind::Shared,
+                        capability: ReferenceCapability::Shared,
+                        inner,
+                    },
+                    _,
+                ) = (expected_ty, found_ty)
+                {
+                    if self.type_ids_compatible(*inner, found) {
+                        return true;
+                    }
+                }
+                if let (
+                    _,
+                    HirType::Pointer {
+                        kind: PointerKind::Shared,
+                        capability: ReferenceCapability::Shared,
+                        inner,
+                    },
+                ) = (expected_ty, found_ty)
+                {
+                    if self.type_ids_compatible(expected, *inner) {
+                        return true;
+                    }
+                }
+                let compatible = self.hir_type_variants_compatible(expected_ty, found_ty);
+                if !compatible && std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
+                    eprintln!(
+                        "return-type pair rejected: expected={expected:?} {expected_ty:?} found={found:?} {found_ty:?}"
+                    );
+                }
+                compatible
+            }
+            _ => true,
+        }
+    }
+
+    fn type_ids_compatible(&self, expected: TypeId, found: TypeId) -> bool {
+        self.hir_types_compatible(expected, found)
+    }
+
+    /// Structural comparison of two registry-resolved types. Named
+    /// aggregates compare by NAME: field layouts legitimately differ between
+    /// an ANY-field fallback registration (see `resolve_type`'s
+    /// global_struct_defs path) and a fully-typed declaration, and
+    /// duplicate-layout names are erased to ANY upstream.
+    fn hir_type_variants_compatible(&self, expected: &HirType, found: &HirType) -> bool {
+        use HirType::*;
+        match (expected, found) {
+            (Void, Void) | (Bool, Bool) | (Any, Any) | (Char, Char) | (String, String)
+            | (Nil, Nil) | (Unknown, Unknown) => true,
+            (
+                Int {
+                    bits: expected_bits,
+                    signedness: expected_sign,
+                },
+                Int {
+                    bits: found_bits,
+                    signedness: found_sign,
+                },
+            ) => expected_bits == found_bits && expected_sign == found_sign,
+            (Float { bits: expected_bits }, Float { bits: found_bits }) => expected_bits == found_bits,
+            (
+                Pointer {
+                    kind: expected_kind,
+                    capability: expected_cap,
+                    inner: expected_inner,
+                },
+                Pointer {
+                    kind: found_kind,
+                    capability: found_cap,
+                    inner: found_inner,
+                },
+            ) => {
+                expected_kind == found_kind
+                    && expected_cap == found_cap
+                    && self.type_ids_compatible(*expected_inner, *found_inner)
+            }
+            (
+                Array {
+                    element: expected_element,
+                    size: expected_size,
+                },
+                Array {
+                    element: found_element,
+                    size: found_size,
+                },
+            ) => {
+                // An empty array literal (`[]`) defaults its element type to
+                // i32 during inference but coerces to any array type -- the
+                // pre-check compiler accepted every trailing `if/else` with
+                // an `[]` arm, and the interpreter still does. Otherwise a
+                // dynamic array declaration (size None) admits any fixed-size
+                // array of the same element (Simple array literals coerce
+                // pervasively between fixed and dynamic spellings), while a
+                // fixed-size declaration still requires the exact size.
+                *expected_size == Some(0)
+                    || *found_size == Some(0)
+                    || ((expected_size.is_none() || expected_size == found_size)
+                        && self.type_ids_compatible(*expected_element, *found_element))
+            }
+            (
+                Simd {
+                    lanes: expected_lanes,
+                    element: expected_element,
+                },
+                Simd {
+                    lanes: found_lanes,
+                    element: found_element,
+                },
+            ) => {
+                expected_lanes == found_lanes
+                    && self.type_ids_compatible(*expected_element, *found_element)
+            }
+            (Tuple(expected_elements), Tuple(found_elements)) => {
+                expected_elements.len() == found_elements.len()
+                    && expected_elements
+                        .iter()
+                        .zip(found_elements.iter())
+                        .all(|(a, b)| self.type_ids_compatible(*a, *b))
+            }
+            (LabeledTuple(expected_fields), LabeledTuple(found_fields)) => {
+                expected_fields.len() == found_fields.len()
+                    && expected_fields
+                        .iter()
+                        .zip(found_fields.iter())
+                        .all(|((expected_name, expected_ty), (found_name, found_ty))| {
+                            expected_name == found_name && self.type_ids_compatible(*expected_ty, *found_ty)
+                        })
+            }
+            (
+                Dict {
+                    key: expected_key,
+                    value: expected_value,
+                },
+                Dict {
+                    key: found_key,
+                    value: found_value,
+                },
+            ) => {
+                self.type_ids_compatible(*expected_key, *found_key)
+                    && self.type_ids_compatible(*expected_value, *found_value)
+            }
+            (
+                Function {
+                    params: expected_params,
+                    ret: expected_ret,
+                },
+                Function {
+                    params: found_params,
+                    ret: found_ret,
+                },
+            ) => {
+                expected_params.len() == found_params.len()
+                    && expected_params
+                        .iter()
+                        .zip(found_params.iter())
+                        .all(|(a, b)| self.type_ids_compatible(*a, *b))
+                    && self.type_ids_compatible(*expected_ret, *found_ret)
+            }
+            (Struct { name: expected_name, .. }, Struct { name: found_name, .. }) => {
+                expected_name == found_name
+            }
+            (Enum { name: expected_name, .. }, Enum { name: found_name, .. }) => {
+                expected_name == found_name
+            }
+            (UnitType { name: expected_name, .. }, UnitType { name: found_name, .. }) => {
+                expected_name == found_name
+            }
+            (Union { variants: expected_variants }, Union { variants: found_variants }) => {
+                expected_variants.len() == found_variants.len()
+                    && expected_variants
+                        .iter()
+                        .zip(found_variants.iter())
+                        .all(|(a, b)| self.type_ids_compatible(*a, *b))
+            }
+            (Promise { inner: expected_inner }, Promise { inner: found_inner }) => {
+                self.type_ids_compatible(*expected_inner, *found_inner)
+            }
+            (Mixin { name: expected_name, .. }, Mixin { name: found_name, .. }) => {
+                expected_name == found_name
+            }
+            (Bitfield { name: expected_name, .. }, Bitfield { name: found_name, .. }) => {
+                expected_name == found_name
+            }
+            (ExternClass { name: expected_name }, ExternClass { name: found_name }) => {
+                expected_name == found_name
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn validate_declared_return_type(&self, expected: TypeId, found: TypeId) -> LowerResult<()> {
-        if expected == TypeId::ANY
-            || found == TypeId::ANY
-            || expected == found
-            || (is_numeric_type(expected) && is_numeric_type(found))
-        {
+        if self.hir_types_compatible(expected, found) {
             return Ok(());
+        }
+        if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
+            eprintln!(
+                "return-type mismatch debug: expected={expected:?} {:?} found={found:?} {:?}",
+                self.module.types.get(expected),
+                self.module.types.get(found)
+            );
         }
         Err(LowerError::TypeMismatch { expected, found })
     }
@@ -792,7 +1032,12 @@ impl Lowerer {
             Lowerer::coerce_exists_tail_in_place(&mut body);
         }
         if declared_return_type.is_some() {
-            self.validate_implicit_return_type(&body, return_type)?;
+            if let Err(error) = self.validate_implicit_return_type(&body, return_type) {
+                if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
+                    eprintln!("return-type mismatch in function {}: {error:?}", func_name);
+                }
+                return Err(error);
+            }
         }
 
         // Detect suspension operators in function body for async/sync validation.
