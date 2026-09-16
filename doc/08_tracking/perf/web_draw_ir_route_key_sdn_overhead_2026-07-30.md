@@ -77,3 +77,11 @@ Acceptance evidence:
   median lookup time;
 - CUDA live route calibration/reuse still passes; Metal repeats on the prepared
   macOS host under TODO 588.
+
+## 2026-09-16 re-measurement (Windows seed, interpreter mode)
+
+Spec `web_draw_ir_route_key_cost_spec.spl` PASS. Medians: small 10,030 us,
+medium 37,406 us, large 152,459 us; SDN bytes identical to the July table
+(30,571 / 121,514 / 485,835). Roughly 30x cheaper than the July Rust dev
+interpreter numbers. End-to-end route evidence (producer/consumer boundary)
+remains open, unchanged.
