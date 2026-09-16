@@ -185,11 +185,29 @@ impl HirLowering:
         val existing_id = self.symbols.lookup_or_invalid(local_name)
         if not existing_id.is_valid():
             return ""
+        # BOOT-20-robust path: answer from the plain [text] rows mirror
+        # first -- class-field Dict reads (membership AND bracket) on the
+        # symbol table under-report/misread under Stage-2 native codegen
+        # once the table grows in the full stage3 closure; the rows list is
+        # the house-verified-safe structure. The legacy dict path below is
+        # retained as a fallback with a diagnostic trace.
+        val row_prefix = "{local_name}\u001f"
+        for owner_row in self.imported_enum_owner_rows:
+            if owner_row.starts_with(row_prefix):
+                return owner_row[row_prefix.len():]
         val raw = existing_id.id
-        if not self.symbols.symbols.has(raw):
+        val trace_owner = (hir_module_env_get("SIMPLE_HIR_ENUM_OWNER_TRACE") ?? "") == "1"
+        if trace_owner:
+            eprint("[enum-owner-trace] ROWS-MISS name={local_name} raw={raw} rows={self.imported_enum_owner_rows.len()}")
+        if not rt_dict_contains(self.symbols.symbols, raw):
+            if trace_owner:
+                eprint("[enum-owner-trace] MISSING-BY-CONTAINS name={local_name} raw={raw}")
             return ""
         val symbol: HirSymbol = self.symbols.symbols[raw]
-        symbol.defining_module ?? ""
+        val owner = symbol.defining_module ?? ""
+        if trace_owner and owner == "":
+            eprint("[enum-owner-trace] EMPTY-DEFINING-MODULE name={local_name} raw={raw}")
+        owner
 
     me lower_module_enum_definitions(module: ParserModule) -> Dict<SymbolId, HirEnum>:
         var lowered: Dict<SymbolId, HirEnum> = {}
