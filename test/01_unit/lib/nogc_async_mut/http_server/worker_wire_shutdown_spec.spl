@@ -148,7 +148,10 @@ describe "TLS application-record accumulation":
         var malformed_result = malformed_stream.ingest(malformed)
         expect(malformed_result.is_malformed()).to_be(true)
 
-        val oversized_header: [u8] = [23, 3, 3, 64, 17]
+        # TLS_MAX_RECORD_PAYLOAD_LENGTH_V1 = 16384 + 256 AEAD headroom
+        # (RFC 8446 §5.2: 2^14 + 256); 65*256+1 = 16641 is the first
+        # length past the bound, unlike 16385 which is legal.
+        val oversized_header: [u8] = [23, 3, 3, 65, 1]
         var oversized_stream = tls_application_record_stream_new_v1(1)
         var oversized_result = oversized_stream.ingest(oversized_header)
         expect(oversized_result.is_malformed()).to_be(true)
@@ -162,14 +165,22 @@ describe "TLS application-record accumulation":
         expect(accepted_result.is_overflow()).to_be(false)
         expect(accepted_records.len()).to_be(1)
         expect(accepted_result.remaining_byte_count()).to_be(3)
-        expect(accepted_stream.commit_authenticated(
+        # Bind intermediates: chained calls inside expect(...) poison the
+        # receiver's inferred type (see
+        # doc/08_tracking/bug/method_chain_poisons_receiver_type_2026-09-16.md).
+        val committed = accepted_stream.commit_authenticated(
             accepted_result.proposal_token(), accepted_records.len()
-        )).to_be(true)
-        expect(accepted_stream.remaining_byte_count()).to_be(3)
+        )
+        expect(committed).to_be(true)
+        val stream_remaining = accepted_stream.remaining_byte_count()
+        expect(stream_remaining).to_be(3)
 
+        # Overflow needs incoming.len() > TLS_MAX_RX_BUFFER_LENGTH_V1
+        # (= (5 + 16640) * 2 = 33290); a payload just past one record stays
+        # under it and fails as malformed framing instead.
         var beyond_ceiling: [u8] = []
         var i = 0
-        while i <= full_record.len():
+        while i < 17000:
             beyond_ceiling.push(0)
             i = i + 1
         var overflow_stream = tls_application_record_stream_new_v1(1)

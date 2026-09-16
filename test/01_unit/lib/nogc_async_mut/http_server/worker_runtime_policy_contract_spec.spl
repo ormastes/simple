@@ -5,47 +5,59 @@ describe "HTTP server runtime worker policy":
     it "keeps only the unavailable-thread fallback inline and never joins its invalid handle":
         val source = file_read_text(
             "src/lib/nogc_async_mut/http_server/server.spl")
-        expect(source).to_contain("server_worker_plan(")
-        expect(source).to_contain("if i < worker_plan.spawn_count:")
-        expect(source).to_contain("if server_thread_handle_joinable(handle):")
-        expect(source).to_contain("last_worker = worker")
-        expect(source).to_contain("worker_count = i + 1")
+        # The spawn loop was rewritten around Worker.create + spawn_worker:
+        # bounded by the config's worker_count, each successful spawn appends
+        # a WorkerHandle and each failure aborts/cleans up fail-fast.
+        expect(source).to_contain("val worker_count = self.config.worker_count")
+        expect(source).to_contain("while i < worker_count:")
+        expect(source).to_contain("val spawned = spawn_worker(worker)")
+        expect(source).to_contain("worker.abort_start()")
+        expect(source).to_contain("self.cleanup_failed_start(channels)")
+        # The join guard is now an `if wh.is_alive:` block joining directly
+        # under [ffi] (no server_thread_handle_joinable helper on this path).
         expect(source).to_contain(
-            "wh.is_alive and server_thread_handle_joinable(wh.thread_handle)")
+            "if wh.is_alive:\n                unsafe(capabilities: [ffi]):\n                    spl_thread_join(wh.thread_handle)")
 
     it "uses a dedicated status channel and remembers each drain acknowledgement":
         val server_source = file_read_text(
             "src/lib/nogc_async_mut/http_server/server.spl")
         val worker_source = file_read_text(
-            "src/lib/nogc_async_mut/http_server/worker.spl")
+            "src/lib/nogc_async_mut/http_server/worker_owner.spl")
         expect(server_source).to_contain("status_channels: [Channel]")
-        expect(server_source).to_contain("drained_workers[status_index] = true")
+        expect(server_source).to_contain("self.drained_workers[i] = true")
         expect(server_source).to_contain(
-            "self.status_channels[status_index].try_recv()")
-        expect(worker_source).to_contain("self.status.send(\"drained\")")
+            "self.status_channels[i].try_recv()")
+        # `status` became an Optional field; the drain notice is sent through
+        # the `if val status = self.status:` binding.
+        expect(worker_source).to_contain("if val status = self.status:")
+        expect(worker_source).to_contain("status.send(\"drained\")")
         expect(worker_source.contains("self.control.send(\"drained\")")).to_equal(false)
 
     it "releases the listener when TLS construction fails after bind":
         val worker_source = file_read_text(
-            "src/lib/nogc_async_mut/http_server/worker.spl")
+            "src/lib/nogc_async_mut/http_server/worker_owner.spl")
         val cert_failure = worker_source.index_of(
-            "certificate load failed: {msg}")
+            "certificate load failed: \{msg\}")
         val key_failure = worker_source.index_of(
-            "private key load failed: {msg}")
+            "private key load failed: \{msg\}")
         val first_close = worker_source.index_of("tcp_backend_close(listen_fd)")
         expect(cert_failure).to_be_greater_than(first_close)
         expect(key_failure).to_be_greater_than(cert_failure)
         expect(worker_source.count("tcp_backend_close(listen_fd)")).to_equal(2)
 
-    it "keeps h2c initial SETTINGS and acknowledgement in one ordered write":
+    it "keeps the h2c transition ordered: settings, consume, flush, rearm":
+        # The h2c transition moved to worker_connection_extensions.spl and now
+        # performs TWO ordered writes by design: server SETTINGS first, then
+        # the flushed client-SETTINGS ACK from take_pending_writes().
         val worker_source = file_read_text(
-            "src/lib/nogc_async_mut/http_server/worker.spl")
-        val transition_start = worker_source.index_of("if h2c_probe == 1:")
+            "src/lib/nogc_async_mut/http_server/worker_connection_extensions.spl")
+        val transition_start = worker_source.index_of("val h2c_ok =")
         val transition_end = worker_source.index_of(
-            "# A failed probe may include bytes retained from earlier recv")
+            "# TLS application data decryption path")
         val transition = worker_source.slice(transition_start, transition_end)
         expect(transition).to_contain("H2Connection.new(fd, peer, now)")
+        expect(transition).to_contain("h2conn.h2_on_data_received(raw_bytes, now)")
         expect(transition).to_contain("h2conn.consume_frames()")
         expect(transition).to_contain("h2conn.take_pending_writes()")
-        expect(transition.count("self.driver.submit_send_bytes(fd")).to_equal(1)
-        expect(transition.contains("h2conn.settings_sent = true")).to_equal(false)
+        expect(transition).to_contain("h2conn.settings_sent = true")
+        expect(transition.count("self.driver.submit_send_bytes(fd")).to_equal(2)
