@@ -3653,9 +3653,18 @@ bootstrap_stage3_git_state() {
     bootstrap_stage3_git_files_only="${bootstrap_stage3_git_output}.files-only.$$"
     bootstrap_stage3_git_file_shas="${bootstrap_stage3_git_output}.file-shas.$$"
     bootstrap_stage3_jj_stderr="${bootstrap_stage3_git_output}.jj-stderr.$$"
+    # The bootstrap runs with a sandboxed HOME, so a user/system gitconfig
+    # safe.directory exception is invisible here and git rejects a repo whose
+    # owner uid differs from the runner (observed 2026-09-16: FreeBSD QEMU
+    # bootstrap, repo copied in as uid 1000, run as root -> "detected dubious
+    # ownership" -> this bind failed after every Rust stage had built green).
+    # Scope the exception to exactly this repo root, inside the subshells, so
+    # it neither leaks into the caller nor widens beyond the tree being bound.
     if ! (
         cd "$bootstrap_stage3_git_root" &&
-            git rev-parse --verify HEAD >/dev/null 2>&1
+            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory \
+                GIT_CONFIG_VALUE_0="$bootstrap_stage3_git_root" \
+                git rev-parse --verify HEAD >/dev/null 2>&1
     ); then
         command -v jj >/dev/null 2>&1 || return 1
         (
@@ -3692,6 +3701,10 @@ bootstrap_stage3_git_state() {
     fi
     (
         cd "$bootstrap_stage3_git_root" || exit 1
+        GIT_CONFIG_COUNT=1
+        GIT_CONFIG_KEY_0=safe.directory
+        GIT_CONFIG_VALUE_0="$bootstrap_stage3_git_root"
+        export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
         bootstrap_stage3_git_head=$(git rev-parse --verify HEAD) || exit 1
         git diff --binary --full-index --no-ext-diff --no-textconv HEAD -- \
             >"$bootstrap_stage3_git_diff" || exit 1
