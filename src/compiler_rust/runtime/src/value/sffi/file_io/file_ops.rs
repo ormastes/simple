@@ -947,7 +947,65 @@ pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeou
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileA, LockFileEx, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, OPEN_ALWAYS,
+        };
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        unsafe {
+            let handle = CreateFileA(
+                path.as_ptr() as *const u8,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            );
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return -1;
+            }
+
+            let mut overlapped: OVERLAPPED = std::mem::zeroed();
+
+            if timeout_secs <= 0 {
+                // Blocking exclusive lock (mirrors platform_win.h).
+                if LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped) == 0 {
+                    CloseHandle(handle);
+                    return -1;
+                }
+                return handle as isize as i64;
+            }
+
+            // Non-blocking attempts with a timeout, polling like the unix path.
+            let timeout = std::time::Duration::from_secs(timeout_secs as u64);
+            let deadline = std::time::Instant::now().checked_add(timeout);
+            loop {
+                if LockFileEx(
+                    handle,
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                    &mut overlapped,
+                ) != 0
+                {
+                    return handle as isize as i64;
+                }
+                if deadline.is_none_or(|limit| std::time::Instant::now() >= limit) {
+                    CloseHandle(handle);
+                    return -1;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
     {
         let _ = (path, timeout_secs);
         -1
@@ -970,7 +1028,24 @@ pub unsafe extern "C" fn rt_file_unlock(handle: i64) -> bool {
         unlocked && closed
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        if handle <= 0 {
+            return false;
+        }
+        let file = handle as isize as *mut std::ffi::c_void;
+        unsafe {
+            let mut overlapped: OVERLAPPED = std::mem::zeroed();
+            UnlockFileEx(file, 0, u32::MAX, u32::MAX, &mut overlapped);
+            CloseHandle(file) != 0
+        }
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
     {
         let _ = handle;
         false
@@ -1962,6 +2037,30 @@ mod tests {
         let (fdp, fdl) = str_to_ptr(fresh_dest.to_str().unwrap());
         assert!(!unsafe { rt_file_link_create_excl_no_follow(ssp, ssl, fdp, fdl) });
         assert!(!fresh_dest.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_lock_provider_owns_and_releases_real_descriptor_windows() {
+        let temp_dir = TempDir::new().unwrap();
+        let lock_path = temp_dir.path().join("provider.lock");
+        let path = lock_path.to_str().unwrap();
+
+        unsafe {
+            assert_eq!(rt_file_lock(std::ptr::null(), 0, 1), -1);
+            assert!(!rt_file_unlock(-1));
+
+            let handle = rt_file_lock(path.as_ptr(), path.len() as u64, 1);
+            assert!(handle >= 0);
+
+            let contended = rt_file_lock(path.as_ptr(), path.len() as u64, 1);
+            assert_eq!(contended, -1);
+            assert!(rt_file_unlock(handle));
+
+            let reacquired = rt_file_lock(path.as_ptr(), path.len() as u64, 1);
+            assert!(reacquired >= 0);
+            assert!(rt_file_unlock(reacquired));
+        }
     }
 
     #[cfg(unix)]
