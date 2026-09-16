@@ -556,3 +556,35 @@ fn parse_tool_use_blocks(json: text) -> [ToolCall]:
         calls = calls + [ToolCall(id: id, name: name, input: input)]
         search_from = abs_marker + marker.len()
     calls
+
+# Text-protocol bridge for providers with no wire tool JSON (slang_local,
+# local_torch): the model emits <tool_use>{...}</tool_use> tags in plain
+# content instead. Ids are synthesized (the tag form carries none) -- enough
+# for the transcript's [tool_result id=...] pairing. Without this bridge a
+# local model can only NARRATE tool use; measured 2026-09-16, a 9B model
+# "reported" a test run that never executed.
+fn parse_tool_use_tags(content: text) -> [ToolCall]:
+    var calls: [ToolCall] = []
+    var search_from = 0
+    var n: i64 = 0
+    val open_t = "<tool_use>"
+    val close_t = "</tool_use>"
+    var scanning = true
+    while scanning:
+        val rel = _idx(content.substring(search_from), open_t)
+        if rel < 0:
+            scanning = false
+        else:
+            val obj_start = search_from + rel + open_t.len()
+            val obj = _extract_object_at(content, obj_start)
+            var obj_end = content.len()
+            val rel_close = _idx(content.substring(obj_start), close_t)
+            if rel_close >= 0:
+                obj_end = obj_start + rel_close
+            val name = _json_get_str(obj, "name")
+            if name != "":
+                n = n + 1
+                calls = calls + [ToolCall(id: "tag_" + n.to_text(), name: name,
+                    input: _extract_input_object(obj))]
+            search_from = obj_end
+    calls
