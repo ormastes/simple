@@ -1687,6 +1687,13 @@ bootstrap_stage_sanity() (
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
+  # The stage2 sanity probes are bounded by COMPILER_BUILD_TIMEOUT_SECONDS
+  # (admission script default 180s, sized for native hardware). Capture the
+  # caller's value before the scrub so an emulated lane (QEMU TCG FreeBSD,
+  # where hello-world-positional scans the whole import graph and exceeds
+  # 180s) can raise it; without this the scrub always restored the 180s
+  # default and the probe timed out with raw_status=124.
+  sanity_build_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-}
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
@@ -1706,6 +1713,10 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_llvm_prefix}" ]; then
     LLVM_SYS_180_PREFIX=${sanity_llvm_prefix}
     export LLVM_SYS_180_PREFIX
+  fi
+  if [ -n "${sanity_build_timeout}" ]; then
+    COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
+    export COMPILER_BUILD_TIMEOUT_SECONDS
   fi
   if [ -n "${sanity_windows_abi}" ]; then
     SIMPLE_WINDOWS_ABI=${sanity_windows_abi}
