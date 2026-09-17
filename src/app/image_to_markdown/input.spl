@@ -1,11 +1,11 @@
 # codex-impl
 # Bounded local PNG/JPEG/WebP admission with magic-derived MIME and dimensions.
 
-use app.io.mod.{file_is_regular_no_follow, file_read_regular_no_follow_bounded}
+use app.io.mod.{file_is_regular_no_follow, file_read_regular_no_follow_bounded_bytes}
 use app.io.file_ops.{path_absolute}
 use std.common.imaging.png_ingest.{ingest_png_bytes}
 use std.common.base_encoding.base64.{base64_encode_bytes}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_u8_hex}
 use app.llm_caret.multimodal_types.{ContentPartV1, image_data_part_v1}
 use app.llm_caret.image_format.{inspect_image_bytes_v1}
 
@@ -44,10 +44,9 @@ fn admit_local_image_with_limits_v1(path: text, allowed_root: text, max_bytes: i
         return _failed_image_v1("invalid_limit", "image working-set limit must be between 1 and 2147483648")
     if not file_is_regular_no_follow(path):
         return _failed_image_v1("not_regular_file", "image must be a regular non-symlink file")
-    val read_result = file_read_regular_no_follow_bounded(path, max_bytes)
+    val read_result = file_read_regular_no_follow_bounded_bytes(path, max_bytes)
     if read_result.is_err(): return _failed_image_v1("read_failed", read_result.unwrap_err())
-    val raw_text = read_result.unwrap()
-    val raw = raw_text.bytes()
+    val raw = read_result.unwrap()
     val inspected = inspect_image_bytes_v1(raw)
     if inspected.error != "":
         return _failed_image_v1("unsupported_or_malformed_image", inspected.error)
@@ -63,7 +62,7 @@ fn admit_local_image_with_limits_v1(path: text, allowed_root: text, max_bytes: i
         val image = decoded.unwrap()
         if image.width as i64 != inspected.width or image.height as i64 != inspected.height:
             return _failed_image_v1("unsupported_or_malformed_image", "PNG decoder dimensions disagree with container")
-    val digest = sha256_text(raw_text)
+    val digest = sha256_u8_hex(raw)
     val data_url = "data:" + inspected.mime_type + ";base64," + base64_encode_bytes(raw)
     AdmittedImageV1(part: image_data_part_v1("sha256:" + digest, inspected.mime_type,
         inspected.width, inspected.height, digest, detail, data_url), error_code: "", error_message: "")

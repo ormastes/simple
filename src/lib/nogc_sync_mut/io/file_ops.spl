@@ -36,6 +36,10 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
 @unsafe(reason: "opens one no-follow file descriptor, verifies regular-file metadata, and returns at most the caller-owned bound", capabilities: [ffi])
 extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+# Byte-array sibling for binary payloads (images/archives): identical
+# admission arms; the content is not UTF-8 decoded.
+@unsafe(reason: "opens one no-follow file descriptor, verifies regular-file metadata, and returns at most the caller-owned bound as raw bytes", capabilities: [ffi])
+extern fn rt_file_read_regular_no_follow_bounded_bytes(path: text, max_bytes: i64) -> [u8]?
 extern fn rt_file_read_regular_no_follow_last_failure() -> i64
 @unsafe(reason: "requests durable synchronization of an opened file", capabilities: [ffi])
 extern fn rt_file_fsync(path: text) -> bool
@@ -126,6 +130,32 @@ fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<tex
     if value.len() < 0:
         return Err("regular no-follow bounded file read returned nil ({_read_no_follow_failure_name()}): {path}")
     Ok(value)
+
+fn file_read_regular_no_follow_bounded_bytes(path: text, max_bytes: i64) -> Result<[u8], text>:
+    if max_bytes < 0:
+        return Err("bounded file read requires a non-negative limit")
+    var content: [u8]? = nil
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_regular_no_follow_bounded_bytes(host_path_native(path), max_bytes)
+    if content.?:
+        # Mirror of the text wrapper's nil-arm discipline: distinguish the
+        # present-but-empty answer from a real refusal via the arm code.
+        val value = content.unwrap()
+        if value.len() < 0:
+            if _read_no_follow_failure_code() == 100:
+                return Ok([])
+            return Err("regular no-follow bounded file read returned nil ({_read_no_follow_failure_name()}): {path}")
+        Ok(value)
+    else:
+        if _read_no_follow_failure_code() == 100:
+            return Ok([])
+        Err("regular no-follow bounded file read failed ({_read_no_follow_failure_name()}): {path}")
+
+fn _read_no_follow_failure_code() -> i64:
+    var code: i64 = -1
+    unsafe(capabilities: [ffi]):
+        code = rt_file_read_regular_no_follow_last_failure()
+    code
 
 fn _read_no_follow_failure_name() -> text:
     """Name the admission arm that rejected the most recent bounded read.

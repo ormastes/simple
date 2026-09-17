@@ -11044,6 +11044,78 @@ int64_t rt_file_read_regular_no_follow_bounded(
     return result;
 }
 
+/* Byte-array sibling of rt_file_read_regular_no_follow_bounded for binary
+ * payloads (images, archives). Identical admission arms and bound; the
+ * content is returned as a [u8] SplArray instead of being UTF-8 decoded,
+ * which the text form must reject. Binary image admission
+ * (image_to_markdown) reads PNG/JPEG bytes through this form. */
+int64_t rt_file_read_regular_no_follow_bounded_bytes(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    const int64_t rt_nil = 3;
+    char path[RT_TEXT_PATH_MAX];
+    if (max_bytes < 0 || path_len == 0 ||
+        !rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path)) ||
+        (uint64_t)max_bytes >= (uint64_t)SIZE_MAX) return RT_RNF_FAIL(2);
+    size_t capacity = (size_t)max_bytes + 1;
+    uint8_t* bytes = (uint8_t*)malloc(capacity);
+    if (!bytes) return RT_RNF_FAIL(9);
+    size_t total = 0;
+#if defined(_WIN32)
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) { free(bytes); return RT_RNF_FAIL(4); }
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    free(wide_path);
+    if (handle == INVALID_HANDLE_VALUE) { free(bytes); return RT_RNF_FAIL(4); }
+    BY_HANDLE_FILE_INFORMATION info;
+    LARGE_INTEGER size;
+    if (!GetFileInformationByHandle(handle, &info) || !GetFileSizeEx(handle, &size) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) {
+        CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
+    }
+    while (total < capacity) {
+        DWORD chunk = (DWORD)((capacity - total) > UINT32_MAX ? UINT32_MAX : (capacity - total));
+        DWORD read_count = 0;
+        if (!ReadFile(handle, bytes + total, chunk, &read_count, NULL)) {
+            CloseHandle(handle); free(bytes); return RT_RNF_FAIL(5);
+        }
+        if (read_count == 0) break;
+        total += (size_t)read_count;
+    }
+    CloseHandle(handle);
+#else
+#ifndef O_NOFOLLOW
+    free(bytes);
+    return RT_RNF_FAIL(9);
+#else
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) { free(bytes); return RT_RNF_FAIL(4); }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size > (uint64_t)max_bytes) {
+        close(fd); free(bytes); return RT_RNF_FAIL(5);
+    }
+    while (total < capacity) {
+        ssize_t count = read(fd, bytes + total, capacity - total);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { close(fd); free(bytes); return RT_RNF_FAIL(9); }
+        if (count == 0) break;
+        total += (size_t)count;
+    }
+    close(fd);
+#endif
+#endif
+    if (total > (size_t)max_bytes) { free(bytes); return RT_RNF_FAIL(7); }
+    rt_rnf_last_failure = 100;
+    SplArray* result = rt_byte_array_new_len((uint64_t)total);
+    if (!result) { free(bytes); return RT_RNF_FAIL(9); }
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (total > 0 && array) memcpy(array->data, bytes, total);
+    free(bytes);
+    return (int64_t)(uintptr_t)result;
+}
+
 /* RuntimeValue-ABI spelling of rt_file_read_text.
  *
  * THIS is the symbol natively compiled Simple code actually calls: `nm` on any
