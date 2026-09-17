@@ -180,12 +180,26 @@ candidate_frontend_capture_setup() {
         CANDIDATE_FRONTEND_CAPTURE_PARENT=/proc/$frontend_owner_pid/fd/6
         export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
         ;;
+      FreeBSD)
+        # FreeBSD has no /proc/<pid>/fd by default and no guaranteed fdescfs
+        # mount, so descriptor-path pinning is unavailable. Pin by plain
+        # absolute paths instead, with the collector script sha256-pinned
+        # like the windows-job kind.
+        CANDIDATE_FRONTEND_CAPTURE_KIND=plain-pin
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=$(CDPATH= cd -- "$1" && pwd -P) || return 126
+        BOOTSTRAP_STAGE3_PLAIN_PERL=$(command -v perl) || return 126
+        BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl
+        [ -f "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" ] &&
+            [ ! -L "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" ] || return 126
+        BOOTSTRAP_STAGE3_BOUNDED_LOG_SHA=$(candidate_frontend_hash_file "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR") || return 126
+        ;;
       *) return 126 ;;
     esac
 }
 
 candidate_frontend_capture_leaf() {
-    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ] ||
+        [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = plain-pin ]; then
         [ "${1%/*}" = "$CANDIDATE_FRONTEND_CAPTURE_PARENT" ] || return 1
         case "${1##*/}" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
     else
@@ -199,6 +213,10 @@ candidate_frontend_collect() {
             --helper-sha256="$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA" "$@"
     elif [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-pinned ]; then
         candidate_frontend_run_collector "$@"
+    elif [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = plain-pin ]; then
+        [ "$(candidate_frontend_hash_file "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR")" = \
+            "$BOOTSTRAP_STAGE3_BOUNDED_LOG_SHA" ] || return 126
+        "$BOOTSTRAP_STAGE3_PLAIN_PERL" "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" "$@"
     else
         candidate_frontend_procfd "${BOOTSTRAP_STAGE3_PERL_DESCRIPTOR:-}" || return 126
         candidate_frontend_procfd "${BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR:-}" || return 126
