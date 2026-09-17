@@ -114,10 +114,27 @@ fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<tex
         # secure temp dir and provider diagnostic guards.
         val value = content.unwrap()
         if value.len() < 0:
+            if _read_no_follow_failure_code() == 100:
+                return Ok("")
             return Err("regular no-follow bounded file read returned nil ({_read_no_follow_failure_name()}): {path}")
         Ok(value)
     else:
+        # An absent OPTIONAL after a successful read is the empty-file case:
+        # the raw ABI cannot carry present-but-empty text, so the extern
+        # records READ_NF_OK (100) and answers absent. Trust the arm code
+        # rather than reporting a phantom failure -- otherwise every
+        # legitimately empty source file fails snapshot freezes closed
+        # (snapshot-read-failed, seen 2026-09-17 on the salvaged empty
+        # src/app/debug/remote/types.spl).
+        if _read_no_follow_failure_code() == 100:
+            return Ok("")
         Err("regular no-follow bounded file read failed ({_read_no_follow_failure_name()}): {path}")
+
+fn _read_no_follow_failure_code() -> i64:
+    var code: i64 = -1
+    unsafe(capabilities: [ffi]):
+        code = rt_file_read_regular_no_follow_last_failure()
+    code
 
 fn _read_no_follow_failure_name() -> text:
     """Name the admission arm that rejected the most recent bounded read.
@@ -127,9 +144,7 @@ fn _read_no_follow_failure_name() -> text:
     diagnostic was written successfully and read back as nil with nothing able to
     say which arm refused it.
     """
-    var code: i64 = -1
-    unsafe(capabilities: [ffi]):
-        code = rt_file_read_regular_no_follow_last_failure()
+    val code = _read_no_follow_failure_code()
     if code == 0: "diagnostic extern unresolved in this lane"
     elif code == 77: "reader never called"
     elif code == 100: "read succeeded"
