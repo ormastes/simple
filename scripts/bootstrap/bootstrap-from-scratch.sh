@@ -3032,7 +3032,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
-      "SIMPLE_FRONTEND_CACHE=$([ "${NATIVE_LOW_MEMORY}" = 0 ] && printf 1 || printf 0)" \
+      "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
@@ -3092,7 +3092,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}" \
       "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
-      "SIMPLE_FRONTEND_CACHE=$([ "${NATIVE_LOW_MEMORY}" = 0 ] && printf 1 || printf 0)" \
+      "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
@@ -3145,6 +3145,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     set -- \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
       "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
+      "MIMALLOC_EAGER_COMMIT=${MIMALLOC_EAGER_COMMIT:-0}" \
       "LLVM_SYS_180_PREFIX=${LLVM_SYS_180_PREFIX:-}" \
       "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -3160,7 +3161,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       SIMPLE_NATIVE_BUILD_RUST=1 \
       SIMPLE_NO_STUB_FALLBACK=1 \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
-      SIMPLE_FRONTEND_CACHE=$([ "${NATIVE_LOW_MEMORY}" = 0 ] && printf 1 || printf 0) \
+      SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
@@ -3658,7 +3659,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_STAGE3_STREAMING_SURFACES=1 \
     SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
-    SIMPLE_FRONTEND_CACHE=$([ "${NATIVE_LOW_MEMORY}" = 0 ] && printf 1 || printf 0) \
+    SIMPLE_FRONTEND_CACHE=1 \
     SIMPLE_FRONTEND_CACHE_DIR="${stage3_cache_absolute}/frontend" \
     SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ="${stage2_compatibility_manifest_absolute}" \
     SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT="${stage3_cache_absolute}" \
