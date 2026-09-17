@@ -10,6 +10,7 @@ use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -442,23 +443,54 @@ impl HirLowering:
         self.surface_decl_owners = owners
         self.surface_decl_pair_names = pair_names
         self.surface_decl_pair_surfaces = pair_surfaces
+        # Hash chains over the pairs: bucket-per-power-of-two, chaining via a
+        # next array parallel to the pairs. Pure scalar storage; the bucket
+        # head for a name is buckets[hash_text(name) & mask].
+        var bucket_count: i64 = 64
+        while bucket_count < pair_names.len() * 2:
+            bucket_count = bucket_count * 2
+        val hash_mask = bucket_count - 1
+        var hash_buckets: [i64] = []
+        var bucket_fill = 0
+        while bucket_fill < bucket_count:
+            hash_buckets = hash_buckets.push(-1)
+            bucket_fill = bucket_fill + 1
+        var hash_next: [i64] = []
+        var hash_pair_index = 0
+        while hash_pair_index < pair_names.len():
+            val hash_bucket = hash_text(pair_names[hash_pair_index]) & hash_mask
+            hash_next = hash_next.push(hash_buckets[hash_bucket])
+            hash_buckets[hash_bucket] = hash_pair_index
+            hash_pair_index = hash_pair_index + 1
+        self.surface_decl_pair_hash_buckets = hash_buckets
+        self.surface_decl_pair_hash_next = hash_next
+        self.surface_decl_pair_hash_mask = hash_mask
         self.surface_decl_index_built = true
 
     me surface_decl_owner_indices(name: text) -> [i64]:
         """Surfaces declaring `name`, as `hir_module_declares_item` defines
         declaring. Replaces the full-registry sweeps that asked the same
         question once per consumer. BOOT-20 (2026-09-17): answered from the
-        scalar pair arrays; the class-field surface_decl_owners Dict is no
-        longer trusted for membership (false negatives under Stage-2 native
-        codegen)."""
+        scalar pair arrays via the scalar hash chains; the class-field
+        surface_decl_owners Dict is no longer trusted for membership (false
+        negatives under Stage-2 native codegen) and the pair array is no
+        longer scanned linearly (this runs per unbound name in every body)."""
         if not self.surface_decl_index_built:
             self.build_surface_decl_index()
         var result: [i64] = []
-        var pair_index = 0
-        while pair_index < self.surface_decl_pair_names.len():
+        if self.surface_decl_pair_hash_buckets.len() == 0:
+            var pair_index = 0
+            while pair_index < self.surface_decl_pair_names.len():
+                if self.surface_decl_pair_names[pair_index] == name:
+                    result = result.push(self.surface_decl_pair_surfaces[pair_index])
+                pair_index = pair_index + 1
+            return result
+        val name_bucket = hash_text(name) & self.surface_decl_pair_hash_mask
+        var pair_index = self.surface_decl_pair_hash_buckets[name_bucket]
+        while pair_index >= 0:
             if self.surface_decl_pair_names[pair_index] == name:
                 result = result.push(self.surface_decl_pair_surfaces[pair_index])
-            pair_index = pair_index + 1
+            pair_index = self.surface_decl_pair_hash_next[pair_index]
         result
 
     me build_package_sibling_index():
