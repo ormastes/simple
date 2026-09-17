@@ -386,48 +386,80 @@ impl HirLowering:
     me build_surface_decl_index():
         """One pass over the registry: declaration name -> owning surface
         indices (ascending, one entry per surface even when the same name is
-        declared in several of that surface's decl kinds)."""
+        declared in several of that surface's decl kinds).
+
+        BOOT-20 (2026-09-17): built from the FROZEN per-kind name arrays and
+        stored as parallel scalar pair arrays. The previous build read
+        surface.callables.keys() -- class-field Dict ITERATION, the
+        misreported class under Stage-2 native codegen -- and the reader
+        trusted surface_decl_owners.contains_key -- class-field Dict
+        membership, whose false negatives turn a genuine single-owner answer
+        into [] and fail the ambient unique-owner probe. The pair arrays are
+        the read authority; the Dict is still populated (local ops only) for
+        shape compatibility with existing consumers/specs."""
         self.surface_decl_index_build_count = self.surface_decl_index_build_count + 1
         var owners: {text: [i64]} = {}
+        var pair_names: [text] = []
+        var pair_surfaces: [i64] = []
         var surface_index = 0
         while surface_index < self.module_surfaces.surfaces.len():
             val surface = self.module_surfaces.surfaces[surface_index]
+            var surface_names: [text] = []
             var kind_index = 0
             while kind_index < 6:
-                val names: [text] = match kind_index:
-                    case 0: surface.callables.keys()
-                    case 1: surface.composites.keys()
-                    case 2: surface.enums.keys()
-                    case 3: surface.traits.keys()
-                    case 4: surface.type_aliases.keys()
-                    case _: surface.constants.keys()
+                val decl_names: [text] = match kind_index:
+                    case 0: surface.callable_names
+                    case 1: surface.composite_names
+                    case 2: surface.enum_names
+                    case 3: surface.trait_names
+                    case 4: surface.type_alias_names
+                    case _: surface.constant_names
                 var name_index = 0
-                while name_index < names.len():
-                    val decl_name = names[name_index]
-                    if owners.contains_key(decl_name):
-                        val existing: [i64] = owners[decl_name]
-                        # Ascending insertion order makes the duplicate check a
-                        # single tail comparison rather than a membership scan.
-                        if existing.len() == 0 or existing[existing.len() - 1] != surface_index:
-                            owners[decl_name] = existing.push(surface_index)
-                    else:
-                        owners[decl_name] = [surface_index]
+                while name_index < decl_names.len():
+                    val decl_name = decl_names[name_index]
+                    var already = false
+                    var seen_index = 0
+                    while seen_index < surface_names.len():
+                        if surface_names[seen_index] == decl_name:
+                            already = true
+                            break
+                        seen_index = seen_index + 1
+                    if not already:
+                        surface_names = surface_names.push(decl_name)
                     name_index = name_index + 1
                 kind_index = kind_index + 1
+            var uniq_index = 0
+            while uniq_index < surface_names.len():
+                val decl_name = surface_names[uniq_index]
+                if owners.contains_key(decl_name):
+                    owners[decl_name] = owners[decl_name].push(surface_index)
+                else:
+                    owners[decl_name] = [surface_index]
+                pair_names = pair_names.push(decl_name)
+                pair_surfaces = pair_surfaces.push(surface_index)
+                uniq_index = uniq_index + 1
             surface_index = surface_index + 1
         self.surface_decl_owners = owners
+        self.surface_decl_pair_names = pair_names
+        self.surface_decl_pair_surfaces = pair_surfaces
         self.surface_decl_index_built = true
 
     me surface_decl_owner_indices(name: text) -> [i64]:
         """Surfaces declaring `name`, as `hir_module_declares_item` defines
         declaring. Replaces the full-registry sweeps that asked the same
-        question once per consumer."""
+        question once per consumer. BOOT-20 (2026-09-17): answered from the
+        scalar pair arrays; the class-field surface_decl_owners Dict is no
+        longer trusted for membership (false negatives under Stage-2 native
+        codegen)."""
         if not self.surface_decl_index_built:
             self.build_surface_decl_index()
-        if self.surface_decl_owners.contains_key(name):
-            return self.surface_decl_owners[name]
-        val empty: [i64] = []
-        empty
+        var result: [i64] = []
+        var pair_index = 0
+        while pair_index < self.surface_decl_pair_names.len():
+            if self.surface_decl_pair_names[pair_index] == name:
+                result = result.push(self.surface_decl_pair_surfaces[pair_index])
+            pair_index = pair_index + 1
+        result
 
     me build_package_sibling_index():
         """One pass over the registry KEYS: canonical package name -> the
