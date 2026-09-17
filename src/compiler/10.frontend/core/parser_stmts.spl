@@ -1442,6 +1442,20 @@ fn parse_for_binding_name() -> text:
     # G26/G40: plain identifiers must preserve their token text; keyword and
     # wildcard bindings use their canonical spelling.  This shared reader keeps
     # parenthesized and unparenthesized tuple loops semantically identical.
+    if par_kind_get() == 6 and par_text_get() == "mut":
+        # `for (i, mut x) in ...` — the canonical parser accepts a `mut`
+        # modifier on a destructured binding. `mut` lexes as a plain
+        # identifier, so peek ahead (the parser_skip_mut_if_present idiom)
+        # and only consume it as a modifier when a real binding name follows;
+        # otherwise `mut` itself is the binding name.
+        val fb_snap = lex_snapshot_save()
+        val (fb_tok_nums, fb_tok_text) = parser_tok_save()
+        parser_advance()
+        val next_is_name = par_kind_get() == 6 or par_kind_get() == 169
+        lex_snapshot_rollback(fb_snap)
+        parser_tok_restore(fb_tok_nums, fb_tok_text)
+        if next_is_name:
+            parser_advance()
     if par_kind_get() == 169:
         parser_advance()
         return "_"
@@ -1514,15 +1528,41 @@ fn parse_while_stmt() -> i64:
     parser_advance()
 
     # G19: while val NAME = EXPR: body  (re-bind each iteration, break on nil)
+    # Constructor patterns are valid heads too, matching `if val` and the
+    # canonical parser: `while val Some((id, r)) = f():` binds per iteration
+    # and breaks when the pattern stops matching (desugared to a match).
     if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
         parser_advance()  # consume val/var
-        val bind_name = par_text_get()
-        parser_expect(6)  # consume IDENT
+        val pattern_idx = parse_or()
+        val pattern_tag = expr_get_tag(pattern_idx)
+        if pattern_tag != EXPR_CALL and pattern_tag != EXPR_METHOD_CALL and pattern_tag != EXPR_IDENT:
+            parser_error("expected identifier or constructor pattern after while val/var")
         parser_expect(100)  # consume =
         val init_expr = parse_expr()
         parser_expect(161)  # consume :
         val body = parse_block()
 
+        if pattern_tag == EXPR_CALL or pattern_tag == EXPR_METHOD_CALL:
+            # while true:
+            #     match init:
+            #         case PATTERN: <body>
+            #         case _: break
+            val rationale = extract_wildcard_rationale(pattern_idx)
+            val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+            var arm_indices: [i64] = []
+            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, body, "", rationale))
+            var wildcard_body: [i64] = []
+            wildcard_body.push(stmt_break_stmt(0))
+            arm_indices.push(arm_new_with_binding_and_rationale(expr_ident("_", 0), -1, wildcard_body, "", ""))
+            val match_span = flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col)
+            val match_stmt = stmt_match_stmt(init_expr, arm_indices, match_span)
+            var loop_body: [i64] = []
+            loop_body.push(match_stmt)
+            val true_expr2 = expr_ident("true", 0)
+            expr_set_span(true_expr2, flat_span_new(decision_start, decision_start + 1, decision_line, decision_col))
+            return stmt_while_stmt(true_expr2, loop_body, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
+
+        val bind_name = expr_get_str(pattern_idx)
         # Mark the synthetic binding so the interpreter unwraps Option only.
         val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
         val name_expr = expr_ident(bind_name, 0)

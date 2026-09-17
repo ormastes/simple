@@ -251,10 +251,14 @@ impl HirLowering:
         # single-module entry, used by the in-guest riscv64/x86_64 interpreter
         # rows and by any embedder that drives the frontend directly without the
         # module loader — fail with "missing importing module surface" on a
-        # self-contained hello world. The loop below is the ONLY consumer of
-        # `importer_surface`, and it does not execute when there are no imports,
-        # so returning here is exactly semantics-preserving for every module that
-        # does have imports.
+        # self-contained hello world. The import-item rows read below are the
+        # ONLY consumer of the importer's own surface; a module WITH imports
+        # whose own surface is still absent (unit fixtures, single-module
+        # embedders) reads the identical rows from the live parser import
+        # decls instead — the surface rows are a verbatim flatten of
+        # `owner.value.imports` (module_surface_declarations.spl), built in
+        # the same per-import order — so both shapes stay semantics-equal and
+        # only the imported TARGET's surface is load-bearing either way.
         if module.imports.len() == 0:
             return
         # Use the same owner as source discovery and native symbol naming.
@@ -290,9 +294,18 @@ impl HirLowering:
                 # a scan miss, instead of being a dead end. See
                 # bootstrap_s3_missing_importing_module_surface_2026-09-14.
                 eprint("[surface-miss] module={module.name} key1={importer_key} key2={hir_pkg_canonical_module_name(module.name)} registry_size={self.module_surfaces.ordered_names.len()}")
-            self.error("missing importing module surface for {module.name}", Span.empty())
-            return
-        val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
+            # NOT a hard error: the per-import item rows are re-derived from
+            # the live parser import decls at the use site below (they are a
+            # verbatim flatten of `owner.value.imports` by construction —
+            # module_surface_declarations.spl). Single-module embedders and
+            # unit fixtures that drive lower_module() without registering the
+            # importing module's own surface used to die here with every
+            # import silently unresolved (regressed the
+            # module_namespace_retained_surface fixture family; see
+            # doc/08_tracking/bug/stage4_env_paths_llvm_undeclared_variables_2026_08_03.md).
+            # The real entry closure is unaffected: every closure module has
+            # a registered importer surface, so this branch never fires there.
+            importer_surface_index = -1
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
@@ -366,8 +379,28 @@ impl HirLowering:
                     import_idx = import_idx + 1
                     continue
                 val imported_surface = self.module_surfaces.surfaces[imported_index]
-                val item_start = importer_surface.import_item_offsets[import_idx]
-                val item_end = importer_surface.import_item_offsets[import_idx + 1]
+                # Per-import item rows: the frozen importer surface's flattened
+                # copy when the importing module has a registered surface, the
+                # live parser import decls otherwise (identical data and order;
+                # see the note on the importer_surface_index branch above).
+                var item_start = 0
+                var item_end = 0
+                var item_names: [text] = []
+                var item_aliases: [text] = []
+                var item_has_alias: [bool] = []
+                if importer_surface_index >= 0:
+                    val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
+                    item_start = importer_surface.import_item_offsets[import_idx]
+                    item_end = importer_surface.import_item_offsets[import_idx + 1]
+                    item_names = importer_surface.import_item_names
+                    item_aliases = importer_surface.import_item_aliases
+                    item_has_alias = importer_surface.import_item_has_alias
+                else:
+                    for import_item in imp.items:
+                        item_names = item_names.push(import_item.name)
+                        item_aliases = item_aliases.push(import_item.alias)
+                        item_has_alias = item_has_alias.push(import_item.has_alias)
+                    item_end = item_names.len()
                 if item_start == item_end:
                     self.register_glob_imported_symbols(imported_surface, resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
@@ -387,9 +420,9 @@ impl HirLowering:
                 else:
                     var item_idx = item_start
                     while item_idx < item_end:
-                        val item_name = importer_surface.import_item_names[item_idx]
-                        val local_name = if importer_surface.import_item_has_alias[item_idx]:
-                            importer_surface.import_item_aliases[item_idx]
+                        val item_name = item_names[item_idx]
+                        val local_name = if item_has_alias[item_idx]:
+                            item_aliases[item_idx]
                         else: item_name
                         self.register_imported_symbol(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
                         item_idx = item_idx + 1

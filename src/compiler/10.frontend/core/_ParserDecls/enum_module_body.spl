@@ -993,6 +993,40 @@ fn parse_module_body():
             val me_d = parse_fn_decl(0)
             module_add_decl(me_d)
             parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 30:
+            # Module-level static (canonical parse_static): `static fn` /
+            # `static me` route to the function parser; otherwise
+            # `static [mut] name [: type] = value` becomes a module-level
+            # binding — var when mutable, val otherwise. The pure AST has no
+            # separate static-storage node; the binding form preserves the
+            # name, type, and initializer through every downstream layer.
+            val static_start = lex_token_start_get()
+            val static_line = par_line_get()
+            val static_col = par_col_get()
+            parser_advance()
+            if par_kind_get() == 20 or par_kind_get() == 34:
+                val static_fn_d = parse_fn_decl(0)
+                module_add_decl(static_fn_d)
+                parser_reset_pending_vhdl_decorators()
+            else:
+                val static_is_mut = par_kind_get() == 6 and par_text_get() == "mut"
+                if static_is_mut:
+                    parser_advance()
+                val static_name = par_text_get()
+                parser_expect(6)
+                var static_type: i64 = 0
+                if par_kind_get() == TOK_COLON:
+                    parser_advance()
+                    static_type = parser_parse_type_with_union()
+                parser_expect(TOK_ASSIGN)
+                val static_init = parse_expr()
+                val static_span = flat_span_new(static_start, lex_token_start_get(), static_line, static_col)
+                val static_d = if static_is_mut:
+                    decl_var_binding(static_name, static_type, static_init, static_span)
+                else:
+                    decl_val_binding(static_name, static_type, static_init, static_span)
+                module_add_decl(static_d)
+                parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 25:
             parser_advance()
             val d = parse_extern_fn_decl()
@@ -1829,18 +1863,47 @@ fn parse_module_body():
             # Handle bare 'print' and 'from' at module level
             if par_kind_get() == 6:
                 if par_text_get() == "from":
-                    # from X import {Y, Z}
+                    # from X import {Y, Z} — X may be a relative path
+                    # (from ..core import {A}, from .sibling import {B}),
+                    # matching the use-decl relative forms and the canonical
+                    # parser. Leading dots become the same "..." / ".." / "."
+                    # path prefix spelling parse_use_decl produces.
                     parser_advance()
                     var from_path: text = ""
+                    if par_kind_get() == 173:
+                        parser_advance()
+                        from_path = "..."
+                    elif par_kind_get() == 165:
+                        parser_advance()
+                        from_path = ".."
+                        if par_kind_get() == 164:
+                            parser_advance()
+                            from_path = "..."
+                    elif par_kind_get() == 164:
+                        parser_advance()
+                        from_path = "."
+                    # Module path segments may be contextual keywords
+                    # (`from match import {match_pattern}`) — same acceptance
+                    # as the use-decl and mod-decl segment readers.
+                    var from_seg = ""
                     if par_kind_get() == 6:
-                        from_path = par_text_get()
+                        from_seg = par_text_get()
+                    else:
+                        from_seg = use_kw_segment_text(par_kind_get())
+                    if from_seg != "":
+                        from_path = from_path + from_seg
                         parser_advance()
                     while true:
                         if par_kind_get() != 164:
                             break
                         parser_advance()
+                        var from_seg2 = ""
                         if par_kind_get() == 6:
-                            from_path = from_path + "." + par_text_get()
+                            from_seg2 = par_text_get()
+                        else:
+                            from_seg2 = use_kw_segment_text(par_kind_get())
+                        if from_seg2 != "":
+                            from_path = from_path + "." + from_seg2
                             parser_advance()
                         else:
                             break
@@ -1862,9 +1925,17 @@ fn parse_module_body():
                                 break
                             if par_kind_get() == 190:
                                 break
-                            val from_is_name: bool = par_kind_get() == 6
+                            # Import-list names may be contextual keywords
+                            # (`from x import {type}`) — same acceptance as
+                            # the use-decl import list.
+                            var from_name: text = ""
+                            if par_kind_get() == 6:
+                                from_name = par_text_get()
+                            else:
+                                from_name = use_kw_segment_text(par_kind_get())
+                            val from_is_name: bool = from_name != ""
                             if from_is_name:
-                                from_names.push(par_text_get())
+                                from_names.push(from_name)
                                 parser_advance()
                             if par_kind_get() == 160:
                                 parser_advance()
