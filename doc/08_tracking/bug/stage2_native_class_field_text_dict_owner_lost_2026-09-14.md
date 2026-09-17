@@ -254,3 +254,59 @@ compiler, larger than the dict-membership class fixed in PR #1052. The
 house-documented mitigations (fresh carriers, accessor-only fields, scalar
 mirrors) are the right pattern for any further source hardening; a codegen fix
 needs the BOOT-20 owner lane.
+
+## 2026-09-17 follow-up: full-chain reproduction + origin-index hardening (branch fix/boot20-surface-index)
+
+Full bootstrap chain on current main (all prior workarounds in place:
+02d5b7c1405 enum-owner-via-symbol-table, 12902e1c65b surface-index linear scan,
+#1052 rows mirror, #1044 receiver/closure-context): Stage 2 PASS (890/890),
+Stage 3 FAIL exit 1. Failure signature CHANGED from the 36-error enum-owner
+slice to a broad builtin-name collapse:
+- 15,876 `unresolved type` + 15,538 `unresolved name` (capped ~10/file),
+  dominated by `text` (4,085), `i64`, `bool`, `Option`, `Dict`, `Result` and
+  the int widths -- i.e. the prelude itself stops resolving across most of
+  the closure, plus genuine receipt types (SccPublicationOwnershipV1,
+  DemandCompile*V1, RouteCapabilityScope) in 80.driver.
+- 15,361 `[hir-reexport-chase-unresolved]` receipts: the re-export chase
+  returns not-found for names the facades genuinely route. `local=` is bare
+  (`text local=text`, 4,085x) for misses and qualified
+  (`local=lib.nogc_sync_mut.io_runtime::Option`, 171x) for the
+  terminal-register path -- the two populations are distinct.
+
+New defect sites confirmed (all the documented `{text:*}` class-field Dict
+class), fixed on this branch:
+1. `module_surface_export_origin_index_position` (module_surface_types.spl):
+   the `index_by_name.len() >= 0` gate is constant-true, so the Dict path ran
+   unconditionally and the scalar-array fallback was DEAD CODE. A false
+   contains_key negative returned -1 (origin arm of the chase misses). Fixed:
+   scan the retained `names` array; Dict no longer consulted.
+2. `module_surface_export_origin_index_put` (same file): slot lookup was
+   `index_by_name.contains_key` + bracket-read. False negative -> duplicate
+   `names` entry; false positive -> `owner_modules[garbage]` OOB write. Fixed:
+   locate the slot by scanning `names`; arrays are the authority.
+3. Sibling-inference predicate (module_surface_export_index.spl:573) read
+   `owner.export_origins.contains_key(source_name)` (the `{text:
+   ModuleSurfaceExportOrigin}` class-field Dict). Fixed: reuse the hardened
+   position scan.
+
+Seed-interpreter spec validation of the three edits: origin/chase/surface
+specs PASS (export_origin_layered_facade, bare_export_facade_chain_reexport,
+hir_package_dependency_scan_memo 7/7, standalone_module 2/2,
+hir_lowering_items_surface_completeness, imported_enum_owner_native_workaround);
+the four FAILs (explicit_import_beats_glob_reexport,
+hir_unresolved_name_import_reachability, module_surface_index_allocation_guard
+0/2, resolve_import_symbols 1/32) are pre-existing on clean main (A/B via
+stash confirmed) -- not regressions.
+
+Remaining suspects if Stage 3 still fails after this slice (from static
+reading, in order of likelihood):
+- `reexport_root_memo_item` (`{text: text}`) is read UNGUARDED at
+  module_import_registration.spl:780 after an index-dict hit; corruption-on-hit
+  feeds a garbage `item_name` straight into `register_imported_symbol`. The
+  index dict (`{text: i64}`) false-NEGATIVES per the surface-index finding, so
+  it is retry-safe; the item dict is not.
+- `surface_decl_owner_indices` (module_lowering.spl:427) ambient-probe
+  `surface_decl_owners` `{text: [i64]}` contains_key -> `[]` on a false
+  miss, failing the unique-owner check for names like `Option`.
+- `SIMPLE_REXMEMO_VERIFY=1` SIGSEGV under the exact env (documented above)
+  still blocks memo self-verification.
