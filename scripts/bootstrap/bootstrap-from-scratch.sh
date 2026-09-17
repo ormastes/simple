@@ -3038,6 +3038,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${native_verbose_arg} \
       ${stage2_timeout_args} \
       --cache-dir "${stage2_cache_absolute}" \
+      $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
       --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage2_bin}"
@@ -3113,6 +3114,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
+      $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
       --runtime-path "${stage_runtime_absolute}" \
       --entry src/app/cli/bootstrap_main.spl -o "${stage3_bin}"
   )
@@ -3203,6 +3205,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ${native_verbose_arg} \
     ${stage2_timeout_args} \
     --cache-dir "${stage2_cache_absolute}" \
+    $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory) \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
     --runtime-path "${stage_runtime_absolute}" \
