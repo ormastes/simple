@@ -57,7 +57,18 @@ resolved through another's.
 - Any tree change that invalidates part of the cache risks leaving the
   remaining stale entries incoherent with freshly parsed neighbours.
 
-## Suggested direction
+## Additional manifestation (2026-09-18): std.json divergence
+
+`json_parse` is pure Simple (src/lib/common/json/parser.spl) with a single
+implementation, yet returns a valid object for a document in one import
+graph and nil for the IDENTICAL bytes in another (observed via
+image_to_markdown's decode_extraction_document_v1 vs a direct probe on the
+same seed binary). The extractor's validator then reports "invalid
+extraction JSON object". Two specs in
+test/01_unit/app/image_to_markdown/contracts_spec.spl remain red on this;
+the PR code and messages are correct (the expected "chart point x_value
+must be numeric" message exists verbatim and contains the spec's substring).
+Same family-variant resolution hazard as the TypeId incoherence above.
 
 Unify TypeId interning across co-compiled family variants (structural /
 content-hash interning, or a single shared arena for the parse phase), or
