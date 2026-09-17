@@ -175,3 +175,82 @@ table, not a native-buggy class field`), `work/bootstrap-s3-2-2026-09-14`.
   this bug is a new row (class-field `text`-valued bracket-read garbage on a
   hit), not yet added there pending wider confirmation.
 
+
+## Addendum 2026-09-17 (bootstrap-unblock lane, do not overwrite)
+
+Full-bootstrap chain13 reached Stage 3 with this class live. Findings:
+
+- Repro harness: run the chain-admitted stage2 binary
+  (`.simple/storage/build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple`)
+  with the exact stage3 env replayed from
+  `.simple/storage/build/bootstrap/stage3/aarch64-unknown-linux-gnu/stage3-command.transcript`
+  (source the explicit-env lines; point the four cache/profile paths at a
+  scratch dir). Plain hand-picked env passes (884/884); the exact env
+  reproduces 36 `imported enum has no declaration owner` + `unresolved type`
+  fatals + a terminal SIGSEGV. `MALLOC_ARENA_MAX=2`/`MALLOC_TRIM_THRESHOLD_=0`
+  are NOT the trigger (failures persist with them unset) — the exposing
+  variable is elsewhere in the engine env (candidates: SIMPLE_BOOTSTRAP_STAGE3,
+  SIMPLE_STAGE3_STREAMING_SURFACES, SIMPLE_PACKAGE_INDEX_COLD_INIT,
+  SIMPLE_NATIVE_ARENA_DECLS; not yet bisected further).
+- Fixed and merged (PR #1052): the enum-owner read via a parallel `[text]`
+  rows mirror (house-safe structure) — 36/36 owner errors eliminated; the
+  legacy dict path never engaged in verification.
+- Remaining: `unresolved type: SccPublicationOwnershipV1 /
+  DemandCompileCountersV1 / DemandCompileExecutionV1 / RouteCapabilityScope`
+  attributed to driver.spl / driver_aot_output.spl / driver_pipeline.spl
+  (spans empty). These route through glob imports
+  (`use compiler.driver.driver_pipeline_execution.*`) whose re-export chase
+  walks `self.module_surfaces.surfaces` — a HirLowering class-field subject to
+  the documented "native cross-module frame sync can restore an older visit
+  snapshot" hazard (module_import_registration.spl:783). The root memo
+  (`reexport_root_memo_index`) is also a HirLowering field and negative
+  results are memoized permanently per generation.
+- `SIMPLE_REXMEMO_VERIFY=1` (the in-code memo self-check) SEGFAULTS under the
+  exact env — evidence the walk/recursion itself is corrupted, not just the
+  memo.
+- Candidate fix (UNVERIFIED, stashed in the bootstrap-lane session, NOT
+  merged): `module_surface_export_origin_index_position` in
+  module_surface_types.spl — its scalar-array scan fallback was unreachable
+  (`index_by_name.len() >= 0` is always true); made the dict fast path
+  validated + scan-on-miss. Did not cure the unresolved-type class (the
+  failing routes are not origin-index arms) and the verify run segfaulted
+  before a clean measurement.
+- Localization knobs that exist and work: SIMPLE_HIR_ENUM_OWNER_TRACE=1,
+  SIMPLE_HIR_UNRESOLVED_TYPE_TRACE=1, SIMPLE_BOOTSTRAP_DIAG=1
+  (`[reexport-chase] mod=... wanted=... imports=N exports=M found=F`),
+  SIMPLE_REXMEMO_VERIFY=1 (crashes).
+
+### Addendum 2026-09-17 (second pass) — env-bisect results and mechanism analysis
+
+Falsified as the exposing trigger, each with a full exact-env replay minus one
+variable (25-min runs):
+- `MALLOC_ARENA_MAX=2` / `MALLOC_TRIM_THRESHOLD_=0` unset: same fatals + SIGSEGV.
+- `SIMPLE_STAGE3_STREAMING_SURFACES` unset: still fails; the failing TYPE SET
+  CHANGES with the perturbation (BuildLinkState / BuildProgressState vs the
+  original SccPublicationOwnershipV1 / DemandCompileExecutionV1 /
+  RouteCapabilityScope). A failure set that shifts with heap layout/timing
+  perturbation is the signature of reading uninitialized or stale memory, not
+  of one wrong branch.
+
+Mechanism analysis (from reading the walk + registry code):
+- The unresolved types route through glob imports whose re-export chase walks
+  `self.module_surfaces.surfaces` (a HirLowering class field). The code
+  documents the hazard itself (module_import_registration.spl:783): HirLowering
+  fields are shared by nested root queries and "native cross-module frame sync
+  can restore an older visit snapshot after a nested call returns". If a late
+  surface registration is reverted by such a restore, the generation guard
+  (read from the same restored field) cannot detect the loss, and memoized
+  negatives become permanent -- self-consistent within the stale snapshot.
+- The per-surface route arrays are populated before streaming release and the
+  code asserts "promoted field owners remain valid"; the SoA promotion path
+  (driver_source_pipeline_parsing.spl) is the right place to audit first for
+  any array that still aliases released per-file records.
+- `SIMPLE_REXMEMO_VERIFY=1` (the memo self-check) SIGSEGVs under the exact env,
+  so the walk itself cannot currently be trusted to re-verify its own cache.
+
+Conclusion: the remaining stage3 blocker is a native-codegen memory-safety
+defect (stale/uninitialized reads under nested calls) in the pure-Simple
+compiler, larger than the dict-membership class fixed in PR #1052. The
+house-documented mitigations (fresh carriers, accessor-only fields, scalar
+mirrors) are the right pattern for any further source hardening; a codegen fix
+needs the BOOT-20 owner lane.
