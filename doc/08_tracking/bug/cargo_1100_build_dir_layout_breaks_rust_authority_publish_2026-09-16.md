@@ -95,7 +95,39 @@ deps/-layout call sites listed above must change together; the tuple must stay
 internally consistent because the phase-verification and sanity gates re-derive
 the same paths.
 
-## Update 2026-09-16 (same day, full-chain run)
+## Update 2026-09-17 (LLVM prebuilt landed; admission decoupled)
+
+The user directed downloading a prebuilt LLVM binary. Both clang+llvm-23.1.1
+and clang+llvm-18.1.8 (x86_64-pc-windows-msvc) are installed under C:\llvm-23
+and C:\llvm-18. LLVM 18 satisfies the llvm-sys 180 pin; 23.1 is kept as a
+spare (the seed's llvm-sys cannot consume it, but the pure-Simple loader
+tolerates any LLVM-C.dll).
+
+The MSVC-LLVM-on-GNU static link was fought to a standstill over three
+defects (rustc windows-gnu does not search <name>.lib for `static=` deps;
+the tarball ships no libxml2s.lib; llvm-config --link-shared wants
+LLVM-18.dll which this distribution lacks) plus cargo's treatment of
+vendored sources as immutable (build-script edits need fingerprint
+dirs cleared). inkwell no-llvm-linking leaves real LLVM symbols undefined.
+
+Landed instead (commit 4537af34d90): the bootstrap lane never exercises
+the seed's inkwell codegen -- the seed drives the pure-Simple compiler,
+which loads LLVM-C.dll directly -- so the LLVM availability gate now
+accepts a runtime-proven SIMPLE_LLVM_PATH, the seed builds feature-free
+under SIMPLE_BOOTSTRAP_RUST_LLVM=0, and the lane runs
+--backend=cranelift with LLVM discovered. The frontend sanity smoke
+follows the seed's capability (cranelift), and the frontend cache is
+disabled under low memory (the ~10GB growth term).
+
+Validated end-to-end to the final two gates:
+- the candidate's install_selected_k1_backend_table_v1 still answers
+  false inside the smoke (the k1-table diagnostic pinpoints the failing
+  sub-check; needs one focused look at the compiled candidate's table
+  construction),
+- the hello-world positional smoke exits 126 with its capture logs not
+  materialising (infrastructure-failure path in
+  scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs).
+
 
 All of the above is now FIXED on branch work/image-memory-budget-20260915
 (commits 8eddea9e1ed, 08d6fb9599e): the authority tuple resolves both cargo
