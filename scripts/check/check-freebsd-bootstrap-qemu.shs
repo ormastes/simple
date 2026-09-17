@@ -413,7 +413,32 @@ pkg_root() {
 
 SCRIPT_OK=0
 GIT_AUTHORITY_DIR=""
+
+# Kill any QEMU still holding this run's overlay image. The EXIT trap alone
+# cannot cover a SIGKILLed wrapper or a workspace wiped before cleanup ran --
+# both orphaned multi-day QEMU processes on this host (measured 2026-09-18:
+# VMs alive 3d8h and 12h after their wrapper was gone, pid files deleted with
+# the workspace). Match the exact overlay path so unrelated QEMU instances are
+# never touched.
+reap_orphan_qemu() {
+    [ -n "${OVERLAY_IMAGE:-}" ] || return 0
+    for proc in /proc/[0-9]*/cmdline; do
+        pid=${proc#/proc/}
+        pid=${pid%/cmdline}
+        [ "$pid" = "$$" ] && continue
+        cmd=$(tr '\000' ' ' <"$proc" 2>/dev/null) || continue
+        case "$cmd" in
+            qemu-system-*"${OVERLAY_IMAGE}"*)
+                info "Reaping orphaned QEMU pid=$pid (holds ${OVERLAY_IMAGE})"
+                kill "$pid" 2>/dev/null || true
+                ;;
+        esac
+    done
+    return 0
+}
+
 cleanup() {
+    reap_orphan_qemu
     if [ -n "$GIT_AUTHORITY_DIR" ] && [ -d "$GIT_AUTHORITY_DIR" ]; then
         rm -rf "$GIT_AUTHORITY_DIR"
     fi
@@ -439,6 +464,7 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+trap 'trap - HUP INT TERM; cleanup; exit 129' HUP INT TERM
 
 # ── Prerequisites ──────────────────────────────────────────────────────
 printf 'FreeBSD QEMU Bootstrap Check (%s mode)\n\n' "$MODE"
@@ -577,6 +603,7 @@ case "${HOST_ARCH:-$(uname -m 2>/dev/null || true)}" in
         ;;
 esac
 
+reap_orphan_qemu
 rm -f "$PID_FILE" "$QEMU_START_LOG"
 if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" qemu-system-x86_64 \
     -machine "accel=${ACCEL}" \
