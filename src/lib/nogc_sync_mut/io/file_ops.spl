@@ -103,21 +103,29 @@ fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<tex
     var content: text? = nil
     unsafe(capabilities: [ffi]):
         content = rt_file_read_regular_no_follow_bounded(host_path_native(path), max_bytes)
-    if content.?:
-        # `.len() < 0` is the nil marker. The extern can answer "present" with a
-        # payload that is itself nil, and `.?` only tests the OPTIONAL, not the
-        # value inside it -- so a failed read was handed back as `Ok(<nil>)`.
-        # Callers then saw a successful read of an empty string and reported the
-        # file as empty rather than unreadable, which is exactly how the Stage 2
-        # backend diagnostic ("wrote 29 bytes but reads back -1") stayed
-        # invisible across many bootstrap cycles. Same nil-vs-empty family as the
-        # secure temp dir and provider diagnostic guards.
-        val value = content.unwrap()
-        if value.len() < 0:
-            return Err("regular no-follow bounded file read returned nil ({_read_no_follow_failure_name()}): {path}")
-        Ok(value)
-    else:
-        Err("regular no-follow bounded file read failed ({_read_no_follow_failure_name()}): {path}")
+    # `== nil` + `??`, NOT `.?` + `.unwrap()`. Nullable extern text transport
+    # is a bare payload word (0 = nil, else heap string) on the Stage-2 AOT
+    # lane; the force-unwrap Option-enum lowering miscompiles that transport --
+    # `.?` reads a nonzero garbage "tag" and reports present while the
+    # unwrapped payload decodes to len -1, so a real backend failure surfaced
+    # only as the opaque "backend object-path status 1" (doc/08_tracking/bug/
+    # bootstrap_stage2_backend_object_path_status_2026-09-08.md,
+    # "force-unwrap Option-wrapper family"). `== nil` compares the word and
+    # `??` reads the payload through the shape verified on that same binary
+    # (io_runtime.file_read_result and the driver's capsule-receipt read).
+    if content == nil:
+        return Err("regular no-follow bounded file read failed ({_read_no_follow_failure_name()}): {path}")
+    # `.len() < 0` is the nil marker. The extern can answer "present" with a
+    # payload that is itself nil -- so a failed read must not be handed back as
+    # `Ok(<nil>)`. Callers would see a successful read of an empty string and
+    # report the file as empty rather than unreadable, which is exactly how the
+    # Stage 2 backend diagnostic ("wrote 29 bytes but reads back -1") stayed
+    # invisible across many bootstrap cycles. Same nil-vs-empty family as the
+    # secure temp dir and provider diagnostic guards.
+    val value = content ?? ""
+    if value.len() < 0:
+        return Err("regular no-follow bounded file read returned nil ({_read_no_follow_failure_name()}): {path}")
+    Ok(value)
 
 fn _read_no_follow_failure_name() -> text:
     """Name the admission arm that rejected the most recent bounded read.
