@@ -1,3 +1,20 @@
+## [1.0.0-beta.8] - 2026-09-17
+Fifth corrected beta of the **1.0.0 line**.
+
+### Fixed
+- windows-x86_64 native-build leg OOM: the seed compile exceeded the
+  windows-latest runner under --threads 4 despite --mode dynload
+  (run 35182374321: "memory allocation of 5616 bytes failed" mid-compile).
+  Windows leg now compiles with --threads 2; linux/macOS unchanged.
+- Rust seed cargo builds now echo a progress note: the ~10 min silent
+  bootstrap-profile build looked hung in the Actions UI, and the linux
+  blocking leg was cancelled externally twice in that window (beta.6,
+  beta.7).
+
+### Release
+- Product version is `1.0.0-beta.8`, projected into all 19 declared version
+  sites. Ships as tag `v1.0.0-beta.8`. The 1.0.1 line remains withdrawn.
+
 ## [1.0.0-beta.7] - 2026-09-17
 Fourth corrected beta of the **1.0.0 line**.
 
