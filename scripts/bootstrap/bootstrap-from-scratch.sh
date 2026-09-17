@@ -2906,6 +2906,19 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ) || exit 1
     fi
   fi
+  # Per-file native-build timeout for the strict Stage 2 invocation. OPT-IN via
+  # SIMPLE_NATIVE_FILE_TIMEOUT (unset => empty => pinned argv byte-identical),
+  # mirroring stage3_timeout_args in resume-stage3-from-admitted.sh, whose
+  # stage2 args-hash formula must stay word-for-word identical to this one.
+  stage2_timeout_args=
+  case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
+    '') ;;
+    *[!0-9]*)
+      echo "error: SIMPLE_NATIVE_FILE_TIMEOUT must be a number" >&2
+      exit 1
+      ;;
+    *) stage2_timeout_args="--timeout ${SIMPLE_NATIVE_FILE_TIMEOUT}" ;;
+  esac
   stage2_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -2937,6 +2950,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${k1_composition_source_args} --source src/compiler --source src/app --source src/lib \
       --entry-closure --threads "${jobs}" \
       ${native_verbose_arg} \
+      ${stage2_timeout_args} \
       --cache-dir "${stage2_cache_absolute}" \
       --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
       --runtime-path "${stage_runtime_absolute}" \
@@ -3103,6 +3117,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     --entry-closure \
     --threads "${jobs}" \
     ${native_verbose_arg} \
+    ${stage2_timeout_args} \
     --cache-dir "${stage2_cache_absolute}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
