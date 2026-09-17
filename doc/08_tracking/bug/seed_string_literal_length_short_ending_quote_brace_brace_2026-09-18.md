@@ -38,27 +38,21 @@ test/fixture/image_to_markdown/{audited_document.v2.json,
 chart_missing_x_value.v2.json} via file_read; runtime-read strings measure
 correctly. Inline the literals again once the lexer is fixed.
 
-## Runtime manifestation (2026-09-18, same day): concatenation-built strings
+## Resolution of the "runtime" manifestation (2026-09-18, later same day)
 
-The defect is not lexer-only. A string BUILT at runtime by concatenation
-miscounts the same way when the result contains the sequence: the forward
-OpenAI->Anthropic converter's output
+The runtime text layer is INNOCENT: `"}" + "}"` measures 2 and carries
+`}}` correctly, and json_parse handles runtime/file-read strings containing
+`}}` fine (the contracts fixtures prove it). The round-trip failure traced
+to the CONVERTERS' OWN SOURCE: server.spl's JSON-assembly literals ended in
+`\"}}`, which the collapse contract folded to `\"}`, so
+openai_messages_to_anthropic_v1 / anthropic_messages_to_openai_v1 emitted
+JSON missing the image part's closing brace. Fixed in the PR by splitting
+those literals (`\"}" + "}"`); multimodal_proxy_spec is 11/11.
 
-```
-[{"role":"user","content":[{"type":"image","source":{"type":"base64",
-  "media_type":"image/png","data":"AA=="}}]}]
-```
-
-reports text.len() 111 where the true length is 112, and json_parse of it
-fails with "Expected comma in object" -- the '}}' in the payload collides
-with whatever the seed's text layer uses there. File-read strings carrying
-the same bytes parse fine, so the corruption is specific to the
-concat/join-built path. This blocks the openai->anthropic->openai round
--trip example in test/01_unit/app/llm_caret/multimodal_proxy_spec.spl
-(10/11; the other ten were fixed by splitting literals at the sequence and
-by replacing a corrupt inline PNG payload).
-
-The common thread -- literals, concatenation results, but not file-read
-strings -- points at the seed's text construction/flattening layer rather
-than storage. Any fix should start there (text rope / escape handling for
-adjacent closing braces).
+The collapse contract itself remains a sharp edge for ANY source that
+builds JSON (or C, or anything with adjacent braces) in double-quoted
+literals: the lexer silently folds `}}` to `}` and the malformed output
+surfaces far away as a parse error. Consider: emitting a lint when a
+literal contains `}}`/`{{` in a context that is not an f-string, or
+recommending triple-quoted/raw strings for embedded JSON. Raw strings
+(r"...") and file-read text are the safe carriers today.
