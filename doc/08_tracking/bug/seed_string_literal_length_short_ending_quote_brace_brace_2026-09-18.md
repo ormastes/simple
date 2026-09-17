@@ -56,3 +56,16 @@ surfaces far away as a parse error. Consider: emitting a lint when a
 literal contains `}}`/`{{` in a context that is not an f-string, or
 recommending triple-quoted/raw strings for embedded JSON. Raw strings
 (r"...") and file-read text are the safe carriers today.
+
+## Follow-up audit (2026-09-18)
+
+`git grep -c '\\"}}' -- src/` finds 71 literals containing the sequence.
+Most are likely intentional f-string/`${...}}` closures, but every literal
+that assembles JSON or brace-delimited foreign syntax is a latent instance
+of the converter bug fixed in server.spl. Notable files to review first:
+src/app/sffi_gen.templates/bootstrap_sffi.txt (10), src/app/devhub/
+cmd_{minio,storage}.spl (2 each), src/app/editor/debug_process_*.spl,
+src/app/itf/cmd_minio.spl, src/app/llm_caret/messaging/adapter/**,
+src/app/semihost/reader.spl, src/app/sspec_maintain/main.spl. Each needs
+context judgment (collapse intended vs silent corruption); a mechanical
+sweep would break legitimate f-strings.
