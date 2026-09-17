@@ -1,0 +1,55 @@
+#!/bin/sh
+# llm-caret-messaging hook launcher.
+#
+# Agent hook timeouts are a few seconds at most, while a seed-interpreter run
+# of the full caret CLI takes minutes. Dispatch to the compiled hook worker
+# when one is present; fall back to the seed CLI only when no worker exists.
+#
+# Expected argv: messaging hook <provider> <event>
+set -u
+
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+plugin_dir=$(CDPATH= cd -- "${hook_dir}/.." && pwd)
+repo_root=$(CDPATH= cd -- "${plugin_dir}/../.." && pwd)
+
+# Both the compiled worker and the seed fallback resolve state (SCV cache,
+# messaging DB) relative to the working directory, so anchor at the repo
+# root no matter which directory the host fired the hook from.
+cd "${repo_root}" || exit 127
+
+worker=""
+for cand in \
+    "${LLM_CARET_HOOK_WORKER:-}" \
+    "${repo_root}/build/database/llm_caret_messaging_hook.exe" \
+    "${repo_root}/build/database/llm_caret_messaging_hook"
+do
+    if [ -n "${cand}" ] && [ -x "${cand}" ]; then
+        worker="${cand}"
+        break
+    fi
+done
+
+if [ -n "${worker}" ]; then
+    provider=""
+    event=""
+    if [ "${1:-}" = "messaging" ] && [ "${2:-}" = "hook" ]; then
+        provider="${3:-}"
+        event="${4:-}"
+    elif [ "${1:-}" = "--provider" ]; then
+        provider="${2:-}"
+        event="${4:-}"
+    fi
+    if [ -n "${provider}" ] && [ -n "${event}" ]; then
+        exec "${worker}" --provider "${provider}" --event "${event}"
+    fi
+    # Unknown argv shape: let the worker-less fallback handle or fail loudly.
+fi
+
+# Fallback: full caret CLI through the seed interpreter. The repo's bin/simple
+# can be reverted to a stale seed that fails SCV admission, so prefer the last
+# known-good runtime build when the caller did not pin one explicitly.
+if [ -z "${SIMPLE_BINARY:-}" ] && [ -f "${repo_root}/.simple/simple-beta3.exe" ]; then
+    SIMPLE_BINARY="${repo_root}/.simple/simple-beta3.exe"
+    export SIMPLE_BINARY
+fi
+exec "${repo_root}/bin/caret" "$@"
