@@ -44,7 +44,7 @@ fi
 SKILLS_DIR="$SCRIPT_DIR/skills"
 AGENTS_DIR="$SCRIPT_DIR/agents"
 
-for f in "$SKILLS_DIR/research.md" "$AGENTS_DIR/research.md"; do
+for f in "$SKILLS_DIR/codex-research/SKILL.md" "$AGENTS_DIR/research.md"; do
     if [ ! -f "$f" ]; then
         echo "ERROR: Referenced file not found: $f"
         exit 1
